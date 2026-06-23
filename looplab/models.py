@@ -21,6 +21,11 @@ class Idea(BaseModel):
     # RepoTask Phase 2: the Researcher may pick which eval profile to run (e.g. cheap
     # "smoke" during search vs "full" on confirm) — eval depth is part of the action space.
     eval_profile: Optional[str] = None
+    # Semantic grouping (UI #7): a short, reusable slug the Researcher assigns to cluster related
+    # experiments in one search tree (e.g. "loss-fn", "architecture", "regularization"). Optional
+    # and audit-only — never affects search/selection; the UI groups nodes by it. Flows through the
+    # event log automatically (idea.model_dump → node_created → Idea(**d["idea"]) in replay.fold).
+    theme: Optional[str] = None
 
 
 class Node(BaseModel):
@@ -59,6 +64,15 @@ class Node(BaseModel):
     # External-agent audit (ADR-7): set by an `agent_validated` event when the code was
     # produced by a validated CLI-agent Developer. {"ok": bool, "checks": [...]}.
     agent_report: Optional[dict] = None
+
+
+class Project(BaseModel):
+    """A ClearML-style organizational folder for runs. Projects nest via `parent_id` (None = a
+    top-level project). Pure UI metadata stored in `<run-root>/projects.json` — runs never move
+    on disk and the engine/event log are untouched (see `projects.ProjectStore`)."""
+    id: str
+    name: str
+    parent_id: Optional[str] = None
 
 
 class Event(BaseModel):

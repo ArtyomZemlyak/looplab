@@ -28,6 +28,10 @@ app = typer.Typer(add_completion=False, help="LoopLab — autonomous ML research
 
 def _engine(run_dir: Path, task: TaskAdapter, settings: Settings,
             crash_after: Optional[int]) -> Engine:
+    from .tracing import set_llm_capture
+    # Capture LLM prompts/completions into spans (UI per-node trace) unless disabled. Diagnostics
+    # only; never read by replay.fold. Honors LOOPLAB_TRACE_LLM_IO via Settings.
+    set_llm_capture(settings.trace_llm_io)
     researcher, developer = make_roles(task, settings)
     # RepoTask onboarding (Phase 3): if the task can propose its own eval spec, build the
     # onboarder (Researcher proposes + Developer writes the adapter).

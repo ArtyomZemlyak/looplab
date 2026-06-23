@@ -20,21 +20,53 @@ const NARR = {
   llm_cost: (d) => `LLM: ${d.total_tokens} tokens, $${fmt(d.cost)}`,
 }
 
-export default function Dock({ runId, liveSeq, viewSeq, setViewSeq }) {
+// The node an event refers to, if any — lets a feed/timeline click drill into that node.
+function eventNode(e) {
+  const d = e.data || {}
+  return d.node_id ?? d.parent_id ?? null
+}
+
+export default function Dock({ runId, liveSeq, viewSeq, setViewSeq, onFocus, collapsed, onToggleCollapse, height = 230 }) {
   const [tab, setTab] = useState('travel')
   const [log, setLog] = useState([])
   const [trace, setTrace] = useState(null)
+  const [filter, setFilter] = useState('')
   useEffect(() => { get(`/api/runs/${runId}/log`).then(setLog).catch(() => {}) }, [runId, liveSeq])
   useEffect(() => { if (tab === 'timeline') get(`/api/runs/${runId}/trace`).then(setTrace).catch(() => {}) }, [tab, runId, liveSeq])
   const atLive = viewSeq == null || viewSeq >= liveSeq
+
+  // Click an event → select its node, jump the scrubber to that moment, open the right inspector tab.
+  const focusEvent = (e) => {
+    const nid = eventNode(e)
+    if (nid == null) { setViewSeq(e.seq); return }
+    onFocus?.(Number(nid), e.type === 'node_created' ? 'Reasoning' : 'Overview', e.seq)
+  }
+  const matches = (e) => {
+    if (!filter) return true
+    const q = filter.toLowerCase()
+    const narr = (NARR[e.type] || (() => ''))(e.data)
+    return e.type.toLowerCase().includes(q) || String(narr).toLowerCase().includes(q)
+  }
+  const Row = ({ e, showSeq }) => (
+    <div className="ev clickable" key={e.seq} onClick={() => focusEvent(e)}
+         title={eventNode(e) != null ? `open node #${eventNode(e)} @ seq ${e.seq}` : `jump to seq ${e.seq}`}>
+      {showSeq && <span className="t">{e.seq}</span>}
+      <span className="ty">{e.type}</span>
+      <span>{(NARR[e.type] || ((d) => JSON.stringify(d).slice(0, 80)))(e.data)}</span>
+      {eventNode(e) != null && <span className="ev-go">↗</span>}
+    </div>
+  )
 
   return (
     <div className="dock">
       <div className="dock-tabs">
         {[['travel', 'Time-travel'], ['feed', 'Activity'], ['timeline', 'Timeline']].map(([k, l]) =>
-          <div key={k} className={'tab' + (k === tab ? ' active' : '')} onClick={() => setTab(k)}>{l}</div>)}
+          <div key={k} className={'tab' + (k === tab ? ' active' : '')} onClick={() => !collapsed && setTab(k)}>{l}</div>)}
+        <span className="spacer" style={{ flex: 1 }} />
+        <button className="btn sm ghost dock-collapse" title={collapsed ? 'expand' : 'collapse'}
+                onClick={onToggleCollapse}>{collapsed ? '▴' : '▾'}</button>
       </div>
-      <div className="dock-body">
+      {!collapsed && <div className="dock-body" style={{ height }}>
         {tab === 'travel' && <div className="scrubber">
           <button className="btn sm" onClick={() => setViewSeq(null)} disabled={atLive}>⏵ Live</button>
           <input type="range" min={0} max={Math.max(0, liveSeq)} value={atLive ? liveSeq : viewSeq}
@@ -42,15 +74,19 @@ export default function Dock({ runId, liveSeq, viewSeq, setViewSeq }) {
           <span className={atLive ? 'live-tag' : 'hist-tag'}>{atLive ? `live · seq ${liveSeq}` : `replay · seq ${viewSeq}/${liveSeq}`}</span>
         </div>}
         {tab === 'travel' && <div style={{ marginTop: 8 }} className="feed">
-          {log.filter(e => atLive || e.seq <= viewSeq).slice(-6).reverse().map(e =>
-            <div className="ev" key={e.seq}><span className="ty">{e.type}</span><span>{(NARR[e.type] || (() => ''))(e.data)}</span></div>)}
+          {log.filter(e => atLive || e.seq <= viewSeq).slice(-8).reverse().map(e => <Row key={e.seq} e={e} />)}
         </div>}
-        {tab === 'feed' && <div className="feed">
-          {log.filter(e => atLive || e.seq <= viewSeq).slice().reverse().map(e =>
-            <div className="ev" key={e.seq}><span className="t">{e.seq}</span><span className="ty">{e.type}</span><span>{(NARR[e.type] || (() => JSON.stringify(e.data).slice(0, 80)))(e.data)}</span></div>)}
-        </div>}
-        {tab === 'timeline' && (trace ? <Gantt spans={trace} /> : <div className="muted">loading spans…</div>)}
-      </div>
+        {tab === 'feed' && <>
+          <input className="text feed-filter" placeholder="filter events (type or text)…"
+                 value={filter} onChange={e => setFilter(e.target.value)} />
+          <div className="feed">
+            {log.filter(e => (atLive || e.seq <= viewSeq) && matches(e)).slice().reverse().map(e => <Row key={e.seq} e={e} showSeq />)}
+          </div>
+        </>}
+        {tab === 'timeline' && (trace
+          ? <Gantt spans={trace} onPick={(nid) => onFocus?.(Number(nid), 'Reasoning', null)} />
+          : <div className="muted">loading spans…</div>)}
+      </div>}
     </div>
   )
 }

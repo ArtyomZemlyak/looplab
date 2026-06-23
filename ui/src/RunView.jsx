@@ -1,9 +1,10 @@
-import React, { useEffect, useState } from 'react'
+import React, { useEffect, useMemo, useState } from 'react'
 import { useRunState, useNotifications } from './hooks.js'
 import { get, fmt, fmtInt, phaseLabel, CONTROL } from './util.js'
 import Dag from './Dag.jsx'
-import Inspector from './Inspector.jsx'
+import Inspector, { GroupSummary } from './Inspector.jsx'
 import Dock from './Dock.jsx'
+import { computeGroups } from './grouping.js'
 import {
   TrustPanel, SensitivityPanel, FailuresPanel, ParetoPanel, DataQualityPanel,
   ConfigPanel, AuthoringPanel, MemoryPanel, RegistryPanel, ReportPanel, EventExplorer,
@@ -22,7 +23,37 @@ export default function RunView({ runId, onBack }) {
   const [viewSeq, setViewSeq] = useState(null)
   const [hist, setHist] = useState(null)
   const [selectedId, setSelectedId] = useState(null)
+  const [inspectTab, setInspectTab] = useState('Overview')
+  const [groupMode, setGroupMode] = useState('theme')
+  const [collapsed, setCollapsed] = useState(() => new Set())
+  const [selectedGroup, setSelectedGroup] = useState(null)
   const [panel, setPanel] = useState(null)
+  // Resizable / collapsible panes (standard multi-pane layout), persisted across sessions.
+  const [sideW, setSideW] = useState(() => +localStorage.getItem('ll.sideW') || 420)
+  const [dockH, setDockH] = useState(() => +localStorage.getItem('ll.dockH') || 230)
+  const [sideC, setSideC] = useState(() => localStorage.getItem('ll.sideC') === '1')
+  const [dockC, setDockC] = useState(() => localStorage.getItem('ll.dockC') === '1')
+  useEffect(() => {
+    localStorage.setItem('ll.sideW', sideW); localStorage.setItem('ll.dockH', dockH)
+    localStorage.setItem('ll.sideC', sideC ? '1' : '0'); localStorage.setItem('ll.dockC', dockC ? '1' : '0')
+  }, [sideW, dockH, sideC, dockC])
+  // Drag a splitter: the side panel grows when dragged left, the dock when dragged up.
+  const startDrag = (axis) => (e) => {
+    e.preventDefault()
+    const x0 = e.clientX, y0 = e.clientY, w0 = sideW, h0 = dockH
+    const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v))
+    const onMove = (ev) => {
+      // bounds stay sane on small windows: keep max ≥ min so clamp never degenerates
+      if (axis === 'side') setSideW(clamp(w0 - (ev.clientX - x0), 280, Math.max(320, window.innerWidth - 340)))
+      else setDockH(clamp(h0 - (ev.clientY - y0), 90, Math.max(140, window.innerHeight - 160)))
+    }
+    const onUp = () => {
+      window.removeEventListener('mousemove', onMove); window.removeEventListener('mouseup', onUp)
+      document.body.style.userSelect = ''
+    }
+    window.addEventListener('mousemove', onMove); window.addEventListener('mouseup', onUp)
+    document.body.style.userSelect = 'none'
+  }
   const [toast, setToast] = useState(null)
   const [notif, setNotif] = useState(false)
   const [cfg, setCfg] = useState(null)
@@ -33,6 +64,24 @@ export default function RunView({ runId, onBack }) {
     get(`/api/runs/${runId}/state?seq=${viewSeq}`).then(p => setHist(p.state)).catch(() => {})
   }, [viewSeq, seq, runId])
   const showToast = (m) => { setToast(m); setTimeout(() => setToast(null), 2200) }
+  // Members of the selected group — memoized so unrelated re-renders (toast, live ticks) don't
+  // re-walk all nodes; only recomputes when the node set / mode / selection actually changes.
+  const groupMembers = useMemo(() => {
+    const ns = (hist || live)?.nodes
+    return (selectedGroup != null && ns) ? (computeGroups(ns, groupMode).get(selectedGroup) || []) : []
+  }, [hist, live, groupMode, selectedGroup])
+  // Node selection clears any group selection (the side panel shows one or the other).
+  const selectNode = (id) => { setSelectedId(id); if (id != null) setSelectedGroup(null) }
+  // Drill-down from the dock/timeline: select a node, optionally open a tab + jump the scrubber.
+  const focusNode = (id, tab, seq) => {
+    selectNode(id)
+    if (tab) setInspectTab(tab)
+    if (seq != null) setViewSeq(seq)
+  }
+  // --- semantic-zoom grouping controls ---
+  const toggleGroup = (key) => setCollapsed(s => { const n = new Set(s); n.has(key) ? n.delete(key) : n.add(key); return n })
+  const changeMode = (m) => { setGroupMode(m); setCollapsed(new Set()); setSelectedGroup(null) }
+  const selectGroup = (key) => { setSelectedGroup(key); if (key != null) setSelectedId(null) }
 
   if (!live) return <div className="app"><div className="runlist"><div className="notice">Connecting to run <b>{runId}</b>…</div></div></div>
   const state = hist || live
@@ -86,11 +135,32 @@ export default function RunView({ runId, onBack }) {
       </div>
 
       <div className="main">
-        <div className="canvas-wrap"><Dag state={state} selectedId={selectedId} onSelect={setSelectedId} /></div>
-        <div className="side"><Inspector runId={runId} nodeId={selectedId} state={state} live={live} onToast={showToast} /></div>
+        <div className="canvas-wrap"><Dag state={state} selectedId={selectedId} onSelect={selectNode}
+          groupMode={groupMode} collapsed={collapsed} onToggleGroup={toggleGroup} onSetMode={changeMode}
+          onCollapseAll={(keys) => setCollapsed(new Set(keys))} onExpandAll={() => setCollapsed(new Set())}
+          selectedGroup={selectedGroup} onSelectGroup={selectGroup} /></div>
+        {sideC
+          ? <div className="side-rail" title="show panel" onClick={() => setSideC(false)}>‹ {selectedGroup != null ? 'group' : 'inspector'}</div>
+          : <>
+              <div className="splitter v" onMouseDown={startDrag('side')} title="drag to resize" />
+              <div className="side" style={{ width: sideW }}>
+                <div className="pane-grip">
+                  <span className="muted">{selectedGroup != null ? 'group' : 'inspector'}</span>
+                  <span className="spacer" style={{ flex: 1 }} />
+                  <button className="btn sm ghost" title="collapse panel" onClick={() => setSideC(true)}>⟩</button>
+                </div>
+                {selectedGroup != null
+                  ? <GroupSummary groupKey={selectedGroup} memberIds={groupMembers}
+                      state={state} onSelectNode={focusNode} onClose={() => setSelectedGroup(null)} />
+                  : <Inspector runId={runId} nodeId={selectedId} state={state} live={live}
+                      tab={inspectTab} setTab={setInspectTab} onToast={showToast} />}
+              </div>
+            </>}
       </div>
 
-      <Dock runId={runId} liveSeq={seq} viewSeq={viewSeq} setViewSeq={setViewSeq} />
+      {!dockC && <div className="splitter h" onMouseDown={startDrag('dock')} title="drag to resize" />}
+      <Dock runId={runId} liveSeq={seq} viewSeq={viewSeq} setViewSeq={setViewSeq} onFocus={focusNode}
+            collapsed={dockC} onToggleCollapse={() => setDockC(c => !c)} height={dockH} />
 
       {panel === 'trust' && <TrustPanel state={state} runId={runId} onClose={() => setPanel(null)} />}
       {panel === 'sensitivity' && <SensitivityPanel state={state} onClose={() => setPanel(null)} />}

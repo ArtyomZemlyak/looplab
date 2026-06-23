@@ -26,6 +26,7 @@ import orjson
 from .config import Settings
 from .eventstore import EventStore, iter_jsonl
 from .models import Event
+from .projects import ProjectError, ProjectStore
 from .replay import fold
 
 # These imports require the [ui] extra; importing this module without it raises a clear error.
@@ -60,6 +61,24 @@ def _ui_dist() -> Path:
     return Path(__file__).resolve().parents[1] / "ui" / "dist"
 
 
+def _theme_rollup(st) -> dict:
+    """Per-theme rollup for the cross-run map: {theme: {count, best_metric}}. A node's theme is
+    its `idea.theme` (Researcher-assigned); nodes without one are skipped. `best_metric` is the
+    better value per the run's direction. Audit-only — never read by replay.fold."""
+    better = (lambda a, b: a < b) if st.direction == "min" else (lambda a, b: a > b)
+    out: dict[str, dict] = {}
+    for n in st.nodes.values():
+        theme = getattr(n.idea, "theme", None)
+        if not theme:
+            continue
+        m = n.confirmed_mean if n.confirmed_mean is not None else n.metric
+        e = out.setdefault(theme, {"count": 0, "best_metric": None})
+        e["count"] += 1
+        if m is not None and (e["best_metric"] is None or better(m, e["best_metric"])):
+            e["best_metric"] = m
+    return out
+
+
 def make_app(run_root: str | os.PathLike) -> "FastAPI":
     root = Path(run_root).resolve()
     root.mkdir(parents=True, exist_ok=True)
@@ -67,6 +86,7 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
     # Local dev tool: the Vite dev server (5173) hits the API on another port.
     app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"],
                        allow_headers=["*"])
+    projects = ProjectStore(root / "projects.json")   # ClearML-style run organization (UI-only)
 
     # ------------------------------------------------------------------ helpers
     def _run_dir(run_id: str) -> Path:
@@ -137,12 +157,60 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
                     "best_metric": (best.metric if best else None),
                     "best_confirmed": (best.confirmed_mean if best else None),
                     "stop_reason": st.stop_reason,
+                    "themes": _theme_rollup(st),
                 }
                 _summary_cache[rd.name] = (*sig, summary)
                 out.append(summary)
             except Exception:  # noqa: BLE001 - a half-written run shouldn't break the list
                 continue
-        return out
+        # Overlay project membership (kept OUT of the summary cache — assignments change
+        # independently of the event log, so a finished/cached run can still be re-filed).
+        assignments = projects.load()["assignments"]
+        return [{**s, "project_id": assignments.get(s["run_id"])} for s in out]
+
+    # ------------------------------------------------------------------ projects (ClearML-style)
+    @app.get("/api/projects")
+    def list_projects():
+        return projects.load()
+
+    @app.post("/api/projects")
+    async def create_project(request: Request):
+        body = await request.json()
+        try:
+            p = projects.create(body.get("name", ""), body.get("parent_id"))
+        except ProjectError as e:
+            raise HTTPException(400, str(e))
+        return p.model_dump()
+
+    @app.patch("/api/projects/{pid}")
+    async def patch_project(pid: str, request: Request):
+        body = await request.json()
+        try:
+            if "name" in body and body["name"] is not None:
+                projects.rename(pid, body["name"])
+            if "parent_id" in body:
+                projects.reparent(pid, body["parent_id"])
+        except ProjectError as e:
+            raise HTTPException(400, str(e))
+        return {"ok": True}
+
+    @app.delete("/api/projects/{pid}")
+    def delete_project(pid: str):
+        try:
+            projects.delete(pid)
+        except ProjectError as e:
+            raise HTTPException(400, str(e))
+        return {"ok": True}
+
+    @app.post("/api/runs/{run_id}/project")
+    async def assign_run(run_id: str, request: Request):
+        _run_dir(run_id)   # 404 guard: only real runs can be filed
+        body = await request.json()
+        try:
+            projects.assign(run_id, body.get("project_id"))
+        except ProjectError as e:
+            raise HTTPException(400, str(e))
+        return {"ok": True}
 
     # ------------------------------------------------------------------ state + time-travel
     @app.get("/api/runs/{run_id}/state")

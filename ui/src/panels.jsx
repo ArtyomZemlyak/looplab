@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useState } from 'react'
-import { ReactFlow, Background, Controls } from '@xyflow/react'
 import { get, putText, post, fmt, fmtInt, CONTROL } from './util.js'
 import { Trajectory, Bars, Gantt, ParallelCoords, Scatter } from './charts.jsx'
+import MapView from './MapView.jsx'
 
 export function Panel({ title, sub, onClose, children, wide }) {
   return (
@@ -295,33 +295,12 @@ export function ComparePanel({ state, runId, onClose }) {
 }
 
 export function MetaGraphPanel({ onClose }) {
-  const [runs, setRuns] = useState([])
-  useEffect(() => { get('/api/runs').then(setRuns).catch(() => {}) }, [])
-  const { nodes, edges } = useMemo(() => {
-    const byTask = {}
-    runs.forEach(r => { (byTask[r.task_id] ||= []).push(r) })
-    const ns = [], es = []
-    let ty = 0
-    Object.entries(byTask).forEach(([task, rs]) => {
-      const hub = `task:${task}`
-      ns.push({ id: hub, position: { x: 0, y: ty * 40 + rs.length * 30 }, data: { label: `📋 ${task}` },
-        style: { background: '#181c25', color: '#e6e9ef', border: '1px solid #4aa3ff', borderRadius: 8, fontWeight: 700, width: 200 } })
-      rs.forEach((r, i) => {
-        const id = `run:${r.run_id}`
-        ns.push({ id, position: { x: 280, y: ty * 40 + i * 64 }, data: { label: `${r.run_id}\n${r.phase} · best ${r.best_metric == null ? '—' : Number(r.best_metric).toPrecision(3)}` },
-          style: { background: '#12151c', color: '#e6e9ef', border: '1px solid ' + (r.phase === 'finished' ? '#2c6e49' : '#353c47'), borderRadius: 8, width: 220, whiteSpace: 'pre' } })
-        es.push({ id: `${hub}-${id}`, source: hub, target: id, animated: r.phase !== 'finished' })
-      })
-      ty += rs.length + 1
-    })
-    return { nodes: ns, edges: es }
-  }, [runs])
+  // The cross-run map: projects › runs › themes as one collapsible semantic-zoom continuum
+  // (same hull / super-node language as the in-run canvas). Clicking a run drills into it.
   return (
-    <Panel title="Multi-tree meta-graph" sub="runs grouped by task" onClose={onClose} wide>
-      <div style={{ height: 460 }}>
-        <ReactFlow nodes={nodes} edges={edges} fitView nodesDraggable={false} proOptions={{ hideAttribution: true }}>
-          <Background color="#20252f" gap={20} /><Controls showInteractive={false} />
-        </ReactFlow>
+    <Panel title="Multi-tree meta-graph" sub="projects › runs › themes" onClose={onClose} wide>
+      <div style={{ height: 540 }}>
+        <MapView onOpen={(id) => { onClose(); location.hash = '#/run/' + encodeURIComponent(id) }} />
       </div>
     </Panel>
   )

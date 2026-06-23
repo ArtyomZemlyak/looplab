@@ -12,9 +12,23 @@ import urllib.error
 import urllib.request
 from typing import Optional
 
+from .tracing import record_llm_call
+
 
 class BudgetExceeded(Exception):
     pass
+
+
+def _assistant_text(msg: dict) -> str:
+    """Display text for a tool-calling assistant turn: its content, plus a compact note of any
+    tool calls it made (so the trace shows the model chose to call a tool, not an empty reply)."""
+    content = msg.get("content") or ""
+    calls = msg.get("tool_calls") or []
+    if calls:
+        names = ", ".join(c.get("function", {}).get("name", "?") for c in calls)
+        note = f"[tool_calls: {names}]"
+        return f"{content}\n{note}" if content else note
+    return content
 
 
 class OpenAICompatibleClient:
@@ -54,7 +68,10 @@ class OpenAICompatibleClient:
     def complete_text(self, messages: list[dict]) -> str:
         body = self._post({"model": self.model, "messages": messages,
                            "temperature": self.temperature, "stream": False})
-        return body["choices"][0]["message"].get("content") or ""
+        out = body["choices"][0]["message"].get("content") or ""
+        record_llm_call(op="complete_text", model=self.model, messages=messages,
+                        completion=out, usage=body.get("usage"))
+        return out
 
     def chat(self, messages: list[dict], tools: list[dict],
              tool_choice: str = "auto") -> dict:
@@ -64,7 +81,10 @@ class OpenAICompatibleClient:
             "model": self.model, "messages": messages, "tools": tools,
             "tool_choice": tool_choice, "temperature": self.temperature, "stream": False,
         })
-        return body["choices"][0]["message"]
+        msg = body["choices"][0]["message"]
+        record_llm_call(op="chat", model=self.model, messages=messages,
+                        completion=_assistant_text(msg), usage=body.get("usage"))
+        return msg
 
     def complete_tool(self, messages: list[dict], json_schema: dict) -> dict:
         tool = {"type": "function",
@@ -80,6 +100,9 @@ class OpenAICompatibleClient:
         if not calls:  # endpoint ignored tool_choice -> let parse.py fall back to text
             raise KeyError("no tool_calls in response")
         args = calls[0]["function"]["arguments"]
+        record_llm_call(op="complete_tool", model=self.model, messages=messages,
+                        completion=args if isinstance(args, str) else json.dumps(args),
+                        usage=body.get("usage"))
         return json.loads(args) if isinstance(args, str) else args
 
 
@@ -137,10 +160,22 @@ class LiteLLMClient:
             cost = None
         self.accountant.add(cost or 0.0)
 
+    def _usage(self, resp) -> Optional[dict]:
+        try:
+            u = resp.usage
+            return {"prompt_tokens": getattr(u, "prompt_tokens", 0),
+                    "completion_tokens": getattr(u, "completion_tokens", 0),
+                    "total_tokens": getattr(u, "total_tokens", 0)}
+        except Exception:
+            return None
+
     def complete_text(self, messages: list[dict]) -> str:
         resp = self._litellm().completion(model=self.model, messages=messages, **self.kwargs)
         self._account(resp)
-        return resp.choices[0].message.content or ""
+        out = resp.choices[0].message.content or ""
+        record_llm_call(op="complete_text", model=self.model, messages=messages,
+                        completion=out, usage=self._usage(resp))
+        return out
 
     def complete_tool(self, messages: list[dict], json_schema: dict) -> dict:
         tool = {
@@ -156,4 +191,8 @@ class LiteLLMClient:
         calls = resp.choices[0].message.tool_calls
         if not calls:  # endpoint ignored tool_choice -> KeyError so parse.py falls back
             raise KeyError("no tool_calls in response")
-        return json.loads(calls[0].function.arguments)
+        args = calls[0].function.arguments
+        record_llm_call(op="complete_tool", model=self.model, messages=messages,
+                        completion=args if isinstance(args, str) else json.dumps(args),
+                        usage=self._usage(resp))
+        return json.loads(args)

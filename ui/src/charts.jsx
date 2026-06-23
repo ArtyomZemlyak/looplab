@@ -61,8 +61,8 @@ export function Bars({ data, width = 760, height = 220, color = '#4aa3ff', fmtv 
   )
 }
 
-// Gantt of span timing per node.
-export function Gantt({ spans, width = 760 }) {
+// Gantt of span timing per node. `onPick(nid)` drills into the clicked span's node.
+export function Gantt({ spans, width = 760, onPick }) {
   const flat = []
   const walk = (arr, nid) => arr.forEach(s => {
     flat.push({ nid, name: s.name, start: s.start, dur: s.duration_s || 0, err: s.status === 'ERROR' })
@@ -80,7 +80,9 @@ export function Gantt({ spans, width = 760 }) {
     <svg width="100%" viewBox={`0 0 ${w} ${h}`}>
       {flat.map((s, i) => {
         const y = i * rowH + 4, x = X(s.start), bw = Math.max(2, (s.dur / span) * (w - lab - 20))
-        return <g key={i}>
+        return <g key={i} onClick={onPick ? () => onPick(s.nid) : undefined}
+                  style={onPick ? { cursor: 'pointer' } : undefined}>
+          <title>{s.nid}:{s.name} — {fmt(s.dur, 3)}s{s.err ? ' (ERROR)' : ''}</title>
           <text x={lab - 6} y={y + 11} fill="#9aa3b2" fontSize="10" textAnchor="end">{s.nid}:{s.name}</text>
           <rect x={x} y={y} width={bw} height={rowH - 5} rx="2" fill={s.err ? '#ef4444' : (palette[s.name] || '#4aa3ff')} opacity=".85" />
         </g>
