@@ -305,16 +305,32 @@ class RepoTask(BaseModel):
     def _eval_protected(self) -> list[str]:
         """Files the metric is READ from — the agent must not be able to forge the score by
         writing them. Covers a metric FILE (`file_json`/`file_regex`) AND an agent-authored
-        `adapter` module (an explicit, non-onboarded adapter eval would otherwise leave the
-        reader the agent literally writes editable — trust-boundary hole). Namespaced under the
-        eval `cwd` so the protected name matches the workspace-relative path the agent edits."""
-        m = self.eval.metric if self.eval else {}
-        kind = m.get("kind", "")
-        if (kind.startswith("file_") or kind == "adapter") and m.get("path"):
-            cwd = self._normp((self.eval.cwd or ".").strip()).strip("/")
-            pre = "" if cwd in (".", "") else cwd + "/"
-            return [self._normp(pre + m["path"])]
-        return []
+        `adapter` module, across EVERY reader the eval uses: the primary `metric`, the extra
+        `metrics`, each `constraints` reader, and the drift `cross_check` (review C1 — secondary
+        reader paths were left unprotected, so constraint/aux/drift values could be forged).
+        Namespaced under the eval `cwd` so the protected name matches the workspace-relative path
+        the agent edits."""
+        if not self.eval:
+            return []
+        cwd = self._normp((self.eval.cwd or ".").strip()).strip("/")
+        pre = "" if cwd in (".", "") else cwd + "/"
+        out: list[str] = []
+
+        def _add(reader) -> None:
+            if not isinstance(reader, dict):
+                return
+            kind = reader.get("kind", "")
+            if (kind.startswith("file_") or kind == "adapter") and reader.get("path"):
+                out.append(self._normp(pre + reader["path"]))
+
+        _add(self.eval.metric)
+        for r in (self.eval.metrics or {}).values():
+            _add(r)
+        for c in (self.eval.constraints or []):
+            _add(c)
+        _add(self.eval.cross_check)
+        seen: set[str] = set()
+        return [p for p in out if not (p in seen or seen.add(p))]   # dedupe, keep order
 
     def _protected_names(self) -> list[str]:
         """Files the agent's edits may never overwrite, namespaced across all editable repos:

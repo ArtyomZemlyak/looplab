@@ -40,6 +40,10 @@ def fold(events: Iterable[Event]) -> RunState:
         elif t == "node_evaluated":
             n = st.nodes.get(d["node_id"])              # tolerate an event for an unknown node
             if n is not None:                           # (corrupt/hand-edited log) — skip, don't crash
+                # Idempotent (C4): only a node's FIRST terminal event contributes its eval time, so
+                # a duplicate node_evaluated/node_failed (corrupt log / double-fold) can't inflate
+                # total_eval_seconds or make the budget order-dependent.
+                first_terminal = n.status is NodeStatus.pending
                 n.metric = d["metric"]
                 n.status = NodeStatus.evaluated
                 n.stdout_tail = d.get("stdout_tail", "")
@@ -47,15 +51,18 @@ def fold(events: Iterable[Event]) -> RunState:
                 n.extra_metrics = d.get("extra_metrics", {}) or {}
                 n.violations = d.get("violations", []) or []
                 n.feasible = not n.violations           # #5: constraint-violating -> infeasible
-            st.total_eval_seconds += d.get("eval_seconds") or 0.0
+                if first_terminal:
+                    st.total_eval_seconds += d.get("eval_seconds") or 0.0
         elif t == "node_failed":
             n = st.nodes.get(d["node_id"])
             if n is not None:
+                first_terminal = n.status is NodeStatus.pending
                 n.status = NodeStatus.failed
                 n.error = d.get("error", "")
                 n.error_reason = d.get("reason", "")
                 n.eval_seconds = d.get("eval_seconds")
-            st.total_eval_seconds += d.get("eval_seconds") or 0.0
+                if first_terminal:
+                    st.total_eval_seconds += d.get("eval_seconds") or 0.0
         elif t == "confirm_eval":
             st.total_eval_seconds += d.get("eval_seconds") or 0.0   # confirm-seed eval cost
             if "node_id" in d and "seed" in d:                       # per-seed resume memo (#0)

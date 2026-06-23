@@ -173,6 +173,7 @@ def make_docker_wrap(mount_root: str, image: str, network: str = "none",
             raise ValueError(f"eval cwd {host_cwd!r} is outside the mounted workspace {str(root)!r}")
         cdir = "/work" if rel in (".", "") else f"/work/{rel}"
         base = ["docker", "run", "--rm", "--network", network,
+                "--pids-limit", "1024",       # fork-bomb guard (review C1: no pids limit before)
                 "-v", f"{root.as_posix()}:/work", "-w", cdir]
         if mem:
             base += ["--memory", mem]

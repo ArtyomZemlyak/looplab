@@ -58,6 +58,38 @@ def test_sandbox_redacts_secret_env(tmp_path, monkeypatch):
     assert info["has_path"] is True                              # but PATH (functionality) kept
 
 
+def test_fold_idempotent_to_duplicate_terminal_events(tmp_path):
+    # A duplicate node_evaluated (corrupt/hand-edited log) must not double-count eval time.
+    s = EventStore(tmp_path / "e.jsonl")
+    s.append("run_started", {"run_id": "r", "task_id": "t", "direction": "min"})
+    s.append("node_created", {"node_id": 0, "parent_ids": [], "operator": "draft",
+                              "idea": {"operator": "draft", "params": {}}, "code": ""})
+    s.append("node_evaluated", {"node_id": 0, "metric": 1.0, "eval_seconds": 2.0})
+    s.append("node_evaluated", {"node_id": 0, "metric": 1.0, "eval_seconds": 2.0})  # dup
+    st = fold(s.read_all())
+    assert st.total_eval_seconds == 2.0          # counted once, not 4.0
+
+
+def test_repo_eval_protects_every_reader_path(tmp_path):
+    import sys
+    from looplab.repo_task import EvalSpec, RepoTask
+    repo = tmp_path / "repo"; repo.mkdir()
+    (repo / "run.py").write_text("print('{\"metric\": 1.0}')\n", encoding="utf-8")
+    t = RepoTask(
+        id="p", direction="max", editable_path=str(repo), edit_surface=["*.py"],
+        eval=EvalSpec(
+            command=[sys.executable, "run.py"],
+            metric={"kind": "file_json", "path": "out/metric.json", "key": "metric"},
+            metrics={"aux": {"kind": "file_json", "path": "out/aux.json", "key": "a"}},
+            constraints=[{"kind": "file_json", "path": "out/lat.json", "key": "lat",
+                          "max": 100, "name": "lat"}],
+            cross_check={"kind": "file_json", "path": "out/cross.json", "key": "metric"}))
+    protected = set(t._protected_names())
+    # every file-based reader (primary + aux metric + constraint + cross-check) is now forge-proof
+    for p in ("out/metric.json", "out/aux.json", "out/lat.json", "out/cross.json"):
+        assert p in protected, f"{p} not protected: {protected}"
+
+
 def test_llm_transport_error_is_clean_and_falls_back():
     from looplab.llm import OpenAICompatibleClient, LLMError
     from looplab.models import Idea

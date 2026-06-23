@@ -295,6 +295,14 @@ Fixed in this round (correctness + cheap hardening, chosen to preserve all exist
   free-form repo param wasn't numeric — no `node_created` was written).
 - **Hygiene:** `skills.py`/`prompts.py` read prompt/skill files with `errors="replace"` (a
   cp1252/UTF-16 file no longer crashes load).
+- **Metric integrity (C1, partial):** `RepoTask._eval_protected` now protects EVERY file-based
+  reader path — the primary `metric`, the extra `metrics`, each `constraints` reader, and the
+  drift `cross_check` — not just the primary (secondary/constraint/drift values were forgeable).
+- **Durability (C4, partial):** `replay.fold` is now idempotent for terminal node events — only a
+  node's first `node_evaluated`/`node_failed` contributes its eval time, so a duplicate event can't
+  inflate `total_eval_seconds` or make the budget order-dependent.
+- **Sandbox (C1, partial):** both Docker paths (`command_eval.make_docker_wrap` +
+  `sandbox.DockerSandbox`) add `--pids-limit 1024` — a fork-bomb guard on the untrusted tier.
 
 Locked by `tests/test_review_fixes_3.py` (config bounds, direction, merge guard, secret-env
 redaction, LLM-error fallback) + a CORS allow-list test in `tests/test_server.py`. Offline suite
@@ -302,7 +310,9 @@ green.
 
 **Consciously deferred** (larger / higher-risk to existing functionality, and not blocking the
 stated trusted-local single-operator default — tracked here, not silently dropped): C1 host-side
-metric scoring + out-of-process mlebench grader + `:ro` Docker mounts + glob `protect`; C3 auth
-tokens on mutating `/api/*`; C4/C5 schema-version enforcement, idempotent `fold`, atomic read-model
-with a seq watermark; Docker resource limits; `cli_agent` process-group tree-kill (the live-tested
-opencode path — deferred to avoid regressing it). These remain the roadmap above.
+metric scoring + out-of-process mlebench grader + `:ro` Docker mounts (a read-only mount would
+break file-based metric readers, which write into the mount); C3 auth tokens on mutating `/api/*`;
+C4/C5 envelope schema-version enforcement + atomic read-model with a seq watermark; full Docker
+`--memory`/`--cpus`/`--read-only` (untestable without a Docker host here); `cli_agent`
+process-group tree-kill (the live-tested opencode path — deferred to avoid regressing it). These
+remain the roadmap above.

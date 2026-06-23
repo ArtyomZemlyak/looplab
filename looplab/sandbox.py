@@ -223,6 +223,7 @@ class DockerSandbox:
         # seconds even if the host kills the client first. Host timeout gets a grace margin.
         secs = max(1, int(timeout))
         argv = (["docker", "run", "--rm", "--network", self.network,
+                 "--pids-limit", "1024",      # fork-bomb guard (review C1: no pids limit before)
                  "-v", f"{wd.as_posix()}:/work", "-w", "/work"] + envs
                 + [self.image, "timeout", "-k", "5", str(secs), "python", "solution.py"])
         rc, out, err, to = _run_argv(argv, str(wd), timeout + 15.0, None, self.max_output_bytes, cancel)
