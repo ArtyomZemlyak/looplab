@@ -28,6 +28,32 @@ export default function RunView({ runId, onBack }) {
   const [collapsed, setCollapsed] = useState(() => new Set())
   const [selectedGroup, setSelectedGroup] = useState(null)
   const [panel, setPanel] = useState(null)
+  // Resizable / collapsible panes (standard multi-pane layout), persisted across sessions.
+  const [sideW, setSideW] = useState(() => +localStorage.getItem('ll.sideW') || 420)
+  const [dockH, setDockH] = useState(() => +localStorage.getItem('ll.dockH') || 230)
+  const [sideC, setSideC] = useState(() => localStorage.getItem('ll.sideC') === '1')
+  const [dockC, setDockC] = useState(() => localStorage.getItem('ll.dockC') === '1')
+  useEffect(() => {
+    localStorage.setItem('ll.sideW', sideW); localStorage.setItem('ll.dockH', dockH)
+    localStorage.setItem('ll.sideC', sideC ? '1' : '0'); localStorage.setItem('ll.dockC', dockC ? '1' : '0')
+  }, [sideW, dockH, sideC, dockC])
+  // Drag a splitter: the side panel grows when dragged left, the dock when dragged up.
+  const startDrag = (axis) => (e) => {
+    e.preventDefault()
+    const x0 = e.clientX, y0 = e.clientY, w0 = sideW, h0 = dockH
+    const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v))
+    const onMove = (ev) => {
+      // bounds stay sane on small windows: keep max ≥ min so clamp never degenerates
+      if (axis === 'side') setSideW(clamp(w0 - (ev.clientX - x0), 280, Math.max(320, window.innerWidth - 340)))
+      else setDockH(clamp(h0 - (ev.clientY - y0), 90, Math.max(140, window.innerHeight - 160)))
+    }
+    const onUp = () => {
+      window.removeEventListener('mousemove', onMove); window.removeEventListener('mouseup', onUp)
+      document.body.style.userSelect = ''
+    }
+    window.addEventListener('mousemove', onMove); window.addEventListener('mouseup', onUp)
+    document.body.style.userSelect = 'none'
+  }
   const [toast, setToast] = useState(null)
   const [notif, setNotif] = useState(false)
   const [cfg, setCfg] = useState(null)
@@ -113,16 +139,28 @@ export default function RunView({ runId, onBack }) {
           groupMode={groupMode} collapsed={collapsed} onToggleGroup={toggleGroup} onSetMode={changeMode}
           onCollapseAll={(keys) => setCollapsed(new Set(keys))} onExpandAll={() => setCollapsed(new Set())}
           selectedGroup={selectedGroup} onSelectGroup={selectGroup} /></div>
-        <div className="side">
-          {selectedGroup != null
-            ? <GroupSummary groupKey={selectedGroup} memberIds={groupMembers}
-                state={state} onSelectNode={focusNode} onClose={() => setSelectedGroup(null)} />
-            : <Inspector runId={runId} nodeId={selectedId} state={state} live={live}
-                tab={inspectTab} setTab={setInspectTab} onToast={showToast} />}
-        </div>
+        {sideC
+          ? <div className="side-rail" title="show panel" onClick={() => setSideC(false)}>‹ {selectedGroup != null ? 'group' : 'inspector'}</div>
+          : <>
+              <div className="splitter v" onMouseDown={startDrag('side')} title="drag to resize" />
+              <div className="side" style={{ width: sideW }}>
+                <div className="pane-grip">
+                  <span className="muted">{selectedGroup != null ? 'group' : 'inspector'}</span>
+                  <span className="spacer" style={{ flex: 1 }} />
+                  <button className="btn sm ghost" title="collapse panel" onClick={() => setSideC(true)}>⟩</button>
+                </div>
+                {selectedGroup != null
+                  ? <GroupSummary groupKey={selectedGroup} memberIds={groupMembers}
+                      state={state} onSelectNode={focusNode} onClose={() => setSelectedGroup(null)} />
+                  : <Inspector runId={runId} nodeId={selectedId} state={state} live={live}
+                      tab={inspectTab} setTab={setInspectTab} onToast={showToast} />}
+              </div>
+            </>}
       </div>
 
-      <Dock runId={runId} liveSeq={seq} viewSeq={viewSeq} setViewSeq={setViewSeq} onFocus={focusNode} />
+      {!dockC && <div className="splitter h" onMouseDown={startDrag('dock')} title="drag to resize" />}
+      <Dock runId={runId} liveSeq={seq} viewSeq={viewSeq} setViewSeq={setViewSeq} onFocus={focusNode}
+            collapsed={dockC} onToggleCollapse={() => setDockC(c => !c)} height={dockH} />
 
       {panel === 'trust' && <TrustPanel state={state} runId={runId} onClose={() => setPanel(null)} />}
       {panel === 'sensitivity' && <SensitivityPanel state={state} onClose={() => setPanel(null)} />}

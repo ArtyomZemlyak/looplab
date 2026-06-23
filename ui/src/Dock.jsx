@@ -26,7 +26,7 @@ function eventNode(e) {
   return d.node_id ?? d.parent_id ?? null
 }
 
-export default function Dock({ runId, liveSeq, viewSeq, setViewSeq, onFocus }) {
+export default function Dock({ runId, liveSeq, viewSeq, setViewSeq, onFocus, collapsed, onToggleCollapse, height = 230 }) {
   const [tab, setTab] = useState('travel')
   const [log, setLog] = useState([])
   const [trace, setTrace] = useState(null)
@@ -61,9 +61,12 @@ export default function Dock({ runId, liveSeq, viewSeq, setViewSeq, onFocus }) {
     <div className="dock">
       <div className="dock-tabs">
         {[['travel', 'Time-travel'], ['feed', 'Activity'], ['timeline', 'Timeline']].map(([k, l]) =>
-          <div key={k} className={'tab' + (k === tab ? ' active' : '')} onClick={() => setTab(k)}>{l}</div>)}
+          <div key={k} className={'tab' + (k === tab ? ' active' : '')} onClick={() => !collapsed && setTab(k)}>{l}</div>)}
+        <span className="spacer" style={{ flex: 1 }} />
+        <button className="btn sm ghost dock-collapse" title={collapsed ? 'expand' : 'collapse'}
+                onClick={onToggleCollapse}>{collapsed ? '▴' : '▾'}</button>
       </div>
-      <div className="dock-body">
+      {!collapsed && <div className="dock-body" style={{ height }}>
         {tab === 'travel' && <div className="scrubber">
           <button className="btn sm" onClick={() => setViewSeq(null)} disabled={atLive}>⏵ Live</button>
           <input type="range" min={0} max={Math.max(0, liveSeq)} value={atLive ? liveSeq : viewSeq}
@@ -83,7 +86,7 @@ export default function Dock({ runId, liveSeq, viewSeq, setViewSeq, onFocus }) {
         {tab === 'timeline' && (trace
           ? <Gantt spans={trace} onPick={(nid) => onFocus?.(Number(nid), 'Reasoning', null)} />
           : <div className="muted">loading spans…</div>)}
-      </div>
+      </div>}
     </div>
   )
 }
