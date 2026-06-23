@@ -221,5 +221,22 @@ def inspect(run_dir: Path = typer.Argument(...)):
     _print_result(fold(store.read_all()))
 
 
+@app.command()
+def ui(run_root: Path = typer.Option(Path("runs"), help="Directory containing run subdirs."),
+       host: str = typer.Option("127.0.0.1", help="Bind host."),
+       port: int = typer.Option(8765, help="Bind port.")):
+    """Serve the live React UI over the run dirs (needs the [ui] extra: pip install 'looplab[ui]').
+
+    A separate read/control process (ADR-18): tails events.jsonl -> SSE, serves the built React
+    app, and turns UI actions into appended control events. Does not change the engine."""
+    try:
+        from .server import serve  # lazy: keeps the core import-free of fastapi/uvicorn
+    except ModuleNotFoundError as e:
+        typer.echo(f"UI extra not installed: {e}")
+        raise typer.Exit(1)
+    typer.echo(f"LoopLab UI on http://{host}:{port}  (run-root={run_root})")
+    serve(run_root, host=host, port=port)
+
+
 if __name__ == "__main__":
     app()

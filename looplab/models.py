@@ -114,6 +114,29 @@ class RunState(BaseModel):
     # re-executing every expensive full-profile seed from scratch.
     confirm_seed_results: dict[int, dict] = Field(default_factory=dict)
 
+    # --- live operator control (UI intervention via the event log) ---
+    # These are folded from appended CONTROL events (intent). The engine remains the sole writer
+    # of DOMAIN events: it reads the intent here and writes the effect (e.g. node_abort -> a
+    # node_failed reason="aborted"). All deterministic under replay; audit-only fields never
+    # change best-selection.
+    paused: bool = False                       # `pause`/`resume`: resumable break (not finished)
+    stop_requested: Optional[str] = None       # `run_abort`: reason; loop -> run_finished + break
+    aborted_nodes: list[int] = Field(default_factory=list)   # `node_abort`: skip/kill these nodes
+    budget_overrides: dict = Field(default_factory=dict)     # `budget_extend`: max_seconds/eval
+    pending_hints: list[dict] = Field(default_factory=list)  # `hint`: operator directives to steer
+    confirm_requests: list[int] = Field(default_factory=list)  # `force_confirm`: operator robustness ask
+    confirmed_forced: list[int] = Field(default_factory=list)   # nodes a forced confirm finished (gate)
+    ablate_requests: list[int] = Field(default_factory=list)    # `force_ablate` (wired in Phase 5)
+    fork_requests: list[dict] = Field(default_factory=list)     # `fork`: operator-seeded improve
+    forks_done: int = 0                        # count of processed forks (replay-safe fulfillment)
+    annotations: dict[int, list[str]] = Field(default_factory=dict)  # `annotation`: node notes
+    promotions: list[dict] = Field(default_factory=list)        # `promote`: solution-registry audit
+    champion: Optional[int] = None             # node id the `champion` registry alias points at
+    llm_cost: Optional[dict] = None            # run-level LLM cost/token roll-up ({cost,tokens,…})
+    ablations: list[dict] = Field(default_factory=list)  # ablate events {parent_id, impacts} (sensitivity)
+    policy_scores: dict[int, float] = Field(default_factory=dict)  # latest policy_decision candidate scores
+    policy_chosen: Optional[int] = None                  # node the policy expanded ("why this node")
+
     # --- read helpers (no mutation) ---
     def best(self) -> Optional[Node]:
         return self.nodes.get(self.best_node_id) if self.best_node_id is not None else None

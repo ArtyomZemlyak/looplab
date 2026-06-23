@@ -91,12 +91,59 @@ def fold(events: Iterable[Event]) -> RunState:
             st.workspace_changed = True                 # resume saw the source repo/data change
         elif t == "diversity_archive":
             st.archive = d
+        elif t == "llm_cost":
+            st.llm_cost = d
+        elif t == "ablate":
+            st.ablations.append(d)   # {parent_id, impacts} — parameter-sensitivity audit
+        elif t == "policy_decision":
+            st.policy_scores = {int(k): v for k, v in (d.get("scores") or {}).items()}
+            st.policy_chosen = d.get("chosen")
         elif t == "best_confirmed":
             best_confirmed = d["node_id"]
             st.confirmed_done = True   # the confirmation phase ran to completion
         elif t == "run_finished":
             st.finished = True
             st.stop_reason = d.get("reason")
+        # --- live operator control events (UI intervention). Intent only; the engine reads
+        # these and writes the matching domain effect. Deterministic under replay. ---
+        elif t == "run_abort":
+            st.stop_requested = d.get("reason", "operator")
+        elif t == "pause":
+            st.paused = True
+        elif t == "resume":
+            st.paused = False
+        elif t == "node_abort":
+            nid = d.get("node_id")
+            if nid is not None and nid not in st.aborted_nodes:
+                st.aborted_nodes.append(nid)
+        elif t == "budget_extend":
+            for _k in ("max_seconds", "max_eval_seconds"):
+                if d.get(_k) is not None:
+                    st.budget_overrides[_k] = d[_k]
+        elif t == "hint":
+            st.pending_hints.append(d)
+        elif t == "force_confirm":
+            if d.get("node_id") is not None:
+                st.confirm_requests.append(d["node_id"])
+        elif t == "force_ablate":
+            if d.get("node_id") is not None:
+                st.ablate_requests.append(d["node_id"])
+        elif t == "fork":
+            st.fork_requests.append(d)
+        elif t == "fork_done":
+            st.forks_done += 1   # one per processed fork request (gate for replay-safe fulfillment)
+        elif t == "confirm_done":
+            nid = d.get("node_id")   # forced-confirm finished for this node (gate; selection untouched)
+            if nid is not None and nid not in st.confirmed_forced:
+                st.confirmed_forced.append(nid)
+        elif t == "annotation":
+            nid = d.get("node_id")
+            if nid is not None:
+                st.annotations.setdefault(nid, []).append(d.get("text", ""))
+        elif t == "promote":
+            st.promotions.append(d)
+            if d.get("alias", "champion") == "champion":
+                st.champion = d.get("node_id")
         # unknown event types (e.g. "budget") are ignored for state — forward-compat
 
     # Multi-objective (#5): a constraint-violating node is excluded from selection — it keeps

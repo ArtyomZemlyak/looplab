@@ -47,7 +47,7 @@ class OpenAICompatibleClient:
             body = json.loads(resp.read().decode("utf-8"))
         usage = body.get("usage") or {}
         # No price table for local models -> account tokens as 0 cost, but track them.
-        self.accountant.add(0.0)
+        self.accountant.add(0.0, usage=usage)
         self._last_usage = usage
         return body
 
@@ -89,9 +89,22 @@ class CostAccountant:
         self.warn_frac = warn_frac
         self.spent = 0.0
         self.warned = False
+        # Token accounting (UI cost panel): local models have no $ price, but tokens are the
+        # real signal of how much LLM work a run cost. Accumulated across all calls.
+        self.calls = 0
+        self.prompt_tokens = 0
+        self.completion_tokens = 0
+        self.total_tokens = 0
 
-    def add(self, cost: Optional[float]) -> float:
+    def add(self, cost: Optional[float], usage: Optional[dict] = None) -> float:
         self.spent += max(0.0, float(cost or 0.0))
+        if usage:
+            self.calls += 1
+            pt = int(usage.get("prompt_tokens") or 0)
+            ct = int(usage.get("completion_tokens") or 0)
+            self.prompt_tokens += pt
+            self.completion_tokens += ct
+            self.total_tokens += int(usage.get("total_tokens") or (pt + ct))
         if self.limit is not None:
             if not self.warned and self.spent >= self.warn_frac * self.limit:
                 self.warned = True  # caller may surface a warning event

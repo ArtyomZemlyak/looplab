@@ -205,7 +205,7 @@ def run_command_eval(command: list[str], cwd: str, timeout: float, metric: dict,
                      setup_cwd: Optional[str] = None, cross_check: Optional[dict] = None,
                      drift_tolerance: float = 1e-6, enforce_drift: bool = False,
                      wrap=None, metrics: Optional[dict] = None,
-                     constraints: Optional[list] = None, tracer=None) -> RunResult:
+                     constraints: Optional[list] = None, tracer=None, cancel=None) -> RunResult:
     """Run `command` (argv, no shell) in `cwd`, capped + timeout + tree-kill, then read the
     metric. If `setup` is given (e.g. a dependency install), it runs FIRST in `setup_cwd`
     (defaults to the repo/workdir root, NOT the eval `cwd` subdir — so a root-level
@@ -246,14 +246,14 @@ def run_command_eval(command: list[str], cwd: str, timeout: float, metric: dict,
         swd.mkdir(parents=True, exist_ok=True)
         with _sp("setup", sandboxed=bool(wrap)):
             rc, out, err, to = _run_argv(_w(_bound(setup, setup_timeout), str(swd)), swd,
-                                         setup_timeout + grace, env, max_output_bytes)
+                                         setup_timeout + grace, env, max_output_bytes, cancel)
         to = to or (is_docker and rc == 124)            # coreutils timeout -> exit 124
         if rc != 0 or to:
             return RunResult(exit_code=rc, stdout=out, stderr="setup failed:\n" + err,
                              metric=None, timed_out=to)
     with _sp("command", sandboxed=bool(wrap)) as _h:
         rc, out, err, to = _run_argv(_w(_bound(command, timeout), str(wd)), wd,
-                                     timeout + grace, env, max_output_bytes)
+                                     timeout + grace, env, max_output_bytes, cancel)
         to = to or (is_docker and rc == 124)
         if _h is not None:
             _h.set_many(exit_code=rc, timed_out=to)

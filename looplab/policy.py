@@ -230,6 +230,7 @@ class MCTSPolicy:
         n_total = len(evaluated)
         best_of = min if state.direction == "min" else max
         chosen, best_ucb = None, None
+        scores: dict[int, float] = {}   # per-candidate UCB1 (surfaced as a `policy_decision` event)
         for node in sorted(evaluated, key=lambda n: n.id):
             tree = subtree(node.id)
             metrics = [state.nodes[i].metric for i in tree
@@ -243,12 +244,13 @@ class MCTSPolicy:
             visits = sum(1 for i in tree if state.nodes[i].status is NodeStatus.evaluated
                          and state.nodes[i].feasible) or 1
             ucb = reward + self.c * math.sqrt(math.log(n_total + 1) / visits)
+            scores[node.id] = round(ucb, 4)
             if best_ucb is None or ucb > best_ucb:
                 best_ucb, chosen = ucb, node.id
         if chosen is None:
             b = state.best()
             chosen = b.id if b is not None else sorted(evaluated, key=lambda n: n.id)[0].id
-        return [{"kind": "improve", "parent_id": chosen}]
+        return [{"kind": "improve", "parent_id": chosen, "_scores": scores, "_chosen": chosen}]
 
 
 def make_policy(name: str = "greedy", *, n_seeds: int, max_nodes: int,
