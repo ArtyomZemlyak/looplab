@@ -21,12 +21,12 @@ import orjson
 from .agents_md import generate_agents_md
 from .archive import DiversityArchive
 from .cv import cv_summary
-from .eventstore import EventStore
+from .eventstore import EventStore, iter_jsonl
 from .gate import one_se_better
 from .htmlview import render_html
 from .leakage import target_leakage, temporal_leakage, train_test_contamination
 from .memory import JsonlCaseLibrary
-from .models import Idea, RunState
+from .models import Idea, NodeStatus, RunState
 from .operators import merge_idea
 from .policy import SearchPolicy
 from .profile import profile_dataset
@@ -287,6 +287,16 @@ class Engine:
             state = fold(self.store.read_all())
             if state.finished:
                 break
+            # Live operator control (UI intervention via the event log). The UI appends a
+            # control event; the engine — sole writer of domain events — reads the intent here
+            # and writes the effect. `run_abort` terminates (resumable=no); `pause` breaks
+            # WITHOUT finishing (a later `resume` event + re-entering run() continues), the same
+            # files-as-truth shape as the HITL approval gate below.
+            if state.stop_requested:
+                self.store.append("run_finished", {"reason": "aborted"})
+                break
+            if state.paused:
+                break
             # Onboarding pre-phase (Phase 3, ADR-7): the agent proposes a trusted eval
             # spec + metric adapter; a human ratifies it once (or autonomous auto-confirms);
             # then it's frozen + protected and the optimization loop trusts it.
@@ -319,17 +329,46 @@ class Engine:
                                   "cross_check; the agent-authored reader is trusted WITHOUT "
                                   "independent corroboration. Add eval.cross_check (a built-in "
                                   "reader) to enable the drift guard."})
+            # Effective budgets: an operator may raise (or lower) them live via a `budget_extend`
+            # control event (folded into state.budget_overrides), e.g. "keep going for 600s more".
+            max_s = state.budget_overrides.get("max_seconds", self.max_seconds)
+            max_es = state.budget_overrides.get("max_eval_seconds", self.max_eval_seconds)
             # Budget (I13): per-invocation wall-clock ceiling (resets on each resume).
-            if self.max_seconds is not None and (time.time() - start) >= self.max_seconds:
+            if max_s is not None and (time.time() - start) >= max_s:
                 self.store.append("run_finished", {"reason": "time_budget"})
                 break
             # Eval-compute budget (#2): cumulative time spent inside evals across the whole run
             # (persisted via the event log, so it survives resume — unlike wall-clock). Stops
             # the silent multi-hour sweep that real training runs can produce.
-            if (self.max_eval_seconds is not None
-                    and state.total_eval_seconds >= self.max_eval_seconds):
+            if (max_es is not None
+                    and state.total_eval_seconds >= max_es):
                 self.store.append("run_finished", {"reason": "eval_budget"})
                 break
+
+            # Operator-forced steering (Phase 5), one per iteration then re-fold. Each is gated on
+            # the domain event it produces (fork_done / an ablate event / node_confirmed), so a
+            # resume never repeats it — deterministic under replay.
+            if len(state.fork_requests) > state.forks_done:
+                req = state.fork_requests[state.forks_done]
+                pid = req.get("from_node_id")
+                if pid in state.nodes:
+                    self._create_node({"kind": "improve", "parent_id": pid})  # operator-seeded branch
+                self.store.append("fork_done", {"from_node_id": pid})         # always advance the gate
+                continue
+            forced_ablate = next((p for p in state.ablate_requests
+                                  if p in state.nodes
+                                  and not any(a.get("parent_id") == p for a in state.ablations)), None)
+            if forced_ablate is not None:
+                await self._ablate(forced_ablate)
+                continue
+            forced_confirm = next((n for n in state.confirm_requests
+                                   if n in state.nodes
+                                   and state.nodes[n].status is NodeStatus.evaluated
+                                   and n not in state.confirmed_forced), None)
+            if forced_confirm is not None:
+                await self._confirm_node(state.nodes[forced_confirm])
+                continue
+
             actions = self.policy.next_actions(state)
             if not actions:
                 # Optional multi-seed confirmation pass (I12) before finishing:
@@ -363,6 +402,9 @@ class Engine:
 
             if creates:
                 for a in creates:
+                    if "_scores" in a:   # policy exposed candidate scores (MCTS UCB1) -> surface "why"
+                        self.store.append("policy_decision",
+                                          {"scores": a["_scores"], "chosen": a.get("_chosen")})
                     self._create_node(a)  # sequential -> deterministic ids/proposals
                 continue
 
@@ -372,17 +414,35 @@ class Engine:
             if self.max_parallel <= 1:
                 limiter = anyio.CapacityLimiter(1)
                 for a in evals:
+                    cur = fold(self.store.read_all())
+                    # Operator stopped this specific node (`node_abort`): skip the eval and record
+                    # the effect as a node_failed reason="aborted" (cooperative pre-eval skip; a
+                    # mid-eval kill of an in-flight subprocess is the deferred v2). An aborted node
+                    # keeps no metric, so replay excludes it from best-selection.
+                    if a["node_id"] in cur.aborted_nodes:
+                        n = cur.nodes.get(a["node_id"])
+                        if n is not None and n.status is NodeStatus.pending:
+                            self.store.append("node_failed", {
+                                "node_id": a["node_id"], "error": "aborted by operator",
+                                "reason": "aborted", "eval_seconds": 0.0})
+                        continue
                     # Re-check the eval-compute budget BEFORE each eval (not just per loop
                     # iteration), so a multi-eval batch can't overshoot by a whole batch (#2/#25).
-                    if (self.max_eval_seconds is not None
-                            and fold(self.store.read_all()).total_eval_seconds
-                            >= self.max_eval_seconds):
+                    if (max_es is not None and cur.total_eval_seconds >= max_es):
                         break
                     await self._evaluate(a["node_id"], limiter)
             else:
                 limiter = anyio.CapacityLimiter(self.max_parallel)
+                cur = fold(self.store.read_all())
                 async with anyio.create_task_group() as tg:
                     for a in evals:
+                        if a["node_id"] in cur.aborted_nodes:
+                            n = cur.nodes.get(a["node_id"])
+                            if n is not None and n.status is NodeStatus.pending:
+                                self.store.append("node_failed", {
+                                    "node_id": a["node_id"], "error": "aborted by operator",
+                                    "reason": "aborted", "eval_seconds": 0.0})
+                            continue
                         tg.start_soon(self._evaluate, a["node_id"], limiter)
 
         # Finalize only on real completion (not when paused for approval / idempotent
@@ -396,6 +456,7 @@ class Engine:
             })
             self.store.append("diversity_archive",              # diversity archive (I22)
                               DiversityArchive(self.archive_resolution).summary(cur))
+            self._emit_llm_cost()                               # LLM cost/tokens roll-up (UI)
             self._store_case(fold(self.store.read_all()))       # cross-run memory (I19)
 
         final = build_readmodel(self.store.read_all(), self.run_dir / "readmodel.sqlite")
@@ -406,6 +467,41 @@ class Engine:
         (self.run_dir / "trace.json").write_bytes(orjson.dumps(tv))
         (self.run_dir / "tree.html").write_text(render_html(final, tv), encoding="utf-8")
         return final
+
+    def _emit_llm_cost(self) -> None:
+        """Best-effort LLM cost/token roll-up for the UI cost panel. Duck-types the role graph
+        (researcher/developer may be wrapped by ToolUsingResearcher/ValidatingDeveloper) to find
+        every CostAccountant, dedupes by identity, and emits one `llm_cost` event. Local models
+        have no $ price (spent=0.0) but tokens are the real cost signal. Skips silently for the
+        offline/toy backend (no client, no accountant) — never breaks a run."""
+        try:
+            seen: dict[int, object] = {}
+            stack = [self.researcher, self.developer]
+            while stack:
+                obj = stack.pop()
+                if obj is None:
+                    continue
+                acc = getattr(obj, "accountant", None)
+                if acc is not None and id(acc) not in seen:
+                    seen[id(acc)] = acc
+                for attr in ("client", "inner", "fallback", "researcher", "developer", "tools"):
+                    child = getattr(obj, attr, None)
+                    if child is not None and child is not obj:
+                        stack.append(child)
+            if not seen:
+                return
+            accs = list(seen.values())
+            if not any(getattr(a, "calls", 0) for a in accs):
+                return  # no LLM calls actually happened (e.g. toy run) — nothing to report
+            self.store.append("llm_cost", {
+                "cost": round(sum(getattr(a, "spent", 0.0) for a in accs), 6),
+                "calls": sum(getattr(a, "calls", 0) for a in accs),
+                "prompt_tokens": sum(getattr(a, "prompt_tokens", 0) for a in accs),
+                "completion_tokens": sum(getattr(a, "completion_tokens", 0) for a in accs),
+                "total_tokens": sum(getattr(a, "total_tokens", 0) for a in accs),
+            })
+        except Exception:  # noqa: BLE001 - cost telemetry must NEVER abort run finalization
+            return
 
     # ---------------------------------------------------------------- private
     def _create_node(self, action: dict) -> None:
@@ -531,7 +627,7 @@ class Engine:
             elif sp.is_file():
                 (wd / name).write_bytes(sp.read_bytes())
 
-    def _run_eval(self, node, workdir, env=None, profile=None):
+    def _run_eval(self, node, workdir, env=None, profile=None, cancel=None):
         """Eval dispatcher: RepoTask runs the operator's command + reads its metric;
         otherwise the classic solution.py sandbox path. Both return a `RunResult`, so all
         downstream metric/exit/timeout checks are identical.
@@ -561,8 +657,9 @@ class Engine:
                 wrap=wrap,
                 metrics=es.get("metrics") or None,            # #5 multi-objective …
                 constraints=es.get("constraints") or None,
-                tracer=self.tracer)                           # child spans: setup/command/read
-        return self.sandbox.run(node.code, str(workdir), self.timeout, env)
+                tracer=self.tracer,                           # child spans: setup/command/read
+                cancel=cancel)                                # operator mid-eval node_abort
+        return self.sandbox.run(node.code, str(workdir), self.timeout, env, cancel=cancel)
 
     def _emit_agent_report(self, node_id: int) -> None:
         """External-agent audit (ADR-7): if the Developer validated its output (a
@@ -601,11 +698,44 @@ class Engine:
             self._write_node_files(node, workdir)   # … agent edits on top …
             self._write_assets(workdir)             # … task assets win any name collision
             _t0 = time.time()
-            res = await anyio.to_thread.run_sync(
-                self._run_eval, node, str(workdir)
-            )
+            # Mid-eval per-node intervention (v2): a watcher polls the log while the eval runs in a
+            # worker thread; if the operator appends `node_abort` for THIS node, it sets the cancel
+            # Event, which tree-kills the in-flight subprocess (sandbox._run_argv). v1's pre-eval
+            # skip only catches not-yet-started nodes — this kills a running one.
+            import threading
+            cancel = threading.Event()
+            aborted = False
+            async with anyio.create_task_group() as _tg:
+                def _abort_seen() -> bool:   # lightweight raw scan — no full fold each tick
+                    for o in iter_jsonl(self.store.path):
+                        if o.get("type") == "node_abort" and o.get("data", {}).get("node_id") == node_id:
+                            return True
+                    return False
+                async def _watch():
+                    nonlocal aborted
+                    while True:
+                        await anyio.sleep(0.3)
+                        if cancel.is_set():
+                            return
+                        if await anyio.to_thread.run_sync(_abort_seen):
+                            aborted = True
+                            cancel.set()
+                            return
+                _tg.start_soon(_watch)
+                res = await anyio.to_thread.run_sync(
+                    self._run_eval, node, str(workdir), None, None, cancel
+                )
+                cancel.set()                  # eval finished on its own …
+                _tg.cancel_scope.cancel()     # … stop the watcher now (no poll-interval latency)
             dur = round(time.time() - _t0, 3)            # eval wall-clock (cost accounting #2)
             ok = res.metric is not None and res.exit_code == 0 and not res.timed_out
+            if aborted and not ok:                       # killed mid-eval by the operator (and the
+                async with self._write_lock:             # eval didn't already finish cleanly first)
+                    self.store.append("node_failed", {
+                        "node_id": node_id, "error": "aborted by operator (killed mid-eval)",
+                        "reason": "aborted", "eval_seconds": dur})
+                    self._maybe_crash()
+                return
             sp.set_many(eval_seconds=dur, exit_code=res.exit_code, timed_out=res.timed_out,
                         metric=res.metric, ok=ok)
             if res.violations:
@@ -718,6 +848,36 @@ class Engine:
         async with self._write_lock:
             self.store.append("best_confirmed", {"node_id": chosen, "significant": significant})
 
+    async def _confirm_node(self, nd) -> None:
+        """Operator-forced multi-seed confirmation of ONE node (force_confirm). Records the per-seed
+        results (for the UI Metrics/Trust tabs) + a `confirm_done` gate, but deliberately does NOT
+        emit `node_confirmed` — that would put this node into the robust-selection pool and could
+        promote an otherwise-worse node to best. So a forced confirm informs the operator without
+        altering deterministic best-selection. Replay-safe (gated on confirm_done + per-seed memo)."""
+        state = fold(self.store.read_all())
+        seeds = max(self.confirm_seeds, 3)
+        done = state.confirm_seed_results.get(nd.id, {})
+        for s in range(seeds):
+            if s in done:
+                continue
+            workdir = self.run_dir / "confirm" / f"node_{nd.id}_seed_{s}"
+            self._seed_workspace(workdir)
+            self._write_node_files(nd, workdir)
+            self._write_assets(workdir)
+            _t0 = time.time()
+            with self.tracer.span("confirm_seed", new_trace=True, node_id=nd.id, seed=s):
+                res = await anyio.to_thread.run_sync(
+                    self._run_eval, nd, str(workdir), {"LOOPLAB_EVAL_SEED": str(s)}, "full")
+                valid = res.metric is not None and res.exit_code == 0 and not res.timed_out
+                async with self._write_lock:
+                    self.store.append("confirm_eval", {
+                        "node_id": nd.id, "seed": s, "eval_seconds": round(time.time() - _t0, 3),
+                        "metric": res.metric if valid else None})
+                    if res.drift is not None:
+                        self.store.append("spec_drift", {"node_id": nd.id, "seed": s, **res.drift})
+        async with self._write_lock:
+            self.store.append("confirm_done", {"node_id": nd.id})   # fulfill the request (gate)
+
     async def _ablate(self, parent_id: int) -> None:
         """Ablation-driven refinement (I7, MLE-STAR): probe each parameter's impact by
         setting it to a neutral baseline (0.0) and re-running, then create a
@@ -729,6 +889,11 @@ class Engine:
         # For a RepoTask (command-eval) that path is wrong (the repo tree is absent and the
         # baseline developer emits no code), so ablation is a no-op there. Skip cleanly.
         if self._repo_spec or self._eval_spec:
+            # Still emit an (empty) ablate event so an operator `force_ablate` request is marked
+            # done — otherwise the forced-ablate gate, which waits for an ablate event for this
+            # parent, never closes and the loop spins forever on repo/eval-spec runs.
+            self.store.append("ablate", {"parent_id": parent_id, "impacts": {},
+                                         "skipped": "repo_or_eval_spec"})
             return
         base = parent.metric if parent.metric is not None else 0.0
         impacts: dict[str, float] = {}

@@ -88,11 +88,13 @@ class ToolUsingResearcher:
 
     def propose(self, state: RunState, parent: Optional[Node]) -> Idea:
         tool_specs = self.tools.specs() + [self._emit_spec()]
+        hints = [h.get("text", "") for h in (state.pending_hints or []) if h.get("text")]
+        hint_block = ("\nOperator directives (follow if sensible): " + "; ".join(hints)) if hints else ""
         messages = [
             {"role": "system",
              "content": render(self.prompts, "tool_researcher_system", self._SYSTEM)
                         + self.space_hint},
-            {"role": "user", "content": _state_brief(state, parent) +
+            {"role": "user", "content": _state_brief(state, parent) + hint_block +
                 "\nDecide the next experiment. Consult knowledge if useful, then emit."},
         ]
         for _ in range(self.max_turns):

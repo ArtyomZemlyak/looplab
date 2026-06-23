@@ -47,7 +47,7 @@ class RunResult:
 
 class Sandbox(Protocol):
     def run(self, code: str, workdir: str, timeout: float,
-            env: Optional[dict] = None) -> RunResult: ...
+            env: Optional[dict] = None, cancel=None) -> RunResult: ...
 
 
 def _to_float(v) -> Optional[float]:
@@ -81,11 +81,17 @@ def _parse_metric(stdout: str) -> Optional[float]:
 
 
 def _run_argv(argv: list[str], workdir: str, timeout: float,
-              env: Optional[dict] = None, max_output_bytes: int = 64_000):
+              env: Optional[dict] = None, max_output_bytes: int = 64_000, cancel=None):
     """Run one subprocess (argv, no shell) in `workdir` with timeout + process-tree kill +
     capped UTF-8/replace capture. Returns (returncode, stdout, stderr, timed_out). The single
     place process management lives — SubprocessSandbox, DockerSandbox, and command_eval all
-    route through it so timeouts/tree-kill/encoding behave identically everywhere."""
+    route through it so timeouts/tree-kill/encoding behave identically everywhere.
+
+    `cancel` (optional `threading.Event`): when set mid-run, tree-kill the subprocess and return
+    early — this is how an operator's `node_abort` interrupts an in-flight eval (the engine watches
+    the event log and sets it). When `cancel` is None the original single-`communicate` fast path
+    runs unchanged. Repeated `communicate(timeout=)` after a TimeoutExpired is the documented,
+    output-preserving way to poll, so capping a chatty run's pipe never deadlocks."""
     wd = Path(workdir).resolve()
     wd.mkdir(parents=True, exist_ok=True)
     kwargs: dict = {}
@@ -101,12 +107,26 @@ def _run_argv(argv: list[str], workdir: str, timeout: float,
     except OSError as e:
         return -1, "", f"failed to launch: {e}", False
     timed_out = False
-    try:
-        out, err = proc.communicate(timeout=timeout)
-    except subprocess.TimeoutExpired:
-        _kill_tree(proc)
-        out, err = proc.communicate()
-        timed_out = True
+    if cancel is None:
+        try:
+            out, err = proc.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            _kill_tree(proc)
+            out, err = proc.communicate()
+            timed_out = True
+    else:
+        import time as _time
+        deadline = _time.monotonic() + timeout
+        while True:
+            try:
+                out, err = proc.communicate(timeout=0.25)
+                break
+            except subprocess.TimeoutExpired:
+                if cancel.is_set() or _time.monotonic() >= deadline:
+                    _kill_tree(proc)
+                    out, err = proc.communicate()
+                    timed_out = True
+                    break
     rc = proc.returncode if proc.returncode is not None else -1
     return rc, (out or "")[-max_output_bytes:], (err or "")[-max_output_bytes:], timed_out
 
@@ -150,13 +170,13 @@ class SubprocessSandbox:
         self.max_output_bytes = max_output_bytes
 
     def run(self, code: str, workdir: str, timeout: float = 30.0,
-            env: Optional[dict] = None) -> RunResult:
+            env: Optional[dict] = None, cancel=None) -> RunResult:
         wd = Path(workdir).resolve()  # absolute -> safe regardless of caller's cwd
         wd.mkdir(parents=True, exist_ok=True)
         (wd / "solution.py").write_text(code, encoding="utf-8")
         rc, out, err, to = _run_argv(
             [self.python, "solution.py"],  # by name, relative to cwd -> no path doubling
-            str(wd), timeout, env, self.max_output_bytes)
+            str(wd), timeout, env, self.max_output_bytes, cancel)
         return RunResult(exit_code=rc, stdout=out, stderr=err,
                          metric=_parse_metric(out), timed_out=to)
 
@@ -174,7 +194,7 @@ class DockerSandbox:
         self.max_output_bytes = max_output_bytes
 
     def run(self, code: str, workdir: str, timeout: float = 30.0,
-            env: Optional[dict] = None) -> RunResult:
+            env: Optional[dict] = None, cancel=None) -> RunResult:
         import shutil as _sh
         if not _sh.which("docker"):
             raise RuntimeError(
@@ -194,7 +214,7 @@ class DockerSandbox:
         argv = (["docker", "run", "--rm", "--network", self.network,
                  "-v", f"{wd.as_posix()}:/work", "-w", "/work"] + envs
                 + [self.image, "timeout", "-k", "5", str(secs), "python", "solution.py"])
-        rc, out, err, to = _run_argv(argv, str(wd), timeout + 15.0, None, self.max_output_bytes)
+        rc, out, err, to = _run_argv(argv, str(wd), timeout + 15.0, None, self.max_output_bytes, cancel)
         timed_out = to or rc == 124          # coreutils timeout exits 124 when it fires
         return RunResult(exit_code=rc, stdout=out, stderr=err,
                          metric=(None if timed_out else _parse_metric(out)), timed_out=timed_out)

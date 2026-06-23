@@ -1,4 +1,4 @@
-﻿{
+{
   "kind": "repo",
   "id": "repo_drift_example",
   "goal": "tune config.json to maximize the eval metric (max at x=3), drift-checked",

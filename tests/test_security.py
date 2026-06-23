@@ -41,7 +41,7 @@ def test_untrusted_builds_docker_argv(monkeypatch, tmp_path):
     monkeypatch.setattr(shutil, "which", lambda _x: "/usr/bin/docker")
     seen = {}
 
-    def fake_run_argv(argv, workdir, timeout, env=None, max_output_bytes=64_000):
+    def fake_run_argv(argv, workdir, timeout, env=None, max_output_bytes=64_000, cancel=None):
         seen["argv"] = argv
         return 0, '{"metric": 1.0}', "", False
 

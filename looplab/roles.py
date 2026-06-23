@@ -137,10 +137,16 @@ class LLMResearcher:
         self.prompts = prompts
 
     def propose(self, state: RunState, parent: Optional[Node]) -> Idea:
+        # Operator steering (Phase 5 `hint` control events): fold them into the prompt so a live
+        # human can nudge the search ("try higher degree", "focus on regularization"). Advisory —
+        # the model still proposes; bounds still clamp.
+        hints = [h.get("text", "") for h in (state.pending_hints or []) if h.get("text")]
+        hint_block = ("\nOperator directives (follow if sensible): " + "; ".join(hints)) if hints else ""
         messages = [
             {"role": "system",
              "content": render(self.prompts, "researcher_system", _RESEARCHER_SYSTEM)},
             {"role": "user", "content": _state_brief(state, parent) + "\n" + self.space_hint +
+                                        hint_block +
                                         "\nPropose the next Idea (operator, params, rationale)."},
         ]
         # Small models occasionally emit unparseable output; retry, then fall back to a

@@ -15,6 +15,9 @@ build/
 venv*/
 env/
 
+# Node / frontend (ui/ source is committed; deps + build output are not — `dist/` above covers ui/dist)
+node_modules/
+
 # Testing
 .pytest_cache/
 .coverage

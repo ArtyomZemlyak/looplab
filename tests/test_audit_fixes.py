@@ -206,7 +206,7 @@ def test_confirm_phase_skips_already_run_seeds(tmp_path):
                  confirm_top_k=1, confirm_seeds=3)
     ran: list[int] = []
 
-    def fake_run_eval(node, workdir, env=None, profile=None):
+    def fake_run_eval(node, workdir, env=None, profile=None, cancel=None):
         ran.append(int((env or {}).get("LOOPLAB_EVAL_SEED", -1)))
         return RunResult(exit_code=0, stdout="", stderr="", metric=1.0, timed_out=False)
 

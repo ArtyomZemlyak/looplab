@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from LoopLab import command_eval
+from looplab import command_eval
 from looplab.command_eval import make_docker_wrap, run_command_eval
 
 _M = {"kind": "stdout_json", "key": "metric"}
