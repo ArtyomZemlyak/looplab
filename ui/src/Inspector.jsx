@@ -2,10 +2,15 @@ import React, { useEffect, useState } from 'react'
 import { get, fmt, fmtInt, CONTROL } from './util.js'
 import { Trajectory } from './charts.jsx'
 import { groupAggregate } from './grouping.js'
+import { ChatTab } from './experiment.jsx'
 
-const TABS = ['Overview', 'Reasoning', 'LLM', 'Code', 'Metrics', 'Trust', 'Agent', 'Cost']
+// One lifecycle "Trace" tab replaces the old Reasoning / LLM / Agent split: a node is worked on by
+// several parts in sequence (Researcher proposes, Developer implements/repairs, then it's evaluated
+// and confirmed), so we show that whole story in one place — each stage with its sub-steps, inline
+// LLM I/O, and the coding-agent's validation — instead of three disconnected panes.
+const TABS = ['Overview', 'Trace', 'Code', 'Metrics', 'Trust', 'Cost', 'Chat']
 
-export default function Inspector({ runId, nodeId, state, live, tab, setTab, onToast }) {
+export default function Inspector({ runId, nodeId, state, live, tab, setTab, onToast, onInject }) {
   const [detail, setDetail] = useState(null)
   useEffect(() => {
     if (nodeId == null) { setDetail(null); return }
@@ -34,18 +39,18 @@ export default function Inspector({ runId, nodeId, state, live, tab, setTab, onT
                   onClick={() => act(() => CONTROL.forceConfirm(runId, n.id), `confirm requested for ${n.id}`)}>↻ Confirm</button>
           <button className="btn sm" disabled={live.finished} onClick={() => act(() => CONTROL.forceAblate(runId, n.id), `ablate requested for ${n.id}`)}>⊟ Ablate</button>
           <button className="btn sm" onClick={() => act(() => CONTROL.fork(runId, n.id), `forked from ${n.id}`)}>⑂ Fork</button>
+          {onInject && <button className="btn sm" title="hand-author a new experiment branching from this node" onClick={() => onInject({ parent_id: n.id, idea: { operator: 'improve', params: n.idea?.params, theme: n.idea?.theme } })}>✚ Experiment</button>}
           <button className="btn sm warn" onClick={() => act(() => CONTROL.promote(runId, n.id), `promoted ${n.id} → champion`)}>★ Promote</button>
           <button className="btn sm" onClick={() => { const t = prompt('Note for node ' + n.id); if (t) act(() => CONTROL.annotate(runId, n.id, t), 'note saved') }}>✎ Note</button>
         </div>
 
         {tab === 'Overview' && <Overview n={n} state={state} />}
-        {tab === 'Reasoning' && <Reasoning n={n} />}
-        {tab === 'LLM' && <LLM n={n} />}
+        {tab === 'Trace' && <Trace n={n} />}
         {tab === 'Code' && <Code n={n} />}
         {tab === 'Metrics' && <Metrics n={n} detail={detail} />}
         {tab === 'Trust' && <Trust n={n} detail={detail} />}
-        {tab === 'Agent' && <Agent n={n} />}
         {tab === 'Cost' && <Cost state={state} />}
+        {tab === 'Chat' && <ChatTab runId={runId} nodeId={n.id} state={live} onInject={onInject} onToast={onToast} />}
       </div>
     </>
   )
@@ -110,20 +115,39 @@ function maxDur(spans) {
   return m || 1e-9
 }
 
+// Friendly identity for each span kind — turns raw span names into "who did what" so the trace
+// reads as the node's life story rather than instrumentation. (Span names come from orchestrator.py.)
+const STAGE = {
+  onboard:      { icon: '🚀', role: 'Onboarding', desc: 'task setup & eval spec' },
+  create_node:  { icon: '🧬', role: 'Author node', desc: 'propose an idea, then build the solution' },
+  propose:      { icon: '🔬', role: 'Researcher', desc: 'propose the next idea' },
+  implement:    { icon: '⚙️', role: 'Developer', desc: 'write / edit the solution code' },
+  repair:       { icon: '🩹', role: 'Developer · repair', desc: 'fix a failed parent' },
+  evaluate:     { icon: '📊', role: 'Evaluation', desc: 'run the solution & score it' },
+  confirm_seed: { icon: '🎲', role: 'Confirmation', desc: 'multi-seed robustness check' },
+  ablate:       { icon: '🧮', role: 'Ablation', desc: 'sensitivity probe' },
+}
+const stageMeta = (name) => STAGE[name] || { icon: '▸', role: name, desc: '' }
+
+function llmEvents(s) { return (s.events || []).filter(e => e.name === 'llm_call') }
+
+// One span and its subtree. LLM I/O is now inlined here (expand the span to read it) instead of
+// living in a separate tab, so a step's prompt/response sits right next to the step that made it.
 function SpanRow({ s, depth, max }) {
   const [open, setOpen] = useState(false)
   const attrs = Object.entries(s.attributes || {}).filter(([k]) => k !== 'node_id')
-  const events = (s.events || []).filter(e => e.name !== 'llm_call')   // LLM I/O has its own tab
-  const llmCount = (s.events || []).filter(e => e.name === 'llm_call').length
-  const detail = attrs.length || events.length
+  const events = (s.events || []).filter(e => e.name !== 'llm_call')
+  const calls = llmEvents(s)
+  const m = stageMeta(s.name)
+  const detail = attrs.length || events.length || calls.length
   return <>
     <div className={'span-row' + (s.status === 'ERROR' ? ' err' : '')} style={{ paddingLeft: depth * 14 }}
-         onClick={() => detail && setOpen(o => !o)} title={detail ? 'click for span detail' : ''}>
+         onClick={() => detail && setOpen(o => !o)} title={detail ? 'click for step detail' : ''}>
       <span className="span-tw">{detail ? (open ? '▾' : '▸') : '·'}</span>
-      <span className="span-name">{s.name}</span>
+      <span className="span-name" title={m.desc}>{m.icon} {m.role !== s.name ? m.role : s.name}</span>
       <span className="span-bar"><span className="span-fill" style={{ width: Math.max(2, (s.duration_s || 0) / max * 100) + '%' }} /></span>
       <span className="t">{fmt(s.duration_s, 3)}s</span>
-      {llmCount > 0 && <span className="badge" title="LLM calls — see the LLM tab">{llmCount}×LLM</span>}
+      {calls.length > 0 && <span className="badge" title="LLM calls — expand to read prompt & completion">{calls.length}×LLM</span>}
       {s.status === 'ERROR' && <span className="badge reason">ERROR</span>}
     </div>
     {open && detail && <div className="span-detail" style={{ marginLeft: depth * 14 + 16 }}>
@@ -133,27 +157,10 @@ function SpanRow({ s, depth, max }) {
         <span className="ty">{e.name}</span>{e.error ? <span className="flag"> {e.error}</span> :
           <span className="muted"> {Object.entries(e).filter(([k]) => k !== 'name').map(([k, v]) => `${k}=${v}`).join(' ')}</span>}
       </div>)}
+      {calls.map((c, i) => <LlmCall key={i} call={{ ...c, span: s.name }} idx={i} />)}
     </div>}
     {(s.children || []).map((c, i) => <SpanRow key={i} s={c} depth={depth + 1} max={max} />)}
   </>
-}
-
-function Reasoning({ n }) {
-  const spans = n.trace?.nodes || []
-  if (!spans.length) return <div className="muted">No execution trace for this node (toy/offline nodes may have minimal spans).</div>
-  const max = maxDur(spans)
-  return <div className="spans">{spans.map((s, i) => <SpanRow key={i} s={s} depth={0} max={max} />)}</div>
-}
-
-// Flatten every captured LLM call across a node's span forest (set by tracing.record_llm_call).
-function collectLlm(spans) {
-  const out = []
-  const walk = (arr) => arr.forEach(s => {
-    (s.events || []).forEach(e => { if (e.name === 'llm_call') out.push({ ...e, span: s.name }) })
-    walk(s.children || [])
-  })
-  walk(spans || [])
-  return out
 }
 
 function LlmCall({ call, idx }) {
@@ -163,7 +170,7 @@ function LlmCall({ call, idx }) {
     <div className="llm-head" onClick={() => setOpen(o => !o)}>
       <span className="span-tw">{open ? '▾' : '▸'}</span>
       <b>{call.op || 'llm'}</b>
-      <span className="muted"> {call.span} · {call.model}</span>
+      <span className="muted"> {call.model}</span>
       <span className="spacer" style={{ flex: 1 }} />
       <span className="muted">{(t.total || (t.prompt + t.completion)) || 0} tok</span>
     </div>
@@ -180,12 +187,61 @@ function LlmCall({ call, idx }) {
   </div>
 }
 
-function LLM({ n }) {
-  const calls = collectLlm(n.trace?.nodes)
-  if (!calls.length) return <div className="muted">No LLM calls captured for this node — toy/offline run, an external coding agent wrote it, or capture is off (LOOPLAB_TRACE_LLM_IO=0).</div>
-  return <div className="llm-list">
-    <div className="muted" style={{ marginBottom: 6 }}>{calls.length} LLM call{calls.length > 1 ? 's' : ''} for node #{n.id}</div>
-    {calls.map((c, i) => <LlmCall key={i} call={c} idx={i} />)}
+// A top-level lifecycle stage (one root span = one phase of work on this node), with its sub-steps.
+function StageBlock({ s, max }) {
+  const m = stageMeta(s.name)
+  return <div className={'stage' + (s.status === 'ERROR' ? ' err' : '')}>
+    <div className="stage-h">
+      <span className="stage-ic">{m.icon}</span>
+      <b>{m.role}</b>
+      <span className="muted">{m.desc}</span>
+      <span className="spacer" style={{ flex: 1 }} />
+      <span className="t">{fmt(s.duration_s, 3)}s</span>
+    </div>
+    <div className="spans">
+      {(s.children || []).length
+        ? (s.children || []).map((c, i) => <SpanRow key={i} s={c} depth={0} max={max} />)
+        : <SpanRow s={s} depth={0} max={max} />}
+    </div>
+  </div>
+}
+
+// The coding-agent's own validation report (was its own tab) — folded into the lifecycle as the
+// Developer stage's verification footnote, only when an external agent actually wrote the node.
+function AgentReport({ r }) {
+  return <div className="stage">
+    <div className="stage-h">
+      <span className="stage-ic">{r.ok && !r.fell_back ? '✅' : r.fell_back ? '↩️' : '❌'}</span>
+      <b>Developer · agent validation</b>
+      <span className="muted">{r.fell_back ? 'fell back to template' : r.ok ? 'shipped clean' : 'failed checks'}</span>
+      <span className="spacer" style={{ flex: 1 }} />
+      <span className="muted">{r.attempts} attempt{r.attempts === 1 ? '' : 's'}</span>
+    </div>
+    <table className="tbl"><thead><tr><th>check</th><th>ok</th><th>detail</th></tr></thead>
+      <tbody>{(r.checks || []).map((c, i) => <tr key={i}>
+        <td>{c.name}</td><td style={{ color: c.ok ? 'var(--ok)' : 'var(--fail)' }}>{c.ok ? '✓' : '✗'}</td>
+        <td className="muted">{c.detail || c.severity || ''}</td></tr>)}</tbody></table>
+  </div>
+}
+
+function Trace({ n }) {
+  const spans = n.trace?.nodes || []
+  const agent = n.agent_report
+  if (!spans.length && !agent)
+    return <div className="muted">No execution trace for this node — toy/offline nodes may have minimal spans, or LLM I/O capture is off (LOOPLAB_TRACE_LLM_IO=0).</div>
+  const max = maxDur(spans)
+  // create_node already nests propose→implement; if an agent wrote the node, the report belongs
+  // right after that authoring stage (placed by index), otherwise it trails the whole lifecycle.
+  const authorIdx = spans.findIndex(s => ['create_node', 'implement', 'repair'].includes(s.name))
+  return <div className="trace">
+    <div className="muted" style={{ marginBottom: 10 }}>
+      Lifecycle of node #{n.id} — what each part did, in order. Expand a step to see its LLM prompt &amp; completion.
+    </div>
+    {spans.map((s, i) => <React.Fragment key={i}>
+      <StageBlock s={s} max={max} />
+      {agent && i === authorIdx && <AgentReport r={agent} />}
+    </React.Fragment>)}
+    {agent && authorIdx < 0 && <AgentReport r={agent} />}
   </div>
 }
 

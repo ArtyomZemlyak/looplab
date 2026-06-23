@@ -39,7 +39,7 @@ export default function Dock({ runId, liveSeq, viewSeq, setViewSeq, onFocus, col
   const focusEvent = (e) => {
     const nid = eventNode(e)
     if (nid == null) { setViewSeq(e.seq); return }
-    onFocus?.(Number(nid), e.type === 'node_created' ? 'Reasoning' : 'Overview', e.seq)
+    onFocus?.(Number(nid), e.type === 'node_created' ? 'Trace' : 'Overview', e.seq)
   }
   const matches = (e) => {
     if (!filter) return true
@@ -84,7 +84,7 @@ export default function Dock({ runId, liveSeq, viewSeq, setViewSeq, onFocus, col
           </div>
         </>}
         {tab === 'timeline' && (trace
-          ? <Gantt spans={trace} onPick={(nid) => onFocus?.(Number(nid), 'Reasoning', null)} />
+          ? <Gantt spans={trace} onPick={(nid) => onFocus?.(Number(nid), 'Trace', null)} />
           : <div className="muted">loading spans…</div>)}
       </div>}
     </div>

@@ -13,6 +13,8 @@ from typing import Protocol, Type, TypeVar
 
 from pydantic import BaseModel, ValidationError
 
+from .llm import LLMError
+
 T = TypeVar("T", bound=BaseModel)
 
 _THINK = re.compile(r"<think>.*?</think>", re.DOTALL | re.IGNORECASE)
@@ -87,7 +89,10 @@ def parse_structured(
                         "content": f"Respond with ONLY a JSON object matching this schema: {json.dumps(schema)}"}
                 obj = _extract_json(client.complete_text([*messages, hint]))
             return model.model_validate(obj)
-        except (ValidationError, ParseError, json.JSONDecodeError, KeyError, AttributeError) as e:
+        except (ValidationError, ParseError, json.JSONDecodeError, KeyError, AttributeError,
+                LLMError) as e:
+            # LLMError (a transient endpoint/transport failure) is treated like an unparseable
+            # response: try the next parser, then let the caller fall back — never crash the run.
             last_err = e
             continue
     raise ParseError(f"all parsers failed (last: {last_err})")

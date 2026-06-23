@@ -28,6 +28,7 @@ from .eventstore import EventStore, iter_jsonl
 from .models import Event
 from .projects import ProjectError, ProjectStore
 from .replay import fold
+from .tasks import make_llm_client
 
 # These imports require the [ui] extra; importing this module without it raises a clear error.
 try:
@@ -47,7 +48,7 @@ except ModuleNotFoundError as e:  # pragma: no cover - exercised only without th
 CONTROL_EVENTS = {
     "run_abort", "pause", "resume", "node_abort", "budget_extend", "hint",
     "force_confirm", "force_ablate", "fork", "annotation", "promote",
-    "approval_granted", "spec_approved",
+    "approval_granted", "spec_approved", "inject_node", "run_reopened",
 }
 
 POLL_SECONDS = 0.4   # SSE tail cadence — fast enough to feel live, light on the disk
@@ -83,8 +84,15 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
     root = Path(run_root).resolve()
     root.mkdir(parents=True, exist_ok=True)
     app = FastAPI(title="LoopLab UI", version="0.1.0")
-    # Local dev tool: the Vite dev server (5173) hits the API on another port.
-    app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"],
+    # CORS allow-list (review C3): the production UI is served SAME-ORIGIN from /dist (needs no
+    # CORS), so the only legitimate cross-origin caller is the Vite dev server. Restricting to
+    # localhost dev origins (instead of "*") stops any other web page the operator has open from
+    # driving this unauthenticated control-plane cross-origin (CSRF). Override with LOOPLAB_UI_CORS
+    # (comma-separated) if the dev server runs elsewhere.
+    cors = os.environ.get("LOOPLAB_UI_CORS")
+    origins = ([o.strip() for o in cors.split(",") if o.strip()] if cors else
+               ["http://localhost:5173", "http://127.0.0.1:5173"])
+    app.add_middleware(CORSMiddleware, allow_origins=origins, allow_methods=["*"],
                        allow_headers=["*"])
     projects = ProjectStore(root / "projects.json")   # ClearML-style run organization (UI-only)
 
@@ -165,8 +173,10 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
                 continue
         # Overlay project membership (kept OUT of the summary cache — assignments change
         # independently of the event log, so a finished/cached run can still be re-filed).
-        assignments = projects.load()["assignments"]
-        return [{**s, "project_id": assignments.get(s["run_id"])} for s in out]
+        pdata = projects.load()
+        assignments, labels = pdata["assignments"], pdata.get("labels", {})
+        return [{**s, "project_id": assignments.get(s["run_id"]),
+                 "label": labels.get(s["run_id"])} for s in out]
 
     # ------------------------------------------------------------------ projects (ClearML-style)
     @app.get("/api/projects")
@@ -210,6 +220,34 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
             projects.assign(run_id, body.get("project_id"))
         except ProjectError as e:
             raise HTTPException(400, str(e))
+        return {"ok": True}
+
+    @app.patch("/api/runs/{run_id}")
+    async def rename_run(run_id: str, request: Request):
+        """Set/clear a run's UI display label. Non-destructive: the run dir id is unchanged."""
+        _run_dir(run_id)   # 404 guard
+        body = await request.json()
+        projects.set_label(run_id, body.get("label"))
+        return {"ok": True}
+
+    @app.delete("/api/runs/{run_id}")
+    def delete_run(run_id: str):
+        """Permanently remove a run's directory and forget its UI metadata. Refuses to delete a
+        run that is still live (not finished) so we never yank the dir out from under the engine."""
+        import shutil
+        rd = _run_dir(run_id)
+        st = fold(_events(rd))
+        if not st.finished:
+            raise HTTPException(409, "run is still live — pause/stop it before deleting")
+        # Don't report success on a partial delete (e.g. a Windows open handle on a node dir) —
+        # that would leave a ghost run the UI thinks is gone. Only forget it if the dir is actually
+        # removed; otherwise surface the failure.
+        shutil.rmtree(rd, ignore_errors=True)
+        if rd.exists():
+            raise HTTPException(500, "run dir could not be fully removed (a file may be in use); "
+                                     "retry after the engine process exits")
+        projects.forget(run_id)
+        _summary_cache.pop(run_id, None)
         return {"ok": True}
 
     # ------------------------------------------------------------------ state + time-travel
@@ -365,28 +403,265 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
         run_id = body.get("run_id")
         if not task_file or not run_id:
             raise HTTPException(400, "task_file and run_id are required")
+        if not Path(task_file).exists():
+            raise HTTPException(400, f"task file not found: {task_file}")
         rd = (root / run_id).resolve()
         if root not in rd.parents and rd != root:
             raise HTTPException(400, "bad run_id")
+        if (rd / "events.jsonl").exists():
+            raise HTTPException(409, f"run {run_id!r} already exists — pick another id")
         rd.mkdir(parents=True, exist_ok=True)
         (rd / "ui_meta.json").write_text(json.dumps({"task_file": str(task_file)}), encoding="utf-8")
-        extra = []
-        for k in ("backend", "developer_backend", "model", "max_nodes"):
-            if body.get(k) is not None:
-                extra += [f"--{k.replace('_', '-')}", str(body[k])]
-        if body.get("require_approval"):
-            extra += ["--require-approval"]
-        _spawn_engine(["run", str(task_file), "--out", str(rd), *extra])
+        # Per-run settings = the saved UI defaults overlaid with whatever the launch dialog set.
+        # Everything reaches the engine as LOOPLAB_* env on the spawned process, so ANY Settings
+        # field is configurable from the UI without growing the CLI surface (Settings() reads env).
+        settings = {**_load_ui_settings(), **(body.get("settings") or {})}
+        env = _settings_env(settings)
+        _spawn_engine(["run", str(task_file), "--out", str(rd)], env=env)
         return {"ok": True, "run_id": run_id}
 
-    def _spawn_engine(cli_args: list[str]) -> None:
+    def _spawn_engine(cli_args: list[str], env: Optional[dict] = None) -> None:
         cmd = [sys.executable, "-m", "looplab.cli", *cli_args]
         kw: dict = {"cwd": str(Path(__file__).resolve().parents[1])}
+        if env:
+            kw["env"] = {**os.environ, **env}
         if os.name == "nt":
             kw["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP  # detached, survives request
         else:
             kw["start_new_session"] = True
         subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, **kw)
+
+    # ------------------------------------------------------------------ settings (UI defaults)
+    # The engine has no settings server (ADR-18); these are UI-chosen DEFAULTS for new runs,
+    # persisted at <run-root>/ui_settings.json and applied to a spawned run as LOOPLAB_* env.
+    _ui_settings_path = root / "ui_settings.json"
+    _SECRET_FIELDS = {"llm_api_key"}
+    _ALLOWED_FIELDS = set(Settings.model_fields)
+
+    def _load_ui_settings() -> dict:
+        try:
+            d = json.loads(_ui_settings_path.read_text(encoding="utf-8"))
+            return {k: v for k, v in d.items() if k in _ALLOWED_FIELDS and k not in _SECRET_FIELDS}
+        except (OSError, json.JSONDecodeError):
+            return {}
+
+    def _resolved_settings() -> dict:
+        """Engine defaults (Settings(): defaults+env) overlaid with the saved UI overrides — i.e.
+        exactly what a new run gets if the launch dialog changes nothing. Secret masked."""
+        base = Settings().masked_snapshot()
+        base.update(_load_ui_settings())
+        base.pop("llm_api_key", None)
+        return base
+
+    def _settings_env(settings: dict) -> dict:
+        """Render UI settings into LOOPLAB_* env strings pydantic-settings can parse back."""
+        env = {}
+        for k, v in settings.items():
+            if k not in _ALLOWED_FIELDS or k in _SECRET_FIELDS or v is None:
+                continue
+            if isinstance(v, bool):
+                s = "true" if v else "false"
+            elif isinstance(v, (list, dict)):
+                s = json.dumps(v)            # pydantic reads complex env values as JSON
+            else:
+                s = str(v)
+            env[f"LOOPLAB_{k.upper()}"] = s
+        return env
+
+    @app.get("/api/settings")
+    def get_settings():
+        defaults = Settings().model_dump()
+        defaults.pop("llm_api_key", None)
+        return {"settings": _resolved_settings(), "overrides": _load_ui_settings(), "defaults": defaults}
+
+    @app.put("/api/settings")
+    async def put_settings(request: Request):
+        body = await request.json()
+        incoming = body.get("settings", body) or {}
+        # Keep only known, non-secret fields whose value differs from the engine default — the file
+        # stays a small, readable diff rather than a full mirror of every Settings field.
+        base = Settings().model_dump()
+        overrides = {}
+        for k, v in incoming.items():
+            if k in _ALLOWED_FIELDS and k not in _SECRET_FIELDS and v is not None and base.get(k) != v:
+                overrides[k] = v
+        tmp = _ui_settings_path.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(overrides, indent=2), encoding="utf-8")
+        os.replace(tmp, _ui_settings_path)
+        return {"ok": True, "settings": _resolved_settings(), "overrides": overrides}
+
+    # ------------------------------------------------------------------ task catalogue
+    @app.get("/api/tasks")
+    def list_tasks():
+        """Discover runnable task JSON files (the `examples/` catalogue by default, plus any in the
+        run-root) so the launch dialog can offer a pick-list instead of a raw path."""
+        repo = Path(__file__).resolve().parents[1]
+        dirs = [repo / "examples", root]
+        env_dir = os.environ.get("LOOPLAB_TASKS_DIR")
+        if env_dir:
+            dirs.insert(0, Path(env_dir))
+        seen, out = set(), []
+        for d in dirs:
+            if not d.exists():
+                continue
+            for p in sorted(d.glob("*.json")):
+                rp = str(p.resolve())
+                if rp in seen:
+                    continue
+                seen.add(rp)
+                try:
+                    data = json.loads(p.read_text(encoding="utf-8"))
+                except (OSError, json.JSONDecodeError):
+                    continue
+                if not isinstance(data, dict) or not ("goal" in data or "id" in data):
+                    continue
+                out.append({"path": rp, "name": p.name,
+                            "kind": data.get("kind", "quadratic"),
+                            "id": data.get("id"), "goal": data.get("goal", ""),
+                            "direction": data.get("direction")})
+        return {"tasks": out}
+
+    # ------------------------------------------------------------------ pre-research a topic
+    @app.post("/api/research")
+    async def research(request: Request):
+        """Best-effort LLM brief for a research topic, to prime a run. Optionally saved as a
+        knowledge note (markdown) so the agentic-retrieval Researcher can read it (ADR-16).
+        Degrades cleanly when no model endpoint is reachable."""
+        body = await request.json()
+        topic = (body.get("topic") or "").strip()
+        if not topic:
+            raise HTTPException(400, "topic is required")
+        s = Settings(**{k: v for k, v in _load_ui_settings().items()
+                        if k in {"llm_model", "llm_base_url", "llm_temperature", "llm_api_key"}})
+        try:
+            from .tasks import make_llm_client
+            client = make_llm_client(s)
+            msgs = [
+                {"role": "system", "content": "You are a senior ML research advisor. Given a problem "
+                 "topic, write a concise markdown brief: key approaches to try, likely hyperparameters "
+                 "and sensible ranges, common pitfalls, and 2-3 concrete first experiments. Be specific "
+                 "and terse."},
+                {"role": "user", "content": f"Research topic for an autonomous ML run:\n\n{topic}"},
+            ]
+            text = client.complete_text(msgs)
+        except Exception as e:  # noqa: BLE001 - offline / no model -> soft fail
+            return {"ok": False, "error": str(e), "model": s.llm_model, "base_url": s.llm_base_url}
+        saved = None
+        if body.get("save"):
+            kd = _load_ui_settings().get("knowledge_dir") or Settings().knowledge_dir
+            if kd:
+                d = Path(kd); d.mkdir(parents=True, exist_ok=True)
+                slug = "".join(c if c.isalnum() else "-" for c in topic.lower())[:48].strip("-") or "topic"
+                fp = d / f"research-{slug}.md"
+                fp.write_text(f"# Research brief: {topic}\n\n{text}\n", encoding="utf-8")
+                saved = str(fp)
+        return {"ok": True, "text": text, "model": s.llm_model, "saved": saved}
+
+    # ------------------------------------------------------------------ LLM (chat / suggest / health)
+    def _llm_settings() -> "Settings":
+        """Settings for the UI-side LLM calls (chat/suggest/health/research): engine defaults +
+        env overlaid with the saved UI LLM overrides, so the UI talks to the SAME model a run does."""
+        ui = {k: v for k, v in _load_ui_settings().items()
+              if k in {"llm_model", "llm_base_url", "llm_temperature"}}
+        return Settings(**ui)
+
+    def _node_context(st, nid: Optional[int], full: "Path") -> str:
+        """A compact textual brief of the run (+ one focused experiment) to ground an LLM chat:
+        goal, direction, best-so-far, and — when a node is selected — its idea/metric/code/error."""
+        best = st.best()
+        lines = [f"Run goal: {st.goal or st.task_id}", f"Optimization direction: {st.direction}",
+                 f"Nodes so far: {len(st.nodes)} ({len(st.evaluated_nodes())} evaluated)."]
+        if best is not None:
+            lines.append(f"Best node #{best.id}: metric={best.metric} "
+                         f"params={best.idea.params} operator={best.operator}")
+        if nid is not None and nid in st.nodes:
+            n = st.nodes[nid]
+            lines += ["", f"--- Focused experiment: node #{n.id} ---",
+                      f"operator={n.operator} status={n.status} metric={n.metric} "
+                      f"feasible={n.feasible}",
+                      f"params={n.idea.params}", f"rationale: {n.idea.rationale}"]
+            if n.error:
+                lines.append(f"error ({n.error_reason}): {n.error[:400]}")
+            if n.code:
+                lines.append("solution.py:\n```python\n" + n.code[:2400] + "\n```")
+        return "\n".join(lines)
+
+    @app.post("/api/runs/{run_id}/chat")
+    async def chat(run_id: str, request: Request):
+        """Advisory chat grounded on a run (and optionally one experiment node). Read-only — it
+        never appends events; it's a thinking aid. The UI keeps the history and posts the full
+        message list each turn. Soft-fails offline so the panel degrades cleanly."""
+        rd = _run_dir(run_id)
+        body = await request.json()
+        msgs = body.get("messages") or []
+        nid = body.get("node_id")
+        st = fold(_events(rd))
+        sys_prompt = (
+            "You are a senior ML research collaborator embedded in an autonomous experiment loop. "
+            "Discuss the run and the focused experiment concretely: interpret the metric, reason "
+            "about what to try next, and suggest specific parameter changes. Be terse and specific. "
+            "When you propose an experiment, state the operator (improve/draft/debug), the exact "
+            "params, and a one-line rationale.\n\n" + _node_context(st, nid, rd))
+        try:
+            client = make_llm_client(_llm_settings())
+            text = client.complete_text([{"role": "system", "content": sys_prompt}, *msgs])
+        except Exception as e:  # noqa: BLE001 - offline / no model -> soft fail
+            return JSONResponse({"ok": False, "error": str(e)}, status_code=200)
+        return {"ok": True, "text": text}
+
+    @app.post("/api/runs/{run_id}/suggest")
+    async def suggest(run_id: str, request: Request):
+        """Turn the chat discussion (or a free-form instruction) into a CONCRETE experiment idea
+        (operator + params + rationale) the UI can drop straight into the inject-node dialog.
+        Uses structured output so the result is a ready-to-run Idea. Soft-fails offline."""
+        rd = _run_dir(run_id)
+        body = await request.json()
+        nid = body.get("node_id")
+        instruction = (body.get("instruction") or "").strip()
+        history = body.get("messages") or []
+        st = fold(_events(rd))
+        from .models import Idea
+        from .parse import parse_structured
+        convo = "\n".join(f"{m.get('role')}: {m.get('content')}" for m in history)
+        prompt = ("Propose ONE next experiment as a structured Idea (operator one of "
+                  "draft/improve/debug/merge; numeric params; a short rationale). Base it on the "
+                  "run context and this discussion.\n\n" + _node_context(st, nid, rd)
+                  + (f"\n\nDiscussion so far:\n{convo}" if convo else "")
+                  + (f"\n\nInstruction: {instruction}" if instruction else ""))
+        s = _llm_settings()
+        try:
+            client = make_llm_client(s)
+        except Exception as e:  # noqa: BLE001 - offline / no model
+            return JSONResponse({"ok": False, "error": str(e)}, status_code=200)
+        try:
+            idea = parse_structured(client, [{"role": "user", "content": prompt}], Idea, s.llm_parser)
+            return {"ok": True, "idea": idea.model_dump(mode="json"), "parsed": True}
+        except Exception:  # noqa: BLE001 - small models fumble strict tool-call output; fall back to
+            # a free-text suggestion the operator can finish editing in the inject dialog. Never the
+            # difference between "got a starting point" and "got nothing".
+            try:
+                text = client.complete_text([
+                    {"role": "system", "content": "Reply with a one-line experiment suggestion: the "
+                     "operator (improve/draft/debug), suggested params, and why — plain text."},
+                    {"role": "user", "content": prompt}])
+                return {"ok": True, "parsed": False,
+                        "idea": {"operator": "improve", "params": {}, "rationale": text.strip()[:600]}}
+            except Exception as e:  # noqa: BLE001
+                return JSONResponse({"ok": False, "error": str(e)}, status_code=200)
+
+    @app.get("/api/llm/health")
+    def llm_health():
+        """Liveness self-test for the configured LLM endpoint (the UI equivalent of `LoopLab
+        smoke`): pings the model with a one-word prompt. Never raises — returns reachability so
+        the UI can warn before a run launches against a dead endpoint."""
+        s = _llm_settings()
+        info = {"model": s.llm_model, "base_url": s.llm_base_url}
+        try:
+            client = make_llm_client(s)
+            txt = client.complete_text([{"role": "user", "content": "Reply with one word: ready"}])
+            return {"ok": True, "text": (txt or "").strip()[:80], **info}
+        except Exception as e:  # noqa: BLE001
+            return {"ok": False, "error": str(e), **info}
 
     # ------------------------------------------------------------------ GPU monitor
     @app.get("/api/gpu")
@@ -463,10 +738,13 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
 
         @app.get("/{path:path}")
         def spa(path: str):
-            # SPA fallback for client-side routes; never shadow /api.
-            f = (dist / path)
-            if f.is_file():
-                return FileResponse(str(f))
+            # SPA fallback for client-side routes; never shadow /api. Resolve-guard the path so a
+            # traversal (`/..%2f..%2fwin.ini`) can't read a file outside the built assets dir — the
+            # other file routes guard, this one used to serve any readable file (review C3).
+            base = dist.resolve()
+            target = (dist / path).resolve()
+            if (target == base or base in target.parents) and target.is_file():
+                return FileResponse(str(target))
             return FileResponse(str(dist / "index.html"))
     else:
         @app.get("/")

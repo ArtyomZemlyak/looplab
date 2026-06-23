@@ -143,6 +143,11 @@ class RunState(BaseModel):
     ablate_requests: list[int] = Field(default_factory=list)    # `force_ablate` (wired in Phase 5)
     fork_requests: list[dict] = Field(default_factory=list)     # `fork`: operator-seeded improve
     forks_done: int = 0                        # count of processed forks (replay-safe fulfillment)
+    # `inject_node`: an operator-authored experiment hand-added to the tree (a manual idea +
+    # optional parent + optional code). The engine materializes each one into a real pending node
+    # that the policy then evaluates like any other — so a human can steer the search directly.
+    inject_requests: list[dict] = Field(default_factory=list)
+    injects_done: int = 0                      # count of processed injects (replay-safe fulfillment)
     annotations: dict[int, list[str]] = Field(default_factory=dict)  # `annotation`: node notes
     promotions: list[dict] = Field(default_factory=list)        # `promote`: solution-registry audit
     champion: Optional[int] = None             # node id the `champion` registry alias points at

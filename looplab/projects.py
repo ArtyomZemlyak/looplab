@@ -6,7 +6,11 @@ server, so a plain read-modify-atomic-write is enough; no cross-process lock lik
 
 Shape of projects.json:
     {"projects": [{"id","name","parent_id"}, ...],
-     "assignments": {"<run_id>": "<project_id>", ...}}
+     "assignments": {"<run_id>": "<project_id>", ...},
+     "labels": {"<run_id>": "<display name>", ...}}
+
+`labels` is a UI-only display name for a run; the run's directory (its id) never changes, so the
+event log + resume stay intact — exactly like assignments, this is a non-destructive overlay.
 """
 from __future__ import annotations
 
@@ -44,13 +48,14 @@ class ProjectStore:
     # ------------------------------------------------------------------ load / save
     def load(self) -> dict:
         if not self.path.exists():
-            return {"projects": [], "assignments": {}}
+            return {"projects": [], "assignments": {}, "labels": {}}
         try:
             data = json.loads(self.path.read_text(encoding="utf-8"))
         except (json.JSONDecodeError, OSError):
-            return {"projects": [], "assignments": {}}
+            return {"projects": [], "assignments": {}, "labels": {}}
         data.setdefault("projects", [])
         data.setdefault("assignments", {})
+        data.setdefault("labels", {})
         return data
 
     def _save(self, data: dict) -> None:
@@ -150,3 +155,24 @@ class ProjectStore:
 
     def project_of(self, run_id: str) -> str | None:
         return self.load()["assignments"].get(run_id)
+
+    # ------------------------------------------------------------------ run labels (UI display name)
+    def set_label(self, run_id: str, label: str | None) -> None:
+        """Give a run a display name (or clear it with None/empty). UI-only overlay — the run's
+        directory id is never touched, so its event log and resume stay valid."""
+        with self._lock:
+            data = self.load()
+            label = (label or "").strip()
+            if label:
+                data["labels"][run_id] = label
+            else:
+                data["labels"].pop(run_id, None)
+            self._save(data)
+
+    def forget(self, run_id: str) -> None:
+        """Drop all UI metadata for a run (used when its directory is deleted)."""
+        with self._lock:
+            data = self.load()
+            data["assignments"].pop(run_id, None)
+            data["labels"].pop(run_id, None)
+            self._save(data)

@@ -355,6 +355,15 @@ class Engine:
                     self._create_node({"kind": "improve", "parent_id": pid})  # operator-seeded branch
                 self.store.append("fork_done", {"from_node_id": pid})         # always advance the gate
                 continue
+            # Operator-authored experiment (manual tree edit): the human hand-adds a node (an idea
+            # + optional parent + optional ready-made code). Materialize it into a real pending node;
+            # the policy then evaluates it next (pending nodes are scheduled first). Gated on
+            # `inject_done` so a resume never re-creates it — deterministic under replay.
+            if len(state.inject_requests) > state.injects_done:
+                req = state.inject_requests[state.injects_done]
+                self._create_injected_node(req)
+                self.store.append("inject_done", {"idx": state.injects_done})
+                continue
             forced_ablate = next((p for p in state.ablate_requests
                                   if p in state.nodes
                                   and not any(a.get("parent_id") == p for a in state.ablations)), None)
@@ -563,6 +572,53 @@ class Engine:
                 },
             )
         self._emit_agent_report(node_id)
+
+    def _create_injected_node(self, req: dict) -> None:
+        """Materialize an operator-authored experiment (`inject_node` control event) into a real
+        pending node. The operator supplies an idea (operator label, params, rationale, optional
+        theme) and optionally a parent and ready-made code. If no code is given, the Developer
+        implements the idea — so a human can describe an experiment and let the agent build it.
+        The new node enters the search as `pending`; the policy evaluates it next.
+
+        Manual injection deliberately bypasses the policy's proposal step — the human IS the
+        researcher here — but everything downstream (eval, confirmation, best-selection, lineage)
+        is identical to an agent-authored node, so a hand-added winner can be selected as best."""
+        state = fold(self.store.read_all())
+        node_id = len(state.nodes)
+        idea_d = dict(req.get("idea") or {})
+        idea_d.setdefault("operator", "manual")
+        # Coerce params to floats defensively (a manual form may send strings); drop unparseable.
+        raw_params = idea_d.get("params") or {}
+        params: dict[str, float] = {}
+        for k, v in raw_params.items():
+            try:
+                params[str(k)] = float(v)
+            except (TypeError, ValueError):
+                continue
+        idea_d["params"] = params
+        idea = Idea(**idea_d)
+        parent_id = req.get("parent_id")
+        parents = [parent_id] if parent_id is not None and parent_id in state.nodes else []
+        with self.tracer.span("create_node", new_trace=True, node_id=node_id,
+                              operator=idea.operator, source="manual"):
+            code = req.get("code")
+            if not code:
+                with self.tracer.span("implement"):
+                    code = self.developer.implement(idea)
+            self.store.append(
+                "node_created",
+                {
+                    "node_id": node_id,
+                    "parent_ids": parents,
+                    "operator": idea.operator,
+                    "idea": idea.model_dump(mode="json"),
+                    "code": code,
+                    "files": ({} if req.get("code") else getattr(self.developer, "last_files", {})) or {},
+                    "source": "manual",
+                },
+            )
+        if not req.get("code"):
+            self._emit_agent_report(node_id)
 
     def _activate_spec(self, proposal: dict) -> None:
         """Make the ratified onboarding proposal the trusted eval (Phase 3): the eval_spec

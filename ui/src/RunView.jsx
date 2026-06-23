@@ -5,6 +5,7 @@ import Dag from './Dag.jsx'
 import Inspector, { GroupSummary } from './Inspector.jsx'
 import Dock from './Dock.jsx'
 import { computeGroups } from './grouping.js'
+import { InjectModal, ChatTab } from './experiment.jsx'
 import {
   TrustPanel, SensitivityPanel, FailuresPanel, ParetoPanel, DataQualityPanel,
   ConfigPanel, AuthoringPanel, MemoryPanel, RegistryPanel, ReportPanel, EventExplorer,
@@ -57,6 +58,9 @@ export default function RunView({ runId, onBack }) {
   const [toast, setToast] = useState(null)
   const [notif, setNotif] = useState(false)
   const [cfg, setCfg] = useState(null)
+  const [injectPrefill, setInjectPrefill] = useState(null)   // null = closed; object = inject modal open
+  const [chatOpen, setChatOpen] = useState(false)
+  const openInject = (prefill) => setInjectPrefill(prefill || {})
   useNotifications(notif, live)
   useEffect(() => { get(`/api/runs/${runId}/config`).then(setCfg).catch(() => {}) }, [runId])
   useEffect(() => {
@@ -114,6 +118,8 @@ export default function RunView({ runId, onBack }) {
             : <button className="btn sm warn" onClick={() => act(() => CONTROL.pause(runId), 'paused')}>⏸ Pause</button>)}
           {!state.finished && <button className="btn sm danger" onClick={() => act(() => CONTROL.abort(runId), 'stopping run')}>■ Stop</button>}
           {!state.finished && <button className="btn sm" title="inject a directive for the researcher" onClick={() => { const t = prompt('Hint / directive for the researcher (e.g. "try higher degree")'); if (t) act(() => CONTROL.hint(runId, t), 'hint sent') }}>💡 Hint</button>}
+          <button className="btn sm" title={state.finished ? 'add an experiment — reopens & continues the run' : 'hand-add an experiment node to the tree'} onClick={() => openInject(null)}>✚ Experiment</button>
+          <button className="btn sm" title="chat about this run / the selected experiment" onClick={() => setChatOpen(true)}>💬 Chat</button>
           {state.paused && <button className="btn sm" onClick={() => act(() => post(`/api/runs/${runId}/resume`, {}), 'engine resume spawned')}>⟳ Spawn resume</button>}
           <button className={'btn sm' + (notif ? ' primary' : '')} title="desktop notifications" onClick={() => setNotif(n => !n)}>🔔</button>
         </div>
@@ -153,7 +159,7 @@ export default function RunView({ runId, onBack }) {
                   ? <GroupSummary groupKey={selectedGroup} memberIds={groupMembers}
                       state={state} onSelectNode={focusNode} onClose={() => setSelectedGroup(null)} />
                   : <Inspector runId={runId} nodeId={selectedId} state={state} live={live}
-                      tab={inspectTab} setTab={setInspectTab} onToast={showToast} />}
+                      tab={inspectTab} setTab={setInspectTab} onToast={showToast} onInject={openInject} />}
               </div>
             </>}
       </div>
@@ -175,6 +181,20 @@ export default function RunView({ runId, onBack }) {
       {panel === 'registry' && <RegistryPanel state={state} onClose={() => setPanel(null)} />}
       {panel === 'report' && <ReportPanel state={state} runId={runId} onClose={() => setPanel(null)} />}
       {panel === 'events' && <EventExplorer runId={runId} onClose={() => setPanel(null)} />}
+
+      {injectPrefill != null && <InjectModal runId={runId} state={live} initial={injectPrefill}
+        onClose={() => setInjectPrefill(null)} onToast={showToast} />}
+      {chatOpen && <div className="overlay" onClick={() => setChatOpen(false)}>
+        <div className="panel" style={{ width: 'min(680px, 95%)' }} onClick={e => e.stopPropagation()}>
+          <div className="panel-h"><span className="ttl">Research chat</span>
+            <span className="pill">{selectedId != null ? `experiment #${selectedId}` : 'whole run'}</span>
+            <span className="right" /><button className="btn sm ghost" onClick={() => setChatOpen(false)}>✕</button></div>
+          <div className="panel-b" style={{ height: 460, display: 'flex', flexDirection: 'column' }}>
+            <ChatTab runId={runId} nodeId={selectedId} state={live}
+              onInject={(p) => { setChatOpen(false); openInject(p) }} onToast={showToast} />
+          </div>
+        </div>
+      </div>}
 
       {toast && <div className="toast">{toast}</div>}
     </div>

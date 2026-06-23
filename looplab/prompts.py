@@ -26,7 +26,7 @@ class PromptStore:
         if self.dir is not None:
             f = self.dir / f"{name}.md"
             if f.exists():  # re-read each call -> hot reload
-                text = _strip_frontmatter(f.read_text(encoding="utf-8")).strip()
+                text = _strip_frontmatter(f.read_text(encoding="utf-8", errors="replace")).strip()
         return string.Template(text).safe_substitute(vars)
 
 

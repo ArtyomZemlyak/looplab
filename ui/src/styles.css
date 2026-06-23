@@ -164,12 +164,16 @@ button { font: inherit; }
   border-radius: var(--radius-sm); padding: 5px 8px; box-shadow: var(--shadow); color: var(--fg-dim); }
 .grp-control .text { width: auto; padding: 3px 6px; }
 
-.grp-region { position: relative; }
+/* The hull is purely decorative: make the whole region click-through so it can never steal a
+   click from the nodes drawn over it, and re-enable pointer events on just the collapse tab — so
+   the per-group ▾ collapse always works even when a node overlaps the region's bounding box. */
+.grp-region { position: relative; pointer-events: none; }
 .grp-region svg { position: absolute; inset: 0; overflow: visible; pointer-events: none; }
 .grp-hull { fill: color-mix(in srgb, var(--grp-tint) 9%, transparent);
   stroke: color-mix(in srgb, var(--grp-tint) 55%, transparent); stroke-width: 1.5; }
 .grp-tab { position: absolute; top: -12px; left: 16px; cursor: pointer; display: inline-flex; align-items: center; gap: 6px;
-  background: var(--bg-1); border: 1px solid var(--grp-tint); color: var(--fg-dim); border-radius: 999px; padding: 1px 10px; font-size: 11px; }
+  background: var(--bg-1); border: 1px solid var(--grp-tint); color: var(--fg-dim); border-radius: 999px; padding: 1px 10px; font-size: 11px;
+  pointer-events: auto; z-index: 5; }
 .grp-tab:hover { color: var(--fg); }
 .grp-tab .grp-chev { color: var(--grp-tint); }
 .grp-tab .grp-n { background: var(--bg-3); border-radius: 999px; padding: 0 6px; font-size: 10px; }
@@ -325,3 +329,82 @@ input.text, textarea.text, select.text { background: var(--bg); color: var(--fg)
 textarea.text { min-height: 220px; font-family: ui-monospace, Consolas, monospace; }
 .toast { position: fixed; bottom: 16px; left: 50%; transform: translateX(-50%); background: var(--bg-3);
   border: 1px solid var(--line-2); border-radius: 8px; padding: 8px 14px; box-shadow: var(--shadow); z-index: 100; }
+
+/* ---------- modal popup (create project / rename run) ---------- */
+.modal { background: var(--bg-1); border: 1px solid var(--line-2); border-radius: 12px;
+  box-shadow: var(--shadow); width: min(440px, 92%); margin-top: 12vh; overflow: hidden; }
+.modal-h { display: flex; align-items: center; gap: 10px; padding: 11px 14px; border-bottom: 1px solid var(--line); }
+.modal-h b { font-size: 14px; }
+.modal-b { padding: 14px; }
+.modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 14px; }
+
+/* ---------- inject-experiment dialog ---------- */
+.panel-b .sf-field { margin-bottom: 10px; }
+
+/* ---------- experiment chat ---------- */
+.chat { display: flex; flex-direction: column; flex: 1; min-height: 0; height: 100%; }
+.chat-log { flex: 1; overflow: auto; min-height: 120px; padding-right: 4px; }
+.chat-msg { margin: 8px 0; }
+.chat-msg .chat-role { font-size: 11px; color: var(--fg-mut); text-transform: uppercase; letter-spacing: .04em; margin-bottom: 2px; }
+.chat-msg .chat-text { white-space: pre-wrap; line-height: 1.45; border-radius: 9px; padding: 8px 11px; border: 1px solid var(--line); }
+.chat-msg.user .chat-text { background: rgba(74,163,255,.10); border-color: var(--accent-dim); }
+.chat-msg.assistant .chat-text { background: var(--bg-1); }
+.chat-in { border-top: 1px solid var(--line); padding-top: 8px; margin-top: 6px; }
+.chat-in textarea.text { min-height: 44px; }
+
+/* ---------- per-run "⋮" menu ---------- */
+.run-actions { position: relative; flex: none; }
+.ic { background: transparent; border: none; color: var(--fg-dim); cursor: pointer; padding: 2px 6px; border-radius: 6px; }
+.ic:hover { background: var(--bg-3); color: var(--fg); }
+.ic.dots { font-size: 18px; line-height: 1; }
+.menu-backdrop { position: fixed; inset: 0; z-index: 90; }
+.run-menu { position: absolute; top: 26px; right: 0; z-index: 91; min-width: 200px; background: var(--bg-1);
+  border: 1px solid var(--line-2); border-radius: 10px; box-shadow: var(--shadow); padding: 5px; }
+.run-menu .mi { display: block; width: 100%; text-align: left; background: transparent; border: none; color: var(--fg);
+  cursor: pointer; padding: 6px 9px; border-radius: 6px; font: inherit; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.run-menu .mi:hover { background: var(--bg-3); }
+.run-menu .mi.on { color: var(--accent); }
+.run-menu .mi.danger { color: var(--fail); }
+.run-menu .mi-sep { height: 1px; background: var(--line); margin: 5px 4px; }
+.run-menu .mi-label { font-size: 10px; text-transform: uppercase; letter-spacing: .5px; color: var(--fg-mut); padding: 4px 9px 2px; }
+.run-menu .mi-scroll { max-height: 200px; overflow: auto; }
+.run-menu .mi-empty { color: var(--fg-mut); padding: 4px 9px; font-size: 12px; }
+
+/* ---------- settings page + reusable settings form ---------- */
+.settings-page { flex: 1; overflow: auto; padding: 22px; max-width: 1000px; margin: 0 auto; width: 100%; }
+.settings-form { display: flex; flex-direction: column; gap: 14px; }
+.sf-group { border: 1px solid var(--line); border-radius: 10px; background: var(--bg-1); overflow: hidden; }
+.sf-group-h { display: flex; align-items: center; gap: 10px; padding: 8px 12px; background: var(--bg-2); border-bottom: 1px solid var(--line); }
+.sf-group-h b { font-size: 13px; }
+.sf-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 12px 18px; padding: 12px 14px; }
+.sf-field { min-width: 0; }
+.sf-field .sf-label { font-size: 12px; color: var(--fg-dim); margin-bottom: 3px; display: flex; align-items: center; gap: 5px; }
+.sf-field.changed .sf-label { color: var(--fg); }
+.sf-dot { color: var(--accent); font-size: 9px; }
+.sf-input .text { width: 100%; }
+.sf-help { font-size: 11px; color: var(--fg-mut); margin-top: 3px; line-height: 1.35; }
+
+/* toggle switch (bool fields) */
+.switch { display: inline-flex; cursor: pointer; }
+.switch input { display: none; }
+.switch .track { width: 38px; height: 20px; border-radius: 999px; background: var(--bg-3); border: 1px solid var(--line-2);
+  position: relative; transition: background .15s; }
+.switch .track::after { content: ''; position: absolute; top: 1px; left: 1px; width: 16px; height: 16px; border-radius: 50%;
+  background: var(--fg-dim); transition: transform .15s, background .15s; }
+.switch input:checked + .track { background: var(--accent-dim); border-color: var(--accent); }
+.switch input:checked + .track::after { transform: translateX(18px); background: #fff; }
+.chk, .brief { font-size: 12px; color: var(--fg-dim); }
+.chk { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; }
+.brief { margin-top: 8px; }
+
+/* ---------- inspector: per-node lifecycle trace ---------- */
+.trace .stage { border: 1px solid var(--line); border-radius: 10px; margin-bottom: 10px; overflow: hidden; background: var(--bg-1); }
+.trace .stage.err { border-color: #7a2b2b; }
+.trace .stage-h { display: flex; align-items: center; gap: 8px; padding: 7px 11px; background: var(--bg-2); border-bottom: 1px solid var(--line); }
+.trace .stage-h b { font-size: 13px; }
+.trace .stage-h .muted { font-size: 11px; }
+.trace .stage-h .t { color: var(--fg-mut); font-variant-numeric: tabular-nums; }
+.trace .stage-ic { font-size: 15px; }
+.trace .stage .spans { padding: 6px 10px; }
+.trace .stage table.tbl { margin: 4px 0; }
+.trace .stage .llm-card { margin: 6px 0; }

@@ -19,11 +19,17 @@ from __future__ import annotations
 import json
 import math
 import os
+import re
 import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, Protocol
+
+# Env-var NAMES that look like a secret — redacted from the child process environment so generated
+# code can't read (and persist into the event log) the operator's keys/tokens. Name-based, so it
+# never touches PATH/SYSTEMROOT/TEMP etc. that a process legitimately needs.
+_SECRET_ENV = re.compile(r"(KEY|SECRET|TOKEN|PASSWORD|PASSWD|CREDENTIAL|API_KEY)", re.IGNORECASE)
 
 
 @dataclass
@@ -99,7 +105,12 @@ def _run_argv(argv: list[str], workdir: str, timeout: float,
         kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
     else:
         kwargs["start_new_session"] = True
-    full_env = {**os.environ, **{k: str(v) for k, v in (env or {}).items()}}
+    # Don't hand the child code the host's secrets (review C2): a `print(os.environ)` or a stack
+    # trace would otherwise exfiltrate LLM_API_KEY / cloud creds into the durable stdout tail. Drop
+    # env vars whose NAME looks secret, but keep everything a process needs (PATH, SYSTEMROOT, …)
+    # and always keep what the engine explicitly passes in `env` (e.g. LOOPLAB_EVAL_SEED).
+    base = {k: v for k, v in os.environ.items() if not _SECRET_ENV.search(k)}
+    full_env = {**base, **{k: str(v) for k, v in (env or {}).items()}}
     try:
         proc = subprocess.Popen(
             argv, cwd=str(wd), stdout=subprocess.PIPE, stderr=subprocess.PIPE,

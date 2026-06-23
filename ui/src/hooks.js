@@ -15,7 +15,8 @@ export function useRunState(runId) {
       const es = new EventSource(`/api/runs/${runId}/events`)
       esRef.current = es
       es.addEventListener('state', (e) => {
-        const p = JSON.parse(e.data)
+        let p
+        try { p = JSON.parse(e.data) } catch { return }  // ignore a torn/partial SSE frame
         setLive(p.state); setSeq(p.seq); setConnected(true)
       })
       es.addEventListener('done', () => { es.close() })
@@ -36,7 +37,9 @@ export function useNotifications(enabled, state) {
   const prev = useRef({ phase: null, fails: 0 })
   useEffect(() => {
     if (!enabled || !state) return
-    if (Notification && Notification.permission === 'default') Notification.requestPermission()
+    // `Notification` is absent in insecure/unsupported contexts — referencing it bare throws.
+    if (!('Notification' in window)) return
+    if (Notification.permission === 'default') Notification.requestPermission()
     const phase = state.phase
     const fails = Object.values(state.nodes || {}).filter(n => n.status === 'failed').length
     const notify = (t, b) => { try { new Notification(t, { body: b }) } catch {} }

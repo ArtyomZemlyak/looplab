@@ -178,11 +178,13 @@ export default function Dag({ state, selectedId, onSelect, groupMode = 'none', c
           <button className="btn sm ghost" title="expand all groups" onClick={() => onExpandAll && onExpandAll()}>⊞ all</button>
         </>}
       </Panel>
-      <Panel position="bottom-right" className="map-toggles">
+      {/* lift the toggles above the overview map when it's open — otherwise the minimap (also
+          bottom-right) covers this row and you can't click 🗺 again to hide it. */}
+      <Panel position="bottom-right" className="map-toggles" style={{ marginBottom: showMap ? 152 : 0 }}>
         <button className={'btn sm ghost' + (showLegend ? ' primary' : '')} title="operator legend"
                 onClick={() => setShowLegend(v => !v)}>ⓘ ops</button>
-        <button className={'btn sm ghost' + (showMap ? ' primary' : '')} title="toggle overview map"
-                onClick={toggleMap}>🗺 map</button>
+        <button className={'btn sm ghost' + (showMap ? ' primary' : '')} title={showMap ? 'hide overview map' : 'show overview map'}
+                onClick={toggleMap}>🗺 map{showMap ? ' ✕' : ''}</button>
       </Panel>
       {showLegend && <Panel position="top-left" className="op-legend">
         <div className="legend-h">Operators</div>
@@ -191,13 +193,13 @@ export default function Dag({ state, selectedId, onSelect, groupMode = 'none', c
             <span className="op-icon"><OpIcon name={m.icon} /></span><span>{m.label}</span>
           </div>) })}
       </Panel>}
-      {showMap && <MiniMap pannable zoomable nodeColor={(n) => {
+      {showMap && <MiniMap position="bottom-right" pannable zoomable nodeColor={(n) => {
         const nd = n.data?.node; if (!nd) return '#3a4250'
         if (nd.id === state.best_node_id) return '#ffd54a'
         if (nd.status === 'failed') return '#ef4444'
         if (nd.status === 'evaluated') return '#2ecc71'
         return '#6b7686'
-      }} style={{ background: '#12151c' }} />}
+      }} style={{ background: '#12151c', width: 180, height: 130 }} />}
     </ReactFlow>
   )
 }

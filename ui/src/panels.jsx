@@ -1,7 +1,8 @@
 import React, { useEffect, useMemo, useState } from 'react'
 import { get, putText, post, fmt, fmtInt, CONTROL } from './util.js'
-import { Trajectory, Bars, Gantt, ParallelCoords, Scatter } from './charts.jsx'
+import { Trajectory, Bars, Gantt, ParallelCoords, Scatter, ImprovementWaterfall } from './charts.jsx'
 import MapView from './MapView.jsx'
+import { analyze, paramDiffLabel, toMarkdown } from './report.js'
 
 export function Panel({ title, sub, onClose, children, wide }) {
   return (
@@ -223,7 +224,7 @@ export function RegistryPanel({ state, onClose }) {
         : <div className="muted">none — use ★ Promote on a node</div>}
       <div className="section-h">Cross-run leaderboard</div>
       <table className="tbl"><thead><tr><th>run</th><th>task</th><th>phase</th><th>best</th><th>nodes</th></tr></thead><tbody>
-        {runs.sort((a, b) => (b.best_confirmed ?? b.best_metric ?? -Infinity) - (a.best_confirmed ?? a.best_metric ?? -Infinity))
+        {[...runs].sort((a, b) => (b.best_confirmed ?? b.best_metric ?? -Infinity) - (a.best_confirmed ?? a.best_metric ?? -Infinity))
           .map(r => <tr key={r.run_id}><td>{r.run_id}</td><td className="muted">{r.task_id}</td><td>{r.phase}</td><td>{fmt(r.best_confirmed ?? r.best_metric)}</td><td>{r.nodes}</td></tr>)}
       </tbody></table>
     </Panel>
@@ -235,29 +236,81 @@ export function ReportPanel({ state, runId, onClose }) {
   const failed = Object.values(state.nodes).filter(n => n.status === 'failed')
   const [bestCode, setBestCode] = useState(null)
   useEffect(() => { if (best) get(`/api/runs/${runId}/nodes/${best.id}`).then(d => setBestCode(d)).catch(() => {}) }, [runId, best?.id])
-  const download = () => {
-    if (!bestCode?.code) return
-    const blob = new Blob([bestCode.code], { type: 'text/x-python' })
-    const a = document.createElement('a'); a.href = URL.createObjectURL(blob)
-    a.download = `solution_node${best.id}.py`; a.click(); URL.revokeObjectURL(a.href)
+  const a = useMemo(() => analyze(state), [state])
+  const dl = (name, text, type) => {
+    const blob = new Blob([text], { type }); const u = URL.createObjectURL(blob)
+    const el = document.createElement('a'); el.href = u; el.download = name; el.click(); URL.revokeObjectURL(u)
   }
+  const impr = (s) => (s.delta == null ? true : (state.direction === 'min' ? s.delta < 0 : s.delta > 0))
   return (
     <Panel title="Run report" onClose={onClose} wide>
       <div className="toolbar" style={{ marginBottom: 10 }}>
         <button className="btn sm primary" onClick={() => window.print()}>🖨 Print / PDF</button>
-        {best && <button className="btn sm" disabled={!bestCode?.code} onClick={download}>⬇ Download solution</button>}
+        <button className="btn sm" onClick={() => dl(`${state.run_id}_report.md`, toMarkdown(state, best), 'text/markdown')}>⬇ Markdown report</button>
+        {best && <button className="btn sm" disabled={!bestCode?.code} onClick={() => dl(`solution_node${best.id}.py`, bestCode.code, 'text/x-python')}>⬇ Solution</button>}
       </div>
       <h2>{state.goal || state.task_id}</h2>
       <div className="kv">
         <div className="k">run</div><div className="v">{state.run_id}</div>
         <div className="k">direction</div><div className="v">{state.direction}</div>
         <div className="k">status</div><div className="v">{state.phase}{state.stop_reason ? ` (${state.stop_reason})` : ''}</div>
-        <div className="k">nodes</div><div className="v">{Object.keys(state.nodes).length} ({Object.values(state.nodes).filter(n => n.status === 'evaluated').length} evaluated, {failed.length} failed)</div>
+        <div className="k">nodes</div><div className="v">{Object.keys(state.nodes).length} ({a.nEval} evaluated, {failed.length} failed)</div>
         {best && <><div className="k">best</div><div className="v">#{best.id} · {fmt(best.confirmed_mean ?? best.metric)} · {JSON.stringify(best.idea?.params)}</div></>}
+        {a.steps.length > 1 && <><div className="k">total gain</div><div className="v">{fmt(a.totalGain)} over {a.steps.length} steps (baseline {fmt(a.firstBest)} → {fmt(a.finalBest)})</div></>}
         {state.llm_cost && <><div className="k">LLM</div><div className="v">{fmtInt(state.llm_cost.total_tokens)} tokens · ${fmt(state.llm_cost.cost)}</div></>}
       </div>
-      <div className="section-h">Best-metric trajectory</div>
-      <Trajectory nodes={Object.values(state.nodes)} direction={state.direction} />
+
+      <div className="section-h">Best-metric trajectory <span className="muted">(○ = a step that moved the frontier)</span></div>
+      <Trajectory nodes={Object.values(state.nodes)} direction={state.direction} steps={a.steps} />
+
+      <div className="section-h">Key improvements — how the metric got better</div>
+      {a.steps.length
+        ? <><ImprovementWaterfall steps={a.steps} direction={state.direction} />
+            <table className="tbl"><thead><tr><th>#</th><th>node</th><th>operator</th><th>metric</th><th>Δ</th><th>what changed</th><th>why</th></tr></thead><tbody>
+              {a.steps.map((s, i) => <tr key={s.id}>
+                <td>{i + 1}</td><td>#{s.id}</td><td>{s.operator}{s.theme ? <span className="pill" style={{ marginLeft: 4 }}>{s.theme}</span> : null}</td>
+                <td>{fmt(s.to)}</td>
+                <td style={{ color: s.delta == null ? 'var(--accent)' : (impr(s) ? 'var(--ok)' : 'var(--fail)') }}>{s.delta == null ? 'baseline' : fmt(s.delta)}</td>
+                <td className="muted">{paramDiffLabel(s.diff)}</td>
+                <td className="muted" style={{ maxWidth: 220, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={s.rationale}>{s.rationale}</td>
+              </tr>)}
+            </tbody></table></>
+        : <div className="muted">No improving steps recorded yet.</div>}
+
+      <div className="section-h">What worked — operator &amp; theme effectiveness</div>
+      <div style={{ display: 'flex', gap: 18, flexWrap: 'wrap' }}>
+        <div style={{ flex: 1, minWidth: 280 }}>
+          <div className="muted" style={{ marginBottom: 4 }}>operators</div>
+          <table className="tbl"><thead><tr><th>operator</th><th>nodes</th><th>eval</th><th>improved</th><th>best</th></tr></thead><tbody>
+            {a.operators.map(o => <tr key={o.key}><td>{o.key}</td><td>{o.count}</td><td>{o.evaluated}</td>
+              <td style={{ color: o.improved ? 'var(--ok)' : 'inherit' }}>{o.improved}</td><td>{fmt(o.best)}</td></tr>)}
+          </tbody></table>
+        </div>
+        {a.themes.length > 0 && <div style={{ flex: 1, minWidth: 280 }}>
+          <div className="muted" style={{ marginBottom: 4 }}>themes</div>
+          <table className="tbl"><thead><tr><th>theme</th><th>nodes</th><th>improved</th><th>best</th></tr></thead><tbody>
+            {a.themes.map(t => <tr key={t.key}><td>{t.key}</td><td>{t.count}</td>
+              <td style={{ color: t.improved ? 'var(--ok)' : 'inherit' }}>{t.improved}</td><td>{fmt(t.best)}</td></tr>)}
+          </tbody></table>
+        </div>}
+      </div>
+
+      <div className="section-h">What didn't work</div>
+      <div className="cardgrid" style={{ marginBottom: 10 }}>
+        {Object.entries(a.failures).map(([r, ns]) => <Stat key={r} n={ns.length} l={`failed · ${r}`} />)}
+        {a.regressions.length > 0 && <Stat n={a.regressions.length} l="regressions" />}
+        {a.infeasible.length > 0 && <Stat n={a.infeasible.length} l="infeasible" />}
+        {(state.drifts || []).length > 0 && <Stat n={state.drifts.length} l="metric drift" />}
+        {!Object.keys(a.failures).length && !a.regressions.length && !a.infeasible.length && <Stat n={0} l="nothing notably failed" />}
+      </div>
+      {a.regressions.length > 0 && <>
+        <div className="muted" style={{ marginBottom: 4 }}>tried but didn't beat the parent</div>
+        <table className="tbl"><thead><tr><th>node</th><th>operator</th><th>metric</th><th>vs parent</th><th>change</th></tr></thead><tbody>
+          {a.regressions.slice(0, 12).map(r => <tr key={r.id}><td>#{r.id}</td><td>{r.operator}</td><td>{fmt(r.metric)}</td>
+            <td className="muted">#{r.parentId} {fmt(r.parentMetric)}</td><td className="muted">{paramDiffLabel(r.diff)}</td></tr>)}
+        </tbody></table>
+      </>}
+
       {best && <><div className="section-h">Winning solution</div><pre className="code">{bestCode?.code || '(loading…)'}</pre></>}
     </Panel>
   )

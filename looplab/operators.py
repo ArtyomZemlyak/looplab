@@ -20,7 +20,16 @@ def merge_idea(parents: list[Node]) -> Idea:
         keys |= set(p.idea.params)
     params: dict[str, float] = {}
     for k in sorted(keys):
-        vals = [p.idea.params[k] for p in parents if k in p.idea.params]
+        # Only mean-merge numerically-coercible values. A non-numeric param (free-form repo task)
+        # would otherwise raise inside sum() and, because no node_created event is written, the
+        # policy would re-issue the SAME merge every iteration — an infinite loop on resume.
+        vals: list[float] = []
+        for p in parents:
+            if k in p.idea.params:
+                try:
+                    vals.append(float(p.idea.params[k]))
+                except (TypeError, ValueError):
+                    continue
         if vals:
             params[k] = round(sum(vals) / len(vals), 4)
     pids = ",".join(str(p.id) for p in parents)

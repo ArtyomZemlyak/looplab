@@ -20,7 +20,7 @@ class Skill:
 
 
 def _parse_skill(path: Path) -> Skill:
-    text = path.read_text(encoding="utf-8")
+    text = path.read_text(encoding="utf-8", errors="replace")  # a cp1252/UTF-16 file must not crash load
     name, desc, body = path.stem, "", text.strip()
     m = _FM.match(text)
     if m:

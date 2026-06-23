@@ -157,6 +157,65 @@ def test_force_confirm_records_robustness_without_hijacking_best(tmp_path):
     assert s3.confirmed_forced.count(nid) == 1        # not re-confirmed on resume
 
 
+# ---- inject_node: operator-authored experiment materializes into a real, evaluated node ----
+def test_inject_node_creates_and_evaluates(tmp_path):
+    rd = tmp_path / "run"
+    # A manual experiment hand-added BEFORE the run starts: the engine creates it as a real node
+    # and the policy evaluates it like any other (pending nodes are scheduled first).
+    EventStore(rd / "events.jsonl").append("inject_node", {
+        "idea": {"operator": "manual", "params": {"x": 0.5}, "rationale": "operator hunch",
+                 "theme": "hand-tuned"}, "parent_id": None, "code": None})
+    state = anyio.run(_engine(rd).run)
+    assert state.finished and state.injects_done == 1
+    inj = next(n for n in state.nodes.values() if n.operator == "manual")
+    assert inj.status is NodeStatus.evaluated and inj.metric is not None
+    assert inj.idea.params == {"x": 0.5} and inj.idea.theme == "hand-tuned"
+
+
+def test_inject_node_with_parent_and_replay_safe(tmp_path):
+    rd = tmp_path / "run"
+    s1 = _paused(rd)                                  # a paused run with evaluated nodes
+    pid = s1.best().id
+    n0 = len(s1.nodes)
+    EventStore(rd / "events.jsonl").append("inject_node", {
+        "idea": {"operator": "improve", "params": {"x": 0.1}}, "parent_id": pid})
+    s2 = _paused(rd)
+    assert s2.injects_done == 1 and len(s2.nodes) > n0
+    child = next(n for n in s2.nodes.values() if n.id >= n0)
+    assert pid in child.parent_ids                    # branched from the chosen parent
+    s3 = _paused(rd)
+    assert s3.injects_done == 1                        # processed exactly once across resumes
+
+
+def test_reopen_finished_run_with_injected_node(tmp_path):
+    rd = tmp_path / "run"
+    s1 = anyio.run(_engine(rd).run)
+    assert s1.finished
+    n0 = len(s1.nodes)
+    # Operator adds an experiment to the FINISHED run: reopen clears the terminal flag, the inject
+    # queues the node; re-entering the loop evaluates it and re-finishes.
+    store = EventStore(rd / "events.jsonl")
+    store.append("run_reopened", {})
+    store.append("inject_node", {"idea": {"operator": "manual", "params": {"x": 0.2},
+                                          "rationale": "post-hoc idea"}, "parent_id": None})
+    s2 = anyio.run(_engine(rd).run)
+    assert s2.finished                                    # re-finished after processing the inject
+    assert s2.injects_done == 1 and len(s2.nodes) == n0 + 1
+    man = next(n for n in s2.nodes.values() if n.operator == "manual")
+    assert man.status is NodeStatus.evaluated and man.metric is not None
+
+
+def test_inject_node_ships_ready_made_code(tmp_path):
+    rd = tmp_path / "run"
+    EventStore(rd / "events.jsonl").append("inject_node", {
+        "idea": {"operator": "manual", "params": {}},
+        "code": "print('{\"metric\": 0.123}')"})
+    state = anyio.run(_engine(rd).run)
+    inj = next(n for n in state.nodes.values() if n.operator == "manual")
+    assert inj.code == "print('{\"metric\": 0.123}')"   # ran the operator's code verbatim
+    assert inj.status is NodeStatus.evaluated and inj.metric == 0.123
+
+
 # ---- mid-eval kill primitive (v2): cancel Event tree-kills an in-flight subprocess ----
 def test_run_argv_cancel_kills_inflight(tmp_path):
     from looplab.sandbox import _run_argv

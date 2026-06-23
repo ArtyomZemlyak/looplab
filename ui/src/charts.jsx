@@ -3,8 +3,10 @@ import { fmt } from './util.js'
 
 const AX = '#6b7480', GRID = '#20252f'
 
-// Best-metric-over-time + all-node scatter.
-export function Trajectory({ nodes, direction, width = 760, height = 220 }) {
+// Best-metric-over-time + all-node scatter. Pass `steps` (from report.improvements) to annotate
+// the nodes that moved the frontier with a marker + a "what changed" label — so the chart shows
+// not just the metric curve but WHICH improvement caused each drop/rise.
+export function Trajectory({ nodes, direction, width = 760, height = 220, steps = null }) {
   const evald = nodes.filter(n => (n.metric ?? null) !== null).sort((a, b) => a.id - b.id)
   if (!evald.length) return <Empty>no evaluated nodes yet</Empty>
   const xs = evald.map(n => n.id)
@@ -22,6 +24,7 @@ export function Trajectory({ nodes, direction, width = 760, height = 220 }) {
     if (best !== null) bestPts.push([X(n.id), Y(best)])
   })
   const line = bestPts.map((p, i) => (i ? 'L' : 'M') + p[0] + ' ' + p[1]).join(' ')
+  const marks = steps || []
   return (
     <svg width="100%" viewBox={`0 0 ${w} ${h}`}>
       {[0, .25, .5, .75, 1].map((t, i) => {
@@ -34,8 +37,47 @@ export function Trajectory({ nodes, direction, width = 760, height = 220 }) {
           fill={n.feasible === false ? '#7a6b9a' : '#4aa3ff'} opacity={.8} />
       })}
       <path d={line} fill="none" stroke="#2ecc71" strokeWidth="2" />
+      {marks.map((s, i) => {
+        const v = s.to, x = X(s.id), y = Y(v)
+        return <g key={i}>
+          <circle cx={x} cy={y} r="5" fill="none" stroke="#2ecc71" strokeWidth="1.6" />
+          <line x1={x} x2={x} y1={y - 6} y2={Math.max(14, y - 20)} stroke="#2ecc71" strokeWidth="1" opacity=".5" />
+          <text x={x} y={Math.max(11, y - 22)} fill="#7fe0a3" fontSize="9.5" textAnchor="middle">#{s.id}</text>
+          <title>#{s.id} {s.operator}{s.theme ? ` (${s.theme})` : ''} → {fmt(v)}{s.delta != null ? ` (Δ ${fmt(s.delta)})` : ' baseline'}</title>
+        </g>
+      })}
       <text x={pad} y={12} fill={AX} fontSize="11">best so far: {fmt(best)}</text>
       <text x={pad} y={h - 8} fill={AX} fontSize="11">node id →</text>
+    </svg>
+  )
+}
+
+// Waterfall of the key improvements: each bar is the metric the frontier reached at that step;
+// the baseline is the first best, and each subsequent bar's coloured segment is the gain it added.
+export function ImprovementWaterfall({ steps, direction, width = 760 }) {
+  if (!steps || !steps.length) return <Empty>no improvement steps yet</Empty>
+  const vals = steps.map(s => s.to)
+  const lo = Math.min(...vals), hi = Math.max(...vals)
+  const pad = 40, bw = Math.max(18, Math.min(64, (width - 2 * pad) / steps.length - 10))
+  const gap = ((width - 2 * pad) - steps.length * bw) / Math.max(1, steps.length - 1)
+  const h = 200, base = h - 26
+  const Y = (v) => 16 + (1 - (v - lo) / Math.max(1e-9, hi - lo)) * (base - 16)
+  return (
+    <svg width="100%" viewBox={`0 0 ${width} ${h}`}>
+      <line x1={pad} x2={width - pad} y1={base} y2={base} stroke={GRID} />
+      {steps.map((s, i) => {
+        const x = pad + i * (bw + gap)
+        const yTo = Y(s.to), yFrom = s.from == null ? base : Y(s.from)
+        const top = Math.min(yTo, yFrom), hgt = Math.max(3, Math.abs(yTo - yFrom))
+        const improved = s.delta == null || (direction === 'min' ? s.delta < 0 : s.delta > 0)
+        return <g key={i}>
+          <rect x={x} y={s.from == null ? yTo : top} width={bw} height={s.from == null ? base - yTo : hgt} rx="3"
+                fill={s.from == null ? '#4aa3ff' : (improved ? '#2ecc71' : '#ef4444')} opacity={s.from == null ? .55 : .9} />
+          <text x={x + bw / 2} y={Math.max(11, top - 4)} fill="#9aa3b2" fontSize="9.5" textAnchor="middle">#{s.id}</text>
+          <text x={x + bw / 2} y={base + 12} fill={AX} fontSize="9.5" textAnchor="middle">{fmt(s.to)}</text>
+          <title>#{s.id} {s.operator} → {fmt(s.to)}{s.delta != null ? ` (Δ ${fmt(s.delta)})` : ' (baseline)'}</title>
+        </g>
+      })}
     </svg>
   )
 }

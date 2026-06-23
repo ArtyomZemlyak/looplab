@@ -4,21 +4,23 @@ reproducibility. (No real secrets in P0, but the masking discipline is in place.
 """
 from __future__ import annotations
 
-from pydantic import SecretStr
+from pydantic import Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="LOOPLAB_", extra="ignore")
 
-    n_seeds: int = 3
-    max_nodes: int = 8
+    # Lower bounds (review C/⚪): `max_parallel=0` silently stalls the loop; a non-positive
+    # node/seed budget or timeout is never valid. Reject at config time, not mid-run.
+    n_seeds: int = Field(default=3, ge=1)
+    max_nodes: int = Field(default=8, ge=1)
     # Concurrent evaluation is a backlog seam. The base/primary mode is a single
     # experiment at a time (deterministic, one eval process running) — important for
     # RepoTask where an eval is a real training run with its own resources/trackers.
     # Set > 1 to opt into the parallel fan-out (the task-group path).
-    max_parallel: int = 1
-    timeout: float = 30.0
+    max_parallel: int = Field(default=1, ge=1)
+    timeout: float = Field(default=30.0, gt=0)
     # Sandbox tier (ADR-13): "trusted_local" (subprocess, no Docker) for the CLI;
     # "untrusted" (Docker --network none -> gVisor) for hosted/multi-tenant UI.
     trust_mode: str = "trusted_local"

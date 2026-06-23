@@ -85,6 +85,94 @@ def test_config_masked_and_gpu_softfail(tmp_path):
     assert "available" in gpu  # True or False, never an error
 
 
+def test_settings_get_put_roundtrip(tmp_path):
+    client = TestClient(make_app(tmp_path))
+    base = client.get("/api/settings").json()
+    assert "settings" in base and "defaults" in base and base["overrides"] == {}
+    # saving a value EQUAL to the default keeps the override file empty (stores only diffs)
+    default_nodes = base["defaults"]["max_nodes"]
+    client.put("/api/settings", json={"settings": {"max_nodes": default_nodes}})
+    assert client.get("/api/settings").json()["overrides"] == {}
+    # a real change is persisted and reflected in the resolved settings
+    r = client.put("/api/settings", json={"settings": {"max_nodes": 99, "policy": "mcts"}}).json()
+    assert r["overrides"] == {"max_nodes": 99, "policy": "mcts"}
+    got = client.get("/api/settings").json()
+    assert got["settings"]["max_nodes"] == 99 and got["settings"]["policy"] == "mcts"
+    # secrets are never accepted as an override
+    client.put("/api/settings", json={"settings": {"llm_api_key": "leak"}})
+    assert "llm_api_key" not in client.get("/api/settings").json()["overrides"]
+
+
+def test_tasks_catalogue(tmp_path):
+    client = TestClient(make_app(tmp_path))
+    tasks = client.get("/api/tasks").json()["tasks"]
+    assert any(t["name"] == "toy_task.json" and t["goal"] for t in tasks)
+
+
+def test_start_validation_and_env(tmp_path, monkeypatch):
+    import looplab.server as server
+    spawned = {}
+
+    def fake_popen(cmd, **kw):
+        spawned["cmd"] = cmd
+        spawned["env"] = kw.get("env", {})
+        class _P:  # noqa: D401 - stub
+            pass
+        return _P()
+    monkeypatch.setattr(server.subprocess, "Popen", fake_popen)
+
+    client = TestClient(make_app(tmp_path))
+    # missing fields / nonexistent task -> 400
+    assert client.post("/api/start", json={"run_id": "x"}).status_code == 400
+    assert client.post("/api/start", json={"task_file": "nope.json", "run_id": "x"}).status_code == 400
+    # a real task spawns the engine with per-run settings as LOOPLAB_* env
+    ok = client.post("/api/start", json={
+        "task_file": str(TASK), "run_id": "fromui",
+        "settings": {"max_nodes": 3, "backend": "toy", "require_approval": True}})
+    assert ok.status_code == 200
+    assert spawned["env"]["LOOPLAB_MAX_NODES"] == "3"
+    assert spawned["env"]["LOOPLAB_REQUIRE_APPROVAL"] == "true"
+    assert (tmp_path / "fromui" / "ui_meta.json").exists()
+    # a second start on the same id is refused once the run has events
+    (tmp_path / "fromui" / "events.jsonl").write_text("{}\n", encoding="utf-8")
+    assert client.post("/api/start", json={"task_file": str(TASK), "run_id": "fromui"}).status_code == 409
+
+
+def test_inject_node_control_append(tmp_path):
+    _build_run(tmp_path)
+    client = TestClient(make_app(tmp_path))
+    r = client.post("/api/runs/demo/control", json={"type": "inject_node", "data": {
+        "idea": {"operator": "manual", "params": {"x": 0.5}, "rationale": "hand"}, "parent_id": None}})
+    assert r.status_code == 200 and r.json()["type"] == "inject_node"
+    st = fold(EventStore(tmp_path / "demo" / "events.jsonl").read_all())
+    assert st.inject_requests and st.inject_requests[0]["idea"]["operator"] == "manual"
+
+
+def test_chat_suggest_health_softfail(tmp_path):
+    # These hit the LLM endpoint; whether or not a model is reachable they must return 200 with a
+    # well-formed envelope (ok: bool) — never raise. Asserts the shape, not the model output.
+    _build_run(tmp_path)
+    client = TestClient(make_app(tmp_path))
+    c = client.post("/api/runs/demo/chat", json={"messages": [{"role": "user", "content": "hi"}]})
+    assert c.status_code == 200 and "ok" in c.json()
+    s = client.post("/api/runs/demo/suggest", json={"instruction": "try a higher degree"})
+    assert s.status_code == 200 and "ok" in s.json()
+    h = client.get("/api/llm/health").json()
+    assert "ok" in h and "model" in h
+
+
+def test_cors_is_allowlisted_not_wildcard(tmp_path):
+    _build_run(tmp_path)
+    client = TestClient(make_app(tmp_path))
+    # an arbitrary web page the operator has open must NOT be allowed to drive the control-plane
+    evil = client.get("/api/runs", headers={"Origin": "http://evil.example"})
+    assert evil.headers.get("access-control-allow-origin") != "*"
+    assert evil.headers.get("access-control-allow-origin") in (None, "")
+    # the Vite dev server origin is still allowed (dev workflow preserved)
+    ok = client.get("/api/runs", headers={"Origin": "http://localhost:5173"})
+    assert ok.headers.get("access-control-allow-origin") == "http://localhost:5173"
+
+
 def test_sse_emits_state_snapshot(tmp_path):
     _build_run(tmp_path)
     client = TestClient(make_app(tmp_path))

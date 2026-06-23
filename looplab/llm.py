@@ -19,6 +19,12 @@ class BudgetExceeded(Exception):
     pass
 
 
+class LLMError(RuntimeError):
+    """A reachable LLM transport/protocol failure (network down, HTTP error, non-JSON, no choices).
+    Raised instead of leaking a raw urllib/JSON exception so the role layer's retry+fallback treats
+    it like any other bad response and the run degrades to a safe default rather than crashing."""
+
+
 def _assistant_text(msg: dict) -> str:
     """Display text for a tool-calling assistant turn: its content, plus a compact note of any
     tool calls it made (so the trace shows the model chose to call a tool, not an empty reply)."""
@@ -57,8 +63,21 @@ class OpenAICompatibleClient:
             headers={"Content-Type": "application/json",
                      "Authorization": f"Bearer {self.api_key}"},
         )
-        with urllib.request.urlopen(req, timeout=self.timeout) as resp:
-            body = json.loads(resp.read().decode("utf-8"))
+        # A network blip / HTTP error / non-JSON body must surface as a clean LLMError, not an
+        # unhandled URLError/HTTPError/JSONDecodeError that aborts the whole run — the role layer
+        # already retries + falls back on LLMError. (urllib.error was imported but unused before.)
+        try:
+            with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+                raw = resp.read().decode("utf-8")
+        except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, OSError) as e:
+            raise LLMError(f"LLM request to {self.base_url} failed: {e}") from e
+        try:
+            body = json.loads(raw)
+        except (json.JSONDecodeError, ValueError) as e:
+            raise LLMError(f"LLM returned non-JSON: {raw[:200]!r}") from e
+        if not isinstance(body, dict) or "choices" not in body or not body["choices"]:
+            # Ollama/vLLM emit {"error": ...} envelopes on a bad request — don't index [0] blind.
+            raise LLMError(f"LLM response had no choices: {str(body)[:200]}")
         usage = body.get("usage") or {}
         # No price table for local models -> account tokens as 0 cost, but track them.
         self.accountant.add(0.0, usage=usage)

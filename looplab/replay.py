@@ -19,7 +19,11 @@ def fold(events: Iterable[Event]) -> RunState:
             st.run_id = d["run_id"]
             st.task_id = d["task_id"]
             st.goal = d.get("goal", "")
-            st.direction = d.get("direction", "min")
+            # `direction` drives is_better/best-selection for the whole run — a typo ("Max",
+            # "maximize") must not silently invert the objective. Accept only the two valid values;
+            # anything else falls back to the safe default rather than flipping optimization.
+            _dir = str(d.get("direction", "min")).strip().lower()
+            st.direction = _dir if _dir in ("min", "max") else "min"
             st.config_hash = d.get("config_hash", "")
             st.workspace = d.get("workspace")
         elif t == "node_created":
@@ -104,6 +108,12 @@ def fold(events: Iterable[Event]) -> RunState:
         elif t == "run_finished":
             st.finished = True
             st.stop_reason = d.get("reason")
+        elif t == "run_reopened":
+            # An operator added an experiment to a FINISHED run and wants to continue it: clear the
+            # terminal flags so re-entering the loop (resume) processes the new node(s) and then
+            # re-finishes. Deterministic under replay — a later run_finished simply sets it again.
+            st.finished = False
+            st.stop_reason = None
         # --- live operator control events (UI intervention). Intent only; the engine reads
         # these and writes the matching domain effect. Deterministic under replay. ---
         elif t == "run_abort":
@@ -132,6 +142,10 @@ def fold(events: Iterable[Event]) -> RunState:
             st.fork_requests.append(d)
         elif t == "fork_done":
             st.forks_done += 1   # one per processed fork request (gate for replay-safe fulfillment)
+        elif t == "inject_node":
+            st.inject_requests.append(d)        # operator-authored experiment (manual tree edit)
+        elif t == "inject_done":
+            st.injects_done += 1                 # one per processed inject (replay-safe gate)
         elif t == "confirm_done":
             nid = d.get("node_id")   # forced-confirm finished for this node (gate; selection untouched)
             if nid is not None and nid not in st.confirmed_forced:

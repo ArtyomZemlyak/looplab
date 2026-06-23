@@ -1,8 +1,56 @@
 import React, { useEffect, useMemo, useState } from 'react'
-import { get, fmt, listProjects, createProject, patchProject, deleteProject, assignRun } from './util.js'
+import { get, fmt, listProjects, createProject, patchProject, deleteProject, assignRun, renameRun, deleteRun } from './util.js'
 import MapView from './MapView.jsx'
+import StartRun from './StartRun.jsx'
 
 const ALL = '__all__', UNASSIGNED = '__unassigned__'
+
+// Small centered popup (replaces window.prompt for project create / run rename).
+function Modal({ title, onClose, children }) {
+  return <div className="overlay" onMouseDown={onClose}>
+    <div className="modal" onMouseDown={e => e.stopPropagation()}>
+      <div className="modal-h"><b>{title}</b><span style={{ flex: 1 }} />
+        <button className="btn sm ghost" onClick={onClose} title="close">✕</button></div>
+      <div className="modal-b">{children}</div>
+    </div>
+  </div>
+}
+
+function PromptModal({ title, label, placeholder, initial = '', confirm = 'Create', allowEmpty = false, onSubmit, onClose }) {
+  const [v, setV] = useState(initial)
+  const ok = allowEmpty || !!v.trim()
+  const go = () => { if (ok) onSubmit(v.trim()) }
+  return <Modal title={title} onClose={onClose}>
+    {label && <div className="muted" style={{ marginBottom: 8 }}>{label}</div>}
+    <input className="text" autoFocus placeholder={placeholder} value={v} onChange={e => setV(e.target.value)}
+           onKeyDown={e => { if (e.key === 'Enter') go(); if (e.key === 'Escape') onClose() }} />
+    <div className="modal-actions">
+      <button className="btn sm ghost" onClick={onClose}>Cancel</button>
+      <button className="btn sm primary" disabled={!ok} onClick={go}>{confirm}</button>
+    </div>
+  </Modal>
+}
+
+// Per-run "⋮" dropdown: open / rename / move (to any project or unassigned) / delete.
+function RunMenu({ r, projects, onOpen, onMove, onRename, onDelete, onClose }) {
+  return <>
+    <div className="menu-backdrop" onClick={onClose} onDragStart={onClose} />
+    <div className="run-menu" onClick={e => e.stopPropagation()}>
+      <button className="mi" onClick={() => { onClose(); onOpen(r.run_id) }}>↗ Open</button>
+      <button className="mi" onClick={() => { onClose(); onRename(r) }}>✎ Rename</button>
+      <div className="mi-sep" />
+      <div className="mi-label">Move to project</div>
+      <div className="mi-scroll">
+        <button className={'mi' + (!r.project_id ? ' on' : '')} onClick={() => { onClose(); onMove(r.run_id, UNASSIGNED) }}>○ — unassigned —</button>
+        {projects.map(p => <button key={p.id} className={'mi' + (r.project_id === p.id ? ' on' : '')}
+          onClick={() => { onClose(); onMove(r.run_id, p.id) }}>📁 {p.name}</button>)}
+        {!projects.length && <div className="mi-empty">no projects yet</div>}
+      </div>
+      <div className="mi-sep" />
+      <button className="mi danger" onClick={() => onDelete(r)}>✕ Delete run…</button>
+    </div>
+  </>
+}
 
 // children-by-parent index + the set of a project's own id plus all descendants (for run counts
 // and "show runs in this project and everything under it" selection — nesting implies containment).
@@ -18,14 +66,18 @@ function indexProjects(projects) {
   return { byParent, subtree }
 }
 
-export default function RunList({ onOpen }) {
+export default function RunList({ onOpen, onSettings }) {
   const [runs, setRuns] = useState(null)
   const [proj, setProj] = useState({ projects: [], assignments: {} })
   const [sel, setSel] = useState(ALL)
   const [expanded, setExpanded] = useState(() => new Set())
-  const [renaming, setRenaming] = useState(null)   // project id being renamed
+  const [renaming, setRenaming] = useState(null)   // project id being renamed (inline)
   const [dragRun, setDragRun] = useState(null)
   const [view, setView] = useState('list')         // 'list' | 'map' (semantic-zoom cross-run map)
+  const [projModal, setProjModal] = useState(null) // {parent_id} → show create-project popup
+  const [runMenu, setRunMenu] = useState(null)     // run_id whose ⋮ menu is open
+  const [runRename, setRunRename] = useState(null) // run object being renamed (popup)
+  const [starting, setStarting] = useState(false)  // show the New-run launch dialog
 
   const loadRuns = () => get('/api/runs').then(setRuns).catch(() => setRuns([]))
   const loadProjects = () => listProjects().then(setProj).catch(() => {})
@@ -53,9 +105,9 @@ export default function RunList({ onOpen }) {
   const toggle = (id) => setExpanded(s => { const n = new Set(s); n.has(id) ? n.delete(id) : n.add(id); return n })
   const refresh = () => { loadProjects(); loadRuns() }
 
-  const addProject = async (parent_id) => {
-    const name = prompt(parent_id ? 'New sub-project name' : 'New project name')
-    if (!name) return
+  const addProject = (parent_id) => setProjModal({ parent_id })
+  const submitProject = async (name) => {
+    const parent_id = projModal?.parent_id; setProjModal(null)
     const p = await createProject(name, parent_id)
     if (parent_id) setExpanded(s => new Set(s).add(parent_id))
     await loadProjects(); setSel(p.id)
@@ -67,6 +119,13 @@ export default function RunList({ onOpen }) {
   }
   const moveRun = async (runId, project_id) => { await assignRun(runId, project_id === UNASSIGNED ? null : project_id); refresh() }
   const onDrop = async (project_id) => { if (dragRun) { await moveRun(dragRun, project_id); setDragRun(null) } }
+  const submitRunRename = async (label) => { const id = runRename.run_id; setRunRename(null); await renameRun(id, label); loadRuns() }
+  const removeRun = async (r) => {
+    setRunMenu(null)
+    if (!confirm(`Delete run "${r.label || r.run_id}" permanently? This removes its files on disk and cannot be undone.`)) return
+    try { await deleteRun(r.run_id); refresh() }
+    catch (e) { alert(/409/.test(e.message) ? 'This run is still live — pause or stop it before deleting.' : 'Delete failed: ' + e.message) }
+  }
 
   const TreeNode = ({ p, depth }) => {
     const kids = byParent[p.id] || []
@@ -102,6 +161,8 @@ export default function RunList({ onOpen }) {
           <button className={view === 'list' ? 'on' : ''} onClick={() => setView('list')}>☰ List</button>
           <button className={view === 'map' ? 'on' : ''} onClick={() => setView('map')}>🗺 Map</button>
         </div>
+        <button className="btn sm primary" onClick={() => setStarting(true)}>▶ New run</button>
+        <button className="btn sm ghost" title="settings" onClick={() => onSettings && onSettings()}>⚙ Settings</button>
       </div>
       {view === 'map' && <div style={{ flex: 1, minHeight: 0 }}><MapView onOpen={onOpen} /></div>}
       {view === 'list' && <div className="runlayout">
@@ -139,7 +200,7 @@ export default function RunList({ onOpen }) {
                  onDragStart={() => setDragRun(r.run_id)} onDragEnd={() => setDragRun(null)}>
               <span className="pill phase" onClick={() => onOpen(r.run_id)}>{r.phase}</span>
               <div onClick={() => onOpen(r.run_id)} style={{ cursor: 'pointer', flex: 1 }}>
-                <div><b>{r.run_id}</b> <span className="muted">· {r.task_id}</span>
+                <div><b>{r.label || r.run_id}</b> <span className="muted">· {r.label ? r.run_id + ' · ' : ''}{r.task_id}</span>
                   {r.project_id && projName[r.project_id] && <span className="pill" style={{ marginLeft: 6 }}>📁 {projName[r.project_id]}</span>}</div>
                 <div className="goal">{r.goal}</div>
               </div>
@@ -147,15 +208,31 @@ export default function RunList({ onOpen }) {
                 <div>best <b>{fmt(r.best_confirmed ?? r.best_metric)}</b></div>
                 <div className="muted">{r.nodes} nodes · {r.direction}</div>
               </div>
-              <select className="text move-sel" title="move to project" value={r.project_id || UNASSIGNED}
-                      onChange={e => moveRun(r.run_id, e.target.value)}>
-                <option value={UNASSIGNED}>— unassigned —</option>
-                {proj.projects.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
-              </select>
+              <div className="run-actions">
+                <button className="ic dots" title="run actions"
+                        onClick={e => { e.stopPropagation(); setRunMenu(m => m === r.run_id ? null : r.run_id) }}>⋮</button>
+                {runMenu === r.run_id && <RunMenu r={r} projects={proj.projects}
+                  onOpen={onOpen} onMove={moveRun} onRename={setRunRename} onDelete={removeRun}
+                  onClose={() => setRunMenu(null)} />}
+              </div>
             </div>
           ))}
         </div>
       </div>}
+
+      {projModal && <PromptModal
+        title={projModal.parent_id ? 'New sub-project' : 'New project'}
+        label={projModal.parent_id ? `Inside “${projName[projModal.parent_id]}”` : 'Group runs into a project folder.'}
+        placeholder="e.g. baseline sweep" confirm="Create"
+        onSubmit={submitProject} onClose={() => setProjModal(null)} />}
+
+      {runRename && <PromptModal
+        title="Rename run" label={`Display name for ${runRename.run_id} (clear it to fall back to the id).`}
+        placeholder={runRename.run_id} initial={runRename.label || ''} confirm="Save" allowEmpty
+        onSubmit={submitRunRename} onClose={() => setRunRename(null)} />}
+
+      {starting && <StartRun onClose={() => setStarting(false)}
+        onStarted={(id) => { setStarting(false); loadRuns(); onOpen(id) }} />}
     </div>
   )
 }
