@@ -1,0 +1,806 @@
+"""Engine / control loop (I6, ADR-12/18). anyio structured concurrency:
+node *creation* is sequential & deterministic; node *evaluation* fans out under a
+CapacityLimiter. State is always a fresh fold of the log (files-as-truth); resume
+is just re-entering this loop on an existing run dir — pending nodes get re-evaluated
+idempotently, and node ids are a monotonic count so reruns never duplicate.
+
+A crash can be injected (for the resume test) via `crash_after`: hard-exit after N
+node_evaluated events have been written, simulating `kill -9` mid-run.
+"""
+from __future__ import annotations
+
+import hashlib
+import os
+import time
+from pathlib import Path
+from typing import Optional
+
+import anyio
+import orjson
+
+from .agents_md import generate_agents_md
+from .archive import DiversityArchive
+from .cv import cv_summary
+from .eventstore import EventStore
+from .gate import one_se_better
+from .htmlview import render_html
+from .leakage import target_leakage, temporal_leakage, train_test_contamination
+from .memory import JsonlCaseLibrary
+from .models import Idea, RunState
+from .operators import merge_idea
+from .policy import SearchPolicy
+from .profile import profile_dataset
+from .readmodel import build_readmodel
+from .replay import fold
+from .roles import Developer, Researcher
+from .sandbox import Sandbox
+from .tracing import JsonlSpanExporter, Tracer
+
+
+def _dir_fingerprint(path) -> str:
+    """git HEAD SHA if `path` is (inside) a git repo, else a sha256 over sorted
+    (relpath, size, mtime_ns) — cheap and deterministic, catches edits/adds/removes without
+    reading file contents. A missing path fingerprints as 'absent'."""
+    import subprocess
+    p = Path(path)
+    if not p.exists():
+        return "absent"
+    try:
+        r = subprocess.run(["git", "-C", str(p), "rev-parse", "HEAD"],
+                           capture_output=True, text=True, encoding="utf-8", errors="replace")
+        if r.returncode == 0 and r.stdout.strip():
+            return "git:" + r.stdout.strip()
+    except OSError:
+        pass
+    if p.is_file():
+        st = p.stat()
+        return f"file:{st.st_size}:{st.st_mtime_ns}"
+    h = hashlib.sha256()
+    for f in sorted(p.rglob("*")):
+        if f.is_file() and ".git" not in f.parts:
+            st = f.stat()
+            h.update(f.relative_to(p).as_posix().encode())
+            h.update(f"{st.st_size}:{st.st_mtime_ns}".encode())
+    return "hash:" + h.hexdigest()[:16]
+
+
+def _shallow_fingerprint(path) -> str:
+    """Cheap signature for large/immutable mounts (data, references): git HEAD if it's a git
+    repo, else a single os.scandir of the TOP level (entry count + max mtime) — O(top-level),
+    never a recursive walk. Catches add/remove/replace at the root; deep edits to immutable
+    inputs aren't the resume-drift concern (the editable repos are, and those are deep-hashed)."""
+    import subprocess
+    p = Path(path)
+    if not p.exists():
+        return "absent"
+    try:
+        r = subprocess.run(["git", "-C", str(p), "rev-parse", "HEAD"],
+                           capture_output=True, text=True, encoding="utf-8", errors="replace")
+        if r.returncode == 0 and r.stdout.strip():
+            return "git:" + r.stdout.strip()
+    except OSError:
+        pass
+    if p.is_file():
+        st = p.stat()
+        return f"file:{st.st_size}:{st.st_mtime_ns}"
+    n, newest = 0, 0
+    with os.scandir(p) as it:
+        for e in it:
+            n += 1
+            try:
+                newest = max(newest, e.stat(follow_symlinks=False).st_mtime_ns)
+            except OSError:
+                pass
+    return f"dir:{n}:{newest}"
+
+
+def _failure_reason(res) -> str:
+    """Classify why an eval produced no usable metric, so the audit trail distinguishes a
+    crash from a timeout from a missing-deps setup failure from a drift rejection from a clean
+    run that simply printed no metric. Ordered most-specific first."""
+    if getattr(res, "drift", None) is not None:
+        return "drift"
+    if res.timed_out:
+        return "timeout"
+    if (res.stderr or "").startswith("setup failed:"):
+        return "setup"
+    if res.exit_code != 0:
+        return "crash"
+    return "no_metric"          # exit 0 but no parseable metric emitted
+
+
+class Engine:
+    def __init__(
+        self,
+        run_dir: str | os.PathLike,
+        *,
+        task,
+        researcher: Researcher,
+        developer: Developer,
+        sandbox: Sandbox,
+        policy: SearchPolicy,
+        max_parallel: int = 1,   # single experiment at a time; > 1 = backlog parallel seam
+        timeout: float = 30.0,
+        crash_after: Optional[int] = None,
+        confirm_top_k: int = 0,
+        confirm_seeds: int = 0,
+        max_seconds: Optional[float] = None,
+        max_eval_seconds: Optional[float] = None,
+        memory_dir: Optional[str] = None,
+        require_approval: bool = False,
+        archive_resolution: float = 1.0,
+        onboarder=None,
+        eval_trust_mode: str = "ratify_freeze",
+        trust_mode: str = "trusted_local",
+        docker_image: str = "python:3.12-slim",
+    ):
+        self.run_dir = Path(run_dir)
+        self.task = task
+        self.researcher = researcher
+        self.developer = developer
+        self.sandbox = sandbox
+        self.policy = policy
+        self.max_parallel = max_parallel
+        self.timeout = timeout
+        self.crash_after = crash_after
+        self.confirm_top_k = confirm_top_k
+        self.confirm_seeds = confirm_seeds
+        self.max_seconds = max_seconds
+        self.max_eval_seconds = max_eval_seconds
+        self.memory_dir = memory_dir
+        self.require_approval = require_approval
+        self.archive_resolution = archive_resolution
+        # RepoTask onboarding (Phase 3): `onboarder()` -> a proposed {eval_spec,
+        # adapter_files, goal}; ratified per `eval_trust_mode` then frozen+trusted.
+        self.onboarder = onboarder
+        self.eval_trust_mode = eval_trust_mode
+        # Sandbox tier for the command-eval path (ADR-13, Phase 4): "untrusted" wraps each
+        # eval in `docker run --network none` (real isolation for an arbitrary framework);
+        # "trusted_local" runs it directly. The solution.py path uses self.sandbox instead.
+        self.trust_mode = trust_mode
+        self.docker_image = docker_image
+        self._drift_warned = False   # one-shot guard for the #8 drift-coverage warning
+        # Fail loud at START, not mid-sweep: the untrusted tier needs docker, so verify it once
+        # here instead of re-discovering (and re-scanning PATH) on every eval's make_docker_wrap.
+        if trust_mode == "untrusted":
+            import shutil as _sh
+            if not _sh.which("docker"):
+                raise RuntimeError(
+                    "trust_mode='untrusted' needs the docker CLI to sandbox evals, but it was "
+                    "not found on PATH. Install Docker or use trust_mode='trusted_local'.")
+        self._spec_activated = False
+        self.run_dir.mkdir(parents=True, exist_ok=True)
+        self.store = EventStore(self.run_dir / "events.jsonl")
+        self._write_lock = anyio.Lock()
+        # Tracing (I14): nested, correlated spans -> spans.jsonl (files-as-truth), bridged to
+        # OpenTelemetry when the SDK is configured. Diagnostics only; never drives state.
+        self.tracer = Tracer(JsonlSpanExporter(self.run_dir / "spans.jsonl"),
+                             run_id=self.run_dir.name)
+        # Task assets (e.g. the dataset) materialized into each node's sandbox workdir.
+        assets = getattr(task, "assets", None)
+        self._assets: dict = assets() if callable(assets) else {}
+        # RepoTask (ADR-7): an existing repo the agent edits + a command-based eval.
+        rs = getattr(task, "repo_spec", None)
+        self._repo_spec: dict = rs() if callable(rs) else {}
+        es = getattr(task, "eval_spec", None)
+        self._eval_spec: dict = es() if callable(es) else {}
+        # Fail loudly: a repo task with no trusted eval AND no onboarder would silently
+        # evaluate every node via the empty solution.py path. Require one or the other.
+        if self._repo_spec and not self._eval_spec and onboarder is None:
+            raise ValueError(
+                "RepoTask has no eval and no onboarder: set `onboard: true` with "
+                "backend=llm (so an onboarder is built), or provide `eval` in the task.")
+
+    def _write_assets(self, workdir) -> None:
+        if not self._assets:
+            return
+        from pathlib import Path as _P
+        wd = _P(workdir)
+        wd.mkdir(parents=True, exist_ok=True)
+        for name, content in self._assets.items():
+            (wd / name).write_text(content, encoding="utf-8")
+
+    def _write_node_files(self, node, workdir) -> None:
+        """Materialize a multi-file solution's helper files (ADR-7 patch-gated agent)
+        into the eval workdir. Skipped: `solution.py` (the sandbox writes it from
+        `node.code`) and any **task-asset name** — an agent must never be able to
+        overwrite a task-owned file (e.g. the private `grader.py` answer key) via an
+        in-surface `*.py` edit. Paths are surface-gated (no escapes) by the developer; we
+        re-check defensively. Call BEFORE `_write_assets` so task assets always win."""
+        from pathlib import Path as _P
+        files = getattr(node, "files", None) or {}
+        deleted = getattr(node, "deleted", None) or []
+        if not files and not deleted:
+            return
+        # Case-insensitive protected match (defense-in-depth): the surface gate uses fnmatch and
+        # NTFS is case-insensitive, so a case-variant name (Ttrain.PY) would otherwise dodge the
+        # freeze and overwrite the real metric/grader/eval file on Windows.
+        import os as _os
+        protected = {_os.path.normcase(n) for n in
+                     ("solution.py", *self._assets, *self._repo_spec.get("protected_names", []))}
+        wd = _P(workdir).resolve()
+        wd.mkdir(parents=True, exist_ok=True)
+        for name, content in files.items():
+            if _os.path.normcase(str(name).replace("\\", "/")) in protected:
+                continue
+            target = (wd / name).resolve()
+            if wd not in target.parents:        # defense-in-depth: never escape workdir
+                continue
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(content, encoding="utf-8")
+        # Apply accepted deletions (the agent removed an in-surface file). Skip protected names
+        # and never escape the workdir; missing is fine (idempotent).
+        for name in deleted:
+            if _os.path.normcase(str(name).replace("\\", "/")) in protected:
+                continue
+            target = (wd / name).resolve()
+            if wd not in target.parents:
+                continue
+            try:
+                target.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+    # ----------------------------------------------------------------- public
+    async def run(self) -> RunState:
+        state = fold(self.store.read_all())
+        if not state.run_id:
+            cfg_hash = hashlib.sha256(
+                orjson.dumps(self.task.model_dump(mode="json"))
+            ).hexdigest()[:12]
+            self.store.append(
+                "run_started",
+                {
+                    "run_id": self.run_dir.name,
+                    "task_id": self.task.id,
+                    "goal": self.task.goal,
+                    "direction": self.task.direction,
+                    "config_hash": cfg_hash,
+                    # Reproducibility (item #4): pin the editable repo(s)+data fingerprint at
+                    # start so a resume can tell whether the source workspace changed underneath.
+                    "workspace": self._workspace_fingerprint(),
+                },
+            )
+            # AGENTS.md (I18): task/contract context for coding-agent backends.
+            (self.run_dir / "AGENTS.md").write_text(
+                generate_agents_md(self.task), encoding="utf-8")
+            # Grounding pre-phase (I16): profile the dataset if the task exposes one.
+            cols = getattr(self.task, "columns", None)
+            if callable(cols):
+                self.store.append("data_profiled", {"columns": profile_dataset(cols())})
+            # Leakage-first grounding (I9): if the task exposes split/feature/target/time
+            # data and a leak is detected, refuse to run — don't produce results on
+            # leaky data.
+            if self._leakage_blocks():
+                self.store.append("run_finished", {"reason": "leakage"})
+        elif self._repo_spec and state.workspace and not state.workspace_changed:
+            # Resume (item #4): the editable workspace is copied fresh each node, so if the
+            # operator's repo changed since the run started, later nodes silently evaluate a
+            # DIFFERENT codebase. Record it instead of pretending the run is reproducible.
+            now = self._workspace_fingerprint()
+            if now != state.workspace:
+                self.store.append("workspace_changed", {"was": state.workspace, "now": now})
+
+        entry_finished = fold(self.store.read_all()).finished  # resuming a done run?
+        start = time.time()
+        while True:
+            state = fold(self.store.read_all())
+            if state.finished:
+                break
+            # Onboarding pre-phase (Phase 3, ADR-7): the agent proposes a trusted eval
+            # spec + metric adapter; a human ratifies it once (or autonomous auto-confirms);
+            # then it's frozen + protected and the optimization loop trusts it.
+            if self.onboarder is not None and not state.spec_confirmed:
+                if state.proposed_spec is None:
+                    with self.tracer.span("onboard", new_trace=True):
+                        proposal = self.onboarder()
+                    self.store.append("spec_proposed", proposal)
+                    continue
+                if self.eval_trust_mode == "autonomous":
+                    self.store.append("spec_approved", {})   # no human gate
+                    continue
+                if not state.spec_approval_requested:
+                    self.store.append("spec_approval_requested",
+                                      {"eval": state.proposed_spec.get("eval_spec")})
+                break  # pause for `autornd approve` (ratify_freeze)
+            if self.onboarder is not None and not self._spec_activated:
+                self._activate_spec(state.proposed_spec)
+            # Drift coverage (#8): ratify_freeze_drift only corroborates the metric if a
+            # cross_check reader exists. An adapter metric (agent-authored reader) with no
+            # cross_check would make the drift guard a SILENT no-op exactly where it matters
+            # most — surface it loudly once instead of pretending the metric is corroborated.
+            if (self.eval_trust_mode == "ratify_freeze_drift" and self._eval_spec
+                    and not self._drift_warned):
+                self._drift_warned = True
+                _m = self._eval_spec.get("metric", {})
+                if _m.get("kind") == "adapter" and not self._eval_spec.get("cross_check"):
+                    self.store.append("drift_unavailable", {
+                        "reason": "ratify_freeze_drift selected but the adapter metric has no "
+                                  "cross_check; the agent-authored reader is trusted WITHOUT "
+                                  "independent corroboration. Add eval.cross_check (a built-in "
+                                  "reader) to enable the drift guard."})
+            # Budget (I13): per-invocation wall-clock ceiling (resets on each resume).
+            if self.max_seconds is not None and (time.time() - start) >= self.max_seconds:
+                self.store.append("run_finished", {"reason": "time_budget"})
+                break
+            # Eval-compute budget (#2): cumulative time spent inside evals across the whole run
+            # (persisted via the event log, so it survives resume — unlike wall-clock). Stops
+            # the silent multi-hour sweep that real training runs can produce.
+            if (self.max_eval_seconds is not None
+                    and state.total_eval_seconds >= self.max_eval_seconds):
+                self.store.append("run_finished", {"reason": "eval_budget"})
+                break
+            actions = self.policy.next_actions(state)
+            if not actions:
+                # Optional multi-seed confirmation pass (I12) before finishing:
+                # re-evaluate the top-k under several seeds and record robust metrics.
+                if (self.confirm_top_k > 0 and self.confirm_seeds > 0
+                        and not self._already_confirmed(state)):
+                    await self._confirm_phase(state)
+                    continue
+                # HITL gate (I21, ADR-11): pause for human approval of the final best.
+                # Approval flows through the event log (a UI/human appends
+                # `approval_granted`); the engine, sole writer of domain events, reads it.
+                if self.require_approval and not state.approved:
+                    if not state.awaiting_approval:
+                        best = state.best()
+                        self.store.append("approval_requested", {
+                            "node_id": best.id if best else None,
+                            "metric": best.metric if best else None})
+                    break  # awaiting approval -> stop without finishing
+                self.store.append("run_finished", {})
+                break
+
+            ablates = [a for a in actions if a["kind"] == "ablate"]
+            if ablates:
+                for a in ablates:
+                    await self._ablate(a["parent_id"])
+                continue
+
+            evals = [a for a in actions if a["kind"] == "evaluate"]
+            creates = [a for a in actions
+                       if a["kind"] in ("draft", "improve", "debug", "merge")]
+
+            if creates:
+                for a in creates:
+                    self._create_node(a)  # sequential -> deterministic ids/proposals
+                continue
+
+            # Single experiment at a time is the base mode: run evals sequentially and
+            # deterministically. Concurrent fan-out (the task-group below) is a backlog
+            # seam — opt in with max_parallel > 1.
+            if self.max_parallel <= 1:
+                limiter = anyio.CapacityLimiter(1)
+                for a in evals:
+                    # Re-check the eval-compute budget BEFORE each eval (not just per loop
+                    # iteration), so a multi-eval batch can't overshoot by a whole batch (#2/#25).
+                    if (self.max_eval_seconds is not None
+                            and fold(self.store.read_all()).total_eval_seconds
+                            >= self.max_eval_seconds):
+                        break
+                    await self._evaluate(a["node_id"], limiter)
+            else:
+                limiter = anyio.CapacityLimiter(self.max_parallel)
+                async with anyio.create_task_group() as tg:
+                    for a in evals:
+                        tg.start_soon(self._evaluate, a["node_id"], limiter)
+
+        # Finalize only on real completion (not when paused for approval / idempotent
+        # resume of a done run).
+        if not entry_finished and fold(self.store.read_all()).finished:
+            cur = fold(self.store.read_all())
+            self.store.append("budget", {                       # budget summary (I13 + #2)
+                "elapsed_s": round(time.time() - start, 3),
+                "eval_s": round(cur.total_eval_seconds, 3),
+                "nodes": len(cur.nodes),
+            })
+            self.store.append("diversity_archive",              # diversity archive (I22)
+                              DiversityArchive(self.archive_resolution).summary(cur))
+            self._store_case(fold(self.store.read_all()))       # cross-run memory (I19)
+
+        final = build_readmodel(self.store.read_all(), self.run_dir / "readmodel.sqlite")
+        # UI projection (ADR-17): join the research tree (events) to its execution detail
+        # (spans) -> trace.json for the React UI + an inline span tree in the static HTML.
+        from .traceview import build_trace_view, load_spans
+        tv = build_trace_view(final, load_spans(self.run_dir / "spans.jsonl"))
+        (self.run_dir / "trace.json").write_bytes(orjson.dumps(tv))
+        (self.run_dir / "tree.html").write_text(render_html(final, tv), encoding="utf-8")
+        return final
+
+    # ---------------------------------------------------------------- private
+    def _create_node(self, action: dict) -> None:
+        state = fold(self.store.read_all())
+        node_id = len(state.nodes)  # monotonic across the whole run -> unique
+        kind = action["kind"]
+        with self.tracer.span("create_node", new_trace=True, node_id=node_id, operator=kind):
+            if kind == "draft":
+                with self.tracer.span("propose"):
+                    idea = self.researcher.propose(state, None)
+                idea.operator = "draft"        # operator is authoritative from the policy,
+                parents: list[int] = []        # not whatever label the LLM returns
+                with self.tracer.span("implement"):
+                    code = self.developer.implement(idea)
+            elif kind == "merge":
+                parents = list(action["parent_ids"])
+                idea = merge_idea([state.nodes[i] for i in parents])
+                with self.tracer.span("implement"):
+                    code = self.developer.implement(idea)
+            elif kind == "debug":
+                parent = state.nodes[action["parent_id"]]
+                parents = [parent.id]
+                repair = getattr(self.developer, "repair", None)
+                # Error-feedback debug: hand the failure back to the Developer to fix. Fires for
+                # whole-file solutions (parent.code), multi-file edits (parent.files), AND any
+                # repo task (self._repo_spec) even when a prior attempt fell back to the empty
+                # baseline — so an e2e agent can fix runtime errors / missing deps from the
+                # error alone (it edits requirements and the eval's setup step re-installs them).
+                if callable(repair) and parent.error and (parent.code or parent.files
+                                                          or self._repo_spec):
+                    idea = parent.idea.model_copy()
+                    idea.operator = "debug"
+                    with self.tracer.span("repair", parent_id=parent.id):
+                        code = repair(parent.idea, parent.code, parent.error)
+                else:
+                    with self.tracer.span("propose"):
+                        idea = self.researcher.propose(state, parent)
+                    idea.operator = "debug"
+                    with self.tracer.span("implement"):
+                        code = self.developer.implement(idea)
+            else:  # improve
+                parent = state.nodes[action["parent_id"]]
+                with self.tracer.span("propose"):
+                    idea = self.researcher.propose(state, parent)
+                idea.operator = "improve"
+                parents = [parent.id]
+                with self.tracer.span("implement"):
+                    code = self.developer.implement(idea)
+            self.store.append(
+                "node_created",
+                {
+                    "node_id": node_id,
+                    "parent_ids": parents,
+                    "operator": idea.operator,
+                    "idea": idea.model_dump(mode="json"),
+                    "code": code,
+                    "files": getattr(self.developer, "last_files", {}) or {},
+                    "deleted": getattr(self.developer, "last_deleted", []) or [],
+                },
+            )
+        self._emit_agent_report(node_id)
+
+    def _activate_spec(self, proposal: dict) -> None:
+        """Make the ratified onboarding proposal the trusted eval (Phase 3): the eval_spec
+        drives `_run_eval`, and the metric adapter is written into every eval workdir as a
+        task asset AND added to the protected set so the optimization agent can't edit it
+        (freeze + surface-exclude)."""
+        if not proposal:
+            return
+        self._eval_spec = proposal.get("eval_spec", {})
+        adapters = proposal.get("adapter_files", {})
+        self._assets = {**self._assets, **adapters}        # frozen: written into every wd
+        protected = list(self._repo_spec.get("protected_names", []))
+        protected += list(adapters)                        # agent may never overwrite them
+        self._repo_spec = {**self._repo_spec, "protected_names": protected}
+        self._spec_activated = True
+
+    def _workspace_fingerprint(self) -> dict:
+        """A per-source fingerprint of the editable repos + mounted data (item #4): the git
+        HEAD SHA when the source is a git repo, else a cheap content signature over
+        (relpath, size, mtime). Used to detect that the operator's source changed between a
+        run's start and a resume. {} for non-repo tasks."""
+        if not self._repo_spec:
+            return {}
+        srcs: dict[str, str] = {}
+        # Editable repos are the drift-detection TARGET (the agent edits them, the search
+        # continues over them) and are small code trees -> deep content fingerprint. Data and
+        # reference mounts are typically large + immutable inputs -> cheap shallow signature, so
+        # the fingerprint never walks a multi-GB dataset on every (re)start.
+        for ed in self._repo_spec.get("editables", []):
+            srcs[f"editable:{ed['name']}"] = _dir_fingerprint(ed["path"])
+        for name, src in self._repo_spec.get("data", {}).items():
+            srcs[f"data:{name}"] = _shallow_fingerprint(src)
+        for ref in self._repo_spec.get("references", []):
+            if ref.get("mount"):
+                srcs[f"ref:{ref['name']}"] = _shallow_fingerprint(ref["path"])
+        return srcs
+
+    def _seed_workspace(self, workdir) -> None:
+        """RepoTask (ADR-7): materialize the editable repo tree(s) into the eval workdir, plus
+        any runtime-mounted reference repos and data files. Phase 4: each editable repo is
+        mounted at its own subdir (name=".") -> workspace root). The agent's `Node.files` edits
+        are applied on top by `_write_node_files`; task assets win last. No-op for non-repo
+        tasks."""
+        if not self._repo_spec:
+            return
+        import shutil
+        from pathlib import Path as _P
+        wd = _P(workdir)
+        wd.mkdir(parents=True, exist_ok=True)
+        ignore = shutil.ignore_patterns(".git", "__pycache__", "*.pyc", ".venv", "node_modules")
+        for ed in self._repo_spec.get("editables", []):
+            dst = wd if ed["name"] in (".", "") else wd / ed["name"]
+            shutil.copytree(ed["path"], dst, dirs_exist_ok=True, ignore=ignore)
+        for ref in self._repo_spec.get("references", []):
+            if ref.get("mount"):                 # runtime dependency -> copy in read context
+                dst = wd / ref["name"]
+                shutil.copytree(ref["path"], dst, dirs_exist_ok=True, ignore=ignore)
+        for name, src in self._repo_spec.get("data", {}).items():
+            sp = _P(src)
+            if sp.is_dir():
+                shutil.copytree(sp, wd / name, dirs_exist_ok=True, ignore=ignore)
+            elif sp.is_file():
+                (wd / name).write_bytes(sp.read_bytes())
+
+    def _run_eval(self, node, workdir, env=None, profile=None):
+        """Eval dispatcher: RepoTask runs the operator's command + reads its metric;
+        otherwise the classic solution.py sandbox path. Both return a `RunResult`, so all
+        downstream metric/exit/timeout checks are identical.
+
+        Phase 2: the command is built with an eval profile (smoke/full — `profile` arg, else
+        the Researcher's `idea.eval_profile`) and, when params_style=cli_overrides, the
+        node's params as `key=value` overrides."""
+        if self._eval_spec:
+            from . import command_eval
+            es = self._eval_spec
+            prof = profile or (node.idea.eval_profile if node is not None else None)
+            params = node.idea.params if node is not None else {}
+            cmd, timeout = command_eval.build_command(es, params, prof)
+            root = str(Path(workdir).resolve())               # repo/workdir root
+            cwd = str((Path(workdir) / es.get("cwd", ".")).resolve())
+            # untrusted tier (Phase 4): sandbox the eval in docker, mounting the workspace
+            # root so the cwd subdir + host metric reading line up. Fails loudly w/o docker.
+            wrap = (command_eval.make_docker_wrap(root, self.docker_image)
+                    if self.trust_mode == "untrusted" else None)
+            return command_eval.run_command_eval(
+                cmd, cwd, timeout, es["metric"], env,
+                setup=es.get("setup") or None, setup_timeout=es.get("setup_timeout", 600.0),
+                setup_cwd=root,                               # deps install at the repo root
+                cross_check=es.get("cross_check"),            # Phase 4 drift cross-check …
+                drift_tolerance=float(es.get("drift_tolerance", 1e-6)),
+                enforce_drift=(self.eval_trust_mode == "ratify_freeze_drift"),
+                wrap=wrap,
+                metrics=es.get("metrics") or None,            # #5 multi-objective …
+                constraints=es.get("constraints") or None,
+                tracer=self.tracer)                           # child spans: setup/command/read
+        return self.sandbox.run(node.code, str(workdir), self.timeout, env)
+
+    def _emit_agent_report(self, node_id: int) -> None:
+        """External-agent audit (ADR-7): if the Developer validated its output (a
+        `ValidatingDeveloper`), record the verdict as an `agent_validated` event so each
+        node carries a trail of how the external coding agent performed. No-op for
+        plain developers (no `last_report`).
+
+        Safe because node *creation* (`_create_node` / `_ablate`) is awaited sequentially
+        in the main loop and never inside the parallel `evals` task group, so the shared
+        `developer.last_report` set just above always belongs to `node_id`."""
+        report = getattr(self.developer, "last_report", None)
+        if report is not None:
+            data = {"node_id": node_id, **report.summary()}
+            extra = getattr(self.developer, "audit_extra", None)
+            if callable(extra):
+                data.update(extra())
+            self.store.append("agent_validated", data)
+
+    @property
+    def _probe_developer(self):
+        """Developer used for ablation *probes* (I7): the raw inner developer, bypassing
+        any ValidatingDeveloper's retry/fallback. Probes are a measurement harness, not a
+        shipped step — routing them through validation would (a) substitute the LLM
+        fallback mid-measurement, corrupting impact numbers, and (b) multiply expensive
+        external-agent calls by len(params) per ablation (ADR-7 cost rule)."""
+        return getattr(self.developer, "inner", self.developer)
+
+    async def _evaluate(self, node_id: int, limiter: anyio.CapacityLimiter) -> None:
+        async with limiter:
+          with self.tracer.span("evaluate", new_trace=True, node_id=node_id) as sp:
+            state = fold(self.store.read_all())
+            node = state.nodes[node_id]
+            sp.set("operator", node.operator)
+            workdir = self.run_dir / "nodes" / f"node_{node_id}"
+            self._seed_workspace(workdir)           # RepoTask: editable repo tree (ADR-7) …
+            self._write_node_files(node, workdir)   # … agent edits on top …
+            self._write_assets(workdir)             # … task assets win any name collision
+            _t0 = time.time()
+            res = await anyio.to_thread.run_sync(
+                self._run_eval, node, str(workdir)
+            )
+            dur = round(time.time() - _t0, 3)            # eval wall-clock (cost accounting #2)
+            ok = res.metric is not None and res.exit_code == 0 and not res.timed_out
+            sp.set_many(eval_seconds=dur, exit_code=res.exit_code, timed_out=res.timed_out,
+                        metric=res.metric, ok=ok)
+            if res.violations:
+                sp.set("violations", len(res.violations))
+            if res.drift is not None:
+                sp.set("drift", True)
+            async with self._write_lock:
+                if res.drift is not None:               # Phase 4: uncorroborated metric (audit)
+                    self.store.append("spec_drift", {"node_id": node_id, **res.drift})
+                if ok:
+                    self.store.append(
+                        "node_evaluated",
+                        {"node_id": node_id, "metric": res.metric,
+                         "stdout_tail": res.stdout[-500:], "eval_seconds": dur,
+                         "extra_metrics": res.extra_metrics or {},   # #5 multi-objective
+                         "violations": res.violations or []},
+                    )
+                else:
+                    err = res.stderr[-500:] or (
+                        f"metric drift: {res.drift}" if res.drift is not None else
+                        f"exit={res.exit_code} timed_out={res.timed_out} no_metric"
+                    )
+                    reason = _failure_reason(res)
+                    sp.set("error_reason", reason)
+                    self.store.append("node_failed", {"node_id": node_id, "error": err,
+                                                      "reason": reason, "eval_seconds": dur})
+                self._maybe_crash()
+
+    @staticmethod
+    def _already_confirmed(state: RunState) -> bool:
+        return state.confirmed_done  # gated on completion, not on partial progress
+
+    async def _confirm_phase(self, state: RunState) -> None:
+        """Re-run the top-k evaluated nodes under `confirm_seeds` seeds. Selection picks
+        the robust winner (best confirmed MEAN), demoting any seed-lucky leader; the
+        variance gate records whether that demotion is statistically significant.
+
+        Resume-safe: nodes already confirmed (from an earlier crashed attempt) are
+        reused, and a `best_confirmed` event is ALWAYS emitted to mark completion — so a
+        confirm pass where every seed run fails can't loop forever."""
+        # Only confirm FEASIBLE leaders (#5): spending the expensive full-profile seed budget
+        # on a constraint-violating node is wasted, and it must never be promoted to best.
+        evaluated = sorted(state.feasible_nodes(), key=lambda n: (n.metric, n.id),
+                           reverse=(state.direction == "max"))
+        topk = evaluated[: self.confirm_top_k]
+        if not topk:
+            async with self._write_lock:
+                self.store.append("best_confirmed", {"node_id": None, "significant": False})
+            return
+
+        summaries: list[dict] = []
+        for nd in topk:
+            if nd.confirmed_mean is not None:  # reuse a prior (crashed) attempt's result
+                # Use the REAL seed count from that attempt, not confirm_seeds — some
+                # seeds may have failed, and inflating n shrinks the SE in the variance
+                # gate, overstating significance.
+                summaries.append({"node_id": nd.id, "mean": nd.confirmed_mean,
+                                  "std": nd.confirmed_std or 0.0,
+                                  "n": nd.confirmed_seeds or self.confirm_seeds})
+                continue
+            # Per-seed resume (#0): reuse seeds already run in a prior (crashed) attempt instead
+            # of re-executing every expensive full-profile seed. `done` maps seed -> metric|None.
+            done = state.confirm_seed_results.get(nd.id, {})
+            scores: list[float] = [m for m in done.values() if m is not None]
+            for s in range(self.confirm_seeds):
+                if s in done:                         # already evaluated this seed earlier
+                    continue
+                workdir = self.run_dir / "confirm" / f"node_{nd.id}_seed_{s}"
+                self._seed_workspace(workdir)         # RepoTask: editable repo tree (ADR-7) …
+                self._write_node_files(nd, workdir)   # … agent edits on top …
+                self._write_assets(workdir)           # … task assets win any collision
+                # Confirmation uses the FULL eval profile (robust check on the leaders),
+                # regardless of the cheaper profile the Researcher used during search.
+                _t0 = time.time()
+                # Keep the per-seed events INSIDE the span so they carry its trace/span id
+                # (events<->spans UI join), consistent with the _evaluate path.
+                with self.tracer.span("confirm_seed", new_trace=True, node_id=nd.id, seed=s):
+                    res = await anyio.to_thread.run_sync(
+                        self._run_eval, nd, str(workdir), {"AUTORND_EVAL_SEED": str(s)}, "full",
+                    )
+                    valid = res.metric is not None and res.exit_code == 0 and not res.timed_out
+                    async with self._write_lock:            # confirm-seed eval cost (#2) + memo (#0)
+                        self.store.append("confirm_eval", {
+                            "node_id": nd.id, "seed": s,
+                            "eval_seconds": round(time.time() - _t0, 3),
+                            "metric": res.metric if valid else None})
+                        if res.drift is not None:           # Phase 4: drop + audit drifted seeds
+                            self.store.append("spec_drift", {"node_id": nd.id, "seed": s, **res.drift})
+                if valid:
+                    scores.append(res.metric)
+            if scores:
+                summ = cv_summary(scores)
+                summaries.append({"node_id": nd.id, **summ})
+                async with self._write_lock:
+                    self.store.append("node_confirmed", {
+                        "node_id": nd.id, "mean": summ["mean"],
+                        "std": summ["std"], "seeds": len(scores),
+                    })
+
+        if summaries:
+            chooser = min if state.direction == "min" else max
+            robust = chooser(summaries, key=lambda s: (s["mean"], s["node_id"]))
+            leader = next((s for s in summaries if s["node_id"] == topk[0].id), robust)
+            significant = robust["node_id"] != leader["node_id"] and one_se_better(
+                robust["mean"], leader["mean"], robust["std"], robust["n"],
+                state.direction, incumbent_std=leader["std"], incumbent_n=leader["n"])
+            chosen = robust["node_id"]
+        else:
+            chosen, significant = topk[0].id, False  # all seeds failed -> keep leader
+        async with self._write_lock:
+            self.store.append("best_confirmed", {"node_id": chosen, "significant": significant})
+
+    async def _ablate(self, parent_id: int) -> None:
+        """Ablation-driven refinement (I7, MLE-STAR): probe each parameter's impact by
+        setting it to a neutral baseline (0.0) and re-running, then create a
+        `refine_block` child that refines only the highest-impact parameter."""
+        state = fold(self.store.read_all())
+        parent = state.nodes[parent_id]
+        # Ablation probes run via the solution.py sandbox path (self.sandbox.run on generated
+        # code) and seed only assets — they do NOT mount the editable repo or apply node files.
+        # For a RepoTask (command-eval) that path is wrong (the repo tree is absent and the
+        # baseline developer emits no code), so ablation is a no-op there. Skip cleanly.
+        if self._repo_spec or self._eval_spec:
+            return
+        base = parent.metric if parent.metric is not None else 0.0
+        impacts: dict[str, float] = {}
+        with self.tracer.span("ablate", new_trace=True, node_id=parent_id):
+            for p in sorted(parent.idea.params):
+                ablated = parent.idea.model_copy(deep=True)
+                ablated.params[p] = 0.0
+                workdir = self.run_dir / "ablate" / f"node_{parent_id}_{p}"
+                self._write_assets(workdir)
+                code = await anyio.to_thread.run_sync(self._probe_developer.implement, ablated)
+                res = await anyio.to_thread.run_sync(
+                    self.sandbox.run, code, str(workdir), self.timeout)
+                if res.metric is not None and res.exit_code == 0 and not res.timed_out:
+                    impacts[p] = abs(res.metric - base)
+        async with self._write_lock:
+            self.store.append("ablate", {"parent_id": parent_id, "impacts": impacts})
+
+        top = max(impacts, key=impacts.get) if impacts else (
+            sorted(parent.idea.params)[0] if parent.idea.params else None)
+        proposal = self.researcher.propose(state, parent)  # refine only `top`
+        new_params = dict(parent.idea.params)
+        if top is not None and top in proposal.params:
+            new_params[top] = proposal.params[top]
+        idea = Idea(operator="refine_block", params=new_params,
+                    rationale=f"ablation: refine highest-impact '{top}' (impacts={impacts})")
+        code = self.developer.implement(idea)
+        node_id = len(fold(self.store.read_all()).nodes)
+        self.store.append("node_created", {
+            "node_id": node_id, "parent_ids": [parent_id], "operator": "refine_block",
+            "idea": idea.model_dump(mode="json"), "code": code,
+            "files": getattr(self.developer, "last_files", {}) or {}})
+        self._emit_agent_report(node_id)
+
+    def _maybe_crash(self) -> None:
+        if self.crash_after is None:
+            return
+        n_eval = sum(1 for e in self.store.read_all() if e.type == "node_evaluated")
+        if n_eval >= self.crash_after:
+            os._exit(137)  # simulate kill -9 (no cleanup, no run_finished)
+
+    def _leakage_blocks(self) -> bool:
+        """Leakage-first gate (I9): run the detectors on whatever split/feature/target/
+        timestamp data the task exposes via `leakage_inputs()`. Emit a verdict; return
+        True (abort) if a hard leak is found. Tasks without the method are skipped."""
+        fn = getattr(self.task, "leakage_inputs", None)
+        if not callable(fn):
+            return False
+        inp = fn() or {}
+        verdicts = []
+        if "train_rows" in inp and "test_rows" in inp:
+            verdicts.append(train_test_contamination(inp["train_rows"], inp["test_rows"]))
+        if "features" in inp and "target" in inp:
+            verdicts.append(target_leakage(inp["features"], inp["target"]))
+        if "train_timestamps" in inp and "test_timestamps" in inp:
+            verdicts.append(temporal_leakage(inp["train_timestamps"], inp["test_timestamps"]))
+        leak = any(v.get("leak") for v in verdicts)
+        self.store.append("data_leakage", {"leak": leak, "verdicts": verdicts})
+        return leak
+
+    def _store_case(self, final: RunState) -> None:
+        """Cross-run memory (I19): persist the best result as a retrievable case."""
+        if not self.memory_dir:
+            return
+        best = final.best()
+        if best is None:
+            return
+        lib = JsonlCaseLibrary(Path(self.memory_dir) / "cases.jsonl")
+        lib.add({
+            "task_id": final.task_id,
+            "goal": final.goal,
+            "direction": final.direction,
+            "params": best.idea.params,
+            "metric": best.confirmed_mean if best.confirmed_mean is not None else best.metric,
+            "rationale": best.idea.rationale,
+        })

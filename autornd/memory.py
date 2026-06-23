@@ -1,0 +1,87 @@
+"""Cross-run memory (I19, ADR-10): an episodic case library over a VectorStore.
+Cases are keyed by a task description embedding; `retain_if_improved` keeps a case
+only when its metric beats the stored one (retain-on-improvement). This is the
+top-system differentiator — solved tasks make later similar tasks easier.
+"""
+from __future__ import annotations
+
+import json
+from pathlib import Path
+from typing import Callable, Optional
+
+from .vectorstore import Hit, Item, VectorStore, hash_embed
+
+
+class JsonlCaseLibrary:
+    """Persistent case store (I19, ADR-10): cases on disk as JSONL, keyed by task_id
+    with retain-on-improvement. Loads existing cases on init so it accumulates across
+    runs. `search` does a keyword/recency lookup (no embedding dependency)."""
+
+    def __init__(self, path: str | Path):
+        self.path = Path(path)
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.cases: list[dict] = []
+        if self.path.exists():
+            for line in self.path.read_text(encoding="utf-8").splitlines():
+                line = line.strip()
+                if line:
+                    self.cases.append(json.loads(line))
+
+    def _flush(self) -> None:
+        self.path.write_text(
+            "\n".join(json.dumps(c) for c in self.cases) + "\n", encoding="utf-8")
+
+    def add(self, case: dict) -> bool:
+        """Upsert by task_id, retaining the better metric. Returns True if stored."""
+        tid = case.get("task_id")
+        direction = case.get("direction", "min")
+        metric = case.get("metric")
+        prev = next((c for c in self.cases if c.get("task_id") == tid), None)
+        if prev is not None and metric is not None and prev.get("metric") is not None:
+            better = metric < prev["metric"] if direction == "min" else metric > prev["metric"]
+            if not better:
+                return False
+            self.cases.remove(prev)
+        self.cases.append(case)
+        self._flush()
+        return True
+
+    def search(self, query: str, k: int = 3) -> list[dict]:
+        q = set(query.lower().split())
+        scored = [(len(q & set((c.get("goal", "") + " " + c.get("task_id", "")).lower().split())), c)
+                  for c in self.cases]
+        scored.sort(key=lambda t: -t[0])
+        return [c for _, c in scored[:k]]
+
+    def all(self) -> list[dict]:
+        return list(self.cases)
+
+
+class CaseLibrary:
+    def __init__(self, store: VectorStore, embed: Callable[[str], list[float]] = hash_embed,
+                 index: str = "cases"):
+        self.store = store
+        self.embed = embed
+        self.index = index
+
+    def add(self, case_id: str, task_desc: str, payload: dict) -> None:
+        self.store.upsert(self.index, [Item(case_id, self.embed(task_desc), payload)])
+
+    def retrieve(self, task_desc: str, k: int = 3) -> list[Hit]:
+        return self.store.search(self.index, self.embed(task_desc), k)
+
+    def retain_if_improved(self, case_id: str, task_desc: str, payload: dict,
+                           metric: float, direction: str = "min") -> bool:
+        """Store/replace only if better than the existing case. Returns True if stored."""
+        existing: Optional[Hit] = None
+        getter = getattr(self.store, "get", None)
+        if callable(getter):
+            existing = getter(self.index, case_id)
+        if existing is not None:
+            prev = existing.payload.get("metric")
+            if prev is not None:
+                better = metric < prev if direction == "min" else metric > prev
+                if not better:
+                    return False
+        self.add(case_id, task_desc, {**payload, "metric": metric})
+        return True

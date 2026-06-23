@@ -1,0 +1,54 @@
+"""Leakage detectors (I9, ADR-15) — the differentiator, pure-Python (no deps).
+
+No library models ML-pipeline leakage, so these are custom. Each returns a small
+dict so verdicts attach to nodes/events. Datasets are plain dict[col, list] +
+explicit row lists / timestamp lists — adapter-agnostic.
+"""
+from __future__ import annotations
+
+from typing import Sequence
+
+
+def _pearson(a: Sequence[float], b: Sequence[float]) -> float:
+    n = len(a)
+    if n == 0 or n != len(b):
+        return 0.0
+    ma, mb = sum(a) / n, sum(b) / n
+    cov = sum((x - ma) * (y - mb) for x, y in zip(a, b))
+    va = sum((x - ma) ** 2 for x in a)
+    vb = sum((y - mb) ** 2 for y in b)
+    if va == 0.0 or vb == 0.0:
+        return 0.0
+    return cov / (va * vb) ** 0.5
+
+
+def train_test_contamination(train_rows: list, test_rows: list) -> dict:
+    """Detect identical rows shared between train and test splits."""
+    train = {tuple(r) for r in train_rows}
+    dups = [r for r in test_rows if tuple(r) in train]
+    frac = len(dups) / len(test_rows) if test_rows else 0.0
+    return {"detector": "train_test_contamination",
+            "leak": len(dups) > 0, "duplicates": len(dups), "fraction": round(frac, 6)}
+
+
+def target_leakage(features: dict[str, list[float]], target: list[float],
+                   threshold: float = 0.98) -> dict:
+    """Flag feature columns near-perfectly correlated with the target (a proxy/leak)."""
+    flagged = {}
+    for name, col in features.items():
+        r = _pearson(col, target)
+        if abs(r) >= threshold:
+            flagged[name] = round(r, 6)
+    return {"detector": "target_leakage", "leak": bool(flagged),
+            "threshold": threshold, "flagged": flagged}
+
+
+def temporal_leakage(train_timestamps: list[float], test_timestamps: list[float]) -> dict:
+    """For a forward (train-before-test) split, flag train rows at/after the test
+    cutoff — i.e. training on future information."""
+    if not train_timestamps or not test_timestamps:
+        return {"detector": "temporal_leakage", "leak": False, "overlap": 0}
+    cutoff = min(test_timestamps)
+    overlap = sum(1 for t in train_timestamps if t >= cutoff)
+    return {"detector": "temporal_leakage", "leak": overlap > 0,
+            "cutoff": cutoff, "overlap": overlap}

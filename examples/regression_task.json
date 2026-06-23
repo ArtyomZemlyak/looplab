@@ -1,0 +1,12 @@
+{
+  "kind": "regression",
+  "id": "poly_regression",
+  "goal": "select polynomial degree + ridge lambda minimizing 5-fold CV MSE (true degree 2)",
+  "direction": "min",
+  "n": 40,
+  "true_degree": 2,
+  "noise": 1.0,
+  "seed": 1,
+  "max_degree": 6,
+  "cv_k": 5
+}

@@ -1,0 +1,13 @@
+{
+  "kind": "mlebench",
+  "id": "mlebench_blobs",
+  "goal": "train a classifier on train.json and maximize held-out accuracy on test.json (private grader)",
+  "direction": "max",
+  "seed": 0,
+  "n_train": 80,
+  "n_test": 40,
+  "n_features": 4,
+  "sep": 2.0,
+  "noise": 1.0,
+  "max_k": 15
+}

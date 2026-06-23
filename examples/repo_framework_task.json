@@ -1,0 +1,18 @@
+{
+  "kind": "repo",
+  "id": "repo_framework",
+  "goal": "tune the x hyperparameter to maximize the eval metric (max at x=3), no code edits",
+  "direction": "max",
+  "editable_path": "examples/repo_example",
+  "protect": ["ttrain_cli.py"],
+  "params": {"x": [-5.0, 5.0]},
+  "eval": {
+    "command": ["python", "ttrain_cli.py"],
+    "params_style": "cli_overrides",
+    "metric": {"kind": "stdout_json", "key": "metric"},
+    "profiles": {
+      "smoke": {"overrides": ["steps=10"], "timeout": 60},
+      "full":  {"overrides": ["steps=200"], "timeout": 120}
+    }
+  }
+}

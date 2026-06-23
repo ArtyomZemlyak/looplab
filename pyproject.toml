@@ -1,0 +1,38 @@
+[project]
+name = "autornd"
+version = "0.1.0"
+description = "AutoRND — autonomous ML/DS research engine (P0 working-loop slice)"
+requires-python = ">=3.11"
+dependencies = [
+    "pydantic>=2.6",
+    "pydantic-settings>=2.0",
+    "orjson>=3.9",
+    "anyio>=4.0",
+    "typer>=0.12",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+proc = ["psutil>=5.9"]
+# Real OpenTelemetry export. Without these, tracing still works fully into spans.jsonl
+# (files-as-truth, zero-dep); installing them + setting OTEL_* env sends the SAME spans to any
+# OTLP collector (Jaeger / Tempo / Honeycomb / …) with no code change.
+otel = [
+    "opentelemetry-api>=1.20",
+    "opentelemetry-sdk>=1.20",
+    "opentelemetry-exporter-otlp>=1.20",
+]
+
+[project.scripts]
+autornd = "autornd.cli:app"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["autornd"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"

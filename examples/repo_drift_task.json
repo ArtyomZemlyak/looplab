@@ -1,0 +1,17 @@
+{
+  "kind": "repo",
+  "id": "repo_drift_example",
+  "goal": "tune config.json to maximize the eval metric (max at x=3), drift-checked",
+  "direction": "max",
+  "editable_path": "examples/repo_example",
+  "edit_surface": ["*.json"],
+  "protect": ["ttrain.py"],
+  "eval": {
+    "command": ["python", "ttrain.py"],
+    "metric": {"kind": "file_json", "path": "metrics.json", "key": "metric"},
+    "cross_check": {"kind": "stdout_json", "key": "metric"},
+    "drift_tolerance": 1e-6,
+    "timeout": 60
+  },
+  "_note": "Phase 4 ratify_freeze_drift: the trusted metric is read from metrics.json (a file the agent's code could forge), and an INDEPENDENT cross_check re-reads it from the real process stdout. If they disagree, the metric is discarded and a spec_drift event is recorded. Run with AUTORND_EVAL_TRUST_MODE=ratify_freeze_drift."
+}

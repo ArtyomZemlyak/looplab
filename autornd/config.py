@@ -1,0 +1,93 @@
+"""Engine config (I0, ADR-11). pydantic-settings: env override (AUTORND_*) over
+defaults. A resolved, secret-masked snapshot is written next to each run for
+reproducibility. (No real secrets in P0, but the masking discipline is in place.)
+"""
+from __future__ import annotations
+
+from pydantic import SecretStr
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+class Settings(BaseSettings):
+    model_config = SettingsConfigDict(env_prefix="AUTORND_", extra="ignore")
+
+    n_seeds: int = 3
+    max_nodes: int = 8
+    # Concurrent evaluation is a backlog seam. The base/primary mode is a single
+    # experiment at a time (deterministic, one eval process running) — important for
+    # RepoTask where an eval is a real training run with its own resources/trackers.
+    # Set > 1 to opt into the parallel fan-out (the task-group path).
+    max_parallel: int = 1
+    timeout: float = 30.0
+    # Sandbox tier (ADR-13): "trusted_local" (subprocess, no Docker) for the CLI;
+    # "untrusted" (Docker --network none -> gVisor) for hosted/multi-tenant UI.
+    trust_mode: str = "trusted_local"
+    # Image for the untrusted command-eval tier (RepoTask, Phase 4): the framework's deps
+    # should be baked in (the container runs --network none, so a pip setup can't fetch).
+    docker_image: str = "python:3.12-slim"
+    # Search policy (ADR-2): "greedy" | "evolutionary" | "mcts".
+    policy: str = "greedy"
+    # Ablation-driven refinement (I7): every N improves, ablate the best to find the
+    # highest-impact parameter and refine it. 0 = off. (GreedyTree only.)
+    ablate_every: int = 0
+    # Multi-seed confirmation (I12, ADR-15): confirm the top-k under N seeds before
+    # finishing. 0 disables (default). Only meaningful when eval has variance.
+    confirm_top_k: int = 0
+    confirm_seeds: int = 0
+    # Budget (I13): hard wall-clock ceiling; the run aborts cleanly when exceeded.
+    max_seconds: float | None = None
+    # Eval-compute budget (#2): hard ceiling on cumulative time spent INSIDE evals (training
+    # runs), separate from wall-clock. Survives resume (summed from the event log). The real
+    # guard against a silent multi-hour sweep when an eval is a minutes-hours training run.
+    max_eval_seconds: float | None = None
+    # Cross-run memory (I19, ADR-10): if set, the best result of each run is stored as
+    # a case here, and the cases become retrievable knowledge for future runs.
+    memory_dir: str | None = None
+    # HITL (I21, ADR-11): pause for human approval of the final best before finishing.
+    require_approval: bool = False
+    # Diversity archive (I22): niche bucket width in parameter space.
+    archive_resolution: float = 1.0
+    # Role backend (ADR-7/14): "toy" (offline optimizer) | "llm" (live model).
+    backend: str = "toy"
+    # Developer backend (ADR-7): "default" (templated/LLM from the task) or an external
+    # CLI coding agent: "opencode" | "aider" | "goose" | "continue".
+    developer_backend: str = "default"
+    agent_cmd: str | None = None  # override the agent's launcher (path / wrapper)
+    # External-agent validation (ADR-7): wrap a CLI-agent Developer with a validator that
+    # audits each output (no-op/syntax/crash/timeout), retries with feedback, and falls
+    # back to the in-house LLM Developer. Off -> use the raw agent output unchecked.
+    validate_agent: bool = True
+    agent_max_retries: int = 1    # re-prompts of the agent on an invalid result
+    # Patch-gated multi-file agent (ADR-7 Rule 3): run the CLI agent in a git worktree and
+    # accept only edits whose paths match `agent_surface` (reject-not-strip out-of-surface
+    # touches). Lets the agent create helper modules, not just solution.py. Degrades to
+    # whole-file readback if git is unavailable.
+    agent_patch_gate: bool = True
+    agent_surface: list[str] = ["*.py"]   # edit-surface allow-list (globs)
+    # Trust policy for an agent-authored eval/metric adapter (RepoTask onboarding, Phase 3):
+    # "ratify_freeze" (human confirms once, then frozen+protected) | "autonomous" |
+    # "ratify_freeze_drift". Selected per project. Not yet enforced (Phase 1 uses an
+    # explicit operator-written eval_spec).
+    eval_trust_mode: str = "ratify_freeze"
+    llm_model: str = "qwen3:8b"
+    llm_base_url: str = "http://localhost:11434/v1"  # Ollama OpenAI-compatible endpoint
+    llm_temperature: float = 0.6
+    llm_parser: str = "tool_call"
+    # Agentic retrieval (ADR-16): if set, the LLM Researcher gets grep/kb_search/read
+    # tools over this directory of markdown notes and chooses when to use them.
+    knowledge_dir: str | None = None
+    # Agent Skills (I18, ADR-9): dir of SKILL.md the Researcher can list/load as tools.
+    skills_dir: str | None = None
+    # Prompt store (I18, ADR-8): dir of editable, hot-reloaded role prompt .md files.
+    prompt_dir: str | None = None
+    # API key as a reference, never serialized as a value (ADR-11). Local servers
+    # ignore it; default to a placeholder.
+    llm_api_key: SecretStr | None = None
+
+    def masked_snapshot(self) -> dict:
+        d = self.model_dump()
+        if self.llm_api_key is not None:
+            d["llm_api_key"] = "***"
+        else:
+            d["llm_api_key"] = None
+        return d

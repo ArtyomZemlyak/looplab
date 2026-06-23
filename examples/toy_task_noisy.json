@@ -1,0 +1,9 @@
+{
+  "id": "toy_quadratic_noisy",
+  "goal": "minimize (x-3)^2 + (y+1)^2 with seeded eval noise (demonstrates multi-seed confirmation)",
+  "direction": "min",
+  "bounds": {"x": [-10.0, 10.0], "y": [-10.0, 10.0]},
+  "seed": 3,
+  "step": 1.5,
+  "noise": 0.8
+}
