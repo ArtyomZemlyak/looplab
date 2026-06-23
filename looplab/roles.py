@@ -19,7 +19,11 @@ from .prompts import PromptStore, render
 from .validate import AgentReport, validate_agent_code
 
 _RESEARCHER_SYSTEM = ("You are an ML researcher proposing the next experiment as "
-                      "parameters to try. Respond ONLY with the requested structured fields.")
+                      "parameters to try. Also set `theme`: a short, reusable lower-case slug "
+                      "(e.g. \"loss-fn\", \"architecture\", \"regularization\", \"learning-rate\") "
+                      "that groups this experiment with related ones — reuse the SAME slug across "
+                      "experiments that explore the same idea. Respond ONLY with the requested "
+                      "structured fields.")
 _DEVELOPER_SYSTEM = ("You are an expert ML engineer. Output ONLY a single fenced "
                      "```python``` block containing a complete, self-contained script. ")
 

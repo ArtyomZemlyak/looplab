@@ -85,6 +85,68 @@ def current_ids() -> tuple[Optional[str], Optional[str]]:
     return (st[-1]["trace_id"], st[-1]["span_id"]) if st else (None, None)
 
 
+# LLM I/O capture (ADR-17): off by default at import; the engine flips it on per run from
+# Settings.trace_llm_io. When on, record_llm_call attaches the prompt+completion as a span
+# event on whatever operation span is active (propose/implement/repair), so the UI sees exactly
+# what the model read and wrote — without a new transport or any change to the event log.
+_CAPTURE_LLM_IO = False
+
+
+def set_llm_capture(enabled: bool) -> None:
+    global _CAPTURE_LLM_IO
+    _CAPTURE_LLM_IO = bool(enabled)
+
+
+def record_llm_call(*, op: str, model: str, messages: list[dict], completion: str,
+                    usage: Optional[dict] = None) -> None:
+    """Append an `llm_call` event to the active span record (no-op when capture is off or there
+    is no active span — e.g. an LLM call outside any traced operation). Full text by design;
+    secrets are masked upstream at the config layer, prompts/completions are task content."""
+    if not _CAPTURE_LLM_IO:
+        return
+    st = _stack.get()
+    if not st:
+        return
+    rec = st[-1]
+    tokens = {
+        "prompt": int((usage or {}).get("prompt_tokens") or 0),
+        "completion": int((usage or {}).get("completion_tokens") or 0),
+        "total": int((usage or {}).get("total_tokens") or 0),
+    }
+    rec["events"].append({
+        "name": "llm_call",
+        "op": op,
+        "model": model,
+        # store messages verbatim (role + content) so the UI can render the conversation
+        "prompt": [{"role": m.get("role", "user"), "content": _as_text(m.get("content"))}
+                   for m in (messages or [])],
+        "completion": completion or "",
+        "tokens": tokens,
+    })
+    # Mirror to the active OpenTelemetry span when the bridge is live, so OTLP collectors
+    # (Jaeger/Tempo/…) see LLM I/O too — not just spans.jsonl. Best-effort; primitives only.
+    if _OTEL is not None:
+        try:
+            from opentelemetry import trace as _ot
+            _ot.get_current_span().add_event("llm_call", {
+                "op": op, "model": model,
+                "prompt_tokens": tokens["prompt"], "completion_tokens": tokens["completion"],
+                "total_tokens": tokens["total"],
+                "completion": (completion or "")[:2000],
+            })
+        except Exception:  # noqa: BLE001 - mirroring must never affect the run
+            pass
+
+
+def _as_text(content) -> str:
+    """OpenAI content can be a string or a list of content parts; normalize to text for display."""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "".join(p.get("text", "") if isinstance(p, dict) else str(p) for p in content)
+    return "" if content is None else str(content)
+
+
 class JsonlSpanExporter:
     """Default exporter: one JSON span per line in `spans.jsonl` (files-as-truth, offline)."""
 

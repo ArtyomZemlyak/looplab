@@ -39,7 +39,8 @@ class CompositeTools:
 class ToolUsingResearcher:
     _SYSTEM = ("You are an ML researcher. You MAY call the retrieval tools to consult "
                "prior knowledge, then call `emit` exactly once with your final Idea "
-               "(operator, params, rationale). ")
+               "(operator, params, rationale, and a short reusable `theme` slug that groups "
+               "this experiment with related ones, e.g. \"loss-fn\" or \"regularization\"). ")
 
     def __init__(self, client, tools, space_hint: str = "",
                  bounds: Optional[dict] = None, parser: str = "tool_call",

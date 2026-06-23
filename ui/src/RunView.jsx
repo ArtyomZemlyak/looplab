@@ -1,9 +1,10 @@
-import React, { useEffect, useState } from 'react'
+import React, { useEffect, useMemo, useState } from 'react'
 import { useRunState, useNotifications } from './hooks.js'
 import { get, fmt, fmtInt, phaseLabel, CONTROL } from './util.js'
 import Dag from './Dag.jsx'
-import Inspector from './Inspector.jsx'
+import Inspector, { GroupSummary } from './Inspector.jsx'
 import Dock from './Dock.jsx'
+import { computeGroups } from './grouping.js'
 import {
   TrustPanel, SensitivityPanel, FailuresPanel, ParetoPanel, DataQualityPanel,
   ConfigPanel, AuthoringPanel, MemoryPanel, RegistryPanel, ReportPanel, EventExplorer,
@@ -22,6 +23,10 @@ export default function RunView({ runId, onBack }) {
   const [viewSeq, setViewSeq] = useState(null)
   const [hist, setHist] = useState(null)
   const [selectedId, setSelectedId] = useState(null)
+  const [inspectTab, setInspectTab] = useState('Overview')
+  const [groupMode, setGroupMode] = useState('theme')
+  const [collapsed, setCollapsed] = useState(() => new Set())
+  const [selectedGroup, setSelectedGroup] = useState(null)
   const [panel, setPanel] = useState(null)
   const [toast, setToast] = useState(null)
   const [notif, setNotif] = useState(false)
@@ -33,6 +38,24 @@ export default function RunView({ runId, onBack }) {
     get(`/api/runs/${runId}/state?seq=${viewSeq}`).then(p => setHist(p.state)).catch(() => {})
   }, [viewSeq, seq, runId])
   const showToast = (m) => { setToast(m); setTimeout(() => setToast(null), 2200) }
+  // Members of the selected group — memoized so unrelated re-renders (toast, live ticks) don't
+  // re-walk all nodes; only recomputes when the node set / mode / selection actually changes.
+  const groupMembers = useMemo(() => {
+    const ns = (hist || live)?.nodes
+    return (selectedGroup != null && ns) ? (computeGroups(ns, groupMode).get(selectedGroup) || []) : []
+  }, [hist, live, groupMode, selectedGroup])
+  // Node selection clears any group selection (the side panel shows one or the other).
+  const selectNode = (id) => { setSelectedId(id); if (id != null) setSelectedGroup(null) }
+  // Drill-down from the dock/timeline: select a node, optionally open a tab + jump the scrubber.
+  const focusNode = (id, tab, seq) => {
+    selectNode(id)
+    if (tab) setInspectTab(tab)
+    if (seq != null) setViewSeq(seq)
+  }
+  // --- semantic-zoom grouping controls ---
+  const toggleGroup = (key) => setCollapsed(s => { const n = new Set(s); n.has(key) ? n.delete(key) : n.add(key); return n })
+  const changeMode = (m) => { setGroupMode(m); setCollapsed(new Set()); setSelectedGroup(null) }
+  const selectGroup = (key) => { setSelectedGroup(key); if (key != null) setSelectedId(null) }
 
   if (!live) return <div className="app"><div className="runlist"><div className="notice">Connecting to run <b>{runId}</b>…</div></div></div>
   const state = hist || live
@@ -86,11 +109,20 @@ export default function RunView({ runId, onBack }) {
       </div>
 
       <div className="main">
-        <div className="canvas-wrap"><Dag state={state} selectedId={selectedId} onSelect={setSelectedId} /></div>
-        <div className="side"><Inspector runId={runId} nodeId={selectedId} state={state} live={live} onToast={showToast} /></div>
+        <div className="canvas-wrap"><Dag state={state} selectedId={selectedId} onSelect={selectNode}
+          groupMode={groupMode} collapsed={collapsed} onToggleGroup={toggleGroup} onSetMode={changeMode}
+          onCollapseAll={(keys) => setCollapsed(new Set(keys))} onExpandAll={() => setCollapsed(new Set())}
+          selectedGroup={selectedGroup} onSelectGroup={selectGroup} /></div>
+        <div className="side">
+          {selectedGroup != null
+            ? <GroupSummary groupKey={selectedGroup} memberIds={groupMembers}
+                state={state} onSelectNode={focusNode} onClose={() => setSelectedGroup(null)} />
+            : <Inspector runId={runId} nodeId={selectedId} state={state} live={live}
+                tab={inspectTab} setTab={setInspectTab} onToast={showToast} />}
+        </div>
       </div>
 
-      <Dock runId={runId} liveSeq={seq} viewSeq={viewSeq} setViewSeq={setViewSeq} />
+      <Dock runId={runId} liveSeq={seq} viewSeq={viewSeq} setViewSeq={setViewSeq} onFocus={focusNode} />
 
       {panel === 'trust' && <TrustPanel state={state} runId={runId} onClose={() => setPanel(null)} />}
       {panel === 'sensitivity' && <SensitivityPanel state={state} onClose={() => setPanel(null)} />}

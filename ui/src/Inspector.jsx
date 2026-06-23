@@ -1,11 +1,12 @@
 import React, { useEffect, useState } from 'react'
 import { get, fmt, fmtInt, CONTROL } from './util.js'
+import { Trajectory } from './charts.jsx'
+import { groupAggregate } from './grouping.js'
 
-const TABS = ['Overview', 'Reasoning', 'Code', 'Metrics', 'Trust', 'Agent', 'Cost']
+const TABS = ['Overview', 'Reasoning', 'LLM', 'Code', 'Metrics', 'Trust', 'Agent', 'Cost']
 
-export default function Inspector({ runId, nodeId, state, live, onToast }) {
+export default function Inspector({ runId, nodeId, state, live, tab, setTab, onToast }) {
   const [detail, setDetail] = useState(null)
-  const [tab, setTab] = useState('Overview')
   useEffect(() => {
     if (nodeId == null) { setDetail(null); return }
     let on = true
@@ -39,6 +40,7 @@ export default function Inspector({ runId, nodeId, state, live, onToast }) {
 
         {tab === 'Overview' && <Overview n={n} state={state} />}
         {tab === 'Reasoning' && <Reasoning n={n} />}
+        {tab === 'LLM' && <LLM n={n} />}
         {tab === 'Code' && <Code n={n} />}
         {tab === 'Metrics' && <Metrics n={n} detail={detail} />}
         {tab === 'Trust' && <Trust n={n} detail={detail} />}
@@ -50,6 +52,34 @@ export default function Inspector({ runId, nodeId, state, live, onToast }) {
 }
 
 function KV({ k, v }) { return <><div className="k">{k}</div><div className="v">{v}</div></> }
+
+// Summary for a COLLAPSED group's super-node (semantic zoom): aggregate + drill back to members.
+export function GroupSummary({ groupKey, memberIds, state, onSelectNode, onClose }) {
+  const members = (memberIds || []).map(id => state.nodes[id]).filter(Boolean).sort((a, b) => a.id - b.id)
+  const dir = state.direction
+  const best = groupAggregate(memberIds || [], state.nodes, dir).best   // same aggregate as the super-node card
+  const themes = [...new Set(members.map(n => n.idea?.theme).filter(Boolean))]
+  return <>
+    <div className="tabs">
+      <div className="tab active">Group · {groupKey}</div>
+      <span style={{ flex: 1 }} />
+      <button className="btn sm ghost" onClick={onClose} title="close group view">✕</button>
+    </div>
+    <div className="insp-body">
+      <div className="kv">
+        <KV k="experiments" v={members.length} />
+        <KV k="best" v={fmt(best)} />
+        {themes.length > 0 && <KV k="themes" v={themes.join(', ')} />}
+      </div>
+      <div className="section-h">Best over members</div>
+      <Trajectory nodes={members} direction={dir} height={150} />
+      <div className="section-h">Members <span className="pill">{members.length}</span></div>
+      <table className="tbl"><thead><tr><th>node</th><th>operator</th><th>metric</th><th>status</th></tr></thead>
+        <tbody>{members.map(n => <tr key={n.id} style={{ cursor: 'pointer' }} onClick={() => onSelectNode(n.id)}>
+          <td>#{n.id}</td><td>{n.operator}</td><td>{fmt(n.confirmed_mean ?? n.metric)}</td><td>{n.status}</td></tr>)}</tbody></table>
+    </div>
+  </>
+}
 
 function Overview({ n, state }) {
   const p = n.idea?.params || {}
@@ -72,18 +102,91 @@ function Overview({ n, state }) {
   </>
 }
 
+// Max span duration across the forest — for proportional duration bars (langflow-style trace).
+function maxDur(spans) {
+  let m = 0
+  const walk = (arr) => arr.forEach(s => { m = Math.max(m, s.duration_s || 0); walk(s.children || []) })
+  walk(spans)
+  return m || 1e-9
+}
+
+function SpanRow({ s, depth, max }) {
+  const [open, setOpen] = useState(false)
+  const attrs = Object.entries(s.attributes || {}).filter(([k]) => k !== 'node_id')
+  const events = (s.events || []).filter(e => e.name !== 'llm_call')   // LLM I/O has its own tab
+  const llmCount = (s.events || []).filter(e => e.name === 'llm_call').length
+  const detail = attrs.length || events.length
+  return <>
+    <div className={'span-row' + (s.status === 'ERROR' ? ' err' : '')} style={{ paddingLeft: depth * 14 }}
+         onClick={() => detail && setOpen(o => !o)} title={detail ? 'click for span detail' : ''}>
+      <span className="span-tw">{detail ? (open ? '▾' : '▸') : '·'}</span>
+      <span className="span-name">{s.name}</span>
+      <span className="span-bar"><span className="span-fill" style={{ width: Math.max(2, (s.duration_s || 0) / max * 100) + '%' }} /></span>
+      <span className="t">{fmt(s.duration_s, 3)}s</span>
+      {llmCount > 0 && <span className="badge" title="LLM calls — see the LLM tab">{llmCount}×LLM</span>}
+      {s.status === 'ERROR' && <span className="badge reason">ERROR</span>}
+    </div>
+    {open && detail && <div className="span-detail" style={{ marginLeft: depth * 14 + 16 }}>
+      {attrs.length > 0 && <div className="kv">{attrs.map(([k, v]) =>
+        <KV key={k} k={k} v={typeof v === 'object' ? JSON.stringify(v) : String(v)} />)}</div>}
+      {events.map((e, i) => <div key={i} className="span-ev">
+        <span className="ty">{e.name}</span>{e.error ? <span className="flag"> {e.error}</span> :
+          <span className="muted"> {Object.entries(e).filter(([k]) => k !== 'name').map(([k, v]) => `${k}=${v}`).join(' ')}</span>}
+      </div>)}
+    </div>}
+    {(s.children || []).map((c, i) => <SpanRow key={i} s={c} depth={depth + 1} max={max} />)}
+  </>
+}
+
 function Reasoning({ n }) {
   const spans = n.trace?.nodes || []
   if (!spans.length) return <div className="muted">No execution trace for this node (toy/offline nodes may have minimal spans).</div>
-  const Row = ({ s, depth }) => <>
-    <div className="feed ev" style={{ paddingLeft: depth * 14 }}>
-      <span className="ty" style={{ color: s.status === 'ERROR' ? 'var(--fail)' : undefined }}>{s.name}</span>
-      <span className="t">{fmt(s.duration_s, 3)}s</span>
-      {s.status === 'ERROR' && <span className="badge reason">ERROR</span>}
+  const max = maxDur(spans)
+  return <div className="spans">{spans.map((s, i) => <SpanRow key={i} s={s} depth={0} max={max} />)}</div>
+}
+
+// Flatten every captured LLM call across a node's span forest (set by tracing.record_llm_call).
+function collectLlm(spans) {
+  const out = []
+  const walk = (arr) => arr.forEach(s => {
+    (s.events || []).forEach(e => { if (e.name === 'llm_call') out.push({ ...e, span: s.name }) })
+    walk(s.children || [])
+  })
+  walk(spans || [])
+  return out
+}
+
+function LlmCall({ call, idx }) {
+  const [open, setOpen] = useState(idx === 0)   // first call expanded by default
+  const t = call.tokens || {}
+  return <div className="llm-card">
+    <div className="llm-head" onClick={() => setOpen(o => !o)}>
+      <span className="span-tw">{open ? '▾' : '▸'}</span>
+      <b>{call.op || 'llm'}</b>
+      <span className="muted"> {call.span} · {call.model}</span>
+      <span className="spacer" style={{ flex: 1 }} />
+      <span className="muted">{(t.total || (t.prompt + t.completion)) || 0} tok</span>
     </div>
-    {(s.children || []).map((c, i) => <Row key={i} s={c} depth={depth + 1} />)}
-  </>
-  return <div className="feed">{spans.map((s, i) => <Row key={i} s={s} depth={0} />)}</div>
+    {open && <>
+      {(call.prompt || []).map((m, i) => <div key={i} className="msg">
+        <div className={'msg-role role-' + (m.role || 'user')}>{m.role}</div>
+        <pre className="code">{m.content}</pre>
+      </div>)}
+      <div className="msg">
+        <div className="msg-role role-completion">completion</div>
+        <pre className="code">{call.completion || '(empty)'}</pre>
+      </div>
+    </>}
+  </div>
+}
+
+function LLM({ n }) {
+  const calls = collectLlm(n.trace?.nodes)
+  if (!calls.length) return <div className="muted">No LLM calls captured for this node — toy/offline run, an external coding agent wrote it, or capture is off (LOOPLAB_TRACE_LLM_IO=0).</div>
+  return <div className="llm-list">
+    <div className="muted" style={{ marginBottom: 6 }}>{calls.length} LLM call{calls.length > 1 ? 's' : ''} for node #{n.id}</div>
+    {calls.map((c, i) => <LlmCall key={i} call={c} idx={i} />)}
+  </div>
 }
 
 function diffLines(a, b) {

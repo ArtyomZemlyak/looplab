@@ -73,6 +73,11 @@ class Settings(BaseSettings):
     llm_base_url: str = "http://localhost:11434/v1"  # Ollama OpenAI-compatible endpoint
     llm_temperature: float = 0.6
     llm_parser: str = "tool_call"
+    # Observability (ADR-17): capture each LLM call's full prompt + completion into the active
+    # span (spans.jsonl) so the UI can show exactly what the model read and wrote per node.
+    # Diagnostics only — `replay.fold` never reads spans. Default on for local single-user; set
+    # LOOPLAB_TRACE_LLM_IO=0 to suppress (e.g. to keep spans.jsonl small or avoid storing prompts).
+    trace_llm_io: bool = True
     # Agentic retrieval (ADR-16): if set, the LLM Researcher gets grep/kb_search/read
     # tools over this directory of markdown notes and chooses when to use them.
     knowledge_dir: str | None = None

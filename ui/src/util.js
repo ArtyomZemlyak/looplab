@@ -30,6 +30,29 @@ export function nodeClass(node, state, workId) {
   return cls.join(' ')
 }
 
+// Visual identity per operator (= the kind of task a node performs). A single monochrome SVG
+// icon (see icons.jsx) makes the DAG readable at a glance — which nodes are baselines vs
+// hill-climbs vs repairs vs merges vs ablations — WITHOUT adding hue (status owns colour).
+const OPERATOR_META = {
+  draft:        { icon: 'flag',      label: 'draft — initial baseline solution' },
+  improve:      { icon: 'trending',  label: 'improve — hill-climb around best' },
+  debug:        { icon: 'bug',       label: 'debug — repair a failed parent' },
+  merge:        { icon: 'confluence', label: 'merge — combine multiple parents' },
+  refine_block: { icon: 'target',    label: 'refine — ablation-driven tweak' },
+  fork:         { icon: 'gitbranch', label: 'fork — operator-seeded branch' },
+  random:       { icon: 'dot',       label: 'random — exploratory sample' },
+  exploit:      { icon: 'trending',  label: 'exploit — refine the leader' },
+  greedy:       { icon: 'trending',  label: 'greedy — best-first step' },
+  ablate:       { icon: 'target',    label: 'ablate — sensitivity probe' },
+}
+
+export function operatorMeta(op) {
+  return OPERATOR_META[op] || { icon: 'dot', label: op || 'operator' }
+}
+
+// The operators worth showing in the legend (stable order, only the common ones).
+export const OPERATOR_LEGEND = ['draft', 'improve', 'debug', 'merge', 'refine_block', 'fork', 'random']
+
 export function parentMetric(node, state) {
   if (!node.parent_ids || !node.parent_ids.length) return null
   const p = state.nodes[node.parent_ids[0]]
@@ -45,26 +68,36 @@ export function delta(node, state) {
   return { d, improved }
 }
 
-// Longest-path layered layout from parent_ids (handles merges/DAG). Deterministic, no deps.
-export function layout(nodes) {
-  const ids = Object.keys(nodes).map(Number)
+// Layered layout that treats a collapsed group as ONE entity (semantic zoom). Returns positions
+// keyed by entity id: `n:<id>` for a visible node, `super:<key>` for a collapsed group. When no
+// group is collapsed it degenerates to the per-node layout above (one entity per node).
+export function layoutWithGroups(nodes, { collapsed = new Set(), nodeGroup = new Map() } = {}) {
+  const ent = (id) => { const k = nodeGroup.get(id); return (k != null && collapsed.has(k)) ? `super:${k}` : `n:${id}` }
+  const parents = {}, ents = new Set()
+  Object.values(nodes).forEach(n => {
+    const e = ent(n.id); ents.add(e); parents[e] ||= new Set()
+      ; (n.parent_ids || []).forEach(p => {
+        if (!(p in nodes)) return
+        const pe = ent(p); ents.add(pe); parents[pe] ||= new Set()
+        if (pe !== e) parents[e].add(pe)
+      })
+  })
   const depth = {}
-  const dep = (id) => {
-    if (id in depth) return depth[id]
-    const n = nodes[id]
-    const ps = (n.parent_ids || []).filter(p => p in nodes)
-    depth[id] = ps.length ? 1 + Math.max(...ps.map(dep)) : 0
-    return depth[id]
+  const dep = (e) => {
+    if (e in depth) return depth[e]
+    depth[e] = 0   // cycle guard (DAG, so safe)
+    const ps = [...(parents[e] || [])]
+    depth[e] = ps.length ? 1 + Math.max(...ps.map(dep)) : 0
+    return depth[e]
   }
-  ids.forEach(dep)
+  ents.forEach(dep)
   const byDepth = {}
-  ids.forEach(id => { (byDepth[depth[id]] ||= []).push(id) })
-  const XS = 230, YS = 150
-  const pos = {}
+  ents.forEach(e => { (byDepth[depth[e]] ||= []).push(e) })
+  const XS = 230, YS = 150, pos = {}
   Object.keys(byDepth).map(Number).sort((a, b) => a - b).forEach(d => {
-    const arr = byDepth[d].sort((a, b) => a - b)
+    const arr = byDepth[d].sort()
     const offset = -(arr.length - 1) / 2
-    arr.forEach((id, i) => { pos[id] = { x: (offset + i) * XS, y: d * YS } })
+    arr.forEach((e, i) => { pos[e] = { x: (offset + i) * XS, y: d * YS } })
   })
   return pos
 }
@@ -104,3 +137,15 @@ export async function putText(path, text) {
   if (!r.ok) throw new Error(`${path}: ${r.status}`)
   return r.json()
 }
+async function send(path, method, body) {
+  const r = await fetch(path, { method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body || {}) })
+  if (!r.ok) throw new Error(`${path}: ${r.status}`)
+  return r.json()
+}
+
+// ---- ClearML-style project API ----
+export const listProjects = () => get('/api/projects')
+export const createProject = (name, parent_id = null) => post('/api/projects', { name, parent_id })
+export const patchProject = (id, body) => send(`/api/projects/${id}`, 'PATCH', body)
+export const deleteProject = (id) => send(`/api/projects/${id}`, 'DELETE')
+export const assignRun = (runId, project_id) => post(`/api/runs/${encodeURIComponent(runId)}/project`, { project_id })
