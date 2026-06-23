@@ -1,4 +1,4 @@
-"""I14 JSONL span exporter + I22 EvolutionaryPolicy (pluggable algorithm seam)."""
+﻿"""I14 JSONL span exporter + I22 EvolutionaryPolicy (pluggable algorithm seam)."""
 from __future__ import annotations
 
 from pathlib import Path
@@ -6,11 +6,11 @@ from pathlib import Path
 import anyio
 import orjson
 
-from autornd.orchestrator import Engine
-from autornd.policy import EvolutionaryPolicy, MCTSPolicy, make_policy
-from autornd.sandbox import SubprocessSandbox
-from autornd.toytask import ToyTask
-from autornd.tracing import JsonlSpanExporter, Tracer
+from looplab.orchestrator import Engine
+from looplab.policy import EvolutionaryPolicy, MCTSPolicy, make_policy
+from looplab.sandbox import SubprocessSandbox
+from looplab.toytask import ToyTask
+from looplab.tracing import JsonlSpanExporter, Tracer
 
 ROOT = Path(__file__).resolve().parents[1]
 TASK_FILE = ROOT / "examples" / "toy_task.json"

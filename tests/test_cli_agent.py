@@ -1,4 +1,4 @@
-"""ADR-7: tool-agnostic external CLI coding agent as a Developer backend. Offline
+﻿"""ADR-7: tool-agnostic external CLI coding agent as a Developer backend. Offline
 plumbing uses a stub agent (a script that edits solution.py); a guarded live test uses
 real OpenCode + Ollama."""
 from __future__ import annotations
@@ -11,8 +11,8 @@ from pathlib import Path
 
 import pytest
 
-from autornd.cli_agent import PRESETS, CliAgentDeveloper
-from autornd.models import Idea
+from looplab.cli_agent import PRESETS, CliAgentDeveloper
+from looplab.models import Idea
 
 ROOT = Path(__file__).resolve().parents[1]
 _OPENCODE = Path(os.environ.get("APPDATA", "")) / "npm" / "opencode.cmd"
@@ -58,9 +58,9 @@ def test_cli_agent_missing_binary_leaves_seed(tmp_path):
 def test_make_roles_selects_cli_agent():
     # Default wraps the CLI agent in a ValidatingDeveloper (audit + fallback, ADR-7),
     # drops a self-contained opencode.json in the workdir, and falls back to the LLM dev.
-    from autornd.config import Settings
-    from autornd.roles import LLMDeveloper, ValidatingDeveloper
-    from autornd.tasks import load_task, make_roles
+    from looplab.config import Settings
+    from looplab.roles import LLMDeveloper, ValidatingDeveloper
+    from looplab.tasks import load_task, make_roles
     s = Settings()
     s.backend, s.developer_backend = "llm", "opencode"
     task = load_task(ROOT / "examples" / "code_regression_task.json")
@@ -76,8 +76,8 @@ def test_make_roles_selects_cli_agent():
 
 
 def test_make_roles_raw_agent_when_validation_off():
-    from autornd.config import Settings
-    from autornd.tasks import load_task, make_roles
+    from looplab.config import Settings
+    from looplab.tasks import load_task, make_roles
     s = Settings()
     s.backend, s.developer_backend, s.validate_agent = "llm", "opencode", False
     task = load_task(ROOT / "examples" / "code_regression_task.json")
@@ -86,11 +86,11 @@ def test_make_roles_raw_agent_when_validation_off():
 
 
 def _opencode_ready():
-    # Opt-in only (a live model call): enable with AUTORND_TEST_OPENCODE=1 on a box with
+    # Opt-in only (a live model call): enable with LOOPLAB_TEST_OPENCODE=1 on a box with
     # a working `opencode` + a local Ollama serving qwen3:8b. A self-contained
     # opencode.json (see opencode_config) points OpenCode at local Ollama so it does NOT
     # fetch the external model registry — the call that otherwise hangs behind a proxy.
-    if os.environ.get("AUTORND_TEST_OPENCODE") != "1" or not _OPENCODE.exists():
+    if os.environ.get("LOOPLAB_TEST_OPENCODE") != "1" or not _OPENCODE.exists():
         return False
     try:
         with urllib.request.urlopen("http://127.0.0.1:11434/api/tags", timeout=3) as r:
@@ -101,7 +101,7 @@ def _opencode_ready():
 
 
 def _live_agent(model="ollama/qwen3:8b"):
-    from autornd.cli_agent import opencode_config
+    from looplab.cli_agent import opencode_config
     return CliAgentDeveloper(
         model=model,
         brief='Write solution.py so it prints exactly one line of JSON: {"metric": 42.0}.',
@@ -110,7 +110,7 @@ def _live_agent(model="ollama/qwen3:8b"):
 
 
 @pytest.mark.skipif(not _opencode_ready(),
-                    reason="set AUTORND_TEST_OPENCODE=1 with a working opencode + Ollama")
+                    reason="set LOOPLAB_TEST_OPENCODE=1 with a working opencode + Ollama")
 def test_live_opencode_integration_mechanics(tmp_path):
     # Proves the *integration* works (launcher resolved, headless run, output captured &
     # parseable). NOT the model's edit quality in one shot — qwen3:8b's edit tool is
@@ -125,15 +125,15 @@ def test_live_opencode_integration_mechanics(tmp_path):
 
 
 @pytest.mark.skipif(not _opencode_ready(),
-                    reason="set AUTORND_TEST_OPENCODE=1 with a working opencode + Ollama")
+                    reason="set LOOPLAB_TEST_OPENCODE=1 with a working opencode + Ollama")
 def test_live_opencode_validated_ships_valid_code(tmp_path):
     # End-to-end through the validator: with retries + LLM fallback the developer ALWAYS
     # ships valid code. With enough retries the flaky agent usually succeeds; if it can't,
     # the fallback guarantees a valid result — that robustness is the contract we assert.
-    from autornd.roles import LLMDeveloper, ValidatingDeveloper
-    from autornd.parse import LLMClient  # noqa: F401 (type hint only)
-    from autornd.tasks import make_llm_client
-    from autornd.config import Settings
+    from looplab.roles import LLMDeveloper, ValidatingDeveloper
+    from looplab.parse import LLMClient  # noqa: F401 (type hint only)
+    from looplab.tasks import make_llm_client
+    from looplab.config import Settings
     fallback = LLMDeveloper(make_llm_client(Settings()),
                             brief='Print exactly: {"metric": 42.0}')
     dev = ValidatingDeveloper(_live_agent(), fallback=fallback, max_retries=3)

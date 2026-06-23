@@ -1,6 +1,6 @@
-# AutoRND — Architecture Review (2026-06-22)
+﻿# LoopLab — Architecture Review (2026-06-22)
 
-**Scope:** full audit of the `autornd/` implementation (~22 modules, 76 tests) against the design (ADR-1…18 in [03](03-decisions.md)/[05](05-build-decisions.md)). Method: two parallel adversarial code-review passes (concurrency/replay/policy cluster; trust/LLM cluster) + manual design-consistency check. Companion: [README.md](README.md), status board [06](06-implementation-plan.md).
+**Scope:** full audit of the `LoopLab/` implementation (~22 modules, 76 tests) against the design (ADR-1…18 in [03](03-decisions.md)/[05](05-build-decisions.md)). Method: two parallel adversarial code-review passes (concurrency/replay/policy cluster; trust/LLM cluster) + manual design-consistency check. Companion: [README.md](README.md), status board [06](06-implementation-plan.md).
 
 **Verdict:** the implementation is **consistent with the architecture**; the moat (files-as-truth event loop, pluggable roles/policies/sandbox, trust layer) is intact. Seven real bugs were found and **fixed**; documented deviations are deliberate. No design change required — only the I10 gate *semantics* were clarified (below).
 
@@ -24,7 +24,7 @@
 ## 2. Deviations from the plan (intentional, documented)
 
 1. **I4 git/patch path not built.** Solutions are whole-file scripts in per-node workdirs; lineage is `parent_ids` in the event log, not git commits. Fine until an external **diff-emitting** coding agent is wired — at which point the ADR-14 unidiff allow-list gate must be built before trusting its edits.
-2. **Flat module layout** vs the planned subpackage tree (documented in `autornd/__init__.py`).
+2. **Flat module layout** vs the planned subpackage tree (documented in `LoopLab/__init__.py`).
 3. **Leakage gate is inert for the current tasks** — it activates only when a task exposes `leakage_inputs()` (toy/regression have no train/test split). The wiring is real; the trigger awaits a split-bearing task.
 4. **Wall-clock budget is per-invocation**, not cumulative across resumes (documented in code).
 

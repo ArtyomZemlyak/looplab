@@ -1,6 +1,6 @@
-"""Typer CLI (I0/I6, ADR-17): run / resume / inspect / replay.
+﻿"""Typer CLI (I0/I6, ADR-17): run / resume / inspect / replay.
 
-The engine is a *process*, not a server (ADR-18): `autornd run task.json` spawns one
+The engine is a *process*, not a server (ADR-18): `LoopLab run task.json` spawns one
 async orchestrator that drives the loop to completion (or crash). `resume` re-enters
 the same run dir; `replay`/`inspect` are pure read-only folds of the event log.
 """
@@ -23,7 +23,7 @@ from .replay import fold
 from .sandbox import make_sandbox
 from .tasks import TaskAdapter, load_task, make_llm_client, make_roles
 
-app = typer.Typer(add_completion=False, help="AutoRND — autonomous ML research engine (P0).")
+app = typer.Typer(add_completion=False, help="LoopLab — autonomous ML research engine (P0).")
 
 
 def _engine(run_dir: Path, task: TaskAdapter, settings: Settings,

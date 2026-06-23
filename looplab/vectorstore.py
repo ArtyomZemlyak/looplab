@@ -1,4 +1,4 @@
-"""Pluggable vector store (I17, ADR-16). `VectorStore` is the seam; LanceDB is the
+﻿"""Pluggable vector store (I17, ADR-16). `VectorStore` is the seam; LanceDB is the
 production default — here we ship a dependency-free `InMemoryVectorStore` (brute-force
 cosine) as the testable default so swapping in LanceDB/Qdrant is a config change.
 
@@ -51,7 +51,7 @@ def _cosine(a: Vector, b: Vector) -> float:
 
 
 class InMemoryVectorStore:
-    """Default offline impl. Brute-force cosine; fine at AutoRND's scale (hundreds–
+    """Default offline impl. Brute-force cosine; fine at LoopLab's scale (hundreds–
     low-thousands of notes, per ADR-16's benchmark analysis)."""
 
     def __init__(self) -> None:

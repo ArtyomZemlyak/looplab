@@ -1,9 +1,9 @@
-"""Item #3: the Researcher gets read-only grep/list/read over the editable repo(s) so it
+﻿"""Item #3: the Researcher gets read-only grep/list/read over the editable repo(s) so it
 proposes changes from the actual code. RepoTools is read-only and path-restricted (editing
 stays the Developer's job — the role/trust boundary)."""
 from __future__ import annotations
 
-from autornd.knowledge_tools import RepoTools
+from looplab.knowledge_tools import RepoTools
 
 
 def _repo(tmp_path):
@@ -45,11 +45,11 @@ def test_read_is_path_restricted(tmp_path):
 def test_make_roles_wires_repo_tools_for_edit_mode(tmp_path):
     from pathlib import Path
 
-    from autornd.agent import ToolUsingResearcher
-    from autornd.config import Settings
-    from autornd.knowledge_tools import RepoTools as RT
-    from autornd.repo_task import EvalSpec, RepoTask
-    from autornd.tasks import make_roles
+    from looplab.agent import ToolUsingResearcher
+    from looplab.config import Settings
+    from looplab.knowledge_tools import RepoTools as RT
+    from looplab.repo_task import EvalSpec, RepoTask
+    from looplab.tasks import make_roles
     repo = tmp_path / "repo"; repo.mkdir()
     (repo / "m.py").write_text("x=1\n", encoding="utf-8")
     t = RepoTask(id="e", editable_path=str(repo), edit_surface=["*.py"],
@@ -62,10 +62,10 @@ def test_make_roles_wires_repo_tools_for_edit_mode(tmp_path):
 
 
 def test_make_roles_no_repo_tools_for_param_search(tmp_path):
-    from autornd.config import Settings
-    from autornd.knowledge_tools import RepoTools as RT
-    from autornd.repo_task import EvalSpec, RepoTask
-    from autornd.tasks import make_roles
+    from looplab.config import Settings
+    from looplab.knowledge_tools import RepoTools as RT
+    from looplab.repo_task import EvalSpec, RepoTask
+    from looplab.tasks import make_roles
     repo = tmp_path / "repo"; repo.mkdir()
     (repo / "m.py").write_text("x=1\n", encoding="utf-8")
     t = RepoTask(id="p", editable_path=str(repo), params={"lr": (0.0, 1.0)},

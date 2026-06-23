@@ -1,4 +1,4 @@
-"""External CLI coding agents as a Developer backend (ADR-7), tool-agnostic.
+﻿"""External CLI coding agents as a Developer backend (ADR-7), tool-agnostic.
 
 A `CliAgentDeveloper` runs any terminal coding agent head-less as a subprocess that
 edits a single `solution.py` in a throwaway dir, pointed at our local OpenAI-compatible
@@ -177,7 +177,7 @@ class CliAgentDeveloper:
         self.last_files = {}
         self.last_deleted = []
         self.last_patch = None
-        with tempfile.TemporaryDirectory(prefix="autornd_cliagent_") as d:
+        with tempfile.TemporaryDirectory(prefix="LOOPLAB_cliagent_") as d:
             wd = Path(d)
             if self.seed_dirs:                   # RepoTask: seed the worktree from the repo(s)
                 import shutil
@@ -303,7 +303,7 @@ def _git_seed(wd: Path) -> Optional[str]:
     if _git(wd, "init", "-q") != 0:
         return None
     _git(wd, "add", "-A")
-    if _git(wd, "-c", "user.email=a@autornd", "-c", "user.name=autornd",
+    if _git(wd, "-c", "user.email=a@LoopLab", "-c", "user.name=LoopLab",
             "commit", "-q", "-m", "seed") != 0:
         return None
     return _git_out(wd, "rev-parse", "HEAD").strip() or None

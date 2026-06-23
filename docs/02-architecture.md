@@ -1,9 +1,9 @@
-# AutoRND — Architecture Specification
+﻿# LoopLab — Architecture Specification
 
 **Version:** 0.1 (design) · **Date:** 2026-06-20
 **Companion docs:** [01-product-design.md](01-product-design.md) · [03-decisions.md](03-decisions.md) · [04-file-layout.md](04-file-layout.md) · [05-build-decisions.md](05-build-decisions.md) · **Research basis:** [autoresearch-systems-exploration.md](autoresearch-systems-exploration.md)
 
-> This document defines **how AutoRND works**: principles, components, data model, control flow, the search and trust mechanisms, extension points, rules/invariants, and a tech stack. It is a from-scratch design (no fork) that **synthesizes the best ideas** from the surveyed systems — each major decision cites its source.
+> This document defines **how LoopLab works**: principles, components, data model, control flow, the search and trust mechanisms, extension points, rules/invariants, and a tech stack. It is a from-scratch design (no fork) that **synthesizes the best ideas** from the surveyed systems — each major decision cites its source.
 
 ---
 
@@ -158,7 +158,7 @@ Pipeline per candidate:
 2. **Leakage check (primary)** — auto-detect **train/test leakage, temporal leakage, and target leakage** (our genuine differentiation — only MLE-STAR ships even a partial one). Fail or auto-correct on detection.
 3. **Objective on a trustworthy validation metric** — compute via the adapter; **consistent-evaluation protocol** (same fixed splits/seeds for the metric across candidates) so scores are comparable — the single biggest lever (AIRA: +9–15 pts).
 4. **Variance gate (cheap default, strict only at the frontier)** — use **robust CV** for the validation metric everywhere; reserve **multi-seed confirmation for the top-k promotion frontier** (k≈3) before final selection. See §8.
-- **Optional (open-ended mode only):** the co-evolving adversarial evaluator + growing reward-hack `ExploitRule` suite — load-bearing *only* when AutoRND defines its own success metric, not for fixed-harness tasks like MLE-bench. *(See §7.)*
+- **Optional (open-ended mode only):** the co-evolving adversarial evaluator + growing reward-hack `ExploitRule` suite — load-bearing *only* when LoopLab defines its own success metric, not for fixed-harness tasks like MLE-bench. *(See §7.)*
 
 A `Verdict` is `{accepted, metric, ci, validity, leakage, reason}`.
 

@@ -1,10 +1,10 @@
-"""External-agent validator (ADR-7): static + process checks (validate.py) and the
+﻿"""External-agent validator (ADR-7): static + process checks (validate.py) and the
 ValidatingDeveloper wrapper (retry-with-feedback + fallback)."""
 from __future__ import annotations
 
-from autornd.models import Idea
-from autornd.roles import ValidatingDeveloper
-from autornd.validate import AgentRun, validate_agent_code
+from looplab.models import Idea
+from looplab.roles import ValidatingDeveloper
+from looplab.validate import AgentRun, validate_agent_code
 
 _SEED = 'import json\nprint(json.dumps({"metric": 0.0}))\n'
 _GOOD = 'import json\nprint(json.dumps({"metric": 42.0}))\n'
@@ -189,12 +189,12 @@ def test_engine_emits_agent_validated_audit_trail(tmp_path):
 
     import anyio
 
-    from autornd.eventstore import EventStore
-    from autornd.orchestrator import Engine
-    from autornd.policy import GreedyTree
-    from autornd.replay import fold
-    from autornd.sandbox import SubprocessSandbox
-    from autornd.toytask import ToyTask
+    from looplab.eventstore import EventStore
+    from looplab.orchestrator import Engine
+    from looplab.policy import GreedyTree
+    from looplab.replay import fold
+    from looplab.sandbox import SubprocessSandbox
+    from looplab.toytask import ToyTask
 
     task = ToyTask.load(Path(__file__).resolve().parents[1] / "examples" / "toy_task.json")
     researcher, developer = task.build_roles()
@@ -223,10 +223,10 @@ def test_ablation_probes_bypass_the_validator(tmp_path):
     and multiplying expensive agent calls (review finding B1)."""
     from pathlib import Path
 
-    from autornd.orchestrator import Engine
-    from autornd.policy import GreedyTree
-    from autornd.sandbox import SubprocessSandbox
-    from autornd.toytask import ToyTask
+    from looplab.orchestrator import Engine
+    from looplab.policy import GreedyTree
+    from looplab.sandbox import SubprocessSandbox
+    from looplab.toytask import ToyTask
 
     task = ToyTask.load(Path(__file__).resolve().parents[1] / "examples" / "toy_task.json")
     researcher, inner = task.build_roles()

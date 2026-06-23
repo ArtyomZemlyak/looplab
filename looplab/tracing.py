@@ -1,4 +1,4 @@
-"""Observability (I14, ADR-17): full tracing that stays files-as-truth by default and bridges
+﻿"""Observability (I14, ADR-17): full tracing that stays files-as-truth by default and bridges
 to real OpenTelemetry when the SDK is installed.
 
 Design (see 08-tracing-architecture.md):
@@ -31,7 +31,7 @@ import orjson
 
 # Active span stack (per async task / thread — contextvars are copied across anyio.to_thread
 # and task spawns, so nesting works through the worker-thread eval too).
-_stack: contextvars.ContextVar[tuple] = contextvars.ContextVar("autornd_spans", default=())
+_stack: contextvars.ContextVar[tuple] = contextvars.ContextVar("LOOPLAB_spans", default=())
 
 def _init_otel():  # pragma: no cover - exercised only with the [otel] extra installed
     """Return an OpenTelemetry tracer if the SDK is installed, configuring an OTLP exporter
@@ -53,7 +53,7 @@ def _init_otel():  # pragma: no cover - exercised only with the [otel] extra ins
                 from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
                 from opentelemetry.sdk.resources import Resource
                 from opentelemetry.sdk.trace.export import BatchSpanProcessor
-                provider = TracerProvider(resource=Resource.create({"service.name": "autornd"}))
+                provider = TracerProvider(resource=Resource.create({"service.name": "looplab"}))
                 provider.add_span_processor(BatchSpanProcessor(OTLPSpanExporter()))
                 _otrace.set_tracer_provider(provider)
     except Exception:  # noqa: BLE001 - SDK present but mis-wired -> fall through to the check
@@ -64,7 +64,7 @@ def _init_otel():  # pragma: no cover - exercised only with the [otel] extra ins
     try:
         from opentelemetry.sdk.trace import TracerProvider
         if isinstance(_otrace.get_tracer_provider(), TracerProvider):
-            return _otrace.get_tracer("autornd")
+            return _otrace.get_tracer("looplab")
     except Exception:  # noqa: BLE001 - sdk not installed -> no real provider possible
         pass
     return None

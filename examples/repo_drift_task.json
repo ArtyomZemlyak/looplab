@@ -1,4 +1,4 @@
-{
+﻿{
   "kind": "repo",
   "id": "repo_drift_example",
   "goal": "tune config.json to maximize the eval metric (max at x=3), drift-checked",
@@ -13,5 +13,5 @@
     "drift_tolerance": 1e-6,
     "timeout": 60
   },
-  "_note": "Phase 4 ratify_freeze_drift: the trusted metric is read from metrics.json (a file the agent's code could forge), and an INDEPENDENT cross_check re-reads it from the real process stdout. If they disagree, the metric is discarded and a spec_drift event is recorded. Run with AUTORND_EVAL_TRUST_MODE=ratify_freeze_drift."
+  "_note": "Phase 4 ratify_freeze_drift: the trusted metric is read from metrics.json (a file the agent's code could forge), and an INDEPENDENT cross_check re-reads it from the real process stdout. If they disagree, the metric is discarded and a spec_drift event is recorded. Run with LOOPLAB_EVAL_TRUST_MODE=ratify_freeze_drift."
 }

@@ -1,4 +1,4 @@
-# AutoRND — Concrete Build Decisions (frameworks & libraries)
+﻿# LoopLab — Concrete Build Decisions (frameworks & libraries)
 
 **Version:** 0.1 · **Date:** 2026-06-21
 **Companion docs:** [00-INDEX.md](00-INDEX.md) · [01-product-design.md](01-product-design.md) · [02-architecture.md](02-architecture.md) · [03-decisions.md](03-decisions.md) · [04-file-layout.md](04-file-layout.md) · research basis: [autoresearch-systems-exploration.md](autoresearch-systems-exploration.md)
@@ -212,7 +212,7 @@ Guidance lives in a Skill (ADR-9, procedural tier): *prefer grep/glob/read for e
 
 **Decision — the core is an importable Python package + a thin Typer CLI, executed as a local long-lived *process* (not a server), and it is NOT built on any agent-orchestration framework.** The engine is our own code: a control loop on **anyio** structured concurrency, state as the **files-as-truth event log** (resume = replay; ADR-1/12), DI from **pydantic-settings** (ADR-11).
 
-- **Script/server:** run like `pytest`/`git` — `autornd run task.yaml` spawns one async orchestrator process per run (which spawns sandboxed experiment subprocesses + per-thread git worktrees). **No server is required.** Servers exist only as optional *peripheral projections*: the later web-UI FastAPI (reads files) and the MCP capability servers (local tool processes, streamable-HTTP). The engine core never needs one.
+- **Script/server:** run like `pytest`/`git` — `LoopLab run task.yaml` spawns one async orchestrator process per run (which spawns sandboxed experiment subprocesses + per-thread git worktrees). **No server is required.** Servers exist only as optional *peripheral projections*: the later web-UI FastAPI (reads files) and the MCP capability servers (local tool processes, streamable-HTTP). The engine core never needs one.
 - **Tree/search logic = our `SearchPolicy`** (greedy tree + gated merge) over an in-memory **DAG that is a fold of the event log** — plain Python data structures (+ `networkx` only for lineage graph ops, since `parent_ids` is an adjacency list). Not a framework graph engine.
 - **Agent/role logic = our `Researcher`/`Developer`/`Operators`/`Evaluator`**, each calling a pluggable backend (LLM via LiteLLM, or an external coding-agent CLI via `RoleBackend`, ADR-7); native tool calling is the channel (ADR-14).
 

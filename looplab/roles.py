@@ -1,4 +1,4 @@
-"""Role backends (I5, ADR-7). `Researcher` proposes an Idea (params to try);
+﻿"""Role backends (I5, ADR-7). `Researcher` proposes an Idea (params to try);
 `Developer` turns an Idea into runnable code. Both are Protocols so an LLM-backed
 or external-coding-agent backend drops in with zero orchestrator change.
 
@@ -46,9 +46,9 @@ loss = (x - 3.0) ** 2 + (y + 1.0) ** 2
 noise = {noise}
 if noise:
     # Seeded eval noise: lets the multi-seed confirmation phase (I12) measure
-    # variance. AUTORND_EVAL_SEED is unset (-> "0") during normal evaluation, so
+    # variance. LOOPLAB_EVAL_SEED is unset (-> "0") during normal evaluation, so
     # search stays deterministic; the confirm phase varies it across seeds.
-    rng = random.Random(int(os.environ.get("AUTORND_EVAL_SEED", "0")))
+    rng = random.Random(int(os.environ.get("LOOPLAB_EVAL_SEED", "0")))
     loss += rng.gauss(0.0, noise)
 print(json.dumps({{"metric": loss}}))
 '''

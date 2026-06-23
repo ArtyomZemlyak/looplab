@@ -1,4 +1,4 @@
-"""Items #4 (workspace fingerprint + resume drift) and #6 (event-envelope version + failure
+﻿"""Items #4 (workspace fingerprint + resume drift) and #6 (event-envelope version + failure
 taxonomy)."""
 from __future__ import annotations
 
@@ -6,11 +6,11 @@ import sys
 
 import anyio
 
-from autornd.eventstore import EventStore
-from autornd.orchestrator import Engine, _dir_fingerprint
-from autornd.policy import GreedyTree
-from autornd.repo_task import EvalSpec, RepoTask
-from autornd.sandbox import SubprocessSandbox
+from looplab.eventstore import EventStore
+from looplab.orchestrator import Engine, _dir_fingerprint
+from looplab.policy import GreedyTree
+from looplab.repo_task import EvalSpec, RepoTask
+from looplab.sandbox import SubprocessSandbox
 
 _M = {"kind": "stdout_json", "key": "metric"}
 

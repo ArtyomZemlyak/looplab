@@ -1,4 +1,4 @@
-"""RepoTask (kind="repo", ADR-7): the R&D agent works inside an EXISTING repo — it edits
+﻿"""RepoTask (kind="repo", ADR-7): the R&D agent works inside an EXISTING repo — it edits
 experiment code within an allow-listed surface, and success is measured by running the
 OPERATOR'S OWN eval command and reading the metric it emits. The agent never authors the
 metric (trust boundary): the eval command + its output files are task-owned and protected
@@ -191,9 +191,9 @@ class LLMOnboarder:
             code = f"def read_metric(workdir):\n    raise RuntimeError({str(e)!r})\n"
         return {
             "eval_spec": {"command": list(self.command),
-                          "metric": {"kind": "adapter", "path": "autornd_adapter.py"},
+                          "metric": {"kind": "adapter", "path": "LOOPLAB_adapter.py"},
                           "params_style": "none", "timeout": self.timeout},
-            "adapter_files": {"autornd_adapter.py": code},
+            "adapter_files": {"LOOPLAB_adapter.py": code},
             "goal": self.goal,
         }
 

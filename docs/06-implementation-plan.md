@@ -1,9 +1,9 @@
-# AutoRND — Implementation ToDo & Status
+﻿# LoopLab — Implementation ToDo & Status
 
 **Version:** 0.2 (status tracker) · **Updated:** 2026-06-22
 **Companion docs:** [00-INDEX.md](00-INDEX.md) · [01-product-design.md](01-product-design.md) · [02-architecture.md](02-architecture.md) · [03-decisions.md](03-decisions.md) · [04-file-layout.md](04-file-layout.md) · [05-build-decisions.md](05-build-decisions.md) · code: [README.md](README.md)
 
-> This was the iteration plan; it is now the **living status board**. Each item shows what's built, where it lives, and what remains. The running code is in `autornd/` (flat module set; the deeper subpackage tree below is the target shape, not yet split out).
+> This was the iteration plan; it is now the **living status board**. Each item shows what's built, where it lives, and what remains. The running code is in `LoopLab/` (flat module set; the deeper subpackage tree below is the target shape, not yet split out).
 
 **Legend:** ✅ done · 🟡 partial (note says what's missing) · ⬜ todo · 🧱 infra-seam (Protocol/stub exists; body needs external infra — daemon/lib/service)
 
@@ -126,7 +126,7 @@
 - [🟡] **I21 — Hardening** 🟡
   - [x] secret-leak scan gate + secret-masked config — `test_security.py`, `config.py`
   - [x] trust-mode sandbox tiering — `sandbox.py`
-  - [x] **HITL-as-events**: `require_approval` pauses at the final-best gate; `approval_requested`/`approval_granted` flow through the event log; `autornd approve` CLI; resume finishes — `orchestrator.py`, `cli.py`; tested `test_archive_hitl.py`
+  - [x] **HITL-as-events**: `require_approval` pauses at the final-best gate; `approval_requested`/`approval_granted` flow through the event log; `LoopLab approve` CLI; resume finishes — `orchestrator.py`, `cli.py`; tested `test_archive_hitl.py`
   - [ ] 🧱 gVisor/Sysbox escalation; [ ] ⬜ short-lived gateway tokens
 - [🟡] **I22 — Opt-in machinery + web UI** 🟡
   - [x] `EvolutionaryPolicy` + **`MCTSPolicy` (UCB1)** + `make_policy` (config-selectable: greedy/evolutionary/mcts) — `policy.py`; tested `test_tracing_altpolicy.py`
@@ -155,13 +155,13 @@ Remaining offline-buildable features, roughly by value:
 
 - [x] ~~Skills + prompt store + AGENTS.md (I18)~~ ✅ done
 - [x] ~~Diversity archive (I22)~~ ✅ done — `archive.py`
-- [x] ~~HITL-as-events (I21)~~ ✅ done — `orchestrator.py` + `autornd approve`
+- [x] ~~HITL-as-events (I21)~~ ✅ done — `orchestrator.py` + `LoopLab approve`
 - [~] ~~Textual TUI (I15)~~ — CUT
 
 - [x] ~~Git/patch path (I4)~~ ✅ done — `patch.py` (surface gate; ready for a diff-emitting backend)
 
-- [x] ~~External coding-agent backend~~ ✅ **built + LIVE-WORKING** — tool-agnostic `cli_agent.CliAgentDeveloper` + presets (opencode/aider/goose/continue), `developer_backend`/`agent_cmd` config, reuses the task brief. Tested offline with a stub agent **and live end-to-end with OpenCode 1.17.9 + local Ollama** (`python -m autornd.cli run … --developer-backend opencode`): all nodes written by the agent, evaluated, best selected.
-  - **Headless, self-contained:** `cli_agent.opencode_config()` drops an `opencode.json` (local Ollama provider, explicit `--model`) into the agent workdir, so OpenCode never fetches the external model registry — the startup fetch that the corporate proxy used to stall (the earlier "live blocked on this box" conclusion is **superseded**; it only ever hung on the registry/TUI/interactive-provider paths, all now avoided). Live test opt-in via `AUTORND_TEST_OPENCODE=1`.
+- [x] ~~External coding-agent backend~~ ✅ **built + LIVE-WORKING** — tool-agnostic `cli_agent.CliAgentDeveloper` + presets (opencode/aider/goose/continue), `developer_backend`/`agent_cmd` config, reuses the task brief. Tested offline with a stub agent **and live end-to-end with OpenCode 1.17.9 + local Ollama** (`python -m LoopLab.cli run … --developer-backend opencode`): all nodes written by the agent, evaluated, best selected.
+  - **Headless, self-contained:** `cli_agent.opencode_config()` drops an `opencode.json` (local Ollama provider, explicit `--model`) into the agent workdir, so OpenCode never fetches the external model registry — the startup fetch that the corporate proxy used to stall (the earlier "live blocked on this box" conclusion is **superseded**; it only ever hung on the registry/TUI/interactive-provider paths, all now avoided). Live test opt-in via `LOOPLAB_TEST_OPENCODE=1`.
   - **Windows fixes:** `_resolve_launcher` maps the bare `opencode` name to the real `node_modules\…\opencode.exe` (a `subprocess`-without-shell run of the npm `.cmd` shim fails with WinError 2 — this had been silently forcing the fallback on every node); subprocess capture forced to UTF-8/`errors=replace` (cp1252 reader-thread crash on agent glyphs).
   - **Output validation (NEW):** `validate.py` + `roles.ValidatingDeveloper` audit each agent output (launched / not-timed-out / produced / modified-seed / parses / emits-metric), retry the agent with the failure as feedback (`agent_max_retries`), then fall back to the in-house LLM Developer (known-good). Per-node `agent_validated` event → `node.agent_report` → surfaced in the SQLite read-model (`agent_ok`/`agent_fell_back`) and the HTML node table. Audit only; never affects selection. Config `validate_agent` (default on).
   - **Edit-surface gate (ADR-7 Rule 3) — ✅ DONE (multi-file, patch-gated):** with `agent_patch_gate` (default on) the agent runs in a **git worktree** (seed committed); afterward `git diff --cached <seed>` is gated by `patch.gate(agent_surface)` (default `["*.py"]`, reject-not-strip out-of-surface/`..`/absolute). Accepted in-surface files (solution.py + helper modules) are captured into `Node.files` (files-as-truth → resumable) and materialized into the eval/confirm workdirs by `Engine._write_node_files`; the validator adds an `edit_in_surface` check. Robust to agents that self-commit (diffs vs the seed SHA) and degrades to whole-file readback if git is missing. Verified live with OpenCode (clean in-surface single + multi-file via stub). Config `agent_patch_gate` / `agent_surface`.

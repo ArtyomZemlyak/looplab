@@ -1,4 +1,4 @@
-"""Full tracing (ADR-08): nested correlated spans into spans.jsonl (files-as-truth), bridged
+﻿"""Full tracing (ADR-08): nested correlated spans into spans.jsonl (files-as-truth), bridged
 to OpenTelemetry when present, joined to events for the UI. fold never reads spans."""
 from __future__ import annotations
 
@@ -8,13 +8,13 @@ import anyio
 import orjson
 import pytest
 
-from autornd.eventstore import EventStore
-from autornd.orchestrator import Engine
-from autornd.policy import GreedyTree
-from autornd.repo_task import EvalSpec, RepoTask
-from autornd.sandbox import SubprocessSandbox
-from autornd.tracing import JsonlSpanExporter, Tracer, current_ids
-from autornd.traceview import build_trace_view, load_spans
+from looplab.eventstore import EventStore
+from looplab.orchestrator import Engine
+from looplab.policy import GreedyTree
+from looplab.repo_task import EvalSpec, RepoTask
+from looplab.sandbox import SubprocessSandbox
+from looplab.tracing import JsonlSpanExporter, Tracer, current_ids
+from looplab.traceview import build_trace_view, load_spans
 
 _M = {"kind": "stdout_json", "key": "metric"}
 
@@ -113,7 +113,7 @@ def test_trace_json_written_and_grouped_by_node(tmp_path):
 
 def test_fold_ignores_spans(tmp_path):
     # Determinism: the read model / fold depends only on events, never on spans.
-    from autornd.replay import fold
+    from looplab.replay import fold
     anyio.run(_engine(tmp_path).run)
     run_dir = tmp_path / "run"
     s1 = fold(list(EventStore(run_dir / "events.jsonl").read_all()))

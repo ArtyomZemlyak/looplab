@@ -1,4 +1,4 @@
-# AutoRND — File Layer Structure (on-disk design)
+﻿# LoopLab — File Layer Structure (on-disk design)
 
 **Version:** 0.1 · **Date:** 2026-06-20
 **Companion docs:** [01-product-design.md](01-product-design.md) · [02-architecture.md](02-architecture.md) · [03-decisions.md](03-decisions.md) (ADR-1 UI / ADR-4 tracking) · [05-build-decisions.md](05-build-decisions.md) (concrete libs) · research basis: [autoresearch-systems-exploration.md](autoresearch-systems-exploration.md)

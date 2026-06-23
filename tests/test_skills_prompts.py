@@ -1,4 +1,4 @@
-"""I18: prompt store (hot-reload), skills (progressive disclosure), AGENTS.md."""
+﻿"""I18: prompt store (hot-reload), skills (progressive disclosure), AGENTS.md."""
 from __future__ import annotations
 
 import json
@@ -6,15 +6,15 @@ from pathlib import Path
 
 import anyio
 
-from autornd.agent import CompositeTools
-from autornd.agents_md import generate_agents_md
-from autornd.eventstore import EventStore
-from autornd.orchestrator import Engine
-from autornd.policy import GreedyTree
-from autornd.prompts import PromptStore, render
-from autornd.sandbox import SubprocessSandbox
-from autornd.skills import SkillLibrary, SkillTools
-from autornd.toytask import ToyTask
+from looplab.agent import CompositeTools
+from looplab.agents_md import generate_agents_md
+from looplab.eventstore import EventStore
+from looplab.orchestrator import Engine
+from looplab.policy import GreedyTree
+from looplab.prompts import PromptStore, render
+from looplab.sandbox import SubprocessSandbox
+from looplab.skills import SkillLibrary, SkillTools
+from looplab.toytask import ToyTask
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -62,7 +62,7 @@ def test_example_skill_loads():
 # ---- composite tools ----
 def test_composite_tools_routing(tmp_path):
     (tmp_path / "s.md").write_text("---\nname: s\ndescription: d\n---\nbody", encoding="utf-8")
-    from autornd.knowledge_tools import KnowledgeTools
+    from looplab.knowledge_tools import KnowledgeTools
     (tmp_path / "note.md").write_text("a knowledge note about trees", encoding="utf-8")
     comp = CompositeTools([KnowledgeTools(str(tmp_path)), SkillTools(str(tmp_path))])
     names = {f["function"]["name"] for f in comp.specs()}

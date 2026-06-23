@@ -1,4 +1,4 @@
-"""Engine config (I0, ADR-11). pydantic-settings: env override (AUTORND_*) over
+﻿"""Engine config (I0, ADR-11). pydantic-settings: env override (LOOPLAB_*) over
 defaults. A resolved, secret-masked snapshot is written next to each run for
 reproducibility. (No real secrets in P0, but the masking discipline is in place.)
 """
@@ -9,7 +9,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_prefix="AUTORND_", extra="ignore")
+    model_config = SettingsConfigDict(env_prefix="LOOPLAB_", extra="ignore")
 
     n_seeds: int = 3
     max_nodes: int = 8

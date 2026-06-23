@@ -1,4 +1,4 @@
-"""Engine / control loop (I6, ADR-12/18). anyio structured concurrency:
+﻿"""Engine / control loop (I6, ADR-12/18). anyio structured concurrency:
 node *creation* is sequential & deterministic; node *evaluation* fans out under a
 CapacityLimiter. State is always a fresh fold of the log (files-as-truth); resume
 is just re-entering this loop on an existing run dir — pending nodes get re-evaluated
@@ -302,7 +302,7 @@ class Engine:
                 if not state.spec_approval_requested:
                     self.store.append("spec_approval_requested",
                                       {"eval": state.proposed_spec.get("eval_spec")})
-                break  # pause for `autornd approve` (ratify_freeze)
+                break  # pause for `LoopLab approve` (ratify_freeze)
             if self.onboarder is not None and not self._spec_activated:
                 self._activate_spec(state.proposed_spec)
             # Drift coverage (#8): ratify_freeze_drift only corroborates the metric if a
@@ -684,7 +684,7 @@ class Engine:
                 # (events<->spans UI join), consistent with the _evaluate path.
                 with self.tracer.span("confirm_seed", new_trace=True, node_id=nd.id, seed=s):
                     res = await anyio.to_thread.run_sync(
-                        self._run_eval, nd, str(workdir), {"AUTORND_EVAL_SEED": str(s)}, "full",
+                        self._run_eval, nd, str(workdir), {"LOOPLAB_EVAL_SEED": str(s)}, "full",
                     )
                     valid = res.metric is not None and res.exit_code == 0 and not res.timed_out
                     async with self._write_lock:            # confirm-seed eval cost (#2) + memo (#0)

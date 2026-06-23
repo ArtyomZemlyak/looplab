@@ -1,4 +1,4 @@
-# ADR-08 — Tracing / observability architecture
+﻿# ADR-08 — Tracing / observability architecture
 
 ## Status
 Accepted (2026-06-22). Supersedes the I14 "stub span exporter" note.
@@ -62,5 +62,5 @@ Nested spans with status (OK/ERROR + recorded exception) and attributes:
 ## Consequences
 - Default run dir now also has `spans.jsonl` and `trace.json`; `tree.html` renders the per-node
   span tree, failure reason, eval time, and infeasibility.
-- `pip install autornd[otel]` + `OTEL_EXPORTER_OTLP_ENDPOINT` → live traces in any collector.
+- `pip install LoopLab[otel]` + `OTEL_EXPORTER_OTLP_ENDPOINT` → live traces in any collector.
 - A future React UI consumes `trace.json` (+ the SQLite read model) with no engine coupling.

@@ -1,4 +1,4 @@
-"""I2: OpenAI-compatible client against a mock HTTP server (offline, deterministic).
+﻿"""I2: OpenAI-compatible client against a mock HTTP server (offline, deterministic).
 Verifies tool-call parsing, the text/JSON fallback path, and <think> stripping."""
 from __future__ import annotations
 
@@ -8,9 +8,9 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import pytest
 
-from autornd.llm import OpenAICompatibleClient
-from autornd.models import Idea
-from autornd.parse import parse_structured
+from looplab.llm import OpenAICompatibleClient
+from looplab.models import Idea
+from looplab.parse import parse_structured
 
 
 class _Handler(BaseHTTPRequestHandler):

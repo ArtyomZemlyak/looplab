@@ -1,6 +1,6 @@
-# AutoRND — working-loop implementation
+﻿# LoopLab — working-loop implementation
 
-A runnable slice of the [AutoRND](00-INDEX.md) design: the **autonomous search loop**
+A runnable slice of the [LoopLab](00-INDEX.md) design: the **autonomous search loop**
 plus the result-moving levers and the knowledge/trust seams. It drafts → runs candidates
 in a sandbox → evaluates → improves the best → **merges** top candidates → repeats, with
 the **event log as the source of truth** and **crash-resume by replay**. Runs fully
@@ -23,20 +23,20 @@ Windows, works on the RTX 5090; SGLang has no native-Windows path — it needs W
 
 ```bash
 ollama pull qwen3:8b
-python -m autornd.cli smoke                                   # verify endpoint + tool-calling
-python -m autornd.cli run examples/toy_task.json --backend llm --max-nodes 6
+python -m LoopLab.cli smoke                                   # verify endpoint + tool-calling
+python -m LoopLab.cli run examples/toy_task.json --backend llm --max-nodes 6
 ```
 
 With `--backend llm`, Qwen3-8B reasons about the objective and refines params
 gradient-descent-style toward the optimum — the engine, sandbox, policy, and event log
-are all unchanged (only the role backend swaps, per ADR-7). Config: `AUTORND_BACKEND=llm`,
-`AUTORND_LLM_MODEL`, `AUTORND_LLM_BASE_URL`. For SGLang instead, point `llm_base_url` at
+are all unchanged (only the role backend swaps, per ADR-7). Config: `LOOPLAB_BACKEND=llm`,
+`LOOPLAB_LLM_MODEL`, `LOOPLAB_LLM_BASE_URL`. For SGLang instead, point `llm_base_url` at
 its `/v1` (run it in WSL2/Docker).
 
 ### LLM writes the code (full coding loop)
 
 ```bash
-python -m autornd.cli run examples/code_regression_task.json --backend llm --max-nodes 6
+python -m LoopLab.cli run examples/code_regression_task.json --backend llm --max-nodes 6
 ```
 
 Here the LLM is also the **Developer**: it writes a complete numpy script that reads the
@@ -50,7 +50,7 @@ run → self-repair loop.
 ### Agentic retrieval (Researcher consults a knowledge base)
 
 ```bash
-python -m autornd.cli run examples/regression_task.json --backend llm \
+python -m LoopLab.cli run examples/regression_task.json --backend llm \
     --knowledge-dir examples/knowledge --max-nodes 6
 ```
 
@@ -69,7 +69,7 @@ worktree, points it at the local Ollama endpoint, and reads the edited solution 
 tool is a preset (`opencode` / `aider` / `goose` / `continue`):
 
 ```bash
-python -m autornd.cli run examples/code_regression_task.json \
+python -m LoopLab.cli run examples/code_regression_task.json \
   --backend llm --developer-backend opencode --model qwen3:8b
 ```
 
@@ -92,7 +92,7 @@ Verified live end-to-end with **OpenCode + local Ollama**. Three things make it 
   `Node.files` (files-as-truth, resumable) and are materialized into the eval workdir.
   Toggle with `--agent-patch-gate`.
 
-AutoRND's built-in LLM Developer (writes code via Ollama, no external fetch) remains the
+LoopLab's built-in LLM Developer (writes code via Ollama, no external fetch) remains the
 zero-dependency default coding path.
 
 ### MLEBench-style held-out benchmark (`kind="mlebench"`, I20)
@@ -104,7 +104,7 @@ self-reported metric. The agent cannot overwrite the grader (asset-name protecti
 `trusted_local` it could still read the key — an accepted caveat (see `mlebench.py`).
 
 ```bash
-python -m autornd.cli run examples/mlebench_task.json   # offline templated k-NN
+python -m LoopLab.cli run examples/mlebench_task.json   # offline templated k-NN
 ```
 
 ### Work inside an existing repo (`kind="repo"`, ADR-7)
@@ -127,7 +127,7 @@ which generalizes the `solution.py`-prints-metric and mlebench-grader models.
 }
 ```
 ```bash
-python -m autornd.cli run examples/repo_task.json --backend llm --developer-backend opencode
+python -m LoopLab.cli run examples/repo_task.json --backend llm --developer-backend opencode
 ```
 
 The editable repo is mounted into each eval workdir, the agent's edits applied on top
@@ -149,22 +149,22 @@ cli_overrides`): declare a hyperparameter space and the Researcher's proposals b
                          "full":  {"overrides": ["steps=200"], "timeout": 120}} } }
 ```
 ```bash
-python -m autornd.cli run examples/repo_framework_task.json   # offline hyperparameter search
+python -m LoopLab.cli run examples/repo_framework_task.json   # offline hyperparameter search
 ```
 
 **Onboarding — let the agent figure out the eval** (`"onboard": true`): you give the
 framework's command; the agent **writes a metric adapter** for whatever tracker the repo
 uses (TensorBoard / MLflow / ClearML / a metrics file / stdout). It proposes the eval, a
-human **ratifies it once** (`autornd approve`), then it's **frozen + protected** and the
+human **ratifies it once** (`LoopLab approve`), then it's **frozen + protected** and the
 optimization loop trusts it. The trust policy is `eval_trust_mode`: `ratify_freeze`
 (default — pause for approval), `autonomous` (no gate), or `ratify_freeze_drift`.
 
 ```bash
-python -m autornd.cli run examples/repo_onboard_task.json --backend llm \
+python -m LoopLab.cli run examples/repo_onboard_task.json --backend llm \
   --developer-backend opencode --model qwen3:8b
 # run pauses with a proposed eval+adapter; review it, then:
-python -m autornd.cli approve runs/run_local
-python -m autornd.cli resume runs/run_local --task-file examples/repo_onboard_task.json
+python -m LoopLab.cli approve runs/run_local
+python -m LoopLab.cli resume runs/run_local --task-file examples/repo_onboard_task.json
 ```
 
 Writing the adapter code is the **Developer's** job; the **Researcher** proposes the spec
@@ -180,7 +180,7 @@ The sandbox tier is chosen by **trust mode**, not environment:
   run here.
 - **`untrusted`** (hosted / web-UI / multi-tenant): `DockerSandbox` (`--network none` →
   gVisor) — a real boundary, required only when executing code on infra that must protect
-  other users. Set `AUTORND_TRUST_MODE=untrusted`.
+  other users. Set `LOOPLAB_TRUST_MODE=untrusted`.
 
 So **Docker becomes necessary only for the hosted/UI scenario that serves untrusted
 code — never for the local CLI.**
@@ -189,13 +189,13 @@ code — never for the local CLI.**
 
 ```bash
 pip install -e .                       # or: pip install pydantic pydantic-settings orjson anyio typer
-python -m autornd.cli run examples/toy_task.json --out runs/demo --max-nodes 14
-python -m autornd.cli inspect runs/demo          # config snapshot + best result
-python -m autornd.cli replay  runs/demo          # pure fold of the event log -> state
+python -m LoopLab.cli run examples/toy_task.json --out runs/demo --max-nodes 14
+python -m LoopLab.cli inspect runs/demo          # config snapshot + best result
+python -m LoopLab.cli replay  runs/demo          # pure fold of the event log -> state
 
 # A real ML task: polynomial degree + ridge model selection via 5-fold CV.
 # The loop discovers the right model complexity (true degree 2) from a profiled dataset.
-python -m autornd.cli run examples/regression_task.json --out runs/reg --max-nodes 14
+python -m LoopLab.cli run examples/regression_task.json --out runs/reg --max-nodes 14
 ```
 
 Open `runs/demo/tree.html` for the static lineage view.
@@ -203,9 +203,9 @@ Open `runs/demo/tree.html` for the static lineage view.
 ### Crash & resume (the keystone)
 
 ```bash
-python -m autornd.cli run examples/toy_task.json --out runs/c --max-nodes 12 --crash-after 3
+python -m LoopLab.cli run examples/toy_task.json --out runs/c --max-nodes 12 --crash-after 3
 #   -> hard-exits (code 137) mid-run, like kill -9
-python -m autornd.cli resume runs/c --task-file examples/toy_task.json --max-nodes 12
+python -m LoopLab.cli resume runs/c --task-file examples/toy_task.json --max-nodes 12
 #   -> replays the log, continues from the exact frontier, finishes; no duplicate/lost work
 ```
 

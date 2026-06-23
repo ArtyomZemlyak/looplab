@@ -1,4 +1,4 @@
-"""I4: unified-diff path extraction, the out-of-surface gate (reject not strip), and
+﻿"""I4: unified-diff path extraction, the out-of-surface gate (reject not strip), and
 git apply."""
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ import subprocess
 
 import pytest
 
-from autornd.patch import apply_patch, changed_paths, gate
+from looplab.patch import apply_patch, changed_paths, gate
 
 _DIFF = """\
 diff --git a/solution.py b/solution.py

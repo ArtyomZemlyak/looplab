@@ -1,4 +1,4 @@
-"""RepoTask Phase 2 — framework mode: cli_overrides (Researcher params -> CLI overrides,
+﻿"""RepoTask Phase 2 — framework mode: cli_overrides (Researcher params -> CLI overrides,
 no code edits) and eval profiles (smoke/full; confirm forces full)."""
 from __future__ import annotations
 
@@ -7,12 +7,12 @@ from pathlib import Path
 
 import anyio
 
-from autornd.command_eval import build_command
-from autornd.models import Idea
-from autornd.orchestrator import Engine
-from autornd.policy import GreedyTree
-from autornd.repo_task import EvalSpec, RepoParamResearcher, RepoTask
-from autornd.sandbox import SubprocessSandbox
+from looplab.command_eval import build_command
+from looplab.models import Idea
+from looplab.orchestrator import Engine
+from looplab.policy import GreedyTree
+from looplab.repo_task import EvalSpec, RepoParamResearcher, RepoTask
+from looplab.sandbox import SubprocessSandbox
 
 FIXTURE = Path(__file__).resolve().parent / "fixtures" / "repo_fixture"
 

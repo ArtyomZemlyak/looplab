@@ -1,4 +1,4 @@
-"""Regression tests for the /code-review findings fixed in the RepoTask feature."""
+﻿"""Regression tests for the /code-review findings fixed in the RepoTask feature."""
 from __future__ import annotations
 
 import json
@@ -8,14 +8,14 @@ from pathlib import Path
 import anyio
 import pytest
 
-from autornd.command_eval import build_command, run_command_eval
-from autornd.config import Settings
-from autornd.models import Idea
-from autornd.orchestrator import Engine
-from autornd.policy import GreedyTree
-from autornd.repo_task import EvalSpec, NoOpRepoDeveloper, RepoTask
-from autornd.sandbox import SubprocessSandbox
-from autornd.tasks import make_roles
+from looplab.command_eval import build_command, run_command_eval
+from looplab.config import Settings
+from looplab.models import Idea
+from looplab.orchestrator import Engine
+from looplab.policy import GreedyTree
+from looplab.repo_task import EvalSpec, NoOpRepoDeveloper, RepoTask
+from looplab.sandbox import SubprocessSandbox
+from looplab.tasks import make_roles
 
 FIXTURE = Path(__file__).resolve().parent / "fixtures" / "repo_fixture"
 _M = {"kind": "stdout_json", "key": "metric"}

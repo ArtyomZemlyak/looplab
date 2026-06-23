@@ -1,4 +1,4 @@
-"""Item #5: multi-objective via extra reported metrics + hard constraints. A node that
+﻿"""Item #5: multi-objective via extra reported metrics + hard constraints. A node that
 violates a constraint stays measured but is excluded from best-selection — "optimize the
 metric subject to latency <= bound"."""
 from __future__ import annotations
@@ -7,11 +7,11 @@ import sys
 
 import anyio
 
-from autornd.command_eval import run_command_eval
-from autornd.orchestrator import Engine
-from autornd.policy import GreedyTree
-from autornd.repo_task import EvalSpec, RepoTask
-from autornd.sandbox import SubprocessSandbox
+from looplab.command_eval import run_command_eval
+from looplab.orchestrator import Engine
+from looplab.policy import GreedyTree
+from looplab.repo_task import EvalSpec, RepoTask
+from looplab.sandbox import SubprocessSandbox
 
 _M = {"kind": "stdout_json", "key": "metric"}
 _LAT = {"kind": "stdout_json", "key": "latency"}

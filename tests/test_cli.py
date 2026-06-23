@@ -1,4 +1,4 @@
-"""CLI surface (Typer) smoke tests — catch broken option wiring that unit tests miss
+﻿"""CLI surface (Typer) smoke tests — catch broken option wiring that unit tests miss
 (e.g. an option assigned to a non-existent Settings field)."""
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ from pathlib import Path
 
 from typer.testing import CliRunner
 
-from autornd.cli import app
+from looplab.cli import app
 
 ROOT = Path(__file__).resolve().parents[1]
 runner = CliRunner()

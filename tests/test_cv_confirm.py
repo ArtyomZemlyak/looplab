@@ -1,10 +1,10 @@
-"""I8 consistent-CV harness + I12 multi-seed top-k confirmation."""
+﻿"""I8 consistent-CV harness + I12 multi-seed top-k confirmation."""
 from __future__ import annotations
 
-from autornd.confirm import confirm_top_k
-from autornd.cv import (consistent_cv, cv_summary, kfold_indices,
+from looplab.confirm import confirm_top_k
+from looplab.cv import (consistent_cv, cv_summary, kfold_indices,
                         purged_walk_forward)
-from autornd.models import Idea, Node, NodeStatus
+from looplab.models import Idea, Node, NodeStatus
 
 
 # ------------------------------- I8 CV ------------------------------------- #

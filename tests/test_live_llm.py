@@ -1,4 +1,4 @@
-"""Live LLM integration (I2 go-live). Auto-skips unless a local Ollama with the
+﻿"""Live LLM integration (I2 go-live). Auto-skips unless a local Ollama with the
 target model is reachable, so the default suite stays offline. When the model is
 present, this drives the *real* loop with the LLM as the Researcher."""
 from __future__ import annotations
@@ -9,11 +9,11 @@ import urllib.request
 import anyio
 import pytest
 
-from autornd.config import Settings
-from autornd.orchestrator import Engine
-from autornd.policy import GreedyTree
-from autornd.sandbox import SubprocessSandbox
-from autornd.tasks import load_task, make_roles
+from looplab.config import Settings
+from looplab.orchestrator import Engine
+from looplab.policy import GreedyTree
+from looplab.sandbox import SubprocessSandbox
+from looplab.tasks import load_task, make_roles
 
 MODEL = "qwen3:8b"
 
@@ -59,8 +59,8 @@ def test_live_agentic_researcher(tmp_path):
     s.knowledge_dir = str(ROOT / "examples" / "knowledge")
     task = load_task(ROOT / "examples" / "regression_task.json")
     researcher, _ = make_roles(task, s)
-    from autornd.agent import ToolUsingResearcher
-    from autornd.models import RunState
+    from looplab.agent import ToolUsingResearcher
+    from looplab.models import RunState
     assert isinstance(researcher, ToolUsingResearcher)
     idea = researcher.propose(RunState(goal=task.goal, direction="min"), None)
     assert 0.0 <= idea.params.get("degree", 0.0) <= 6.0  # valid, in-bounds Idea
@@ -74,8 +74,8 @@ def test_live_researcher_with_skills(tmp_path):
     s.skills_dir = str(ROOT / "examples" / "skills")
     task = load_task(ROOT / "examples" / "regression_task.json")
     researcher, _ = make_roles(task, s)
-    from autornd.agent import CompositeTools, ToolUsingResearcher
-    from autornd.models import RunState
+    from looplab.agent import CompositeTools, ToolUsingResearcher
+    from looplab.models import RunState
     assert isinstance(researcher, ToolUsingResearcher)
     assert isinstance(researcher.tools, CompositeTools)
     idea = researcher.propose(RunState(goal=task.goal, direction="min"), None)

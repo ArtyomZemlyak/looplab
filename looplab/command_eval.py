@@ -1,4 +1,4 @@
-"""Command-based evaluation (RepoTask, ADR-7) — generalizes the solution.py-prints-metric
+﻿"""Command-based evaluation (RepoTask, ADR-7) — generalizes the solution.py-prints-metric
 model into "run an operator-declared command in a workdir, then read a metric from a
 declared source". The metric reader is pluggable:
 
@@ -76,7 +76,7 @@ def read_metric(stdout: str, workdir: str, spec: dict, wrap=None) -> Optional[fl
         # float, for an arbitrary tracker (TensorBoard/ClearML/custom). Run as a SUBPROCESS
         # in the workdir (not in-process) so it inherits the same timeout/tree-kill harness
         # and can't hang or crash the orchestrator; its printed metric is parsed back.
-        rel = spec.get("path", "autornd_adapter.py")
+        rel = spec.get("path", "LOOPLAB_adapter.py")
         if not (Path(workdir) / rel).is_file():
             return None
         runner = ("import json, runpy; "

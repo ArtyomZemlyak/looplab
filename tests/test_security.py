@@ -1,4 +1,4 @@
-"""I21/ADR-11 + ADR-13: secret-leak gate and trust-mode sandbox selection."""
+﻿"""I21/ADR-11 + ADR-13: secret-leak gate and trust-mode sandbox selection."""
 from __future__ import annotations
 
 import json
@@ -7,11 +7,11 @@ from pathlib import Path
 import anyio
 import pytest
 
-from autornd.config import Settings
-from autornd.orchestrator import Engine
-from autornd.policy import GreedyTree
-from autornd.sandbox import DockerSandbox, SubprocessSandbox, make_sandbox
-from autornd.toytask import ToyTask
+from looplab.config import Settings
+from looplab.orchestrator import Engine
+from looplab.policy import GreedyTree
+from looplab.sandbox import DockerSandbox, SubprocessSandbox, make_sandbox
+from looplab.toytask import ToyTask
 
 ROOT = Path(__file__).resolve().parents[1]
 TASK_FILE = ROOT / "examples" / "toy_task.json"
@@ -37,7 +37,7 @@ def test_untrusted_builds_docker_argv(monkeypatch, tmp_path):
     # scratch workdir bind-mounted; capture the argv via a stubbed runner (no real docker).
     import shutil
 
-    import autornd.sandbox as sb
+    import looplab.sandbox as sb
     monkeypatch.setattr(shutil, "which", lambda _x: "/usr/bin/docker")
     seen = {}
 
@@ -63,7 +63,7 @@ def test_unknown_trust_mode_rejected():
 
 def test_secret_is_masked_and_never_persisted(tmp_path, monkeypatch):
     secret = "sk-TESTSECRET-DEADBEEF-d0n0tle4k"
-    monkeypatch.setenv("AUTORND_LLM_API_KEY", secret)
+    monkeypatch.setenv("LOOPLAB_LLM_API_KEY", secret)
 
     s = Settings()
     assert s.llm_api_key is not None

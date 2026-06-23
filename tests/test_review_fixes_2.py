@@ -1,4 +1,4 @@
-"""Regression tests for the second code-review round (feasibility gate, NaN metrics, tracing)."""
+﻿"""Regression tests for the second code-review round (feasibility gate, NaN metrics, tracing)."""
 from __future__ import annotations
 
 import sys
@@ -6,13 +6,13 @@ import sys
 import anyio
 import orjson
 
-from autornd.command_eval import _drift, run_command_eval
-from autornd.models import Idea, Node, NodeStatus, RunState
-from autornd.orchestrator import Engine
-from autornd.policy import GreedyTree
-from autornd.repo_task import EvalSpec, RepoTask
-from autornd.sandbox import SubprocessSandbox, _parse_metric
-from autornd.tracing import JsonlSpanExporter, Tracer
+from looplab.command_eval import _drift, run_command_eval
+from looplab.models import Idea, Node, NodeStatus, RunState
+from looplab.orchestrator import Engine
+from looplab.policy import GreedyTree
+from looplab.repo_task import EvalSpec, RepoTask
+from looplab.sandbox import SubprocessSandbox, _parse_metric
+from looplab.tracing import JsonlSpanExporter, Tracer
 
 _M = {"kind": "stdout_json", "key": "metric"}
 _LAT = {"kind": "stdout_json", "key": "latency"}
@@ -80,7 +80,7 @@ def test_span_error_status(tmp_path):
 
 # #9 — confirm events are correlated to their span (carry a trace_id)
 def test_confirm_events_carry_trace_id(tmp_path):
-    from autornd.eventstore import EventStore
+    from looplab.eventstore import EventStore
     repo = tmp_path / "repo"; repo.mkdir()
     (repo / "run.py").write_text('import json; print(json.dumps({"metric": 1.0}))\n',
                                  encoding="utf-8")
@@ -99,7 +99,7 @@ def test_confirm_events_carry_trace_id(tmp_path):
 # #8 — large data/ref mounts use a cheap shallow fingerprint (no recursive walk), still
 # catching top-level add/remove; missing path -> "absent".
 def test_shallow_fingerprint(tmp_path):
-    from autornd.orchestrator import _shallow_fingerprint
+    from looplab.orchestrator import _shallow_fingerprint
     d = tmp_path / "data"; d.mkdir()
     (d / "a.bin").write_text("x", encoding="utf-8")
     fp1 = _shallow_fingerprint(str(d))
@@ -111,7 +111,7 @@ def test_shallow_fingerprint(tmp_path):
 
 # live-surfaced bug — the agentic Researcher must survive a junk emit (non-numeric params)
 def test_tool_researcher_finalize_drops_nonnumeric_params():
-    from autornd.agent import ToolUsingResearcher
+    from looplab.agent import ToolUsingResearcher
     r = ToolUsingResearcher(client=None, tools=None, bounds=None)
     # the live model returned this and crashed the run before the fix
     idea = r._finalize({"operator": "modify_metric", "params": {"new_metric": "linear"},
@@ -125,6 +125,6 @@ def test_tool_researcher_finalize_drops_nonnumeric_params():
 
 # latent fix — both sandbox tiers tolerate tier-specific kwargs (symmetry)
 def test_make_sandbox_tolerates_extra_kwargs():
-    from autornd.sandbox import SubprocessSandbox, make_sandbox
+    from looplab.sandbox import SubprocessSandbox, make_sandbox
     s = make_sandbox("trusted_local", image="ignored", max_output_bytes=1000)
     assert isinstance(s, SubprocessSandbox) and s.max_output_bytes == 1000

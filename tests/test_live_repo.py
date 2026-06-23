@@ -1,4 +1,4 @@
-"""Live RepoTask integration over Ollama (auto-skips without it). Covers the live paths the
+﻿"""Live RepoTask integration over Ollama (auto-skips without it). Covers the live paths the
 offline suite can't: the LLM hyperparameter Researcher over a real framework (P2), live
 onboarding where the Developer WRITES the metric adapter (P3), and the agentic Researcher
 reading the editable repo via RepoTools (#3)."""
@@ -12,13 +12,13 @@ from pathlib import Path
 import anyio
 import pytest
 
-from autornd.config import Settings
-from autornd.models import RunState
-from autornd.orchestrator import Engine
-from autornd.policy import GreedyTree
-from autornd.repo_task import EvalSpec, RepoTask
-from autornd.sandbox import SubprocessSandbox
-from autornd.tasks import make_roles
+from looplab.config import Settings
+from looplab.models import RunState
+from looplab.orchestrator import Engine
+from looplab.policy import GreedyTree
+from looplab.repo_task import EvalSpec, RepoTask
+from looplab.sandbox import SubprocessSandbox
+from looplab.tasks import make_roles
 
 MODEL = "qwen3:8b"
 FIXTURE = Path(__file__).resolve().parent / "fixtures" / "repo_fixture"
@@ -77,7 +77,7 @@ def test_live_onboarding_writes_adapter_and_runs(tmp_path):
     state = anyio.run(eng.run)
     assert state.spec_confirmed and state.finished          # adapter proposed, frozen, run done
     # the frozen adapter was written into the workspace as a protected asset
-    assert "autornd_adapter.py" in eng._repo_spec.get("protected_names", [])
+    assert "LOOPLAB_adapter.py" in eng._repo_spec.get("protected_names", [])
 
 
 def test_live_repotools_researcher_reads_repo(tmp_path):
@@ -87,8 +87,8 @@ def test_live_repotools_researcher_reads_repo(tmp_path):
                  editable_path=str(FIXTURE), edit_surface=["*.json"], protect=["ttrain.py"],
                  eval=EvalSpec(command=[sys.executable, "ttrain.py"], metric=_M))
     researcher, _ = make_roles(t, _llm())
-    from autornd.agent import ToolUsingResearcher
-    from autornd.knowledge_tools import RepoTools
+    from looplab.agent import ToolUsingResearcher
+    from looplab.knowledge_tools import RepoTools
     assert isinstance(researcher, ToolUsingResearcher)
     provs = getattr(researcher.tools, "providers", [researcher.tools])
     assert any(isinstance(p, RepoTools) for p in provs)     # repo is readable by the proposer

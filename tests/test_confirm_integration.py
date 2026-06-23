@@ -1,15 +1,15 @@
-"""I12 integration: the orchestrator-wired multi-seed confirmation phase."""
+﻿"""I12 integration: the orchestrator-wired multi-seed confirmation phase."""
 from __future__ import annotations
 
 import anyio
 
-from autornd.eventstore import EventStore
-from autornd.orchestrator import Engine
-from autornd.policy import GreedyTree
-from autornd.replay import fold
-from autornd.roles import ToyObjectiveDeveloper, ToyResearcher
-from autornd.sandbox import SubprocessSandbox
-from autornd.toytask import ToyTask
+from looplab.eventstore import EventStore
+from looplab.orchestrator import Engine
+from looplab.policy import GreedyTree
+from looplab.replay import fold
+from looplab.roles import ToyObjectiveDeveloper, ToyResearcher
+from looplab.sandbox import SubprocessSandbox
+from looplab.toytask import ToyTask
 
 
 def _noisy_engine(run_dir, *, confirm_top_k, confirm_seeds, max_nodes=10):

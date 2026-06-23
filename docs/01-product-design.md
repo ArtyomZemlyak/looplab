@@ -1,4 +1,4 @@
-# AutoRND — Product & Design Specification
+﻿# LoopLab — Product & Design Specification
 
 **Version:** 0.1 (design) · **Date:** 2026-06-20
 **Companion docs:** [02-architecture.md](02-architecture.md) · [03-decisions.md](03-decisions.md) · [04-file-layout.md](04-file-layout.md) · [05-build-decisions.md](05-build-decisions.md) · **Research basis:** [autoresearch-systems-exploration.md](autoresearch-systems-exploration.md)
@@ -9,9 +9,9 @@
 
 ## 1. Vision & one-line pitch
 
-> **AutoRND turns a measurable ML/DS goal into a self-running research program.** It runs many experiment threads, searches the space of code solutions, and only promotes results that survive an adversarial, variance-aware evaluator — so the answer it hands back is real, not a lucky run or a benchmark exploit.
+> **LoopLab turns a measurable ML/DS goal into a self-running research program.** It runs many experiment threads, searches the space of code solutions, and only promotes results that survive an adversarial, variance-aware evaluator — so the answer it hands back is real, not a lucky run or a benchmark exploit.
 
-The differentiator vs everything surveyed: existing OSS systems each hold *one* piece — AIDE has tree search, R&D-Agent has dual-agent + per-role routing, MLE-STAR has ablation-refinement + ensembling + a leakage checker, AIRA has the operators-beat-policy + consistent-evaluation findings, Karpathy's `autoresearch` has the minimal loop. **No open system combines the result-moving techniques (rich operators + ensembling + leakage-safe consistent evaluation) with backend flexibility (local + API), reproducible event-log lineage, and per-role routing.** AutoRND aims at that combination.
+The differentiator vs everything surveyed: existing OSS systems each hold *one* piece — AIDE has tree search, R&D-Agent has dual-agent + per-role routing, MLE-STAR has ablation-refinement + ensembling + a leakage checker, AIRA has the operators-beat-policy + consistent-evaluation findings, Karpathy's `autoresearch` has the minimal loop. **No open system combines the result-moving techniques (rich operators + ensembling + leakage-safe consistent evaluation) with backend flexibility (local + API), reproducible event-log lineage, and per-role routing.** LoopLab aims at that combination.
 
 > **⚑ 2026 re-prioritization ([ADR-6](03-decisions.md)).** A fresh SOTA review changed where we claim an edge: **we differentiate on operators, evaluation rigor, ensembling, and temporal/target-leakage safety — not on a hardened evaluator or fancy search.** Our honest position: *better* than the field on **trust/reproducibility/backend-portability/leakage-safety**; *competitive on raw results only if* we ship the high-ROI operators above (we are not claiming raw MLE-bench SOTA). See [ADR-6](03-decisions.md).
 
@@ -198,7 +198,7 @@ Concrete capabilities the system must expose (interfaces detailed in the archite
 
 ---
 
-## 9. Success metrics (how we know AutoRND is good)
+## 9. Success metrics (how we know LoopLab is good)
 
 1. **Benchmark strength** — medal rate on a held-out MLE-bench subset; should be in AIDE→R&D-Agent range and improve with the evaluator/archive on.
 2. **Trust** — % of promoted results that reproduce on a fresh seed/machine (target ≥95%); number of reward-hacks caught vs leaked.

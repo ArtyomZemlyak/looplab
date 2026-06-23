@@ -1,4 +1,4 @@
-"""RepoTask (kind="repo", ADR-7): command-based eval with pluggable metric readers,
+﻿"""RepoTask (kind="repo", ADR-7): command-based eval with pluggable metric readers,
 workspace mount of an existing repo, eval-file protection, and an end-to-end engine run
 where an agent edits the repo and the OPERATOR's command/metric scores it."""
 from __future__ import annotations
@@ -9,13 +9,13 @@ from pathlib import Path
 
 import anyio
 
-from autornd.command_eval import read_metric, run_command_eval
-from autornd.models import Idea
-from autornd.orchestrator import Engine
-from autornd.policy import GreedyTree
-from autornd.repo_task import EvalSpec, RepoTask
-from autornd.sandbox import SubprocessSandbox
-from autornd.tasks import TaskAdapter, load_task
+from looplab.command_eval import read_metric, run_command_eval
+from looplab.models import Idea
+from looplab.orchestrator import Engine
+from looplab.policy import GreedyTree
+from looplab.repo_task import EvalSpec, RepoTask
+from looplab.sandbox import SubprocessSandbox
+from looplab.tasks import TaskAdapter, load_task
 
 FIXTURE = Path(__file__).resolve().parent / "fixtures" / "repo_fixture"
 
@@ -108,11 +108,11 @@ def test_engine_runs_repo_command_eval_and_protects_eval(tmp_path):
 
 
 def test_make_roles_wires_repo_agent():
-    from autornd.cli_agent import CliAgentDeveloper
-    from autornd.config import Settings
-    from autornd.repo_task import NoOpRepoDeveloper
-    from autornd.roles import ValidatingDeveloper
-    from autornd.tasks import make_roles
+    from looplab.cli_agent import CliAgentDeveloper
+    from looplab.config import Settings
+    from looplab.repo_task import NoOpRepoDeveloper
+    from looplab.roles import ValidatingDeveloper
+    from looplab.tasks import make_roles
     s = Settings()
     s.backend, s.developer_backend = "llm", "opencode"
     # monkeypatch the kind dispatch by passing the task directly
@@ -144,7 +144,7 @@ def _opencode_ready():
     import os
     import urllib.request
     oc = Path(os.environ.get("APPDATA", "")) / "npm" / "opencode.cmd"
-    if os.environ.get("AUTORND_TEST_OPENCODE") != "1" or not oc.exists():
+    if os.environ.get("LOOPLAB_TEST_OPENCODE") != "1" or not oc.exists():
         return False
     try:
         with urllib.request.urlopen("http://127.0.0.1:11434/api/tags", timeout=3) as r:
@@ -158,12 +158,12 @@ import pytest  # noqa: E402
 
 
 @pytest.mark.skipif(not _opencode_ready(),
-                    reason="set AUTORND_TEST_OPENCODE=1 with a working opencode + Ollama")
+                    reason="set LOOPLAB_TEST_OPENCODE=1 with a working opencode + Ollama")
 def test_live_opencode_edits_repo_end_to_end(tmp_path):
     # Full live path: opencode edits config.json (in-surface) of the seeded repo; the
     # operator's command/metric scores it; ttrain.py stays protected.
-    from autornd.config import Settings
-    from autornd.tasks import make_roles
+    from looplab.config import Settings
+    from looplab.tasks import make_roles
     s = Settings()
     s.backend, s.developer_backend, s.llm_model = "llm", "opencode", "qwen3:8b"
     t = _task()

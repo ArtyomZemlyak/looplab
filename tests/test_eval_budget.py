@@ -1,4 +1,4 @@
-"""Item #2: per-eval time accounting + a hard eval-compute budget that stops the silent
+﻿"""Item #2: per-eval time accounting + a hard eval-compute budget that stops the silent
 long sweep (distinct from the wall-clock max_seconds — this counts only time inside evals)."""
 from __future__ import annotations
 
@@ -6,10 +6,10 @@ import sys
 
 import anyio
 
-from autornd.orchestrator import Engine
-from autornd.policy import GreedyTree
-from autornd.repo_task import EvalSpec, RepoTask
-from autornd.sandbox import SubprocessSandbox
+from looplab.orchestrator import Engine
+from looplab.policy import GreedyTree
+from looplab.repo_task import EvalSpec, RepoTask
+from looplab.sandbox import SubprocessSandbox
 
 _M = {"kind": "stdout_json", "key": "metric"}
 

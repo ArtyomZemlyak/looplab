@@ -1,15 +1,15 @@
-"""I7: ablation-driven refinement — probe each param's impact, refine the top one."""
+﻿"""I7: ablation-driven refinement — probe each param's impact, refine the top one."""
 from __future__ import annotations
 
 from pathlib import Path
 
 import anyio
 
-from autornd.eventstore import EventStore
-from autornd.orchestrator import Engine
-from autornd.policy import GreedyTree
-from autornd.sandbox import SubprocessSandbox
-from autornd.toytask import ToyTask
+from looplab.eventstore import EventStore
+from looplab.orchestrator import Engine
+from looplab.policy import GreedyTree
+from looplab.sandbox import SubprocessSandbox
+from looplab.toytask import ToyTask
 
 ROOT = Path(__file__).resolve().parents[1]
 TASK = ROOT / "examples" / "toy_task.json"

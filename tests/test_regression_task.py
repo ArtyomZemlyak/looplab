@@ -1,18 +1,18 @@
-"""A real ML task through the engine: polynomial model selection via CV (ADR-2)."""
+﻿"""A real ML task through the engine: polynomial model selection via CV (ADR-2)."""
 from __future__ import annotations
 
 from pathlib import Path
 
 import anyio
 
-from autornd.eventstore import EventStore
-from autornd.models import Idea
-from autornd.orchestrator import Engine
-from autornd.policy import GreedyTree
-from autornd.regression import RegressionTask
-from autornd.replay import fold
-from autornd.sandbox import SubprocessSandbox
-from autornd.tasks import load_task
+from looplab.eventstore import EventStore
+from looplab.models import Idea
+from looplab.orchestrator import Engine
+from looplab.policy import GreedyTree
+from looplab.regression import RegressionTask
+from looplab.replay import fold
+from looplab.sandbox import SubprocessSandbox
+from looplab.tasks import load_task
 
 ROOT = Path(__file__).resolve().parents[1]
 REG_FILE = ROOT / "examples" / "regression_task.json"
@@ -30,7 +30,7 @@ def test_generated_solution_runs_and_cv_prefers_true_degree(tmp_path):
     generalize better (lower CV MSE) than a degree-0 underfit."""
     task = RegressionTask(seed=1, n=40, true_degree=2, noise=1.0)
     X, Y = task._data()
-    from autornd.regression import RegressionDeveloper
+    from looplab.regression import RegressionDeveloper
     dev = RegressionDeveloper(X, Y, k=5)
     sb = SubprocessSandbox()
 

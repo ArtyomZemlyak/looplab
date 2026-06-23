@@ -1,4 +1,4 @@
-"""Phase 4 drift cross-check (eval_trust_mode='ratify_freeze_drift').
+﻿"""Phase 4 drift cross-check (eval_trust_mode='ratify_freeze_drift').
 
 The threat closed here: under plain ratify_freeze the metric adapter is frozen (the agent
 can't edit it), but the agent's experiment code still RUNS as part of the eval, so it can
@@ -15,12 +15,12 @@ from pathlib import Path
 import anyio
 import pytest
 
-from autornd.command_eval import run_command_eval
-from autornd.models import Idea
-from autornd.orchestrator import Engine
-from autornd.policy import GreedyTree
-from autornd.repo_task import EvalSpec, RepoTask
-from autornd.sandbox import SubprocessSandbox
+from looplab.command_eval import run_command_eval
+from looplab.models import Idea
+from looplab.orchestrator import Engine
+from looplab.policy import GreedyTree
+from looplab.repo_task import EvalSpec, RepoTask
+from looplab.sandbox import SubprocessSandbox
 
 # A program that reports the TRUE metric on stdout but writes a FAKE (better) metrics.json —
 # i.e. a reward hack through the eval workdir.

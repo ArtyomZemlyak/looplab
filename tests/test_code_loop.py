@@ -1,4 +1,4 @@
-"""I2/I7: LLM-as-Developer coding loop — asset materialization + error-feedback debug.
+﻿"""I2/I7: LLM-as-Developer coding loop — asset materialization + error-feedback debug.
 Offline, using a fake LLM client (no model needed)."""
 from __future__ import annotations
 
@@ -7,13 +7,13 @@ from pathlib import Path
 
 import anyio
 
-from autornd.models import Idea, RunState
-from autornd.orchestrator import Engine
-from autornd.policy import GreedyTree
-from autornd.regression import CodeRegressionTask
-from autornd.replay import fold
-from autornd.roles import LLMDeveloper
-from autornd.sandbox import SubprocessSandbox
+from looplab.models import Idea, RunState
+from looplab.orchestrator import Engine
+from looplab.policy import GreedyTree
+from looplab.regression import CodeRegressionTask
+from looplab.replay import fold
+from looplab.roles import LLMDeveloper
+from looplab.sandbox import SubprocessSandbox
 
 
 # --- code extraction (fences + <think>) ---
@@ -92,7 +92,7 @@ def test_error_feedback_debug_repairs(tmp_path):
 
 
 def test_code_regression_loader_and_assets():
-    from autornd.tasks import load_task
+    from looplab.tasks import load_task
     t = load_task(Path(__file__).resolve().parents[1] / "examples" / "code_regression_task.json")
     assert t.kind == "code_regression"
     assets = t.assets()

@@ -1,12 +1,12 @@
-"""I2: structured-output parsing + auto-fallback, cost accounting, LLM role seam."""
+﻿"""I2: structured-output parsing + auto-fallback, cost accounting, LLM role seam."""
 from __future__ import annotations
 
 import pytest
 
-from autornd.llm import BudgetExceeded, CostAccountant
-from autornd.models import Idea
-from autornd.parse import ParseError, parse_structured
-from autornd.roles import LLMResearcher
+from looplab.llm import BudgetExceeded, CostAccountant
+from looplab.models import Idea
+from looplab.parse import ParseError, parse_structured
+from looplab.roles import LLMResearcher
 
 
 class FakeClient:
@@ -53,19 +53,19 @@ def test_all_parsers_fail_raises():
 def test_llm_researcher_returns_idea():
     c = FakeClient(tool=[{"operator": "improve", "params": {"x": 3.0, "y": -1.0}, "rationale": "r"}])
     r = LLMResearcher(c)
-    from autornd.models import RunState
+    from looplab.models import RunState
     idea = r.propose(RunState(goal="g"), None)
     assert isinstance(idea, Idea) and idea.params["x"] == 3.0
 
 
 def test_extract_json_ignores_trailing_braces():
-    from autornd.parse import _extract_json
+    from looplab.parse import _extract_json
     obj = _extract_json('Sure: {"operator": "draft", "params": {"x": 1.0}} note: see {y}')
     assert obj["operator"] == "draft" and obj["params"] == {"x": 1.0}
 
 
 def test_extract_code_prefers_python_fence():
-    from autornd.parse import extract_code
+    from looplab.parse import extract_code
     text = "Example output:\n```\nnot code\n```\nSolution:\n```python\nprint(1)\n```"
     assert extract_code(text) == "print(1)"
 

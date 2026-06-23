@@ -1,18 +1,18 @@
-"""I22 diversity archive + I21 HITL approval (offline)."""
+﻿"""I22 diversity archive + I21 HITL approval (offline)."""
 from __future__ import annotations
 
 from pathlib import Path
 
 import anyio
 
-from autornd.archive import DiversityArchive
-from autornd.eventstore import EventStore
-from autornd.models import Idea, Node, NodeStatus, RunState
-from autornd.orchestrator import Engine
-from autornd.policy import GreedyTree
-from autornd.replay import fold
-from autornd.sandbox import SubprocessSandbox
-from autornd.toytask import ToyTask
+from looplab.archive import DiversityArchive
+from looplab.eventstore import EventStore
+from looplab.models import Idea, Node, NodeStatus, RunState
+from looplab.orchestrator import Engine
+from looplab.policy import GreedyTree
+from looplab.replay import fold
+from looplab.sandbox import SubprocessSandbox
+from looplab.toytask import ToyTask
 
 ROOT = Path(__file__).resolve().parents[1]
 TASK = ROOT / "examples" / "toy_task.json"

@@ -1,4 +1,4 @@
-"""AutoRND — autonomous ML/DS research engine.
+﻿"""LoopLab — autonomous ML/DS research engine.
 
 This package is the **P0 working-loop slice** (iterations I0-I6 of
 ``06-implementation-plan.md`` + the I10 variance gate). It is deliberately a

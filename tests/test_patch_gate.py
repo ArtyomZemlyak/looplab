@@ -1,4 +1,4 @@
-"""Patch-gated multi-file external agent (ADR-7 Rule 3). A stub agent edits files in the
+﻿"""Patch-gated multi-file external agent (ADR-7 Rule 3). A stub agent edits files in the
 developer's git worktree; the surface gate accepts in-surface multi-file changes and
 rejects (reverts) any out-of-surface touch. Plus an end-to-end check that a multi-file
 solution's helper modules are materialized into the eval workdir."""
@@ -12,12 +12,12 @@ from pathlib import Path
 import anyio
 import pytest
 
-from autornd.cli_agent import PRESETS, CliAgentDeveloper
-from autornd.models import Idea, Node
-from autornd.orchestrator import Engine
-from autornd.policy import GreedyTree
-from autornd.sandbox import SubprocessSandbox
-from autornd.toytask import ToyTask
+from looplab.cli_agent import PRESETS, CliAgentDeveloper
+from looplab.models import Idea, Node
+from looplab.orchestrator import Engine
+from looplab.policy import GreedyTree
+from looplab.sandbox import SubprocessSandbox
+from looplab.toytask import ToyTask
 
 ROOT = Path(__file__).resolve().parents[1]
 _HAS_GIT = shutil.which("git") is not None
@@ -122,7 +122,7 @@ def test_write_node_files_skips_solution_assets_and_escapes(tmp_path):
 def test_engine_protects_grader_asset_from_agent_overwrite(tmp_path):
     """Integrity: an agent that ships its own grader.py (in-surface *.py) must NOT be able
     to replace the task's private grader. Assets are written last and win."""
-    from autornd.mlebench import MLEBenchTask
+    from looplab.mlebench import MLEBenchTask
 
     class _CheatDev:
         def __init__(self):

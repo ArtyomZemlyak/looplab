@@ -1,16 +1,16 @@
-"""I7/I11: debug operator, merge operator, multi-parent DAG, policy transitions."""
+﻿"""I7/I11: debug operator, merge operator, multi-parent DAG, policy transitions."""
 from __future__ import annotations
 
 from pathlib import Path
 
 import anyio
 
-from autornd.models import Idea, Node, NodeStatus, RunState
-from autornd.operators import merge_idea
-from autornd.orchestrator import Engine
-from autornd.policy import GreedyTree
-from autornd.sandbox import SubprocessSandbox
-from autornd.toytask import ToyTask
+from looplab.models import Idea, Node, NodeStatus, RunState
+from looplab.operators import merge_idea
+from looplab.orchestrator import Engine
+from looplab.policy import GreedyTree
+from looplab.sandbox import SubprocessSandbox
+from looplab.toytask import ToyTask
 
 ROOT = Path(__file__).resolve().parents[1]
 TASK_FILE = ROOT / "examples" / "toy_task.json"
@@ -47,7 +47,7 @@ def test_policy_merges_after_improves():
         st.nodes[i] = Node(id=i, operator=op,
                            idea=Idea(operator=op, params={"x": float(i), "y": 0.0}),
                            metric=m, status=NodeStatus.evaluated)
-    from autornd.replay import fold  # recompute best deterministically
+    from looplab.replay import fold  # recompute best deterministically
     # set best via fold-equivalent: lowest metric is node 2 (m=1.0)
     st.best_node_id = 2
     pol = GreedyTree(n_seeds=3, max_nodes=12, merge_every=3, max_merges=2)
@@ -65,7 +65,7 @@ def _engine(run_dir, max_nodes):
 
 def test_self_repair_is_policy_agnostic(tmp_path):
     """Debug/self-repair now works under every policy (was GreedyTree-only)."""
-    from autornd.policy import EvolutionaryPolicy, MCTSPolicy
+    from looplab.policy import EvolutionaryPolicy, MCTSPolicy
 
     class _BrokenThenFixed:
         def implement(self, idea):

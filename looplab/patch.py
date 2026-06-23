@@ -1,4 +1,4 @@
-"""Patch application with an out-of-surface gate (I4, ADR-14).
+﻿"""Patch application with an out-of-surface gate (I4, ADR-14).
 
 When a Developer backend edits files via a unified diff (rather than whole-file
 rewrites), the diff is double-gated before it touches disk:
@@ -101,7 +101,7 @@ def apply_patch(diff_text: str, repo_dir: str, allow: list[str]) -> dict:
         return {"applied": False, "paths": g["paths"], "rejected": g["rejected"],
                 "error": "out-of-surface" if g["rejected"] else "empty patch"}
     repo = Path(repo_dir)
-    patch_file = repo / ".autornd.patch"
+    patch_file = repo / ".LoopLab.patch"
     patch_file.write_text(diff_text, encoding="utf-8")
     try:
         chk = subprocess.run(["git", "apply", "--check", patch_file.name],

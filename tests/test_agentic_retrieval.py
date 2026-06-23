@@ -1,12 +1,12 @@
-"""ADR-16: agentic retrieval — KnowledgeTools + the tool-using Researcher agent loop.
+﻿"""ADR-16: agentic retrieval — KnowledgeTools + the tool-using Researcher agent loop.
 Offline (fake chat client), no model needed."""
 from __future__ import annotations
 
 import json
 
-from autornd.agent import ToolUsingResearcher
-from autornd.knowledge_tools import KnowledgeTools
-from autornd.models import RunState
+from looplab.agent import ToolUsingResearcher
+from looplab.knowledge_tools import KnowledgeTools
+from looplab.models import RunState
 
 
 def _seed_kb(d):

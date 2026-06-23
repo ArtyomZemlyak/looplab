@@ -1,11 +1,11 @@
-"""I9 leakage, I16 profiler, I17 vector store + retrieval, I19 cross-run memory."""
+﻿"""I9 leakage, I16 profiler, I17 vector store + retrieval, I19 cross-run memory."""
 from __future__ import annotations
 
-from autornd.leakage import target_leakage, temporal_leakage, train_test_contamination
-from autornd.memory import CaseLibrary
-from autornd.profile import profile_dataset
-from autornd.retrieval import grep, glob_files
-from autornd.vectorstore import InMemoryVectorStore, hash_embed
+from looplab.leakage import target_leakage, temporal_leakage, train_test_contamination
+from looplab.memory import CaseLibrary
+from looplab.profile import profile_dataset
+from looplab.retrieval import grep, glob_files
+from looplab.vectorstore import InMemoryVectorStore, hash_embed
 
 
 # ----------------------------- I9 leakage ---------------------------------- #
@@ -46,7 +46,7 @@ def test_profiler_stats_and_flags():
 
 # ------------------------- I17 vector store + retrieval -------------------- #
 def test_vector_store_search_and_swap():
-    from autornd.vectorstore import Item
+    from looplab.vectorstore import Item
     vs = InMemoryVectorStore()
     vs.upsert("notes", [
         Item("a", hash_embed("xgboost gradient boosting trees"), {"t": "boost"}),

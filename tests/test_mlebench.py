@@ -1,4 +1,4 @@
-"""MLEBench-style competition adapter (I20): held-out grading, leakage-clean split, and
+﻿"""MLEBench-style competition adapter (I20): held-out grading, leakage-clean split, and
 an offline end-to-end run scored by the private grader."""
 from __future__ import annotations
 
@@ -7,13 +7,13 @@ from pathlib import Path
 
 import anyio
 
-from autornd.leakage import train_test_contamination
-from autornd.mlebench import MLEBenchTask
-from autornd.models import Idea
-from autornd.orchestrator import Engine
-from autornd.policy import GreedyTree
-from autornd.sandbox import SubprocessSandbox
-from autornd.tasks import TaskAdapter, load_task
+from looplab.leakage import train_test_contamination
+from looplab.mlebench import MLEBenchTask
+from looplab.models import Idea
+from looplab.orchestrator import Engine
+from looplab.policy import GreedyTree
+from looplab.sandbox import SubprocessSandbox
+from looplab.tasks import TaskAdapter, load_task
 
 ROOT = Path(__file__).resolve().parents[1]
 TASK_FILE = ROOT / "examples" / "mlebench_task.json"
@@ -75,7 +75,7 @@ def test_test_key_independent_of_train_size():
 def test_llm_roles_pass_hyperparameter_and_grader_brief():
     # The LLM Developer must receive the proposed 'k' (regression of the hardcoded
     # degree/lam bug) and a brief that wires the held-out grader.
-    from autornd.roles import LLMDeveloper, LLMResearcher
+    from looplab.roles import LLMDeveloper, LLMResearcher
 
     captured: dict = {}
 

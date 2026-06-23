@@ -1,4 +1,4 @@
-"""RepoTask e2e Developer loop: a `setup` step (dependency install) runs before each eval,
+﻿"""RepoTask e2e Developer loop: a `setup` step (dependency install) runs before each eval,
 and an eval FAILURE is fed back to the Developer's `repair` (the error-feedback loop fires
 for repo tasks, where node.code is empty — the fix that lets an e2e agent fix runtime
 errors / missing deps)."""
@@ -10,12 +10,12 @@ from pathlib import Path
 
 import anyio
 
-from autornd.command_eval import run_command_eval
-from autornd.models import Idea
-from autornd.orchestrator import Engine
-from autornd.policy import GreedyTree
-from autornd.repo_task import EvalSpec, RepoTask
-from autornd.sandbox import SubprocessSandbox
+from looplab.command_eval import run_command_eval
+from looplab.models import Idea
+from looplab.orchestrator import Engine
+from looplab.policy import GreedyTree
+from looplab.repo_task import EvalSpec, RepoTask
+from looplab.sandbox import SubprocessSandbox
 
 FIXTURE = Path(__file__).resolve().parent / "fixtures" / "repo_fixture"
 _M = {"kind": "stdout_json", "key": "metric"}

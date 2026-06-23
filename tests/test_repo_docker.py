@@ -1,4 +1,4 @@
-"""Phase 4 untrusted tier: command-eval sandboxed via `docker run`. Docker isn't required
+﻿"""Phase 4 untrusted tier: command-eval sandboxed via `docker run`. Docker isn't required
 to run these — we test the argv construction (monkeypatching the docker-CLI probe) and that
 run_command_eval routes the wrap to setup (root) and eval (cwd subdir) correctly."""
 from __future__ import annotations
@@ -9,8 +9,8 @@ from pathlib import Path
 
 import pytest
 
-from autornd import command_eval
-from autornd.command_eval import make_docker_wrap, run_command_eval
+from LoopLab import command_eval
+from looplab.command_eval import make_docker_wrap, run_command_eval
 
 _M = {"kind": "stdout_json", "key": "metric"}
 
@@ -63,8 +63,8 @@ def test_run_command_eval_applies_wrap_to_setup_and_eval(tmp_path):
 def test_adapter_metric_is_wrapped_under_untrusted(tmp_path):
     """#1a: the agent-authored `adapter` reader EXECS code, so under the untrusted tier it
     must run through the sandbox wrap (in-container), not directly on the host."""
-    from autornd.command_eval import read_metric
-    (tmp_path / "autornd_adapter.py").write_text(
+    from looplab.command_eval import read_metric
+    (tmp_path / "LOOPLAB_adapter.py").write_text(
         "def read_metric(workdir):\n    return 2.5\n", encoding="utf-8")
     seen = {}
 
@@ -74,7 +74,7 @@ def test_adapter_metric_is_wrapped_under_untrusted(tmp_path):
         # test can actually execute it locally and confirm the value still flows through.
         return [sys.executable] + argv[1:]
 
-    val = read_metric("", str(tmp_path), {"kind": "adapter", "path": "autornd_adapter.py"},
+    val = read_metric("", str(tmp_path), {"kind": "adapter", "path": "LOOPLAB_adapter.py"},
                       wrap=wrap)
     assert val == 2.5
     assert seen["argv"][0] == "python"               # container python, NOT host sys.executable
@@ -82,11 +82,11 @@ def test_adapter_metric_is_wrapped_under_untrusted(tmp_path):
 
 def test_adapter_metric_runs_on_host_without_wrap(tmp_path):
     # Sanity: trusted_local path (no wrap) execs with the host interpreter, in-process harness.
-    from autornd.command_eval import read_metric
-    (tmp_path / "autornd_adapter.py").write_text(
+    from looplab.command_eval import read_metric
+    (tmp_path / "LOOPLAB_adapter.py").write_text(
         "def read_metric(workdir):\n    return -1.0\n", encoding="utf-8")
     assert read_metric("", str(tmp_path),
-                       {"kind": "adapter", "path": "autornd_adapter.py"}) == -1.0
+                       {"kind": "adapter", "path": "LOOPLAB_adapter.py"}) == -1.0
 
 
 def test_engine_untrusted_builds_docker_wrap(monkeypatch, tmp_path):
@@ -101,10 +101,10 @@ def test_engine_untrusted_builds_docker_wrap(monkeypatch, tmp_path):
     monkeypatch.setattr(command_eval, "make_docker_wrap", fake_wrap_factory)
 
     import sys as _s
-    from autornd.orchestrator import Engine
-    from autornd.policy import GreedyTree
-    from autornd.repo_task import EvalSpec, RepoTask
-    from autornd.sandbox import SubprocessSandbox
+    from looplab.orchestrator import Engine
+    from looplab.policy import GreedyTree
+    from looplab.repo_task import EvalSpec, RepoTask
+    from looplab.sandbox import SubprocessSandbox
 
     repo = tmp_path / "repo"
     repo.mkdir()

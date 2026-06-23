@@ -1,4 +1,4 @@
-"""I6 keystone: a real (tiny) autonomous run, plus crash + resume.
+﻿"""I6 keystone: a real (tiny) autonomous run, plus crash + resume.
 
 These tests drive the full loop on the toy task: draft -> sandbox-run -> evaluate ->
 improve -> greedy-select, and verify crash-resume continues from the exact frontier
@@ -12,12 +12,12 @@ from pathlib import Path
 
 import anyio
 
-from autornd.eventstore import EventStore
-from autornd.orchestrator import Engine
-from autornd.policy import GreedyTree
-from autornd.replay import fold
-from autornd.sandbox import SubprocessSandbox
-from autornd.toytask import ToyTask
+from looplab.eventstore import EventStore
+from looplab.orchestrator import Engine
+from looplab.policy import GreedyTree
+from looplab.replay import fold
+from looplab.sandbox import SubprocessSandbox
+from looplab.toytask import ToyTask
 
 ROOT = Path(__file__).resolve().parents[1]
 TASK_FILE = ROOT / "examples" / "toy_task.json"
@@ -74,7 +74,7 @@ def test_crash_then_resume_subprocess(tmp_path):
 
     # 1) Run with a crash hook -> process hard-exits after 2 evaluations.
     proc = subprocess.run(
-        [sys.executable, "-m", "autornd.cli", "run", str(TASK_FILE),
+        [sys.executable, "-m", "looplab.cli", "run", str(TASK_FILE),
          "--out", str(rd), "--max-nodes", "10", "--crash-after", "2"],
         cwd=str(ROOT), env=env, capture_output=True, text=True,
     )
@@ -85,7 +85,7 @@ def test_crash_then_resume_subprocess(tmp_path):
 
     # 2) Resume -> completes, no duplicates, all 10 nodes present.
     proc2 = subprocess.run(
-        [sys.executable, "-m", "autornd.cli", "resume", str(rd),
+        [sys.executable, "-m", "looplab.cli", "resume", str(rd),
          "--task-file", str(TASK_FILE), "--max-nodes", "10"],
         cwd=str(ROOT), env=env, capture_output=True, text=True,
     )
@@ -99,6 +99,6 @@ def test_crash_then_resume_subprocess(tmp_path):
 def _clean_env():
     import os
     e = dict(os.environ)
-    # Make the in-repo package importable for `-m autornd.cli`.
+    # Make the in-repo package importable for `-m LoopLab.cli`.
     e["PYTHONPATH"] = str(ROOT) + os.pathsep + e.get("PYTHONPATH", "")
     return e

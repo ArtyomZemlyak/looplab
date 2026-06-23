@@ -1,4 +1,4 @@
-"""Phase 4 multi-editable workspace: several editable repos mounted at named subdirs, each
+﻿"""Phase 4 multi-editable workspace: several editable repos mounted at named subdirs, each
 with its own surface/protect, edited in one experiment and scored by one eval that may span
 them."""
 from __future__ import annotations
@@ -9,11 +9,11 @@ from pathlib import Path
 import anyio
 import pytest
 
-from autornd.cli_agent import CliAgentDeveloper
-from autornd.orchestrator import Engine
-from autornd.policy import GreedyTree
-from autornd.repo_task import EditableSpec, EvalSpec, RepoTask
-from autornd.sandbox import SubprocessSandbox
+from looplab.cli_agent import CliAgentDeveloper
+from looplab.orchestrator import Engine
+from looplab.policy import GreedyTree
+from looplab.repo_task import EditableSpec, EvalSpec, RepoTask
+from looplab.sandbox import SubprocessSandbox
 
 _M = {"kind": "stdout_json", "key": "metric"}
 

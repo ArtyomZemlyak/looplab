@@ -1,4 +1,4 @@
-"""Completed-partials: I14 spans, I13 budget, I10 gated promotion, I9 leakage gate,
+﻿"""Completed-partials: I14 spans, I13 budget, I10 gated promotion, I9 leakage gate,
 I19 cross-run memory. All offline."""
 from __future__ import annotations
 
@@ -8,15 +8,15 @@ from pathlib import Path
 import anyio
 import orjson
 
-from autornd.confirm import confirm_top_k
-from autornd.eventstore import EventStore
-from autornd.memory import JsonlCaseLibrary
-from autornd.models import Idea, Node, NodeStatus
-from autornd.orchestrator import Engine
-from autornd.policy import GreedyTree
-from autornd.replay import fold
-from autornd.sandbox import SubprocessSandbox
-from autornd.toytask import ToyTask
+from looplab.confirm import confirm_top_k
+from looplab.eventstore import EventStore
+from looplab.memory import JsonlCaseLibrary
+from looplab.models import Idea, Node, NodeStatus
+from looplab.orchestrator import Engine
+from looplab.policy import GreedyTree
+from looplab.replay import fold
+from looplab.sandbox import SubprocessSandbox
+from looplab.toytask import ToyTask
 
 ROOT = Path(__file__).resolve().parents[1]
 TASK = ROOT / "examples" / "toy_task.json"
@@ -147,7 +147,7 @@ def test_memory_persists_and_retains_best(tmp_path):
 def test_past_cases_become_searchable_knowledge(tmp_path):
     """I19 retrieval: a stored case is indexed by KnowledgeTools so the Researcher can
     recall it via kb_search."""
-    from autornd.knowledge_tools import KnowledgeTools
+    from looplab.knowledge_tools import KnowledgeTools
     cases = tmp_path / "cases.jsonl"
     JsonlCaseLibrary(cases).add({"task_id": "poly_regression", "direction": "min",
                                  "goal": "polynomial degree selection",
@@ -161,10 +161,10 @@ def test_past_cases_become_searchable_knowledge(tmp_path):
 
 
 class _FailsUnderConfirmDeveloper:
-    """Normal eval succeeds; every confirm-seed run (AUTORND_EVAL_SEED set) fails."""
+    """Normal eval succeeds; every confirm-seed run (LOOPLAB_EVAL_SEED set) fails."""
     def implement(self, idea):
         return ("import os, sys, json\n"
-                "if os.environ.get('AUTORND_EVAL_SEED') is not None:\n"
+                "if os.environ.get('LOOPLAB_EVAL_SEED') is not None:\n"
                 "    sys.exit(1)\n"
                 "print(json.dumps({'metric': 1.0}))\n")
 

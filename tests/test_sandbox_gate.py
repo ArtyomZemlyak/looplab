@@ -1,10 +1,10 @@
-"""I3 sandbox behavior + I10 variance-gate unit tests."""
+﻿"""I3 sandbox behavior + I10 variance-gate unit tests."""
 from __future__ import annotations
 
 import pytest
 
-from autornd.gate import one_se_better
-from autornd.sandbox import SubprocessSandbox
+from looplab.gate import one_se_better
+from looplab.sandbox import SubprocessSandbox
 
 
 def test_sandbox_captures_metric(tmp_path):

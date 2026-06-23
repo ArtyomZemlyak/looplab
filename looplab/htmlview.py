@@ -1,4 +1,4 @@
-"""Static-HTML lineage view (I6, ADR-1). A decoupled *reader* of files-as-truth:
+﻿"""Static-HTML lineage view (I6, ADR-1). A decoupled *reader* of files-as-truth:
 takes a RunState and renders a standalone HTML page (no server, no JS framework).
 """
 from __future__ import annotations
@@ -92,7 +92,7 @@ def render_html(state: RunState, trace_view: dict | None = None) -> str:
         if best else "<b>Best:</b> (none yet)"
     )
     return f"""<!doctype html>
-<html><head><meta charset="utf-8"><title>AutoRND — {html.escape(state.run_id)}</title>
+<html><head><meta charset="utf-8"><title>LoopLab — {html.escape(state.run_id)}</title>
 <style>
  body{{font-family:system-ui,Segoe UI,sans-serif;margin:2rem;color:#1c1c1c}}
  table{{border-collapse:collapse;width:100%;margin-top:1rem}}
@@ -101,7 +101,7 @@ def render_html(state: RunState, trace_view: dict | None = None) -> str:
  code{{font-size:12px}}
  .meta{{color:#555}}
 </style></head><body>
-<h1>AutoRND run <code>{html.escape(state.run_id)}</code></h1>
+<h1>LoopLab run <code>{html.escape(state.run_id)}</code></h1>
 <p class="meta">Task: <b>{html.escape(state.task_id)}</b> · goal: {html.escape(state.goal)} ·
  direction: {state.direction} · config: <code>{html.escape(state.config_hash)}</code> ·
  finished: {state.finished}</p>

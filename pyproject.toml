@@ -1,7 +1,7 @@
-[project]
-name = "autornd"
+﻿[project]
+name = "looplab"
 version = "0.1.0"
-description = "AutoRND — autonomous ML/DS research engine (P0 working-loop slice)"
+description = "LoopLab — autonomous ML/DS research engine (P0 working-loop slice)"
 requires-python = ">=3.11"
 dependencies = [
     "pydantic>=2.6",
@@ -24,14 +24,14 @@ otel = [
 ]
 
 [project.scripts]
-autornd = "autornd.cli:app"
+LoopLab = "looplab.cli:app"
 
 [build-system]
 requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
-packages = ["autornd"]
+packages = ["looplab"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
