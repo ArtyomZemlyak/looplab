@@ -34,7 +34,7 @@ from .tasks import make_llm_client
 try:
     from fastapi import FastAPI, HTTPException, Request
     from fastapi.middleware.cors import CORSMiddleware
-    from fastapi.responses import (FileResponse, JSONResponse, PlainTextResponse,
+    from fastapi.responses import (FileResponse, HTMLResponse, JSONResponse, PlainTextResponse,
                                    StreamingResponse)
     from fastapi.staticfiles import StaticFiles
 except ModuleNotFoundError as e:  # pragma: no cover - exercised only without the extra
@@ -95,6 +95,20 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
                ["http://localhost:5173", "http://127.0.0.1:5173"])
     app.add_middleware(CORSMiddleware, allow_origins=origins, allow_methods=["*"],
                        allow_headers=["*"])
+    # G1 server auth (review C3): when LOOPLAB_UI_TOKEN is set, require a matching X-LoopLab-Token
+    # header on every MUTATING /api/* request (GET/HEAD/OPTIONS + SSE stay open for read/stream). The
+    # SPA is served the token in a same-origin <meta> tag (see _index_response), so a cross-origin
+    # page can't read it. Unset (default local single-user) -> no auth, behaviour unchanged.
+    ui_token = os.environ.get("LOOPLAB_UI_TOKEN")
+    if ui_token:
+        @app.middleware("http")
+        async def _require_token(request: "Request", call_next):
+            if (request.method in ("POST", "PUT", "PATCH", "DELETE")
+                    and request.url.path.startswith("/api/")
+                    and request.headers.get("X-LoopLab-Token") != ui_token):
+                return JSONResponse({"detail": "unauthorized (missing/invalid UI token)"},
+                                    status_code=401)
+            return await call_next(request)
     projects = ProjectStore(root / "projects.json")   # ClearML-style run organization (UI-only)
 
     # ------------------------------------------------------------------ helpers
@@ -730,12 +744,23 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
 
     # ------------------------------------------------------------------ static React app
     dist = _ui_dist()
+
+    def _index_response():
+        # G1: inject the UI token into the served page (same-origin <meta>) when auth is on, so the
+        # SPA can echo it on mutating requests. Without a token, serve the file unchanged.
+        html_path = dist / "index.html"
+        if ui_token:
+            html = html_path.read_text(encoding="utf-8")
+            meta = f'<meta name="ll-token" content="{ui_token}">'
+            return HTMLResponse(html.replace("</head>", meta + "</head>", 1))
+        return FileResponse(str(html_path))
+
     if dist.exists():
         app.mount("/assets", StaticFiles(directory=str(dist / "assets")), name="assets")
 
         @app.get("/")
         def index():
-            return FileResponse(str(dist / "index.html"))
+            return _index_response()
 
         @app.get("/{path:path}")
         def spa(path: str):
@@ -746,7 +771,7 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
             target = (dist / path).resolve()
             if (target == base or base in target.parents) and target.is_file():
                 return FileResponse(str(target))
-            return FileResponse(str(dist / "index.html"))
+            return _index_response()
     else:
         @app.get("/")
         def index_placeholder():

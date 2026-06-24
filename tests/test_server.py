@@ -185,3 +185,28 @@ def test_sse_emits_state_snapshot(tmp_path):
                 break
             chunk = next(resp.iter_lines())
         assert "id:" in chunk or "state" in chunk
+
+
+def test_g1_auth_token_required_on_mutating(tmp_path, monkeypatch):
+    """G1: with LOOPLAB_UI_TOKEN set, mutating /api/* needs the X-LoopLab-Token header; reads stay open."""
+    _build_run(tmp_path)
+    monkeypatch.setenv("LOOPLAB_UI_TOKEN", "s3cret")
+    client = TestClient(make_app(tmp_path))
+    # reads are open
+    assert client.get("/api/runs").status_code == 200
+    # mutating without the token -> 401
+    r = client.post("/api/runs/demo/control", json={"type": "pause", "data": {}})
+    assert r.status_code == 401
+    # with the token -> allowed
+    r = client.post("/api/runs/demo/control", json={"type": "pause", "data": {}},
+                    headers={"X-LoopLab-Token": "s3cret"})
+    assert r.status_code == 200
+
+
+def test_g1_no_token_means_open(tmp_path, monkeypatch):
+    """Default (no token) -> the control plane is open, behaviour unchanged."""
+    _build_run(tmp_path)
+    monkeypatch.delenv("LOOPLAB_UI_TOKEN", raising=False)
+    client = TestClient(make_app(tmp_path))
+    r = client.post("/api/runs/demo/control", json={"type": "pause", "data": {}})
+    assert r.status_code == 200
