@@ -56,3 +56,30 @@ def test_text_fallback_strips_think(base_url):
     c = OpenAICompatibleClient("m", base_url=base_url)
     idea = parse_structured(c, [{"role": "user", "content": "go"}], Idea, "baml")
     assert idea.operator == "draft" and idea.params == {"x": 1.0}
+
+
+def test_h1_guided_json_adds_schema_constraints():
+    """H1: with guided_json on, complete_tool sends response_format + guided_json built from the schema."""
+    from looplab.llm import OpenAICompatibleClient
+    c = OpenAICompatibleClient("m", guided_json=True)
+    captured = {}
+
+    def _fake_post(payload):
+        captured.update(payload)
+        return {"choices": [{"message": {"tool_calls": [
+            {"function": {"name": "emit", "arguments": "{}"}}]}}], "usage": {}}
+
+    c._post = _fake_post
+    c.complete_tool([{"role": "user", "content": "x"}], {"type": "object", "properties": {}})
+    assert captured.get("response_format", {}).get("type") == "json_schema"
+    assert "guided_json" in captured
+
+
+def test_h1_off_by_default_no_constraints():
+    from looplab.llm import OpenAICompatibleClient
+    c = OpenAICompatibleClient("m")
+    captured = {}
+    c._post = lambda p: (captured.update(p) or {"choices": [{"message": {"tool_calls": [
+        {"function": {"name": "emit", "arguments": "{}"}}]}}], "usage": {}})
+    c.complete_tool([{"role": "user", "content": "x"}], {"type": "object"})
+    assert "response_format" not in captured and "guided_json" not in captured

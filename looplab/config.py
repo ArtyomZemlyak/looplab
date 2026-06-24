@@ -151,6 +151,9 @@ class Settings(BaseSettings):
     researcher_base_url: str | None = None
     developer_base_url: str | None = None
     llm_parser: str = "tool_call"
+    # H1: drive structured calls with the endpoint's constrained decoding (vLLM/SGLang guided_json +
+    # response_format json_schema) so weak models can't emit invalid JSON. Off for Ollama (default).
+    llm_guided_json: bool = False
     # Observability (ADR-17): capture each LLM call's full prompt + completion into the active
     # span (spans.jsonl) so the UI can show exactly what the model read and wrote per node.
     # Diagnostics only — `replay.fold` never reads spans. Default on for local single-user; set

@@ -92,6 +92,8 @@ export const SETTINGS_GROUPS = [
       { key: 'llm_temperature', label: 'Temperature', type: 'float', help: 'Sampling temperature.' },
       { key: 'llm_parser', label: 'Structured parser', type: 'enum', options: ['tool_call', 'baml', 'outlines'],
         help: 'How structured ideas are parsed from the model.' },
+      { key: 'llm_guided_json', label: 'Guided JSON decoding', type: 'bool',
+        help: 'H1: constrain structured calls with the endpoint schema (vLLM/SGLang guided_json). Leave off for Ollama.' },
       { key: 'researcher_model', label: 'Researcher model', type: 'text', placeholder: 'shared',
         help: 'H3: per-role override — run the Researcher on its own model (blank = shared model).' },
       { key: 'developer_model', label: 'Developer model', type: 'text', placeholder: 'shared',

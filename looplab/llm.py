@@ -48,13 +48,19 @@ class OpenAICompatibleClient:
 
     def __init__(self, model: str, base_url: str = "http://localhost:11434/v1",
                  api_key: str = "ollama", temperature: float = 0.7,
-                 timeout: float = 180.0, accountant: Optional["CostAccountant"] = None):
+                 timeout: float = 180.0, accountant: Optional["CostAccountant"] = None,
+                 guided_json: bool = False):
         self.model = model
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key or "x"
         self.temperature = temperature
         self.timeout = timeout
         self.accountant = accountant or CostAccountant()
+        # H1: when the endpoint supports constrained decoding (vLLM/SGLang), drive structured calls
+        # from the Pydantic JSON schema — `response_format` json_schema (OpenAI-standard, vLLM+SGLang)
+        # + `guided_json` (vLLM extra) — so a weak model can't emit invalid JSON. Off by default
+        # (Ollama needs no constraint and some builds reject unknown fields).
+        self.guided_json = guided_json
 
     def _post(self, payload: dict) -> dict:
         data = json.dumps(payload).encode("utf-8")
@@ -109,11 +115,16 @@ class OpenAICompatibleClient:
         tool = {"type": "function",
                 "function": {"name": "emit", "description": "Emit the structured result.",
                              "parameters": json_schema}}
-        body = self._post({
+        payload = {
             "model": self.model, "messages": messages, "tools": [tool],
             "tool_choice": {"type": "function", "function": {"name": "emit"}},
             "temperature": self.temperature, "stream": False,
-        })
+        }
+        if self.guided_json:   # H1 constrained decoding (vLLM/SGLang); Ollama ignores when off
+            payload["response_format"] = {"type": "json_schema",
+                                          "json_schema": {"name": "emit", "schema": json_schema}}
+            payload["guided_json"] = json_schema
+        body = self._post(payload)
         msg = body["choices"][0]["message"]
         calls = msg.get("tool_calls")
         if not calls:  # endpoint ignored tool_choice -> let parse.py fall back to text

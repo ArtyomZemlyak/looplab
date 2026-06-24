@@ -55,6 +55,7 @@ def make_llm_client(settings, *, model: str | None = None,
     return OpenAICompatibleClient(
         model=model or settings.llm_model, base_url=base_url or settings.llm_base_url, api_key=key,
         temperature=settings.llm_temperature, accountant=CostAccountant(),
+        guided_json=getattr(settings, "llm_guided_json", False),   # H1 constrained decoding
     )
 
 
