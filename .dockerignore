@@ -1,0 +1,38 @@
+# Keep the build context small + reproducible. Source dirs (looplab/, ui/ source,
+# examples/, tools/) are copied explicitly by the Dockerfile.
+.git/
+.gitignore
+.claude/
+.venv*/
+venv*/
+env/
+**/__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Frontend deps + build output (the image rebuilds the UI from source).
+ui/node_modules/
+ui/dist/
+
+# Local artifacts / data — never baked into the image.
+runs/
+*.db
+*.sqlite
+
+# Local env / secrets — provided at runtime via compose, not the image.
+.env
+.env.*
+!.env.example
+secrets.*
+
+# Docs/plans not needed at runtime.
+docs/
+plans/
+
+# OS / IDE
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

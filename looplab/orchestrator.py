@@ -346,10 +346,14 @@ class Engine:
             # Out-of-process host-side grading active: record WHICH scorer + how many held-out labels
             # (NEVER the labels themselves — the log is readable). Surfaced in the Trust panel.
             if self._host_grader is not None:
-                self.store.append("host_grading", {
-                    "scorer": self._host_grader.get("scorer", "rmse"),
-                    "predictions": self._host_grader.get("predictions", "predictions.json"),
-                    "n_labels": len(self._host_grader.get("labels") or [])})
+                hg = self._host_grader
+                evt = {
+                    "scorer": hg.get("scorer", "rmse"),
+                    "predictions": hg.get("predictions") or hg.get("submission", "predictions.json"),
+                    "n_labels": len(hg.get("labels") or [])}
+                if hg.get("kind") == "mlebench":          # real MLE-bench: answers held in the
+                    evt["competition"] = hg.get("competition")   # mle-bench data dir, never here
+                self.store.append("host_grading", evt)
             # Grounding pre-phase (I16): profile the dataset if the task exposes one.
             cols = getattr(self.task, "columns", None)
             if callable(cols):
@@ -1140,6 +1144,22 @@ class Engine:
         import json as _json
         from .command_eval import host_score
         g = self._host_grader
+        # Real MLE-bench: the candidate writes submission.csv; mle-bench's REAL grader scores it
+        # out-of-process against private/test.csv answers (in the mle-bench data dir, never copied
+        # into the candidate workdir). The official score replaces any self-report; the medal/
+        # above-median report rides along in extra_metrics for the trust panel + final report.
+        if g.get("kind") == "mlebench":
+            from .mlebench_grade import grade_in_subprocess
+            sub = Path(workdir) / g.get("submission", "submission.csv")
+            metric, report = (None, None)
+            if sub.is_file():
+                metric, report = grade_in_subprocess(
+                    g["competition"], sub, g.get("data_dir"),
+                    timeout=float(g.get("timeout", 300.0)))
+            res.metric = metric
+            if report is not None:
+                res.extra_metrics = {**(res.extra_metrics or {}), "mlebench": report}
+            return res
         preds_path = Path(workdir) / g.get("predictions", "predictions.json")
         m = None
         if preds_path.is_file():

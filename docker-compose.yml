@@ -1,0 +1,126 @@
+# LoopLab full-stack deploy (optional). Brings up:
+#   sglang  — Qwen3.6-35B-A3B (4-bit) on the GPU, OpenAI-compatible API
+#   ui      — the live React UI + control-plane (FastAPI), served on the host
+#   run     — one-shot engine runner (profile "tasks"; started on demand)
+#
+# Local single-user use does NOT need any of this — the engine is zero-dependency
+# (see README "Docker is not required"). This path is for the hosted/full-stack
+# scenario where you want everything deployed with one command.
+#
+# Usage:
+#   cp .env.example .env          # then edit if needed
+#   docker compose up -d sglang ui          # start the model + UI
+#   docker compose logs -f sglang           # watch the (one-time) model download/load
+#   open http://localhost:${UI_PORT:-8765}
+#   docker compose run --rm run LoopLab run examples/toy_task.json --backend llm --max-nodes 6
+
+# Shared LLM wiring: point LoopLab at the in-network SGLang endpoint. Used by both
+# the UI (its Researcher/chat/suggest) and the one-shot run service.
+x-llm-env: &llm-env
+  LOOPLAB_BACKEND: "${LOOPLAB_BACKEND:-llm}"
+  LOOPLAB_LLM_MODEL: "${LLM_MODEL_NAME:-qwen3-coder-30b-a3b}"
+  LOOPLAB_LLM_BASE_URL: "http://sglang:30000/v1"
+  # Native qwen tool-calling (parser=qwen) gives reliable structured output for Qwen3 models.
+  # SGLang's guided_json/xgrammar path produced empty {} for Qwen3-Coder-30B, so default OFF;
+  # set LOOPLAB_LLM_GUIDED_JSON=1 in .env if a weaker model needs constrained decoding.
+  LOOPLAB_LLM_GUIDED_JSON: "${LOOPLAB_LLM_GUIDED_JSON:-0}"
+  LOOPLAB_LLM_TEMPERATURE: "${LOOPLAB_LLM_TEMPERATURE:-0.6}"
+
+services:
+  # ---- LLM server: Qwen3-Coder-30B-A3B (4-bit AWQ) via SGLang ----------------
+  # NOTE: Qwen3.6-35B-A3B (the originally-requested model) is a hybrid Mamba+MoE that
+  # currently crashes in SGLang's causal_conv1d Triton kernel on Blackwell (known upstream
+  # bug: github.com/sgl-project/sglang/issues/24364, /19406). Default is the non-hybrid
+  # Qwen3-Coder-30B-A3B (works today); set SGLANG_MODEL back to the 3.6 repo once SGLang ships the fix.
+  sglang:
+    image: lmsysorg/sglang:latest
+    container_name: looplab-sglang
+    # Compose word-splits this folded string into argv (incl. ${SGLANG_EXTRA_ARGS}), and the
+    # SGLang image runs the command list directly (no shell needed).
+    command: >
+      python3 -m sglang.launch_server
+      --model-path "${SGLANG_MODEL:-QuantTrio/Qwen3-Coder-30B-A3B-Instruct-AWQ}"
+      --served-model-name "${LLM_MODEL_NAME:-qwen3-coder-30b-a3b}"
+      --host 0.0.0.0 --port 30000
+      --context-length "${SGLANG_CONTEXT_LENGTH:-32768}"
+      --mem-fraction-static "${SGLANG_MEM_FRACTION:-0.9}"
+      ${SGLANG_EXTRA_ARGS:---trust-remote-code --tool-call-parser qwen}
+    environment:
+      HF_TOKEN: "${HF_TOKEN:-}"
+    volumes:
+      # Persist the downloaded model weights across restarts (~18 GB for the 4-bit).
+      - hf-cache:/root/.cache/huggingface
+    ports:
+      # Bind to loopback by default — the UI reaches SGLang over the internal compose
+      # network (sglang:30000), so the published port is only for local-host access.
+      # Set SGLANG_BIND=0.0.0.0 in .env to expose it on the LAN deliberately.
+      - "${SGLANG_BIND:-127.0.0.1}:${SGLANG_PORT:-30000}:30000"
+    ipc: host                # SGLang needs large shared memory for NCCL/tensor IPC
+    restart: unless-stopped
+    stop_grace_period: 30s
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    healthcheck:
+      # Model load takes minutes; start_period keeps it "starting" (not unhealthy) meanwhile.
+      test: ["CMD", "python3", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:30000/health',timeout=5).status==200 else 1)"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 1200s
+
+  # ---- LoopLab live UI + control-plane --------------------------------------
+  ui:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: looplab:local
+    container_name: looplab-ui
+    command: ["LoopLab", "ui", "--host", "0.0.0.0", "--port", "8765", "--run-root", "/app/runs"]
+    environment:
+      <<: *llm-env
+      # Optional hardening (uncomment / set in .env): require a token + restrict CORS.
+      LOOPLAB_UI_TOKEN: "${LOOPLAB_UI_TOKEN:-}"
+      LOOPLAB_UI_CORS: "${LOOPLAB_UI_CORS:-}"
+    volumes:
+      - ./runs:/app/runs            # share run artifacts with the host + the run service
+    ports:
+      # Loopback-only by default: the control-plane is UNAUTHENTICATED unless LOOPLAB_UI_TOKEN
+      # is set, so do not expose it on the LAN implicitly. To serve it beyond localhost, set a
+      # token AND set UI_BIND=0.0.0.0 in .env.
+      - "${UI_BIND:-127.0.0.1}:${UI_PORT:-8765}:8765"
+    depends_on:
+      sglang:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8765/api/runs',timeout=5).status==200 else 1)"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 20s
+
+  # ---- One-shot engine runner (started on demand) ---------------------------
+  # `docker compose run --rm run LoopLab run examples/<task>.json --backend llm --max-nodes 6`
+  run:
+    image: looplab:local
+    build:
+      context: .
+      dockerfile: Dockerfile
+    profiles: ["tasks"]           # not started by `up`; invoked via `compose run`
+    environment:
+      <<: *llm-env
+    volumes:
+      - ./runs:/app/runs
+    depends_on:
+      sglang:
+        condition: service_healthy
+    # Default command if none is given on the CLI; usually you override it.
+    command: ["LoopLab", "run", "examples/toy_task.json", "--backend", "llm", "--max-nodes", "6"]
+
+volumes:
+  hf-cache:

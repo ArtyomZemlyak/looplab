@@ -107,6 +107,22 @@ self-reported metric. The agent cannot overwrite the grader (asset-name protecti
 python -m LoopLab.cli run examples/mlebench_task.json   # offline templated k-NN
 ```
 
+### Real MLE-bench competitions (`kind="mlebench_real"`, D1)
+
+Run **actual Kaggle competitions** from OpenAI's [MLE-bench](https://github.com/openai/mle-bench):
+the engine gets the official `public/` split, writes `submission.csv`, and the **host** scores it
+with mle-bench's *real* grader against held-out answers — producing the genuine MLE-bench metric
+plus the official medal / above-median report. The candidate sandbox stays zero-dep (numpy+stdlib,
+CPU-only); only the host grader uses pandas/sklearn. Auth uses the modern Kaggle `KGAT_` Bearer
+token directly (`looplab/kaggle_dl.py`), bypassing the kaggle client that can't use it.
+
+```bash
+python -m looplab.mlebench_prep --selected               # download+prepare the CPU-lite comps
+python -m looplab.cli run examples/mlebench_real_spooky.json --out runs/spooky --backend llm
+```
+
+Full runbook (token, per-competition rule acceptance, untrusted tier): **[docs/MLEBENCH.md](docs/MLEBENCH.md)**.
+
 ### Work inside an existing repo (`kind="repo"`, ADR-7)
 
 Point the R&D agent at an **existing experiment repo**: it edits code within an
@@ -184,6 +200,40 @@ The sandbox tier is chosen by **trust mode**, not environment:
 
 So **Docker becomes necessary only for the hosted/UI scenario that serves untrusted
 code — never for the local CLI.**
+
+## Deploy the full stack with Docker Compose (optional)
+
+For the hosted scenario you can bring up **everything — the LLM, the UI, and the engine —
+with one command**. This is purely a deployment convenience; the local CLI above needs none
+of it. Requires Docker with the NVIDIA GPU runtime (Docker Desktop + WSL2 is fine).
+
+The stack (`docker-compose.yml`):
+- **`sglang`** — serves a 4-bit MoE on the GPU via SGLang, OpenAI-compatible at `:30000`. Default
+  **`Qwen3-Coder-30B-A3B`** (works on Blackwell today). *Qwen3.6-35B-A3B* — the hybrid Mamba+MoE — currently
+  hits a known SGLang `causal_conv1d` kernel bug on Blackwell ([sglang#24364](https://github.com/sgl-project/sglang/issues/24364));
+  set `SGLANG_MODEL` back to it once that's fixed.
+- **`ui`** — the live React UI + control-plane (`LoopLab ui`) on `:8765`, pointed at the in-network model.
+- **`run`** — a one-shot engine runner (compose profile `tasks`), started on demand.
+
+```bash
+cp .env.example .env                       # model id, ports, context length, etc.
+docker compose up -d sglang ui             # start the model + UI (first run downloads ~18 GB weights)
+docker compose logs -f sglang              # watch the one-time model load (minutes)
+# open http://localhost:8765
+
+# run an autonomous experiment against the containerized model:
+docker compose run --rm run \
+  LoopLab run examples/regression_task.json --backend llm --max-nodes 14
+```
+
+LoopLab is wired to the model purely by env (`LOOPLAB_BACKEND=llm`, `LOOPLAB_LLM_BASE_URL=http://sglang:30000/v1`,
+`LOOPLAB_LLM_MODEL`), with `LOOPLAB_LLM_GUIDED_JSON=1` so SGLang's constrained decoding keeps the
+quantized model's structured tool calls valid. The model, ports, VRAM fraction, context length and
+SGLang flags are all tunable in `.env`. Run artifacts land in `./runs` (shared with the host and the UI).
+
+> **Exposure:** both ports publish to `127.0.0.1` only by default — the UI control-plane is
+> unauthenticated unless `LOOPLAB_UI_TOKEN` is set, so it is not put on the LAN implicitly. To
+> serve it beyond localhost, set a token and `UI_BIND=0.0.0.0` in `.env`.
 
 ## Quick start
 
