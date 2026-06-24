@@ -334,7 +334,7 @@ export function StrategistPanel({ state, runId, onClose, onToast }) {
   const rungs = state.rungs || []
   const [pol, setPol] = useState('')
   const [fid, setFid] = useState('')
-  const POLICIES = ['greedy', 'evolutionary', 'mcts', 'asha']
+  const POLICIES = ['greedy', 'evolutionary', 'mcts', 'asha', 'bohb']
   const pin = async () => {
     const strat = {}
     if (pol) strat.policy = pol

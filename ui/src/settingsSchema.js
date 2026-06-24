@@ -7,8 +7,8 @@ export const SETTINGS_GROUPS = [
   {
     title: 'Search & policy', sub: 'how the loop explores the solution tree',
     fields: [
-      { key: 'policy', label: 'Policy', type: 'enum', options: ['greedy', 'evolutionary', 'mcts', 'asha'],
-        help: 'Tree-search strategy: greedy hill-climb, evolutionary archive, MCTS, or ASHA (multi-fidelity racing).' },
+      { key: 'policy', label: 'Policy', type: 'enum', options: ['greedy', 'evolutionary', 'mcts', 'asha', 'bohb'],
+        help: 'Search strategy: greedy, evolutionary, MCTS, ASHA (multi-fidelity racing), or BOHB (ASHA racing × surrogate proposal).' },
       { key: 'max_nodes', label: 'Max nodes', type: 'int',
         help: 'Node (experiment) budget — the loop stops after this many.' },
       { key: 'n_seeds', label: 'Seeds', type: 'int', help: 'Eval seeds per node (variance handling).' },

@@ -338,8 +338,8 @@ class ASHAPolicy:
 
 
 # Policy registry (ADR-2). The Strategist (A7) may only pick from these names; new policies
-# (A2 surrogate/BO, A3 BOHB) auto-register here and become selectable without engine changes.
-_POLICIES = ("greedy", "evolutionary", "mcts", "asha")
+# auto-register here and become selectable without engine changes.
+_POLICIES = ("greedy", "evolutionary", "mcts", "asha", "bohb")
 
 
 def available_policies() -> list[str]:
@@ -357,7 +357,10 @@ def make_policy(name: str = "greedy", *, n_seeds: int, max_nodes: int,
     if name == "mcts":
         c = float(params.get("c", 1.4))
         return MCTSPolicy(n_seeds=n_seeds, max_nodes=max_nodes, c=c)
-    if name == "asha":
+    if name in ("asha", "bohb"):
+        # A3 BOHB = Hyperband racing (ASHA) × surrogate-guided proposal (A2). The racing schedule is
+        # the ASHA policy; the surrogate is wired as the Researcher (cli enables it for `bohb`), so
+        # the policy object is the same — the fusion is the racing schedule + a surrogate proposer.
         eta = int(params.get("eta", 3))
         return ASHAPolicy(n_seeds=n_seeds, max_nodes=max_nodes, eta=eta)
     raise ValueError(f"unknown policy: {name!r}")

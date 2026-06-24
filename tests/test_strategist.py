@@ -239,6 +239,12 @@ def test_make_policy_registers_asha():
     assert isinstance(make_policy("asha", n_seeds=4, max_nodes=10, eta=3), ASHAPolicy)
 
 
+def test_make_policy_registers_bohb():
+    # A3: BOHB reuses the ASHA racing schedule (the surrogate proposer is wired by the CLI).
+    assert "bohb" in available_policies()
+    assert isinstance(make_policy("bohb", n_seeds=4, max_nodes=10, eta=2), ASHAPolicy)
+
+
 def test_asha_eta3_still_promotes_ceil_survivors():
     # Regression: with floor(4/3)=1 survivor ASHA could never halve and degenerated to greedy
     # exploit (caught in live testing). ceil(4/3)=2 must keep >=2 survivors so a rung promotes.

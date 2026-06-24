@@ -34,8 +34,9 @@ def _engine(run_dir: Path, task: TaskAdapter, settings: Settings,
     set_llm_capture(settings.trace_llm_io)
     researcher, developer = make_roles(task, settings)
     # A2 surrogate-guided proposer: wrap the base Researcher when the task exposes numeric bounds
-    # (it bootstraps via the wrapped Researcher and delegates on non-numeric spaces).
-    if settings.surrogate_proposer:
+    # (it bootstraps via the wrapped Researcher and delegates on non-numeric spaces). A3 BOHB =
+    # ASHA racing + the surrogate, so `policy=bohb` auto-enables it.
+    if settings.surrogate_proposer or settings.policy == "bohb":
         from .surrogate import SurrogateResearcher
         _bounds = getattr(researcher, "bounds", None)
         if _bounds:
