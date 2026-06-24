@@ -171,6 +171,10 @@ class Settings(BaseSettings):
     # Agentic retrieval (ADR-16): if set, the LLM Researcher gets grep/kb_search/read
     # tools over this directory of markdown notes and chooses when to use them.
     knowledge_dir: str | None = None
+    # E3 literature-grounded ideation (network-OPTIONAL): give the agentic Researcher an arXiv search
+    # tool to ground ideas in real techniques. Off by default (egress is unreliable on some boxes);
+    # fails gracefully if the network is blocked.
+    literature_search: bool = False
     # Agent Skills (I18, ADR-9): dir of SKILL.md the Researcher can list/load as tools.
     skills_dir: str | None = None
     # Prompt store (I18, ADR-8): dir of editable, hot-reloaded role prompt .md files.

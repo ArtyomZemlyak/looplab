@@ -151,6 +151,8 @@ export const SETTINGS_GROUPS = [
       { key: 'knowledge_dir', label: 'Knowledge dir', type: 'text', placeholder: 'unset',
         help: 'Markdown notes for agentic retrieval (also where pre-research is saved).' },
       { key: 'skills_dir', label: 'Skills dir', type: 'text', placeholder: 'unset', help: 'SKILL.md files the Researcher can load.' },
+      { key: 'literature_search', label: 'Literature grounding', type: 'bool',
+        help: 'E3: give the agentic Researcher an arXiv search tool (network-optional; fails gracefully if blocked).' },
       { key: 'prompt_dir', label: 'Prompt dir', type: 'text', placeholder: 'unset', help: 'Editable, hot-reloaded role prompt .md files.' },
       { key: 'memory_dir', label: 'Memory dir', type: 'text', placeholder: 'unset', help: 'Cross-run case memory.' },
     ],

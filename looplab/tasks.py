@@ -161,6 +161,9 @@ def make_roles(task: TaskAdapter, settings):
     if settings.skills_dir:
         from .skills import SkillTools
         providers.append(SkillTools(settings.skills_dir))
+    if getattr(settings, "literature_search", False):   # E3 arXiv grounding (network-optional)
+        from .literature import LiteratureTools
+        providers.append(LiteratureTools(enabled=True))
     # RepoTask code-edit mode (item #3): give the Researcher read-only grep/list/read over the
     # editable repo(s) so it proposes changes from the actual code, not blind. Skipped for the
     # cli_overrides param-search mode (no code to read) and non-repo tasks.
