@@ -227,9 +227,11 @@ docker compose run --rm run \
 ```
 
 LoopLab is wired to the model purely by env (`LOOPLAB_BACKEND=llm`, `LOOPLAB_LLM_BASE_URL=http://sglang:30000/v1`,
-`LOOPLAB_LLM_MODEL`), with `LOOPLAB_LLM_GUIDED_JSON=1` so SGLang's constrained decoding keeps the
-quantized model's structured tool calls valid. The model, ports, VRAM fraction, context length and
-SGLang flags are all tunable in `.env`. Run artifacts land in `./runs` (shared with the host and the UI).
+`LOOPLAB_LLM_MODEL`). Structured output uses Qwen's native tool-call parser (`--tool-call-parser qwen`);
+`LOOPLAB_LLM_GUIDED_JSON` is **off** by default because SGLang's guided_json/xgrammar path produced
+empty `{}` for Qwen3-Coder-30B — set it to `1` in `.env` only if a weaker model needs constrained
+decoding. The model, ports, VRAM fraction, context length and SGLang flags are all tunable in `.env`.
+Run artifacts land in `./runs` (shared with the host and the UI).
 
 > **Exposure:** both ports publish to `127.0.0.1` only by default — the UI control-plane is
 > unauthenticated unless `LOOPLAB_UI_TOKEN` is set, so it is not put on the LAN implicitly. To

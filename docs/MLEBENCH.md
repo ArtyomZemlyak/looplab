@@ -112,7 +112,8 @@ The candidate process runs in **UTF-8 mode** (`PYTHONUTF8=1`, set by the sandbox
 > Qwen3.6-35B-A3B (hybrid Mamba+MoE) currently crashes in SGLang on Blackwell — see `.env.example`.
 
 The score, medal status, and `above_median` are graded automatically and recorded:
-- the per-node official report is in `node.extra_metrics["mlebench"]`,
+- the per-node official report (score + medal thresholds + above_median) is written as a
+  `mlebench_report.json` artifact in each graded node's workdir,
 - a `host_grading` event records the scorer + competition (never the answers).
 
 For **true isolation** of LLM-written candidate code, set the untrusted tier (needs Docker):

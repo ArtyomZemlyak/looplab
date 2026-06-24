@@ -349,10 +349,13 @@ class Engine:
                 hg = self._host_grader
                 evt = {
                     "scorer": hg.get("scorer", "rmse"),
-                    "predictions": hg.get("predictions") or hg.get("submission", "predictions.json"),
-                    "n_labels": len(hg.get("labels") or [])}
-                if hg.get("kind") == "mlebench":          # real MLE-bench: answers held in the
-                    evt["competition"] = hg.get("competition")   # mle-bench data dir, never here
+                    "predictions": hg.get("predictions") or hg.get("submission", "predictions.json")}
+                if hg.get("kind") == "mlebench":          # real MLE-bench: answers live in the
+                    evt["competition"] = hg.get("competition")   # mle-bench data dir, never here —
+                    # so there is no in-memory label list to count; n_labels=0 would mislead the Trust
+                    # panel into "nothing held out". Omit it; `competition` signals host-held answers.
+                else:
+                    evt["n_labels"] = len(hg.get("labels") or [])
                 self.store.append("host_grading", evt)
             # Grounding pre-phase (I16): profile the dataset if the task exposes one.
             cols = getattr(self.task, "columns", None)

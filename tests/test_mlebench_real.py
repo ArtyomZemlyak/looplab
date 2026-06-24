@@ -171,8 +171,10 @@ def test_offline_engine_run_host_graded(prepared_spooky, tmp_path):
     # the candidate workdir has submission.csv and NO answer key
     nd0 = tmp_path / "run" / "nodes" / "node_0"
     assert (nd0 / "submission.csv").exists()
-    assert not (nd0 / "test.csv").exists() or True       # test.csv (features) is fine; answers are not
+    # the held-out answer key must never be materialized into the candidate workdir (test.csv here is
+    # the public FEATURES file, which is expected; the private answers live only in the data dir)
     assert not (nd0 / "answers.csv").exists()
+    assert not (nd0 / "private").exists()
     # the official report (medals/above_median) is persisted as a per-node artifact (NOT in
     # extra_metrics, which is a numeric dict the UI treats as Pareto objectives)
     import json as _j
