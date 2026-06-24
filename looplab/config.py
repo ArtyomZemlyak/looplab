@@ -95,6 +95,9 @@ class Settings(BaseSettings):
     # I3 data-centric: static code-leakage scan of each evaluated solution (fit-before-split,
     # fit-on-test) surfaced into the Trust panel alongside reward-hack flags. Off by default.
     code_leakage_detect: bool = False
+    # C4 independent critic: an execution-free critic of each solution (stub / hardcoded-metric /
+    # params-ignored) surfaced in the Trust panel. Audit-only. Off by default.
+    critic_check: bool = False
     # A7 Strategist (NEW, user-requested): optional LLM/rule meta-controller that picks the search
     # policy/allocator + operator mix + fidelity (+ Developer backend) per situation. Config-first:
     # "off" (default) == today's behavior, every choice the Strategist makes is also a direct knob.

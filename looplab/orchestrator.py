@@ -160,6 +160,7 @@ class Engine:
         proxy_kill_fraction: float = 0.0,
         reward_hack_detect: bool = False,   # B5: flag suspicious wins (audit-only)
         code_leakage_detect: bool = False,  # I3: static code-leakage scan per node
+        critic_check: bool = False,         # C4: execution-free critic per node
         redact_output: bool = False,        # B3: redact secrets from persisted output tails
         novelty_gate: bool = False,         # E1: dedup near-duplicate proposals
         novelty_epsilon: float = 0.05,
@@ -192,6 +193,7 @@ class Engine:
         self.proxy_kill_fraction = proxy_kill_fraction
         self.reward_hack_detect = reward_hack_detect
         self._code_leakage_detect = code_leakage_detect
+        self._critic_check = critic_check
         self._redact_output = redact_output
         self._novelty_gate = novelty_gate
         self._novelty_epsilon = novelty_epsilon
@@ -1197,6 +1199,10 @@ class Engine:
                         for f in code_leakage_scan(node.code)["flags"]:
                             sigs.append({"signal": "data_leakage:" + f["signal"],
                                          "detail": f"line {f['line']}: {f['code']}"})
+                    if self._critic_check and node.code:
+                        from .critic import critique
+                        for c in critique(node.idea, node.code):
+                            sigs.append({"signal": "critic:" + c["issue"], "detail": c["detail"]})
                     if sigs:
                         self.store.append("reward_hack_suspected",
                                           {"node_id": node_id, "signals": sigs})

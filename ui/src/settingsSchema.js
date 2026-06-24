@@ -57,6 +57,8 @@ export const SETTINGS_GROUPS = [
         help: 'B5: flag suspicious wins (grader/answer-key access, frozen-file writes, perfect metrics) in the Trust panel. Audit-only.' },
       { key: 'code_leakage_detect', label: 'Code-leakage scan', type: 'bool',
         help: 'I3: static scan of each solution for train→test leakage (fit-before-split, fit-on-test); surfaced in the Trust panel.' },
+      { key: 'critic_check', label: 'Independent critic', type: 'bool',
+        help: 'C4: execution-free critic of each solution (stub / hardcoded-metric / params-ignored); surfaced in the Trust panel.' },
       { key: 'novelty_gate', label: 'Novelty gate', type: 'bool',
         help: 'E1: nudge near-duplicate proposals off each other so the search stops re-trying the same idea.' },
       { key: 'novelty_epsilon', label: 'Novelty ε', type: 'float',
