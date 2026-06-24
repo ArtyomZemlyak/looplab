@@ -9,30 +9,32 @@
 
 ---
 
-## ★ Shipped 2026-06-24 (this session) — 22 roadmap items, config-first, all in the UI
+## ★ Shipped 2026-06-24 (this session) — ~43 roadmap items, config-first, all in the UI
 
-Branch `feat/adaptive-search-intelligence`, ~12 commits. All **config-first** (every knob in
+Branch `feat/adaptive-search-intelligence`, ~30 commits. All **config-first** (every knob in
 `config.Settings` + the Settings UI), **replay-safe**, surfaced in the UI (new Strategist /
-Importance / Cross-run panels, Pareto/Trust additions, chips, activity narratives). Full suite
-**355 passed, 3 skipped**; live-verified (toy, ASHA, BOHB, surrogate, proxy, a live `qwen3:30b-a3b`
-run, and UI preview of every new panel).
+Importance / Cross-run / Collab panels, Pareto/Trust additions, chips, activity narratives, Model-card
++ Notebook exports). Full suite **413 passed, 5 skipped**; live-verified (toy, ASHA, BOHB, surrogate,
+proxy, time-series, classification, a live `qwen3:30b-a3b` run, UI preview of every new panel).
 
-- ✅ **Theme A — search intelligence:** **A7 Strategist** (rule|llm meta-controller, `strategy_decision`,
-  replay-safe, `set_strategy` override) · **A1 ASHA** racing · **A2 surrogate** proposer (BO-lite) ·
-  **A3 BOHB** (ASHA×surrogate) · **A0a** code-block ablation · **A0b** ensemble merge · **A0d**
-  complexity cue · **A5** budget-aware · **A6** proxy scoring.
-- ✅ **Theme B — trust:** **B3** output redaction (secret-leak gate) · **B5** reward-hack detector.
-- ✅ **Theme C — Developer:** **C2** best-of-N (execution-free reward). *(C1 localization deferred.)*
-- ✅ **Theme D:** **D4** data provenance.
-- ✅ **Theme E:** **E1** novelty/dedup gate · **E4** reflection-memory priors.
-- ✅ **Theme F:** **F1** hyperparameter-importance · **F2** cross-run sweep · **F3** model-card export.
-- ✅ **Theme H:** **H2** schema-aligned parser · **H3** per-role models.
-- ✅ **Theme I:** **I1** CV-gated feature-engineering · **I5** Pareto selector.
+- ✅ **Theme A — search intelligence (complete):** A7 Strategist · A1 ASHA · A2 surrogate · A3 BOHB ·
+  A4 failure-reflection · A0a code-block ablation · A0b ensemble merge · A0d complexity cue ·
+  A5 budget-aware · A6 proxy scoring.
+- ✅ **Theme B — trust:** B1 host-side scoring (`host_score`) · B3 output redaction · B4+ gVisor
+  hostile tier · B5 reward-hack detector. *(B6 parked per user.)*
+- ✅ **Theme C — Developer:** C1 fault localization · C2 best-of-N · C3 deep repair · C4 critic.
+  *(C6 ACI: largely covered by the patch-gate / whole-file-write.)*
+- ✅ **Theme D:** D2 `looplab bench` · D3 classification adapter · D4 data provenance.
+- ✅ **Theme E:** E1 novelty gate · E2 researcher panel · E3 literature grounding · E4 reflection priors.
+- ✅ **Theme F:** F1 importance · F2 cross-run sweep · F3 model-card · F4 collab · F6 fork-to-branch.
+- ✅ **Theme G:** G1 server auth token · G3 parallel-eval budget guard · G5 MLflow export.
+- ✅ **Theme H (complete):** H1 guided_json · H2 schema-aligned parser · H3 per-role models · H4 ctx budget.
+- ✅ **Theme I:** I1 feature-engineering · I2 time-series adapter · I3 code-leakage · I4 notebook export ·
+  I5 Pareto selector.
 
-*(B6 remains parked per user decision — overfitting-on-validation is out of scope for now.)*
-**Still open** (heavy-infra / larger / repo-specific): A4 LATS; B1 host-side scoring + out-of-proc
-grader; C1/C3/C4/C6; D1 real MLE-bench (Kaggle); D2/D3; E2/E3; F4/F6; G1 server-auth/G3/G5; H1/H4;
-I2/I3/I4.
+**Still open** (external-infra-gated): **D1 real MLE-bench** (needs Kaggle creds + dataset download) +
+the **out-of-process grader** (a careful eval-loop refactor — B1 `host_score` is the scoring primitive
+it builds on). B6 parked per user decision.
 
 ---
 
