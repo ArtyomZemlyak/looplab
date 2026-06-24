@@ -71,6 +71,22 @@ def read_metric(stdout: str, workdir: str, spec: dict, wrap=None) -> Optional[fl
             return _to_float(_dig(json.loads(text), spec.get("key", "metric")))
         except json.JSONDecodeError:
             return None
+    if kind == "host_score":
+        # B1 host-side scoring (trust): the candidate WRITES predictions into its workdir; the HOST
+        # scores them against held-out labels it holds at a path OUTSIDE the candidate's workspace
+        # (never mounted under the untrusted tier, never writable by the candidate). The metric is
+        # computed here, on the host — the candidate cannot self-report or see the labels. This turns
+        # `stdout_json` self-reporting into an enforced guarantee for untrusted real tasks.
+        preds_path = Path(workdir) / spec.get("predictions", "predictions.json")
+        labels_path = Path(spec["labels"])             # operator-declared host path (trusted)
+        if not preds_path.is_file() or not labels_path.is_file():
+            return None
+        try:
+            preds = json.loads(preds_path.read_text(encoding="utf-8-sig", errors="replace"))
+            labels = json.loads(labels_path.read_text(encoding="utf-8-sig", errors="replace"))
+        except (json.JSONDecodeError, OSError):
+            return None
+        return host_score(spec.get("scorer", "rmse"), preds, labels, key=spec.get("key"))
     if kind == "adapter":
         # A (human-ratified, frozen) agent-written module exposing read_metric(workdir)->
         # float, for an arbitrary tracker (TensorBoard/ClearML/custom). Run as a SUBPROCESS
@@ -90,6 +106,42 @@ def read_metric(stdout: str, workdir: str, spec: dict, wrap=None) -> Optional[fl
         rc, out, _, to = _run_argv(argv, str(workdir),
                                    float(spec.get("timeout", 120)), None, 64_000)
         return _json_line_metric(out, "metric") if (rc == 0 and not to) else None
+    return None
+
+
+def _as_list(obj, key: Optional[str]):
+    """Coerce a predictions/labels payload to a flat list: a bare list, or `obj[key]` (e.g.
+    {"predictions": [...]}), or the single value list of a dict."""
+    if isinstance(obj, list):
+        return obj
+    if isinstance(obj, dict):
+        if key and key in obj:
+            return obj[key]
+        for cand in ("predictions", "preds", "y", "labels", "values"):
+            if cand in obj:
+                return obj[cand]
+    return None
+
+
+def host_score(scorer: str, preds, labels, *, key: Optional[str] = None) -> Optional[float]:
+    """B1: compute a metric on the HOST from candidate predictions + held-out labels. Built-in,
+    dependency-free scorers (data, never agent code). Returns None on shape/empty mismatch."""
+    yp, yt = _as_list(preds, key), _as_list(labels, key)
+    if not isinstance(yp, list) or not isinstance(yt, list) or not yt or len(yp) != len(yt):
+        return None
+    try:
+        if scorer in ("rmse", "mse", "mae"):
+            errs = [(float(a) - float(b)) for a, b in zip(yp, yt)]
+            if scorer == "mae":
+                return sum(abs(e) for e in errs) / len(errs)
+            mse = sum(e * e for e in errs) / len(errs)
+            return mse if scorer == "mse" else mse ** 0.5
+        if scorer in ("accuracy", "acc"):
+            return sum(1 for a, b in zip(yp, yt) if a == b) / len(yt)
+        if scorer == "error_rate":
+            return 1.0 - sum(1 for a, b in zip(yp, yt) if a == b) / len(yt)
+    except (TypeError, ValueError):
+        return None
     return None
 
 
