@@ -520,8 +520,12 @@ class Engine:
                         break
                     await self._evaluate(a["node_id"], limiter)
             else:
+                # G3 distributed/parallel eval: fan out under a CapacityLimiter (worker pool). The
+                # eval-budget guard the review flagged for this path: cap the number STARTED so an
+                # over-budget run launches at most ~max_parallel more evals, not the whole batch.
                 limiter = anyio.CapacityLimiter(self.max_parallel)
                 cur = fold(self.store.read_all())
+                started = 0
                 async with anyio.create_task_group() as tg:
                     for a in evals:
                         if a["node_id"] in cur.aborted_nodes:
@@ -531,7 +535,13 @@ class Engine:
                                     "node_id": a["node_id"], "error": "aborted by operator",
                                     "reason": "aborted", "eval_seconds": 0.0})
                             continue
+                        # Budget guard (parallel path): stop launching once the folded eval-budget is
+                        # spent, and never start more than max_parallel beyond it in one batch.
+                        if (max_es is not None and cur.total_eval_seconds >= max_es
+                                and started >= self.max_parallel):
+                            break
                         tg.start_soon(self._evaluate, a["node_id"], limiter)
+                        started += 1
 
         # Finalize only on real completion (not when paused for approval / idempotent
         # resume of a done run).
