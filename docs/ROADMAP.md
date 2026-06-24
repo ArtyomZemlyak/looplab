@@ -506,6 +506,58 @@ are mostly config/recipe, not new engine architecture.
 
 ---
 
+## 9.7 Theme I — Net-new capabilities (expand the functional surface)
+
+*The other themes deepen what LoopLab already does; this theme adds genuinely new capability. All
+items below are verified (3-0) in RESEARCH_NOTES Pass 9 unless noted.*
+
+**I1 · LLM feature-engineering operator (CAAFE-style, CV-gated).** The highest-value net-new operator
+for tabular tasks: an LLM reads the **dataset description + column semantics** and iteratively proposes
+**semantically-meaningful engineered features as code**, each **kept only if cross-validation improves**
+(CAAFE improved 11/14 datasets, mean ROC-AUC **0.798→0.822**, arXiv:2305.03403; OpenFE's generated
+features beat **99.6% of Kaggle teams**, arXiv:2211.12507; LLM-FE frames it as evolutionary program
+search, arXiv:2503.14434). **Critical failure mode (verified): feature engineering is NON-universal —
+it *hurts* on some datasets**, so the CV gate is mandatory, and the "OCTree beats CAAFE/OpenFE" claim
+was **refuted (0-3)** — don't pick a single FE method, gate empirically. *For LoopLab:* a new
+`feature_engineering` operator (a code-block the eval CV-gates) — composes with A0a code-block ablation
+and the existing data-profiler. *Effort:* M. *Differentiator:* high for tabular.
+
+**I2 · New task adapters (each a `TaskAdapter`, parallelizable).**
+  - **Time-series forecasting.** Wrap **AutoGluon-TimeSeries** (11 forecasting metrics, *probabilistic*
+    forecasting) or **Darts** (heterogeneous models + built-in **historical-forecast backtesting**) —
+    the eval is a backtest with a forecasting metric (MASE/WQL). *(auto.gluon.ai; unit8co.github.io/darts;
+    a reproducible TS-AutoML benchmark exists, arXiv:2407.16445.)* *Effort:* M.
+  - **Tabular AutoML** (AutoGluon/LightGBM/sklearn pipelines) and **small NLP/CV / multimodal**
+    (AutoGluon trains on combined text+image+tabular). Validates generality + grows the demo surface.
+    *Effort:* M each.
+
+**I3 · Data-centric capabilities.**
+  - **Leakage detection beyond exact-match.** LoopLab's leakage gate is exact-match contamination;
+    add **static dataflow analysis over the solution notebook/code** to catch train→test information
+    flow (verified: pervasive in real pipelines; static analysis detects it, arXiv:2209.03345) +
+    correlation/temporal checks. *Effort:* M. *Ties to:* B (trust).
+  - **Drift + dataset/version provenance.** Pin dataset hashes into the run (extends D4) and add a
+    drift check between train/serve distributions. *Effort:* S–M.
+
+**I4 · Integrations that multiply value.**
+  - **Notebook export.** Emit a run's champion as a **runnable Jupyter notebook** (nbformat/nbconvert)
+    — the artifact data scientists actually want. *Effort:* S–M.
+  - **MLflow autolog bridge** (params/metrics/model/artifacts) so LoopLab plugs into existing MLOps
+    (overlaps G5). *Effort:* M.
+  - **Data connectors** (CSV/parquet/SQL/Kaggle) behind the `TaskAdapter`. *Effort:* M.
+
+**I5 · Multi-objective / cost-aware optimization.** LoopLab gates on hard constraints; add a true
+**Pareto front** (accuracy vs latency vs model-size) and a cost-aware objective — the practical AutoML
+need (Optuna multi-objective; cost-aware AutoML, arXiv:2001.06588). The Pareto panel + `extra_metrics`
+already exist — wire a real non-dominated-set selector. *Effort:* M. *Ties to:* Theme A selection.
+
+*Why this theme matters:* I1 (feature-eng) and I2 (forecasting/tabular adapters) are where most
+real-world data-science value lives — they turn LoopLab from "optimizes a given solution" into
+"does the data scientist's job end-to-end," and each is a clean `TaskAdapter`/operator addition that
+doesn't touch the core loop.
+
+---
+
 ## 10. Phased plan (sequenced)
 
 **Phase 1 — "Trust the numbers" (foundation; ~now).** Finish the in-flight review fixes as features:

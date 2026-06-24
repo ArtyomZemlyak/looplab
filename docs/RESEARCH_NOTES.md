@@ -205,5 +205,31 @@ crossover + agent-proposed merge, **A0a** code-block ablation, **A0e** ReAct deb
 
 ---
 
+## Pass 9 — Net-new capabilities: feature-eng, new adapters, data-centric, integrations *(2026-06-24; 24/25 claims 3-0)*
+Drives the new Roadmap **Theme I**. Unusually well-verified (24 confirmed, 1 refuted).
+- ✅ **LLM feature engineering works, CV-gated:** **CAAFE** — an LLM reads the dataset description +
+  column semantics and iteratively generates semantic features *as code*, kept only if CV improves →
+  **11/14 datasets, mean ROC-AUC 0.798→0.822** (arXiv:2305.03403). **OpenFE** features + a single
+  model **beat 99.6% of Kaggle teams** (arXiv:2211.12507). **LLM-FE** = evolutionary program search
+  for features (arXiv:2503.14434). **OCTree** reduces error but its **head-to-head superiority over
+  CAAFE/OpenFE was REFUTED (0-3)** — don't crown one method.
+- ✅ **Failure mode (verified): feature engineering is NON-universal** — it *hurts* on some datasets ⇒
+  a CV gate per feature is mandatory (this is the safety mechanism, not a nicety).
+- ✅ **New task adapters:** **AutoGluon-TimeSeries** (11 metrics, probabilistic forecasting; eval_metric
+  drives training) + **multimodal Tabular** (text+image+tabular); **Darts** (heterogeneous models +
+  built-in **historical-forecast backtesting**); reproducible TS-AutoML benchmark (arXiv:2407.16445).
+- ✅ **Data-centric:** **static dataflow analysis over notebooks detects train→test leakage** (beyond
+  exact-match; leakage is *pervasive* in real pipelines — arXiv:2209.03345); drift (nannyml);
+  versioning/provenance = code-commit + data-hash + params + metrics + env (mlip-cmu).
+- ✅ **Integrations:** **MLflow autolog** (params/metrics/model/artifacts auto-captured);
+  **nbformat/nbconvert** to emit/execute a champion notebook; tracelet as a tracking bridge.
+- ✅ **Multi-objective:** Optuna multi-objective (Pareto); cost-aware AutoML trades accuracy vs latency
+  vs model-size (arXiv:2001.06588). LoopLab has `extra_metrics` + a Pareto panel — wire a real
+  non-dominated selector.
+→ *Roadmap Theme I.* Highest-value net-new: **I1 CAAFE-style feature-eng operator (CV-gated)** + **I2
+forecasting/tabular adapters** — where most real data-science value lives.
+
+---
+
 *These notes back [ROADMAP.md](ROADMAP.md). Several sources are 2026-dated arXiv IDs surfaced by the
 search agents — confirm they resolve before quoting externally.*
