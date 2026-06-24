@@ -37,6 +37,17 @@ def _engine(run_dir: Path, task: TaskAdapter, settings: Settings,
     # onboarder (Researcher proposes + Developer writes the adapter).
     mk = getattr(task, "make_onboarder", None)
     onboarder = mk(settings) if callable(mk) else None
+    # A7 Strategist (optional adaptive meta-control) + live Developer-backend swap factory.
+    from .strategist import make_strategist
+    from .tasks import make_developer_factory
+    strat_client = (make_llm_client(settings)
+                    if settings.backend == "llm" and settings.strategist_backend == "llm" else None)
+    strategist = make_strategist(settings, client=strat_client, n_seeds=settings.n_seeds)
+    dev_factory = make_developer_factory(task, settings) if settings.backend == "llm" else None
+    proxy_scorer = None
+    if settings.proxy_scoring or settings.proxy_kill_fraction > 0:
+        from .proxy import ProxyScorer
+        proxy_scorer = ProxyScorer(kill_fraction=settings.proxy_kill_fraction)
     return Engine(
         run_dir,
         task=task,
@@ -44,7 +55,8 @@ def _engine(run_dir: Path, task: TaskAdapter, settings: Settings,
         developer=developer,
         sandbox=make_sandbox(settings.trust_mode, image=settings.docker_image),
         policy=make_policy(settings.policy, n_seeds=settings.n_seeds,
-                           max_nodes=settings.max_nodes, ablate_every=settings.ablate_every),
+                           max_nodes=settings.max_nodes, ablate_every=settings.ablate_every,
+                           eta=settings.asha_eta),   # forwarded to ASHA (greedy/mcts/evo ignore it)
         max_parallel=settings.max_parallel,
         timeout=settings.timeout,
         crash_after=crash_after,
@@ -59,6 +71,18 @@ def _engine(run_dir: Path, task: TaskAdapter, settings: Settings,
         eval_trust_mode=settings.eval_trust_mode,
         trust_mode=settings.trust_mode,
         docker_image=settings.docker_image,
+        n_seeds=settings.n_seeds,
+        max_nodes=settings.max_nodes,
+        policy_name=settings.policy,
+        ablate_every=settings.ablate_every,
+        strategist=strategist,
+        strategist_every=settings.strategist_every,
+        developer_factory=dev_factory,
+        merge_mode=settings.merge_mode,
+        complexity_cue=settings.complexity_cue,
+        ablate_code_blocks=settings.ablate_code_blocks,
+        proxy_scorer=proxy_scorer,
+        proxy_kill_fraction=settings.proxy_kill_fraction,
     )
 
 

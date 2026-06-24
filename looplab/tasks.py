@@ -57,6 +57,19 @@ def make_llm_client(settings) -> OpenAICompatibleClient:
     )
 
 
+def make_developer_factory(task: TaskAdapter, settings):
+    """A7 Strategist support: a callable `factory(backend) -> Developer` that rebuilds just the
+    Developer under a different `developer_backend` (e.g. swap in-house LLM <-> agentic coding agent
+    live). Reuses `make_roles` so all the validation/patch-gate wiring is identical; returns only the
+    developer. Used when the Strategist (or an operator) picks a Developer mode per phase/node."""
+    def factory(backend: str):
+        b = "default" if backend == "llm" else backend
+        s = settings.model_copy(update={"developer_backend": b})
+        _researcher, developer = make_roles(task, s)
+        return developer
+    return factory
+
+
 def make_roles(task: TaskAdapter, settings):
     """Pick role backends from config (ADR-7): toy optimizer or a live LLM. When a
     knowledge_dir is configured, the LLM Researcher is wrapped with the agentic

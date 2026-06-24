@@ -68,9 +68,11 @@ just mean-params), and a **memory operator** that reuses prior winning patterns.
 Across agents, the validation metric keeps improving while the true **test** score plateaus or
 **declines** (val-test gap 15–16.6%); searching on test would gain 9.4–12.4%. Today LoopLab selects
 `best` purely by the validation/CV metric — i.e., it is *structurally* exposed to this exact failure.
-→ **New top feature: B6 — a held-out test split the search never sees + a generalization-gap guard**
-(report val-vs-test, penalize/flag high-gap "winners"). This is both a *trust* feature and a
-*search-quality* feature, and few systems solve it — a real differentiator.
+→ **Feature B6 — a held-out test split the search never sees + a generalization-gap guard** (report
+val-vs-test, penalize/flag high-gap "winners"). Both a *trust* and a *search-quality* feature, and few
+systems solve it — a real differentiator. *(Status per user decision 2026-06-24: **parked in the
+backlog** — kept as a high-value item and the recommended gate before a published D1 benchmark number,
+but deliberately not a top-3/Phase-1 priority right now.)*
 
 **③ Two cost-reduction levers beat fancier search (KompeteAI 6.9×, ArchPilot proxy-MCTS, both 3-0).**
 The top MLE-bench systems win by **evaluating more candidates per unit compute** — a *predictive
@@ -139,6 +141,12 @@ LLM-driven *and* AutoML-principled search). That intersection is the moat to wid
 ablate) is what actually moves the metric, and the 2025 evidence says **this is the bottleneck, not
 the search policy** (§0.5①); (ii) *compute allocation* — every eval runs to completion and the metric
 history is ignored when proposing. **Do A0 first; A1–A4 compound on it.**
+
+**Design principle (user decision): config-first, strategist-optional.** Every operator, policy, and
+allocator below must be **individually configurable** (enable/disable + params) via settings — full
+manual control is the default. On top of that, an **optional LLM "Strategist" role (A7)** can *adapt*
+those choices at runtime. Nothing the Strategist decides is unreachable by hand; the Strategist is a
+convenience layer over the same config knobs, never a black box.
 
 **A0 · Richer operators (the actual bottleneck — NEW top priority).** Invest in the *move set* before
 the search policy. The evidence is unusually concrete and reproducible — Meta/FAIR's **aira-dojo**
@@ -234,6 +242,33 @@ full-training escalation** (arXiv:2511.03985). *Code:* a `ProxyScorer` consulted
 `_evaluate`; emit a `proxy_scored` event; escalate to full eval only for promoters. Pairs with A1
 (proxy picks rung-0 survivors cheaply) and **C2 best-of-N** (makes N affordable). *Effort:* M–L.
 *Differentiator:* yes — this is what currently separates the MLE-bench leaders.
+
+**A7 · Strategist role — adaptive meta-control (NEW; user-requested).** A new **optional LLM role**
+(behind a Protocol, exactly like `Researcher`/`Developer`) that periodically reads the folded run
+state — progress vs budget, per-operator yield, failure-reason mix, val/CV trajectory, breadth/depth
+of the tree — and **decides which search machinery to use next**:
+  - **Search policy / allocator:** greedy vs evolutionary vs MCTS vs ASHA (A1) vs surrogate/BO (A2) vs
+    BOHB (A3), and their key params (UCB constant, halving η, breadth) — e.g. "explore broad with
+    cheap ASHA rungs early, switch to BO refinement once a leader emerges."
+  - **Developer backend (ties Theme C):** in-house LLM vs **agentless** vs **external coding-agent** —
+    per phase or per node (agentless for well-scoped edits, agentic for open-ended exploration).
+  - **Operator mix & fidelity:** which A0 operators to favor now (draft/improve/merge/ablate/feature-eng),
+    smoke-vs-full breadth, when to trigger confirm/ablation.
+  - *Design:* default **OFF** — a static config picks policy+Developer (full manual control, the
+    current behavior). When ON, the Strategist proposes a `strategy` and the engine applies it; every
+    decision is **logged as a `strategy_decision` event** (replay-safe, audit-only — never silently
+    changes selection) and surfaced in a **"why this strategy" panel** (mirrors the existing policy
+    "why-this-node"). Bounded cadence (every N nodes / on phase change) so it doesn't thrash.
+  - *Why it's the right shape:* it reuses the role-swap seam + event-sourced control plane LoopLab
+    already has; it makes §0.5① *actionable* (don't hardcode "MCTS everywhere" — let an informed
+    controller pick per-situation, but keep it overridable); gradient-free, fits local-first.
+    *Pairs with:* E4 (cross-run meta-priors seed its opening choice), A5 (budget-aware), A6 (proxy
+    signals feed its decisions).
+  - *Code:* `roles.Strategist` Protocol + `make_strategist` (config `strategist_backend`:
+    `off`(default)`|rule|llm`); ship the **rule-based baseline first** (deterministic heuristics over
+    the same state — also the zero-dep fallback), then the LLM variant. *Effort:* M (rule) + M (LLM).
+    *Differentiator:* high — adaptive, auditable, hand-overridable meta-control is rare.
+    **→ Full implementation-ready design: [A7-strategist-design.md](A7-strategist-design.md).**
 
 ---
 
@@ -337,9 +372,13 @@ into the existing `ValidatingDeveloper`.
 **C5 · Agentless mode (high priority given the weak local model).** A deterministic
 localize→generate-N-patches→validate pipeline (no open-ended agent loop) is empirically more reliable,
 more *stable*, and far cheaper than a full agent (Agentless 32% Lite @ $0.70; PatchPilot more stable
-than agentic). Offer it as a `developer_backend=agentless` preset — likely LoopLab's best default
+than agentic). Offer it as a `developer_backend=agentless` preset — a strong default
 coding path until a stronger model is available. *This subsumes C1+C2+C4 into one proven recipe.*
-  - *Effort:* M. *Recommendation:* make this the **default** repo-mode Developer.
+  - *Effort:* M. *Recommendation (user decision):* make agentless the **default**, but **keep the
+    external coding-agent (agentic) backend as a first-class configurable option** — `developer_backend`
+    selects `llm | agentless | <agent preset>`, and when the **Strategist (A7)** is on it may pick the
+    mode per phase/node (agentless for scoped edits, agentic for open-ended exploration). Agentic is
+    never removed — it's one selectable backend among several.
 
 **C6 · Better ACI / write-over-edit.** Build-status already found qwen3:8b is more robust writing a
 file whole than using strict edit/diff tools. Formalize this into a tuned Agent-Computer Interface:
@@ -561,12 +600,12 @@ doesn't touch the core loop.
 ## 10. Phased plan (sequenced)
 
 **Phase 1 — "Trust the numbers" (foundation; ~now).** Finish the in-flight review fixes as features:
-B1 host-side scoring, B2 reader protection, B3 secret gate, **B6 held-out test + generalization-gap
-guard**, G1 server auth, G2 replay hardening, G4 LLM robustness, F5 UX correctness. *Why first:*
-everything credible (benchmarks, untrusted tasks, sharing) depends on integrity + safety being real;
-**B6 is here because selecting on validation alone is the verified #1 failure mode** and a credible
-benchmark score (D1) is meaningless without held-out selection. Much of this is already underway in
-the tree (the review-fix commits).
+B1 host-side scoring, B2 reader protection, B3 secret gate, G1 server auth, G2 replay hardening, G4
+LLM robustness, F5 UX correctness. *Why first:* everything credible (benchmarks, untrusted tasks,
+sharing) depends on integrity + safety being real. Much of this is already underway in the tree (the
+review-fix commits). *(**B6 held-out/generalization-gap guard is parked in the backlog** per user
+decision — still the verified #1 *unsolved* problem and the recommended gate before publishing a D1
+MLE-bench number, but not a Phase-1 blocker.)*
 
 **Phase 2 — "Better moves, then better search" (differentiation).** **A0 richer operators FIRST**
 (code-block ablation refinement, real merge/ensembling, memory operator) — the verified bottleneck —
@@ -586,13 +625,14 @@ held-out selection (Phase 1) and good operators/search (Phase 2) to produce resu
 
 | Quick wins (≤ S, high value) | Big bets (L, transformative) |
 |---|---|
-| B2 protect readers · B3 secret gate · G1 server auth · A5 budget-aware · E1 novelty gate · F3 lineage export · D4 data provenance · F5 UX fixes · A0 memory-operator (S–M) · **H2 schema-aligned parsing · H3 5090 model presets** | **A0 code-block ablation + merge/ensembling (the verified bottleneck)** · **B6 held-out test + generalization-gap guard (#1 unsolved)** · A6 proxy scoring + A1 ASHA · D1 real MLE-bench · C2/C5 best-of-N / agentless Developer · G3 distributed eval · E4 meta-learned priors |
+| B2 protect readers · B3 secret gate · G1 server auth · A5 budget-aware · E1 novelty gate · F3 lineage export · D4 data provenance · F5 UX fixes · A0 memory-operator (S–M) · A0d complexity-cue · **A7 rule-based Strategist (baseline)** · **H2 schema-aligned parsing · H3 5090 model presets** | **A0 code-block ablation + merge/ensembling (the verified bottleneck)** · **A7 LLM Strategist meta-control (config-overridable)** · A6 proxy scoring + A1 ASHA · D1 real MLE-bench · C2/C5 best-of-N / agentless+agentic Developer · G3 distributed eval · E4 meta-learned priors · *(backlog: B6 held-out/gap guard)* |
 
-**If you do only three things:** (1) **A0** — extend `_ablate` to code blocks + add a real
-merge/ensembling operator (the verified #1 lever, and LoopLab is closest to it); (2) **B6** — a
-held-out test the search can't see + a generalization-gap guard (the verified #1 *unsolved* problem,
-and LoopLab is structurally exposed today); (3) **A6/A1** — proxy scoring + ASHA racing so broad
-operator search and best-of-N are affordable (what currently separates the MLE-bench leaders).
+**If you do only three things (per user decision):** (1) **A0** — extend `_ablate` to code blocks +
+add a real merge/ensembling operator, *each individually configurable* (the verified #1 lever, and
+LoopLab is closest to it); (2) **A6/A1** — proxy scoring + ASHA racing so broad operator search and
+best-of-N are affordable (what currently separates the MLE-bench leaders); (3) **A7 Strategist** — the
+optional LLM meta-controller that *picks* the search algorithm + Developer mode per situation (all
+overridable by config). *(B6 held-out guard remains in the backlog — high value, not top-3 right now.)*
 
 ---
 

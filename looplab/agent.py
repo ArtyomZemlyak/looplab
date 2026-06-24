@@ -91,11 +91,12 @@ class ToolUsingResearcher:
         tool_specs = self.tools.specs() + [self._emit_spec()]
         hints = [h.get("text", "") for h in (state.pending_hints or []) if h.get("text")]
         hint_block = ("\nOperator directives (follow if sensible): " + "; ".join(hints)) if hints else ""
+        cue = getattr(self, "_complexity_hint", "")   # A0d breadth-keyed complexity cue (empty=off)
         messages = [
             {"role": "system",
              "content": render(self.prompts, "tool_researcher_system", self._SYSTEM)
                         + self.space_hint},
-            {"role": "user", "content": _state_brief(state, parent) + hint_block +
+            {"role": "user", "content": _state_brief(state, parent) + hint_block + cue +
                 "\nDecide the next experiment. Consult knowledge if useful, then emit."},
         ]
         for _ in range(self.max_turns):

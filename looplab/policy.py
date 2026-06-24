@@ -253,13 +253,111 @@ class MCTSPolicy:
         return [{"kind": "improve", "parent_id": chosen, "_scores": scores, "_chosen": chosen}]
 
 
+class ASHAPolicy:
+    """A1 · Asynchronous Successive Halving (ASHA / Hyperband, ADR-2). Allocates compute by
+    *racing*: seed a wide rung-0 of cheap drafts, then promote only the top 1/eta survivors to the
+    next rung (an `improve` that gets more attention), recursively — instead of full-expanding
+    every lineage. Adapted to LoopLab's tree substrate: a "rung" is a generation (draft=rung 0,
+    improve-of-survivor=rung 1, …); promotion = spending the next node on a survivor's lineage. The
+    fidelity (smoke at low rungs, full near the top) is driven by the Strategist/eval-profile seam.
+
+    Pure: rungs/survivors are derived from the folded DAG, so it's deterministic and replay-safe.
+    Emits `_rung`/`_promoted` meta on its action so the engine can log a `rung_promoted` event."""
+
+    def __init__(self, n_seeds: int = 4, max_nodes: int = 12, eta: int = 3, debug_depth: int = 1):
+        self.n_seeds = max(2, n_seeds)         # rung-0 width
+        self.max_nodes = max_nodes
+        self.eta = max(2, eta)                 # keep top 1/eta per rung
+        self.debug_depth = debug_depth
+
+    def _generation(self, state: RunState) -> dict[int, int]:
+        """Generation (rung) of each node: a draft is rung 0; an improve/merge child is parent+1.
+        Computed by a monotone pass over ids (parents always precede children)."""
+        gen: dict[int, int] = {}
+        for n in sorted(state.nodes.values(), key=lambda n: n.id):
+            if not n.parent_ids:
+                gen[n.id] = 0
+            else:
+                gen[n.id] = 1 + max((gen.get(p, 0) for p in n.parent_ids), default=0)
+        return gen
+
+    def next_actions(self, state: RunState) -> list[dict]:
+        pending = state.pending_nodes()
+        if pending:
+            return [{"kind": "evaluate", "node_id": n.id} for n in pending]
+        total = len(state.nodes)
+        if total < self.max_nodes:
+            dbg = debug_action(state, self.debug_depth)
+            if dbg:
+                return [dbg]
+        if total >= self.max_nodes:
+            return []
+
+        # Rung 0: fill to n_seeds cheap drafts (the wide base of the bracket).
+        drafts = [n for n in state.nodes.values() if not n.parent_ids]
+        if len(drafts) < self.n_seeds:
+            k = min(self.n_seeds - len(drafts), self.max_nodes - total)
+            return [{"kind": "draft"} for _ in range(k)]
+
+        gen = self._generation(state)
+        feasible = {n.id for n in state.feasible_nodes()}
+        if not feasible:
+            return [{"kind": "draft"}]
+        has_child: set[int] = set()
+        for n in state.nodes.values():
+            has_child.update(n.parent_ids)
+
+        # Promote from the LOWEST rung that still has an unexpanded survivor (asynchronous: don't
+        # wait for a whole rung to finish before promoting from a lower one).
+        by_rung: dict[int, list[int]] = {}
+        for nid in feasible:
+            by_rung.setdefault(gen.get(nid, 0), []).append(nid)
+        best_of = max if state.direction == "max" else min
+        for r in sorted(by_rung):
+            members = by_rung[r]
+            # successive-halving survivor count: keep the top ⌈n/η⌉ (round UP so a rung wider than η
+            # always promotes ≥2 — `floor` would collapse e.g. n=4,η=3 to 1 survivor and never halve).
+            keep = max(1, math.ceil(len(members) / self.eta))
+            survivors = sorted(
+                members, key=lambda i: (state.nodes[i].metric, i),
+                reverse=(state.direction == "max"))[:keep]
+            unexpanded = [i for i in survivors if i not in has_child]
+            if len(survivors) <= 1:
+                continue            # rung collapsed to a single leader: nothing left to halve here
+            if unexpanded:
+                chosen = sorted(unexpanded)[0]
+                scores = {i: round(state.nodes[i].metric, 4) for i in members
+                          if state.nodes[i].metric is not None}
+                return [{"kind": "improve", "parent_id": chosen,
+                         "_scores": scores, "_chosen": chosen,
+                         "_rung": r + 1, "_promoted": survivors}]
+
+        # All rungs collapsed/expanded -> exploit the global best with remaining budget.
+        b = state.best()
+        return [{"kind": "improve", "parent_id": b.id}] if b is not None else [{"kind": "draft"}]
+
+
+# Policy registry (ADR-2). The Strategist (A7) may only pick from these names; new policies
+# (A2 surrogate/BO, A3 BOHB) auto-register here and become selectable without engine changes.
+_POLICIES = ("greedy", "evolutionary", "mcts", "asha")
+
+
+def available_policies() -> list[str]:
+    return list(_POLICIES)
+
+
 def make_policy(name: str = "greedy", *, n_seeds: int, max_nodes: int,
-                ablate_every: int = 0) -> SearchPolicy:
-    """Select a search policy by name (ADR-2 pluggable algorithm)."""
+                ablate_every: int = 0, **params) -> SearchPolicy:
+    """Select a search policy by name (ADR-2 pluggable algorithm). `params` carries
+    policy-specific overrides the Strategist may pass (e.g. mcts `c`, asha `eta`)."""
     if name == "greedy":
         return GreedyTree(n_seeds=n_seeds, max_nodes=max_nodes, ablate_every=ablate_every)
     if name == "evolutionary":
         return EvolutionaryPolicy(pop=n_seeds, max_nodes=max_nodes)
     if name == "mcts":
-        return MCTSPolicy(n_seeds=n_seeds, max_nodes=max_nodes)
+        c = float(params.get("c", 1.4))
+        return MCTSPolicy(n_seeds=n_seeds, max_nodes=max_nodes, c=c)
+    if name == "asha":
+        eta = int(params.get("eta", 3))
+        return ASHAPolicy(n_seeds=n_seeds, max_nodes=max_nodes, eta=eta)
     raise ValueError(f"unknown policy: {name!r}")

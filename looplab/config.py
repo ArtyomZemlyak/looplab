@@ -27,11 +27,34 @@ class Settings(BaseSettings):
     # Image for the untrusted command-eval tier (RepoTask, Phase 4): the framework's deps
     # should be baked in (the container runs --network none, so a pip setup can't fetch).
     docker_image: str = "python:3.12-slim"
-    # Search policy (ADR-2): "greedy" | "evolutionary" | "mcts".
+    # Search policy (ADR-2): "greedy" | "evolutionary" | "mcts" | "asha".
     policy: str = "greedy"
     # Ablation-driven refinement (I7): every N improves, ablate the best to find the
     # highest-impact parameter and refine it. 0 = off. (GreedyTree only.)
     ablate_every: int = 0
+    # A0a (MLE-STAR): when ablating, treat each generated pipeline *code block* (not just a
+    # numeric param) as an ablation unit — neutralize a block, measure the metric delta, refine
+    # the highest-impact block. Off => the classic numeric-param ablation. Config-first knob.
+    ablate_code_blocks: bool = False
+    # A0b: real merge/ensembling. "mean" = legacy mean-param merge; "ensemble" = the Developer
+    # writes a code-recombination ensemble over the two parents' solutions (verified: agent-proposed
+    # ensembling 37.9%->43.9%). Falls back to mean when the Developer can't ensemble.
+    merge_mode: str = "mean"
+    # A0d (AIRA): inject a dynamic complexity hint into the draft/improve prompt keyed on the
+    # node's child count (few children -> keep minimal; many -> escalate to ensembling/HPO).
+    complexity_cue: bool = False
+    # A1 ASHA / successive-halving: reduction factor (keep top 1/eta per rung) and rung budget.
+    asha_eta: int = Field(default=3, ge=2)
+    asha_rung_nodes: int = Field(default=4, ge=2)   # candidates batched at rung 0
+    # A6 proxy/predictive scoring: cheaply rank a candidate's potential from early-stage signals
+    # and skip a full eval for the doomed bottom fraction. 0.0 = off (no candidate skipped).
+    proxy_scoring: bool = False
+    proxy_kill_fraction: float = Field(default=0.0, ge=0.0, le=0.9)
+    # A7 Strategist (NEW, user-requested): optional LLM/rule meta-controller that picks the search
+    # policy/allocator + operator mix + fidelity (+ Developer backend) per situation. Config-first:
+    # "off" (default) == today's behavior, every choice the Strategist makes is also a direct knob.
+    strategist_backend: str = "off"            # "off" | "rule" | "llm"
+    strategist_every: int = Field(default=3, ge=1)   # consult cadence (created nodes)
     # Multi-seed confirmation (I12, ADR-15): confirm the top-k under N seeds before
     # finishing. 0 disables (default). Only meaningful when eval has variance.
     confirm_top_k: int = 0

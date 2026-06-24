@@ -49,6 +49,7 @@ CONTROL_EVENTS = {
     "run_abort", "pause", "resume", "node_abort", "budget_extend", "hint",
     "force_confirm", "force_ablate", "fork", "annotation", "promote",
     "approval_granted", "spec_approved", "inject_node", "run_reopened",
+    "set_strategy",   # A7: operator pins/overrides the Strategist's choice (HITL parity)
 }
 
 POLL_SECONDS = 0.4   # SSE tail cadence — fast enough to feel live, light on the disk

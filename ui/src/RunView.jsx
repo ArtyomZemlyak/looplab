@@ -9,14 +9,14 @@ import { InjectModal, ChatTab } from './experiment.jsx'
 import {
   TrustPanel, SensitivityPanel, FailuresPanel, ParetoPanel, DataQualityPanel,
   ConfigPanel, AuthoringPanel, MemoryPanel, RegistryPanel, ReportPanel, EventExplorer,
-  ComparePanel, MetaGraphPanel, GpuPanel, PolicyPanel,
+  ComparePanel, MetaGraphPanel, GpuPanel, PolicyPanel, StrategistPanel,
 } from './panels.jsx'
 
 const PANELS = [
-  ['report', 'Report'], ['trust', 'Trust'], ['policy', 'Policy'], ['sensitivity', 'Sensitivity'],
-  ['failures', 'Failures'], ['pareto', 'Pareto/Div'], ['data', 'Data'], ['compare', 'Compare'],
-  ['config', 'Config'], ['authoring', 'Authoring'], ['memory', 'Memory'], ['registry', 'Registry'],
-  ['meta', 'Meta-graph'], ['gpu', 'GPU'], ['events', 'Events'],
+  ['report', 'Report'], ['trust', 'Trust'], ['policy', 'Policy'], ['strategist', 'Strategist'],
+  ['sensitivity', 'Sensitivity'], ['failures', 'Failures'], ['pareto', 'Pareto/Div'], ['data', 'Data'],
+  ['compare', 'Compare'], ['config', 'Config'], ['authoring', 'Authoring'], ['memory', 'Memory'],
+  ['registry', 'Registry'], ['meta', 'Meta-graph'], ['gpu', 'GPU'], ['events', 'Events'],
 ]
 
 export default function RunView({ runId, onBack }) {
@@ -113,6 +113,9 @@ export default function RunView({ runId, onBack }) {
         {cost && <span className="chip"><span className="k">tokens</span> {fmtInt(cost.total_tokens)}</span>}
         {state.pending_hints?.length > 0 && <span className="chip" title={state.pending_hints.map(h => '• ' + (h.text || JSON.stringify(h))).join('\n')}>
           <span className="k">💡 hints</span> {state.pending_hints.length}</span>}
+        {state.active_strategy && <span className="chip" title={state.active_strategy.rationale || 'active strategy'}
+          onClick={() => setPanel('strategist')} style={{ cursor: 'pointer' }}>
+          <span className="k">🧭 strategy</span> {state.active_strategy.policy || 'greedy'}{state.active_strategy.fidelity ? '/' + state.active_strategy.fidelity : ''}</span>}
 
         <div className="toolbar">
           {!state.finished && (state.paused
@@ -182,6 +185,7 @@ export default function RunView({ runId, onBack }) {
       {panel === 'memory' && <MemoryPanel onClose={() => setPanel(null)} />}
       {panel === 'registry' && <RegistryPanel state={state} onClose={() => setPanel(null)} />}
       {panel === 'policy' && <PolicyPanel state={state} onSelect={selectNode} onClose={() => setPanel(null)} />}
+      {panel === 'strategist' && <StrategistPanel state={state} runId={runId} onToast={showToast} onClose={() => setPanel(null)} />}
       {panel === 'gpu' && <GpuPanel onClose={() => setPanel(null)} />}
       {panel === 'report' && <ReportPanel state={state} runId={runId} onClose={() => setPanel(null)} />}
       {panel === 'events' && <EventExplorer runId={runId} onClose={() => setPanel(null)} />}

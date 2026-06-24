@@ -16,6 +16,10 @@ const NARR = {
   pause: () => 'paused by operator', resume: () => 'resumed', run_abort: () => 'abort requested',
   node_abort: (d) => `stop requested for #${d.node_id}`, budget_extend: (d) => `budget extended ${JSON.stringify(d)}`,
   hint: (d) => `hint: ${d.text}`, promote: (d) => `promoted #${d.node_id} → ${d.alias || 'champion'}`,
+  strategy_decision: (d) => `strategy → ${d.strategy?.policy || '?'}${d.strategy?.fidelity ? '/' + d.strategy.fidelity : ''}${d.strategy?.rationale ? ' — ' + d.strategy.rationale.slice(0, 70) : ''}`,
+  rung_promoted: (d) => `ASHA rung ↑${d.rung}: promoted ${(d.survivors || []).map(s => '#' + s).join(', ')}`,
+  set_strategy: (d) => `operator pinned strategy → ${d.strategy?.policy || ''}${d.strategy?.fidelity ? '/' + d.strategy.fidelity : ''}`,
+  proxy_scored: (d) => `proxy scored #${d.node_id}: ${fmt(d.score)}${d.skipped ? ' (skipped full eval)' : ''}`,
   run_finished: (d) => `run finished${d.reason ? ' (' + d.reason + ')' : ''}`,
   llm_cost: (d) => `LLM: ${d.total_tokens} tokens, $${fmt(d.cost)}`,
 }

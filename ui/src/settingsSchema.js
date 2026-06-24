@@ -7,8 +7,8 @@ export const SETTINGS_GROUPS = [
   {
     title: 'Search & policy', sub: 'how the loop explores the solution tree',
     fields: [
-      { key: 'policy', label: 'Policy', type: 'enum', options: ['greedy', 'evolutionary', 'mcts'],
-        help: 'Tree-search strategy: greedy hill-climb, evolutionary archive, or MCTS.' },
+      { key: 'policy', label: 'Policy', type: 'enum', options: ['greedy', 'evolutionary', 'mcts', 'asha'],
+        help: 'Tree-search strategy: greedy hill-climb, evolutionary archive, MCTS, or ASHA (multi-fidelity racing).' },
       { key: 'max_nodes', label: 'Max nodes', type: 'int',
         help: 'Node (experiment) budget — the loop stops after this many.' },
       { key: 'n_seeds', label: 'Seeds', type: 'int', help: 'Eval seeds per node (variance handling).' },
@@ -18,6 +18,27 @@ export const SETTINGS_GROUPS = [
         help: 'Ablation-driven refinement every N improves (0 = off; greedy only).' },
       { key: 'archive_resolution', label: 'Archive resolution', type: 'float',
         help: 'Diversity-archive niche width in parameter space.' },
+      { key: 'asha_eta', label: 'ASHA η (reduction)', type: 'int',
+        help: 'Successive-halving factor: keep top 1/η survivors per rung (asha policy).' },
+    ],
+  },
+  {
+    title: 'Strategist & operators', sub: 'A7 adaptive meta-control + richer operators (config-first)',
+    fields: [
+      { key: 'strategist_backend', label: 'Strategist', type: 'enum', options: ['off', 'rule', 'llm'],
+        help: 'Optional meta-controller that picks policy/operators/fidelity at runtime. off = static config (default); rule = deterministic heuristics; llm = model-driven (falls back to rule).' },
+      { key: 'strategist_every', label: 'Consult every', type: 'int',
+        help: 'Strategist consult cadence in created nodes (bounded, so it never thrashes).' },
+      { key: 'merge_mode', label: 'Merge mode', type: 'enum', options: ['mean', 'ensemble'],
+        help: 'A0b: mean = legacy mean-param merge; ensemble = Developer recombines parent solutions (code-level).' },
+      { key: 'complexity_cue', label: 'Complexity cue', type: 'bool',
+        help: 'A0d: inject a complexity hint keyed on a branch’s breadth (few children = minimal; many = advanced).' },
+      { key: 'ablate_code_blocks', label: 'Ablate code blocks', type: 'bool',
+        help: 'A0a: ablate generated pipeline code blocks (MLE-STAR), not just numeric params.' },
+      { key: 'proxy_scoring', label: 'Proxy scoring', type: 'bool',
+        help: 'A6: early-signal score candidates to skip doomed full evals.' },
+      { key: 'proxy_kill_fraction', label: 'Proxy kill fraction', type: 'float',
+        help: 'A6: skip the bottom fraction of candidates by proxy score (0 = never skip).' },
     ],
   },
   {

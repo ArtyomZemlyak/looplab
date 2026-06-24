@@ -109,6 +109,21 @@ def fold(events: Iterable[Event]) -> RunState:
         elif t == "policy_decision":
             st.policy_scores = {int(k): v for k, v in (d.get("scores") or {}).items()}
             st.policy_chosen = d.get("chosen")
+        elif t == "strategy_decision":
+            # A7 Strategist (audit-only): the engine recorded the chosen Strategy. Replay rebuilds
+            # active_strategy WITHOUT re-calling the LLM (the decision is config, not selection).
+            st.active_strategy = d.get("strategy")
+            st.strategy_history.append({"strategy": d.get("strategy"), "at_node": d.get("at_node"),
+                                        "ctx": d.get("ctx")})
+        elif t == "rung_promoted":
+            st.rungs.append({"rung": d.get("rung"), "survivors": d.get("survivors", [])})
+        elif t == "proxy_scored":
+            # A6 proxy/predictive scoring (audit-only): early-signal rank + which nodes were skipped.
+            nid = d.get("node_id")
+            if nid is not None and d.get("score") is not None:
+                st.proxy_scores[nid] = d["score"]
+            if d.get("skipped") and nid is not None and nid not in st.proxy_skipped:
+                st.proxy_skipped.append(nid)
         elif t == "best_confirmed":
             best_confirmed = d["node_id"]
             st.confirmed_done = True   # the confirmation phase ran to completion
@@ -139,6 +154,11 @@ def fold(events: Iterable[Event]) -> RunState:
                     st.budget_overrides[_k] = d[_k]
         elif t == "hint":
             st.pending_hints.append(d)
+        elif t == "set_strategy":
+            # A7 operator override (HITL parity with pause/hint): the human pins a Strategy. The
+            # engine applies it before consulting the Strategist, so a human always wins. Cleared by
+            # the engine recording the matching strategy_decision (source="operator").
+            st.pending_strategy = d.get("strategy")
         elif t == "force_confirm":
             if d.get("node_id") is not None:
                 st.confirm_requests.append(d["node_id"])

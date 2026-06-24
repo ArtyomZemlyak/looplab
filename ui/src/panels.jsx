@@ -292,6 +292,78 @@ export function PolicyPanel({ state, onClose, onSelect }) {
   )
 }
 
+// "Why this strategy" — the A7 Strategist's adaptive meta-control. Shows the active Strategy
+// (policy / Developer / fidelity / operator mix + rationale), the timeline of switches
+// (strategy_history), the ASHA rung-promotion trail, and an operator override (set_strategy) so a
+// human can pin a policy live (HITL parity). Mirrors the policy "why-this-node" panel.
+export function StrategistPanel({ state, runId, onClose, onToast }) {
+  const active = state.active_strategy
+  const history = state.strategy_history || []
+  const rungs = state.rungs || []
+  const [pol, setPol] = useState('')
+  const [fid, setFid] = useState('')
+  const POLICIES = ['greedy', 'evolutionary', 'mcts', 'asha']
+  const pin = async () => {
+    const strat = {}
+    if (pol) strat.policy = pol
+    if (fid) strat.fidelity = fid
+    if (!Object.keys(strat).length) return
+    strat.rationale = 'operator-pinned via UI'
+    try { await CONTROL.setStrategy(runId, strat); onToast && onToast('strategy pinned') }
+    catch (e) { onToast && onToast('failed: ' + e.message) }
+  }
+  const opLine = (ops) => ops ? Object.entries(ops).map(([k, v]) => `${k}=${v}`).join(', ') : '—'
+  return (
+    <Panel title="Strategist — why this strategy" sub={active ? (active.source || 'rule') : 'off'} onClose={onClose} wide>
+      {active
+        ? <div className="kvs" style={{ marginBottom: 10 }}>
+            <div className="kv"><div className="k">policy</div><div className="v"><b>{active.policy || state.policy || 'greedy'}</b>
+              {active.policy_params && Object.keys(active.policy_params).length ? <span className="muted"> ({opLine(active.policy_params)})</span> : null}</div></div>
+            <div className="kv"><div className="k">developer</div><div className="v">{active.developer || 'default'}</div></div>
+            <div className="kv"><div className="k">fidelity</div><div className="v">{active.fidelity || 'adaptive'}</div></div>
+            <div className="kv"><div className="k">operators</div><div className="v">{opLine(active.operators)}</div></div>
+            <div className="kv"><div className="k">why</div><div className="v">{active.rationale || '—'}</div></div>
+          </div>
+        : <div className="muted">Strategist is <b>off</b> — the static config policy (<b>{state.policy || 'greedy'}</b>) drives the search.
+            Every choice below is also a direct config knob; turn the Strategist on (Settings → strategist_backend = rule|llm) to adapt it at runtime.</div>}
+
+      {history.length > 0 && <>
+        <div className="section-h">Strategy timeline ({history.length} switch{history.length === 1 ? '' : 'es'})</div>
+        <table className="tbl"><thead><tr><th>@node</th><th>policy</th><th>fidelity</th><th>operators</th><th>why</th></tr></thead><tbody>
+          {history.map((h, i) => { const s = h.strategy || {}; return (
+            <tr key={i}><td>{h.at_node ?? '—'}</td><td>{s.policy || '—'}</td><td>{s.fidelity || 'adaptive'}</td>
+              <td className="muted">{opLine(s.operators)}</td><td className="muted" style={{ maxWidth: 320 }}>{s.rationale || ''}</td></tr>) })}
+        </tbody></table></>}
+
+      {rungs.length > 0 && <>
+        <div className="section-h">ASHA rung promotions (successive-halving)</div>
+        <table className="tbl"><thead><tr><th>rung</th><th>survivors promoted</th></tr></thead><tbody>
+          {rungs.map((r, i) => <tr key={i}><td>↑ {r.rung}</td><td>{(r.survivors || []).map(s => '#' + s).join(', ') || '—'}</td></tr>)}
+        </tbody></table></>}
+
+      {Object.keys(state.proxy_scores || {}).length > 0 && <>
+        <div className="section-h">A6 proxy scoring — early-signal candidate ranking
+          {state.proxy_skipped?.length ? ` (${state.proxy_skipped.length} doomed candidate(s) skipped)` : ''}</div>
+        <table className="tbl"><thead><tr><th>node</th><th>predicted</th><th>outcome</th></tr></thead><tbody>
+          {Object.entries(state.proxy_scores).sort((a, b) => Number(a[0]) - Number(b[0])).map(([id, s]) =>
+            <tr key={id} className={(state.proxy_skipped || []).includes(Number(id)) ? 'sel' : ''}>
+              <td>#{id}</td><td>{fmt(s)}</td>
+              <td>{(state.proxy_skipped || []).includes(Number(id)) ? '⏭ skipped full eval' : 'evaluated'}</td></tr>)}
+        </tbody></table></>}
+
+      {!state.finished && <>
+        <div className="section-h">Override (pin a strategy — human wins over the Strategist)</div>
+        <div className="row" style={{ gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+          <select className="inp sm" value={pol} onChange={e => setPol(e.target.value)}>
+            <option value="">policy…</option>{POLICIES.map(p => <option key={p} value={p}>{p}</option>)}</select>
+          <select className="inp sm" value={fid} onChange={e => setFid(e.target.value)}>
+            <option value="">fidelity…</option>{['smoke', 'full', 'adaptive'].map(f => <option key={f} value={f}>{f}</option>)}</select>
+          <button className="btn sm primary" onClick={pin} disabled={!pol && !fid}>📌 Pin strategy</button>
+        </div></>}
+    </Panel>
+  )
+}
+
 export function ReportPanel({ state, runId, onClose }) {
   const best = state.best_node_id != null ? state.nodes[state.best_node_id] : null
   const failed = Object.values(state.nodes).filter(n => n.status === 'failed')

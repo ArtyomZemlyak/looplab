@@ -146,11 +146,13 @@ class LLMResearcher:
         # the model still proposes; bounds still clamp.
         hints = [h.get("text", "") for h in (state.pending_hints or []) if h.get("text")]
         hint_block = ("\nOperator directives (follow if sensible): " + "; ".join(hints)) if hints else ""
+        # A0d: an engine-set complexity cue keyed on the operated node's breadth (empty when off).
+        cue = getattr(self, "_complexity_hint", "")
         messages = [
             {"role": "system",
              "content": render(self.prompts, "researcher_system", _RESEARCHER_SYSTEM)},
             {"role": "user", "content": _state_brief(state, parent) + "\n" + self.space_hint +
-                                        hint_block +
+                                        hint_block + cue +
                                         "\nPropose the next Idea (operator, params, rationale)."},
         ]
         # Small models occasionally emit unparseable output; retry, then fall back to a

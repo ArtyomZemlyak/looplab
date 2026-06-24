@@ -155,6 +155,18 @@ class RunState(BaseModel):
     ablations: list[dict] = Field(default_factory=list)  # ablate events {parent_id, impacts} (sensitivity)
     policy_scores: dict[int, float] = Field(default_factory=dict)  # latest policy_decision candidate scores
     policy_chosen: Optional[int] = None                  # node the policy expanded ("why this node")
+    # A7 Strategist (audit-only; never read by best-selection). `active_strategy` is the latest
+    # applied Strategy dict; `strategy_history` is the timeline of switches for the "why this
+    # strategy" panel. `pending_strategy` is an operator override (set_strategy control event) that
+    # the engine applies before consulting the Strategist (human-wins parity with pause/hint).
+    active_strategy: Optional[dict] = None
+    strategy_history: list[dict] = Field(default_factory=list)
+    pending_strategy: Optional[dict] = None
+    # A1 ASHA: rung-promotion audit trail {rung, survivors} for the UI (successive-halving view).
+    rungs: list[dict] = Field(default_factory=list)
+    # A6 proxy/predictive scoring: per-node early-signal scores + which candidates were skipped.
+    proxy_scores: dict[int, float] = Field(default_factory=dict)
+    proxy_skipped: list[int] = Field(default_factory=list)
 
     # --- read helpers (no mutation) ---
     def best(self) -> Optional[Node]:

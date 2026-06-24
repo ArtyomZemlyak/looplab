@@ -28,7 +28,15 @@ from .leakage import target_leakage, temporal_leakage, train_test_contamination
 from .memory import JsonlCaseLibrary
 from .models import Idea, NodeStatus, RunState
 from .operators import merge_idea
-from .policy import SearchPolicy
+from .policy import SearchPolicy, available_policies, make_policy
+from .strategist import (
+    StrategyContext,
+    failure_rate,
+    improves_since_best,
+    is_numeric_space,
+    run_phase,
+    validate_strategy,
+)
 from .profile import profile_dataset
 from .readmodel import build_readmodel
 from .replay import fold
@@ -133,6 +141,19 @@ class Engine:
         eval_trust_mode: str = "ratify_freeze",
         trust_mode: str = "trusted_local",
         docker_image: str = "python:3.12-slim",
+        # --- A7 Strategist + richer-operator knobs (config-first; defaults == today's behavior) ---
+        n_seeds: int = 3,
+        max_nodes: int = 8,
+        policy_name: str = "greedy",
+        ablate_every: int = 0,
+        strategist=None,            # Optional[Strategist]; None => static config policy (default)
+        strategist_every: int = 3,
+        developer_factory=None,     # Optional[Callable[[str], Developer]] for live backend swap
+        merge_mode: str = "mean",        # A0b: "mean" | "ensemble"
+        complexity_cue: bool = False,    # A0d: breadth-keyed prompt hint
+        ablate_code_blocks: bool = False,  # A0a: ablate pipeline code blocks, not just params
+        proxy_scorer=None,          # A6: Optional[ProxyScorer] early-signal candidate gate
+        proxy_kill_fraction: float = 0.0,
     ):
         self.run_dir = Path(run_dir)
         self.task = task
@@ -140,6 +161,22 @@ class Engine:
         self.developer = developer
         self.sandbox = sandbox
         self.policy = policy
+        # A7 Strategist: the policy is now hot-swappable, so the engine keeps the knobs needed to
+        # rebuild it (n_seeds/max_nodes/ablate_every) + the meta-controller + operator-mix state.
+        self.n_seeds = n_seeds
+        self.max_nodes = max_nodes
+        self._policy_name = policy_name
+        self._ablate_every = ablate_every
+        self.strategist = strategist
+        self.strategist_every = max(1, strategist_every)
+        self.developer_factory = developer_factory
+        self._developer_name = "default"
+        self._merge_mode = merge_mode
+        self._complexity_cue = complexity_cue
+        self._ablate_code_blocks = ablate_code_blocks
+        self.proxy_scorer = proxy_scorer
+        self.proxy_kill_fraction = proxy_kill_fraction
+        self._strategy_fidelity: Optional[str] = None   # None => use the Idea's own profile
         self.max_parallel = max_parallel
         self.timeout = timeout
         self.crash_after = crash_after
@@ -282,6 +319,11 @@ class Engine:
                 self.store.append("workspace_changed", {"was": state.workspace, "now": now})
 
         entry_finished = fold(self.store.read_all()).finished  # resuming a done run?
+        # A7 Strategist: re-apply the last-decided strategy on (re)entry so a resumed run continues
+        # with it WITHOUT re-consulting the Strategist (the decision lives in the event log).
+        _entry = fold(self.store.read_all())
+        if _entry.active_strategy:
+            self._apply_strategy(_entry.active_strategy)
         start = time.time()
         while True:
             state = fold(self.store.read_all())
@@ -378,6 +420,10 @@ class Engine:
                 await self._confirm_node(state.nodes[forced_confirm])
                 continue
 
+            # A7 Strategist: adapt the search machinery (policy/operators/fidelity/Developer) before
+            # the policy proposes the next actions. No-op when strategist is off (== today).
+            state = self._maybe_consult_strategist(state)
+
             actions = self.policy.next_actions(state)
             if not actions:
                 # Optional multi-seed confirmation pass (I12) before finishing:
@@ -414,6 +460,9 @@ class Engine:
                     if "_scores" in a:   # policy exposed candidate scores (MCTS UCB1) -> surface "why"
                         self.store.append("policy_decision",
                                           {"scores": a["_scores"], "chosen": a.get("_chosen")})
+                    if a.get("_rung") is not None:   # A1 ASHA: surface the successive-halving promotion
+                        self.store.append("rung_promoted",
+                                          {"rung": a["_rung"], "survivors": a.get("_promoted", [])})
                     self._create_node(a)  # sequential -> deterministic ids/proposals
                 continue
 
@@ -512,6 +561,143 @@ class Engine:
         except Exception:  # noqa: BLE001 - cost telemetry must NEVER abort run finalization
             return
 
+    # ----------------------------------------------------------- A7 Strategist
+    @staticmethod
+    def _strategy_core(s: Optional[dict]) -> dict:
+        """The decision-relevant subset of a Strategy (ignores rationale/source) — used to detect a
+        REAL change so the engine doesn't re-record/re-apply an identical strategy every iteration."""
+        if not s:
+            return {}
+        return {k: s.get(k) for k in ("policy", "policy_params", "developer", "operators", "fidelity")}
+
+    def _available_developers(self) -> list[str]:
+        from .cli_agent import PRESETS
+        names = ["default", "llm", *PRESETS]
+        return names if self.developer_factory is not None else names[:1]
+
+    def _strategy_ctx(self, state: RunState) -> StrategyContext:
+        max_es = state.budget_overrides.get("max_eval_seconds", self.max_eval_seconds)
+        rem = (max_es - state.total_eval_seconds) if max_es is not None else None
+        defaults = {"policy": self._policy_name, "operators": {"ablate_every": self._ablate_every}}
+        if max_es:
+            defaults["_budget_frac"] = max(0.0, (rem or 0.0) / max_es)
+        return StrategyContext(
+            node_count=len(state.nodes),
+            phase=run_phase(state, self.n_seeds),
+            eval_budget_remaining=rem,
+            failure_rate=failure_rate(state),
+            improves_since_best=improves_since_best(state),
+            is_numeric_space=is_numeric_space(state),
+            available_policies=available_policies(),
+            available_developers=self._available_developers(),
+            defaults=defaults,
+        )
+
+    def _should_consult(self, state: RunState) -> bool:
+        """Bounded, deterministic cadence: only at a creation decision point (no pending evals),
+        at the seed boundary or every `strategist_every` created nodes."""
+        if state.pending_nodes():
+            return False
+        n = len(state.nodes)
+        if n == 0:
+            return False
+        return n == self.n_seeds or n % self.strategist_every == 0
+
+    def _record_strategy(self, strat: dict, state: RunState,
+                         ctx: Optional[StrategyContext] = None) -> None:
+        self.store.append("strategy_decision", {
+            "strategy": strat,
+            "at_node": len(state.nodes),
+            "ctx": (ctx.model_dump(include={"phase", "eval_budget_remaining", "failure_rate"})
+                    if ctx is not None else None),
+        })
+        self._apply_strategy(strat)
+
+    def _apply_strategy(self, strat: dict) -> None:
+        """Rebuild the live search machinery from a Strategy (pure wiring, no events). Policies share
+        the action vocabulary and are pure, so swapping between loop iterations is safe; the Developer
+        is swapped only between sequential _create_node calls."""
+        ops = strat.get("operators") or {}
+        if "ablate_every" in ops:
+            self._ablate_every = int(ops["ablate_every"])
+        if "merge_mode" in ops:
+            self._merge_mode = ops["merge_mode"]
+        if "complexity_cue" in ops:
+            self._complexity_cue = bool(ops["complexity_cue"])
+        if "ablate_code_blocks" in ops:
+            self._ablate_code_blocks = bool(ops["ablate_code_blocks"])
+        pol = strat.get("policy")
+        if pol:
+            try:
+                self.policy = make_policy(pol, n_seeds=self.n_seeds, max_nodes=self.max_nodes,
+                                          ablate_every=self._ablate_every,
+                                          **(strat.get("policy_params") or {}))
+                self._policy_name = pol
+            except (ValueError, TypeError):
+                pass    # keep the current policy on a bad spec (validate_strategy already whitelisted)
+        fid = strat.get("fidelity")
+        if fid in ("smoke", "full"):
+            self._strategy_fidelity = fid
+        elif fid == "adaptive":
+            self._strategy_fidelity = None
+        dev = strat.get("developer")
+        if dev and self.developer_factory is not None and dev != self._developer_name:
+            try:
+                self.developer = self.developer_factory(dev)
+                self._developer_name = dev
+            except Exception:  # noqa: BLE001 — a bad backend swap must never abort the run
+                pass
+
+    def _maybe_consult_strategist(self, state: RunState) -> RunState:
+        """Operator override first (HITL parity), then the bounded-cadence Strategist consult.
+        Records a `strategy_decision` and re-folds only when the strategy actually changes."""
+        # Operator-pinned strategy (set_strategy control event) always wins over the Strategist.
+        if (state.pending_strategy
+                and self._strategy_core(state.pending_strategy) != self._strategy_core(state.active_strategy)):
+            ctx = self._strategy_ctx(state)
+            strat = validate_strategy({**state.pending_strategy, "source": "operator"}, ctx)
+            if strat:
+                strat.setdefault("rationale", "operator-pinned strategy")
+                self._record_strategy(strat, state, ctx)
+                return fold(self.store.read_all())
+        if self.strategist is not None and self._should_consult(state):
+            ctx = self._strategy_ctx(state)
+            strat = validate_strategy(self.strategist.decide(state, ctx), ctx)
+            if strat and self._strategy_core(strat) != self._strategy_core(state.active_strategy):
+                self._record_strategy(strat, state, ctx)
+                return fold(self.store.read_all())
+        return state
+
+    def _set_complexity_hint(self, state: RunState, parent) -> None:
+        """A0d (AIRA): a dynamic complexity hint keyed on the operated node's child count, injected
+        into the next proposal prompt. No-op unless `complexity_cue` is on; harmless on Toy roles."""
+        hint = ""
+        if self._complexity_cue:
+            nc = (sum(1 for n in state.nodes.values() if parent.id in n.parent_ids)
+                  if parent is not None else len([n for n in state.nodes.values() if not n.parent_ids]))
+            level = ("a minimal baseline" if nc < 2 else "a moderate approach" if nc < 4
+                     else "an advanced approach (ensembling / HPO / feature-engineering)")
+            hint = (f"\nComplexity guidance: this branch already has {nc} sibling experiment(s); "
+                    f"propose {level}.")
+        try:
+            setattr(self.researcher, "_complexity_hint", hint)
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _ensemble_idea(self, parents) -> Idea:
+        """A0b: an ensembling/recombination merge — instruct the Developer to combine the parents'
+        solutions (stack/average predictions) rather than mean-averaging params. Carries the mean
+        params as a safe payload so a Toy/baseline Developer degrades to the legacy mean-merge."""
+        base = merge_idea(parents)
+        descr = "; ".join(
+            f"node {p.id} (metric={p.metric}, params={p.idea.params})"
+            + (f": {p.idea.rationale[:120]}" if p.idea.rationale else "")
+            for p in parents)
+        base.rationale = ("Ensemble/recombine the top solutions into one stronger pipeline "
+                          "(e.g. average or stack their predictions, or merge their best components). "
+                          f"Parents — {descr}.")
+        return base
+
     # ---------------------------------------------------------------- private
     def _create_node(self, action: dict) -> None:
         state = fold(self.store.read_all())
@@ -519,6 +705,7 @@ class Engine:
         kind = action["kind"]
         with self.tracer.span("create_node", new_trace=True, node_id=node_id, operator=kind):
             if kind == "draft":
+                self._set_complexity_hint(state, None)   # A0d breadth-keyed complexity cue
                 with self.tracer.span("propose"):
                     idea = self.researcher.propose(state, None)
                 idea.operator = "draft"        # operator is authoritative from the policy,
@@ -527,7 +714,11 @@ class Engine:
                     code = self.developer.implement(idea)
             elif kind == "merge":
                 parents = list(action["parent_ids"])
-                idea = merge_idea([state.nodes[i] for i in parents])
+                # A0b: real ensembling (code recombination) when configured/Strategist-selected;
+                # else the legacy mean-param merge. Toy/baseline developers degrade to mean.
+                pnodes = [state.nodes[i] for i in parents]
+                idea = (self._ensemble_idea(pnodes) if self._merge_mode == "ensemble"
+                        else merge_idea(pnodes))
                 with self.tracer.span("implement"):
                     code = self.developer.implement(idea)
             elif kind == "debug":
@@ -553,6 +744,7 @@ class Engine:
                         code = self.developer.implement(idea)
             else:  # improve
                 parent = state.nodes[action["parent_id"]]
+                self._set_complexity_hint(state, parent)   # A0d breadth-keyed complexity cue
                 with self.tracer.span("propose"):
                     idea = self.researcher.propose(state, parent)
                 idea.operator = "improve"
@@ -695,6 +887,11 @@ class Engine:
             from . import command_eval
             es = self._eval_spec
             prof = profile or (node.idea.eval_profile if node is not None else None)
+            # A7 Strategist fidelity override: when the active strategy pins smoke/full and the node
+            # didn't request a profile, use the strategy's. An explicit `profile` arg (confirm=full)
+            # always wins. "adaptive" leaves _strategy_fidelity None => the Idea's own profile.
+            if prof is None and self._strategy_fidelity in ("smoke", "full"):
+                prof = self._strategy_fidelity
             params = node.idea.params if node is not None else {}
             cmd, timeout = command_eval.build_command(es, params, prof)
             root = str(Path(workdir).resolve())               # repo/workdir root
@@ -749,6 +946,26 @@ class Engine:
             state = fold(self.store.read_all())
             node = state.nodes[node_id]
             sp.set("operator", node.operator)
+            # A6 proxy/predictive scoring: cheaply predict this candidate's metric from the observed
+            # history and skip a full eval for the doomed bottom fraction (cost lever). Deterministic
+            # + replay-safe: the skip is recorded as node_failed reason="proxy_skipped" and a
+            # proxy_scored audit event. OFF by default (kill_fraction=0 -> never skips).
+            if self.proxy_scorer is not None and self.proxy_kill_fraction > 0:
+                pred = self.proxy_scorer.score(state, node)
+                if pred is not None:
+                    skip = self.proxy_scorer.should_skip(state, node, pred)
+                    sp.set_many(proxy_score=round(pred, 6), proxy_skipped=skip)
+                    async with self._write_lock:
+                        self.store.append("proxy_scored",
+                                          {"node_id": node_id, "score": round(pred, 6), "skipped": skip})
+                        if skip:
+                            self.store.append("node_failed", {
+                                "node_id": node_id,
+                                "error": "skipped by proxy scorer (predicted in the doomed bottom fraction)",
+                                "reason": "proxy_skipped", "eval_seconds": 0.0})
+                            self._maybe_crash()
+                    if skip:
+                        return
             workdir = self.run_dir / "nodes" / f"node_{node_id}"
             self._seed_workspace(workdir)           # RepoTask: editable repo tree (ADR-7) …
             self._write_node_files(node, workdir)   # … agent edits on top …
@@ -951,6 +1168,11 @@ class Engine:
             self.store.append("ablate", {"parent_id": parent_id, "impacts": {},
                                          "skipped": "repo_or_eval_spec"})
             return
+        # A0a (MLE-STAR): ablate generated *pipeline code blocks*, not just numeric params — the
+        # verified higher-leverage refinement. Only when configured AND the parent has real code.
+        if self._ablate_code_blocks and parent.code.strip():
+            await self._ablate_code(parent_id)
+            return
         base = parent.metric if parent.metric is not None else 0.0
         impacts: dict[str, float] = {}
         with self.tracer.span("ablate", new_trace=True, node_id=parent_id):
@@ -980,6 +1202,82 @@ class Engine:
         self.store.append("node_created", {
             "node_id": node_id, "parent_ids": [parent_id], "operator": "refine_block",
             "idea": idea.model_dump(mode="json"), "code": code,
+            "files": getattr(self.developer, "last_files", {}) or {}})
+        self._emit_agent_report(node_id)
+
+    @staticmethod
+    def _segment_blocks(code: str) -> list[tuple[int, int]]:
+        """A0a: split solution code into blank-line-separated paragraph blocks -> (start,end) line
+        ranges (end exclusive). Deterministic; the unit of code-block ablation (an ML-pipeline
+        component: data prep / feature-eng / model / loss / ensembling tends to be one paragraph)."""
+        lines = code.splitlines()
+        blocks: list[tuple[int, int]] = []
+        i, n = 0, len(lines)
+        while i < n:
+            if lines[i].strip() == "":
+                i += 1
+                continue
+            j = i
+            while j < n and lines[j].strip() != "":
+                j += 1
+            blocks.append((i, j))
+            i = j
+        return blocks
+
+    @staticmethod
+    def _comment_block(code: str, block: tuple[int, int]) -> str:
+        """Neutralize one block by commenting its lines out (the ablation), keeping the rest intact."""
+        s, e = block
+        lines = code.splitlines()
+        for k in range(s, e):
+            lines[k] = "# [ablated] " + lines[k]
+        return "\n".join(lines) + "\n"
+
+    async def _ablate_code(self, parent_id: int) -> None:
+        """A0a code-block ablation → targeted refinement (MLE-STAR, 64% MLE-bench-Lite). Score each
+        generated code block's contribution by neutralizing it and measuring the metric delta (a
+        block whose removal BREAKS the pipeline is maximally essential), then refine only the
+        highest-impact block. Replay-safe: probes are off-tree; only the `ablate` audit event +
+        the `refine_block` child enter the log."""
+        state = fold(self.store.read_all())
+        parent = state.nodes[parent_id]
+        code = parent.code
+        base = parent.metric if parent.metric is not None else 0.0
+        blocks = self._segment_blocks(code)
+        impacts: dict[str, Optional[float]] = {}
+        with self.tracer.span("ablate_code", new_trace=True, node_id=parent_id, blocks=len(blocks)):
+            for idx, blk in enumerate(blocks):
+                ablated = self._comment_block(code, blk)
+                workdir = self.run_dir / "ablate" / f"node_{parent_id}_block_{idx}"
+                self._write_assets(workdir)
+                res = await anyio.to_thread.run_sync(
+                    self.sandbox.run, ablated, str(workdir), self.timeout)
+                if res.metric is not None and res.exit_code == 0 and not res.timed_out:
+                    impacts[str(idx)] = round(abs(res.metric - base), 6)
+                else:
+                    impacts[str(idx)] = None   # removing this block broke the run => essential block
+
+        # Rank: a None (the pipeline broke without it) is the most essential; else the largest delta.
+        def _rank(item):
+            _k, v = item
+            return (1, float("inf")) if v is None else (0, v)
+        top = max(impacts.items(), key=_rank)[0] if impacts else None
+        async with self._write_lock:
+            self.store.append("ablate", {"parent_id": parent_id, "impacts": impacts,
+                                         "mode": "code_blocks", "blocks": len(blocks),
+                                         "top_block": top})
+        top_src = ""
+        if top is not None:
+            s, e = blocks[int(top)]
+            top_src = "\n".join(code.splitlines()[s:e])[:300]
+        idea = Idea(operator="refine_block", params=dict(parent.idea.params),
+                    rationale=("code-block ablation: refine the highest-impact pipeline block "
+                               f"#{top} and keep the rest. Block:\n{top_src}"))
+        new_code = self.developer.implement(idea)
+        node_id = len(fold(self.store.read_all()).nodes)
+        self.store.append("node_created", {
+            "node_id": node_id, "parent_ids": [parent_id], "operator": "refine_block",
+            "idea": idea.model_dump(mode="json"), "code": new_code,
             "files": getattr(self.developer, "last_files", {}) or {}})
         self._emit_agent_report(node_id)
 
