@@ -56,6 +56,10 @@ class Settings(BaseSettings):
     # A4 (LATS-style): feed a summary of the most recent FAILED branches (operator + error reason)
     # back into the proposal prompt so the proposer reflects on and avoids repeating them. Off default.
     failure_reflection: bool = False
+    # C1 (Agentless localization): for repo tasks, rank the source files most relevant to the most
+    # recent failure (traceback + identifiers) and surface them in the proposal/repair prompt so the
+    # Developer edits the right place. Off by default; repo tasks only.
+    localize_faults: bool = False
     # A2 surrogate-guided proposal (BO-lite): fit a k-NN surrogate over (params->metric) and propose
     # by acquisition instead of random/hill-climb. Numeric-bounds tasks only; bootstraps via the
     # base Researcher. Off by default. `surrogate_explore` = UCB-style exploration weight.

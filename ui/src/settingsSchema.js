@@ -43,6 +43,8 @@ export const SETTINGS_GROUPS = [
         help: 'I1: CAAFE-style — propose engineered features; the CV eval keeps only those that improve (tabular tasks).' },
       { key: 'failure_reflection', label: 'Failure reflection', type: 'bool',
         help: 'A4: feed recent failed-branch summaries into the proposal prompt so the proposer avoids repeating them.' },
+      { key: 'localize_faults', label: 'Fault localization', type: 'bool',
+        help: 'C1: rank the repo files most relevant to a failure and surface them in the prompt (repo tasks).' },
       { key: 'ablate_code_blocks', label: 'Ablate code blocks', type: 'bool',
         help: 'A0a: ablate generated pipeline code blocks (MLE-STAR), not just numeric params.' },
       { key: 'proxy_scoring', label: 'Proxy scoring', type: 'bool',

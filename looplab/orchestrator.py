@@ -153,6 +153,7 @@ class Engine:
         complexity_cue: bool = False,    # A0d: breadth-keyed prompt hint
         budget_aware: bool = False,      # A5: surface remaining eval budget into the prompt
         failure_reflection: bool = False,  # A4: reflect on recent failed branches in the prompt
+        localize_faults: bool = False,   # C1: surface fault-localized files for repo tasks
         feature_engineering: bool = False,  # I1: CV-gated feature-engineering directive
         ablate_code_blocks: bool = False,  # A0a: ablate pipeline code blocks, not just params
         proxy_scorer=None,          # A6: Optional[ProxyScorer] early-signal candidate gate
@@ -183,6 +184,7 @@ class Engine:
         self._complexity_cue = complexity_cue
         self._budget_aware = budget_aware
         self._failure_reflection = failure_reflection
+        self._localize_faults = localize_faults
         self._feature_engineering = feature_engineering
         self._ablate_code_blocks = ablate_code_blocks
         self.proxy_scorer = proxy_scorer
@@ -724,6 +726,18 @@ class Engine:
             if fails:
                 summ = "; ".join(f"node {n.id} ({n.error_reason}): {(n.error or '')[:60]}" for n in fails)
                 hint += f"\nReflection — recent failures to avoid repeating: {summ}."
+        if self._localize_faults and self._repo_spec.get("editables"):
+            fails = sorted((n for n in state.nodes.values()
+                            if n.status is NodeStatus.failed and n.error),
+                           key=lambda n: n.id, reverse=True)
+            if fails:
+                from .localize import localize
+                roots = [e["path"] for e in self._repo_spec["editables"]]
+                loc = localize(fails[0].error, roots,
+                               idea_text=(parent.idea.rationale if parent is not None else ""))
+                if loc:
+                    files = ", ".join(item["file"] for item in loc[:3])
+                    hint += f"\nFault localization — likely files to edit: {files}."
         if self._feature_engineering and (self.task_has_columns or self._assets):
             hint += ("\nFeature engineering: propose 1-2 semantically-meaningful engineered features "
                      "(ratios, interactions, aggregations, domain transforms) as code. The eval's "
