@@ -65,6 +65,9 @@ class Settings(BaseSettings):
     # base Researcher. Off by default. `surrogate_explore` = UCB-style exploration weight.
     surrogate_proposer: bool = False
     surrogate_explore: float = 0.1
+    # E2 researcher panel: generate K candidate ideas per proposal and keep the one ranked best by a
+    # cheap empirical surrogate over the (params->metric) history (NOT an LLM-judge). 1 = off.
+    researcher_panel: int = 1
     # A1 ASHA / successive-halving: reduction factor (keep top 1/eta per rung) and rung budget.
     asha_eta: int = Field(default=3, ge=2)
     asha_rung_nodes: int = Field(default=4, ge=2)   # candidates batched at rung 0

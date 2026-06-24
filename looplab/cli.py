@@ -42,6 +42,10 @@ def _engine(run_dir: Path, task: TaskAdapter, settings: Settings,
         if _bounds:
             researcher = SurrogateResearcher(_bounds, fallback=researcher,
                                              explore=settings.surrogate_explore)
+    # E2 researcher panel: generate K ideas and keep the best by the empirical surrogate (not LLM-judge).
+    if settings.researcher_panel > 1:
+        from .panel import PanelResearcher
+        researcher = PanelResearcher(researcher, k=settings.researcher_panel)
     # RepoTask onboarding (Phase 3): if the task can propose its own eval spec, build the
     # onboarder (Researcher proposes + Developer writes the adapter).
     mk = getattr(task, "make_onboarder", None)

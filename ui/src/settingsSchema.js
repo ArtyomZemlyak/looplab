@@ -24,6 +24,8 @@ export const SETTINGS_GROUPS = [
         help: 'A2: BO-lite k-NN surrogate over (params→metric) proposes the next point (numeric tasks).' },
       { key: 'surrogate_explore', label: 'Surrogate explore', type: 'float',
         help: 'A2: UCB-style exploration weight for the surrogate (0 = pure exploit).' },
+      { key: 'researcher_panel', label: 'Researcher panel (K)', type: 'int',
+        help: 'E2: propose K ideas and keep the best by an empirical surrogate (not LLM-judge). 1 = off.' },
     ],
   },
   {
