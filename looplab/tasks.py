@@ -49,12 +49,29 @@ def _agent_model(backend: str, model: str) -> str:
     return model
 
 
-def make_llm_client(settings) -> OpenAICompatibleClient:
+def make_llm_client(settings, *, model: str | None = None,
+                    base_url: str | None = None) -> OpenAICompatibleClient:
     key = settings.llm_api_key.get_secret_value() if settings.llm_api_key else "local"
     return OpenAICompatibleClient(
-        model=settings.llm_model, base_url=settings.llm_base_url, api_key=key,
+        model=model or settings.llm_model, base_url=base_url or settings.llm_base_url, api_key=key,
         temperature=settings.llm_temperature, accountant=CostAccountant(),
     )
+
+
+def _set_role_client(obj, client) -> None:
+    """H3: point a role (and any wrapped inner/fallback role) at a per-role LLM client. Best-effort —
+    objects without a `client` (e.g. an external CLI-agent Developer) are left untouched."""
+    if obj is None:
+        return
+    if hasattr(obj, "client"):
+        try:
+            obj.client = client
+        except Exception:  # noqa: BLE001
+            pass
+    for attr in ("inner", "fallback"):
+        child = getattr(obj, attr, None)
+        if child is not None and child is not obj:
+            _set_role_client(child, client)
 
 
 def make_developer_factory(task: TaskAdapter, settings):
@@ -157,4 +174,12 @@ def make_roles(task: TaskAdapter, settings):
             bounds=getattr(researcher, "bounds", None),
             parser=settings.llm_parser, prompts=prompts,
         )
+    # H3 per-role model presets: point the Researcher / Developer at their own model/endpoint when
+    # configured (e.g. Developer on a strong coding model, Researcher on a fast breadth model).
+    if settings.researcher_model or settings.researcher_base_url:
+        _set_role_client(researcher, make_llm_client(
+            settings, model=settings.researcher_model, base_url=settings.researcher_base_url))
+    if settings.developer_model or settings.developer_base_url:
+        _set_role_client(developer, make_llm_client(
+            settings, model=settings.developer_model, base_url=settings.developer_base_url))
     return researcher, developer

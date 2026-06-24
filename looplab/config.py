@@ -119,6 +119,13 @@ class Settings(BaseSettings):
     llm_model: str = "qwen3:8b"
     llm_base_url: str = "http://localhost:11434/v1"  # Ollama OpenAI-compatible endpoint
     llm_temperature: float = 0.6
+    # H3 per-role model presets (5090 recipe): optionally run the Researcher and Developer on
+    # DIFFERENT models/endpoints (e.g. Developer=Qwen3-Coder-30B for code, a fast model for breadth).
+    # Blank = use the shared llm_model/llm_base_url. Generalizes the role-backend swap to per-role.
+    researcher_model: str | None = None
+    developer_model: str | None = None
+    researcher_base_url: str | None = None
+    developer_base_url: str | None = None
     llm_parser: str = "tool_call"
     # Observability (ADR-17): capture each LLM call's full prompt + completion into the active
     # span (spans.jsonl) so the UI can show exactly what the model read and wrote per node.
