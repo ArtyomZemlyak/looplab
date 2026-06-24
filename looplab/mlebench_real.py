@@ -140,6 +140,31 @@ class MLEBenchRealTask(BaseModel):
         return (MLEBenchRealResearcher(self.competition, max_param=self.max_param),
                 MLEBenchRealDeveloper(self.competition, self.submission))
 
+    def _schema_preview(self, sample: str, n_rows: int = 2, max_field: int = 100) -> str:
+        """A compact, truncated preview of train.csv + the sample submission so the LLM sees the REAL
+        schema (column names + a couple rows) instead of guessing it. This is what stops the model
+        confusing, e.g., spooky's single categorical `author` column with the submission's per-class
+        probability columns. Long text fields are truncated to keep the prompt small."""
+        import csv as _csv
+        pub = self._public_dir()
+
+        def head(path: Path, rows: int) -> str:
+            if not path.is_file():
+                return "(missing)"
+            out = []
+            with open(path, newline="", encoding="utf-8", errors="replace") as f:
+                for i, row in enumerate(_csv.reader(f)):
+                    if i > rows:
+                        break
+                    out.append(",".join((c[:max_field] + "…") if len(c) > max_field else c
+                                        for c in row))
+            return "\n".join(out)
+
+        return (f"\n\nSCHEMA PREVIEW (real columns + first rows; text truncated):\n"
+                f"--- train.csv ---\n{head(pub / 'train.csv', n_rows)}\n"
+                f"--- test.csv ---\n{head(pub / 'test.csv', 1)}\n"
+                f"--- {sample} (EXACT required output format) ---\n{head(pub / sample, 1)}\n")
+
     def llm_roles(self, client: LLMClient, parser: str = "tool_call"):
         meta = self._meta()
         sample = meta["sample_name"]
@@ -161,6 +186,7 @@ class MLEBenchRealTask(BaseModel):
             f"SAME header and row order as './{sample}'. Open every file with encoding='utf-8' (the "
             "data is UTF-8). Do NOT print a metric and do NOT read any test labels — the host scores "
             "your submission. You may use the suggested hyperparameter 'p'.")
+        brief += self._schema_preview(sample)
         return (LLMResearcher(client, space_hint=hint,
                               bounds={"p": (1e-3, float(self.max_param))}, parser=parser),
                 LLMDeveloper(client, brief=brief))
