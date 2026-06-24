@@ -1,0 +1,13 @@
+{
+  "kind": "timeseries",
+  "id": "seasonal_forecast",
+  "goal": "choose a forecaster's smoothing weight + seasonal period to minimize backtest MASE",
+  "direction": "min",
+  "n": 120,
+  "period": 7,
+  "trend": 0.05,
+  "noise": 0.5,
+  "seed": 0,
+  "max_period": 12,
+  "backtest_h": 20
+}

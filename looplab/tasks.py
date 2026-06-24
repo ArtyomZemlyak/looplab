@@ -14,6 +14,7 @@ from .prompts import PromptStore
 from .regression import CodeRegressionTask, RegressionTask
 from .repo_task import RepoTask
 from .roles import Developer, Researcher
+from .timeseries import TimeSeriesTask
 from .toytask import ToyTask
 
 
@@ -28,7 +29,7 @@ class TaskAdapter(Protocol):
 
 _KINDS = {"quadratic": ToyTask, "regression": RegressionTask,
           "code_regression": CodeRegressionTask, "mlebench": MLEBenchTask,
-          "repo": RepoTask}
+          "repo": RepoTask, "timeseries": TimeSeriesTask}
 
 
 def load_task(path: str | Path) -> TaskAdapter:
