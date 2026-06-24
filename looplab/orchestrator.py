@@ -153,6 +153,7 @@ class Engine:
         complexity_cue: bool = False,    # A0d: breadth-keyed prompt hint
         budget_aware: bool = False,      # A5: surface remaining eval budget into the prompt
         failure_reflection: bool = False,  # A4: reflect on recent failed branches in the prompt
+        deep_repair: bool = False,       # C3: structured failure-taxonomy repair context
         localize_faults: bool = False,   # C1: surface fault-localized files for repo tasks
         feature_engineering: bool = False,  # I1: CV-gated feature-engineering directive
         ablate_code_blocks: bool = False,  # A0a: ablate pipeline code blocks, not just params
@@ -186,6 +187,7 @@ class Engine:
         self._complexity_cue = complexity_cue
         self._budget_aware = budget_aware
         self._failure_reflection = failure_reflection
+        self._deep_repair = deep_repair
         self._localize_faults = localize_faults
         self._feature_engineering = feature_engineering
         self._ablate_code_blocks = ablate_code_blocks
@@ -890,8 +892,16 @@ class Engine:
                                                           or self._repo_spec):
                     idea = parent.idea.model_copy()
                     idea.operator = "debug"
+                    err = parent.error
+                    if self._deep_repair:
+                        # C3 deep test-driven repair: hand the Developer the failure TAXONOMY + a
+                        # structured directive (write a minimal reproduction if the cause is unclear,
+                        # then fix), not just the raw stderr tail. Depth is already bounded by debug_depth.
+                        err = (f"[failure kind: {parent.error_reason or 'unknown'}]\n{parent.error}\n"
+                               "Diagnose the root cause; if it's unclear, add a tiny reproduction/"
+                               "assert near the failure, then return a corrected, complete script.")
                     with self.tracer.span("repair", parent_id=parent.id):
-                        code = repair(parent.idea, parent.code, parent.error)
+                        code = repair(parent.idea, parent.code, err)
                 else:
                     with self.tracer.span("propose"):
                         idea = self.researcher.propose(state, parent)

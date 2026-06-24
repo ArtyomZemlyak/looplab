@@ -56,6 +56,9 @@ class Settings(BaseSettings):
     # A4 (LATS-style): feed a summary of the most recent FAILED branches (operator + error reason)
     # back into the proposal prompt so the proposer reflects on and avoids repeating them. Off default.
     failure_reflection: bool = False
+    # C3 deep test-driven repair: hand the Developer the failure taxonomy + a structured "reproduce
+    # then fix" directive on debug, not just the raw stderr tail. Off by default.
+    deep_repair: bool = False
     # C1 (Agentless localization): for repo tasks, rank the source files most relevant to the most
     # recent failure (traceback + identifiers) and surface them in the proposal/repair prompt so the
     # Developer edits the right place. Off by default; repo tasks only.
