@@ -9,14 +9,15 @@ import { InjectModal, ChatTab } from './experiment.jsx'
 import {
   TrustPanel, SensitivityPanel, FailuresPanel, ParetoPanel, DataQualityPanel,
   ConfigPanel, AuthoringPanel, MemoryPanel, RegistryPanel, ReportPanel, EventExplorer,
-  ComparePanel, MetaGraphPanel, GpuPanel, PolicyPanel, StrategistPanel,
+  ComparePanel, MetaGraphPanel, GpuPanel, PolicyPanel, StrategistPanel, HyperImportancePanel,
 } from './panels.jsx'
 
 const PANELS = [
   ['report', 'Report'], ['trust', 'Trust'], ['policy', 'Policy'], ['strategist', 'Strategist'],
-  ['sensitivity', 'Sensitivity'], ['failures', 'Failures'], ['pareto', 'Pareto/Div'], ['data', 'Data'],
-  ['compare', 'Compare'], ['config', 'Config'], ['authoring', 'Authoring'], ['memory', 'Memory'],
-  ['registry', 'Registry'], ['meta', 'Meta-graph'], ['gpu', 'GPU'], ['events', 'Events'],
+  ['sensitivity', 'Sensitivity'], ['importance', 'Importance'], ['failures', 'Failures'],
+  ['pareto', 'Pareto/Div'], ['data', 'Data'], ['compare', 'Compare'], ['config', 'Config'],
+  ['authoring', 'Authoring'], ['memory', 'Memory'], ['registry', 'Registry'], ['meta', 'Meta-graph'],
+  ['gpu', 'GPU'], ['events', 'Events'],
 ]
 
 export default function RunView({ runId, onBack }) {
@@ -175,6 +176,7 @@ export default function RunView({ runId, onBack }) {
 
       {panel === 'trust' && <TrustPanel state={state} runId={runId} onClose={() => setPanel(null)} />}
       {panel === 'sensitivity' && <SensitivityPanel state={state} onClose={() => setPanel(null)} />}
+      {panel === 'importance' && <HyperImportancePanel state={state} onClose={() => setPanel(null)} />}
       {panel === 'failures' && <FailuresPanel state={state} onSelect={setSelectedId} onClose={() => setPanel(null)} />}
       {panel === 'pareto' && <ParetoPanel state={state} onClose={() => setPanel(null)} />}
       {panel === 'data' && <DataQualityPanel state={state} onClose={() => setPanel(null)} />}

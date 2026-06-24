@@ -43,6 +43,10 @@ class Settings(BaseSettings):
     # A0d (AIRA): inject a dynamic complexity hint into the draft/improve prompt keyed on the
     # node's child count (few children -> keep minimal; many -> escalate to ensembling/HPO).
     complexity_cue: bool = False
+    # A5: surface the REMAINING eval-compute budget into the proposal prompt so the Researcher can
+    # reason over how much compute is left (explore broad while flush, exploit/cheapen when low).
+    # No-op unless a max_eval_seconds budget is set.
+    budget_aware: bool = False
     # A1 ASHA / successive-halving: reduction factor (keep top 1/eta per rung) and rung budget.
     asha_eta: int = Field(default=3, ge=2)
     asha_rung_nodes: int = Field(default=4, ge=2)   # candidates batched at rung 0

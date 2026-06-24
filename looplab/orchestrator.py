@@ -151,6 +151,7 @@ class Engine:
         developer_factory=None,     # Optional[Callable[[str], Developer]] for live backend swap
         merge_mode: str = "mean",        # A0b: "mean" | "ensemble"
         complexity_cue: bool = False,    # A0d: breadth-keyed prompt hint
+        budget_aware: bool = False,      # A5: surface remaining eval budget into the prompt
         ablate_code_blocks: bool = False,  # A0a: ablate pipeline code blocks, not just params
         proxy_scorer=None,          # A6: Optional[ProxyScorer] early-signal candidate gate
         proxy_kill_fraction: float = 0.0,
@@ -173,6 +174,7 @@ class Engine:
         self._developer_name = "default"
         self._merge_mode = merge_mode
         self._complexity_cue = complexity_cue
+        self._budget_aware = budget_aware
         self._ablate_code_blocks = ablate_code_blocks
         self.proxy_scorer = proxy_scorer
         self.proxy_kill_fraction = proxy_kill_fraction
@@ -669,16 +671,27 @@ class Engine:
         return state
 
     def _set_complexity_hint(self, state: RunState, parent) -> None:
-        """A0d (AIRA): a dynamic complexity hint keyed on the operated node's child count, injected
-        into the next proposal prompt. No-op unless `complexity_cue` is on; harmless on Toy roles."""
+        """Inject the engine-computed proposal cues into the next prompt: A0d (breadth-keyed
+        complexity) + A5 (remaining eval budget). No-op unless the respective knob is on; harmless on
+        Toy roles. Both flow via the single `_complexity_hint` attribute both Researchers read."""
         hint = ""
         if self._complexity_cue:
             nc = (sum(1 for n in state.nodes.values() if parent.id in n.parent_ids)
                   if parent is not None else len([n for n in state.nodes.values() if not n.parent_ids]))
             level = ("a minimal baseline" if nc < 2 else "a moderate approach" if nc < 4
                      else "an advanced approach (ensembling / HPO / feature-engineering)")
-            hint = (f"\nComplexity guidance: this branch already has {nc} sibling experiment(s); "
-                    f"propose {level}.")
+            hint += (f"\nComplexity guidance: this branch already has {nc} sibling experiment(s); "
+                     f"propose {level}.")
+        if self._budget_aware:
+            max_es = state.budget_overrides.get("max_eval_seconds", self.max_eval_seconds)
+            if max_es:
+                rem = max(0.0, max_es - state.total_eval_seconds)
+                frac = rem / max_es if max_es else 1.0
+                stance = ("explore broadly — plenty of budget" if frac > 0.5 else
+                          "be selective — budget is over half spent" if frac > 0.2 else
+                          "exploit the leader with cheap experiments — budget nearly spent")
+                hint += (f"\nBudget guidance: {rem:.0f}s of {max_es:.0f}s eval budget remain "
+                         f"({frac:.0%}); {stance}.")
         try:
             setattr(self.researcher, "_complexity_hint", hint)
         except Exception:  # noqa: BLE001

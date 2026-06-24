@@ -267,6 +267,21 @@ def test_ensemble_merge_mode_sets_recombination_rationale(tmp_path):
     assert idea.params == {"x": 3.0, "y": 1.0}   # mean payload preserved for Toy fallback
 
 
+def test_budget_aware_hint_includes_remaining(tmp_path):
+    eng = _engine(tmp_path / "ba", budget_aware=True, max_eval_seconds=100.0)
+    st = RunState(direction="min")
+    st.nodes[0] = Node(id=0, operator="draft", idea=Idea(operator="draft", params={"x": 1.0}),
+                       metric=1.0, status=NodeStatus.evaluated)
+    st.total_eval_seconds = 90.0   # 10% of the budget left -> "nearly spent"
+    eng._set_complexity_hint(st, None)
+    hint = getattr(eng.researcher, "_complexity_hint", "")
+    assert "Budget guidance" in hint and "10%" in hint
+    # off -> no budget line
+    eng._budget_aware = False
+    eng._set_complexity_hint(st, None)
+    assert "Budget guidance" not in getattr(eng.researcher, "_complexity_hint", "")
+
+
 def test_complexity_cue_sets_hint_on_researcher(tmp_path):
     eng = _engine(tmp_path / "cue", complexity_cue=True)
     st = RunState(direction="min")

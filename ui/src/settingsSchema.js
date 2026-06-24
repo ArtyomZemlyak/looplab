@@ -33,6 +33,8 @@ export const SETTINGS_GROUPS = [
         help: 'A0b: mean = legacy mean-param merge; ensemble = Developer recombines parent solutions (code-level).' },
       { key: 'complexity_cue', label: 'Complexity cue', type: 'bool',
         help: 'A0d: inject a complexity hint keyed on a branch’s breadth (few children = minimal; many = advanced).' },
+      { key: 'budget_aware', label: 'Budget-aware proposals', type: 'bool',
+        help: 'A5: surface remaining eval budget into the proposal prompt (needs a max eval-time budget).' },
       { key: 'ablate_code_blocks', label: 'Ablate code blocks', type: 'bool',
         help: 'A0a: ablate generated pipeline code blocks (MLE-STAR), not just numeric params.' },
       { key: 'proxy_scoring', label: 'Proxy scoring', type: 'bool',

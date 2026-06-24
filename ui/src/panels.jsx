@@ -364,6 +364,48 @@ export function StrategistPanel({ state, runId, onClose, onToast }) {
   )
 }
 
+// F1 · Global hyperparameter importance — across ALL evaluated feasible nodes in the run, how
+// strongly does each numeric param predict the metric (|Pearson r|)? The per-node Sensitivity panel
+// is local (one ablation); this is the run-wide W&B-style "which knobs matter" view. Pure UI.
+function _pearson(xs, ys) {
+  const n = xs.length
+  const mx = xs.reduce((a, b) => a + b, 0) / n, my = ys.reduce((a, b) => a + b, 0) / n
+  let sxy = 0, sxx = 0, syy = 0
+  for (let i = 0; i < n; i++) { const dx = xs[i] - mx, dy = ys[i] - my; sxy += dx * dy; sxx += dx * dx; syy += dy * dy }
+  const d = Math.sqrt(sxx * syy)
+  return d === 0 ? 0 : sxy / d
+}
+export function HyperImportancePanel({ state, onClose }) {
+  const nodes = Object.values(state.nodes).filter(n => n.status === 'evaluated' && n.metric != null && n.feasible !== false)
+  const keys = new Set()
+  nodes.forEach(n => Object.entries(n.idea?.params || {}).forEach(([k, v]) => { if (typeof v === 'number') keys.add(k) }))
+  const rows = []
+  keys.forEach(k => {
+    const pts = nodes.filter(n => typeof n.idea?.params?.[k] === 'number')
+    if (pts.length < 3) return
+    const r = _pearson(pts.map(n => n.idea.params[k]), pts.map(n => n.metric))
+    rows.push({ k, imp: Math.abs(r), r, n: pts.length })
+  })
+  rows.sort((a, b) => b.imp - a.imp)
+  const top = rows[0]?.imp || 1
+  return (
+    <Panel title="Hyperparameter importance" sub={`${nodes.length} evaluated`} onClose={onClose}>
+      {rows.length
+        ? <><div className="section-h">|correlation| of each param with the metric (run-wide)</div>
+            <table className="tbl"><thead><tr><th>param</th><th>importance</th><th>r</th><th>n</th><th></th></tr></thead><tbody>
+              {rows.map(row => <tr key={row.k}>
+                <td>{row.k}</td><td>{fmt(row.imp, 3)}</td>
+                <td className="muted">{row.r >= 0 ? '+' : ''}{fmt(row.r, 3)}</td><td className="muted">{row.n}</td>
+                <td style={{ width: 160 }}><div className="bar" style={{ height: 8 }}>
+                  <div className="fill" style={{ width: Math.min(100, row.imp / top * 100) + '%' }} /></div></td></tr>)}
+            </tbody></table>
+            <div className="muted" style={{ marginTop: 8 }}>Sign of r shows direction: with a {state.direction === 'min' ? 'minimize' : 'maximize'} objective,
+              a {state.direction === 'min' ? 'negative' : 'positive'} r means a larger value tends to help. Needs ≥3 evaluated nodes per param.</div></>
+        : <div className="muted">Not enough numeric-param data yet — run more experiments (≥3 evaluated nodes that share a numeric param).</div>}
+    </Panel>
+  )
+}
+
 export function ReportPanel({ state, runId, onClose }) {
   const best = state.best_node_id != null ? state.nodes[state.best_node_id] : null
   const failed = Object.values(state.nodes).filter(n => n.status === 'failed')
