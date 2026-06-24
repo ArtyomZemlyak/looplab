@@ -48,7 +48,10 @@ def export_run(state: RunState, *, tracking_uri: str | None = None,
                 mlflow.log_metric("best_metric", float(metric))
             for k, v in (best.extra_metrics or {}).items():
                 if v is not None:
-                    mlflow.log_metric(str(k), float(v))
+                    try:                              # extra_metrics is eval-reported: a non-numeric
+                        mlflow.log_metric(str(k), float(v))   # value must not abort the whole export
+                    except (TypeError, ValueError):
+                        pass
         mlflow.log_metric("nodes", len(state.nodes))
         mlflow.log_metric("evaluated", len(state.evaluated_nodes()))
         if code:

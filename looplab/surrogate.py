@@ -67,14 +67,13 @@ class SurrogateResearcher:
         # Sample candidates over the bounds; score each by the acquisition (predicted metric adjusted
         # by an exploration bonus toward sparsely-sampled regions), and pick the optimum for the
         # objective direction. A simple, dependency-free EI/UCB surrogate.
-        better = (lambda a, b: a < b) if state.direction == "min" else (lambda a, b: a > b)
         best_acq, best_params = None, None
         for _ in range(self.n_candidates):
             x = {k: self.rng.uniform(lo, hi) for k, (lo, hi) in self.bounds.items()}
             pred, nearest = self._predict(x, hist)
             # exploration: reward distance from known points (UCB-style); sign by direction.
             acq = pred - self.explore * nearest if state.direction == "min" else pred + self.explore * nearest
-            if best_acq is None or better(acq, best_acq):
+            if best_acq is None or state.is_better(acq, best_acq):
                 best_acq, best_params = acq, x
         params = {k: round(v, 4) for k, v in best_params.items()}
         op = "improve" if parent is not None else "draft"

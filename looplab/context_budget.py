@@ -22,11 +22,15 @@ def truncate_history(messages: list[dict], max_chars: int, *, keep_last: int = 2
     for i, m in enumerate(messages):
         content = str(m.get("content") or "")
         protected = m.get("role") == "system" or i >= n - keep_last
-        if protected or len(content) <= per_msg_cap:
+        # Stop once the running total is back under budget: max_chars is a TARGET, not just a
+        # trigger — keep truncating oldest long messages only until we're under, then leave the
+        # rest intact (over-truncating would discard far more context than the budget requires).
+        if protected or len(content) <= per_msg_cap or total <= max_chars:
             out.append(m)
             continue
         head = per_msg_cap // 2
         trimmed = (content[:head] + f"\n…[truncated {len(content) - 2 * head} chars]…\n"
                    + content[-head:])
+        total -= len(content) - len(trimmed)
         out.append({**m, "content": trimmed})
     return out

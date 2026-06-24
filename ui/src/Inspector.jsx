@@ -23,11 +23,14 @@ export default function Inspector({ runId, nodeId, state, live, tab, setTab, onT
   const n = detail || (state.nodes[nodeId])
   if (!n) return <div className="insp-empty">…</div>
   const act = async (fn, msg) => { try { await fn(); onToast(msg) } catch (e) { onToast('failed: ' + e.message) } }
+  // Metric-drift is run-level state (state.drifts), each entry tagged with its node_id — the
+  // per-node detail payload has no `drifts` key, so filter the run state down to this node.
+  const nodeDrifts = (state?.drifts || []).filter(d => d.node_id === n.id)
 
   return (
     <>
       <div className="tabs">
-        {TABS.map(t => <div key={t} className={'tab' + (t === tab ? ' active' : '') + (t === 'Trust' && (n.violations?.length || (detail?.drifts || []).length) ? ' alarm' : '')}
+        {TABS.map(t => <div key={t} className={'tab' + (t === tab ? ' active' : '') + (t === 'Trust' && (n.violations?.length || nodeDrifts.length) ? ' alarm' : '')}
                             onClick={() => setTab(t)}>{t}</div>)}
       </div>
       <div className="insp-body">
@@ -48,7 +51,7 @@ export default function Inspector({ runId, nodeId, state, live, tab, setTab, onT
         {tab === 'Trace' && <Trace n={n} />}
         {tab === 'Code' && <Code n={n} />}
         {tab === 'Metrics' && <Metrics n={n} detail={detail} />}
-        {tab === 'Trust' && <Trust n={n} detail={detail} />}
+        {tab === 'Trust' && <Trust n={n} drifts={nodeDrifts} />}
         {tab === 'Cost' && <Cost state={state} />}
         {tab === 'Chat' && <ChatTab runId={runId} nodeId={n.id} state={live} onInject={onInject} onToast={onToast} />}
       </div>
@@ -287,8 +290,7 @@ function Metrics({ n, detail }) {
   </>
 }
 
-function Trust({ n, detail }) {
-  const drifts = (detail?.drifts || [])
+function Trust({ n, drifts = [] }) {
   return <>
     <div className="section-h">Robustness</div>
     {n.confirmed_mean != null
@@ -304,6 +306,11 @@ function Trust({ n, detail }) {
       ? <table className="tbl"><thead><tr><th>constraint</th><th>value</th><th>bound</th></tr></thead>
         <tbody>{n.violations.map((v, i) => <tr key={i}><td className="flag">{v.name}</td><td>{fmt(v.value)}</td><td>{v.max != null ? `≤ ${fmt(v.max)}` : `≥ ${fmt(v.min)}`}</td></tr>)}</tbody></table>
       : <div className="chip ok">no constraint violations</div>}
+    <div className="section-h">Metric drift</div>
+    {drifts.length
+      ? <table className="tbl"><thead><tr><th>seed</th><th>primary</th><th>cross-check</th><th>tol</th></tr></thead>
+        <tbody>{drifts.map((d, i) => <tr key={i}><td>{d.seed ?? '—'}</td><td className="flag">{fmt(d.primary)}</td><td>{fmt(d.cross)}</td><td className="muted">{fmt(d.tolerance)}</td></tr>)}</tbody></table>
+      : <div className="chip ok">no uncorroborated (drifted) metrics</div>}
     {n.status === 'failed' && <><div className="section-h">Failure</div><span className="badge reason">{n.error_reason}</span><pre className="code">{n.error}</pre></>}
   </>
 }

@@ -89,7 +89,14 @@ def _coerce_value(val, ann):
             ann, origin = non_none[0], get_origin(non_none[0])
     try:
         if ann is bool:
-            return val.strip().lower() in ("true", "yes", "1", "y") if isinstance(val, str) else bool(val)
+            if isinstance(val, str):
+                s = val.strip().lower()
+                if s in ("true", "yes", "1", "y", "on"):
+                    return True
+                if s in ("false", "no", "0", "n", "off"):
+                    return False
+                return val          # unrecognized string: don't silently coerce to False — return it
+            return bool(val)        # so model validation rejects it rather than flipping a flag off
         if ann is int:
             return int(float(val)) if isinstance(val, (str, float)) else int(val)
         if ann is float:

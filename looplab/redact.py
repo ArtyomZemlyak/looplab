@@ -19,8 +19,15 @@ _PATTERNS = [
     (re.compile(r"gh[pousr]_[A-Za-z0-9]{20,}"), "gh***"),                 # GitHub token
     (re.compile(r"xox[baprs]-[A-Za-z0-9-]{10,}"), "xox***"),              # Slack token
     (re.compile(r"(?i)bearer\s+[A-Za-z0-9._\-]{16,}"), "bearer ***"),     # Authorization: Bearer
-    (re.compile(r"(?i)\b(api[_-]?key|secret|token|password|passwd|access[_-]?key)\b(\s*[:=]\s*)"
-                r"['\"]?([^\s'\"]{6,})"), r"\1\2***"),                     # key=VALUE assignments
+    # key=VALUE / 'key': 'VALUE' assignments. The key NAME may be a compound identifier that merely
+    # CONTAINS a credential word (AWS_SECRET_ACCESS_KEY, db_password, MY_API_KEY) — matching the
+    # bare word with \b…\b misses those because `_` is a word char, so we allow identifier chars on
+    # either side of the keyword. A quote may sit between the key and the separator (dict-repr form).
+    (re.compile(r"(?i)([A-Za-z0-9_\-]*"
+                r"(?:api[_-]?key|secret|access[_-]?key|token|password|passwd|credential)"
+                r"[A-Za-z0-9_\-]*)"
+                r"(['\"]?\s*[:=]\s*['\"]?)"
+                r"([^\s'\"]{4,})"), r"\1\2***"),
 ]
 
 

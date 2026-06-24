@@ -56,13 +56,12 @@ class PanelResearcher:
                  n.metric) for n in state.feasible_nodes() if n.metric is not None]
         if len(hist) < self.warmup:
             return ideas[0]            # not enough signal to rank -> first proposal
-        better = (lambda a, b: a < b) if state.direction == "min" else (lambda a, b: a > b)
         best, best_pred = None, None
         for idea in ideas:
             pred = _predict(idea.params, hist, self.bounds)
             if pred is None:
                 continue
-            if best_pred is None or better(pred, best_pred):
+            if best_pred is None or state.is_better(pred, best_pred):
                 best, best_pred = idea, pred
         if best is not None:
             best.rationale = (best.rationale + f" [panel: best of {self.k} by surrogate]").strip()

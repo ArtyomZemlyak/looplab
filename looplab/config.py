@@ -73,7 +73,9 @@ class Settings(BaseSettings):
     researcher_panel: int = 1
     # A1 ASHA / successive-halving: reduction factor (keep top 1/eta per rung) and rung budget.
     asha_eta: int = Field(default=3, ge=2)
-    asha_rung_nodes: int = Field(default=4, ge=2)   # candidates batched at rung 0
+    # Rung-0 width for ASHA/BOHB (the wide base of cheap drafts). 0 = use n_seeds (default,
+    # preserving prior behavior); set >0 to seed a wider/narrower base independent of n_seeds.
+    asha_rung_nodes: int = Field(default=0, ge=0)
     # A6 proxy/predictive scoring: cheaply rank a candidate's potential from early-stage signals
     # and skip a full eval for the doomed bottom fraction. 0.0 = off (no candidate skipped).
     proxy_scoring: bool = False

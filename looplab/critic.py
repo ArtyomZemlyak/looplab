@@ -22,7 +22,12 @@ def critique(idea: Idea, code: str) -> list[dict]:
     if "metric" not in code:
         issues.append({"issue": "no_metric_output",
                        "detail": "code never references 'metric' — it may not emit the required score"})
-    if re.search(r'["\']metric["\']\s*:\s*[0-9.+\-eE]+\s*[}\)]', code):
+    # Flag a literal metric value ({"metric": 0.95}) ONLY when nothing in the code assigns the
+    # metric from a name/expression. Otherwise a legitimate `print(json.dumps({"metric": score}))`
+    # — or a placeholder `{"metric": 0.0}` later overwritten with a computed value — false-positives.
+    hardcoded = re.search(r'["\']metric["\']\s*:\s*[0-9.+\-eE]+\s*[}\)]', code)
+    computed = re.search(r'["\']?metric["\']?\s*[:=]\s*[A-Za-z_]', code)
+    if hardcoded and not computed:
         issues.append({"issue": "hardcoded_metric",
                        "detail": "the metric appears to be a hard-coded constant, not computed"})
     # Requested hyperparameters should appear in the code; none appearing suggests a no-op that

@@ -20,6 +20,8 @@ export const SETTINGS_GROUPS = [
         help: 'Diversity-archive niche width in parameter space.' },
       { key: 'asha_eta', label: 'ASHA η (reduction)', type: 'int',
         help: 'Successive-halving factor: keep top 1/η survivors per rung (asha policy).' },
+      { key: 'asha_rung_nodes', label: 'ASHA rung-0 width', type: 'int',
+        help: 'Width of the cheap rung-0 draft base for asha/bohb. 0 = use n_seeds (default).' },
       { key: 'surrogate_proposer', label: 'Surrogate proposer', type: 'bool',
         help: 'A2: BO-lite k-NN surrogate over (params→metric) proposes the next point (numeric tasks).' },
       { key: 'surrogate_explore', label: 'Surrogate explore', type: 'float',

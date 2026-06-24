@@ -83,6 +83,7 @@ class BestOfNDeveloper:
             self.last_n_scores = [_score(code)]
             return code
         best_code, best_score = "", None
+        self.last_n_scores = []          # per-node telemetry: reset so it holds only THIS node's N
         for _ in range(self.n):
             code = self.inner.implement(idea)
             sc = _score(code)

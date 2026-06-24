@@ -73,3 +73,22 @@ def test_missing_predictions_fails_node(tmp_path):
     state = _run(tmp_path / "nopred", code)
     assert state.best() is None
     assert all(n.metric is None for n in state.nodes.values())
+
+
+class _NoLabelsTask(_PredTask):
+    kind: str = "nolabels"
+    id: str = "nolabels"
+
+    def host_grader(self) -> dict:
+        return {"predictions": "predictions.json", "scorer": "rmse"}   # labels key omitted
+
+
+def test_host_grader_without_labels_does_not_crash(tmp_path):
+    # A host_grader() dict missing "labels" must yield no metric (node fails), not an uncaught
+    # KeyError that crashes the eval worker.
+    eng = Engine(tmp_path / "nolab", task=_NoLabelsTask(), researcher=_Stub(),
+                 developer=_dev(_PERFECT_BUT_LIES), sandbox=SubprocessSandbox(),
+                 policy=GreedyTree(n_seeds=1, max_nodes=1))
+    state = anyio.run(eng.run)
+    assert state.finished
+    assert all(n.metric is None for n in state.nodes.values())

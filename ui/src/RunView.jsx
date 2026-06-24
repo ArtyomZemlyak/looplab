@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useState } from 'react'
 import { useRunState, useNotifications } from './hooks.js'
-import { get, fmt, fmtInt, phaseLabel, CONTROL } from './util.js'
+import { get, post, fmt, fmtInt, phaseLabel, CONTROL } from './util.js'
 import Dag from './Dag.jsx'
 import Inspector, { GroupSummary } from './Inspector.jsx'
 import Dock from './Dock.jsx'
@@ -216,10 +216,4 @@ export default function RunView({ runId, onBack }) {
       {toast && <div className="toast">{toast}</div>}
     </div>
   )
-}
-
-async function post(path, body) {
-  const r = await fetch(path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body || {}) })
-  if (!r.ok) throw new Error(`${path}: ${r.status}`)
-  return r.json()
 }

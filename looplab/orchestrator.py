@@ -166,6 +166,7 @@ class Engine:
         novelty_gate: bool = False,         # E1: dedup near-duplicate proposals
         novelty_epsilon: float = 0.05,
         reflection_priors: bool = False,    # E4: cross-run meta-review priors
+        surrogate_explore: float = 0.1,     # A2/A3: explore weight for a lazily-wired BOHB surrogate
     ):
         self.run_dir = Path(run_dir)
         self.task = task
@@ -200,6 +201,7 @@ class Engine:
         self._novelty_gate = novelty_gate
         self._novelty_epsilon = novelty_epsilon
         self._reflection_priors = reflection_priors
+        self._surrogate_explore = surrogate_explore
         self._prior_note_text = ""   # E4: cross-run meta-review prior, loaded at run start
         self._strategy_fidelity: Optional[str] = None   # None => use the Idea's own profile
         self.max_parallel = max_parallel
@@ -672,6 +674,22 @@ class Engine:
         })
         self._apply_strategy(strat)
 
+    def _ensure_surrogate(self) -> None:
+        """Wrap the Researcher in a SurrogateResearcher if it isn't already (idempotent). Used when a
+        mid-run strategy switch turns BOHB on: BOHB is ASHA's racing schedule PLUS the surrogate
+        proposer, and the proposer is only wired at startup for policy=bohb/surrogate_proposer — so a
+        Strategist switching to bohb would otherwise run bare ASHA. Needs numeric bounds; if the
+        Researcher (or its inner/fallback) exposes none, this is a no-op (bohb degrades to ASHA)."""
+        from .surrogate import SurrogateResearcher
+        if isinstance(self.researcher, SurrogateResearcher):
+            return
+        bounds = (getattr(self.researcher, "bounds", None)
+                  or getattr(getattr(self.researcher, "inner", None), "bounds", None)
+                  or getattr(getattr(self.researcher, "fallback", None), "bounds", None))
+        if bounds:
+            self.researcher = SurrogateResearcher(bounds, fallback=self.researcher,
+                                                  explore=self._surrogate_explore)
+
     def _apply_strategy(self, strat: dict) -> None:
         """Rebuild the live search machinery from a Strategy (pure wiring, no events). Policies share
         the action vocabulary and are pure, so swapping between loop iterations is safe; the Developer
@@ -688,9 +706,17 @@ class Engine:
         pol = strat.get("policy")
         if pol:
             try:
+                # Strip the names make_policy takes as explicit kwargs: a policy_params entry like
+                # {"n_seeds": 4} would otherwise raise "multiple values for keyword argument",
+                # silently dropping the whole switch (recorded decision diverging from live policy).
+                pp = {k: v for k, v in (strat.get("policy_params") or {}).items()
+                      if k not in ("n_seeds", "max_nodes", "ablate_every")}
                 self.policy = make_policy(pol, n_seeds=self.n_seeds, max_nodes=self.max_nodes,
-                                          ablate_every=self._ablate_every,
-                                          **(strat.get("policy_params") or {}))
+                                          ablate_every=self._ablate_every, **pp)
+                # A3 BOHB = ASHA racing + the surrogate proposer. make_policy only builds the racing
+                # half; wire the surrogate now so a mid-run switch to bohb isn't bare ASHA.
+                if pol == "bohb":
+                    self._ensure_surrogate()
                 self._policy_name = pol
             except (ValueError, TypeError):
                 pass    # keep the current policy on a bad spec (validate_strategy already whitelisted)
@@ -1083,7 +1109,7 @@ class Engine:
                         root, self.docker_image,
                         runtime=("runsc" if self.trust_mode == "hostile" else None))
                     if self.trust_mode in ("untrusted", "hostile") else None)
-            return command_eval.run_command_eval(
+            res = command_eval.run_command_eval(
                 cmd, cwd, timeout, es["metric"], env,
                 setup=es.get("setup") or None, setup_timeout=es.get("setup_timeout", 600.0),
                 setup_cwd=root,                               # deps install at the repo root
@@ -1095,10 +1121,13 @@ class Engine:
                 constraints=es.get("constraints") or None,
                 tracer=self.tracer,                           # child spans: setup/command/read
                 cancel=cancel)                                # operator mid-eval node_abort
-        res = self.sandbox.run(node.code, str(workdir), self.timeout, env, cancel=cancel)
+        else:
+            res = self.sandbox.run(node.code, str(workdir), self.timeout, env, cancel=cancel)
         # Out-of-process host-side grading (general): override the (ignored) self-reported metric with
-        # the HOST's score of the candidate's predictions. Applied here so EVERY sandbox-path eval —
-        # normal AND the multi-seed confirm pass (both call _run_eval) — is graded the same way.
+        # the HOST's score of the candidate's predictions. Applied for BOTH the command-eval and the
+        # sandbox path, so a task that exposes host_grader() is always host-scored — and so EVERY
+        # sandbox-path eval (normal AND the multi-seed confirm pass, both call _run_eval) is graded
+        # the same way. host_grader takes precedence: its score replaces any self-reported metric.
         if self._host_grader is not None:
             res = self._apply_host_grade(res, workdir)
         return res
@@ -1116,7 +1145,9 @@ class Engine:
         if preds_path.is_file():
             try:
                 preds = _json.loads(preds_path.read_text(encoding="utf-8-sig", errors="replace"))
-                m = host_score(g.get("scorer", "rmse"), preds, g["labels"], key=g.get("key"))
+                # .get (not g["labels"]): a host_grader() dict missing labels yields metric None
+                # (node fails) rather than an uncaught KeyError that would crash the eval worker.
+                m = host_score(g.get("scorer", "rmse"), preds, g.get("labels"), key=g.get("key"))
             except (ValueError, OSError):
                 m = None
         res.metric = m

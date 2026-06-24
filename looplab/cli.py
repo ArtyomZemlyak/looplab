@@ -69,7 +69,8 @@ def _engine(run_dir: Path, task: TaskAdapter, settings: Settings,
         sandbox=make_sandbox(settings.trust_mode, image=settings.docker_image),
         policy=make_policy(settings.policy, n_seeds=settings.n_seeds,
                            max_nodes=settings.max_nodes, ablate_every=settings.ablate_every,
-                           eta=settings.asha_eta),   # forwarded to ASHA (greedy/mcts/evo ignore it)
+                           eta=settings.asha_eta,     # forwarded to ASHA (greedy/mcts/evo ignore it)
+                           rung_nodes=settings.asha_rung_nodes),
         max_parallel=settings.max_parallel,
         timeout=settings.timeout,
         crash_after=crash_after,
@@ -108,6 +109,7 @@ def _engine(run_dir: Path, task: TaskAdapter, settings: Settings,
         novelty_gate=settings.novelty_gate,
         novelty_epsilon=settings.novelty_epsilon,
         reflection_priors=settings.reflection_priors,
+        surrogate_explore=settings.surrogate_explore,
     )
 
 

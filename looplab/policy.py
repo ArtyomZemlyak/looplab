@@ -264,8 +264,11 @@ class ASHAPolicy:
     Pure: rungs/survivors are derived from the folded DAG, so it's deterministic and replay-safe.
     Emits `_rung`/`_promoted` meta on its action so the engine can log a `rung_promoted` event."""
 
-    def __init__(self, n_seeds: int = 4, max_nodes: int = 12, eta: int = 3, debug_depth: int = 1):
-        self.n_seeds = max(2, n_seeds)         # rung-0 width
+    def __init__(self, n_seeds: int = 4, max_nodes: int = 12, eta: int = 3, debug_depth: int = 1,
+                 rung_nodes: int = 0):
+        self.n_seeds = max(2, n_seeds)
+        # rung-0 width: an explicit rung_nodes (>0) overrides n_seeds, else default to n_seeds.
+        self.rung0 = max(2, rung_nodes) if rung_nodes else self.n_seeds
         self.max_nodes = max_nodes
         self.eta = max(2, eta)                 # keep top 1/eta per rung
         self.debug_depth = debug_depth
@@ -293,10 +296,10 @@ class ASHAPolicy:
         if total >= self.max_nodes:
             return []
 
-        # Rung 0: fill to n_seeds cheap drafts (the wide base of the bracket).
+        # Rung 0: fill to rung0 cheap drafts (the wide base of the bracket).
         drafts = [n for n in state.nodes.values() if not n.parent_ids]
-        if len(drafts) < self.n_seeds:
-            k = min(self.n_seeds - len(drafts), self.max_nodes - total)
+        if len(drafts) < self.rung0:
+            k = min(self.rung0 - len(drafts), self.max_nodes - total)
             return [{"kind": "draft"} for _ in range(k)]
 
         gen = self._generation(state)
@@ -362,5 +365,6 @@ def make_policy(name: str = "greedy", *, n_seeds: int, max_nodes: int,
         # the ASHA policy; the surrogate is wired as the Researcher (cli enables it for `bohb`), so
         # the policy object is the same — the fusion is the racing schedule + a surrogate proposer.
         eta = int(params.get("eta", 3))
-        return ASHAPolicy(n_seeds=n_seeds, max_nodes=max_nodes, eta=eta)
+        return ASHAPolicy(n_seeds=n_seeds, max_nodes=max_nodes, eta=eta,
+                          rung_nodes=int(params.get("rung_nodes", 0) or 0))
     raise ValueError(f"unknown policy: {name!r}")

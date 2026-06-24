@@ -69,12 +69,15 @@ def make_classification_dataset(
     return Xtr, ytr, Xte, yte
 
 
-# Offline templated solution: a self-contained k-NN that reads the assets and grades via
-# grader.py — keeps the task runnable (and deterministic) with no LLM.
-_KNN_TEMPLATE = '''\
+# Offline templated solution: a self-contained k-NN that reads the assets and produces predictions.
+# Shared body (deterministic, no LLM); the two variants below differ only in how the result is
+# emitted (in-workdir grader vs. host-scored predictions file), so the classifier lives in one place.
+_KNN_BODY = '''\
 import json
-TRAIN = json.load(open("train.json"))
-TEST = json.load(open("test.json"))
+with open("train.json", encoding="utf-8") as _f:
+    TRAIN = json.load(_f)
+with open("test.json", encoding="utf-8") as _f:
+    TEST = json.load(_f)
 K = {k}
 Xtr, ytr, Xte = TRAIN["X"], TRAIN["y"], TEST["X"]
 k = max(1, min(int(K), len(Xtr)))
@@ -91,7 +94,10 @@ for x in Xte:
     for i in nn:
         votes[ytr[i]] = votes.get(ytr[i], 0) + 1
     preds.append(max(votes, key=votes.get))
+'''
 
+# In-workdir grader variant: grades via grader.py and prints the metric line.
+_KNN_TEMPLATE = _KNN_BODY + '''
 from grader import score
 print(json.dumps({{"metric": score(preds)}}))
 '''
@@ -99,28 +105,11 @@ print(json.dumps({{"metric": score(preds)}}))
 # Host-graded variant (out-of-process grading): the solution writes ONLY predictions; the host scores
 # them against the held-out labels (which are NEVER materialized into the workdir). Closes the
 # in-process-grader leak entirely — there is no answer key on the candidate's filesystem to read.
-_KNN_PREDICT_TEMPLATE = '''\
-import json
-TRAIN = json.load(open("train.json"))
-TEST = json.load(open("test.json"))
-K = {k}
-Xtr, ytr, Xte = TRAIN["X"], TRAIN["y"], TEST["X"]
-k = max(1, min(int(K), len(Xtr)))
-
-
-def dist2(a, b):
-    return sum((p - q) ** 2 for p, q in zip(a, b))
-
-
-preds = []
-for x in Xte:
-    nn = sorted(range(len(Xtr)), key=lambda i: dist2(x, Xtr[i]))[:k]
-    votes = {{}}
-    for i in nn:
-        votes[ytr[i]] = votes.get(ytr[i], 0) + 1
-    preds.append(max(votes, key=votes.get))
-# Write predictions only — the HOST scores them against labels we never see (no self-report).
-json.dump(preds, open("predictions.json", "w"))
+_KNN_PREDICT_TEMPLATE = _KNN_BODY + '''
+# Write predictions only — the HOST scores them against labels we never see (no self-report). Use a
+# `with` block so the file is flushed/closed deterministically even if the process is killed after.
+with open("predictions.json", "w", encoding="utf-8") as _f:
+    json.dump(preds, _f)
 '''
 
 # The private grader (materialized as an asset). Holds the held-out answer key.

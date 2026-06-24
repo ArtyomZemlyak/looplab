@@ -78,7 +78,16 @@ def read_metric(stdout: str, workdir: str, spec: dict, wrap=None) -> Optional[fl
         # computed here, on the host — the candidate cannot self-report or see the labels. This turns
         # `stdout_json` self-reporting into an enforced guarantee for untrusted real tasks.
         preds_path = Path(workdir) / spec.get("predictions", "predictions.json")
-        labels_path = Path(spec["labels"])             # operator-declared host path (trusted)
+        labels_path = Path(spec["labels"]).resolve()   # operator-declared host path (trusted)
+        # Enforce the invariant the docstring asserts: the answer key must live OUTSIDE the
+        # candidate's workspace. Under the untrusted/hostile tier the whole workdir root is
+        # bind-mounted into the container, so a labels path inside it would be readable AND
+        # writable by the candidate — defeating held-out grading. Fail loud on misconfig.
+        if _is_within(labels_path, Path(workdir).resolve()):
+            raise ValueError(
+                f"host_score labels path {labels_path} is inside the candidate workspace "
+                f"{Path(workdir).resolve()} — it would be mounted/writable by the candidate. "
+                "Place the held-out labels outside the eval workspace.")
         if not preds_path.is_file() or not labels_path.is_file():
             return None
         try:
@@ -109,24 +118,54 @@ def read_metric(stdout: str, workdir: str, spec: dict, wrap=None) -> Optional[fl
     return None
 
 
-def _as_list(obj, key: Optional[str]):
+def _is_within(child: Path, parent: Path) -> bool:
+    """True if `child` is `parent` or nested under it (both already resolved)."""
+    try:
+        child.relative_to(parent)
+        return True
+    except ValueError:
+        return False
+
+
+# Default keys probed when coercing a dict payload to a list. The CANDIDATE-controlled
+# predictions payload is restricted to a single canonical key so a candidate can't ship
+# several arrays and let key-precedence pick the most favorable one (it must be a bare list
+# or live under the explicit `key`/"predictions"). The host-held labels keep the full set.
+_PRED_KEYS = ("predictions",)
+_LABEL_KEYS = ("predictions", "preds", "y", "labels", "values")
+
+
+def _as_list(obj, key: Optional[str], fallbacks: tuple[str, ...] = _LABEL_KEYS):
     """Coerce a predictions/labels payload to a flat list: a bare list, or `obj[key]` (e.g.
-    {"predictions": [...]}), or the single value list of a dict."""
+    {"predictions": [...]}), or the first of `fallbacks` present in the dict."""
     if isinstance(obj, list):
         return obj
     if isinstance(obj, dict):
         if key and key in obj:
             return obj[key]
-        for cand in ("predictions", "preds", "y", "labels", "values"):
+        for cand in fallbacks:
             if cand in obj:
                 return obj[cand]
     return None
 
 
+def _label_eq(a, b) -> bool:
+    """Discrete-label equality for accuracy/error_rate. Treats numerically-equal encodings
+    as equal (int 1 == float 1.0 == str "1") so a JSON-stringified or float-encoded class
+    label still matches, while a genuine non-label value (a probability 0.999) stays unequal."""
+    if a == b:
+        return True
+    try:
+        return float(a) == float(b)
+    except (TypeError, ValueError):
+        return False
+
+
 def host_score(scorer: str, preds, labels, *, key: Optional[str] = None) -> Optional[float]:
     """B1: compute a metric on the HOST from candidate predictions + held-out labels. Built-in,
     dependency-free scorers (data, never agent code). Returns None on shape/empty mismatch."""
-    yp, yt = _as_list(preds, key), _as_list(labels, key)
+    yp = _as_list(preds, key, _PRED_KEYS)            # candidate payload: no key-shopping
+    yt = _as_list(labels, key, _LABEL_KEYS)          # host labels: full fallback set
     if not isinstance(yp, list) or not isinstance(yt, list) or not yt or len(yp) != len(yt):
         return None
     try:
@@ -137,9 +176,9 @@ def host_score(scorer: str, preds, labels, *, key: Optional[str] = None) -> Opti
             mse = sum(e * e for e in errs) / len(errs)
             return mse if scorer == "mse" else mse ** 0.5
         if scorer in ("accuracy", "acc"):
-            return sum(1 for a, b in zip(yp, yt) if a == b) / len(yt)
+            return sum(1 for a, b in zip(yp, yt) if _label_eq(a, b)) / len(yt)
         if scorer == "error_rate":
-            return 1.0 - sum(1 for a, b in zip(yp, yt) if a == b) / len(yt)
+            return 1.0 - sum(1 for a, b in zip(yp, yt) if _label_eq(a, b)) / len(yt)
     except (TypeError, ValueError):
         return None
     return None
