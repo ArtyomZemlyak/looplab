@@ -174,6 +174,12 @@ def make_roles(task: TaskAdapter, settings):
             bounds=getattr(researcher, "bounds", None),
             parser=settings.llm_parser, prompts=prompts,
         )
+    # C2 best-of-N: wrap the in-house LLM developer to generate N candidates and keep the best by an
+    # execution-free reward. Skipped for external coding agents (cost rule) and the no-edit param mode.
+    if (settings.best_of_n > 1 and settings.developer_backend not in PRESETS
+            and not _param_search):
+        from .best_of_n import BestOfNDeveloper
+        developer = BestOfNDeveloper(developer, n=settings.best_of_n)
     # H3 per-role model presets: point the Researcher / Developer at their own model/endpoint when
     # configured (e.g. Developer on a strong coding model, Researcher on a fast breadth model).
     if settings.researcher_model or settings.researcher_base_url:

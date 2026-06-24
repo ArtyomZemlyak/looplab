@@ -100,6 +100,8 @@ export const SETTINGS_GROUPS = [
       { key: 'developer_backend', label: 'Developer backend', type: 'enum',
         options: ['default', 'opencode', 'aider', 'goose', 'continue'],
         help: 'default = in-house templated/LLM developer; or drive an external CLI coding agent.' },
+      { key: 'best_of_n', label: 'Best-of-N', type: 'int',
+        help: 'C2: generate N candidate implementations per node, keep the best by an execution-free reward (1 = off; in-house LLM developer only).' },
       { key: 'agent_cmd', label: 'Agent command', type: 'text', placeholder: 'auto',
         help: 'Override the external agent launcher (path / wrapper).' },
       { key: 'validate_agent', label: 'Validate agent output', type: 'bool',

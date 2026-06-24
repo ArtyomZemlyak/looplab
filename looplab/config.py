@@ -99,6 +99,10 @@ class Settings(BaseSettings):
     # Developer backend (ADR-7): "default" (templated/LLM from the task) or an external
     # CLI coding agent: "opencode" | "aider" | "goose" | "continue".
     developer_backend: str = "default"
+    # C2 best-of-N: generate N candidate implementations per node and keep the best by an
+    # execution-free reward (static validity + metric-print). 1 = off. In-house LLM developer only
+    # (not external agents — ADR-7 cost rule). The top SWE-bench reliability lever for weak models.
+    best_of_n: int = 1
     agent_cmd: str | None = None  # override the agent's launcher (path / wrapper)
     # External-agent validation (ADR-7): wrap a CLI-agent Developer with a validator that
     # audits each output (no-op/syntax/crash/timeout), retries with feedback, and falls
