@@ -11,6 +11,7 @@ from typing import Protocol, runtime_checkable
 from .llm import CostAccountant, OpenAICompatibleClient
 from .mlebench import MLEBenchTask
 from .prompts import PromptStore
+from .classification import ClassificationTask
 from .regression import CodeRegressionTask, RegressionTask
 from .repo_task import RepoTask
 from .roles import Developer, Researcher
@@ -29,7 +30,8 @@ class TaskAdapter(Protocol):
 
 _KINDS = {"quadratic": ToyTask, "regression": RegressionTask,
           "code_regression": CodeRegressionTask, "mlebench": MLEBenchTask,
-          "repo": RepoTask, "timeseries": TimeSeriesTask}
+          "repo": RepoTask, "timeseries": TimeSeriesTask,
+          "classification": ClassificationTask}
 
 
 def load_task(path: str | Path) -> TaskAdapter:

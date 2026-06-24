@@ -1,0 +1,10 @@
+{
+  "kind": "classification",
+  "id": "blob_classification",
+  "goal": "tune a logistic-regression learner to maximize K-fold CV accuracy",
+  "direction": "max",
+  "n": 80,
+  "sep": 1.5,
+  "seed": 0,
+  "cv_k": 5
+}
