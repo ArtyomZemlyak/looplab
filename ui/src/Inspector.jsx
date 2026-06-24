@@ -39,7 +39,7 @@ export default function Inspector({ runId, nodeId, state, live, tab, setTab, onT
                   onClick={() => act(() => CONTROL.forceConfirm(runId, n.id), `confirm requested for ${n.id}`)}>↻ Confirm</button>
           <button className="btn sm" disabled={live.finished} onClick={() => act(() => CONTROL.forceAblate(runId, n.id), `ablate requested for ${n.id}`)}>⊟ Ablate</button>
           <button className="btn sm" onClick={() => act(() => CONTROL.fork(runId, n.id), `forked from ${n.id}`)}>⑂ Fork</button>
-          {onInject && <button className="btn sm" title="hand-author a new experiment branching from this node" onClick={() => onInject({ parent_id: n.id, idea: { operator: 'improve', params: n.idea?.params, theme: n.idea?.theme } })}>✚ Experiment</button>}
+          {onInject && <button className="btn sm" title="F6: branch a new experiment from this node — edit the idea and fork (history intact)" onClick={() => onInject({ parent_id: n.id, idea: { operator: 'improve', params: n.idea?.params, rationale: n.idea?.rationale, theme: n.idea?.theme } })}>⑂ Branch / Experiment</button>}
           <button className="btn sm warn" onClick={() => act(() => CONTROL.promote(runId, n.id), `promoted ${n.id} → champion`)}>★ Promote</button>
           <button className="btn sm" onClick={() => { const t = prompt('Note for node ' + n.id); if (t) act(() => CONTROL.annotate(runId, n.id, t), 'note saved') }}>✎ Note</button>
         </div>
