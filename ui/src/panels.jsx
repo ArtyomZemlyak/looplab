@@ -477,6 +477,33 @@ export function CrossRunPanel({ state, onClose }) {
   )
 }
 
+// F4 · Collaboration — a thread view of every node annotation (folded from `annotation` events) plus
+// a read-only share link. Annotations are already events; this surfaces them as a reviewable thread.
+export function CollabPanel({ state, runId, onSelect, onClose, onToast }) {
+  const ann = state.annotations || {}
+  const entries = Object.entries(ann).flatMap(([nid, notes]) =>
+    (notes || []).map((text, i) => ({ nid: Number(nid), i, text })))
+    .sort((a, b) => a.nid - b.nid)
+  const share = () => {
+    const url = `${location.origin}/#/run/${encodeURIComponent(runId)}`
+    if (navigator.clipboard) navigator.clipboard.writeText(url).then(() => onToast && onToast('share link copied'))
+    else onToast && onToast(url)
+  }
+  return (
+    <Panel title="Collaboration" sub={`${entries.length} note(s)`} onClose={onClose}>
+      <div className="toolbar" style={{ marginBottom: 10 }}>
+        <button className="btn sm" onClick={share}>🔗 Copy read-only share link</button>
+      </div>
+      <div className="muted" style={{ marginBottom: 8 }}>Annotations are appended as events (any reviewer with the run can add them via a node’s ✎ Note); they read back here as a thread.</div>
+      {entries.length
+        ? <div className="thread">{entries.map((e, k) => <div key={k} className="kv" style={{ alignItems: 'baseline' }}>
+            <div className="k"><button className="btn sm ghost" onClick={() => { onSelect && onSelect(e.nid); onClose() }}>#{e.nid}</button></div>
+            <div className="v">{e.text}</div></div>)}</div>
+        : <div className="muted">No annotations yet — add one from a node’s Inspector (✎ Note).</div>}
+    </Panel>
+  )
+}
+
 export function ReportPanel({ state, runId, onClose }) {
   const best = state.best_node_id != null ? state.nodes[state.best_node_id] : null
   const failed = Object.values(state.nodes).filter(n => n.status === 'failed')

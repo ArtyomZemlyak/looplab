@@ -10,15 +10,15 @@ import {
   TrustPanel, SensitivityPanel, FailuresPanel, ParetoPanel, DataQualityPanel,
   ConfigPanel, AuthoringPanel, MemoryPanel, RegistryPanel, ReportPanel, EventExplorer,
   ComparePanel, MetaGraphPanel, GpuPanel, PolicyPanel, StrategistPanel, HyperImportancePanel,
-  CrossRunPanel,
+  CrossRunPanel, CollabPanel,
 } from './panels.jsx'
 
 const PANELS = [
   ['report', 'Report'], ['trust', 'Trust'], ['policy', 'Policy'], ['strategist', 'Strategist'],
   ['sensitivity', 'Sensitivity'], ['importance', 'Importance'], ['failures', 'Failures'],
   ['pareto', 'Pareto/Div'], ['data', 'Data'], ['compare', 'Compare'], ['crossrun', 'Cross-run'],
-  ['config', 'Config'], ['authoring', 'Authoring'], ['memory', 'Memory'], ['registry', 'Registry'],
-  ['meta', 'Meta-graph'], ['gpu', 'GPU'], ['events', 'Events'],
+  ['collab', 'Collab'], ['config', 'Config'], ['authoring', 'Authoring'], ['memory', 'Memory'],
+  ['registry', 'Registry'], ['meta', 'Meta-graph'], ['gpu', 'GPU'], ['events', 'Events'],
 ]
 
 export default function RunView({ runId, onBack }) {
@@ -187,6 +187,7 @@ export default function RunView({ runId, onBack }) {
       {panel === 'data' && <DataQualityPanel state={state} onClose={() => setPanel(null)} />}
       {panel === 'compare' && <ComparePanel state={state} runId={runId} onClose={() => setPanel(null)} />}
       {panel === 'crossrun' && <CrossRunPanel state={state} onClose={() => setPanel(null)} />}
+      {panel === 'collab' && <CollabPanel state={state} runId={runId} onSelect={selectNode} onToast={showToast} onClose={() => setPanel(null)} />}
       {panel === 'meta' && <MetaGraphPanel onClose={() => setPanel(null)} />}
       {panel === 'config' && <ConfigPanel runId={runId} state={state} onToast={showToast} onClose={() => setPanel(null)} />}
       {panel === 'authoring' && <AuthoringPanel onToast={showToast} onClose={() => setPanel(null)} />}
