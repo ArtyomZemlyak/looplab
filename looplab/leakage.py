@@ -6,6 +6,7 @@ explicit row lists / timestamp lists — adapter-agnostic.
 """
 from __future__ import annotations
 
+import re
 from typing import Sequence
 
 
@@ -41,6 +42,31 @@ def target_leakage(features: dict[str, list[float]], target: list[float],
             flagged[name] = round(r, 6)
     return {"detector": "target_leakage", "leak": bool(flagged),
             "threshold": threshold, "flagged": flagged}
+
+
+_FIT_RE = re.compile(r"\.(fit|fit_transform)\s*\(([^)]*)\)")
+_SPLIT_RE = re.compile(r"train_test_split\s*\(|KFold|StratifiedKFold|\.split\s*\(")
+
+
+def code_leakage_scan(code: str) -> dict:
+    """I3 data-centric: static-dataflow-lite scan of solution CODE for train->test information flow
+    (beyond exact-row contamination). Flags the classic anti-patterns: fitting a preprocessor on the
+    FULL data before the split, and calling .fit() on test data. Heuristic + dependency-free — a
+    surfaced suspicion for the operator, not a hard gate."""
+    flags: list[dict] = []
+    lines = code.splitlines()
+    split_at = next((i for i, l in enumerate(lines) if _SPLIT_RE.search(l)), None)
+    for i, line in enumerate(lines):
+        m = _FIT_RE.search(line)
+        if not m:
+            continue
+        arg = m.group(2).lower()
+        if "test" in arg or "x_test" in arg or "val" in arg:
+            flags.append({"signal": "fit_on_test", "line": i + 1, "code": line.strip()[:90]})
+        elif split_at is not None and i < split_at and "train" not in arg:
+            # a fit/fit_transform on (apparently full) data BEFORE the split leaks test statistics
+            flags.append({"signal": "fit_before_split", "line": i + 1, "code": line.strip()[:90]})
+    return {"detector": "code_leakage", "leak": bool(flags), "flags": flags}
 
 
 def temporal_leakage(train_timestamps: list[float], test_timestamps: list[float]) -> dict:

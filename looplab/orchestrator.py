@@ -159,6 +159,7 @@ class Engine:
         proxy_scorer=None,          # A6: Optional[ProxyScorer] early-signal candidate gate
         proxy_kill_fraction: float = 0.0,
         reward_hack_detect: bool = False,   # B5: flag suspicious wins (audit-only)
+        code_leakage_detect: bool = False,  # I3: static code-leakage scan per node
         redact_output: bool = False,        # B3: redact secrets from persisted output tails
         novelty_gate: bool = False,         # E1: dedup near-duplicate proposals
         novelty_epsilon: float = 0.05,
@@ -190,6 +191,7 @@ class Engine:
         self.proxy_scorer = proxy_scorer
         self.proxy_kill_fraction = proxy_kill_fraction
         self.reward_hack_detect = reward_hack_detect
+        self._code_leakage_detect = code_leakage_detect
         self._redact_output = redact_output
         self._novelty_gate = novelty_gate
         self._novelty_epsilon = novelty_epsilon
@@ -1171,16 +1173,23 @@ class Engine:
                          "extra_metrics": res.extra_metrics or {},   # #5 multi-objective
                          "violations": res.violations or []},
                     )
-                    # B5 reward-hacking detector (audit-only): flag a suspicious win without ever
-                    # changing selection. Runs on the evaluated node's code + metric vs the frozen set.
+                    # B5 reward-hacking detector + I3 code-leakage scan (audit-only): flag a
+                    # suspicious win / leaky pipeline without ever changing selection. Both surface in
+                    # the Trust panel via the same reward_hack_suspected event.
+                    sigs = []
                     if self.reward_hack_detect:
                         from .reward_hack import detect_reward_hacks
                         protected = set(self._repo_spec.get("protected_names", [])) | set(self._assets)
-                        sigs = detect_reward_hacks(node.code, res.metric, state.direction,
-                                                   protected_names=protected, stdout=res.stdout)
-                        if sigs:
-                            self.store.append("reward_hack_suspected",
-                                              {"node_id": node_id, "signals": sigs})
+                        sigs += detect_reward_hacks(node.code, res.metric, state.direction,
+                                                    protected_names=protected, stdout=res.stdout)
+                    if self._code_leakage_detect and node.code:
+                        from .leakage import code_leakage_scan
+                        for f in code_leakage_scan(node.code)["flags"]:
+                            sigs.append({"signal": "data_leakage:" + f["signal"],
+                                         "detail": f"line {f['line']}: {f['code']}"})
+                    if sigs:
+                        self.store.append("reward_hack_suspected",
+                                          {"node_id": node_id, "signals": sigs})
                 else:
                     err = self._redact(res.stderr[-500:]) or (
                         f"metric drift: {res.drift}" if res.drift is not None else

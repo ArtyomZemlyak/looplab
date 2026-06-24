@@ -89,6 +89,9 @@ class Settings(BaseSettings):
     # access, runtime writes to frozen files, suspiciously-perfect metrics) as a `reward_hack_suspected`
     # audit event in the Trust panel. Never changes selection. Off by default.
     reward_hack_detect: bool = False
+    # I3 data-centric: static code-leakage scan of each evaluated solution (fit-before-split,
+    # fit-on-test) surfaced into the Trust panel alongside reward-hack flags. Off by default.
+    code_leakage_detect: bool = False
     # A7 Strategist (NEW, user-requested): optional LLM/rule meta-controller that picks the search
     # policy/allocator + operator mix + fidelity (+ Developer backend) per situation. Config-first:
     # "off" (default) == today's behavior, every choice the Strategist makes is also a direct knob.
