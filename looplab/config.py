@@ -59,6 +59,15 @@ class Settings(BaseSettings):
     # and skip a full eval for the doomed bottom fraction. 0.0 = off (no candidate skipped).
     proxy_scoring: bool = False
     proxy_kill_fraction: float = Field(default=0.0, ge=0.0, le=0.9)
+    # E1 novelty/dedup gate: reject near-duplicate proposals (normalized param-space distance below
+    # `novelty_epsilon`) by deterministically nudging them off the duplicate — stops the search
+    # wasting evals re-trying the same idea. Audit event `novelty_rejected`. Off by default.
+    novelty_gate: bool = False
+    novelty_epsilon: float = 0.05
+    # E4 reflection-memory -> priors (gradient-free cross-run meta-learning): at run end distill a
+    # one-line meta-review (best params/operator) into `<memory_dir>/meta_notes.jsonl`; at run start,
+    # inject prior notes for this task into the proposal prompt. Needs memory_dir; off without it.
+    reflection_priors: bool = False
     # B5 reward-hacking detector: a host-side monitor that flags suspicious wins (grader/answer-key
     # access, runtime writes to frozen files, suspiciously-perfect metrics) as a `reward_hack_suspected`
     # audit event in the Trust panel. Never changes selection. Off by default.

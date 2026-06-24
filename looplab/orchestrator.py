@@ -156,6 +156,9 @@ class Engine:
         proxy_scorer=None,          # A6: Optional[ProxyScorer] early-signal candidate gate
         proxy_kill_fraction: float = 0.0,
         reward_hack_detect: bool = False,   # B5: flag suspicious wins (audit-only)
+        novelty_gate: bool = False,         # E1: dedup near-duplicate proposals
+        novelty_epsilon: float = 0.05,
+        reflection_priors: bool = False,    # E4: cross-run meta-review priors
     ):
         self.run_dir = Path(run_dir)
         self.task = task
@@ -180,6 +183,10 @@ class Engine:
         self.proxy_scorer = proxy_scorer
         self.proxy_kill_fraction = proxy_kill_fraction
         self.reward_hack_detect = reward_hack_detect
+        self._novelty_gate = novelty_gate
+        self._novelty_epsilon = novelty_epsilon
+        self._reflection_priors = reflection_priors
+        self._prior_note_text = ""   # E4: cross-run meta-review prior, loaded at run start
         self._strategy_fidelity: Optional[str] = None   # None => use the Idea's own profile
         self.max_parallel = max_parallel
         self.timeout = timeout
@@ -328,6 +335,7 @@ class Engine:
         _entry = fold(self.store.read_all())
         if _entry.active_strategy:
             self._apply_strategy(_entry.active_strategy)
+        self._prior_note_text = self._load_reflection_priors()   # E4: cross-run meta-learned priors
         start = time.time()
         while True:
             state = fold(self.store.read_all())
@@ -520,6 +528,7 @@ class Engine:
                               DiversityArchive(self.archive_resolution).summary(cur))
             self._emit_llm_cost()                               # LLM cost/tokens roll-up (UI)
             self._store_case(fold(self.store.read_all()))       # cross-run memory (I19)
+            self._write_reflection_note(fold(self.store.read_all()))   # E4 cross-run meta-review prior
 
         final = build_readmodel(self.store.read_all(), self.run_dir / "readmodel.sqlite")
         # UI projection (ADR-17): join the research tree (events) to its execution detail
@@ -694,10 +703,87 @@ class Engine:
                           "exploit the leader with cheap experiments — budget nearly spent")
                 hint += (f"\nBudget guidance: {rem:.0f}s of {max_es:.0f}s eval budget remain "
                          f"({frac:.0%}); {stance}.")
+        hint += self._prior_note_text   # E4: cross-run meta-learned prior (empty unless enabled)
         try:
             setattr(self.researcher, "_complexity_hint", hint)
         except Exception:  # noqa: BLE001
             pass
+
+    def _load_reflection_priors(self) -> str:
+        """E4: load prior-run meta-review notes for THIS task from the cross-run memory and format
+        them as a proposal-prompt prior (gradient-free meta-learning). Empty unless enabled + present."""
+        if not (self._reflection_priors and self.memory_dir):
+            return ""
+        path = Path(self.memory_dir) / "meta_notes.jsonl"
+        if not path.exists():
+            return ""
+        notes: list[str] = []
+        for line in path.read_text(encoding="utf-8").splitlines():
+            try:
+                o = orjson.loads(line)
+            except Exception:  # noqa: BLE001
+                continue
+            if o.get("task_id") == self.task.id and o.get("note"):
+                notes.append(str(o["note"]))
+        if not notes:
+            return ""
+        return "\nPrior-run insights for this task (meta-learned): " + " | ".join(notes[-3:])
+
+    def _write_reflection_note(self, final: RunState) -> None:
+        """E4: distill a one-line meta-review of this run (what won) into the cross-run memory, so the
+        NEXT run of this task warm-starts from it. Appends to <memory_dir>/meta_notes.jsonl."""
+        if not (self._reflection_priors and self.memory_dir):
+            return
+        best = final.best()
+        if best is None:
+            return
+        note = (f"best metric {best.metric:.4g} via op '{best.operator}' params {best.idea.params}; "
+                f"{len(final.nodes)} nodes, {len(final.evaluated_nodes())} evaluated")
+        p = Path(self.memory_dir) / "meta_notes.jsonl"
+        p.parent.mkdir(parents=True, exist_ok=True)
+        with open(p, "a", encoding="utf-8") as f:
+            f.write(orjson.dumps({"task_id": final.task_id, "note": note}).decode() + "\n")
+
+    def _apply_novelty_gate(self, state: RunState, idea: Idea) -> Idea:
+        """E1: if a fresh proposal's numeric params are within `novelty_epsilon` (normalized L2) of an
+        existing node, nudge it off the duplicate deterministically and record a `novelty_rejected`
+        audit event. Loop-safe (always returns a usable idea) and replay-safe (the nudged params land
+        in node_created; the gate is not re-run on replay). No-op unless `novelty_gate` is on."""
+        if not self._novelty_gate:
+            return idea
+        import math
+        import random as _random
+        params = {k: float(v) for k, v in idea.params.items() if isinstance(v, (int, float))}
+        if not params:
+            return idea
+
+        def _ndist(a: dict, b: dict) -> float:
+            keys = set(a) & set(b)
+            if not keys:
+                return float("inf")
+            return math.sqrt(sum((a[k] - b[k]) ** 2 for k in keys)) / math.sqrt(len(keys))
+
+        nearest, mind = None, float("inf")
+        for n in state.nodes.values():
+            p = {k: float(v) for k, v in n.idea.params.items() if isinstance(v, (int, float))}
+            d = _ndist(params, p)
+            if d < mind:
+                mind, nearest = d, n.id
+        if mind >= self._novelty_epsilon:
+            return idea
+        nid = len(state.nodes)
+        rng = _random.Random(nid * 1009 + 7)        # deterministic per node-slot
+        nudged = dict(idea.params)
+        for k in params:
+            scale = max(abs(params[k]), 1.0) * 0.1
+            nudged[k] = round(params[k] + rng.uniform(-1.0, 1.0) * scale, 4)
+        self.store.append("novelty_rejected", {
+            "node_id": nid, "near_node": nearest, "distance": round(mind, 4),
+            "original": idea.params, "nudged": nudged})
+        out = idea.model_copy()
+        out.params = nudged
+        out.rationale = (idea.rationale + " [novelty-gate: nudged off a near-duplicate]").strip()
+        return out
 
     def _ensemble_idea(self, parents) -> Idea:
         """A0b: an ensembling/recombination merge — instruct the Developer to combine the parents'
@@ -723,6 +809,7 @@ class Engine:
                 self._set_complexity_hint(state, None)   # A0d breadth-keyed complexity cue
                 with self.tracer.span("propose"):
                     idea = self.researcher.propose(state, None)
+                idea = self._apply_novelty_gate(state, idea)   # E1 dedup near-duplicate proposals
                 idea.operator = "draft"        # operator is authoritative from the policy,
                 parents: list[int] = []        # not whatever label the LLM returns
                 with self.tracer.span("implement"):
@@ -762,6 +849,7 @@ class Engine:
                 self._set_complexity_hint(state, parent)   # A0d breadth-keyed complexity cue
                 with self.tracer.span("propose"):
                     idea = self.researcher.propose(state, parent)
+                idea = self._apply_novelty_gate(state, idea)   # E1 dedup near-duplicate proposals
                 idea.operator = "improve"
                 parents = [parent.id]
                 with self.tracer.span("implement"):

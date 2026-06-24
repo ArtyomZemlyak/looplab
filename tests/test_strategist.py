@@ -404,6 +404,55 @@ def test_reward_hack_detector_off_by_default(tmp_path):
 
 
 # --------------------------------------------------------------------------- #
+# E1 novelty gate + E4 reflection priors
+# --------------------------------------------------------------------------- #
+
+def test_novelty_gate_nudges_near_duplicate(tmp_path):
+    eng = _engine(tmp_path / "nov", novelty_gate=True, novelty_epsilon=0.05)
+    st = RunState(direction="min")
+    st.nodes[0] = Node(id=0, operator="draft", idea=Idea(operator="draft", params={"x": 1.0, "y": 1.0}),
+                       metric=1.0, status=NodeStatus.evaluated)
+    dup = Idea(operator="improve", params={"x": 1.0, "y": 1.0}, rationale="same")
+    out = eng._apply_novelty_gate(st, dup)
+    assert out.params != {"x": 1.0, "y": 1.0}           # nudged off the duplicate
+    assert "novelty-gate" in out.rationale
+    evs = list(_read(tmp_path / "nov"))
+    assert any(e.type == "novelty_rejected" for e in evs)
+
+
+def test_novelty_gate_keeps_distinct_idea(tmp_path):
+    eng = _engine(tmp_path / "nov2", novelty_gate=True, novelty_epsilon=0.05)
+    st = RunState(direction="min")
+    st.nodes[0] = Node(id=0, operator="draft", idea=Idea(operator="draft", params={"x": 1.0, "y": 1.0}),
+                       metric=1.0, status=NodeStatus.evaluated)
+    distinct = Idea(operator="improve", params={"x": 4.0, "y": -3.0}, rationale="far")
+    out = eng._apply_novelty_gate(st, distinct)
+    assert out.params == {"x": 4.0, "y": -3.0}          # far enough -> untouched
+
+
+def test_novelty_gate_off_is_noop(tmp_path):
+    eng = _engine(tmp_path / "nov3", novelty_gate=False)
+    st = RunState(direction="min")
+    st.nodes[0] = Node(id=0, operator="draft", idea=Idea(operator="draft", params={"x": 1.0}), metric=1.0,
+                       status=NodeStatus.evaluated)
+    out = eng._apply_novelty_gate(st, Idea(operator="improve", params={"x": 1.0}))
+    assert out.params == {"x": 1.0}
+
+
+def test_reflection_priors_roundtrip(tmp_path):
+    mem = tmp_path / "mem"
+    # Run 1 writes a meta-note; run 2 loads it as a prior.
+    s1 = anyio.run(_engine(tmp_path / "r1", reflection_priors=True,
+                           memory_dir=str(mem)).run)
+    assert s1.finished
+    notes = (mem / "meta_notes.jsonl")
+    assert notes.exists() and notes.read_text(encoding="utf-8").strip()
+    eng2 = _engine(tmp_path / "r2", reflection_priors=True, memory_dir=str(mem))
+    prior = eng2._load_reflection_priors()
+    assert "Prior-run insights" in prior and "best metric" in prior
+
+
+# --------------------------------------------------------------------------- #
 
 def _read(run_dir: Path):
     from looplab.eventstore import EventStore

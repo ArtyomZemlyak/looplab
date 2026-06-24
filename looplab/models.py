@@ -170,6 +170,8 @@ class RunState(BaseModel):
     # B5 reward-hacking detector (audit-only; never changes selection): flagged suspicious wins
     # {node_id, signals:[{signal, detail}]} for the Trust panel.
     reward_hacks: list[dict] = Field(default_factory=list)
+    # E1 novelty/dedup gate: near-duplicate proposals that were nudged off {node_id, near_node, ...}.
+    novelty_events: list[dict] = Field(default_factory=list)
 
     # --- read helpers (no mutation) ---
     def best(self) -> Optional[Node]:

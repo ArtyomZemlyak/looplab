@@ -117,6 +117,10 @@ export default function RunView({ runId, onBack }) {
         {state.active_strategy && <span className="chip" title={state.active_strategy.rationale || 'active strategy'}
           onClick={() => setPanel('strategist')} style={{ cursor: 'pointer' }}>
           <span className="k">🧭 strategy</span> {state.active_strategy.policy || 'greedy'}{state.active_strategy.fidelity ? '/' + state.active_strategy.fidelity : ''}</span>}
+        {state.novelty_events?.length > 0 && <span className="chip" title="near-duplicate proposals nudged to diversify (E1)">
+          <span className="k">🔁 dedup</span> {state.novelty_events.length}</span>}
+        {state.reward_hacks?.length > 0 && <span className="chip alarm" title="suspicious wins flagged (B5)" onClick={() => setPanel('trust')} style={{ cursor: 'pointer' }}>
+          <span className="k">⚠ hack?</span> {state.reward_hacks.length}</span>}
 
         <div className="toolbar">
           {!state.finished && (state.paused

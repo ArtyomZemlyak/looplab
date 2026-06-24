@@ -47,6 +47,12 @@ export const SETTINGS_GROUPS = [
         help: 'A6: skip the bottom fraction of candidates by proxy score (0 = never skip).' },
       { key: 'reward_hack_detect', label: 'Reward-hack detector', type: 'bool',
         help: 'B5: flag suspicious wins (grader/answer-key access, frozen-file writes, perfect metrics) in the Trust panel. Audit-only.' },
+      { key: 'novelty_gate', label: 'Novelty gate', type: 'bool',
+        help: 'E1: nudge near-duplicate proposals off each other so the search stops re-trying the same idea.' },
+      { key: 'novelty_epsilon', label: 'Novelty ε', type: 'float',
+        help: 'E1: normalized param-space distance below which a proposal counts as a near-duplicate.' },
+      { key: 'reflection_priors', label: 'Reflection priors', type: 'bool',
+        help: 'E4: distill a meta-review at run end and inject prior-run insights into the next run’s prompt (needs a memory dir).' },
     ],
   },
   {

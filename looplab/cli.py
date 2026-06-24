@@ -93,6 +93,9 @@ def _engine(run_dir: Path, task: TaskAdapter, settings: Settings,
         proxy_scorer=proxy_scorer,
         proxy_kill_fraction=settings.proxy_kill_fraction,
         reward_hack_detect=settings.reward_hack_detect,
+        novelty_gate=settings.novelty_gate,
+        novelty_epsilon=settings.novelty_epsilon,
+        reflection_priors=settings.reflection_priors,
     )
 
 
