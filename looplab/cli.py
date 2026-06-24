@@ -272,6 +272,20 @@ def bench(
                        f"eval_s={r['eval_seconds']} hacks={r['reward_hack_flags']}")
 
 
+@app.command(name="export-mlflow")
+def export_mlflow(
+    run_dir: Path = typer.Argument(..., help="Run dir to export to MLflow."),
+    tracking_uri: Optional[str] = typer.Option(None, help="MLflow tracking URI (default: local ./mlruns)."),
+    experiment: Optional[str] = typer.Option(None, help="MLflow experiment name."),
+):
+    """G5: log the run's champion (params/metrics/solution) to MLflow (needs the optional mlflow pkg)."""
+    from .mlflow_export import available, export_run_dir
+    if not available():
+        typer.echo("MLflow not installed: pip install mlflow"); raise typer.Exit(1)
+    rid = export_run_dir(run_dir, tracking_uri=tracking_uri, experiment=experiment)
+    typer.echo(f"logged to MLflow run {rid}")
+
+
 @app.command(name="export-notebook")
 def export_notebook(
     run_dir: Path = typer.Argument(..., help="Run dir to export the champion from."),
