@@ -11,9 +11,12 @@ Trust model: this is the credible, comparable benchmark path. The answer key liv
 mle-bench data dir; ``assets()`` copies just the public files into the candidate workspace, and
 grading runs on the host. Run untrusted-tier (Docker) for true isolation of the candidate code.
 
-Candidate sandbox stays zero-dep: the offline baselines and the LLM brief use **numpy + the
-Python standard library only** (CSV via :mod:`csv`), so the lite text/tabular competitions run on
-CPU with no pandas/sklearn in the sandbox. (pandas/sklearn are needed only by the host grader.)
+CPU-only throughout. The OFFLINE baselines use **numpy + the Python standard library only** (CSV via
+:mod:`csv`), so they run with zero extra deps. The LLM brief additionally allows **pandas + scikit-
+learn**, which are installed on the trusted_local host (the host grader needs them) and are therefore
+importable by the candidate subprocess — they make the LLM's job far more reliable (e.g. column-by-
+name handling avoids train/test feature misalignment). For the untrusted Docker tier those libs must
+be added to the candidate image, or the brief constrained to numpy+stdlib.
 """
 from __future__ import annotations
 
@@ -146,14 +149,18 @@ class MLEBenchRealTask(BaseModel):
         brief = (
             f"This is the real Kaggle competition '{self.competition}'. Metric: {meta['scorer']} "
             f"({meta['direction']} is better). Read the training data from './train.csv' and the "
-            "test features from './test.csv' (CSV files; use the standard-library `csv` module — "
-            "pandas/scikit-learn are NOT installed in the sandbox; you may use numpy + stdlib only). "
+            "test features from './test.csv' (CSV files). You may use numpy, pandas and scikit-learn "
+            "(all installed) plus the Python standard library; CPU only, no GPU/network. "
             f"A './description.md' explains the task and './{sample}' shows the EXACT required "
-            f"output format. Train a model (CPU only), predict for every test row, and WRITE your "
-            f"predictions to './{self.submission}' with the SAME columns/header and row order as "
-            f"'./{sample}'. Open every file with encoding='utf-8' (the data is UTF-8). Do NOT print "
-            f"a metric and do NOT read any test labels — the host scores your submission. You may use "
-            f"the suggested hyperparameter 'p'.")
+            "output format. IMPORTANT about columns: the column(s) you must predict are exactly the "
+            f"non-id column(s) of './{sample}'. './test.csv' has the SAME columns as './train.csv' "
+            "EXCEPT those target column(s); build your feature matrix from the SAME set of columns for "
+            "train and test — exclude the id column and the target column(s) from the features (a "
+            "train/test feature-count mismatch means you left a target or id column in). Train a model, "
+            f"predict for every test row, and WRITE your predictions to './{self.submission}' with the "
+            f"SAME header and row order as './{sample}'. Open every file with encoding='utf-8' (the "
+            "data is UTF-8). Do NOT print a metric and do NOT read any test labels — the host scores "
+            "your submission. You may use the suggested hyperparameter 'p'.")
         return (LLMResearcher(client, space_hint=hint,
                               bounds={"p": (1e-3, float(self.max_param))}, parser=parser),
                 LLMDeveloper(client, brief=brief))
