@@ -508,6 +508,22 @@ export function ReportPanel({ state, runId, onClose }) {
     }
     return JSON.stringify(card, null, 2)
   }
+  // I4 · champion as a runnable nbformat-v4 notebook (built client-side; no backend round-trip).
+  const notebook = (code) => {
+    const champ = state.champion != null ? state.nodes[state.champion] : best
+    const src = code.endsWith('\n') ? code : code + '\n'
+    return {
+      cells: [
+        { cell_type: 'markdown', metadata: {}, source: [
+          '# Champion solution\n', `\n*LoopLab run ${state.run_id} (task ${state.task_id}).*\n`,
+          `\n**Goal:** ${state.goal}\n`, `\n**Best metric:** ${champ ? (champ.confirmed_mean ?? champ.metric) : '—'}\n`,
+          `\n**Params:** \`${JSON.stringify(champ?.idea?.params || {})}\`\n`] },
+        { cell_type: 'code', metadata: {}, execution_count: null, outputs: [], source: src.split(/(?<=\n)/) },
+      ],
+      metadata: { kernelspec: { display_name: 'Python 3', language: 'python', name: 'python3' }, language_info: { name: 'python' } },
+      nbformat: 4, nbformat_minor: 5,
+    }
+  }
   return (
     <Panel title="Run report" onClose={onClose} wide>
       <div className="toolbar" style={{ marginBottom: 10 }}>
@@ -515,6 +531,8 @@ export function ReportPanel({ state, runId, onClose }) {
         <button className="btn sm" onClick={() => dl(`${state.run_id}_report.md`, toMarkdown(state, best), 'text/markdown')}>⬇ Markdown report</button>
         {best && <button className="btn sm" disabled={!bestCode?.code} onClick={() => dl(`solution_node${best.id}.py`, bestCode.code, 'text/x-python')}>⬇ Solution</button>}
         <button className="btn sm" title="F3: portable champion lineage + provenance" onClick={() => dl(`${state.run_id}_model_card.json`, modelCard(), 'application/json')}>⬇ Model card</button>
+        {best && <button className="btn sm" title="I4: champion as a runnable Jupyter notebook" disabled={!bestCode?.code}
+          onClick={() => dl(`${state.run_id}_champion.ipynb`, JSON.stringify(notebook(bestCode.code), null, 1), 'application/x-ipynb+json')}>⬇ Notebook</button>}
       </div>
       <h2>{state.goal || state.task_id}</h2>
       <div className="kv">

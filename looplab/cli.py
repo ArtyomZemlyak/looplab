@@ -271,6 +271,26 @@ def bench(
                        f"eval_s={r['eval_seconds']} hacks={r['reward_hack_flags']}")
 
 
+@app.command(name="export-notebook")
+def export_notebook(
+    run_dir: Path = typer.Argument(..., help="Run dir to export the champion from."),
+    out: Optional[Path] = typer.Option(None, help="Output .ipynb path (default: <run>/champion.ipynb)."),
+):
+    """I4: export the run's champion solution as a runnable Jupyter notebook (.ipynb)."""
+    from .notebook import champion_notebook
+    store = EventStore(run_dir / "events.jsonl")
+    state = fold(store.read_all())
+    champ = state.nodes.get(state.champion) if state.champion is not None else state.best()
+    if champ is None:
+        typer.echo("no champion/best node to export"); raise typer.Exit(1)
+    nb = champion_notebook(state.goal, champ.code, params=champ.idea.params,
+                           metric=(champ.confirmed_mean if champ.confirmed_mean is not None else champ.metric),
+                           task_id=state.task_id, run_id=state.run_id)
+    dest = out or (run_dir / "champion.ipynb")
+    atomic_write_text(dest, json.dumps(nb, indent=1))
+    typer.echo(f"wrote {dest}")
+
+
 @app.command()
 def replay(run_dir: Path = typer.Argument(...)):
     """Pure fold of the event log -> current state (read-only)."""
