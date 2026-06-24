@@ -216,11 +216,11 @@ class Engine:
         self._drift_warned = False   # one-shot guard for the #8 drift-coverage warning
         # Fail loud at START, not mid-sweep: the untrusted tier needs docker, so verify it once
         # here instead of re-discovering (and re-scanning PATH) on every eval's make_docker_wrap.
-        if trust_mode == "untrusted":
+        if trust_mode in ("untrusted", "hostile"):
             import shutil as _sh
             if not _sh.which("docker"):
                 raise RuntimeError(
-                    "trust_mode='untrusted' needs the docker CLI to sandbox evals, but it was "
+                    f"trust_mode={trust_mode!r} needs the docker CLI to sandbox evals, but it was "
                     "not found on PATH. Install Docker or use trust_mode='trusted_local'.")
         self._spec_activated = False
         self.run_dir.mkdir(parents=True, exist_ok=True)
@@ -1027,8 +1027,10 @@ class Engine:
             cwd = str((Path(workdir) / es.get("cwd", ".")).resolve())
             # untrusted tier (Phase 4): sandbox the eval in docker, mounting the workspace
             # root so the cwd subdir + host metric reading line up. Fails loudly w/o docker.
-            wrap = (command_eval.make_docker_wrap(root, self.docker_image)
-                    if self.trust_mode == "untrusted" else None)
+            wrap = (command_eval.make_docker_wrap(
+                        root, self.docker_image,
+                        runtime=("runsc" if self.trust_mode == "hostile" else None))
+                    if self.trust_mode in ("untrusted", "hostile") else None)
             return command_eval.run_command_eval(
                 cmd, cwd, timeout, es["metric"], env,
                 setup=es.get("setup") or None, setup_timeout=es.get("setup_timeout", 600.0),

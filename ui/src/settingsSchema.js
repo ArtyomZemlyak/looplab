@@ -120,8 +120,8 @@ export const SETTINGS_GROUPS = [
   {
     title: 'Sandbox & trust', sub: 'isolation and human-in-the-loop',
     fields: [
-      { key: 'trust_mode', label: 'Sandbox tier', type: 'enum', options: ['trusted_local', 'untrusted'],
-        help: 'trusted_local = subprocess (no Docker); untrusted = Docker --network none.' },
+      { key: 'trust_mode', label: 'Sandbox tier', type: 'enum', options: ['trusted_local', 'untrusted', 'hostile'],
+        help: 'trusted_local = subprocess; untrusted = Docker --network none; hostile = + gVisor (runsc) true-isolation runtime (B4+).' },
       { key: 'docker_image', label: 'Docker image', type: 'text', placeholder: 'python:3.12-slim',
         help: 'Image for the untrusted eval tier.' },
       { key: 'eval_trust_mode', label: 'Eval trust', type: 'enum',

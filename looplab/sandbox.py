@@ -199,10 +199,14 @@ class DockerSandbox:
     absent rather than silently degrading the boundary."""
 
     def __init__(self, image: str = "python:3.12-slim", network: str = "none",
-                 max_output_bytes: int = 64_000, **_: object):
+                 max_output_bytes: int = 64_000, runtime: Optional[str] = None, **_: object):
         self.image = image
         self.network = network
         self.max_output_bytes = max_output_bytes
+        # B4+ hostile tier: an OCI runtime that is a REAL isolation boundary for untrusted code —
+        # gVisor ("runsc", user-space kernel) or Kata ("kata-runtime", microVM). None = the default
+        # shared-kernel runtime (untrusted tier). Passed to `docker run --runtime`.
+        self.runtime = runtime
 
     def run(self, code: str, workdir: str, timeout: float = 30.0,
             env: Optional[dict] = None, cancel=None) -> RunResult:
@@ -222,7 +226,8 @@ class DockerSandbox:
         # container exits at `timeout` and `--rm` removes it, so a runaway leaks at most ~timeout
         # seconds even if the host kills the client first. Host timeout gets a grace margin.
         secs = max(1, int(timeout))
-        argv = (["docker", "run", "--rm", "--network", self.network,
+        rt = ["--runtime", self.runtime] if self.runtime else []   # B4+ gVisor/Kata isolation tier
+        argv = (["docker", "run", "--rm", "--network", self.network, *rt,
                  "--pids-limit", "1024",      # fork-bomb guard (review C1: no pids limit before)
                  "-v", f"{wd.as_posix()}:/work", "-w", "/work"] + envs
                 + [self.image, "timeout", "-k", "5", str(secs), "python", "solution.py"])
@@ -239,5 +244,10 @@ def make_sandbox(trust_mode: str = "trusted_local", *, image: Optional[str] = No
     if trust_mode == "trusted_local":
         return SubprocessSandbox(**kwargs)
     if trust_mode == "untrusted":
+        return DockerSandbox(image=image or "python:3.12-slim", **kwargs)
+    if trust_mode == "hostile":
+        # B4+ true-isolation tier: shared-kernel container hardening is NOT an isolation boundary for
+        # untrusted LLM code; run under gVisor (runsc) by default. Override via `runtime`.
+        kwargs.setdefault("runtime", "runsc")
         return DockerSandbox(image=image or "python:3.12-slim", **kwargs)
     raise ValueError(f"unknown trust_mode: {trust_mode!r}")

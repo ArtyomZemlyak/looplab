@@ -205,7 +205,7 @@ def _drift(primary: Optional[float], cross: Optional[float], tol: float) -> bool
 
 
 def make_docker_wrap(mount_root: str, image: str, network: str = "none",
-                     mem: Optional[str] = None):
+                     mem: Optional[str] = None, runtime: Optional[str] = None):
     """untrusted tier (ADR-13, Phase 4): return a `wrap(argv, host_cwd) -> argv` that runs the
     command inside `docker run` with the run workspace bind-mounted at /work and the network
     off by default — a real isolation boundary for executing an arbitrary framework. The bind
@@ -224,7 +224,8 @@ def make_docker_wrap(mount_root: str, image: str, network: str = "none",
         if rel == ".." or rel.startswith("../"):     # cwd outside the mounted root -> never escape
             raise ValueError(f"eval cwd {host_cwd!r} is outside the mounted workspace {str(root)!r}")
         cdir = "/work" if rel in (".", "") else f"/work/{rel}"
-        base = ["docker", "run", "--rm", "--network", network,
+        rt = ["--runtime", runtime] if runtime else []   # B4+ gVisor/Kata true-isolation tier
+        base = ["docker", "run", "--rm", "--network", network, *rt,
                 "--pids-limit", "1024",       # fork-bomb guard (review C1: no pids limit before)
                 "-v", f"{root.as_posix()}:/work", "-w", cdir]
         if mem:
