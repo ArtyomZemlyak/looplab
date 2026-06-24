@@ -53,6 +53,9 @@ class Settings(BaseSettings):
     # reason over how much compute is left (explore broad while flush, exploit/cheapen when low).
     # No-op unless a max_eval_seconds budget is set.
     budget_aware: bool = False
+    # A4 (LATS-style): feed a summary of the most recent FAILED branches (operator + error reason)
+    # back into the proposal prompt so the proposer reflects on and avoids repeating them. Off default.
+    failure_reflection: bool = False
     # A2 surrogate-guided proposal (BO-lite): fit a k-NN surrogate over (params->metric) and propose
     # by acquisition instead of random/hill-climb. Numeric-bounds tasks only; bootstraps via the
     # base Researcher. Off by default. `surrogate_explore` = UCB-style exploration weight.

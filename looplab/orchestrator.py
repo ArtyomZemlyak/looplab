@@ -152,6 +152,7 @@ class Engine:
         merge_mode: str = "mean",        # A0b: "mean" | "ensemble"
         complexity_cue: bool = False,    # A0d: breadth-keyed prompt hint
         budget_aware: bool = False,      # A5: surface remaining eval budget into the prompt
+        failure_reflection: bool = False,  # A4: reflect on recent failed branches in the prompt
         feature_engineering: bool = False,  # I1: CV-gated feature-engineering directive
         ablate_code_blocks: bool = False,  # A0a: ablate pipeline code blocks, not just params
         proxy_scorer=None,          # A6: Optional[ProxyScorer] early-signal candidate gate
@@ -181,6 +182,7 @@ class Engine:
         self._merge_mode = merge_mode
         self._complexity_cue = complexity_cue
         self._budget_aware = budget_aware
+        self._failure_reflection = failure_reflection
         self._feature_engineering = feature_engineering
         self._ablate_code_blocks = ablate_code_blocks
         self.proxy_scorer = proxy_scorer
@@ -715,6 +717,13 @@ class Engine:
                           "exploit the leader with cheap experiments — budget nearly spent")
                 hint += (f"\nBudget guidance: {rem:.0f}s of {max_es:.0f}s eval budget remain "
                          f"({frac:.0%}); {stance}.")
+        if self._failure_reflection:
+            fails = sorted((n for n in state.nodes.values()
+                            if n.status is NodeStatus.failed and n.error_reason),
+                           key=lambda n: n.id, reverse=True)[:3]
+            if fails:
+                summ = "; ".join(f"node {n.id} ({n.error_reason}): {(n.error or '')[:60]}" for n in fails)
+                hint += f"\nReflection — recent failures to avoid repeating: {summ}."
         if self._feature_engineering and (self.task_has_columns or self._assets):
             hint += ("\nFeature engineering: propose 1-2 semantically-meaningful engineered features "
                      "(ratios, interactions, aggregations, domain transforms) as code. The eval's "

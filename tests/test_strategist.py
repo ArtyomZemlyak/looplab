@@ -288,6 +288,19 @@ def test_budget_aware_hint_includes_remaining(tmp_path):
     assert "Budget guidance" not in getattr(eng.researcher, "_complexity_hint", "")
 
 
+def test_failure_reflection_injects_recent_failures(tmp_path):
+    eng = _engine(tmp_path / "refl", failure_reflection=True)
+    st = RunState(direction="min")
+    st.nodes[0] = Node(id=0, operator="draft", idea=Idea(operator="draft", params={"x": 1.0}),
+                       status=NodeStatus.failed, error_reason="crash", error="boom traceback")
+    eng._set_complexity_hint(st, None)
+    hint = getattr(eng.researcher, "_complexity_hint", "")
+    assert "Reflection" in hint and "crash" in hint
+    eng._failure_reflection = False
+    eng._set_complexity_hint(st, None)
+    assert "Reflection" not in getattr(eng.researcher, "_complexity_hint", "")
+
+
 def test_feature_engineering_directive_injected(tmp_path):
     # I1: with a tabular task (assets present) + feature_engineering on, the FE directive is added.
     eng = _engine(tmp_path / "fe", feature_engineering=True)
