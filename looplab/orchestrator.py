@@ -157,6 +157,7 @@ class Engine:
         proxy_scorer=None,          # A6: Optional[ProxyScorer] early-signal candidate gate
         proxy_kill_fraction: float = 0.0,
         reward_hack_detect: bool = False,   # B5: flag suspicious wins (audit-only)
+        redact_output: bool = False,        # B3: redact secrets from persisted output tails
         novelty_gate: bool = False,         # E1: dedup near-duplicate proposals
         novelty_epsilon: float = 0.05,
         reflection_priors: bool = False,    # E4: cross-run meta-review priors
@@ -185,6 +186,7 @@ class Engine:
         self.proxy_scorer = proxy_scorer
         self.proxy_kill_fraction = proxy_kill_fraction
         self.reward_hack_detect = reward_hack_detect
+        self._redact_output = redact_output
         self._novelty_gate = novelty_gate
         self._novelty_epsilon = novelty_epsilon
         self._reflection_priors = reflection_priors
@@ -1140,7 +1142,7 @@ class Engine:
                     self.store.append(
                         "node_evaluated",
                         {"node_id": node_id, "metric": res.metric,
-                         "stdout_tail": res.stdout[-500:], "eval_seconds": dur,
+                         "stdout_tail": self._redact(res.stdout[-500:]), "eval_seconds": dur,
                          "extra_metrics": res.extra_metrics or {},   # #5 multi-objective
                          "violations": res.violations or []},
                     )
@@ -1155,7 +1157,7 @@ class Engine:
                             self.store.append("reward_hack_suspected",
                                               {"node_id": node_id, "signals": sigs})
                 else:
-                    err = res.stderr[-500:] or (
+                    err = self._redact(res.stderr[-500:]) or (
                         f"metric drift: {res.drift}" if res.drift is not None else
                         f"exit={res.exit_code} timed_out={res.timed_out} no_metric"
                     )
@@ -1408,6 +1410,13 @@ class Engine:
             "idea": idea.model_dump(mode="json"), "code": new_code,
             "files": getattr(self.developer, "last_files", {}) or {}})
         self._emit_agent_report(node_id)
+
+    def _redact(self, text: str) -> str:
+        """B3: mask secrets in an output tail before it is persisted, when redaction is enabled."""
+        if not self._redact_output or not text:
+            return text
+        from .redact import redact_secrets
+        return redact_secrets(text)
 
     def _maybe_crash(self) -> None:
         if self.crash_after is None:

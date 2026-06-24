@@ -74,6 +74,10 @@ class Settings(BaseSettings):
     # one-line meta-review (best params/operator) into `<memory_dir>/meta_notes.jsonl`; at run start,
     # inject prior notes for this task into the proposal prompt. Needs memory_dir; off without it.
     reflection_priors: bool = False
+    # B3 output redaction: mask credentials (known key shapes + high-entropy tokens) in the
+    # stdout/stderr tail before it is persisted to the event log / spans / UI — a leaked secret in a
+    # print()/traceback must not land in the durable log. Off by default; recommend on for untrusted.
+    redact_output: bool = False
     # B5 reward-hacking detector: a host-side monitor that flags suspicious wins (grader/answer-key
     # access, runtime writes to frozen files, suspiciously-perfect metrics) as a `reward_hack_suspected`
     # audit event in the Trust panel. Never changes selection. Off by default.

@@ -127,6 +127,8 @@ export const SETTINGS_GROUPS = [
         help: 'Trust policy for an agent-authored eval/metric adapter.' },
       { key: 'require_approval', label: 'Require approval (HITL)', type: 'bool',
         help: 'Pause for human approval of the final best before finishing.' },
+      { key: 'redact_output', label: 'Redact output secrets', type: 'bool',
+        help: 'B3: mask credentials/high-entropy tokens in the persisted stdout/stderr tail (recommended for untrusted tiers).' },
     ],
   },
   {
