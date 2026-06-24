@@ -9,27 +9,30 @@
 
 ---
 
-## ★ Shipped 2026-06-24 (this session) — adaptive search intelligence, config-first, in the UI
+## ★ Shipped 2026-06-24 (this session) — 22 roadmap items, config-first, all in the UI
 
-The user's top-3 ("if you do only three things") **A0 · A6/A1 · A7** plus the quick-win operators —
-all **config-first** (every knob in `config.Settings` + the Settings UI), **replay-safe**, and
-surfaced in a new **Strategist panel** + activity feed. Verified with 30 new tests + live runs
-(toy, ASHA, proxy, and a live `qwen3:30b-a3b` LLM run).
+Branch `feat/adaptive-search-intelligence`, ~12 commits. All **config-first** (every knob in
+`config.Settings` + the Settings UI), **replay-safe**, surfaced in the UI (new Strategist /
+Importance / Cross-run panels, Pareto/Trust additions, chips, activity narratives). Full suite
+**355 passed, 3 skipped**; live-verified (toy, ASHA, BOHB, surrogate, proxy, a live `qwen3:30b-a3b`
+run, and UI preview of every new panel).
 
-- ✅ **A7 Strategist** (`looplab/strategist.py`) — optional rule/LLM meta-controller picking
-  policy/operators/fidelity/Developer at a bounded cadence; `strategy_decision` event + `fold`
-  reconstruction (LLM never re-called on replay); `set_strategy` operator override (HITL parity);
-  default `off` == today. **Live: switched greedy→mcts on a stall at node 10.**
-- ✅ **A1 ASHA** multi-fidelity racing policy (`make_policy("asha")`, η reduction, `rung_promoted`
-  event). *(Live-test caught + fixed two bugs: CLI didn't forward `asha_eta`; `floor` survivor count
-  degenerated to greedy — now `ceil`.)*
-- ✅ **A0b** real ensemble/recombination merge (`merge_mode=ensemble`); **A0d** breadth-keyed
-  complexity cue (**live: in all 5 LLM prompts**); **A0a** code-block ablation→refinement
-  (`ablate_code_blocks`).
-- ✅ **A6 proxy/predictive scoring** (`looplab/proxy.py`) — k-NN-in-param-space early-signal gate
-  that skips the doomed bottom fraction; `proxy_scored` event; off by default.
+- ✅ **Theme A — search intelligence:** **A7 Strategist** (rule|llm meta-controller, `strategy_decision`,
+  replay-safe, `set_strategy` override) · **A1 ASHA** racing · **A2 surrogate** proposer (BO-lite) ·
+  **A3 BOHB** (ASHA×surrogate) · **A0a** code-block ablation · **A0b** ensemble merge · **A0d**
+  complexity cue · **A5** budget-aware · **A6** proxy scoring.
+- ✅ **Theme B — trust:** **B3** output redaction (secret-leak gate) · **B5** reward-hack detector.
+- ✅ **Theme C — Developer:** **C2** best-of-N (execution-free reward). *(C1 localization deferred.)*
+- ✅ **Theme D:** **D4** data provenance.
+- ✅ **Theme E:** **E1** novelty/dedup gate · **E4** reflection-memory priors.
+- ✅ **Theme F:** **F1** hyperparameter-importance · **F2** cross-run sweep · **F3** model-card export.
+- ✅ **Theme H:** **H2** schema-aligned parser · **H3** per-role models.
+- ✅ **Theme I:** **I1** CV-gated feature-engineering · **I5** Pareto selector.
 
 *(B6 remains parked per user decision — overfitting-on-validation is out of scope for now.)*
+**Still open** (heavy-infra / larger / repo-specific): A4 LATS; B1 host-side scoring + out-of-proc
+grader; C1/C3/C4/C6; D1 real MLE-bench (Kaggle); D2/D3; E2/E3; F4/F6; G1 server-auth/G3/G5; H1/H4;
+I2/I3/I4.
 
 ---
 
