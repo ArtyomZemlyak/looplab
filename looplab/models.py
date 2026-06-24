@@ -101,6 +101,7 @@ class RunState(BaseModel):
     finished: bool = False
     data_profile: Optional[dict] = None   # set by the grounding pre-phase (I16)
     leakage: Optional[dict] = None        # set by the grounding leakage scan (I9)
+    data_provenance: Optional[dict] = None  # D4: pinned content hashes of task assets/data
     stop_reason: Optional[str] = None     # why the run finished (budget/leakage/done)
     confirmed_done: bool = False          # the multi-seed confirmation phase completed (I12)
     awaiting_approval: bool = False       # HITL: approval requested, not yet granted (I21)

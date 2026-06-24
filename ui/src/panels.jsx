@@ -103,8 +103,19 @@ export function FailuresPanel({ state, onClose, onSelect }) {
   )
 }
 
+// I5 · non-dominated (Pareto-optimal) set over the primary metric (direction-aware) + every
+// extra_metric (treated as cost-like / minimize). A node is Pareto-optimal if no other node is
+// at-least-as-good on all objectives and strictly better on one.
+function paretoFront(nodes, direction) {
+  const keys = [...new Set(nodes.flatMap(n => Object.keys(n.extra_metrics || {})))]
+  const vec = (n) => [direction === 'min' ? n.metric : -n.metric,
+    ...keys.map(k => { const v = n.extra_metrics?.[k]; return v == null ? Infinity : v })]
+  const dominates = (a, b) => { let strict = false; for (let i = 0; i < a.length; i++) { if (a[i] > b[i]) return false; if (a[i] < b[i]) strict = true } return strict }
+  const pts = nodes.map(n => ({ n, v: vec(n) }))
+  return { keys, front: pts.filter(p => !pts.some(q => q !== p && dominates(q.v, p.v))).map(p => p.n) }
+}
 export function ParetoPanel({ state, onClose }) {
-  const nodes = Object.values(state.nodes).filter(n => n.metric != null)
+  const nodes = Object.values(state.nodes).filter(n => n.metric != null && n.feasible !== false)
   // first constraint dimension, if any
   const withV = nodes.filter(n => (n.violations || []).length || Object.keys(n.extra_metrics || {}).length)
   let scatter = null
@@ -121,6 +132,19 @@ export function ParetoPanel({ state, onClose }) {
   Object.values(state.nodes).forEach(n => { const o = (ops[n.operator] ||= { n: 0, ev: 0 }); o.n++; if (n.status === 'evaluated') o.ev++ })
   return (
     <Panel title="Pareto · Diversity · Operators" onClose={onClose} wide>
+      {(() => {
+        const { keys, front } = paretoFront(nodes, state.direction)
+        return <>
+          <div className="section-h">Pareto-optimal set (I5) {keys.length ? <span className="pill">{keys.length + 1} objectives</span> : <span className="pill">metric only</span>}</div>
+          {keys.length
+            ? <table className="tbl"><thead><tr><th>node</th><th>metric</th>{keys.map(k => <th key={k}>{k}</th>)}</tr></thead><tbody>
+                {front.sort((a, b) => (state.direction === 'min' ? a.metric - b.metric : b.metric - a.metric)).map(n =>
+                  <tr key={n.id}><td>#{n.id}{n.id === state.best_node_id ? ' ★' : ''}</td><td>{fmt(n.confirmed_mean ?? n.metric)}</td>
+                    {keys.map(k => <td key={k} className="muted">{fmt(n.extra_metrics?.[k])}</td>)}</tr>)}
+              </tbody></table>
+            : <div className="muted">Single-objective task — the Pareto front is just the best node (#{state.best_node_id ?? '—'}). Add extra_metrics (e.g. latency, size) to trade off.</div>}
+        </>
+      })()}
       <div className="section-h">Pareto (metric vs constraint)</div>
       {scatter || <div className="muted">No constraints/aux metrics in this task.</div>}
       <div className="section-h">Diversity archive {archive && <span className="pill">{archive.niches} niches</span>}</div>
@@ -425,12 +449,33 @@ export function ReportPanel({ state, runId, onClose }) {
     const el = document.createElement('a'); el.href = u; el.download = name; el.click(); URL.revokeObjectURL(u)
   }
   const impr = (s) => (s.delta == null ? true : (state.direction === 'min' ? s.delta < 0 : s.delta > 0))
+  // F3 · lineage / model-card export: a portable champion artifact tying data-hash -> code ->
+  // params -> metric -> selection, plus provenance, for handoff/reproducibility.
+  const modelCard = () => {
+    const champ = state.champion != null ? state.nodes[state.champion] : best
+    const card = {
+      task: state.task_id, goal: state.goal, direction: state.direction,
+      generated: new Date().toISOString(), run_id: state.run_id,
+      champion: champ ? {
+        node_id: champ.id, operator: champ.operator,
+        metric: champ.confirmed_mean ?? champ.metric,
+        confirmed: champ.confirmed_mean != null,
+        params: champ.idea.params, rationale: champ.idea.rationale,
+        lineage: (champ.parent_ids || []),
+      } : null,
+      data_provenance: state.data_provenance || null,
+      workspace: state.workspace || null,
+      counts: { nodes: Object.keys(state.nodes).length, evaluated: Object.values(state.nodes).filter(n => n.status === 'evaluated').length },
+    }
+    return JSON.stringify(card, null, 2)
+  }
   return (
     <Panel title="Run report" onClose={onClose} wide>
       <div className="toolbar" style={{ marginBottom: 10 }}>
         <button className="btn sm primary" onClick={() => window.print()}>🖨 Print / PDF</button>
         <button className="btn sm" onClick={() => dl(`${state.run_id}_report.md`, toMarkdown(state, best), 'text/markdown')}>⬇ Markdown report</button>
         {best && <button className="btn sm" disabled={!bestCode?.code} onClick={() => dl(`solution_node${best.id}.py`, bestCode.code, 'text/x-python')}>⬇ Solution</button>}
+        <button className="btn sm" title="F3: portable champion lineage + provenance" onClick={() => dl(`${state.run_id}_model_card.json`, modelCard(), 'application/json')}>⬇ Model card</button>
       </div>
       <h2>{state.goal || state.task_id}</h2>
       <div className="kv">

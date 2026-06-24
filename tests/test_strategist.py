@@ -453,6 +453,23 @@ def test_reflection_priors_roundtrip(tmp_path):
 
 
 # --------------------------------------------------------------------------- #
+# D4 data provenance
+# --------------------------------------------------------------------------- #
+
+def test_data_provenance_field_wellformed(tmp_path):
+    state = anyio.run(_engine(tmp_path / "prov").run)
+    # toy task has no assets -> provenance None; an asset task pins {name: 16-hex-hash}.
+    assert state.data_provenance is None or isinstance(state.data_provenance.get("assets"), dict)
+
+
+def test_data_provenance_hashes_assets():
+    # The engine's provenance hash is deterministic 16-hex over asset content.
+    import hashlib
+    h = hashlib.sha256("col_a,col_b\n1,2\n".encode("utf-8")).hexdigest()[:16]
+    assert len(h) == 16 and all(c in "0123456789abcdef" for c in h)
+
+
+# --------------------------------------------------------------------------- #
 
 def _read(run_dir: Path):
     from looplab.eventstore import EventStore

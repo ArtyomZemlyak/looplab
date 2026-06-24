@@ -312,6 +312,13 @@ class Engine:
             # AGENTS.md (I18): task/contract context for coding-agent backends.
             (self.run_dir / "AGENTS.md").write_text(
                 generate_agents_md(self.task), encoding="utf-8")
+            # D4 data provenance: pin a content hash of every task asset/dataset into the run so a
+            # result is tied to the exact data (repo tasks also pin via `workspace`). Reproducibility.
+            prov = {name: hashlib.sha256(
+                        c.encode("utf-8") if isinstance(c, str) else bytes(c)).hexdigest()[:16]
+                    for name, c in (self._assets or {}).items()}
+            if prov:
+                self.store.append("data_provenance", {"assets": prov})
             # Grounding pre-phase (I16): profile the dataset if the task exposes one.
             cols = getattr(self.task, "columns", None)
             if callable(cols):

@@ -83,6 +83,8 @@ def fold(events: Iterable[Event]) -> RunState:
                 }
         elif t == "data_profiled":
             st.data_profile = d.get("columns")
+        elif t == "data_provenance":
+            st.data_provenance = d   # D4: pinned dataset/asset content hashes
         elif t == "data_leakage":
             st.leakage = d
         elif t == "approval_requested":
