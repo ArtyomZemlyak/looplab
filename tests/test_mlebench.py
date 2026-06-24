@@ -106,3 +106,43 @@ def test_offline_engine_run_grades_held_out(tmp_path):
     nd0 = tmp_path / "run" / "nodes" / "node_0"
     assert (nd0 / "grader.py").exists() and (nd0 / "train.json").exists()
     assert (nd0 / "test.json").exists()
+
+
+# --- out-of-process host-side grading (host_graded mode) -------------------------------------------
+
+def test_host_graded_withholds_answer_key():
+    task = MLEBenchTask(host_graded=True)
+    a = task.assets()
+    assert "grader.py" not in a                      # no answer key on the candidate FS
+    assert set(a) == {"train.json", "test.json"}
+    g = task.host_grader()
+    _, _, _, yte = task._data()
+    assert g["scorer"] == "accuracy" and g["labels"] == yte and g["predictions"] == "predictions.json"
+
+
+def test_host_graded_brief_writes_predictions():
+    from looplab.roles import LLMDeveloper
+
+    class _Fake:
+        def complete_text(self, m):
+            return "```python\npass\n```"
+
+    _r, d = MLEBenchTask(host_graded=True).llm_roles(_Fake())
+    assert isinstance(d, LLMDeveloper)
+    assert "predictions.json" in d.brief and "grader" not in d.brief
+
+
+def test_host_graded_end_to_end(tmp_path):
+    task = load_task(ROOT / "examples" / "mlebench_hostgraded_task.json")
+    r, d = task.build_roles()
+    engine = Engine(tmp_path / "run", task=task, researcher=r, developer=d,
+                    sandbox=SubprocessSandbox(), policy=GreedyTree(n_seeds=3, max_nodes=6))
+    state = anyio.run(engine.run)
+    assert state.finished
+    best = state.best()
+    assert best is not None and 0.6 < best.metric <= 1.0      # host-scored held-out accuracy
+    assert state.host_grading and state.host_grading["scorer"] == "accuracy"
+    # the candidate workdir has predictions.json and NO grader/answer key
+    nd0 = tmp_path / "run" / "nodes" / "node_0"
+    assert (nd0 / "predictions.json").exists()
+    assert not (nd0 / "grader.py").exists()

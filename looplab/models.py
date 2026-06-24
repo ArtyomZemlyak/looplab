@@ -102,6 +102,10 @@ class RunState(BaseModel):
     data_profile: Optional[dict] = None   # set by the grounding pre-phase (I16)
     leakage: Optional[dict] = None        # set by the grounding leakage scan (I9)
     data_provenance: Optional[dict] = None  # D4: pinned content hashes of task assets/data
+    # Out-of-process / host-side grading (B1+): when set, the candidate wrote only predictions and the
+    # HOST scored them against held-out labels it never put on the candidate FS. {scorer, predictions,
+    # n_labels} — the labels themselves NEVER enter the event log. Audit/UI only.
+    host_grading: Optional[dict] = None
     stop_reason: Optional[str] = None     # why the run finished (budget/leakage/done)
     confirmed_done: bool = False          # the multi-seed confirmation phase completed (I12)
     awaiting_approval: bool = False       # HITL: approval requested, not yet granted (I21)

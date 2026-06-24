@@ -85,6 +85,8 @@ def fold(events: Iterable[Event]) -> RunState:
             st.data_profile = d.get("columns")
         elif t == "data_provenance":
             st.data_provenance = d   # D4: pinned dataset/asset content hashes
+        elif t == "host_grading":
+            st.host_grading = d      # out-of-process host-side grading active (audit; no labels)
         elif t == "data_leakage":
             st.leakage = d
         elif t == "approval_requested":

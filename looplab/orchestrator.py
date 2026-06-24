@@ -242,6 +242,13 @@ class Engine:
         assets = getattr(task, "assets", None)
         self._assets: dict = assets() if callable(assets) else {}
         self.task_has_columns = callable(getattr(task, "columns", None))   # I1: tabular task?
+        # Out-of-process / host-side grading (B1+, general): a task may expose `host_grader()` ->
+        # {"predictions": <file>, "scorer": <name>, "labels": <held-out answer key>, "key"?: ...}. When
+        # present, the candidate (a separate sandbox process) writes ONLY predictions; the host (this
+        # engine process) scores them — the labels live in engine memory and never touch the candidate
+        # FS or the event log. Works for ANY solution.py-path task, not just MLEBench.
+        hg = getattr(task, "host_grader", None)
+        self._host_grader: Optional[dict] = hg() if callable(hg) else None
         # RepoTask (ADR-7): an existing repo the agent edits + a command-based eval.
         rs = getattr(task, "repo_spec", None)
         self._repo_spec: dict = rs() if callable(rs) else {}
@@ -334,6 +341,13 @@ class Engine:
                     for name, c in (self._assets or {}).items()}
             if prov:
                 self.store.append("data_provenance", {"assets": prov})
+            # Out-of-process host-side grading active: record WHICH scorer + how many held-out labels
+            # (NEVER the labels themselves — the log is readable). Surfaced in the Trust panel.
+            if self._host_grader is not None:
+                self.store.append("host_grading", {
+                    "scorer": self._host_grader.get("scorer", "rmse"),
+                    "predictions": self._host_grader.get("predictions", "predictions.json"),
+                    "n_labels": len(self._host_grader.get("labels") or [])})
             # Grounding pre-phase (I16): profile the dataset if the task exposes one.
             cols = getattr(self.task, "columns", None)
             if callable(cols):
@@ -1081,7 +1095,32 @@ class Engine:
                 constraints=es.get("constraints") or None,
                 tracer=self.tracer,                           # child spans: setup/command/read
                 cancel=cancel)                                # operator mid-eval node_abort
-        return self.sandbox.run(node.code, str(workdir), self.timeout, env, cancel=cancel)
+        res = self.sandbox.run(node.code, str(workdir), self.timeout, env, cancel=cancel)
+        # Out-of-process host-side grading (general): override the (ignored) self-reported metric with
+        # the HOST's score of the candidate's predictions. Applied here so EVERY sandbox-path eval —
+        # normal AND the multi-seed confirm pass (both call _run_eval) — is graded the same way.
+        if self._host_grader is not None:
+            res = self._apply_host_grade(res, workdir)
+        return res
+
+    def _apply_host_grade(self, res, workdir):
+        """B1+ out-of-process grading: read the candidate's predictions file from its workdir and score
+        it on the HOST against the held-out labels (held in engine memory, never on the candidate FS).
+        Overrides `res.metric`; missing/malformed predictions -> no metric (the node fails, so a
+        candidate that doesn't actually produce predictions can't pass)."""
+        import json as _json
+        from .command_eval import host_score
+        g = self._host_grader
+        preds_path = Path(workdir) / g.get("predictions", "predictions.json")
+        m = None
+        if preds_path.is_file():
+            try:
+                preds = _json.loads(preds_path.read_text(encoding="utf-8-sig", errors="replace"))
+                m = host_score(g.get("scorer", "rmse"), preds, g["labels"], key=g.get("key"))
+            except (ValueError, OSError):
+                m = None
+        res.metric = m
+        return res
 
     def _emit_agent_report(self, node_id: int) -> None:
         """External-agent audit (ADR-7): if the Developer validated its output (a

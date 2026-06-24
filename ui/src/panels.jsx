@@ -31,9 +31,13 @@ export function TrustPanel({ state, runId, onClose }) {
       <div className="cardgrid" style={{ marginBottom: 14 }}>
         <Stat n={cfg?.trust_mode || '—'} l="sandbox tier" />
         <Stat n={cfg?.eval_trust_mode || '—'} l="eval trust mode" />
-        <Stat n={state.spec_confirmed ? 'ratified' : (state.proposed_spec ? 'pending' : 'n/a')} l="eval spec" />
+        <Stat n={state.host_grading ? 'host-side' : 'self-reported'} l="metric scoring" />
         <Stat n={state.workspace_changed ? '⚠ changed' : 'pinned'} l="workspace repro" />
       </div>
+      {state.host_grading && <div className="chip ok" style={{ marginBottom: 12 }}>
+        Out-of-process grading: the candidate writes predictions only; the host scores them
+        ({state.host_grading.scorer}, {state.host_grading.n_labels} held-out labels) — the answer key
+        never touches the candidate process, so the metric can’t be self-reported.</div>}
 
       <div className="section-h">Seed-luck check (naive leader vs robust winner)</div>
       {robust && naive

@@ -96,6 +96,33 @@ from grader import score
 print(json.dumps({{"metric": score(preds)}}))
 '''
 
+# Host-graded variant (out-of-process grading): the solution writes ONLY predictions; the host scores
+# them against the held-out labels (which are NEVER materialized into the workdir). Closes the
+# in-process-grader leak entirely — there is no answer key on the candidate's filesystem to read.
+_KNN_PREDICT_TEMPLATE = '''\
+import json
+TRAIN = json.load(open("train.json"))
+TEST = json.load(open("test.json"))
+K = {k}
+Xtr, ytr, Xte = TRAIN["X"], TRAIN["y"], TEST["X"]
+k = max(1, min(int(K), len(Xtr)))
+
+
+def dist2(a, b):
+    return sum((p - q) ** 2 for p, q in zip(a, b))
+
+
+preds = []
+for x in Xte:
+    nn = sorted(range(len(Xtr)), key=lambda i: dist2(x, Xtr[i]))[:k]
+    votes = {{}}
+    for i in nn:
+        votes[ytr[i]] = votes.get(ytr[i], 0) + 1
+    preds.append(max(votes, key=votes.get))
+# Write predictions only — the HOST scores them against labels we never see (no self-report).
+json.dump(preds, open("predictions.json", "w"))
+'''
+
 # The private grader (materialized as an asset). Holds the held-out answer key.
 _GRADER_TEMPLATE = '''\
 # Private grader (MLEBench-style). The held-out answer key lives here, not with the data.
@@ -140,14 +167,17 @@ class MLEBenchResearcher:
 
 
 class MLEBenchDeveloper:
-    """Offline templated k-NN classifier (reads assets, grades via grader.py)."""
+    """Offline templated k-NN classifier. `host_graded` -> writes predictions.json (host scores it);
+    otherwise grades via the in-workdir grader.py."""
 
-    def __init__(self, max_train: int):
+    def __init__(self, max_train: int, host_graded: bool = False):
         self.max_train = max_train
+        self.host_graded = host_graded
 
     def implement(self, idea: Idea) -> str:
         k = max(1, min(self.max_train, int(round(idea.params.get("k", 3)))))
-        return _KNN_TEMPLATE.format(k=k)
+        tmpl = _KNN_PREDICT_TEMPLATE if self.host_graded else _KNN_TEMPLATE
+        return tmpl.format(k=k)
 
 
 class MLEBenchTask(BaseModel):
@@ -166,6 +196,10 @@ class MLEBenchTask(BaseModel):
     sep: float = 2.0
     noise: float = 1.0
     max_k: int = 15
+    # Out-of-process grading (recommended for untrusted/real benchmarks): the solution writes
+    # predictions.json and the HOST scores it against held-out labels never placed on the candidate
+    # FS — there is no answer key to read or self-report. False keeps the legacy in-workdir grader.
+    host_graded: bool = False
 
     def _data(self):
         return make_classification_dataset(
@@ -185,39 +219,57 @@ class MLEBenchTask(BaseModel):
         return {"train_rows": Xtr, "test_rows": Xte}
 
     def assets(self) -> dict[str, str]:
-        """Materialized into each node's sandbox workdir before the solution runs:
-        train (with labels), test (features only), and the private grader."""
+        """Materialized into each node's sandbox workdir before the solution runs: train (with
+        labels) + test (features only). In the legacy (in-workdir) mode the private grader is also
+        written; under `host_graded` it is NOT — the answer key never touches the candidate FS."""
         Xtr, ytr, Xte, yte = self._data()
-        return {
+        a = {
             "train.json": json.dumps({"X": Xtr, "y": ytr}),
             "test.json": json.dumps({"X": Xte}),       # labels withheld
-            "grader.py": _GRADER_TEMPLATE.format(y_test=yte),
         }
+        if not self.host_graded:
+            a["grader.py"] = _GRADER_TEMPLATE.format(y_test=yte)
+        return a
 
-    def build_roles(self):  # offline fallback (templated k-NN, reads assets + grader)
+    def host_grader(self):
+        """Out-of-process grading hook (B1+): when `host_graded`, hand the engine the held-out labels
+        + scorer so the HOST scores predictions.json. None (legacy in-workdir grader) otherwise."""
+        if not self.host_graded:
+            return None
+        _, _, _, yte = self._data()
+        return {"predictions": "predictions.json", "scorer": "accuracy", "labels": yte}
+
+    def build_roles(self):  # offline fallback (templated k-NN)
         return (MLEBenchResearcher(max_k=self.max_k, seed=self.seed),
-                MLEBenchDeveloper(max_train=self.n_train))
+                MLEBenchDeveloper(max_train=self.n_train, host_graded=self.host_graded))
 
     def llm_roles(self, client: LLMClient, parser: str = "tool_call"):
         hint = (f"Choose 'k' (integer 1..{self.max_k}): the model-complexity knob, e.g. "
                 "the number of nearest neighbours. Higher held-out accuracy is better; "
                 "too small overfits, too large underfits.")
         bounds = {"k": (1.0, float(self.max_k))}
-        brief = (
+        common = (
             "This is a held-out classification competition. Read training data from "
             "'./train.json' (a JSON object with 'X' = list of equal-length float feature "
             "rows and 'y' = list of integer class labels) and the test features from "
             "'./test.json' (a JSON object with 'X' only — the test labels are withheld). "
             "Train a classifier (you may use the suggested hyperparameter 'k', e.g. "
             "k-nearest-neighbours) and predict an integer label for every row of "
-            "test.json's X, in order. Then score your predictions with the provided "
-            "grader and print EXACTLY one final line of JSON: "
-            '{"metric": <float>} produced by:\n'
-            "    from grader import score\n"
-            "    print(json.dumps({\"metric\": score(predictions)}))\n"
-            "Do NOT read or import the test labels any other way. Use ONLY numpy and the "
-            "Python standard library — scikit-learn, pandas and scipy are NOT installed "
-            "and importing them will crash. Print nothing after that JSON line."
-        )
+            "test.json's X, in order. ")
+        if self.host_graded:
+            brief = common + (
+                "Then WRITE your predictions (a JSON list of integer labels, in test order) to "
+                "'./predictions.json' with json.dump — the HOST scores them; do NOT print a metric "
+                "and do NOT attempt to read the test labels. Use ONLY numpy and the Python standard "
+                "library — scikit-learn/pandas/scipy are NOT installed.")
+        else:
+            brief = common + (
+                "Then score your predictions with the provided grader and print EXACTLY one final "
+                'line of JSON: {"metric": <float>} produced by:\n'
+                "    from grader import score\n"
+                "    print(json.dumps({\"metric\": score(predictions)}))\n"
+                "Do NOT read or import the test labels any other way. Use ONLY numpy and the "
+                "Python standard library — scikit-learn, pandas and scipy are NOT installed "
+                "and importing them will crash. Print nothing after that JSON line.")
         return (LLMResearcher(client, space_hint=hint, bounds=bounds, parser=parser),
                 LLMDeveloper(client, brief=brief))
