@@ -94,6 +94,8 @@ export const SETTINGS_GROUPS = [
         help: 'How structured ideas are parsed from the model.' },
       { key: 'llm_guided_json', label: 'Guided JSON decoding', type: 'bool',
         help: 'H1: constrain structured calls with the endpoint schema (vLLM/SGLang guided_json). Leave off for Ollama.' },
+      { key: 'context_budget_chars', label: 'Context budget (chars)', type: 'int',
+        help: 'H4: cap the agentic researcher’s tool-call history by middle-truncating stale output (0 = unbounded).' },
       { key: 'researcher_model', label: 'Researcher model', type: 'text', placeholder: 'shared',
         help: 'H3: per-role override — run the Researcher on its own model (blank = shared model).' },
       { key: 'developer_model', label: 'Developer model', type: 'text', placeholder: 'shared',

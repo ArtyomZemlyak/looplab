@@ -44,7 +44,8 @@ class ToolUsingResearcher:
 
     def __init__(self, client, tools, space_hint: str = "",
                  bounds: Optional[dict] = None, parser: str = "tool_call",
-                 max_turns: int = 4, prompts: Optional[PromptStore] = None):
+                 max_turns: int = 4, prompts: Optional[PromptStore] = None,
+                 context_budget_chars: int = 0):
         self.client = client
         self.tools = tools          # object with .specs() and .execute(name, args)
         self.space_hint = space_hint
@@ -52,6 +53,7 @@ class ToolUsingResearcher:
         self.parser = parser
         self.max_turns = max_turns
         self.prompts = prompts
+        self.context_budget_chars = context_budget_chars   # H4: cap the growing tool-call history
 
     def _emit_spec(self) -> dict:
         return {"type": "function", "function": {
@@ -100,6 +102,9 @@ class ToolUsingResearcher:
                 "\nDecide the next experiment. Consult knowledge if useful, then emit."},
         ]
         for _ in range(self.max_turns):
+            if self.context_budget_chars:        # H4: middle-truncate stale tool output if too long
+                from .context_budget import truncate_history
+                messages = truncate_history(messages, self.context_budget_chars)
             msg = self.client.chat(messages, tool_specs, tool_choice="auto")
             calls = msg.get("tool_calls") or []
             if not calls:

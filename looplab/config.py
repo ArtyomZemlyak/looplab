@@ -154,6 +154,9 @@ class Settings(BaseSettings):
     # H1: drive structured calls with the endpoint's constrained decoding (vLLM/SGLang guided_json +
     # response_format json_schema) so weak models can't emit invalid JSON. Off for Ollama (default).
     llm_guided_json: bool = False
+    # H4: cap the growing agentic-researcher tool-call history (chars) by middle-truncating stale
+    # tool output, so a long trace doesn't blow the context window. 0 = off (unbounded).
+    context_budget_chars: int = 0
     # Observability (ADR-17): capture each LLM call's full prompt + completion into the active
     # span (spans.jsonl) so the UI can show exactly what the model read and wrote per node.
     # Diagnostics only — `replay.fold` never reads spans. Default on for local single-user; set

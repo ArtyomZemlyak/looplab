@@ -174,6 +174,7 @@ def make_roles(task: TaskAdapter, settings):
             space_hint=getattr(researcher, "space_hint", ""),
             bounds=getattr(researcher, "bounds", None),
             parser=settings.llm_parser, prompts=prompts,
+            context_budget_chars=getattr(settings, "context_budget_chars", 0),   # H4
         )
     # C2 best-of-N: wrap the in-house LLM developer to generate N candidates and keep the best by an
     # execution-free reward. Skipped for external coding agents (cost rule) and the no-edit param mode.
