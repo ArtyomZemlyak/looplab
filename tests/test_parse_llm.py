@@ -64,6 +64,25 @@ def test_extract_json_ignores_trailing_braces():
     assert obj["operator"] == "draft" and obj["params"] == {"x": 1.0}
 
 
+def test_h2_coerces_string_numbers_in_tool_call():
+    # H2 schema-aligned repair: a weak model returns numbers-as-strings -> coerced, not crashed.
+    c = FakeClient(tool=[{"operator": "draft", "params": {"x": "3", "y": "1.5"}, "rationale": "r"}])
+    idea = parse_structured(c, [{"role": "user", "content": "go"}], Idea, "tool_call")
+    assert idea.params == {"x": 3.0, "y": 1.5}
+
+
+def test_h2_lenient_json_single_quotes_and_trailing_comma():
+    from looplab.parse import _extract_json
+    obj = _extract_json("Here: {'operator': 'improve', 'params': {'x': 2.0,}}")
+    assert obj["operator"] == "improve" and obj["params"]["x"] == 2.0
+
+
+def test_h2_coerce_case_insensitive_keys():
+    from looplab.parse import _coerce_to_model
+    out = _coerce_to_model({"Operator": "draft", "Rationale": "hi"}, Idea)
+    assert out["operator"] == "draft" and out["rationale"] == "hi"
+
+
 def test_extract_code_prefers_python_fence():
     from looplab.parse import extract_code
     text = "Example output:\n```\nnot code\n```\nSolution:\n```python\nprint(1)\n```"

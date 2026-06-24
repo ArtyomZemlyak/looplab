@@ -7,9 +7,11 @@ so the real LiteLLM client and the test fake are interchangeable.
 """
 from __future__ import annotations
 
+import ast
 import json
 import re
-from typing import Protocol, Type, TypeVar
+import typing
+from typing import Protocol, Type, TypeVar, get_args, get_origin
 
 from pydantic import BaseModel, ValidationError
 
@@ -61,7 +63,64 @@ def _extract_json(text: str) -> dict:
         if isinstance(obj, dict):
             return obj
         i = text.find("{", i + 1)
+    # H2 schema-aligned lenient fallback: small models emit near-JSON (single quotes, trailing
+    # commas, Python True/None). Try a Python-literal eval of the outermost {...} span before failing.
+    s, e = text.find("{"), text.rfind("}")
+    if s != -1 and e > s:
+        try:
+            obj = ast.literal_eval(text[s:e + 1])
+            if isinstance(obj, dict):
+                return obj
+        except (ValueError, SyntaxError, MemoryError, RecursionError):
+            pass
     raise ParseError("no JSON object found in text")
+
+
+def _coerce_value(val, ann):
+    """Best-effort coerce a raw value to the field annotation (H2 schema-aligned repair): unwrap
+    Optional, cast string/number/bool drift, and recurse into dict/list element types. Never raises —
+    returns the original value if it can't coerce, so validation makes the final decision."""
+    origin = get_origin(ann)
+    if origin is typing.Union:                       # Optional[X] / Union[...]
+        if val is None:
+            return None
+        non_none = [a for a in get_args(ann) if a is not type(None)]
+        if non_none:
+            ann, origin = non_none[0], get_origin(non_none[0])
+    try:
+        if ann is bool:
+            return val.strip().lower() in ("true", "yes", "1", "y") if isinstance(val, str) else bool(val)
+        if ann is int:
+            return int(float(val)) if isinstance(val, (str, float)) else int(val)
+        if ann is float:
+            return float(val)
+        if ann is str:
+            return val if isinstance(val, str) else (json.dumps(val) if isinstance(val, (dict, list)) else str(val))
+    except (ValueError, TypeError):
+        return val
+    if origin is dict and isinstance(val, dict):
+        args = get_args(ann)
+        vt = args[1] if len(args) == 2 else typing.Any
+        return {str(k): _coerce_value(v, vt) for k, v in val.items()}
+    if origin is list and isinstance(val, list):
+        args = get_args(ann)
+        it = args[0] if args else typing.Any
+        return [_coerce_value(x, it) for x in val]
+    return val
+
+
+def _coerce_to_model(obj: dict, model: Type[T]) -> dict:
+    """Map a loosely-typed dict onto a model's fields with per-field coercion: case-insensitive key
+    match + type repair, dropping extras. The BAML 'Schema-Aligned Parsing' step that lets a weak
+    local model's near-miss output validate instead of throwing."""
+    out: dict = {}
+    lower = {str(k).lower(): k for k in obj}
+    for name, field in model.model_fields.items():
+        key = name if name in obj else lower.get(name.lower())
+        if key is None:
+            continue
+        out[name] = _coerce_value(obj[key], field.annotation)
+    return out
 
 
 _ORDER = {
@@ -88,7 +147,13 @@ def parse_structured(
                 hint = {"role": "system",
                         "content": f"Respond with ONLY a JSON object matching this schema: {json.dumps(schema)}"}
                 obj = _extract_json(client.complete_text([*messages, hint]))
-            return model.model_validate(obj)
+            try:
+                return model.model_validate(obj)
+            except ValidationError:
+                # H2 schema-aligned repair: coerce common type/format drift, then re-validate. Only
+                # if THAT fails do we fall through to the next parser — so a weak model's near-miss
+                # (e.g. {"degree":"3"} or single-quoted keys) parses instead of crashing the run.
+                return model.model_validate(_coerce_to_model(obj, model))
         except (ValidationError, ParseError, json.JSONDecodeError, KeyError, AttributeError,
                 LLMError) as e:
             # LLMError (a transient endpoint/transport failure) is treated like an unparseable
