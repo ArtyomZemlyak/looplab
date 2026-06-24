@@ -54,6 +54,10 @@ class Settings(BaseSettings):
     # and skip a full eval for the doomed bottom fraction. 0.0 = off (no candidate skipped).
     proxy_scoring: bool = False
     proxy_kill_fraction: float = Field(default=0.0, ge=0.0, le=0.9)
+    # B5 reward-hacking detector: a host-side monitor that flags suspicious wins (grader/answer-key
+    # access, runtime writes to frozen files, suspiciously-perfect metrics) as a `reward_hack_suspected`
+    # audit event in the Trust panel. Never changes selection. Off by default.
+    reward_hack_detect: bool = False
     # A7 Strategist (NEW, user-requested): optional LLM/rule meta-controller that picks the search
     # policy/allocator + operator mix + fidelity (+ Developer backend) per situation. Config-first:
     # "off" (default) == today's behavior, every choice the Strategist makes is also a direct knob.

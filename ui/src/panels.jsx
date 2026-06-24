@@ -58,6 +58,14 @@ export function TrustPanel({ state, runId, onClose }) {
         ? <table className="tbl"><thead><tr><th>node</th><th>primary</th><th>cross</th><th>tolerance</th></tr></thead><tbody>
           {state.drifts.map((d, i) => <tr key={i}><td className="flag">#{d.node_id}</td><td>{fmt(d.primary)}</td><td>{fmt(d.cross)}</td><td>{fmt(d.tolerance)}</td></tr>)}</tbody></table>
         : <div className="chip ok">no metric drift detected</div>}
+
+      <div className="section-h">Reward-hacking monitor (B5) {(state.reward_hacks || []).length > 0 && <span className="chip alarm">{state.reward_hacks.length} flagged</span>}</div>
+      {(state.reward_hacks || []).length
+        ? <table className="tbl"><thead><tr><th>node</th><th>signal</th><th>detail</th></tr></thead><tbody>
+          {state.reward_hacks.flatMap((h, i) => (h.signals || []).map((s, j) =>
+            <tr key={`${i}-${j}`}><td className="flag">#{h.node_id}</td><td>{s.signal}</td>
+              <td className="muted">{s.detail}</td></tr>))}</tbody></table>
+        : <div className="chip ok">no suspicious wins flagged{cfg && !cfg.reward_hack_detect ? ' (detector off — enable reward_hack_detect)' : ''}</div>}
     </Panel>
   )
 }

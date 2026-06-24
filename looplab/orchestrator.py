@@ -155,6 +155,7 @@ class Engine:
         ablate_code_blocks: bool = False,  # A0a: ablate pipeline code blocks, not just params
         proxy_scorer=None,          # A6: Optional[ProxyScorer] early-signal candidate gate
         proxy_kill_fraction: float = 0.0,
+        reward_hack_detect: bool = False,   # B5: flag suspicious wins (audit-only)
     ):
         self.run_dir = Path(run_dir)
         self.task = task
@@ -178,6 +179,7 @@ class Engine:
         self._ablate_code_blocks = ablate_code_blocks
         self.proxy_scorer = proxy_scorer
         self.proxy_kill_fraction = proxy_kill_fraction
+        self.reward_hack_detect = reward_hack_detect
         self._strategy_fidelity: Optional[str] = None   # None => use the Idea's own profile
         self.max_parallel = max_parallel
         self.timeout = timeout
@@ -1039,6 +1041,16 @@ class Engine:
                          "extra_metrics": res.extra_metrics or {},   # #5 multi-objective
                          "violations": res.violations or []},
                     )
+                    # B5 reward-hacking detector (audit-only): flag a suspicious win without ever
+                    # changing selection. Runs on the evaluated node's code + metric vs the frozen set.
+                    if self.reward_hack_detect:
+                        from .reward_hack import detect_reward_hacks
+                        protected = set(self._repo_spec.get("protected_names", [])) | set(self._assets)
+                        sigs = detect_reward_hacks(node.code, res.metric, state.direction,
+                                                   protected_names=protected, stdout=res.stdout)
+                        if sigs:
+                            self.store.append("reward_hack_suspected",
+                                              {"node_id": node_id, "signals": sigs})
                 else:
                     err = res.stderr[-500:] or (
                         f"metric drift: {res.drift}" if res.drift is not None else

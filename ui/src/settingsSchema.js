@@ -41,6 +41,8 @@ export const SETTINGS_GROUPS = [
         help: 'A6: early-signal score candidates to skip doomed full evals.' },
       { key: 'proxy_kill_fraction', label: 'Proxy kill fraction', type: 'float',
         help: 'A6: skip the bottom fraction of candidates by proxy score (0 = never skip).' },
+      { key: 'reward_hack_detect', label: 'Reward-hack detector', type: 'bool',
+        help: 'B5: flag suspicious wins (grader/answer-key access, frozen-file writes, perfect metrics) in the Trust panel. Audit-only.' },
     ],
   },
   {

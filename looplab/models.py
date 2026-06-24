@@ -167,6 +167,9 @@ class RunState(BaseModel):
     # A6 proxy/predictive scoring: per-node early-signal scores + which candidates were skipped.
     proxy_scores: dict[int, float] = Field(default_factory=dict)
     proxy_skipped: list[int] = Field(default_factory=list)
+    # B5 reward-hacking detector (audit-only; never changes selection): flagged suspicious wins
+    # {node_id, signals:[{signal, detail}]} for the Trust panel.
+    reward_hacks: list[dict] = Field(default_factory=list)
 
     # --- read helpers (no mutation) ---
     def best(self) -> Optional[Node]:

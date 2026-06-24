@@ -373,6 +373,37 @@ def test_proxy_end_to_end_records_and_can_skip(tmp_path):
 
 
 # --------------------------------------------------------------------------- #
+# B5 reward-hacking detector
+# --------------------------------------------------------------------------- #
+
+def test_reward_hack_flags_grader_access():
+    from looplab.reward_hack import detect_reward_hacks
+    sigs = detect_reward_hacks("import grader\nprint(grader._Y)", 0.5, "min")
+    assert any(s["signal"] == "grader_access" for s in sigs)
+
+
+def test_reward_hack_flags_protected_write():
+    from looplab.reward_hack import detect_reward_hacks
+    code = "f = open('metrics.json', 'w')\nf.write('1')"
+    sigs = detect_reward_hacks(code, 0.5, "min", protected_names={"metrics.json"})
+    assert any(s["signal"] == "protected_write" for s in sigs)
+
+
+def test_reward_hack_flags_perfect_metric():
+    from looplab.reward_hack import detect_reward_hacks
+    assert any(s["signal"] == "perfect_metric" for s in detect_reward_hacks("x=1", 0.0, "min"))
+    assert any(s["signal"] == "perfect_metric" for s in detect_reward_hacks("x=1", 1.0, "max"))
+    assert detect_reward_hacks("import numpy", 0.4, "min") == []   # clean code -> no signals
+
+
+def test_reward_hack_detector_off_by_default(tmp_path):
+    # A normal toy run never emits reward_hack_suspected unless the detector is enabled.
+    state = anyio.run(_engine(tmp_path / "rh_off").run)
+    assert not any(e.type == "reward_hack_suspected" for e in _read(tmp_path / "rh_off"))
+    assert state.reward_hacks == []
+
+
+# --------------------------------------------------------------------------- #
 
 def _read(run_dir: Path):
     from looplab.eventstore import EventStore

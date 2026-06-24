@@ -117,6 +117,8 @@ def fold(events: Iterable[Event]) -> RunState:
                                         "ctx": d.get("ctx")})
         elif t == "rung_promoted":
             st.rungs.append({"rung": d.get("rung"), "survivors": d.get("survivors", [])})
+        elif t == "reward_hack_suspected":
+            st.reward_hacks.append({"node_id": d.get("node_id"), "signals": d.get("signals", [])})
         elif t == "proxy_scored":
             # A6 proxy/predictive scoring (audit-only): early-signal rank + which nodes were skipped.
             nid = d.get("node_id")
