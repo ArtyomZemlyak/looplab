@@ -282,6 +282,20 @@ def test_budget_aware_hint_includes_remaining(tmp_path):
     assert "Budget guidance" not in getattr(eng.researcher, "_complexity_hint", "")
 
 
+def test_feature_engineering_directive_injected(tmp_path):
+    # I1: with a tabular task (assets present) + feature_engineering on, the FE directive is added.
+    eng = _engine(tmp_path / "fe", feature_engineering=True)
+    eng._assets = {"data.json": "[]"}        # simulate a tabular dataset asset
+    st = RunState(direction="min")
+    st.nodes[0] = Node(id=0, operator="draft", idea=Idea(operator="draft", params={"x": 1.0}))
+    eng._set_complexity_hint(st, None)
+    assert "Feature engineering" in getattr(eng.researcher, "_complexity_hint", "")
+    # off -> no FE directive
+    eng._feature_engineering = False
+    eng._set_complexity_hint(st, None)
+    assert "Feature engineering" not in getattr(eng.researcher, "_complexity_hint", "")
+
+
 def test_complexity_cue_sets_hint_on_researcher(tmp_path):
     eng = _engine(tmp_path / "cue", complexity_cue=True)
     st = RunState(direction="min")

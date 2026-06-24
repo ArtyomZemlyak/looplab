@@ -43,6 +43,12 @@ class Settings(BaseSettings):
     # A0d (AIRA): inject a dynamic complexity hint into the draft/improve prompt keyed on the
     # node's child count (few children -> keep minimal; many -> escalate to ensembling/HPO).
     complexity_cue: bool = False
+    # I1 (CAAFE-style) LLM feature-engineering: instruct the proposer/developer to add
+    # semantically-meaningful engineered features (ratios, interactions, aggregations) as code. The
+    # existing cross-validation eval + best-selection is the CV GATE — a feature set that doesn't
+    # improve CV is never selected (feature engineering is non-universal, so this gate is mandatory).
+    # Tabular tasks (those exposing column data). Off by default.
+    feature_engineering: bool = False
     # A5: surface the REMAINING eval-compute budget into the proposal prompt so the Researcher can
     # reason over how much compute is left (explore broad while flush, exploit/cheapen when low).
     # No-op unless a max_eval_seconds budget is set.

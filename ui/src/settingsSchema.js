@@ -39,6 +39,8 @@ export const SETTINGS_GROUPS = [
         help: 'A0d: inject a complexity hint keyed on a branch’s breadth (few children = minimal; many = advanced).' },
       { key: 'budget_aware', label: 'Budget-aware proposals', type: 'bool',
         help: 'A5: surface remaining eval budget into the proposal prompt (needs a max eval-time budget).' },
+      { key: 'feature_engineering', label: 'Feature engineering', type: 'bool',
+        help: 'I1: CAAFE-style — propose engineered features; the CV eval keeps only those that improve (tabular tasks).' },
       { key: 'ablate_code_blocks', label: 'Ablate code blocks', type: 'bool',
         help: 'A0a: ablate generated pipeline code blocks (MLE-STAR), not just numeric params.' },
       { key: 'proxy_scoring', label: 'Proxy scoring', type: 'bool',
