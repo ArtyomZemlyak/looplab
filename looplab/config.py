@@ -47,6 +47,11 @@ class Settings(BaseSettings):
     # reason over how much compute is left (explore broad while flush, exploit/cheapen when low).
     # No-op unless a max_eval_seconds budget is set.
     budget_aware: bool = False
+    # A2 surrogate-guided proposal (BO-lite): fit a k-NN surrogate over (params->metric) and propose
+    # by acquisition instead of random/hill-climb. Numeric-bounds tasks only; bootstraps via the
+    # base Researcher. Off by default. `surrogate_explore` = UCB-style exploration weight.
+    surrogate_proposer: bool = False
+    surrogate_explore: float = 0.1
     # A1 ASHA / successive-halving: reduction factor (keep top 1/eta per rung) and rung budget.
     asha_eta: int = Field(default=3, ge=2)
     asha_rung_nodes: int = Field(default=4, ge=2)   # candidates batched at rung 0

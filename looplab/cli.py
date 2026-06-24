@@ -33,6 +33,14 @@ def _engine(run_dir: Path, task: TaskAdapter, settings: Settings,
     # only; never read by replay.fold. Honors LOOPLAB_TRACE_LLM_IO via Settings.
     set_llm_capture(settings.trace_llm_io)
     researcher, developer = make_roles(task, settings)
+    # A2 surrogate-guided proposer: wrap the base Researcher when the task exposes numeric bounds
+    # (it bootstraps via the wrapped Researcher and delegates on non-numeric spaces).
+    if settings.surrogate_proposer:
+        from .surrogate import SurrogateResearcher
+        _bounds = getattr(researcher, "bounds", None)
+        if _bounds:
+            researcher = SurrogateResearcher(_bounds, fallback=researcher,
+                                             explore=settings.surrogate_explore)
     # RepoTask onboarding (Phase 3): if the task can propose its own eval spec, build the
     # onboarder (Researcher proposes + Developer writes the adapter).
     mk = getattr(task, "make_onboarder", None)
