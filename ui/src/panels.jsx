@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState } from 'react'
-import { get, putText, post, fmt, fmtInt, CONTROL } from './util.js'
+import { get, putText, post, fmt, fmtInt, CONTROL, gpuStat } from './util.js'
 import { Trajectory, Bars, Gantt, ParallelCoords, Scatter, ImprovementWaterfall } from './charts.jsx'
 import MapView from './MapView.jsx'
 import { analyze, paramDiffLabel, toMarkdown } from './report.js'
@@ -227,6 +227,67 @@ export function RegistryPanel({ state, onClose }) {
         {[...runs].sort((a, b) => (b.best_confirmed ?? b.best_metric ?? -Infinity) - (a.best_confirmed ?? a.best_metric ?? -Infinity))
           .map(r => <tr key={r.run_id}><td>{r.run_id}</td><td className="muted">{r.task_id}</td><td>{r.phase}</td><td>{fmt(r.best_confirmed ?? r.best_metric)}</td><td>{r.nodes}</td></tr>)}
       </tbody></table>
+    </Panel>
+  )
+}
+
+// Live GPU telemetry (nvidia-smi via /api/gpu). Polls while open so an operator can watch
+// utilization / VRAM / power during a real training run without leaving the browser.
+export function GpuPanel({ onClose }) {
+  const [data, setData] = useState(null)
+  useEffect(() => {
+    let on = true
+    const tick = () => gpuStat().then(d => on && setData(d)).catch(() => on && setData({ available: false }))
+    tick(); const t = setInterval(tick, 2000)
+    return () => { on = false; clearInterval(t) }
+  }, [])
+  const bar = (v, max, hot) => <div className="bar" style={{ height: 8 }}>
+    <div className={'fill' + (hot ? ' hot' : '')} style={{ width: Math.min(100, max ? v / max * 100 : 0) + '%' }} /></div>
+  return (
+    <Panel title="GPU monitor" sub="nvidia-smi · live" onClose={onClose} wide>
+      {!data ? <div className="muted">polling…</div>
+        : !data.available ? <div className="notice">No GPU / nvidia-smi not available on the server host.</div>
+          : (data.gpus || []).map((g, i) => (
+            <div key={i} style={{ marginBottom: 16 }}>
+              <div className="section-h">{g.name}</div>
+              <div className="cardgrid" style={{ marginBottom: 10 }}>
+                <Stat n={`${fmt(g.util)}%`} l="utilization" />
+                <Stat n={`${fmt(g.mem_used)} / ${fmt(g.mem_total)} MiB`} l="memory" />
+                <Stat n={`${fmt(g.temp)}°C`} l="temperature" />
+                <Stat n={`${fmt(g.power)} W`} l="power draw" />
+              </div>
+              <div className="kv">
+                <div className="k">GPU util</div><div className="v">{bar(g.util, 100, true)}</div>
+                <div className="k">VRAM</div><div className="v">{bar(g.mem_used, g.mem_total)}</div>
+              </div>
+            </div>))}
+    </Panel>
+  )
+}
+
+// "Why this node" — the search policy's last decision. MCTS surfaces per-candidate UCB1 scores
+// (policy_decision events → state.policy_scores / policy_chosen); greedy/evo expose the chosen
+// node only. Makes the otherwise-opaque search strategy auditable.
+export function PolicyPanel({ state, onClose, onSelect }) {
+  const scores = state.policy_scores || {}
+  const chosen = state.policy_chosen
+  const rows = Object.entries(scores).map(([id, s]) => ({ id: Number(id), s })).sort((a, b) => b.s - a.s)
+  const cfgPolicy = state.policy || null
+  return (
+    <Panel title="Policy — why this node" sub={cfgPolicy || 'search'} onClose={onClose}>
+      {chosen != null
+        ? <div className="kv" style={{ marginBottom: 8 }}><div className="k">last expanded</div>
+            <div className="v">#{chosen} {onSelect && <button className="btn sm ghost" onClick={() => { onSelect(chosen); onClose() }}>inspect →</button>}</div></div>
+        : <div className="muted">No policy decision recorded yet.</div>}
+      {rows.length
+        ? <><div className="section-h">Candidate scores (UCB1 — higher = more promising to expand)</div>
+            <table className="tbl"><thead><tr><th>node</th><th>score</th><th></th></tr></thead><tbody>
+              {rows.map(r => <tr key={r.id} className={r.id === chosen ? 'sel' : ''} style={{ cursor: onSelect ? 'pointer' : 'default' }}
+                                 onClick={() => onSelect && (onSelect(r.id), onClose())}>
+                <td>#{r.id}{r.id === chosen && ' ◀ chosen'}</td><td>{fmt(r.s, 4)}</td>
+                <td><div className="bar" style={{ height: 8 }}><div className="fill" style={{ width: Math.min(100, r.s / (rows[0].s || 1) * 100) + '%' }} /></div></td></tr>)}
+            </tbody></table></>
+        : <div className="muted" style={{ marginTop: 8 }}>This policy ({cfgPolicy || 'greedy'}) doesn't expose per-candidate scores — only MCTS surfaces UCB1 values. The chosen node above is the latest expansion.</div>}
     </Panel>
   )
 }

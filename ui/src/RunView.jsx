@@ -9,14 +9,14 @@ import { InjectModal, ChatTab } from './experiment.jsx'
 import {
   TrustPanel, SensitivityPanel, FailuresPanel, ParetoPanel, DataQualityPanel,
   ConfigPanel, AuthoringPanel, MemoryPanel, RegistryPanel, ReportPanel, EventExplorer,
-  ComparePanel, MetaGraphPanel,
+  ComparePanel, MetaGraphPanel, GpuPanel, PolicyPanel,
 } from './panels.jsx'
 
 const PANELS = [
-  ['trust', 'Trust'], ['sensitivity', 'Sensitivity'], ['failures', 'Failures'],
-  ['pareto', 'Pareto/Div'], ['data', 'Data'], ['compare', 'Compare'], ['config', 'Config'],
-  ['authoring', 'Authoring'], ['memory', 'Memory'], ['registry', 'Registry'],
-  ['meta', 'Meta-graph'], ['report', 'Report'], ['events', 'Events'],
+  ['report', 'Report'], ['trust', 'Trust'], ['policy', 'Policy'], ['sensitivity', 'Sensitivity'],
+  ['failures', 'Failures'], ['pareto', 'Pareto/Div'], ['data', 'Data'], ['compare', 'Compare'],
+  ['config', 'Config'], ['authoring', 'Authoring'], ['memory', 'Memory'], ['registry', 'Registry'],
+  ['meta', 'Meta-graph'], ['gpu', 'GPU'], ['events', 'Events'],
 ]
 
 export default function RunView({ runId, onBack }) {
@@ -111,6 +111,8 @@ export default function RunView({ runId, onBack }) {
           {maxEval ? <div className="bar"><div className="fill hot" style={{ width: Math.min(100, evalSec / maxEval * 100) + '%' }} /></div> : null}
         </div>
         {cost && <span className="chip"><span className="k">tokens</span> {fmtInt(cost.total_tokens)}</span>}
+        {state.pending_hints?.length > 0 && <span className="chip" title={state.pending_hints.map(h => '• ' + (h.text || JSON.stringify(h))).join('\n')}>
+          <span className="k">💡 hints</span> {state.pending_hints.length}</span>}
 
         <div className="toolbar">
           {!state.finished && (state.paused
@@ -179,6 +181,8 @@ export default function RunView({ runId, onBack }) {
       {panel === 'authoring' && <AuthoringPanel onToast={showToast} onClose={() => setPanel(null)} />}
       {panel === 'memory' && <MemoryPanel onClose={() => setPanel(null)} />}
       {panel === 'registry' && <RegistryPanel state={state} onClose={() => setPanel(null)} />}
+      {panel === 'policy' && <PolicyPanel state={state} onSelect={selectNode} onClose={() => setPanel(null)} />}
+      {panel === 'gpu' && <GpuPanel onClose={() => setPanel(null)} />}
       {panel === 'report' && <ReportPanel state={state} runId={runId} onClose={() => setPanel(null)} />}
       {panel === 'events' && <EventExplorer runId={runId} onClose={() => setPanel(null)} />}
 
