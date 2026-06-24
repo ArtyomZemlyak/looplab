@@ -140,6 +140,69 @@ param-importance, cross-run sweep aggregation, lineage/provenance export, data-v
 → *Roadmap Theme E.* Validates a Researcher *panel* + Elo/empirical ranking + meta-review-to-prompt
 priors; warns against LLM-judge-as-oracle; bounds the panel size (~3).
 
+## Pass 7 — Local-LLM serving & structured-output reliability *(2026-06-24, RTX 5090 32 GB focus)*
+*Drives the new Roadmap Theme H. Verification was again partially rate-limited (3 concurrent passes
++ a live engine run), so most claims below are literature-sourced leads, not adversarially voted.*
+- **Qwen3-Coder-30B-A3B-Instruct** (MoE, ~3B active, 256K ctx → 1M via YaRN) is the size-appropriate
+  top open coding/agentic model for a 32 GB GPU; reported agentic-coding comparable to Claude Sonnet
+  among open models; integrates with Qwen Code / CLINE / Claude Code via a dedicated function-call
+  format. *(github.com/QwenLM/Qwen3-Coder — lead)*
+- **Serving for agentic tool-calling:** Qwen3-Coder's tool/function calling has **dedicated parsers in
+  both vLLM and SGLang** → those stacks are recommended over Ollama for robust agentic loops. **vLLM
+  guided decoding** drives schema-valid output via `guided_json` (from a Pydantic JSON schema),
+  `guided_grammar` (CFG), `guided_regex`, `guided_choice`, over the OpenAI-compatible API; backends are
+  XGrammar (caches well for long gens), Guidance (lower per-request latency), Outlines. *Caveat:*
+  XGrammar historically **rejects JSON schemas containing `Enum`** ("features not supported by
+  xgrammar") on several v0.6–v0.8 releases. *(docs.vllm.ai; redhat developers — leads)*
+- **Structured output is highly model-dependent.** On BFCL, native function-calling **collapses on
+  small/weak models** (GPT-4o-mini ~19.8% vs GPT-4o ~87%). **Schema-Aligned Parsing (SAP / BAML)** —
+  error-correct the raw output instead of hard token constraints — scored **92–94%** and beat both
+  native FC and a plain AST parser across all tested models. *(boundaryml.com; gorilla BFCL — leads)*
+- **Tool-calling leaderboard (BFCL, Oct-2025):** open-weight **GLM-4.5 (FC) led overall at 70.85%**,
+  edging Claude Opus 4.1 (70.36%) / Sonnet 4 (70.29%); GPT-5 59.22%. BFCL V4 (2026-04-12) adds
+  holistic agentic eval (web search, memory, format sensitivity). *(klavis.ai; gorilla.cs.berkeley.edu
+  — leads)* SOTA tool-calling models still struggle with memory + long-horizon multi-step reasoning.
+- **R1/R2 corroboration this round (verified 3-0 unless noted):** MLE-bench = 75 Kaggle comps,
+  best o1-preview+AIDE 16.9%; **KompeteAI merge-stage + RAG-from-notebooks/arXiv + predictive scorer
+  6.9× faster, +3%**; **AIRA 39.6%→47.7%, operators are the bottleneck (MCTS/evo no gain under AIDE
+  ops)**. New sourced leads: **ideation-diversity loss costs 6.9 (greedy)/8.4 (MCTS) pts**; naive
+  **parallelism saturates without shared state** (async multi-GPU evolution needed); **best-of-N
+  list-wise +~8 pts on GAIA**; **AlphaEvolve = QD program-DB + per-role routing (fast model breadth,
+  strong model depth)**. UX (R2, 3-0): **checkpoint time-travel with _forking_** (branch a new run
+  from an edited past state) is the top steering pattern; **session-replay + click-to-inspect node
+  graph + path-frequency analytics** (AgentOps / Galileo Graph View) are the cockpit features to copy.
+→ *Roadmap Theme H* (serving + structured output) and hardening of Themes A/E/F.
+
+## Pass 8 — Operator / action-space design (deepens A0; all 9 claims verified 3-0) *(2026-06-24)*
+The best-verified pass. Reference impl: **Meta/FAIR `aira-dojo`** (open source) implements every
+mechanism below — A0 is largely a *port*, not research.
+- ✅ **Operators > search, re-confirmed by a 2nd paper:** AIRA_2 (arXiv:2603.26499) — advanced search
+  only beats greedy "when operators can reliably generate diverse and valid child artifacts."
+- ✅ **Isolated operator effect:** AIDE→AIRA operators at **fixed greedy search = 39.8%→45.5%** medals
+  (14% rel; best pairing 47.7%). Same policy ⇒ the gain is purely operators. *(2507.02554)*
+- ✅ **AIRA's 4 additions beyond draft/debug/improve:** (a) **complexity cue scaled by node child-count**
+  (nc<2 minimal / 2–4 moderate / ≥5 advanced) in draft/improve prompts — avoids premature
+  over-engineering (repo `draft.yaml` simple/normal/complex branches); (b) scope-aware **memory**; (c)
+  explicit think-token reasoning; (d) **Crossover**. *(2507.02554 + aira-dojo)*
+- ✅ **Crossover = code recombination:** 2 prior solutions → NL "Crossover Plan" + combined Python (NOT
+  param/output averaging). *(aira-dojo `crossover.yaml`)*
+- ✅ **Operator-scoped memory:** draft/improve pull **sibling** memories (diversity); debug pulls the
+  **ancestral debug-chain** (avoid undo↔redo oscillation). Repo `MEM_OPS`: sibling/ancestral/simple/
+  no_memory. *(2507.02554 + aira-dojo)*
+- ✅ **MLE-STAR refine_block detail:** extract one pipeline-component code block → ablation study →
+  refine only the highest-impact block via an inner loop of **K plans**, repeat with prior attempts as
+  feedback. *(2506.15692)*
+- ✅ **Ensembling = agent-PROPOSED, iteratively-refined strategy** (not voting / best-of-N): MLE-STAR
+  proposes a merge over R rounds using history → **37.9%→43.9%** (beats best-of-N 42.4%). KompeteAI =
+  **multi-level merge** (MergeFE + MergeMT, throughout search): removing it drops Lite **47.6%→38.5%**.
+  *(2506.15692; 2508.10177)*
+- ✅ **Reflection/debug = interactive multi-turn (ReAct), not single-shot:** AIRA_2 replaces fixed
+  single-turn operators (a ceiling) with ReAct agents → **+5.5 percentile-rank** (81.5% PR @24h).
+  *(2603.26499)*
+→ *Roadmap A0.* For LoopLab (already has draft/debug/improve/merge/refine_block/ablate + param-ablation),
+highest-leverage ports: **A0d** complexity cue (quick win), **A0c** operator-scoped memory, **A0b**
+crossover + agent-proposed merge, **A0a** code-block ablation, **A0e** ReAct debug.
+
 ---
 
 *These notes back [ROADMAP.md](ROADMAP.md). Several sources are 2026-dated arXiv IDs surfaced by the

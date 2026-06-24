@@ -7,12 +7,14 @@
 > LoopLab's *current* capabilities (code + build-status), (2) a full-repo code review
 > ([CODE_REVIEW.md](CODE_REVIEW.md)), and (3) **seven deep web-research passes** (AI-scientist
 > frontier ×2, search/allocation, coding agents, reward-hacking/eval-integrity, observability/UX,
-> research/scientist layer) — see [RESEARCH_NOTES.md](RESEARCH_NOTES.md). The **2026-06-24 re-run
-> hardened the previously rate-limited passes**: the AI-ML-engineering-frontier pass now carries
-> 7 adversarially-verified (3-0 / 2-1) claims, and MLE-STAR's mechanism was confirmed by direct
-> source fetch. The verification layer was *again* partially throttled on secondary claims, so a few
-> in-paper facts abstained (flagged in RESEARCH_NOTES). Treat verified (✅) claims as solid and the
-> rest as literature-sourced leads.
+> research/scientist layer, **+ a 2026-06-24 local-LLM-serving pass → Theme H**) — see
+> [RESEARCH_NOTES.md](RESEARCH_NOTES.md). The **2026-06-24 re-run hardened the previously
+> rate-limited passes**: the AI-ML-engineering-frontier pass now carries 7 adversarially-verified
+> (3-0 / 2-1) claims, MLE-STAR's mechanism was confirmed by direct source fetch, and a new
+> **Pass 7 (local-LLM serving on the RTX 5090)** was added. The verification layer was *again*
+> partially throttled on secondary claims (running multiple passes concurrently tripped the API rate
+> limit), so a few facts abstained (0-0 = un-voted, *not* refuted; flagged in RESEARCH_NOTES). Treat
+> verified (✅) claims as solid and the rest as literature-sourced leads.
 
 ---
 
@@ -139,20 +141,47 @@ the search policy** (§0.5①); (ii) *compute allocation* — every eval runs to
 history is ignored when proposing. **Do A0 first; A1–A4 compound on it.**
 
 **A0 · Richer operators (the actual bottleneck — NEW top priority).** Invest in the *move set* before
-the search policy. Concrete upgrades, all mapped to existing LoopLab seams:
-  - **Code-block ablation → targeted refinement (MLE-STAR).** LoopLab's `_ablate` already finds the
-    highest-impact *numeric param* and emits a `refine_block` child. Extend it to **code blocks /
-    pipeline components** (feature-eng, model, loss, ensembling): ablate each block, then have the
-    Developer refine only the highest-impact one. *Verified: MLE-STAR's core mechanism, 64% Lite
-    (arXiv:2506.15692).* *Effort:* M. *Differentiator:* high — LoopLab is one extension away.
-  - **Real solution-merge / ensembling.** `merge_idea` currently means-merges *params*. Add an
-    operator that **composes top solutions' code** (stacking/ensembling/blending), the way MLE-STAR's
-    "novel ensembling" and KompeteAI's candidate-merging do. *Effort:* M.
-  - **Memory operator.** A `recall` operator that seeds a draft from the best matching prior case
-    (cross-run memory already stores them) — turns memory from passive retrieval into an action.
-    *Effort:* S–M. *Ties to:* E4.
-  - **Web-retrieval-grounded init (optional).** Seed the first draft from a web/lit search for
-    effective models (MLE-STAR's initialization), behind a network-optional flag. *Effort:* M. *Ties to:* E3.
+the search policy. The evidence is unusually concrete and reproducible — Meta/FAIR's **aira-dojo**
+([github.com/facebookresearch/aira-dojo](https://github.com/facebookresearch/aira-dojo)) is an open
+reference implementation of every mechanism below, so this is largely a *porting* exercise, not
+open research. Controlled result: **swapping AIDE→AIRA operators at fixed greedy search lifts
+MLE-bench-Lite medals 39.8%→45.5% (14% relative)** with no change to the search policy (arXiv:2507.02554,
+vote 3-0). Six upgrades, mapped to existing LoopLab seams (each emits a normal event → replay-safe):
+
+  - **A0a · Code-block ablation → targeted refinement (MLE-STAR; verified 3-0).** LoopLab's `_ablate`
+    finds the highest-impact *numeric param* and emits a `refine_block` child. Extend it to **code
+    blocks = ML-pipeline components** (data prep, feature-eng, model, loss, ensembling): run an
+    ablation study scoring each block's contribution, then refine **only the highest-impact block** via
+    an inner loop of **K candidate refinement plans**, repeating the ablate→refine cycle with prior
+    attempts as feedback. *MLE-STAR's core mechanism → 64% MLE-bench-Lite (arXiv:2506.15692).*
+    *Effort:* M. *Differentiator:* high — LoopLab is one extension away.
+  - **A0b · Crossover/merge as code recombination, not param averaging (AIRA + MLE-STAR + KompeteAI;
+    3-0).** LoopLab's `merge_idea` mean-merges *params* — the weakest form. Replace with an operator
+    that takes two strong solutions and prompts the Developer for a **natural-language "crossover plan"
+    + a combined implementation** (AIRA's `Crossover`), and an **agent-proposed, iteratively-refined
+    ensemble strategy** (MLE-STAR's ensembler proposes a merge over R rounds using the history of prior
+    merges — *measured: no-ensemble 37.9% → agent-proposed 43.9%, beating best-of-N's 42.4%*). Make it
+    **multi-level** (KompeteAI merges at the feature-eng AND model levels *throughout* the search, not
+    just at the end — *removing merge drops MLE-bench-Lite 47.6%→38.5%*). *Effort:* M. *Differentiator:* high.
+  - **A0c · Operator-scoped memory (AIRA; 3-0).** Memory should be an *active context-construction
+    action per operator*, not a flat log: **draft/improve retrieve only *sibling* memories** (other
+    children of the node being operated on) to push diversity; **debug retrieves the *ancestral*
+    debug-chain** to review prior fixes and **avoid undo↔redo oscillation**. aira-dojo ships these as a
+    pluggable `MEM_OPS` registry (`sibling`/`ancestral`/`simple`/`no_memory`) — port the registry shape.
+    *Effort:* S–M.
+  - **A0d · Complexity cue scaled by node breadth (AIRA; 3-0).** Inject a **dynamic complexity hint
+    into the draft/improve prompt keyed on the node's child count** (nc<2 → keep it minimal/baseline;
+    2≤nc<4 → moderate; nc≥5 → advanced: ensembling/HPO/feature-eng). This avoids *premature
+    over-engineering* early and forces escalation once a subtree is well-explored. Tiny change (a prompt
+    variable LoopLab computes from the folded DAG), real measured effect. *Effort:* S. *Quick win.*
+  - **A0e · Interactive (ReAct/reflexion) debug, not single-shot (AIRA_2; 3-0).** LoopLab's repair is a
+    one-shot `repair(idea, code, error)`. The newest evidence (arXiv:2603.26499) shows **fixed
+    single-turn operators cap search performance**; replacing them with **multi-turn ReAct agents that
+    read the error trace, act, observe, and iterate** beats single-turn by **+5.5 percentile-rank
+    points**. For LoopLab: let the debug operator run a bounded act/observe loop against the eval
+    harness (it already has the sandbox + error feedback). *Effort:* M. *Ties to:* C3/C5.
+  - **A0f · Web-retrieval-grounded init (MLE-STAR; optional).** Seed the first draft from a web/lit
+    search for effective models, behind a network-optional flag. *Effort:* M. *Ties to:* E3.
 
 **A1 · Multi-fidelity racing (ASHA / Hyperband / successive-halving).** *Highest ROI of the search items.* Run many
 candidates at low fidelity (`smoke`), promote only the top fraction to higher fidelity (`full`),
@@ -395,6 +424,18 @@ exist as events — surface a thread UI), and export-to-report (report.js exists
 `layoutWithGroups` cycle guard, SSE/Dock O(n²) refetch, `delete_run` `ignore_errors`, listener leaks.
 *Effort:* S — do alongside Theme G.
 
+**F6 · Fork-to-branch from any checkpoint (verified top steering pattern — Pass 7).** The
+best-corroborated agent-steering UX (LangGraph/LangSmith Studio, AgentOps; vote 3-0) is **checkpoint
+time-travel with _forking_**: scrub to a point in time, *edit the idea/state there*, and **branch a
+new execution** with original history intact — not just linear replay. LoopLab already has the three
+primitives (time-travel scrubber, `inject_node`, reopen-finished-run); F6 fuses them into one
+"branch from this seq with an edited idea" gesture. Add **session-replay polish** (color-coded
+node/edge state + per-node "why this decision" inline) and **cross-run path-frequency analytics**
+(which operator chains pay off), à la Galileo's Graph View / AgentOps session replay. *Effort:* M.
+*Differentiator:* upgrades the existing replay+fork into the GA-grade steering loop competitors ship.
+*(Note: a live GPU monitor, a Policy "why-this-node" panel surfacing MCTS UCB1 scores, and a
+pending-hint feedback chip were added in the 2026-06-24 UI pass — F-theme partially in progress.)*
+
 ---
 
 ## 9. Theme G — Scale, ops, and hardening
@@ -416,6 +457,52 @@ review flagged for the parallel path. Enables A1's batched rungs at scale. *Effo
 
 **G5 · MLflow / OTLP bridges (consumer-facing).** OTel export already works; add an optional MLflow
 run-export so LoopLab plugs into existing MLOps stacks (the build-status "MLflow seam"). *Effort:* M.
+
+---
+
+## 9.5 Theme H — Local-LLM serving & structured-output reliability (the RTX 5090 recipe)
+
+*New theme from the 2026-06-24 research (RESEARCH_NOTES Pass 7). LoopLab is local-first and the
+target box is a single RTX 5090 (32 GB). The Researcher/Developer quality ceiling (the "small-model
+ceiling" risk in §12, and Theme C's premise) is largely a **model + serving + structured-output**
+problem — and it's now mostly configuration, since LoopLab already abstracts the OpenAI-compatible
+endpoint and has a `tool_call|baml|outlines` parser switch.*
+
+**H1 · A documented vLLM/SGLang serving recipe (WSL2) with guided decoding.** Ollama is the zero-setup
+default (keep it, per the local-first ADR), but for robust **agentic tool-calling** the evidence
+favors vLLM/SGLang: they ship **dedicated Qwen3-Coder tool parsers** and **`guided_json` constrained
+decoding** driven straight from a Pydantic JSON schema (also `guided_grammar`/regex/choice). Wire
+LoopLab's structured calls (the `Idea`/tool schemas in `parse.py`) to emit a `guided_json` request
+when the endpoint supports it. *Caveat to encode:* XGrammar has rejected `Enum` schemas on some
+versions — prefer the Guidance/Outlines backend or string-enums. *Effort:* S–M. *Lands in:*
+`llm.py`, `parse.py`, docs, Settings (`llm_base_url`).
+
+**H2 · Schema-Aligned Parsing (BAML-style) as the robust default parser.** Native function-calling
+**collapses on small models** (BFCL: GPT-4o-mini ~19.8% vs GPT-4o ~87%); **error-correcting raw
+output** (SAP/BAML) scored **92–94%** and beat native FC across all tested models. Make LoopLab's
+`baml` parser path a real schema-aligned, error-correcting parser so structured-idea extraction
+degrades gracefully on weak local models instead of throwing. *Effort:* S. *Lands in:* `parse.py`.
+*Pairs with:* Theme C (a reliable Developer needs reliable structured I/O first).
+
+**H3 · Per-role model presets for the 5090 (ties to a new A0/E "model routing" knob).**
+  - **Developer:** Qwen3-Coder-30B-A3B-Instruct (Q4_K_M / AWQ) — strong open coding + tool-calling,
+    256K ctx for long traces. (Verified live 2026-06-24: Qwen3-30B-A3B drove the full code-write loop
+    on this box at ~88–92% GPU util, ~24 GB VRAM.)
+  - **Researcher:** Qwen3-30B-A3B (reasoning) or **GLM-4.x** (BFCL-leading tool-calling) for idea
+    proposals; a smaller/faster model for the *breadth* pass (AlphaEvolve-style fast-model-for-breadth,
+    strong-model-for-depth — RESEARCH_NOTES Pass 7).
+  - Wire as **per-role model config** (generalize the existing role-backend swap to per-role `model` +
+    `base_url`), exposed in the Settings UI as presets. *Effort:* S–M. *Lands in:* `config.py`,
+    `tasks.py:make_roles`, `settingsSchema.js`.
+
+**H4 · Throughput & context budgeting for long agent traces.** Long lifecycles (propose→implement→
+repair→evaluate with inline LLM I/O) grow the prompt; budget context (truncate/scoped-memory per A0)
+and prefer MoE models (3B active) + paged-KV serving for throughput. *Effort:* S (mostly guidance +
+the scoped-memory operator from A0).
+
+*Why this theme matters:* it's the cheapest way to lift the *whole* system — every Theme A/C/E gain
+is gated by how reliably the local model proposes structured ideas and writes runnable code. H1+H2+H3
+are mostly config/recipe, not new engine architecture.
 
 ---
 
@@ -447,7 +534,7 @@ held-out selection (Phase 1) and good operators/search (Phase 2) to produce resu
 
 | Quick wins (≤ S, high value) | Big bets (L, transformative) |
 |---|---|
-| B2 protect readers · B3 secret gate · G1 server auth · A5 budget-aware · E1 novelty gate · F3 lineage export · D4 data provenance · F5 UX fixes · A0 memory-operator (S–M) | **A0 code-block ablation + merge/ensembling (the verified bottleneck)** · **B6 held-out test + generalization-gap guard (#1 unsolved)** · A6 proxy scoring + A1 ASHA · D1 real MLE-bench · C2/C5 best-of-N / agentless Developer · G3 distributed eval · E4 meta-learned priors |
+| B2 protect readers · B3 secret gate · G1 server auth · A5 budget-aware · E1 novelty gate · F3 lineage export · D4 data provenance · F5 UX fixes · A0 memory-operator (S–M) · **H2 schema-aligned parsing · H3 5090 model presets** | **A0 code-block ablation + merge/ensembling (the verified bottleneck)** · **B6 held-out test + generalization-gap guard (#1 unsolved)** · A6 proxy scoring + A1 ASHA · D1 real MLE-bench · C2/C5 best-of-N / agentless Developer · G3 distributed eval · E4 meta-learned priors |
 
 **If you do only three things:** (1) **A0** — extend `_ablate` to code blocks + add a real
 merge/ensembling operator (the verified #1 lever, and LoopLab is closest to it); (2) **B6** — a
