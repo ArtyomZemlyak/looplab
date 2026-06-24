@@ -438,6 +438,45 @@ export function HyperImportancePanel({ state, onClose }) {
   )
 }
 
+// F2 · Cross-run sweep aggregation — a lab dashboard overlaying every run of the same task:
+// best-metric comparison + which settings won. Uses the /api/runs summary (no per-run refetch).
+export function CrossRunPanel({ state, onClose }) {
+  const [runs, setRuns] = useState(null)
+  const [task, setTask] = useState(state.task_id || '')
+  useEffect(() => { get('/api/runs').then(setRuns).catch(() => setRuns([])) }, [])
+  if (!runs) return <Panel title="Cross-run sweep" onClose={onClose} wide><div className="muted">Loading runs…</div></Panel>
+  const tasks = [...new Set(runs.map(r => r.task_id).filter(Boolean))].sort()
+  const dir = (runs.find(r => r.task_id === task)?.direction) || state.direction
+  const rows = runs.filter(r => r.task_id === task)
+    .map(r => ({ ...r, m: r.best_confirmed ?? r.best_metric }))
+    .filter(r => r.m != null)
+    .sort((a, b) => dir === 'min' ? a.m - b.m : b.m - a.m)
+  const top = rows[0]?.m
+  const worst = rows.length ? rows[rows.length - 1].m : 0
+  const span = Math.abs((top ?? 0) - worst) || 1
+  return (
+    <Panel title="Cross-run sweep" sub={`${runs.length} runs · ${tasks.length} tasks`} onClose={onClose} wide>
+      <div className="row" style={{ gap: 8, alignItems: 'center', marginBottom: 8 }}>
+        <span className="muted">task:</span>
+        <select className="inp sm" value={task} onChange={e => setTask(e.target.value)}>
+          {tasks.map(t => <option key={t} value={t}>{t}</option>)}</select>
+        <span className="muted">{rows.length} comparable run(s) · {dir}</span>
+      </div>
+      {rows.length
+        ? <table className="tbl"><thead><tr><th>run</th><th>best metric</th><th>nodes</th><th>status</th><th></th></tr></thead><tbody>
+            {rows.map((r, i) => <tr key={r.run_id} className={i === 0 ? 'sel' : ''}>
+              <td>{r.label || r.run_id}{i === 0 ? ' ★' : ''}</td>
+              <td>{fmt(r.m)}{r.best_confirmed != null ? ' (conf)' : ''}</td>
+              <td className="muted">{r.nodes}</td><td className="muted">{r.phase || (r.finished ? 'finished' : '—')}</td>
+              <td style={{ width: 180 }}><div className="bar" style={{ height: 8 }}>
+                <div className="fill" style={{ width: Math.max(4, 100 - Math.abs(r.m - top) / span * 100) + '%' }} /></div></td></tr>)}
+          </tbody></table>
+        : <div className="muted">No comparable runs for this task yet (need ≥1 finished run with a metric).</div>}
+      <div className="muted" style={{ marginTop: 8 }}>Best run per task is starred. Bars are relative to the task’s best (longer = closer to best).</div>
+    </Panel>
+  )
+}
+
 export function ReportPanel({ state, runId, onClose }) {
   const best = state.best_node_id != null ? state.nodes[state.best_node_id] : null
   const failed = Object.values(state.nodes).filter(n => n.status === 'failed')
