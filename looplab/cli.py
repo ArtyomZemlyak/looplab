@@ -247,6 +247,30 @@ def approve(run_dir: Path = typer.Argument(..., help="Run dir awaiting approval.
 
 
 @app.command()
+def bench(
+    task_files: list[Path] = typer.Argument(..., help="Task JSON files to benchmark end-to-end."),
+    out: Path = typer.Option(Path("runs/bench"), help="Output dir for the benchmark runs + report."),
+    backend: str = typer.Option("toy", help="Role backend: toy | llm."),
+    max_nodes: int = typer.Option(8, help="Node budget per task."),
+):
+    """D2: capability self-benchmark — run each task e2e and report best-metric / eval-seconds /
+    reward-hack flags (a regression test for capability, not just code)."""
+    from .bench import run_benchmark
+    settings = Settings()
+    settings.backend = backend
+    settings.max_nodes = max_nodes
+    results = run_benchmark(task_files, settings, out)
+    solved = sum(1 for r in results if r.get("finished") and r.get("best_metric") is not None)
+    typer.echo(f"benchmark: {solved}/{len(results)} solved  (report: {out / 'benchmark.json'})")
+    for r in results:
+        if r.get("error"):
+            typer.echo(f"  {r['task']}: ERROR {r['error']}")
+        else:
+            typer.echo(f"  {r['task']}: best={r['best_metric']} nodes={r['nodes']} "
+                       f"eval_s={r['eval_seconds']} hacks={r['reward_hack_flags']}")
+
+
+@app.command()
 def replay(run_dir: Path = typer.Argument(...)):
     """Pure fold of the event log -> current state (read-only)."""
     store = EventStore(run_dir / "events.jsonl")
