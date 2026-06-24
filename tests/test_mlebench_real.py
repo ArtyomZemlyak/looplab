@@ -173,8 +173,13 @@ def test_offline_engine_run_host_graded(prepared_spooky, tmp_path):
     assert (nd0 / "submission.csv").exists()
     assert not (nd0 / "test.csv").exists() or True       # test.csv (features) is fine; answers are not
     assert not (nd0 / "answers.csv").exists()
-    # the official report (medals/above_median) rode along in extra_metrics
-    assert best.extra_metrics and "mlebench" in best.extra_metrics
+    # the official report (medals/above_median) is persisted as a per-node artifact (NOT in
+    # extra_metrics, which is a numeric dict the UI treats as Pareto objectives)
+    import json as _j
+    rep_path = nd0 / "mlebench_report.json"
+    assert rep_path.exists()
+    rep = _j.loads(rep_path.read_text(encoding="utf-8"))
+    assert rep["competition_id"] == SPOOKY and "above_median" in rep
 
 
 # --- the other two competitions: baseline -> real grader, end to end -------------------------------

@@ -39,7 +39,7 @@ def grade_in_subprocess(competition_id: str, submission_path, data_dir: Optional
                         *, timeout: float = 300.0) -> tuple[Optional[float], Optional[dict]]:
     """Run :func:`grade` in a child process. Returns ``(metric, report)``; ``(None, None)`` on
     non-zero exit, timeout, or unparseable output (the node then has no metric → it fails)."""
-    from .sandbox import _json_line_metric, _run_argv
+    from .sandbox import _run_argv
     argv = [sys.executable, "-m", "looplab.mlebench_grade",
             "-c", competition_id, "-s", str(submission_path)]
     if data_dir:
@@ -49,17 +49,22 @@ def grade_in_subprocess(competition_id: str, submission_path, data_dir: Optional
     rc, out, _err, to = _run_argv(argv, root, timeout, None, 256_000)
     if rc != 0 or to:
         return None, None
-    metric = _json_line_metric(out, "metric")
-    report = None
+    # Single pass: main() prints exactly one JSON object line carrying BOTH "metric" and "report".
+    # Scan from the end for the last parseable JSON object that has a "metric" key and read both from
+    # it (so a stray log line that merely contains the text "report" can't be mis-parsed).
     for line in reversed(out.splitlines()):
         line = line.strip()
-        if line.startswith("{") and '"report"' in line:
-            try:
-                report = json.loads(line).get("report")
-            except ValueError:
-                report = None
-            break
-    return metric, report
+        if not (line.startswith("{") and line.endswith("}")):
+            continue
+        try:
+            obj = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(obj, dict) and "metric" in obj:
+            m = obj.get("metric")
+            return (float(m) if isinstance(m, (int, float)) and not isinstance(m, bool) else None,
+                    obj.get("report"))
+    return None, None
 
 
 def main(argv: Optional[list[str]] = None) -> int:

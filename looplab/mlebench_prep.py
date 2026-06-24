@@ -62,9 +62,18 @@ def prepare_competition(competition_id: str, *, data_dir: Optional[str] = None,
     from mlebench.data import create_prepared_dir, is_dataset_prepared
     from mlebench.utils import extract, is_empty
 
+    import shutil
+
     comp = _registry(data_dir).get_competition(competition_id)
     if is_dataset_prepared(comp) and not force:
         return comp
+
+    if force:
+        # Clear any stale raw/prepared so the re-downloaded zip is actually re-extracted and
+        # re-prepared — extract() below is gated on an empty raw_dir, so a leftover raw tree would
+        # otherwise be reused and prepare_fn would run on stale data.
+        shutil.rmtree(comp.raw_dir, ignore_errors=True)
+        shutil.rmtree(comp.public_dir.parent, ignore_errors=True)   # prepared/{public,private}
 
     # Leaderboard ships in the mle-bench repo (committed); get_competition points at it. If it's
     # missing the competition isn't a known/lite one — fail clearly rather than hit the network.

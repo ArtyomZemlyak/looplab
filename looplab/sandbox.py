@@ -112,9 +112,10 @@ def _run_argv(argv: list[str], workdir: str, timeout: float,
     base = {k: v for k, v in os.environ.items() if not _SECRET_ENV.search(k)}
     full_env = {**base, **{k: str(v) for k, v in (env or {}).items()}}
     # Run the child in UTF-8 mode so its `open()`/stdio default to UTF-8 even on Windows (whose
-    # default is cp1252). LLM-written solutions and real benchmark data (mle-bench CSVs) are UTF-8
-    # and routinely crash with a cp1252 UnicodeDecodeError otherwise — this makes the sandbox behave
-    # like Linux, where these tasks are authored. setdefault: an explicit engine/env value still wins.
+    # default is cp1252). LLM-written solutions and real benchmark data (mle-bench CSVs) are UTF-8 and
+    # routinely crash with a cp1252 UnicodeDecodeError on the Windows host path. (The Docker/untrusted
+    # tier runs a Linux image that already defaults to UTF-8, so this primarily fixes the host
+    # SubprocessSandbox path.) setdefault: an explicit engine/env value still wins.
     full_env.setdefault("PYTHONUTF8", "1")
     full_env.setdefault("PYTHONIOENCODING", "utf-8")
     try:

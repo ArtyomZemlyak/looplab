@@ -26,7 +26,7 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 from typing import Optional
-from urllib.parse import urlsplit
+from urllib.parse import urljoin, urlsplit
 
 API = "https://www.kaggle.com/api/v1"
 
@@ -74,10 +74,14 @@ class _DropAuthOnHostChange(urllib.request.HTTPRedirectHandler):
 
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         new = super().redirect_request(req, fp, code, msg, headers, newurl)
-        if new is not None and urlsplit(newurl).hostname != urlsplit(req.full_url).hostname:
-            new.headers = {k: v for k, v in new.headers.items() if k.lower() != "authorization"}
-            new.unredirected_hdrs = {k: v for k, v in getattr(new, "unredirected_hdrs", {}).items()
-                                     if k.lower() != "authorization"}
+        if new is not None:
+            # Resolve a possibly-relative redirect against the original URL before comparing hosts,
+            # so a same-host (relative) redirect keeps the bearer and only a true host change drops it.
+            dest = urljoin(req.full_url, newurl)
+            if urlsplit(dest).hostname != urlsplit(req.full_url).hostname:
+                new.headers = {k: v for k, v in new.headers.items() if k.lower() != "authorization"}
+                new.unredirected_hdrs = {k: v for k, v in getattr(new, "unredirected_hdrs", {}).items()
+                                         if k.lower() != "authorization"}
         return new
 
 
@@ -115,7 +119,8 @@ def download_competition(competition_id: str, dest_dir, *, token: Optional[str] 
     out = dest / f"{competition_id}.zip"
     if out.is_file() and out.stat().st_size > 0 and not force:
         return out
-    tmp = out.with_suffix(".zip.part")
+    # NB: not out.with_suffix(".zip.part") — a multi-dot suffix raises ValueError before Python 3.14.
+    tmp = out.parent / (out.name + ".part")
     req = _request(f"competitions/data/download-all/{competition_id}", token)
     try:
         with _opener().open(req, timeout=timeout) as resp, open(tmp, "wb") as f:

@@ -35,15 +35,21 @@ from .roles import LLMDeveloper, LLMResearcher
 # leaderboard (committed in the mle-bench repo) decides whether lower is better; the prepared
 # public dir is where we read train/test/sample-submission from.
 # --------------------------------------------------------------------------------------------------
+def _competition(competition_id: str, data_dir: Optional[str] = None):
+    """Resolve a mle-bench Competition under the given (or the default) data dir. The single place
+    the registry/data-dir resolution lives. Imports mlebench lazily."""
+    from mlebench.registry import registry
+    reg = registry if not data_dir else registry.set_data_dir(Path(data_dir).resolve())
+    return reg.get_competition(competition_id)
+
+
 @lru_cache(maxsize=32)
 def competition_meta(competition_id: str, data_dir: Optional[str] = None) -> dict:
     """Immutable competition metadata: {'direction','scorer','sample_name','public_dir','answers'}.
     Cached (these don't change). The mutable 'is it prepared yet' check is :func:`is_prepared`,
     deliberately NOT cached. Imports mlebench lazily so the rest of LoopLab doesn't depend on it."""
     from mlebench.data import get_leaderboard
-    from mlebench.registry import registry
-    reg = registry if not data_dir else registry.set_data_dir(Path(data_dir).resolve())
-    comp = reg.get_competition(competition_id)
+    comp = _competition(competition_id, data_dir)
     direction = "min" if comp.grader.is_lower_better(get_leaderboard(comp)) else "max"
     return {
         "direction": direction,
@@ -57,9 +63,7 @@ def competition_meta(competition_id: str, data_dir: Optional[str] = None) -> dic
 def is_prepared(competition_id: str, data_dir: Optional[str] = None) -> bool:
     """Live (uncached) check that the competition's public+private split exists locally."""
     from mlebench.data import is_dataset_prepared
-    from mlebench.registry import registry
-    reg = registry if not data_dir else registry.set_data_dir(Path(data_dir).resolve())
-    return is_dataset_prepared(reg.get_competition(competition_id))
+    return is_dataset_prepared(_competition(competition_id, data_dir))
 
 
 class MLEBenchRealTask(BaseModel):
@@ -199,6 +203,7 @@ class MLEBenchRealDeveloper:
 _CSV_HELPERS = '''\
 import csv, math
 import numpy as np
+csv.field_size_limit(10_000_000)   # competition text fields can exceed csv's 131072 default
 
 def read_rows(path):
     with open(path, newline="", encoding="utf-8") as f:

@@ -1150,15 +1150,24 @@ class Engine:
         # above-median report rides along in extra_metrics for the trust panel + final report.
         if g.get("kind") == "mlebench":
             from .mlebench_grade import grade_in_subprocess
-            sub = Path(workdir) / g.get("submission", "submission.csv")
+            # Resolve so the grader subprocess (run from the repo root) reads the submission from the
+            # node workdir regardless of whether run_dir was relative.
+            sub = (Path(workdir) / g.get("submission", "submission.csv")).resolve()
             metric, report = (None, None)
             if sub.is_file():
                 metric, report = grade_in_subprocess(
                     g["competition"], sub, g.get("data_dir"),
                     timeout=float(g.get("timeout", 300.0)))
             res.metric = metric
+            # The official medal/above-median report is a STRUCTURED dict, not a scalar — it must NOT
+            # go into extra_metrics (typed dict[str, float]; the UI treats each value as a numeric
+            # Pareto objective). Persist it as a per-node artifact instead: files-as-truth, inspectable.
             if report is not None:
-                res.extra_metrics = {**(res.extra_metrics or {}), "mlebench": report}
+                try:
+                    (Path(workdir) / "mlebench_report.json").write_text(
+                        _json.dumps(report), encoding="utf-8")
+                except OSError:
+                    pass
             return res
         preds_path = Path(workdir) / g.get("predictions", "predictions.json")
         m = None
