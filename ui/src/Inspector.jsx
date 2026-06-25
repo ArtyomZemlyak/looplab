@@ -2,7 +2,7 @@ import React, { useEffect, useState } from 'react'
 import { get, fmt, fmtInt, isSweep } from './util.js'
 import { Trajectory, ParallelCoords, Scatter } from './charts.jsx'
 import { groupAggregate } from './grouping.js'
-import { mergeSummary, changeLabel } from './report.js'
+import { mergeSummary, nodeChip } from './report.js'
 import Markdown from './markdown.jsx'
 
 // One lifecycle "Trace" tab replaces the old Reasoning / LLM / Agent split: a node is worked on by
@@ -10,10 +10,10 @@ import Markdown from './markdown.jsx'
 // and confirmed), so we show that whole story in one place — each stage with its sub-steps, inline
 // LLM I/O, and the coding-agent's validation — instead of three disconnected panes. The Inspector is
 // READ-ONLY (Workstream C): every node action — confirm/ablate/fork/promote/note — is done from the
-// chat (drag the node in, or use a /command), so there's no per-node button toolbar here.
+// chat (add the node via its ＋#id chip, or use a /command), so there's no per-node button toolbar.
 const TABS = ['Overview', 'Trace', 'Code', 'Metrics', 'Trust', 'Cost']
 
-export default function Inspector({ runId, nodeId, state, live, tab, setTab, onToast, selectedTrial }) {
+export default function Inspector({ runId, nodeId, state, live, tab, setTab, onToast }) {
   const [detail, setDetail] = useState(null)
   useEffect(() => {
     if (nodeId == null) { setDetail(null); return }
@@ -41,10 +41,10 @@ export default function Inspector({ runId, nodeId, state, live, tab, setTab, onT
                             onClick={() => setTab(t)}>{t}</div>)}
       </div>
       <div className="insp-body">
-        <div className="insp-hint muted">Actions (confirm · ablate · fork · promote · note) live in the chat — drag <span className="ctx-chip" style={{ padding: '0 6px' }}>#{n.id}</span> into it or type a <code>/command</code>.</div>
+        <div className="insp-hint muted">Actions (confirm · ablate · fork · promote · note) live in the chat — add <span className="ctx-chip" style={{ padding: '0 6px' }}>＋ #{n.id}</span> as context there, or type a <code>/command</code>.</div>
 
         {activeTab === 'Overview' && <Overview n={n} state={state} />}
-        {activeTab === 'Trials' && <Trials n={n} detail={detail} state={state} selectedTrial={selectedTrial} />}
+        {activeTab === 'Trials' && <Trials n={n} detail={detail} state={state} />}
         {activeTab === 'Trace' && <Trace n={n} />}
         {activeTab === 'Code' && <Code n={n} />}
         {activeTab === 'Metrics' && <Metrics n={n} detail={detail} />}
@@ -88,7 +88,7 @@ export function GroupSummary({ groupKey, memberIds, state, onSelectNode, onClose
 function Overview({ n, state }) {
   const p = n.idea?.params || {}
   const uses = mergeSummary(n, state.nodes || {})   // E3: for merges, which technique each parent fused
-  const chg = changeLabel(n, state.nodes || {})     // '' for merges (changeLabel owns that rule)
+  const chg = nodeChip(n, state.nodes || {})        // same chip as the card (sweep-aware; '' for merges)
   return <>
     <div className="kv">
       <KV k="node" v={`#${n.id}`} />
@@ -112,47 +112,89 @@ function Overview({ n, state }) {
   </>
 }
 
-// Max span duration across the forest — for proportional duration bars (langflow-style trace).
-function maxDur(spans) {
-  let m = 0
-  const walk = (arr) => arr.forEach(s => { m = Math.max(m, s.duration_s || 0); walk(s.children || []) })
+// Trace timeline bounds: earliest start + total wall-span across the forest, so every span bar can be
+// positioned by its OFFSET from t0 (a langfuse-style waterfall) rather than just sized by duration.
+function traceBounds(spans) {
+  let lo = Infinity, hi = 0
+  const walk = (arr) => (arr || []).forEach(s => {
+    const st = (typeof s.start === 'number') ? s.start : null
+    const en = st != null ? st + (s.duration_s || 0) : (s.duration_s || 0)
+    if (st != null && st < lo) lo = st
+    if (en > hi) hi = en
+    walk(s.children)
+  })
   walk(spans)
-  return m || 1e-9
+  if (!isFinite(lo)) lo = 0
+  return { t0: lo, total: Math.max(1e-9, hi - lo) }
 }
 
 // Friendly identity for each span kind — turns raw span names into "who did what" so the trace
-// reads as the node's life story rather than instrumentation. (Span names come from orchestrator.py.)
+// reads as the node's life story rather than instrumentation. `tone` colours the waterfall bar so
+// phases are distinguishable at a glance. (Span names come from orchestrator.py.)
 const STAGE = {
-  onboard:      { icon: '🚀', role: 'Onboarding', desc: 'task setup & eval spec' },
-  create_node:  { icon: '🧬', role: 'Author node', desc: 'propose an idea, then build the solution' },
-  propose:      { icon: '🔬', role: 'Researcher', desc: 'propose the next idea' },
-  implement:    { icon: '⚙️', role: 'Developer', desc: 'write / edit the solution code' },
-  repair:       { icon: '🩹', role: 'Developer · repair', desc: 'fix a failed parent' },
-  evaluate:     { icon: '📊', role: 'Evaluation', desc: 'run the solution & score it' },
-  confirm_seed: { icon: '🎲', role: 'Confirmation', desc: 'multi-seed robustness check' },
-  ablate:       { icon: '🧮', role: 'Ablation', desc: 'sensitivity probe' },
+  onboard:      { icon: '🚀', role: 'Onboarding', desc: 'task setup & eval spec', tone: '#8a7bb0' },
+  create_node:  { icon: '🧬', role: 'Author node', desc: 'propose an idea, then build the solution', tone: '#6f8bb0' },
+  propose:      { icon: '🔬', role: 'Researcher', desc: 'propose the next idea', tone: '#6fa3b0' },
+  implement:    { icon: '⚙️', role: 'Developer', desc: 'write / edit the solution code', tone: '#6fae97' },
+  repair:       { icon: '🩹', role: 'Developer · repair', desc: 'fix a failed parent', tone: '#b0936f' },
+  evaluate:     { icon: '📊', role: 'Evaluation', desc: 'run the solution & score it', tone: '#a87da8' },
+  confirm_seed: { icon: '🎲', role: 'Confirmation', desc: 'multi-seed robustness check', tone: '#9aa06f' },
+  ablate:       { icon: '🧮', role: 'Ablation', desc: 'sensitivity probe', tone: '#6f8bb0' },
 }
-const stageMeta = (name) => STAGE[name] || { icon: '▸', role: name, desc: '' }
+const stageMeta = (name) => STAGE[name] || { icon: '▸', role: name, desc: '', tone: 'var(--accent)' }
 
 function llmEvents(s) { return (s.events || []).filter(e => e.name === 'llm_call') }
 
-// One span and its subtree. LLM I/O is now inlined here (expand the span to read it) instead of
-// living in a separate tab, so a step's prompt/response sits right next to the step that made it.
-function SpanRow({ s, depth, max }) {
+// Compact info helpers so each trace row carries the data that DIFFERENTIATES it (langfuse/Phoenix
+// convention: model · input→output tokens · a content preview), instead of a bare op name repeated.
+const ktok = (n) => (n == null ? '' : (n >= 1000 ? +(n / 1000).toFixed(n >= 9950 ? 0 : 1) + 'k' : String(n)))
+const shortModel = (m) => (m || '').split('/').pop()
+function callTok(c) { const t = c.tokens || {}; return { in: t.prompt, out: t.completion, total: t.total || ((t.prompt || 0) + (t.completion || 0)) } }
+// First meaningful line of the completion (what the call PRODUCED) — falls back to the last user
+// message (what it was ASKED) so even an empty/streaming completion still reads as something.
+function callPreview(c) {
+  const firstLine = (s) => (s || '').trim().split('\n').map(l => l.trim()).find(Boolean) || ''
+  const compl = firstLine(c.completion)
+  if (compl) return compl
+  const lastUser = [...(c.prompt || [])].reverse().find(m => m.role === 'user')
+  return firstLine(lastUser && lastUser.content)
+}
+// Roll the whole subtree of a span up to "how many model calls and how many tokens it cost" — shown on
+// the stage/span header so you see the expensive steps without expanding anything.
+function spanRollup(s) {
+  let calls = 0, tok = 0
+  const walk = (x) => {
+    (x.events || []).forEach(e => { if (e.name === 'llm_call') { calls++; const t = callTok(e); tok += t.total || 0 } })
+    ;(x.children || []).forEach(walk)
+  }
+  walk(s)
+  return { calls, tok }
+}
+
+// One span and its subtree, drawn as a langfuse-style waterfall row: the bar is positioned by the
+// span's OFFSET from the trace start (t0) and sized by its duration, so concurrency/sequence reads at
+// a glance. LLM I/O is inlined (expand the span to read it) so a step's prompt/response sits next to
+// the step that made it.
+function SpanRow({ s, depth, t0, total }) {
   const [open, setOpen] = useState(false)
   const attrs = Object.entries(s.attributes || {}).filter(([k]) => k !== 'node_id')
   const events = (s.events || []).filter(e => e.name !== 'llm_call')
   const calls = llmEvents(s)
   const m = stageMeta(s.name)
   const detail = attrs.length || events.length || calls.length
+  const off = (typeof s.start === 'number') ? Math.max(0, (s.start - t0) / total * 100) : 0
+  const wid = Math.max(1.5, (s.duration_s || 0) / total * 100)
   return <>
     <div className={'span-row' + (s.status === 'ERROR' ? ' err' : '')} style={{ paddingLeft: depth * 14 }}
          onClick={() => detail && setOpen(o => !o)} title={detail ? 'click for step detail' : ''}>
       <span className="span-tw">{detail ? (open ? '▾' : '▸') : '·'}</span>
       <span className="span-name" title={m.desc}>{m.icon} {m.role !== s.name ? m.role : s.name}</span>
-      <span className="span-bar"><span className="span-fill" style={{ width: Math.max(2, (s.duration_s || 0) / max * 100) + '%' }} /></span>
+      <span className="span-bar"><span className="span-fill" style={{
+        marginLeft: Math.min(98, off) + '%', width: wid + '%',
+        background: s.status === 'ERROR' ? 'var(--fail)' : m.tone }} /></span>
       <span className="t">{fmt(s.duration_s, 3)}s</span>
-      {calls.length > 0 && <span className="badge" title="LLM calls — expand to read prompt & completion">{calls.length}×LLM</span>}
+      {calls.length > 0 && (() => { const tok = calls.reduce((a, c) => a + (callTok(c).total || 0), 0)
+        return <span className="badge" title="model calls in this step — expand to read prompt & completion">{calls.length}×LLM{tok ? ` · ${ktok(tok)}` : ''}</span> })()}
       {s.status === 'ERROR' && <span className="badge reason">ERROR</span>}
     </div>
     {open && detail && <div className="span-detail" style={{ marginLeft: depth * 14 + 16 }}>
@@ -164,24 +206,31 @@ function SpanRow({ s, depth, max }) {
       </div>)}
       {calls.map((c, i) => <LlmCall key={i} call={{ ...c, span: s.name }} idx={i} />)}
     </div>}
-    {(s.children || []).map((c, i) => <SpanRow key={i} s={c} depth={depth + 1} max={max} />)}
+    {(s.children || []).map((c, i) => <SpanRow key={i} s={c} depth={depth + 1} t0={t0} total={total} />)}
   </>
 }
 
-function LlmCall({ call, idx }) {
+// One LLM call as a COMPACT, information-dense row (the langfuse "generation" line): op · model ·
+// in→out tokens · #prompt-msgs · 🧠 · a one-line content preview — so repeated calls in a loop read
+// as distinct steps, not "chat / chat / chat". Click to expand the full prompt / completion / reasoning.
+export function LlmCall({ call, idx }) {
   const [open, setOpen] = useState(idx === 0)   // first call expanded by default
   const [think, setThink] = useState(false)     // raw reasoning is debug-only — collapsed by default
-  const t = call.tokens || {}
-  return <div className="llm-card">
-    <div className="llm-head" onClick={() => setOpen(o => !o)}>
+  const t = callTok(call)
+  const msgs = (call.prompt || []).length
+  const preview = callPreview(call)
+  return <div className={'llm-row' + (open ? ' open' : '')}>
+    <div className="llm-line" onClick={() => setOpen(o => !o)} title={preview || 'expand for prompt & completion'}>
       <span className="span-tw">{open ? '▾' : '▸'}</span>
-      <b>{call.op || 'llm'}</b>
-      <span className="muted"> {call.model}</span>
-      <span className="spacer" style={{ flex: 1 }} />
-      {call.thinking && <span className="badge" title="model reasoning captured (debug)">🧠</span>}
-      <span className="muted">{(t.total || (t.prompt + t.completion)) || 0} tok</span>
+      {typeof idx === 'number' && <span className="llm-i">{idx + 1}</span>}
+      <span className="llm-op">{call.op || 'llm'}</span>
+      {call.model && <span className="llm-model" title={call.model}>{shortModel(call.model)}</span>}
+      {(t.in != null || t.out != null) && <span className="llm-tok" title={`${t.in || 0} prompt → ${t.out || 0} completion tokens`}>{ktok(t.in)}→{ktok(t.out)}</span>}
+      {msgs > 2 && <span className="llm-msgs" title={`${msgs} messages in the prompt (context size)`}>{msgs}m</span>}
+      {call.thinking && <span className="llm-think" title="model reasoning captured">🧠</span>}
+      {preview && <span className="llm-prev">{preview}</span>}
     </div>
-    {open && <>
+    {open && <div className="llm-io">
       {(call.prompt || []).map((m, i) => <div key={i} className="msg">
         <div className={'msg-role role-' + (m.role || 'user')}>{m.role}</div>
         <pre className="code">{m.content}</pre>
@@ -198,27 +247,38 @@ function LlmCall({ call, idx }) {
         </div>
         {think && <Markdown className="think-body" text={call.thinking} />}
       </div>}
-    </>}
+    </div>}
   </div>
 }
 
 // A top-level lifecycle stage (one root span = one phase of work on this node), with its sub-steps.
-function StageBlock({ s, max }) {
+// The header rolls up the stage's model-call count + token cost so the expensive phases stand out.
+function StageBlock({ s, t0, total }) {
   const m = stageMeta(s.name)
+  const roll = spanRollup(s)
   return <div className={'stage' + (s.status === 'ERROR' ? ' err' : '')}>
-    <div className="stage-h">
+    <div className="stage-h" title={m.desc}>
       <span className="stage-ic">{m.icon}</span>
       <b>{m.role}</b>
-      <span className="muted">{m.desc}</span>
+      {roll.calls > 0 && <span className="stage-roll" title={`${roll.calls} model call(s) · ~${roll.tok} tokens in this stage`}>{roll.calls} call{roll.calls > 1 ? 's' : ''} · {ktok(roll.tok)} tok</span>}
       <span className="spacer" style={{ flex: 1 }} />
       <span className="t">{fmt(s.duration_s, 3)}s</span>
     </div>
     <div className="spans">
       {(s.children || []).length
-        ? (s.children || []).map((c, i) => <SpanRow key={i} s={c} depth={0} max={max} />)
-        : <SpanRow s={s} depth={0} max={max} />}
+        ? (s.children || []).map((c, i) => <SpanRow key={i} s={c} depth={0} t0={t0} total={total} />)
+        : <SpanRow s={s} depth={0} t0={t0} total={total} />}
     </div>
   </div>
+}
+
+// Reusable langfuse-style trace for ONE node's span forest — the lifecycle stages on a shared
+// timeline. Exported so the chat feed can show the same waterfall inline (Dock.jsx) as the Inspector.
+export function NodeTrace({ spans }) {
+  const roots = spans || []
+  if (!roots.length) return <div className="muted" style={{ fontSize: 12 }}>No LLM/execution spans captured for this node yet.</div>
+  const { t0, total } = traceBounds(roots)
+  return <div className="trace">{roots.map((s, i) => <StageBlock key={i} s={s} t0={t0} total={total} />)}</div>
 }
 
 // The coding-agent's own validation report (was its own tab) — folded into the lifecycle as the
@@ -243,17 +303,18 @@ function Trace({ n }) {
   const spans = n.trace?.nodes || []
   const agent = n.agent_report
   if (!spans.length && !agent)
-    return <div className="muted">No execution trace for this node — toy/offline nodes may have minimal spans, or LLM I/O capture is off (LOOPLAB_TRACE_LLM_IO=0).</div>
-  const max = maxDur(spans)
+    return <div className="muted">No execution spans for this node yet — toy/offline nodes have minimal spans, and a node still in progress fills its trace as it runs.</div>
+  const { t0, total } = traceBounds(spans)
   // create_node already nests propose→implement; if an agent wrote the node, the report belongs
   // right after that authoring stage (placed by index), otherwise it trails the whole lifecycle.
   const authorIdx = spans.findIndex(s => ['create_node', 'implement', 'repair'].includes(s.name))
   return <div className="trace">
     <div className="muted" style={{ marginBottom: 10 }}>
-      Lifecycle of node #{n.id} — what each part did, in order. Expand a step to see its LLM prompt &amp; completion.
+      Lifecycle of node #{n.id} — each part on a shared timeline (offset = when it ran, bar = how long).
+      Expand a step to read its LLM prompt &amp; completion.
     </div>
     {spans.map((s, i) => <React.Fragment key={i}>
-      <StageBlock s={s} max={max} />
+      <StageBlock s={s} t0={t0} total={total} />
       {agent && i === authorIdx && <AgentReport r={agent} />}
     </React.Fragment>)}
     {agent && authorIdx < 0 && <AgentReport r={agent} />}
@@ -305,7 +366,7 @@ function Metrics({ n, detail }) {
 // Intra-node sweep trials: a sortable table of every config the node ran in-process, plus
 // parallel-coords / scatter views. Trials aren't backend nodes, so the charts get pseudo-node
 // adapters ({id, metric, idea:{params}, feasible}) — no charts.jsx change needed.
-function Trials({ n, detail, state, selectedTrial }) {
+function Trials({ n, detail, state }) {
   const trials = detail?.trials ?? n.trials ?? []
   const summary = n.trials_summary
   const [sortKey, setSortKey] = useState('metric')
@@ -357,7 +418,7 @@ function Trials({ n, detail, state, selectedTrial }) {
     <table className="tbl">
       <thead><tr><Th k="idx">#</Th>{params.map(p => <Th key={p} k={p}>{p}</Th>)}<Th k="metric">metric</Th><Th k="seconds">s</Th></tr></thead>
       <tbody>{rows.map(t => <tr key={t._i}
-        className={(t._i === bestIdx ? 'best-row' : '') + (selectedTrial && selectedTrial.idx === t._i ? ' sel-row' : '')}>
+        className={t._i === bestIdx ? 'best-row' : ''}>
         <td>#{t._i}{t._i === bestIdx ? ' ♚' : ''}</td>
         {params.map(p => <td key={p}>{t.params?.[p] != null ? fmt(t.params[p]) : '—'}</td>)}
         <td>{t.metric != null ? fmt(t.metric) : <span className="badge reason">{t.error ? 'error' : 'failed'}</span>}</td>

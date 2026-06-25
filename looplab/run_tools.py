@@ -8,10 +8,21 @@ run. Long output is additionally truncated by the agent layer (4000 chars).
 """
 from __future__ import annotations
 
+import csv
+import io
 from typing import Optional
 
 from . import digest
 from .models import NodeStatus, RunState
+
+
+def _is_number(v: str) -> bool:
+    """True if the string parses as a finite-ish number (used to infer column dtype)."""
+    try:
+        float(v)
+        return True
+    except (TypeError, ValueError):
+        return False
 
 
 def _fn(name: str, description: str, props: dict, required: Optional[list] = None) -> dict:
@@ -191,8 +202,8 @@ class DataTools:
         return [
             _fn("data_schema", "Show the task's data schema — column names, types, and a couple of "
                 "sample values — so you propose from the real fields.", {}),
-            _fn("data_profile", "Per-column statistics of the task data (count, missing, min/max/"
-                "mean/std, cardinality) when profiled.", {}),
+            _fn("data_profile", "Per-column statistics of the task data — missing fraction, numeric "
+                "min/max/mean, and categorical cardinality (derived from the training table).", {}),
             _fn("read_asset", "Read a sample of a task data asset (e.g. train/test). Omit `name` to "
                 "list available assets.", {"name": {"type": "string"}}),
         ]
@@ -217,31 +228,87 @@ class DataTools:
         fn = getattr(self.task, "assets", None)
         return (fn() if callable(fn) else {}) or {}
 
+    _PROFILE_ROWS = 5000      # bounded sample keeps schema/profile cheap even on a large table
+
+    def _primary_table(self):
+        """Pick the most representative training table among the CSV assets (prefer ``train*.csv``,
+        else the first CSV) and parse a bounded row sample. Returns ``(name, header, rows)`` or
+        ``None`` when no parseable CSV asset exists — so schema/profile can derive a real view from
+        the actual data even when the task declares no structured ``columns()``."""
+        tables = {n: v for n, v in self._assets().items()
+                  if isinstance(v, str) and n.lower().endswith(".csv")}
+        if not tables:
+            return None
+        name = next((n for n in tables if n.lower().startswith("train")), None) or sorted(tables)[0]
+        try:
+            reader = csv.reader(io.StringIO(tables[name]))
+            header = next(reader, None)
+            if not header:
+                return None
+            rows = []
+            for i, r in enumerate(reader):
+                if i >= self._PROFILE_ROWS:
+                    break
+                rows.append(r)
+            return name, header, rows
+        except (csv.Error, ValueError):
+            return None
+
     def _schema(self) -> str:
         cols = self._columns()
-        if not cols:
+        if cols:
+            lines = [f"{len(cols)} column(s):"]
+            for name, vals in list(cols.items())[:40]:
+                sample = [v for v in (vals[:3] if isinstance(vals, list) else [])]
+                dtype = "numeric" if sample and all(isinstance(v, (int, float)) for v in sample) else "categorical"
+                lines.append(f"  {name} ({dtype}) e.g. {sample}")
+            return "\n".join(lines)[:self.max_chars]
+        # Fallback: derive the schema from the training table itself (CSV header + sampled values),
+        # so a task that exposes no explicit columns() (e.g. mlebench_real) still gets a real schema.
+        tbl = self._primary_table()
+        if not tbl:
             return "(this task exposes no structured schema — try read_asset or data_profile)"
-        lines = [f"{len(cols)} column(s):"]
-        for name, vals in list(cols.items())[:40]:
-            sample = [v for v in (vals[:3] if isinstance(vals, list) else [])]
-            dtype = "numeric" if sample and all(isinstance(v, (int, float)) for v in sample) else "categorical"
-            lines.append(f"  {name} ({dtype}) e.g. {sample}")
+        name, header, rows = tbl
+        lines = [f"schema inferred from {name} ({len(header)} columns, {len(rows)} rows sampled):"]
+        for ci, col in enumerate(header[:60]):
+            samples = [r[ci] for r in rows[:50] if ci < len(r) and r[ci] != ""]
+            dtype = "numeric" if samples and all(_is_number(v) for v in samples) else "categorical"
+            lines.append(f"  {col} ({dtype}) e.g. {samples[:3]}")
         return "\n".join(lines)[:self.max_chars]
 
     def _profile(self) -> str:
         prof = getattr(self.state, "data_profile", None) if self.state else None
-        if not prof:
+        if prof:
+            lines = ["column profile:"]
+            for name, p in list(prof.items())[:40]:
+                if not isinstance(p, dict):
+                    continue
+                bits = [f"dtype={p.get('dtype')}", f"missing={p.get('missing_frac')}"]
+                if p.get("dtype") == "numeric":
+                    bits += [f"min={p.get('min')}", f"max={p.get('max')}", f"mean={p.get('mean')}"]
+                else:
+                    bits.append(f"unique={p.get('n_unique')}")
+                lines.append(f"  {name}: " + " ".join(str(b) for b in bits))
+            return "\n".join(lines)[:self.max_chars]
+        # Fallback: profile the training table on the fly (count/missing + numeric min/max/mean or
+        # categorical cardinality) when the run recorded no profile — real per-column stats, cheaply.
+        tbl = self._primary_table()
+        if not tbl:
             return "(no data profile recorded for this run)"
-        lines = ["column profile:"]
-        for name, p in list(prof.items())[:40]:
-            if not isinstance(p, dict):
-                continue
-            bits = [f"dtype={p.get('dtype')}", f"missing={p.get('missing_frac')}"]
-            if p.get("dtype") == "numeric":
-                bits += [f"min={p.get('min')}", f"max={p.get('max')}", f"mean={p.get('mean')}"]
+        name, header, rows = tbl
+        lines = [f"column profile from {name} ({len(rows)} rows sampled):"]
+        for ci, col in enumerate(header[:60]):
+            vals = [r[ci] for r in rows if ci < len(r)]
+            nonempty = [v for v in vals if v != ""]
+            missing = (1 - len(nonempty) / len(vals)) if vals else 0.0
+            nums = [float(v) for v in nonempty if _is_number(v)]
+            if nonempty and len(nums) == len(nonempty):           # fully numeric column
+                mean = sum(nums) / len(nums)
+                lines.append(f"  {col}: numeric missing={missing:.2f} "
+                             f"min={digest._fmt_num(min(nums))} max={digest._fmt_num(max(nums))} "
+                             f"mean={digest._fmt_num(mean)}")
             else:
-                bits.append(f"unique={p.get('n_unique')}")
-            lines.append(f"  {name}: " + " ".join(str(b) for b in bits))
+                lines.append(f"  {col}: categorical missing={missing:.2f} unique={len(set(nonempty))}")
         return "\n".join(lines)[:self.max_chars]
 
     def _asset(self, name: Optional[str]) -> str:

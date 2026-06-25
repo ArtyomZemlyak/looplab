@@ -2,16 +2,16 @@ import React, { useMemo, useState } from 'react'
 import { ReactFlow, Background, Controls, MiniMap, Handle, Position, Panel } from '@xyflow/react'
 import '@xyflow/react/dist/style.css'
 import { fmt, layoutWithGroups, nodeClass, delta, workingId, operatorMeta, OPERATOR_LEGEND, isSweep, sweepInfo } from './util.js'
-import { changeLabel } from './report.js'
+import { nodeChip } from './report.js'
 import { OpIcon } from './icons.jsx'
 import { Spark } from './charts.jsx'
-import { RegionShell, SuperShell } from './groupnodes.jsx'
+import { LaneHeader, SuperShell } from './groupnodes.jsx'
 import {
   computeGroups, nodeGroupMap, regionGeometry, rerouteForCollapse, groupColor,
   groupAggregate, superId, GROUP_MODES,
 } from './grouping.js'
 
-const NODE_W = 190, NODE_H = 84
+const NODE_W = 188, NODE_H = 78
 
 function agentBadge(rep) {
   if (!rep) return null
@@ -21,32 +21,31 @@ function agentBadge(rep) {
 }
 
 function ExpNode({ data }) {
-  const { node, state, workId, selectedId, onSelect, onExplode, exploded, themeFilter } = data
+  const { node, state, workId, selectedId, onSelect, themeFilter, groupTint } = data
   const m = node.confirmed_mean ?? node.metric
   const d = delta(node, state)
   const op = operatorMeta(node.operator)
   const sweep = isSweep(node)
   const sw = sweep ? sweepInfo(node) : null
-  // E2/E3: a one-line "what changed vs parent" chip (git-commit style); merges show what they fuse.
+  // A one-line "what this node did" chip (git-commit style): a sweep says what was searched, a draft
+  // says baseline, everything else diffs vs parent. nodeChip owns those rules (merges handled below).
   const parents = (node.parent_ids || []).map(p => state.nodes[p]).filter(Boolean)
   const isMerge = parents.length > 1
-  const chg = node.idea?.change_summary || changeLabel(node, state.nodes)   // '' for merges (handled below)
+  const chg = nodeChip(node, state.nodes)   // returns '' for a (resolved) merge — render guards isMerge
   const mergeThemes = isMerge ? parents.map(p => p.idea?.theme || ('#' + p.id)) : null
   const dim = themeFilter && node.idea?.theme !== themeFilter
   return (
-    <div className={nodeClass(node, state, workId) + (node.id === selectedId ? ' sel' : '') + (sweep ? ' sweep' : '') + (dim ? ' dim' : '')}
+    <div className={nodeClass(node, state, workId) + (node.id === selectedId ? ' sel' : '') + (sweep ? ' sweep' : '') + (groupTint ? ' grouped' : '') + (dim ? ' dim' : '')}
+         style={groupTint ? { '--grp-tint': groupTint } : undefined}
          onClick={() => onSelect(node.id)} title={op.label + (node.idea?.rationale ? ' — ' + node.idea.rationale : '')}>
       <Handle type="target" position={Position.Top} style={{ opacity: 0 }} />
       <div className="row">
         <span className="nid">#{node.id}</span>
         <span className="op"><OpIcon name={op.icon} /> {node.operator}</span>
         <span className="spacer" style={{ flex: 1 }} />
-        {sweep && <span className="badge sweep" title={`intra-node sweep · ${sw.count} trials`}>⊞ {sw.count}</span>}
+        {sweep && <span className="badge sweep" title={`intra-node sweep · ${sw.count} trials — open the node's Trials tab`}>⊞ {sw.count}</span>}
         {node.id === state.best_node_id && <span className="crown" title="champion">♚</span>}
         {agentBadge(node.agent_report)}
-        <span className="drag-h" draggable title="drag into the chat as context"
-          onClick={(e) => e.stopPropagation()}
-          onDragStart={(e) => { e.stopPropagation(); e.dataTransfer.setData('application/looplab-node', String(node.id)); e.dataTransfer.setData('text/plain', '#' + node.id); e.dataTransfer.effectAllowed = 'copy' }}>⠿</span>
       </div>
       <div className="metric">
         {fmt(m)}
@@ -60,8 +59,6 @@ function ExpNode({ data }) {
             <Spark series={sw.series} width={104} height={16} />
             <span className="spacer" style={{ flex: 1 }} />
             {sw.failed ? <span className="dot fail" title={`${sw.failed} failed trials`}>●{sw.failed}</span> : null}
-            <button className="btn-chev" title={exploded ? 'collapse trials' : 'explode into trials'}
-                    onClick={(e) => { e.stopPropagation(); onExplode && onExplode(node.id) }}>{exploded ? '⊟' : '⊞'}</button>
           </div>
         : <div className="sub">
             {node.status === 'failed'
@@ -76,34 +73,11 @@ function ExpNode({ data }) {
   )
 }
 
-// One trial of an exploded sweep — a tiny leaf card. Not a real DAG node (no backend id): it is a
-// synthetic node placed under its sweep node's hull (see the explosion pass in Dag's useMemo).
-function TrialNode({ data }) {
-  const { trial, idx, isBest, selected, more, loading, onSelect, nodeId } = data
-  const failed = !more && !loading && trial.metric == null
-  const title = more ? 'more trials — open the Trials tab'
-    : loading ? 'loading trials…'
-    : Object.entries(trial.params || {}).map(([k, v]) => `${k}=${v}`).join(', ') + ` → ${fmt(trial.metric)}`
-  return (
-    <div className={'trial-card' + (failed ? ' fail' : '') + (selected ? ' sel' : '') + (more ? ' more' : '') + (isBest ? ' best' : '')}
-         onClick={(e) => { e.stopPropagation(); onSelect && onSelect(nodeId, more ? null : idx) }} title={title}>
-      <Handle type="target" position={Position.Top} style={{ opacity: 0 }} />
-      <div className="trial-top"><span className="trial-idx">{more ? idx : `#${idx}`}</span>{isBest && <span className="crown" title="best trial">♚</span>}</div>
-      <div className="trial-metric">{more ? 'more' : loading ? '…' : failed ? '✗' : fmt(trial.metric)}</div>
-    </div>
-  )
-}
-
-// Soft enclosing region behind an expanded group. Only the label tab is interactive (the hull is
-// pointer-transparent) so it never steals clicks from the nodes drawn on top.
-function GroupRegion({ data }) {
-  const { w, h, path, label, count, tint, onToggle } = data
-  const tab = (
-    <div className="grp-tab" onClick={(e) => { e.stopPropagation(); onToggle(label) }} title="collapse group">
-      <span className="grp-chev">▾</span>{label}<span className="grp-n">{count}</span>
-    </div>
-  )
-  return <RegionShell w={w} h={h} path={path} tint={tint} tab={tab} />
+// Slim labeled lane header above an EXPANDED group's cluster (round-6, replaces the giant hull). The
+// bar spans the cluster width and is the (only) interactive surface — click it to collapse the group.
+function GroupLane({ data }) {
+  const { w, label, count, tint, onToggle } = data
+  return <LaneHeader w={w} label={label} count={count} tint={tint} onToggle={onToggle} />
 }
 
 // Collapsed group → one aggregate card (semantic zoom). Body selects (group summary); the ▸ expands.
@@ -153,11 +127,10 @@ function ResearchNode({ data }) {
   )
 }
 
-const nodeTypes = { exp: ExpNode, groupRegion: GroupRegion, groupSuper: GroupSuper, trial: TrialNode, research: ResearchNode }
+const nodeTypes = { exp: ExpNode, groupLane: GroupLane, groupSuper: GroupSuper, research: ResearchNode }
 
 export default function Dag({ state, selectedId, onSelect, groupMode = 'none', collapsed = new Set(),
                              onToggleGroup, onSetMode, onCollapseAll, onExpandAll, selectedGroup, onSelectGroup,
-                             exploded = new Set(), onExplode, trialCache = {}, selectedTrial, onSelectTrial,
                              selectedResearch = null, onSelectResearch, themeFilter = null }) {
   const workId = workingId(state)
   const [showMap, setShowMap] = useState(() => localStorage.getItem('ll.minimap') === '1')
@@ -172,18 +145,18 @@ export default function Dag({ state, selectedId, onSelect, groupMode = 'none', c
     const { hidden, edges: reEdges } = rerouteForCollapse(ns, collapsed, ng)
     const rfNodes = []
 
-    // 1) region hulls for EXPANDED groups (drawn behind everything). A 1-member group needs no
-    //    enclosing block — it'd just be a box hugging one node (pure noise, e.g. niche mode where
-    //    most param combos are unique). The inter-cluster layout gap still sets singletons apart.
+    // 1) slim lane header for each EXPANDED group (round-6: replaces the full-canvas hull). A
+    //    1-member group needs no header — it'd just label a single node. We still use regionGeometry
+    //    to find the cluster's top edge + width; the bar sits in the 26px pad gap above the top row.
     groups.forEach((ids, key) => {
       if (collapsed.has(key) || ids.length < 2) return
       const rects = ids.map(id => pos[`n:${id}`]).filter(Boolean).map(p => ({ x: p.x, y: p.y, w: NODE_W, h: NODE_H }))
       if (!rects.length) return
       const geo = regionGeometry(rects)
       rfNodes.push({
-        id: `region:${key}`, type: 'groupRegion', position: { x: geo.x, y: geo.y }, zIndex: 0,
+        id: `region:${key}`, type: 'groupLane', position: { x: geo.x, y: geo.y }, zIndex: 0,
         selectable: false, draggable: false, focusable: false,
-        data: { w: geo.w, h: geo.h, path: geo.path, label: key, count: ids.length, tint: groupColor(key), onToggle: onToggleGroup },
+        data: { w: geo.w, label: key, count: ids.length, tint: groupColor(key), onToggle: onToggleGroup },
       })
     })
 
@@ -201,74 +174,23 @@ export default function Dag({ state, selectedId, onSelect, groupMode = 'none', c
       })
     })
 
-    // 3) visible experiment nodes
+    // 3) visible experiment nodes. A grouped node carries its group's tint so the card shows a faint
+    //    top accent + wash (membership cue) without an enclosing box — but ONLY for groups that
+    //    actually drew a lane header (≥2 members), so a singleton never gets an unexplained tint.
     Object.values(ns).forEach(n => {
       if (hidden.has(n.id)) return
       const p = pos[`n:${n.id}`]; if (!p) return
+      const gkey = ng.get(n.id)
+      const inLane = gkey != null && (groups.get(gkey)?.length || 0) >= 2 && !collapsed.has(gkey)
       rfNodes.push({ id: `n:${n.id}`, type: 'exp', position: p, zIndex: 1,
         data: { node: n, state, workId, selectedId, onSelect, themeFilter,
-                onExplode, exploded: exploded.has(n.id) } })
+                groupTint: inLane ? groupColor(gkey) : null } })
     })
 
-    // 4) exploded sweep nodes → trial mini-nodes under a soft hull (semantic zoom, one level down).
-    //    Trials are NOT backend DAG nodes, so they're placed in this parallel pass (NOT via
-    //    layoutWithGroups, which keys entities `n:<int>`) and the sweep→trial edges are appended
-    //    after the rerouted DAG edges. Big sweeps render the top-K trials + a "+N more" leaf.
-    const trialEdges = []
-    const TRIAL_W = 56, TRIAL_H = 42, TX = 72, TY = 58, CAP = 60
-    Object.values(ns).forEach(n => {
-      if (!exploded.has(n.id) || hidden.has(n.id)) return
-      const base = pos[`n:${n.id}`]; if (!base) return
-      const trials = trialCache[n.id]
-      if (!trials) {   // detail not fetched yet → a single placeholder leaf
-        rfNodes.push({ id: `t:${n.id}:loading`, type: 'trial', zIndex: 2, selectable: false, draggable: false,
-          position: { x: base.x + NODE_W / 2 - TRIAL_W / 2, y: base.y + NODE_H + 56 },
-          data: { loading: true, idx: '…' } })
-        return
-      }
-      const better = (a, b) => state.direction === 'min' ? a < b : a > b
-      let bestIdx = -1, bestV = null
-      trials.forEach((t, i) => { if (t.metric != null && (bestV == null || better(t.metric, bestV))) { bestV = t.metric; bestIdx = i } })
-      // cap: keep the best CAP trials (by metric under direction), summarize the rest in a "+N more"
-      let shown = trials.map((t, i) => ({ t, i })), overflow = 0
-      if (shown.length > CAP) {
-        const sorted = [...shown].sort((a, b) => {
-          if (a.t.metric == null) return 1; if (b.t.metric == null) return -1
-          return state.direction === 'min' ? a.t.metric - b.t.metric : b.t.metric - a.t.metric
-        })
-        overflow = shown.length - CAP
-        shown = sorted.slice(0, CAP)
-      }
-      const cells = shown.length + (overflow ? 1 : 0)
-      const cols = Math.max(1, Math.ceil(Math.sqrt(cells)))
-      const startX = base.x + NODE_W / 2 - (cols * TX) / 2
-      const startY = base.y + NODE_H + 56
-      const rects = []
-      const place = (k) => ({ x: startX + (k % cols) * TX, y: startY + Math.floor(k / cols) * TY })
-      shown.forEach(({ t, i }, k) => {
-        const xy = place(k); rects.push({ x: xy.x, y: xy.y, w: TRIAL_W, h: TRIAL_H })
-        rfNodes.push({ id: `t:${n.id}:${i}`, type: 'trial', position: xy, zIndex: 2, selectable: true, draggable: false,
-          data: { trial: t, idx: i, nodeId: n.id, isBest: i === bestIdx, onSelect: onSelectTrial,
-                  selected: !!(selectedTrial && selectedTrial.nodeId === n.id && selectedTrial.idx === i) } })
-        trialEdges.push({ id: `n:${n.id}->t:${n.id}:${i}`, source: `n:${n.id}`, target: `t:${n.id}:${i}`, className: 'trial' })
-      })
-      if (overflow) {
-        const xy = place(shown.length); rects.push({ x: xy.x, y: xy.y, w: TRIAL_W, h: TRIAL_H })
-        rfNodes.push({ id: `t:${n.id}:more`, type: 'trial', position: xy, zIndex: 2, selectable: true, draggable: false,
-          data: { more: true, idx: `+${overflow}`, nodeId: n.id, onSelect: onSelectTrial } })
-      }
-      if (rects.length) {
-        const geo = regionGeometry(rects, 22)
-        rfNodes.push({ id: `region:sweep:${n.id}`, type: 'groupRegion', position: { x: geo.x, y: geo.y }, zIndex: 0,
-          selectable: false, draggable: false, focusable: false,
-          data: { w: geo.w, h: geo.h, path: geo.path, label: `sweep #${n.id}`, count: trials.length,
-                  tint: '#6f8bb0', onToggle: () => onExplode && onExplode(n.id) } })
-      }
-    })
-
-    // 5) Deep-Research memo nodes (Phase 2): rendered from state.research as a distinct node type
-    //    in a lane below the forest, each linked (dashed) to the most recent experiment it reviewed
+    // 4) Deep-Research memo nodes (Phase 2): rendered from state.research as a distinct node type in
+    //    a lane below the forest, each linked (dashed) to the most recent experiment it reviewed
     //    (largest node id ≤ at_node). Kept out of grouping/layout so the search DAG is untouched.
+    const extraEdges = []
     const memos = state?.research || []
     if (memos.length) {
       let maxY = 0
@@ -285,7 +207,7 @@ export default function Dag({ state, selectedId, onSelect, groupMode = 'none', c
           selectable: true, draggable: false,
           data: { memo: mm, idx: i, selected: i === selectedResearch, onSelect: onSelectResearch } })
         if (anchorId != null && pos[`n:${anchorId}`]) {
-          trialEdges.push({ id: `n:${anchorId}->research:${i}`, source: `n:${anchorId}`,
+          extraEdges.push({ id: `n:${anchorId}->research:${i}`, source: `n:${anchorId}`,
                             target: `research:${i}`, className: 'research-edge', animated: false })
         }
       })
@@ -304,9 +226,9 @@ export default function Dag({ state, selectedId, onSelect, groupMode = 'none', c
         animated: e.dstId === workId && !hidden.has(e.dstId),
       }
     })
-    return { nodes: rfNodes, edges: rfEdges.concat(trialEdges), groupKeys: [...groups.keys()] }
+    return { nodes: rfNodes, edges: rfEdges.concat(extraEdges), groupKeys: [...groups.keys()] }
   }, [state, selectedId, workId, onSelect, groupMode, collapsed, selectedGroup, onToggleGroup, onSelectGroup,
-      exploded, onExplode, trialCache, selectedTrial, onSelectTrial, selectedResearch, onSelectResearch, themeFilter])
+      selectedResearch, onSelectResearch, themeFilter])
 
   return (
     <ReactFlow nodes={nodes} edges={edges} nodeTypes={nodeTypes} fitView minZoom={0.15} maxZoom={1.8}

@@ -141,8 +141,12 @@ def build_unified_agent(task: TaskAdapter, settings):
     pilot_client = client_for(stage_models.get("pilot"), stage_urls.get("pilot"))
     pilot_tools = None
     if getattr(settings, "researcher_tools", True):
-        from .run_tools import RunTools
-        pilot_tools = RunTools()
+        # The pilot self-drives the next action AND triages crashes; give it BOTH run-introspection
+        # and the task data, so triage can judge whether a crash is a code bug or a wrong idea by
+        # consulting the real schema/columns (e.g. a reference to a column that doesn't exist).
+        from .run_tools import RunTools, DataTools
+        from .agent import CompositeTools
+        pilot_tools = CompositeTools([RunTools(), DataTools(task)])
 
     extra_clients = [c for c in (strat_client, pilot_client) if c is not None]
     return UnifiedAgent(researcher=researcher, developer=developer, strategist=strategist,

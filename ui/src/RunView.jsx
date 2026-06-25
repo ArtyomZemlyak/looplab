@@ -32,11 +32,6 @@ export default function RunView({ runId, onBack }) {
   const [groupMode, setGroupMode] = useState('theme')
   const [collapsed, setCollapsed] = useState(() => new Set())
   const [selectedGroup, setSelectedGroup] = useState(null)
-  // Intra-node sweep: which sweep nodes are "exploded" into their trial subgraph, the lazily-fetched
-  // full trials per node (live state carries only a summary), and the currently-selected trial.
-  const [exploded, setExploded] = useState(() => new Set())
-  const [trialCache, setTrialCache] = useState({})
-  const [selectedTrial, setSelectedTrial] = useState(null)   // {nodeId, idx} | null
   const [panel, setPanel] = useState(null)
   const [view, setView] = useState('dag')                    // 'dag' | 'report' — primary destination
   const [themeFilter, setThemeFilter] = useState(null)       // E1: drill the tree to one direction
@@ -86,23 +81,8 @@ export default function RunView({ runId, onBack }) {
     const ns = (hist || live)?.nodes
     return (selectedGroup != null && ns) ? (computeGroups(ns, groupMode).get(selectedGroup) || []) : []
   }, [hist, live, groupMode, selectedGroup])
-  // Node selection clears any group/trial selection (the side panel shows one or the other).
-  const selectNode = (id) => { setSelectedId(id); setSelectedTrial(null); if (id != null) setSelectedGroup(null) }
-  // Lazily fetch a sweep node's full trials (live state only carries a summary) into the cache.
-  const ensureTrials = (id) => {
-    if (id == null || trialCache[id]) return
-    get(`/api/runs/${runId}/nodes/${id}`).then(d => setTrialCache(c => ({ ...c, [id]: d.trials || [] }))).catch(() => {})
-  }
-  const toggleExplode = (id) => {
-    setExploded(s => { const n = new Set(s); n.has(id) ? n.delete(id) : n.add(id); return n })
-    ensureTrials(id)
-  }
-  // Selecting a trial pseudo-node also selects its sweep node (so the inspector loads that node's
-  // detail) and opens the Trials tab. idx==null (the "+N more" leaf) just opens the tab.
-  const selectTrial = (nodeId, idx) => {
-    setSelectedTrial(idx == null ? null : { nodeId, idx })
-    setSelectedId(nodeId); setSelectedGroup(null); setInspectTab('Trials'); ensureTrials(nodeId)
-  }
+  // Node selection clears any group selection (the side panel shows one or the other).
+  const selectNode = (id) => { setSelectedId(id); if (id != null) setSelectedGroup(null) }
   // Drill-down from the dock/timeline: select a node, optionally open a tab + jump the scrubber.
   const focusNode = (id, tab, seq) => {
     selectNode(id)
@@ -170,7 +150,6 @@ export default function RunView({ runId, onBack }) {
         </div>}
 
       <div className="topbar panel-bar" style={{ minHeight: 38, paddingTop: 4, paddingBottom: 4 }}>
-        <span className="muted">views:</span>
         <div className="menu">{PANEL_GROUPS.map((group, gi) => <React.Fragment key={gi}>
           {gi > 0 && <span className="panel-sep" />}
           {group.map(([k, l]) => <button key={k} className={'btn sm ghost' + (panel === k ? ' on' : '')} onClick={() => setPanel(k)}>{l}</button>)}
@@ -188,8 +167,6 @@ export default function RunView({ runId, onBack }) {
           groupMode={groupMode} collapsed={collapsed} onToggleGroup={toggleGroup} onSetMode={changeMode}
           onCollapseAll={(keys) => setCollapsed(new Set(keys))} onExpandAll={() => setCollapsed(new Set())}
           selectedGroup={selectedGroup} onSelectGroup={selectGroup} themeFilter={themeFilter}
-          exploded={exploded} onExplode={toggleExplode} trialCache={trialCache}
-          selectedTrial={selectedTrial} onSelectTrial={selectTrial}
           selectedResearch={null} onSelectResearch={() => { }} /></div>
         {sideC
           ? <div className="side-rail" title="show panel" onClick={() => setSideC(false)}>‹ {selectedGroup != null ? 'group' : 'inspector'}</div>
@@ -205,8 +182,7 @@ export default function RunView({ runId, onBack }) {
                   ? <GroupSummary groupKey={selectedGroup} memberIds={groupMembers}
                       state={state} onSelectNode={focusNode} onClose={() => setSelectedGroup(null)} />
                   : <Inspector runId={runId} nodeId={selectedId} state={state} live={live}
-                      tab={inspectTab} setTab={setInspectTab} onToast={showToast}
-                      selectedTrial={selectedTrial} />}
+                      tab={inspectTab} setTab={setInspectTab} onToast={showToast} />}
               </div>
             </>}
       </div>

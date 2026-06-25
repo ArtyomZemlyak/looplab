@@ -3,7 +3,7 @@
 // set. Mirrors the engine's selection rule — only FEASIBLE evaluated nodes move the frontier — so
 // the report never credits a result the engine itself rejected.
 
-import { fmt } from './util.js'
+import { fmt, isSweep } from './util.js'
 
 const metricOf = (n) => (n.confirmed_mean ?? n.metric)
 const isEvaluated = (n) => n.status === 'evaluated' && metricOf(n) != null
@@ -142,6 +142,36 @@ export function changeLabel(node, nodes) {
   const parent = (node.parent_ids || []).map(p => nodes[p]).find(Boolean)
   if (!parent) return ''
   const lbl = paramDiffLabel(paramDiff(node, parent))
+  return lbl === '—' ? '' : lbl
+}
+
+// The card's one-line "what this node did" chip. Deterministic so it shows IMMEDIATELY (no waiting on
+// the late LLM `change_summary`), and correct for the cases the bare param-diff got wrong:
+//   • sweep  → what was SEARCHED (the grid), not the single best value (the old `p=2.5` bug);
+//   • draft / root (no parent) → `baseline` (nothing to diff against — it used to render nothing);
+//   • else   → the agent's `change_summary` if it wrote one, else the param-diff vs the first parent.
+// Returns '' for a merge (it renders its own ⊕ line) and when there's genuinely nothing to say.
+export function nodeChip(node, nodes) {
+  if (!node) return ''
+  // Resolve parents the SAME way the card's isMerge does (filter out ids missing from the fold), so
+  // a node with a dangling 2nd parent id isn't mis-classified as a merge and left with no chip.
+  const parents = (node.parent_ids || []).map(p => nodes[p]).filter(Boolean)
+  if (parents.length > 1) return ''                        // real merge → renders its ⊕ combines line
+  if (isSweep(node)) {
+    const sp = node.idea?.space || {}
+    const keys = Object.keys(sp)
+    if (!keys.length) return 'swept'
+    const tok = (k) => {
+      const vs = (sp[k] || []).filter(v => v != null)
+      return (vs.length > 1 && vs.every(v => typeof v === 'number'))
+        ? `${k}∈[${fmt(Math.min(...vs))}…${fmt(Math.max(...vs))}]` : k
+    }
+    return 'swept ' + (keys.length <= 2 ? keys.map(tok).join(', ') : `${keys.length} params`)
+  }
+  const parent = parents[0]
+  if (!parent) return 'baseline'                           // draft / root — nothing to diff against
+  if (node.idea?.change_summary) return node.idea.change_summary
+  const lbl = paramDiffLabel(paramDiff(node, parent))      // diff vs the resolved parent directly
   return lbl === '—' ? '' : lbl
 }
 

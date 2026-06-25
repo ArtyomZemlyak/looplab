@@ -111,6 +111,34 @@ def test_data_tools_graceful_and_with_data():
     assert "no data profile" in dt.execute("data_profile", {}).lower()
 
 
+# --- schema/profile DERIVED from a tabular asset when the task declares no columns() -----------
+class _CsvTask:
+    """A task with no columns(), only a raw train.csv asset — like mlebench_real."""
+    def assets(self):
+        return {"train.csv": "id,height,city,target\n1,1.8,NY,0\n2,1.6,LA,1\n3,,NY,0\n",
+                "test.csv": "id,height,city\n9,1.7,LA\n"}
+
+
+def test_data_schema_inferred_from_csv_when_no_columns():
+    dt = DataTools(_CsvTask())
+    dt.bind_state(_st())
+    sch = dt.execute("data_schema", {})
+    assert "inferred from train.csv" in sch          # used the training table, not test.csv
+    assert "height (numeric)" in sch                 # numeric column inferred
+    assert "city (categorical)" in sch               # categorical column inferred
+    assert "target" in sch
+
+
+def test_data_profile_computed_from_csv_when_unrecorded():
+    dt = DataTools(_CsvTask())
+    dt.bind_state(_st())                              # _st() has no data_profile -> fall back to CSV
+    prof = dt.execute("data_profile", {})
+    assert "train.csv" in prof
+    assert "height: numeric" in prof and "min=1.6" in prof and "max=1.8" in prof
+    assert "missing=0.33" in prof                    # 1 of 3 height values is blank
+    assert "city: categorical" in prof and "unique=2" in prof
+
+
 # --------------------------------------------------------------------------- agent loop
 class _FakeChatClient:
     def __init__(self, scripted):

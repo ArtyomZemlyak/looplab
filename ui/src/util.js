@@ -186,7 +186,7 @@ export function layoutWithGroups(nodes, { collapsed = new Set(), nodeGroup = new
   }
   for (let i = 0; i < 4; i++) { sweep(true); sweep(false) }
 
-  // Tighter spacing than before (node is 190×84) keeps the forest compact without overlap.
+  // Tighter spacing than before (node is 188×78, density pass) keeps the forest compact without overlap.
   // GAP: insert horizontal slack between adjacent entities that belong to DIFFERENT groups, so a
   // grouped layout reads as separated blocks instead of one undifferentiated row (the #7 readability
   // win). Ungrouped neighbours get no extra gap, so a plain DAG layout is unchanged.
@@ -195,7 +195,7 @@ export function layoutWithGroups(nodes, { collapsed = new Set(), nodeGroup = new
     const k = nodeGroup.get(Number(e.slice(2)))
     return k != null ? String(k) : null
   }
-  const XS = 214, YS = 132, GAP = 0.85, pos = {}
+  const XS = 206, YS = 122, GAP = 0.85, pos = {}
   depths.forEach(d => {
     const arr = layers[d]
     let slot = 0
