@@ -47,7 +47,7 @@ def test_engine_raises_without_eval_or_onboarder(tmp_path):
 # #3 — cli_overrides param-search must NOT wire the editing agent even with a preset backend
 def test_make_roles_param_search_ignores_agent_backend():
     s = Settings()
-    s.backend, s.developer_backend = "llm", "opencode"
+    s.backend, s.developer_backend, s.unified_agent = "llm", "opencode", False
     t = RepoTask(id="p", direction="max", editable_path=str(FIXTURE), protect=["ttrain_cli.py"],
                  params={"x": (-5.0, 5.0)},
                  eval=EvalSpec(command=[sys.executable, "ttrain_cli.py"],

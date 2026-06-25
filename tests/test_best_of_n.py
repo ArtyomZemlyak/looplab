@@ -56,5 +56,5 @@ def test_make_roles_wraps_best_of_n():
     from looplab.tasks import load_task, make_roles
     root = Path(__file__).resolve().parents[1]
     task = load_task(root / "examples" / "code_regression_task.json")
-    _r, dev = make_roles(task, Settings(backend="llm", best_of_n=3))
+    _r, dev = make_roles(task, Settings(backend="llm", best_of_n=3, unified_agent=False))
     assert isinstance(dev, BestOfNDeveloper) and dev.n == 3

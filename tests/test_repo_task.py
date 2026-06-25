@@ -114,7 +114,7 @@ def test_make_roles_wires_repo_agent():
     from looplab.roles import ValidatingDeveloper
     from looplab.tasks import make_roles
     s = Settings()
-    s.backend, s.developer_backend = "llm", "opencode"
+    s.backend, s.developer_backend, s.unified_agent = "llm", "opencode", False
     # monkeypatch the kind dispatch by passing the task directly
     _, dev = make_roles(_task(), s)
     assert isinstance(dev, ValidatingDeveloper) and dev.repo_mode is True

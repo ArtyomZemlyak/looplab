@@ -73,6 +73,21 @@ def fold(events: Iterable[Event]) -> RunState:
                 n.eval_seconds = d.get("eval_seconds")
                 if first_terminal:
                     st.total_eval_seconds += d.get("eval_seconds") or 0.0
+        elif t == "node_repaired":
+            # In-node inline repair (hybrid crash repair): a NON-terminal event that replaces the
+            # node's code with the LLM-repaired version BEFORE the eval that follows it. Idempotent
+            # and replay-safe: only mutates while the node is still pending (the single terminal
+            # event emitted at the end of the repair loop flips status off pending), so a duplicate
+            # or post-terminal node_repaired (corrupt/double-fold) is a no-op — mirrors the
+            # `first_terminal` guard above. The LLM/subprocess are never re-invoked; the final code
+            # and metric/status are reconstructed purely from this event + the terminal event.
+            n = st.nodes.get(d["node_id"])
+            if n is not None and n.status is NodeStatus.pending:
+                n.code = d.get("code", n.code)
+                if d.get("files"):
+                    n.files = d["files"]
+                if d.get("deleted"):
+                    n.deleted = d["deleted"]
         elif t == "confirm_eval":
             st.total_eval_seconds += d.get("eval_seconds") or 0.0   # confirm-seed eval cost
             if "node_id" in d and "seed" in d:                       # per-seed resume memo (#0)

@@ -42,7 +42,8 @@ const NARR = {
   run_started: (d) => `run started — ${d.goal || d.task_id} (${d.direction})`,
   node_created: (d) => `node #${d.node_id} via ${d.operator}${d.idea?.rationale ? ' — ' + d.idea.rationale.slice(0, 80) : ''}`,
   node_evaluated: (d) => `node #${d.node_id} → ${fmt(d.metric)}`,
-  node_failed: (d) => `node #${d.node_id} failed (${d.reason})`,
+  node_failed: (d) => `node #${d.node_id} failed (${d.reason})${d.triage_action === 'reject_idea' ? ' — idea rejected' + (d.triage_rationale ? ': ' + String(d.triage_rationale).slice(0, 70) : '') : ''}`,
+  node_repaired: (d) => `node #${d.node_id} repaired in place (attempt ${d.attempt})${d.rationale ? ' — ' + String(d.rationale).slice(0, 80) : ''}`,
   node_confirmed: (d) => `node #${d.node_id} confirmed: ${fmt(d.mean)} ±${fmt(d.std)} (${d.seeds}×)`,
   best_confirmed: (d) => `robust winner: #${d.node_id}${d.significant ? ' (significant >1SE)' : ''}`,
   ablate: (d) => `ablated #${d.parent_id}: ${Object.entries(d.impacts || {}).map(([k, v]) => `${k}=${fmt(v, 2)}`).join(', ')}`,
@@ -86,7 +87,7 @@ const GROUPS = [
 ]
 const TYPE2GROUP = {
   node_created: 'proposal',
-  node_evaluated: 'eval', node_failed: 'eval', node_confirmed: 'eval', best_confirmed: 'eval', proxy_scored: 'eval', ablate: 'eval',
+  node_evaluated: 'eval', node_failed: 'eval', node_repaired: 'eval', node_confirmed: 'eval', best_confirmed: 'eval', proxy_scored: 'eval', ablate: 'eval',
   policy_decision: 'decision', strategy_decision: 'decision', rung_promoted: 'decision', agent_decision: 'decision', set_strategy: 'decision',
   research_completed: 'research', deep_research: 'research',
   report_generated: 'report',
@@ -99,7 +100,7 @@ const TYPE2GROUP = {
   data_profiled: 'lifecycle', data_provenance: 'lifecycle', host_grading: 'lifecycle', diversity_archive: 'lifecycle',
 }
 const ICON = {
-  node_evaluated: '📊', node_failed: '✗', node_confirmed: '✓', best_confirmed: '🏆',
+  node_evaluated: '📊', node_failed: '✗', node_repaired: '🔧', node_confirmed: '✓', best_confirmed: '🏆',
   reward_hack_suspected: '⚠', data_leakage: '⚠', research_completed: '🔬', report_generated: '📋',
   run_started: '▶', run_finished: '■', llm_cost: '💲', agent_decision: '🤖',
 }

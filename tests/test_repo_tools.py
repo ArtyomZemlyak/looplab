@@ -54,7 +54,7 @@ def test_make_roles_wires_repo_tools_for_edit_mode(tmp_path):
     (repo / "m.py").write_text("x=1\n", encoding="utf-8")
     t = RepoTask(id="e", editable_path=str(repo), edit_surface=["*.py"],
                  eval=EvalSpec(command=["python", "m.py"]))
-    s = Settings(); s.backend = "llm"            # default developer_backend -> no editing agent
+    s = Settings(); s.backend = "llm"; s.unified_agent = False   # default dev backend -> no editing agent
     researcher, _ = make_roles(t, s)
     assert isinstance(researcher, ToolUsingResearcher)
     provs = getattr(researcher.tools, "providers", [researcher.tools])

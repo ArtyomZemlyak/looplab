@@ -136,7 +136,7 @@ def test_make_roles_unified_returns_one_object():
 
 
 def test_make_roles_split_is_unchanged_when_flag_off():
-    r, d = make_roles(ToyTask(), Settings(backend="llm"))
+    r, d = make_roles(ToyTask(), Settings(backend="llm", unified_agent=False))
     assert r is not d and not isinstance(r, UnifiedAgent)
 
 
@@ -149,7 +149,8 @@ def test_unified_absorbs_strategist():
     ctx = StrategyContext(node_count=0, phase="seed", available_policies=["greedy"])
     assert r.decide(_st(), ctx) is not None              # rule baseline fires in seed phase
 
-    off, _ = make_roles(ToyTask(), Settings(backend="llm", unified_agent=True))
+    off, _ = make_roles(ToyTask(), Settings(backend="llm", unified_agent=True,
+                                            strategist_backend="off"))
     assert off.decide(_st(), ctx) is None                # off => no strategy (parity)
 
 

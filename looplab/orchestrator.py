@@ -105,7 +105,9 @@ def _shallow_fingerprint(path) -> str:
 def _failure_reason(res) -> str:
     """Classify why an eval produced no usable metric, so the audit trail distinguishes a
     crash from a timeout from a missing-deps setup failure from a drift rejection from a clean
-    run that simply printed no metric. Ordered most-specific first."""
+    run that simply printed no metric. Ordered most-specific first. (The "idea_rejected" reason
+    is NOT classified here — it is set by `_evaluate` when the crash-triage agent judges the idea
+    fundamentally wrong, which then steers `debug_action` away from that lineage.)"""
     if getattr(res, "drift", None) is not None:
         return "drift"
     if res.timed_out:
@@ -115,6 +117,28 @@ def _failure_reason(res) -> str:
     if res.exit_code != 0:
         return "crash"
     return "no_metric"          # exit 0 but no parseable metric emitted
+
+
+# Mechanical-failure signatures: a crash whose stderr matches one of these is almost always a
+# code/runtime defect (bad import, removed/renamed API, typo) — repairable in place from the
+# traceback alone. Used by the deterministic crash-triage fallback when no LLM agent is wired.
+_MECHANICAL_MARKERS = (
+    "ImportError", "ModuleNotFoundError", "NameError", "AttributeError", "SyntaxError",
+    "IndentationError", "TypeError", "unexpected keyword argument", "has no attribute",
+    "is not defined", "no attribute",
+)
+
+
+def _rule_triage(reason: str, error: str, attempt: int, max_attempts: int) -> dict:
+    """Deterministic crash-triage fallback (no LLM): repair a clear MECHANICAL crash while attempts
+    remain, otherwise abandon. Conservatively NEVER returns "reject_idea" — killing a whole idea
+    lineage is a strong call reserved for the LLM agent, so the rule path stays safe with the
+    unified agent off (it only ever repairs obvious mechanical crashes or abandons)."""
+    err = error or ""
+    mechanical = any(s in err for s in _MECHANICAL_MARKERS)
+    if reason == "crash" and mechanical and attempt <= max_attempts:
+        return {"action": "repair", "rationale": "mechanical crash (rule-based)"}
+    return {"action": "abandon", "rationale": "non-mechanical failure or attempts exhausted (rule-based)"}
 
 
 class Engine:
@@ -174,6 +198,9 @@ class Engine:
         surrogate_explore: float = 0.1,     # A2/A3: explore weight for a lazily-wired BOHB surrogate
         unified_agent: bool = False,        # one agent plays Researcher+Developer(+Strategist)
         agent_drives_actions: bool = False,  # agent picks the next macro action (within a legal gate)
+        inline_repair: bool = True,          # hybrid: triage + repair a crashed node IN PLACE (no new node)
+        inline_repair_attempts: int = 1,     # max in-place repair retries per node
+        inline_repair_reasons: tuple = ("crash",),  # failure reasons eligible for inline repair
     ):
         self.run_dir = Path(run_dir)
         self.task = task
@@ -201,6 +228,10 @@ class Engine:
         self._budget_aware = budget_aware
         self._failure_reflection = failure_reflection
         self._deep_repair = deep_repair
+        # Hybrid in-node crash repair (triage + inline repair). See Settings.inline_repair.
+        self._inline_repair = inline_repair
+        self._inline_repair_attempts = max(1, int(inline_repair_attempts))
+        self._inline_repair_reasons = tuple(inline_repair_reasons or ("crash",))
         self._localize_faults = localize_faults
         self._feature_engineering = feature_engineering
         self._ablate_code_blocks = ablate_code_blocks
@@ -1084,6 +1115,39 @@ class Engine:
         })
         return [chosen]
 
+    def _triage_crash(self, state: RunState, node, error: str, attempt: int) -> dict:
+        """Decide what to do with a just-crashed node BEFORE spending another eval:
+        {"action": "repair"|"abandon"|"reject_idea", "rationale": str}. Base mode: the unified
+        agent decides (it can consult the run via its pilot tools — read_code / find_analogous —
+        to judge whether nearby configs also fail, i.e. whether the IDEA is wrong vs the code).
+        Falls back to a deterministic rule when no LLM triage agent is wired (unified_agent off),
+        which never rejects an idea — so the feature is safe without an agent."""
+        reason = "crash"
+        fn = getattr(self.researcher, "triage_crash", None)
+        if callable(fn):
+            try:
+                from .roles import _state_brief
+                try:
+                    brief = _state_brief(state, None)
+                except Exception:  # noqa: BLE001 - a brief is advisory; never block on it
+                    brief = ""
+                out = fn(node, error, attempt, state=state, brief=brief)
+                if isinstance(out, dict) and out.get("action") in ("repair", "abandon", "reject_idea"):
+                    return {"action": out["action"], "rationale": str(out.get("rationale", ""))[:300]}
+            except Exception:  # noqa: BLE001 - agent triage is best-effort; fall through to the rule
+                pass
+        return _rule_triage(reason, error, attempt, self._inline_repair_attempts)
+
+    def _repair_error_context(self, reason: str, error: str) -> str:
+        """Error context handed to Developer.repair(). With deep_repair (C3) enrich the raw stderr
+        tail with the failure taxonomy + a 'reproduce then fix' directive; else pass the raw tail.
+        Shared by the inter-node debug operator and the inline (in-node) repair loop."""
+        if self._deep_repair:
+            return (f"[failure kind: {reason or 'unknown'}]\n{error}\n"
+                    "Diagnose the root cause; if it's unclear, add a tiny reproduction/"
+                    "assert near the failure, then return a corrected, complete script.")
+        return error
+
     # ---------------------------------------------------------------- private
     def _create_node(self, action: dict) -> None:
         state = fold(self.store.read_all())
@@ -1121,14 +1185,10 @@ class Engine:
                                                           or self._repo_spec):
                     idea = parent.idea.model_copy()
                     idea.operator = "debug"
-                    err = parent.error
-                    if self._deep_repair:
-                        # C3 deep test-driven repair: hand the Developer the failure TAXONOMY + a
-                        # structured directive (write a minimal reproduction if the cause is unclear,
-                        # then fix), not just the raw stderr tail. Depth is already bounded by debug_depth.
-                        err = (f"[failure kind: {parent.error_reason or 'unknown'}]\n{parent.error}\n"
-                               "Diagnose the root cause; if it's unclear, add a tiny reproduction/"
-                               "assert near the failure, then return a corrected, complete script.")
+                    # C3 deep test-driven repair (when enabled): failure taxonomy + a structured
+                    # "reproduce then fix" directive, not just the raw stderr tail. Depth is already
+                    # bounded by debug_depth.
+                    err = self._repair_error_context(parent.error_reason, parent.error)
                     with self.tracer.span("repair", parent_id=parent.id):
                         code = repair(parent.idea, parent.code, err)
                 else:
@@ -1455,47 +1515,99 @@ class Engine:
             self._seed_workspace(workdir)           # RepoTask: editable repo tree (ADR-7) …
             self._write_node_files(node, workdir)   # … agent edits on top …
             self._write_assets(workdir)             # … task assets win any name collision
-            _t0 = time.time()
-            # Mid-eval per-node intervention (v2): a watcher polls the log while the eval runs in a
-            # worker thread; if the operator appends `node_abort` for THIS node, it sets the cancel
-            # Event, which tree-kills the in-flight subprocess (sandbox._run_argv). v1's pre-eval
-            # skip only catches not-yet-started nodes — this kills a running one.
+            # Hybrid crash repair: each attempt runs the eval (with the mid-eval abort watcher) and,
+            # if it CRASHES, the agent triages it and may repair the code IN PLACE and re-run — all
+            # within this one node (no new tree node, no max_nodes spent). At most
+            # `inline_repair_attempts` repairs; then the node fails normally and stays eligible for the
+            # budgeted inter-node debug operator. Exactly ONE terminal event (node_evaluated/node_failed)
+            # is emitted at the end so first_terminal budget accounting and resume re-entry are intact;
+            # only NON-terminal `node_repaired` events are written mid-loop.
             import threading
-            cancel = threading.Event()
-            aborted = False
-            async with anyio.create_task_group() as _tg:
-                def _abort_seen() -> bool:   # lightweight raw scan — no full fold each tick
-                    for o in iter_jsonl(self.store.path):
-                        if o.get("type") == "node_abort" and o.get("data", {}).get("node_id") == node_id:
-                            return True
-                    return False
-                async def _watch():
-                    nonlocal aborted
-                    while True:
-                        await anyio.sleep(0.3)
-                        if cancel.is_set():
-                            return
-                        if await anyio.to_thread.run_sync(_abort_seen):
-                            aborted = True
-                            cancel.set()
-                            return
-                _tg.start_soon(_watch)
-                res = await anyio.to_thread.run_sync(
-                    self._run_eval, node, str(workdir), None, None, cancel
+            attempt = 0
+            total_eval = 0.0                 # summed subprocess wall-clock across all attempts (cost)
+            triage_outcome = None            # ("abandon"|"reject_idea", rationale) for the terminal event
+            err = ""
+            reason = "crash"
+            while True:
+                _t0 = time.time()
+                # Mid-eval per-node intervention (v2): a watcher polls the log while the eval runs in a
+                # worker thread; if the operator appends `node_abort` for THIS node, it sets the cancel
+                # Event, which tree-kills the in-flight subprocess (sandbox._run_argv). v1's pre-eval
+                # skip only catches not-yet-started nodes — this kills a running one.
+                cancel = threading.Event()
+                aborted = False
+                async with anyio.create_task_group() as _tg:
+                    def _abort_seen() -> bool:   # lightweight raw scan — no full fold each tick
+                        for o in iter_jsonl(self.store.path):
+                            if o.get("type") == "node_abort" and o.get("data", {}).get("node_id") == node_id:
+                                return True
+                        return False
+                    async def _watch():
+                        nonlocal aborted
+                        while True:
+                            await anyio.sleep(0.3)
+                            if cancel.is_set():
+                                return
+                            if await anyio.to_thread.run_sync(_abort_seen):
+                                aborted = True
+                                cancel.set()
+                                return
+                    _tg.start_soon(_watch)
+                    res = await anyio.to_thread.run_sync(
+                        self._run_eval, node, str(workdir), None, None, cancel
+                    )
+                    cancel.set()                  # eval finished on its own …
+                    _tg.cancel_scope.cancel()     # … stop the watcher now (no poll-interval latency)
+                total_eval = round(total_eval + (time.time() - _t0), 3)   # cumulative eval cost (#2)
+                ok = res.metric is not None and res.exit_code == 0 and not res.timed_out
+                if aborted and not ok:                       # killed mid-eval by the operator (and the
+                    async with self._write_lock:             # eval didn't already finish cleanly first)
+                        self.store.append("node_failed", {
+                            "node_id": node_id, "error": "aborted by operator (killed mid-eval)",
+                            "reason": "aborted", "eval_seconds": total_eval})
+                        self._maybe_crash()
+                    return
+                if ok:
+                    break
+                reason = _failure_reason(res)
+                err = self._redact(res.stderr[-500:]) or (
+                    f"metric drift: {res.drift}" if res.drift is not None else
+                    f"exit={res.exit_code} timed_out={res.timed_out} no_metric"
                 )
-                cancel.set()                  # eval finished on its own …
-                _tg.cancel_scope.cancel()     # … stop the watcher now (no poll-interval latency)
-            dur = round(time.time() - _t0, 3)            # eval wall-clock (cost accounting #2)
-            ok = res.metric is not None and res.exit_code == 0 and not res.timed_out
-            if aborted and not ok:                       # killed mid-eval by the operator (and the
-                async with self._write_lock:             # eval didn't already finish cleanly first)
-                    self.store.append("node_failed", {
-                        "node_id": node_id, "error": "aborted by operator (killed mid-eval)",
-                        "reason": "aborted", "eval_seconds": dur})
-                    self._maybe_crash()
-                return
-            sp.set_many(eval_seconds=dur, exit_code=res.exit_code, timed_out=res.timed_out,
-                        metric=res.metric, ok=ok)
+                # Inline-repair gate: feature on, repairable reason, attempts left, a Developer that
+                # can repair, and something to repair (whole-file code, multi-file edits, or a repo).
+                if (not self._inline_repair
+                        or reason not in self._inline_repair_reasons
+                        or attempt >= self._inline_repair_attempts
+                        or not callable(getattr(self.developer, "repair", None))
+                        or not (node.code or node.files or self._repo_spec)):
+                    break
+                triage = self._triage_crash(state, node, err, attempt + 1)
+                action = triage.get("action", "repair")
+                if action == "abandon":
+                    triage_outcome = ("abandon", triage.get("rationale", ""))
+                    break
+                if action == "reject_idea":   # the idea itself is wrong -> mark the lineage; steer to a new idea
+                    reason = "idea_rejected"
+                    triage_outcome = ("reject_idea", triage.get("rationale", ""))
+                    break
+                # action == "repair": fix the code in place and re-eval (no new node, no budget spent).
+                with self.tracer.span("inline_repair", node_id=node_id, attempt=attempt + 1):
+                    new_code = self.developer.repair(
+                        node.idea, node.code, self._repair_error_context(reason, err))
+                attempt += 1
+                async with self._write_lock:
+                    self.store.append("node_repaired", {
+                        "node_id": node_id, "attempt": attempt, "code": new_code,
+                        "files": getattr(self.developer, "last_files", {}) or {},
+                        "deleted": getattr(self.developer, "last_deleted", []) or [],
+                        "error_in": err, "triage_action": "repair",
+                        "rationale": str(triage.get("rationale", ""))[:300]})
+                node = fold(self.store.read_all()).nodes[node_id]   # node.code now == repaired code
+                self._write_node_files(node, workdir)               # re-materialize before re-eval
+                # loop -> re-run the eval with the corrected code
+            sp.set_many(eval_seconds=total_eval, exit_code=res.exit_code, timed_out=res.timed_out,
+                        metric=res.metric, ok=ok, repair_attempts=attempt)
             if res.violations:
                 sp.set("violations", len(res.violations))
             if res.drift is not None:
@@ -1507,7 +1619,7 @@ class Engine:
                     self.store.append(
                         "node_evaluated",
                         {"node_id": node_id, "metric": res.metric,
-                         "stdout_tail": self._redact(res.stdout[-500:]), "eval_seconds": dur,
+                         "stdout_tail": self._redact(res.stdout[-500:]), "eval_seconds": total_eval,
                          "extra_metrics": res.extra_metrics or {},   # #5 multi-objective
                          "violations": res.violations or [],
                          # Intra-node sweep: the whole grid's per-trial results, carried on the ONE
@@ -1537,14 +1649,15 @@ class Engine:
                         self.store.append("reward_hack_suspected",
                                           {"node_id": node_id, "signals": sigs})
                 else:
-                    err = self._redact(res.stderr[-500:]) or (
-                        f"metric drift: {res.drift}" if res.drift is not None else
-                        f"exit={res.exit_code} timed_out={res.timed_out} no_metric"
-                    )
-                    reason = _failure_reason(res)
+                    # `err`/`reason` were computed in the attempt loop (reason may be "idea_rejected"
+                    # if the crash-triage agent judged the idea fundamentally wrong).
                     sp.set("error_reason", reason)
-                    self.store.append("node_failed", {"node_id": node_id, "error": err,
-                                                      "reason": reason, "eval_seconds": dur})
+                    data = {"node_id": node_id, "error": err, "reason": reason,
+                            "eval_seconds": total_eval}
+                    if triage_outcome is not None:
+                        data["triage_action"], data["triage_rationale"] = (
+                            triage_outcome[0], str(triage_outcome[1])[:300])
+                    self.store.append("node_failed", data)
                 self._maybe_crash()
 
     @staticmethod

@@ -86,7 +86,8 @@ def test_live_repotools_researcher_reads_repo(tmp_path):
     t = RepoTask(id="rt", goal="improve the experiment to raise the metric", direction="max",
                  editable_path=str(FIXTURE), edit_surface=["*.json"], protect=["ttrain.py"],
                  eval=EvalSpec(command=[sys.executable, "ttrain.py"], metric=_M))
-    researcher, _ = make_roles(t, _llm())
+    s = _llm(); s.unified_agent = False     # this test asserts the split ToolUsingResearcher wiring
+    researcher, _ = make_roles(t, s)
     from looplab.agent import ToolUsingResearcher
     from looplab.knowledge_tools import RepoTools
     assert isinstance(researcher, ToolUsingResearcher)

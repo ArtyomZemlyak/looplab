@@ -145,10 +145,11 @@ def test_agent_uses_run_tool_then_emits():
 
 # --------------------------------------------------------------------------- wiring
 def test_make_roles_wraps_tool_researcher_by_default():
-    researcher, _ = make_roles(ToyTask(), Settings(backend="llm"))
+    researcher, _ = make_roles(ToyTask(), Settings(backend="llm", unified_agent=False))
     assert isinstance(researcher, ToolUsingResearcher)
 
 
 def test_make_roles_flag_off_is_plain_researcher():
-    researcher, _ = make_roles(ToyTask(), Settings(backend="llm", researcher_tools=False))
+    researcher, _ = make_roles(ToyTask(), Settings(backend="llm", unified_agent=False,
+                                                   researcher_tools=False))
     assert isinstance(researcher, LLMResearcher)

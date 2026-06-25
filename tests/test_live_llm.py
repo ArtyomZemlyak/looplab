@@ -56,6 +56,7 @@ def test_live_agentic_researcher(tmp_path):
     """The tool-using Researcher runs the real multi-turn tool protocol over Ollama:
     it may call grep/kb_search/read over the knowledge notes, then emits a valid Idea."""
     s = _llm_settings()
+    s.unified_agent = False                 # this test asserts the split ToolUsingResearcher wiring
     s.knowledge_dir = str(ROOT / "examples" / "knowledge")
     task = load_task(ROOT / "examples" / "regression_task.json")
     researcher, _ = make_roles(task, s)
@@ -70,6 +71,7 @@ def test_live_researcher_with_skills(tmp_path):
     """Composite tools (knowledge + skills) reach the live Researcher; it returns a
     valid Idea after optionally consulting them."""
     s = _llm_settings()
+    s.unified_agent = False                 # this test asserts the split ToolUsingResearcher wiring
     s.knowledge_dir = str(ROOT / "examples" / "knowledge")
     s.skills_dir = str(ROOT / "examples" / "skills")
     task = load_task(ROOT / "examples" / "regression_task.json")

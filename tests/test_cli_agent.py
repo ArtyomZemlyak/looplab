@@ -62,7 +62,7 @@ def test_make_roles_selects_cli_agent():
     from looplab.roles import LLMDeveloper, ValidatingDeveloper
     from looplab.tasks import load_task, make_roles
     s = Settings()
-    s.backend, s.developer_backend = "llm", "opencode"
+    s.backend, s.developer_backend, s.unified_agent = "llm", "opencode", False
     task = load_task(ROOT / "examples" / "code_regression_task.json")
     _, developer = make_roles(task, s)
     assert isinstance(developer, ValidatingDeveloper)
@@ -80,6 +80,7 @@ def test_make_roles_raw_agent_when_validation_off():
     from looplab.tasks import load_task, make_roles
     s = Settings()
     s.backend, s.developer_backend, s.validate_agent = "llm", "opencode", False
+    s.unified_agent = False
     task = load_task(ROOT / "examples" / "code_regression_task.json")
     _, developer = make_roles(task, s)
     assert isinstance(developer, CliAgentDeveloper)          # no wrapper

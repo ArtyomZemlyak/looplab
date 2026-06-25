@@ -61,6 +61,7 @@ def debug_action(state: RunState, debug_depth: int) -> Optional[dict]:
         has_child.update(n.parent_ids)
     for n in sorted(state.nodes.values(), key=lambda n: n.id):
         if (n.status is NodeStatus.failed and n.id not in has_child
+                and n.error_reason != "idea_rejected"   # crash-triage judged the idea wrong: don't debug it
                 and _debug_lineage(state, n.id) < debug_depth):
             return {"kind": "debug", "parent_id": n.id}
     return None

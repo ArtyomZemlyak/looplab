@@ -162,3 +162,58 @@ class UnifiedAgent:
             self._pilot_tools.bind_state(state, None)
         return drive_tool_loop(self._pilot_client, self._pilot_tools, messages, emit_spec,
                                max_turns=3, finalize=_finalize, fallback=_fallback)
+
+    # --------------------------------------------------- Crash triage (in-node repair)
+    _TRIAGE_SYSTEM = (
+        "You are debugging an autonomous ML research loop. One experiment node just CRASHED at "
+        "runtime. Decide what to do BEFORE spending another eval:\n"
+        "  - 'repair': the crash is mechanical (bad import, removed/renamed API, typo, wrong arg) "
+        "and the SAME idea is sound — fix the code and re-run in place.\n"
+        "  - 'reject_idea': the idea itself is fundamentally flawed (e.g. the approach can't work, or "
+        "nearby configs crash the same way) — abandon this lineage so the loop tries a different idea.\n"
+        "  - 'abandon': stop here without judging the idea (e.g. not worth another attempt).\n"
+        "Consult the run if useful (read the code, find analogous experiments), then call "
+        "`triage_crash` exactly once with your `action` and a one-sentence `rationale`."
+    )
+
+    def triage_crash(self, node, error: str, attempt: int, *, state: Optional[RunState] = None,
+                     brief: str = "") -> Optional[dict]:
+        """Decide what to do with a just-crashed node: returns ``{"action", "rationale"}`` where
+        action ∈ {repair, abandon, reject_idea}, or ``None`` when no pilot model is wired (the engine
+        then falls back to its deterministic rule). The agent may use its run-introspection tools
+        (read_code / find_analogous) to judge whether the IDEA is wrong vs just the code. No side
+        effects: the CALLER performs the repair and records the events."""
+        if self._pilot_client is None:
+            return None                       # no triage model -> engine uses the rule-based fallback
+        code_tail = (getattr(node, "code", "") or "")[-1500:]
+        messages = [
+            {"role": "system", "content": self._TRIAGE_SYSTEM},
+            {"role": "user", "content": (
+                (brief + "\n" if brief else "") +
+                f"Crashed node {getattr(node, 'id', '?')} (repair attempt {attempt}).\n"
+                f"--- ERROR (stderr tail) ---\n{error}\n"
+                f"--- CODE (tail) ---\n{code_tail}\n"
+                "Choose: repair, reject_idea, or abandon.").strip()},
+        ]
+        emit_spec = {"type": "function", "function": {
+            "name": "triage_crash",
+            "description": "Decide how to handle the crashed node.",
+            "parameters": {"type": "object", "properties": {
+                "action": {"type": "string", "enum": ["repair", "abandon", "reject_idea"],
+                           "description": "repair in place | abandon node | reject the whole idea."},
+                "rationale": {"type": "string"}},
+                "required": ["action"]}}}
+
+        def _finalize(args: dict) -> dict:
+            action = str((args or {}).get("action", "")).strip()
+            if action not in ("repair", "abandon", "reject_idea"):
+                action = "repair"             # default to the cheap, safe action on a malformed emit
+            return {"action": action, "rationale": str((args or {}).get("rationale", ""))[:300]}
+
+        def _fallback(_messages) -> dict:
+            return {"action": "repair", "rationale": "fallback: attempt repair"}
+
+        if state is not None and self._pilot_tools is not None and hasattr(self._pilot_tools, "bind_state"):
+            self._pilot_tools.bind_state(state, None)   # enable read_code / find_analogous on the run
+        return drive_tool_loop(self._pilot_client, self._pilot_tools, messages, emit_spec,
+                               max_turns=3, finalize=_finalize, fallback=_fallback)

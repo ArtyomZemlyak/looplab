@@ -61,7 +61,19 @@ class Settings(BaseSettings):
     failure_reflection: bool = False
     # C3 deep test-driven repair: hand the Developer the failure taxonomy + a structured "reproduce
     # then fix" directive on debug, not just the raw stderr tail. Off by default.
-    deep_repair: bool = False
+    deep_repair: bool = True
+    # Hybrid in-node crash repair: when an LLM-generated node CRASHES at runtime (mechanical errors
+    # — bad import, removed kwarg, typo), the agent triages it and may repair the code IN PLACE within
+    # the same eval (cheap; does NOT consume max_nodes and does NOT add a node to the search tree).
+    # Semantic failures still flow to a new idea/debug node via the policy. ON by default; set False
+    # to restore the prior behavior (every crash waits for a budgeted inter-node debug node).
+    inline_repair: bool = True
+    # Max in-place repair attempts per node before it fails normally (and stays eligible for the
+    # budgeted inter-node debug operator). 1 = a single repair retry.
+    inline_repair_attempts: int = Field(default=1, ge=1)
+    # Which failure reasons (_failure_reason: crash|timeout|setup|no_metric|drift) are eligible for
+    # inline repair. Default: only mechanical crashes. Env override expects a JSON array.
+    inline_repair_reasons: tuple[str, ...] = ("crash",)
     # C1 (Agentless localization): for repo tasks, rank the source files most relevant to the most
     # recent failure (traceback + identifiers) and surface them in the proposal/repair prompt so the
     # Developer edits the right place. Off by default; repo tasks only.
@@ -108,8 +120,9 @@ class Settings(BaseSettings):
     critic_check: bool = False
     # A7 Strategist (NEW, user-requested): optional LLM/rule meta-controller that picks the search
     # policy/allocator + operator mix + fidelity (+ Developer backend) per situation. Config-first:
-    # "off" (default) == today's behavior, every choice the Strategist makes is also a direct knob.
-    strategist_backend: str = "off"            # "off" | "rule" | "llm"
+    # every choice the Strategist makes is also a direct knob. Defaults to "llm" so the agent adapts
+    # the search policy/operators/fidelity per situation; set "off" for static config-driven search.
+    strategist_backend: str = "llm"            # "off" | "rule" | "llm"
     strategist_every: int = Field(default=3, ge=1)   # consult cadence (created nodes)
     # Multi-seed confirmation (I12, ADR-15): confirm the top-k under N seeds before
     # finishing. 0 disables (default). Only meaningful when eval has variance.
@@ -164,13 +177,13 @@ class Settings(BaseSettings):
     developer_model: str | None = None
     researcher_base_url: str | None = None
     developer_base_url: str | None = None
-    # Unified self-driving agent (NEW): one LLM identity that plays Researcher + Developer
-    # (+ Strategist) across pipeline stages, choosing its own model/toolset per stage. Off by
-    # default == today's split-role behavior (byte-identical). `agent_drives_actions` is the
-    # nested opt-in that lets the agent pick the next macro action (within a pure legal-action
-    # gate); off even when `unified_agent` is on ships the drop-in role merge without self-driving.
-    unified_agent: bool = False
-    agent_drives_actions: bool = False
+    # Unified self-driving agent: one LLM identity that plays Researcher + Developer (+ Strategist)
+    # across pipeline stages, choosing its own model/toolset per stage. ON by default — the agent
+    # drives the loop (incl. crash triage: repair/abandon/reject_idea) and, via
+    # `agent_drives_actions`, picks the next macro action within a pure legal-action gate. Set both
+    # to False for the legacy byte-identical split-role behavior. (No-op unless backend="llm".)
+    unified_agent: bool = True
+    agent_drives_actions: bool = True
     # Per-stage model/endpoint overrides for the unified agent. Recognized keys (see
     # tasks.build_unified_agent): `propose` (researcher), `implement`/`repair` (developer),
     # `strategy`, `pilot`. Unlisted keys are ignored. Empty = the per-role researcher_*/developer_*
@@ -183,10 +196,11 @@ class Settings(BaseSettings):
     #   OpenAI/Ollama-v1/DeepSeek -> reasoning_effort (low|medium|high|none)
     # `llm_reasoning`: "" = send nothing (server default — current behavior); off = actively disable;
     #   on = enable at default depth; low|medium|high = enable at that effort.
-    # Empty by default so existing runs are unchanged; the model's chain-of-thought is still CAPTURED
-    # either way (reasoning_content field or inline <think>). NOTE: to get a SEPARATE reasoning_content
-    # field from SGLang/vLLM, the server also needs `--reasoning-parser qwen3` (else it's inline).
-    llm_reasoning: str = ""
+    # Defaults to "high" so the agent reasons before proposing/repairing/triaging (better code, fewer
+    # crashes); set "" to send nothing (server default) or "off" to disable. The model's chain-of-thought
+    # is CAPTURED either way (reasoning_content field or inline <think>). NOTE: to get a SEPARATE
+    # reasoning_content field from SGLang/vLLM, the server also needs `--reasoning-parser qwen3`.
+    llm_reasoning: str = "high"
     llm_reasoning_style: str = "auto"    # auto | qwen | effort | none — how to shape the request param
     llm_reasoning_extra: dict = {}       # raw fields merged into the body (escape hatch, e.g. Anthropic thinking)
     # H1: drive structured calls with the endpoint's constrained decoding (vLLM/SGLang guided_json +
