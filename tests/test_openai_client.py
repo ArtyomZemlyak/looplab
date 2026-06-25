@@ -58,6 +58,52 @@ def test_text_fallback_strips_think(base_url):
     assert idea.operator == "draft" and idea.params == {"x": 1.0}
 
 
+# --- transient-timeout resilience: a slow/unresponsive endpoint is retried, not fatal ----------
+class _OkResp:
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+    def read(self):
+        return json.dumps({"choices": [{"message": {"role": "assistant", "content": "ok"}}],
+                           "usage": {}}).encode()
+
+
+def test_post_retries_transient_timeout(monkeypatch):
+    """A momentary socket timeout (e.g. Ollama reloading a model) must be retried with backoff and
+    then succeed — a single slow response must not abort a long unattended run."""
+    import looplab.llm as llm
+    calls = {"n": 0}
+
+    def fake_urlopen(req, timeout=None):
+        calls["n"] += 1
+        if calls["n"] < 3:
+            raise TimeoutError("timed out")        # first two attempts time out
+        return _OkResp()
+
+    monkeypatch.setattr(llm.urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(llm.time, "sleep", lambda *_a: None)   # skip real backoff
+    c = llm.OpenAICompatibleClient("m", base_url="http://x/v1")
+    assert c.complete_text([{"role": "user", "content": "go"}]) == "ok"
+    assert calls["n"] == 3                                     # retried twice, succeeded on the 3rd
+
+
+def test_post_raises_after_exhausting_timeouts(monkeypatch):
+    """A persistently dead endpoint still surfaces a clean LLMError once retries are exhausted."""
+    import looplab.llm as llm
+
+    def fake_urlopen(req, timeout=None):
+        raise TimeoutError("timed out")
+
+    monkeypatch.setattr(llm.urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(llm.time, "sleep", lambda *_a: None)
+    c = llm.OpenAICompatibleClient("m", base_url="http://x/v1")
+    with pytest.raises(llm.LLMError):
+        c.complete_text([{"role": "user", "content": "go"}])
+
+
 def test_h1_guided_json_adds_schema_constraints():
     """H1: with guided_json on, complete_tool sends response_format + guided_json built from the schema."""
     from looplab.llm import OpenAICompatibleClient

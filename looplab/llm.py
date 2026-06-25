@@ -169,6 +169,13 @@ class OpenAICompatibleClient:
                 hint = (" — check the API key (LOOPLAB_LLM_API_KEY)" if e.code == 401 else "")
                 raise LLMError(f"LLM request to {self.base_url} failed: {e}{hint}") from e
             except (urllib.error.URLError, TimeoutError, OSError) as e:
+                # Transient network failures (a socket timeout, connection reset, or a momentarily
+                # unresponsive local server — e.g. Ollama reloading a model) are retried with backoff
+                # too, exactly like a 5xx: a single slow response must not abort a long unattended run
+                # (the tool-using proposer / pilot call client.chat directly and don't wrap LLMError).
+                if attempt < self._max_retries:
+                    time.sleep(min(2.0 * (2 ** attempt), 30.0))
+                    continue
                 raise LLMError(f"LLM request to {self.base_url} failed: {e}") from e
         if raw is None:  # loop exhausted retries on a transient code without ever succeeding
             raise LLMError(f"LLM request to {self.base_url} failed: no response after retries")
