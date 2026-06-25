@@ -111,6 +111,64 @@ def test_data_tools_graceful_and_with_data():
     assert "no data profile" in dt.execute("data_profile", {}).lower()
 
 
+# --- schema/profile DERIVED from a tabular asset when the task declares no columns() -----------
+class _CsvTask:
+    """A task with no columns(), only a raw train.csv asset — like mlebench_real."""
+    def assets(self):
+        return {"train.csv": "id,height,city,target\n1,1.8,NY,0\n2,1.6,LA,1\n3,,NY,0\n",
+                "test.csv": "id,height,city\n9,1.7,LA\n"}
+
+
+def test_data_schema_inferred_from_csv_when_no_columns():
+    dt = DataTools(_CsvTask())
+    dt.bind_state(_st())
+    sch = dt.execute("data_schema", {})
+    assert "inferred from train.csv" in sch          # used the training table, not test.csv
+    assert "height (numeric)" in sch                 # numeric column inferred
+    assert "city (categorical)" in sch               # categorical column inferred
+    assert "target" in sch
+
+
+def test_data_profile_computed_from_csv_when_unrecorded():
+    dt = DataTools(_CsvTask())
+    dt.bind_state(_st())                              # _st() has no data_profile -> fall back to CSV
+    prof = dt.execute("data_profile", {})
+    assert "train.csv" in prof
+    assert "height: numeric" in prof and "min=1.6" in prof and "max=1.8" in prof
+    assert "missing=0.33" in prof                    # 1 of 3 height values is blank
+    assert "city: categorical" in prof and "unique=2" in prof
+
+
+class _SentinelTask:
+    def assets(self):
+        return {"train.csv": "x,y\n1.0,NaN\n2.0,inf\n3.0,Infinity\n"}
+
+
+def test_csv_nan_inf_sentinels_not_numeric():
+    """A column of textual NaN/inf sentinels must read as categorical (needs handling), not numeric
+    with NaN/inf-poisoned stats."""
+    dt = DataTools(_SentinelTask())
+    dt.bind_state(_st())
+    sch = dt.execute("data_schema", {})
+    assert "x (numeric)" in sch and "y (categorical)" in sch
+    prof = dt.execute("data_profile", {})
+    assert "x: numeric" in prof
+    assert "y: categorical" in prof and "nan" not in prof.lower().split("y:")[1]
+
+
+class _RaggedTask:
+    def assets(self):                                # header a,b,c,d ; rows 2-4 truncated before d
+        return {"train.csv": "a,b,c,d\n1,2,3,9\n1,2\n1,2\n1,2\n"}
+
+
+def test_csv_ragged_rows_count_truncated_as_missing():
+    dt = DataTools(_RaggedTask())
+    dt.bind_state(_st())
+    prof = dt.execute("data_profile", {})
+    dline = [l for l in prof.splitlines() if l.strip().startswith("d:")][0]
+    assert "missing=0.75" in dline                   # d present in only 1 of 4 rows, not 0.00
+
+
 # --------------------------------------------------------------------------- agent loop
 class _FakeChatClient:
     def __init__(self, scripted):

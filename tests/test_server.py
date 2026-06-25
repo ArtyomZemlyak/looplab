@@ -161,6 +161,33 @@ def test_chat_suggest_health_softfail(tmp_path):
     assert "ok" in h and "model" in h
 
 
+def test_chat_returns_trace_with_user_and_completion(tmp_path, monkeypatch):
+    """A successful /chat reply must carry a langfuse-style `trace` whose prompt includes the user's
+    ACTUAL message (not just the system prompt) plus the completion — the Dock chat-trace card depends
+    on this contract, so a dropped/renamed key must fail CI."""
+    _build_run(tmp_path)
+    import looplab.server as server
+
+    class _FakeClient:
+        model = "fake-model"
+
+        def complete_text(self, messages):
+            return "a grounded answer"
+
+    monkeypatch.setattr(server, "make_llm_client", lambda *a, **k: _FakeClient())
+    client = TestClient(make_app(tmp_path))
+    r = client.post("/api/runs/demo/chat",
+                    json={"messages": [{"role": "user", "content": "why did node 1 fail?"}]})
+    body = r.json()
+    assert r.status_code == 200 and body["ok"] is True
+    assert body["text"] == "a grounded answer"
+    tr = body["trace"]
+    assert tr["model"] == "fake-model"
+    assert tr["completion"] == "a grounded answer"
+    assert tr["user"] == "why did node 1 fail?"          # the real input is captured in the trace
+    assert tr["system"]                                   # system prompt (run/node context) present
+
+
 def test_cors_is_allowlisted_not_wildcard(tmp_path):
     _build_run(tmp_path)
     client = TestClient(make_app(tmp_path))

@@ -26,6 +26,17 @@ class LLMError(RuntimeError):
     it like any other bad response and the run degrades to a safe default rather than crashing."""
 
 
+def _is_timeout(e: BaseException) -> bool:
+    """True only for a transient socket TIMEOUT (worth retrying — a slow/momentarily-busy endpoint,
+    e.g. Ollama reloading a model). A refused connection / DNS / TLS error is a steady-state
+    "endpoint down or misconfigured" signal and returns False so the caller fails FAST. `socket.timeout`
+    has been an alias of `TimeoutError` since Python 3.10, so a `URLError` wrapping a socket timeout
+    (its `.reason`) is covered too."""
+    if isinstance(e, TimeoutError):
+        return True
+    return isinstance(getattr(e, "reason", None), TimeoutError)
+
+
 def split_think(text: str) -> tuple[str, str]:
     """(thinking, answer) split — thin wrapper over `parse.split_think`, imported lazily to avoid
     the parse↔llm import cycle (parse imports LLMError from here)."""
@@ -169,6 +180,15 @@ class OpenAICompatibleClient:
                 hint = (" — check the API key (LOOPLAB_LLM_API_KEY)" if e.code == 401 else "")
                 raise LLMError(f"LLM request to {self.base_url} failed: {e}{hint}") from e
             except (urllib.error.URLError, TimeoutError, OSError) as e:
+                # Retry ONLY a transient TIMEOUT (a slow / momentarily-busy endpoint, e.g. Ollama
+                # reloading a model) — the failure mode that was aborting long runs, since the
+                # tool-using proposer / pilot call client.chat directly and don't wrap LLMError.
+                # A refused connection / DNS / TLS error is a steady-state "endpoint down or
+                # misconfigured" signal: fail FAST so /api/llm/health stays instant and a wrong
+                # base_url surfaces on the first call instead of after ~30s of pointless backoff.
+                if _is_timeout(e) and attempt < self._max_retries:
+                    time.sleep(min(2.0 * (2 ** attempt), 30.0))
+                    continue
                 raise LLMError(f"LLM request to {self.base_url} failed: {e}") from e
         if raw is None:  # loop exhausted retries on a transient code without ever succeeding
             raise LLMError(f"LLM request to {self.base_url} failed: no response after retries")

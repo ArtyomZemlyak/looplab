@@ -696,7 +696,15 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
             text = client.complete_text([{"role": "system", "content": sys_prompt}, *msgs])
         except Exception as e:  # noqa: BLE001 - offline / no model -> soft fail
             return JSONResponse({"ok": False, "error": str(e)}, status_code=200)
-        return {"ok": True, "text": text}
+        # Return the LLM I/O so the chat row can expand into a langfuse-style trace. We include the
+        # user's latest message + the system prompt (which carries the run/node context) so the trace
+        # honestly shows the actual input, but omit the REST of the echoed conversation — the client
+        # already holds it, and re-sending the whole history would grow the payload O(n²) over a long
+        # chat (the single latest user turn is O(1)). `text` unchanged.
+        user_msg = next((m.get("content", "") for m in reversed(msgs) if m.get("role") == "user"), "")
+        return {"ok": True, "text": text,
+                "trace": {"model": getattr(client, "model", None),
+                          "system": sys_prompt, "user": user_msg, "completion": text}}
 
     @app.post("/api/runs/{run_id}/suggest")
     async def suggest(run_id: str, request: Request):
@@ -777,11 +785,19 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
         except Exception:  # noqa: BLE001 - parse fumble -> fall through to advisory reply
             pass
         try:
-            text = await anyio.to_thread.run_sync(lambda: client.complete_text([
-                {"role": "system", "content": "You are an ML research collaborator embedded in an "
-                 "experiment loop. Answer concisely, grounded on the run.\n" + _node_context(st, nid, rd)},
-                *msgs] + ([{"role": "user", "content": instruction}] if instruction else [])))
-            return {"ok": True, "reply": text}
+            advise_sys = ("You are an ML research collaborator embedded in an experiment loop. Answer "
+                          "concisely, grounded on the run.\n" + _node_context(st, nid, rd))
+            advise_msgs = msgs + ([{"role": "user", "content": instruction}] if instruction else [])
+            text = await anyio.to_thread.run_sync(lambda: client.complete_text(
+                [{"role": "system", "content": advise_sys}, *advise_msgs]))
+            # Carry the LLM I/O back so the chat row can expand into a langfuse-style trace card. We
+            # include the user's instruction + system prompt so the trace shows the real input, but
+            # omit the rest of the echoed conversation (the client holds it) to avoid O(n²) growth.
+            user_msg = instruction or next(
+                (m.get("content", "") for m in reversed(msgs) if m.get("role") == "user"), "")
+            return {"ok": True, "reply": text,
+                    "trace": {"model": getattr(client, "model", None),
+                              "system": advise_sys, "user": user_msg, "completion": text}}
         except Exception as e:  # noqa: BLE001
             return JSONResponse({"ok": False, "error": str(e)}, status_code=200)
 

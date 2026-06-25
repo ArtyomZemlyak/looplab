@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react'
-import { get, fmt, chat, command, applyAction } from './util.js'
+import { get, fmt, chat, command, applyAction, workingId } from './util.js'
 import Markdown from './markdown.jsx'
+import { NodeTrace, LlmCall } from './Inspector.jsx'
 
 const HELP = 'Commands: /confirm #n · /ablate #n · /fork #n · /promote #n · /note #n text · /hint text · /strategy policy=ucb fidelity=low · /deep-research · /experiment <idea> · /approve #n · /ratify · /pause · /resume · /stop · /refresh. Or just type what you want and I’ll propose an action to confirm.'
 
@@ -126,6 +127,25 @@ function collectThinking(trace, nid) {
   return out
 }
 
+// A short, honest "what's the agent doing now" line, derived purely from the live state + the latest
+// event (no backend signal needed). Drives the animated status strip at the foot of the feed.
+function agentStatus(live, log) {
+  if (!live || live.finished) return null
+  if (live.paused) return 'Paused'
+  const phase = live.phase
+  if (phase === 'grounding' || phase === 'onboarding') return 'Setting up the task & data…'
+  if (phase === 'approval') return 'Waiting for your approval…'
+  if (phase === 'spec_approval') return 'Waiting to ratify the eval spec…'
+  const wid = workingId(live)                                   // a node is pending → it's evaluating
+  if (wid != null) return `Running experiment #${wid}…`
+  const last = log.length ? log[log.length - 1].type : null     // between nodes → infer from last event
+  if (last === 'strategy_decision' || last === 'set_strategy') return 'Choosing a strategy…'
+  if (last === 'policy_decision' || last === 'agent_decision') return 'Planning the next experiment…'
+  if (last === 'research_completed' || last === 'deep_research') return 'Reading the literature…'
+  if (last === 'node_created') return 'Writing & running the experiment…'
+  return 'Thinking about the next step…'
+}
+
 const Disclosure = ({ label, children }) => {
   const [open, setOpen] = useState(false)
   return <div className="think-debug" style={{ marginTop: 6 }}>
@@ -226,6 +246,30 @@ function reasoningDetail(e, trace) {
   return null
 }
 
+// The full, UNtruncated text behind a feed row whose one-line narration clamped it (node_failed's
+// triage, node_repaired's rationale, the report headline, a hint, …) — so every message is fully
+// readable on expand even when it has no dedicated reasoning card. Returns [] when there's nothing.
+function genericRows(e) {
+  const d = e.data || {}
+  const rows = []
+  const add = (label, v) => { if (v != null && String(v).trim()) rows.push([label, String(v)]) }
+  add('rationale', d.rationale)
+  add('triage', d.triage_rationale)
+  add('reason', d.reason)
+  add('error', d.error)
+  add('headline', d.content?.headline)
+  add('summary', d.memo?.summary || d.summary)
+  add('hint', d.text)
+  return rows
+}
+
+function GenericDetail({ e }) {
+  const rows = genericRows(e)
+  if (!rows.length) return <div className="ev-detail"><pre className="code" style={{ maxHeight: 220 }}>{JSON.stringify(e.data || {}, null, 2)}</pre></div>
+  return <div className="ev-detail">{rows.map(([k, v], i) =>
+    <React.Fragment key={i}><div className="section-h">{k}</div><div className="v">{v}</div></React.Fragment>)}</div>
+}
+
 // One feed row, chat-message styled: an icon/color by kind, the narration, an expandable "why" card.
 // node_created auto-expands ONLY while its node is the live frontier (the Researcher is "thinking");
 // once the node is evaluated the card collapses to its one-line key info.
@@ -236,7 +280,19 @@ function EventRow({ e, trace, onFocusEvent, autoOpen }) {
   // the user manually toggled this card — then their choice wins.
   useEffect(() => { if (!touched.current) setOpen(autoOpen) }, [autoOpen])
   const nid = eventNode(e)
-  const expandable = REASONING_TYPES.has(e.type)
+  const hasReason = REASONING_TYPES.has(e.type)
+  // langfuse-style: any event that resolves a node expands to that node's span trace inline (it
+  // appears once spans land, so the toggle shows up for evaluated/failed/repaired nodes too).
+  // Use the event's OWN node_id (not eventNode's parent_id fallback) so e.g. an `ablate` row — which
+  // carries only parent_id — never renders the PARENT node's trace mislabeled as its own.
+  const traceNid = e.data?.node_id
+  const nodeSpans = traceNid != null ? (trace?.nodes || {})[String(traceNid)] : null
+  const hasTrace = !!(nodeSpans && nodeSpans.length)
+  // no-truncation: a row whose one-line narration clamped text (or used the raw JSON fallback) is
+  // expandable to its FULL content even without a dedicated reasoning card.
+  const isRawFallback = !hasReason && !NARR[e.type]
+  const hasGeneric = !hasReason && (genericRows(e).length > 0 || isRawFallback)
+  const expandable = hasReason || hasTrace || hasGeneric
   const { group, icon } = kindOf(e.type)
   const narr = (NARR[e.type] || ((d) => JSON.stringify(d).slice(0, 80)))(e.data)
   return (
@@ -249,7 +305,11 @@ function EventRow({ e, trace, onFocusEvent, autoOpen }) {
           <span className="fm-narr">{narr}</span>
           {nid != null && <span className="ev-go">↗</span>}
         </div>
-        {open && expandable && <div className="ev-detail-wrap">{reasoningDetail(e, trace)}</div>}
+        {open && expandable && <div className="ev-detail-wrap">
+          {hasReason && reasoningDetail(e, trace)}
+          {hasGeneric && <GenericDetail e={e} />}
+          {hasTrace && <NodeTrace spans={nodeSpans} />}
+        </div>}
       </div>
     </div>
   )
@@ -280,12 +340,21 @@ function ActionRow({ m, idx, onResolve }) {
 }
 
 function ChatRow({ m }) {
+  const [open, setOpen] = useState(false)
+  const tr = m.role === 'assistant' ? m.trace : null   // the LLM I/O behind this reply, if captured
   return (
     <div className={'feed-msg chat ' + m.role}>
       <div className="fm-ic">{m.role === 'user' ? '🧑' : '🤖'}</div>
       <div className="fm-body">
         {(m.ctx || []).length > 0 && <div className="ctx-row">{m.ctx.map(id => <span key={id} className="ctx-chip">#{id}</span>)}</div>}
         {m.role === 'user' ? <div className="chat-text">{m.content}</div> : <Markdown className="chat-text" text={m.content} />}
+        {tr && <div className="chat-trace-tog" onClick={() => setOpen(o => !o)}>{open ? '▾' : '▸'} trace</div>}
+        {tr && open && <div className="chat-trace">
+          <LlmCall idx={0} call={{ op: 'chat', model: tr.model, tokens: tr.tokens, completion: tr.completion,
+            prompt: [...(tr.system ? [{ role: 'system', content: tr.system }] : []),
+                     ...(tr.user ? [{ role: 'user', content: tr.user }] : []),
+                     ...(tr.messages || [])] }} />
+        </div>}
       </div>
     </div>
   )
@@ -306,7 +375,11 @@ export default function Dock({ runId, live, liveSeq, viewSeq, setViewSeq, onFocu
   // The trace re-folds the whole spans.jsonl server-side, and it only backs the inline "thinking"
   // cards — so refetch when a NODE is added (or the run finishes), not on every SSE seq tick.
   const nodeCount = live ? Object.keys(live.nodes || {}).length : 0
-  useEffect(() => { get(`/api/runs/${runId}/trace`).then(setTrace).catch(() => {}) }, [runId, nodeCount, live?.finished])
+  // Refetch the trace when a node is ADDED or SETTLES (evaluate/repair spans land on a node-in-place,
+  // which doesn't change nodeCount) — so a node's eval/repair waterfall appears on its feed rows
+  // without waiting for the next node. Still not every SSE tick (idle ticks don't change either key).
+  const settledCount = live ? Object.values(live.nodes || {}).filter(n => n.status === 'evaluated' || n.status === 'failed').length : 0
+  useEffect(() => { get(`/api/runs/${runId}/trace`).then(setTrace).catch(() => {}) }, [runId, nodeCount, settledCount, live?.finished])
   const atLive = viewSeq == null || viewSeq >= liveSeq
 
   // The live frontier: the highest-id node still pending while the run runs — its proposal card stays
@@ -356,18 +429,19 @@ export default function Dock({ runId, live, liveSeq, viewSeq, setViewSeq, onFocu
 
   useEffect(() => { if (atLive) endRef.current?.scrollIntoView({ block: 'end' }) }, [feed.length, busy, atLive])
 
-  const pushAssistant = (content) => setMsgs(m => [...m, { role: 'assistant', content, ts: Date.now() / 1000 }])
+  const pushAssistant = (content, trace = null) => setMsgs(m => [...m, { role: 'assistant', content, trace, ts: Date.now() / 1000 }])
   const pushAction = (action) => setMsgs(m => [...m, { role: 'action', action, status: 'pending', ts: Date.now() / 1000 }])
   // Free text -> the action-router proposes an action (confirm-first) or replies; soft-fails to chat.
+  // A reply carries its `trace` (the LLM I/O) so the chat row can expand into a langfuse-style card.
   const runCommand = async (instruction, nid, history) => {
     const r = await command(runId, { messages: history, node_id: nid, instruction })
     if (r.ok && r.action) pushAction(r.action)
-    else if (r.ok && r.reply) pushAssistant(r.reply)
+    else if (r.ok && r.reply) pushAssistant(r.reply, r.trace)
     else {
       // Soft-fail to advisory chat. `history` is the PRIOR turns; the current instruction must be
       // appended or the model answers the previous message (it's not in `history` yet).
       const c = await chat(runId, [...history, { role: 'user', content: instruction }], nid)
-      pushAssistant(c.ok ? c.text : `⚠ ${c.error || 'no model reachable'}`)
+      pushAssistant(c.ok ? c.text : `⚠ ${c.error || 'no model reachable'}`, c.ok ? c.trace : null)
     }
   }
   const send = async () => {
@@ -443,7 +517,8 @@ export default function Dock({ runId, live, liveSeq, viewSeq, setViewSeq, onFocu
                 : it.m.role === 'action'
                   ? <ActionRow key={'a' + it.i} m={it.m} idx={it.i} onResolve={resolveAction} />
                   : <ChatRow key={'m' + it.i} m={it.m} />)}
-          {busy && <div className="muted" style={{ padding: '4px 8px' }}>…thinking</div>}
+          {(() => { const st = busy ? 'Working on your request…' : (atLive ? agentStatus(live, log) : null)
+            return st ? <div className="agent-status"><span className="as-dot" />{st}</div> : null })()}
           <div ref={endRef} />
         </div>
         <div className={'chat-in' + (dropActive ? ' drop' : '')}
@@ -453,7 +528,7 @@ export default function Dock({ runId, live, liveSeq, viewSeq, setViewSeq, onFocu
             {ctx.map(id => <span key={id} className="ctx-chip">#{id}<button onClick={() => setCtx(c => c.filter(x => x !== id))}>✕</button></span>)}
             {selectedId != null && !ctx.includes(selectedId) && <button className="ctx-chip add" onClick={() => addCtx(selectedId)}>＋ #{selectedId}</button>}
           </div>}
-          <textarea className="text" rows={2} placeholder="Ask, run a /command, or just say what to do (I’ll propose an action)… drag a node for context · Enter to send"
+          <textarea className="text" rows={2} placeholder="Ask, run a /command, or just say what to do (I’ll propose an action)… select a node to add it as ＋context · Enter to send"
             value={input} onChange={e => setInput(e.target.value)}
             onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send() } }} />
           <div className="toolbar" style={{ marginTop: 4 }}>
