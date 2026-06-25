@@ -20,12 +20,24 @@ from .llm import LLMError
 T = TypeVar("T", bound=BaseModel)
 
 _THINK = re.compile(r"<think>.*?</think>", re.DOTALL | re.IGNORECASE)
+_THINK_INNER = re.compile(r"<think>(.*?)</think>", re.DOTALL | re.IGNORECASE)
 _FENCE_PY = re.compile(r"```(?:python|py)\s*(.*?)```", re.DOTALL | re.IGNORECASE)
 _FENCE_ANY = re.compile(r"```\s*(.*?)```", re.DOTALL)
 
 
 def strip_think(text: str) -> str:
     return _THINK.sub("", text)
+
+
+def split_think(text: str) -> tuple[str, str]:
+    """Split a reasoning-model reply into (thinking, answer): the concatenated
+    <think>…</think> chain-of-thought and the clean post-reasoning answer. Either may be
+    empty. Lets callers surface the model's *conclusion* (the answer) as the primary output
+    while keeping the raw reasoning as a debug-only channel — never discarding it silently."""
+    if not text:
+        return "", ""
+    thinking = "\n\n".join(m.strip() for m in _THINK_INNER.findall(text) if m.strip())
+    return thinking, strip_think(text).strip()
 
 
 def extract_code(text: str) -> str:

@@ -11,22 +11,31 @@ export function useRunState(runId) {
   useEffect(() => {
     if (!runId) return
     let stopped = false
+    let timer = null
+    let lastSeq = -2
+    const reconnect = (delay) => { if (stopped) return; clearTimeout(timer); timer = setTimeout(connect, delay) }
     function connect() {
       const es = new EventSource(`/api/runs/${runId}/events`)
       esRef.current = es
       es.addEventListener('state', (e) => {
         let p
         try { p = JSON.parse(e.data) } catch { return }  // ignore a torn/partial SSE frame
-        setLive(p.state); setSeq(p.seq); setConnected(true)
+        setConnected(true)
+        if (p.seq === lastSeq) return   // unchanged (a reconnect-poll on a finished run) — no churn
+        lastSeq = p.seq; setLive(p.state); setSeq(p.seq)
       })
-      es.addEventListener('done', () => { es.close() })
+      // `done` = the run reached a terminal state and the server ends the stream. We do NOT treat it
+      // as "stop forever": reconnect-poll so a reopen (fork / branch / add-experiment) is picked up
+      // within a couple seconds. Closing-and-never-reconnecting is what made those actions invisible
+      // until a manual reload (#8). The state handler dedups by seq, so the poll is cheap when idle.
+      es.addEventListener('done', () => { es.close(); reconnect(2500) })
       es.onerror = () => {
         setConnected(false); es.close()
-        if (!stopped) setTimeout(connect, 1500)  // reconnect
+        reconnect(1500)
       }
     }
     connect()
-    return () => { stopped = true; esRef.current && esRef.current.close() }
+    return () => { stopped = true; clearTimeout(timer); esRef.current && esRef.current.close() }
   }, [runId])
 
   return { live, seq, connected }

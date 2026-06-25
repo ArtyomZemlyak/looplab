@@ -50,6 +50,7 @@ CONTROL_EVENTS = {
     "force_confirm", "force_ablate", "fork", "annotation", "promote",
     "approval_granted", "spec_approved", "inject_node", "run_reopened",
     "set_strategy",   # A7: operator pins/overrides the Strategist's choice (HITL parity)
+    "deep_research",  # P2: operator asks the engine to run the Deep-Research stage now
 }
 
 POLL_SECONDS = 0.4   # SSE tail cadence — fast enough to feel live, light on the disk
@@ -133,10 +134,26 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
         # Trim heavy per-node payloads from the live state (code/files/stdout/error) — they are
         # fetched on demand via /nodes/{id}. Keeps SSE ticks small even for code-writing runs.
         d = st.model_dump(mode="json")
+        better = (lambda a, b: a < b) if st.direction == "min" else (lambda a, b: a > b)
         for n in d.get("nodes", {}).values():
             n.pop("code", None); n.pop("files", None)
             n["stdout_tail"] = (n.get("stdout_tail") or "")[:160]
             n["error"] = (n.get("error") or "")[:160]
+            # Intra-node sweep: a node can carry many trials — replace the full array with a compact
+            # summary for the live state (card badge + spark + explode-hull header). The full trials
+            # ride along the on-demand /nodes/{id} detail endpoint, like code/files do.
+            trials = n.pop("trials", None) or []
+            if trials:
+                vals = [t.get("metric") for t in trials if t.get("metric") is not None]
+                best = None
+                for m in vals:
+                    if best is None or better(m, best):
+                        best = m
+                ok = sum(1 for t in trials if t.get("metric") is not None and not t.get("error"))
+                n["trials_summary"] = {
+                    "count": len(trials), "best": best, "ok": ok, "failed": len(trials) - ok,
+                    "series": vals[:64],   # cap the inline sparkline series
+                }
         d["phase"] = _phase(st)
         return {"state": d, "seq": last_seq, "max_seq": last_seq}
 
@@ -287,6 +304,10 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
                            f"event: state\n"
                            f"data: {json.dumps(payload)}\n\n")
                     if payload["state"].get("finished"):   # reuse the threaded fold; don't re-fold
+                        # End this stream — but the client deliberately does NOT close on `done`; it
+                        # lets the closed connection trigger its reconnect, so a reopen (fork / branch
+                        # / add-experiment) is picked up within a couple seconds. (Holding the stream
+                        # open instead would never terminate, which hangs the TestClient SSE test.)
                         yield "event: done\ndata: {}\n\n"
                         break
                 await anyio.sleep(POLL_SECONDS)
@@ -402,12 +423,17 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
     @app.post("/api/runs/{run_id}/resume")
     def resume_run(run_id: str):
         rd = _run_dir(run_id)
+        # Prefer the UI's recorded task_file; fall back to the verbatim task.snapshot.json that
+        # `run` now writes into every run dir, so even a CLI-started run can be resumed/continued.
+        task_file: Optional[str] = None
         meta = rd / "ui_meta.json"
-        if not meta.exists():
-            raise HTTPException(400, "run has no ui_meta.json (start it via the UI to enable resume)")
-        task_file = json.loads(meta.read_text(encoding="utf-8")).get("task_file")
+        if meta.exists():
+            task_file = json.loads(meta.read_text(encoding="utf-8")).get("task_file")
+        if not task_file and (rd / "task.snapshot.json").exists():
+            task_file = str(rd / "task.snapshot.json")
         if not task_file:
-            raise HTTPException(400, "ui_meta.json missing task_file")
+            raise HTTPException(400, "run is not resumable — no task.snapshot.json or ui_meta.json "
+                                     "(it predates self-describing runs; start it via the UI to enable resume)")
         _spawn_engine(["resume", str(rd), "--task-file", str(task_file)])
         return {"ok": True}
 
@@ -612,11 +638,18 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
         nid = body.get("node_id")
         st = fold(_events(rd))
         sys_prompt = (
-            "You are a senior ML research collaborator embedded in an autonomous experiment loop. "
-            "Discuss the run and the focused experiment concretely: interpret the metric, reason "
-            "about what to try next, and suggest specific parameter changes. Be terse and specific. "
-            "When you propose an experiment, state the operator (improve/draft/debug), the exact "
-            "params, and a one-line rationale.\n\n" + _node_context(st, nid, rd))
+            "You are an ML research collaborator embedded in an autonomous experiment loop, chatting "
+            "with the human running it. Talk like a sharp, friendly colleague at a whiteboard — warm "
+            "and conversational, not a formal report. Use the human's language. Open with a direct "
+            "answer to what they asked, then your reasoning; ask a clarifying question back when it "
+            "would help. Keep it concise but human: contractions are fine, and it's okay to say what "
+            "you'd be curious to try and why.\n"
+            "Format with Markdown so it's easy to read: short paragraphs, **bold** for the key point, "
+            "bullet lists for options, and ```python fenced blocks for any code or params. When you "
+            "actually recommend an experiment, name the operator (improve/draft/debug), give the exact "
+            "params, and a one-line why — but don't force every reply into that shape; sometimes the "
+            "right answer is just an explanation or a question.\n\n"
+            "Here is the run you're discussing:\n" + _node_context(st, nid, rd))
         try:
             client = make_llm_client(_llm_settings())
             text = client.complete_text([{"role": "system", "content": sys_prompt}, *msgs])

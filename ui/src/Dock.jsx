@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react'
+import React, { useEffect, useRef, useState } from 'react'
 import { get, fmt } from './util.js'
 import { Trajectory, Gantt } from './charts.jsx'
 
@@ -19,6 +19,8 @@ const NARR = {
   strategy_decision: (d) => `strategy → ${d.strategy?.policy || '?'}${d.strategy?.fidelity ? '/' + d.strategy.fidelity : ''}${d.strategy?.rationale ? ' — ' + d.strategy.rationale.slice(0, 70) : ''}`,
   rung_promoted: (d) => `ASHA rung ↑${d.rung}: promoted ${(d.survivors || []).map(s => '#' + s).join(', ')}`,
   set_strategy: (d) => `operator pinned strategy → ${d.strategy?.policy || ''}${d.strategy?.fidelity ? '/' + d.strategy.fidelity : ''}`,
+  deep_research: () => 'deep research requested',
+  research_completed: (d) => `🔬 deep research (${d.trigger || 'auto'})${d.memo?.summary ? ' — ' + String(d.memo.summary).slice(0, 70) : ''}`,
   proxy_scored: (d) => `proxy scored #${d.node_id}: ${fmt(d.score)}${d.skipped ? ' (skipped full eval)' : ''}`,
   reward_hack_suspected: (d) => `⚠ reward-hack suspected on #${d.node_id}: ${(d.signals || []).map(s => s.signal).join(', ')}`,
   novelty_rejected: (d) => `dedup: proposal near #${d.near_node} (dist ${fmt(d.distance, 3)}) nudged to diversify`,
@@ -40,6 +42,22 @@ export default function Dock({ runId, liveSeq, viewSeq, setViewSeq, onFocus, col
   useEffect(() => { get(`/api/runs/${runId}/log`).then(setLog).catch(() => {}) }, [runId, liveSeq])
   useEffect(() => { if (tab === 'timeline') get(`/api/runs/${runId}/trace`).then(setTrace).catch(() => {}) }, [tab, runId, liveSeq])
   const atLive = viewSeq == null || viewSeq >= liveSeq
+
+  // The scrubber thumb tracks a LOCAL value (instant, no re-render of the canvas) while the actual
+  // history fetch — which re-folds state and re-lays-out the whole DAG — is throttled to ~11fps.
+  // Without this, every pixel of drag fired a network round-trip + full relayout, so the thumb
+  // stuttered and the buttons above it flickered. `drag == null` means "follow the committed seq".
+  const [drag, setDrag] = useState(null)
+  const thr = useRef({ last: 0, timer: null })
+  const sliderVal = drag != null ? drag : (atLive ? liveSeq : viewSeq)
+  const commit = (v) => setViewSeq(v >= liveSeq ? null : v)
+  const onScrub = (v) => {
+    setDrag(v)
+    const now = Date.now(), st = thr.current
+    if (now - st.last >= 90) { st.last = now; commit(v) }
+    else { clearTimeout(st.timer); st.timer = setTimeout(() => { st.last = Date.now(); commit(v) }, 90) }
+  }
+  const endScrub = () => { clearTimeout(thr.current.timer); commit(sliderVal); setDrag(null) }
 
   // Click an event → select its node, jump the scrubber to that moment, open the right inspector tab.
   const focusEvent = (e) => {
@@ -74,10 +92,11 @@ export default function Dock({ runId, liveSeq, viewSeq, setViewSeq, onFocus, col
       </div>
       {!collapsed && <div className="dock-body" style={{ height }}>
         {tab === 'travel' && <div className="scrubber">
-          <button className="btn sm" onClick={() => setViewSeq(null)} disabled={atLive}>⏵ Live</button>
-          <input type="range" min={0} max={Math.max(0, liveSeq)} value={atLive ? liveSeq : viewSeq}
-                 onChange={e => setViewSeq(Number(e.target.value))} />
-          <span className={atLive ? 'live-tag' : 'hist-tag'}>{atLive ? `live · seq ${liveSeq}` : `replay · seq ${viewSeq}/${liveSeq}`}</span>
+          <button className="btn sm" onClick={() => { setViewSeq(null); setDrag(null) }} disabled={atLive && drag == null}>⏵ Live</button>
+          <input type="range" min={0} max={Math.max(0, liveSeq)} value={sliderVal}
+                 onChange={e => onScrub(Number(e.target.value))}
+                 onPointerUp={endScrub} onMouseUp={endScrub} onKeyUp={endScrub} onBlur={endScrub} />
+          <span className={(sliderVal >= liveSeq) ? 'live-tag' : 'hist-tag'}>{(sliderVal >= liveSeq) ? `live · seq ${liveSeq}` : `replay · seq ${sliderVal}/${liveSeq}`}</span>
         </div>}
         {tab === 'travel' && <div style={{ marginTop: 8 }} className="feed">
           {log.filter(e => atLive || e.seq <= viewSeq).slice(-8).reverse().map(e => <Row key={e.seq} e={e} />)}

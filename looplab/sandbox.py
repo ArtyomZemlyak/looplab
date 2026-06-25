@@ -49,6 +49,10 @@ class RunResult:
     # excluded from best-selection. None on the normal path.
     extra_metrics: Optional[dict] = None
     violations: Optional[list] = None
+    # Intra-node sweep: when the solution ran a grid of configs in one process, it emits a final
+    # `{"trials": [...]}` line; this carries that raw list of trial dicts. The orchestrator picks
+    # the best feasible trial to set the node's scalar `metric`. None on the single-config path.
+    trials: Optional[list] = None
 
 
 class Sandbox(Protocol):
@@ -84,6 +88,23 @@ def _json_line_metric(text: str, key: str = "metric") -> Optional[float]:
 
 def _parse_metric(stdout: str) -> Optional[float]:
     return _json_line_metric(stdout, "metric")
+
+
+def _json_line_trials(text: str) -> Optional[list]:
+    """Last stdout line that is a JSON object with a "trials" key holding a list (intra-node
+    sweep). Scans bottom-up like `_json_line_metric`, so trailing chatter after the sweep's
+    summary line is tolerated. Returns the raw list of trial dicts, or None if absent."""
+    for line in reversed(text.splitlines()):
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            obj = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(obj, dict) and isinstance(obj.get("trials"), list):
+            return obj["trials"]
+    return None
 
 
 def _run_argv(argv: list[str], workdir: str, timeout: float,
@@ -196,7 +217,8 @@ class SubprocessSandbox:
             [self.python, "solution.py"],  # by name, relative to cwd -> no path doubling
             str(wd), timeout, env, self.max_output_bytes, cancel)
         return RunResult(exit_code=rc, stdout=out, stderr=err,
-                         metric=_parse_metric(out), timed_out=to)
+                         metric=_parse_metric(out), timed_out=to,
+                         trials=_json_line_trials(out))
 
 
 class DockerSandbox:
@@ -241,7 +263,8 @@ class DockerSandbox:
         rc, out, err, to = _run_argv(argv, str(wd), timeout + 15.0, None, self.max_output_bytes, cancel)
         timed_out = to or rc == 124          # coreutils timeout exits 124 when it fires
         return RunResult(exit_code=rc, stdout=out, stderr=err,
-                         metric=(None if timed_out else _parse_metric(out)), timed_out=timed_out)
+                         metric=(None if timed_out else _parse_metric(out)), timed_out=timed_out,
+                         trials=(None if timed_out else _json_line_trials(out)))
 
 
 def make_sandbox(trust_mode: str = "trusted_local", *, image: Optional[str] = None,

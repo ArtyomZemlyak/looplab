@@ -98,10 +98,14 @@ def set_llm_capture(enabled: bool) -> None:
 
 
 def record_llm_call(*, op: str, model: str, messages: list[dict], completion: str,
-                    usage: Optional[dict] = None) -> None:
+                    thinking: Optional[str] = None, usage: Optional[dict] = None) -> None:
     """Append an `llm_call` event to the active span record (no-op when capture is off or there
     is no active span — e.g. an LLM call outside any traced operation). Full text by design;
-    secrets are masked upstream at the config layer, prompts/completions are task content."""
+    secrets are masked upstream at the config layer, prompts/completions are task content.
+
+    `completion` is the model's clean answer (the conclusion the UI surfaces). `thinking`, when
+    present, is the raw <think> chain-of-thought — stored on a SEPARATE field so the UI can keep
+    it as a collapsed debug-only disclosure rather than the primary view."""
     if not _CAPTURE_LLM_IO:
         return
     st = _stack.get()
@@ -113,7 +117,7 @@ def record_llm_call(*, op: str, model: str, messages: list[dict], completion: st
         "completion": int((usage or {}).get("completion_tokens") or 0),
         "total": int((usage or {}).get("total_tokens") or 0),
     }
-    rec["events"].append({
+    ev = {
         "name": "llm_call",
         "op": op,
         "model": model,
@@ -122,7 +126,10 @@ def record_llm_call(*, op: str, model: str, messages: list[dict], completion: st
                    for m in (messages or [])],
         "completion": completion or "",
         "tokens": tokens,
-    })
+    }
+    if thinking:
+        ev["thinking"] = thinking
+    rec["events"].append(ev)
     # Mirror to the active OpenTelemetry span when the bridge is live, so OTLP collectors
     # (Jaeger/Tempo/…) see LLM I/O too — not just spans.jsonl. Best-effort; primitives only.
     if _OTEL is not None:

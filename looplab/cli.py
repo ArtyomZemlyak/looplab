@@ -56,6 +56,11 @@ def _engine(run_dir: Path, task: TaskAdapter, settings: Settings,
     strat_client = (make_llm_client(settings)
                     if settings.backend == "llm" and settings.strategist_backend == "llm" else None)
     strategist = make_strategist(settings, client=strat_client, n_seeds=settings.n_seeds)
+    # Deep-Research stage (Phase 2): reachable only with an LLM backend. Reuses the run's LLM client;
+    # tools (arXiv/web/knowledge) are wired from config inside make_deep_researcher. None when off.
+    from .deep_research import make_deep_researcher
+    deep_researcher = (make_deep_researcher(settings, client=make_llm_client(settings))
+                       if settings.backend == "llm" else None)
     dev_factory = make_developer_factory(task, settings) if settings.backend == "llm" else None
     proxy_scorer = None
     if settings.proxy_scoring or settings.proxy_kill_fraction > 0:
@@ -73,6 +78,7 @@ def _engine(run_dir: Path, task: TaskAdapter, settings: Settings,
                            rung_nodes=settings.asha_rung_nodes),
         max_parallel=settings.max_parallel,
         timeout=settings.timeout,
+        sweep_timeout_mult=settings.sweep_timeout_mult,
         crash_after=crash_after,
         confirm_top_k=settings.confirm_top_k,
         confirm_seeds=settings.confirm_seeds,
@@ -91,6 +97,8 @@ def _engine(run_dir: Path, task: TaskAdapter, settings: Settings,
         ablate_every=settings.ablate_every,
         strategist=strategist,
         strategist_every=settings.strategist_every,
+        deep_researcher=deep_researcher,
+        deep_research_every=settings.deep_research_every,
         developer_factory=dev_factory,
         merge_mode=settings.merge_mode,
         complexity_cue=settings.complexity_cue,
@@ -184,6 +192,14 @@ def run(
     out.mkdir(parents=True, exist_ok=True)
     atomic_write_text(out / "config.snapshot.json",
                       json.dumps(settings.masked_snapshot(), indent=2))
+    # Self-describing run: keep a verbatim copy of the task so `resume` (CLI or UI) can re-enter the
+    # loop from the run dir alone — no need to remember the original task-file path. This is what
+    # lets the UI's Fork / Branch reopen-and-continue a finished run that wasn't UI-started.
+    try:
+        atomic_write_text(out / "task.snapshot.json",
+                          Path(task_file).read_text(encoding="utf-8"))
+    except OSError:
+        pass
     eng = _engine(out, task, settings, crash_after)
     state = anyio.run(eng.run)
     _print_result(state)
@@ -192,10 +208,19 @@ def run(
 @app.command()
 def resume(
     run_dir: Path = typer.Argument(..., help="Existing run directory to resume."),
-    task_file: Path = typer.Option(..., help="The same task file used to start the run."),
+    task_file: Optional[Path] = typer.Option(
+        None, help="The task file used to start the run. Defaults to the run's task.snapshot.json."),
     max_nodes: Optional[int] = typer.Option(None),
 ):
     """Resume a crashed/incomplete run by re-entering the loop (replay-based)."""
+    # Fall back to the verbatim task snapshot `run` wrote into the run dir, so a run can be resumed
+    # from the dir alone (the UI relies on this to continue a finished run without ui_meta.json).
+    snap = run_dir / "task.snapshot.json"
+    if task_file is None:
+        if not snap.exists():
+            raise typer.BadParameter(
+                "no --task-file given and no task.snapshot.json in the run dir")
+        task_file = snap
     task = load_task(task_file)
     # Restore the ORIGINAL run's settings from the snapshot `run` wrote — a fresh Settings()
     # would silently drop run-only flags (require_approval, trust_mode, confirm_*, eval_trust_mode,

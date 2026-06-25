@@ -3,6 +3,7 @@ import { get, putText, post, fmt, fmtInt, CONTROL, gpuStat } from './util.js'
 import { Trajectory, Bars, Gantt, ParallelCoords, Scatter, ImprovementWaterfall } from './charts.jsx'
 import MapView from './MapView.jsx'
 import { analyze, paramDiffLabel, toMarkdown } from './report.js'
+import Markdown from './markdown.jsx'
 
 export function Panel({ title, sub, onClose, children, wide }) {
   return (
@@ -396,6 +397,95 @@ export function StrategistPanel({ state, runId, onClose, onToast }) {
             <option value="">fidelity…</option>{['smoke', 'full', 'adaptive'].map(f => <option key={f} value={f}>{f}</option>)}</select>
           <button className="btn sm primary" onClick={pin} disabled={!pol && !fid}>📌 Pin strategy</button>
         </div></>}
+    </Panel>
+  )
+}
+
+// "Planning" — what the Researcher is thinking about WHAT TO DO NEXT. One row per proposal in run
+// order, surfacing the model's *conclusion* (idea.rationale) up front: why this experiment and what
+// it expects to learn. The raw chain-of-thought lives in each node's Trace tab as a collapsed
+// "reasoning (debug)" disclosure — this panel stays conclusion-only so the plan reads cleanly.
+export function PlanningPanel({ state, onSelect, onClose }) {
+  const nodes = Object.values(state.nodes || {}).sort((a, b) => a.id - b.id)
+  const memos = state.research || []
+  const opLine = (p) => p && Object.keys(p).length
+    ? Object.entries(p).map(([k, v]) => `${k}=${typeof v === 'number' ? fmt(v) : v}`).join(', ') : '—'
+  return (
+    <Panel title="Planning — what to try next & why" sub={`${nodes.length} proposal${nodes.length === 1 ? '' : 's'}`} onClose={onClose} wide>
+      <div className="muted" style={{ marginBottom: 10 }}>
+        The Researcher's conclusion for each experiment — its takeaway on why this step and what it
+        expects to learn. Open a node's <b>Trace</b> tab to read the raw reasoning (debug).
+      </div>
+      {memos.length > 0 && <div className="chip" style={{ marginBottom: 10 }}>🔬 {memos.length} deep-research memo{memos.length === 1 ? '' : 's'} — see the Research panel</div>}
+      {nodes.length === 0
+        ? <div className="muted">No proposals yet.</div>
+        : <table className="tbl"><thead><tr><th>node</th><th>operator</th><th>params</th><th>conclusion (why this next)</th></tr></thead><tbody>
+            {nodes.map(n => <tr key={n.id} style={{ cursor: onSelect ? 'pointer' : 'default' }}
+                               onClick={() => onSelect && (onSelect(n.id), onClose())}>
+              <td>#{n.id}{n.id === state.best_node_id && ' ♚'}</td>
+              <td>{n.operator}{n.idea?.theme ? <span className="muted"> · {n.idea.theme}</span> : null}</td>
+              <td className="muted" style={{ maxWidth: 220 }}>{opLine(n.idea?.params)}</td>
+              <td style={{ maxWidth: 460 }}>{n.idea?.rationale || <span className="muted">—</span>}</td></tr>)}
+          </tbody></table>}
+    </Panel>
+  )
+}
+
+// "Research" — the Deep-Research stage memos (Phase 2). One entry per `research_completed` memo:
+// the model's conclusion (summary/findings/recommended_directions) up front + the consulted sources
+// as clickable links; the raw deliberation sits in a collapsed "reasoning (debug)" disclosure. The
+// `focus` index (set when an operator clicks a research node in the DAG) auto-expands that memo.
+function MemoCard({ memo, idx, open, onToggle }) {
+  const [think, setThink] = useState(false)
+  return (
+    <div className="memo-card">
+      <div className="memo-head" onClick={() => onToggle(idx)}>
+        <span className="span-tw">{open ? '▾' : '▸'}</span>
+        <b>🔬 memo #{idx + 1}</b>
+        {memo.trigger && <span className="pill">{memo.trigger}</span>}
+        {memo.at_node != null && <span className="muted"> @{memo.at_node} nodes</span>}
+        <span className="spacer" style={{ flex: 1 }} />
+        <span className="muted">{(memo.sources || []).length} source{(memo.sources || []).length === 1 ? '' : 's'}</span>
+      </div>
+      {open && <div className="memo-body">
+        <div className="section-h">Conclusion</div>
+        <div className="v">{memo.summary || '—'}</div>
+        {(memo.findings || []).length > 0 && <>
+          <div className="section-h">Findings</div>
+          <ul className="bul">{memo.findings.map((f, i) => <li key={i}>{f}</li>)}</ul></>}
+        {(memo.recommended_directions || []).length > 0 && <>
+          <div className="section-h">Recommended directions (fed to the Researcher)</div>
+          <ul className="bul">{memo.recommended_directions.map((d, i) => <li key={i}>{d}</li>)}</ul></>}
+        {(memo.sources || []).length > 0 && <>
+          <div className="section-h">Sources consulted</div>
+          <ul className="bul">{memo.sources.map((s, i) => <li key={i}>
+            {s.url ? <a href={s.url} target="_blank" rel="noreferrer">{s.title || s.url}</a> : (s.title || '—')}
+            {s.snippet && <span className="muted"> — {String(s.snippet).slice(0, 120)}</span>}</li>)}</ul></>}
+        {memo.reasoning && <div className="think-debug" style={{ marginTop: 8 }}>
+          <div className="role-think" onClick={() => setThink(v => !v)} style={{ cursor: 'pointer', fontSize: 11, textTransform: 'uppercase', letterSpacing: '.5px' }}>
+            {think ? '▾' : '▸'} reasoning (debug)</div>
+          {think && <Markdown className="think-body" text={memo.reasoning} />}
+        </div>}
+      </div>}
+    </div>
+  )
+}
+
+export function ResearchPanel({ state, focus = null, onClose }) {
+  const memos = state.research || []
+  const [open, setOpen] = useState(focus)
+  useEffect(() => { if (focus != null) setOpen(focus) }, [focus])
+  const toggle = (i) => setOpen(o => o === i ? null : i)
+  return (
+    <Panel title="Deep research — memos that steer the run" sub={`${memos.length} memo${memos.length === 1 ? '' : 's'}`} onClose={onClose} wide>
+      <div className="muted" style={{ marginBottom: 10 }}>
+        Each memo is the Deep-Research stage reading across ALL results so far + the literature/web,
+        then writing a conclusion and concrete next directions (fed back to the Researcher). The raw
+        reasoning is a collapsed debug aid.
+      </div>
+      {memos.length === 0
+        ? <div className="muted">No deep-research memos yet — click <b>🔬 Deep research</b> on the run, set a cadence (<code>deep_research_every</code>), or enable a Strategist that requests it.</div>
+        : memos.map((m, i) => <MemoCard key={i} memo={m} idx={i} open={open === i} onToggle={toggle} />)}
     </Panel>
   )
 }

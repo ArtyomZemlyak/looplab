@@ -1,8 +1,9 @@
 import React, { useEffect, useState } from 'react'
-import { get, fmt, fmtInt, CONTROL } from './util.js'
-import { Trajectory } from './charts.jsx'
+import { get, fmt, fmtInt, CONTROL, resumeRun, isSweep } from './util.js'
+import { Trajectory, ParallelCoords, Scatter } from './charts.jsx'
 import { groupAggregate } from './grouping.js'
 import { ChatTab } from './experiment.jsx'
+import Markdown from './markdown.jsx'
 
 // One lifecycle "Trace" tab replaces the old Reasoning / LLM / Agent split: a node is worked on by
 // several parts in sequence (Researcher proposes, Developer implements/repairs, then it's evaluated
@@ -10,7 +11,7 @@ import { ChatTab } from './experiment.jsx'
 // LLM I/O, and the coding-agent's validation — instead of three disconnected panes.
 const TABS = ['Overview', 'Trace', 'Code', 'Metrics', 'Trust', 'Cost', 'Chat']
 
-export default function Inspector({ runId, nodeId, state, live, tab, setTab, onToast, onInject }) {
+export default function Inspector({ runId, nodeId, state, live, tab, setTab, onToast, onInject, selectedTrial }) {
   const [detail, setDetail] = useState(null)
   useEffect(() => {
     if (nodeId == null) { setDetail(null); return }
@@ -23,14 +24,33 @@ export default function Inspector({ runId, nodeId, state, live, tab, setTab, onT
   const n = detail || (state.nodes[nodeId])
   if (!n) return <div className="insp-empty">…</div>
   const act = async (fn, msg) => { try { await fn(); onToast(msg) } catch (e) { onToast('failed: ' + e.message) } }
+  // Fork = seed an `improve` branch off this node. On a LIVE run the loop picks it up next; on a
+  // FINISHED run we reopen + re-enter the loop (same as adding an experiment) so it actually
+  // materializes — otherwise the toast lied and nothing appeared (the #8 report).
+  const doFork = async () => {
+    try {
+      if (live.finished) {
+        await CONTROL.reopen(runId); await CONTROL.fork(runId, n.id); await resumeRun(runId)
+        onToast(`forked #${n.id} — reopening & continuing the run`)
+      } else {
+        await CONTROL.fork(runId, n.id)
+        onToast(`fork queued from #${n.id} — the engine will branch it next`)
+      }
+    } catch (e) { onToast('fork failed: ' + e.message) }
+  }
   // Metric-drift is run-level state (state.drifts), each entry tagged with its node_id — the
   // per-node detail payload has no `drifts` key, so filter the run state down to this node.
   const nodeDrifts = (state?.drifts || []).filter(d => d.node_id === n.id)
+  // Sweep nodes get a Trials tab (right after Overview). `activeTab` guards against a stale tab
+  // (e.g. 'Trials' left selected after switching to a non-sweep node) falling through to nothing.
+  const sweep = isSweep(n)
+  const tabs = sweep ? ['Overview', 'Trials', ...TABS.slice(1)] : TABS
+  const activeTab = tabs.includes(tab) ? tab : 'Overview'
 
   return (
     <>
       <div className="tabs">
-        {TABS.map(t => <div key={t} className={'tab' + (t === tab ? ' active' : '') + (t === 'Trust' && (n.violations?.length || nodeDrifts.length) ? ' alarm' : '')}
+        {tabs.map(t => <div key={t} className={'tab' + (t === activeTab ? ' active' : '') + (t === 'Trust' && (n.violations?.length || nodeDrifts.length) ? ' alarm' : '')}
                             onClick={() => setTab(t)}>{t}</div>)}
       </div>
       <div className="insp-body">
@@ -41,19 +61,20 @@ export default function Inspector({ runId, nodeId, state, live, tab, setTab, onT
                   title={n.status !== 'evaluated' ? 'only evaluated nodes can be confirmed' : 'multi-seed confirm'}
                   onClick={() => act(() => CONTROL.forceConfirm(runId, n.id), `confirm requested for ${n.id}`)}>↻ Confirm</button>
           <button className="btn sm" disabled={live.finished} onClick={() => act(() => CONTROL.forceAblate(runId, n.id), `ablate requested for ${n.id}`)}>⊟ Ablate</button>
-          <button className="btn sm" onClick={() => act(() => CONTROL.fork(runId, n.id), `forked from ${n.id}`)}>⑂ Fork</button>
+          <button className="btn sm" title={live.finished ? 'fork an improve branch — reopens & continues the run' : 'seed an improve branch off this node'} onClick={doFork}>⑂ Fork</button>
           {onInject && <button className="btn sm" title="F6: branch a new experiment from this node — edit the idea and fork (history intact)" onClick={() => onInject({ parent_id: n.id, idea: { operator: 'improve', params: n.idea?.params, rationale: n.idea?.rationale, theme: n.idea?.theme } })}>⑂ Branch / Experiment</button>}
           <button className="btn sm warn" onClick={() => act(() => CONTROL.promote(runId, n.id), `promoted ${n.id} → champion`)}>★ Promote</button>
           <button className="btn sm" onClick={() => { const t = prompt('Note for node ' + n.id); if (t) act(() => CONTROL.annotate(runId, n.id, t), 'note saved') }}>✎ Note</button>
         </div>
 
-        {tab === 'Overview' && <Overview n={n} state={state} />}
-        {tab === 'Trace' && <Trace n={n} />}
-        {tab === 'Code' && <Code n={n} />}
-        {tab === 'Metrics' && <Metrics n={n} detail={detail} />}
-        {tab === 'Trust' && <Trust n={n} drifts={nodeDrifts} />}
-        {tab === 'Cost' && <Cost state={state} />}
-        {tab === 'Chat' && <ChatTab runId={runId} nodeId={n.id} state={live} onInject={onInject} onToast={onToast} />}
+        {activeTab === 'Overview' && <Overview n={n} state={state} />}
+        {activeTab === 'Trials' && <Trials n={n} detail={detail} state={state} selectedTrial={selectedTrial} />}
+        {activeTab === 'Trace' && <Trace n={n} />}
+        {activeTab === 'Code' && <Code n={n} />}
+        {activeTab === 'Metrics' && <Metrics n={n} detail={detail} />}
+        {activeTab === 'Trust' && <Trust n={n} drifts={nodeDrifts} />}
+        {activeTab === 'Cost' && <Cost state={state} />}
+        {activeTab === 'Chat' && <ChatTab runId={runId} nodeId={n.id} state={live} onInject={onInject} onToast={onToast} />}
       </div>
     </>
   )
@@ -168,6 +189,7 @@ function SpanRow({ s, depth, max }) {
 
 function LlmCall({ call, idx }) {
   const [open, setOpen] = useState(idx === 0)   // first call expanded by default
+  const [think, setThink] = useState(false)     // raw reasoning is debug-only — collapsed by default
   const t = call.tokens || {}
   return <div className="llm-card">
     <div className="llm-head" onClick={() => setOpen(o => !o)}>
@@ -175,6 +197,7 @@ function LlmCall({ call, idx }) {
       <b>{call.op || 'llm'}</b>
       <span className="muted"> {call.model}</span>
       <span className="spacer" style={{ flex: 1 }} />
+      {call.thinking && <span className="badge" title="model reasoning captured (debug)">🧠</span>}
       <span className="muted">{(t.total || (t.prompt + t.completion)) || 0} tok</span>
     </div>
     {open && <>
@@ -186,6 +209,14 @@ function LlmCall({ call, idx }) {
         <div className="msg-role role-completion">completion</div>
         <pre className="code">{call.completion || '(empty)'}</pre>
       </div>
+      {/* Raw <think> chain-of-thought: a debug aid only, kept collapsed so the clean answer above
+          stays the primary view. The conclusion is what matters; this is how it got there. */}
+      {call.thinking && <div className="msg think-debug">
+        <div className="msg-role role-think" onClick={() => setThink(v => !v)} style={{ cursor: 'pointer' }}>
+          {think ? '▾' : '▸'} reasoning (debug)
+        </div>
+        {think && <Markdown className="think-body" text={call.thinking} />}
+      </div>}
     </>}
   </div>
 }
@@ -287,6 +318,72 @@ function Metrics({ n, detail }) {
         <tbody>{vals.map(x => <tr key={x.s}><td>{x.s}</td><td>{fmt(x.v)}</td></tr>)}</tbody></table>
     </>}
     {!vals.length && <div className="muted" style={{ marginTop: 10 }}>No per-step series for this task kind; run multi-seed confirmation to populate robustness.</div>}
+  </>
+}
+
+// Intra-node sweep trials: a sortable table of every config the node ran in-process, plus
+// parallel-coords / scatter views. Trials aren't backend nodes, so the charts get pseudo-node
+// adapters ({id, metric, idea:{params}, feasible}) — no charts.jsx change needed.
+function Trials({ n, detail, state, selectedTrial }) {
+  const trials = detail?.trials ?? n.trials ?? []
+  const summary = n.trials_summary
+  const [sortKey, setSortKey] = useState('metric')
+  const [sortDir, setSortDir] = useState(state.direction === 'min' ? 'asc' : 'desc')
+  const [showAll, setShowAll] = useState(false)
+  if (!trials.length) {
+    return <div className="muted">{summary
+      ? `Sweep of ${summary.count} trial(s) — loading full results…`
+      : 'No trials recorded for this node.'}</div>
+  }
+  const dir = state.direction
+  const params = Array.from(new Set(trials.flatMap(t => Object.keys(t.params || {}))))
+  // best trial = best metric under direction (matches the node's scalar metric)
+  let bestIdx = -1, bestV = null
+  trials.forEach((t, i) => { if (t.metric != null && (bestV == null || (dir === 'min' ? t.metric < bestV : t.metric > bestV))) { bestV = t.metric; bestIdx = i } })
+  const setSort = (k) => { if (k === sortKey) setSortDir(d => d === 'asc' ? 'desc' : 'asc'); else { setSortKey(k); setSortDir('asc') } }
+  const val = (t, k) => k === 'idx' ? t._i : k === 'metric' ? t.metric : k === 'seconds' ? t.seconds : t.params?.[k]
+  const rowsAll = trials.map((t, i) => ({ ...t, _i: i })).sort((a, b) => {
+    const av = val(a, sortKey), bv = val(b, sortKey)
+    if (av == null) return 1; if (bv == null) return -1
+    return sortDir === 'asc' ? av - bv : bv - av
+  })
+  const CAP = 100
+  const rows = showAll ? rowsAll : rowsAll.slice(0, CAP)
+  const okN = trials.filter(t => t.metric != null).length
+  const totSec = trials.reduce((s, t) => s + (t.seconds || 0), 0)
+  // pseudo-nodes for the existing charts (they read n.idea?.params and n.confirmed_mean ?? n.metric)
+  const pseudo = trials.map((t, i) => ({ id: i, metric: t.metric, confirmed_mean: null, idea: { params: t.params || {} }, feasible: t.metric != null }))
+  const scatter = params.length
+    ? trials.map((t, i) => ({ x: t.params?.[params[0]] ?? i, y: t.metric, feasible: t.metric != null, id: i })).filter(d => d.y != null)
+    : []
+  const Th = ({ k, children }) => <th style={{ cursor: 'pointer' }} onClick={() => setSort(k)}>{children}{sortKey === k ? (sortDir === 'asc' ? ' ▲' : ' ▼') : ''}</th>
+  return <>
+    <div className="kv">
+      <KV k="trials" v={trials.length} />
+      <KV k="best metric" v={`${fmt(bestV)}${bestIdx >= 0 ? ` (#${bestIdx})` : ''}`} />
+      <KV k="ok / failed" v={`${okN} / ${trials.length - okN}`} />
+      <KV k="Σ seconds" v={fmt(totSec)} />
+    </div>
+    {params.length > 0 && <>
+      <div className="section-h">Params → metric</div>
+      <ParallelCoords nodes={pseudo} direction={dir} height={220} />
+    </>}
+    {scatter.length > 0 && <>
+      <div className="section-h">{params[0]} vs metric</div>
+      <Scatter data={scatter} xlab={params[0]} ylab="metric" height={220} />
+    </>}
+    <div className="section-h">Trials <span className="pill">{trials.length}</span></div>
+    <table className="tbl">
+      <thead><tr><Th k="idx">#</Th>{params.map(p => <Th key={p} k={p}>{p}</Th>)}<Th k="metric">metric</Th><Th k="seconds">s</Th></tr></thead>
+      <tbody>{rows.map(t => <tr key={t._i}
+        className={(t._i === bestIdx ? 'best-row' : '') + (selectedTrial && selectedTrial.idx === t._i ? ' sel-row' : '')}>
+        <td>#{t._i}{t._i === bestIdx ? ' ♚' : ''}</td>
+        {params.map(p => <td key={p}>{t.params?.[p] != null ? fmt(t.params[p]) : '—'}</td>)}
+        <td>{t.metric != null ? fmt(t.metric) : <span className="badge reason">{t.error ? 'error' : 'failed'}</span>}</td>
+        <td className="muted">{fmt(t.seconds)}</td></tr>)}</tbody>
+    </table>
+    {rowsAll.length > CAP && <button className="btn sm ghost" style={{ marginTop: 6 }} onClick={() => setShowAll(s => !s)}>
+      {showAll ? 'show fewer' : `show all ${rowsAll.length}`}</button>}
   </>
 }
 

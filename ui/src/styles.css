@@ -96,6 +96,8 @@ button { font: inherit; }
 .live .led { width: 8px; height: 8px; border-radius: 50%; background: var(--fg-mut); }
 .live.on .led { background: var(--ok); box-shadow: 0 0 8px var(--ok); animation: breathe 2s infinite; }
 .live.off .led { background: var(--fail); }
+.live.done { color: var(--fg-mut); }
+.live.done .led { background: var(--fg-mut); box-shadow: none; }
 @keyframes breathe { 0%,100%{opacity:1} 50%{opacity:.35} }
 
 /* gauges */
@@ -135,11 +137,49 @@ button { font: inherit; }
 .badge.agent-fb { color: var(--working); border-color: #7a5a1d; }
 .badge.agent-x { color: var(--fail); border-color: #7a2b2b; }
 .badge.reason { color: var(--fail); border-color: #7a2b2b; }
+.badge.sweep { color: var(--accent); border-color: var(--accent-dim); }
+
+/* intra-node sweep: card foot (mini spark + explode toggle) and the exploded trial mini-nodes */
+.node-card.sweep { border-top: 2px solid var(--accent-dim); }
+.node-card .sweep-foot { display: flex; align-items: center; gap: 6px; margin-top: 3px; }
+.node-card .sweep-foot .grp-spark { margin: 0; }
+.node-card .sweep-foot .dot.fail { color: var(--fail); font-size: 11px; }
+.node-card .btn-chev { background: transparent; border: 1px solid var(--line-2); color: var(--accent);
+  cursor: pointer; font-size: 12px; line-height: 1; border-radius: 4px; padding: 1px 4px; }
+.node-card .btn-chev:hover { border-color: var(--accent); }
+.trial-card {
+  width: 56px; min-height: 42px; background: var(--bg-2); border: 1px solid var(--line-2);
+  border-radius: 6px; padding: 3px 4px; color: var(--fg); box-shadow: var(--shadow); cursor: pointer;
+  transition: border-color .12s, box-shadow .12s;
+}
+.trial-card:hover { border-color: var(--accent-dim); }
+.trial-card.sel { border-color: var(--accent); box-shadow: 0 0 0 2px rgba(74,163,255,.35); }
+.trial-card.best { border-color: var(--best); }
+.trial-card.fail { opacity: .6; border-color: #7a2b2b; }
+.trial-card.more { border-style: dashed; color: var(--fg-mut); }
+.trial-card .trial-top { display: flex; align-items: center; justify-content: space-between; font-size: 10px; color: var(--fg-mut); }
+.trial-card .trial-top .crown { color: var(--best); }
+.trial-card .trial-metric { font-variant-numeric: tabular-nums; font-weight: 600; font-size: 12px; margin-top: 1px; }
+
+/* Deep-Research memo node (Phase 2) — a distinct, non-experiment node in the DAG. */
+.research-node {
+  width: 190px; background: var(--bg-2); border: 1px dashed #6f8bb0; border-left: 3px solid #6f8bb0;
+  border-radius: 8px; padding: 7px 9px; color: var(--fg); box-shadow: var(--shadow); cursor: pointer;
+  transition: border-color .12s, box-shadow .12s;
+}
+.research-node:hover { border-color: var(--accent-dim); }
+.research-node.sel { box-shadow: 0 0 0 2px rgba(74,163,255,.4); border-color: var(--accent); }
+.research-node .row { display: flex; align-items: center; gap: 5px; font-size: 12px; }
+.research-node .rn-ic { font-size: 13px; }
+.research-node .rn-summary { font-size: 11px; color: var(--fg-mut); margin: 4px 0; line-height: 1.3; }
+.research-node .rn-foot { display: flex; gap: 5px; }
 
 /* edges (react-flow) */
 .react-flow__edge-path { stroke: var(--line-2); }
 .react-flow__edge.lineage .react-flow__edge-path { stroke: var(--accent); stroke-width: 2; }
 .react-flow__edge.debug .react-flow__edge-path { stroke: var(--fail); stroke-dasharray: 4 3; }
+.react-flow__edge.trial .react-flow__edge-path { stroke: var(--accent-dim); stroke-dasharray: 2 3; opacity: .55; }
+.react-flow__edge.research-edge .react-flow__edge-path { stroke: #6f8bb0; stroke-dasharray: 5 4; opacity: .6; }
 .react-flow__attribution { display: none; }
 .react-flow__background { background: var(--bg); }
 
@@ -169,14 +209,15 @@ button { font: inherit; }
    the per-group ▾ collapse always works even when a node overlaps the region's bounding box. */
 .grp-region { position: relative; pointer-events: none; }
 .grp-region svg { position: absolute; inset: 0; overflow: visible; pointer-events: none; }
-.grp-hull { fill: color-mix(in srgb, var(--grp-tint) 9%, transparent);
-  stroke: color-mix(in srgb, var(--grp-tint) 55%, transparent); stroke-width: 1.5; }
-.grp-tab { position: absolute; top: -12px; left: 16px; cursor: pointer; display: inline-flex; align-items: center; gap: 6px;
-  background: var(--bg-1); border: 1px solid var(--grp-tint); color: var(--fg-dim); border-radius: 999px; padding: 1px 10px; font-size: 11px;
-  pointer-events: auto; z-index: 5; }
-.grp-tab:hover { color: var(--fg); }
-.grp-tab .grp-chev { color: var(--grp-tint); }
-.grp-tab .grp-n { background: var(--bg-3); border-radius: 999px; padding: 0 6px; font-size: 10px; }
+.grp-hull { fill: color-mix(in srgb, var(--grp-tint) 13%, transparent);
+  stroke: color-mix(in srgb, var(--grp-tint) 70%, transparent); stroke-width: 1.5; }
+.grp-tab { position: absolute; top: -13px; left: 14px; cursor: pointer; display: inline-flex; align-items: center; gap: 6px;
+  background: color-mix(in srgb, var(--grp-tint) 30%, var(--bg-1)); border: 1px solid var(--grp-tint);
+  color: var(--fg); border-radius: 999px; padding: 2px 11px; font-size: 11px; font-weight: 600;
+  box-shadow: var(--shadow); pointer-events: auto; z-index: 5; }
+.grp-tab:hover { background: color-mix(in srgb, var(--grp-tint) 45%, var(--bg-1)); }
+.grp-tab .grp-chev { color: var(--fg); opacity: .8; }
+.grp-tab .grp-n { background: rgba(0,0,0,.35); border-radius: 999px; padding: 0 7px; font-size: 10px; font-weight: 700; }
 
 .grp-super { width: 174px; background: var(--bg-2); border: 1.5px solid var(--grp-tint); border-left: 4px solid var(--grp-tint);
   border-radius: var(--radius); padding: 8px 10px; box-shadow: var(--shadow); cursor: pointer; }
@@ -221,6 +262,15 @@ pre.code { background: var(--bg); border: 1px solid var(--line); border-radius: 
 .diff-del { background: rgba(239,68,68,.16); display: block; }
 .section-h { font-weight: 600; margin: 14px 0 6px; color: var(--fg); display: flex; align-items: center; gap: 8px; }
 .section-h .pill { font-weight: 400; }
+.bul { margin: 4px 0 4px 18px; padding: 0; }
+.bul li { margin: 2px 0; }
+
+/* ---------- Deep-Research memos (Research panel) ---------- */
+.memo-card { border: 1px solid var(--line); border-radius: 8px; margin-bottom: 10px; overflow: hidden; }
+.memo-head { display: flex; align-items: center; gap: 6px; padding: 7px 10px; background: var(--bg-2); cursor: pointer; }
+.memo-head:hover { background: var(--bg-3); }
+.memo-body { padding: 4px 12px 12px; }
+.memo-body .v { white-space: pre-wrap; }
 
 /* ---------- per-node execution trace (Reasoning) ---------- */
 .spans { font-size: 12px; }
@@ -247,6 +297,9 @@ pre.code { background: var(--bg); border: 1px solid var(--line); border-radius: 
 .llm-card .role-assistant { color: #c08af0; }
 .llm-card .role-tool { color: #5ad1d1; }
 .llm-card .role-completion { color: var(--ok); }
+.llm-card .role-think { color: var(--fg-mut); user-select: none; }
+.llm-card .think-debug { border-top: 1px dashed var(--line); margin-top: 2px; }
+.llm-card .think-body { font-size: 12px; color: var(--fg-mut); font-style: italic; max-height: 320px; overflow: auto; padding: 2px 0 4px; }
 .llm-card pre.code { max-height: 280px; margin: 0; }
 
 /* ---------- dock tabs ---------- */
@@ -287,6 +340,8 @@ table.tbl { width: 100%; border-collapse: collapse; font-variant-numeric: tabula
 table.tbl th, table.tbl td { text-align: left; padding: 5px 8px; border-bottom: 1px solid var(--line); }
 table.tbl th { color: var(--fg-mut); font-weight: 500; position: sticky; top: 0; background: var(--bg-1); }
 table.tbl tr:hover td { background: var(--bg-2); }
+table.tbl tr.best-row td { color: var(--best); }
+table.tbl tr.sel-row td { background: rgba(74,163,255,.16); }
 .flag { color: var(--fail); font-weight: 600; }
 
 .toolbar { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
@@ -349,6 +404,26 @@ textarea.text { min-height: 220px; font-family: ui-monospace, Consolas, monospac
 .chat-msg .chat-text { white-space: pre-wrap; line-height: 1.45; border-radius: 9px; padding: 8px 11px; border: 1px solid var(--line); }
 .chat-msg.user .chat-text { background: rgba(74,163,255,.10); border-color: var(--accent-dim); }
 .chat-msg.assistant .chat-text { background: var(--bg-1); }
+.chat-msg.assistant .md.chat-text { white-space: normal; }
+
+/* ---------- markdown rendering (chat answers) ---------- */
+.md { line-height: 1.5; }
+.md > :first-child { margin-top: 0; }
+.md > :last-child { margin-bottom: 0; }
+.md .md-p { margin: 6px 0; }
+.md .md-h { margin: 10px 0 5px; font-weight: 700; line-height: 1.25; }
+.md h3.md-h { font-size: 15px; } .md h4.md-h { font-size: 14px; } .md h5.md-h, .md h6.md-h { font-size: 13px; color: var(--fg-dim); }
+.md .md-list { margin: 5px 0; padding-left: 20px; }
+.md .md-list li { margin: 2px 0; }
+.md code { font-family: ui-monospace, "Cascadia Code", Consolas, monospace; font-size: 12px;
+  background: var(--bg-3); border: 1px solid var(--line); border-radius: 4px; padding: 0 4px; }
+.md .md-code { margin: 7px 0; max-height: 320px; }
+.md .md-code code, .md pre code { background: none; border: none; padding: 0; }
+.md .md-quote { margin: 7px 0; padding: 4px 11px; border-left: 3px solid var(--accent-dim);
+  color: var(--fg-dim); background: var(--bg); border-radius: 0 6px 6px 0; }
+.md .md-hr { border: none; border-top: 1px solid var(--line); margin: 10px 0; }
+.md a { text-decoration: underline; }
+.md strong { color: var(--fg); }
 .chat-in { border-top: 1px solid var(--line); padding-top: 8px; margin-top: 6px; }
 .chat-in textarea.text { min-height: 44px; }
 

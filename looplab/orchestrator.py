@@ -129,6 +129,7 @@ class Engine:
         policy: SearchPolicy,
         max_parallel: int = 1,   # single experiment at a time; > 1 = backlog parallel seam
         timeout: float = 30.0,
+        sweep_timeout_mult: float = 8.0,  # intra-node sweep nodes get this × the single-eval budget
         crash_after: Optional[int] = None,
         confirm_top_k: int = 0,
         confirm_seeds: int = 0,
@@ -148,6 +149,8 @@ class Engine:
         ablate_every: int = 0,
         strategist=None,            # Optional[Strategist]; None => static config policy (default)
         strategist_every: int = 3,
+        deep_researcher=None,       # Optional[DeepResearcher]; None => Deep-Research stage off
+        deep_research_every: int = 0,  # run the stage every N created nodes (0 = manual/strategist only)
         developer_factory=None,     # Optional[Callable[[str], Developer]] for live backend swap
         merge_mode: str = "mean",        # A0b: "mean" | "ensemble"
         complexity_cue: bool = False,    # A0d: breadth-keyed prompt hint
@@ -182,10 +185,13 @@ class Engine:
         self._ablate_every = ablate_every
         self.strategist = strategist
         self.strategist_every = max(1, strategist_every)
+        self.deep_researcher = deep_researcher
+        self.deep_research_every = max(0, deep_research_every)
         self.developer_factory = developer_factory
         self._developer_name = "default"
         self._merge_mode = merge_mode
         self._complexity_cue = complexity_cue
+        self._prefer_sweep = False   # A7: Strategist-set bias toward intra-node sweeps (audit-driven)
         self._budget_aware = budget_aware
         self._failure_reflection = failure_reflection
         self._deep_repair = deep_repair
@@ -206,6 +212,7 @@ class Engine:
         self._strategy_fidelity: Optional[str] = None   # None => use the Idea's own profile
         self.max_parallel = max_parallel
         self.timeout = timeout
+        self.sweep_timeout_mult = max(1.0, sweep_timeout_mult)
         self.crash_after = crash_after
         self.confirm_top_k = confirm_top_k
         self.confirm_seeds = confirm_seeds
@@ -481,6 +488,11 @@ class Engine:
             # the policy proposes the next actions. No-op when strategist is off (== today).
             state = self._maybe_consult_strategist(state)
 
+            # Deep-Research stage (Phase 2): a "go think hard" step over all results + the web that
+            # writes a memo to steer the next batch. Fires on a manual request, a cadence, or a
+            # Strategist `request_research`. No-op when the stage is off. Replay-safe (gated).
+            state = self._maybe_deep_research(state)
+
             actions = self.policy.next_actions(state)
             if not actions:
                 # Optional multi-seed confirmation pass (I12) before finishing:
@@ -649,6 +661,10 @@ class Engine:
         defaults = {"policy": self._policy_name, "operators": {"ablate_every": self._ablate_every}}
         if max_es:
             defaults["_budget_frac"] = max(0.0, (rem or 0.0) / max_es)
+        # Mean per-node eval cost so far — the cost signal the Strategist uses to bias toward an
+        # intra-node sweep (amortizing data load / warm-up pays off when each eval is expensive).
+        ev = [n.eval_seconds for n in state.nodes.values() if n.eval_seconds]
+        avg_es = (sum(ev) / len(ev)) if ev else None
         return StrategyContext(
             node_count=len(state.nodes),
             phase=run_phase(state, self.n_seeds),
@@ -656,6 +672,7 @@ class Engine:
             failure_rate=failure_rate(state),
             improves_since_best=improves_since_best(state),
             is_numeric_space=is_numeric_space(state),
+            avg_eval_seconds=avg_es,
             available_policies=available_policies(),
             available_developers=self._available_developers(),
             defaults=defaults,
@@ -710,6 +727,8 @@ class Engine:
             self._complexity_cue = bool(ops["complexity_cue"])
         if "ablate_code_blocks" in ops:
             self._ablate_code_blocks = bool(ops["ablate_code_blocks"])
+        if "prefer_sweep" in ops:
+            self._prefer_sweep = bool(ops["prefer_sweep"])
         pol = strat.get("policy")
         if pol:
             try:
@@ -760,6 +779,54 @@ class Engine:
                 return fold(self.store.read_all())
         return state
 
+    # ----------------------------------------------------------------- Deep-Research stage (P2)
+    def _maybe_deep_research(self, state: RunState) -> RunState:
+        """Run the Deep-Research stage when there's demand, then re-fold. Three triggers, each gated
+        for replay safety: a MANUAL `deep_research` control event (counter gate), a CADENCE
+        (`deep_research_every`, once per node-count), or a Strategist `request_research` decided at
+        this node-count. No-op when the stage is off or already served. Records `research_completed`
+        (audit-only sidecar) and feeds the memo's directions back as a standing hint."""
+        n = len(state.nodes)
+        # Manual: serve outstanding requests first, regardless of node-count (operator asked now).
+        if len(state.research_requests) > state.research_served:
+            return self._run_deep_research(state, trigger="manual", manual=True)
+        # Auto triggers only at a creation decision point (no pending evals), never re-firing at a
+        # node-count already researched (the at_node gate makes resume a no-op).
+        if state.pending_nodes() or n == 0 or self._already_researched_at(state, n):
+            return state
+        if self.deep_research_every and n % self.deep_research_every == 0:
+            return self._run_deep_research(state, trigger="cadence", manual=False)
+        hist = state.strategy_history
+        if (hist and hist[-1].get("at_node") == n
+                and (hist[-1].get("strategy") or {}).get("request_research")):
+            return self._run_deep_research(state, trigger="strategist", manual=False)
+        return state
+
+    @staticmethod
+    def _already_researched_at(state: RunState, n: int) -> bool:
+        return any((m or {}).get("at_node") == n for m in state.research)
+
+    def _run_deep_research(self, state: RunState, *, trigger: str, manual: bool) -> RunState:
+        """Execute one Deep-Research step and record it. Always records a `research_completed` event
+        (even with no model wired, so a manual request's gate advances and the loop doesn't spin)."""
+        from .models import ResearchMemo
+        if self.deep_researcher is None:
+            memo = ResearchMemo(at_node=len(state.nodes), trigger=trigger,
+                                summary="(deep research unavailable: no model configured)")
+        else:
+            with self.tracer.span("deep_research", new_trace=True, trigger=trigger):
+                memo = self.deep_researcher.research(state, trigger=trigger)
+        self.store.append("research_completed", {
+            "memo": memo.model_dump(mode="json"),
+            "at_node": memo.at_node, "trigger": trigger, "served_manual": manual})
+        # Steer the next proposals: surface the memo's directions as a standing operator hint (the
+        # same channel the Researcher already reads), so deep research actually informs planning.
+        if memo.recommended_directions:
+            self.store.append("hint", {
+                "text": "deep-research directions: " + "; ".join(memo.recommended_directions[:5]),
+                "source": "deep_research"})
+        return fold(self.store.read_all())
+
     def _set_complexity_hint(self, state: RunState, parent) -> None:
         """Inject the engine-computed proposal cues into the next prompt: A0d (breadth-keyed
         complexity) + A5 (remaining eval budget). No-op unless the respective knob is on; harmless on
@@ -809,6 +876,16 @@ class Engine:
         hint += self._prior_note_text   # E4: cross-run meta-learned prior (empty unless enabled)
         try:
             setattr(self.researcher, "_complexity_hint", hint)
+        except Exception:  # noqa: BLE001
+            pass
+        # A7 `prefer_sweep`: nudge — never force — the Researcher toward an intra-node sweep when the
+        # Strategist's cost model favors in-process execution. Cleared when the flag is off, so a one-
+        # time bias doesn't persist after the Strategist moves on.
+        sweep_hint = ("\nStrategy bias: evals here are costly and the space is numeric — STRONGLY "
+                      "consider a SWEEP (set `space` to a small grid) so many configs share one "
+                      "data load." if self._prefer_sweep else "")
+        try:
+            setattr(self.researcher, "_sweep_hint", sweep_hint)
         except Exception:  # noqa: BLE001
             pass
 
@@ -1129,7 +1206,20 @@ class Engine:
                 tracer=self.tracer,                           # child spans: setup/command/read
                 cancel=cancel)                                # operator mid-eval node_abort
         else:
-            res = self.sandbox.run(node.code, str(workdir), self.timeout, env, cancel=cancel)
+            # Intra-node sweep nodes run a whole grid in one process, so they need ~N× the
+            # single-eval budget. `sweep_timeout_mult` scales the wall-clock for sweep nodes only;
+            # _kill_tree + the mid-eval cancel watcher still bound a runaway. (The RepoTask path
+            # gets its per-profile timeout from build_command above.)
+            timeout = self.timeout
+            if node is not None and node.idea.is_sweep:
+                timeout = self.timeout * self.sweep_timeout_mult
+            res = self.sandbox.run(node.code, str(workdir), timeout, env, cancel=cancel)
+        # Intra-node sweep: if the solution reported a grid of trials, collapse them into the node's
+        # scalar `metric` (the best feasible trial under the task direction) so fold/best-selection/
+        # improve are untouched. Done BEFORE host grading so a host grader still has the final say on
+        # the best trial's predictions file. The full trial list rides along on `res.trials`.
+        if res.trials:
+            self._apply_sweep_best(res)
         # Out-of-process host-side grading (general): override the (ignored) self-reported metric with
         # the HOST's score of the candidate's predictions. Applied for BOTH the command-eval and the
         # sandbox path, so a task that exposes host_grader() is always host-scored — and so EVERY
@@ -1138,6 +1228,25 @@ class Engine:
         if self._host_grader is not None:
             res = self._apply_host_grade(res, workdir)
         return res
+
+    def _apply_sweep_best(self, res):
+        """Collapse an intra-node sweep's `res.trials` into the node's scalar `metric`: pick the
+        best trial that produced a usable (finite) metric, under the task direction. Keeping
+        `metric` a single number means fold, best-selection, confirm and `improve` treat a sweep
+        node like any other; the trials are audit/UI only. No usable trial -> no metric (the node
+        fails like an empty run, so a sweep where every config crashed can't pass)."""
+        from .sandbox import _to_float
+        scored = [(t, _to_float(t.get("metric"))) for t in (res.trials or [])]
+        scored = [(t, m) for t, m in scored if m is not None]
+        if not scored:
+            res.metric = None
+            return
+        chooser = min if self.task.direction == "min" else max
+        best_t, best_m = chooser(scored, key=lambda tm: tm[1])
+        res.metric = best_m
+        extra = best_t.get("extra_metrics") or {}
+        if extra:
+            res.extra_metrics = {**(res.extra_metrics or {}), **extra}
 
     def _apply_host_grade(self, res, workdir):
         """B1+ out-of-process grading: read the candidate's predictions file from its workdir and score
@@ -1295,7 +1404,11 @@ class Engine:
                         {"node_id": node_id, "metric": res.metric,
                          "stdout_tail": self._redact(res.stdout[-500:]), "eval_seconds": dur,
                          "extra_metrics": res.extra_metrics or {},   # #5 multi-objective
-                         "violations": res.violations or []},
+                         "violations": res.violations or [],
+                         # Intra-node sweep: the whole grid's per-trial results, carried on the ONE
+                         # node_evaluated event (the sweep is a single atomic eval — eval_seconds is
+                         # the whole-sweep wall-clock; per-trial seconds are audit-only). [] normally.
+                         "trials": res.trials or []},
                     )
                     # B5 reward-hacking detector + I3 code-leakage scan (audit-only): flag a
                     # suspicious win / leaky pipeline without ever changing selection. Both surface in

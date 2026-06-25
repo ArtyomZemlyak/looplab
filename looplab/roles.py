@@ -22,10 +22,28 @@ _RESEARCHER_SYSTEM = ("You are an ML researcher proposing the next experiment as
                       "parameters to try. Also set `theme`: a short, reusable lower-case slug "
                       "(e.g. \"loss-fn\", \"architecture\", \"regularization\", \"learning-rate\") "
                       "that groups this experiment with related ones — reuse the SAME slug across "
-                      "experiments that explore the same idea. Respond ONLY with the requested "
-                      "structured fields.")
+                      "experiments that explore the same idea. "
+                      "Optionally, when a hyperparameter is cheap to vary and the task data loads "
+                      "fast, you MAY propose a SWEEP instead of a single point: set `space` to a "
+                      "small discrete grid {name: [values, ...]} (keep the total grid small, "
+                      "<= ~12 points). The Developer then evaluates every grid point in ONE process "
+                      "(loading the data once), so a sweep is far cheaper than the same points run "
+                      "as separate nodes. Leave `space` empty for an ordinary single-config "
+                      "experiment; fixed/shared hyperparameters still go in `params`. "
+                      "Respond ONLY with the requested structured fields.")
 _DEVELOPER_SYSTEM = ("You are an expert ML engineer. Output ONLY a single fenced "
                      "```python``` block containing a complete, self-contained script. ")
+# Appended to the Developer's system prompt when the Idea carries a `space` (intra-node sweep).
+_SWEEP_CONTRACT = (
+    "\nThis is an INTRA-NODE SWEEP: evaluate EVERY point of the given grid in ONE process — load "
+    "the data ONCE and reuse it across all grid points. Report ALL results by printing, as the "
+    "FINAL stdout line, a JSON object: {\"trials\": [{\"params\": {..}, \"metric\": <float>, "
+    "\"seconds\": <float>, \"extra_metrics\": {..}}, ...]} — one entry per grid point. The easiest "
+    "way is `from looplab.sweep import run_sweep` and call run_sweep(space, train_fn) where "
+    "train_fn(params, seed) returns the metric (it prints the required line for you); but you may "
+    "use Optuna/GridSearchCV/joblib instead as long as you emit that exact JSON line. If the task "
+    "is host-graded (it asks you to write predictions/submission), write them for the SINGLE BEST "
+    "grid point so the host can grade it.")
 
 
 class Researcher(Protocol):
@@ -148,12 +166,20 @@ class LLMResearcher:
         hint_block = ("\nOperator directives (follow if sensible): " + "; ".join(hints)) if hints else ""
         # A0d: an engine-set complexity cue keyed on the operated node's breadth (empty when off).
         cue = getattr(self, "_complexity_hint", "")
+        # Strategist `prefer_sweep` bias (engine-set, empty when off): nudges — but never forces —
+        # the Researcher toward an intra-node sweep when the cost model favors in-process execution.
+        sweep_hint = getattr(self, "_sweep_hint", "")
         messages = [
             {"role": "system",
              "content": render(self.prompts, "researcher_system", _RESEARCHER_SYSTEM)},
             {"role": "user", "content": _state_brief(state, parent) + "\n" + self.space_hint +
-                                        hint_block + cue +
-                                        "\nPropose the next Idea (operator, params, rationale)."},
+                                        hint_block + cue + sweep_hint +
+                                        "\nPropose the next Idea (operator, params, rationale; "
+                                        "optionally a `space` grid for a sweep). The `rationale` is "
+                                        "your conclusion the operator reads: in 1-3 sentences state "
+                                        "WHY this experiment next and WHAT you expect it to "
+                                        "learn/improve given the results so far — not a restatement "
+                                        "of the params."},
         ]
         # Small models occasionally emit unparseable output; retry, then fall back to a
         # safe default so one bad response never crashes the run.
@@ -187,7 +213,15 @@ class LLMDeveloper:
         # for regression, k for mlebench, etc. — hardcoding names dropped the value on
         # tasks that use a different hyperparameter.
         params = ", ".join(f"{k}={v}" for k, v in idea.params.items()) or "(model defaults)"
-        user = (f"Approach to implement with parameters: {params}. {idea.rationale}").strip()
+        if idea.space:
+            # Intra-node sweep: render the grid and append the trials-reporting contract to the
+            # system prompt so the Developer runs every point in one process and reports them all.
+            system += _SWEEP_CONTRACT
+            grid = "; ".join(f"{k} in {v}" for k, v in idea.space.items())
+            fixed = f" Fixed/shared params: {params}." if idea.params else ""
+            user = (f"Run an intra-node sweep over the grid: {grid}.{fixed} {idea.rationale}").strip()
+        else:
+            user = (f"Approach to implement with parameters: {params}. {idea.rationale}").strip()
         return extract_code(self.client.complete_text(
             [{"role": "system", "content": system}, {"role": "user", "content": user}]))
 

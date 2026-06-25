@@ -26,6 +26,28 @@ class Idea(BaseModel):
     # and audit-only — never affects search/selection; the UI groups nodes by it. Flows through the
     # event log automatically (idea.model_dump → node_created → Idea(**d["idea"]) in replay.fold).
     theme: Optional[str] = None
+    # Intra-node sweep: instead of a single point in `params`, the Researcher may attach a discrete
+    # search GRID here {name: [values...]}. When non-empty, the Developer renders code that runs
+    # every grid point in ONE process (shared data load / warm GPU) and reports all results back as
+    # node.trials in a single node_evaluated event. `params` may still carry fixed/shared
+    # hyperparameters alongside the swept grid. Grids only (not ranges) to keep the model union-free
+    # and the enumeration deterministic for replay — a future `space_kind` field can add ranges.
+    space: dict[str, list[float]] = Field(default_factory=dict)
+
+    @property
+    def is_sweep(self) -> bool:
+        return bool(self.space)
+
+
+class Trial(BaseModel):
+    """One configuration evaluated inside an intra-node sweep. Audit/UI data — the node's scalar
+    `metric` is set (by the engine) from the best feasible trial, so fold/best-selection are
+    untouched."""
+    params: dict[str, float] = Field(default_factory=dict)
+    metric: Optional[float] = None
+    seconds: Optional[float] = None
+    extra_metrics: dict[str, Optional[float]] = Field(default_factory=dict)
+    error: str = ""
 
 
 class Node(BaseModel):
@@ -64,6 +86,29 @@ class Node(BaseModel):
     # External-agent audit (ADR-7): set by an `agent_validated` event when the code was
     # produced by a validated CLI-agent Developer. {"ok": bool, "checks": [...]}.
     agent_report: Optional[dict] = None
+    # Intra-node sweep results: when the node's idea carried a `space`, the Developer's code ran
+    # many configurations in one process and reported them all here. `metric` above is the best
+    # feasible trial's metric (computed by the engine), so this list is audit/UI only and never
+    # affects search/selection. Empty for ordinary single-config nodes (backward compat).
+    trials: list[Trial] = Field(default_factory=list)
+
+
+class ResearchMemo(BaseModel):
+    """Output of the Deep-Research stage (Phase 2): the model reads across ALL results so far +
+    the literature/web and writes a strategic memo that steers the next batch. Audit-only — it is
+    recorded as a `research_completed` event folded into `RunState.research`, NEVER into the search
+    DAG, so best-selection/policies are untouched. The UI renders it as a node and surfaces the
+    `summary`/`findings`/`recommended_directions` as the conclusion; `reasoning` is debug-only."""
+    summary: str = ""                                   # one-paragraph conclusion (the takeaway)
+    reasoning: str = ""                                 # the "think hard" narrative (debug-only)
+    findings: list[str] = Field(default_factory=list)   # concrete observations across results/web
+    sources: list[dict] = Field(default_factory=list)   # {title, url} consulted (web/arXiv)
+    recommended_directions: list[str] = Field(default_factory=list)  # what to try next (steer hints)
+    # Optional concrete proposals the engine may materialize as injected nodes (empty for v1; the
+    # directions above already feed the Researcher as standing context).
+    proposed_ideas: list[Idea] = Field(default_factory=list)
+    at_node: Optional[int] = None                       # node count when the stage ran (UI anchor)
+    trigger: str = ""                                   # "manual" | "cadence" | "strategist"
 
 
 class Project(BaseModel):
@@ -177,6 +222,13 @@ class RunState(BaseModel):
     reward_hacks: list[dict] = Field(default_factory=list)
     # E1 novelty/dedup gate: near-duplicate proposals that were nudged off {node_id, near_node, ...}.
     novelty_events: list[dict] = Field(default_factory=list)
+    # Deep-Research stage (Phase 2, audit-only sidecar — NEVER read by best-selection). `research`
+    # is the timeline of completed memos (each a ResearchMemo dump); `research_requests` are pending
+    # manual `deep_research` control events and `research_served` how many have been fulfilled (the
+    # replay-safe gate, mirroring inject_requests/injects_done).
+    research: list[dict] = Field(default_factory=list)
+    research_requests: list[dict] = Field(default_factory=list)
+    research_served: int = 0
 
     # --- read helpers (no mutation) ---
     def best(self) -> Optional[Node]:

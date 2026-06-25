@@ -6,7 +6,7 @@ from __future__ import annotations
 
 from typing import Iterable
 
-from .models import Event, Idea, Node, NodeStatus, RunState
+from .models import Event, Idea, Node, NodeStatus, RunState, Trial
 
 
 def fold(events: Iterable[Event]) -> RunState:
@@ -51,6 +51,16 @@ def fold(events: Iterable[Event]) -> RunState:
                 n.extra_metrics = d.get("extra_metrics", {}) or {}
                 n.violations = d.get("violations", []) or []
                 n.feasible = not n.violations           # #5: constraint-violating -> infeasible
+                # Intra-node sweep: per-trial results (audit/UI only; node.metric is already the
+                # best trial, set by the engine). Coerce defensively per trial so one malformed
+                # entry in a hand-edited/bring-your-own-script log can't crash the whole fold.
+                trials = []
+                for t_d in (d.get("trials", []) or []):
+                    try:
+                        trials.append(Trial(**t_d))
+                    except Exception:
+                        continue
+                n.trials = trials
                 if first_terminal:
                     st.total_eval_seconds += d.get("eval_seconds") or 0.0
         elif t == "node_failed":
@@ -181,6 +191,14 @@ def fold(events: Iterable[Event]) -> RunState:
             st.inject_requests.append(d)        # operator-authored experiment (manual tree edit)
         elif t == "inject_done":
             st.injects_done += 1                 # one per processed inject (replay-safe gate)
+        elif t == "deep_research":
+            st.research_requests.append(d)       # manual "go think hard" request (control event)
+        elif t == "research_completed":
+            # Deep-Research memo (audit-only sidecar; NEVER touches nodes/best). `served_manual`
+            # advances the manual-request gate so a resume never re-runs a served request.
+            st.research.append(d.get("memo") or d)
+            if d.get("served_manual"):
+                st.research_served += 1
         elif t == "confirm_done":
             nid = d.get("node_id")   # forced-confirm finished for this node (gate; selection untouched)
             if nid is not None and nid not in st.confirmed_forced:

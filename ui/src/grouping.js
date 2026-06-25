@@ -65,40 +65,6 @@ export function groupColor(key) {
 }
 
 // --- geometry: a soft enclosing region for a set of node rectangles -----------------------------
-function convexHull(pts) {
-  if (pts.length < 3) return pts.slice()
-  const p = pts.slice().sort((a, b) => a[0] - b[0] || a[1] - b[1])
-  const cross = (o, a, b) => (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0])
-  const lower = []
-  for (const q of p) { while (lower.length >= 2 && cross(lower[lower.length - 2], lower[lower.length - 1], q) <= 0) lower.pop(); lower.push(q) }
-  const upper = []
-  for (let i = p.length - 1; i >= 0; i--) { const q = p[i]; while (upper.length >= 2 && cross(upper[upper.length - 2], upper[upper.length - 1], q) <= 0) upper.pop(); upper.push(q) }
-  return lower.slice(0, -1).concat(upper.slice(0, -1))
-}
-
-function expandFromCentroid(hull, pad) {
-  const cx = hull.reduce((s, p) => s + p[0], 0) / hull.length
-  const cy = hull.reduce((s, p) => s + p[1], 0) / hull.length
-  return hull.map(([x, y]) => {
-    const dx = x - cx, dy = y - cy, d = Math.hypot(dx, dy) || 1
-    return [x + (dx / d) * pad, y + (dy / d) * pad]
-  })
-}
-
-// Catmull-Rom -> cubic bezier, closed loop, for an organic boundary.
-function smoothClosed(pts) {
-  const n = pts.length
-  if (n < 3) return ''
-  let d = `M ${pts[0][0].toFixed(1)} ${pts[0][1].toFixed(1)} `
-  for (let i = 0; i < n; i++) {
-    const p0 = pts[(i - 1 + n) % n], p1 = pts[i], p2 = pts[(i + 1) % n], p3 = pts[(i + 2) % n]
-    const c1x = p1[0] + (p2[0] - p0[0]) / 6, c1y = p1[1] + (p2[1] - p0[1]) / 6
-    const c2x = p2[0] - (p3[0] - p1[0]) / 6, c2y = p2[1] - (p3[1] - p1[1]) / 6
-    d += `C ${c1x.toFixed(1)} ${c1y.toFixed(1)}, ${c2x.toFixed(1)} ${c2y.toFixed(1)}, ${p2[0].toFixed(1)} ${p2[1].toFixed(1)} `
-  }
-  return d + 'Z'
-}
-
 function roundRectPath(x, y, w, h, r) {
   r = Math.min(r, w / 2, h / 2)
   return `M ${x + r} ${y} H ${x + w - r} Q ${x + w} ${y} ${x + w} ${y + r} V ${y + h - r} ` +
@@ -107,20 +73,14 @@ function roundRectPath(x, y, w, h, r) {
 
 // rects: [{x,y,w,h}] in absolute (flow) coords. Returns the region node geometry: its absolute
 // origin {x,y}, its {w,h}, and an SVG path string in LOCAL coords (relative to that origin).
-export function regionGeometry(rects, pad = 28) {
+// A clean rounded rectangle reads as a clear "block" even with dozens of members — far more legible
+// than an organic hull, which goes spiky/self-intersecting once a cluster spans several rows.
+export function regionGeometry(rects, pad = 26) {
   const xs = rects.flatMap(r => [r.x, r.x + r.w]); const ys = rects.flatMap(r => [r.y, r.y + r.h])
   const minX = Math.min(...xs) - pad, minY = Math.min(...ys) - pad
   const maxX = Math.max(...xs) + pad, maxY = Math.max(...ys) + pad
   const w = maxX - minX, h = maxY - minY
-  let path
-  if (rects.length <= 2) {
-    path = roundRectPath(pad / 2, pad / 2, w - pad, h - pad, 22)
-  } else {
-    const corners = rects.flatMap(r => [[r.x, r.y], [r.x + r.w, r.y], [r.x + r.w, r.y + r.h], [r.x, r.y + r.h]])
-      .map(([x, y]) => [x - minX, y - minY])
-    path = smoothClosed(expandFromCentroid(convexHull(corners), pad * 0.7))
-  }
-  return { x: minX, y: minY, w, h, path }
+  return { x: minX, y: minY, w, h, path: roundRectPath(pad / 2, pad / 2, w - pad, h - pad, 20) }
 }
 
 // Collapse: replace each collapsed group's members with one super-node id. Returns hidden member

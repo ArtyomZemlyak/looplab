@@ -10,11 +10,11 @@ import {
   TrustPanel, SensitivityPanel, FailuresPanel, ParetoPanel, DataQualityPanel,
   ConfigPanel, AuthoringPanel, MemoryPanel, RegistryPanel, ReportPanel, EventExplorer,
   ComparePanel, MetaGraphPanel, GpuPanel, PolicyPanel, StrategistPanel, HyperImportancePanel,
-  CrossRunPanel, CollabPanel,
+  CrossRunPanel, CollabPanel, PlanningPanel, ResearchPanel,
 } from './panels.jsx'
 
 const PANELS = [
-  ['report', 'Report'], ['trust', 'Trust'], ['policy', 'Policy'], ['strategist', 'Strategist'],
+  ['report', 'Report'], ['planning', 'Planning'], ['research', 'Research'], ['trust', 'Trust'], ['policy', 'Policy'], ['strategist', 'Strategist'],
   ['sensitivity', 'Sensitivity'], ['importance', 'Importance'], ['failures', 'Failures'],
   ['pareto', 'Pareto/Div'], ['data', 'Data'], ['compare', 'Compare'], ['crossrun', 'Cross-run'],
   ['collab', 'Collab'], ['config', 'Config'], ['authoring', 'Authoring'], ['memory', 'Memory'],
@@ -30,7 +30,13 @@ export default function RunView({ runId, onBack }) {
   const [groupMode, setGroupMode] = useState('theme')
   const [collapsed, setCollapsed] = useState(() => new Set())
   const [selectedGroup, setSelectedGroup] = useState(null)
+  // Intra-node sweep: which sweep nodes are "exploded" into their trial subgraph, the lazily-fetched
+  // full trials per node (live state carries only a summary), and the currently-selected trial.
+  const [exploded, setExploded] = useState(() => new Set())
+  const [trialCache, setTrialCache] = useState({})
+  const [selectedTrial, setSelectedTrial] = useState(null)   // {nodeId, idx} | null
   const [panel, setPanel] = useState(null)
+  const [focusMemo, setFocusMemo] = useState(null)           // research memo idx to open in the panel
   // Resizable / collapsible panes (standard multi-pane layout), persisted across sessions.
   const [sideW, setSideW] = useState(() => +localStorage.getItem('ll.sideW') || 420)
   const [dockH, setDockH] = useState(() => +localStorage.getItem('ll.dockH') || 230)
@@ -76,8 +82,23 @@ export default function RunView({ runId, onBack }) {
     const ns = (hist || live)?.nodes
     return (selectedGroup != null && ns) ? (computeGroups(ns, groupMode).get(selectedGroup) || []) : []
   }, [hist, live, groupMode, selectedGroup])
-  // Node selection clears any group selection (the side panel shows one or the other).
-  const selectNode = (id) => { setSelectedId(id); if (id != null) setSelectedGroup(null) }
+  // Node selection clears any group/trial selection (the side panel shows one or the other).
+  const selectNode = (id) => { setSelectedId(id); setSelectedTrial(null); if (id != null) setSelectedGroup(null) }
+  // Lazily fetch a sweep node's full trials (live state only carries a summary) into the cache.
+  const ensureTrials = (id) => {
+    if (id == null || trialCache[id]) return
+    get(`/api/runs/${runId}/nodes/${id}`).then(d => setTrialCache(c => ({ ...c, [id]: d.trials || [] }))).catch(() => {})
+  }
+  const toggleExplode = (id) => {
+    setExploded(s => { const n = new Set(s); n.has(id) ? n.delete(id) : n.add(id); return n })
+    ensureTrials(id)
+  }
+  // Selecting a trial pseudo-node also selects its sweep node (so the inspector loads that node's
+  // detail) and opens the Trials tab. idx==null (the "+N more" leaf) just opens the tab.
+  const selectTrial = (nodeId, idx) => {
+    setSelectedTrial(idx == null ? null : { nodeId, idx })
+    setSelectedId(nodeId); setSelectedGroup(null); setInspectTab('Trials'); ensureTrials(nodeId)
+  }
   // Drill-down from the dock/timeline: select a node, optionally open a tab + jump the scrubber.
   const focusNode = (id, tab, seq) => {
     selectNode(id)
@@ -92,6 +113,10 @@ export default function RunView({ runId, onBack }) {
   if (!live) return <div className="app"><div className="runlist"><div className="notice">Connecting to run <b>{runId}</b>…</div></div></div>
   const state = hist || live
   const replaying = hist != null
+  // Liveness reflects the ACTUAL run, not the viewed snapshot: green+breathing only while a
+  // connected run is still going; a finished run shows a calm "finished", a dropped SSE "offline".
+  const liveStatus = !connected ? 'off' : (live.finished ? 'done' : 'on')
+  const liveLabel = !connected ? 'offline' : (live.finished ? 'finished' : 'live')
   const evalSec = state.total_eval_seconds || 0
   const maxEval = cfg?.max_eval_seconds
   const cost = state.llm_cost
@@ -105,7 +130,7 @@ export default function RunView({ runId, onBack }) {
         <button className="btn sm ghost" onClick={onBack}>← runs</button>
         <span className="pill phase">{phaseLabel(state)}</span>
         <span className="muted" style={{ maxWidth: 280, overflow: 'hidden', whiteSpace: 'nowrap', textOverflow: 'ellipsis' }} title={state.goal}>{state.goal || state.task_id}</span>
-        <span className={'live ' + (connected ? 'on' : 'off')}><span className="led" />{connected ? 'live' : 'offline'}{replaying && ' · replay'}</span>
+        <span className={'live ' + liveStatus}><span className="led" />{liveLabel}{replaying && ' · replay'}</span>
         <span className="spacer" />
 
         <div className="gauge">
@@ -124,24 +149,27 @@ export default function RunView({ runId, onBack }) {
           <span className="k">⚠ hack?</span> {state.reward_hacks.length}</span>}
 
         <div className="toolbar">
-          {!state.finished && (state.paused
+          {/* controls act on the LIVE run, so gate them on `live` — not the replayed snapshot,
+              which would make Pause/Stop flicker in and out while scrubbing through history. */}
+          {!live.finished && (live.paused
             ? <button className="btn sm primary" onClick={() => act(() => CONTROL.resume(runId), 'resumed')}>▶ Resume</button>
             : <button className="btn sm warn" onClick={() => act(() => CONTROL.pause(runId), 'paused')}>⏸ Pause</button>)}
-          {!state.finished && <button className="btn sm danger" onClick={() => act(() => CONTROL.abort(runId), 'stopping run')}>■ Stop</button>}
-          {!state.finished && <button className="btn sm" title="inject a directive for the researcher" onClick={() => { const t = prompt('Hint / directive for the researcher (e.g. "try higher degree")'); if (t) act(() => CONTROL.hint(runId, t), 'hint sent') }}>💡 Hint</button>}
-          <button className="btn sm" title={state.finished ? 'add an experiment — reopens & continues the run' : 'hand-add an experiment node to the tree'} onClick={() => openInject(null)}>✚ Experiment</button>
+          {!live.finished && <button className="btn sm danger" onClick={() => act(() => CONTROL.abort(runId), 'stopping run')}>■ Stop</button>}
+          {!live.finished && <button className="btn sm" title="inject a directive for the researcher" onClick={() => { const t = prompt('Hint / directive for the researcher (e.g. "try higher degree")'); if (t) act(() => CONTROL.hint(runId, t), 'hint sent') }}>💡 Hint</button>}
+          {!live.finished && <button className="btn sm" title="run a deep-research step now: read all results + the web, write a memo that steers the next experiments" onClick={() => act(() => CONTROL.deepResearch(runId), 'deep research queued')}>🔬 Deep research</button>}
+          <button className="btn sm" title={live.finished ? 'add an experiment — reopens & continues the run' : 'hand-add an experiment node to the tree'} onClick={() => openInject(null)}>✚ Experiment</button>
           <button className="btn sm" title="chat about this run / the selected experiment" onClick={() => setChatOpen(true)}>💬 Chat</button>
-          {state.paused && <button className="btn sm" onClick={() => act(() => post(`/api/runs/${runId}/resume`, {}), 'engine resume spawned')}>⟳ Spawn resume</button>}
+          {live.paused && <button className="btn sm" onClick={() => act(() => post(`/api/runs/${runId}/resume`, {}), 'engine resume spawned')}>⟳ Spawn resume</button>}
           <button className={'btn sm' + (notif ? ' primary' : '')} title="desktop notifications" onClick={() => setNotif(n => !n)}>🔔</button>
         </div>
       </div>
 
-      {(state.phase === 'approval' || state.phase === 'spec_approval') &&
+      {(live.phase === 'approval' || live.phase === 'spec_approval') &&
         <div className="topbar" style={{ background: 'rgba(74,163,255,.12)', borderBottom: '1px solid var(--accent-dim)' }}>
-          <b>{state.phase === 'approval' ? 'Human approval required for the final best.' : 'Eval spec needs ratification.'}</b>
+          <b>{live.phase === 'approval' ? 'Human approval required for the final best.' : 'Eval spec needs ratification.'}</b>
           <span className="spacer" />
-          {state.phase === 'approval'
-            ? <button className="btn sm primary" onClick={() => act(() => CONTROL.approve(runId, state.best_node_id), 'approved')}>✓ Approve #{state.best_node_id}</button>
+          {live.phase === 'approval'
+            ? <button className="btn sm primary" onClick={() => act(() => CONTROL.approve(runId, live.best_node_id), 'approved')}>✓ Approve #{live.best_node_id}</button>
             : <button className="btn sm primary" onClick={() => act(() => CONTROL.ratify(runId), 'ratified')}>✓ Ratify spec</button>}
           <button className="btn sm" onClick={() => act(() => post(`/api/runs/${runId}/resume`, {}), 'resume spawned')}>⟳ Spawn resume</button>
         </div>}
@@ -155,7 +183,11 @@ export default function RunView({ runId, onBack }) {
         <div className="canvas-wrap"><Dag state={state} selectedId={selectedId} onSelect={selectNode}
           groupMode={groupMode} collapsed={collapsed} onToggleGroup={toggleGroup} onSetMode={changeMode}
           onCollapseAll={(keys) => setCollapsed(new Set(keys))} onExpandAll={() => setCollapsed(new Set())}
-          selectedGroup={selectedGroup} onSelectGroup={selectGroup} /></div>
+          selectedGroup={selectedGroup} onSelectGroup={selectGroup}
+          exploded={exploded} onExplode={toggleExplode} trialCache={trialCache}
+          selectedTrial={selectedTrial} onSelectTrial={selectTrial}
+          selectedResearch={panel === 'research' ? focusMemo : null}
+          onSelectResearch={(i) => { setFocusMemo(i); setPanel('research') }} /></div>
         {sideC
           ? <div className="side-rail" title="show panel" onClick={() => setSideC(false)}>‹ {selectedGroup != null ? 'group' : 'inspector'}</div>
           : <>
@@ -170,7 +202,8 @@ export default function RunView({ runId, onBack }) {
                   ? <GroupSummary groupKey={selectedGroup} memberIds={groupMembers}
                       state={state} onSelectNode={focusNode} onClose={() => setSelectedGroup(null)} />
                   : <Inspector runId={runId} nodeId={selectedId} state={state} live={live}
-                      tab={inspectTab} setTab={setInspectTab} onToast={showToast} onInject={openInject} />}
+                      tab={inspectTab} setTab={setInspectTab} onToast={showToast} onInject={openInject}
+                      selectedTrial={selectedTrial} />}
               </div>
             </>}
       </div>
@@ -194,6 +227,8 @@ export default function RunView({ runId, onBack }) {
       {panel === 'memory' && <MemoryPanel onClose={() => setPanel(null)} />}
       {panel === 'registry' && <RegistryPanel state={state} onClose={() => setPanel(null)} />}
       {panel === 'policy' && <PolicyPanel state={state} onSelect={selectNode} onClose={() => setPanel(null)} />}
+      {panel === 'planning' && <PlanningPanel state={state} onSelect={selectNode} onClose={() => setPanel(null)} />}
+      {panel === 'research' && <ResearchPanel state={state} focus={focusMemo} onClose={() => { setPanel(null); setFocusMemo(null) }} />}
       {panel === 'strategist' && <StrategistPanel state={state} runId={runId} onToast={showToast} onClose={() => setPanel(null)} />}
       {panel === 'gpu' && <GpuPanel onClose={() => setPanel(null)} />}
       {panel === 'report' && <ReportPanel state={state} runId={runId} onClose={() => setPanel(null)} />}

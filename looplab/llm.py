@@ -25,6 +25,24 @@ class LLMError(RuntimeError):
     it like any other bad response and the run degrades to a safe default rather than crashing."""
 
 
+def split_think(text: str) -> tuple[str, str]:
+    """(thinking, answer) split — thin wrapper over `parse.split_think`, imported lazily to avoid
+    the parse↔llm import cycle (parse imports LLMError from here)."""
+    from .parse import split_think as _split
+    return _split(text)
+
+
+def _clean_thinking(content: str, reasoning: str = "") -> tuple[str, str]:
+    """(thinking, answer) for an assistant turn. Reasoning models surface their chain-of-thought one
+    of two ways: a DEDICATED field (`reasoning`/`reasoning_content` — newer Ollama/OpenAI) or INLINE
+    <think>…</think> tags in `content`. Prefer the dedicated field (content is then already clean);
+    otherwise split the inline tags. Either way the answer is the clean conclusion the UI surfaces."""
+    if reasoning:
+        _, answer = split_think(content or "")   # strip any stray inline tags too, for safety
+        return str(reasoning), (answer or content or "")
+    return split_think(content or "")
+
+
 def _assistant_text(msg: dict) -> str:
     """Display text for a tool-calling assistant turn: its content, plus a compact note of any
     tool calls it made (so the trace shows the model chose to call a tool, not an empty reply)."""
@@ -93,9 +111,14 @@ class OpenAICompatibleClient:
     def complete_text(self, messages: list[dict]) -> str:
         body = self._post({"model": self.model, "messages": messages,
                            "temperature": self.temperature, "stream": False})
-        out = body["choices"][0]["message"].get("content") or ""
+        msg = body["choices"][0]["message"]
+        out = msg.get("content") or ""
+        # Record the clean answer as the completion (the conclusion) and the raw reasoning
+        # separately; return the original text so downstream parsing is unchanged.
+        thinking, answer = _clean_thinking(out, msg.get("reasoning") or msg.get("reasoning_content") or "")
         record_llm_call(op="complete_text", model=self.model, messages=messages,
-                        completion=out, usage=body.get("usage"))
+                        completion=answer or out, thinking=thinking or None,
+                        usage=body.get("usage"))
         return out
 
     def chat(self, messages: list[dict], tools: list[dict],
@@ -107,8 +130,11 @@ class OpenAICompatibleClient:
             "tool_choice": tool_choice, "temperature": self.temperature, "stream": False,
         })
         msg = body["choices"][0]["message"]
+        thinking, answer = _clean_thinking(msg.get("content") or "",
+                                           msg.get("reasoning") or msg.get("reasoning_content") or "")
         record_llm_call(op="chat", model=self.model, messages=messages,
-                        completion=_assistant_text(msg), usage=body.get("usage"))
+                        completion=_assistant_text({**msg, "content": answer}),
+                        thinking=thinking or None, usage=body.get("usage"))
         return msg
 
     def complete_tool(self, messages: list[dict], json_schema: dict) -> dict:
@@ -130,9 +156,14 @@ class OpenAICompatibleClient:
         if not calls:  # endpoint ignored tool_choice -> let parse.py fall back to text
             raise KeyError("no tool_calls in response")
         args = calls[0]["function"]["arguments"]
+        # Reasoning models emit their chain-of-thought (a `reasoning` field, or inline <think> in
+        # `content`) alongside the tool call; capture it (debug channel) instead of discarding it.
+        # The completion stays the structured tool args — the clean conclusion the UI renders.
+        thinking, _ = _clean_thinking(msg.get("content") or "",
+                                      msg.get("reasoning") or msg.get("reasoning_content") or "")
         record_llm_call(op="complete_tool", model=self.model, messages=messages,
                         completion=args if isinstance(args, str) else json.dumps(args),
-                        usage=body.get("usage"))
+                        thinking=thinking or None, usage=body.get("usage"))
         return json.loads(args) if isinstance(args, str) else args
 
 
@@ -202,9 +233,13 @@ class LiteLLMClient:
     def complete_text(self, messages: list[dict]) -> str:
         resp = self._litellm().completion(model=self.model, messages=messages, **self.kwargs)
         self._account(resp)
-        out = resp.choices[0].message.content or ""
+        m = resp.choices[0].message
+        out = m.content or ""
+        thinking, answer = _clean_thinking(
+            out, getattr(m, "reasoning_content", None) or getattr(m, "reasoning", None) or "")
         record_llm_call(op="complete_text", model=self.model, messages=messages,
-                        completion=out, usage=self._usage(resp))
+                        completion=answer or out, thinking=thinking or None,
+                        usage=self._usage(resp))
         return out
 
     def complete_tool(self, messages: list[dict], json_schema: dict) -> dict:
@@ -222,7 +257,11 @@ class LiteLLMClient:
         if not calls:  # endpoint ignored tool_choice -> KeyError so parse.py falls back
             raise KeyError("no tool_calls in response")
         args = calls[0].function.arguments
+        m = resp.choices[0].message
+        thinking, _ = _clean_thinking(
+            getattr(m, "content", None) or "",
+            getattr(m, "reasoning_content", None) or getattr(m, "reasoning", None) or "")
         record_llm_call(op="complete_tool", model=self.model, messages=messages,
                         completion=args if isinstance(args, str) else json.dumps(args),
-                        usage=self._usage(resp))
+                        thinking=thinking or None, usage=self._usage(resp))
         return json.loads(args)

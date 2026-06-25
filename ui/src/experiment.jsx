@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react'
 import { fmt, CONTROL, chat, suggestIdea, resumeRun } from './util.js'
+import Markdown from './markdown.jsx'
 
 // A lightweight modal shell (matches the panel overlay styling) for the experiment dialogs.
 function Modal({ title, sub, onClose, children, width = 560 }) {
@@ -125,7 +126,9 @@ export function ChatTab({ runId, nodeId, state, onInject, onToast }) {
         </div>}
         {msgs.map((m, i) => <div key={i} className={'chat-msg ' + m.role}>
           <div className="chat-role">{m.role === 'user' ? 'you' : 'researcher'}</div>
-          <div className="chat-text">{m.content}</div>
+          {m.role === 'user'
+            ? <div className="chat-text">{m.content}</div>
+            : <Markdown className="chat-text" text={m.content} />}
         </div>)}
         {busy && <div className="muted" style={{ padding: 8 }}>…thinking</div>}
         <div ref={endRef} />

@@ -35,6 +35,7 @@ Strategy = TypedDict(
         "developer": str,       # "default"|"llm"|"opencode"|... (whatever the dev factory knows)
         "operators": dict,      # {"ablate_every":int, "merge_mode":str, "complexity_cue":bool, ...}
         "fidelity": str,        # "smoke"|"full"|"adaptive"
+        "request_research": bool,  # ask the engine to run the Deep-Research stage before continuing
         "rationale": str,       # human-readable "why" (the UI panel)
         "source": str,          # "rule"|"llm"|"operator"|"config" (provenance, audit)
     },
@@ -51,6 +52,7 @@ class StrategyContext(BaseModel):
     failure_rate: float = 0.0
     improves_since_best: int = 0
     is_numeric_space: bool = False
+    avg_eval_seconds: Optional[float] = None   # mean per-node eval cost so far (sweep cost signal)
     available_policies: list[str] = Field(default_factory=list)
     available_developers: list[str] = Field(default_factory=list)
     defaults: dict = Field(default_factory=dict)   # the static config Strategy (fallback/start)
@@ -136,11 +138,18 @@ def validate_strategy(strat: Optional[Strategy], ctx: StrategyContext) -> Option
             clean["complexity_cue"] = ops["complexity_cue"]
         if isinstance(ops.get("ablate_code_blocks"), bool):
             clean["ablate_code_blocks"] = ops["ablate_code_blocks"]
+        # Intra-node sweep bias: a hint that nudges the Researcher toward a sweep. The Strategist
+        # only sets the flag — it never creates a sweep itself (the Researcher decides whether/how
+        # to build the grid), preserving the "Researcher is the decision-maker" division.
+        if isinstance(ops.get("prefer_sweep"), bool):
+            clean["prefer_sweep"] = ops["prefer_sweep"]
         if clean:
             out["operators"] = clean
     fid = strat.get("fidelity")
     if fid in ("smoke", "full", "adaptive"):
         out["fidelity"] = fid
+    if isinstance(strat.get("request_research"), bool) and strat["request_research"]:
+        out["request_research"] = True   # ask the engine to run the Deep-Research stage
     if not out:
         return None
     out["rationale"] = str(strat.get("rationale", ""))[:500]
@@ -189,14 +198,36 @@ class RuleStrategist:
         # Stall: the leader hasn't been dethroned for a while. Per the verified "operators > search"
         # finding, first probe operators (bump ablation); if MCTS is available, switch to explore.
         if ctx.improves_since_best >= self.stall_window:
+            # A hard stall is exactly when stepping back to "think hard" pays off: ask the engine to
+            # run the Deep-Research stage (read across all results + the literature/web) alongside the
+            # machinery switch, so the next batch is informed by more than local hill-climbing.
+            deep = ctx.improves_since_best >= 2 * self.stall_window
             if "mcts" in avail:
-                return {"policy": "mcts", "policy_params": {"c": 1.4}, "fidelity": "adaptive",
-                        "rationale": f"stalled for {ctx.improves_since_best} improves: "
-                                     "switch greedy->mcts to explore under-visited subtrees",
-                        "source": "rule"}
-            return {"policy": "greedy", "operators": {"ablate_every": 2}, "fidelity": "adaptive",
-                    "rationale": f"stalled for {ctx.improves_since_best} improves: probe operators "
-                                 "(ablate the leader) — the verified higher-leverage move than search",
+                strat: Strategy = {"policy": "mcts", "policy_params": {"c": 1.4},
+                                   "fidelity": "adaptive",
+                                   "rationale": f"stalled for {ctx.improves_since_best} improves: "
+                                                "switch greedy->mcts to explore under-visited subtrees",
+                                   "source": "rule"}
+            else:
+                strat = {"policy": "greedy", "operators": {"ablate_every": 2}, "fidelity": "adaptive",
+                         "rationale": f"stalled for {ctx.improves_since_best} improves: probe operators "
+                                      "(ablate the leader) — the verified higher-leverage move than search",
+                         "source": "rule"}
+            if deep:
+                strat["request_research"] = True
+                strat["rationale"] += " + deep-research the problem (hard stall)"
+            return strat
+
+        # Exploring a numeric space where each eval is expensive: bias the Researcher toward an
+        # intra-node sweep. Running several grid points in ONE process amortizes the data load /
+        # imports / GPU warm-up that dominate a costly single eval — strictly cheaper than the same
+        # points as separate nodes. We only set the FLAG; the Researcher chooses the grid.
+        if (ctx.phase == "explore" and ctx.is_numeric_space
+                and (ctx.avg_eval_seconds or 0.0) >= 5.0):
+            return {"policy": "greedy", "operators": {"prefer_sweep": True}, "fidelity": "adaptive",
+                    "rationale": f"explore on a numeric space with costly evals "
+                                 f"(~{ctx.avg_eval_seconds:.0f}s each): bias toward an in-process "
+                                 "sweep to amortize data load / warm-up across grid points",
                     "source": "rule"}
 
         # Many cheap candidates to race + ASHA available -> successive-halving over fidelities.
@@ -230,6 +261,8 @@ class _StrategyOut(BaseModel):
     ablate_every: Optional[int] = None
     merge_mode: Optional[str] = None
     complexity_cue: Optional[bool] = None
+    prefer_sweep: Optional[bool] = None
+    request_research: Optional[bool] = None
     rationale: str = ""
 
 
@@ -248,9 +281,13 @@ class LLMStrategist:
             f"phase={ctx.phase} nodes={ctx.node_count} failure_rate={ctx.failure_rate:.2f} "
             f"improves_since_best={ctx.improves_since_best} numeric_space={ctx.is_numeric_space} "
             f"eval_budget_remaining={ctx.eval_budget_remaining}\n"
-            f"available_policies={ctx.available_policies}\n"
+            f"available_policies={ctx.available_policies} avg_eval_seconds={ctx.avg_eval_seconds}\n"
             "Choose the next strategy (policy from the available list; fidelity smoke|full|adaptive; "
-            "optional ablate_every, merge_mode mean|ensemble, complexity_cue)."
+            "optional ablate_every, merge_mode mean|ensemble, complexity_cue, prefer_sweep — set "
+            "prefer_sweep=true to bias the researcher toward an in-process hyperparameter sweep when "
+            "evals are costly and the space is numeric; set request_research=true when the run is "
+            "stalled or confused and would benefit from a deep-research step over all results + the "
+            "web before continuing)."
         )
         messages = [
             {"role": "system", "content": _STRATEGIST_SYSTEM},
@@ -265,6 +302,8 @@ class LLMStrategist:
             strat["policy"] = out.policy
         if out.fidelity:
             strat["fidelity"] = out.fidelity
+        if out.request_research:
+            strat["request_research"] = True
         ops: dict = {}
         if out.ablate_every is not None:
             ops["ablate_every"] = out.ablate_every
@@ -272,6 +311,8 @@ class LLMStrategist:
             ops["merge_mode"] = out.merge_mode
         if out.complexity_cue is not None:
             ops["complexity_cue"] = out.complexity_cue
+        if out.prefer_sweep is not None:
+            ops["prefer_sweep"] = out.prefer_sweep
         if ops:
             strat["operators"] = ops
         return strat

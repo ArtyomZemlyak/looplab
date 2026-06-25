@@ -21,6 +21,9 @@ class Settings(BaseSettings):
     # Set > 1 to opt into the parallel fan-out (the task-group path).
     max_parallel: int = Field(default=1, ge=1)
     timeout: float = Field(default=30.0, gt=0)
+    # Intra-node sweep: a sweep node runs a whole grid in one process, so it gets this multiple of
+    # `timeout` as its wall-clock budget (solution.py path; RepoTasks use their per-profile timeout).
+    sweep_timeout_mult: float = Field(default=8.0, ge=1)
     # Sandbox tier (ADR-13): "trusted_local" (subprocess, no Docker) for the CLI;
     # "untrusted" (Docker --network none -> gVisor) for hosted/multi-tenant UI.
     trust_mode: str = "trusted_local"
@@ -180,6 +183,13 @@ class Settings(BaseSettings):
     # tool to ground ideas in real techniques. Off by default (egress is unreliable on some boxes);
     # fails gracefully if the network is blocked.
     literature_search: bool = False
+    # Deep-Research stage (network-OPTIONAL): give the DeepResearcher a general web search/fetch
+    # tool (DuckDuckGo) on top of arXiv to read across results + the web before steering the next
+    # batch. Off by default (egress is unreliable on some boxes); fails gracefully when blocked.
+    web_search: bool = False
+    # Cadence for the Deep-Research stage: run it automatically every N created nodes (0 = off; it
+    # still fires on a manual `deep_research` control event or a Strategist `request_research`).
+    deep_research_every: int = 0
     # Agent Skills (I18, ADR-9): dir of SKILL.md the Researcher can list/load as tools.
     skills_dir: str | None = None
     # Prompt store (I18, ADR-8): dir of editable, hot-reloaded role prompt .md files.

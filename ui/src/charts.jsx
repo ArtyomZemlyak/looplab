@@ -184,4 +184,14 @@ export function Scatter({ data, xlab, ylab, width = 720, height = 260 }) {
   )
 }
 
+// Tiny sparkline of a numeric series — used by collapsed-group super-cards, sweep node cards, and
+// the inspector. Returns null for <2 points (nothing meaningful to draw).
+export function Spark({ series, width = 120, height = 22 }) {
+  if (!series || series.length < 2) return null
+  const lo = Math.min(...series), hi = Math.max(...series), span = hi - lo || 1
+  const W = width, H = height
+  const pts = series.map((v, i) => `${(i / (series.length - 1) * W).toFixed(1)},${(H - (v - lo) / span * H).toFixed(1)}`).join(' ')
+  return <svg className="grp-spark" width={W} height={H}><polyline points={pts} fill="none" stroke="var(--accent)" strokeWidth="1.5" /></svg>
+}
+
 function Empty({ children }) { return <div className="muted" style={{ padding: 20 }}>{children}</div> }

@@ -23,7 +23,7 @@ from contextlib import nullcontext
 from pathlib import Path
 from typing import Optional
 
-from .sandbox import RunResult, _json_line_metric, _run_argv, _to_float
+from .sandbox import RunResult, _json_line_metric, _json_line_trials, _run_argv, _to_float
 
 
 def _dig(obj, key: str):
@@ -369,7 +369,10 @@ def run_command_eval(command: list[str], cwd: str, timeout: float, metric: dict,
     extra = ({name: read_metric(out, str(wd), spec, wrap=wrap)
               for name, spec in metrics.items()} if (metrics and not to) else None)
     viol = _violations(out, str(wd), constraints, wrap) if (constraints and not to and m is not None) else None
+    # Intra-node sweep: a RepoTask command may emit the same `{"trials": [...]}` stdout line; carry
+    # it so the engine can collapse it to the node's best metric (no eval_spec change required).
+    trials = _json_line_trials(out) if not to else None
     return RunResult(exit_code=rc, stdout=out, stderr=err, metric=m, timed_out=to, drift=drift,
-                     extra_metrics=extra, violations=(viol or None))
+                     extra_metrics=extra, violations=(viol or None), trials=trials)
 
 
