@@ -57,10 +57,16 @@ def _agent_model(backend: str, model: str) -> str:
 def make_llm_client(settings, *, model: str | None = None,
                     base_url: str | None = None) -> OpenAICompatibleClient:
     key = settings.llm_api_key.get_secret_value() if settings.llm_api_key else "local"
+    mdl = model or settings.llm_model
+    from .llm import reasoning_body
+    reasoning = reasoning_body(mdl, getattr(settings, "llm_reasoning", ""),
+                               getattr(settings, "llm_reasoning_style", "auto"),
+                               getattr(settings, "llm_reasoning_extra", None))
     return OpenAICompatibleClient(
-        model=model or settings.llm_model, base_url=base_url or settings.llm_base_url, api_key=key,
+        model=mdl, base_url=base_url or settings.llm_base_url, api_key=key,
         temperature=settings.llm_temperature, accountant=CostAccountant(),
         guided_json=getattr(settings, "llm_guided_json", False),   # H1 constrained decoding
+        reasoning=reasoning,                                        # provider-aware thinking toggle
     )
 
 
@@ -93,12 +99,68 @@ def make_developer_factory(task: TaskAdapter, settings):
     return factory
 
 
+def build_unified_agent(task: TaskAdapter, settings):
+    """Compose the unified self-driving agent from the normal split-role backends.
+
+    The split roles are built with `unified_agent=False` so ALL existing wiring (agentic tools,
+    ValidatingDeveloper, best-of-N, H3 per-role models) is reused verbatim — `researcher_model`
+    already binds the propose stage and `developer_model` the implement/repair stage. Finer
+    `agent_stage_models[...]` overrides rebind a specific stage on top. The strategy stage mirrors
+    `make_strategist` (None when strategist_backend="off", preserving split-mode parity); the pilot
+    stage gets its own client + read-only run tools for self-driving action choice."""
+    from .strategist import make_strategist
+    from .unified_agent import UnifiedAgent
+    split = settings.model_copy(update={"unified_agent": False})
+    researcher, developer = make_roles(task, split)   # H3 per-role models applied inside
+
+    cache: dict = {}
+    def client_for(model, base):
+        key = (model or settings.llm_model, base or settings.llm_base_url)
+        if key not in cache:
+            cache[key] = make_llm_client(settings, model=model, base_url=base)
+        return cache[key]
+
+    stage_models = settings.agent_stage_models or {}
+    stage_urls = settings.agent_stage_base_urls or {}
+    def maybe_override(stage, role):
+        m, u = stage_models.get(stage), stage_urls.get(stage)
+        if (m or u) and role is not None:
+            _set_role_client(role, client_for(m, u))
+    maybe_override("propose", researcher)
+    maybe_override("implement", developer)
+    maybe_override("repair", developer)   # repair shares the developer object
+
+    # Strategy stage: mirror cli._engine's strategist wiring exactly (off => None => no strategy
+    # events => byte-parity with split mode when agent_drives_actions is also off).
+    strat_client = (client_for(stage_models.get("strategy"), stage_urls.get("strategy"))
+                    if settings.strategist_backend == "llm" else None)
+    strategist = make_strategist(split, client=strat_client, n_seeds=settings.n_seeds)
+
+    # Pilot stage: its own client + read-only run-introspection tools for self-driving the next
+    # macro action (only consulted when agent_drives_actions is on, gated by legal_actions).
+    pilot_client = client_for(stage_models.get("pilot"), stage_urls.get("pilot"))
+    pilot_tools = None
+    if getattr(settings, "researcher_tools", True):
+        from .run_tools import RunTools
+        pilot_tools = RunTools()
+
+    extra_clients = [c for c in (strat_client, pilot_client) if c is not None]
+    return UnifiedAgent(researcher=researcher, developer=developer, strategist=strategist,
+                        pilot_client=pilot_client, pilot_tools=pilot_tools,
+                        stage_clients=extra_clients, prompts=getattr(researcher, "prompts", None))
+
+
 def make_roles(task: TaskAdapter, settings):
     """Pick role backends from config (ADR-7): toy optimizer or a live LLM. When a
     knowledge_dir is configured, the LLM Researcher is wrapped with the agentic
     retrieval toolset (ADR-16) — same developer, tool-using researcher."""
     if settings.backend != "llm":
         return task.build_roles()
+    # Unified self-driving agent: one object plays both roles. Built from the split roles (flag
+    # off) so the rest of this function's wiring is reused, then composed behind one identity.
+    if getattr(settings, "unified_agent", False):
+        agent = build_unified_agent(task, settings)
+        return agent, agent
     client = make_llm_client(settings)
     researcher, developer = task.llm_roles(client, parser=settings.llm_parser)
 
@@ -154,9 +216,15 @@ def make_roles(task: TaskAdapter, settings):
         if hasattr(developer, "prompts"):
             developer.prompts = prompts
 
-    # Tool providers for the agentic Researcher: knowledge + cross-run memory + skills.
+    # Tool providers for the agentic Researcher: run-introspection + knowledge + memory + skills.
     cases_path = str(Path(settings.memory_dir) / "cases.jsonl") if settings.memory_dir else None
     providers = []
+    # Run-introspection (default on): let the Researcher read its OWN experiments + the task data
+    # mid-loop instead of optimizing blind. This alone makes the Researcher a tool-using agent.
+    if getattr(settings, "researcher_tools", True):
+        from .run_tools import DataTools, RunTools
+        providers.append(RunTools())
+        providers.append(DataTools(task))
     if settings.knowledge_dir or cases_path:
         from .knowledge_tools import KnowledgeTools
         providers.append(KnowledgeTools(settings.knowledge_dir, cases_path=cases_path))

@@ -8,6 +8,7 @@ client takes a model name and reads the key from the environment via LiteLLM.
 from __future__ import annotations
 
 import json
+import time
 import urllib.error
 import urllib.request
 from typing import Optional
@@ -43,6 +44,60 @@ def _clean_thinking(content: str, reasoning: str = "") -> tuple[str, str]:
     return split_think(content or "")
 
 
+def reasoning_body(model: str, mode: str = "", style: str = "auto",
+                   extra: Optional[dict] = None) -> dict:
+    """The provider-specific request fields that TOGGLE a reasoning/thinking model — providers differ:
+      - Qwen3 on vLLM/SGLang: `chat_template_kwargs.enable_thinking` (bool)
+      - OpenAI / Ollama-v1 / DeepSeek: `reasoning_effort` (low|medium|high|none)
+    `mode`: "" = inject nothing (use the server default — unchanged behavior); off|none = disable;
+    on = enable at default depth; low|medium|high = enable at that effort. `style`: auto picks `qwen`
+    for qwen* models else `effort`. `extra` is merged last (escape hatch, e.g. Anthropic
+    `{"thinking": {"type": "enabled", "budget_tokens": N}}`)."""
+    mode = (mode or "").strip().lower()
+    body: dict = {}
+    if mode:
+        st = (style or "auto").lower()
+        if st == "auto":
+            st = "qwen" if "qwen" in (model or "").lower() else "effort"
+        on = mode not in ("off", "none", "false", "0")
+        if st == "qwen":
+            body["chat_template_kwargs"] = {"enable_thinking": on}
+        elif st == "effort":
+            # OpenAI/OpenRouter accept only low|medium|high — "none" 400s. To DISABLE on an
+            # effort-style provider, send nothing (server default); rely on `extra` for a provider
+            # that has an explicit off switch (e.g. OpenRouter `{"reasoning": {"enabled": false}}`).
+            if on:
+                body["reasoning_effort"] = "medium" if mode == "on" else mode
+        # st == "none": shape nothing (rely solely on `extra`)
+    if extra:
+        body = {**body, **extra}
+    return body
+
+
+def _retry_after_seconds(ra) -> Optional[float]:
+    """Parse a Retry-After header into seconds. It may be a number (int/float seconds) OR an
+    HTTP-date; returns the delay in seconds (clamped ≥0) or None when absent/unparseable (caller
+    then falls back to exponential backoff)."""
+    if not ra:
+        return None
+    s = str(ra).strip()
+    try:
+        return max(0.0, float(s))
+    except ValueError:
+        pass
+    try:
+        from datetime import datetime, timezone
+        from email.utils import parsedate_to_datetime
+        dt = parsedate_to_datetime(s)
+        if dt is None:
+            return None
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return max(0.0, (dt - datetime.now(timezone.utc)).total_seconds())
+    except (TypeError, ValueError, OverflowError):
+        return None
+
+
 def _assistant_text(msg: dict) -> str:
     """Display text for a tool-calling assistant turn: its content, plus a compact note of any
     tool calls it made (so the trace shows the model chose to call a tool, not an empty reply)."""
@@ -67,13 +122,17 @@ class OpenAICompatibleClient:
     def __init__(self, model: str, base_url: str = "http://localhost:11434/v1",
                  api_key: str = "ollama", temperature: float = 0.7,
                  timeout: float = 180.0, accountant: Optional["CostAccountant"] = None,
-                 guided_json: bool = False):
+                 guided_json: bool = False, reasoning: Optional[dict] = None):
         self.model = model
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key or "x"
         self.temperature = temperature
         self.timeout = timeout
         self.accountant = accountant or CostAccountant()
+        # Provider-specific reasoning toggle (from `reasoning_body`) merged into EVERY request, so the
+        # whole agent loop (propose/chat/tool) runs with the same thinking setting. Empty = unchanged.
+        self.reasoning = reasoning or {}
+        self._max_retries = 4               # 429/5xx backoff retries before surfacing an LLMError
         # H1: when the endpoint supports constrained decoding (vLLM/SGLang), drive structured calls
         # from the Pydantic JSON schema — `response_format` json_schema (OpenAI-standard, vLLM+SGLang)
         # + `guided_json` (vLLM extra) — so a weak model can't emit invalid JSON. Off by default
@@ -81,6 +140,8 @@ class OpenAICompatibleClient:
         self.guided_json = guided_json
 
     def _post(self, payload: dict) -> dict:
+        if self.reasoning:                  # inject the reasoning toggle into every request
+            payload = {**payload, **self.reasoning}
         data = json.dumps(payload).encode("utf-8")
         req = urllib.request.Request(
             f"{self.base_url}/chat/completions", data=data, method="POST",
@@ -90,11 +151,27 @@ class OpenAICompatibleClient:
         # A network blip / HTTP error / non-JSON body must surface as a clean LLMError, not an
         # unhandled URLError/HTTPError/JSONDecodeError that aborts the whole run — the role layer
         # already retries + falls back on LLMError. (urllib.error was imported but unused before.)
-        try:
-            with urllib.request.urlopen(req, timeout=self.timeout) as resp:
-                raw = resp.read().decode("utf-8")
-        except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, OSError) as e:
-            raise LLMError(f"LLM request to {self.base_url} failed: {e}") from e
+        # Rate-limit/transient resilience: a 429 (or 5xx) is retried with backoff (honoring a
+        # Retry-After header when given) BEFORE surfacing — free/shared endpoints (e.g. OpenRouter
+        # free tier) rate-limit bursts, and a single 429 shouldn't crash the whole run.
+        raw = None
+        for attempt in range(self._max_retries + 1):
+            try:
+                with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+                    raw = resp.read().decode("utf-8")
+                break
+            except urllib.error.HTTPError as e:
+                if e.code in (429, 500, 502, 503, 504) and attempt < self._max_retries:
+                    ra = _retry_after_seconds(e.headers.get("Retry-After") if e.headers else None)
+                    delay = ra if ra is not None else 2.0 * (2 ** attempt)
+                    time.sleep(min(delay, 30.0))
+                    continue
+                hint = (" — check the API key (LOOPLAB_LLM_API_KEY)" if e.code == 401 else "")
+                raise LLMError(f"LLM request to {self.base_url} failed: {e}{hint}") from e
+            except (urllib.error.URLError, TimeoutError, OSError) as e:
+                raise LLMError(f"LLM request to {self.base_url} failed: {e}") from e
+        if raw is None:  # loop exhausted retries on a transient code without ever succeeding
+            raise LLMError(f"LLM request to {self.base_url} failed: no response after retries")
         try:
             body = json.loads(raw)
         except (json.JSONDecodeError, ValueError) as e:

@@ -13,6 +13,23 @@ export function fmtInt(v) {
   return Number(v).toLocaleString()
 }
 
+// Epoch-SECONDS timestamp helpers (run mtime/created come from os.stat → seconds, not ms).
+export function fmtDate(sec, withTime = true) {
+  if (!sec) return '—'
+  return new Date(sec * 1000).toLocaleString(undefined, withTime
+    ? { year: 'numeric', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }
+    : { year: 'numeric', month: 'short', day: 'numeric' })
+}
+export function fmtAgo(sec) {
+  if (!sec) return ''
+  const d = Date.now() / 1000 - sec
+  if (d < 60) return 'just now'
+  if (d < 3600) return Math.floor(d / 60) + 'm ago'
+  if (d < 86400) return Math.floor(d / 3600) + 'h ago'
+  if (d < 7 * 86400) return Math.floor(d / 86400) + 'd ago'
+  return new Date(sec * 1000).toLocaleDateString()
+}
+
 // Is this node the one currently being evaluated? (pending + the highest-id pending, and the run
 // isn't paused/finished) — a good-enough "working" heuristic for the live pulse.
 export function workingId(state) {
@@ -224,6 +241,28 @@ export const CONTROL = {
   setStrategy: (rid, strategy) => post(`/api/runs/${rid}/control`, { type: 'set_strategy', data: { strategy } }),
   // P2: ask the engine to run the Deep-Research stage now (read all results + the web, write a memo).
   deepResearch: (rid) => post(`/api/runs/${rid}/control`, { type: 'deep_research', data: {} }),
+  // Workstream A: force a high-quality regeneration of the agent-authored run report now. Dedicated
+  // endpoint (not /control) — generates inline server-side and appends a `report_generated` event.
+  refreshReport: (rid) => post(`/api/runs/${rid}/report_refresh`, {}),
+  // Workstream C: a generic control append by {type, data} — the single execution path every chat
+  // action funnels through (slash commands and the LLM action-router both produce {type, data}).
+  raw: (rid, type, data = {}) => post(`/api/runs/${rid}/control`, { type, data }),
+}
+
+// Workstream C: chat actions on a FINISHED run must reopen + re-enter the loop so the engine actually
+// processes them (mirrors InjectModal's reopen→inject→resume). These verbs need the loop running.
+const NEEDS_RESUME = new Set(['fork', 'inject_node', 'force_confirm', 'force_ablate', 'deep_research', 'set_strategy'])
+
+// Execute one confirmed chat action. `action` = {type, data}. Returns the control promise. Reopens +
+// resumes a finished run for engine-served verbs. `__refresh_report__` is the report-refresh special.
+export async function applyAction(runId, action, finished) {
+  if (action.type === '__refresh_report__') return CONTROL.refreshReport(runId)
+  if (finished && NEEDS_RESUME.has(action.type)) {
+    await CONTROL.reopen(runId)
+    await CONTROL.raw(runId, action.type, action.data || {})
+    return resumeRun(runId)
+  }
+  return CONTROL.raw(runId, action.type, action.data || {})
 }
 
 // Re-enter the engine loop on an existing run dir (used to continue a finished run after an inject).
@@ -233,6 +272,10 @@ export const resumeRun = (rid) => post(`/api/runs/${encodeURIComponent(rid)}/res
 export const chat = (rid, messages, node_id = null) => post(`/api/runs/${rid}/chat`, { messages, node_id })
 export const suggestIdea = (rid, { node_id = null, messages = [], instruction = '' }) =>
   post(`/api/runs/${rid}/suggest`, { node_id, messages, instruction })
+// Workstream C: the action-router — turn a free-text instruction into EITHER an advisory reply or a
+// concrete control action {type, data, label, rationale} the chat proposes for confirmation.
+export const command = (rid, { messages = [], node_id = null, instruction = '' }) =>
+  post(`/api/runs/${rid}/command`, { messages, node_id, instruction })
 export const llmHealth = () => get('/api/llm/health')
 
 // G1 server auth: when the server runs with LOOPLAB_UI_TOKEN it injects the token into the served

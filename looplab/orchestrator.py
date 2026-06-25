@@ -151,6 +151,8 @@ class Engine:
         strategist_every: int = 3,
         deep_researcher=None,       # Optional[DeepResearcher]; None => Deep-Research stage off
         deep_research_every: int = 0,  # run the stage every N created nodes (0 = manual/strategist only)
+        report_writer=None,         # Optional[ReportWriter]; None => agent report off (deterministic only)
+        report_every: int = 0,      # regenerate the run report every N created nodes (0 = manual only)
         developer_factory=None,     # Optional[Callable[[str], Developer]] for live backend swap
         merge_mode: str = "mean",        # A0b: "mean" | "ensemble"
         complexity_cue: bool = False,    # A0d: breadth-keyed prompt hint
@@ -170,6 +172,8 @@ class Engine:
         novelty_epsilon: float = 0.05,
         reflection_priors: bool = False,    # E4: cross-run meta-review priors
         surrogate_explore: float = 0.1,     # A2/A3: explore weight for a lazily-wired BOHB surrogate
+        unified_agent: bool = False,        # one agent plays Researcher+Developer(+Strategist)
+        agent_drives_actions: bool = False,  # agent picks the next macro action (within a legal gate)
     ):
         self.run_dir = Path(run_dir)
         self.task = task
@@ -187,6 +191,8 @@ class Engine:
         self.strategist_every = max(1, strategist_every)
         self.deep_researcher = deep_researcher
         self.deep_research_every = max(0, deep_research_every)
+        self.report_writer = report_writer
+        self.report_every = max(0, report_every)
         self.developer_factory = developer_factory
         self._developer_name = "default"
         self._merge_mode = merge_mode
@@ -208,6 +214,10 @@ class Engine:
         self._novelty_epsilon = novelty_epsilon
         self._reflection_priors = reflection_priors
         self._surrogate_explore = surrogate_explore
+        # Unified self-driving agent: in unified mode `researcher is developer` (one object plays
+        # both roles); `agent_drives_actions` additionally lets it pick the next macro action.
+        self.unified_agent = unified_agent
+        self.agent_drives_actions = unified_agent and agent_drives_actions
         self._prior_note_text = ""   # E4: cross-run meta-review prior, loaded at run start
         self._strategy_fidelity: Optional[str] = None   # None => use the Idea's own profile
         self.max_parallel = max_parallel
@@ -493,7 +503,16 @@ class Engine:
             # Strategist `request_research`. No-op when the stage is off. Replay-safe (gated).
             state = self._maybe_deep_research(state)
 
-            actions = self.policy.next_actions(state)
+            # Run report (conclusion-first, agent-authored): regenerate on a node-count cadence so the
+            # Report grows with the search. Audit-only sidecar; no-op when off. Replay-safe (gated on
+            # the report's at_node). The deterministic report renders regardless.
+            state = self._maybe_refresh_report(state)
+
+            # Action selection: the pure policy decides, UNLESS the unified agent self-drives —
+            # in which case it picks one action from the policy-derived legal-action gate (so the
+            # pipeline stays disciplined no matter what the agent chooses).
+            actions = (self._agent_next_actions(state) if self.agent_drives_actions
+                       else self.policy.next_actions(state))
             if not actions:
                 # Optional multi-seed confirmation pass (I12) before finishing:
                 # re-evaluate the top-k under several seeds and record robust metrics.
@@ -511,6 +530,12 @@ class Engine:
                             "node_id": best.id if best else None,
                             "metric": best.metric if best else None})
                     break  # awaiting approval -> stop without finishing
+                # Final report on clean completion: the confirm pass just ran, so the champion +
+                # robustness are settled — this is the definitive report (it reflects post-confirmation
+                # state a same-at_node cadence report wouldn't). Skip only when the cadence is off
+                # (report_every=0 = manual-only), so "manual only" stays truly call-free.
+                if self.report_writer is not None and self.report_every > 0:
+                    state = self._write_report(state, trigger="finish")
                 self.store.append("run_finished", {})
                 break
 
@@ -526,9 +551,10 @@ class Engine:
 
             if creates:
                 for a in creates:
-                    if "_scores" in a:   # policy exposed candidate scores (MCTS UCB1) -> surface "why"
+                    if "_scores" in a:   # policy exposed candidate scores -> surface "why this node"
                         self.store.append("policy_decision",
-                                          {"scores": a["_scores"], "chosen": a.get("_chosen")})
+                                          {"scores": a["_scores"], "chosen": a.get("_chosen"),
+                                           "reason": a.get("_reason")})
                     if a.get("_rung") is not None:   # A1 ASHA: surface the successive-halving promotion
                         self.store.append("rung_promoted",
                                           {"rung": a["_rung"], "survivors": a.get("_promoted", [])})
@@ -622,10 +648,15 @@ class Engine:
                 acc = getattr(obj, "accountant", None)
                 if acc is not None and id(acc) not in seen:
                     seen[id(acc)] = acc
-                for attr in ("client", "inner", "fallback", "researcher", "developer", "tools"):
+                for attr in ("client", "inner", "fallback", "researcher", "developer",
+                             "strategist", "tools"):
                     child = getattr(obj, attr, None)
                     if child is not None and child is not obj:
                         stack.append(child)
+                # Unified agent: per-stage clients (strategy/pilot) not on the attr graph above.
+                for c in (getattr(obj, "stage_clients", None) or []):
+                    if c is not None and c is not obj:
+                        stack.append(c)
             if not seen:
                 return
             accs = list(seen.values())
@@ -705,7 +736,10 @@ class Engine:
         Strategist switching to bohb would otherwise run bare ASHA. Needs numeric bounds; if the
         Researcher (or its inner/fallback) exposes none, this is a no-op (bohb degrades to ASHA)."""
         from .surrogate import SurrogateResearcher
-        if isinstance(self.researcher, SurrogateResearcher):
+        # Unified mode: re-wrapping `self.researcher` here would desync it from `self.developer`
+        # (the same agent object) — the cli already skips the startup surrogate wrap for the same
+        # reason (R1). A mid-run switch to bohb degrades to bare ASHA, which is acceptable.
+        if self.unified_agent or isinstance(self.researcher, SurrogateResearcher):
             return
         bounds = (getattr(self.researcher, "bounds", None)
                   or getattr(getattr(self.researcher, "inner", None), "bounds", None)
@@ -752,7 +786,12 @@ class Engine:
         elif fid == "adaptive":
             self._strategy_fidelity = None
         dev = strat.get("developer")
-        if dev and self.developer_factory is not None and dev != self._developer_name:
+        # Unified mode: researcher IS developer (one agent). A live developer-backend swap would
+        # replace `self.developer` with a different object, desyncing it from `self.researcher` (and
+        # the factory, still seeing unified_agent=True, would build a whole new agent). The unified
+        # agent owns its own implement stage — skip the swap rather than fracture the identity (R1).
+        if dev and self.developer_factory is not None and dev != self._developer_name \
+                and not self.unified_agent:
             try:
                 self.developer = self.developer_factory(dev)
                 self._developer_name = dev
@@ -825,6 +864,36 @@ class Engine:
             self.store.append("hint", {
                 "text": "deep-research directions: " + "; ".join(memo.recommended_directions[:5]),
                 "source": "deep_research"})
+        return fold(self.store.read_all())
+
+    def _maybe_refresh_report(self, state: RunState) -> RunState:
+        """Regenerate the agent-authored run report on a node-count cadence, then re-fold. No-op when
+        the writer is off, when there's nothing evaluated yet, or when the report is already current
+        for this node-count (the `at_node` gate makes resume a no-op). Best-effort sidecar."""
+        if self.report_writer is None or self.report_every <= 0:
+            return state
+        if state.pending_nodes() or not state.evaluated_nodes():
+            return state
+        n = len(state.nodes)
+        last = (state.report or {}).get("at_node")
+        if n == 0 or last == n:                       # nothing new / already current (resume-safe)
+            return state
+        # Fire once at least `report_every` NEW nodes have accumulated since the last report. Using a
+        # since-last threshold (not `n % report_every == 0`) means a failed/merge/ablate node-count
+        # jump can't step over the only multiple and silently skip the whole window.
+        if n - (last or 0) < self.report_every:
+            return state
+        return self._write_report(state, trigger="cadence")
+
+    def _write_report(self, state: RunState, *, trigger: str) -> RunState:
+        """Generate one run report and record it as a `report_generated` event, then re-fold. Never
+        raises — the writer itself degrades to a minimal report on any failure."""
+        if self.report_writer is None:
+            return state
+        with self.tracer.span("report", new_trace=True, trigger=trigger):
+            content = self.report_writer.generate(state, trigger=trigger)
+        self.store.append("report_generated", {
+            "content": content, "at_node": content.get("at_node"), "trigger": trigger})
         return fold(self.store.read_all())
 
     def _set_complexity_hint(self, state: RunState, parent) -> None:
@@ -931,22 +1000,16 @@ class Engine:
         in node_created; the gate is not re-run on replay). No-op unless `novelty_gate` is on."""
         if not self._novelty_gate:
             return idea
-        import math
         import random as _random
+
+        from .digest import param_distance
         params = {k: float(v) for k, v in idea.params.items() if isinstance(v, (int, float))}
         if not params:
             return idea
 
-        def _ndist(a: dict, b: dict) -> float:
-            keys = set(a) & set(b)
-            if not keys:
-                return float("inf")
-            return math.sqrt(sum((a[k] - b[k]) ** 2 for k in keys)) / math.sqrt(len(keys))
-
         nearest, mind = None, float("inf")
         for n in state.nodes.values():
-            p = {k: float(v) for k, v in n.idea.params.items() if isinstance(v, (int, float))}
-            d = _ndist(params, p)
+            d = param_distance(params, n.idea.params)
             if d < mind:
                 mind, nearest = d, n.id
         if mind >= self._novelty_epsilon:
@@ -978,6 +1041,48 @@ class Engine:
                           "(e.g. average or stack their predictions, or merge their best components). "
                           f"Parents — {descr}.")
         return base
+
+    def _agent_next_actions(self, state: RunState) -> list[dict]:
+        """Self-driving action selection (Step 5). The unified agent picks the next macro action
+        from the pure legal-action gate; forced phases (evaluate-pending / budget / seed) give it
+        no discretion. Records an audit-only `agent_decision` (never read by best-selection); the
+        chosen action then flows through the SAME bucket logic as the policy path. Falls back to the
+        policy's own recommendation on any malformed/abstaining choice — the agent can never escape
+        `legal`, so 'follow the right pipeline' is a structural invariant, not prompt obedience."""
+        from .policy import legal_actions
+        legal = legal_actions(state, self.policy, max_nodes=self.max_nodes)
+        if len(legal) <= 1:
+            return legal                       # finish ([]), forced evaluate/seed, or single option
+        if {a["kind"] for a in legal} == {"evaluate"}:
+            return legal                       # forced: evaluate all pending, no discretion
+        recommended = next(iter(self.policy.next_actions(state)), None)
+        chooser = getattr(self.researcher, "choose_action", None)
+        if not callable(chooser):              # defensive: agent_drives_actions implies unified
+            return self.policy.next_actions(state)
+        from .roles import _state_brief
+        try:
+            brief = _state_brief(state, None)
+        except Exception:  # noqa: BLE001 - a brief is advisory; never block on it
+            brief = ""
+        choice = chooser(state, legal, recommended, brief=brief)
+        idx = choice.get("index", -1) if isinstance(choice, dict) else -1
+        chosen = legal[idx] if isinstance(idx, int) and 0 <= idx < len(legal) else \
+            (recommended if recommended is not None else legal[0])
+
+        def _summ(a: Optional[dict]) -> Optional[dict]:
+            if not a:
+                return None
+            return {"kind": a.get("kind"), "parent_id": a.get("parent_id"),
+                    "parent_ids": a.get("parent_ids"), "node_id": a.get("node_id")}
+
+        self.store.append("agent_decision", {
+            "at_node": len(state.nodes),
+            "chosen": _summ(chosen),
+            "legal": [_summ(a) for a in legal],
+            "recommended": _summ(recommended),
+            "rationale": (choice.get("rationale", "") if isinstance(choice, dict) else "")[:500],
+        })
+        return [chosen]
 
     # ---------------------------------------------------------------- private
     def _create_node(self, action: dict) -> None:

@@ -139,7 +139,12 @@ def _state_brief(state: RunState, parent: Optional[Node]) -> str:
         lines.append(f"Best so far: node {best.id} metric={best.metric} params={best.idea.params}")
     if parent is not None:
         lines.append(f"Refine from node {parent.id}: params={parent.idea.params} metric={parent.metric}")
-    return "\n".join(lines)
+    # Append the always-on "working set": a compact view of the whole search (top winners, weakest /
+    # failures, theme map) so the Researcher proposes with awareness of what's already been tried,
+    # not just `best` + `parent`. Depth (full experiments, code, data) lives behind the run tools.
+    from .digest import experiments_digest
+    lines.append(experiments_digest(state))
+    return "\n".join(l for l in lines if l)
 
 
 class LLMResearcher:

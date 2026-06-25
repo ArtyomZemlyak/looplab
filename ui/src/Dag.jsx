@@ -2,6 +2,7 @@ import React, { useMemo, useState } from 'react'
 import { ReactFlow, Background, Controls, MiniMap, Handle, Position, Panel } from '@xyflow/react'
 import '@xyflow/react/dist/style.css'
 import { fmt, layoutWithGroups, nodeClass, delta, workingId, operatorMeta, OPERATOR_LEGEND, isSweep, sweepInfo } from './util.js'
+import { changeLabel } from './report.js'
 import { OpIcon } from './icons.jsx'
 import { Spark } from './charts.jsx'
 import { RegionShell, SuperShell } from './groupnodes.jsx'
@@ -20,14 +21,20 @@ function agentBadge(rep) {
 }
 
 function ExpNode({ data }) {
-  const { node, state, workId, selectedId, onSelect, onExplode, exploded } = data
+  const { node, state, workId, selectedId, onSelect, onExplode, exploded, themeFilter } = data
   const m = node.confirmed_mean ?? node.metric
   const d = delta(node, state)
   const op = operatorMeta(node.operator)
   const sweep = isSweep(node)
   const sw = sweep ? sweepInfo(node) : null
+  // E2/E3: a one-line "what changed vs parent" chip (git-commit style); merges show what they fuse.
+  const parents = (node.parent_ids || []).map(p => state.nodes[p]).filter(Boolean)
+  const isMerge = parents.length > 1
+  const chg = node.idea?.change_summary || changeLabel(node, state.nodes)   // '' for merges (handled below)
+  const mergeThemes = isMerge ? parents.map(p => p.idea?.theme || ('#' + p.id)) : null
+  const dim = themeFilter && node.idea?.theme !== themeFilter
   return (
-    <div className={nodeClass(node, state, workId) + (node.id === selectedId ? ' sel' : '') + (sweep ? ' sweep' : '')}
+    <div className={nodeClass(node, state, workId) + (node.id === selectedId ? ' sel' : '') + (sweep ? ' sweep' : '') + (dim ? ' dim' : '')}
          onClick={() => onSelect(node.id)} title={op.label + (node.idea?.rationale ? ' — ' + node.idea.rationale : '')}>
       <Handle type="target" position={Position.Top} style={{ opacity: 0 }} />
       <div className="row">
@@ -37,11 +44,17 @@ function ExpNode({ data }) {
         {sweep && <span className="badge sweep" title={`intra-node sweep · ${sw.count} trials`}>⊞ {sw.count}</span>}
         {node.id === state.best_node_id && <span className="crown" title="champion">♚</span>}
         {agentBadge(node.agent_report)}
+        <span className="drag-h" draggable title="drag into the chat as context"
+          onClick={(e) => e.stopPropagation()}
+          onDragStart={(e) => { e.stopPropagation(); e.dataTransfer.setData('application/looplab-node', String(node.id)); e.dataTransfer.setData('text/plain', '#' + node.id); e.dataTransfer.effectAllowed = 'copy' }}>⠿</span>
       </div>
       <div className="metric">
         {fmt(m)}
         {d && <span className={'delta ' + (d.improved ? 'up' : 'down')}>{d.improved ? '▲' : '▼'}{fmt(Math.abs(d.d), 2)}</span>}
       </div>
+      {isMerge
+        ? <div className="merge-line" title={'combines: ' + mergeThemes.join(' + ')}>⊕ {mergeThemes.join(' + ')}</div>
+        : chg ? <div className="change-chip" title={chg}>{chg}</div> : null}
       {sweep
         ? <div className="sub sweep-foot">
             <Spark series={sw.series} width={104} height={16} />
@@ -145,7 +158,7 @@ const nodeTypes = { exp: ExpNode, groupRegion: GroupRegion, groupSuper: GroupSup
 export default function Dag({ state, selectedId, onSelect, groupMode = 'none', collapsed = new Set(),
                              onToggleGroup, onSetMode, onCollapseAll, onExpandAll, selectedGroup, onSelectGroup,
                              exploded = new Set(), onExplode, trialCache = {}, selectedTrial, onSelectTrial,
-                             selectedResearch = null, onSelectResearch }) {
+                             selectedResearch = null, onSelectResearch, themeFilter = null }) {
   const workId = workingId(state)
   const [showMap, setShowMap] = useState(() => localStorage.getItem('ll.minimap') === '1')
   const [showLegend, setShowLegend] = useState(false)
@@ -193,7 +206,7 @@ export default function Dag({ state, selectedId, onSelect, groupMode = 'none', c
       if (hidden.has(n.id)) return
       const p = pos[`n:${n.id}`]; if (!p) return
       rfNodes.push({ id: `n:${n.id}`, type: 'exp', position: p, zIndex: 1,
-        data: { node: n, state, workId, selectedId, onSelect,
+        data: { node: n, state, workId, selectedId, onSelect, themeFilter,
                 onExplode, exploded: exploded.has(n.id) } })
     })
 
@@ -293,7 +306,7 @@ export default function Dag({ state, selectedId, onSelect, groupMode = 'none', c
     })
     return { nodes: rfNodes, edges: rfEdges.concat(trialEdges), groupKeys: [...groups.keys()] }
   }, [state, selectedId, workId, onSelect, groupMode, collapsed, selectedGroup, onToggleGroup, onSelectGroup,
-      exploded, onExplode, trialCache, selectedTrial, onSelectTrial, selectedResearch, onSelectResearch])
+      exploded, onExplode, trialCache, selectedTrial, onSelectTrial, selectedResearch, onSelectResearch, themeFilter])
 
   return (
     <ReactFlow nodes={nodes} edges={edges} nodeTypes={nodeTypes} fitView minZoom={0.15} maxZoom={1.8}

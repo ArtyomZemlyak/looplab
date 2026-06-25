@@ -1,17 +1,19 @@
 import React, { useEffect, useState } from 'react'
-import { get, fmt, fmtInt, CONTROL, resumeRun, isSweep } from './util.js'
+import { get, fmt, fmtInt, isSweep } from './util.js'
 import { Trajectory, ParallelCoords, Scatter } from './charts.jsx'
 import { groupAggregate } from './grouping.js'
-import { ChatTab } from './experiment.jsx'
+import { mergeSummary, changeLabel } from './report.js'
 import Markdown from './markdown.jsx'
 
 // One lifecycle "Trace" tab replaces the old Reasoning / LLM / Agent split: a node is worked on by
 // several parts in sequence (Researcher proposes, Developer implements/repairs, then it's evaluated
 // and confirmed), so we show that whole story in one place — each stage with its sub-steps, inline
-// LLM I/O, and the coding-agent's validation — instead of three disconnected panes.
-const TABS = ['Overview', 'Trace', 'Code', 'Metrics', 'Trust', 'Cost', 'Chat']
+// LLM I/O, and the coding-agent's validation — instead of three disconnected panes. The Inspector is
+// READ-ONLY (Workstream C): every node action — confirm/ablate/fork/promote/note — is done from the
+// chat (drag the node in, or use a /command), so there's no per-node button toolbar here.
+const TABS = ['Overview', 'Trace', 'Code', 'Metrics', 'Trust', 'Cost']
 
-export default function Inspector({ runId, nodeId, state, live, tab, setTab, onToast, onInject, selectedTrial }) {
+export default function Inspector({ runId, nodeId, state, live, tab, setTab, onToast, selectedTrial }) {
   const [detail, setDetail] = useState(null)
   useEffect(() => {
     if (nodeId == null) { setDetail(null); return }
@@ -23,21 +25,6 @@ export default function Inspector({ runId, nodeId, state, live, tab, setTab, onT
   if (nodeId == null) return <div className="insp-empty">Select a node to inspect its idea, code, metrics, trust, and agent trace.</div>
   const n = detail || (state.nodes[nodeId])
   if (!n) return <div className="insp-empty">…</div>
-  const act = async (fn, msg) => { try { await fn(); onToast(msg) } catch (e) { onToast('failed: ' + e.message) } }
-  // Fork = seed an `improve` branch off this node. On a LIVE run the loop picks it up next; on a
-  // FINISHED run we reopen + re-enter the loop (same as adding an experiment) so it actually
-  // materializes — otherwise the toast lied and nothing appeared (the #8 report).
-  const doFork = async () => {
-    try {
-      if (live.finished) {
-        await CONTROL.reopen(runId); await CONTROL.fork(runId, n.id); await resumeRun(runId)
-        onToast(`forked #${n.id} — reopening & continuing the run`)
-      } else {
-        await CONTROL.fork(runId, n.id)
-        onToast(`fork queued from #${n.id} — the engine will branch it next`)
-      }
-    } catch (e) { onToast('fork failed: ' + e.message) }
-  }
   // Metric-drift is run-level state (state.drifts), each entry tagged with its node_id — the
   // per-node detail payload has no `drifts` key, so filter the run state down to this node.
   const nodeDrifts = (state?.drifts || []).filter(d => d.node_id === n.id)
@@ -54,18 +41,7 @@ export default function Inspector({ runId, nodeId, state, live, tab, setTab, onT
                             onClick={() => setTab(t)}>{t}</div>)}
       </div>
       <div className="insp-body">
-        <div className="toolbar" style={{ marginBottom: 10 }}>
-          {!live.finished && n.status === 'pending' &&
-            <button className="btn sm danger" onClick={() => act(() => CONTROL.nodeAbort(runId, n.id), `aborted node ${n.id}`)}>⦸ Stop</button>}
-          <button className="btn sm" disabled={live.finished || n.status !== 'evaluated'}
-                  title={n.status !== 'evaluated' ? 'only evaluated nodes can be confirmed' : 'multi-seed confirm'}
-                  onClick={() => act(() => CONTROL.forceConfirm(runId, n.id), `confirm requested for ${n.id}`)}>↻ Confirm</button>
-          <button className="btn sm" disabled={live.finished} onClick={() => act(() => CONTROL.forceAblate(runId, n.id), `ablate requested for ${n.id}`)}>⊟ Ablate</button>
-          <button className="btn sm" title={live.finished ? 'fork an improve branch — reopens & continues the run' : 'seed an improve branch off this node'} onClick={doFork}>⑂ Fork</button>
-          {onInject && <button className="btn sm" title="F6: branch a new experiment from this node — edit the idea and fork (history intact)" onClick={() => onInject({ parent_id: n.id, idea: { operator: 'improve', params: n.idea?.params, rationale: n.idea?.rationale, theme: n.idea?.theme } })}>⑂ Branch / Experiment</button>}
-          <button className="btn sm warn" onClick={() => act(() => CONTROL.promote(runId, n.id), `promoted ${n.id} → champion`)}>★ Promote</button>
-          <button className="btn sm" onClick={() => { const t = prompt('Note for node ' + n.id); if (t) act(() => CONTROL.annotate(runId, n.id, t), 'note saved') }}>✎ Note</button>
-        </div>
+        <div className="insp-hint muted">Actions (confirm · ablate · fork · promote · note) live in the chat — drag <span className="ctx-chip" style={{ padding: '0 6px' }}>#{n.id}</span> into it or type a <code>/command</code>.</div>
 
         {activeTab === 'Overview' && <Overview n={n} state={state} />}
         {activeTab === 'Trials' && <Trials n={n} detail={detail} state={state} selectedTrial={selectedTrial} />}
@@ -74,7 +50,6 @@ export default function Inspector({ runId, nodeId, state, live, tab, setTab, onT
         {activeTab === 'Metrics' && <Metrics n={n} detail={detail} />}
         {activeTab === 'Trust' && <Trust n={n} drifts={nodeDrifts} />}
         {activeTab === 'Cost' && <Cost state={state} />}
-        {activeTab === 'Chat' && <ChatTab runId={runId} nodeId={n.id} state={live} onInject={onInject} onToast={onToast} />}
       </div>
     </>
   )
@@ -112,6 +87,8 @@ export function GroupSummary({ groupKey, memberIds, state, onSelectNode, onClose
 
 function Overview({ n, state }) {
   const p = n.idea?.params || {}
+  const uses = mergeSummary(n, state.nodes || {})   // E3: for merges, which technique each parent fused
+  const chg = changeLabel(n, state.nodes || {})     // '' for merges (changeLabel owns that rule)
   return <>
     <div className="kv">
       <KV k="node" v={`#${n.id}`} />
@@ -123,6 +100,10 @@ function Overview({ n, state }) {
       <KV k="feasible" v={String(n.feasible)} />
       <KV k="eval seconds" v={fmt(n.eval_seconds)} />
     </div>
+    {chg && <><div className="section-h">What changed vs parent</div><div className="v">{chg}</div></>}
+    {uses.length > 0 && <><div className="section-h">Merge — techniques fused</div>
+      <ul className="bul">{uses.map(u => <li key={u.parentId}>
+        <b>#{u.parentId}</b>{u.theme ? ` · ${u.theme}` : ''}{u.change && u.change !== '—' ? ` — ${u.change}` : ''}</li>)}</ul></>}
     <div className="section-h">Idea params</div>
     {Object.keys(p).length ? <div className="kv">{Object.entries(p).map(([k, v]) => <KV key={k} k={k} v={fmt(v)} />)}</div> : <div className="muted">none</div>}
     {n.idea?.rationale && <><div className="section-h">Rationale</div><div className="v">{n.idea.rationale}</div></>}

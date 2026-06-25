@@ -81,6 +81,70 @@ function rollup(nodes, direction, keyFn) {
 export const operatorEffectiveness = (nodes, dir) => rollup(nodes, dir, n => n.operator || 'unknown')
 export const themeEffectiveness = (nodes, dir) => rollup(nodes, dir, n => n.idea?.theme || null)
 
+// Per-direction (theme) profit for the Directions overview: how many experiments each theme ran and
+// how much its best beat the run baseline (signed, direction-aware). Drives the treemap (area = count,
+// color = gain). Pure — reuses the same frontier baseline the Report leads with.
+export function directionProfit(state) {
+  const nodes = state.nodes || {}
+  const dir = state.direction || 'min'
+  const baseline = (improvements(nodes, dir)[0] || {}).to ?? null   // first feasible frontier value
+  return themeEffectiveness(nodes, dir).map(t => {
+    let gain = null
+    if (baseline != null && t.best != null) gain = dir === 'min' ? baseline - t.best : t.best - baseline
+    return { theme: t.key, count: t.count, evaluated: t.evaluated, improved: t.improved, best: t.best, gain, baseline }
+  }).sort((a, b) => (b.gain ?? -Infinity) - (a.gain ?? -Infinity) || b.count - a.count)
+}
+
+// For a MERGE node (≥2 parents): what each parent contributed — its theme + the "trick" it carried
+// (that parent's own param-diff vs its parent). Powers the node card's "⊕ combines" line + the
+// Inspector's "uses" list, so a merge says which techniques it actually fused.
+export function mergeSummary(node, nodes) {
+  if (!node || (node.parent_ids || []).length < 2) return []
+  return node.parent_ids.map(pid => {
+    const p = nodes[pid]
+    if (!p) return { parentId: pid, theme: null, change: '' }
+    const gp = (p.parent_ids || []).map(x => nodes[x]).find(Boolean)
+    return { parentId: pid, theme: p.idea?.theme || null, change: paramDiffLabel(paramDiff(p, gp)) }
+  })
+}
+
+function _pearson(xs, ys) {
+  const n = xs.length
+  const mx = xs.reduce((a, b) => a + b, 0) / n, my = ys.reduce((a, b) => a + b, 0) / n
+  let sxy = 0, sxx = 0, syy = 0
+  for (let i = 0; i < n; i++) { const dx = xs[i] - mx, dy = ys[i] - my; sxy += dx * dy; sxx += dx * dx; syy += dy * dy }
+  const d = Math.sqrt(sxx * syy)
+  return d === 0 ? 0 : sxy / d
+}
+
+// Run-wide hyperparameter importance: |Pearson r| of each numeric param vs the metric across all
+// evaluated feasible nodes ("which knobs mattered"). Needs ≥3 points per param. One source of truth
+// shared by the Report's Learnings section and the Importance panel.
+export function hyperImportance(state) {
+  const nodes = Object.values(state.nodes || {}).filter(n => n.status === 'evaluated' && n.metric != null && n.feasible !== false)
+  const keys = new Set()
+  nodes.forEach(n => Object.entries(n.idea?.params || {}).forEach(([k, v]) => { if (typeof v === 'number') keys.add(k) }))
+  const rows = []
+  keys.forEach(k => {
+    const pts = nodes.filter(n => typeof n.idea?.params?.[k] === 'number')
+    if (pts.length < 3) return
+    const r = _pearson(pts.map(n => n.idea.params[k]), pts.map(n => n.metric))
+    rows.push({ k, imp: Math.abs(r), r, n: pts.length })
+  })
+  return rows.sort((a, b) => b.imp - a.imp)
+}
+
+// The short "what changed vs the (first) parent" chip for a node card — the deterministic fallback
+// when the Researcher didn't write a `change_summary`. Returns '' for a merge (it describes its
+// fusion via mergeSummary instead) and when nothing changed, so callers needn't re-derive that rule.
+export function changeLabel(node, nodes) {
+  if ((node?.parent_ids || []).length > 1) return ''
+  const parent = (node.parent_ids || []).map(p => nodes[p]).find(Boolean)
+  if (!parent) return ''
+  const lbl = paramDiffLabel(paramDiff(node, parent))
+  return lbl === '—' ? '' : lbl
+}
+
 // Nodes that ran but made things worse than their parent (regressions) — the "tried, didn't help".
 export function regressions(nodes, direction) {
   const dir = direction || 'min'
@@ -126,18 +190,92 @@ export function analyze(state) {
   }
 }
 
+// Trust caveats that must not be buried in the verdict: reward-hack / leakage / drift / single-seed /
+// infeasibility. Each is a chip with a deep-link to the panel that explains it. Pure (from state).
+export function trustCaveats(state, best) {
+  const out = []
+  const hacks = state.reward_hacks || []
+  if (best && hacks.some(h => h.node_id === best.id))
+    out.push({ kind: 'reward-hack', severity: 'alarm', text: 'champion flagged as a possible reward-hack', panel: 'trust' })
+  else if (hacks.length)
+    out.push({ kind: 'reward-hack', severity: 'warn', text: `${hacks.length} node(s) flagged as possible reward-hacks`, panel: 'trust' })
+  if (state.leakage?.leak)
+    out.push({ kind: 'leakage', severity: 'alarm', text: 'data-leakage scan flagged this run', panel: 'data' })
+  if ((state.drifts || []).length)
+    out.push({ kind: 'drift', severity: 'warn', text: `${state.drifts.length} metric-drift divergence(s) caught`, panel: 'trust' })
+  const infeasible = Object.values(state.nodes || {}).filter(n => isEvaluated(n) && n.feasible === false)
+  if (infeasible.length)
+    out.push({ kind: 'infeasible', severity: 'warn', text: `${infeasible.length} evaluated node(s) violated a constraint`, panel: 'trust' })
+  if (best && best.confirmed_mean == null)
+    out.push({ kind: 'single-seed', severity: 'warn', text: 'champion is single-seed (not multi-seed confirmed)', panel: 'trust' })
+  return out
+}
+
+// The deterministic verdict — classify the outcome purely from data so the Report always leads with a
+// plain-language bottom line, even with no model. `a` is the analyze() result (reused, not recomputed).
+export function verdict(state, a) {
+  const dir = state.direction || 'min'
+  const best = state.best_node_id != null ? state.nodes[state.best_node_id] : null
+  const caveats = trustCaveats(state, best)
+  if (!best || a.finalBest == null) {
+    return { outcome: 'none', robustness: 'n/a', trust: 'caveats', best, caveats,
+      headline: a.nEval ? 'No feasible result yet — every evaluated node violated a constraint.' : 'No experiments have been evaluated yet.' }
+  }
+  const baseline = a.firstBest, finalv = a.finalBest
+  const gain = baseline != null ? finalv - baseline : 0
+  const moved = baseline != null && finalv !== baseline
+  const improved = moved && (dir === 'min' ? finalv < baseline : finalv > baseline)
+  const outcome = !moved ? 'flat' : (improved ? 'improved' : 'regressed')
+  // robustness from the champion's multi-seed confirmation
+  let robustness = 'unconfirmed'
+  if (best.confirmed_mean != null && (best.confirmed_seeds || 0) >= 2) {
+    const sd = best.confirmed_std ?? 0, mean = Math.abs(best.confirmed_mean) || 1
+    robustness = (sd <= Math.abs(gain) || sd / mean < 0.1) ? 'robust' : 'fragile'
+  }
+  // trust rollup
+  const hasAlarm = caveats.some(c => c.severity === 'alarm')
+  const trust = hasAlarm ? 'suspect' : (caveats.length ? 'caveats' : 'trustworthy')
+  const gainPct = baseline ? Math.abs(gain / baseline) * 100 : null
+  const gainStr = fmt(Math.abs(gain)) + (gainPct != null ? ` (${fmt(gainPct, 1)}%)` : '')
+  let headline
+  if (outcome === 'improved') {
+    const rob = robustness === 'robust' ? `robust across ${best.confirmed_seeds} seeds`
+      : robustness === 'fragile' ? `but the multi-seed spread is wide` : `single-seed so far`
+    headline = `Improved the metric by ${gainStr} over baseline — champion #${best.id} is ${rob}`
+      + (trust === 'suspect' ? '; ⚠ the win is flagged, treat with caution.'
+        : trust === 'caveats' ? ' (with caveats).' : ' and passes the trust checks.')
+  } else if (outcome === 'flat') {
+    headline = `No improvement over the baseline yet — best stays at ${fmt(finalv)} (#${best.id}).`
+  } else if (outcome === 'regressed') {
+    headline = `Best result ${fmt(finalv)} (#${best.id}) is below the first baseline — search hasn't paid off.`
+  }
+  return { outcome, robustness, trust, best, baseline, gain, gainPct, direction: dir, caveats, headline }
+}
+
 // A portable Markdown report (download / paste into a PR) built from the same analysis.
 export function toMarkdown(state, best) {
   const a = analyze(state)
+  const v = verdict(state, a)
+  const rep = state.report || null
   const L = []
   L.push(`# LoopLab run report — ${state.goal || state.task_id}`)
+  L.push('')
+  // Conclusion-first: the verdict (agent headline when present, else the deterministic one) leads.
+  L.push(`## Verdict`)
+  L.push('')
+  L.push(`**${rep?.headline || v.headline}**`)
+  if (rep?.verdict) { L.push(''); L.push(rep.verdict) }
+  if (v.caveats.length) { L.push(''); L.push('Caveats: ' + v.caveats.map(c => c.text).join('; ') + '.') }
   L.push('')
   L.push(`- **Run:** ${state.run_id}`)
   L.push(`- **Direction:** ${state.direction}`)
   L.push(`- **Status:** ${state.phase || (state.finished ? 'finished' : 'running')}${state.stop_reason ? ` (${state.stop_reason})` : ''}`)
   L.push(`- **Nodes:** ${Object.keys(state.nodes).length} — ${a.nEval} evaluated, ${Object.values(state.failures || {}).reduce((s, x) => s + x.length, 0)} failed`)
-  if (best) L.push(`- **Best:** node #${best.id} · metric ${fmt(best.confirmed_mean ?? best.metric)} · params ${JSON.stringify(best.idea?.params)}`)
+  if (best) L.push(`- **Best:** node #${best.id} · metric ${fmt(best.confirmed_mean ?? best.metric)}${best.confirmed_mean != null ? ` ±${fmt(best.confirmed_std)} (${best.confirmed_seeds}×)` : ''} · params ${JSON.stringify(best.idea?.params)}`)
   if (state.llm_cost) L.push(`- **LLM:** ${state.llm_cost.total_tokens} tokens · $${fmt(state.llm_cost.cost)}`)
+  if (rep?.champion_summary) { L.push(''); L.push('### Champion'); L.push(''); L.push(rep.champion_summary) }
+  if (rep && (rep.learnings || []).length) { L.push(''); L.push('### What we learned'); L.push(''); rep.learnings.forEach(x => L.push(`- ${x}`)) }
+  if (rep && (rep.next_directions || []).length) { L.push(''); L.push('### Next directions'); L.push(''); rep.next_directions.forEach(x => L.push(`- ${x}`)) }
   L.push('')
   L.push('## What worked — key improvements')
   if (a.steps.length) {

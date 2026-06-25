@@ -1,8 +1,7 @@
 import React, { useEffect, useMemo, useState } from 'react'
 import { get, putText, post, fmt, fmtInt, CONTROL, gpuStat } from './util.js'
-import { Trajectory, Bars, Gantt, ParallelCoords, Scatter, ImprovementWaterfall } from './charts.jsx'
-import MapView from './MapView.jsx'
-import { analyze, paramDiffLabel, toMarkdown } from './report.js'
+import { Bars, ParallelCoords, Scatter } from './charts.jsx'
+import { hyperImportance } from './report.js'
 import Markdown from './markdown.jsx'
 
 export function Panel({ title, sub, onClose, children, wide }) {
@@ -302,140 +301,11 @@ export function GpuPanel({ onClose }) {
   )
 }
 
-// "Why this node" — the search policy's last decision. MCTS surfaces per-candidate UCB1 scores
-// (policy_decision events → state.policy_scores / policy_chosen); greedy/evo expose the chosen
-// node only. Makes the otherwise-opaque search strategy auditable.
-export function PolicyPanel({ state, onClose, onSelect }) {
-  const scores = state.policy_scores || {}
-  const chosen = state.policy_chosen
-  const rows = Object.entries(scores).map(([id, s]) => ({ id: Number(id), s })).sort((a, b) => b.s - a.s)
-  const cfgPolicy = state.policy || null
-  return (
-    <Panel title="Policy — why this node" sub={cfgPolicy || 'search'} onClose={onClose}>
-      {chosen != null
-        ? <div className="kv" style={{ marginBottom: 8 }}><div className="k">last expanded</div>
-            <div className="v">#{chosen} {onSelect && <button className="btn sm ghost" onClick={() => { onSelect(chosen); onClose() }}>inspect →</button>}</div></div>
-        : <div className="muted">No policy decision recorded yet.</div>}
-      {rows.length
-        ? <><div className="section-h">Candidate scores (UCB1 — higher = more promising to expand)</div>
-            <table className="tbl"><thead><tr><th>node</th><th>score</th><th></th></tr></thead><tbody>
-              {rows.map(r => <tr key={r.id} className={r.id === chosen ? 'sel' : ''} style={{ cursor: onSelect ? 'pointer' : 'default' }}
-                                 onClick={() => onSelect && (onSelect(r.id), onClose())}>
-                <td>#{r.id}{r.id === chosen && ' ◀ chosen'}</td><td>{fmt(r.s, 4)}</td>
-                <td><div className="bar" style={{ height: 8 }}><div className="fill" style={{ width: Math.min(100, r.s / (rows[0].s || 1) * 100) + '%' }} /></div></td></tr>)}
-            </tbody></table></>
-        : <div className="muted" style={{ marginTop: 8 }}>This policy ({cfgPolicy || 'greedy'}) doesn't expose per-candidate scores — only MCTS surfaces UCB1 values. The chosen node above is the latest expansion.</div>}
-    </Panel>
-  )
-}
-
-// "Why this strategy" — the A7 Strategist's adaptive meta-control. Shows the active Strategy
-// (policy / Developer / fidelity / operator mix + rationale), the timeline of switches
-// (strategy_history), the ASHA rung-promotion trail, and an operator override (set_strategy) so a
-// human can pin a policy live (HITL parity). Mirrors the policy "why-this-node" panel.
-export function StrategistPanel({ state, runId, onClose, onToast }) {
-  const active = state.active_strategy
-  const history = state.strategy_history || []
-  const rungs = state.rungs || []
-  const [pol, setPol] = useState('')
-  const [fid, setFid] = useState('')
-  const POLICIES = ['greedy', 'evolutionary', 'mcts', 'asha', 'bohb']
-  const pin = async () => {
-    const strat = {}
-    if (pol) strat.policy = pol
-    if (fid) strat.fidelity = fid
-    if (!Object.keys(strat).length) return
-    strat.rationale = 'operator-pinned via UI'
-    try { await CONTROL.setStrategy(runId, strat); onToast && onToast('strategy pinned') }
-    catch (e) { onToast && onToast('failed: ' + e.message) }
-  }
-  const opLine = (ops) => ops ? Object.entries(ops).map(([k, v]) => `${k}=${v}`).join(', ') : '—'
-  return (
-    <Panel title="Strategist — why this strategy" sub={active ? (active.source || 'rule') : 'off'} onClose={onClose} wide>
-      {active
-        ? <div className="kvs" style={{ marginBottom: 10 }}>
-            <div className="kv"><div className="k">policy</div><div className="v"><b>{active.policy || state.policy || 'greedy'}</b>
-              {active.policy_params && Object.keys(active.policy_params).length ? <span className="muted"> ({opLine(active.policy_params)})</span> : null}</div></div>
-            <div className="kv"><div className="k">developer</div><div className="v">{active.developer || 'default'}</div></div>
-            <div className="kv"><div className="k">fidelity</div><div className="v">{active.fidelity || 'adaptive'}</div></div>
-            <div className="kv"><div className="k">operators</div><div className="v">{opLine(active.operators)}</div></div>
-            <div className="kv"><div className="k">why</div><div className="v">{active.rationale || '—'}</div></div>
-          </div>
-        : <div className="muted">Strategist is <b>off</b> — the static config policy (<b>{state.policy || 'greedy'}</b>) drives the search.
-            Every choice below is also a direct config knob; turn the Strategist on (Settings → strategist_backend = rule|llm) to adapt it at runtime.</div>}
-
-      {history.length > 0 && <>
-        <div className="section-h">Strategy timeline ({history.length} switch{history.length === 1 ? '' : 'es'})</div>
-        <table className="tbl"><thead><tr><th>@node</th><th>policy</th><th>fidelity</th><th>operators</th><th>why</th></tr></thead><tbody>
-          {history.map((h, i) => { const s = h.strategy || {}; return (
-            <tr key={i}><td>{h.at_node ?? '—'}</td><td>{s.policy || '—'}</td><td>{s.fidelity || 'adaptive'}</td>
-              <td className="muted">{opLine(s.operators)}</td><td className="muted" style={{ maxWidth: 320 }}>{s.rationale || ''}</td></tr>) })}
-        </tbody></table></>}
-
-      {rungs.length > 0 && <>
-        <div className="section-h">ASHA rung promotions (successive-halving)</div>
-        <table className="tbl"><thead><tr><th>rung</th><th>survivors promoted</th></tr></thead><tbody>
-          {rungs.map((r, i) => <tr key={i}><td>↑ {r.rung}</td><td>{(r.survivors || []).map(s => '#' + s).join(', ') || '—'}</td></tr>)}
-        </tbody></table></>}
-
-      {Object.keys(state.proxy_scores || {}).length > 0 && <>
-        <div className="section-h">A6 proxy scoring — early-signal candidate ranking
-          {state.proxy_skipped?.length ? ` (${state.proxy_skipped.length} doomed candidate(s) skipped)` : ''}</div>
-        <table className="tbl"><thead><tr><th>node</th><th>predicted</th><th>outcome</th></tr></thead><tbody>
-          {Object.entries(state.proxy_scores).sort((a, b) => Number(a[0]) - Number(b[0])).map(([id, s]) =>
-            <tr key={id} className={(state.proxy_skipped || []).includes(Number(id)) ? 'sel' : ''}>
-              <td>#{id}</td><td>{fmt(s)}</td>
-              <td>{(state.proxy_skipped || []).includes(Number(id)) ? '⏭ skipped full eval' : 'evaluated'}</td></tr>)}
-        </tbody></table></>}
-
-      {!state.finished && <>
-        <div className="section-h">Override (pin a strategy — human wins over the Strategist)</div>
-        <div className="row" style={{ gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
-          <select className="inp sm" value={pol} onChange={e => setPol(e.target.value)}>
-            <option value="">policy…</option>{POLICIES.map(p => <option key={p} value={p}>{p}</option>)}</select>
-          <select className="inp sm" value={fid} onChange={e => setFid(e.target.value)}>
-            <option value="">fidelity…</option>{['smoke', 'full', 'adaptive'].map(f => <option key={f} value={f}>{f}</option>)}</select>
-          <button className="btn sm primary" onClick={pin} disabled={!pol && !fid}>📌 Pin strategy</button>
-        </div></>}
-    </Panel>
-  )
-}
-
-// "Planning" — what the Researcher is thinking about WHAT TO DO NEXT. One row per proposal in run
-// order, surfacing the model's *conclusion* (idea.rationale) up front: why this experiment and what
-// it expects to learn. The raw chain-of-thought lives in each node's Trace tab as a collapsed
-// "reasoning (debug)" disclosure — this panel stays conclusion-only so the plan reads cleanly.
-export function PlanningPanel({ state, onSelect, onClose }) {
-  const nodes = Object.values(state.nodes || {}).sort((a, b) => a.id - b.id)
-  const memos = state.research || []
-  const opLine = (p) => p && Object.keys(p).length
-    ? Object.entries(p).map(([k, v]) => `${k}=${typeof v === 'number' ? fmt(v) : v}`).join(', ') : '—'
-  return (
-    <Panel title="Planning — what to try next & why" sub={`${nodes.length} proposal${nodes.length === 1 ? '' : 's'}`} onClose={onClose} wide>
-      <div className="muted" style={{ marginBottom: 10 }}>
-        The Researcher's conclusion for each experiment — its takeaway on why this step and what it
-        expects to learn. Open a node's <b>Trace</b> tab to read the raw reasoning (debug).
-      </div>
-      {memos.length > 0 && <div className="chip" style={{ marginBottom: 10 }}>🔬 {memos.length} deep-research memo{memos.length === 1 ? '' : 's'} — see the Research panel</div>}
-      {nodes.length === 0
-        ? <div className="muted">No proposals yet.</div>
-        : <table className="tbl"><thead><tr><th>node</th><th>operator</th><th>params</th><th>conclusion (why this next)</th></tr></thead><tbody>
-            {nodes.map(n => <tr key={n.id} style={{ cursor: onSelect ? 'pointer' : 'default' }}
-                               onClick={() => onSelect && (onSelect(n.id), onClose())}>
-              <td>#{n.id}{n.id === state.best_node_id && ' ♚'}</td>
-              <td>{n.operator}{n.idea?.theme ? <span className="muted"> · {n.idea.theme}</span> : null}</td>
-              <td className="muted" style={{ maxWidth: 220 }}>{opLine(n.idea?.params)}</td>
-              <td style={{ maxWidth: 460 }}>{n.idea?.rationale || <span className="muted">—</span>}</td></tr>)}
-          </tbody></table>}
-    </Panel>
-  )
-}
-
 // "Research" — the Deep-Research stage memos (Phase 2). One entry per `research_completed` memo:
 // the model's conclusion (summary/findings/recommended_directions) up front + the consulted sources
 // as clickable links; the raw deliberation sits in a collapsed "reasoning (debug)" disclosure. The
 // `focus` index (set when an operator clicks a research node in the DAG) auto-expands that memo.
-function MemoCard({ memo, idx, open, onToggle }) {
+export function MemoCard({ memo, idx, open, onToggle }) {
   const [think, setThink] = useState(false)
   return (
     <div className="memo-card">
@@ -471,48 +341,14 @@ function MemoCard({ memo, idx, open, onToggle }) {
   )
 }
 
-export function ResearchPanel({ state, focus = null, onClose }) {
-  const memos = state.research || []
-  const [open, setOpen] = useState(focus)
-  useEffect(() => { if (focus != null) setOpen(focus) }, [focus])
-  const toggle = (i) => setOpen(o => o === i ? null : i)
-  return (
-    <Panel title="Deep research — memos that steer the run" sub={`${memos.length} memo${memos.length === 1 ? '' : 's'}`} onClose={onClose} wide>
-      <div className="muted" style={{ marginBottom: 10 }}>
-        Each memo is the Deep-Research stage reading across ALL results so far + the literature/web,
-        then writing a conclusion and concrete next directions (fed back to the Researcher). The raw
-        reasoning is a collapsed debug aid.
-      </div>
-      {memos.length === 0
-        ? <div className="muted">No deep-research memos yet — click <b>🔬 Deep research</b> on the run, set a cadence (<code>deep_research_every</code>), or enable a Strategist that requests it.</div>
-        : memos.map((m, i) => <MemoCard key={i} memo={m} idx={i} open={open === i} onToggle={toggle} />)}
-    </Panel>
-  )
-}
 
 // F1 · Global hyperparameter importance — across ALL evaluated feasible nodes in the run, how
 // strongly does each numeric param predict the metric (|Pearson r|)? The per-node Sensitivity panel
 // is local (one ablation); this is the run-wide W&B-style "which knobs matter" view. Pure UI.
-function _pearson(xs, ys) {
-  const n = xs.length
-  const mx = xs.reduce((a, b) => a + b, 0) / n, my = ys.reduce((a, b) => a + b, 0) / n
-  let sxy = 0, sxx = 0, syy = 0
-  for (let i = 0; i < n; i++) { const dx = xs[i] - mx, dy = ys[i] - my; sxy += dx * dy; sxx += dx * dx; syy += dy * dy }
-  const d = Math.sqrt(sxx * syy)
-  return d === 0 ? 0 : sxy / d
-}
+// The computation lives in report.js::hyperImportance (shared with the Report's Learnings section).
 export function HyperImportancePanel({ state, onClose }) {
   const nodes = Object.values(state.nodes).filter(n => n.status === 'evaluated' && n.metric != null && n.feasible !== false)
-  const keys = new Set()
-  nodes.forEach(n => Object.entries(n.idea?.params || {}).forEach(([k, v]) => { if (typeof v === 'number') keys.add(k) }))
-  const rows = []
-  keys.forEach(k => {
-    const pts = nodes.filter(n => typeof n.idea?.params?.[k] === 'number')
-    if (pts.length < 3) return
-    const r = _pearson(pts.map(n => n.idea.params[k]), pts.map(n => n.metric))
-    rows.push({ k, imp: Math.abs(r), r, n: pts.length })
-  })
-  rows.sort((a, b) => b.imp - a.imp)
+  const rows = hyperImportance(state)
   const top = rows[0]?.imp || 1
   return (
     <Panel title="Hyperparameter importance" sub={`${nodes.length} evaluated`} onClose={onClose}>
@@ -598,130 +434,6 @@ export function CollabPanel({ state, runId, onSelect, onClose, onToast }) {
   )
 }
 
-export function ReportPanel({ state, runId, onClose }) {
-  const best = state.best_node_id != null ? state.nodes[state.best_node_id] : null
-  const failed = Object.values(state.nodes).filter(n => n.status === 'failed')
-  const [bestCode, setBestCode] = useState(null)
-  useEffect(() => { if (best) get(`/api/runs/${runId}/nodes/${best.id}`).then(d => setBestCode(d)).catch(() => {}) }, [runId, best?.id])
-  const a = useMemo(() => analyze(state), [state])
-  const dl = (name, text, type) => {
-    const blob = new Blob([text], { type }); const u = URL.createObjectURL(blob)
-    const el = document.createElement('a'); el.href = u; el.download = name; el.click(); URL.revokeObjectURL(u)
-  }
-  const impr = (s) => (s.delta == null ? true : (state.direction === 'min' ? s.delta < 0 : s.delta > 0))
-  // F3 · lineage / model-card export: a portable champion artifact tying data-hash -> code ->
-  // params -> metric -> selection, plus provenance, for handoff/reproducibility.
-  const modelCard = () => {
-    const champ = state.champion != null ? state.nodes[state.champion] : best
-    const card = {
-      task: state.task_id, goal: state.goal, direction: state.direction,
-      generated: new Date().toISOString(), run_id: state.run_id,
-      champion: champ ? {
-        node_id: champ.id, operator: champ.operator,
-        metric: champ.confirmed_mean ?? champ.metric,
-        confirmed: champ.confirmed_mean != null,
-        params: champ.idea.params, rationale: champ.idea.rationale,
-        lineage: (champ.parent_ids || []),
-      } : null,
-      data_provenance: state.data_provenance || null,
-      workspace: state.workspace || null,
-      counts: { nodes: Object.keys(state.nodes).length, evaluated: Object.values(state.nodes).filter(n => n.status === 'evaluated').length },
-    }
-    return JSON.stringify(card, null, 2)
-  }
-  // I4 · champion as a runnable nbformat-v4 notebook (built client-side; no backend round-trip).
-  const notebook = (code) => {
-    const champ = state.champion != null ? state.nodes[state.champion] : best
-    const src = code.endsWith('\n') ? code : code + '\n'
-    return {
-      cells: [
-        { cell_type: 'markdown', metadata: {}, source: [
-          '# Champion solution\n', `\n*LoopLab run ${state.run_id} (task ${state.task_id}).*\n`,
-          `\n**Goal:** ${state.goal}\n`, `\n**Best metric:** ${champ ? (champ.confirmed_mean ?? champ.metric) : '—'}\n`,
-          `\n**Params:** \`${JSON.stringify(champ?.idea?.params || {})}\`\n`] },
-        { cell_type: 'code', metadata: {}, execution_count: null, outputs: [], source: src.split(/(?<=\n)/) },
-      ],
-      metadata: { kernelspec: { display_name: 'Python 3', language: 'python', name: 'python3' }, language_info: { name: 'python' } },
-      nbformat: 4, nbformat_minor: 5,
-    }
-  }
-  return (
-    <Panel title="Run report" onClose={onClose} wide>
-      <div className="toolbar" style={{ marginBottom: 10 }}>
-        <button className="btn sm primary" onClick={() => window.print()}>🖨 Print / PDF</button>
-        <button className="btn sm" onClick={() => dl(`${state.run_id}_report.md`, toMarkdown(state, best), 'text/markdown')}>⬇ Markdown report</button>
-        {best && <button className="btn sm" disabled={!bestCode?.code} onClick={() => dl(`solution_node${best.id}.py`, bestCode.code, 'text/x-python')}>⬇ Solution</button>}
-        <button className="btn sm" title="F3: portable champion lineage + provenance" onClick={() => dl(`${state.run_id}_model_card.json`, modelCard(), 'application/json')}>⬇ Model card</button>
-        {best && <button className="btn sm" title="I4: champion as a runnable Jupyter notebook" disabled={!bestCode?.code}
-          onClick={() => dl(`${state.run_id}_champion.ipynb`, JSON.stringify(notebook(bestCode.code), null, 1), 'application/x-ipynb+json')}>⬇ Notebook</button>}
-      </div>
-      <h2>{state.goal || state.task_id}</h2>
-      <div className="kv">
-        <div className="k">run</div><div className="v">{state.run_id}</div>
-        <div className="k">direction</div><div className="v">{state.direction}</div>
-        <div className="k">status</div><div className="v">{state.phase}{state.stop_reason ? ` (${state.stop_reason})` : ''}</div>
-        <div className="k">nodes</div><div className="v">{Object.keys(state.nodes).length} ({a.nEval} evaluated, {failed.length} failed)</div>
-        {best && <><div className="k">best</div><div className="v">#{best.id} · {fmt(best.confirmed_mean ?? best.metric)} · {JSON.stringify(best.idea?.params)}</div></>}
-        {a.steps.length > 1 && <><div className="k">total gain</div><div className="v">{fmt(a.totalGain)} over {a.steps.length} steps (baseline {fmt(a.firstBest)} → {fmt(a.finalBest)})</div></>}
-        {state.llm_cost && <><div className="k">LLM</div><div className="v">{fmtInt(state.llm_cost.total_tokens)} tokens · ${fmt(state.llm_cost.cost)}</div></>}
-      </div>
-
-      <div className="section-h">Best-metric trajectory <span className="muted">(○ = a step that moved the frontier)</span></div>
-      <Trajectory nodes={Object.values(state.nodes)} direction={state.direction} steps={a.steps} />
-
-      <div className="section-h">Key improvements — how the metric got better</div>
-      {a.steps.length
-        ? <><ImprovementWaterfall steps={a.steps} direction={state.direction} />
-            <table className="tbl"><thead><tr><th>#</th><th>node</th><th>operator</th><th>metric</th><th>Δ</th><th>what changed</th><th>why</th></tr></thead><tbody>
-              {a.steps.map((s, i) => <tr key={s.id}>
-                <td>{i + 1}</td><td>#{s.id}</td><td>{s.operator}{s.theme ? <span className="pill" style={{ marginLeft: 4 }}>{s.theme}</span> : null}</td>
-                <td>{fmt(s.to)}</td>
-                <td style={{ color: s.delta == null ? 'var(--accent)' : (impr(s) ? 'var(--ok)' : 'var(--fail)') }}>{s.delta == null ? 'baseline' : fmt(s.delta)}</td>
-                <td className="muted">{paramDiffLabel(s.diff)}</td>
-                <td className="muted" style={{ maxWidth: 220, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={s.rationale}>{s.rationale}</td>
-              </tr>)}
-            </tbody></table></>
-        : <div className="muted">No improving steps recorded yet.</div>}
-
-      <div className="section-h">What worked — operator &amp; theme effectiveness</div>
-      <div style={{ display: 'flex', gap: 18, flexWrap: 'wrap' }}>
-        <div style={{ flex: 1, minWidth: 280 }}>
-          <div className="muted" style={{ marginBottom: 4 }}>operators</div>
-          <table className="tbl"><thead><tr><th>operator</th><th>nodes</th><th>eval</th><th>improved</th><th>best</th></tr></thead><tbody>
-            {a.operators.map(o => <tr key={o.key}><td>{o.key}</td><td>{o.count}</td><td>{o.evaluated}</td>
-              <td style={{ color: o.improved ? 'var(--ok)' : 'inherit' }}>{o.improved}</td><td>{fmt(o.best)}</td></tr>)}
-          </tbody></table>
-        </div>
-        {a.themes.length > 0 && <div style={{ flex: 1, minWidth: 280 }}>
-          <div className="muted" style={{ marginBottom: 4 }}>themes</div>
-          <table className="tbl"><thead><tr><th>theme</th><th>nodes</th><th>improved</th><th>best</th></tr></thead><tbody>
-            {a.themes.map(t => <tr key={t.key}><td>{t.key}</td><td>{t.count}</td>
-              <td style={{ color: t.improved ? 'var(--ok)' : 'inherit' }}>{t.improved}</td><td>{fmt(t.best)}</td></tr>)}
-          </tbody></table>
-        </div>}
-      </div>
-
-      <div className="section-h">What didn't work</div>
-      <div className="cardgrid" style={{ marginBottom: 10 }}>
-        {Object.entries(a.failures).map(([r, ns]) => <Stat key={r} n={ns.length} l={`failed · ${r}`} />)}
-        {a.regressions.length > 0 && <Stat n={a.regressions.length} l="regressions" />}
-        {a.infeasible.length > 0 && <Stat n={a.infeasible.length} l="infeasible" />}
-        {(state.drifts || []).length > 0 && <Stat n={state.drifts.length} l="metric drift" />}
-        {!Object.keys(a.failures).length && !a.regressions.length && !a.infeasible.length && <Stat n={0} l="nothing notably failed" />}
-      </div>
-      {a.regressions.length > 0 && <>
-        <div className="muted" style={{ marginBottom: 4 }}>tried but didn't beat the parent</div>
-        <table className="tbl"><thead><tr><th>node</th><th>operator</th><th>metric</th><th>vs parent</th><th>change</th></tr></thead><tbody>
-          {a.regressions.slice(0, 12).map(r => <tr key={r.id}><td>#{r.id}</td><td>{r.operator}</td><td>{fmt(r.metric)}</td>
-            <td className="muted">#{r.parentId} {fmt(r.parentMetric)}</td><td className="muted">{paramDiffLabel(r.diff)}</td></tr>)}
-        </tbody></table>
-      </>}
-
-      {best && <><div className="section-h">Winning solution</div><pre className="code">{bestCode?.code || '(loading…)'}</pre></>}
-    </Panel>
-  )
-}
-
 export function ComparePanel({ state, runId, onClose }) {
   const ids = Object.keys(state.nodes).map(Number).sort((a, b) => a - b)
   const [a, setA] = useState(null), [b, setB] = useState(null)
@@ -753,17 +465,6 @@ export function ComparePanel({ state, runId, onClose }) {
   )
 }
 
-export function MetaGraphPanel({ onClose }) {
-  // The cross-run map: projects › runs › themes as one collapsible semantic-zoom continuum
-  // (same hull / super-node language as the in-run canvas). Clicking a run drills into it.
-  return (
-    <Panel title="Multi-tree meta-graph" sub="projects › runs › themes" onClose={onClose} wide>
-      <div style={{ height: 540 }}>
-        <MapView onOpen={(id) => { onClose(); location.hash = '#/run/' + encodeURIComponent(id) }} />
-      </div>
-    </Panel>
-  )
-}
 
 export function EventExplorer({ runId, onClose }) {
   const [log, setLog] = useState([])

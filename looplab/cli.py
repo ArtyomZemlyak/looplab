@@ -33,19 +33,24 @@ def _engine(run_dir: Path, task: TaskAdapter, settings: Settings,
     # only; never read by replay.fold. Honors LOOPLAB_TRACE_LLM_IO via Settings.
     set_llm_capture(settings.trace_llm_io)
     researcher, developer = make_roles(task, settings)
-    # A2 surrogate-guided proposer: wrap the base Researcher when the task exposes numeric bounds
-    # (it bootstraps via the wrapped Researcher and delegates on non-numeric spaces). A3 BOHB =
-    # ASHA racing + the surrogate, so `policy=bohb` auto-enables it.
-    if settings.surrogate_proposer or settings.policy == "bohb":
-        from .surrogate import SurrogateResearcher
-        _bounds = getattr(researcher, "bounds", None)
-        if _bounds:
-            researcher = SurrogateResearcher(_bounds, fallback=researcher,
-                                             explore=settings.surrogate_explore)
-    # E2 researcher panel: generate K ideas and keep the best by the empirical surrogate (not LLM-judge).
-    if settings.researcher_panel > 1:
-        from .panel import PanelResearcher
-        researcher = PanelResearcher(researcher, k=settings.researcher_panel)
+    # Unified mode: researcher IS developer (one agent). Skip the researcher-only wrappers
+    # (surrogate/panel) — they would re-wrap `researcher` without re-wrapping `developer`, so the
+    # two handles would diverge mid-run (R1). The unified agent owns its own ideation machinery.
+    _unified = settings.unified_agent and settings.backend == "llm"
+    if not _unified:
+        # A2 surrogate-guided proposer: wrap the base Researcher when the task exposes numeric bounds
+        # (it bootstraps via the wrapped Researcher and delegates on non-numeric spaces). A3 BOHB =
+        # ASHA racing + the surrogate, so `policy=bohb` auto-enables it.
+        if settings.surrogate_proposer or settings.policy == "bohb":
+            from .surrogate import SurrogateResearcher
+            _bounds = getattr(researcher, "bounds", None)
+            if _bounds:
+                researcher = SurrogateResearcher(_bounds, fallback=researcher,
+                                                 explore=settings.surrogate_explore)
+        # E2 researcher panel: generate K ideas and keep the best by the empirical surrogate.
+        if settings.researcher_panel > 1:
+            from .panel import PanelResearcher
+            researcher = PanelResearcher(researcher, k=settings.researcher_panel)
     # RepoTask onboarding (Phase 3): if the task can propose its own eval spec, build the
     # onboarder (Researcher proposes + Developer writes the adapter).
     mk = getattr(task, "make_onboarder", None)
@@ -53,14 +58,25 @@ def _engine(run_dir: Path, task: TaskAdapter, settings: Settings,
     # A7 Strategist (optional adaptive meta-control) + live Developer-backend swap factory.
     from .strategist import make_strategist
     from .tasks import make_developer_factory
-    strat_client = (make_llm_client(settings)
-                    if settings.backend == "llm" and settings.strategist_backend == "llm" else None)
-    strategist = make_strategist(settings, client=strat_client, n_seeds=settings.n_seeds)
+    if _unified:
+        # The unified agent IS the strategist: its `.decide()` delegates to the strategy-stage
+        # backend it built internally (None when strategist_backend="off"). One identity, replay
+        # path unchanged (the engine still records/replays `strategy_decision`).
+        strategist = researcher
+    else:
+        strat_client = (make_llm_client(settings)
+                        if settings.backend == "llm" and settings.strategist_backend == "llm" else None)
+        strategist = make_strategist(settings, client=strat_client, n_seeds=settings.n_seeds)
     # Deep-Research stage (Phase 2): reachable only with an LLM backend. Reuses the run's LLM client;
     # tools (arXiv/web/knowledge) are wired from config inside make_deep_researcher. None when off.
     from .deep_research import make_deep_researcher
-    deep_researcher = (make_deep_researcher(settings, client=make_llm_client(settings))
+    deep_researcher = (make_deep_researcher(settings, client=make_llm_client(settings), task=task)
                        if settings.backend == "llm" else None)
+    # Agent-authored run report (Workstream A): reachable only with an LLM backend; reuses the run's
+    # LLM client. None in toy mode -> the UI shows the deterministic report only.
+    from .report import make_report_writer
+    report_writer = (make_report_writer(settings, client=make_llm_client(settings))
+                     if settings.backend == "llm" else None)
     dev_factory = make_developer_factory(task, settings) if settings.backend == "llm" else None
     proxy_scorer = None
     if settings.proxy_scoring or settings.proxy_kill_fraction > 0:
@@ -99,6 +115,8 @@ def _engine(run_dir: Path, task: TaskAdapter, settings: Settings,
         strategist_every=settings.strategist_every,
         deep_researcher=deep_researcher,
         deep_research_every=settings.deep_research_every,
+        report_writer=report_writer,
+        report_every=settings.report_every,
         developer_factory=dev_factory,
         merge_mode=settings.merge_mode,
         complexity_cue=settings.complexity_cue,
@@ -118,6 +136,8 @@ def _engine(run_dir: Path, task: TaskAdapter, settings: Settings,
         novelty_epsilon=settings.novelty_epsilon,
         reflection_priors=settings.reflection_priors,
         surrogate_explore=settings.surrogate_explore,
+        unified_agent=settings.unified_agent,
+        agent_drives_actions=settings.agent_drives_actions,
     )
 
 

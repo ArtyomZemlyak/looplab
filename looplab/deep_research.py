@@ -84,6 +84,8 @@ class DeepResearcher:
 
     def research(self, state: RunState, trigger: str = "") -> ResearchMemo:
         memo = ResearchMemo(at_node=len(state.nodes), trigger=trigger)
+        if self.tools is not None and hasattr(self.tools, "bind_state"):
+            self.tools.bind_state(state)     # let run-aware tools read the current search
         tool_specs = ((self.tools.specs() if self.tools else []) + [self._emit_spec()])
         messages = [
             {"role": "system", "content": _SYSTEM},
@@ -164,13 +166,17 @@ def _arg_url(args: dict) -> str:
     return str((args or {}).get("url") or "")
 
 
-def make_deep_researcher(settings, *, client=None) -> Optional[DeepResearcher]:
+def make_deep_researcher(settings, *, client=None, task=None) -> Optional[DeepResearcher]:
     """Build a DeepResearcher when the stage is reachable: needs a client and at least one trigger
     enabled (web_search / literature_search / a cadence / manual use). Returns None when no client
     is wired (toy/offline mode) — the engine then simply never runs the stage."""
     if client is None:
         return None
     providers = []
+    if getattr(settings, "researcher_tools", True):   # run-introspection (own experiments + data)
+        from .run_tools import DataTools, RunTools
+        providers.append(RunTools())
+        providers.append(DataTools(task))
     if getattr(settings, "knowledge_dir", None):
         from .knowledge_tools import KnowledgeTools
         providers.append(KnowledgeTools(settings.knowledge_dir))

@@ -164,7 +164,31 @@ class Settings(BaseSettings):
     developer_model: str | None = None
     researcher_base_url: str | None = None
     developer_base_url: str | None = None
+    # Unified self-driving agent (NEW): one LLM identity that plays Researcher + Developer
+    # (+ Strategist) across pipeline stages, choosing its own model/toolset per stage. Off by
+    # default == today's split-role behavior (byte-identical). `agent_drives_actions` is the
+    # nested opt-in that lets the agent pick the next macro action (within a pure legal-action
+    # gate); off even when `unified_agent` is on ships the drop-in role merge without self-driving.
+    unified_agent: bool = False
+    agent_drives_actions: bool = False
+    # Per-stage model/endpoint overrides for the unified agent. Recognized keys (see
+    # tasks.build_unified_agent): `propose` (researcher), `implement`/`repair` (developer),
+    # `strategy`, `pilot`. Unlisted keys are ignored. Empty = the per-role researcher_*/developer_*
+    # models, then the shared llm_model. Explicit map wins. No-op unless `unified_agent` is true.
+    agent_stage_models: dict = {}
+    agent_stage_base_urls: dict = {}
     llm_parser: str = "tool_call"
+    # Reasoning/thinking toggle sent IN the request (providers differ — see `llm.reasoning_body`):
+    #   Qwen3 on vLLM/SGLang -> chat_template_kwargs.enable_thinking (bool)
+    #   OpenAI/Ollama-v1/DeepSeek -> reasoning_effort (low|medium|high|none)
+    # `llm_reasoning`: "" = send nothing (server default — current behavior); off = actively disable;
+    #   on = enable at default depth; low|medium|high = enable at that effort.
+    # Empty by default so existing runs are unchanged; the model's chain-of-thought is still CAPTURED
+    # either way (reasoning_content field or inline <think>). NOTE: to get a SEPARATE reasoning_content
+    # field from SGLang/vLLM, the server also needs `--reasoning-parser qwen3` (else it's inline).
+    llm_reasoning: str = ""
+    llm_reasoning_style: str = "auto"    # auto | qwen | effort | none — how to shape the request param
+    llm_reasoning_extra: dict = {}       # raw fields merged into the body (escape hatch, e.g. Anthropic thinking)
     # H1: drive structured calls with the endpoint's constrained decoding (vLLM/SGLang guided_json +
     # response_format json_schema) so weak models can't emit invalid JSON. Off for Ollama (default).
     llm_guided_json: bool = False
@@ -176,6 +200,11 @@ class Settings(BaseSettings):
     # Diagnostics only — `replay.fold` never reads spans. Default on for local single-user; set
     # LOOPLAB_TRACE_LLM_IO=0 to suppress (e.g. to keep spans.jsonl small or avoid storing prompts).
     trace_llm_io: bool = True
+    # Run-introspection tools (ON by default): make the LLM Researcher (and DeepResearcher) a
+    # tool-using agent that can read its OWN experiments (list/read/find-analogous/themes/code) and
+    # the task data (schema/profile/asset) mid-loop, instead of seeing only best+parent. Advisory —
+    # never changes best-selection. Off = the legacy single-shot Researcher (richer digest still added).
+    researcher_tools: bool = True
     # Agentic retrieval (ADR-16): if set, the LLM Researcher gets grep/kb_search/read
     # tools over this directory of markdown notes and chooses when to use them.
     knowledge_dir: str | None = None
@@ -190,6 +219,10 @@ class Settings(BaseSettings):
     # Cadence for the Deep-Research stage: run it automatically every N created nodes (0 = off; it
     # still fires on a manual `deep_research` control event or a Strategist `request_research`).
     deep_research_every: int = 0
+    # Cadence for the agent-authored run report: regenerate the conclusion-first narrative every N
+    # created nodes (0 = off; it still regenerates on a manual `report_refresh` from the UI). The
+    # deterministic report always renders from the node set regardless of this knob.
+    report_every: int = 3
     # Agent Skills (I18, ADR-9): dir of SKILL.md the Researcher can list/load as tools.
     skills_dir: str | None = None
     # Prompt store (I18, ADR-8): dir of editable, hot-reloaded role prompt .md files.

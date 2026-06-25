@@ -24,6 +24,13 @@ class SearchPolicy(Protocol):
     def next_actions(self, state: RunState) -> list[dict]: ...
 
 
+def _metric_scores(nodes) -> dict[int, float]:
+    """Candidate comparison surfaced as a `policy_decision` event ("why this node"): map each
+    node's id to its observed metric. Lets the UI show the alternatives the policy weighed
+    against the one it chose — even for policies (GreedyTree) that pick by raw metric."""
+    return {n.id: round(n.metric, 4) for n in nodes if n.metric is not None}
+
+
 # --------------------------------------------------------------------------- #
 # Shared self-repair: debug the first failed leaf within the depth bound. Used by
 # every policy so error-feedback repair (I7) is policy-agnostic, not greedy-only.
@@ -114,17 +121,23 @@ class GreedyTree:
                 and n_improve >= self.merge_every and n_merge < n_improve // self.merge_every):
             top2 = sorted(evaluated, key=lambda n: (n.metric, n.id),
                           reverse=(state.direction == "max"))[:2]
-            return [{"kind": "merge", "parent_ids": [top2[0].id, top2[1].id]}]
+            return [{"kind": "merge", "parent_ids": [top2[0].id, top2[1].id],
+                     "_scores": _metric_scores(top2), "_chosen": top2[0].id,
+                     "_reason": "merge top-2"}]
 
         # 5. Ablation-driven refinement (I7): periodically ablate the best to find the
         #    highest-impact parameter, then refine just that one.
         n_refine = sum(1 for n in state.nodes.values() if n.operator == "refine_block")
         if (self.ablate_every > 0 and len(best.idea.params) >= 2
                 and n_improve >= (n_refine + 1) * self.ablate_every):
-            return [{"kind": "ablate", "parent_id": best.id}]
+            return [{"kind": "ablate", "parent_id": best.id,
+                     "_scores": _metric_scores(evaluated), "_chosen": best.id,
+                     "_reason": "ablate highest-impact param"}]
 
-        # 6. Exploit: improve the current best.
-        return [{"kind": "improve", "parent_id": best.id}]
+        # 6. Exploit: improve the current best (over all feasible candidates).
+        return [{"kind": "improve", "parent_id": best.id,
+                 "_scores": _metric_scores(evaluated), "_chosen": best.id,
+                 "_reason": "exploit best"}]
 
 
 class EvolutionaryPolicy:
@@ -333,11 +346,54 @@ class ASHAPolicy:
                           if state.nodes[i].metric is not None}
                 return [{"kind": "improve", "parent_id": chosen,
                          "_scores": scores, "_chosen": chosen,
+                         "_reason": f"promote rung {r + 1}",
                          "_rung": r + 1, "_promoted": survivors}]
 
         # All rungs collapsed/expanded -> exploit the global best with remaining budget.
         b = state.best()
-        return [{"kind": "improve", "parent_id": b.id}] if b is not None else [{"kind": "draft"}]
+        if b is None:
+            return [{"kind": "draft"}]
+        return [{"kind": "improve", "parent_id": b.id,
+                 "_scores": _metric_scores(state.feasible_nodes()), "_chosen": b.id,
+                 "_reason": "exploit best (rungs collapsed)"}]
+
+
+def legal_actions(state: RunState, policy: SearchPolicy, *, max_nodes: int) -> list[dict]:
+    """Pure legal-action gate for the self-driving unified agent (replaces the policy as the
+    *master* of action selection without surrendering pipeline discipline). Returns the set of
+    macro actions the agent may choose from given the folded state, derived from the SAME
+    invariants every `next_actions` enforces — so whatever the agent picks, the pipeline stays
+    correct. Forced phases return a single non-negotiable set (the agent has no discretion):
+
+      * pending nodes        -> only `evaluate` (crash-resume re-entry invariant)
+      * node budget spent    -> `[]` (finish)
+      * seed phase           -> only `draft`
+
+    Otherwise the explore/exploit envelope is built from REAL nodes (draft / improve any feasible /
+    debug a failed leaf within depth / merge the top-2 / ablate the best), so a chosen parent can
+    never be illegal. Deterministic and side-effect-free — safe to call on every loop turn."""
+    pending = state.pending_nodes()
+    if pending:
+        return [{"kind": "evaluate", "node_id": n.id} for n in pending]
+    total = len(state.nodes)
+    if total >= max_nodes:
+        return []
+    n_seeds = getattr(policy, "n_seeds", getattr(policy, "pop", 3))
+    if total < n_seeds:
+        return [{"kind": "draft"}]
+    actions: list[dict] = [{"kind": "draft"}]
+    feasible = sorted(state.feasible_nodes(), key=lambda n: (n.metric, n.id),
+                      reverse=(state.direction == "max"))
+    actions.extend({"kind": "improve", "parent_id": n.id} for n in feasible)
+    dbg = debug_action(state, getattr(policy, "debug_depth", 1))
+    if dbg:
+        actions.append(dbg)
+    if len(feasible) >= 2:
+        actions.append({"kind": "merge", "parent_ids": [feasible[0].id, feasible[1].id]})
+    best = state.best()
+    if best is not None and len(best.idea.params) >= 2:
+        actions.append({"kind": "ablate", "parent_id": best.id})
+    return actions
 
 
 # Policy registry (ADR-2). The Strategist (A7) may only pick from these names; new policies

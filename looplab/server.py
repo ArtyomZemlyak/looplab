@@ -56,6 +56,58 @@ CONTROL_EVENTS = {
 POLL_SECONDS = 0.4   # SSE tail cadence — fast enough to feel live, light on the disk
 
 
+# Workstream C: the chat action-router LLM fills this; the server maps it to a control {type, data}
+# the UI confirms before executing. `advise` = no action (fall back to a grounded chat reply).
+from pydantic import BaseModel  # noqa: E402
+
+
+class _Command(BaseModel):
+    action: str = "advise"   # advise|confirm|ablate|fork|promote|hint|strategy|deep_research|inject|approve|ratify|pause|resume|stop
+    node_id: Optional[int] = None
+    text: str = ""           # hint text / note / free rationale
+    operator: str = "improve"
+    params: dict = {}
+    policy: str = ""
+    fidelity: str = ""
+    rationale: str = ""
+
+
+def _command_to_action(c: "_Command", st) -> Optional[dict]:
+    """Map the LLM's classified command to a control {type, data, label}. None => no actionable verb
+    (treat as advisory chat). `label` is the human-readable confirmation the UI shows."""
+    a, nid = c.action, c.node_id
+    if a == "confirm" and nid is not None:
+        return {"type": "force_confirm", "data": {"node_id": nid}, "label": f"Confirm #{nid} (multi-seed robustness)"}
+    if a == "ablate" and nid is not None:
+        return {"type": "force_ablate", "data": {"node_id": nid}, "label": f"Ablate #{nid} (sensitivity probe)"}
+    if a == "fork" and nid is not None:
+        return {"type": "fork", "data": {"from_node_id": nid}, "label": f"Fork an improve-branch from #{nid}"}
+    if a == "promote" and nid is not None:
+        return {"type": "promote", "data": {"node_id": nid, "alias": "champion"}, "label": f"Promote #{nid} to champion"}
+    if a == "hint" and c.text:
+        return {"type": "hint", "data": {"text": c.text}, "label": f"Send hint: {c.text[:60]}"}
+    if a == "strategy" and (c.policy or c.fidelity):
+        strat = {k: v for k, v in (("policy", c.policy), ("fidelity", c.fidelity)) if v}
+        return {"type": "set_strategy", "data": {"strategy": strat}, "label": f"Switch strategy → {strat}"}
+    if a == "deep_research":
+        return {"type": "deep_research", "data": {}, "label": "Run a deep-research step now"}
+    if a == "inject":
+        idea = {"operator": c.operator or "improve", "params": c.params or {}, "rationale": c.rationale or c.text or ""}
+        return {"type": "inject_node", "data": {"idea": idea, "parent_id": nid, "code": None},
+                "label": f"Add experiment: {idea['operator']} {idea['params'] or ''}".strip()}
+    if a == "approve":
+        node = nid if nid is not None else st.best_node_id
+        if node is None:                      # no champion yet -> not an actionable approve
+            return None
+        return {"type": "approval_granted", "data": {"node_id": node}, "label": f"Approve #{node}"}
+    if a == "ratify":
+        return {"type": "spec_approved", "data": {}, "label": "Ratify the eval spec"}
+    if a in ("pause", "resume", "stop"):
+        t = {"pause": "pause", "resume": "resume", "stop": "run_abort"}[a]
+        return {"type": t, "data": ({"reason": "ui"} if a == "stop" else {}), "label": a.capitalize() + " the run"}
+    return None
+
+
 def _ui_dist() -> Path:
     """Built React assets. Override with LOOPLAB_UI_DIST; default <repo>/ui/dist."""
     env = os.environ.get("LOOPLAB_UI_DIST")
@@ -64,22 +116,9 @@ def _ui_dist() -> Path:
     return Path(__file__).resolve().parents[1] / "ui" / "dist"
 
 
-def _theme_rollup(st) -> dict:
-    """Per-theme rollup for the cross-run map: {theme: {count, best_metric}}. A node's theme is
-    its `idea.theme` (Researcher-assigned); nodes without one are skipped. `best_metric` is the
-    better value per the run's direction. Audit-only — never read by replay.fold."""
-    better = (lambda a, b: a < b) if st.direction == "min" else (lambda a, b: a > b)
-    out: dict[str, dict] = {}
-    for n in st.nodes.values():
-        theme = getattr(n.idea, "theme", None)
-        if not theme:
-            continue
-        m = n.confirmed_mean if n.confirmed_mean is not None else n.metric
-        e = out.setdefault(theme, {"count": 0, "best_metric": None})
-        e["count"] += 1
-        if m is not None and (e["best_metric"] is None or better(m, e["best_metric"])):
-            e["best_metric"] = m
-    return out
+# Per-theme rollup for the cross-run map: {theme: {count, best_metric}}. Now lives in `digest` so the
+# Researcher's working-set digest and this UI endpoint share one definition.
+from .digest import theme_rollup as _theme_rollup
 
 
 def make_app(run_root: str | os.PathLike) -> "FastAPI":
@@ -198,6 +237,8 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
                     "best_confirmed": (best.confirmed_mean if best else None),
                     "stop_reason": st.stop_reason,
                     "themes": _theme_rollup(st),
+                    "mtime": stt.st_mtime,    # last activity (events.jsonl mtime) — time sort + "updated"
+                    "created": stt.st_ctime,  # run creation time (events.jsonl ctime) — "started" date
                 }
                 _summary_cache[rd.name] = (*sig, summary)
                 out.append(summary)
@@ -696,6 +737,76 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
                         "idea": {"operator": "improve", "params": {}, "rationale": text.strip()[:600]}}
             except Exception as e:  # noqa: BLE001
                 return JSONResponse({"ok": False, "error": str(e)}, status_code=200)
+
+    @app.post("/api/runs/{run_id}/command")
+    async def command(run_id: str, request: Request):
+        """Action-router (Workstream C): turn a free-text instruction into EITHER a concrete control
+        action the UI confirms-then-executes, or a grounded advisory reply. Read-only itself — it
+        never appends events; the UI calls /control after the human confirms. Soft-fails offline."""
+        rd = _run_dir(run_id)
+        body = await request.json()
+        msgs = body.get("messages") or []
+        nid = body.get("node_id")
+        instruction = (body.get("instruction") or "").strip()
+        st = fold(_events(rd))
+        s = _llm_settings()
+        try:
+            client = make_llm_client(s)
+        except Exception as e:  # noqa: BLE001 - offline / no model
+            return JSONResponse({"ok": False, "error": str(e)}, status_code=200)
+        sys_prompt = (
+            "Translate the human's instruction about an automated ML experiment run into ONE action. "
+            "If they are merely asking a question or discussing, use action='advise'. Otherwise pick "
+            "the action and fill its fields. Actions: confirm(node_id), ablate(node_id), fork(node_id), "
+            "promote(node_id), hint(text), strategy(policy,fidelity), deep_research, "
+            "inject(operator,params,rationale[,node_id=parent]), approve(node_id), ratify, pause, "
+            "resume, stop. Use the node in context when no id is given.\n\n" + _node_context(st, nid, rd))
+        convo = "\n".join(f"{m.get('role')}: {m.get('content')}" for m in msgs)
+        user = (f"Instruction: {instruction}" if instruction else "") + (f"\n\nDiscussion:\n{convo}" if convo else "")
+        from .parse import parse_structured
+        # The LLM calls are blocking + network-bound; run them off the event loop (anyio worker
+        # thread) so a slow model doesn't stall SSE tails / other endpoints for every UI client.
+        try:
+            c = await anyio.to_thread.run_sync(
+                lambda: parse_structured(client, [{"role": "system", "content": sys_prompt},
+                                                  {"role": "user", "content": user}], _Command, s.llm_parser))
+            act = _command_to_action(c, st)
+            if act is not None:
+                act["rationale"] = c.rationale or ""
+                return {"ok": True, "action": act}
+        except Exception:  # noqa: BLE001 - parse fumble -> fall through to advisory reply
+            pass
+        try:
+            text = await anyio.to_thread.run_sync(lambda: client.complete_text([
+                {"role": "system", "content": "You are an ML research collaborator embedded in an "
+                 "experiment loop. Answer concisely, grounded on the run.\n" + _node_context(st, nid, rd)},
+                *msgs] + ([{"role": "user", "content": instruction}] if instruction else [])))
+            return {"ok": True, "reply": text}
+        except Exception as e:  # noqa: BLE001
+            return JSONResponse({"ok": False, "error": str(e)}, status_code=200)
+
+    @app.post("/api/runs/{run_id}/report_refresh")
+    async def report_refresh(run_id: str):
+        """Force a high-quality regeneration of the agent-authored run report NOW. Generates inline
+        (like /chat) and appends a `report_generated` event directly, so it works whether or not the
+        engine loop is alive — appends are lock-guarded, same as control events. Soft-fails offline:
+        the deterministic report keeps rendering and no event is written."""
+        rd = _run_dir(run_id)
+        st = fold(_events(rd))
+        s = _llm_settings()
+        try:
+            from .report import generate_report
+            client = make_llm_client(s)
+            # Offload the (blocking, network-bound) synthesis to a worker thread so a slow model
+            # call doesn't freeze the event loop / SSE tails for every other connected UI client.
+            content = await anyio.to_thread.run_sync(
+                lambda: generate_report(st, client, parser=s.llm_parser, trigger="manual"))
+        except Exception as e:  # noqa: BLE001 — offline / no model -> soft fail, no event
+            return JSONResponse({"ok": False, "error": str(e)}, status_code=200)
+        ev = EventStore(rd / "events.jsonl").append(
+            "report_generated", {"content": content, "at_node": content.get("at_node"),
+                                 "trigger": "manual"})
+        return {"ok": True, "seq": ev.seq, "content": content}
 
     @app.get("/api/llm/health")
     def llm_health():

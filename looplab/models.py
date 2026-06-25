@@ -205,6 +205,7 @@ class RunState(BaseModel):
     ablations: list[dict] = Field(default_factory=list)  # ablate events {parent_id, impacts} (sensitivity)
     policy_scores: dict[int, float] = Field(default_factory=dict)  # latest policy_decision candidate scores
     policy_chosen: Optional[int] = None                  # node the policy expanded ("why this node")
+    policy_reason: str = ""                               # short why-this-node label (exploit/merge/promote/…)
     # A7 Strategist (audit-only; never read by best-selection). `active_strategy` is the latest
     # applied Strategy dict; `strategy_history` is the timeline of switches for the "why this
     # strategy" panel. `pending_strategy` is an operator override (set_strategy control event) that
@@ -214,6 +215,10 @@ class RunState(BaseModel):
     pending_strategy: Optional[dict] = None
     # A1 ASHA: rung-promotion audit trail {rung, survivors} for the UI (successive-halving view).
     rungs: list[dict] = Field(default_factory=list)
+    # Unified self-driving agent (audit-only; never read by best-selection): timeline of the agent's
+    # macro-action choices {at_node, chosen, legal, recommended, rationale} for the "why this action"
+    # view. Additive — old event logs without `agent_decision` events fold to an empty list.
+    agent_decisions: list[dict] = Field(default_factory=list)
     # A6 proxy/predictive scoring: per-node early-signal scores + which candidates were skipped.
     proxy_scores: dict[int, float] = Field(default_factory=dict)
     proxy_skipped: list[int] = Field(default_factory=list)
@@ -229,6 +234,10 @@ class RunState(BaseModel):
     research: list[dict] = Field(default_factory=list)
     research_requests: list[dict] = Field(default_factory=list)
     research_served: int = 0
+    # Agent-authored run report (conclusion-first; audit-only sidecar — NEVER read by best-selection).
+    # The latest `report_generated` event's content, regenerated on a cadence + on manual refresh. The
+    # UI renders the deterministic analysis from the node set and layers this narrative on top.
+    report: Optional[dict] = None
 
     # --- read helpers (no mutation) ---
     def best(self) -> Optional[Node]:

@@ -123,6 +123,7 @@ def fold(events: Iterable[Event]) -> RunState:
         elif t == "policy_decision":
             st.policy_scores = {int(k): v for k, v in (d.get("scores") or {}).items()}
             st.policy_chosen = d.get("chosen")
+            st.policy_reason = d.get("reason") or ""
         elif t == "strategy_decision":
             # A7 Strategist (audit-only): the engine recorded the chosen Strategy. Replay rebuilds
             # active_strategy WITHOUT re-calling the LLM (the decision is config, not selection).
@@ -131,6 +132,11 @@ def fold(events: Iterable[Event]) -> RunState:
                                         "ctx": d.get("ctx")})
         elif t == "rung_promoted":
             st.rungs.append({"rung": d.get("rung"), "survivors": d.get("survivors", [])})
+        elif t == "agent_decision":
+            # Self-driving unified agent (audit-only): records WHICH legal macro action the agent
+            # chose and why. NEVER drives selection — the effect is the subsequent node_created,
+            # folded as usual. Additive & non-load-bearing: an old log without it folds identically.
+            st.agent_decisions.append(d)
         elif t == "reward_hack_suspected":
             st.reward_hacks.append({"node_id": d.get("node_id"), "signals": d.get("signals", [])})
         elif t == "novelty_rejected":
@@ -199,6 +205,10 @@ def fold(events: Iterable[Event]) -> RunState:
             st.research.append(d.get("memo") or d)
             if d.get("served_manual"):
                 st.research_served += 1
+        elif t == "report_generated":
+            # Agent-authored run report (audit-only sidecar; NEVER touches nodes/best). Latest wins —
+            # the cadence and manual-refresh paths both append this; the freshest narrative stands.
+            st.report = d.get("content") or d
         elif t == "confirm_done":
             nid = d.get("node_id")   # forced-confirm finished for this node (gate; selection untouched)
             if nid is not None and nid not in st.confirmed_forced:

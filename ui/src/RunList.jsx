@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState } from 'react'
-import { get, fmt, listProjects, createProject, patchProject, deleteProject, assignRun, renameRun, deleteRun } from './util.js'
+import { get, fmt, fmtDate, fmtAgo, listProjects, createProject, patchProject, deleteProject, assignRun, renameRun, deleteRun } from './util.js'
 import MapView from './MapView.jsx'
 import StartRun from './StartRun.jsx'
 
@@ -78,6 +78,12 @@ export default function RunList({ onOpen, onSettings }) {
   const [runMenu, setRunMenu] = useState(null)     // run_id whose ⋮ menu is open
   const [runRename, setRunRename] = useState(null) // run object being renamed (popup)
   const [starting, setStarting] = useState(false)  // show the New-run launch dialog
+  // Sort + filter of the run list (client-side over the loaded summaries).
+  const [sortKey, setSortKey] = useState('time')   // time | name | metric | task | nodes | phase
+  const [sortDir, setSortDir] = useState('desc')   // asc | desc
+  const [query, setQuery] = useState('')           // free-text over label/id/task/goal
+  const [taskFilter, setTaskFilter] = useState(ALL)
+  const [statusFilter, setStatusFilter] = useState('all')   // all | running | finished
 
   const loadRuns = () => get('/api/runs').then(setRuns).catch(() => setRuns([]))
   const loadProjects = () => listProjects().then(setProj).catch(() => {})
@@ -94,6 +100,39 @@ export default function RunList({ onOpen, onSettings }) {
     return rs.filter(r => set.has(proj.assignments[r.run_id]))
   }
   const count = (id) => runsOf(id).length
+
+  // Distinct task ids across all loaded runs — populates the task filter dropdown.
+  const tasks = useMemo(
+    () => Array.from(new Set((runs || []).map(r => r.task_id).filter(Boolean))).sort(),
+    [runs])
+
+  // The runs to render: project selection -> filters -> sort. Pure derivation of loaded summaries.
+  const visible = useMemo(() => {
+    let rs = runsOf(sel)
+    const q = query.trim().toLowerCase()
+    if (q) rs = rs.filter(r => [r.label, r.run_id, r.task_id, r.goal]
+      .some(s => (s || '').toLowerCase().includes(q)))
+    if (taskFilter !== ALL) rs = rs.filter(r => r.task_id === taskFilter)
+    if (statusFilter === 'running') rs = rs.filter(r => !r.finished)
+    else if (statusFilter === 'finished') rs = rs.filter(r => r.finished)
+
+    const name = r => (r.label || r.run_id || '').toLowerCase()
+    const metric = r => r.best_confirmed ?? r.best_metric
+    const mul = sortDir === 'asc' ? 1 : -1
+    const cmps = {
+      time: (a, b) => mul * ((a.mtime || 0) - (b.mtime || 0)),
+      name: (a, b) => mul * name(a).localeCompare(name(b)),
+      task: (a, b) => mul * (a.task_id || '').localeCompare(b.task_id || '') || name(a).localeCompare(name(b)),
+      nodes: (a, b) => mul * ((a.nodes || 0) - (b.nodes || 0)),
+      phase: (a, b) => mul * (a.phase || '').localeCompare(b.phase || ''),
+      metric: (a, b) => {                       // best metric; missing values sort last in BOTH dirs
+        const av = metric(a), bv = metric(b)
+        if (av == null || bv == null) return (av == null ? 1 : 0) - (bv == null ? 1 : 0)
+        return mul * (av - bv)
+      },
+    }
+    return [...rs].sort(cmps[sortKey] || (() => 0))
+  }, [runs, sel, proj.assignments, query, taskFilter, statusFilter, sortKey, sortDir])
 
   const breadcrumb = useMemo(() => {
     if (sel === ALL || sel === UNASSIGNED) return []
@@ -192,10 +231,36 @@ export default function RunList({ onOpen, onSettings }) {
               <span className="crumb" onClick={() => setSel(p.id)}>{p.name}</span></React.Fragment>)}
             {sel === UNASSIGNED && <><span className="sep">/</span><span className="crumb">Unassigned</span></>}
           </div>
+          {runs && !!runsOf(sel).length && <div className="runbar">
+            <input className="text runbar-q" placeholder="🔎 filter runs…" value={query}
+                   onChange={e => setQuery(e.target.value)} />
+            <select className="sel" value={statusFilter} onChange={e => setStatusFilter(e.target.value)} title="status">
+              <option value="all">all status</option>
+              <option value="running">running</option>
+              <option value="finished">finished</option>
+            </select>
+            <select className="sel" value={taskFilter} onChange={e => setTaskFilter(e.target.value)} title="task">
+              <option value={ALL}>all tasks</option>
+              {tasks.map(t => <option key={t} value={t}>{t}</option>)}
+            </select>
+            <span style={{ flex: 1 }} />
+            <span className="muted runbar-count">{visible.length}/{runsOf(sel).length}</span>
+            <select className="sel" value={sortKey} onChange={e => setSortKey(e.target.value)} title="sort by">
+              <option value="time">time</option>
+              <option value="name">name</option>
+              <option value="metric">best metric</option>
+              <option value="task">task</option>
+              <option value="nodes">nodes</option>
+              <option value="phase">phase</option>
+            </select>
+            <button className="btn sm ghost" title={sortDir === 'asc' ? 'ascending' : 'descending'}
+                    onClick={() => setSortDir(d => d === 'asc' ? 'desc' : 'asc')}>{sortDir === 'asc' ? '↑' : '↓'}</button>
+          </div>}
           {runs == null && <div className="notice">Loading runs…</div>}
           {runs && !runsOf(sel).length && <div className="notice">No runs here.{sel === ALL && <> Start one with
             <code> python -m looplab.cli run examples/toy_task.json --out runs/demo</code>.</>} Drag a run onto a project, or use its <b>Move</b> menu.</div>}
-          {runs && runsOf(sel).map(r => (
+          {runs && !!runsOf(sel).length && !visible.length && <div className="notice">No runs match the filter.</div>}
+          {runs && visible.map(r => (
             <div className="run-card" key={r.run_id} draggable
                  onDragStart={() => setDragRun(r.run_id)} onDragEnd={() => setDragRun(null)}>
               <span className="pill phase" onClick={() => onOpen(r.run_id)}>{r.phase}</span>
@@ -207,6 +272,9 @@ export default function RunList({ onOpen, onSettings }) {
               <div style={{ textAlign: 'right' }}>
                 <div>best <b>{fmt(r.best_confirmed ?? r.best_metric)}</b></div>
                 <div className="muted">{r.nodes} nodes · {r.direction}</div>
+                {r.mtime && <div className="muted run-when"
+                  title={`started ${fmtDate(r.created)} · updated ${fmtDate(r.mtime)}`}>
+                  {fmtAgo(r.mtime)}</div>}
               </div>
               <div className="run-actions">
                 <button className="ic dots" title="run actions"

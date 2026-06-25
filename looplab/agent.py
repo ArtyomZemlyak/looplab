@@ -35,6 +35,56 @@ class CompositeTools:
         p = self._route.get(name)
         return p.execute(name, args) if p else f"(unknown tool: {name})"
 
+    def bind_state(self, state, parent=None) -> None:
+        """Forward the live run to any run-aware provider (RunTools/DataTools); others ignore it."""
+        for p in self.providers:
+            if hasattr(p, "bind_state"):
+                p.bind_state(state, parent)
+
+
+def drive_tool_loop(client, tools, messages: list, emit_spec: dict, *,
+                    max_turns: int = 4, context_budget_chars: int = 0,
+                    finalize=None, fallback=None):
+    """Bounded multi-turn tool loop shared by the tool-using Researcher and the unified
+    agent. The model MAY call the provided retrieval tools across turns; when it calls the
+    emit function (named in `emit_spec`), `finalize(args)` is returned. If the loop exhausts
+    without an emit, `fallback(messages)` is returned. `tools` may be None (emit-only).
+
+    Pure mechanics: callers own prompt construction, the emit schema, and result coercion —
+    so the SAME loop drives an Idea emit, a code emit, an action choice, or a strategy emit.
+    """
+    emit_name = emit_spec["function"]["name"]
+    tool_specs = ((tools.specs() if tools is not None else []) + [emit_spec])
+    for _ in range(max_turns):
+        if context_budget_chars:        # H4: middle-truncate stale tool output if too long
+            from .context_budget import truncate_history
+            messages = truncate_history(messages, context_budget_chars)
+        msg = client.chat(messages, tool_specs, tool_choice="auto")
+        calls = msg.get("tool_calls") or []
+        if not calls:
+            messages.append({"role": "assistant", "content": msg.get("content") or ""})
+            messages.append({"role": "user", "content": f"Now call `{emit_name}` with your final answer."})
+            continue
+        messages.append({"role": "assistant", "content": msg.get("content") or "",
+                         "tool_calls": calls})
+        for tc in calls:
+            fn = tc.get("function", {})
+            name = fn.get("name", "")
+            raw = fn.get("arguments") or "{}"
+            # A small/junk model can emit malformed JSON arguments; never let that crash the
+            # run — treat an unparseable tool call as empty args (emit then falls back to a
+            # safe result; a retrieval call just gets {}).
+            try:
+                args = json.loads(raw) if isinstance(raw, str) else (raw or {})
+            except (json.JSONDecodeError, TypeError):
+                args = {}
+            if name == emit_name:
+                return finalize(args)
+            result = tools.execute(name, args) if tools is not None else f"(unknown tool: {name})"
+            messages.append({"role": "tool", "tool_call_id": tc.get("id", ""),
+                             "name": name, "content": str(result)[:4000]})
+    return fallback(messages)
+
 
 class ToolUsingResearcher:
     _SYSTEM = ("You are an ML researcher. You MAY call the retrieval tools to consult "
@@ -89,8 +139,20 @@ class ToolUsingResearcher:
             operator = str((args or {}).get("operator") or "draft")
             return _clamp_fill(Idea(operator=operator, params={}, rationale=rationale), self.bounds)
 
+    def _fallback(self, messages: list) -> Idea:
+        # Force a structured emit from the accumulated context; if even that fails, return a
+        # safe bounds-filled default so the run never crashes.
+        try:
+            idea = parse_structured(
+                self.client, messages + [{"role": "user", "content": "Emit the Idea now."}],
+                Idea, self.parser)
+        except ParseError:
+            idea = Idea(operator="draft", params={}, rationale="fallback (agent parse failed)")
+        return _clamp_fill(idea, self.bounds)
+
     def propose(self, state: RunState, parent: Optional[Node]) -> Idea:
-        tool_specs = self.tools.specs() + [self._emit_spec()]
+        if hasattr(self.tools, "bind_state"):    # let run-aware tools see the current search
+            self.tools.bind_state(state, parent)
         hints = [h.get("text", "") for h in (state.pending_hints or []) if h.get("text")]
         hint_block = ("\nOperator directives (follow if sensible): " + "; ".join(hints)) if hints else ""
         cue = getattr(self, "_complexity_hint", "")   # A0d breadth-keyed complexity cue (empty=off)
@@ -101,40 +163,7 @@ class ToolUsingResearcher:
             {"role": "user", "content": _state_brief(state, parent) + hint_block + cue +
                 "\nDecide the next experiment. Consult knowledge if useful, then emit."},
         ]
-        for _ in range(self.max_turns):
-            if self.context_budget_chars:        # H4: middle-truncate stale tool output if too long
-                from .context_budget import truncate_history
-                messages = truncate_history(messages, self.context_budget_chars)
-            msg = self.client.chat(messages, tool_specs, tool_choice="auto")
-            calls = msg.get("tool_calls") or []
-            if not calls:
-                messages.append({"role": "assistant", "content": msg.get("content") or ""})
-                messages.append({"role": "user", "content": "Now call `emit` with your final Idea."})
-                continue
-            messages.append({"role": "assistant", "content": msg.get("content") or "",
-                             "tool_calls": calls})
-            for tc in calls:
-                fn = tc.get("function", {})
-                name = fn.get("name", "")
-                raw = fn.get("arguments") or "{}"
-                # A small/junk model can emit malformed JSON arguments; never let that crash the
-                # run — treat an unparseable tool call as empty args (emit then falls back to a
-                # safe Idea via _finalize/_sanitize; a retrieval call just gets {}).
-                try:
-                    args = json.loads(raw) if isinstance(raw, str) else (raw or {})
-                except (json.JSONDecodeError, TypeError):
-                    args = {}
-                if name == "emit":
-                    return self._finalize(args)
-                result = self.tools.execute(name, args)
-                messages.append({"role": "tool", "tool_call_id": tc.get("id", ""),
-                                 "name": name, "content": str(result)[:4000]})
-        # Fallback: force a structured emit from the accumulated context; if even that
-        # fails, return a safe bounds-filled default so the run never crashes.
-        try:
-            idea = parse_structured(
-                self.client, messages + [{"role": "user", "content": "Emit the Idea now."}],
-                Idea, self.parser)
-        except ParseError:
-            idea = Idea(operator="draft", params={}, rationale="fallback (agent parse failed)")
-        return _clamp_fill(idea, self.bounds)
+        return drive_tool_loop(
+            self.client, self.tools, messages, self._emit_spec(),
+            max_turns=self.max_turns, context_budget_chars=self.context_budget_chars,
+            finalize=self._finalize, fallback=self._fallback)
