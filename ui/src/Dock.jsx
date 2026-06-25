@@ -351,7 +351,9 @@ function ChatRow({ m }) {
         {tr && <div className="chat-trace-tog" onClick={() => setOpen(o => !o)}>{open ? '▾' : '▸'} trace</div>}
         {tr && open && <div className="chat-trace">
           <LlmCall idx={0} call={{ op: 'chat', model: tr.model, tokens: tr.tokens, completion: tr.completion,
-            prompt: [...(tr.system ? [{ role: 'system', content: tr.system }] : []), ...(tr.messages || [])] }} />
+            prompt: [...(tr.system ? [{ role: 'system', content: tr.system }] : []),
+                     ...(tr.user ? [{ role: 'user', content: tr.user }] : []),
+                     ...(tr.messages || [])] }} />
         </div>}
       </div>
     </div>

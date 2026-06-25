@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import csv
 import io
+import math
 from typing import Optional
 
 from . import digest
@@ -17,10 +18,12 @@ from .models import NodeStatus, RunState
 
 
 def _is_number(v: str) -> bool:
-    """True if the string parses as a finite-ish number (used to infer column dtype)."""
+    """True only if the string parses as a FINITE number. Rejects the 'nan'/'inf'/'infinity'
+    sentinels (which float() happily accepts) so a column of textual missing-markers reads as
+    categorical — flagging it as needing missing-value handling — instead of numeric with
+    NaN/inf-poisoned (and order-dependent) min/max/mean."""
     try:
-        float(v)
-        return True
+        return math.isfinite(float(v))
     except (TypeError, ValueError):
         return False
 
@@ -228,20 +231,25 @@ class DataTools:
         fn = getattr(self.task, "assets", None)
         return (fn() if callable(fn) else {}) or {}
 
-    _PROFILE_ROWS = 5000      # bounded sample keeps schema/profile cheap even on a large table
+    _PROFILE_ROWS = 5000          # cap on retained rows (bounds the parse + the sample size)
+    _MAX_TABLE_CHARS = 4_000_000  # cap on the text actually parsed, so neither the StringIO copy
+                                  # nor the parse scales with a multi-hundred-MB table
 
     def _primary_table(self):
         """Pick the most representative training table among the CSV assets (prefer ``train*.csv``,
-        else the first CSV) and parse a bounded row sample. Returns ``(name, header, rows)`` or
-        ``None`` when no parseable CSV asset exists — so schema/profile can derive a real view from
-        the actual data even when the task declares no structured ``columns()``."""
+        else the first CSV) and parse a bounded prefix into at most ``_PROFILE_ROWS`` rows. Returns
+        ``(name, header, rows)`` or ``None`` when no parseable CSV asset exists — so schema/profile
+        can derive a real view from the actual data even when the task declares no structured
+        ``columns()``. Only the first ``_MAX_TABLE_CHARS`` are wrapped/parsed, so a huge file isn't
+        copied whole here. (The task's ``assets()`` still materializes each file once upstream — that
+        read is outside this read-only tool's control.)"""
         tables = {n: v for n, v in self._assets().items()
                   if isinstance(v, str) and n.lower().endswith(".csv")}
         if not tables:
             return None
         name = next((n for n in tables if n.lower().startswith("train")), None) or sorted(tables)[0]
         try:
-            reader = csv.reader(io.StringIO(tables[name]))
+            reader = csv.reader(io.StringIO(tables[name][:self._MAX_TABLE_CHARS]))
             header = next(reader, None)
             if not header:
                 return None
@@ -298,17 +306,19 @@ class DataTools:
         name, header, rows = tbl
         lines = [f"column profile from {name} ({len(rows)} rows sampled):"]
         for ci, col in enumerate(header[:60]):
-            vals = [r[ci] for r in rows if ci < len(r)]
-            nonempty = [v for v in vals if v != ""]
-            missing = (1 - len(nonempty) / len(vals)) if vals else 0.0
-            nums = [float(v) for v in nonempty if _is_number(v)]
-            if nonempty and len(nums) == len(nonempty):           # fully numeric column
+            # A row too short to reach this column counts as MISSING (denominator = all sampled rows),
+            # so a frequently-truncated trailing column in a ragged CSV isn't reported as fully
+            # populated based only on the few rows long enough to include it.
+            present = [r[ci] for r in rows if ci < len(r) and r[ci] != ""]
+            missing = (1 - len(present) / len(rows)) if rows else 0.0
+            nums = [float(v) for v in present if _is_number(v)]
+            if present and len(nums) == len(present):             # every present value is finite-numeric
                 mean = sum(nums) / len(nums)
                 lines.append(f"  {col}: numeric missing={missing:.2f} "
                              f"min={digest._fmt_num(min(nums))} max={digest._fmt_num(max(nums))} "
                              f"mean={digest._fmt_num(mean)}")
             else:
-                lines.append(f"  {col}: categorical missing={missing:.2f} unique={len(set(nonempty))}")
+                lines.append(f"  {col}: categorical missing={missing:.2f} unique={len(set(present))}")
         return "\n".join(lines)[:self.max_chars]
 
     def _asset(self, name: Optional[str]) -> str:

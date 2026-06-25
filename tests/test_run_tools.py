@@ -139,6 +139,36 @@ def test_data_profile_computed_from_csv_when_unrecorded():
     assert "city: categorical" in prof and "unique=2" in prof
 
 
+class _SentinelTask:
+    def assets(self):
+        return {"train.csv": "x,y\n1.0,NaN\n2.0,inf\n3.0,Infinity\n"}
+
+
+def test_csv_nan_inf_sentinels_not_numeric():
+    """A column of textual NaN/inf sentinels must read as categorical (needs handling), not numeric
+    with NaN/inf-poisoned stats."""
+    dt = DataTools(_SentinelTask())
+    dt.bind_state(_st())
+    sch = dt.execute("data_schema", {})
+    assert "x (numeric)" in sch and "y (categorical)" in sch
+    prof = dt.execute("data_profile", {})
+    assert "x: numeric" in prof
+    assert "y: categorical" in prof and "nan" not in prof.lower().split("y:")[1]
+
+
+class _RaggedTask:
+    def assets(self):                                # header a,b,c,d ; rows 2-4 truncated before d
+        return {"train.csv": "a,b,c,d\n1,2,3,9\n1,2\n1,2\n1,2\n"}
+
+
+def test_csv_ragged_rows_count_truncated_as_missing():
+    dt = DataTools(_RaggedTask())
+    dt.bind_state(_st())
+    prof = dt.execute("data_profile", {})
+    dline = [l for l in prof.splitlines() if l.strip().startswith("d:")][0]
+    assert "missing=0.75" in dline                   # d present in only 1 of 4 rows, not 0.00
+
+
 # --------------------------------------------------------------------------- agent loop
 class _FakeChatClient:
     def __init__(self, scripted):

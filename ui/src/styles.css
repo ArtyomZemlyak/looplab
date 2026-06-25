@@ -143,6 +143,9 @@ button { font: inherit; }
 /* group membership (round-6): a faint top accent + wash keyed to the group tint, instead of a hull */
 .node-card.grouped { border-top-color: color-mix(in srgb, var(--grp-tint) 75%, var(--line-2));
   background-color: color-mix(in srgb, var(--grp-tint) 8%, var(--bg-2)); }
+/* a grouped sweep keeps the group-tint top accent (the later `.sweep` border-top would otherwise
+   override it back to accent-dim and lose the membership cue) — at the sweep's 2px thickness. */
+.node-card.grouped.sweep { border-top: 2px solid color-mix(in srgb, var(--grp-tint) 75%, var(--line-2)); }
 
 /* intra-node sweep: card foot (mini spark + failed-trial dot); open the node's Trials tab for detail */
 .node-card.sweep { border-top: 2px solid var(--accent-dim); }

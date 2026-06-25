@@ -134,17 +134,6 @@ export function hyperImportance(state) {
   return rows.sort((a, b) => b.imp - a.imp)
 }
 
-// The short "what changed vs the (first) parent" chip for a node card — the deterministic fallback
-// when the Researcher didn't write a `change_summary`. Returns '' for a merge (it describes its
-// fusion via mergeSummary instead) and when nothing changed, so callers needn't re-derive that rule.
-export function changeLabel(node, nodes) {
-  if ((node?.parent_ids || []).length > 1) return ''
-  const parent = (node.parent_ids || []).map(p => nodes[p]).find(Boolean)
-  if (!parent) return ''
-  const lbl = paramDiffLabel(paramDiff(node, parent))
-  return lbl === '—' ? '' : lbl
-}
-
 // The card's one-line "what this node did" chip. Deterministic so it shows IMMEDIATELY (no waiting on
 // the late LLM `change_summary`), and correct for the cases the bare param-diff got wrong:
 //   • sweep  → what was SEARCHED (the grid), not the single best value (the old `p=2.5` bug);
