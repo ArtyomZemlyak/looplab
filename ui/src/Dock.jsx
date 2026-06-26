@@ -1,7 +1,8 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react'
-import { get, fmt, chat, command, applyAction, workingId } from './util.js'
+import { get, fmt, chat, command, applyAction, workingId, CONTROL, resumeRun, resetRun } from './util.js'
 import Markdown from './markdown.jsx'
 import { NodeTrace, LlmCall } from './Inspector.jsx'
+import { OpIcon } from './icons.jsx'
 
 const HELP = 'Commands: /confirm #n · /ablate #n · /fork #n · /promote #n · /note #n text · /hint text · /strategy policy=ucb fidelity=low · /deep-research · /experiment <idea> · /approve #n · /ratify · /pause · /resume · /stop · /refresh. Or just type what you want and I’ll propose an action to confirm.'
 
@@ -76,15 +77,16 @@ function eventNode(e) {
 
 // Coarse "kind" per event type: drives the icon, the accent color, and the filter chips. One place so
 // the legend, the row, and the filter all agree.
+// [key, label] — the icon is a monochrome glyph (GROUP_GLYPH), not an emoji (round-7 readability pass).
 const GROUPS = [
-  ['proposal', '🧪', 'proposal'],
-  ['eval', '📊', 'results'],
-  ['decision', '🧭', 'decisions'],
-  ['research', '🔬', 'research'],
-  ['report', '📋', 'report'],
-  ['trust', '⚠', 'trust'],
-  ['control', '⚙', 'actions'],
-  ['lifecycle', '▸', 'lifecycle'],
+  ['proposal', 'proposals'],
+  ['eval', 'results'],
+  ['decision', 'decisions'],
+  ['research', 'research'],
+  ['report', 'report'],
+  ['trust', 'trust'],
+  ['control', 'actions'],
+  ['lifecycle', 'lifecycle'],
 ]
 const TYPE2GROUP = {
   node_created: 'proposal',
@@ -100,14 +102,20 @@ const TYPE2GROUP = {
   run_started: 'lifecycle', run_finished: 'lifecycle', llm_cost: 'lifecycle',
   data_profiled: 'lifecycle', data_provenance: 'lifecycle', host_grading: 'lifecycle', diversity_archive: 'lifecycle',
 }
-const ICON = {
-  node_evaluated: '📊', node_failed: '✗', node_repaired: '🔧', node_confirmed: '✓', best_confirmed: '🏆',
-  reward_hack_suspected: '⚠', data_leakage: '⚠', research_completed: '🔬', report_generated: '📋',
-  run_started: '▶', run_finished: '■', llm_cost: '💲', agent_decision: '🤖',
+// Monochrome glyph per kind (default) + a few high-signal per-type overrides. Names resolve in
+// icons.jsx GLYPHS (unknown → 'dot' fallback). Color is carried by CSS (only user/trust/highlighted).
+const GROUP_GLYPH = {
+  proposal: 'trending', eval: 'target', decision: 'gitbranch', research: 'search',
+  report: 'doc', trust: 'alert', control: 'gear', lifecycle: 'flag',
+}
+const TYPE_GLYPH = {
+  node_failed: 'bug', node_repaired: 'gear', node_confirmed: 'target', best_confirmed: 'star',
+  run_started: 'play', run_finished: 'stop', report_generated: 'doc', research_completed: 'search',
+  deep_research: 'search', agent_decision: 'bot',
 }
 function kindOf(type) {
   const g = TYPE2GROUP[type] || 'lifecycle'
-  return { group: g, icon: ICON[type] || (GROUPS.find(x => x[0] === g) || [, '·'])[1] }
+  return { group: g, glyph: TYPE_GLYPH[type] || GROUP_GLYPH[g] || 'dot' }
 }
 
 // Events whose row expands to a "why" detail card (reasoning, considered alternatives, context).
@@ -293,11 +301,11 @@ function EventRow({ e, trace, onFocusEvent, autoOpen }) {
   const isRawFallback = !hasReason && !NARR[e.type]
   const hasGeneric = !hasReason && (genericRows(e).length > 0 || isRawFallback)
   const expandable = hasReason || hasTrace || hasGeneric
-  const { group, icon } = kindOf(e.type)
+  const { group, glyph } = kindOf(e.type)
   const narr = (NARR[e.type] || ((d) => JSON.stringify(d).slice(0, 80)))(e.data)
   return (
     <div className={'feed-msg k-' + group}>
-      <div className="fm-ic" title={group}>{icon}</div>
+      <div className="fm-ic" title={group}><OpIcon name={glyph} size={14} className="fm-ic-svg" /></div>
       <div className="fm-body">
         <div className="fm-line clickable" onClick={() => onFocusEvent(e)}
              title={nid != null ? `open node #${nid} @ seq ${e.seq}` : `jump to seq ${e.seq}`}>
@@ -315,25 +323,26 @@ function EventRow({ e, trace, onFocusEvent, autoOpen }) {
   )
 }
 
-// A proposed action awaiting confirmation — every chat action surfaces here before it executes.
-function ActionRow({ m, idx, onResolve }) {
+// An action the boss-handler APPLIED (round-7: no confirm — it acts immediately). The row is the audit
+// record of what it did; reversible verbs (pause⇄resume) offer one-click Undo. Critical verbs
+// (abort) are highlighted so they stay visible in the feed.
+function AppliedRow({ m, onUndo }) {
   const a = m.action
   return (
-    <div className="feed-msg action">
-      <div className="fm-ic">⚡</div>
+    <div className={'feed-msg action' + (m.highlight ? ' hl' : '')}>
+      <div className="fm-ic"><OpIcon name="bolt" size={14} className="fm-ic-svg" /></div>
       <div className="fm-body">
-        <div className="pending-action">
-          <div className="pa-label"><b>{a.label}</b></div>
-          {a.rationale && <div className="muted pa-why">{a.rationale}</div>}
-          {m.status === 'pending'
-            ? <div className="toolbar" style={{ marginTop: 4 }}>
-                <button className="btn sm primary" onClick={() => onResolve(idx, true, a)}>Confirm</button>
-                <button className="btn sm ghost" onClick={() => onResolve(idx, false, a)}>Cancel</button>
-              </div>
-            : <span className={'pa-status ' + m.status}>{
-                m.status === 'done' ? '✓ done' : m.status === 'running' ? '… running'
-                  : m.status === 'failed' ? '✗ failed' : 'cancelled'}</span>}
+        <div className="fm-line">
+          <b className="pa-label">{a.label}</b>
+          {m.highlight && <OpIcon name="star" size={12} className="fm-star" />}
+          <span className="spacer" style={{ flex: 1 }} />
+          <span className={'pa-status ' + m.status}>{
+            m.status === 'running' ? '… applying' : m.status === 'done' ? '✓ applied'
+              : m.status === 'failed' ? '✗ ' + (m.err || 'failed') : ''}</span>
         </div>
+        {a.rationale && <div className="muted pa-why">{a.rationale}</div>}
+        {m.status === 'done' && m.undo &&
+          <button className="btn sm ghost pa-undo" onClick={() => onUndo(m)}>Undo ({m.undo.label})</button>}
       </div>
     </div>
   )
@@ -344,7 +353,7 @@ function ChatRow({ m }) {
   const tr = m.role === 'assistant' ? m.trace : null   // the LLM I/O behind this reply, if captured
   return (
     <div className={'feed-msg chat ' + m.role}>
-      <div className="fm-ic">{m.role === 'user' ? '🧑' : '🤖'}</div>
+      <div className="fm-ic"><OpIcon name={m.role === 'user' ? 'user' : 'bot'} size={14} className="fm-ic-svg" /></div>
       <div className="fm-body">
         {(m.ctx || []).length > 0 && <div className="ctx-row">{m.ctx.map(id => <span key={id} className="ctx-chip">#{id}</span>)}</div>}
         {m.role === 'user' ? <div className="chat-text">{m.content}</div> : <Markdown className="chat-text" text={m.content} />}
@@ -371,6 +380,11 @@ export default function Dock({ runId, live, liveSeq, viewSeq, setViewSeq, onFocu
   const [ctx, setCtx] = useState([])                      // node-id context chips for the next message
   const [dropActive, setDropActive] = useState(false)
   const endRef = useRef(null)
+  const feedRef = useRef(null)
+  const msgCtr = useRef(0)
+  // round-7: scrubber + filter chips collapse into one block to save space; default hidden, remembered.
+  const [showControls, setShowControls] = useState(() => localStorage.getItem('ll.dock.controls') === '1')
+  const toggleControls = () => setShowControls(v => { const n = !v; localStorage.setItem('ll.dock.controls', n ? '1' : '0'); return n })
   useEffect(() => { get(`/api/runs/${runId}/log`).then(setLog).catch(() => {}) }, [runId, liveSeq])
   // The trace re-folds the whole spans.jsonl server-side, and it only backs the inline "thinking"
   // cards — so refetch when a NODE is added (or the run finishes), not on every SSE seq tick.
@@ -418,25 +432,62 @@ export default function Dock({ runId, live, liveSeq, viewSeq, setViewSeq, onFocu
   }
   const kindMatch = (e) => kinds.size === 0 || kinds.has(TYPE2GROUP[e.type] || 'lifecycle')
 
+  // round-7: anchor each chat turn to the live tail so a just-sent message can't sort into the past
+  // (the old "overlaps previous messages" bug). ts ≥ newest known event; seq grows with liveSeq + order.
+  const tailTs = () => Math.max(Date.now() / 1000, log.length ? (log[log.length - 1].ts || 0) : 0) + 1e-3
+  const chatSeq = () => 1e15 + liveSeq * 1e6 + (msgCtr.current++)
+
   // The unified, chronological feed: events (filtered + time-scrubbed) interleaved with chat turns.
   const feed = useMemo(() => {
     const evItems = log
       .filter(e => (atLive || e.seq <= viewSeq) && kindMatch(e) && textMatch(e))
       .map(e => ({ t: 'ev', ts: e.ts || 0, seq: e.seq, e }))
-    const msgItems = msgs.map((m, i) => ({ t: 'msg', ts: m.ts || 0, seq: 1e15 + i, m, i }))
+    const msgItems = msgs.map((m, i) => ({ t: 'msg', ts: m.ts || 0, seq: m.seq ?? (1e15 + i), m, i }))
     return [...evItems, ...msgItems].sort((a, b) => (a.ts - b.ts) || (a.seq - b.seq))
   }, [log, msgs, atLive, viewSeq, filter, kinds])
 
-  useEffect(() => { if (atLive) endRef.current?.scrollIntoView({ block: 'end' }) }, [feed.length, busy, atLive])
+  // Scroll the CONTAINER after paint — tall Markdown replies lay out late, so scrollIntoView fired
+  // mid-layout would land short and leave a new turn visually colliding with the row above it.
+  useEffect(() => {
+    if (!atLive) return
+    const el = feedRef.current
+    if (el) requestAnimationFrame(() => { el.scrollTop = el.scrollHeight })
+  }, [feed.length, busy, atLive])
 
-  const pushAssistant = (content, trace = null) => setMsgs(m => [...m, { role: 'assistant', content, trace, ts: Date.now() / 1000 }])
-  const pushAction = (action) => setMsgs(m => [...m, { role: 'action', action, status: 'pending', ts: Date.now() / 1000 }])
-  // Free text -> the action-router proposes an action (confirm-first) or replies; soft-fails to chat.
+  const pushAssistant = (content, trace = null, highlight = false) =>
+    setMsgs(m => [...m, { role: 'assistant', content, trace, highlight, ts: tailTs(), seq: chatSeq() }])
+  // round-7 boss mode: the action is APPLIED immediately (no confirm card). Reversible verbs
+  // (pause⇄resume) carry an Undo; critical verbs (abort) are highlighted so they stay visible.
+  const isCritical = (a) => a.type === 'run_abort' || a.type === 'node_abort'
+  const undoFor = (a) =>
+    a.type === 'pause' ? { label: 'resume', type: 'resume', data: {} }
+      : a.type === 'resume' ? { label: 'pause', type: 'pause', data: {} } : null
+  const autoApply = async (action, highlight = false) => {
+    const seq = chatSeq(), id = 'a' + seq
+    setMsgs(m => [...m, {
+      role: 'action', action, status: 'running', id, ts: tailTs(), seq,
+      highlight: highlight || isCritical(action), undo: undoFor(action),
+    }])
+    try {
+      await applyAction(runId, action, live?.finished)   // util.applyAction: reopens a finished run
+      setMsgs(m => m.map(x => x.id === id ? { ...x, status: 'done' } : x))
+      onToast?.('applied: ' + action.label)
+    } catch (e) {
+      setMsgs(m => m.map(x => x.id === id ? { ...x, status: 'failed', err: e.message } : x))
+      onToast?.('failed: ' + e.message)
+    }
+  }
+  const onUndo = async (m) => {
+    if (!m.undo) return
+    try { await CONTROL.raw(runId, m.undo.type, m.undo.data); onToast?.('undid: ' + m.action.label) }
+    catch (e) { onToast?.('undo failed: ' + e.message) }
+  }
+  // Free text -> the boss applies an action immediately, or replies; soft-fails to advisory chat.
   // A reply carries its `trace` (the LLM I/O) so the chat row can expand into a langfuse-style card.
   const runCommand = async (instruction, nid, history) => {
     const r = await command(runId, { messages: history, node_id: nid, instruction })
-    if (r.ok && r.action) pushAction(r.action)
-    else if (r.ok && r.reply) pushAssistant(r.reply, r.trace)
+    if (r.ok && r.action) await autoApply(r.action, r.highlight)
+    else if (r.ok && r.reply) pushAssistant(r.reply, r.trace, r.highlight)
     else {
       // Soft-fail to advisory chat. `history` is the PRIOR turns; the current instruction must be
       // appended or the model answers the previous message (it's not in `history` yet).
@@ -449,14 +500,15 @@ export default function Dock({ runId, live, liveSeq, viewSeq, setViewSeq, onFocu
     if (!text || busy) return
     const nid = ctx.length ? ctx[ctx.length - 1] : (selectedId ?? null)
     const history = msgs.filter(m => m.role === 'user' || m.role === 'assistant').map(m => ({ role: m.role, content: m.content }))
-    setMsgs(m => [...m, { role: 'user', content: text, ts: Date.now() / 1000, ctx: [...ctx] }])
+    setMsgs(m => [...m, { role: 'user', content: text, ts: tailTs(), seq: chatSeq(), ctx: [...ctx] }])
     setInput(''); setCtx([]); setBusy(true)
+    requestAnimationFrame(() => { const el = feedRef.current; if (el) el.scrollTop = el.scrollHeight })
     try {
       if (text.startsWith('/')) {
         const p = parseSlash(text, nid, live || {})
         if (p?.help) pushAssistant(HELP)
         else if (p?.error) pushAssistant('⚠ ' + p.error)
-        else if (p?.action) pushAction(p.action)
+        else if (p?.action) await autoApply(p.action)
         else if (p?.llm) await runCommand(p.llm, nid, history)
         else pushAssistant('⚠ unrecognized — try /help')
       } else {
@@ -465,18 +517,16 @@ export default function Dock({ runId, live, liveSeq, viewSeq, setViewSeq, onFocu
     } catch (e) { pushAssistant('⚠ ' + e.message) }
     setBusy(false)
   }
-  // Confirm/cancel a proposed action. Confirm funnels through applyAction (reopens finished runs).
-  const resolveAction = async (idx, ok, action) => {
-    setMsgs(m => m.map((x, i) => i === idx ? { ...x, status: ok ? 'running' : 'cancelled' } : x))
-    if (!ok) return
-    try {
-      await applyAction(runId, action, live?.finished)
-      onToast?.('done: ' + action.label)
-      setMsgs(m => m.map((x, i) => i === idx ? { ...x, status: 'done' } : x))
-    } catch (e) {
-      onToast?.('failed: ' + e.message)
-      setMsgs(m => m.map((x, i) => i === idx ? { ...x, status: 'failed' } : x))
-    }
+  // round-7 transport: mode derived from live state; wired to existing control endpoints + reset.
+  const paused = !!live?.paused, finished = !!live?.finished
+  const mode = finished ? 'finished' : paused ? 'paused' : 'running'
+  const onPause = () => CONTROL.pause(runId).then(() => onToast?.('paused')).catch(e => onToast?.('pause failed: ' + e.message))
+  const onResume = () => CONTROL.resume(runId).then(() => onToast?.('resumed')).catch(e => onToast?.('resume failed: ' + e.message))
+  const onStop = () => CONTROL.abort(runId).then(() => onToast?.('stop requested')).catch(e => onToast?.('stop failed: ' + e.message))
+  const onReopen = async () => { try { await CONTROL.reopen(runId); await resumeRun(runId); onToast?.('reopened & resumed') } catch (e) { onToast?.('reopen failed: ' + e.message) } }
+  const onReplay = async () => {
+    if (!window.confirm('Reset this run? Wipes all events & nodes and restarts from scratch.')) return
+    try { await resetRun(runId); onToast?.('replaying from scratch') } catch (e) { onToast?.('reset failed: ' + e.message) }
   }
   const addCtx = (id) => { if (id != null) setCtx(c => (c.includes(id) ? c : [...c, id])) }
   const onDrop = (ev) => {
@@ -489,33 +539,39 @@ export default function Dock({ runId, live, liveSeq, viewSeq, setViewSeq, onFocu
   return (
     <div className="dock chat-dock">
       <div className="dock-tabs">
-        <span className="chat-label">💬 chat & timeline</span>
-        <div className="scrubber inline">
-          <button className="btn sm" onClick={() => { setViewSeq(null); setDrag(null) }} disabled={atLive && drag == null}>⏵ Live</button>
-          <input type="range" min={0} max={Math.max(0, liveSeq)} value={sliderVal}
-                 onChange={e => onScrub(Number(e.target.value))}
-                 onPointerUp={endScrub} onMouseUp={endScrub} onKeyUp={endScrub} onBlur={endScrub} />
-          <span className={(sliderVal >= liveSeq) ? 'live-tag' : 'hist-tag'}>{(sliderVal >= liveSeq) ? `live · ${liveSeq}` : `replay · ${sliderVal}/${liveSeq}`}</span>
-        </div>
+        <span className="chat-label"><OpIcon name="chat" size={14} /> chat &amp; timeline</span>
+        <span className={'hist-tag-mini ' + (atLive ? 'live' : 'hist')}>{atLive ? `live · ${liveSeq}` : `replay · ${sliderVal}/${liveSeq}`}</span>
         <span className="spacer" style={{ flex: 1 }} />
+        <button className={'btn sm ghost' + (showControls ? ' on' : '')} title="time-travel & filters"
+                onClick={toggleControls}><OpIcon name="sliders" size={13} /> controls</button>
         <button className="btn sm ghost dock-collapse" title={collapsed ? 'expand' : 'collapse'}
-                onClick={onToggleCollapse}>{collapsed ? '▴' : '▾'}</button>
+                onClick={onToggleCollapse}><OpIcon name={collapsed ? 'chevron-up' : 'chevron-down'} size={13} /></button>
       </div>
       {!collapsed && <div className="dock-body chat-body" style={{ height }}>
-        <div className="kind-chips">
-          {GROUPS.map(([g, ic, label]) => <button key={g}
-            className={'kind-chip k-' + g + (kinds.has(g) ? ' on' : '')} onClick={() => toggleKind(g)}>{ic} {label}</button>)}
-          {kinds.size > 0 && <button className="kind-chip clear" onClick={() => setKinds(new Set())}>clear</button>}
-          <input className="text feed-filter" placeholder="filter text…" value={filter} onChange={e => setFilter(e.target.value)} />
-        </div>
-        <div className="feed chat-feed">
+        {showControls && <div className="dock-controls">
+          <div className="scrubber inline">
+            <button className="btn sm" onClick={() => { setViewSeq(null); setDrag(null) }} disabled={atLive && drag == null}><OpIcon name="play" size={11} /> Live</button>
+            <input type="range" min={0} max={Math.max(0, liveSeq)} value={sliderVal}
+                   onChange={e => onScrub(Number(e.target.value))}
+                   onPointerUp={endScrub} onMouseUp={endScrub} onKeyUp={endScrub} onBlur={endScrub} />
+            <span className={(sliderVal >= liveSeq) ? 'live-tag' : 'hist-tag'}>{(sliderVal >= liveSeq) ? `live · ${liveSeq}` : `replay · ${sliderVal}/${liveSeq}`}</span>
+          </div>
+          <div className="kind-chips">
+            {GROUPS.map(([g, label]) => <button key={g}
+              className={'kind-chip k-' + g + (kinds.has(g) ? ' on' : '')} onClick={() => toggleKind(g)}>
+              <OpIcon name={GROUP_GLYPH[g]} size={12} /> {label}</button>)}
+            {kinds.size > 0 && <button className="kind-chip clear" onClick={() => setKinds(new Set())}>clear</button>}
+            <input className="text feed-filter" placeholder="filter text…" value={filter} onChange={e => setFilter(e.target.value)} />
+          </div>
+        </div>}
+        <div className="feed chat-feed" ref={feedRef}>
           {feed.length === 0
             ? <div className="muted">{(filter || kinds.size) ? 'nothing matches the filter' : 'no events yet — say hello below'}</div>
             : feed.map(it => it.t === 'ev'
                 ? <EventRow key={'e' + it.seq} e={it.e} trace={trace} onFocusEvent={focusEvent}
                     autoOpen={it.e.type === 'node_created' && eventNode(it.e) === livePendingId} />
                 : it.m.role === 'action'
-                  ? <ActionRow key={'a' + it.i} m={it.m} idx={it.i} onResolve={resolveAction} />
+                  ? <AppliedRow key={it.m.id || ('a' + it.i)} m={it.m} onUndo={onUndo} />
                   : <ChatRow key={'m' + it.i} m={it.m} />)}
           {(() => { const st = busy ? 'Working on your request…' : (atLive ? agentStatus(live, log) : null)
             return st ? <div className="agent-status"><span className="as-dot" />{st}</div> : null })()}
@@ -533,8 +589,20 @@ export default function Dock({ runId, live, liveSeq, viewSeq, setViewSeq, onFocu
             onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send() } }} />
           <div className="toolbar" style={{ marginTop: 4 }}>
             <button className="btn sm primary" disabled={busy || !input.trim()} onClick={send}>Send</button>
-            <button className="btn sm ghost" title="list commands" onClick={() => setMsgs(m => [...m, { role: 'assistant', content: HELP, ts: Date.now() / 1000 }])}>/help</button>
-            <span className="muted" style={{ fontSize: 11 }}>{busy ? 'thinking…' : 'every action is confirmed before it runs'}</span>
+            <button className="btn sm ghost" title="list commands" onClick={() => pushAssistant(HELP)}>/help</button>
+            <span className="muted" style={{ fontSize: 11 }}>{busy ? 'thinking…' : 'boss mode — actions apply immediately'}</span>
+            <span className="spacer" style={{ flex: 1 }} />
+            <div className="transport">
+              {mode === 'running' && <>
+                <button className="btn sm" title="pause the run" onClick={onPause}><OpIcon name="pause" size={13} /></button>
+                <button className="btn sm danger" title="stop the run" onClick={onStop}><OpIcon name="stop" size={13} /></button></>}
+              {mode === 'paused' && <>
+                <button className="btn sm primary" title="resume the run" onClick={onResume}><OpIcon name="play" size={13} /></button>
+                <button className="btn sm danger" title="stop the run" onClick={onStop}><OpIcon name="stop" size={13} /></button></>}
+              {mode === 'finished' && <>
+                <button className="btn sm primary" title="reopen & resume" onClick={onReopen}><OpIcon name="play" size={13} /></button>
+                <button className="btn sm" title="reset & restart from scratch" onClick={onReplay}><OpIcon name="replay" size={13} /></button></>}
+            </div>
           </div>
         </div>
       </div>}

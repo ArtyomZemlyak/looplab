@@ -478,6 +478,43 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
         _spawn_engine(["resume", str(rd), "--task-file", str(task_file)])
         return {"ok": True}
 
+    @app.post("/api/runs/{run_id}/reset")
+    def reset_run(run_id: str):
+        """round-7 "Replay": reset a run IN PLACE — archive its event log + spans and re-spawn a fresh
+        run on the same run-id. The UI only offers Replay on a FINISHED run (no live engine is writing
+        here), so archiving + re-spawning is race-free and needs no engine coordination. The prior log
+        is renamed (not deleted) so the history is recoverable."""
+        rd = _run_dir(run_id)
+        task_file: Optional[str] = None
+        meta = rd / "ui_meta.json"
+        if meta.exists():
+            task_file = json.loads(meta.read_text(encoding="utf-8")).get("task_file")
+        if not task_file and (rd / "task.snapshot.json").exists():
+            task_file = str(rd / "task.snapshot.json")
+        if not task_file:
+            raise HTTPException(400, "run is not resettable — no task.snapshot.json or ui_meta.json")
+        stamp = int(time.time())
+        for name in ("events.jsonl", "spans.jsonl", "readmodel.sqlite"):
+            p = rd / name
+            if p.exists():
+                try:
+                    p.rename(rd / f"{name}.reset-{stamp}")
+                except OSError:
+                    pass        # a Windows lock shouldn't block the replay; a fresh `run` recreates it
+        # Reuse the run's OWN resolved settings (minus secrets) so the replay matches the original;
+        # the API key still comes from the spawned process's inherited env.
+        env: Optional[dict] = None
+        snap = rd / "config.snapshot.json"
+        if snap.exists():
+            try:
+                cfg = json.loads(snap.read_text(encoding="utf-8"))
+                env = _settings_env({k: v for k, v in cfg.items()
+                                     if k in _ALLOWED_FIELDS and k not in _SECRET_FIELDS and v is not None})
+            except (OSError, json.JSONDecodeError, ValueError):
+                env = None
+        _spawn_engine(["run", str(task_file), "--out", str(rd)], env=env)
+        return {"ok": True}
+
     @app.post("/api/start")
     async def start_run(request: Request):
         body = await request.json()

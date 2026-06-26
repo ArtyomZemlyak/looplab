@@ -74,7 +74,8 @@ export default function RunView({ runId, onBack }) {
     if (viewSeq == null || viewSeq >= seq) { setHist(null); return }
     get(`/api/runs/${runId}/state?seq=${viewSeq}`).then(p => setHist(p.state)).catch(() => {})
   }, [viewSeq, seq, runId])
-  const showToast = (m) => { setToast(m); setTimeout(() => setToast(null), 2200) }
+  // Accepts a plain string OR a {text, undo?} object (round-7: an action toast can offer one-click Undo).
+  const showToast = (m) => { const o = typeof m === 'string' ? { text: m } : (m || {}); setToast(o); setTimeout(() => setToast(null), o.undo ? 6000 : 2200) }
   // Members of the selected group — memoized so unrelated re-renders (toast, live ticks) don't
   // re-walk all nodes; only recomputes when the node set / mode / selection actually changes.
   const groupMembers = useMemo(() => {
@@ -209,7 +210,9 @@ export default function RunView({ runId, onBack }) {
       {panel === 'gpu' && <GpuPanel onClose={() => setPanel(null)} />}
       {panel === 'events' && <EventExplorer runId={runId} onClose={() => setPanel(null)} />}
 
-      {toast && <div className="toast">{toast}</div>}
+      {toast && <div className="toast">{toast.text}
+        {toast.undo && <button className="btn sm" style={{ marginLeft: 8 }}
+          onClick={() => { toast.undo(); setToast(null) }}>Undo</button>}</div>}
     </div>
   )
 }

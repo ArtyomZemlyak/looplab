@@ -578,28 +578,29 @@ textarea.text { min-height: 220px; font-family: ui-monospace, Consolas, monospac
 .feed-filter { flex: 1; min-width: 120px; height: 24px; }
 
 .chat-feed { flex: 1; overflow: auto; padding: 6px 8px; display: flex; flex-direction: column; gap: 2px; }
-.feed-msg { display: flex; gap: 8px; padding: 4px 6px; border-radius: 8px; border-left: 3px solid var(--line-2); align-items: flex-start; }
+/* round-7: denser rows (~25% shorter) + monochrome glyphs. Type lives on the icon FORM, not hue. */
+.feed-msg { display: flex; gap: 6px; padding: 2px 6px; border-radius: 7px; border-left: 2px solid var(--line); align-items: flex-start; }
 .feed-msg:hover { background: var(--bg-1); }
-.feed-msg .fm-ic { width: 18px; text-align: center; flex: none; font-size: 13px; opacity: .9; }
+.feed-msg .fm-ic { width: 16px; flex: none; display: flex; align-items: center; justify-content: center; padding-top: 1px; }
+.feed-msg .fm-ic-svg { color: var(--fg-dim); }            /* monochrome by default — color is the exception */
 .feed-msg .fm-body { flex: 1; min-width: 0; }
-.feed-msg .fm-line { display: flex; align-items: baseline; gap: 6px; cursor: pointer; }
-.feed-msg .fm-narr { flex: 1; min-width: 0; }
+.feed-msg .fm-line { display: flex; align-items: baseline; gap: 6px; cursor: pointer; line-height: 1.3; }
+.feed-msg .fm-narr { flex: 1; min-width: 0; font-size: 12px; }
 .feed-msg .fm-tw { color: var(--fg-mut); font-size: 11px; cursor: pointer; flex: none; }
 .feed-msg .ev-go { color: var(--accent); opacity: .6; font-size: 11px; }
-.feed-msg.k-proposal { border-left-color: var(--accent); }
-.feed-msg.k-eval { border-left-color: var(--ok); }
-.feed-msg.k-decision { border-left-color: #a87da8; }
-.feed-msg.k-research { border-left-color: #6fa3b0; }
-.feed-msg.k-report { border-left-color: #c8a84b; }
+/* color policy: neutral by default; color ONLY for trust (safety), user, and agent-highlighted. */
+.feed-msg.k-lifecycle { opacity: .9; }
 .feed-msg.k-trust { border-left-color: var(--alarm); background: color-mix(in srgb, var(--alarm) 6%, transparent); }
-.feed-msg.k-control { border-left-color: var(--line-2); }
-.feed-msg.k-lifecycle { border-left-color: var(--line-2); opacity: .92; }
-.kind-chip.k-proposal.on { border-color: var(--accent); }
+.feed-msg.k-trust .fm-ic-svg { color: var(--alarm); }
+.feed-msg.hl { border-left-color: var(--accent); background: color-mix(in srgb, var(--accent) 6%, transparent); }
+.feed-msg.hl .fm-ic-svg { color: var(--best); }
+.feed-msg .fm-star { color: var(--best); flex: none; }
 .kind-chip.k-trust.on { border-color: var(--alarm); background: color-mix(in srgb, var(--alarm) 18%, var(--bg-2)); }
 
-.feed-msg.chat { border-left-color: transparent; background: var(--bg-1); margin: 3px 0; }
-.feed-msg.chat.user { background: color-mix(in srgb, var(--accent) 10%, var(--bg-1)); }
-.feed-msg.chat .chat-text { font-size: 13px; }
+.feed-msg.chat { border-left-color: transparent; background: var(--bg-1); }
+.feed-msg.chat.user { background: color-mix(in srgb, var(--accent) 9%, var(--bg-1)); }
+.feed-msg.chat.user .fm-ic-svg { color: var(--accent); }
+.feed-msg.chat .chat-text { font-size: 12.5px; line-height: 1.4; padding: 1px 0; }
 
 .ctx-row { display: flex; flex-wrap: wrap; gap: 4px; margin-bottom: 4px; }
 .ctx-chip { display: inline-flex; align-items: center; gap: 3px; font-size: 11px; padding: 1px 7px;
@@ -622,15 +623,25 @@ textarea.text { min-height: 220px; font-family: ui-monospace, Consolas, monospac
 .chat-trace-tog:hover { color: var(--fg); }
 .chat-trace { margin-top: 4px; }
 
-/* ── Chat actions (Workstream C): confirmation cards + command hints ──────────── */
-.feed-msg.action { border-left-color: #c8a84b; background: color-mix(in srgb, #c8a84b 7%, transparent); }
-.pending-action .pa-label { font-size: 13px; }
-.pending-action .pa-why { font-size: 11px; margin: 2px 0; }
-.pa-status { font-size: 11px; font-weight: 600; }
+/* ── Chat actions (round-7): the boss APPLIES immediately; the row is the audit record ──── */
+.feed-msg.action { border-left-color: var(--line-2); }
+.feed-msg.action .fm-ic-svg { color: var(--accent); }
+.pa-label { font-size: 12.5px; font-weight: 600; }
+.pa-why { font-size: 11px; margin: 1px 0; color: var(--fg-mut); }
+.pa-status { font-size: 11px; font-weight: 600; flex: none; }
 .pa-status.done { color: var(--ok); }
 .pa-status.failed { color: var(--fail); }
 .pa-status.running { color: var(--accent); }
-.pa-status.cancelled { color: var(--fg-mut); }
+.pa-undo { margin-top: 3px; }
+
+/* round-7 dock: collapsible controls block, header mini-tag, transport buttons */
+.dock-controls { border-bottom: 1px solid var(--line); }
+.scrubber.inline { position: static; }                    /* was sticky via .scrubber — not needed in the controls block */
+.hist-tag-mini { font-size: 11px; color: var(--fg-mut); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.hist-tag-mini.hist { color: var(--working); }
+.transport { display: inline-flex; gap: 4px; align-items: center; }
+.transport .btn { padding: 3px 7px; }
+.btn.danger:hover { background: color-mix(in srgb, var(--fail) 14%, transparent); }
 .cmd-hint { background: var(--bg-3); border: 1px solid var(--line-2); border-radius: 6px; padding: 1px 7px; color: #ffd98a; }
 .insp-hint { font-size: 11px; padding: 6px 8px; margin-bottom: 8px; border: 1px dashed var(--line-2);
   border-radius: 8px; background: var(--bg-1); }

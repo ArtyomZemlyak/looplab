@@ -268,6 +268,10 @@ export async function applyAction(runId, action, finished) {
 // Re-enter the engine loop on an existing run dir (used to continue a finished run after an inject).
 export const resumeRun = (rid) => post(`/api/runs/${encodeURIComponent(rid)}/resume`, {})
 
+// round-7 "Replay": reset a run IN PLACE — the server archives its event log + spans and re-spawns a
+// fresh run on the same run-id. Only offered on a FINISHED run (no live engine), so it's race-free.
+export const resetRun = (rid) => post(`/api/runs/${encodeURIComponent(rid)}/reset`, {})
+
 // ---- experiment chat / suggest / LLM health ----
 export const chat = (rid, messages, node_id = null) => post(`/api/runs/${rid}/chat`, { messages, node_id })
 export const suggestIdea = (rid, { node_id = null, messages = [], instruction = '' }) =>

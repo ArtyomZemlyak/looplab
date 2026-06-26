@@ -22,6 +22,36 @@ const GLYPHS = {
   target: <><circle cx="8" cy="8" r="5.4" /><circle cx="8" cy="8" r="2.3" /><circle cx="8" cy="8" r="0.5" fill="currentColor" stroke="none" /></>,
   // generic fallback
   dot: <circle cx="8" cy="8" r="2.2" fill="currentColor" stroke="none" />,
+
+  // ---- feed-kind + chat + transport glyphs (round-7 dock redesign) ----
+  // research = magnifier
+  search: <><circle cx="7" cy="7" r="4" /><path d="M10.1 10.1l3.4 3.4" /></>,
+  // report = document with text lines + folded corner
+  doc: <><path d="M4.4 2.2h4.9L12 4.9v8.9H4.4Z" /><path d="M9.3 2.2v2.7H12" /><path d="M6.2 8.3h3.6M6.2 10.5h3.6" /></>,
+  // trust / safety = warning triangle + bang
+  alert: <><path d="M8 2.6 14 13.4H2Z" /><path d="M8 6.4v3.3" /><circle cx="8" cy="11.5" r="0.6" fill="currentColor" stroke="none" /></>,
+  // control / actions = gear
+  gear: <><circle cx="8" cy="8" r="2.4" /><path d="M8 2.3v1.6M8 12.1v1.6M2.3 8h1.6M12.1 8h1.6M4 4l1.1 1.1M10.9 10.9l1.1 1.1M12 4l-1.1 1.1M5.1 10.9 4 12" /></>,
+  // chat user = person
+  user: <><circle cx="8" cy="5.3" r="2.5" /><path d="M3.6 13.4a4.4 4.4 0 0 1 8.8 0" /></>,
+  // chat assistant = bot head (antenna + two eyes)
+  bot: <><rect x="3.6" y="5.6" width="8.8" height="6.8" rx="2" /><path d="M8 5.6V3.4" /><circle cx="8" cy="3" r="0.6" fill="currentColor" stroke="none" /><circle cx="6.2" cy="9" r="0.7" fill="currentColor" stroke="none" /><circle cx="9.8" cy="9" r="0.7" fill="currentColor" stroke="none" /></>,
+  // applied action = lightning bolt
+  bolt: <path d="M8.6 2 4.4 8.7H7l-.7 5.3L11.6 7H8.4Z" />,
+  // agent-highlighted = star
+  star: <path d="M8 2.4l1.7 3.5 3.8.6-2.8 2.7.7 3.8L8 11.4l-3.4 1.8.7-3.8-2.8-2.7 3.8-.6Z" />,
+  // transport
+  pause: <><path d="M6 3.5v9" /><path d="M10 3.5v9" /></>,
+  play: <path d="M5.2 3.2 12.5 8l-7.3 4.8Z" />,
+  stop: <rect x="4.3" y="4.3" width="7.4" height="7.4" rx="1" />,
+  replay: <><path d="M12.7 8a4.7 4.7 0 1 0-1.4 3.35" /><path d="M12.9 3.4v2.7h-2.7" /></>,
+  // controls toggle = sliders
+  sliders: <><path d="M2.5 4.5h11M2.5 8h11M2.5 11.5h11" /><circle cx="6" cy="4.5" r="1.5" fill="currentColor" stroke="none" /><circle cx="10.5" cy="8" r="1.5" fill="currentColor" stroke="none" /><circle cx="4.6" cy="11.5" r="1.5" fill="currentColor" stroke="none" /></>,
+  // collapse chevrons
+  'chevron-up': <path d="M3.5 9.5 8 5l4.5 4.5" />,
+  'chevron-down': <path d="M3.5 6.5 8 11l4.5-4.5" />,
+  // header = speech bubble
+  chat: <path d="M3 3.8h10v6.4H6.5L4 12.4V10.2H3Z" />,
 }
 
 export function OpIcon({ name, size = 14, className }) {
