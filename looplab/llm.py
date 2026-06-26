@@ -7,7 +7,9 @@ client takes a model name and reads the key from the environment via LiteLLM.
 """
 from __future__ import annotations
 
+import http.client
 import json
+import ssl
 import time
 import urllib.error
 import urllib.request
@@ -26,15 +28,21 @@ class LLMError(RuntimeError):
     it like any other bad response and the run degrades to a safe default rather than crashing."""
 
 
-def _is_timeout(e: BaseException) -> bool:
-    """True only for a transient socket TIMEOUT (worth retrying — a slow/momentarily-busy endpoint,
-    e.g. Ollama reloading a model). A refused connection / DNS / TLS error is a steady-state
-    "endpoint down or misconfigured" signal and returns False so the caller fails FAST. `socket.timeout`
-    has been an alias of `TimeoutError` since Python 3.10, so a `URLError` wrapping a socket timeout
-    (its `.reason`) is covered too."""
-    if isinstance(e, TimeoutError):
-        return True
-    return isinstance(getattr(e, "reason", None), TimeoutError)
+def _is_transient(e: BaseException) -> bool:
+    """True for a TRANSIENT network failure worth retrying — a socket timeout, a reset/aborted
+    connection, or a mid-read TLS EOF (UNEXPECTED_EOF_WHILE_READING: the peer hung up mid-response,
+    common over a busy hosted gateway like OpenRouter). FALSE for steady-state failures that should
+    fail FAST: a refused connection (endpoint down), a DNS error (bad host), or a TLS CERT error
+    (misconfig). urllib wraps the real cause in `URLError.reason`, so check that too. (`socket.timeout`
+    is an alias of `TimeoutError` since Python 3.10.)"""
+    for x in (e, getattr(e, "reason", None)):
+        if x is None:
+            continue
+        if isinstance(x, (TimeoutError, ConnectionResetError, ConnectionAbortedError)):
+            return True
+        if isinstance(x, ssl.SSLError) and not isinstance(x, ssl.SSLCertVerificationError):
+            return True   # dropped TLS read (e.g. UNEXPECTED_EOF), NOT a cert problem
+    return isinstance(e, (http.client.IncompleteRead, http.client.RemoteDisconnected))
 
 
 def split_think(text: str) -> tuple[str, str]:
@@ -180,13 +188,12 @@ class OpenAICompatibleClient:
                 hint = (" — check the API key (LOOPLAB_LLM_API_KEY)" if e.code == 401 else "")
                 raise LLMError(f"LLM request to {self.base_url} failed: {e}{hint}") from e
             except (urllib.error.URLError, TimeoutError, OSError) as e:
-                # Retry ONLY a transient TIMEOUT (a slow / momentarily-busy endpoint, e.g. Ollama
-                # reloading a model) — the failure mode that was aborting long runs, since the
-                # tool-using proposer / pilot call client.chat directly and don't wrap LLMError.
-                # A refused connection / DNS / TLS error is a steady-state "endpoint down or
-                # misconfigured" signal: fail FAST so /api/llm/health stays instant and a wrong
-                # base_url surfaces on the first call instead of after ~30s of pointless backoff.
-                if _is_timeout(e) and attempt < self._max_retries:
+                # Retry TRANSIENT network failures (timeout, reset, TLS EOF mid-read) — the modes that
+                # otherwise abort a long run, since the tool-using proposer / pilot call client.chat
+                # directly and don't wrap LLMError. A refused connection / DNS / TLS CERT error is a
+                # steady-state "endpoint down or misconfigured" signal: fail FAST so /api/llm/health
+                # stays instant and a wrong base_url surfaces on the first call, not after backoff.
+                if _is_transient(e) and attempt < self._max_retries:
                     time.sleep(min(2.0 * (2 ** attempt), 30.0))
                     continue
                 raise LLMError(f"LLM request to {self.base_url} failed: {e}") from e

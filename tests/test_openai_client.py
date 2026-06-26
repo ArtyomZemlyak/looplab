@@ -124,6 +124,46 @@ def test_post_fails_fast_on_connection_refused(monkeypatch):
     assert calls["sleep"] == 0       # no backoff sleep on a steady-state failure
 
 
+def test_post_retries_transient_ssl_eof(monkeypatch):
+    """A mid-read TLS EOF (UNEXPECTED_EOF_WHILE_READING — the peer hung up, common over a hosted
+    gateway like OpenRouter) is TRANSIENT and must be retried, not abort the run."""
+    import ssl
+    import urllib.error
+    import looplab.llm as llm
+    calls = {"n": 0}
+
+    def fake_urlopen(req, timeout=None):
+        calls["n"] += 1
+        if calls["n"] < 3:
+            raise urllib.error.URLError(ssl.SSLEOFError("EOF occurred in violation of protocol"))
+        return _OkResp()
+
+    monkeypatch.setattr(llm.urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(llm.time, "sleep", lambda *_a: None)
+    c = llm.OpenAICompatibleClient("m", base_url="http://x/v1")
+    assert c.complete_text([{"role": "user", "content": "go"}]) == "ok"
+    assert calls["n"] == 3           # retried the transient TLS drop, then succeeded
+
+
+def test_post_fails_fast_on_tls_cert_error(monkeypatch):
+    """A TLS CERT verification error is a steady-state misconfig — fail fast, do NOT retry."""
+    import ssl
+    import urllib.error
+    import looplab.llm as llm
+    calls = {"open": 0, "sleep": 0}
+
+    def fake_urlopen(req, timeout=None):
+        calls["open"] += 1
+        raise urllib.error.URLError(ssl.SSLCertVerificationError("certificate verify failed"))
+
+    monkeypatch.setattr(llm.urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(llm.time, "sleep", lambda *_a: calls.__setitem__("sleep", calls["sleep"] + 1))
+    c = llm.OpenAICompatibleClient("m", base_url="http://x/v1")
+    with pytest.raises(llm.LLMError):
+        c.complete_text([{"role": "user", "content": "go"}])
+    assert calls["open"] == 1 and calls["sleep"] == 0
+
+
 def test_h1_guided_json_adds_schema_constraints():
     """H1: with guided_json on, complete_tool sends response_format + guided_json built from the schema."""
     from looplab.llm import OpenAICompatibleClient
