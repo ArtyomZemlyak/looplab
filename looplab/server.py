@@ -478,6 +478,52 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
         _spawn_engine(["resume", str(rd), "--task-file", str(task_file)])
         return {"ok": True}
 
+    @app.post("/api/runs/{run_id}/reset")
+    def reset_run(run_id: str):
+        """round-7 "Replay": reset a run IN PLACE — archive its event log + spans + node workspaces and
+        re-spawn a fresh run on the same run-id. The prior artifacts are RENAMED (not deleted) so the
+        history is recoverable."""
+        rd = _run_dir(run_id)
+        # Guard the invariant the UI relies on (it only offers Replay on a finished run): never reset an
+        # ACTIVE run. A running engine is the SOLE writer of events.jsonl — archiving it out from under
+        # one and spawning a second engine would corrupt the log. (A sub-second window remains right
+        # after run_finished while the engine appends llm_cost + builds the readmodel; that's narrow and
+        # a re-reset heals it. This guard is what makes a direct/stale API call safe.)
+        if not fold(_events(rd)).finished:
+            raise HTTPException(409, "run is still active — stop it first (Replay resets a finished run)")
+        task_file: Optional[str] = None
+        meta = rd / "ui_meta.json"
+        if meta.exists():
+            task_file = json.loads(meta.read_text(encoding="utf-8")).get("task_file")
+        if not task_file and (rd / "task.snapshot.json").exists():
+            task_file = str(rd / "task.snapshot.json")
+        if not task_file:
+            raise HTTPException(400, "run is not resettable — no task.snapshot.json or ui_meta.json")
+        stamp = int(time.time() * 1000)   # ms granularity so two resets in the same second don't collide
+        # Archive the event log, spans, the read model, AND the node workspaces. The fresh run reuses
+        # node_<id> dirs with mkdir(exist_ok=True)/copytree(dirs_exist_ok=True), so a leftover nodes/
+        # would let stale files from the prior same-numbered node contaminate the replay's eval.
+        for name in ("events.jsonl", "spans.jsonl", "readmodel.sqlite", "nodes"):
+            p = rd / name
+            if p.exists():
+                try:
+                    p.rename(rd / f"{name}.reset-{stamp}")
+                except OSError:
+                    pass        # a Windows lock shouldn't block the replay; a fresh `run` recreates it
+        # Reuse the run's OWN resolved settings (minus secrets) so the replay matches the original;
+        # the API key still comes from the spawned process's inherited env.
+        env: Optional[dict] = None
+        snap = rd / "config.snapshot.json"
+        if snap.exists():
+            try:
+                cfg = json.loads(snap.read_text(encoding="utf-8"))
+                env = _settings_env({k: v for k, v in cfg.items()
+                                     if k in _ALLOWED_FIELDS and k not in _SECRET_FIELDS and v is not None})
+            except (OSError, json.JSONDecodeError, ValueError):
+                env = None
+        _spawn_engine(["run", str(task_file), "--out", str(rd)], env=env)
+        return {"ok": True}
+
     @app.post("/api/start")
     async def start_run(request: Request):
         body = await request.json()
