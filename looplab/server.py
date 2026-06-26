@@ -248,8 +248,10 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
         # independently of the event log, so a finished/cached run can still be re-filed).
         pdata = projects.load()
         assignments, labels = pdata["assignments"], pdata.get("labels", {})
+        st_assign = pdata.get("supertask_assignments", {})
         return [{**s, "project_id": assignments.get(s["run_id"]),
-                 "label": labels.get(s["run_id"])} for s in out]
+                 "label": labels.get(s["run_id"]),
+                 "supertask_id": st_assign.get(s["run_id"])} for s in out]
 
     # ------------------------------------------------------------------ projects (ClearML-style)
     @app.get("/api/projects")
@@ -291,6 +293,48 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
         body = await request.json()
         try:
             projects.assign(run_id, body.get("project_id"))
+        except ProjectError as e:
+            raise HTTPException(400, str(e))
+        return {"ok": True}
+
+    # ------------------------------------------------------------------ super-tasks (flat axis)
+    @app.get("/api/supertasks")
+    def list_supertasks():
+        data = projects.load()
+        return {"supertasks": data["supertasks"], "assignments": data["supertask_assignments"]}
+
+    @app.post("/api/supertasks")
+    async def create_supertask(request: Request):
+        body = await request.json()
+        try:
+            st = projects.create_supertask(body.get("name", ""), body.get("task_id"))
+        except ProjectError as e:
+            raise HTTPException(400, str(e))
+        return st
+
+    @app.patch("/api/supertasks/{sid}")
+    async def patch_supertask(sid: str, request: Request):
+        body = await request.json()
+        try:
+            projects.rename_supertask(sid, body.get("name", ""))
+        except ProjectError as e:
+            raise HTTPException(400, str(e))
+        return {"ok": True}
+
+    @app.delete("/api/supertasks/{sid}")
+    def delete_supertask(sid: str):
+        try:
+            projects.delete_supertask(sid)
+        except ProjectError as e:
+            raise HTTPException(400, str(e))
+        return {"ok": True}
+
+    @app.post("/api/runs/{run_id}/supertask")
+    async def assign_supertask(run_id: str, request: Request):
+        _run_dir(run_id)   # 404 guard: only real runs can be filed
+        body = await request.json()
+        try:
+            projects.assign_supertask(run_id, body.get("supertask_id"))
         except ProjectError as e:
             raise HTTPException(400, str(e))
         return {"ok": True}
@@ -686,12 +730,25 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
         return {"ok": True, "text": text, "model": s.llm_model, "saved": saved}
 
     # ------------------------------------------------------------------ LLM (chat / suggest / health)
-    def _llm_settings() -> "Settings":
-        """Settings for the UI-side LLM calls (chat/suggest/health/research): engine defaults +
-        env overlaid with the saved UI LLM overrides, so the UI talks to the SAME model a run does."""
-        ui = {k: v for k, v in _load_ui_settings().items()
-              if k in {"llm_model", "llm_base_url", "llm_temperature"}}
-        return Settings(**ui)
+    def _llm_settings(rd: Optional[Path] = None) -> "Settings":
+        """Settings for the UI-side LLM calls (chat/command/suggest/report). ONE source of truth per
+        run: when the run has a `config.snapshot.json`, its llm_model/base_url/temperature WIN — so
+        chat (and the action-router) speak with the SAME model the run was launched with, which keeps
+        the conversation reproducible and the trace honest even if the UI server's own env points at a
+        different model. Falls back to the UI's saved LLM overrides + env when there's no snapshot (or
+        for a run-less call). The api_key is NEVER read from the snapshot (it's masked there) — it
+        always comes from the server env."""
+        over = {k: v for k, v in _load_ui_settings().items()
+                if k in {"llm_model", "llm_base_url", "llm_temperature"}}
+        if rd is not None:
+            try:
+                cfg = json.loads((rd / "config.snapshot.json").read_text(encoding="utf-8"))
+                for k in ("llm_model", "llm_base_url", "llm_temperature"):
+                    if cfg.get(k) is not None:
+                        over[k] = cfg[k]
+            except (OSError, json.JSONDecodeError, ValueError):
+                pass   # no/!readable snapshot -> keep the UI/env defaults
+        return Settings(**over)
 
     def _node_context(st, nid: Optional[int], full: "Path") -> str:
         """A compact textual brief of the run (+ one focused experiment) to ground an LLM chat:
@@ -738,7 +795,7 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
             "right answer is just an explanation or a question.\n\n"
             "Here is the run you're discussing:\n" + _node_context(st, nid, rd))
         try:
-            client = make_llm_client(_llm_settings())
+            client = make_llm_client(_llm_settings(rd))
             text = client.complete_text([{"role": "system", "content": sys_prompt}, *msgs])
         except Exception as e:  # noqa: BLE001 - offline / no model -> soft fail
             return JSONResponse({"ok": False, "error": str(e)}, status_code=200)
@@ -771,7 +828,7 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
                   "run context and this discussion.\n\n" + _node_context(st, nid, rd)
                   + (f"\n\nDiscussion so far:\n{convo}" if convo else "")
                   + (f"\n\nInstruction: {instruction}" if instruction else ""))
-        s = _llm_settings()
+        s = _llm_settings(rd)
         try:
             client = make_llm_client(s)
         except Exception as e:  # noqa: BLE001 - offline / no model
@@ -803,18 +860,27 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
         nid = body.get("node_id")
         instruction = (body.get("instruction") or "").strip()
         st = fold(_events(rd))
-        s = _llm_settings()
+        s = _llm_settings(rd)
         try:
             client = make_llm_client(s)
         except Exception as e:  # noqa: BLE001 - offline / no model
             return JSONResponse({"ok": False, "error": str(e)}, status_code=200)
         sys_prompt = (
-            "Translate the human's instruction about an automated ML experiment run into ONE action. "
-            "If they are merely asking a question or discussing, use action='advise'. Otherwise pick "
-            "the action and fill its fields. Actions: confirm(node_id), ablate(node_id), fork(node_id), "
-            "promote(node_id), hint(text), strategy(policy,fidelity), deep_research, "
-            "inject(operator,params,rationale[,node_id=parent]), approve(node_id), ratify, pause, "
-            "resume, stop. Use the node in context when no id is given.\n\n" + _node_context(st, nid, rd))
+            "You are the BOSS of an autonomous ML experiment run, turning the human's chat message into "
+            "ONE action. Bias toward ACTING on what they want, not just talking back.\n"
+            "- Use action='advise' ONLY for a pure question or chit-chat that asks for nothing to change.\n"
+            "- If they suggest / ask / hint that you TRY, CONSIDER, AVOID, LOOK INTO, or FOCUS ON "
+            "something — even politely, even open-ended (e.g. 'see how others solve this and try it') — "
+            "STEER the search instead of just replying: use action='hint' and put the concrete directive "
+            "for the researcher in `text` (distil their message into specific techniques / features / "
+            "params to try or avoid), so the NEXT experiments follow it. Put a short, friendly "
+            "one-sentence acknowledgement to the human in `rationale`.\n"
+            "- If they explicitly want you to look things up / read the literature first, use "
+            "action='deep_research'. For ONE concrete experiment they fully specify, use action='inject' "
+            "(operator, params, rationale).\n"
+            "- Other verbs: confirm(node_id), ablate(node_id), fork(node_id), promote(node_id), "
+            "strategy(policy,fidelity), approve(node_id), ratify, pause, resume, stop. Use the node in "
+            "context when no id is given.\n\n" + _node_context(st, nid, rd))
         convo = "\n".join(f"{m.get('role')}: {m.get('content')}" for m in msgs)
         user = (f"Instruction: {instruction}" if instruction else "") + (f"\n\nDiscussion:\n{convo}" if convo else "")
         from .parse import parse_structured
@@ -855,7 +921,7 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
         the deterministic report keeps rendering and no event is written."""
         rd = _run_dir(run_id)
         st = fold(_events(rd))
-        s = _llm_settings()
+        s = _llm_settings(rd)
         try:
             from .report import generate_report
             client = make_llm_client(s)

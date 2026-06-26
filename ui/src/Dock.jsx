@@ -6,6 +6,44 @@ import { OpIcon } from './icons.jsx'
 
 const HELP = 'Commands: /confirm #n · /ablate #n · /fork #n · /promote #n · /note #n text · /hint text · /strategy policy=ucb fidelity=low · /deep-research · /experiment <idea> · /approve #n · /ratify · /pause · /resume · /stop · /refresh. Or just say what you want and I’ll do it right away (boss mode — actions apply immediately; reversible ones offer Undo).'
 
+// Slash-command catalogue powering the type-ahead hints above the input. `desc` is the one-line label
+// in the list; `why` is the "what this does / when to reach for it" shown on hover (and in the detail
+// strip). Order = roughly most-reached-for first. Kept in sync with parseSlash() below.
+const COMMANDS = [
+  { cmd: 'confirm', args: '#n', desc: 'multi-seed re-eval of a node',
+    why: 'Re-runs a node across several seeds and ranks by the robust mean — confirms a score is real, not luck from one good seed.' },
+  { cmd: 'ablate', args: '#n', desc: 'sensitivity / ablation probe',
+    why: 'Turns parts of a node’s idea off one at a time to see which actually move the metric — separates what matters from dead weight.' },
+  { cmd: 'fork', args: '#n', desc: 'branch a fresh improve from a node',
+    why: 'Starts a new improve-branch off this (known-good) node so the search explores a different direction from a solid base.' },
+  { cmd: 'promote', args: '#n', desc: 'pin a node as champion',
+    why: 'Marks this node as the current best/champion the report and final answer build on.' },
+  { cmd: 'note', args: '#n text', desc: 'annotate a node',
+    why: 'Attaches a human note to a node — kept in the audit trail and visible to the agent as context.' },
+  { cmd: 'hint', args: 'text', desc: 'steer the agent (soft)',
+    why: 'Drops a free-text directive into the agent’s context to bias what it tries next, without forcing a specific action.' },
+  { cmd: 'strategy', args: 'policy=ucb fidelity=low', desc: 'switch search strategy',
+    why: 'Changes the search policy/fidelity live — e.g. explore harder (ucb) or run cheaper low-fidelity evals to cover more ground.' },
+  { cmd: 'deep-research', args: '', desc: 'run a deep-research step now',
+    why: 'Fires the arXiv + web research stage immediately to pull outside ideas in before the next round of proposals.' },
+  { cmd: 'experiment', args: '<idea>', desc: 'propose & add a node',
+    why: 'Hands your idea to the agent to turn into the next experiment node (LLM-authored), instead of you specifying an exact action.' },
+  { cmd: 'approve', args: '#n', desc: 'approve a gated node (HITL)',
+    why: 'Grants human approval at an approval checkpoint so the run can proceed past it.' },
+  { cmd: 'ratify', args: '', desc: 'ratify the eval spec',
+    why: 'Approves the evaluation spec so the run can start/continue scoring under it.' },
+  { cmd: 'pause', args: '', desc: 'pause the run (resumable)',
+    why: 'Cleanly stops taking new work between nodes while keeping all state — resume picks up exactly where it left off.' },
+  { cmd: 'resume', args: '', desc: 'resume a paused run',
+    why: 'Continues a paused run from where it stopped.' },
+  { cmd: 'stop', args: '', desc: 'stop / abort the run',
+    why: 'Aborts and finalizes the run. Not resumable in place — use Replay to start over from scratch.' },
+  { cmd: 'refresh', args: '', desc: 'rebuild the run report',
+    why: 'Regenerates the agent-authored report from the latest events.' },
+  { cmd: 'help', args: '', desc: 'list all commands',
+    why: 'Prints the full command reference into the chat.' },
+]
+
 // Parse a leading-slash command into a control action (no LLM — deterministic + offline-safe). Returns
 // {action} | {error} | {help} | {llm:instruction} (route to the action-router) | null (not a command).
 function parseSlash(text, ctxId, state) {
@@ -348,15 +386,27 @@ function AppliedRow({ m, onUndo }) {
   )
 }
 
+// A chat turn. The human's own messages sit RIGHT, in a filled accent bubble (so they never visually
+// merge with the left-aligned event/agent stream); the agent's replies sit LEFT in a neutral bubble,
+// and a long reply (the "wall of text") collapses to a clamp with a show-more toggle.
 function ChatRow({ m }) {
   const [open, setOpen] = useState(false)
-  const tr = m.role === 'assistant' ? m.trace : null   // the LLM I/O behind this reply, if captured
+  const isUser = m.role === 'user'
+  const tr = !isUser ? m.trace : null                  // the LLM I/O behind this reply, if captured
+  const long = !isUser && (m.content || '').length > 600
+  const [expanded, setExpanded] = useState(false)
+  const icon = <div className="fm-ic"><OpIcon name={isUser ? 'user' : 'bot'} size={14} className="fm-ic-svg" /></div>
   return (
     <div className={'feed-msg chat ' + m.role}>
-      <div className="fm-ic"><OpIcon name={m.role === 'user' ? 'user' : 'bot'} size={14} className="fm-ic-svg" /></div>
+      {icon}
       <div className="fm-body">
         {(m.ctx || []).length > 0 && <div className="ctx-row">{m.ctx.map(id => <span key={id} className="ctx-chip">#{id}</span>)}</div>}
-        {m.role === 'user' ? <div className="chat-text">{m.content}</div> : <Markdown className="chat-text" text={m.content} />}
+        <div className="chat-who">{isUser ? 'you' : 'agent'}</div>
+        <div className={'chat-bubble' + (long && !expanded ? ' clamp' : '')}>
+          {isUser ? <div className="chat-text">{m.content}</div> : <Markdown className="chat-text" text={m.content} />}
+        </div>
+        {long && <div className="chat-more" onClick={() => setExpanded(e => !e)}>
+          {expanded ? '▾ show less' : '▸ show full reply'}</div>}
         {tr && <div className="chat-trace-tog" onClick={() => setOpen(o => !o)}>{open ? '▾' : '▸'} trace</div>}
         {tr && open && <div className="chat-trace">
           <LlmCall idx={0} call={{ op: 'chat', model: tr.model, tokens: tr.tokens, completion: tr.completion,
@@ -379,6 +429,9 @@ export default function Dock({ runId, live, liveSeq, viewSeq, setViewSeq, onFocu
   const [busy, setBusy] = useState(false)
   const [ctx, setCtx] = useState([])                      // node-id context chips for the next message
   const [dropActive, setDropActive] = useState(false)
+  const [sugIdx, setSugIdx] = useState(0)                 // highlighted command suggestion
+  const [sugOpen, setSugOpen] = useState(true)            // false only after an explicit Esc (reopens on edit)
+  const taRef = useRef(null)
   const feedRef = useRef(null)
   const msgCtr = useRef(0)
   // round-7: scrubber + filter chips collapse into one block to save space; default hidden, remembered.
@@ -526,6 +579,32 @@ export default function Dock({ runId, live, liveSeq, viewSeq, setViewSeq, onFocu
     if (!window.confirm('Reset this run? Wipes all events & nodes and restarts from scratch.')) return
     try { await resetRun(runId); onToast?.('replaying from scratch') } catch (e) { onToast?.('reset failed: ' + e.message) }
   }
+  // Command type-ahead: a `/word` with no space yet → matching commands (prefix first, then substring).
+  // Once a space is typed (entering args) or the text isn't a bare slash-word, the list disappears.
+  const sugTok = input.match(/^\/(\S*)$/)
+  const suggestions = useMemo(() => {
+    if (!sugTok) return []
+    const q = sugTok[1].toLowerCase()
+    const pre = COMMANDS.filter(c => c.cmd.startsWith(q))
+    return q ? [...pre, ...COMMANDS.filter(c => !c.cmd.startsWith(q) && c.cmd.includes(q))] : COMMANDS
+  }, [sugTok ? sugTok[1] : null])
+  const showSuggest = sugOpen && suggestions.length > 0
+  const sugSel = Math.min(sugIdx, Math.max(0, suggestions.length - 1))
+  const acceptSuggestion = (c) => {
+    if (!c) return
+    setInput('/' + c.cmd + ' ')          // trailing space → list closes, caret ready for args
+    setSugIdx(0); setSugOpen(true)
+    requestAnimationFrame(() => taRef.current?.focus())
+  }
+  const onInputKey = (e) => {
+    if (showSuggest) {
+      if (e.key === 'ArrowDown') { e.preventDefault(); setSugIdx(i => Math.min(i + 1, suggestions.length - 1)); return }
+      if (e.key === 'ArrowUp') { e.preventDefault(); setSugIdx(i => Math.max(i - 1, 0)); return }
+      if (e.key === 'Tab' || (e.key === 'Enter' && !e.shiftKey)) { e.preventDefault(); acceptSuggestion(suggestions[sugSel]); return }
+      if (e.key === 'Escape') { e.preventDefault(); setSugOpen(false); return }
+    }
+    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send() }
+  }
   const addCtx = (id) => { if (id != null) setCtx(c => (c.includes(id) ? c : [...c, id])) }
   const onDrop = (ev) => {
     ev.preventDefault(); setDropActive(false)
@@ -580,19 +659,42 @@ export default function Dock({ runId, live, liveSeq, viewSeq, setViewSeq, onFocu
                 : it.m.role === 'action'
                   ? <AppliedRow key={it.m.id || ('a' + it.i)} m={it.m} onUndo={onUndo} />
                   : <ChatRow key={'m' + it.i} m={it.m} />)}
-          {(() => { const st = busy ? 'Working on your request…' : (atLive ? agentStatus(live, log) : null)
-            return st ? <div className="agent-status"><span className="as-dot" />{st}</div> : null })()}
+          {(() => {
+            // Concurrent transparency: the pipeline keeps working (research/eval) WHILE the boss
+            // replies to your message — show both at once, never one masking the other.
+            const pipeline = atLive ? agentStatus(live, log) : null
+            if (!pipeline && !busy) return null
+            return <div className="agent-status">
+              <span className="as-dot" />
+              {pipeline && <span className="as-seg">{pipeline}</span>}
+              {pipeline && busy && <span className="as-bullet">·</span>}
+              {busy && <span className="as-seg as-reply"><OpIcon name="chat" size={11} /> replying to your message…</span>}
+            </div>
+          })()}
         </div>
         <div className={'chat-in' + (dropActive ? ' drop' : '')}
              onDragOver={e => { e.preventDefault(); setDropActive(true) }}
              onDragLeave={() => setDropActive(false)} onDrop={onDrop}>
+          {showSuggest && <div className="cmd-suggest" role="listbox" aria-label="commands">
+            <div className="cmd-list">
+              {suggestions.map((c, i) => <div key={c.cmd} role="option" aria-selected={i === sugSel}
+                  className={'cmd-item' + (i === sugSel ? ' on' : '')} title={c.why}
+                  onMouseEnter={() => setSugIdx(i)}
+                  onMouseDown={e => { e.preventDefault(); acceptSuggestion(c) }}>
+                <span className="cmd-name">/{c.cmd}{c.args && <span className="cmd-args"> {c.args}</span>}</span>
+                <span className="cmd-desc">{c.desc}</span>
+              </div>)}
+            </div>
+            <div className="cmd-why">{suggestions[sugSel]?.why}
+              <span className="cmd-keys">↑↓ choose · Tab insert · Esc close</span></div>
+          </div>}
           {(ctx.length > 0 || selectedId != null) && <div className="ctx-row">
             {ctx.map(id => <span key={id} className="ctx-chip">#{id}<button onClick={() => setCtx(c => c.filter(x => x !== id))}>✕</button></span>)}
             {selectedId != null && !ctx.includes(selectedId) && <button className="ctx-chip add" onClick={() => addCtx(selectedId)}>＋ #{selectedId}</button>}
           </div>}
-          <textarea className="text" rows={2} placeholder="Ask, run a /command, or just say what to do (I’ll propose an action)… select a node to add it as ＋context · Enter to send"
-            value={input} onChange={e => setInput(e.target.value)}
-            onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send() } }} />
+          <textarea ref={taRef} className="text" rows={2} placeholder="Ask, run a /command (type “/” for hints), or just say what to do… select a node to add it as ＋context · Enter to send"
+            value={input} onChange={e => { setInput(e.target.value); setSugIdx(0); setSugOpen(true) }}
+            onKeyDown={onInputKey} />
           <div className="toolbar" style={{ marginTop: 4 }}>
             <button className="btn sm primary" disabled={busy || !input.trim()} onClick={send}>Send</button>
             <button className="btn sm ghost" title="list commands" onClick={() => pushAssistant(HELP)}>/help</button>

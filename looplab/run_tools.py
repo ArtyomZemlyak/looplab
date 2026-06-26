@@ -57,8 +57,14 @@ class RunTools:
                  "theme": {"type": "string", "description": "filter to one theme slug (optional)"}}),
             _fn("read_experiment",
                 "Read one experiment's full detail: params, metric, robustness, rationale, failure "
-                "reason, extra metrics, and sweep trials.",
-                {"node_id": {"type": "integer"}}, ["node_id"]),
+                "reason, extra metrics, and — for a hyperparameter sweep — its trials. `trials` "
+                "chooses how many sweep points to return: a number like '20' (a representative sample "
+                "spanning best→worst), or 'all' for every trial. Omit for a 10-trial sample.",
+                {"node_id": {"type": "integer"},
+                 "trials": {"type": "string",
+                            "description": "how many sweep trials to include: a number, or 'all'. "
+                                           "Default: 10 representative trials (best→worst)."}},
+                ["node_id"]),
             _fn("read_code",
                 "Read the solution code of one experiment (so you can build on or avoid it).",
                 {"node_id": {"type": "integer"}}, ["node_id"]),
@@ -81,7 +87,7 @@ class RunTools:
             if name == "list_experiments":
                 return self._list(st, args)
             if name == "read_experiment":
-                return self._read(st, int(args.get("node_id")))
+                return self._read(st, int(args.get("node_id")), args.get("trials"))
             if name == "read_code":
                 return self._code(st, int(args.get("node_id")))
             if name == "find_analogous":
@@ -89,7 +95,7 @@ class RunTools:
             if name == "list_themes":
                 return self._themes(st)
             return f"(unknown tool: {name})"
-        except (KeyError, TypeError, ValueError) as e:
+        except (KeyError, TypeError, ValueError, ArithmeticError) as e:
             return f"(tool error: {e})"
 
     # --- implementations ----------------------------------------------------
@@ -117,7 +123,7 @@ class RunTools:
         head = f"{len(nodes)} experiment(s), sort={sort}" + (f", theme={theme}" if theme else "")
         return head + ":\n" + "\n".join(self._line(n) for n in nodes)
 
-    def _read(self, st: RunState, nid: int) -> str:
+    def _read(self, st: RunState, nid: int, trials_arg=None) -> str:
         n = st.nodes.get(nid)
         if n is None:
             return f"(no experiment #{nid})"
@@ -137,14 +143,49 @@ class RunTools:
         if n.status is NodeStatus.failed:
             out.append(f"failure={n.error_reason}: {(n.error or '')[:300]}")
         if n.trials:
-            best = min((t for t in n.trials if t.metric is not None),
-                       key=lambda t: t.metric if st.direction == "min" else -t.metric, default=None)
-            out.append(f"sweep: {len(n.trials)} trials" +
-                       (f", best {digest._fmt_params(best.params)} metric={digest._fmt_num(best.metric)}"
-                        if best else ""))
+            out.append(self._sweep_view(n, trials_arg, st.direction))
         if n.idea.rationale:
             out.append(f"rationale: {n.idea.rationale.strip()[:400]}")
-        return "\n".join(out)
+        text = "\n".join(out)
+        return text if len(text) <= self.max_chars else text[:self.max_chars].rstrip() + " …(truncated — ask for fewer trials)"
+
+    @staticmethod
+    def _resolve_trial_k(trials_arg, total: int) -> int:
+        """How many trials to render. None -> the digest default sample; 'all'/'*'/'-1' -> every
+        trial; a number -> that many (representative); anything else -> the default."""
+        if trials_arg is None:
+            return digest.DEFAULT_TRIAL_K
+        s = str(trials_arg).strip().lower()
+        if s in ("all", "*", "-1"):
+            return total
+        try:
+            return max(1, int(float(s)))
+        except (ValueError, OverflowError):   # 'inf'/'1e999' → int(float()) overflows; fall back
+            return digest.DEFAULT_TRIAL_K
+
+    def _sweep_view(self, n, trials_arg, direction: str) -> str:
+        """Render a sweep node's trials as `params → metric` lines, best→worst, for the requested
+        count (representative sample by default, or all). When the full finite set is shown, any
+        no-metric trials are appended so 'all' is genuinely complete."""
+        trials = n.trials
+        finite = digest._finite_trials(trials)
+        k = self._resolve_trial_k(trials_arg, len(trials))
+        sel = digest.select_trials(trials, k, direction)
+        best = sel[0] if sel else None
+        head = f"sweep: {len(trials)} trials" + (f" over {dict(n.idea.space)}" if n.idea.space else "")
+        if best:
+            head += f"; best {digest._fmt_params(best.params)} metric={digest._fmt_num(best.metric)}"
+        n_nometric = len(trials) - len(finite)
+        if n_nometric:
+            head += f" (+{n_nometric} no-metric)"
+        head += (f"\nshowing {len(sel)} of {len(finite)} (best→worst):" if len(sel) < len(finite)
+                 else "\ntrials (best→worst):")
+        lines = [head] + [f"  {digest._trial_line(t)}" for t in sel]
+        if len(sel) >= len(finite):   # complete finite set shown → list the no-metric trials too
+            lines += [f"  {digest._fmt_params(t.params)} → (no metric"
+                      + (f": {t.error[:60]}" if t.error else "") + ")"
+                      for t in trials if t.metric is None or not math.isfinite(t.metric)]
+        return "\n".join(lines)
 
     def _code(self, st: RunState, nid: int) -> str:
         n = st.nodes.get(nid)

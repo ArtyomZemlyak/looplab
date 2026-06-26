@@ -7,10 +7,17 @@ server, so a plain read-modify-atomic-write is enough; no cross-process lock lik
 Shape of projects.json:
     {"projects": [{"id","name","parent_id"}, ...],
      "assignments": {"<run_id>": "<project_id>", ...},
-     "labels": {"<run_id>": "<display name>", ...}}
+     "labels": {"<run_id>": "<display name>", ...},
+     "supertasks": [{"id","name","task_id"}, ...],
+     "supertask_assignments": {"<run_id>": "<supertask_id>", ...}}
 
 `labels` is a UI-only display name for a run; the run's directory (its id) never changes, so the
 event log + resume stay intact — exactly like assignments, this is a non-destructive overlay.
+
+`supertasks` are a SECOND, flat (non-nested) grouping axis orthogonal to projects: a user-named
+"global task" that many runs attack (what the cross-run sweep auto-groups by `task_id`, but
+user-managed — create it, then assign existing/new runs). A run can sit in a project AND a
+super-task at once; `supertask_assignments` is the same non-destructive run_id→id overlay.
 """
 from __future__ import annotations
 
@@ -31,6 +38,10 @@ def _new_id() -> str:
     return "p_" + uuid.uuid4().hex[:10]
 
 
+def _new_st_id() -> str:
+    return "st_" + uuid.uuid4().hex[:10]
+
+
 class ProjectStore:
     """Read/modify/atomic-write CRUD over `<run-root>/projects.json`. Each mutating method loads
     the current file, applies the change, persists, and returns the relevant result — so the
@@ -46,16 +57,19 @@ class ProjectStore:
         self._lock = threading.Lock()
 
     # ------------------------------------------------------------------ load / save
+    @staticmethod
+    def _empty() -> dict:
+        return {"projects": [], "assignments": {}, "labels": {}, "supertasks": [], "supertask_assignments": {}}
+
     def load(self) -> dict:
         if not self.path.exists():
-            return {"projects": [], "assignments": {}, "labels": {}}
+            return self._empty()
         try:
             data = json.loads(self.path.read_text(encoding="utf-8"))
         except (json.JSONDecodeError, OSError):
-            return {"projects": [], "assignments": {}, "labels": {}}
-        data.setdefault("projects", [])
-        data.setdefault("assignments", {})
-        data.setdefault("labels", {})
+            return self._empty()
+        for k, v in self._empty().items():       # backfill any key a pre-super-task file lacks
+            data.setdefault(k, v)
         return data
 
     def _save(self, data: dict) -> None:
@@ -156,6 +170,54 @@ class ProjectStore:
     def project_of(self, run_id: str) -> str | None:
         return self.load()["assignments"].get(run_id)
 
+    # ------------------------------------------------------------------ super-tasks (flat axis)
+    def _require_st(self, data: dict, sid: str) -> dict:
+        st = next((s for s in data["supertasks"] if s["id"] == sid), None)
+        if st is None:
+            raise ProjectError(f"no such super-task: {sid!r}")
+        return st
+
+    def create_supertask(self, name: str, task_id: str | None = None) -> dict:
+        with self._lock:
+            data = self.load()
+            st = {"id": _new_st_id(), "name": (name or "untitled").strip() or "untitled",
+                  "task_id": (task_id or None)}
+            data["supertasks"].append(st)
+            self._save(data)
+            return st
+
+    def rename_supertask(self, sid: str, name: str) -> dict:
+        with self._lock:
+            data = self.load()
+            st = self._require_st(data, sid)
+            st["name"] = (name or "").strip() or st["name"]
+            self._save(data)
+            return st
+
+    def delete_supertask(self, sid: str) -> None:
+        """Delete a super-task and unassign its runs (flat axis — nothing to reparent)."""
+        with self._lock:
+            data = self.load()
+            self._require_st(data, sid)
+            data["supertasks"] = [s for s in data["supertasks"] if s["id"] != sid]
+            data["supertask_assignments"] = {r: v for r, v in data["supertask_assignments"].items()
+                                             if v != sid}
+            self._save(data)
+
+    def assign_supertask(self, run_id: str, supertask_id: str | None) -> None:
+        """Put a run in a super-task (or clear it when supertask_id is None)."""
+        with self._lock:
+            data = self.load()
+            if supertask_id is None:
+                data["supertask_assignments"].pop(run_id, None)
+            else:
+                self._require_st(data, supertask_id)
+                data["supertask_assignments"][run_id] = supertask_id
+            self._save(data)
+
+    def supertask_of(self, run_id: str) -> str | None:
+        return self.load()["supertask_assignments"].get(run_id)
+
     # ------------------------------------------------------------------ run labels (UI display name)
     def set_label(self, run_id: str, label: str | None) -> None:
         """Give a run a display name (or clear it with None/empty). UI-only overlay — the run's
@@ -175,4 +237,5 @@ class ProjectStore:
             data = self.load()
             data["assignments"].pop(run_id, None)
             data["labels"].pop(run_id, None)
+            data["supertask_assignments"].pop(run_id, None)
             self._save(data)

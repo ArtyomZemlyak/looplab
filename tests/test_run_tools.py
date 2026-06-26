@@ -8,7 +8,7 @@ import math
 from looplab import digest
 from looplab.agent import ToolUsingResearcher
 from looplab.config import Settings
-from looplab.models import Idea, Node, NodeStatus, RunState
+from looplab.models import Idea, Node, NodeStatus, RunState, Trial
 from looplab.roles import LLMResearcher
 from looplab.run_tools import DataTools, RunTools
 from looplab.tasks import make_roles
@@ -58,6 +58,81 @@ def test_experiments_digest_content_and_cap():
     capped = digest.experiments_digest(st, char_cap=40)
     assert len(capped) <= 42                              # hard budget honored
     assert digest.experiments_digest(RunState()) == ""    # empty run → no digest
+
+
+# --------------------------------------------------------------------- intra-node sweep surfacing
+def _sweep_st() -> RunState:
+    """A run whose best node is a hyperparameter sweep: 12 finite trials + 1 that diverged."""
+    st = RunState(goal="minimize loss", direction="min")
+    grid = [(0.05, 0.061), (0.02, 0.22), (0.01, 0.30), (0.1, 0.075), (0.2, 0.12), (0.3, 0.18),
+            (0.4, 0.25), (0.5, 0.40), (0.7, 0.50), (1.0, 0.65), (1.5, 0.80), (2.0, 0.90)]
+    trials = [Trial(params={"lr": lr}, metric=m, seconds=0.1) for lr, m in grid]
+    trials.append(Trial(params={"lr": 3.0}, metric=None, error="diverged: nan loss"))
+    st.nodes = {
+        5: Node(id=5, operator="improve",
+                idea=Idea(operator="improve", params={"warmup": 100.0}, theme="hpo",
+                          space={"lr": [lr for lr, _ in grid] + [3.0]}),
+                metric=0.061, status=NodeStatus.evaluated, trials=trials),
+    }
+    st.best_node_id = 5
+    return st
+
+
+def test_select_trials_covers_range_bounded_and_deterministic():
+    trials = _sweep_st().nodes[5].trials
+    sel = digest.select_trials(trials, 5, "min")
+    assert len(sel) == 5
+    assert sel[0].metric == 0.061                         # best first (min direction)
+    assert sel[-1].metric == 0.90                         # worst kept → range covered
+    assert all(t.metric is not None for t in sel)         # the diverged trial is dropped
+    assert sel == digest.select_trials(trials, 5, "min")  # deterministic
+    allsel = digest.select_trials(trials, 999, "min")     # k >= count → all finite, sorted
+    assert len(allsel) == 12 and [t.metric for t in allsel] == sorted(t.metric for t in allsel)
+    assert digest.select_trials(trials, 3, "max")[0].metric == 0.90   # max direction flips best
+
+
+def test_digest_surfaces_sweep_flag_and_tuning_block():
+    st = _sweep_st()
+    d = digest.experiments_digest(st, char_cap=4000)
+    assert "swept ×13" in d                               # node line flags the sweep (12 + 1 nometric)
+    assert "Tuning of #5 (13 trials, showing 10 of 12 best→worst)" in d
+    assert "→ 0.061" in d                                 # best trial's metric shown
+    expected = len(digest.select_trials(st.nodes[5].trials, digest.DEFAULT_TRIAL_K, "min"))
+    assert d.count(" → ") == expected <= digest.DEFAULT_TRIAL_K   # bounded representative sample
+
+
+def test_read_experiment_trial_selection_default_number_and_all():
+    rt = RunTools()
+    rt.bind_state(_sweep_st())
+    default = rt.execute("read_experiment", {"node_id": 5})
+    assert "sweep: 13 trials" in default and "best [lr=0.05] metric=0.061" in default
+    assert "(+1 no-metric)" in default
+    assert default.count(" → ") == digest.DEFAULT_TRIAL_K   # 10-trial sample by default
+
+    three = rt.execute("read_experiment", {"node_id": 5, "trials": "3"})
+    assert three.count(" → ") == 3                          # explicit count honored
+
+    allt = rt.execute("read_experiment", {"node_id": 5, "trials": "all"})
+    assert allt.count(" → ") == 13                          # every trial incl the no-metric one
+    assert "no metric" in allt and "diverged" in allt     # the failed trial is shown, with its error
+
+    bogus = rt.execute("read_experiment", {"node_id": 5, "trials": "lots"})
+    assert bogus.count(" → ") == digest.DEFAULT_TRIAL_K     # unparseable → falls back to default
+
+
+def test_select_trials_k1_and_tool_never_raises_on_edge_selectors():
+    """Regression: k==1 must not hit the k-1 divisor (ZeroDivisionError); and the tool must return a
+    STRING (never raise) for selectors that clamp to 1 or overflow int()."""
+    trials = _sweep_st().nodes[5].trials
+    one = digest.select_trials(trials, 1, "min")
+    assert len(one) == 1 and one[0].metric == 0.061           # the single best, no crash
+
+    rt = RunTools()
+    rt.bind_state(_sweep_st())
+    for sel in ("1", "0", "0.4", "-5", "inf", "1e999", "nan"):
+        out = rt.execute("read_experiment", {"node_id": 5, "trials": sel})
+        assert isinstance(out, str) and "experiment #5" in out  # soft-fails to a string, never raises
+    assert rt.execute("read_experiment", {"node_id": 5, "trials": "1"}).count(" → ") == 1
 
 
 # --------------------------------------------------------------------------- RunTools

@@ -74,13 +74,48 @@ def _fmt_params(params: dict, max_k: int = 4) -> str:
     return f"[{body}{extra}]" if body else "[]"
 
 
+# Default number of intra-node sweep trials surfaced in the always-on context (digest). A small,
+# REPRESENTATIVE sample — best + worst plus an even spread between — conveys the tuning landscape
+# (dispersion + how the metric moves with the params) without flooding the prompt budget. The
+# read_experiment tool can return more, or every trial, on demand.
+DEFAULT_TRIAL_K = 10
+
+
+def _finite_trials(trials) -> list:
+    """Trials that produced a usable (finite) metric — the only ones carrying tuning signal."""
+    return [t for t in trials if t.metric is not None and math.isfinite(t.metric)]
+
+
+def select_trials(trials, k: int, direction: str) -> list:
+    """Up to `k` trials chosen to COVER the metric range and show the tuning dynamics: sorted
+    best→worst, ALWAYS keeping the best and the worst, the rest sampled at even rank-quantiles
+    between them (so a flat region and a cliff both show up). Deterministic — rank-based, with a
+    stable param tie-break — so replay/audit is reproducible. Trials with no finite metric are
+    dropped; `k<=0` or `k>=count` returns the full sorted finite set."""
+    scored = _finite_trials(trials)
+    scored.sort(key=lambda t: sorted(t.params.items()))            # stable, direction-independent tie-break
+    scored.sort(key=lambda t: t.metric, reverse=(direction != "min"))
+    if k <= 0 or len(scored) <= k:
+        return scored
+    if k == 1:                       # one slot → the best (can't span a range with a single point; also
+        return scored[:1]            # guards the k-1==0 divisor in the quantile math below)
+    idx = sorted({round(i * (len(scored) - 1) / (k - 1)) for i in range(k)})
+    return [scored[i] for i in idx]
+
+
+def _trial_line(t) -> str:
+    extra = f"  ({_fmt_num(t.seconds)}s)" if getattr(t, "seconds", None) else ""
+    return f"{_fmt_params(t.params)} → {_fmt_num(t.metric)}{extra}"
+
+
 def _node_line(n) -> str:
     if n.status is NodeStatus.failed:
         outcome = f"FAILED ({n.error_reason or 'error'})"
     else:
         outcome = f"metric={_fmt_num(node_metric(n))}"
     theme = f" {{{n.idea.theme}}}" if getattr(n.idea, "theme", None) else ""
-    return f"  #{n.id} {n.operator} {outcome} {_fmt_params(n.idea.params)}{theme}"
+    swept = f" swept ×{len(n.trials)}" if getattr(n, "trials", None) else ""
+    return f"  #{n.id} {n.operator} {outcome} {_fmt_params(n.idea.params)}{swept}{theme}"
 
 
 def experiments_digest(state: RunState, top_k: int = 5, worst_n: int = 3,
@@ -99,6 +134,20 @@ def experiments_digest(state: RunState, top_k: int = 5, worst_n: int = 3,
     if winners:
         lines.append("Strongest:")
         lines += [_node_line(n) for n in winners]
+
+    # Tuning landscape of the best SWEPT experiment — a small representative sample (best→worst, even
+    # spread) so the model reasons over the response surface, not just the winning point. Placed right
+    # after the winners (before the weaker rows) so it's prioritized over them under the char budget;
+    # depth/all is behind the read_experiment tool. Sourced from the best FEASIBLE evaluated sweep —
+    # a failed/infeasible sweep still gets the inline "swept ×N" flag + on-demand read_experiment.
+    swept = [n for n in top_nodes(state, len(state.nodes)) if getattr(n, "trials", None)]
+    if swept:
+        champ = swept[0]
+        sel = select_trials(champ.trials, DEFAULT_TRIAL_K, state.direction)
+        finite_n = len(_finite_trials(champ.trials))
+        cap = f", showing {len(sel)} of {finite_n} best→worst" if len(sel) < finite_n else ""
+        lines.append(f"Tuning of #{champ.id} ({len(champ.trials)} trials{cap}):")
+        lines += [f"  {_trial_line(t)}" for t in sel]
 
     # Weakest feasible + the most recent failures — the "avoid repeating this" set.
     weak = [n for n in top_nodes(state, worst_n, worst=True) if n not in winners]

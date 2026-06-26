@@ -237,3 +237,32 @@ def test_g1_no_token_means_open(tmp_path, monkeypatch):
     client = TestClient(make_app(tmp_path))
     r = client.post("/api/runs/demo/control", json={"type": "pause", "data": {}})
     assert r.status_code == 200
+
+
+def test_supertask_endpoints_round_trip(tmp_path):
+    """Create a super-task, assign the run to it (so the run summary carries supertask_id), reassign
+    to none, then delete — the whole HTTP flow the start-menu filter/assign UI drives."""
+    _build_run(tmp_path)
+    client = TestClient(make_app(tmp_path))
+
+    assert client.get("/api/supertasks").json() == {"supertasks": [], "assignments": {}}
+    st = client.post("/api/supertasks", json={"name": "nomad2018"}).json()
+    assert st["id"].startswith("st_") and st["name"] == "nomad2018"
+
+    r = client.post("/api/runs/demo/supertask", json={"supertask_id": st["id"]})
+    assert r.status_code == 200
+    summary = {x["run_id"]: x for x in client.get("/api/runs").json()}
+    assert summary["demo"]["supertask_id"] == st["id"]          # surfaced in the run summary
+
+    client.patch(f"/api/supertasks/{st['id']}", json={"name": "MLE-bench"})
+    assert client.get("/api/supertasks").json()["supertasks"][0]["name"] == "MLE-bench"
+
+    # assigning an unknown super-task -> 400; assigning a real run to an unknown run -> 404
+    assert client.post("/api/runs/demo/supertask", json={"supertask_id": "st_x"}).status_code == 400
+    assert client.post("/api/runs/ghost/supertask", json={"supertask_id": st["id"]}).status_code == 404
+
+    client.post("/api/runs/demo/supertask", json={"supertask_id": None})  # clear
+    assert {x["run_id"]: x for x in client.get("/api/runs").json()}["demo"]["supertask_id"] is None
+
+    client.delete(f"/api/supertasks/{st['id']}")
+    assert client.get("/api/supertasks").json()["supertasks"] == []

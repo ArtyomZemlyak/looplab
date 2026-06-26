@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useState } from 'react'
-import { get, fmt, fmtDate, fmtAgo, listProjects, createProject, patchProject, deleteProject, assignRun, renameRun, deleteRun } from './util.js'
+import { get, fmt, fmtDate, fmtAgo, listProjects, createProject, patchProject, deleteProject, assignRun, renameRun, deleteRun,
+  listSupertasks, createSupertask, renameSupertask, deleteSupertask, assignSupertask } from './util.js'
 import MapView from './MapView.jsx'
 import StartRun from './StartRun.jsx'
 
@@ -31,8 +32,8 @@ function PromptModal({ title, label, placeholder, initial = '', confirm = 'Creat
   </Modal>
 }
 
-// Per-run "⋮" dropdown: open / rename / move (to any project or unassigned) / delete.
-function RunMenu({ r, projects, onOpen, onMove, onRename, onDelete, onClose }) {
+// Per-run "⋮" dropdown: open / rename / move (project) / assign (super-task) / delete.
+function RunMenu({ r, projects, supertasks, onOpen, onMove, onSetSuper, onManageSupers, onRename, onDelete, onClose }) {
   return <>
     <div className="menu-backdrop" onClick={onClose} onDragStart={onClose} />
     <div className="run-menu" onClick={e => e.stopPropagation()}>
@@ -47,9 +48,42 @@ function RunMenu({ r, projects, onOpen, onMove, onRename, onDelete, onClose }) {
         {!projects.length && <div className="mi-empty">no projects yet</div>}
       </div>
       <div className="mi-sep" />
+      <div className="mi-label">Super-task</div>
+      <div className="mi-scroll">
+        <button className={'mi' + (!r.supertask_id ? ' on' : '')} onClick={() => { onClose(); onSetSuper(r.run_id, UNASSIGNED) }}>○ — none —</button>
+        {supertasks.map(s => <button key={s.id} className={'mi' + (r.supertask_id === s.id ? ' on' : '')}
+          onClick={() => { onClose(); onSetSuper(r.run_id, s.id) }}>🎯 {s.name}</button>)}
+        <button className="mi accent" onClick={() => { onClose(); onManageSupers() }}>＋ New / manage…</button>
+      </div>
+      <div className="mi-sep" />
       <button className="mi danger" onClick={() => onDelete(r)}>✕ Delete run…</button>
     </div>
   </>
+}
+
+// Manage super-tasks in one popup: create, rename (inline), delete. Assignment happens per-run via
+// the ⋮ menu / drag; this is just the CRUD over the buckets themselves.
+function SuperTaskModal({ supertasks, onCreate, onRename, onDelete, onClose }) {
+  const [name, setName] = useState('')
+  const add = () => { const v = name.trim(); if (v) { onCreate(v); setName('') } }
+  return <Modal title="Super-tasks" onClose={onClose}>
+    <div className="muted" style={{ marginBottom: 8 }}>A super-task groups runs that attack the same global task (across many runs). Assign runs from a run’s ⋮ menu.</div>
+    <div className="st-new">
+      <input className="text" autoFocus placeholder="New super-task name (e.g. nomad2018)" value={name}
+             onChange={e => setName(e.target.value)} onKeyDown={e => { if (e.key === 'Enter') add() }} />
+      <button className="btn sm primary" disabled={!name.trim()} onClick={add}>＋ Create</button>
+    </div>
+    <div className="st-list">
+      {supertasks.map(s => <div key={s.id} className="st-row">
+        <span className="st-ic">🎯</span>
+        <input className="text st-rename" defaultValue={s.name}
+               onBlur={e => { const v = e.target.value.trim(); if (v && v !== s.name) onRename(s.id, v) }}
+               onKeyDown={e => { if (e.key === 'Enter') e.currentTarget.blur() }} />
+        <button className="ic" title="delete super-task" onClick={() => onDelete(s)}>✕</button>
+      </div>)}
+      {!supertasks.length && <div className="muted" style={{ padding: '8px 2px', fontSize: 12 }}>No super-tasks yet.</div>}
+    </div>
+  </Modal>
 }
 
 // children-by-parent index + the set of a project's own id plus all descendants (for run counts
@@ -84,10 +118,17 @@ export default function RunList({ onOpen, onSettings }) {
   const [query, setQuery] = useState('')           // free-text over label/id/task/goal
   const [taskFilter, setTaskFilter] = useState(ALL)
   const [statusFilter, setStatusFilter] = useState('all')   // all | running | finished
+  const [stFilter, setStFilter] = useState(ALL)             // super-task filter (ALL | UNASSIGNED | id)
+  const [superdata, setSuperdata] = useState({ supertasks: [], assignments: {} })
+  const [stModal, setStModal] = useState(false)             // manage-super-tasks popup open?
 
   const loadRuns = () => get('/api/runs').then(setRuns).catch(() => setRuns([]))
   const loadProjects = () => listProjects().then(setProj).catch(() => {})
-  useEffect(() => { loadRuns(); loadProjects(); const t = setInterval(loadRuns, 2500); return () => clearInterval(t) }, [])
+  const loadSupers = () => listSupertasks().then(setSuperdata).catch(() => {})
+  useEffect(() => { loadRuns(); loadProjects(); loadSupers(); const t = setInterval(loadRuns, 2500); return () => clearInterval(t) }, [])
+
+  const stName = useMemo(() => Object.fromEntries(superdata.supertasks.map(s => [s.id, s.name])), [superdata])
+  const assignToSuper = async (runId, sid) => { await assignSupertask(runId, sid === UNASSIGNED ? null : sid); loadRuns() }
 
   const { byParent, subtree } = useMemo(() => indexProjects(proj.projects), [proj.projects])
   const projName = useMemo(() => Object.fromEntries(proj.projects.map(p => [p.id, p.name])), [proj.projects])
@@ -113,6 +154,8 @@ export default function RunList({ onOpen, onSettings }) {
     if (q) rs = rs.filter(r => [r.label, r.run_id, r.task_id, r.goal]
       .some(s => (s || '').toLowerCase().includes(q)))
     if (taskFilter !== ALL) rs = rs.filter(r => r.task_id === taskFilter)
+    if (stFilter === UNASSIGNED) rs = rs.filter(r => !r.supertask_id)
+    else if (stFilter !== ALL) rs = rs.filter(r => r.supertask_id === stFilter)
     if (statusFilter === 'running') rs = rs.filter(r => !r.finished)
     else if (statusFilter === 'finished') rs = rs.filter(r => r.finished)
 
@@ -132,7 +175,7 @@ export default function RunList({ onOpen, onSettings }) {
       },
     }
     return [...rs].sort(cmps[sortKey] || (() => 0))
-  }, [runs, sel, proj.assignments, query, taskFilter, statusFilter, sortKey, sortDir])
+  }, [runs, sel, proj.assignments, query, taskFilter, stFilter, statusFilter, sortKey, sortDir])
 
   const breadcrumb = useMemo(() => {
     if (sel === ALL || sel === UNASSIGNED) return []
@@ -164,6 +207,14 @@ export default function RunList({ onOpen, onSettings }) {
     if (!confirm(`Delete run "${r.label || r.run_id}" permanently? This removes its files on disk and cannot be undone.`)) return
     try { await deleteRun(r.run_id); refresh() }
     catch (e) { alert(/409/.test(e.message) ? 'This run is still live — pause or stop it before deleting.' : 'Delete failed: ' + e.message) }
+  }
+  // super-task CRUD (the buckets themselves; per-run assignment is assignToSuper above).
+  const createSuper = async (name) => { await createSupertask(name); loadSupers() }
+  const renameSuper = async (id, name) => { await renameSupertask(id, name); loadSupers() }
+  const removeSuper = async (s) => {
+    if (!confirm(`Delete super-task "${s.name}"? Runs in it become unassigned (the runs themselves are kept).`)) return
+    if (stFilter === s.id) setStFilter(ALL)
+    await deleteSupertask(s.id); loadSupers(); loadRuns()
   }
 
   const TreeNode = ({ p, depth }) => {
@@ -243,6 +294,12 @@ export default function RunList({ onOpen, onSettings }) {
               <option value={ALL}>all tasks</option>
               {tasks.map(t => <option key={t} value={t}>{t}</option>)}
             </select>
+            <select className="sel" value={stFilter} onChange={e => setStFilter(e.target.value)} title="super-task">
+              <option value={ALL}>all super-tasks</option>
+              <option value={UNASSIGNED}>— no super-task —</option>
+              {superdata.supertasks.map(s => <option key={s.id} value={s.id}>🎯 {s.name}</option>)}
+            </select>
+            <button className="btn sm ghost" title="create / manage super-tasks" onClick={() => setStModal(true)}>🎯 ＋</button>
             <span style={{ flex: 1 }} />
             <span className="muted runbar-count">{visible.length}/{runsOf(sel).length}</span>
             <select className="sel" value={sortKey} onChange={e => setSortKey(e.target.value)} title="sort by">
@@ -266,7 +323,8 @@ export default function RunList({ onOpen, onSettings }) {
               <span className="pill phase" onClick={() => onOpen(r.run_id)}>{r.phase}</span>
               <div onClick={() => onOpen(r.run_id)} style={{ cursor: 'pointer', flex: 1 }}>
                 <div><b>{r.label || r.run_id}</b> <span className="muted">· {r.label ? r.run_id + ' · ' : ''}{r.task_id}</span>
-                  {r.project_id && projName[r.project_id] && <span className="pill" style={{ marginLeft: 6 }}>📁 {projName[r.project_id]}</span>}</div>
+                  {r.project_id && projName[r.project_id] && <span className="pill" style={{ marginLeft: 6 }}>📁 {projName[r.project_id]}</span>}
+                  {r.supertask_id && stName[r.supertask_id] && <span className="pill st-pill" style={{ marginLeft: 6 }}>🎯 {stName[r.supertask_id]}</span>}</div>
                 <div className="goal">{r.goal}</div>
               </div>
               <div style={{ textAlign: 'right' }}>
@@ -279,9 +337,9 @@ export default function RunList({ onOpen, onSettings }) {
               <div className="run-actions">
                 <button className="ic dots" title="run actions"
                         onClick={e => { e.stopPropagation(); setRunMenu(m => m === r.run_id ? null : r.run_id) }}>⋮</button>
-                {runMenu === r.run_id && <RunMenu r={r} projects={proj.projects}
-                  onOpen={onOpen} onMove={moveRun} onRename={setRunRename} onDelete={removeRun}
-                  onClose={() => setRunMenu(null)} />}
+                {runMenu === r.run_id && <RunMenu r={r} projects={proj.projects} supertasks={superdata.supertasks}
+                  onOpen={onOpen} onMove={moveRun} onSetSuper={assignToSuper} onManageSupers={() => setStModal(true)}
+                  onRename={setRunRename} onDelete={removeRun} onClose={() => setRunMenu(null)} />}
               </div>
             </div>
           ))}
@@ -298,6 +356,10 @@ export default function RunList({ onOpen, onSettings }) {
         title="Rename run" label={`Display name for ${runRename.run_id} (clear it to fall back to the id).`}
         placeholder={runRename.run_id} initial={runRename.label || ''} confirm="Save" allowEmpty
         onSubmit={submitRunRename} onClose={() => setRunRename(null)} />}
+
+      {stModal && <SuperTaskModal supertasks={superdata.supertasks}
+        onCreate={createSuper} onRename={renameSuper} onDelete={removeSuper}
+        onClose={() => setStModal(false)} />}
 
       {starting && <StartRun onClose={() => setStarting(false)}
         onStarted={(id) => { setStarting(false); loadRuns(); onOpen(id) }} />}

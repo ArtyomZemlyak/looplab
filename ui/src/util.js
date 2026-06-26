@@ -319,6 +319,14 @@ export const assignRun = (runId, project_id) => post(`/api/runs/${encodeURICompo
 export const renameRun = (runId, label) => send(`/api/runs/${encodeURIComponent(runId)}`, 'PATCH', { label })
 export const deleteRun = (runId) => send(`/api/runs/${encodeURIComponent(runId)}`, 'DELETE')
 
+// super-tasks: a user-managed, flat grouping of runs by the global task they attack (parallel axis
+// to projects). create / rename / delete the bucket, then assign any run (existing or new) to it.
+export const listSupertasks = () => get('/api/supertasks')
+export const createSupertask = (name, task_id = null) => post('/api/supertasks', { name, task_id })
+export const renameSupertask = (id, name) => send(`/api/supertasks/${id}`, 'PATCH', { name })
+export const deleteSupertask = (id) => send(`/api/supertasks/${id}`, 'DELETE')
+export const assignSupertask = (runId, supertask_id) => post(`/api/runs/${encodeURIComponent(runId)}/supertask`, { supertask_id })
+
 export const gpuStat = () => get('/api/gpu')
 
 // ---- settings + run launch ----
