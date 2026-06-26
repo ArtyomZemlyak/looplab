@@ -137,6 +137,11 @@ def test_command_to_action_mapping():
     assert _command_to_action(_Command(action="approve"), s)["data"] == {"node_id": 9}  # defaults to best
     assert _command_to_action(_Command(action="stop"), s)["type"] == "run_abort"
     assert _command_to_action(_Command(action="advise"), s) is None  # not actionable -> chat reply
+    # guidance steers the search via a hint (not a forced node): text carries the researcher directive
+    h = _command_to_action(_Command(action="hint", text="use log1p targets + domain features"), s)
+    assert h["type"] == "hint" and h["data"]["text"] == "use log1p targets + domain features"
+    assert _command_to_action(_Command(action="hint", text=""), s) is None  # empty hint -> not actionable
+    assert _command_to_action(_Command(action="deep_research"), s)["type"] == "deep_research"
 
 
 def test_command_endpoint_returns_action(tmp_path, monkeypatch):
@@ -147,6 +152,68 @@ def test_command_endpoint_returns_action(tmp_path, monkeypatch):
     monkeypatch.setattr("looplab.parse.parse_structured", lambda *a, **k: _Command(action="promote", node_id=2))
     r = client.post("/api/runs/demo/command", json={"instruction": "promote node 2"}).json()
     assert r["ok"] is True and r["action"]["type"] == "promote" and r["action"]["data"]["node_id"] == 2
+
+
+def test_command_endpoint_guidance_becomes_steering_hint(tmp_path, monkeypatch):
+    """A guiding chat message must STEER the search (a hint the researcher follows), not just reply.
+    The router classifies guidance as a hint with the researcher directive in `text` + a friendly
+    human ack in `rationale`; the endpoint surfaces both so the boss applies it as a control event."""
+    _build_run(tmp_path, "demo", writer=None)
+    client = TestClient(make_app(tmp_path))
+    from looplab.server import _Command
+    monkeypatch.setattr("looplab.server.make_llm_client", lambda s: object())
+    monkeypatch.setattr("looplab.parse.parse_structured",
+        lambda *a, **k: _Command(action="hint", text="use log1p-transformed targets + volume features",
+                                 rationale="Got it — I'll have the researcher try those."))
+    r = client.post("/api/runs/demo/command",
+                    json={"instruction": "look up how people win nomad2018 and try it"}).json()
+    assert r["ok"] and r["action"]["type"] == "hint"
+    assert "log1p" in r["action"]["data"]["text"]              # the researcher directive
+    assert "researcher" in r["action"]["rationale"]            # the human-facing acknowledgement
+
+
+def test_pending_hint_reaches_researcher_prompt(monkeypatch):
+    """End of the steering chain: a folded `hint` actually appears as an 'Operator directive' in the
+    proposal prompt the researcher sends — this is HOW a chat guidance message changes the search."""
+    from looplab.roles import LLMResearcher
+    from looplab.models import Idea, RunState
+    captured = {}
+
+    def fake_parse(client, messages, schema, parser):
+        captured["messages"] = messages
+        return Idea(operator="improve", params={"degree": 3.0}, rationale="r")
+
+    monkeypatch.setattr("looplab.roles.parse_structured", fake_parse)
+    r = LLMResearcher(client=object(), space_hint="space")
+    st = RunState(goal="min", direction="min")
+    st.pending_hints = [{"text": "use log1p targets + domain features"}]
+    r.propose(st, None)
+    user = next(m["content"] for m in captured["messages"] if m["role"] == "user")
+    assert "Operator directives" in user and "log1p targets + domain features" in user
+
+
+def test_chat_uses_the_runs_snapshot_model_not_ui_env(tmp_path, monkeypatch):
+    """One source of truth: when a run records its model in config.snapshot.json, the UI chat/command
+    speak with THAT model (reproducible, honest trace) — even if the UI server's own env points at a
+    different model. (Fixes the gap where a DeepSeek run's chat replied via the UI's gpt-oss model.)"""
+    import json as _json
+    _build_run(tmp_path, "demo", writer=None)
+    # the run was launched on a specific model -> recorded in its snapshot (overwrite the test default)
+    (tmp_path / "demo" / "config.snapshot.json").write_text(_json.dumps(
+        {"llm_model": "deepseek/deepseek-v4-flash", "llm_base_url": "https://openrouter.ai/api/v1"}))
+    # the UI server env, by contrast, is on a different model
+    monkeypatch.setenv("LOOPLAB_LLM_MODEL", "openai/gpt-oss-120b:free")
+    client = TestClient(make_app(tmp_path))
+    captured = {}
+
+    class _Cap:
+        def __init__(self, s): self.model = s.llm_model; captured["model"] = s.llm_model
+        def complete_text(self, msgs): return "ok"
+
+    monkeypatch.setattr("looplab.server.make_llm_client", lambda s: _Cap(s))
+    r = client.post("/api/runs/demo/chat", json={"messages": [{"role": "user", "content": "hi"}]}).json()
+    assert captured["model"] == "deepseek/deepseek-v4-flash"     # the RUN's model, not the UI env
+    assert r["trace"]["model"] == "deepseek/deepseek-v4-flash"   # and the trace reports it honestly
 
 
 def test_command_endpoint_soft_fails_offline(tmp_path, monkeypatch):

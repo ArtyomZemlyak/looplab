@@ -101,3 +101,50 @@ def test_delete_top_level_unassigns_runs(tmp_path):
     s.delete(top.id)
     assert s.project_of("run_x") is None             # no parent -> assignment removed
     assert s.load()["projects"] == []
+
+
+# --------------------------------------------------------------- super-tasks (flat parallel axis)
+def test_supertask_create_assign_and_orthogonal_to_projects(tmp_path):
+    s = store(tmp_path)
+    proj = s.create("Q3")                            # the two axes are independent
+    st = s.create_supertask("nomad2018", task_id="nomad2018-predict-transparent-conductors")
+    assert st["id"].startswith("st_") and st["name"] == "nomad2018"
+    assert st["task_id"] == "nomad2018-predict-transparent-conductors"
+    s.assign("run_a", proj.id)                        # project axis
+    s.assign_supertask("run_a", st["id"])             # super-task axis (create_supertask returns a dict)
+    assert s.project_of("run_a") == proj.id           # a run sits in BOTH at once
+    assert s.supertask_of("run_a") == st["id"]
+    s.assign_supertask("run_a", None)                 # clear only the super-task
+    assert s.supertask_of("run_a") is None and s.project_of("run_a") == proj.id
+
+
+def test_supertask_rename_and_unknown_id_guard(tmp_path):
+    s = store(tmp_path)
+    st = s.create_supertask("tmp")
+    s.rename_supertask(st["id"], "MLE-bench")
+    assert s.load()["supertasks"][0]["name"] == "MLE-bench"
+    with pytest.raises(ProjectError):
+        s.assign_supertask("run_a", "st_missing")     # assign to unknown -> rejected
+    with pytest.raises(ProjectError):
+        s.rename_supertask("st_missing", "x")
+    with pytest.raises(ProjectError):
+        s.delete_supertask("st_missing")
+
+
+def test_supertask_delete_unassigns_its_runs(tmp_path):
+    s = store(tmp_path)
+    a, b = s.create_supertask("A"), s.create_supertask("B")
+    s.assign_supertask("r1", a["id"])
+    s.assign_supertask("r2", b["id"])
+    s.delete_supertask(a["id"])
+    assert s.supertask_of("r1") is None               # run kept, just unassigned
+    assert s.supertask_of("r2") == b["id"]            # untouched
+    assert [x["id"] for x in s.load()["supertasks"]] == [b["id"]]
+
+
+def test_forget_drops_supertask_assignment(tmp_path):
+    s = store(tmp_path)
+    st = s.create_supertask("X")
+    s.assign_supertask("run_z", st["id"])
+    s.forget("run_z")                                 # called when a run dir is deleted
+    assert s.supertask_of("run_z") is None
