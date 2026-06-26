@@ -626,6 +626,10 @@ textarea.text { min-height: 220px; font-family: ui-monospace, Consolas, monospac
 /* ── Chat actions (round-7): the boss APPLIES immediately; the row is the audit record ──── */
 .feed-msg.action { border-left-color: var(--line-2); }
 .feed-msg.action .fm-ic-svg { color: var(--accent); }
+/* a highlighted (critical) action must keep the accent border + gold icon — these win over the
+   plain .action rules above by being a compound (higher-specificity) selector, not by source order. */
+.feed-msg.action.hl { border-left-color: var(--accent); }
+.feed-msg.action.hl .fm-ic-svg { color: var(--best); }
 .pa-label { font-size: 12.5px; font-weight: 600; }
 .pa-why { font-size: 11px; margin: 1px 0; color: var(--fg-mut); }
 .pa-status { font-size: 11px; font-weight: 600; flex: none; }

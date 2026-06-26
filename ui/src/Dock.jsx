@@ -4,7 +4,7 @@ import Markdown from './markdown.jsx'
 import { NodeTrace, LlmCall } from './Inspector.jsx'
 import { OpIcon } from './icons.jsx'
 
-const HELP = 'Commands: /confirm #n · /ablate #n · /fork #n · /promote #n · /note #n text · /hint text · /strategy policy=ucb fidelity=low · /deep-research · /experiment <idea> · /approve #n · /ratify · /pause · /resume · /stop · /refresh. Or just type what you want and I’ll propose an action to confirm.'
+const HELP = 'Commands: /confirm #n · /ablate #n · /fork #n · /promote #n · /note #n text · /hint text · /strategy policy=ucb fidelity=low · /deep-research · /experiment <idea> · /approve #n · /ratify · /pause · /resume · /stop · /refresh. Or just say what you want and I’ll do it right away (boss mode — actions apply immediately; reversible ones offer Undo).'
 
 // Parse a leading-slash command into a control action (no LLM — deterministic + offline-safe). Returns
 // {action} | {error} | {help} | {llm:instruction} (route to the action-router) | null (not a command).
@@ -379,7 +379,6 @@ export default function Dock({ runId, live, liveSeq, viewSeq, setViewSeq, onFocu
   const [busy, setBusy] = useState(false)
   const [ctx, setCtx] = useState([])                      // node-id context chips for the next message
   const [dropActive, setDropActive] = useState(false)
-  const endRef = useRef(null)
   const feedRef = useRef(null)
   const msgCtr = useRef(0)
   // round-7: scrubber + filter chips collapse into one block to save space; default hidden, remembered.
@@ -454,8 +453,8 @@ export default function Dock({ runId, live, liveSeq, viewSeq, setViewSeq, onFocu
     if (el) requestAnimationFrame(() => { el.scrollTop = el.scrollHeight })
   }, [feed.length, busy, atLive])
 
-  const pushAssistant = (content, trace = null, highlight = false) =>
-    setMsgs(m => [...m, { role: 'assistant', content, trace, highlight, ts: tailTs(), seq: chatSeq() }])
+  const pushAssistant = (content, trace = null) =>
+    setMsgs(m => [...m, { role: 'assistant', content, trace, ts: tailTs(), seq: chatSeq() }])
   // round-7 boss mode: the action is APPLIED immediately (no confirm card). Reversible verbs
   // (pause⇄resume) carry an Undo; critical verbs (abort) are highlighted so they stay visible.
   const isCritical = (a) => a.type === 'run_abort' || a.type === 'node_abort'
@@ -486,8 +485,8 @@ export default function Dock({ runId, live, liveSeq, viewSeq, setViewSeq, onFocu
   // A reply carries its `trace` (the LLM I/O) so the chat row can expand into a langfuse-style card.
   const runCommand = async (instruction, nid, history) => {
     const r = await command(runId, { messages: history, node_id: nid, instruction })
-    if (r.ok && r.action) await autoApply(r.action, r.highlight)
-    else if (r.ok && r.reply) pushAssistant(r.reply, r.trace, r.highlight)
+    if (r.ok && r.action) await autoApply(r.action)
+    else if (r.ok && r.reply) pushAssistant(r.reply, r.trace)
     else {
       // Soft-fail to advisory chat. `history` is the PRIOR turns; the current instruction must be
       // appended or the model answers the previous message (it's not in `history` yet).
@@ -501,8 +500,7 @@ export default function Dock({ runId, live, liveSeq, viewSeq, setViewSeq, onFocu
     const nid = ctx.length ? ctx[ctx.length - 1] : (selectedId ?? null)
     const history = msgs.filter(m => m.role === 'user' || m.role === 'assistant').map(m => ({ role: m.role, content: m.content }))
     setMsgs(m => [...m, { role: 'user', content: text, ts: tailTs(), seq: chatSeq(), ctx: [...ctx] }])
-    setInput(''); setCtx([]); setBusy(true)
-    requestAnimationFrame(() => { const el = feedRef.current; if (el) el.scrollTop = el.scrollHeight })
+    setInput(''); setCtx([]); setBusy(true)   // the feed.length effect scrolls the new turn into view
     try {
       if (text.startsWith('/')) {
         const p = parseSlash(text, nid, live || {})
@@ -540,7 +538,16 @@ export default function Dock({ runId, live, liveSeq, viewSeq, setViewSeq, onFocu
     <div className="dock chat-dock">
       <div className="dock-tabs">
         <span className="chat-label"><OpIcon name="chat" size={14} /> chat &amp; timeline</span>
-        <span className={'hist-tag-mini ' + (atLive ? 'live' : 'hist')}>{atLive ? `live · ${liveSeq}` : `replay · ${sliderVal}/${liveSeq}`}</span>
+        {/* clickable so the user can return to live even when the controls (with the Live button) are hidden */}
+        <span className={'hist-tag-mini ' + (atLive ? 'live' : 'hist')}
+              onClick={() => { if (!atLive) { setViewSeq(null); setDrag(null) } }}
+              style={atLive ? undefined : { cursor: 'pointer' }}
+              title={atLive ? '' : 'click to return to live'}>
+          {atLive ? `live · ${liveSeq}` : `replay ${sliderVal}/${liveSeq} → live`}</span>
+        {/* a left-over filter is invisible once controls collapse — surface it so the feed never looks empty for no reason */}
+        {!showControls && (filter || kinds.size > 0) &&
+          <span className="hist-tag-mini hist" style={{ cursor: 'pointer' }}
+                title="a filter is active — open controls to change it" onClick={toggleControls}>⌕ filtered</span>}
         <span className="spacer" style={{ flex: 1 }} />
         <button className={'btn sm ghost' + (showControls ? ' on' : '')} title="time-travel & filters"
                 onClick={toggleControls}><OpIcon name="sliders" size={13} /> controls</button>
@@ -575,7 +582,6 @@ export default function Dock({ runId, live, liveSeq, viewSeq, setViewSeq, onFocu
                   : <ChatRow key={'m' + it.i} m={it.m} />)}
           {(() => { const st = busy ? 'Working on your request…' : (atLive ? agentStatus(live, log) : null)
             return st ? <div className="agent-status"><span className="as-dot" />{st}</div> : null })()}
-          <div ref={endRef} />
         </div>
         <div className={'chat-in' + (dropActive ? ' drop' : '')}
              onDragOver={e => { e.preventDefault(); setDropActive(true) }}
