@@ -45,6 +45,32 @@ def _is_transient(e: BaseException) -> bool:
     return isinstance(e, (http.client.IncompleteRead, http.client.RemoteDisconnected))
 
 
+def _parse_chat_body(raw: Optional[str]) -> Optional[dict]:
+    """Parse an OpenAI-compatible chat response body into its dict, or None when the body is
+    UNRECOVERABLE. A hosted gateway can return HTTP 200 with a body that is empty / whitespace /
+    truncated (it dropped the connection mid-response) or that interleaves SSE keep-alive COMMENT
+    lines (': OPENROUTER PROCESSING' — sent to hold the socket open while a model is queued) around
+    the JSON. A None return tells `_post` to retry the request like a transient network failure
+    instead of crashing the run on a single gateway hiccup. A parsed dict is always returned as-is
+    (including an `{"error": ...}` envelope), so the caller's no-`choices` check still fails fast on
+    a genuine bad-request — only an unparseable body is retried."""
+    if not raw or not raw.strip():
+        return None
+    try:
+        obj = json.loads(raw)
+    except (json.JSONDecodeError, ValueError):
+        # Recover the keepalive-interleaved case: drop blank + ':'-comment lines, re-parse the rest.
+        kept = "\n".join(ln for ln in raw.splitlines()
+                         if ln.strip() and not ln.lstrip().startswith(":"))
+        if not kept.strip():
+            return None
+        try:
+            obj = json.loads(kept)
+        except (json.JSONDecodeError, ValueError):
+            return None
+    return obj if isinstance(obj, dict) else None
+
+
 def split_think(text: str) -> tuple[str, str]:
     """(thinking, answer) split — thin wrapper over `parse.split_think`, imported lazily to avoid
     the parse↔llm import cycle (parse imports LLMError from here)."""
@@ -173,12 +199,11 @@ class OpenAICompatibleClient:
         # Rate-limit/transient resilience: a 429 (or 5xx) is retried with backoff (honoring a
         # Retry-After header when given) BEFORE surfacing — free/shared endpoints (e.g. OpenRouter
         # free tier) rate-limit bursts, and a single 429 shouldn't crash the whole run.
-        raw = None
+        body = None
         for attempt in range(self._max_retries + 1):
             try:
                 with urllib.request.urlopen(req, timeout=self.timeout) as resp:
                     raw = resp.read().decode("utf-8")
-                break
             except urllib.error.HTTPError as e:
                 if e.code in (429, 500, 502, 503, 504) and attempt < self._max_retries:
                     ra = _retry_after_seconds(e.headers.get("Retry-After") if e.headers else None)
@@ -187,8 +212,9 @@ class OpenAICompatibleClient:
                     continue
                 hint = (" — check the API key (LOOPLAB_LLM_API_KEY)" if e.code == 401 else "")
                 raise LLMError(f"LLM request to {self.base_url} failed: {e}{hint}") from e
-            except (urllib.error.URLError, TimeoutError, OSError) as e:
-                # Retry TRANSIENT network failures (timeout, reset, TLS EOF mid-read) — the modes that
+            except (urllib.error.URLError, TimeoutError, OSError, http.client.IncompleteRead) as e:
+                # Retry TRANSIENT network failures (timeout, reset, TLS EOF / IncompleteRead mid-read)
+                # — the modes that
                 # otherwise abort a long run, since the tool-using proposer / pilot call client.chat
                 # directly and don't wrap LLMError. A refused connection / DNS / TLS CERT error is a
                 # steady-state "endpoint down or misconfigured" signal: fail FAST so /api/llm/health
@@ -197,13 +223,26 @@ class OpenAICompatibleClient:
                     time.sleep(min(2.0 * (2 ** attempt), 30.0))
                     continue
                 raise LLMError(f"LLM request to {self.base_url} failed: {e}") from e
-        if raw is None:  # loop exhausted retries on a transient code without ever succeeding
+            else:
+                # HTTP 200 read cleanly, but the body can still be unusable: a hosted gateway
+                # sometimes returns an empty / whitespace / SSE-keepalive-only body (OpenRouter sends
+                # ': OPENROUTER PROCESSING' heartbeats while a model is queued and can finish with no
+                # JSON payload). (A mid-read socket drop is caught above as IncompleteRead.) Treat an
+                # unparseable 200 like a transient network failure — retry with backoff — rather than
+                # crash the run on a single gateway hiccup. `_parse_chat_body`
+                # returns the dict for any valid JSON object (so an `{"error": ...}` envelope still
+                # fails fast at the no-`choices` check below), and None only when truly unrecoverable.
+                parsed = _parse_chat_body(raw)
+                if parsed is not None:
+                    body = parsed
+                    break
+                if attempt < self._max_retries:
+                    time.sleep(min(2.0 * (2 ** attempt), 30.0))
+                    continue
+                raise LLMError(f"LLM returned non-JSON after {self._max_retries + 1} attempts: {raw[:200]!r}")
+        if body is None:  # loop exhausted retries on a transient code without ever succeeding
             raise LLMError(f"LLM request to {self.base_url} failed: no response after retries")
-        try:
-            body = json.loads(raw)
-        except (json.JSONDecodeError, ValueError) as e:
-            raise LLMError(f"LLM returned non-JSON: {raw[:200]!r}") from e
-        if not isinstance(body, dict) or "choices" not in body or not body["choices"]:
+        if "choices" not in body or not body["choices"]:
             # Ollama/vLLM emit {"error": ...} envelopes on a bad request — don't index [0] blind.
             raise LLMError(f"LLM response had no choices: {str(body)[:200]}")
         usage = body.get("usage") or {}

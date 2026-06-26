@@ -164,6 +164,120 @@ def test_post_fails_fast_on_tls_cert_error(monkeypatch):
     assert calls["open"] == 1 and calls["sleep"] == 0
 
 
+# --- bad-200-body resilience: an empty / keepalive-only / truncated 200 is a transient gateway
+# hiccup (OpenRouter ': OPENROUTER PROCESSING' heartbeats, dropped socket) → retry, not crash -----
+class _BytesResp:
+    """A urlopen context manager whose body is whatever bytes/str the test queues."""
+    def __init__(self, payload):
+        self._payload = payload if isinstance(payload, bytes) else payload.encode()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+    def read(self):
+        return self._payload
+
+
+_GOOD = json.dumps({"choices": [{"message": {"role": "assistant", "content": "ok"}}], "usage": {}})
+
+
+def test_post_retries_empty_200_body(monkeypatch):
+    """A 200 with an empty / whitespace body (gateway dropped the socket before the final JSON) must
+    be retried with backoff and then succeed — it crashed the DeepSeek run before this fix."""
+    import looplab.llm as llm
+    bodies = iter(["", "  \n \n\n ", _GOOD])      # two bad 200s, then the real payload
+    calls = {"n": 0}
+
+    def fake_urlopen(req, timeout=None):
+        calls["n"] += 1
+        return _BytesResp(next(bodies))
+
+    monkeypatch.setattr(llm.urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(llm.time, "sleep", lambda *_a: None)
+    c = llm.OpenAICompatibleClient("m", base_url="http://x/v1")
+    assert c.complete_text([{"role": "user", "content": "go"}]) == "ok"
+    assert calls["n"] == 3                          # retried twice, succeeded on the 3rd
+
+
+def test_post_recovers_sse_keepalive_comments(monkeypatch):
+    """OpenRouter interleaves ': OPENROUTER PROCESSING' SSE comment lines with the JSON on a slow
+    non-streaming call; the body is recovered by dropping comment lines — no retry needed."""
+    import looplab.llm as llm
+    body = f": OPENROUTER PROCESSING\n\n: OPENROUTER PROCESSING\n\n{_GOOD}\n"
+    calls = {"n": 0}
+
+    def fake_urlopen(req, timeout=None):
+        calls["n"] += 1
+        return _BytesResp(body)
+
+    monkeypatch.setattr(llm.urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(llm.time, "sleep", lambda *_a: None)
+    c = llm.OpenAICompatibleClient("m", base_url="http://x/v1")
+    assert c.complete_text([{"role": "user", "content": "go"}]) == "ok"
+    assert calls["n"] == 1                          # parsed on the first attempt, no retry
+
+
+def test_post_retries_incomplete_read(monkeypatch):
+    """A socket-level truncation (http.client.IncompleteRead from resp.read() — the gateway dropped
+    the connection mid-body) is transient and must be retried, not abort the run."""
+    import http.client
+    import looplab.llm as llm
+    calls = {"n": 0}
+
+    class _TruncResp:
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def read(self): raise http.client.IncompleteRead(b"partial")
+
+    def fake_urlopen(req, timeout=None):
+        calls["n"] += 1
+        return _OkResp() if calls["n"] >= 3 else _TruncResp()
+
+    monkeypatch.setattr(llm.urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(llm.time, "sleep", lambda *_a: None)
+    c = llm.OpenAICompatibleClient("m", base_url="http://x/v1")
+    assert c.complete_text([{"role": "user", "content": "go"}]) == "ok"
+    assert calls["n"] == 3                            # retried the truncated reads, then succeeded
+
+
+def test_post_raises_after_persistent_non_json(monkeypatch):
+    """A persistently unparseable 200 body still surfaces a clean LLMError once retries are spent."""
+    import looplab.llm as llm
+    calls = {"n": 0}
+
+    def fake_urlopen(req, timeout=None):
+        calls["n"] += 1
+        return _BytesResp("<html>502 Bad Gateway</html>")
+
+    monkeypatch.setattr(llm.urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(llm.time, "sleep", lambda *_a: None)
+    c = llm.OpenAICompatibleClient("m", base_url="http://x/v1")
+    with pytest.raises(llm.LLMError, match="non-JSON"):
+        c.complete_text([{"role": "user", "content": "go"}])
+    assert calls["n"] == 5                           # 1 + _max_retries attempts, then raises
+
+
+def test_post_fails_fast_on_error_envelope(monkeypatch):
+    """A valid-JSON `{"error": ...}` envelope (genuine bad request) is NOT a transient body — it must
+    fail fast at the no-choices check with ONE attempt, not waste the retry budget."""
+    import looplab.llm as llm
+    calls = {"n": 0}
+
+    def fake_urlopen(req, timeout=None):
+        calls["n"] += 1
+        return _BytesResp(json.dumps({"error": {"code": 400, "message": "bad request"}}))
+
+    monkeypatch.setattr(llm.urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(llm.time, "sleep", lambda *_a: None)
+    c = llm.OpenAICompatibleClient("m", base_url="http://x/v1")
+    with pytest.raises(llm.LLMError, match="no choices"):
+        c.complete_text([{"role": "user", "content": "go"}])
+    assert calls["n"] == 1                           # error envelope fails fast, no retry
+
+
 def test_h1_guided_json_adds_schema_constraints():
     """H1: with guided_json on, complete_tool sends response_format + guided_json built from the schema."""
     from looplab.llm import OpenAICompatibleClient
