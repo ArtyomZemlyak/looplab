@@ -2,7 +2,8 @@ import React, { useEffect, useMemo, useState } from 'react'
 import { get, fmt, fmtDate, fmtAgo, listProjects, createProject, patchProject, deleteProject, assignRun, renameRun, deleteRun,
   listSupertasks, createSupertask, renameSupertask, deleteSupertask, assignSupertask } from './util.js'
 import MapView from './MapView.jsx'
-import StartRun from './StartRun.jsx'
+import GenesisChat from './GenesisChat.jsx'
+import ScopeReport from './ScopeReport.jsx'
 
 const ALL = '__all__', UNASSIGNED = '__unassigned__'
 
@@ -121,6 +122,9 @@ export default function RunList({ onOpen, onSettings }) {
   const [stFilter, setStFilter] = useState(ALL)             // super-task filter (ALL | UNASSIGNED | id)
   const [superdata, setSuperdata] = useState({ supertasks: [], assignments: {} })
   const [stModal, setStModal] = useState(false)             // manage-super-tasks popup open?
+  const [showReport, setShowReport] = useState(false)       // cross-run scope-report panel open?
+  const [seed, setSeed] = useState('')                      // global-chat text seeded into the genesis flow
+  const [chatInput, setChatInput] = useState('')            // the global chat bar input
 
   const loadRuns = () => get('/api/runs').then(setRuns).catch(() => setRuns([]))
   const loadProjects = () => listProjects().then(setProj).catch(() => {})
@@ -183,6 +187,16 @@ export default function RunList({ onOpen, onSettings }) {
     while (cur) { path.unshift(cur); cur = proj.projects.find(p => p.id === cur.parent_id) }
     return path
   }, [sel, proj.projects])
+
+  // The scope a cross-run report would cover, by the CURRENT view: an explicit super-task / task filter
+  // is the user's intent to scope by it; otherwise the open folder. null = nothing reportable (All runs,
+  // no filter) → hide the Report button.
+  const scope = useMemo(() => {
+    if (stFilter !== ALL && stFilter !== UNASSIGNED) return { type: 'supertask', id: stFilter, label: '🎯 ' + (stName[stFilter] || stFilter) }
+    if (taskFilter !== ALL) return { type: 'task', id: taskFilter, label: 'task ' + taskFilter }
+    if (sel !== ALL && sel !== UNASSIGNED) return { type: 'project', id: sel, label: '📁 ' + (projName[sel] || sel) }
+    return null
+  }, [stFilter, taskFilter, sel, stName, projName])
 
   const toggle = (id) => setExpanded(s => { const n = new Set(s); n.has(id) ? n.delete(id) : n.add(id); return n })
   const refresh = () => { loadProjects(); loadRuns() }
@@ -251,8 +265,20 @@ export default function RunList({ onOpen, onSettings }) {
           <button className={view === 'list' ? 'on' : ''} onClick={() => setView('list')}>☰ List</button>
           <button className={view === 'map' ? 'on' : ''} onClick={() => setView('map')}>🗺 Map</button>
         </div>
-        <button className="btn sm primary" onClick={() => setStarting(true)}>▶ New run</button>
+        <button className="btn sm primary" onClick={() => { setSeed(''); setStarting(true) }}>▶ New run</button>
         <button className="btn sm ghost" title="settings" onClick={() => onSettings && onSettings()}>⚙ Settings</button>
+      </div>
+
+      {/* universal chat: type anything in the main menu — describe a run to create, the boss plans it.
+          Submitting seeds the same genesis flow as the New-run button. */}
+      <div className="global-chat">
+        <span className="gc-spark">✦</span>
+        <input className="text gc-input"
+          placeholder="Ask or start anything — “run nomad2018 on minimax, 100 nodes”, “a quick titanic baseline”…"
+          value={chatInput} onChange={e => setChatInput(e.target.value)}
+          onKeyDown={e => { if (e.key === 'Enter' && chatInput.trim()) { setSeed(chatInput.trim()); setStarting(true); setChatInput('') } }} />
+        <button className="btn primary" disabled={!chatInput.trim()}
+          onClick={() => { setSeed(chatInput.trim()); setStarting(true); setChatInput('') }}>Go</button>
       </div>
       {view === 'map' && <div style={{ flex: 1, minHeight: 0 }}><MapView onOpen={onOpen} /></div>}
       {view === 'list' && <div className="runlayout">
@@ -281,6 +307,11 @@ export default function RunList({ onOpen, onSettings }) {
             {breadcrumb.map(p => <React.Fragment key={p.id}><span className="sep">/</span>
               <span className="crumb" onClick={() => setSel(p.id)}>{p.name}</span></React.Fragment>)}
             {sel === UNASSIGNED && <><span className="sep">/</span><span className="crumb">Unassigned</span></>}
+            <span style={{ flex: 1 }} />
+            {scope && <div className="view-toggle crumb-report">
+              <button className={'vt report' + (showReport ? ' on' : '')} title={`cross-run report for ${scope.label}`}
+                onClick={() => setShowReport(true)}>★ Report<span className="vt-scope"> · {scope.label}</span></button>
+            </div>}
           </div>
           {runs && !!runsOf(sel).length && <div className="runbar">
             <input className="text runbar-q" placeholder="🔎 filter runs…" value={query}
@@ -361,8 +392,11 @@ export default function RunList({ onOpen, onSettings }) {
         onCreate={createSuper} onRename={renameSuper} onDelete={removeSuper}
         onClose={() => setStModal(false)} />}
 
-      {starting && <StartRun onClose={() => setStarting(false)}
-        onStarted={(id) => { setStarting(false); loadRuns(); onOpen(id) }} />}
+      {starting && <GenesisChat seed={seed} onClose={() => { setStarting(false); setSeed('') }}
+        onStarted={(id) => { setStarting(false); setSeed(''); loadRuns(); onOpen(id) }} />}
+
+      {showReport && scope && <ScopeReport scope={scope}
+        onOpen={(id) => { setShowReport(false); onOpen(id) }} onClose={() => setShowReport(false)} />}
     </div>
   )
 }

@@ -753,3 +753,54 @@ textarea.text { min-height: 220px; font-family: ui-monospace, Consolas, monospac
 .panel-bar .menu { display: flex; align-items: center; gap: 4px; flex-wrap: wrap; }
 .panel-sep { width: 1px; height: 16px; background: var(--line-2); margin: 0 6px; display: inline-block; }
 .panel-bar .btn.on { color: var(--fg); background: var(--bg-3); }
+
+/* ── Universal chat bar in the main menu (seeds the genesis flow) ───────────────── */
+.global-chat { display: flex; align-items: center; gap: 8px; padding: 9px 16px; flex: none;
+  border-bottom: 1px solid var(--line); background: var(--bg-1); }
+.global-chat .gc-spark { color: var(--accent); font-size: 14px; flex: none; }
+.global-chat .gc-input { flex: 1; min-width: 0; }
+.global-chat .btn { flex: none; }
+
+/* ── Genesis: chat-first run creation (boss proposes an editable spec card) ─────── */
+.gen-panel { width: min(960px, 96%); }
+.gen-wrap { display: flex; gap: 14px; align-items: stretch; }
+.gen-chat { flex: 1 1 56%; min-width: 0; display: flex; flex-direction: column; min-height: 420px; max-height: 64vh; }
+.gen-feed { flex: 1; overflow: auto; display: flex; flex-direction: column; gap: 4px; padding: 4px 2px; }
+.gen-empty { padding: 8px 4px; display: flex; flex-direction: column; align-items: flex-start; gap: 6px; }
+.gen-seed { text-align: left; background: var(--bg-2); border: 1px solid var(--line-2); color: var(--fg);
+  border-radius: 8px; padding: 7px 10px; font-size: 12.5px; cursor: pointer; width: 100%; }
+.gen-seed:hover { background: var(--bg-3); border-color: var(--accent-dim); }
+.gen-card { flex: 1 1 44%; min-width: 0; border-left: 1px solid var(--line); padding-left: 14px; display: flex; flex-direction: column; }
+.gen-card-h { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+.gen-card-empty { font-size: 12.5px; padding: 16px 4px; line-height: 1.5; }
+.gen-field { margin-bottom: 9px; }
+.gen-lab { font-size: 11px; color: var(--fg-mut); text-transform: uppercase; letter-spacing: .5px; margin-bottom: 3px; }
+.gen-help { font-size: 11px; color: var(--fg-mut); margin-top: 3px; }
+.gen-ro { font-size: 13px; padding: 6px 8px; background: var(--bg-2); border: 1px solid var(--line); border-radius: 6px;
+  overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.gen-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 9px; }
+
+/* ── Cross-run scope report (project / task / super-task) ───────────────────────── */
+/* cross-run Report trigger reuses the run's [★ Report] tab style (gold text → filled when open) */
+.crumbs .crumb-report { flex: none; }
+.crumbs .crumb-report .vt-scope { color: var(--fg-mut); font-weight: 400; }
+.crumbs .crumb-report .vt.report.on .vt-scope { color: rgba(255, 255, 255, .8); }
+.sr-panel { width: min(760px, 95%); max-height: 84vh; display: flex; flex-direction: column; }
+.sr-panel .panel-b { overflow: auto; }
+.sr-empty { padding: 22px 6px; text-align: center; }
+.sr-empty .sr-help { margin-top: 8px; font-size: 12px; color: var(--fg-mut); }
+.sr-meta { display: flex; flex-wrap: wrap; gap: 6px; font-size: 11.5px; color: var(--fg-mut); margin-bottom: 10px; }
+.sr-stale { color: var(--working); }
+.sr-headline { font-size: 16px; font-weight: 650; line-height: 1.35; margin-bottom: 6px; }
+.sr-verdict { font-size: 13px; color: var(--fg-dim); line-height: 1.5; margin-bottom: 12px;
+  border-left: 2px solid var(--accent-dim); padding-left: 10px; }
+.sr-sec { margin-bottom: 12px; }
+.sr-h { font-size: 11px; text-transform: uppercase; letter-spacing: .6px; color: var(--fg-mut); margin-bottom: 5px; }
+.sr-list { margin: 0; padding-left: 18px; display: flex; flex-direction: column; gap: 3px; }
+.sr-list li { font-size: 12.5px; line-height: 1.45; }
+.sr-bests { display: flex; flex-direction: column; gap: 4px; }
+.sr-best { display: flex; align-items: baseline; gap: 8px; padding: 5px 8px; border-radius: 6px;
+  background: var(--bg-2); border: 1px solid var(--line); cursor: pointer; font-size: 12.5px; }
+.sr-best:hover { border-color: var(--accent-dim); background: var(--bg-3); }
+.sr-best .sr-m { font-variant-numeric: tabular-nums; color: var(--best); }
+.sr-best .sr-rid { color: var(--fg-dim); }
