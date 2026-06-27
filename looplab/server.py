@@ -771,6 +771,41 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
                 lines.append("solution.py:\n```python\n" + n.code[:2400] + "\n```")
         return "\n".join(lines)
 
+    def _boss_context(st, nid: Optional[int], full: "Path") -> str:
+        """Richer grounding for the BOSS (action-router + advisory chat): the node brief PLUS the
+        experiments digest (top / weakest / failures / themes — the working set) PLUS the latest
+        agent-authored report. So the boss decides WITH context (what's been tried, what's winning,
+        what failed) instead of just the single best node — and can still reach for the run-tools
+        when even this isn't enough."""
+        from .digest import experiments_digest
+        parts = [_node_context(st, nid, full)]
+        dg = experiments_digest(st)
+        if dg:
+            parts.append(dg)
+        # st.report is the _ReportOut dump (headline/verdict/champion_summary + lists) — NOT a 'content'
+        # string — so stitch the high-signal fields into a readable brief. (A legacy/plain-string
+        # report, or a {'content': ...} shape, is used as-is.)
+        rep = getattr(st, "report", None)
+        rtext = ""
+        if isinstance(rep, str):
+            rtext = rep
+        elif isinstance(rep, dict):
+            inner = rep.get("content")
+            if isinstance(inner, str):
+                rtext = inner                                  # legacy plain-string content
+            else:
+                src = inner if isinstance(inner, dict) else rep   # nested dict, or the _ReportOut dump
+                segs = [str(src[k]) for k in ("headline", "verdict", "champion_summary") if src.get(k)]
+                for k in ("what_worked", "what_didnt", "next_directions", "caveats"):
+                    v = src.get(k)
+                    if v:                                      # a malformed report may store a str/non-list
+                        items = v if isinstance(v, (list, tuple)) else [v]
+                        segs.append(f"{k.replace('_', ' ')}: " + "; ".join(str(x) for x in items))
+                rtext = "\n".join(segs)
+        if rtext:
+            parts.append("\nLatest run report (agent-authored):\n" + rtext[:1800])
+        return "\n".join(parts)
+
     @app.post("/api/runs/{run_id}/chat")
     async def chat(run_id: str, request: Request):
         """Advisory chat grounded on a run (and optionally one experiment node). Read-only — it
@@ -793,7 +828,7 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
             "actually recommend an experiment, name the operator (improve/draft/debug), give the exact "
             "params, and a one-line why — but don't force every reply into that shape; sometimes the "
             "right answer is just an explanation or a question.\n\n"
-            "Here is the run you're discussing:\n" + _node_context(st, nid, rd))
+            "Here is the run you're discussing:\n" + _boss_context(st, nid, rd))
         try:
             client = make_llm_client(_llm_settings(rd))
             text = client.complete_text([{"role": "system", "content": sys_prompt}, *msgs])
@@ -880,25 +915,75 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
             "(operator, params, rationale).\n"
             "- Other verbs: confirm(node_id), ablate(node_id), fork(node_id), promote(node_id), "
             "strategy(policy,fidelity), approve(node_id), ratify, pause, resume, stop. Use the node in "
-            "context when no id is given.\n\n" + _node_context(st, nid, rd))
+            "context when no id is given.\n\n" + _boss_context(st, nid, rd))
         convo = "\n".join(f"{m.get('role')}: {m.get('content')}" for m in msgs)
         user = (f"Instruction: {instruction}" if instruction else "") + (f"\n\nDiscussion:\n{convo}" if convo else "")
         from .parse import parse_structured
+
+        def _route_with_tools() -> Optional["_Command"]:
+            """Boss decision grounded by the run-introspection tools: it MAY read experiments / data
+            before choosing, then emits ONE _Command. None when the model can't drive the tool loop
+            (then the caller falls back to a plain single-call route)."""
+            from .agent import CompositeTools, drive_tool_loop
+            from .run_tools import RunTools
+            providers = [RunTools()]
+            try:                                  # DataTools needs the task; add it when we can load it
+                from .run_tools import DataTools
+                from .tasks import load_task
+                snap = rd / "task.snapshot.json"
+                if snap.exists():
+                    providers.append(DataTools(load_task(snap)))
+            except Exception:  # noqa: BLE001 - tools are best-effort; RunTools alone is fine
+                pass
+            tools = providers[0] if len(providers) == 1 else CompositeTools(providers)
+            tools.bind_state(st, st.nodes.get(nid) if nid is not None else None)
+            emit_spec = {"type": "function", "function": {
+                "name": "emit", "description": "Emit the ONE chosen action (action='advise' to reply).",
+                "parameters": _Command.model_json_schema()}}
+            tool_sys = sys_prompt + ("\n\nThe context above (digest + report) usually has what you "
+                "need — prefer to `emit` your decision directly. ONLY call a read-only tool first "
+                "(read_experiment for a node's code/trials, find_analogous, data_schema/data_profile) "
+                "when you SPECIFICALLY need a detail it doesn't show. Call `emit` exactly once.")
+            box: dict = {}
+            def _fin(args):
+                try:
+                    box["c"] = _Command(**{k: v for k, v in (args or {}).items()
+                                           if k in _Command.model_fields})
+                except Exception:  # noqa: BLE001 - junk emit -> treat as advise
+                    box["c"] = _Command()
+                return box["c"]
+            # max_turns kept TIGHT: the rich static context (digest + report) means the model usually
+            # emits on turn 1; the tool turns are only for when it genuinely needs to look deeper. A
+            # small cap bounds latency on slow/flaky hosted models (each turn is a network round-trip).
+            drive_tool_loop(client, tools, [{"role": "system", "content": tool_sys},
+                                            {"role": "user", "content": user}],
+                            emit_spec, max_turns=3, finalize=_fin, fallback=lambda _m: box.get("c"))
+            # loop exhausted without an emit (model kept calling tools) -> default to advise rather
+            # than None, so we don't burn extra round-trips on the single-call route for that case.
+            return box.get("c") or _Command()
+
         # The LLM calls are blocking + network-bound; run them off the event loop (anyio worker
         # thread) so a slow model doesn't stall SSE tails / other endpoints for every UI client.
+        c = None
         try:
-            c = await anyio.to_thread.run_sync(
-                lambda: parse_structured(client, [{"role": "system", "content": sys_prompt},
-                                                  {"role": "user", "content": user}], _Command, s.llm_parser))
+            c = await anyio.to_thread.run_sync(_route_with_tools)
+        except Exception:  # noqa: BLE001 - model can't tool-call / loop error -> single-call route
+            c = None
+        if c is None:
+            try:
+                c = await anyio.to_thread.run_sync(
+                    lambda: parse_structured(client, [{"role": "system", "content": sys_prompt},
+                                                      {"role": "user", "content": user}], _Command, s.llm_parser))
+            except Exception:  # noqa: BLE001 - parse fumble -> fall through to advisory reply
+                c = None
+        if c is not None:
             act = _command_to_action(c, st)
             if act is not None:
                 act["rationale"] = c.rationale or ""
                 return {"ok": True, "action": act}
-        except Exception:  # noqa: BLE001 - parse fumble -> fall through to advisory reply
-            pass
         try:
             advise_sys = ("You are an ML research collaborator embedded in an experiment loop. Answer "
-                          "concisely, grounded on the run.\n" + _node_context(st, nid, rd))
+                          "concisely, grounded on the run.\n" + _boss_context(st, nid, rd))
             advise_msgs = msgs + ([{"role": "user", "content": instruction}] if instruction else [])
             text = await anyio.to_thread.run_sync(lambda: client.complete_text(
                 [{"role": "system", "content": advise_sys}, *advise_msgs]))
