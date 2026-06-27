@@ -334,4 +334,15 @@ export const getSettings = () => get('/api/settings')
 export const saveSettings = (settings) => send('/api/settings', 'PUT', { settings })
 export const listTasks = () => get('/api/tasks')
 export const startRun = (body) => post('/api/start', body)
+// chat-first run creation: the pre-run BOSS turns a goal into an editable spec {run_id, task|task_file,
+// settings, rationale} + a conversational reply. `draft` carries the current card on refine turns.
+export const genesis = ({ messages = [], instruction = '', draft = null }) =>
+  post('/api/genesis', { messages, instruction, draft })
 export const research = (topic, save = false) => post('/api/research', { topic, save })
+
+// cross-run aggregate reports over a scope (project | task | supertask). GET returns the stored report
+// + staleness ({exists, content, generated_at, run_ids, stale, added, current_run_count}); generate
+// (re)synthesizes on demand via an agent with access to every run in the scope.
+const _scopeUrl = (type, id) => `/api/scope-report/${encodeURIComponent(type)}/${encodeURIComponent(id)}`
+export const getScopeReport = (type, id) => get(_scopeUrl(type, id))
+export const genScopeReport = (type, id) => post(`${_scopeUrl(type, id)}/generate`, {})

@@ -36,13 +36,26 @@ _KINDS = {"quadratic": ToyTask, "regression": RegressionTask,
           "classification": ClassificationTask}
 
 
-def load_task(path: str | Path) -> TaskAdapter:
-    data = json.loads(Path(path).read_text(encoding="utf-8"))
+def kinds() -> list[str]:
+    """The registered task kinds (for UI/validation — e.g. the genesis flow checks an inline task's
+    kind before materializing it)."""
+    return list(_KINDS)
+
+
+def validate_task(data: dict) -> TaskAdapter:
+    """Build + validate a task adapter from an in-memory dict (the inline-task / genesis path). Raises
+    on an unknown kind OR a kind-specific validation failure (e.g. mlebench_real resolving an unknown
+    competition slug) — the SAME validation the engine runs at startup, so callers can reject a bad
+    spec synchronously instead of spawning a detached engine that dies before writing any events."""
     kind = data.get("kind", "quadratic")
     cls = _KINDS.get(kind)
     if cls is None:
         raise ValueError(f"unknown task kind: {kind!r} (known: {sorted(_KINDS)})")
     return cls.model_validate(data)
+
+
+def load_task(path: str | Path) -> TaskAdapter:
+    return validate_task(json.loads(Path(path).read_text(encoding="utf-8")))
 
 
 def _agent_model(backend: str, model: str) -> str:

@@ -170,6 +170,11 @@ class ProjectStore:
     def project_of(self, run_id: str) -> str | None:
         return self.load()["assignments"].get(run_id)
 
+    def descendants(self, pid: str) -> set[str]:
+        """Public: all projects transitively under `pid` (excluding pid). Used to scope a folder
+        report to the project AND everything nested under it."""
+        return self._descendants(self.load(), pid)
+
     # ------------------------------------------------------------------ super-tasks (flat axis)
     def _require_st(self, data: dict, sid: str) -> dict:
         st = next((s for s in data["supertasks"] if s["id"] == sid), None)
