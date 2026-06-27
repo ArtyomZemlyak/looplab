@@ -304,3 +304,254 @@ def test_command_endpoint_soft_fails_offline(tmp_path, monkeypatch):
     monkeypatch.setattr("looplab.server.make_llm_client", _boom)
     r = client.post("/api/runs/demo/command", json={"instruction": "confirm 1"})
     assert r.status_code == 200 and r.json()["ok"] is False
+
+
+# ---- chat-first run creation: /api/start inline task + /api/genesis (pre-run BOSS) ----
+def test_start_accepts_inline_task_and_spawns(tmp_path, monkeypatch):
+    """The genesis flow launches via an INLINE task (no catalogue file): /api/start validates it,
+    materializes it to the run dir, and spawns the engine on that file."""
+    import json as _j
+    client = TestClient(make_app(tmp_path))
+    calls = []
+    monkeypatch.setattr("looplab.server.subprocess.Popen", lambda cmd, **k: calls.append(cmd) or None)
+    monkeypatch.setattr("looplab.tasks.validate_task", lambda d: d)      # don't depend on the mle-bench registry
+    body = {"run_id": "g-run",
+            "task": {"kind": "mlebench_real", "competition": "nomad2018-predict-transparent-conductors"},
+            "settings": {"llm_model": "minimax/minimax-m3"}}
+    r = client.post("/api/start", json=body).json()
+    assert r["ok"] is True and r["run_id"] == "g-run"
+    rd = tmp_path / "g-run"
+    ti = _j.loads((rd / "task.input.json").read_text(encoding="utf-8"))
+    assert ti["competition"] == "nomad2018-predict-transparent-conductors"
+    meta = _j.loads((rd / "ui_meta.json").read_text(encoding="utf-8"))
+    assert meta["task_file"].endswith("task.input.json")
+    assert calls and "run" in calls[0]                                   # engine spawned…
+    assert any("task.input.json" in str(x) for x in calls[0])           # …on the materialized file
+
+
+def test_start_rejects_unknown_inline_kind(tmp_path, monkeypatch):
+    client = TestClient(make_app(tmp_path))
+    monkeypatch.setattr("looplab.server.subprocess.Popen", lambda *a, **k: None)
+    r = client.post("/api/start", json={"run_id": "bad", "task": {"kind": "definitely-not-a-kind"}})
+    assert r.status_code == 400                                          # validated before any spawn
+
+
+def test_start_rejects_inline_task_missing_kind(tmp_path, monkeypatch):
+    """An inline task without an explicit kind is rejected (no silent default to 'quadratic')."""
+    client = TestClient(make_app(tmp_path))
+    monkeypatch.setattr("looplab.server.subprocess.Popen", lambda *a, **k: None)
+    r = client.post("/api/start", json={"run_id": "nk", "task": {"competition": "nomad2018-x"}})
+    assert r.status_code == 400
+    assert not (tmp_path / "nk" / "task.input.json").exists()            # nothing materialized
+
+
+def test_start_rejects_invalid_inline_task_before_spawn(tmp_path, monkeypatch):
+    """A structurally-bad inline task (e.g. mlebench_real with an unknown competition) 400s synchronously
+    instead of spawning a doomed detached engine."""
+    client = TestClient(make_app(tmp_path))
+    spawned = []
+    monkeypatch.setattr("looplab.server.subprocess.Popen", lambda *a, **k: spawned.append(a) or None)
+
+    def _bad(_d):
+        raise ValueError("unknown competition: nope")
+    monkeypatch.setattr("looplab.tasks.validate_task", _bad)
+    r = client.post("/api/start", json={"run_id": "iv", "task": {"kind": "mlebench_real", "competition": "nope"}})
+    assert r.status_code == 400 and not spawned                          # validated -> rejected -> no engine
+    assert not (tmp_path / "iv" / "task.input.json").exists()            # not materialized
+
+
+def test_start_rejects_reserved_run_id(tmp_path, monkeypatch):
+    """run_id 'reports' is reserved (the cross-run report store dir) and must be rejected."""
+    client = TestClient(make_app(tmp_path))
+    monkeypatch.setattr("looplab.server.subprocess.Popen", lambda *a, **k: None)
+    r = client.post("/api/start", json={"run_id": "reports", "task_file": str(TASK)})
+    assert r.status_code == 400
+
+
+def test_genesis_proposes_and_normalizes_spec(tmp_path, monkeypatch):
+    """The pre-run BOSS turns a one-line goal into an editable spec: name slugified, task passed
+    through, only known non-secret setting overrides kept."""
+    client = TestClient(make_app(tmp_path))
+    from looplab.server import _GenesisSpec
+    monkeypatch.setattr("looplab.server.make_llm_client", lambda s: object())
+    monkeypatch.setattr(
+        "looplab.parse.parse_structured",
+        lambda *a, **k: _GenesisSpec(
+            run_id="Nomad Minimax!!",
+            task={"kind": "mlebench_real", "competition": "nomad2018-predict-transparent-conductors"},
+            settings={"llm_model": "minimax/minimax-m3", "max_nodes": 100, "llm_api_key": "DROP_ME"},
+            reply="Plan: run nomad on minimax.", rationale="user asked"))
+    r = client.post("/api/genesis",
+                    json={"instruction": "run nomad2018 on minimax/minimax-m3, 100 nodes"}).json()
+    assert r["ok"] is True and r["reply"]
+    spec = r["spec"]
+    assert spec["run_id"] == "nomad-minimax"                             # invented name, slugified
+    assert spec["task"]["kind"] == "mlebench_real"
+    assert spec["settings"]["llm_model"] == "minimax/minimax-m3"
+    assert spec["settings"]["max_nodes"] == 100
+    assert "llm_api_key" not in spec["settings"]                         # secret stripped by normalizer
+
+
+def test_genesis_run_id_dedupes_against_existing(tmp_path, monkeypatch):
+    d = tmp_path / "nomad-minimax"; d.mkdir()                            # a REAL run (has events.jsonl)
+    (d / "events.jsonl").write_text('{"seq":0,"type":"run_started","data":{}}\n', encoding="utf-8")
+    client = TestClient(make_app(tmp_path))
+    from looplab.server import _GenesisSpec
+    monkeypatch.setattr("looplab.server.make_llm_client", lambda s: object())
+    monkeypatch.setattr("looplab.parse.parse_structured",
+                        lambda *a, **k: _GenesisSpec(run_id="nomad-minimax",
+                                                     task={"kind": "mlebench_real", "competition": "x"}))
+    r = client.post("/api/genesis", json={"instruction": "again"}).json()
+    assert r["spec"]["run_id"] == "nomad-minimax-2"                      # collision avoided
+
+
+def test_genesis_dedup_ignores_empty_leftover_dir(tmp_path, monkeypatch):
+    """A leftover EMPTY dir (e.g. a validation-failed materialization) is NOT a real run, so the name
+    stays free — matches /api/start's events.jsonl-keyed 409."""
+    (tmp_path / "nomad-minimax").mkdir()                                 # empty, no events.jsonl
+    client = TestClient(make_app(tmp_path))
+    from looplab.server import _GenesisSpec
+    monkeypatch.setattr("looplab.server.make_llm_client", lambda s: object())
+    monkeypatch.setattr("looplab.parse.parse_structured",
+                        lambda *a, **k: _GenesisSpec(run_id="nomad-minimax",
+                                                     task={"kind": "mlebench_real", "competition": "x"}))
+    r = client.post("/api/genesis", json={"instruction": "again"}).json()
+    assert r["spec"]["run_id"] == "nomad-minimax"                        # not bumped — name is free
+
+
+def test_genesis_soft_fails_offline(tmp_path, monkeypatch):
+    client = TestClient(make_app(tmp_path))
+
+    def _boom(_s):
+        raise RuntimeError("no model")
+    monkeypatch.setattr("looplab.server.make_llm_client", _boom)
+    r = client.post("/api/genesis", json={"instruction": "anything"})
+    assert r.status_code == 200 and r.json()["ok"] is False and r.json()["reply"]  # usable, no crash
+
+
+# ---- cross-run aggregate (scope) reports: project / task / super-task, one generator ----
+def test_scope_report_module_deterministic_ranks_and_degrades():
+    """The generator with no client returns an honest metrics rollup, ranks by the dominant direction,
+    and always carries every key so the UI renders unconditionally."""
+    from looplab.scope_report import generate_scope_report
+    briefs = [{"run_id": "a", "direction": "min", "best_metric": 0.06, "report": None},
+              {"run_id": "b", "direction": "min", "best_metric": 0.05, "report": {"headline": "h"}}]
+    c = generate_scope_report({"type": "task", "id": "t", "label": "task t"}, briefs, None)
+    assert c["best_runs"][0]["run_id"] == "b"            # lower-better → 0.05 ranks first
+    for k in ("headline", "verdict", "best_runs", "what_worked", "what_didnt",
+              "learnings", "next_directions", "caveats"):
+        assert k in c
+    empty = generate_scope_report({"type": "task", "id": "t", "label": "task t"}, [], None)
+    assert "No runs" in empty["headline"]               # empty scope degrades, never raises
+
+
+def test_scope_report_ranks_each_run_by_its_own_direction():
+    """A mixed-direction scope (project/super-task spanning tasks) must NOT rank a max-objective run
+    backwards under a single set-wide direction."""
+    from looplab.scope_report import _ranked
+    briefs = [{"run_id": "loss1", "direction": "min", "best_metric": 0.10},
+              {"run_id": "loss2", "direction": "min", "best_metric": 0.50},
+              {"run_id": "acc", "direction": "max", "best_metric": 0.95}]   # high accuracy = genuinely best
+    order = [b["run_id"] for b in _ranked(briefs)]
+    assert order[0] == "acc"                             # max-run with 0.95 leads, not buried last
+    assert order.index("loss1") < order.index("loss2")  # min-runs still ascending among themselves
+
+
+def test_scope_report_blank_emit_falls_back_to_deterministic(monkeypatch):
+    """A structurally-valid but all-empty emit_report ({}) must NOT be shown as a blank report — it
+    drops through to the honest metrics rollup."""
+    from looplab import scope_report
+    # tool loop "emits" empty args -> finalize({}) -> blank _AggReport dump (non-empty dict, all defaults)
+    monkeypatch.setattr("looplab.agent.drive_tool_loop",
+                        lambda client, tools, messages, emit_spec, **kw: kw["finalize"]({}))
+    c = scope_report.generate_scope_report(
+        {"type": "task", "id": "t", "label": "task t"},
+        [{"run_id": "a", "direction": "min", "best_metric": 0.05, "report": None}], object())
+    assert "deterministic" in c["verdict"]              # fell back, not a blank report
+    assert c["best_runs"][0]["run_id"] == "a"
+
+
+def test_scope_report_forces_structured_synthesis_when_loop_doesnt_emit(monkeypatch):
+    """If the agent never calls emit_report (a weaker model), we force one structured synthesis over
+    the digest — a real report — instead of dropping straight to the metrics rollup."""
+    from looplab import scope_report
+    # simulate a tool loop that exhausts without emitting -> drive_tool_loop returns fallback(messages)
+    monkeypatch.setattr("looplab.agent.drive_tool_loop",
+                        lambda client, tools, messages, emit_spec, **kw: kw["fallback"](messages))
+    monkeypatch.setattr("looplab.parse.parse_structured",
+                        lambda *a, **k: scope_report._AggReport(headline="SYNTH", verdict="agent synthesized"))
+    c = scope_report.generate_scope_report(
+        {"type": "task", "id": "t", "label": "task t"},
+        [{"run_id": "a", "direction": "min", "best_metric": 0.05, "report": None}], object())
+    assert c["headline"] == "SYNTH" and "synthesized" in c["verdict"]   # not the deterministic rollup
+
+
+def _boom_client(_s):
+    raise RuntimeError("no model")
+
+
+def test_scope_report_generate_and_get_task_scope(tmp_path, monkeypatch):
+    _build_run(tmp_path, "r1", writer=None)
+    _build_run(tmp_path, "r2", writer=None)
+    client = TestClient(make_app(tmp_path))
+    runs = client.get("/api/runs").json()
+    task_id = runs[0]["task_id"]
+    assert task_id and all(r["task_id"] == task_id for r in runs)
+    # offline → the endpoint still generates + persists the deterministic rollup over BOTH runs
+    monkeypatch.setattr("looplab.server.make_llm_client", _boom_client)
+    g = client.post(f"/api/scope-report/task/{task_id}/generate").json()
+    assert g["ok"] is True and set(g["run_ids"]) == {"r1", "r2"}
+    assert "runs" in g["content"]["headline"]
+    got = client.get(f"/api/scope-report/task/{task_id}").json()
+    assert got["exists"] is True and got["stale"] is False and got["current_run_count"] == 2
+
+
+def test_scope_report_absent_then_stale_on_new_run(tmp_path, monkeypatch):
+    _build_run(tmp_path, "r1", writer=None)
+    client = TestClient(make_app(tmp_path))
+    task_id = client.get("/api/runs").json()[0]["task_id"]
+    assert client.get(f"/api/scope-report/task/{task_id}").json()["exists"] is False   # nothing yet
+    monkeypatch.setattr("looplab.server.make_llm_client", _boom_client)
+    client.post(f"/api/scope-report/task/{task_id}/generate")
+    _build_run(tmp_path, "r2", writer=None)                # a new run joins the scope
+    got = client.get(f"/api/scope-report/task/{task_id}").json()
+    assert got["exists"] is True and got["stale"] is True and "r2" in got["added"]
+
+
+def test_scope_report_project_scope_includes_descendants(tmp_path, monkeypatch):
+    """A folder report covers the project AND everything nested under it."""
+    _build_run(tmp_path, "r1", writer=None)
+    _build_run(tmp_path, "r2", writer=None)
+    client = TestClient(make_app(tmp_path))
+    parent = client.post("/api/projects", json={"name": "P"}).json()
+    child = client.post("/api/projects", json={"name": "C", "parent_id": parent["id"]}).json()
+    client.post("/api/runs/r1/project", json={"project_id": parent["id"]})
+    client.post("/api/runs/r2/project", json={"project_id": child["id"]})
+    monkeypatch.setattr("looplab.server.make_llm_client", _boom_client)
+    g = client.post(f"/api/scope-report/project/{parent['id']}/generate").json()
+    assert set(g["run_ids"]) == {"r1", "r2"}              # nested run r2 included
+
+
+def test_scope_report_empty_scope_rejected(tmp_path):
+    client = TestClient(make_app(tmp_path))
+    assert client.post("/api/scope-report/task/nope/generate").status_code == 400
+    assert client.post("/api/scope-report/bogus/x/generate").status_code == 400  # bad scope type
+
+
+def test_genesis_prompt_includes_prior_learnings(tmp_path, monkeypatch):
+    """A stored scope report grounds the genesis boss: its headline shows up in the genesis prompt."""
+    _build_run(tmp_path, "r1", writer=None)
+    client = TestClient(make_app(tmp_path))
+    task_id = client.get("/api/runs").json()[0]["task_id"]
+    monkeypatch.setattr("looplab.server.make_llm_client", _boom_client)
+    client.post(f"/api/scope-report/task/{task_id}/generate")   # persists a report w/ a headline
+    from looplab.server import _GenesisSpec
+    captured = {}
+
+    def _cap_parse(_client, messages, schema, parser):
+        captured["sys"] = messages[0]["content"]
+        return _GenesisSpec(run_id="x", task={"kind": "mlebench_real", "competition": "y"})
+    monkeypatch.setattr("looplab.server.make_llm_client", lambda s: object())
+    monkeypatch.setattr("looplab.parse.parse_structured", _cap_parse)
+    client.post("/api/genesis", json={"instruction": "start something new"})
+    assert "Prior cross-run learnings" in captured["sys"] and "runs" in captured["sys"]

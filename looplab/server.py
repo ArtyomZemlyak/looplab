@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -72,6 +73,21 @@ class _Command(BaseModel):
     rationale: str = ""
 
 
+class _GenesisSpec(BaseModel):
+    """The BOSS's proposed plan for a brand-new run, bootstrapped from a one-line goal (there is no run
+    yet, so this is the pre-run counterpart of _Command). The UI shows it as an editable spec card and
+    only launches on confirm — creating a run spends real tokens, so we propose-then-go, never silently
+    auto-start. The task is EITHER an inline `task` object (e.g. {"kind":"mlebench_real","competition":
+    "..."}) OR a path to an existing catalogue `task_file`; `settings` carries only the engine overrides
+    the goal implies (model, node budget, policy…), the rest fall back to the UI defaults."""
+    run_id: str = ""          # invented kebab-case run name (we slugify + de-dup server-side)
+    task: dict = {}           # inline task JSON (kind + params) when authoring a fresh task
+    task_file: str = ""       # OR a path from the catalogue (preferred when one matches)
+    settings: dict = {}       # engine overrides only (llm_model, max_nodes, n_seeds, policy, …)
+    rationale: str = ""       # one-line why-this-plan
+    reply: str = ""           # conversational message to show in the genesis chat
+
+
 def _command_to_action(c: "_Command", st) -> Optional[dict]:
     """Map the LLM's classified command to a control {type, data, label}. None => no actionable verb
     (treat as advisory chat). `label` is the human-readable confirmation the UI shows."""
@@ -119,6 +135,10 @@ def _ui_dist() -> Path:
 # Per-theme rollup for the cross-run map: {theme: {count, best_metric}}. Now lives in `digest` so the
 # Researcher's working-set digest and this UI endpoint share one definition.
 from .digest import theme_rollup as _theme_rollup
+
+# run-root subdirectories that are NOT runs and must never be used as a run_id (would collide with the
+# cross-run scope-report store at <run-root>/reports/).
+_RESERVED_RUN_IDS = {"reports"}
 
 
 def make_app(run_root: str | os.PathLike) -> "FastAPI":
@@ -571,17 +591,43 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
     @app.post("/api/start")
     async def start_run(request: Request):
         body = await request.json()
-        task_file = body.get("task_file")
         run_id = body.get("run_id")
-        if not task_file or not run_id:
-            raise HTTPException(400, "task_file and run_id are required")
-        if not Path(task_file).exists():
-            raise HTTPException(400, f"task file not found: {task_file}")
+        if not run_id:
+            raise HTTPException(400, "run_id is required")
+        if run_id in _RESERVED_RUN_IDS:        # don't let a run clobber the cross-run report store dir
+            raise HTTPException(400, f"run_id {run_id!r} is reserved")
         rd = (root / run_id).resolve()
         if root not in rd.parents and rd != root:
             raise HTTPException(400, "bad run_id")
         if (rd / "events.jsonl").exists():
             raise HTTPException(409, f"run {run_id!r} already exists — pick another id")
+        task_file = body.get("task_file")
+        task = body.get("task")
+        # Inline task (the genesis flow authors one): require an explicit kind, then VALIDATE it the
+        # same way the engine will (validate_task → model_validate) BEFORE materializing anything — so a
+        # bad spec (unknown kind, mlebench_real with an unknown/empty competition, a missing required
+        # field) fails HERE with a 400 instead of spawning a detached engine that dies (DEVNULL'd)
+        # before writing any events, leaving a phantom never-started run.
+        if isinstance(task, dict) and task:
+            from .tasks import kinds, validate_task
+            kind = task.get("kind")
+            if not kind:
+                raise HTTPException(400, "inline task must declare a 'kind'")
+            if kind not in kinds():
+                raise HTTPException(400, f"unknown task kind: {kind!r} (known: {kinds()})")
+            try:
+                await anyio.to_thread.run_sync(lambda: validate_task(task))
+            except HTTPException:
+                raise
+            except Exception as e:  # noqa: BLE001 - kind-specific validation failed (e.g. bad competition)
+                raise HTTPException(400, f"invalid task: {e}")
+            rd.mkdir(parents=True, exist_ok=True)
+            task_file = str(rd / "task.input.json")
+            Path(task_file).write_text(json.dumps(task, indent=2), encoding="utf-8")
+        if not task_file:
+            raise HTTPException(400, "task_file or task is required")
+        if not Path(task_file).exists():
+            raise HTTPException(400, f"task file not found: {task_file}")
         rd.mkdir(parents=True, exist_ok=True)
         (rd / "ui_meta.json").write_text(json.dumps({"task_file": str(task_file)}), encoding="utf-8")
         # Per-run settings = the saved UI defaults overlaid with whatever the launch dialog set.
@@ -728,6 +774,93 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
                 fp.write_text(f"# Research brief: {topic}\n\n{text}\n", encoding="utf-8")
                 saved = str(fp)
         return {"ok": True, "text": text, "model": s.llm_model, "saved": saved}
+
+    # ------------------------------------------------------------------ genesis (pre-run BOSS)
+    def _normalize_genesis(spec: "_GenesisSpec", draft: dict) -> dict:
+        """Turn the boss's raw proposal into a launch-ready, editable card: slugify + de-dup the run_id
+        against existing run dirs, keep only known non-secret setting overrides, and invent a name when
+        the model didn't give one."""
+        def _slug(s):
+            return re.sub(r"(^-|-$)", "", re.sub(r"[^a-z0-9]+", "-", str(s or "").lower()))[:40]
+
+        task = spec.task if isinstance(spec.task, dict) else {}
+        task_file = spec.task_file or ""
+        base = (_slug(spec.run_id) or _slug(task.get("competition")) or _slug(task.get("kind"))
+                or _slug(Path(task_file).stem if task_file else "") or "run")
+        run_id, n = base, 2
+        # A name is "taken" only when it holds a REAL run (events.jsonl) — matches /api/start's 409 — so
+        # a leftover empty dir (e.g. a validation-failed materialization) doesn't force a -2 suffix.
+        while (root / run_id / "events.jsonl").exists():
+            run_id, n = f"{base}-{n}", n + 1
+        settings = {k: v for k, v in (spec.settings or {}).items()
+                    if k in _ALLOWED_FIELDS and k not in _SECRET_FIELDS and v is not None}
+        return {"run_id": run_id, "task": task, "task_file": task_file,
+                "settings": settings, "rationale": spec.rationale or ""}
+
+    @app.post("/api/genesis")
+    async def genesis(request: Request):
+        """Pre-run BOSS: turn a one-line goal into an editable run spec (name + task + key settings).
+        No run exists yet, so this grounds on the task catalogue + registered kinds + the current default
+        settings and PROPOSES a plan the UI shows as an editable card — we launch on confirm via
+        /api/start, never here (creating a run spends real tokens). Refinement turns pass the prior
+        `draft` so the boss edits it in place. Degrades cleanly when no model is reachable."""
+        from .tasks import kinds
+        body = await request.json()
+        msgs = body.get("messages") or []
+        instruction = (body.get("instruction") or "").strip()
+        draft = body.get("draft") or {}
+        catalogue = list_tasks().get("tasks", [])
+        cat_lines = "\n".join(
+            f"- {t['name']} (kind={t['kind']}, path={t['path']}): {str(t.get('goal', ''))[:90]}"
+            for t in catalogue[:40]) or "(none)"
+        defaults = _resolved_settings()
+        key_defaults = {k: defaults.get(k) for k in
+                        ("llm_model", "llm_base_url", "llm_temperature", "max_nodes", "n_seeds", "policy")}
+        sys_prompt = (
+            "You are the BOSS that bootstraps a NEW autonomous-ML run from the user's goal. Decide the "
+            "whole plan and return it as ONE structured spec:\n"
+            "- run_id: a short, memorable kebab-case name you invent (e.g. 'nomad-minimax', "
+            "'titanic-baseline'). NEVER ask the user for it.\n"
+            "- the TASK: if an existing catalogue entry clearly matches, set task_file to its path. "
+            "Otherwise AUTHOR an inline `task` object. For a Kaggle / MLE-bench competition use "
+            '{"kind":"mlebench_real","competition":"<id>"} with the FULL slug exactly as on Kaggle — '
+            "e.g. 'nomad2018-predict-transparent-conductors' (NOT the short 'nomad2018'), "
+            "'spooky-author-identification'.\n"
+            "- settings: ONLY the overrides the goal implies. CRITICAL: if the user mentions ANY model "
+            "name — even mid-sentence ('on minimax/minimax-m3', 'with deepseek') — copy it VERBATIM into "
+            "settings.llm_model; when it is an OpenRouter-style 'vendor/model' id (contains '/') also set "
+            "settings.llm_base_url='https://openrouter.ai/api/v1'. Map phrasing like '100 nodes' → "
+            "max_nodes, 'N seeds' → n_seeds. Leave everything else to the defaults.\n"
+            "- reply: a short, friendly message stating the plan in one or two sentences.\n"
+            "- rationale: one terse line on why.\n"
+            "When the goal is too vague to choose a task, still invent a sensible run_id, leave task / "
+            "task_file empty, and ask ONE clarifying question in `reply`.\n\n"
+            f"Registered task kinds: {kinds()}\n"
+            f"Default settings (override only what matters): {json.dumps(key_defaults)}\n"
+            f"Task catalogue:\n{cat_lines}\n")
+        prior = _prior_learnings_index()
+        if prior:
+            sys_prompt += ("\nPrior cross-run learnings (portfolio reports from earlier runs — use them "
+                           "to pick a better task / model / settings, and reference them in your reply "
+                           "when relevant):\n" + prior + "\n")
+        if draft:
+            sys_prompt += ("\nThe user is refining this current draft — edit it in place, keeping the "
+                           "fields they didn't ask to change:\n" + json.dumps(draft)[:1200])
+        convo = "\n".join(f"{m.get('role')}: {m.get('content')}" for m in msgs)
+        user = (f"Goal: {instruction}" if instruction else "") + (f"\n\nConversation:\n{convo}" if convo else "")
+        from .parse import parse_structured
+        try:
+            client = make_llm_client(_llm_settings(None))
+            spec = await anyio.to_thread.run_sync(
+                lambda: parse_structured(client, [{"role": "system", "content": sys_prompt},
+                                                  {"role": "user", "content": user}],
+                                         _GenesisSpec, defaults.get("llm_parser", "tool_call")))
+        except Exception as e:  # noqa: BLE001 - offline / no model -> soft fail with a usable message
+            return {"ok": False, "error": str(e),
+                    "spec": {"run_id": "", "task": {}, "task_file": "", "settings": {}, "rationale": ""},
+                    "reply": f"Couldn't reach the model to plan this ({e}). You can still use the manual form."}
+        return {"ok": True, "spec": _normalize_genesis(spec, draft),
+                "reply": spec.reply or "Here's a plan — tweak the card and launch."}
 
     # ------------------------------------------------------------------ LLM (chat / suggest / health)
     def _llm_settings(rd: Optional[Path] = None) -> "Settings":
@@ -1020,6 +1153,157 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
             "report_generated", {"content": content, "at_node": content.get("at_node"),
                                  "trigger": "manual"})
         return {"ok": True, "seq": ev.seq, "content": content}
+
+    # ------------------------------------------------------------------ cross-run aggregate reports
+    # On-demand portfolio reports over a SET of runs (a project folder, a task, or a super-task) — ONE
+    # generator, three scope axes. Persisted under <run-root>/reports/ with a run-set fingerprint so the
+    # UI can flag staleness; an agent reads every run in the set (per-run reports + drill) and synthesizes.
+    _reports_dir = root / "reports"
+
+    def _scope_label(scope_type: str, scope_id: str) -> str:
+        data = projects.load()
+        if scope_type == "project":
+            p = next((x for x in data["projects"] if x["id"] == scope_id), None)
+            return f"project “{p['name']}”" if p else f"project {scope_id}"
+        if scope_type == "supertask":
+            s = next((x for x in data["supertasks"] if x["id"] == scope_id), None)
+            return f"super-task “{s['name']}”" if s else f"super-task {scope_id}"
+        return f"task {scope_id}"
+
+    def _scope_run_ids(scope_type: str, scope_id: str) -> list:
+        """The runs a scope covers. project = the folder AND everything nested under it; task = same
+        task_id; supertask = assigned to that super-task."""
+        summaries = list_runs()
+        if scope_type == "task":
+            return [s["run_id"] for s in summaries if s.get("task_id") == scope_id]
+        if scope_type == "supertask":
+            return [s["run_id"] for s in summaries if s.get("supertask_id") == scope_id]
+        if scope_type == "project":
+            scopeset = {scope_id} | projects.descendants(scope_id)
+            return [s["run_id"] for s in summaries if s.get("project_id") in scopeset]
+        return []
+
+    def _run_brief(run_id: str, labels: dict) -> dict:
+        rd = _run_dir(run_id)
+        st = fold(_events(rd))
+        best = st.best()
+        cfg = {}
+        snap = rd / "config.snapshot.json"
+        if snap.exists():
+            try:
+                cfg = json.loads(snap.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                cfg = {}
+        return {"run_id": run_id, "label": labels.get(run_id), "task_id": st.task_id,
+                "goal": st.goal, "direction": st.direction,
+                "model": cfg.get("llm_model"), "policy": cfg.get("policy"),
+                "best_metric": (best.metric if best else None), "phase": _phase(st),
+                "nodes": len(st.nodes),
+                "report": st.report if isinstance(st.report, dict) else None}
+
+    def _scope_drill(run_id: str, node_id: int) -> str:
+        """Deep access for the report agent: read one experiment of one run via RunTools."""
+        try:
+            from .run_tools import RunTools
+            st = fold(_events(_run_dir(run_id)))
+            rt = RunTools()
+            rt.bind_state(st, None)
+            return rt.execute("read_experiment", {"node_id": node_id})
+        except Exception as e:  # noqa: BLE001 - deep access is best-effort
+            return f"(drill failed: {e})"
+
+    def _scope_sig(run_ids: list) -> list:
+        """Cheap fingerprint of the run set (ids + each log's size/mtime) to detect staleness — a new
+        run added to the scope, or an existing one that kept evolving, changes the sig."""
+        sig = []
+        for rid in sorted(run_ids):
+            try:
+                stt = (root / rid / "events.jsonl").stat()
+                sig.append([rid, stt.st_size, int(stt.st_mtime)])
+            except OSError:
+                sig.append([rid, 0, 0])
+        return sig
+
+    def _scope_report_path(scope_type: str, scope_id: str) -> Path:
+        safe = re.sub(r"[^A-Za-z0-9._-]", "_", f"{scope_type}-{scope_id}")[:120]
+        return _reports_dir / (safe + ".json")
+
+    def _prior_learnings_index() -> str:
+        """Compact index of stored cross-run reports (scope label + headline + a couple of next-
+        directions) so the genesis boss can bootstrap a new run informed by prior portfolios."""
+        if not _reports_dir.exists():
+            return ""
+        lines = []
+        for p in sorted(_reports_dir.glob("*.json")):
+            try:
+                rec = json.loads(p.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            c = rec.get("content") or {}
+            lbl = (rec.get("scope") or {}).get("label") or p.stem
+            line = f"- {lbl}: {c.get('headline') or ''}"
+            nd = c.get("next_directions") or []
+            if nd:
+                line += " | next: " + "; ".join(str(x) for x in nd[:2])
+            lines.append(line)
+        return "\n".join(lines[:20])
+
+    @app.get("/api/scope-report/{scope_type}/{scope_id}")
+    def get_scope_report(scope_type: str, scope_id: str):
+        if scope_type not in ("project", "task", "supertask"):
+            raise HTTPException(400, "bad scope type")
+        cur_ids = _scope_run_ids(scope_type, scope_id)
+        p = _scope_report_path(scope_type, scope_id)
+        if not p.exists():
+            return {"exists": False, "run_count": len(cur_ids),
+                    "label": _scope_label(scope_type, scope_id)}
+        try:
+            rec = json.loads(p.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return {"exists": False, "run_count": len(cur_ids),
+                    "label": _scope_label(scope_type, scope_id)}
+        added = sorted(set(cur_ids) - set(rec.get("run_ids", [])))
+        stale = _scope_sig(cur_ids) != rec.get("sig")
+        return {"exists": True, **rec, "stale": stale,
+                "current_run_count": len(cur_ids), "added": added}
+
+    @app.post("/api/scope-report/{scope_type}/{scope_id}/generate")
+    async def generate_scope_report_ep(scope_type: str, scope_id: str):
+        """Generate (or regenerate) the cross-run report for a scope. On-demand only — the agent reads
+        every run in the set (their per-run reports, configs, metrics) and synthesizes, drilling into
+        any run when needed. Degrades to a metrics rollup offline."""
+        if scope_type not in ("project", "task", "supertask"):
+            raise HTTPException(400, "bad scope type")
+        run_ids = _scope_run_ids(scope_type, scope_id)
+        if not run_ids:
+            raise HTTPException(400, "no runs in this scope")
+        labels = projects.load().get("labels", {})
+        briefs = []
+        for rid in run_ids:
+            try:
+                briefs.append(_run_brief(rid, labels))
+            except Exception:  # noqa: BLE001 - a half-written run shouldn't block the report
+                continue
+        scope = {"type": scope_type, "id": scope_id, "label": _scope_label(scope_type, scope_id)}
+        from .scope_report import generate_scope_report as _gen
+        s = _llm_settings(None)
+        try:
+            client = make_llm_client(s)
+            content = await anyio.to_thread.run_sync(
+                lambda: _gen(scope, briefs, client, parser=s.llm_parser, drill=_scope_drill))
+        except Exception:  # noqa: BLE001 - offline -> deterministic rollup still persists
+            content = _gen(scope, briefs, None)
+        # Record coverage + staleness over the runs that ACTUALLY contributed a brief — a run skipped
+        # above (corrupt log) wasn't read, so it must not count toward "over N runs" or the freshness sig.
+        brief_ids = [b["run_id"] for b in briefs]
+        rec = {"scope": scope, "generated_at": int(time.time() * 1000), "run_ids": brief_ids,
+               "sig": _scope_sig(brief_ids), "model": s.llm_model, "content": content}
+        _reports_dir.mkdir(parents=True, exist_ok=True)
+        dst = _scope_report_path(scope_type, scope_id)
+        tmp = dst.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(rec, indent=2), encoding="utf-8")
+        os.replace(tmp, dst)
+        return {"ok": True, **rec, "stale": False, "added": []}
 
     @app.get("/api/llm/health")
     def llm_health():
