@@ -216,6 +216,85 @@ def test_chat_uses_the_runs_snapshot_model_not_ui_env(tmp_path, monkeypatch):
     assert r["trace"]["model"] == "deepseek/deepseek-v4-flash"   # and the trace reports it honestly
 
 
+def test_boss_grounds_on_digest_and_uses_run_tools_then_acts(tmp_path, monkeypatch):
+    """The boss now decides WITH context: its prompt carries the experiments digest, and it MAY call
+    the run-introspection tools before emitting an action (not blind, single-best-node routing)."""
+    import json as _json
+    _build_run(tmp_path, "demo", writer=None)
+    client = TestClient(make_app(tmp_path))
+
+    def _tc(name, args):
+        return {"content": "", "tool_calls": [{"id": "c1", "function": {"name": name, "arguments": _json.dumps(args)}}]}
+
+    class _FakeBoss:
+        model = "fake"
+        def __init__(self):
+            # turn 1: consult a tool; turn 2: emit a steering hint
+            self.script = [_tc("list_experiments", {"sort": "best"}),
+                           _tc("emit", {"action": "hint", "text": "try log1p targets", "rationale": "ok"})]
+            self.seen = []
+        def chat(self, messages, tools, tool_choice="auto"):
+            self.seen.append(messages)
+            return self.script.pop(0)
+        def complete_text(self, msgs):
+            return "advice"
+
+    fake = _FakeBoss()
+    monkeypatch.setattr("looplab.server.make_llm_client", lambda s: fake)
+    r = client.post("/api/runs/demo/command", json={"instruction": "focus on feature engineering"}).json()
+    assert r["ok"] and r["action"]["type"] == "hint" and "log1p" in r["action"]["data"]["text"]
+    # the boss's prompt was grounded on the digest (the working set), not just the single best node
+    assert "Search so far" in fake.seen[0][0]["content"]
+    # and it actually consulted a tool first — a tool result was fed back before the emit
+    assert any(any(m.get("role") == "tool" for m in msgs) for msgs in fake.seen)
+
+
+def test_boss_context_includes_the_run_report(tmp_path, monkeypatch):
+    """Regression (review-found dead code): the agent report is a _ReportOut dump (headline/verdict/
+    next_directions — NOT a 'content' key), so it must be stitched into the boss/chat context, not
+    silently dropped by reading a non-existent rep['content']."""
+    from looplab.eventstore import EventStore
+    _build_run(tmp_path, "demo", writer=None)
+    EventStore(tmp_path / "demo" / "events.jsonl").append("report_generated", {"content": {
+        "headline": "Quadratic solved near-optimally", "verdict": "metric improved a lot",
+        "champion_summary": "x=3, y=-1", "next_directions": ["try a finer sweep around the optimum"]}})
+    client = TestClient(make_app(tmp_path))
+    captured = {}
+
+    class _Cap:
+        def __init__(self, s): self.model = s.llm_model
+        def complete_text(self, msgs): captured["sys"] = msgs[0]["content"]; return "ok"
+
+    monkeypatch.setattr("looplab.server.make_llm_client", lambda s: _Cap(s))
+    client.post("/api/runs/demo/chat", json={"messages": [{"role": "user", "content": "hi"}]})
+    assert "Latest run report" in captured["sys"]
+    assert "Quadratic solved near-optimally" in captured["sys"]       # the headline reached the boss
+    assert "try a finer sweep around the optimum" in captured["sys"]  # a next_directions item too
+
+
+def test_boss_context_report_handles_malformed_fields(tmp_path, monkeypatch):
+    """Robustness (review-found): a report whose list-fields hold a STRING (or is nested under
+    'content') must be kept whole — not iterated character-by-character, and never crash."""
+    from looplab.eventstore import EventStore
+    _build_run(tmp_path, "demo", writer=None)
+    EventStore(tmp_path / "demo" / "events.jsonl").append("report_generated", {"content": {
+        "headline": "h", "next_directions": "try a finer sweep",   # a STRING where a list is expected
+        "what_worked": ["raw features"]}})
+    client = TestClient(make_app(tmp_path))
+    captured = {}
+
+    class _Cap:
+        def __init__(self, s): self.model = s.llm_model
+        def complete_text(self, msgs): captured["sys"] = msgs[0]["content"]; return "ok"
+
+    monkeypatch.setattr("looplab.server.make_llm_client", lambda s: _Cap(s))
+    r = client.post("/api/runs/demo/chat", json={"messages": [{"role": "user", "content": "hi"}]})
+    assert r.json()["ok"]                          # did not crash on the non-list field
+    sysp = captured["sys"]
+    assert "try a finer sweep" in sysp             # the string stayed whole
+    assert "t; r; y" not in sysp                   # NOT char-split into "t; r; y; ..."
+
+
 def test_command_endpoint_soft_fails_offline(tmp_path, monkeypatch):
     _build_run(tmp_path, "demo", writer=None)
     client = TestClient(make_app(tmp_path))

@@ -43,6 +43,14 @@ button { font: inherit; }
   background: linear-gradient(180deg, var(--bg-2), var(--bg-1));
   border-bottom: 1px solid var(--line); min-height: 42px; flex-wrap: wrap;
 }
+/* The RUN header (only) must stay a SINGLE line — scoped so RunList/Settings/approval bars keep
+   their normal wrapping. Only the goal text (.muted) shrinks/ellipses; every other item keeps its
+   size, so e.g. the Search/Report toggle never shrinks below its content and wraps its own buttons. */
+.topbar.run-head { flex-wrap: nowrap; }
+.topbar.run-head > * { flex-shrink: 0; }
+.topbar.run-head > .muted { flex-shrink: 1; min-width: 0; }
+.topbar.run-head > .spacer { flex: 1 0 0; }        /* grows to fill, never shrinks */
+.topbar.run-head .view-toggle { flex-wrap: nowrap; }
 .brand { font-weight: 700; letter-spacing: .4px; font-size: 14px; }
 .brand .dot { color: var(--accent); }
 .spacer { flex: 1; }
@@ -86,6 +94,7 @@ button { font: inherit; }
   border-radius: 999px; font-size: 12px; background: var(--bg-3); border: 1px solid var(--line); }
 .chip .k { color: var(--fg-mut); }
 .chip.alarm { background: rgba(255,93,93,.14); border-color: var(--alarm); color: #ffd3d3; }
+.chip.warn { background: rgba(240,180,41,.14); border-color: var(--working); color: #e6c170; }
 .chip.ok { background: rgba(46,204,113,.12); border-color: #2c6e49; color: #b6f0cf; }
 
 .pill { font-size: 11px; padding: 1px 7px; border-radius: 999px; border: 1px solid var(--line-2);
@@ -362,6 +371,17 @@ pre.code { background: var(--bg); border: 1px solid var(--line); border-radius: 
 .panel-b { padding: 12px 14px; }
 
 .cardgrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px,1fr)); gap: 10px; }
+
+/* Overview tab (round-8): run metrics lifted out of the header */
+.ov-goal { color: var(--fg-dim); margin-bottom: 12px; line-height: 1.5; }
+.stat-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(110px, 1fr)); gap: 8px; }
+.ov-row { margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--line); }
+.ov-row .k { color: var(--fg-dim); font-weight: 600; margin-right: 6px; }
+.ov-why { font-size: 12px; margin-top: 4px; line-height: 1.45; }
+.ov-hints { margin: 6px 0 0; padding-left: 18px; }
+.ov-hints li { margin: 2px 0; line-height: 1.4; }
+.ov-alerts { display: flex; gap: 8px; }
+
 .stat { background: var(--bg-2); border: 1px solid var(--line); border-radius: 9px; padding: 8px 11px; }
 .stat .n { font-size: 19px; font-weight: 700; font-variant-numeric: tabular-nums; }
 .stat .l { color: var(--fg-mut); font-size: 11px; }

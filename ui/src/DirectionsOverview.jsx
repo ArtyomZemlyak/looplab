@@ -13,10 +13,11 @@ export default function DirectionsOverview({ state, active, onPick }) {
   if (!rows.length) return null
   return (
     <div className="directions-overview">
-      <div className="do-head">
-        <b>Directions</b> <span className="muted">— dot = profit vs baseline · click a theme to focus the tree</span>
-        {active && <button className="btn sm ghost" onClick={() => onPick(null)}>← all directions ({active})</button>}
-      </div>
+      {/* caption removed (the chips + tooltips are self-explanatory); the header row only appears to
+          offer "back to all" while a theme is focused, so it never costs vertical space otherwise. */}
+      {active && <div className="do-head">
+        <button className="btn sm ghost" onClick={() => onPick(null)}>← all directions ({active})</button>
+      </div>}
       <div className="do-chips">
         {rows.map(r => {
           const sel = active === r.theme

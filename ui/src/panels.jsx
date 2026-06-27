@@ -17,6 +17,44 @@ export function Panel({ title, sub, onClose, children, wide }) {
 
 const Stat = ({ n, l }) => <div className="stat"><div className="n">{n}</div><div className="l">{l}</div></div>
 
+// Overall-info tab (round-8): the run's at-a-glance metrics, lifted out of the cramped top bar so the
+// header stays a single line. Everything derives from the folded state (+ maxEval from config).
+export function OverviewPanel({ state, maxEval, onClose, onOpenPanel }) {
+  const nodes = Object.values(state.nodes || {})
+  const evaluated = nodes.filter(n => n.metric != null).length
+  const failed = nodes.filter(n => n.status === 'failed').length
+  const best = state.best_node_id != null ? (state.nodes || {})[state.best_node_id] : null
+  const evalSec = state.total_eval_seconds || 0
+  const cost = state.llm_cost
+  const strat = state.active_strategy
+  const hints = state.pending_hints || []
+  return (
+    <Panel title="Overview" sub={state.task_id || ''} onClose={onClose}>
+      {state.goal && <div className="ov-goal">{state.goal}</div>}
+      <div className="stat-grid">
+        <Stat n={best ? fmt(best.confirmed_mean ?? best.metric) : '—'} l="best metric" />
+        <Stat n={state.direction || '—'} l="direction" />
+        <Stat n={nodes.length} l="nodes" />
+        <Stat n={evaluated} l="evaluated" />
+        <Stat n={failed} l="failed" />
+        <Stat n={fmt(evalSec, 1) + 's' + (maxEval ? ' / ' + maxEval : '')} l="eval time" />
+        {cost && <Stat n={fmtInt(cost.total_tokens)} l="tokens" />}
+        {state.paused ? <Stat n="⏸ paused" l="status" /> : null}
+      </div>
+      {strat && <div className="ov-row"><span className="k">🧭 strategy</span>{' '}
+        {(strat.policy || 'greedy') + (strat.fidelity ? '/' + strat.fidelity : '')}
+        {strat.rationale && <div className="muted ov-why">{strat.rationale}</div>}</div>}
+      {hints.length > 0 && <div className="ov-row"><span className="k">💡 hints ({hints.length})</span>
+        <ul className="ov-hints">{hints.map((h, i) => <li key={(h.text || '') + i}>{h.text || JSON.stringify(h)}</li>)}</ul></div>}
+      {(state.novelty_events?.length > 0 || state.reward_hacks?.length > 0) && <div className="ov-row ov-alerts">
+        {state.novelty_events?.length > 0 && <span className="chip" title="near-duplicate proposals nudged to diversify (E1)">🔁 dedup {state.novelty_events.length}</span>}
+        {state.reward_hacks?.length > 0 && <span className="chip alarm" style={{ cursor: 'pointer' }}
+          title="suspicious wins flagged (B5)" onClick={() => onOpenPanel && onOpenPanel('trust')}>⚠ hack? {state.reward_hacks.length}</span>}
+      </div>}
+    </Panel>
+  )
+}
+
 export function TrustPanel({ state, runId, onClose }) {
   const [cfg, setCfg] = useState(null)
   useEffect(() => { get(`/api/runs/${runId}/config`).then(setCfg).catch(() => {}) }, [runId])
