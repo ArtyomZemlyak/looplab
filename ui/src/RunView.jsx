@@ -10,7 +10,7 @@ import DirectionsOverview from './DirectionsOverview.jsx'
 import {
   TrustPanel, SensitivityPanel, FailuresPanel, ParetoPanel, DataQualityPanel,
   ConfigPanel, AuthoringPanel, MemoryPanel, RegistryPanel, EventExplorer,
-  ComparePanel, GpuPanel, HyperImportancePanel, CrossRunPanel, CollabPanel,
+  ComparePanel, GpuPanel, HyperImportancePanel, CrossRunPanel, CollabPanel, OverviewPanel,
 } from './panels.jsx'
 
 // The panel bar, grouped by importance then process order (Report is the [Search|Report] toggle, and
@@ -108,33 +108,29 @@ export default function RunView({ runId, onBack }) {
 
   return (
     <div className="app">
-      <div className="topbar">
+      <div className="topbar run-head">
         <span className="brand"><span className="dot">◉</span> LoopLab</span>
         <button className="btn sm ghost" onClick={onBack}>← runs</button>
         <div className="view-toggle" role="tablist">
           <button className={'vt' + (view === 'dag' ? ' on' : '')} onClick={() => setView('dag')}>Search</button>
           <button className={'vt report' + (view === 'report' ? ' on' : '')} onClick={() => setView('report')}
             title="conclusion-first run report">★ Report</button>
+          <button className={'vt' + (panel === 'overview' ? ' on' : '')} onClick={() => setPanel(panel === 'overview' ? null : 'overview')}
+            title="at-a-glance run summary — best metric, budget, strategy, hints">Overview</button>
         </div>
         <span className="pill phase">{phaseLabel(state)}</span>
         <span className="muted" style={{ maxWidth: 280, overflow: 'hidden', whiteSpace: 'nowrap', textOverflow: 'ellipsis' }} title={state.goal}>{state.goal || state.task_id}</span>
         <span className={'live ' + liveStatus}><span className="led" />{liveLabel}{replaying && ' · replay'}</span>
         <span className="spacer" />
-
-        <div className="gauge">
-          <div className="lab"><span>eval time</span><span>{fmt(evalSec, 3)}s{maxEval ? ` / ${maxEval}` : ''}</span></div>
-          {maxEval ? <div className="bar"><div className="fill hot" style={{ width: Math.min(100, evalSec / maxEval * 100) + '%' }} /></div> : null}
-        </div>
-        {cost && <span className="chip"><span className="k">tokens</span> {fmtInt(cost.total_tokens)}</span>}
-        {state.pending_hints?.length > 0 && <span className="chip" title={state.pending_hints.map(h => '• ' + (h.text || JSON.stringify(h))).join('\n')}>
-          <span className="k">💡 hints</span> {state.pending_hints.length}</span>}
-        {state.active_strategy && <span className="chip" title={state.active_strategy.rationale || 'active strategy (see the chat for the why)'}>
-          <span className="k">🧭 strategy</span> {state.active_strategy.policy || 'greedy'}{state.active_strategy.fidelity ? '/' + state.active_strategy.fidelity : ''}</span>}
-        {state.novelty_events?.length > 0 && <span className="chip" title="near-duplicate proposals nudged to diversify (E1)">
-          <span className="k">🔁 dedup</span> {state.novelty_events.length}</span>}
-        {state.reward_hacks?.length > 0 && <span className="chip alarm" title="suspicious wins flagged (B5)" onClick={() => setPanel('trust')} style={{ cursor: 'pointer' }}>
+        {/* round-8: keep only COMPACT at-a-glance metrics here (eval, tokens) + alerts; the fuller
+            set (strategy + rationale, hints, dedup) moved to the Overview tab so this header stays a
+            SINGLE non-wrapping line. Clicking a metric opens Overview for the detail. */}
+        {evalSec > 0 && <span className="chip" title="eval time — open Overview for the budget bar" onClick={() => setPanel('overview')} style={{ cursor: 'pointer' }}>
+          <span className="k">eval</span> {fmt(evalSec, 1)}s{maxEval ? ` / ${maxEval}` : ''}</span>}
+        {cost && <span className="chip" title="tokens — open Overview" onClick={() => setPanel('overview')} style={{ cursor: 'pointer' }}>
+          <span className="k">tokens</span> {fmtInt(cost.total_tokens)}</span>}
+        {state.reward_hacks?.length > 0 && <span className="chip alarm" title="suspicious wins flagged (B5) — open Trust" onClick={() => setPanel('trust')} style={{ cursor: 'pointer' }}>
           <span className="k">⚠ hack?</span> {state.reward_hacks.length}</span>}
-
         {live.paused && <span className="chip warn">⏸ paused</span>}
       </div>
 
@@ -193,6 +189,7 @@ export default function RunView({ runId, onBack }) {
             collapsed={dockC} onToggleCollapse={() => setDockC(c => !c)} height={dockH} />
         </>}
 
+      {panel === 'overview' && <OverviewPanel state={state} maxEval={maxEval} onClose={() => setPanel(null)} onOpenPanel={setPanel} />}
       {panel === 'trust' && <TrustPanel state={state} runId={runId} onClose={() => setPanel(null)} />}
       {panel === 'sensitivity' && <SensitivityPanel state={state} onClose={() => setPanel(null)} />}
       {panel === 'importance' && <HyperImportancePanel state={state} onClose={() => setPanel(null)} />}
