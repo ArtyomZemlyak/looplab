@@ -27,6 +27,52 @@
   font-family: ui-sans-serif, system-ui, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
 }
 
+/* ───────────────────────── selectable design themes ─────────────────────────────
+   Every theme is just a re-skin of the CSS-variable palette above (the whole UI is
+   variable-driven), applied via <html data-theme="…">. "current" = the default :root. */
+
+/* Retro Wave — 80s synthwave: deep purple canvas, neon magenta/cyan. */
+:root[data-theme="retrowave"] {
+  --bg: #150c28; --bg-1: #1c1036; --bg-2: #251544; --bg-3: #33205f;
+  --line: #48306e; --line-2: #6b44a0;
+  --fg: #f6e9ff; --fg-dim: #c8a4e8; --fg-mut: #9070b8;
+  --working: #ffb13b; --ok: #2be3c9; --fail: #ff3d77; --best: #ffe93b;
+  --pending: #6f5a92; --infeasible: #a06fd6; --accent: #ff2e97; --accent-dim: #b81f6e; --alarm: #ff3d77;
+  --shadow: 0 8px 30px rgba(120, 20, 160, .55); --shadow-card: 0 2px 12px rgba(180, 30, 140, .30);
+}
+
+/* Paper — warm light, dark ink, ink-blue accent. */
+:root[data-theme="paper"] {
+  --bg: #f4f1ea; --bg-1: #efeae0; --bg-2: #e9e3d6; --bg-3: #e0d8c8;
+  --line: #d9cfbd; --line-2: #c6bba4;
+  --fg: #2b2722; --fg-dim: #5c554a; --fg-mut: #8a8275;
+  --working: #c8941f; --ok: #3f9d5a; --fail: #c0392b; --best: #bb8a1e;
+  --pending: #a99f8c; --infeasible: #9a7fb0; --accent: #346ba3; --accent-dim: #27517d; --alarm: #c0392b;
+  --shadow: 0 8px 24px rgba(70, 55, 30, .16); --shadow-card: 0 1px 5px rgba(70, 55, 30, .12);
+}
+
+/* White Sci-Fi — clean cool-white, cyan HUD accent, crisp lines. */
+:root[data-theme="white-scifi"] {
+  --bg: #f6f9fd; --bg-1: #eef3f9; --bg-2: #e5edf6; --bg-3: #d9e4f1;
+  --line: #cdd8e8; --line-2: #b4c2d8;
+  --fg: #0f1b2d; --fg-dim: #45566d; --fg-mut: #7889a0;
+  --working: #df9426; --ok: #12b07a; --fail: #e2453f; --best: #c49616;
+  --pending: #9fb0c6; --infeasible: #8a93d6; --accent: #0aa6c9; --accent-dim: #077e9b; --alarm: #e2453f;
+  --shadow: 0 8px 26px rgba(20, 50, 90, .14); --shadow-card: 0 1px 6px rgba(20, 50, 90, .10);
+}
+
+/* Old Green — monochrome phosphor CRT: near-black canvas, bright green, mono font + glow. */
+:root[data-theme="old-green"] {
+  --bg: #030a05; --bg-1: #05130a; --bg-2: #071c0e; --bg-3: #0b2916;
+  --line: #10421f; --line-2: #1a6e35;
+  --fg: #3ff06d; --fg-dim: #1fa84a; --fg-mut: #157a35;
+  --working: #b6ff3a; --ok: #3ff06d; --fail: #ff6a4d; --best: #c6ff3a;
+  --pending: #157a35; --infeasible: #2a9e6e; --accent: #5bff95; --accent-dim: #1fa84a; --alarm: #ff6a4d;
+  --shadow: 0 8px 28px rgba(0, 40, 12, .6); --shadow-card: 0 2px 10px rgba(0, 60, 18, .4);
+  font-family: "Consolas", "SF Mono", ui-monospace, "Cascadia Code", monospace;
+}
+:root[data-theme="old-green"] body { text-shadow: 0 0 2px rgba(80, 255, 140, .30); }
+
 * { box-sizing: border-box; }
 html, body, #root { height: 100%; margin: 0; }
 body { background: var(--bg); color: var(--fg); font-size: 13px; line-height: 1.45; }
@@ -753,6 +799,28 @@ textarea.text { min-height: 220px; font-family: ui-monospace, Consolas, monospac
 .panel-bar .menu { display: flex; align-items: center; gap: 4px; flex-wrap: wrap; }
 .panel-sep { width: 1px; height: 16px; background: var(--line-2); margin: 0 6px; display: inline-block; }
 .panel-bar .btn.on { color: var(--fg); background: var(--bg-3); }
+
+/* inline monochrome icon (replaces color emoji; inherits theme text color via currentColor) */
+.t-ic { vertical-align: -2px; flex: none; }
+
+/* ── Theme switcher (design picker in the main-menu topbar) ─────────────────────── */
+.theme-switch { position: relative; }
+.theme-switch .th-dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; margin-right: 5px; vertical-align: middle; }
+.th-backdrop { position: fixed; inset: 0; z-index: 40; }
+.th-menu { position: absolute; right: 0; top: calc(100% + 6px); z-index: 50; width: 228px;
+  background: var(--bg-1); border: 1px solid var(--line-2); border-radius: 10px; box-shadow: var(--shadow); padding: 6px; }
+.th-menu-h { font-size: 10px; text-transform: uppercase; letter-spacing: .8px; color: var(--fg-mut); padding: 4px 8px 6px; }
+.th-opt { display: flex; align-items: center; gap: 10px; width: 100%; text-align: left; padding: 7px 8px;
+  border: none; background: transparent; color: var(--fg); cursor: pointer; border-radius: 7px; }
+.th-opt:hover { background: var(--bg-2); }
+.th-opt.on { background: var(--bg-3); }
+.th-sw { position: relative; width: 30px; height: 22px; border-radius: 5px; border: 1.5px solid; flex: none; overflow: hidden; }
+.th-sw-ac { position: absolute; left: 4px; bottom: 4px; width: 10px; height: 10px; border-radius: 50%; }
+.th-sw-fg { position: absolute; right: 4px; top: 6px; width: 12px; height: 3px; border-radius: 2px; }
+.th-name { display: flex; flex-direction: column; line-height: 1.25; flex: 1; min-width: 0; }
+.th-name b { font-size: 12.5px; }
+.th-sub { font-size: 10.5px; color: var(--fg-mut); }
+.th-check { color: var(--accent); font-weight: 700; }
 
 /* ── Universal chat bar in the main menu (seeds the genesis flow) ───────────────── */
 .global-chat { display: flex; align-items: center; gap: 8px; padding: 9px 16px; flex: none;

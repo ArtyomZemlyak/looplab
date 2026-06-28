@@ -3,6 +3,7 @@ import { get, putText, post, fmt, fmtInt, CONTROL, gpuStat } from './util.js'
 import { Bars, ParallelCoords, Scatter } from './charts.jsx'
 import { hyperImportance } from './report.js'
 import Markdown from './markdown.jsx'
+import { OpIcon } from './icons.jsx'
 
 export function Panel({ title, sub, onClose, children, wide }) {
   return (
@@ -41,13 +42,13 @@ export function OverviewPanel({ state, maxEval, onClose, onOpenPanel }) {
         {cost && <Stat n={fmtInt(cost.total_tokens)} l="tokens" />}
         {state.paused ? <Stat n="⏸ paused" l="status" /> : null}
       </div>
-      {strat && <div className="ov-row"><span className="k">🧭 strategy</span>{' '}
+      {strat && <div className="ov-row"><span className="k"><OpIcon name="compass" className="t-ic" /> strategy</span>{' '}
         {(strat.policy || 'greedy') + (strat.fidelity ? '/' + strat.fidelity : '')}
         {strat.rationale && <div className="muted ov-why">{strat.rationale}</div>}</div>}
-      {hints.length > 0 && <div className="ov-row"><span className="k">💡 hints ({hints.length})</span>
+      {hints.length > 0 && <div className="ov-row"><span className="k"><OpIcon name="bulb" className="t-ic" /> hints ({hints.length})</span>
         <ul className="ov-hints">{hints.map((h, i) => <li key={(h.text || '') + i}>{h.text || JSON.stringify(h)}</li>)}</ul></div>}
       {(state.novelty_events?.length > 0 || state.reward_hacks?.length > 0) && <div className="ov-row ov-alerts">
-        {state.novelty_events?.length > 0 && <span className="chip" title="near-duplicate proposals nudged to diversify (E1)">🔁 dedup {state.novelty_events.length}</span>}
+        {state.novelty_events?.length > 0 && <span className="chip" title="near-duplicate proposals nudged to diversify (E1)"><OpIcon name="replay" className="t-ic" /> dedup {state.novelty_events.length}</span>}
         {state.reward_hacks?.length > 0 && <span className="chip alarm" style={{ cursor: 'pointer' }}
           title="suspicious wins flagged (B5)" onClick={() => onOpenPanel && onOpenPanel('trust')}>⚠ hack? {state.reward_hacks.length}</span>}
       </div>}
@@ -349,7 +350,7 @@ export function MemoCard({ memo, idx, open, onToggle }) {
     <div className="memo-card">
       <div className="memo-head" onClick={() => onToggle(idx)}>
         <span className="span-tw">{open ? '▾' : '▸'}</span>
-        <b>🔬 memo #{idx + 1}</b>
+        <b><OpIcon name="search" className="t-ic" /> memo #{idx + 1}</b>
         {memo.trigger && <span className="pill">{memo.trigger}</span>}
         {memo.at_node != null && <span className="muted"> @{memo.at_node} nodes</span>}
         <span className="spacer" style={{ flex: 1 }} />

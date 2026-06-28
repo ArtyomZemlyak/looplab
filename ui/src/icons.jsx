@@ -52,6 +52,20 @@ const GLYPHS = {
   'chevron-down': <path d="M3.5 6.5 8 11l4.5-4.5" />,
   // header = speech bubble
   chat: <path d="M3 3.8h10v6.4H6.5L4 12.4V10.2H3Z" />,
+
+  // ---- organizational glyphs (replace the color emoji so every theme stays monochrome) ----
+  // project = folder with a tab
+  folder: <path d="M2.4 4.4h3.3l1.3 1.6h6.6v6.6H2.4Z" />,
+  // super-task / cross-run = target (reuses the crosshair metaphor) — alias of `target`
+  // map = location pin
+  map: <><path d="M8 14s4.1-4 4.1-7A4.1 4.1 0 0 0 8 2.9 4.1 4.1 0 0 0 3.9 7c0 3 4.1 7 4.1 7Z" /><circle cx="8" cy="6.9" r="1.5" /></>,
+  // strategy = compass
+  compass: <><circle cx="8" cy="8" r="5.6" /><path d="M10.5 5.5 8.7 8.7 5.5 10.5 7.3 7.3Z" /></>,
+  // hint = lightbulb
+  bulb: <><path d="M5.7 9.5a3.4 3.4 0 1 1 4.6 0c-.5.5-.8 1-.8 1.6H6.5c0-.6-.3-1.1-.8-1.6Z" /><path d="M6.5 12.5h3M7 13.8h2" /></>,
+  // status: ok / failed (color via the semantic vars at the call site)
+  check: <path d="M3.5 8.4 6.4 11.3 12.5 4.7" />,
+  cross: <path d="M4.6 4.6l6.8 6.8M11.4 4.6l-6.8 6.8" />,
 }
 
 export function OpIcon({ name, size = 14, className }) {

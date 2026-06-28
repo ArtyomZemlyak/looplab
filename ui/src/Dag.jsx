@@ -114,7 +114,7 @@ function ResearchNode({ data }) {
     <div className={'research-node' + (selected ? ' sel' : '')} onClick={() => onSelect && onSelect(idx)}
          title={memo.summary || 'deep research'}>
       <Handle type="target" position={Position.Top} style={{ opacity: 0 }} />
-      <div className="row"><span className="rn-ic">🔬</span><b>deep research</b>
+      <div className="row"><span className="rn-ic"><OpIcon name="search" /></span><b>deep research</b>
         <span className="spacer" style={{ flex: 1 }} />
         {memo.trigger && <span className="badge">{memo.trigger}</span>}</div>
       <div className="rn-summary">{(memo.summary || '(no summary)').slice(0, 110)}</div>
@@ -251,7 +251,7 @@ export default function Dag({ state, selectedId, onSelect, groupMode = 'none', c
         <button className={'btn sm ghost' + (showLegend ? ' primary' : '')} title="operator legend"
                 onClick={() => setShowLegend(v => !v)}>ⓘ ops</button>
         <button className={'btn sm ghost' + (showMap ? ' primary' : '')} title={showMap ? 'hide overview map' : 'show overview map'}
-                onClick={toggleMap}>🗺 map{showMap ? ' ✕' : ''}</button>
+                onClick={toggleMap}><OpIcon name="map" className="t-ic" /> map{showMap ? ' ✕' : ''}</button>
       </Panel>
       {showLegend && <Panel position="top-left" className="op-legend">
         <div className="legend-h">Operators</div>

@@ -2,6 +2,9 @@ import React, { useEffect, useState } from 'react'
 import RunList from './RunList.jsx'
 import RunView from './RunView.jsx'
 import Settings from './Settings.jsx'
+import { initTheme } from './ThemeSwitcher.jsx'
+
+initTheme()   // restore the saved design theme before first paint
 
 // Tiny hash router: #/run/<id> opens a run, #/settings opens the settings page.
 function parseHash() {

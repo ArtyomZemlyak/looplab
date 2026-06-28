@@ -4,6 +4,7 @@ import '@xyflow/react/dist/style.css'
 import { get, fmt, listProjects } from './util.js'
 import { regionGeometry, groupColor } from './grouping.js'
 import { RegionShell, SuperShell } from './groupnodes.jsx'
+import { OpIcon } from './icons.jsx'
 
 // Cross-run map: the SAME hull / super-node visual language as the in-run canvas, lifted one level
 // — projects are (nestable) region hulls, runs are nodes inside them with theme chips. Collapsing a
@@ -26,7 +27,7 @@ function RunNode({ data }) {
 function ProjRegion({ data }) {
   const tab = (
     <div className="grp-tab" onClick={(e) => { e.stopPropagation(); data.onToggle(data.id) }} title="collapse project">
-      <span className="grp-chev">▾</span>📁 {data.name}<span className="grp-n">{data.count}</span>
+      <span className="grp-chev">▾</span><OpIcon name="folder" className="t-ic" /> {data.name}<span className="grp-n">{data.count}</span>
     </div>
   )
   return <RegionShell w={data.w} h={data.h} path={data.path} tint={data.tint} tab={tab} />
@@ -37,7 +38,7 @@ function ProjSuper({ data }) {
     <SuperShell tint={data.tint} onClick={() => data.onToggle(data.id)} title="expand project">
       <div className="row">
         <button className="grp-chev btn-chev">▸</button>
-        <b className="grp-name">📁 {data.name}</b>
+        <b className="grp-name"><OpIcon name="folder" className="t-ic" /> {data.name}</b>
         <span className="spacer" style={{ flex: 1 }} /><span className="grp-n">{data.count}</span>
       </div>
       <div className="muted" style={{ marginTop: 3 }}>{data.runs} run{data.runs !== 1 ? 's' : ''}</div>
