@@ -178,29 +178,36 @@ button { font: inherit; }
 .node-card .delta.up { color: var(--ok); } .node-card .delta.down { color: var(--fail); }
 .node-card .sub { font-size: 11px; color: var(--fg-mut); margin-top: 2px; }
 .node-card.sel { border-color: var(--accent); box-shadow: 0 0 0 2px rgba(74,163,255,.35), var(--shadow-card); }
-.node-card.s-evaluated { border-left: 3px solid var(--ok); }
-.node-card.s-failed { border-left: 3px solid var(--fail); animation: shake .4s 1; }
-.node-card.s-pending { border-left: 3px solid var(--pending); }
+/* status owns the card BODY (round-8 channel re-map, after the graph-UX research): a low-alpha
+   full-card wash so experiment health reads preattentively across the whole forest — even at fit-view,
+   where the old 3px left rail was invisible. The loud channels (full border + halo) stay reserved for
+   the RARE best/working/selected; group membership moves to the left edge bar. */
+.node-card.s-evaluated { background-color: color-mix(in srgb, var(--ok) 13%, var(--bg-2)); }
+.node-card.s-failed { background-color: color-mix(in srgb, var(--fail) 15%, var(--bg-2)); animation: shake .4s 1; }
+.node-card.s-pending { background-color: color-mix(in srgb, var(--pending) 12%, var(--bg-2)); }
 .node-card.working { border-color: var(--working); animation: pulse 1.3s infinite; }
 .node-card.infeasible { opacity: .62; background-image: repeating-linear-gradient(45deg, transparent, transparent 7px, rgba(122,107,154,.10) 7px, rgba(122,107,154,.10) 14px); }
 .node-card.best { border-color: var(--best); box-shadow: 0 0 0 2px rgba(255,213,74,.35), var(--shadow-card); }
-.node-card .crown { color: var(--best); }
+/* confirmed/robust tick on the metric row (replaces the restated "robust …" sub-line) */
+.node-card .conf-chip { font-size: 10px; color: var(--ok); font-weight: 700; margin-left: 6px; white-space: nowrap; }
+/* zoom level-of-detail glyph (overview): the status-coloured body + operator icon + id, centred. The
+   card keeps its footprint so the layout never shifts; only the contents collapse. */
+.node-card.lod { display: flex; align-items: center; justify-content: center; gap: 8px; height: 100%; }
+.node-card.lod .lod-ic { display: inline-flex; color: var(--fg-dim); }
+.node-card.lod .lod-id { font-weight: 700; font-size: 15px; color: var(--fg); }
 @keyframes pulse { 0%,100%{ box-shadow: 0 0 0 0 rgba(240,180,41,.0), var(--shadow-card);} 50%{ box-shadow: 0 0 0 5px rgba(240,180,41,.28), var(--shadow-card);} }
 @keyframes shake { 0%,100%{transform:translateX(0)} 20%{transform:translateX(-4px)} 60%{transform:translateX(4px)} }
 
 .badge { font-size: 10px; padding: 0 5px; border-radius: 4px; border: 1px solid var(--line-2); color: var(--fg-dim); }
-.badge.agent-ok { color: var(--ok); border-color: #2c6e49; }
-.badge.agent-fb { color: var(--working); border-color: #7a5a1d; }
-.badge.agent-x { color: var(--fail); border-color: #7a2b2b; }
+/* agent note: monochrome + exception-only, so it never competes with the status colour budget */
+.badge.agent-note { color: var(--fg-mut); border-color: var(--line-2); }
 .badge.reason { color: var(--fail); border-color: #7a2b2b; }
 .badge.sweep { color: var(--accent); border-color: var(--accent-dim); }
 
-/* group membership (round-6): a faint top accent + wash keyed to the group tint, instead of a hull */
-.node-card.grouped { border-top-color: color-mix(in srgb, var(--grp-tint) 75%, var(--line-2));
-  background-color: color-mix(in srgb, var(--grp-tint) 8%, var(--bg-2)); }
-/* a grouped sweep keeps the group-tint top accent (the later `.sweep` border-top would otherwise
-   override it back to accent-dim and lose the membership cue) — at the sweep's 2px thickness. */
-.node-card.grouped.sweep { border-top: 2px solid color-mix(in srgb, var(--grp-tint) 75%, var(--line-2)); }
+/* group membership (round-8 re-map): now a coloured LEFT EDGE bar — the body is owned by status. The
+   cluster band + pill carry the group's name; this is just the per-node membership tick, so status
+   (body) + group (edge) + best/working/selected (halo) never collide. */
+.node-card.grouped { border-left: 4px solid var(--grp-tint); }
 
 /* intra-node sweep: card foot (mini spark + failed-trial dot); open the node's Trials tab for detail */
 .node-card.sweep { border-top: 2px solid var(--accent-dim); }
@@ -227,8 +234,14 @@ button { font: inherit; }
 /* edges (react-flow) */
 .react-flow__edge-path { stroke: var(--line-2); }
 .react-flow__edge.lineage .react-flow__edge-path { stroke: var(--accent); stroke-width: 2; }
+/* the root→champion "winning spine": a persistent faint gold path, visible even with nothing selected */
+.react-flow__edge.champion .react-flow__edge-path { stroke: color-mix(in srgb, var(--best) 55%, var(--line-2)); stroke-width: 2; }
+/* everything off the selected lineage recedes (focus+context) */
+.react-flow__edge.faded { opacity: .12; }
 .react-flow__edge.debug .react-flow__edge-path { stroke: var(--fail); stroke-dasharray: 4 3; }
 .react-flow__edge.research-edge .react-flow__edge-path { stroke: #6f8bb0; stroke-dasharray: 5 4; opacity: .6; }
+/* cross-run map: a "derived-from" edge (run B seeded an experiment from run A) */
+.react-flow__edge.seed-edge .react-flow__edge-path { stroke: var(--accent); stroke-dasharray: 4 3; stroke-width: 1.5; }
 .react-flow__attribution { display: none; }
 .react-flow__background { background: var(--bg); }
 
@@ -268,16 +281,21 @@ button { font: inherit; }
 .grp-tab .grp-chev { color: var(--fg); opacity: .8; }
 .grp-tab .grp-n { background: rgba(0,0,0,.35); border-radius: 999px; padding: 0 7px; font-size: 10px; font-weight: 700; }
 
-/* round-6: slim lane header above an expanded cluster — replaces the giant translucent hull. Spans
-   the cluster width; the whole bar collapses the group on click. */
-.grp-lane { display: flex; align-items: center; gap: 6px; height: 22px; padding: 0 10px; cursor: pointer;
-  background: color-mix(in srgb, var(--grp-tint) 20%, var(--bg-1));
-  border: 1px solid color-mix(in srgb, var(--grp-tint) 75%, transparent); border-radius: 7px;
-  font-size: 11px; font-weight: 600; color: var(--fg); white-space: nowrap; overflow: hidden; }
-.grp-lane:hover { background: color-mix(in srgb, var(--grp-tint) 32%, var(--bg-1)); }
-.grp-lane .grp-chev { opacity: .8; }
-.grp-lane .grp-lane-label { overflow: hidden; text-overflow: ellipsis; }
-.grp-lane .grp-n { background: rgba(0,0,0,.35); border-radius: 999px; padding: 0 7px; font-size: 10px; font-weight: 700; }
+/* round-8: a whisper-faint band behind an expanded cluster (the soft "box" without the heavy hull) +
+   a compact label pill hugging its text at the top-left (replaces the full-width bar that stretched).
+   The band is click-through; only the pill collapses the group. */
+.grp-band { position: relative; border-radius: 12px; pointer-events: none;
+  background: color-mix(in srgb, var(--grp-tint) 5%, transparent);
+  border: 1px solid color-mix(in srgb, var(--grp-tint) 14%, transparent); }
+.grp-pill { position: absolute; top: 5px; left: 9px; pointer-events: auto; cursor: pointer;
+  display: inline-flex; align-items: center; gap: 5px; height: 19px; max-width: 200px; padding: 0 8px;
+  border-radius: 999px; font-size: 11px; font-weight: 600; color: var(--fg-dim); white-space: nowrap;
+  background: color-mix(in srgb, var(--grp-tint) 24%, var(--bg-1));
+  border: 1px solid color-mix(in srgb, var(--grp-tint) 50%, transparent); }
+.grp-pill:hover { background: color-mix(in srgb, var(--grp-tint) 38%, var(--bg-1)); color: var(--fg); }
+.grp-pill .grp-chev { opacity: .75; }
+.grp-pill .grp-pill-label { overflow: hidden; text-overflow: ellipsis; }
+.grp-pill .grp-n { background: rgba(0,0,0,.34); border-radius: 999px; padding: 0 6px; font-size: 10px; font-weight: 700; }
 
 .grp-super { width: 174px; background: var(--bg-2); border: 1px solid var(--grp-tint); border-left: 3px solid var(--grp-tint);
   border-radius: var(--radius); padding: 7px 10px; box-shadow: var(--shadow-card); cursor: pointer; }
@@ -791,6 +809,13 @@ textarea.text { min-height: 220px; font-family: ui-monospace, Consolas, monospac
   max-width: 168px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 .node-card .merge-line { font-size: 10px; color: #c9b3e0; margin-top: 3px; max-width: 168px;
   overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+/* cross-run provenance: a "seeded from a sibling run" chip — accent-tinted to stand apart from the
+   neutral change-chip, and a real link (deep-links to the source run). */
+.node-card .origin-chip { font-size: 10px; color: var(--accent); margin-top: 3px; background: var(--bg-3);
+  border: 1px solid var(--line); border-radius: 5px; padding: 0 5px; display: inline-block;
+  max-width: 168px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis;
+  text-decoration: none; cursor: pointer; }
+.node-card .origin-chip:hover { border-color: var(--accent); }
 .node-card.dim { opacity: .28; filter: saturate(.5); }
 
 .directions-overview { border-bottom: 1px solid var(--line); background: var(--bg-1); padding: 6px 12px 7px; flex: none; }

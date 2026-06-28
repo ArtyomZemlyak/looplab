@@ -35,6 +35,7 @@ def fold(events: Iterable[Event]) -> RunState:
                 code=d.get("code", ""),
                 files=d.get("files", {}) or {},
                 deleted=d.get("deleted", []) or [],
+                origin=d.get("origin"),   # cross-run provenance (None for ordinary nodes)
             )
             st.nodes[n.id] = n
         elif t == "node_evaluated":

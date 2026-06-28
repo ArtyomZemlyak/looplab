@@ -4,8 +4,8 @@ import React from 'react'
 // cross-run map (MapView.jsx), so the hull region and the collapsed super-node card are defined
 // once. Bodies differ legitimately (experiment aggregate vs project rollup) and are passed in.
 
-// Soft enclosing hull behind a group; `tab` is the (interactive) label the caller wires.
-// Used by the cross-run Map (MapView.jsx). The in-run canvas (Dag.jsx) uses the slimmer LaneHeader.
+// Soft enclosing hull behind a group; `tab` is the (interactive) label the caller wires. Used by the
+// cross-run Map (MapView.jsx); the in-run canvas (Dag.jsx) uses the slimmer GroupRegion below.
 export function RegionShell({ w, h, path, tint, tab }) {
   return (
     <div className="grp-region" style={{ width: w, height: h, '--grp-tint': tint }}>
@@ -15,18 +15,19 @@ export function RegionShell({ w, h, path, tint, tab }) {
   )
 }
 
-// Slim labeled lane header drawn at the TOP edge of an EXPANDED group's cluster (round-6) — replaces
-// the old full-canvas hull, which drew a giant translucent box across the screen. Group identity now
-// reads from this bar + a faint per-node tint instead of an enclosing region. `w` spans the cluster;
-// the whole bar is clickable to collapse the group.
-export function LaneHeader({ w, label, count, tint, onToggle }) {
+// Group region for an EXPANDED cluster (round-8): a WHISPER-faint rounded band behind the members
+// (the "objединяющий бокс" without the heavy old hull) + a compact label PILL hugging its text at the
+// top-left (replaces the full-width bar that stretched across the cluster). Group identity reads from
+// the members' shared muted fill; the band + pill just frame and name it. The band is click-through
+// (pointer-events:none) so nodes on top stay clickable; only the pill collapses the group.
+export function GroupRegion({ w, h, label, count, tint, onToggle }) {
   return (
-    <div className="grp-lane" style={{ width: w, '--grp-tint': tint }}
-         onClick={(e) => { e.stopPropagation(); onToggle && onToggle(label) }} title="collapse group">
-      <span className="grp-chev">▾</span>
-      <span className="grp-lane-label">{label}</span>
-      <span className="spacer" style={{ flex: 1 }} />
-      <span className="grp-n">{count}</span>
+    <div className="grp-band" style={{ width: w, height: h, '--grp-tint': tint }}>
+      <div className="grp-pill" onClick={(e) => { e.stopPropagation(); onToggle && onToggle(label) }} title="collapse group">
+        <span className="grp-chev">▾</span>
+        <span className="grp-pill-label">{label}</span>
+        <span className="grp-n">{count}</span>
+      </div>
     </div>
   )
 }

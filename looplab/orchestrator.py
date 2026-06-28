@@ -1279,8 +1279,16 @@ class Engine:
                     "operator": idea.operator,
                     "idea": idea.model_dump(mode="json"),
                     "code": code,
-                    "files": ({} if req.get("code") else getattr(self.developer, "last_files", {})) or {},
+                    # Honour explicit files/deleted on the request (a cross-run `import` ships the
+                    # sibling's full multi-file solution); else use the Developer's last build, and
+                    # only when the Developer actually implemented (no ready-made code was supplied).
+                    "files": (req.get("files")
+                              or ({} if req.get("code") else getattr(self.developer, "last_files", {}))) or {},
+                    "deleted": req.get("deleted") or [],
                     "source": "manual",
+                    # Cross-run provenance: present when this inject SEEDED from a sibling run's
+                    # experiment (an `import` action). None for an ordinary operator-authored inject.
+                    "origin": req.get("origin"),
                 },
             )
         if not req.get("code"):

@@ -73,7 +73,7 @@ def _engine(run_dir: Path, task: TaskAdapter, settings: Settings,
     # Capture LLM prompts/completions into spans (UI per-node trace) unless disabled. Diagnostics
     # only; never read by replay.fold. Honors LOOPLAB_TRACE_LLM_IO via Settings.
     set_llm_capture(settings.trace_llm_io)
-    researcher, developer = make_roles(task, settings)
+    researcher, developer = make_roles(task, settings, run_dir)
     # Unified mode: researcher IS developer (one agent). Skip the researcher-only wrappers
     # (surrogate/panel) — they would re-wrap `researcher` without re-wrapping `developer`, so the
     # two handles would diverge mid-run (R1). The unified agent owns its own ideation machinery.

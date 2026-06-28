@@ -219,6 +219,12 @@ class Settings(BaseSettings):
     # the task data (schema/profile/asset) mid-loop, instead of seeing only best+parent. Advisory —
     # never changes best-selection. Off = the legacy single-shot Researcher (richer digest still added).
     researcher_tools: bool = True
+    # Cross-run introspection: give the agentic Researcher / pilot read-only tools to look at
+    # SIBLING runs (same task_id, same run-root) — list them, read an experiment / its code, and
+    # find analogous configs across runs — so a run can build on what neighbouring runs already
+    # learned instead of rediscovering it. Advisory; never changes best-selection. Needs the run's
+    # own dir wired through (no-op for unit-built roles). Off = the legacy single-run view only.
+    cross_run_tools: bool = True
     # Agentic retrieval (ADR-16): if set, the LLM Researcher gets grep/kb_search/read
     # tools over this directory of markdown notes and chooses when to use them.
     knowledge_dir: str | None = None

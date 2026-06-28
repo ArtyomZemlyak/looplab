@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState } from 'react'
-import { ReactFlow, Background, Controls } from '@xyflow/react'
+import { ReactFlow, Background, Controls, MarkerType, Handle, Position } from '@xyflow/react'
 import '@xyflow/react/dist/style.css'
 import { get, fmt, listProjects } from './util.js'
 import { regionGeometry, groupColor } from './grouping.js'
@@ -16,6 +16,9 @@ function RunNode({ data }) {
   const themes = Object.entries(r.themes || {})
   return (
     <div className="run-node" onClick={() => data.onOpen(r.run_id)} title={r.goal}>
+      {/* invisible handles so cross-run "derived-from" edges can attach (left=source, right=target) */}
+      <Handle type="source" position={Position.Right} style={{ opacity: 0 }} />
+      <Handle type="target" position={Position.Left} style={{ opacity: 0 }} />
       <div className="row"><span className="pill phase">{r.phase}</span><b>{r.run_id}</b></div>
       <div className="muted">{r.task_id} · best {fmt(r.best_confirmed ?? r.best_metric)} · {r.nodes} nodes</div>
       {themes.length > 0 && <div className="chips">{themes.slice(0, 5).map(([t, info]) =>
@@ -79,7 +82,8 @@ function buildGraph(projects, runs, collapsed, onOpen, onToggle) {
     }
     const myRuns = runsByProj[p.id] || []
     myRuns.forEach((r, i) => { const pos = { x: d * INDENT + i * RUN_DX, y }; runPos[r.run_id] = pos
-      rfNodes.push({ id: 'run:' + r.run_id, type: 'run', position: pos, zIndex: 5, data: { run: r, onOpen } }) })
+      rfNodes.push({ id: 'run:' + r.run_id, type: 'run', position: pos, zIndex: 5,
+        width: RUN_W, height: RUN_H, data: { run: r, onOpen } }) })
     if (myRuns.length) y += ROW_DY
     ;(childrenOf[p.id] || []).forEach(visit)
   }
@@ -87,7 +91,8 @@ function buildGraph(projects, runs, collapsed, onOpen, onToggle) {
 
   const un = runsByProj.__un || []
   un.forEach((r, i) => { const pos = { x: i * RUN_DX, y }; runPos[r.run_id] = pos
-    rfNodes.push({ id: 'run:' + r.run_id, type: 'run', position: pos, zIndex: 5, data: { run: r, onOpen } }) })
+    rfNodes.push({ id: 'run:' + r.run_id, type: 'run', position: pos, zIndex: 5,
+      width: RUN_W, height: RUN_H, data: { run: r, onOpen } }) })
 
   // project regions: subtree bbox over placed runs (parent encloses children → genuine nesting)
   projects.forEach(p => {
@@ -101,7 +106,19 @@ function buildGraph(projects, runs, collapsed, onOpen, onToggle) {
       selectable: false, draggable: false, focusable: false,
       data: { id: p.id, name: p.name, count: rects.length, w: geo.w, h: geo.h, path: geo.path, tint: groupColor(p.id), onToggle } })
   })
-  return rfNodes
+  // Cross-run lineage: a "derived-from" edge for each run that SEEDED an experiment from another run
+  // (run.seeded_from, from the backend). Only drawn when BOTH runs are placed (not hidden inside a
+  // collapsed project) — this is the genuine node→node-across-runs provenance the in-run canvas can't show.
+  const edges = []
+  runs.forEach(r => (r.seeded_from || []).forEach(src => {
+    if (runPos[r.run_id] && runPos[src]) {
+      // minimal edge object (styling via the .seed-edge CSS class) — mirrors the in-run canvas's
+      // proven pattern; an inline style/label/markerEnd here prevents the path from rendering in v12.
+      edges.push({ id: `seed:${src}->${r.run_id}`, source: 'run:' + src, target: 'run:' + r.run_id,
+        className: 'seed-edge', markerEnd: { type: MarkerType.ArrowClosed } })
+    }
+  }))
+  return { nodes: rfNodes, edges }
 }
 
 export default function MapView({ onOpen }) {
@@ -113,11 +130,11 @@ export default function MapView({ onOpen }) {
     get('/api/runs').then(setRuns).catch(() => {})
   }, [])
   const toggle = (id) => setCollapsed(s => { const n = new Set(s); n.has(id) ? n.delete(id) : n.add(id); return n })
-  const nodes = useMemo(() => buildGraph(projects, runs, collapsed, onOpen, toggle), [projects, runs, collapsed, onOpen])
+  const { nodes, edges } = useMemo(() => buildGraph(projects, runs, collapsed, onOpen, toggle), [projects, runs, collapsed, onOpen])
 
   return (
     <div className="mapwrap">
-      <ReactFlow nodes={nodes} edges={[]} nodeTypes={nodeTypes} fitView minZoom={0.1} maxZoom={1.6}
+      <ReactFlow nodes={nodes} edges={edges} nodeTypes={nodeTypes} fitView minZoom={0.1} maxZoom={1.6}
                  proOptions={{ hideAttribution: true }} nodesDraggable={false}>
         <Background color="#20252f" gap={22} />
         <Controls showInteractive={false} />

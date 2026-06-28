@@ -1,11 +1,11 @@
-import React, { useMemo, useState } from 'react'
-import { ReactFlow, Background, Controls, MiniMap, Handle, Position, Panel } from '@xyflow/react'
+import React, { useContext, useEffect, useMemo, useState } from 'react'
+import { ReactFlow, Background, Controls, MiniMap, Handle, Position, Panel, useViewport } from '@xyflow/react'
 import '@xyflow/react/dist/style.css'
 import { fmt, layoutWithGroups, nodeClass, delta, workingId, operatorMeta, OPERATOR_LEGEND, isSweep, sweepInfo } from './util.js'
 import { nodeChip } from './report.js'
 import { OpIcon } from './icons.jsx'
 import { Spark } from './charts.jsx'
-import { LaneHeader, SuperShell } from './groupnodes.jsx'
+import { GroupRegion, SuperShell } from './groupnodes.jsx'
 import {
   computeGroups, nodeGroupMap, regionGeometry, rerouteForCollapse, groupColor,
   groupAggregate, superId, GROUP_MODES,
@@ -13,15 +13,33 @@ import {
 
 const NODE_W = 188, NODE_H = 78
 
+// Zoom level-of-detail: a single watcher (rendered INSIDE <ReactFlow> so it can read the live viewport)
+// flips a context boolean when zoom crosses a dead-band; every ExpNode reads it via context. So changing
+// zoom never re-runs the layout memo (its deps don't include zoom) — it just swaps full-card ↔ glyph.
+const LodContext = React.createContext(false)
+const LOD_ON = 0.42, LOD_OFF = 0.5   // hysteresis: a dead-band so sitting near the threshold can't flicker
+function LodWatcher({ lod, onChange }) {
+  const { zoom } = useViewport()
+  useEffect(() => {
+    if (!lod && zoom < LOD_ON) onChange(true)
+    else if (lod && zoom > LOD_OFF) onChange(false)
+  }, [zoom, lod, onChange])
+  return null
+}
+
+// Exception-only + monochrome: the common success case gets NO badge (the card's colour budget is
+// reserved for experiment STATUS, so a green ✓agent can't sit next to a red failure meaning two
+// different things). Only a fallback or a failed validation shows one faint glyph.
 function agentBadge(rep) {
   if (!rep) return null
-  if (rep.ok && !rep.fell_back) return <span className="badge agent-ok">✓agent</span>
-  if (rep.fell_back) return <span className="badge agent-fb">↩fallback</span>
-  return <span className="badge agent-x">✗agent</span>
+  if (rep.fell_back) return <span className="badge agent-note" title="developer fell back to a simpler build">↩</span>
+  if (rep.ok === false) return <span className="badge agent-note" title="agent validation failed">✗</span>
+  return null
 }
 
 function ExpNode({ data }) {
   const { node, state, workId, selectedId, onSelect, themeFilter, groupTint } = data
+  const lod = useContext(LodContext)   // overview zoom → render the compact glyph instead of the full card
   const m = node.confirmed_mean ?? node.metric
   const d = delta(node, state)
   const op = operatorMeta(node.operator)
@@ -33,51 +51,70 @@ function ExpNode({ data }) {
   const isMerge = parents.length > 1
   const chg = nodeChip(node, state.nodes)   // returns '' for a (resolved) merge — render guards isMerge
   const mergeThemes = isMerge ? parents.map(p => p.idea?.theme || ('#' + p.id)) : null
-  const dim = themeFilter && node.idea?.theme !== themeFilter
+  const dim = data.dim   // precomputed in the canvas memo: lineage-focus dimming OR the theme filter
+  const confirmed = node.confirmed_mean != null
+  const cardCls = nodeClass(node, state, workId) + (node.id === selectedId ? ' sel' : '') + (sweep ? ' sweep' : '') + (groupTint ? ' grouped' : '') + (dim ? ' dim' : '')
+  const cardStyle = groupTint ? { '--grp-tint': groupTint } : undefined
+  const cardTitle = op.label + (node.idea?.rationale ? ' — ' + node.idea.rationale : '')
+  // Zoom LOD: below the threshold the full card is sub-pixel mush AND expensive (4 text rows + a Spark
+  // SVG). Collapse to a glyph — the status-coloured body does the talking, plus the operator icon + id,
+  // so the forest reads as a field of green/red blocks at overview (Blender/ELK level-of-detail pattern).
+  if (lod) return (
+    <div className={cardCls + ' lod'} style={cardStyle} onClick={() => onSelect(node.id)} title={cardTitle}>
+      <Handle type="target" position={Position.Top} style={{ opacity: 0 }} />
+      <span className="lod-ic"><OpIcon name={op.icon} size={22} /></span>
+      <span className="lod-id">#{node.id}</span>
+      <Handle type="source" position={Position.Bottom} style={{ opacity: 0 }} />
+    </div>
+  )
   return (
-    <div className={nodeClass(node, state, workId) + (node.id === selectedId ? ' sel' : '') + (sweep ? ' sweep' : '') + (groupTint ? ' grouped' : '') + (dim ? ' dim' : '')}
-         style={groupTint ? { '--grp-tint': groupTint } : undefined}
-         onClick={() => onSelect(node.id)} title={op.label + (node.idea?.rationale ? ' — ' + node.idea.rationale : '')}>
+    <div className={cardCls} style={cardStyle}
+         onClick={() => onSelect(node.id)} title={cardTitle}>
       <Handle type="target" position={Position.Top} style={{ opacity: 0 }} />
       <div className="row">
         <span className="nid">#{node.id}</span>
-        <span className="op"><OpIcon name={op.icon} /> {node.operator}</span>
+        {/* operator = icon only (the word is in the title + legend); kept monochrome so colour stays status */}
+        <span className="op" title={node.operator}><OpIcon name={op.icon} /></span>
         <span className="spacer" style={{ flex: 1 }} />
         {sweep && <span className="badge sweep" title={`intra-node sweep · ${sw.count} trials — open the node's Trials tab`}>⊞ {sw.count}</span>}
-        {node.id === state.best_node_id && <span className="crown" title="champion">♚</span>}
         {agentBadge(node.agent_report)}
       </div>
       <div className="metric">
         {fmt(m)}
-        {d && <span className={'delta ' + (d.improved ? 'up' : 'down')}>{d.improved ? '▲' : '▼'}{fmt(Math.abs(d.d), 2)}</span>}
+        {/* delta only where it's meaningful — a merge has several parents, so a single ▲/▼ vs parent[0] would lie */}
+        {!isMerge && d && <span className={'delta ' + (d.improved ? 'up' : 'down')}>{d.improved ? '▲' : '▼'}{fmt(Math.abs(d.d), 2)}</span>}
+        {/* confirmed = a compact tick, not a restated 'robust …' line; the full ±std lives in the Inspector */}
+        {confirmed && <span className="conf-chip" title={`robust ${fmt(node.confirmed_mean, 3)} ±${fmt(node.confirmed_std, 2)} over ${node.confirmed_seeds} seeds`}>✓{node.confirmed_seeds}×</span>}
       </div>
       {isMerge
         ? <div className="merge-line" title={'combines: ' + mergeThemes.join(' + ')}>⊕ {mergeThemes.join(' + ')}</div>
         : chg ? <div className="change-chip" title={chg}>{chg}</div> : null}
+      {/* cross-run provenance: this experiment was seeded from a sibling run — deep-link to it */}
+      {node.origin?.run_id && <a className="origin-chip" href={`#/run/${node.origin.run_id}`}
+        onClick={(e) => e.stopPropagation()}
+        title={`seeded from run ${node.origin.run_id} #${node.origin.node_id}`
+          + (node.origin.metric != null ? ` · source metric ${fmt(node.origin.metric)}` : '')
+          + ' — click to open that run'}>⤴ from {node.origin.run_id} #{node.origin.node_id}</a>}
+      {/* one optional sub-line, reserved for the ONE thing shown nowhere else: why it failed / infeasible */}
       {sweep
         ? <div className="sub sweep-foot">
             <Spark series={sw.series} width={104} height={16} />
             <span className="spacer" style={{ flex: 1 }} />
             {sw.failed ? <span className="dot fail" title={`${sw.failed} failed trials`}>●{sw.failed}</span> : null}
           </div>
-        : <div className="sub">
-            {node.status === 'failed'
-              ? <span className="badge reason">{node.error_reason || 'failed'}</span>
-              : node.confirmed_mean != null
-                ? <>robust {fmt(node.confirmed_mean, 3)} ±{fmt(node.confirmed_std, 2)} ({node.confirmed_seeds}×)</>
-                : node.feasible === false ? <span className="badge reason">infeasible</span>
-                  : node.status}
-          </div>}
+        : node.status === 'failed'
+          ? <div className="sub"><span className="badge reason">{node.error_reason || 'failed'}</span></div>
+          : node.feasible === false ? <div className="sub"><span className="badge reason">infeasible</span></div> : null}
       <Handle type="source" position={Position.Bottom} style={{ opacity: 0 }} />
     </div>
   )
 }
 
-// Slim labeled lane header above an EXPANDED group's cluster (round-6, replaces the giant hull). The
-// bar spans the cluster width and is the (only) interactive surface — click it to collapse the group.
+// Group region behind an EXPANDED cluster (round-8): a faint band + a compact label pill (replaces
+// the round-6 full-width lane bar that stretched across the cluster). Click the pill to collapse.
 function GroupLane({ data }) {
-  const { w, label, count, tint, onToggle } = data
-  return <LaneHeader w={w} label={label} count={count} tint={tint} onToggle={onToggle} />
+  const { w, h, label, count, tint, onToggle } = data
+  return <GroupRegion w={w} h={h} label={label} count={count} tint={tint} onToggle={onToggle} />
 }
 
 // Collapsed group → one aggregate card (semantic zoom). Body selects (group summary); the ▸ expands.
@@ -135,14 +172,38 @@ export default function Dag({ state, selectedId, onSelect, groupMode = 'none', c
   const workId = workingId(state)
   const [showMap, setShowMap] = useState(() => localStorage.getItem('ll.minimap') === '1')
   const [showLegend, setShowLegend] = useState(false)
+  const [lod, setLod] = useState(false)   // zoom level-of-detail: full cards ↔ glyphs (set by LodWatcher)
   const toggleMap = () => setShowMap(v => { localStorage.setItem('ll.minimap', v ? '0' : '1'); return !v })
 
   const { nodes, edges, groupKeys } = useMemo(() => {
     const ns = state?.nodes || {}
     const groups = groupMode === 'none' ? new Map() : computeGroups(ns, groupMode)
+    // Group ORDER → a curated tint per group, so adjacent groups stay visually distinct (vs a hash
+    // that can collide two neighbours). One muted hue per group is the primary "same family" cue.
+    const groupOrder = new Map([...groups.keys()].map((k, i) => [k, i]))
+    const tintOf = (k) => groupColor(k, groupOrder.get(k))
     const ng = nodeGroupMap(groups)
     const pos = layoutWithGroups(ns, { collapsed, nodeGroup: ng })
     const { hidden, edges: reEdges } = rerouteForCollapse(ns, collapsed, ng)
+
+    // Focus+context (Prefect-style): the transitive ancestor+descendant set of the SELECTED node — the
+    // rest of the forest dims so "how did we get to this experiment / where did it lead" reads on a
+    // deep tree. Plus the champion's ancestor chain → a persistent faint-gold "winning spine" that
+    // shows the root→best path even with nothing selected. Pure graph walks over parent_ids/children.
+    const children = {}
+    Object.values(ns).forEach(n => (n.parent_ids || []).forEach(p => { (children[p] ||= []).push(n.id) }))
+    const reach = (start, nextOf) => {
+      const seen = new Set(); const stack = [start]
+      while (stack.length) { const x = stack.pop(); (nextOf(x) || []).forEach(y => { if (!seen.has(y)) { seen.add(y); stack.push(y) } }) }
+      return seen
+    }
+    const focusSet = (selectedId != null && ns[selectedId])
+      ? new Set([selectedId, ...reach(selectedId, x => ns[x]?.parent_ids), ...reach(selectedId, x => children[x])])
+      : null
+    const champSet = (state.best_node_id != null && ns[state.best_node_id])
+      ? new Set([state.best_node_id, ...reach(state.best_node_id, x => ns[x]?.parent_ids)])
+      : null
+
     const rfNodes = []
 
     // 1) slim lane header for each EXPANDED group (round-6: replaces the full-canvas hull). A
@@ -156,7 +217,7 @@ export default function Dag({ state, selectedId, onSelect, groupMode = 'none', c
       rfNodes.push({
         id: `region:${key}`, type: 'groupLane', position: { x: geo.x, y: geo.y }, zIndex: 0,
         selectable: false, draggable: false, focusable: false,
-        data: { w: geo.w, label: key, count: ids.length, tint: groupColor(key), onToggle: onToggleGroup },
+        data: { w: geo.w, h: geo.h, label: key, count: ids.length, tint: tintOf(key), onToggle: onToggleGroup },
       })
     })
 
@@ -169,7 +230,7 @@ export default function Dag({ state, selectedId, onSelect, groupMode = 'none', c
         id: superId(key), type: 'groupSuper', position: p, zIndex: 1,
         data: {
           label: key, count: agg.count, best: agg.best, series: agg.series, status: agg.status,
-          tint: groupColor(key), selected: key === selectedGroup, onExpand: onToggleGroup, onSelect: onSelectGroup,
+          tint: tintOf(key), selected: key === selectedGroup, onExpand: onToggleGroup, onSelect: onSelectGroup,
         },
       })
     })
@@ -182,9 +243,11 @@ export default function Dag({ state, selectedId, onSelect, groupMode = 'none', c
       const p = pos[`n:${n.id}`]; if (!p) return
       const gkey = ng.get(n.id)
       const inLane = gkey != null && (groups.get(gkey)?.length || 0) >= 2 && !collapsed.has(gkey)
-      rfNodes.push({ id: `n:${n.id}`, type: 'exp', position: p, zIndex: 1,
-        data: { node: n, state, workId, selectedId, onSelect, themeFilter,
-                groupTint: inLane ? groupColor(gkey) : null } })
+      // dim a node that's outside the selected lineage, or off the active theme filter
+      const dimmed = (focusSet ? !focusSet.has(n.id) : false) || (themeFilter && n.idea?.theme !== themeFilter)
+      rfNodes.push({ id: `n:${n.id}`, type: 'exp', position: p, zIndex: 1, width: NODE_W, height: NODE_H,
+        data: { node: n, state, workId, selectedId, onSelect, themeFilter, dim: dimmed,
+                groupTint: inLane ? tintOf(gkey) : null } })
     })
 
     // 4) Deep-Research memo nodes (Phase 2): rendered from state.research as a distinct node type in
@@ -219,10 +282,16 @@ export default function Dag({ state, selectedId, onSelect, groupMode = 'none', c
       // debug semantics attach to the child (the repair node). Keep the styling as long as the
       // child is visible — even if the parent was collapsed and the edge now starts at a super-node.
       const isDebug = child && child.operator === 'debug' && !hidden.has(e.dstId)
-      const onPath = e.dstId === selectedId || e.srcId === selectedId
+      const onLineage = focusSet && focusSet.has(e.srcId) && focusSet.has(e.dstId)   // selected node's path
+      const onChamp = champSet && champSet.has(e.srcId) && champSet.has(e.dstId)      // root→best spine
+      const cls = []
+      if (isDebug) cls.push('debug')
+      if (onLineage) cls.push('lineage')                 // accent: the path through the selected node
+      else if (onChamp) cls.push('champion')             // faint gold: the winning lineage (persistent)
+      if (focusSet && !onLineage && !onChamp) cls.push('faded')   // everything off-path recedes
       return {
         id: `${e.source}->${e.target}`, source: e.source, target: e.target,
-        className: isDebug ? 'debug' : (onPath ? 'lineage' : ''),
+        className: cls.join(' '),
         animated: e.dstId === workId && !hidden.has(e.dstId),
       }
     })
@@ -231,8 +300,12 @@ export default function Dag({ state, selectedId, onSelect, groupMode = 'none', c
       selectedResearch, onSelectResearch, themeFilter])
 
   return (
-    <ReactFlow nodes={nodes} edges={edges} nodeTypes={nodeTypes} fitView minZoom={0.15} maxZoom={1.8}
-               proOptions={{ hideAttribution: true }} nodesDraggable={false} onPaneClick={() => { onSelect(null); onSelectGroup && onSelectGroup(null) }}>
+    <LodContext.Provider value={lod}>
+    <ReactFlow nodes={nodes} edges={edges} nodeTypes={nodeTypes} fitView fitViewOptions={{ padding: 0.12 }}
+               minZoom={0.05} maxZoom={1.8}
+               onlyRenderVisibleElements proOptions={{ hideAttribution: true }} nodesDraggable={false}
+               onPaneClick={() => { onSelect(null); onSelectGroup && onSelectGroup(null) }}>
+      <LodWatcher lod={lod} onChange={setLod} />
       <Background color="#20252f" gap={22} />
       <Controls showInteractive={false} />
       <Panel position="top-right" className="grp-control">
@@ -268,5 +341,6 @@ export default function Dag({ state, selectedId, onSelect, groupMode = 'none', c
         return '#6b7686'
       }} style={{ background: '#12151c', width: 180, height: 130 }} />}
     </ReactFlow>
+    </LodContext.Provider>
   )
 }

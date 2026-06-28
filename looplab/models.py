@@ -91,6 +91,10 @@ class Node(BaseModel):
     # feasible trial's metric (computed by the engine), so this list is audit/UI only and never
     # affects search/selection. Empty for ordinary single-config nodes (backward compat).
     trials: list[Trial] = Field(default_factory=list)
+    # Cross-run provenance: set when this node was SEEDED from an experiment in a sibling run (via an
+    # `import` inject). {"run_id","node_id","metric"} of the source. None for ordinary nodes. Audit/UI
+    # only — eval/confirmation/best-selection treat it exactly like any other injected node.
+    origin: Optional[dict] = None
 
 
 class ResearchMemo(BaseModel):
