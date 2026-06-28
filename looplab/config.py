@@ -239,6 +239,21 @@ class Settings(BaseSettings):
     # Cadence for the Deep-Research stage: run it automatically every N created nodes (0 = off; it
     # still fires on a manual `deep_research` control event or a Strategist `request_research`).
     deep_research_every: int = 0
+    # Overlap a DUE deep-research "think" with the GPU-bound eval instead of running it in its own
+    # serial step (the agent is otherwise idle while a node trains). research() is pure compute on a
+    # state snapshot — the engine still records the memo as the sole writer AFTER the eval, so the
+    # event log stays single-writer. OFF by default: only a win when the LLM is REMOTE (no GPU
+    # contention with eval), and it needs a live-run validation before enabling. See ROADMAP/notes.
+    concurrent_research: bool = False
+    # Speculative pipeline: while a node trains (GPU-bound eval), SPECULATIVELY propose+implement the
+    # likely next "improve off best" node in a worker thread, so when the eval finishes it's ready to
+    # append immediately (the agent's propose/implement latency overlaps the eval instead of following
+    # it). Match-or-discard: the speculation is used ONLY if the real policy makes the matching choice
+    # post-eval — otherwise it's discarded and the node is proposed normally, so the SEARCH is
+    # unchanged. Speculated nodes skip the novelty-dedup nudge + complexity cue + per-node trace span
+    # (pure compute only). OFF by default; only a win with a REMOTE LLM and a slow eval; needs live
+    # validation. Single-eval mode only (max_parallel<=1).
+    speculative_pipeline: bool = False
     # Cadence for the agent-authored run report: regenerate the conclusion-first narrative every N
     # created nodes (0 = off; it still regenerates on a manual `report_refresh` from the UI). The
     # deterministic report always renders from the node set regardless of this knob.

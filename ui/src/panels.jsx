@@ -56,6 +56,46 @@ export function OverviewPanel({ state, maxEval, onClose, onOpenPanel }) {
   )
 }
 
+// Deep-research drawer: every memo in one place (instead of scrolling the timeline feed), with
+// ACTIONABLE directions — "steer →" posts a hint the Researcher folds into the next proposal. Deep
+// research is no longer a DAG node; this drawer + the Dock timeline marker are its home.
+export function ResearchPanel({ state, runId, onToast, onClose }) {
+  const memos = [...(state.research || [])].reverse()   // newest first
+  const steer = async (text) => {
+    try { await CONTROL.hint(runId, 'try this research direction: ' + text); onToast && onToast('steered the next proposal →') }
+    catch { onToast && onToast('could not steer (run offline?)') }
+  }
+  return (
+    <Panel title="Deep research" sub={memos.length ? `${memos.length} memo${memos.length === 1 ? '' : 's'}` : 'none yet'} onClose={onClose} wide>
+      {!memos.length && <div className="muted">No deep-research memos yet. Trigger one with <code>/deep-research</code> in the chat, or set a cadence in Config.</div>}
+      {memos.map((m, i) => (
+        <div className="rsch-memo" key={i}>
+          <div className="rsch-h">
+            <span className="rsch-ic"><OpIcon name="search" /></span>
+            <b>{m.summary || '(no summary)'}</b>
+            <span className="right" />
+            {m.trigger && <span className="pill">{m.trigger}</span>}
+            {m.at_node != null && <span className="pill">@#{m.at_node}</span>}
+          </div>
+          {(m.findings || []).length > 0 && <><div className="section-h">Findings</div>
+            <ul className="bul">{m.findings.map((f, j) => <li key={j}>{f}</li>)}</ul></>}
+          {(m.recommended_directions || []).length > 0 && <><div className="section-h">Recommended directions</div>
+            <ul className="rsch-dirs">{m.recommended_directions.map((d, j) => (
+              <li key={j}><span>{d}</span>
+                <button className="btn sm ghost" title="steer the next proposal toward this direction (posts a hint)"
+                        onClick={() => steer(d)}>steer →</button></li>))}</ul></>}
+          {(m.sources || []).length > 0 && <><div className="section-h">Sources</div>
+            <ul className="bul">{m.sources.map((s, j) => (
+              <li key={j}>{s.url ? <a href={s.url} target="_blank" rel="noreferrer">{s.title || s.url}</a> : (s.title || 'source')}
+                {s.snippet && <div className="muted">{String(s.snippet).slice(0, 160)}</div>}</li>))}</ul></>}
+          {m.reasoning && <details className="rsch-reasoning"><summary>reasoning (debug)</summary>
+            <Markdown className="think-body" text={m.reasoning} /></details>}
+        </div>
+      ))}
+    </Panel>
+  )
+}
+
 export function TrustPanel({ state, runId, onClose }) {
   const [cfg, setCfg] = useState(null)
   useEffect(() => { get(`/api/runs/${runId}/config`).then(setCfg).catch(() => {}) }, [runId])
