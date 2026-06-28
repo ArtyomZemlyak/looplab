@@ -279,6 +279,10 @@ export const resetRun = (rid) => post(`/api/runs/${encodeURIComponent(rid)}/rese
 // forget on the client (the in-memory feed stays the live truth; persistence is a soft-fail backup).
 export const getChatLog = (rid) => get(`/api/runs/${encodeURIComponent(rid)}/chat-log`)
 export const appendChatTurn = (rid, turn) => post(`/api/runs/${encodeURIComponent(rid)}/chat-log`, turn)
+// Compact a stretch of older chat turns into ONE recap (the boss's history is re-sent in full each
+// turn, so this caps the context growth). Returns {ok, summary, tokens}; the UI appends the recap as
+// a durable `summary` turn and sends it to the boss in place of the folded turns. Soft-fails offline.
+export const chatCompact = (rid, messages) => post(`/api/runs/${encodeURIComponent(rid)}/chat-compact`, { messages })
 
 // ---- experiment chat / suggest / LLM health ----
 export const chat = (rid, messages, node_id = null) => post(`/api/runs/${rid}/chat`, { messages, node_id })
