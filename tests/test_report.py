@@ -127,31 +127,32 @@ def _read_events(rd: Path):
 
 # ---- Workstream C: chat action-router (/command) ----
 def test_command_to_action_mapping():
-    from looplab.server import _Command, _command_to_action
+    from looplab.server import _Action, _action_to_control
 
     class _S:
         best_node_id = 9
     s = _S()
-    assert _command_to_action(_Command(action="confirm", node_id=5), s)["type"] == "force_confirm"
-    assert _command_to_action(_Command(action="fork", node_id=4), s)["data"] == {"from_node_id": 4}
-    assert _command_to_action(_Command(action="approve"), s)["data"] == {"node_id": 9}  # defaults to best
-    assert _command_to_action(_Command(action="stop"), s)["type"] == "run_abort"
-    assert _command_to_action(_Command(action="advise"), s) is None  # not actionable -> chat reply
+    assert _action_to_control(_Action(action="confirm", node_id=5), s)["type"] == "force_confirm"
+    assert _action_to_control(_Action(action="fork", node_id=4), s)["data"] == {"from_node_id": 4}
+    assert _action_to_control(_Action(action="approve"), s)["data"] == {"node_id": 9}  # defaults to best
+    assert _action_to_control(_Action(action="stop"), s)["type"] == "run_abort"
+    assert _action_to_control(_Action(action="advise"), s) is None  # not actionable -> chat reply
     # guidance steers the search via a hint (not a forced node): text carries the researcher directive
-    h = _command_to_action(_Command(action="hint", text="use log1p targets + domain features"), s)
+    h = _action_to_control(_Action(action="hint", text="use log1p targets + domain features"), s)
     assert h["type"] == "hint" and h["data"]["text"] == "use log1p targets + domain features"
-    assert _command_to_action(_Command(action="hint", text=""), s) is None  # empty hint -> not actionable
-    assert _command_to_action(_Command(action="deep_research"), s)["type"] == "deep_research"
+    assert _action_to_control(_Action(action="hint", text=""), s) is None  # empty hint -> not actionable
+    assert _action_to_control(_Action(action="deep_research"), s)["type"] == "deep_research"
 
 
 def test_command_endpoint_returns_action(tmp_path, monkeypatch):
     _build_run(tmp_path, "demo", writer=None)
     client = TestClient(make_app(tmp_path))
-    from looplab.server import _Command
+    from looplab.server import _Action, _Plan
     monkeypatch.setattr("looplab.server.make_llm_client", lambda s: object())
-    monkeypatch.setattr("looplab.parse.parse_structured", lambda *a, **k: _Command(action="promote", node_id=2))
+    monkeypatch.setattr("looplab.parse.parse_structured",
+                        lambda *a, **k: _Plan(actions=[_Action(action="promote", node_id=2)]))
     r = client.post("/api/runs/demo/command", json={"instruction": "promote node 2"}).json()
-    assert r["ok"] is True and r["action"]["type"] == "promote" and r["action"]["data"]["node_id"] == 2
+    assert r["ok"] is True and r["actions"][0]["type"] == "promote" and r["actions"][0]["data"]["node_id"] == 2
 
 
 def test_command_endpoint_guidance_becomes_steering_hint(tmp_path, monkeypatch):
@@ -160,16 +161,17 @@ def test_command_endpoint_guidance_becomes_steering_hint(tmp_path, monkeypatch):
     human ack in `rationale`; the endpoint surfaces both so the boss applies it as a control event."""
     _build_run(tmp_path, "demo", writer=None)
     client = TestClient(make_app(tmp_path))
-    from looplab.server import _Command
+    from looplab.server import _Action, _Plan
     monkeypatch.setattr("looplab.server.make_llm_client", lambda s: object())
     monkeypatch.setattr("looplab.parse.parse_structured",
-        lambda *a, **k: _Command(action="hint", text="use log1p-transformed targets + volume features",
-                                 rationale="Got it — I'll have the researcher try those."))
+        lambda *a, **k: _Plan(reply="Got it — I'll have the researcher try those.", actions=[
+            _Action(action="hint", text="use log1p-transformed targets + volume features",
+                    rationale="Got it — I'll have the researcher try those.")]))
     r = client.post("/api/runs/demo/command",
                     json={"instruction": "look up how people win nomad2018 and try it"}).json()
-    assert r["ok"] and r["action"]["type"] == "hint"
-    assert "log1p" in r["action"]["data"]["text"]              # the researcher directive
-    assert "researcher" in r["action"]["rationale"]            # the human-facing acknowledgement
+    assert r["ok"] and r["actions"][0]["type"] == "hint"
+    assert "log1p" in r["actions"][0]["data"]["text"]              # the researcher directive
+    assert "researcher" in r["actions"][0]["rationale"]            # the human-facing acknowledgement
 
 
 def test_pending_hint_reaches_researcher_prompt(monkeypatch):
@@ -229,9 +231,10 @@ def test_boss_grounds_on_digest_and_uses_run_tools_then_acts(tmp_path, monkeypat
     class _FakeBoss:
         model = "fake"
         def __init__(self):
-            # turn 1: consult a tool; turn 2: emit a steering hint
+            # turn 1: consult a tool; turn 2: emit a PLAN whose one step is a steering hint
             self.script = [_tc("list_experiments", {"sort": "best"}),
-                           _tc("emit", {"action": "hint", "text": "try log1p targets", "rationale": "ok"})]
+                           _tc("emit", {"reply": "on it",
+                                        "actions": [{"action": "hint", "text": "try log1p targets", "rationale": "ok"}]})]
             self.seen = []
         def chat(self, messages, tools, tool_choice="auto"):
             self.seen.append(messages)
@@ -242,7 +245,7 @@ def test_boss_grounds_on_digest_and_uses_run_tools_then_acts(tmp_path, monkeypat
     fake = _FakeBoss()
     monkeypatch.setattr("looplab.server.make_llm_client", lambda s: fake)
     r = client.post("/api/runs/demo/command", json={"instruction": "focus on feature engineering"}).json()
-    assert r["ok"] and r["action"]["type"] == "hint" and "log1p" in r["action"]["data"]["text"]
+    assert r["ok"] and r["actions"][0]["type"] == "hint" and "log1p" in r["actions"][0]["data"]["text"]
     # the boss's prompt was grounded on the digest (the working set), not just the single best node
     assert "Search so far" in fake.seen[0][0]["content"]
     # and it actually consulted a tool first — a tool result was fed back before the emit

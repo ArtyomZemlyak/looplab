@@ -7,6 +7,14 @@ const slug = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, '-').re
 // left-to-right ("my-" → "my-run"); the strict slug() is applied once at launch.
 const slugLoose = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+/, '').slice(0, 40)
 
+// Draft persistence: the planning chat lives pre-run (no run-id yet), so it can't go in a run's
+// chat.jsonl until launch. To stop an accidental reload (F5) or a close-and-reopen from losing the
+// in-progress planning, mirror {msgs, spec} into sessionStorage — scoped to this tab, restored on the
+// next mount, and cleared once the run launches (the conversation then lives in the run's chat.jsonl).
+const DRAFT_KEY = 'll.genesis.draft'
+const readDraft = () => { try { return JSON.parse(sessionStorage.getItem(DRAFT_KEY) || 'null') } catch { return null } }
+const clearDraft = () => { try { sessionStorage.removeItem(DRAFT_KEY) } catch { /* private mode */ } }
+
 // A few one-tap goals to seed the empty chat — the boss turns any of these into a full spec.
 const SEEDS = [
   'Run nomad2018 on minimax/minimax-m3, 100 nodes',
@@ -18,10 +26,13 @@ const SEEDS = [
 // editable card; tweak and launch (or drop to the manual form). The graph/run only exists AFTER launch,
 // so this is a pre-run surface — no run-id yet, the boss invents one.
 export default function GenesisChat({ onClose, onStarted, seed }) {
-  const [msgs, setMsgs] = useState([])          // {role:'user'|'assistant', content}
+  // A fresh goal typed in the global chat bar (a non-empty `seed`) starts clean; otherwise restore any
+  // saved draft so reopening "New run" (or recovering after a reload) brings the planning chat back.
+  const fresh = !!(seed && seed.trim())
+  const [msgs, setMsgs] = useState(() => fresh ? [] : (readDraft()?.msgs || []))   // {role:'user'|'assistant', content}
   const [input, setInput] = useState('')
   const [busy, setBusy] = useState(false)
-  const [spec, setSpec] = useState(null)        // {run_id, task, task_file, settings, rationale}
+  const [spec, setSpec] = useState(() => fresh ? null : (readDraft()?.spec || null))  // {run_id, task, task_file, settings, rationale}
   const [err, setErr] = useState(null)
   const [advanced, setAdvanced] = useState(false)
   const feedRef = useRef(null)
@@ -30,6 +41,14 @@ export default function GenesisChat({ onClose, onStarted, seed }) {
     const f = feedRef.current
     if (f) requestAnimationFrame(() => { f.scrollTop = f.scrollHeight })
   }, [msgs, busy])
+
+  // Mirror the in-progress draft to sessionStorage on every change (cleared when nothing's drafted).
+  useEffect(() => {
+    try {
+      if (msgs.length || spec) sessionStorage.setItem(DRAFT_KEY, JSON.stringify({ msgs, spec }))
+      else sessionStorage.removeItem(DRAFT_KEY)
+    } catch { /* private mode / quota — best-effort */ }
+  }, [msgs, spec])
 
   const ask = async (text) => {
     const goal = (text ?? input).trim()
@@ -73,7 +92,11 @@ export default function GenesisChat({ onClose, onStarted, seed }) {
     try {
       const body = { run_id: rid, settings: spec.settings || {} }
       if (spec.task_file) body.task_file = spec.task_file; else body.task = spec.task
+      // Carry the planning conversation into the new run so it opens with its own creation story
+      // (the boss's chat becomes the first turns of the run's saved chat) instead of being lost.
+      if (msgs.length) body.chat = msgs.map(m => ({ role: m.role, content: m.content }))
       await startRun(body)
+      clearDraft()                 // the conversation now lives in the run's chat.jsonl
       onStarted?.(rid)
     } catch (e) {
       setErr(/409/.test(e.message) ? `run "${spec.run_id}" already exists — rename it` : 'launch failed: ' + e.message)

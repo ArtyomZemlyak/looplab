@@ -251,17 +251,19 @@ export const CONTROL = {
 
 // Workstream C: chat actions on a FINISHED run must reopen + re-enter the loop so the engine actually
 // processes them (mirrors InjectModal's reopen→inject→resume). These verbs need the loop running.
-const NEEDS_RESUME = new Set(['fork', 'inject_node', 'force_confirm', 'force_ablate', 'deep_research', 'set_strategy'])
+// `budget_extend` is here too: raising the node budget on a finished run is pointless unless the run
+// reopens and keeps going (the agentic boss pairs it with inject/hint steps).
+const NEEDS_RESUME = new Set(['fork', 'inject_node', 'force_confirm', 'force_ablate', 'deep_research', 'set_strategy', 'budget_extend'])
 
-// Execute one confirmed chat action. `action` = {type, data}. Returns the control promise. Reopens +
-// resumes a finished run for engine-served verbs. `__refresh_report__` is the report-refresh special.
-export async function applyAction(runId, action, finished) {
+// Does applying this action on a FINISHED run require reopening + resuming the engine? (Used to batch a
+// multi-action plan: append every step's intent, then reopen+resume ONCE if any step needs the loop.)
+export const actionNeedsEngine = (action) => NEEDS_RESUME.has(action?.type)
+
+// Append ONE action's control intent WITHOUT reopening/resuming — the building block for applying an
+// agentic plan as a batch (append every step, then resume once at the end). `__refresh_report__` is
+// the report-refresh special case (its own endpoint, never the engine loop).
+export async function appendAction(runId, action) {
   if (action.type === '__refresh_report__') return CONTROL.refreshReport(runId)
-  if (finished && NEEDS_RESUME.has(action.type)) {
-    await CONTROL.reopen(runId)
-    await CONTROL.raw(runId, action.type, action.data || {})
-    return resumeRun(runId)
-  }
   return CONTROL.raw(runId, action.type, action.data || {})
 }
 
@@ -271,6 +273,12 @@ export const resumeRun = (rid) => post(`/api/runs/${encodeURIComponent(rid)}/res
 // round-7 "Replay": reset a run IN PLACE — the server archives its event log + spans and re-spawns a
 // fresh run on the same run-id. Only offered on a FINISHED run (no live engine), so it's race-free.
 export const resetRun = (rid) => post(`/api/runs/${encodeURIComponent(rid)}/reset`, {})
+
+// ---- persisted chat transcript (saved WITH the run, so it survives remount/reload) ----
+// getChatLog → the stored feed turns in order; appendChatTurn → durably append ONE turn. Fire-and-
+// forget on the client (the in-memory feed stays the live truth; persistence is a soft-fail backup).
+export const getChatLog = (rid) => get(`/api/runs/${encodeURIComponent(rid)}/chat-log`)
+export const appendChatTurn = (rid, turn) => post(`/api/runs/${encodeURIComponent(rid)}/chat-log`, turn)
 
 // ---- experiment chat / suggest / LLM health ----
 export const chat = (rid, messages, node_id = null) => post(`/api/runs/${rid}/chat`, { messages, node_id })

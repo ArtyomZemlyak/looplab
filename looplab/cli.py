@@ -7,6 +7,8 @@ the same run dir; `replay`/`inspect` are pure read-only folds of the event log.
 from __future__ import annotations
 
 import json
+import os
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Optional
 
@@ -24,6 +26,45 @@ from .sandbox import make_sandbox
 from .tasks import TaskAdapter, load_task, make_llm_client, make_roles
 
 app = typer.Typer(add_completion=False, help="LoopLab — autonomous ML research engine (P0).")
+
+
+@contextmanager
+def _engine_singleton(run_dir: Path):
+    """Hold an exclusive OS lock on <run_dir>/engine.lock for the engine's whole lifetime, so a second
+    `run`/`resume` on the SAME dir can't spawn a concurrent loop (two engines folding+appending the one
+    events.jsonl corrupts the log / double-spends the budget). The UI's agentic chat now auto-reopens+
+    resumes a finished run per message, so two tabs acting at once is a real race this closes. Yields
+    True when the lock was acquired (run), False when another engine already holds it (caller no-ops).
+    The OS frees the lock when the process exits (even on crash), so there's no stale-lock problem.
+    Degrades to a no-op (yields True) where file locking is unavailable."""
+    run_dir.mkdir(parents=True, exist_ok=True)
+    f = open(run_dir / "engine.lock", "a+")
+    acquired = True
+    try:
+        try:
+            if os.name == "nt":
+                import msvcrt
+                f.seek(0)
+                msvcrt.locking(f.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            acquired = False        # another engine holds it -> caller will skip running
+        yield acquired
+    finally:
+        if acquired:
+            try:
+                if os.name == "nt":
+                    import msvcrt
+                    f.seek(0)
+                    msvcrt.locking(f.fileno(), msvcrt.LK_UNLCK, 1)
+                else:
+                    import fcntl
+                    fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+            except OSError:
+                pass
+        f.close()
 
 
 def _engine(run_dir: Path, task: TaskAdapter, settings: Settings,
@@ -224,7 +265,11 @@ def run(
     except OSError:
         pass
     eng = _engine(out, task, settings, crash_after)
-    state = anyio.run(eng.run)
+    with _engine_singleton(out) as ok:
+        if not ok:
+            typer.echo(f"engine already running on {out} — not starting a second loop")
+            return
+        state = anyio.run(eng.run)
     _print_result(state)
 
 
@@ -257,7 +302,11 @@ def resume(
     if max_nodes is not None:
         settings.max_nodes = max_nodes
     eng = _engine(run_dir, task, settings, crash_after=None)
-    state = anyio.run(eng.run)
+    with _engine_singleton(run_dir) as ok:
+        if not ok:
+            typer.echo(f"engine already running on {run_dir} — not resuming a second loop")
+            return
+        state = anyio.run(eng.run)
     _print_result(state)
 
 

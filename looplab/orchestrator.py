@@ -212,6 +212,11 @@ class Engine:
         # rebuild it (n_seeds/max_nodes/ablate_every) + the meta-controller + operator-mix state.
         self.n_seeds = n_seeds
         self.max_nodes = max_nodes
+        # The policy's OWN node budget is the base a live add_nodes override extends — NOT self.max_nodes
+        # (the engine default can differ from a passed-in policy's, e.g. in tests). Tracked separately so
+        # the override is applied idempotently (absolute set per iteration) without compounding, and
+        # re-captured on a strategy-driven policy swap below.
+        self._base_max_nodes = getattr(policy, "max_nodes", max_nodes)
         self._policy_name = policy_name
         self._ablate_every = ablate_every
         self.strategist = strategist
@@ -539,6 +544,16 @@ class Engine:
             # the report's at_node). The deterministic report renders regardless.
             state = self._maybe_refresh_report(state)
 
+            # Effective node budget: a `budget_extend` with add_nodes (e.g. "give the run 10 more
+            # nodes") raises the policy's max_nodes so a reopened/resumed run keeps proposing
+            # experiments instead of immediately re-finishing. Applied HERE — AFTER any in-loop policy
+            # swap (strategist / set_strategy above, which rebuilds the policy un-extended) and right
+            # before action selection — so the override is never dropped on a swap iteration. Floored
+            # at the current node count so a stale/negative delta can't shrink the gate below work done.
+            self.policy.max_nodes = max(
+                len(state.nodes),
+                self._base_max_nodes + int(state.budget_overrides.get("add_nodes", 0) or 0))
+
             # Action selection: the pure policy decides, UNLESS the unified agent self-drives —
             # in which case it picks one action from the policy-derived legal-action gate (so the
             # pipeline stays disciplined no matter what the agent chooses).
@@ -804,6 +819,7 @@ class Engine:
                       if k not in ("n_seeds", "max_nodes", "ablate_every")}
                 self.policy = make_policy(pol, n_seeds=self.n_seeds, max_nodes=self.max_nodes,
                                           ablate_every=self._ablate_every, **pp)
+                self._base_max_nodes = getattr(self.policy, "max_nodes", self.max_nodes)  # new base for the live override
                 # A3 BOHB = ASHA racing + the surrogate proposer. make_policy only builds the racing
                 # half; wire the surrogate now so a mid-run switch to bohb isn't bare ASHA.
                 if pol == "bohb":
@@ -1081,7 +1097,9 @@ class Engine:
         policy's own recommendation on any malformed/abstaining choice — the agent can never escape
         `legal`, so 'follow the right pipeline' is a structural invariant, not prompt obedience."""
         from .policy import legal_actions
-        legal = legal_actions(state, self.policy, max_nodes=self.max_nodes)
+        # Honor a live node-budget extension (set on self.policy.max_nodes in the run loop) so the
+        # agent path and the pure-policy path agree on when the search is allowed to keep going.
+        legal = legal_actions(state, self.policy, max_nodes=self.policy.max_nodes)
         if len(legal) <= 1:
             return legal                       # finish ([]), forced evaluate/seed, or single option
         if {a["kind"] for a in legal} == {"evaluate"}:
