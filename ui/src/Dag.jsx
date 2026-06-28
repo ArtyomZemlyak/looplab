@@ -8,7 +8,7 @@ import { Spark } from './charts.jsx'
 import { GroupRegion, SuperShell } from './groupnodes.jsx'
 import {
   computeGroups, nodeGroupMap, regionGeometry, rerouteForCollapse, groupColor,
-  groupAggregate, superId, GROUP_MODES,
+  groupAggregate, superId, GROUP_MODES, isMergeEntryEdge,
 } from './grouping.js'
 
 const NODE_W = 188, NODE_H = 78
@@ -167,7 +167,7 @@ function ResearchNode({ data }) {
 const nodeTypes = { exp: ExpNode, groupLane: GroupLane, groupSuper: GroupSuper, research: ResearchNode }
 
 export default function Dag({ state, selectedId, onSelect, groupMode = 'none', collapsed = new Set(),
-                             onToggleGroup, onSetMode, onCollapseAll, onExpandAll, selectedGroup, onSelectGroup,
+                             onToggleGroup, onSetMode, onCollapseAll, onExpandAll, onAutoCollapse, selectedGroup, onSelectGroup,
                              selectedResearch = null, onSelectResearch, themeFilter = null }) {
   const workId = workingId(state)
   const [showMap, setShowMap] = useState(() => localStorage.getItem('ll.minimap') === '1')
@@ -183,7 +183,8 @@ export default function Dag({ state, selectedId, onSelect, groupMode = 'none', c
     const groupOrder = new Map([...groups.keys()].map((k, i) => [k, i]))
     const tintOf = (k) => groupColor(k, groupOrder.get(k))
     const ng = nodeGroupMap(groups)
-    const pos = layoutWithGroups(ns, { collapsed, nodeGroup: ng })
+    const banded = groupMode === 'theme' || groupMode === 'niche'
+    const { pos, cells } = layoutWithGroups(ns, { collapsed, nodeGroup: ng, groupMode })
     const { hidden, edges: reEdges } = rerouteForCollapse(ns, collapsed, ng)
 
     // Focus+context (Prefect-style): the transitive ancestor+descendant set of the SELECTED node — the
@@ -206,18 +207,19 @@ export default function Dag({ state, selectedId, onSelect, groupMode = 'none', c
 
     const rfNodes = []
 
-    // 1) slim lane header for each EXPANDED group (round-6: replaces the full-canvas hull). A
-    //    1-member group needs no header — it'd just label a single node. We still use regionGeometry
-    //    to find the cluster's top edge + width; the bar sits in the 26px pad gap above the top row.
-    groups.forEach((ids, key) => {
-      if (collapsed.has(key) || ids.length < 2) return
-      const rects = ids.map(id => pos[`n:${id}`]).filter(Boolean).map(p => ({ x: p.x, y: p.y, w: NODE_W, h: NODE_H }))
+    // 1) a region behind each EXPANDED group CELL. A layered mode draws one cell per group; the banded
+    //    grid-pack (theme/niche) draws one per (band, group) — each a tight compact block instead of a
+    //    tall stripe. A 1-member cell needs no header — it'd just label a single node. regionGeometry
+    //    gives the cell's bounding rect; the label pill sits in the 26px pad gap above the top row.
+    cells.forEach(cell => {
+      if (cell.ids.length < 2) return
+      const rects = cell.ids.map(id => pos[`n:${id}`]).filter(Boolean).map(p => ({ x: p.x, y: p.y, w: NODE_W, h: NODE_H }))
       if (!rects.length) return
       const geo = regionGeometry(rects)
       rfNodes.push({
-        id: `region:${key}`, type: 'groupLane', position: { x: geo.x, y: geo.y }, zIndex: 0,
+        id: `region:${cell.band ?? 'g'}:${cell.key}`, type: 'groupLane', position: { x: geo.x, y: geo.y }, zIndex: 0,
         selectable: false, draggable: false, focusable: false,
-        data: { w: geo.w, h: geo.h, label: key, count: ids.length, tint: tintOf(key), onToggle: onToggleGroup },
+        data: { w: geo.w, h: geo.h, label: cell.key, count: cell.ids.length, tint: tintOf(cell.key), onToggle: onToggleGroup },
       })
     })
 
@@ -236,13 +238,18 @@ export default function Dag({ state, selectedId, onSelect, groupMode = 'none', c
     })
 
     // 3) visible experiment nodes. A grouped node carries its group's tint so the card shows a faint
-    //    top accent + wash (membership cue) without an enclosing box — but ONLY for groups that
-    //    actually drew a lane header (≥2 members), so a singleton never gets an unexplained tint.
+    //    top accent + wash (membership cue) without an enclosing box — but ONLY for nodes that sit in a
+    //    CELL that actually drew a region (≥2 members), so a singleton never gets an unexplained tint.
+    //    Keying off the drawn cells (not whole-group size) keeps tint⇔region in sync in BOTH the layered
+    //    layout (one cell per group) and the banded pack (a group split across bands can have a lone-
+    //    member cell that draws no box — its node must then stay untinted).
+    const tintedIds = new Set()
+    cells.forEach(cell => { if (cell.ids.length >= 2) cell.ids.forEach(id => tintedIds.add(id)) })
     Object.values(ns).forEach(n => {
       if (hidden.has(n.id)) return
       const p = pos[`n:${n.id}`]; if (!p) return
       const gkey = ng.get(n.id)
-      const inLane = gkey != null && (groups.get(gkey)?.length || 0) >= 2 && !collapsed.has(gkey)
+      const inLane = tintedIds.has(n.id)
       // dim a node that's outside the selected lineage, or off the active theme filter
       const dimmed = (focusSet ? !focusSet.has(n.id) : false) || (themeFilter && n.idea?.theme !== themeFilter)
       rfNodes.push({ id: `n:${n.id}`, type: 'exp', position: p, zIndex: 1, width: NODE_W, height: NODE_H,
@@ -282,15 +289,21 @@ export default function Dag({ state, selectedId, onSelect, groupMode = 'none', c
       // debug semantics attach to the child (the repair node). Keep the styling as long as the
       // child is visible — even if the parent was collapsed and the edge now starts at a super-node.
       const isDebug = child && child.operator === 'debug' && !hidden.has(e.dstId)
+      // Phase 2: an edge into a MERGE (≥2 parents) crosses between packed cells. In a banded layout,
+      // route it orthogonally (a "leader" edge) so it hugs the band gaps instead of slicing a bezier
+      // straight through a compact cell. Only in banded modes — layered modes keep today's beziers.
+      const isLeader = banded && isMergeEntryEdge(child) && !hidden.has(e.dstId)
       const onLineage = focusSet && focusSet.has(e.srcId) && focusSet.has(e.dstId)   // selected node's path
       const onChamp = champSet && champSet.has(e.srcId) && champSet.has(e.dstId)      // root→best spine
       const cls = []
       if (isDebug) cls.push('debug')
+      if (isLeader) cls.push('leader')
       if (onLineage) cls.push('lineage')                 // accent: the path through the selected node
       else if (onChamp) cls.push('champion')             // faint gold: the winning lineage (persistent)
       if (focusSet && !onLineage && !onChamp) cls.push('faded')   // everything off-path recedes
       return {
         id: `${e.source}->${e.target}`, source: e.source, target: e.target,
+        type: isLeader ? 'smoothstep' : undefined,
         className: cls.join(' '),
         animated: e.dstId === workId && !hidden.has(e.dstId),
       }
@@ -316,6 +329,9 @@ export default function Dag({ state, selectedId, onSelect, groupMode = 'none', c
         {groupMode !== 'none' && groupKeys.length > 0 && <>
           <button className="btn sm ghost" title="collapse all groups" onClick={() => onCollapseAll && onCollapseAll(groupKeys)}>⊟ all</button>
           <button className="btn sm ghost" title="expand all groups" onClick={() => onExpandAll && onExpandAll()}>⊞ all</button>
+          {(groupMode === 'theme' || groupMode === 'niche') && onAutoCollapse &&
+            <button className="btn sm ghost" title="auto-collapse settled groups (keeps the champion, selected, and active groups open)"
+                    onClick={() => onAutoCollapse()}>⊟ settled</button>}
         </>}
       </Panel>
       {/* lift the toggles above the overview map when it's open — otherwise the minimap (also

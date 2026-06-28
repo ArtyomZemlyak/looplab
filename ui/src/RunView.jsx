@@ -1,10 +1,10 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { useRunState } from './hooks.js'
-import { get, fmt, fmtInt, phaseLabel } from './util.js'
+import { get, fmt, fmtInt, phaseLabel, workingId } from './util.js'
 import Dag from './Dag.jsx'
 import Inspector, { GroupSummary } from './Inspector.jsx'
 import Dock from './Dock.jsx'
-import { computeGroups } from './grouping.js'
+import { computeGroups, autoCollapseSet } from './grouping.js'
 import ReportView from './Report.jsx'
 import DirectionsOverview from './DirectionsOverview.jsx'
 import {
@@ -93,6 +93,23 @@ export default function RunView({ runId, onBack }) {
   const toggleGroup = (key) => setCollapsed(s => { const n = new Set(s); n.has(key) ? n.delete(key) : n.add(key); return n })
   const changeMode = (m) => { setGroupMode(m); setCollapsed(new Set()); setSelectedGroup(null) }
   const selectGroup = (key) => { setSelectedGroup(key); if (key != null) setSelectedId(null) }
+  // Phase 0: auto-collapse settled groups into the existing `collapsed` Set (one-shot fill, not a live
+  // policy — so it never fights the user's manual toggles). Keeps the champion/selected/working groups
+  // open. Wired to the "⊟ settled" button and fired once when a run finishes (only if nothing's been
+  // collapsed yet, so it never clobbers a layout the user arranged by hand).
+  const autoCollapse = () => {
+    const st = hist || live; const ns = st?.nodes; if (!ns) return
+    setCollapsed(autoCollapseSet(ns, computeGroups(ns, groupMode),
+      { mode: groupMode, bestId: st.best_node_id, selectedId, workId: workingId(st) }))
+  }
+  const autoCollapsedRef = useRef(false)
+  // groupMode is in the deps so that if the run finishes in a non-banded mode (operator/metric/none),
+  // a later switch to theme/niche still triggers the one-shot fold (the ref keeps it firing only once).
+  useEffect(() => {
+    if (live?.finished && !autoCollapsedRef.current && (groupMode === 'theme' || groupMode === 'niche') && collapsed.size === 0) {
+      autoCollapsedRef.current = true; autoCollapse()
+    }
+  }, [live?.finished, groupMode])
 
   if (!live) return <div className="app"><div className="runlist"><div className="notice">Connecting to run <b>{runId}</b>…</div></div></div>
   const state = hist || live
@@ -162,6 +179,7 @@ export default function RunView({ runId, onBack }) {
         <div className="canvas-wrap"><Dag state={state} selectedId={selectedId} onSelect={selectNode}
           groupMode={groupMode} collapsed={collapsed} onToggleGroup={toggleGroup} onSetMode={changeMode}
           onCollapseAll={(keys) => setCollapsed(new Set(keys))} onExpandAll={() => setCollapsed(new Set())}
+          onAutoCollapse={autoCollapse}
           selectedGroup={selectedGroup} onSelectGroup={selectGroup} themeFilter={themeFilter}
           selectedResearch={null} onSelectResearch={() => { }} /></div>
         {sideC

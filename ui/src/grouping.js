@@ -108,6 +108,31 @@ export function rerouteForCollapse(nodesObj, collapsed, nodeGroup) {
   return { hidden, edges }
 }
 
+// Phase 0 (auto-collapse): a pure policy that FILLS the collapsed Set — rendering reuses the existing
+// collapse pipeline (rerouteForCollapse + groupAggregate + super-nodes), so this adds no new visuals.
+// Folds every SETTLED group (no pending member) of meaningful size, EXCEPT the ones you're watching:
+// the working node's group, the selected group, and the champion's group are hard never-collapse. Only
+// meaningful in theme/niche mode (operator = one dominant group, metric = full-height terciles).
+export function autoCollapseSet(nodesObj, groups, { mode, bestId = null, selectedId = null, workId = null, minSize = 3 } = {}) {
+  const out = new Set()
+  if (mode !== 'theme' && mode !== 'niche') return out
+  const ng = nodeGroupMap(groups)
+  const keep = new Set([ng.get(bestId), ng.get(selectedId), ng.get(workId)].filter(k => k != null))
+  groups.forEach((ids, key) => {
+    if (keep.has(key) || ids.length < minSize) return
+    const settled = ids.every(id => { const s = nodesObj[id]?.status; return s && s !== 'pending' })
+    if (settled) out.add(key)
+  })
+  return out
+}
+
+// Phase 2 (merge bridges): an edge ENTERING a merge node (a node with ≥2 parents) crosses between
+// packed group cells, so it must be routed orthogonally (a "leader" edge) instead of as a bezier that
+// would cut straight through a cell. Pure predicate so the classification is unit-testable.
+export function isMergeEntryEdge(childNode) {
+  return !!(childNode && (childNode.parent_ids || []).length > 1)
+}
+
 // Aggregate stats for a collapsed group's super-node card.
 export function groupAggregate(memberIds, nodesObj, direction) {
   const better = direction === 'min' ? (a, b) => a < b : (a, b) => a > b
