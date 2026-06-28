@@ -58,7 +58,12 @@ export function nodeGroupMap(groups) {
 // Low-chroma, deterministic tint per group key — identity is carried by the LABEL; colour is a
 // faint, decorative wash (kept desaturated on purpose so many groups never become a rainbow).
 const TINTS = ['#6f8bb0', '#8a7bb0', '#6fae97', '#b0936f', '#a87da8', '#6fa3b0', '#9aa06f']
-export function groupColor(key) {
+// When the caller knows the group's ORDER (its index in the active grouping), assign tints in sequence
+// so adjacent groups never collide on the same hue — a curated, distinct ramp instead of a hash that
+// can land two neighbours on the same colour. Falls back to the stable hash when no index is given
+// (e.g. the cross-run Map, which has no single ordering).
+export function groupColor(key, idx) {
+  if (typeof idx === 'number' && idx >= 0) return TINTS[idx % TINTS.length]
   let h = 0; const s = String(key)
   for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) >>> 0
   return TINTS[h % TINTS.length]

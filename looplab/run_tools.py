@@ -11,6 +11,7 @@ from __future__ import annotations
 import csv
 import io
 import math
+from pathlib import Path
 from typing import Optional
 
 from . import digest
@@ -227,6 +228,181 @@ class RunTools:
             f"{t}: {d['count']} experiment(s)" +
             (f", best={digest._fmt_num(d['best_metric'])}" if d['best_metric'] is not None else "")
             for t, d in sorted(roll.items(), key=lambda kv: -kv[1]["count"]))
+
+
+class SiblingRunTools:
+    """Read-only view over SIBLING runs — other runs of the SAME task under the same run-root — so a
+    run can build on what neighbouring runs already learned instead of rediscovering it. Same
+    `.specs()`/`.execute()`/`bind_state()` shape as RunTools; every `execute` returns a string and
+    soft-fails (a junk tool call must never crash the run).
+
+    Sibling `RunState`s are folded from disk on demand and cached by each event log's (size, mtime)
+    fingerprint, so repeated turns don't re-fold unchanged runs. Reading one sibling's experiment/code
+    delegates to an internal `RunTools` bound to that sibling — the same reader the in-run agent uses."""
+
+    def __init__(self, run_root, self_run_id: str = "", max_chars: int = 3500):
+        self.run_root = Path(run_root)
+        self.self_run_id = self_run_id
+        self.task_id = ""
+        self.max_chars = max_chars
+        self._cache: dict[str, tuple] = {}        # run_id -> (sig, RunState)
+        self._reader = RunTools(max_chars=max_chars)
+
+    # The agent loop calls this each turn; we use it to learn our OWN run_id + task_id from the live
+    # state (so we never list ourselves, and only surface same-task siblings) without extra wiring.
+    def bind_state(self, state: Optional[RunState] = None, parent=None) -> None:
+        if state is not None:
+            if getattr(state, "run_id", ""):
+                self.self_run_id = state.run_id
+            if getattr(state, "task_id", ""):
+                self.task_id = state.task_id
+
+    def specs(self) -> list[dict]:
+        return [
+            _fn("list_sibling_runs",
+                "List OTHER runs of the same task (siblings) with their best metric, node count and "
+                "phase — so you can see what neighbouring runs achieved before proposing.", {}),
+            _fn("read_sibling_experiment",
+                "Read one experiment of a SIBLING run in full detail (params, metric, rationale, "
+                "failure, sweep trials). Use a run_id from list_sibling_runs.",
+                {"run_id": {"type": "string"}, "node_id": {"type": "integer"},
+                 "trials": {"type": "string", "description": "how many sweep trials: a number, or 'all'"}},
+                ["run_id", "node_id"]),
+            _fn("read_sibling_code",
+                "Read the solution code of one experiment of a SIBLING run (to reproduce or build on "
+                "it — pair with an `import` action to seed it into this run).",
+                {"run_id": {"type": "string"}, "node_id": {"type": "integer"}},
+                ["run_id", "node_id"]),
+            _fn("find_analogous_across_runs",
+                "Find experiments ACROSS sibling runs most similar to a set of params, by parameter "
+                "distance — to see how a nearby config performed elsewhere.",
+                {"params": {"type": "object", "description": "param dict to compare against"},
+                 "k": {"type": "integer"}}, ["params"]),
+        ]
+
+    def execute(self, name: str, args: dict) -> str:
+        try:
+            if name == "list_sibling_runs":
+                return self._list_runs()
+            if name == "read_sibling_experiment":
+                return self._read(args.get("run_id"), int(args.get("node_id")), args.get("trials"))
+            if name == "read_sibling_code":
+                return self._code(args.get("run_id"), int(args.get("node_id")))
+            if name == "find_analogous_across_runs":
+                return self._analogous(args)
+            return f"(unknown tool: {name})"
+        except (KeyError, TypeError, ValueError, ArithmeticError) as e:
+            return f"(tool error: {e})"
+
+    # --- internals -----------------------------------------------------------
+    def _safe_dir(self, run_id: Optional[str]) -> Optional[Path]:
+        """Resolve <run_root>/<run_id>, with the same path-traversal guard as server._run_dir: the
+        directory must sit directly under run_root and carry an events.jsonl. Returns None otherwise."""
+        if not run_id:
+            return None
+        rd = (self.run_root / str(run_id)).resolve()
+        root = self.run_root.resolve()
+        if rd.parent != root:
+            return None
+        if not (rd / "events.jsonl").exists():
+            return None
+        return rd
+
+    @staticmethod
+    def _sig(rd: Path):
+        try:
+            s = (rd / "events.jsonl").stat()
+            return (s.st_size, int(s.st_mtime))
+        except OSError:
+            return (0, 0)
+
+    def _state(self, run_id: Optional[str]) -> Optional[RunState]:
+        rd = self._safe_dir(run_id)
+        if rd is None:
+            return None
+        sig = self._sig(rd)
+        hit = self._cache.get(str(run_id))
+        if hit and hit[0] == sig:
+            return hit[1]
+        from .eventstore import iter_jsonl
+        from .models import Event
+        from .replay import fold
+        try:
+            st = fold(Event(**o) for o in iter_jsonl(rd / "events.jsonl"))
+        except (OSError, ValueError, TypeError):
+            return None
+        self._cache[str(run_id)] = (sig, st)
+        return st
+
+    def _sibling_ids(self) -> list[str]:
+        """Run ids under run_root, excluding self, restricted to the same task_id when we know ours."""
+        try:
+            cand = sorted(p.name for p in self.run_root.iterdir()
+                          if p.is_dir() and (p / "events.jsonl").exists())
+        except OSError:
+            return []
+        out = []
+        for rid in cand:
+            if rid == self.self_run_id:
+                continue
+            if self.task_id:
+                st = self._state(rid)
+                if st is None or st.task_id != self.task_id:
+                    continue
+            out.append(rid)
+        return out
+
+    def _list_runs(self) -> str:
+        ids = self._sibling_ids()
+        if not ids:
+            return "(no sibling runs of this task)"
+        lines = []
+        for rid in ids:
+            st = self._state(rid)
+            if st is None:
+                continue
+            best = st.best()
+            phase = "finished" if st.finished else "running"
+            lines.append(f"{rid}: best={digest._fmt_num(best.metric) if best else '—'} "
+                         f"({st.direction}) · {len(st.nodes)} nodes · {phase}"
+                         + (f" · best=#{best.id}" if best else ""))
+        head = f"{len(lines)} sibling run(s) of task {self.task_id or '?'}:"
+        return head + "\n" + "\n".join(lines) if lines else "(no sibling runs of this task)"
+
+    def _read(self, run_id, nid: int, trials_arg=None) -> str:
+        st = self._state(run_id)
+        if st is None:
+            return f"(no such sibling run: {run_id!r})"
+        self._reader.bind_state(st, None)
+        return f"run {run_id} · " + self._reader.execute(
+            "read_experiment", {"node_id": nid, "trials": trials_arg})
+
+    def _code(self, run_id, nid: int) -> str:
+        st = self._state(run_id)
+        if st is None:
+            return f"(no such sibling run: {run_id!r})"
+        self._reader.bind_state(st, None)
+        return f"# from run {run_id}\n" + self._reader.execute("read_code", {"node_id": nid})
+
+    def _analogous(self, args: dict) -> str:
+        target = args.get("params")
+        if not isinstance(target, dict) or not target:
+            return "(give a params dict to compare against)"
+        scored = []
+        for rid in self._sibling_ids():
+            st = self._state(rid)
+            if st is None:
+                continue
+            for n in st.nodes.values():
+                d = digest.param_distance(target, n.idea.params)
+                if d != float("inf"):
+                    scored.append((d, rid, n))
+        scored.sort(key=lambda t: t[0])
+        k = int(args.get("k") or 5)
+        if not scored:
+            return "(no comparable experiments across siblings — no shared numeric params)"
+        return "nearest across sibling runs (by param-distance):\n" + "\n".join(
+            f"dist={d:.3f}  run {rid} {self._reader._line(n)}" for d, rid, n in scored[:k])
 
 
 class DataTools:

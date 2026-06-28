@@ -112,7 +112,7 @@ def make_developer_factory(task: TaskAdapter, settings):
     return factory
 
 
-def build_unified_agent(task: TaskAdapter, settings):
+def build_unified_agent(task: TaskAdapter, settings, run_dir=None):
     """Compose the unified self-driving agent from the normal split-role backends.
 
     The split roles are built with `unified_agent=False` so ALL existing wiring (agentic tools,
@@ -124,7 +124,7 @@ def build_unified_agent(task: TaskAdapter, settings):
     from .strategist import make_strategist
     from .unified_agent import UnifiedAgent
     split = settings.model_copy(update={"unified_agent": False})
-    researcher, developer = make_roles(task, split)   # H3 per-role models applied inside
+    researcher, developer = make_roles(task, split, run_dir)   # H3 per-role models applied inside
 
     cache: dict = {}
     def client_for(model, base):
@@ -159,7 +159,13 @@ def build_unified_agent(task: TaskAdapter, settings):
         # consulting the real schema/columns (e.g. a reference to a column that doesn't exist).
         from .run_tools import RunTools, DataTools
         from .agent import CompositeTools
-        pilot_tools = CompositeTools([RunTools(), DataTools(task)])
+        _pilot_providers = [RunTools(), DataTools(task)]
+        # Cross-run: let the pilot look at sibling runs of the same task (read-only) so it can choose
+        # to import a winning experiment from a neighbour. Needs the run's own dir; no-op without it.
+        if run_dir is not None and getattr(settings, "cross_run_tools", True):
+            from .run_tools import SiblingRunTools
+            _pilot_providers.append(SiblingRunTools(Path(run_dir).parent, Path(run_dir).name))
+        pilot_tools = CompositeTools(_pilot_providers)
 
     extra_clients = [c for c in (strat_client, pilot_client) if c is not None]
     return UnifiedAgent(researcher=researcher, developer=developer, strategist=strategist,
@@ -167,16 +173,20 @@ def build_unified_agent(task: TaskAdapter, settings):
                         stage_clients=extra_clients, prompts=getattr(researcher, "prompts", None))
 
 
-def make_roles(task: TaskAdapter, settings):
+def make_roles(task: TaskAdapter, settings, run_dir=None):
     """Pick role backends from config (ADR-7): toy optimizer or a live LLM. When a
     knowledge_dir is configured, the LLM Researcher is wrapped with the agentic
-    retrieval toolset (ADR-16) — same developer, tool-using researcher."""
+    retrieval toolset (ADR-16) — same developer, tool-using researcher.
+
+    `run_dir` (the live run's directory) is threaded through purely to enable the cross-run sibling
+    tools; it is None for unit-built roles and the developer-only `make_developer_factory` rebuild, so
+    those paths get the legacy single-run view (byte-parity)."""
     if settings.backend != "llm":
         return task.build_roles()
     # Unified self-driving agent: one object plays both roles. Built from the split roles (flag
     # off) so the rest of this function's wiring is reused, then composed behind one identity.
     if getattr(settings, "unified_agent", False):
-        agent = build_unified_agent(task, settings)
+        agent = build_unified_agent(task, settings, run_dir)
         return agent, agent
     client = make_llm_client(settings)
     researcher, developer = task.llm_roles(client, parser=settings.llm_parser)
@@ -242,6 +252,11 @@ def make_roles(task: TaskAdapter, settings):
         from .run_tools import DataTools, RunTools
         providers.append(RunTools())
         providers.append(DataTools(task))
+    # Cross-run introspection: read-only access to SIBLING runs of the same task so the Researcher can
+    # build on a neighbouring run's experiments. Needs the run's own dir; off without it (parity).
+    if run_dir is not None and getattr(settings, "cross_run_tools", True):
+        from .run_tools import SiblingRunTools
+        providers.append(SiblingRunTools(Path(run_dir).parent, Path(run_dir).name))
     if settings.knowledge_dir or cases_path:
         from .knowledge_tools import KnowledgeTools
         providers.append(KnowledgeTools(settings.knowledge_dir, cases_path=cases_path))

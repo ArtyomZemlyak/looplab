@@ -65,13 +65,15 @@ from pydantic import BaseModel  # noqa: E402
 
 
 class _Action(BaseModel):
-    action: str = "advise"   # advise|confirm|ablate|fork|promote|hint|note|strategy|budget|deep_research|inject|approve|ratify|pause|resume|stop
+    action: str = "advise"   # advise|confirm|ablate|fork|promote|hint|note|strategy|budget|deep_research|inject|import|approve|ratify|pause|resume|stop
     node_id: Optional[int] = None
     text: str = ""           # hint text / note text / free rationale
     operator: str = "improve"
     params: dict = {}
     policy: str = ""
     fidelity: str = ""
+    source_run: str = ""     # import: the SIBLING run to seed an experiment from
+    source_node: Optional[int] = None   # import: which experiment (node id) of that sibling run
     nodes: int = 0           # budget: add this many experiment nodes to the run's node budget
     rationale: str = ""      # one-line why for THIS step (shown on its applied row)
 
@@ -130,6 +132,16 @@ def _action_to_control(c: "_Action", st) -> Optional[dict]:
         pp = " ".join(f"{k}={v}" for k, v in (idea["params"] or {}).items())   # "lr=0.1 depth=3", not a dict repr
         return {"type": "inject_node", "data": {"idea": idea, "parent_id": nid, "code": None},
                 "label": f"Add experiment: {idea['operator']}" + (f" ({pp})" if pp else "")}
+    if a == "import" and c.source_run and c.source_node is not None:
+        # Seed an experiment FROM a sibling run. The source idea/code/metric are resolved from disk at
+        # apply time (in /control), which then bakes `origin` provenance into the inject_node event —
+        # so this rides the existing manual-injection pipeline, no new event type.
+        return {"type": "inject_node",
+                "data": {"idea": {"operator": c.operator or "improve", "params": c.params or {},
+                                  "rationale": c.rationale or c.text or ""},
+                         "parent_id": nid, "code": None,
+                         "source_run": c.source_run, "source_node": int(c.source_node)},
+                "label": f"Import #{c.source_node} from run {c.source_run}"}
     if a == "approve":
         node = nid if nid is not None else st.best_node_id
         if node is None:                      # no champion yet -> not an actionable approve
@@ -303,6 +315,10 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
                     "best_metric": (best.metric if best else None),
                     "best_confirmed": (best.confirmed_mean if best else None),
                     "stop_reason": st.stop_reason,
+                    # Cross-run lineage: distinct sibling run_ids this run SEEDED experiments from
+                    # (via `import`). Drives the MapView's "derived-from" edges. Empty for most runs.
+                    "seeded_from": sorted({n.origin["run_id"] for n in st.nodes.values()
+                                           if isinstance(n.origin, dict) and n.origin.get("run_id")}),
                     "themes": _theme_rollup(st),
                     "mtime": stt.st_mtime,    # last activity (events.jsonl mtime) — time sort + "updated"
                     "created": stt.st_ctime,  # run creation time (events.jsonl ctime) — "started" date
@@ -567,6 +583,30 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
         if etype not in CONTROL_EVENTS:
             raise HTTPException(400, f"unknown control event: {etype!r}")
         data = body.get("data") or {}
+        # Cross-run import: an inject seeded from a sibling run. Resolve the source experiment from disk
+        # NOW and bake its code + `origin` provenance into the inject_node, so the engine reproduces it
+        # faithfully and the lineage is recorded. (_run_dir guards path traversal on the sibling id.)
+        if etype == "inject_node" and data.get("source_run") and data.get("source_node") is not None:
+            sr = str(data.pop("source_run"))
+            sn = int(data.pop("source_node"))
+            sst = fold(_events(_run_dir(sr)))            # 404 if the sibling run doesn't exist
+            snode = sst.nodes.get(sn)
+            if snode is None:
+                raise HTTPException(404, f"no experiment #{sn} in run {sr}")
+            sidea = snode.idea.model_dump(mode="json")
+            note = f"imported from run {sr} #{sn}"
+            base = (sidea.get("rationale") or "").strip()
+            sidea["rationale"] = f"{base} | {note}" if base else note
+            data["idea"] = sidea
+            data["code"] = snode.code or None           # None => engine re-implements the idea
+            # Carry the sibling's FULL solution, not just solution.py: multi-file (repo/agent) nodes
+            # keep their helper modules + accepted deletions, so the reproduction actually runs. Safe
+            # to replay `deleted` because a sibling shares this task's pristine repo base (same task_id).
+            data["files"] = dict(snode.files)
+            data["deleted"] = list(snode.deleted)
+            data["origin"] = {"run_id": sr, "node_id": sn,
+                              "metric": snode.confirmed_mean if snode.confirmed_mean is not None
+                              else snode.metric}
         # Fresh EventStore per write (single-writer discipline): it rescans last seq before append.
         ev = EventStore(rd / "events.jsonl").append(etype, data)
         return {"ok": True, "seq": ev.seq, "type": etype}
@@ -1177,6 +1217,9 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
             "concrete experiment — emit several inject steps for several experiments; deep_research to "
             "read the literature first; note(node_id, text) to annotate a node; confirm(node_id), "
             "ablate(node_id), fork(node_id), promote(node_id), strategy(policy,fidelity), "
+            "import(source_run, source_node) to SEED a winning experiment from a SIBLING run of this "
+            "task into this run (use list_sibling_runs / read_sibling_experiment first to find one — the "
+            "imported node records where it came from); "
             "approve(node_id), ratify, pause, resume, stop. Use the node in context when no id is given. "
             "Give each step a one-line `rationale`.\n\n" + _boss_context(st, nid, rd))
         convo = "\n".join(f"{m.get('role')}: {m.get('content')}" for m in msgs)
@@ -1188,8 +1231,8 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
             before choosing, then emits ONE _Plan (reply + ordered actions). None when the model can't
             drive the tool loop (then the caller falls back to a plain single-call route)."""
             from .agent import CompositeTools, drive_tool_loop
-            from .run_tools import RunTools
-            providers = [RunTools()]
+            from .run_tools import RunTools, SiblingRunTools
+            providers = [RunTools(), SiblingRunTools(rd.parent, rd.name)]
             try:                                  # DataTools needs the task; add it when we can load it
                 from .run_tools import DataTools
                 from .tasks import load_task
