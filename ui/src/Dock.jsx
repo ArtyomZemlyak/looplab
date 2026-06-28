@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react'
-import { get, fmt, chat, command, appendAction, actionNeedsEngine, workingId, CONTROL, resumeRun, resetRun, getChatLog, appendChatTurn } from './util.js'
+import { get, fmt, chat, command, appendAction, actionNeedsEngine, workingId, CONTROL, resumeRun, resetRun, getChatLog, appendChatTurn, chatCompact } from './util.js'
 import Markdown from './markdown.jsx'
 import { NodeTrace, LlmCall } from './Inspector.jsx'
 import { OpIcon } from './icons.jsx'
@@ -64,7 +64,7 @@ function parseSlash(text, ctxId, state) {
     case 'promote': { const id = idArg(); return need(id, { action: { type: 'promote', data: { node_id: id, alias: 'champion' }, label: `Promote #${id} to champion` } }) }
     case 'note': { const id = idArg(), txt = afterId(); return (id == null || !txt) ? { error: 'usage: /note #id your note' } : { action: { type: 'annotation', data: { node_id: id, text: txt }, label: `Note on #${id}` } } }
     case 'hint': return rest ? { action: { type: 'hint', data: { text: rest }, label: `Hint: ${rest.slice(0, 60)}` } } : { error: 'usage: /hint your directive' }
-    case 'strategy': { const s = {}; rest.split(/\s+/).forEach(kv => { const [k, v] = kv.split('='); if (k && v) s[k] = v }); return Object.keys(s).length ? { action: { type: 'set_strategy', data: { strategy: s }, label: `Switch strategy → ${JSON.stringify(s)}` } } : { error: 'usage: /strategy policy=ucb fidelity=low' } }
+    case 'strategy': { const s = {}; rest.split(/\s+/).forEach(kv => { const [k, v] = kv.split('='); if (k && v) s[k] = v }); const pretty = Object.entries(s).map(([k, v]) => `${k}=${v}`).join(' '); return Object.keys(s).length ? { action: { type: 'set_strategy', data: { strategy: s }, label: `Switch strategy → ${pretty}` } } : { error: 'usage: /strategy policy=ucb fidelity=low' } }
     case 'deep-research': case 'research': return { action: { type: 'deep_research', data: {}, label: 'Run a deep-research step now' } }
     case 'approve': { const id = idArg() ?? state.best_node_id; return { action: { type: 'approval_granted', data: { node_id: id }, label: `Approve #${id}` } } }
     case 'ratify': return { action: { type: 'spec_approved', data: {}, label: 'Ratify the eval spec' } }
@@ -91,7 +91,14 @@ const NARR = {
   approval_requested: (d) => `awaiting approval of #${d.node_id}`,
   approval_granted: (d) => `approved #${d.node_id}`,
   pause: () => 'paused by operator', resume: () => 'resumed', run_abort: () => 'abort requested',
-  node_abort: (d) => `stop requested for #${d.node_id}`, budget_extend: (d) => `budget extended ${JSON.stringify(d)}`,
+  node_abort: (d) => `stop requested for #${d.node_id}`,
+  budget_extend: (d) => {
+    const bits = []
+    if (d.add_nodes) bits.push(`+${d.add_nodes} experiment node${d.add_nodes === 1 ? '' : 's'}`)
+    if (d.max_seconds != null) bits.push(`wall-clock ${d.max_seconds}s`)
+    if (d.max_eval_seconds != null) bits.push(`per-eval ${d.max_eval_seconds}s`)
+    return `run budget extended — ${bits.join(', ') || 'no change'}`
+  },
   hint: (d) => `hint: ${d.text}`, promote: (d) => `promoted #${d.node_id} → ${d.alias || 'champion'}`,
   policy_decision: (d) => `chose #${d.chosen}${d.reason ? ' (' + d.reason + ')' : ''} over ${Object.keys(d.scores || {}).length} candidate(s)`,
   strategy_decision: (d) => `strategy → ${d.strategy?.policy || '?'}${d.strategy?.fidelity ? '/' + d.strategy.fidelity : ''}${d.strategy?.rationale ? ' — ' + d.strategy.rationale.slice(0, 70) : ''}`,
@@ -105,6 +112,31 @@ const NARR = {
   novelty_rejected: (d) => `dedup: proposal near #${d.near_node} (dist ${fmt(d.distance, 3)}) nudged to diversify`,
   run_finished: (d) => `run finished${d.reason ? ' (' + d.reason + ')' : ''}`,
   llm_cost: (d) => `LLM: ${d.total_tokens} tokens, $${fmt(d.cost)}`,
+  // --- operator/boss control INTENTS + their engine confirmations. Every event the agentic boss can
+  // produce gets a plain-English line here, so an action never shows in the feed as a raw-JSON blob. ---
+  force_confirm: (d) => `requested a multi-seed confirm of #${d.node_id}`,
+  force_ablate: (d) => `requested an ablation probe on #${d.node_id}`,
+  fork: (d) => `forked a fresh improve-branch from #${d.from_node_id}`,
+  inject_node: (d) => { const i = d.idea || {}; return `added experiment: ${i.operator || 'improve'}${d.parent_id != null ? ' from #' + d.parent_id : ''}${i.rationale ? ' — ' + String(i.rationale).slice(0, 70) : ''}` },
+  annotation: (d) => `note on #${d.node_id}: ${String(d.text || '').slice(0, 80)}`,
+  run_reopened: () => 'run reopened to keep going',
+  fork_done: () => 'fork fulfilled — branch added',
+  inject_done: () => 'experiment injected into the tree',
+  confirm_done: (d) => `multi-seed confirm finished for #${d.node_id}`,
+  confirm_eval: (d) => `confirm seed ${d.seed} on #${d.node_id} → ${fmt(d.metric)}`,
+  agent_decision: (d) => `agent chose ${d.chosen?.kind || '?'}${d.chosen?.node_id != null ? ' → #' + d.chosen.node_id : ''} (of ${(d.legal || []).length} legal move${(d.legal || []).length === 1 ? '' : 's'})${d.rationale ? ' — ' + String(d.rationale).slice(0, 70) : ''}`,
+  agent_validated: (d) => `developer validated #${d.node_id}${d.fell_back ? ' (fell back to a simpler build)' : d.ok === false ? ' (checks failed)' : ' ✓'}`,
+  spec_proposed: () => 'eval spec proposed — awaiting ratification',
+  spec_approval_requested: () => 'awaiting your approval of the eval spec',
+  spec_approved: () => 'eval spec ratified',
+  spec_drift: (d) => `spec drift on #${d.node_id}${d.seed != null ? ' (seed ' + d.seed + ')' : ''} — metric discarded`,
+  drift_unavailable: (d) => `drift check unavailable${d.reason ? ' — ' + String(d.reason).slice(0, 80) : ''}`,
+  data_profiled: (d) => { const c = d.columns; const n = Array.isArray(c) ? c.length : Object.keys(c || {}).length; return `dataset profiled (${n} column${n === 1 ? '' : 's'})` },
+  data_provenance: (d) => { const n = Object.keys(d.assets || {}).length; return `dataset provenance pinned (${n} asset${n === 1 ? '' : 's'})` },
+  host_grading: (d) => `host-side grading active${d.scorer ? ' (' + d.scorer + ')' : ''}${d.competition ? ' · ' + d.competition : ''}`,
+  diversity_archive: () => 'diversity archive updated',
+  workspace_changed: () => 'workspace changed since the last run — re-grounding',
+  budget: (d) => `checkpoint — ${d.nodes} node${d.nodes === 1 ? '' : 's'}, ${fmt(d.elapsed_s, 3)}s elapsed`,
 }
 
 // The node an event refers to, if any — lets a feed click drill into that node.
@@ -137,7 +169,10 @@ const TYPE2GROUP = {
   fork: 'control', promote: 'control', annotation: 'control', inject_node: 'control', force_confirm: 'control',
   force_ablate: 'control', approval_requested: 'control', approval_granted: 'control', budget_extend: 'control',
   run_reopened: 'control', spec_approved: 'control', spec_approval_requested: 'control', spec_proposed: 'control',
-  run_started: 'lifecycle', run_finished: 'lifecycle', llm_cost: 'lifecycle',
+  fork_done: 'control', inject_done: 'control',
+  confirm_done: 'eval', confirm_eval: 'eval', agent_validated: 'eval',
+  drift_unavailable: 'trust', workspace_changed: 'trust',
+  run_started: 'lifecycle', run_finished: 'lifecycle', llm_cost: 'lifecycle', budget: 'lifecycle',
   data_profiled: 'lifecycle', data_provenance: 'lifecycle', host_grading: 'lifecycle', diversity_archive: 'lifecycle',
 }
 // Monochrome glyph per kind (default) + a few high-signal per-type overrides. Names resolve in
@@ -149,7 +184,8 @@ const GROUP_GLYPH = {
 const TYPE_GLYPH = {
   node_failed: 'bug', node_repaired: 'gear', node_confirmed: 'target', best_confirmed: 'star',
   run_started: 'play', run_finished: 'stop', report_generated: 'doc', research_completed: 'search',
-  deep_research: 'search', agent_decision: 'bot',
+  deep_research: 'search', agent_decision: 'bot', run_reopened: 'play', inject_node: 'gitbranch',
+  fork: 'gitbranch', agent_validated: 'target',
 }
 function kindOf(type) {
   const g = TYPE2GROUP[type] || 'lifecycle'
@@ -374,6 +410,8 @@ function AppliedRow({ m, onUndo }) {
           <b className="pa-label">{a.label}</b>
           {m.highlight && <OpIcon name="star" size={12} className="fm-star" />}
           <span className="spacer" style={{ flex: 1 }} />
+          {m.tokens?.total ? <span className="chat-tok"
+            title={`${m.tokens.prompt || 0} prompt → ${m.tokens.completion || 0} completion tokens`}>{ktok(m.tokens.total)} tok</span> : null}
           <span className={'pa-status ' + m.status}>{
             m.status === 'running' ? '… applying' : m.status === 'done' ? '✓ applied'
               : m.status === 'failed' ? '✗ ' + (m.err || 'failed') : ''}</span>
@@ -401,7 +439,9 @@ function ChatRow({ m }) {
       {icon}
       <div className="fm-body">
         {(m.ctx || []).length > 0 && <div className="ctx-row">{m.ctx.map(id => <span key={id} className="ctx-chip">#{id}</span>)}</div>}
-        <div className="chat-who">{isUser ? 'you' : 'agent'}</div>
+        <div className="chat-who">{isUser ? 'you' : 'agent'}
+          {!isUser && m.tokens?.total ? <span className="chat-tok"
+            title={`${m.tokens.prompt || 0} prompt → ${m.tokens.completion || 0} completion tokens`}>{ktok(m.tokens.total)} tok</span> : null}</div>
         <div className={'chat-bubble' + (long && !expanded ? ' clamp' : '')}>
           {isUser ? <div className="chat-text">{m.content}</div> : <Markdown className="chat-text" text={m.content} />}
         </div>
@@ -419,6 +459,39 @@ function ChatRow({ m }) {
   )
 }
 
+// Compact token formatter (langfuse-style): 1280 → "1.3k", 12000 → "12k".
+const ktok = (n) => (n == null ? '' : n >= 1000 ? +(n / 1000).toFixed(n >= 9950 ? 0 : 1) + 'k' : String(n))
+// Turns kept verbatim at the tail when compacting; the rest fold into the recap. Compact only offers
+// itself once there's a real backlog to fold (KEEP_RECENT + at least 2 older turns).
+const KEEP_RECENT = 6
+// Tokens spent on ONE turn — assistant replies carry it in their trace; an agentic plan carries it
+// directly (no trace); a summary carries the compaction cost. One reader so the header total agrees.
+const turnTokens = (m) => (m?.trace?.tokens?.total || m?.tokens?.total || 0)
+
+// A compaction marker: N older chat turns folded into ONE recap, so the boss re-reads the recap
+// instead of every turn. Expands to show the recap; a sub-toggle reveals the original folded turns
+// (still in chat.jsonl — just hidden from the live feed and the boss's context).
+function SummaryRow({ m, folded, showFolded, onToggleFolded }) {
+  const [open, setOpen] = useState(false)
+  return (
+    <div className="feed-msg summary">
+      <div className="fm-ic"><OpIcon name="doc" size={14} className="fm-ic-svg" /></div>
+      <div className="fm-body">
+        <div className="fm-line clickable" onClick={() => setOpen(o => !o)}>
+          <span className="fm-tw">{open ? '▾' : '▸'}</span>
+          <span className="fm-narr">compacted {folded} earlier message{folded === 1 ? '' : 's'} into a recap</span>
+          {m.tokens?.total ? <span className="chat-tok" title="tokens spent compacting">{ktok(m.tokens.total)} tok</span> : null}
+        </div>
+        {open && <div className="ev-detail-wrap"><div className="ev-detail">
+          <div className="v">{m.content}</div>
+          <div className="sum-foot" onClick={(e) => { e.stopPropagation(); onToggleFolded() }}>
+            {showFolded ? '▾ hide the folded turns' : `▸ show the ${folded} folded turn${folded === 1 ? '' : 's'}`}</div>
+        </div></div>}
+      </div>
+    </div>
+  )
+}
+
 export default function Dock({ runId, live, liveSeq, viewSeq, setViewSeq, onFocus, collapsed, onToggleCollapse, height = 230, selectedId, onToast }) {
   const [log, setLog] = useState([])
   const [trace, setTrace] = useState(null)
@@ -431,6 +504,13 @@ export default function Dock({ runId, live, liveSeq, viewSeq, setViewSeq, onFocu
   const [dropActive, setDropActive] = useState(false)
   const [sugIdx, setSugIdx] = useState(0)                 // highlighted command suggestion
   const [sugOpen, setSugOpen] = useState(true)            // false only after an explicit Esc (reopens on edit)
+  const [showFolded, setShowFolded] = useState(false)     // reveal turns hidden behind the latest recap
+  const [compacting, setCompacting] = useState(false)     // a /chat-compact request is in flight
+  // Transparency: the single in-flight CHAT-SIDE operation, shown live in the status strip with an
+  // elapsed counter so a slow model call (compaction / a boss reply can take 20-30s on a hosted model)
+  // reads as "working, 14s" instead of a frozen "…". { label, icon, since (epoch s) } | null.
+  const [op, setOp] = useState(null)
+  const [, tick] = useState(0)                            // 1Hz repaint so the elapsed counter advances
   const taRef = useRef(null)
   const feedRef = useRef(null)
   const msgCtr = useRef(0)
@@ -512,14 +592,47 @@ export default function Dock({ runId, live, liveSeq, viewSeq, setViewSeq, onFocu
   const tailTs = () => Math.max(Date.now() / 1000, log.length ? (log[log.length - 1].ts || 0) : 0) + 1e-3
   const chatSeq = () => 1e15 + liveSeq * 1e6 + (msgCtr.current++)
 
+  // --- context compaction (manual "Compact"): fold older chat turns into ONE recap so the boss stops
+  // re-reading the whole conversation each message. The recap is a durable `summary` turn; everything
+  // it covers (seq ≤ covers_upto_seq) is hidden from the feed + the boss's context unless expanded. ---
+  const latestSummary = useMemo(() => {
+    const s = msgs.filter(m => m.role === 'summary')
+    return s.length ? s.reduce((a, b) => ((b.seq ?? 0) > (a.seq ?? 0) ? b : a)) : null
+  }, [msgs])
+  const coveredSeq = latestSummary?.covers_upto_seq ?? -1
+  const foldedCount = useMemo(() =>
+    msgs.filter(m => m.role !== 'summary' && (m.seq ?? 0) <= coveredSeq).length, [msgs, coveredSeq])
+  // Turns eligible to fold next time = real conversation turns AFTER the current recap boundary.
+  const compactableTurns = useMemo(() =>
+    msgs.filter(m => (m.role === 'user' || m.role === 'assistant' || m.role === 'action') && (m.seq ?? 0) > coveredSeq),
+    [msgs, coveredSeq])
+  // Running token total for this chat (boss plans + advisory replies + compactions) — the header badge.
+  const chatTokens = useMemo(() => msgs.reduce((sum, m) => sum + turnTokens(m), 0), [msgs])
+  // The conversation the boss actually receives: the recap (if any) standing in for the folded turns,
+  // then every turn after it. This is what caps the O(n) context growth a long chat would otherwise hit.
+  const buildHistory = () => {
+    const after = coveredSeq >= 0 ? msgs.filter(m => (m.seq ?? 0) > coveredSeq) : msgs
+    // Keep applied actions in the boss's memory as one-liners — else a recent tail dominated by a big
+    // plan's action rows would be stripped, leaving the boss only the recap with no recent context.
+    const conv = after.filter(m => m.role === 'user' || m.role === 'assistant' || m.role === 'action')
+      .map(m => m.role === 'action' ? { role: 'assistant', content: 'applied: ' + (m.action?.label || '') } : { role: m.role, content: m.content })
+    return latestSummary
+      ? [{ role: 'assistant', content: 'Recap of our earlier discussion (compacted):\n' + latestSummary.content }, ...conv]
+      : conv
+  }
+
   // The unified, chronological feed: events (filtered + time-scrubbed) interleaved with chat turns.
   const feed = useMemo(() => {
     const evItems = log
       .filter(e => (atLive || e.seq <= viewSeq) && kindMatch(e) && textMatch(e))
       .map(e => ({ t: 'ev', ts: e.ts || 0, seq: e.seq, e }))
-    const msgItems = msgs.map((m, i) => ({ t: 'msg', ts: m.ts || 0, seq: m.seq ?? (1e15 + i), m, i }))
+    const msgItems = msgs
+      .map((m, i) => ({ t: 'msg', ts: m.ts || 0, seq: m.seq ?? (1e15 + i), m, i }))
+      .filter(it => it.m.role === 'summary'
+        ? it.m.seq === latestSummary?.seq                                  // only the newest recap card
+        : (showFolded || coveredSeq < 0 || (it.m.seq ?? 0) > coveredSeq))  // hide turns behind the recap
     return [...evItems, ...msgItems].sort((a, b) => (a.ts - b.ts) || (a.seq - b.seq))
-  }, [log, msgs, atLive, viewSeq, filter, kinds])
+  }, [log, msgs, atLive, viewSeq, filter, kinds, coveredSeq, showFolded, latestSummary])
 
   // Scroll the CONTAINER after paint — tall Markdown replies lay out late, so scrollIntoView fired
   // mid-layout would land short and leave a new turn visually colliding with the row above it.
@@ -528,9 +641,16 @@ export default function Dock({ runId, live, liveSeq, viewSeq, setViewSeq, onFocu
     const el = feedRef.current
     if (el) requestAnimationFrame(() => { el.scrollTop = el.scrollHeight })
   }, [feed.length, busy, atLive])
+  // Advance the elapsed counter while an operation is running (and only then — no idle timer).
+  useEffect(() => {
+    if (!op) return
+    const id = setInterval(() => tick(t => t + 1), 1000)
+    return () => clearInterval(id)
+  }, [op])
+  const opElapsed = op ? Math.max(0, Math.floor(Date.now() / 1000 - op.since)) : 0
 
-  const pushAssistant = (content, trace = null) => {
-    const turn = { role: 'assistant', content, trace, ts: tailTs(), seq: chatSeq() }
+  const pushAssistant = (content, trace = null, tokens = null) => {
+    const turn = { role: 'assistant', content, trace, tokens: tokens || trace?.tokens || null, ts: tailTs(), seq: chatSeq() }
     setMsgs(m => [...m, turn]); persistTurn(turn)
   }
   // round-7 boss mode: the action is APPLIED immediately (no confirm card). Reversible verbs
@@ -543,12 +663,16 @@ export default function Dock({ runId, live, liveSeq, viewSeq, setViewSeq, onFocu
   // persisted), appended IN ORDER as append-only intents; then we reopen+resume the run ONCE if any
   // step needs the engine (on a finished run the intents otherwise just sit in the log unrun). A live
   // run needs no resume — the engine drains the intents between nodes. Reversible steps keep their Undo.
-  const autoApplyPlan = async (actions) => {
+  const autoApplyPlan = async (actions, planTokens = null) => {
     if (!actions || !actions.length) return
     let needsResume = false, anyFailed = false
-    for (const action of actions) {
+    for (let i = 0; i < actions.length; i++) {
+      const action = actions[i]
       const seq = chatSeq(), id = 'a' + seq, ts = tailTs()
-      const base = { role: 'action', action, id, ts, seq, highlight: isCritical(action), undo: undoFor(action) }
+      // Stamp the plan's token cost on the FIRST applied row when there was no narration turn to carry
+      // it (an actions-only plan), so the header total still counts it.
+      const base = { role: 'action', action, id, ts, seq, highlight: isCritical(action), undo: undoFor(action),
+                     tokens: i === 0 ? planTokens : null }
       setMsgs(m => [...m, { ...base, status: 'running' }])
       try {
         await appendAction(runId, action)                // append-only intent — no resume yet
@@ -564,6 +688,7 @@ export default function Dock({ runId, live, liveSeq, viewSeq, setViewSeq, onFocu
     if (needsResume) {
       // Still resume even if a step failed — the steps are independent append-only intents, so the
       // ones that DID apply should run; the failed step stays visible as a ✗ row in the feed.
+      setOp({ label: 'Reopening & resuming the run', icon: 'play', since: Date.now() / 1000 })
       try {
         await CONTROL.reopen(runId); await resumeRun(runId)
         onToast?.(anyFailed ? 'resumed — but a step failed (see the feed)' : 'applied & resumed — running the plan')
@@ -584,15 +709,46 @@ export default function Dock({ runId, live, liveSeq, viewSeq, setViewSeq, onFocu
     try { await CONTROL.raw(runId, m.undo.type, m.undo.data); onToast?.('undid: ' + m.action.label) }
     catch (e) { onToast?.('undo failed: ' + e.message) }
   }
+  // Manual "Compact": fold all but the last KEEP_RECENT live turns into one recap (the boss then
+  // re-reads the recap, not every turn). The recap is a durable `summary` turn placed at the fold
+  // boundary; everything it covers is hidden from the feed + the boss's context until expanded.
+  const onCompact = async () => {
+    if (compacting || busy) return   // one chat-side op at a time (send + compact share the op strip)
+    const fold = compactableTurns.slice(0, Math.max(0, compactableTurns.length - KEEP_RECENT))
+    if (fold.length < 2) { onToast?.('nothing to compact yet — keep chatting'); return }
+    setCompacting(true)
+    setOp({ label: `Compacting ${fold.length} earlier messages`, icon: 'doc', since: Date.now() / 1000 })
+    try {
+      // Send the folded turns (action rows become a one-line "applied: …"); carry the PRIOR recap so a
+      // second compaction stays cumulative rather than dropping the first recap's memory.
+      const prior = latestSummary ? [{ role: 'assistant', content: 'Earlier recap: ' + latestSummary.content }] : []
+      const payload = [...prior, ...fold.map(m => ({
+        role: m.role === 'action' ? 'assistant' : m.role,
+        content: m.role === 'action' ? ('applied: ' + (m.action?.label || '')) : (m.content || '') }))]
+      const r = await chatCompact(runId, payload)
+      if (!r || !r.ok || !r.summary) { onToast?.(r?.error ? 'compact failed: ' + r.error : 'compact unavailable (offline?)'); return }
+      const foldLast = fold[fold.length - 1]
+      const upto = Math.max(...fold.map(m => m.seq ?? 0))
+      // Sit the recap at the fold boundary (just after the last folded turn, before the kept tail).
+      // Stamp `folded` on the record so the card's count is exact PER-recap (not a live re-count that
+      // overstates after a 2nd compaction, or reads 0 if the folded turns failed to persist).
+      const turn = { role: 'summary', content: r.summary, covers_upto_seq: upto, tokens: r.tokens || null,
+                     folded: fold.length, ts: (foldLast?.ts || tailTs()) + 1e-4, seq: upto + 0.5 }
+      setMsgs(m => [...m, turn]); persistTurn(turn); setShowFolded(false)
+      onToast?.(`compacted ${fold.length} messages into a recap`)
+    } catch (e) { onToast?.('compact failed: ' + e.message) }
+    finally { setCompacting(false); setOp(null) }
+  }
   // Free text -> the boss applies an action immediately, or replies; soft-fails to advisory chat.
   // A reply carries its `trace` (the LLM I/O) so the chat row can expand into a langfuse-style card.
   const runCommand = async (instruction, nid, history) => {
     const r = await command(runId, { messages: history, node_id: nid, instruction })
     if (r.ok && r.actions?.length) {
       // Agentic plan: show the boss's narration first, then apply the ordered steps (single resume).
-      if (r.reply) pushAssistant(r.reply)
-      await autoApplyPlan(r.actions)
-    } else if (r.ok && r.reply) pushAssistant(r.reply, r.trace)
+      // Token cost rides the narration turn, or the first applied row when the plan has no narration.
+      if (r.reply) pushAssistant(r.reply, null, r.tokens)
+      await autoApplyPlan(r.actions, r.reply ? null : r.tokens)
+    } else if (r.ok && r.reply) pushAssistant(r.reply, r.trace, r.tokens)
     else {
       // Soft-fail to advisory chat. `history` is the PRIOR turns; the current instruction must be
       // appended or the model answers the previous message (it's not in `history` yet).
@@ -602,25 +758,28 @@ export default function Dock({ runId, live, liveSeq, viewSeq, setViewSeq, onFocu
   }
   const send = async () => {
     const text = input.trim()
-    if (!text || busy) return
+    if (!text || busy || compacting) return   // one chat-side op at a time (send + compact share the op strip)
     const nid = ctx.length ? ctx[ctx.length - 1] : (selectedId ?? null)
-    const history = msgs.filter(m => m.role === 'user' || m.role === 'assistant').map(m => ({ role: m.role, content: m.content }))
+    const history = buildHistory()   // recap + post-recap turns, so the boss's context doesn't grow unbounded
     const userTurn = { role: 'user', content: text, ts: tailTs(), seq: chatSeq(), ctx: [...ctx] }
     setMsgs(m => [...m, userTurn]); persistTurn(userTurn)
     setInput(''); setCtx([]); setBusy(true)   // the feed.length effect scrolls the new turn into view
+    // Honest op label: a boss/LLM path says "reading & deciding"; a purely-local slash action does no
+    // model call, so it says "Applying" instead (autoApplyPlan relabels to "resuming" if it reopens).
+    const reading = () => setOp({ label: 'Boss is reading & deciding', icon: 'chat', since: Date.now() / 1000 })
     try {
       if (text.startsWith('/')) {
         const p = parseSlash(text, nid, live || {})
         if (p?.help) pushAssistant(HELP)
         else if (p?.error) pushAssistant('⚠ ' + p.error)
-        else if (p?.action) await autoApply(p.action)
-        else if (p?.llm) await runCommand(p.llm, nid, history)
+        else if (p?.action) { setOp({ label: 'Applying', icon: 'gear', since: Date.now() / 1000 }); await autoApply(p.action) }
+        else if (p?.llm) { reading(); await runCommand(p.llm, nid, history) }
         else pushAssistant('⚠ unrecognized — try /help')
       } else {
-        await runCommand(text, nid, history)
+        reading(); await runCommand(text, nid, history)
       }
     } catch (e) { pushAssistant('⚠ ' + e.message) }
-    setBusy(false)
+    finally { setBusy(false); setOp(null) }
   }
   // round-7 transport: mode derived from live state; wired to existing control endpoints + reset.
   const paused = !!live?.paused, finished = !!live?.finished
@@ -682,6 +841,9 @@ export default function Dock({ runId, live, liveSeq, viewSeq, setViewSeq, onFocu
           <span className="hist-tag-mini hist" style={{ cursor: 'pointer' }}
                 title="a filter is active — open controls to change it" onClick={toggleControls}>⌕ filtered</span>}
         <span className="spacer" style={{ flex: 1 }} />
+        {chatTokens > 0 && <span className="chat-tok hdr"
+              title="approx tokens this chat has cost so far (boss replies + compaction) — a lifetime total, not the current context size">
+          {ktok(chatTokens)} tok</span>}
         <button className={'btn sm ghost' + (showControls ? ' on' : '')} title="time-travel & filters"
                 onClick={toggleControls}><OpIcon name="sliders" size={13} /> controls</button>
         <button className="btn sm ghost dock-collapse" title={collapsed ? 'expand' : 'collapse'}
@@ -710,19 +872,24 @@ export default function Dock({ runId, live, liveSeq, viewSeq, setViewSeq, onFocu
             : feed.map(it => it.t === 'ev'
                 ? <EventRow key={'e' + it.seq} e={it.e} trace={trace} onFocusEvent={focusEvent}
                     autoOpen={it.e.type === 'node_created' && eventNode(it.e) === livePendingId} />
-                : it.m.role === 'action'
-                  ? <AppliedRow key={it.m.id || ('a' + it.i)} m={it.m} onUndo={onUndo} />
-                  : <ChatRow key={'m' + it.i} m={it.m} />)}
+                : it.m.role === 'summary'
+                  ? <SummaryRow key={'s' + it.i} m={it.m} folded={it.m.folded ?? foldedCount}
+                      showFolded={showFolded} onToggleFolded={() => setShowFolded(v => !v)} />
+                  : it.m.role === 'action'
+                    ? <AppliedRow key={it.m.id || ('a' + it.i)} m={it.m} onUndo={onUndo} />
+                    : <ChatRow key={'m' + it.i} m={it.m} />)}
           {(() => {
-            // Concurrent transparency: the pipeline keeps working (research/eval) WHILE the boss
-            // replies to your message — show both at once, never one masking the other.
+            // Concurrent transparency: the engine pipeline (research/eval) keeps working WHILE a
+            // chat-side op (boss reply / compaction / resume) runs — show BOTH, never one masking the
+            // other, and put a live elapsed counter on the chat op so a slow model call never looks hung.
             const pipeline = atLive ? agentStatus(live, log) : null
-            if (!pipeline && !busy) return null
+            if (!pipeline && !op) return null
             return <div className="agent-status">
               <span className="as-dot" />
               {pipeline && <span className="as-seg">{pipeline}</span>}
-              {pipeline && busy && <span className="as-bullet">·</span>}
-              {busy && <span className="as-seg as-reply"><OpIcon name="chat" size={11} /> replying to your message…</span>}
+              {pipeline && op && <span className="as-bullet">·</span>}
+              {op && <span className="as-seg as-reply">
+                <OpIcon name={op.icon || 'chat'} size={11} /> {op.label}…{opElapsed >= 2 ? ` ${opElapsed}s` : ''}</span>}
             </div>
           })()}
         </div>
@@ -750,8 +917,11 @@ export default function Dock({ runId, live, liveSeq, viewSeq, setViewSeq, onFocu
             value={input} onChange={e => { setInput(e.target.value); setSugIdx(0); setSugOpen(true) }}
             onKeyDown={onInputKey} />
           <div className="toolbar" style={{ marginTop: 4 }}>
-            <button className="btn sm primary" disabled={busy || !input.trim()} onClick={send}>Send</button>
+            <button className="btn sm primary" disabled={busy || compacting || !input.trim()} onClick={send}>Send</button>
             <button className="btn sm ghost" title="list commands" onClick={() => pushAssistant(HELP)}>/help</button>
+            <button className="btn sm ghost" disabled={busy || compacting || compactableTurns.length < KEEP_RECENT + 2}
+                    title="Compact older chat turns into a recap — shrinks what the boss re-reads each message"
+                    onClick={onCompact}>{compacting ? '…' : 'Compact'}</button>
             <span className="muted" style={{ fontSize: 11 }}>{busy ? 'thinking…' : 'boss mode — actions apply immediately'}</span>
             <span className="spacer" style={{ flex: 1 }} />
             <div className="transport">

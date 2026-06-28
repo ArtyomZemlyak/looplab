@@ -761,6 +761,17 @@ textarea.text { min-height: 220px; font-family: ui-monospace, Consolas, monospac
 .pa-status.running { color: var(--accent); }
 .pa-undo { margin-top: 3px; }
 
+/* ── Context usage (round-8): per-turn + running token badge, and the "Compact" recap card ──── */
+.chat-tok { font-size: 10.5px; color: var(--fg-mut); font-variant-numeric: tabular-nums; white-space: nowrap;
+  background: var(--bg-3); border: 1px solid var(--line); border-radius: 5px; padding: 0 5px; margin-left: 6px; }
+.chat-tok.hdr { margin-left: 0; margin-right: 6px; }       /* the header running-total variant */
+/* the recap row left by Compact: neutral, slightly inset, with a doc glyph — clearly a fold marker */
+.feed-msg.summary { border-left-color: var(--line-2); background: var(--bg-1); }
+.feed-msg.summary .fm-ic-svg { color: var(--fg-mut); }
+.feed-msg.summary .fm-narr { color: var(--fg-dim); font-style: italic; }
+.sum-foot { font-size: 11px; color: var(--fg-mut); cursor: pointer; user-select: none; margin-top: 6px; }
+.sum-foot:hover { color: var(--fg); }
+
 /* round-7 dock: collapsible controls block, header mini-tag, transport buttons */
 .dock-controls { border-bottom: 1px solid var(--line); }
 .scrubber.inline { position: static; }                    /* was sticky via .scrubber — not needed in the controls block */

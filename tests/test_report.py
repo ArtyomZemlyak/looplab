@@ -144,6 +144,30 @@ def test_command_to_action_mapping():
     assert _action_to_control(_Action(action="deep_research"), s)["type"] == "deep_research"
 
 
+def test_action_labels_are_human_readable():
+    """Every applied-row `label` is what the human reads in the chat timeline, so it must be a plain
+    sentence — never a Python dict/`repr` leaking braces/quotes (the readability regression we fixed)."""
+    from looplab.server import _Action, _action_to_control
+
+    class _S:
+        best_node_id = 9
+    s = _S()
+    cases = [
+        _Action(action="strategy", policy="ucb", fidelity="low"),
+        _Action(action="inject", operator="improve", params={"lr": 0.1, "depth": 3}),
+        _Action(action="budget", nodes=10),
+        _Action(action="confirm", node_id=5),
+        _Action(action="note", node_id=3, text="try log1p"),
+    ]
+    for c in cases:
+        lab = _action_to_control(c, s)["label"]
+        assert lab and "{" not in lab and "}" not in lab and "'" not in lab, lab
+    # the two that used to leak a dict repr now read as key=value
+    assert _action_to_control(_Action(action="strategy", policy="ucb", fidelity="low"), s)["label"] \
+        == "Switch strategy → policy=ucb fidelity=low"
+    assert "lr=0.1" in _action_to_control(_Action(action="inject", params={"lr": 0.1}), s)["label"]
+
+
 def test_command_endpoint_returns_action(tmp_path, monkeypatch):
     _build_run(tmp_path, "demo", writer=None)
     client = TestClient(make_app(tmp_path))
@@ -273,6 +297,69 @@ def test_boss_context_includes_the_run_report(tmp_path, monkeypatch):
     assert "Latest run report" in captured["sys"]
     assert "Quadratic solved near-optimally" in captured["sys"]       # the headline reached the boss
     assert "try a finer sweep around the optimum" in captured["sys"]  # a next_directions item too
+
+
+def test_chat_compact_summarizes_and_reports_tokens(tmp_path, monkeypatch):
+    """Compaction folds a stretch of older turns into ONE recap and reports the token cost — so the UI
+    can append a durable `summary` turn and the header running-total stays honest."""
+    _build_run(tmp_path, "demo", writer=None)
+    client = TestClient(make_app(tmp_path))
+    captured = {}
+
+    class _Cap:
+        def __init__(self, s):
+            self.model = s.llm_model
+            self.accountant = type("A", (), {"prompt_tokens": 120, "completion_tokens": 30,
+                                             "total_tokens": 150, "calls": 1})()
+
+        def complete_text(self, msgs):
+            captured["user"] = msgs[-1]["content"]
+            return "recap: agreed to try MLPs; budget raised by 10."
+
+    monkeypatch.setattr("looplab.server.make_llm_client", lambda s: _Cap(s))
+    r = client.post("/api/runs/demo/chat-compact", json={"messages": [
+        {"role": "user", "content": "try some neural nets"},
+        {"role": "assistant", "content": "added two MLP baselines"}]}).json()
+    assert r["ok"] and r["summary"].startswith("recap:")
+    assert r["tokens"]["total"] == 150                     # token cost surfaced for the header total
+    assert "try some neural nets" in captured["user"]      # the folded turns were actually summarized
+
+
+def test_chat_compact_empty_is_noop(tmp_path, monkeypatch):
+    """No turns to fold -> empty recap, no model call (and no crash)."""
+    _build_run(tmp_path, "demo", writer=None)
+    client = TestClient(make_app(tmp_path))
+
+    def _boom(_s):
+        raise AssertionError("must not call the model when there's nothing to compact")
+
+    monkeypatch.setattr("looplab.server.make_llm_client", _boom)
+    r = client.post("/api/runs/demo/chat-compact", json={"messages": []}).json()
+    assert r["ok"] and r["summary"] == ""
+
+
+def test_command_reply_carries_token_usage(tmp_path, monkeypatch):
+    """An advisory boss reply returns its token cost in the trace, so the chat row + header can show it."""
+    _build_run(tmp_path, "demo", writer=None)
+    client = TestClient(make_app(tmp_path))
+
+    class _Cap:
+        def __init__(self, s):
+            self.model = s.llm_model
+            self.accountant = type("A", (), {"prompt_tokens": 200, "completion_tokens": 44,
+                                             "total_tokens": 244, "calls": 2})()
+
+        def complete_text(self, msgs):
+            return "here's my take"
+
+    # Force the advisory fallback: structured plan parse + tool-loop both unavailable.
+    monkeypatch.setattr("looplab.server.make_llm_client", lambda s: _Cap(s))
+    monkeypatch.setattr("looplab.parse.parse_structured",
+                        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("no structured output")))
+    r = client.post("/api/runs/demo/command",
+                    json={"instruction": "what should I try?", "messages": []}).json()
+    assert r["ok"] and r["reply"] == "here's my take"
+    assert r["trace"]["tokens"]["total"] == 244
 
 
 def test_boss_context_report_handles_malformed_fields(tmp_path, monkeypatch):

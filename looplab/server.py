@@ -121,13 +121,15 @@ def _action_to_control(c: "_Action", st) -> Optional[dict]:
                 "label": f"Extend the run budget by {n} node(s)"}
     if a == "strategy" and (c.policy or c.fidelity):
         strat = {k: v for k, v in (("policy", c.policy), ("fidelity", c.fidelity)) if v}
-        return {"type": "set_strategy", "data": {"strategy": strat}, "label": f"Switch strategy → {strat}"}
+        pretty = " ".join(f"{k}={v}" for k, v in strat.items())   # "policy=ucb fidelity=low", not a dict repr
+        return {"type": "set_strategy", "data": {"strategy": strat}, "label": f"Switch strategy → {pretty}"}
     if a == "deep_research":
         return {"type": "deep_research", "data": {}, "label": "Run a deep-research step now"}
     if a == "inject":
         idea = {"operator": c.operator or "improve", "params": c.params or {}, "rationale": c.rationale or c.text or ""}
+        pp = " ".join(f"{k}={v}" for k, v in (idea["params"] or {}).items())   # "lr=0.1 depth=3", not a dict repr
         return {"type": "inject_node", "data": {"idea": idea, "parent_id": nid, "code": None},
-                "label": f"Add experiment: {idea['operator']} {idea['params'] or ''}".strip()}
+                "label": f"Add experiment: {idea['operator']}" + (f" ({pp})" if pp else "")}
     if a == "approve":
         node = nid if nid is not None else st.best_node_id
         if node is None:                      # no champion yet -> not an actionable approve
@@ -151,6 +153,22 @@ def _plan_to_actions(plan: "_Plan", st) -> list[dict]:
             ctrl["rationale"] = step.rationale or ""
             out.append(ctrl)
     return out
+
+
+def _client_tokens(client) -> Optional[dict]:
+    """Best-effort token usage for ONE chat request. `make_llm_client` mints a fresh client per
+    request, so its accountant totals already SUM every sub-call this turn made (the boss tool-loop
+    can fire several). Shape matches the UI's `callTok` reader ({prompt, completion, total}). None
+    when the client/model doesn't report usage (older local servers) — the UI just omits the badge."""
+    acc = getattr(client, "accountant", None)
+    if acc is not None and getattr(acc, "total_tokens", 0):
+        return {"prompt": acc.prompt_tokens, "completion": acc.completion_tokens,
+                "total": acc.total_tokens, "calls": acc.calls}
+    u = getattr(client, "_last_usage", None) or {}
+    if u:
+        return {"prompt": u.get("prompt_tokens", 0), "completion": u.get("completion_tokens", 0),
+                "total": u.get("total_tokens", 0), "calls": 1}
+    return None
 
 
 def _ui_dist() -> Path:
@@ -1016,6 +1034,35 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
             os.fsync(f.fileno())
         return {"ok": True}
 
+    @app.post("/api/runs/{run_id}/chat-compact")
+    async def chat_compact(run_id: str, request: Request):
+        """Summarize a stretch of older chat turns into ONE tight recap, so the boss's working memory
+        stops growing turn-over-turn (the human↔boss history is re-sent in full each message). The UI
+        sends the turns to fold; we return a recap string (+ its token cost) which the UI appends as a
+        durable `summary` turn and then sends to the boss IN PLACE OF those turns. Read-only + soft-fail
+        offline — compaction is opt-in, so a missing model just leaves the chat uncompacted."""
+        rd = _run_dir(run_id)
+        body = await request.json()
+        msgs = body.get("messages") or []
+        convo = "\n".join(f"{m.get('role')}: {m.get('content', '')}"
+                          for m in msgs if str(m.get("content", "")).strip())
+        if not convo.strip():
+            return {"ok": True, "summary": "", "tokens": None}
+        try:
+            client = make_llm_client(_llm_settings(rd))
+            sys_prompt = (
+                "You are compacting a conversation between a human and the BOSS of an autonomous ML "
+                "experiment run. Rewrite it as a TIGHT recap that becomes the boss's memory of these "
+                "turns, so they can be dropped from the live context. PRESERVE, in order of priority: "
+                "decisions made, actions already applied (and their outcome), open questions, and any "
+                "agreed next steps or constraints the human set. Drop pleasantries and resolved "
+                "tangents. One compact paragraph, no preamble, written as notes-to-self.")
+            summary = await anyio.to_thread.run_sync(lambda: client.complete_text(
+                [{"role": "system", "content": sys_prompt}, {"role": "user", "content": convo}]))
+        except Exception as e:  # noqa: BLE001 - offline / no model -> soft fail (chat stays uncompacted)
+            return JSONResponse({"ok": False, "error": str(e)}, status_code=200)
+        return {"ok": True, "summary": (summary or "").strip(), "tokens": _client_tokens(client)}
+
     @app.post("/api/runs/{run_id}/chat")
     async def chat(run_id: str, request: Request):
         """Advisory chat grounded on a run (and optionally one experiment node). Read-only — it
@@ -1052,7 +1099,8 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
         user_msg = next((m.get("content", "") for m in reversed(msgs) if m.get("role") == "user"), "")
         return {"ok": True, "text": text,
                 "trace": {"model": getattr(client, "model", None),
-                          "system": sys_prompt, "user": user_msg, "completion": text}}
+                          "system": sys_prompt, "user": user_msg, "completion": text,
+                          "tokens": _client_tokens(client)}}
 
     @app.post("/api/runs/{run_id}/suggest")
     async def suggest(run_id: str, request: Request):
@@ -1194,12 +1242,13 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
                 plan = None
         if plan is not None:
             actions = _plan_to_actions(plan, st)
+            tok = _client_tokens(client)         # whole-turn token cost (incl. any tool-loop sub-calls)
             if actions:
                 # An agentic plan: the ordered actions the UI applies in sequence, plus the boss's
                 # narration. `reply` (if any) is shown as the chat message above the applied rows.
-                return {"ok": True, "actions": actions, "reply": plan.reply or ""}
+                return {"ok": True, "actions": actions, "reply": plan.reply or "", "tokens": tok}
             if plan.reply:                       # the boss chose to only talk back — show its reply
-                return {"ok": True, "reply": plan.reply}
+                return {"ok": True, "reply": plan.reply, "tokens": tok}
         try:
             advise_sys = ("You are an ML research collaborator embedded in an experiment loop. Answer "
                           "concisely, grounded on the run.\n" + _boss_context(st, nid, rd))
@@ -1213,7 +1262,8 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
                 (m.get("content", "") for m in reversed(msgs) if m.get("role") == "user"), "")
             return {"ok": True, "reply": text,
                     "trace": {"model": getattr(client, "model", None),
-                              "system": advise_sys, "user": user_msg, "completion": text}}
+                              "system": advise_sys, "user": user_msg, "completion": text,
+                              "tokens": _client_tokens(client)}}
         except Exception as e:  # noqa: BLE001
             return JSONResponse({"ok": False, "error": str(e)}, status_code=200)
 
