@@ -9,6 +9,7 @@ node_evaluated events have been written, simulating `kill -9` mid-run.
 """
 from __future__ import annotations
 
+import functools
 import hashlib
 import os
 import time
@@ -175,6 +176,8 @@ class Engine:
         strategist_every: int = 3,
         deep_researcher=None,       # Optional[DeepResearcher]; None => Deep-Research stage off
         deep_research_every: int = 0,  # run the stage every N created nodes (0 = manual/strategist only)
+        concurrent_research: bool = False,  # overlap a due research "think" with the GPU-bound eval (opt-in)
+        speculative_pipeline: bool = False,  # precompute the next improve-off-best while a node evals (opt-in)
         report_writer=None,         # Optional[ReportWriter]; None => agent report off (deterministic only)
         report_every: int = 0,      # regenerate the run report every N created nodes (0 = manual only)
         developer_factory=None,     # Optional[Callable[[str], Developer]] for live backend swap
@@ -223,6 +226,9 @@ class Engine:
         self.strategist_every = max(1, strategist_every)
         self.deep_researcher = deep_researcher
         self.deep_research_every = max(0, deep_research_every)
+        self.concurrent_research = concurrent_research
+        self.speculative_pipeline = speculative_pipeline
+        self._spec_build = None   # cached speculative (improve) build, consumed match-or-discard next iter
         self.report_writer = report_writer
         self.report_every = max(0, report_every)
         self.developer_factory = developer_factory
@@ -604,6 +610,11 @@ class Engine:
                     if a.get("_rung") is not None:   # A1 ASHA: surface the successive-halving promotion
                         self.store.append("rung_promoted",
                                           {"rung": a["_rung"], "survivors": a.get("_promoted", [])})
+                    # Speculative pipeline: if we precomputed this exact improve while the prior node was
+                    # training, append it from cache (the propose/implement already overlapped the eval).
+                    # Match-or-discard, so the search is identical to the un-speculated policy choice.
+                    if self.speculative_pipeline and self._consume_speculation(a):
+                        continue
                     self._create_node(a)  # sequential -> deterministic ids/proposals
                 continue
 
@@ -612,24 +623,55 @@ class Engine:
             # seam — opt in with max_parallel > 1.
             if self.max_parallel <= 1:
                 limiter = anyio.CapacityLimiter(1)
-                for a in evals:
-                    cur = fold(self.store.read_all())
-                    # Operator stopped this specific node (`node_abort`): skip the eval and record
-                    # the effect as a node_failed reason="aborted" (cooperative pre-eval skip; a
-                    # mid-eval kill of an in-flight subprocess is the deferred v2). An aborted node
-                    # keeps no metric, so replay excludes it from best-selection.
-                    if a["node_id"] in cur.aborted_nodes:
-                        n = cur.nodes.get(a["node_id"])
-                        if n is not None and n.status is NodeStatus.pending:
-                            self.store.append("node_failed", {
-                                "node_id": a["node_id"], "error": "aborted by operator",
-                                "reason": "aborted", "eval_seconds": 0.0})
-                        continue
-                    # Re-check the eval-compute budget BEFORE each eval (not just per loop
-                    # iteration), so a multi-eval batch can't overshoot by a whole batch (#2/#25).
-                    if (max_es is not None and cur.total_eval_seconds >= max_es):
-                        break
-                    await self._evaluate(a["node_id"], limiter)
+                # Concurrency seam (opt-in, default off): overlap a DUE deep-research "think" with the
+                # GPU-bound eval — the agent is otherwise idle while the node trains. _compute_deep_research
+                # is pure compute on the `state` snapshot (no event-log writes, span skipped), so the
+                # engine stays the SOLE writer: the memo is recorded from THIS (main) task after the evals.
+                # Only a real win when the LLM is remote (no GPU contention); needs live-run validation.
+                rtrig = self._due_research_trigger(state) if self.concurrent_research else None
+                # Speculative pipeline (opt-in): while the node trains, precompute the likely next
+                # "improve off best" in a worker thread (pure propose+implement, no log writes/spans) so
+                # it's ready to append the instant the eval finishes. Cached for the next iteration's
+                # creates, consumed match-or-discard. Needs a current best (a parent) to improve off.
+                spec_pid = (state.best_node_id if (self.speculative_pipeline
+                            and state.best_node_id is not None
+                            and state.best_node_id in state.nodes) else None)
+                rbox: dict = {}
+                sbox: dict = {}
+                async with anyio.create_task_group() as tg:
+                    if rtrig is not None:
+                        async def _bg_research(snap=state, trig=rtrig):
+                            rbox["memo"] = await anyio.to_thread.run_sync(
+                                functools.partial(self._compute_deep_research, snap, trig, trace=False))
+                        tg.start_soon(_bg_research)
+                    if spec_pid is not None:
+                        async def _bg_spec(snap=state, pid=spec_pid):
+                            sbox["build"] = await anyio.to_thread.run_sync(
+                                functools.partial(self._precompute_improve, snap, pid))
+                        tg.start_soon(_bg_spec)
+                    for a in evals:
+                        cur = fold(self.store.read_all())
+                        # Operator stopped this specific node (`node_abort`): skip the eval and record
+                        # the effect as a node_failed reason="aborted" (cooperative pre-eval skip; a
+                        # mid-eval kill of an in-flight subprocess is the deferred v2). An aborted node
+                        # keeps no metric, so replay excludes it from best-selection.
+                        if a["node_id"] in cur.aborted_nodes:
+                            n = cur.nodes.get(a["node_id"])
+                            if n is not None and n.status is NodeStatus.pending:
+                                self.store.append("node_failed", {
+                                    "node_id": a["node_id"], "error": "aborted by operator",
+                                    "reason": "aborted", "eval_seconds": 0.0})
+                            continue
+                        # Re-check the eval-compute budget BEFORE each eval (not just per loop
+                        # iteration), so a multi-eval batch can't overshoot by a whole batch (#2/#25).
+                        if (max_es is not None and cur.total_eval_seconds >= max_es):
+                            break
+                        await self._evaluate(a["node_id"], limiter)
+                # Record the overlapped memo now — main task is the sole writer, AFTER the eval events.
+                if rbox.get("memo") is not None:
+                    self._record_deep_research(rbox["memo"], trigger=rtrig, manual=False)
+                # Cache the speculative build (if any) for the next iteration's creates (None = no hit).
+                self._spec_build = sbox.get("build")
             else:
                 # G3 distributed/parallel eval: fan out under a CapacityLimiter (worker pool). The
                 # eval-budget guard the review flagged for this path: cap the number STARTED so an
@@ -893,15 +935,33 @@ class Engine:
         return any((m or {}).get("at_node") == n for m in state.research)
 
     def _run_deep_research(self, state: RunState, *, trigger: str, manual: bool) -> RunState:
-        """Execute one Deep-Research step and record it. Always records a `research_completed` event
-        (even with no model wired, so a manual request's gate advances and the loop doesn't spin)."""
+        """Execute one Deep-Research step (serial path) and record it, then re-fold. Always records a
+        `research_completed` event (even with no model wired, so a manual request's gate advances and
+        the loop doesn't spin)."""
+        memo = self._compute_deep_research(state, trigger)
+        self._record_deep_research(memo, trigger=trigger, manual=manual)
+        return fold(self.store.read_all())
+
+    def _compute_deep_research(self, state: RunState, trigger: str, *, trace: bool = True):
+        """PURE compute: run one Deep-Research step and RETURN the memo WITHOUT writing the event log,
+        so it can run in a worker thread concurrently with an eval while the engine stays the sole
+        writer. Best-effort — never raises (a crash/None model yields a stub so the gate still advances).
+        `trace=False` skips the span: the tracer is not safe to write from the concurrent worker."""
         from .models import ResearchMemo
         if self.deep_researcher is None:
-            memo = ResearchMemo(at_node=len(state.nodes), trigger=trigger,
+            return ResearchMemo(at_node=len(state.nodes), trigger=trigger,
                                 summary="(deep research unavailable: no model configured)")
-        else:
-            with self.tracer.span("deep_research", new_trace=True, trigger=trigger):
-                memo = self.deep_researcher.research(state, trigger=trigger)
+        try:
+            if trace:
+                with self.tracer.span("deep_research", new_trace=True, trigger=trigger):
+                    return self.deep_researcher.research(state, trigger=trigger)
+            return self.deep_researcher.research(state, trigger=trigger)
+        except Exception as exc:  # noqa: BLE001 — advisory sidecar must never kill the run
+            return ResearchMemo(at_node=len(state.nodes), trigger=trigger,
+                                summary=f"(deep research failed: {exc})")
+
+    def _record_deep_research(self, memo, *, trigger: str, manual: bool) -> None:
+        """Append the memo to the event log (engine = sole writer; called only from the main task)."""
         self.store.append("research_completed", {
             "memo": memo.model_dump(mode="json"),
             "at_node": memo.at_node, "trigger": trigger, "served_manual": manual})
@@ -911,7 +971,25 @@ class Engine:
             self.store.append("hint", {
                 "text": "deep-research directions: " + "; ".join(memo.recommended_directions[:5]),
                 "source": "deep_research"})
-        return fold(self.store.read_all())
+
+    def _due_research_trigger(self, state: RunState) -> str | None:
+        """Is an AUTO deep-research trigger (cadence/strategist) due at the current node-count? Used by
+        the concurrent-research seam to overlap the "think" with an in-flight eval. Mirrors the auto
+        triggers in _maybe_deep_research but WITHOUT the no-pending gate (we overlap with pending evals
+        on purpose). Manual requests stay on the serial path; the at_node gate (a memo recorded at this
+        node-count) keeps the serial path from re-firing after the concurrent memo lands."""
+        if self.deep_researcher is None:
+            return None
+        n = len(state.nodes)
+        if n == 0 or self._already_researched_at(state, n):
+            return None
+        if self.deep_research_every and n % self.deep_research_every == 0:
+            return "cadence"
+        hist = state.strategy_history
+        if (hist and hist[-1].get("at_node") == n
+                and (hist[-1].get("strategy") or {}).get("request_research")):
+            return "strategist"
+        return None
 
     def _maybe_refresh_report(self, state: RunState) -> RunState:
         """Regenerate the agent-authored run report on a node-count cadence, then re-fold. No-op when
@@ -1225,6 +1303,15 @@ class Engine:
                 parents = [parent.id]
                 with self.tracer.span("implement"):
                     code = self.developer.implement(idea)
+            # 💡 deep-research provenance: tag the first couple of nodes created right after a research
+            # memo (its directions are the active steering) so the UI can show WHERE research landed in
+            # the tree. Audit/UI only — never affects search. Coarse-but-honest (temporal proximity).
+            research_origin = None
+            if state.research:
+                _m = state.research[-1]
+                _ra = _m.get("at_node")
+                if _ra is not None and _ra <= node_id < _ra + 2:
+                    research_origin = {"at_node": _ra, "trigger": _m.get("trigger")}
             self.store.append(
                 "node_created",
                 {
@@ -1235,9 +1322,65 @@ class Engine:
                     "code": code,
                     "files": getattr(self.developer, "last_files", {}) or {},
                     "deleted": getattr(self.developer, "last_deleted", []) or [],
+                    "research_origin": research_origin,
                 },
             )
         self._emit_agent_report(node_id)
+
+    # --------------------------------------------------------------- speculative pipeline (opt-in)
+    def _precompute_improve(self, state: RunState, parent_id: int):
+        """Build the LIKELY next 'improve off best' node as PURE compute (propose + implement only),
+        so it can run in a worker thread overlapping the GPU eval. No store writes, no spans → the
+        engine stays the sole writer (the matching node is APPENDED later, from the main task). Skips
+        the novelty-dedup nudge / complexity cue / per-node span deliberately (those have store/prompt
+        side effects that can't run off the main task). Returns a build dict, or None on any miss/error
+        — a discarded speculation costs only the LLM call, never correctness."""
+        try:
+            parent = state.nodes.get(parent_id)
+            if parent is None:
+                return None
+            node_id = len(state.nodes)
+            idea = self.researcher.propose(state, parent)
+            idea.operator = "improve"
+            code = self.developer.implement(idea)
+            return {
+                "parent_id": parent_id, "node_id": node_id, "idea": idea, "code": code,
+                "parents": [parent.id],
+                "files": getattr(self.developer, "last_files", {}) or {},
+                "deleted": getattr(self.developer, "last_deleted", []) or [],
+            }
+        except Exception:  # noqa: BLE001 — speculation is best-effort; a miss just means a normal propose
+            return None
+
+    def _consume_speculation(self, action: dict) -> bool:
+        """If the cached speculative build matches this create action (improve off the SAME parent, with
+        no node appended since it was built), append it from cache — overlapping the propose/implement
+        latency with the just-finished eval — and return True. Else discard and return False (the caller
+        proposes normally). The append happens on the main task, so the engine stays the sole writer, and
+        the match-or-discard rule means the SEARCH never diverges from what the real policy chose."""
+        b = self._spec_build
+        self._spec_build = None
+        if not b or action.get("kind") != "improve":
+            return False
+        state = fold(self.store.read_all())
+        # valid only if nothing was created since (node_id still lines up) AND the policy still wants to
+        # improve off the SAME parent (best unchanged across the eval) — otherwise discard.
+        if action.get("parent_id") != b["parent_id"] or b["node_id"] != len(state.nodes):
+            return False
+        research_origin = None
+        if state.research:
+            _m = state.research[-1]; _ra = _m.get("at_node")
+            if _ra is not None and _ra <= b["node_id"] < _ra + 2:
+                research_origin = {"at_node": _ra, "trigger": _m.get("trigger")}
+        with self.tracer.span("create_node", new_trace=True, node_id=b["node_id"],
+                              operator="improve", speculative=True):
+            self.store.append("node_created", {
+                "node_id": b["node_id"], "parent_ids": b["parents"], "operator": "improve",
+                "idea": b["idea"].model_dump(mode="json"), "code": b["code"],
+                "files": b["files"], "deleted": b["deleted"], "research_origin": research_origin,
+            })
+        self._emit_agent_report(b["node_id"])
+        return True
 
     def _create_injected_node(self, req: dict) -> None:
         """Materialize an operator-authored experiment (`inject_node` control event) into a real

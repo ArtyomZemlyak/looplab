@@ -95,6 +95,10 @@ class Node(BaseModel):
     # `import` inject). {"run_id","node_id","metric"} of the source. None for ordinary nodes. Audit/UI
     # only — eval/confirmation/best-selection treat it exactly like any other injected node.
     origin: Optional[dict] = None
+    # Deep-research provenance: set when this node was proposed right after a deep-research memo (its
+    # directions were the active steering). {"at_node","trigger"} of the memo. None otherwise. Audit/UI
+    # only (a 💡 chip) — shows where research landed in the tree; never affects search/selection.
+    research_origin: Optional[dict] = None
 
 
 class ResearchMemo(BaseModel):

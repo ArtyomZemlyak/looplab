@@ -95,6 +95,10 @@ function ExpNode({ data }) {
         title={`seeded from run ${node.origin.run_id} #${node.origin.node_id}`
           + (node.origin.metric != null ? ` · source metric ${fmt(node.origin.metric)}` : '')
           + ' — click to open that run'}>⤴ from {node.origin.run_id} #{node.origin.node_id}</a>}
+      {/* deep-research provenance: this experiment was proposed right after a research memo (its
+          directions were the active steering) — the 💡 marks where research landed in the tree */}
+      {node.research_origin && <span className="origin-chip rsch"
+        title={`proposed just after deep research (${node.research_origin.trigger || 'auto'}) at node ${node.research_origin.at_node} — its directions were steering`}>💡 from research</span>}
       {/* one optional sub-line, reserved for the ONE thing shown nowhere else: why it failed / infeasible */}
       {sweep
         ? <div className="sub sweep-foot">
@@ -141,34 +145,16 @@ function GroupSuper({ data }) {
   )
 }
 
-// Deep-Research memo node (Phase 2). NOT a search node (no metric/code) — rendered from
-// state.research so the "go think hard" stage is a visible step in the tree. Click opens the
-// Research panel at this memo (conclusion + sources + reasoning-debug).
-function ResearchNode({ data }) {
-  const { memo, idx, selected, onSelect } = data
-  const dirs = memo.recommended_directions || []
-  return (
-    <div className={'research-node' + (selected ? ' sel' : '')} onClick={() => onSelect && onSelect(idx)}
-         title={memo.summary || 'deep research'}>
-      <Handle type="target" position={Position.Top} style={{ opacity: 0 }} />
-      <div className="row"><span className="rn-ic"><OpIcon name="search" /></span><b>deep research</b>
-        <span className="spacer" style={{ flex: 1 }} />
-        {memo.trigger && <span className="badge">{memo.trigger}</span>}</div>
-      <div className="rn-summary">{(memo.summary || '(no summary)').slice(0, 110)}</div>
-      <div className="rn-foot">
-        {dirs.length ? <span className="badge">{dirs.length} direction{dirs.length === 1 ? '' : 's'}</span> : null}
-        {memo.sources?.length ? <span className="badge">{memo.sources.length} src</span> : null}
-      </div>
-      <Handle type="source" position={Position.Bottom} style={{ opacity: 0 }} />
-    </div>
-  )
-}
+// Deep research is NOT a search node (no metric/code/lineage), so it no longer lives in the DAG. Its
+// memos are surfaced where they belong: a timeline marker in the Dock feed (research_completed) and the
+// interactive Research drawer (panels.jsx). (Per-node "spawned from research direction" provenance
+// chips are a planned follow-up — they need the Researcher to attribute which direction it used.)
 
-const nodeTypes = { exp: ExpNode, groupLane: GroupLane, groupSuper: GroupSuper, research: ResearchNode }
+const nodeTypes = { exp: ExpNode, groupLane: GroupLane, groupSuper: GroupSuper }
 
 export default function Dag({ state, selectedId, onSelect, groupMode = 'none', collapsed = new Set(),
                              onToggleGroup, onSetMode, onCollapseAll, onExpandAll, onAutoCollapse, selectedGroup, onSelectGroup,
-                             selectedResearch = null, onSelectResearch, themeFilter = null }) {
+                             themeFilter = null }) {
   const workId = workingId(state)
   const [showMap, setShowMap] = useState(() => localStorage.getItem('ll.minimap') === '1')
   const [showLegend, setShowLegend] = useState(false)
@@ -257,31 +243,8 @@ export default function Dag({ state, selectedId, onSelect, groupMode = 'none', c
                 groupTint: inLane ? tintOf(gkey) : null } })
     })
 
-    // 4) Deep-Research memo nodes (Phase 2): rendered from state.research as a distinct node type in
-    //    a lane below the forest, each linked (dashed) to the most recent experiment it reviewed
-    //    (largest node id ≤ at_node). Kept out of grouping/layout so the search DAG is untouched.
-    const extraEdges = []
-    const memos = state?.research || []
-    if (memos.length) {
-      let maxY = 0
-      Object.values(pos).forEach(p => { if (p.y > maxY) maxY = p.y })
-      const RY = maxY + NODE_H + 70
-      const ids = Object.keys(ns).map(Number)
-      memos.forEach((mm, i) => {
-        const cap = (mm && mm.at_node != null) ? mm.at_node : Infinity
-        const cands = ids.filter(id => id <= cap)
-        const anchorId = cands.length ? Math.max(...cands) : null
-        const ax = anchorId != null ? pos[`n:${anchorId}`]?.x : null
-        const x = (ax != null ? ax : 0) + i * 36
-        rfNodes.push({ id: `research:${i}`, type: 'research', position: { x, y: RY }, zIndex: 1,
-          selectable: true, draggable: false,
-          data: { memo: mm, idx: i, selected: i === selectedResearch, onSelect: onSelectResearch } })
-        if (anchorId != null && pos[`n:${anchorId}`]) {
-          extraEdges.push({ id: `n:${anchorId}->research:${i}`, source: `n:${anchorId}`,
-                            target: `research:${i}`, className: 'research-edge', animated: false })
-        }
-      })
-    }
+    // (Deep-research memos are no longer drawn in the DAG — they live in the Dock timeline + the
+    //  Research drawer; nodes spawned from a research direction carry a 💡 origin chip instead.)
 
     // edges (already rerouted around collapsed groups)
     const rfEdges = reEdges.map(e => {
@@ -308,9 +271,9 @@ export default function Dag({ state, selectedId, onSelect, groupMode = 'none', c
         animated: e.dstId === workId && !hidden.has(e.dstId),
       }
     })
-    return { nodes: rfNodes, edges: rfEdges.concat(extraEdges), groupKeys: [...groups.keys()] }
+    return { nodes: rfNodes, edges: rfEdges, groupKeys: [...groups.keys()] }
   }, [state, selectedId, workId, onSelect, groupMode, collapsed, selectedGroup, onToggleGroup, onSelectGroup,
-      selectedResearch, onSelectResearch, themeFilter])
+      themeFilter])
 
   return (
     <LodContext.Provider value={lod}>

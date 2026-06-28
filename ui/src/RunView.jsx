@@ -10,7 +10,7 @@ import DirectionsOverview from './DirectionsOverview.jsx'
 import {
   TrustPanel, SensitivityPanel, FailuresPanel, ParetoPanel, DataQualityPanel,
   ConfigPanel, AuthoringPanel, MemoryPanel, RegistryPanel, EventExplorer,
-  ComparePanel, GpuPanel, HyperImportancePanel, CrossRunPanel, CollabPanel, OverviewPanel,
+  ComparePanel, GpuPanel, HyperImportancePanel, CrossRunPanel, CollabPanel, OverviewPanel, ResearchPanel,
 } from './panels.jsx'
 
 // The panel bar, grouped by importance then process order (Report is the [Search|Report] toggle, and
@@ -18,7 +18,7 @@ import {
 //   rigor → analysis → data/lab → ops
 const PANEL_GROUPS = [
   [['trust', 'Trust'], ['failures', 'Failures']],
-  [['sensitivity', 'Sensitivity'], ['importance', 'Importance'], ['pareto', 'Pareto/Div'], ['compare', 'Compare']],
+  [['research', 'Research'], ['sensitivity', 'Sensitivity'], ['importance', 'Importance'], ['pareto', 'Pareto/Div'], ['compare', 'Compare']],
   [['data', 'Data'], ['crossrun', 'Cross-run'], ['registry', 'Registry']],
   [['config', 'Config'], ['gpu', 'GPU'], ['memory', 'Memory'], ['events', 'Events'], ['collab', 'Collab'], ['authoring', 'Authoring']],
 ]
@@ -180,8 +180,7 @@ export default function RunView({ runId, onBack }) {
           groupMode={groupMode} collapsed={collapsed} onToggleGroup={toggleGroup} onSetMode={changeMode}
           onCollapseAll={(keys) => setCollapsed(new Set(keys))} onExpandAll={() => setCollapsed(new Set())}
           onAutoCollapse={autoCollapse}
-          selectedGroup={selectedGroup} onSelectGroup={selectGroup} themeFilter={themeFilter}
-          selectedResearch={null} onSelectResearch={() => { }} /></div>
+          selectedGroup={selectedGroup} onSelectGroup={selectGroup} themeFilter={themeFilter} /></div>
         {sideC
           ? <div className="side-rail" title="show panel" onClick={() => setSideC(false)}>‹ {selectedGroup != null ? 'group' : 'inspector'}</div>
           : <>
@@ -208,6 +207,7 @@ export default function RunView({ runId, onBack }) {
         </>}
 
       {panel === 'overview' && <OverviewPanel state={state} maxEval={maxEval} onClose={() => setPanel(null)} onOpenPanel={setPanel} />}
+      {panel === 'research' && <ResearchPanel state={state} runId={runId} onToast={showToast} onClose={() => setPanel(null)} />}
       {panel === 'trust' && <TrustPanel state={state} runId={runId} onClose={() => setPanel(null)} />}
       {panel === 'sensitivity' && <SensitivityPanel state={state} onClose={() => setPanel(null)} />}
       {panel === 'importance' && <HyperImportancePanel state={state} onClose={() => setPanel(null)} />}

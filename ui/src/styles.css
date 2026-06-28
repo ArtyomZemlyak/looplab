@@ -436,6 +436,17 @@ pre.code { background: var(--bg); border: 1px solid var(--line); border-radius: 
   position: sticky; top: 0; background: var(--bg-1); }
 .panel-h .ttl { font-weight: 700; font-size: 14px; }
 .panel-b { padding: 12px 14px; }
+/* Deep-research drawer (panels.jsx ResearchPanel): memos with actionable directions. */
+.rsch-memo { padding: 10px 0; border-bottom: 1px solid var(--line); }
+.rsch-memo:last-child { border-bottom: 0; }
+.rsch-h { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+.rsch-h .rsch-ic { opacity: .7; }
+.rsch-h b { font-weight: 600; }
+.rsch-dirs { list-style: none; padding: 0; margin: 4px 0; }
+.rsch-dirs li { display: flex; align-items: flex-start; gap: 8px; padding: 3px 0; }
+.rsch-dirs li > span { flex: 1; }
+.rsch-reasoning { margin-top: 6px; }
+.rsch-reasoning summary { cursor: pointer; color: var(--fg-dim); font-size: 12px; }
 
 .cardgrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px,1fr)); gap: 10px; }
 
@@ -819,6 +830,10 @@ textarea.text { min-height: 220px; font-family: ui-monospace, Consolas, monospac
   max-width: 168px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis;
   text-decoration: none; cursor: pointer; }
 .node-card .origin-chip:hover { border-color: var(--accent); }
+/* deep-research provenance chip: a non-link variant (no deep-link), muted so it doesn't compete with
+   the cross-run ⤴ origin chip — just marks where research landed in the tree. */
+.node-card .origin-chip.rsch { color: var(--fg-dim); cursor: default; }
+.node-card .origin-chip.rsch:hover { border-color: var(--line); }
 .node-card.dim { opacity: .28; filter: saturate(.5); }
 
 .directions-overview { border-bottom: 1px solid var(--line); background: var(--bg-1); padding: 6px 12px 7px; flex: none; }
