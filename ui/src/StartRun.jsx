@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useState } from 'react'
 import { getSettings, listTasks, startRun, research } from './util.js'
 import { toForm, fromForm } from './settingsSchema.js'
 import SettingsForm from './SettingsForm.jsx'
+import { OpIcon } from './icons.jsx'
 
 // Compact subset shown by default in the launch dialog; "all settings" expands to the full form.
 const QUICK_GROUPS = ['Search & policy', 'Roles & LLM', 'Budgets']
@@ -110,7 +111,7 @@ export default function StartRun({ onClose, onStarted }) {
                     value={topic} onChange={e => setTopic(e.target.value)} />
           <div className="toolbar" style={{ marginTop: 6 }}>
             <button className="btn sm" disabled={!topic.trim() || researching} onClick={doResearch}>
-              {researching ? '… researching' : '🔬 Pre-research topic'}</button>
+              {researching ? '… researching' : <><OpIcon name="search" className="t-ic" /> Pre-research topic</>}</button>
             <label className="chk"><input type="checkbox" checked={saveNote} onChange={e => setSaveNote(e.target.checked)} /> save to knowledge dir</label>
           </div>
           {brief && (brief.error

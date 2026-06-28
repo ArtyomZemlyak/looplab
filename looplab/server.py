@@ -57,25 +57,33 @@ CONTROL_EVENTS = {
 POLL_SECONDS = 0.4   # SSE tail cadence — fast enough to feel live, light on the disk
 
 
-# Workstream C: the chat action-router LLM fills this; the server maps it to a control {type, data}
-# the UI confirms before executing. `advise` = no action (fall back to a grounded chat reply).
+# Workstream C → agentic boss: the chat action-router LLM emits a _Plan — a short conversational reply
+# plus an ORDERED list of _Action steps. Each _Action maps to a control {type, data} the UI applies
+# (boss mode auto-applies them in order, then reopens/resumes the run ONCE if any step needs the
+# engine). An empty actions list = pure conversation (only the reply is shown).
 from pydantic import BaseModel  # noqa: E402
 
 
-class _Command(BaseModel):
-    action: str = "advise"   # advise|confirm|ablate|fork|promote|hint|strategy|deep_research|inject|approve|ratify|pause|resume|stop
+class _Action(BaseModel):
+    action: str = "advise"   # advise|confirm|ablate|fork|promote|hint|note|strategy|budget|deep_research|inject|approve|ratify|pause|resume|stop
     node_id: Optional[int] = None
-    text: str = ""           # hint text / note / free rationale
+    text: str = ""           # hint text / note text / free rationale
     operator: str = "improve"
     params: dict = {}
     policy: str = ""
     fidelity: str = ""
-    rationale: str = ""
+    nodes: int = 0           # budget: add this many experiment nodes to the run's node budget
+    rationale: str = ""      # one-line why for THIS step (shown on its applied row)
+
+
+class _Plan(BaseModel):
+    reply: str = ""               # conversational narration to the human (always shown)
+    actions: list[_Action] = []   # ordered steps to apply; empty list = pure advice
 
 
 class _GenesisSpec(BaseModel):
     """The BOSS's proposed plan for a brand-new run, bootstrapped from a one-line goal (there is no run
-    yet, so this is the pre-run counterpart of _Command). The UI shows it as an editable spec card and
+    yet, so this is the pre-run counterpart of the per-message _Plan). The UI shows it as an editable spec card and
     only launches on confirm — creating a run spends real tokens, so we propose-then-go, never silently
     auto-start. The task is EITHER an inline `task` object (e.g. {"kind":"mlebench_real","competition":
     "..."}) OR a path to an existing catalogue `task_file`; `settings` carries only the engine overrides
@@ -88,9 +96,9 @@ class _GenesisSpec(BaseModel):
     reply: str = ""           # conversational message to show in the genesis chat
 
 
-def _command_to_action(c: "_Command", st) -> Optional[dict]:
-    """Map the LLM's classified command to a control {type, data, label}. None => no actionable verb
-    (treat as advisory chat). `label` is the human-readable confirmation the UI shows."""
+def _action_to_control(c: "_Action", st) -> Optional[dict]:
+    """Map ONE classified boss action to a control {type, data, label}. None => no actionable verb
+    (a pure-advice step, skipped). `label` is the human-readable line the UI's applied-row shows."""
     a, nid = c.action, c.node_id
     if a == "confirm" and nid is not None:
         return {"type": "force_confirm", "data": {"node_id": nid}, "label": f"Confirm #{nid} (multi-seed robustness)"}
@@ -102,6 +110,15 @@ def _command_to_action(c: "_Command", st) -> Optional[dict]:
         return {"type": "promote", "data": {"node_id": nid, "alias": "champion"}, "label": f"Promote #{nid} to champion"}
     if a == "hint" and c.text:
         return {"type": "hint", "data": {"text": c.text}, "label": f"Send hint: {c.text[:60]}"}
+    if a in ("note", "annotate") and nid is not None and c.text:
+        return {"type": "annotation", "data": {"node_id": nid, "text": c.text}, "label": f"Note on #{nid}: {c.text[:50]}"}
+    if a in ("budget", "extend_budget"):
+        n = int(c.nodes)
+        if n <= 0:                       # a budget verb only ADDS room — ignore zero/negative (no-op)
+            return None
+        n = min(n, 1000)                 # cap a hallucinated huge delta so the LLM can't trigger a runaway
+        return {"type": "budget_extend", "data": {"add_nodes": n},
+                "label": f"Extend the run budget by {n} node(s)"}
     if a == "strategy" and (c.policy or c.fidelity):
         strat = {k: v for k, v in (("policy", c.policy), ("fidelity", c.fidelity)) if v}
         return {"type": "set_strategy", "data": {"strategy": strat}, "label": f"Switch strategy → {strat}"}
@@ -122,6 +139,18 @@ def _command_to_action(c: "_Command", st) -> Optional[dict]:
         t = {"pause": "pause", "resume": "resume", "stop": "run_abort"}[a]
         return {"type": t, "data": ({"reason": "ui"} if a == "stop" else {}), "label": a.capitalize() + " the run"}
     return None
+
+
+def _plan_to_actions(plan: "_Plan", st) -> list[dict]:
+    """Map a boss plan to the ORDERED list of control actions, dropping pure-advice steps. Each
+    carries its own `rationale` so the UI's applied-row can explain that step."""
+    out: list[dict] = []
+    for step in plan.actions:
+        ctrl = _action_to_control(step, st)
+        if ctrl is not None:
+            ctrl["rationale"] = step.rationale or ""
+            out.append(ctrl)
+    return out
 
 
 def _ui_dist() -> Path:
@@ -564,10 +593,12 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
         if not task_file:
             raise HTTPException(400, "run is not resettable — no task.snapshot.json or ui_meta.json")
         stamp = int(time.time() * 1000)   # ms granularity so two resets in the same second don't collide
-        # Archive the event log, spans, the read model, AND the node workspaces. The fresh run reuses
-        # node_<id> dirs with mkdir(exist_ok=True)/copytree(dirs_exist_ok=True), so a leftover nodes/
-        # would let stale files from the prior same-numbered node contaminate the replay's eval.
-        for name in ("events.jsonl", "spans.jsonl", "readmodel.sqlite", "nodes"):
+        # Archive the event log, spans, the read model, the node workspaces, AND the chat transcript.
+        # The fresh run reuses node_<id> dirs with mkdir(exist_ok=True)/copytree(dirs_exist_ok=True),
+        # so a leftover nodes/ would let stale files from the prior same-numbered node contaminate the
+        # replay's eval; the prior chat.jsonl belongs to the old attempt, so the replay starts with a
+        # clean conversation (the archived copy stays recoverable alongside events.jsonl.reset-*).
+        for name in ("events.jsonl", "spans.jsonl", "readmodel.sqlite", "nodes", "chat.jsonl"):
             p = rd / name
             if p.exists():
                 try:
@@ -630,6 +661,23 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
             raise HTTPException(400, f"task file not found: {task_file}")
         rd.mkdir(parents=True, exist_ok=True)
         (rd / "ui_meta.json").write_text(json.dumps({"task_file": str(task_file)}), encoding="utf-8")
+        # Carry the GENESIS conversation (the chat-first creation flow, where the boss planned this run)
+        # into the run's saved chat, so that planning becomes the OPENING history of the run's chat.jsonl
+        # instead of vanishing the moment the run launches. Stamp each turn with the creation time (which
+        # is < the engine's run_started ts) so it sorts at the TOP of the run's chat feed, and a
+        # chat-range seq so the Dock renders it as a conversation turn (not an engine event).
+        seed_chat = body.get("chat")
+        if isinstance(seed_chat, list) and seed_chat:
+            t0 = time.time()
+            with open(rd / "chat.jsonl", "ab") as f:
+                for i, m in enumerate(seed_chat):
+                    if not isinstance(m, dict) or m.get("role") not in ("user", "assistant"):
+                        continue
+                    f.write(orjson.dumps({
+                        "role": m["role"], "content": str(m.get("content", "")),
+                        "ts": t0 + i * 1e-3, "seq": int(1e15) + i, "genesis": True}) + b"\n")
+                f.flush()
+                os.fsync(f.fileno())
         # Per-run settings = the saved UI defaults overlaid with whatever the launch dialog set.
         # Everything reaches the engine as LOOPLAB_* env on the spawned process, so ANY Settings
         # field is configurable from the UI without growing the CLI surface (Settings() reads env).
@@ -939,6 +987,35 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
             parts.append("\nLatest run report (agent-authored):\n" + rtext[:1800])
         return "\n".join(parts)
 
+    # ---- persisted chat transcript (the human↔boss conversation, saved WITH the run) --------------
+    # The /chat and /command endpoints below are stateless thinking aids — the UI holds the history.
+    # That history used to live ONLY in React state, so it vanished whenever the Dock remounted (a
+    # Search↔Report toggle, the finish-auto-land, reopening the run, or a reload). This sidecar makes
+    # the transcript durable: one JSON turn per line in `chat.jsonl`, loaded on mount + appended per
+    # turn. It is the UI server's OWN file (the engine never touches it), kept separate from
+    # events.jsonl so it never folds into engine state and a `reset` can archive it independently.
+    @app.get("/api/runs/{run_id}/chat-log")
+    def chat_log(run_id: str):
+        """The saved chat turns for this run, in order ({role:'user'|'assistant'|'action', …})."""
+        rd = _run_dir(run_id)
+        return list(iter_jsonl(rd / "chat.jsonl"))
+
+    @app.post("/api/runs/{run_id}/chat-log")
+    async def chat_log_append(run_id: str, request: Request):
+        """Append ONE chat turn (the verbatim feed entry: role/content/trace or role/action/status)
+        so it survives a remount/reload. Single writer (this server) + a synchronous fsync'd append
+        per request serialize within the process, so no cross-process lock is needed here."""
+        rd = _run_dir(run_id)
+        turn = await request.json()
+        if not isinstance(turn, dict):
+            raise HTTPException(400, "chat turn must be a JSON object")
+        path = rd / "chat.jsonl"
+        with open(path, "ab") as f:
+            f.write(orjson.dumps(turn) + b"\n")
+            f.flush()
+            os.fsync(f.fileno())
+        return {"ok": True}
+
     @app.post("/api/runs/{run_id}/chat")
     async def chat(run_id: str, request: Request):
         """Advisory chat grounded on a run (and optionally one experiment node). Read-only — it
@@ -1034,29 +1111,34 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
         except Exception as e:  # noqa: BLE001 - offline / no model
             return JSONResponse({"ok": False, "error": str(e)}, status_code=200)
         sys_prompt = (
-            "You are the BOSS of an autonomous ML experiment run, turning the human's chat message into "
-            "ONE action. Bias toward ACTING on what they want, not just talking back.\n"
-            "- Use action='advise' ONLY for a pure question or chit-chat that asks for nothing to change.\n"
-            "- If they suggest / ask / hint that you TRY, CONSIDER, AVOID, LOOK INTO, or FOCUS ON "
-            "something — even politely, even open-ended (e.g. 'see how others solve this and try it') — "
-            "STEER the search instead of just replying: use action='hint' and put the concrete directive "
-            "for the researcher in `text` (distil their message into specific techniques / features / "
-            "params to try or avoid), so the NEXT experiments follow it. Put a short, friendly "
-            "one-sentence acknowledgement to the human in `rationale`.\n"
-            "- If they explicitly want you to look things up / read the literature first, use "
-            "action='deep_research'. For ONE concrete experiment they fully specify, use action='inject' "
-            "(operator, params, rationale).\n"
-            "- Other verbs: confirm(node_id), ablate(node_id), fork(node_id), promote(node_id), "
-            "strategy(policy,fidelity), approve(node_id), ratify, pause, resume, stop. Use the node in "
-            "context when no id is given.\n\n" + _boss_context(st, nid, rd))
+            "You are the BOSS of an autonomous ML experiment run. Turn the human's chat message into a "
+            "PLAN: a short conversational `reply` plus an ORDERED list of `actions` to apply right now. "
+            "You are a real agent — take AS MANY actions as the request needs (zero, one, or several), "
+            "and the run will apply them in order, then reopen+resume itself if any step needs the "
+            "engine. Bias toward ACTING on what they want, not just talking back.\n"
+            "- Empty `actions` (advice only) ONLY for a pure question or chit-chat that asks for nothing "
+            "to change. Otherwise put real steps in `actions`.\n"
+            "- Compose steps freely. E.g. 'you have 10 more nodes, try some neural nets' →\n"
+            "    [budget(nodes=10), hint(text='try small neural nets: an MLP and a 1-D CNN baseline, "
+            "tune width/depth/lr'), inject(operator='draft', params={...}, rationale='MLP baseline'), "
+            "inject(operator='draft', params={...}, rationale='CNN baseline')].\n"
+            "- Verbs: budget(nodes=N) raises the run's node budget by N (REQUIRED before asking for more "
+            "experiments on a finished/near-budget run, else there's no room to run them); "
+            "hint(text=concrete directive distilled into specific techniques/features/params to try or "
+            "avoid); inject(operator one of draft/improve/debug/merge, params, rationale) for ONE "
+            "concrete experiment — emit several inject steps for several experiments; deep_research to "
+            "read the literature first; note(node_id, text) to annotate a node; confirm(node_id), "
+            "ablate(node_id), fork(node_id), promote(node_id), strategy(policy,fidelity), "
+            "approve(node_id), ratify, pause, resume, stop. Use the node in context when no id is given. "
+            "Give each step a one-line `rationale`.\n\n" + _boss_context(st, nid, rd))
         convo = "\n".join(f"{m.get('role')}: {m.get('content')}" for m in msgs)
         user = (f"Instruction: {instruction}" if instruction else "") + (f"\n\nDiscussion:\n{convo}" if convo else "")
         from .parse import parse_structured
 
-        def _route_with_tools() -> Optional["_Command"]:
+        def _route_with_tools() -> Optional["_Plan"]:
             """Boss decision grounded by the run-introspection tools: it MAY read experiments / data
-            before choosing, then emits ONE _Command. None when the model can't drive the tool loop
-            (then the caller falls back to a plain single-call route)."""
+            before choosing, then emits ONE _Plan (reply + ordered actions). None when the model can't
+            drive the tool loop (then the caller falls back to a plain single-call route)."""
             from .agent import CompositeTools, drive_tool_loop
             from .run_tools import RunTools
             providers = [RunTools()]
@@ -1071,19 +1153,20 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
             tools = providers[0] if len(providers) == 1 else CompositeTools(providers)
             tools.bind_state(st, st.nodes.get(nid) if nid is not None else None)
             emit_spec = {"type": "function", "function": {
-                "name": "emit", "description": "Emit the ONE chosen action (action='advise' to reply).",
-                "parameters": _Command.model_json_schema()}}
+                "name": "emit", "description": "Emit the plan: a reply plus the ordered actions to "
+                "apply now (empty actions = advice only).",
+                "parameters": _Plan.model_json_schema()}}
             tool_sys = sys_prompt + ("\n\nThe context above (digest + report) usually has what you "
-                "need — prefer to `emit` your decision directly. ONLY call a read-only tool first "
+                "need — prefer to `emit` your plan directly. ONLY call a read-only tool first "
                 "(read_experiment for a node's code/trials, find_analogous, data_schema/data_profile) "
                 "when you SPECIFICALLY need a detail it doesn't show. Call `emit` exactly once.")
             box: dict = {}
             def _fin(args):
                 try:
-                    box["c"] = _Command(**{k: v for k, v in (args or {}).items()
-                                           if k in _Command.model_fields})
-                except Exception:  # noqa: BLE001 - junk emit -> treat as advise
-                    box["c"] = _Command()
+                    box["c"] = _Plan(**{k: v for k, v in (args or {}).items()
+                                        if k in _Plan.model_fields})
+                except Exception:  # noqa: BLE001 - junk emit -> treat as advise (empty plan)
+                    box["c"] = _Plan()
                 return box["c"]
             # max_turns kept TIGHT: the rich static context (digest + report) means the model usually
             # emits on turn 1; the tool turns are only for when it genuinely needs to look deeper. A
@@ -1093,27 +1176,30 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
                             emit_spec, max_turns=3, finalize=_fin, fallback=lambda _m: box.get("c"))
             # loop exhausted without an emit (model kept calling tools) -> default to advise rather
             # than None, so we don't burn extra round-trips on the single-call route for that case.
-            return box.get("c") or _Command()
+            return box.get("c") or _Plan()
 
         # The LLM calls are blocking + network-bound; run them off the event loop (anyio worker
         # thread) so a slow model doesn't stall SSE tails / other endpoints for every UI client.
-        c = None
+        plan = None
         try:
-            c = await anyio.to_thread.run_sync(_route_with_tools)
+            plan = await anyio.to_thread.run_sync(_route_with_tools)
         except Exception:  # noqa: BLE001 - model can't tool-call / loop error -> single-call route
-            c = None
-        if c is None:
+            plan = None
+        if plan is None:
             try:
-                c = await anyio.to_thread.run_sync(
+                plan = await anyio.to_thread.run_sync(
                     lambda: parse_structured(client, [{"role": "system", "content": sys_prompt},
-                                                      {"role": "user", "content": user}], _Command, s.llm_parser))
+                                                      {"role": "user", "content": user}], _Plan, s.llm_parser))
             except Exception:  # noqa: BLE001 - parse fumble -> fall through to advisory reply
-                c = None
-        if c is not None:
-            act = _command_to_action(c, st)
-            if act is not None:
-                act["rationale"] = c.rationale or ""
-                return {"ok": True, "action": act}
+                plan = None
+        if plan is not None:
+            actions = _plan_to_actions(plan, st)
+            if actions:
+                # An agentic plan: the ordered actions the UI applies in sequence, plus the boss's
+                # narration. `reply` (if any) is shown as the chat message above the applied rows.
+                return {"ok": True, "actions": actions, "reply": plan.reply or ""}
+            if plan.reply:                       # the boss chose to only talk back — show its reply
+                return {"ok": True, "reply": plan.reply}
         try:
             advise_sys = ("You are an ML research collaborator embedded in an experiment loop. Answer "
                           "concisely, grounded on the run.\n" + _boss_context(st, nid, rd))

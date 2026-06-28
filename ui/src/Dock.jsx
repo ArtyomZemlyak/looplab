@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react'
-import { get, fmt, chat, command, applyAction, workingId, CONTROL, resumeRun, resetRun } from './util.js'
+import { get, fmt, chat, command, appendAction, actionNeedsEngine, workingId, CONTROL, resumeRun, resetRun, getChatLog, appendChatTurn } from './util.js'
 import Markdown from './markdown.jsx'
 import { NodeTrace, LlmCall } from './Inspector.jsx'
 import { OpIcon } from './icons.jsx'
@@ -217,7 +217,7 @@ function NodeCreatedDetail({ d, trace }) {
         {Object.keys(params).length > 0 && <span>params {Object.entries(params).map(([k, v]) => `${k}=${fmt(v, 3)}`).join(', ')}</span>}
         {Object.keys(space).length > 0 && <span>sweep {Object.entries(space).map(([k, v]) => `${k}∈[${(v || []).join(', ')}]`).join('; ')}</span>}
       </div>
-      {think.length > 0 && <Disclosure label="🧠 Researcher thinking (debug)">
+      {think.length > 0 && <Disclosure label="Researcher thinking (debug)">
         {think.map((t, i) => <Markdown key={i} className="think-body" text={t.text} />)}
       </Disclosure>}
     </div>
@@ -437,6 +437,29 @@ export default function Dock({ runId, live, liveSeq, viewSeq, setViewSeq, onFocu
   // round-7: scrubber + filter chips collapse into one block to save space; default hidden, remembered.
   const [showControls, setShowControls] = useState(() => localStorage.getItem('ll.dock.controls') === '1')
   const toggleControls = () => setShowControls(v => { const n = !v; localStorage.setItem('ll.dock.controls', n ? '1' : '0'); return n })
+  // Restore the saved conversation on mount (and whenever the run changes) so chat turns survive a
+  // Dock remount — a Search↔Report toggle, the finish-auto-land, reopening the run, or a full reload.
+  // The in-memory feed stays the live truth; this just rehydrates it from the run's chat.jsonl.
+  useEffect(() => {
+    let alive = true
+    getChatLog(runId).then(turns => {
+      if (!alive || !Array.isArray(turns)) return
+      // Merge, don't clobber: a turn the user sent WHILE this load was in flight (it carries its own
+      // seq) must survive — the GET was issued before that POST, so its snapshot predates it. Dedup by
+      // seq (a persisted turn reuses the same seq) and keep chronological order.
+      setMsgs(prev => {
+        if (!prev.length) return turns
+        const have = new Set(turns.map(t => t.seq))
+        return [...turns, ...prev.filter(p => !have.has(p.seq))]
+          .sort((a, b) => ((a.ts || 0) - (b.ts || 0)) || ((a.seq ?? 0) - (b.seq ?? 0)))
+      })
+      msgCtr.current = Math.max(msgCtr.current, turns.length)   // keep new seqs past the restored turns
+    }).catch(() => {})
+    return () => { alive = false }
+  }, [runId])
+  // Durably append one feed turn to the run's transcript. Fire-and-forget + soft-fail: the in-memory
+  // feed already shows it, so a disk hiccup must never break the chat — it just won't survive a reload.
+  const persistTurn = (turn) => { appendChatTurn(runId, turn).catch(() => {}) }
   useEffect(() => { get(`/api/runs/${runId}/log`).then(setLog).catch(() => {}) }, [runId, liveSeq])
   // The trace re-folds the whole spans.jsonl server-side, and it only backs the inline "thinking"
   // cards — so refetch when a NODE is added (or the run finishes), not on every SSE seq tick.
@@ -506,29 +529,56 @@ export default function Dock({ runId, live, liveSeq, viewSeq, setViewSeq, onFocu
     if (el) requestAnimationFrame(() => { el.scrollTop = el.scrollHeight })
   }, [feed.length, busy, atLive])
 
-  const pushAssistant = (content, trace = null) =>
-    setMsgs(m => [...m, { role: 'assistant', content, trace, ts: tailTs(), seq: chatSeq() }])
+  const pushAssistant = (content, trace = null) => {
+    const turn = { role: 'assistant', content, trace, ts: tailTs(), seq: chatSeq() }
+    setMsgs(m => [...m, turn]); persistTurn(turn)
+  }
   // round-7 boss mode: the action is APPLIED immediately (no confirm card). Reversible verbs
   // (pause⇄resume) carry an Undo; critical verbs (abort) are highlighted so they stay visible.
   const isCritical = (a) => a.type === 'run_abort' || a.type === 'node_abort'
   const undoFor = (a) =>
     a.type === 'pause' ? { label: 'resume', type: 'resume', data: {} }
       : a.type === 'resume' ? { label: 'pause', type: 'pause', data: {} } : null
-  const autoApply = async (action, highlight = false) => {
-    const seq = chatSeq(), id = 'a' + seq
-    setMsgs(m => [...m, {
-      role: 'action', action, status: 'running', id, ts: tailTs(), seq,
-      highlight: highlight || isCritical(action), undo: undoFor(action),
-    }])
-    try {
-      await applyAction(runId, action, live?.finished)   // util.applyAction: reopens a finished run
-      setMsgs(m => m.map(x => x.id === id ? { ...x, status: 'done' } : x))
-      onToast?.('applied: ' + action.label)
-    } catch (e) {
-      setMsgs(m => m.map(x => x.id === id ? { ...x, status: 'failed', err: e.message } : x))
-      onToast?.('failed: ' + e.message)
+  // Agentic apply: a PLAN is a list of actions. Each becomes its own applied-row (running→done/failed,
+  // persisted), appended IN ORDER as append-only intents; then we reopen+resume the run ONCE if any
+  // step needs the engine (on a finished run the intents otherwise just sit in the log unrun). A live
+  // run needs no resume — the engine drains the intents between nodes. Reversible steps keep their Undo.
+  const autoApplyPlan = async (actions) => {
+    if (!actions || !actions.length) return
+    let needsResume = false, anyFailed = false
+    for (const action of actions) {
+      const seq = chatSeq(), id = 'a' + seq, ts = tailTs()
+      const base = { role: 'action', action, id, ts, seq, highlight: isCritical(action), undo: undoFor(action) }
+      setMsgs(m => [...m, { ...base, status: 'running' }])
+      try {
+        await appendAction(runId, action)                // append-only intent — no resume yet
+        setMsgs(m => m.map(x => x.id === id ? { ...x, status: 'done' } : x))
+        persistTurn({ ...base, status: 'done' })         // persist only the SETTLED row (never 'running')
+        if (live?.finished && actionNeedsEngine(action)) needsResume = true
+      } catch (e) {
+        anyFailed = true
+        setMsgs(m => m.map(x => x.id === id ? { ...x, status: 'failed', err: e.message } : x))
+        persistTurn({ ...base, status: 'failed', err: e.message })
+      }
+    }
+    if (needsResume) {
+      // Still resume even if a step failed — the steps are independent append-only intents, so the
+      // ones that DID apply should run; the failed step stays visible as a ✗ row in the feed.
+      try {
+        await CONTROL.reopen(runId); await resumeRun(runId)
+        onToast?.(anyFailed ? 'resumed — but a step failed (see the feed)' : 'applied & resumed — running the plan')
+      } catch (e) { onToast?.('resume failed: ' + e.message) }
+    } else if (anyFailed) {
+      onToast?.('plan partially applied — a step failed (see the feed)')
+    } else {
+      // No engine resume needed. A live run drains these intents between nodes; on a FINISHED run a
+      // hint/note step is only BUFFERED (it runs on the next reopen, not now) — say so honestly.
+      const note = live?.finished ? ' — saved for the next reopen' : ''
+      onToast?.((actions.length > 1 ? `applied ${actions.length} steps` : 'applied: ' + actions[0].label) + note)
     }
   }
+  // Single-action apply (slash commands) routes through the same plan path.
+  const autoApply = (action) => autoApplyPlan([action])
   const onUndo = async (m) => {
     if (!m.undo) return
     try { await CONTROL.raw(runId, m.undo.type, m.undo.data); onToast?.('undid: ' + m.action.label) }
@@ -538,8 +588,11 @@ export default function Dock({ runId, live, liveSeq, viewSeq, setViewSeq, onFocu
   // A reply carries its `trace` (the LLM I/O) so the chat row can expand into a langfuse-style card.
   const runCommand = async (instruction, nid, history) => {
     const r = await command(runId, { messages: history, node_id: nid, instruction })
-    if (r.ok && r.action) await autoApply(r.action)
-    else if (r.ok && r.reply) pushAssistant(r.reply, r.trace)
+    if (r.ok && r.actions?.length) {
+      // Agentic plan: show the boss's narration first, then apply the ordered steps (single resume).
+      if (r.reply) pushAssistant(r.reply)
+      await autoApplyPlan(r.actions)
+    } else if (r.ok && r.reply) pushAssistant(r.reply, r.trace)
     else {
       // Soft-fail to advisory chat. `history` is the PRIOR turns; the current instruction must be
       // appended or the model answers the previous message (it's not in `history` yet).
@@ -552,7 +605,8 @@ export default function Dock({ runId, live, liveSeq, viewSeq, setViewSeq, onFocu
     if (!text || busy) return
     const nid = ctx.length ? ctx[ctx.length - 1] : (selectedId ?? null)
     const history = msgs.filter(m => m.role === 'user' || m.role === 'assistant').map(m => ({ role: m.role, content: m.content }))
-    setMsgs(m => [...m, { role: 'user', content: text, ts: tailTs(), seq: chatSeq(), ctx: [...ctx] }])
+    const userTurn = { role: 'user', content: text, ts: tailTs(), seq: chatSeq(), ctx: [...ctx] }
+    setMsgs(m => [...m, userTurn]); persistTurn(userTurn)
     setInput(''); setCtx([]); setBusy(true)   // the feed.length effect scrolls the new turn into view
     try {
       if (text.startsWith('/')) {

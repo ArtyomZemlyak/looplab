@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from 'react'
 import { getScopeReport, genScopeReport, fmt, fmtAgo } from './util.js'
+import { OpIcon } from './icons.jsx'
 
 function Section({ title, items }) {
   if (!items || !items.length) return null
@@ -36,7 +37,7 @@ export default function ScopeReport({ scope, onOpen, onClose }) {
   return <div className="overlay" onMouseDown={onClose}>
     <div className="panel sr-panel" onMouseDown={e => e.stopPropagation()}>
       <div className="panel-h">
-        <span className="ttl">📄 Cross-run report</span>
+        <span className="ttl"><OpIcon name="doc" className="t-ic" /> Cross-run report</span>
         <span className="pill">{label}</span>
         <span className="right" style={{ flex: 1 }} />
         {data?.exists && <button className="btn sm" disabled={busy} onClick={generate}>{busy ? '… generating' : '↻ Regenerate'}</button>}

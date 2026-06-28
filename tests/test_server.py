@@ -15,7 +15,7 @@ from fastapi.testclient import TestClient  # noqa: E402
 from looplab.orchestrator import Engine  # noqa: E402
 from looplab.policy import GreedyTree  # noqa: E402
 from looplab.replay import fold  # noqa: E402
-from looplab.eventstore import EventStore  # noqa: E402
+from looplab.eventstore import EventStore, iter_jsonl  # noqa: E402
 from looplab.sandbox import SubprocessSandbox  # noqa: E402
 from looplab.server import make_app  # noqa: E402
 from looplab.toytask import ToyTask  # noqa: E402
@@ -266,3 +266,174 @@ def test_supertask_endpoints_round_trip(tmp_path):
 
     client.delete(f"/api/supertasks/{st['id']}")
     assert client.get("/api/supertasks").json()["supertasks"] == []
+
+
+def test_chat_log_persist_and_restore(tmp_path):
+    """The human↔boss transcript is saved WITH the run (chat.jsonl sidecar) so it survives a Dock
+    remount/reload: append turns, then GET them back verbatim in order."""
+    _build_run(tmp_path)
+    client = TestClient(make_app(tmp_path))
+
+    assert client.get("/api/runs/demo/chat-log").json() == []     # empty before any chat
+    turns = [
+        {"role": "user", "content": "try a higher degree", "ts": 1.0, "seq": 1e15},
+        {"role": "assistant", "content": "**sure** — degree 3 next", "ts": 1.1, "seq": 1e15 + 1},
+        {"role": "action", "action": {"type": "pause", "label": "Pause the run"},
+         "status": "done", "ts": 1.2, "seq": 1e15 + 2},
+    ]
+    for t in turns:
+        assert client.post("/api/runs/demo/chat-log", json=t).json()["ok"] is True
+
+    got = client.get("/api/runs/demo/chat-log").json()
+    assert [m["role"] for m in got] == ["user", "assistant", "action"]
+    assert got[0]["content"] == "try a higher degree"
+    assert got[2]["action"]["type"] == "pause" and got[2]["status"] == "done"
+    # a fresh app (simulating a reload / new server) reads the same persisted transcript
+    assert TestClient(make_app(tmp_path)).get("/api/runs/demo/chat-log").json() == got
+
+    # guards: a non-object turn is rejected; an unknown run is 404
+    assert client.post("/api/runs/demo/chat-log", json=["nope"]).status_code == 400
+    assert client.get("/api/runs/ghost/chat-log").status_code == 404
+
+
+def test_start_seeds_genesis_chat(tmp_path, monkeypatch):
+    """The chat-first creation flow carries its planning conversation into the new run: /api/start with
+    a `chat` array writes those turns to the run's chat.jsonl, so the run opens with its creation story
+    (and only user/assistant turns, in order, flagged as genesis)."""
+    import looplab.server as server
+    monkeypatch.setattr(server.subprocess, "Popen", lambda *a, **k: type("P", (), {})())
+    client = TestClient(make_app(tmp_path))
+    r = client.post("/api/start", json={
+        "task_file": str(TASK), "run_id": "born",
+        "chat": [
+            {"role": "user", "content": "run titanic on deepseek, 30 nodes"},
+            {"role": "assistant", "content": "naming it titanic-deepseek-30 ✓"},
+            {"role": "system", "content": "not a chat turn -> skipped"},
+        ]})
+    assert r.status_code == 200
+    # read chat.jsonl off disk (the engine is mocked, so there's no events.jsonl for the GET guard yet)
+    turns = list(iter_jsonl(tmp_path / "born" / "chat.jsonl"))
+    assert [m["role"] for m in turns] == ["user", "assistant"]           # the system turn is dropped
+    assert turns[0]["content"].startswith("run titanic") and turns[0]["genesis"] is True
+    assert turns[0]["ts"] < turns[1]["ts"] and turns[1]["seq"] > turns[0]["seq"]  # stable feed order
+    # a run started WITHOUT a chat seeds nothing (no stray chat.jsonl)
+    client.post("/api/start", json={"task_file": str(TASK), "run_id": "plain"})
+    assert not (tmp_path / "plain" / "chat.jsonl").exists()
+
+
+def test_reset_archives_chat_log(tmp_path, monkeypatch):
+    """Replay (reset) starts a clean conversation: the prior chat.jsonl is archived (renamed), not
+    carried into the fresh run."""
+    import looplab.server as server
+    _build_run(tmp_path)                                          # a finished run (reset only runs on those)
+    # patch AFTER the build — Popen is the shared module symbol the sandbox uses to run solution.py too
+    monkeypatch.setattr(server.subprocess, "Popen", lambda *a, **k: type("P", (), {})())
+    rd = tmp_path / "demo"
+    (rd / "ui_meta.json").write_text('{"task_file": "%s"}' % str(TASK).replace("\\", "/"), encoding="utf-8")
+
+    client = TestClient(make_app(tmp_path))
+    client.post("/api/runs/demo/chat-log", json={"role": "user", "content": "hello", "ts": 1.0, "seq": 1})
+    assert (rd / "chat.jsonl").exists()
+
+    assert client.post("/api/runs/demo/reset").status_code == 200
+    assert not (rd / "chat.jsonl").exists()                       # archived out of the way
+    assert any(p.name.startswith("chat.jsonl.reset-") for p in rd.iterdir())  # ...and recoverable
+
+
+def test_action_router_maps_plan_to_multiple_controls():
+    """The agentic boss emits a _Plan (reply + ordered actions); _plan_to_actions maps each step to a
+    control, drops pure-advice steps, and carries per-step rationale. Covers the new note + budget verbs
+    and the multi-action shape that makes 'you have 10 more nodes, try some nets' a real batch."""
+    from looplab.server import _Action, _Plan, _action_to_control, _plan_to_actions
+
+    class _St:  # _action_to_control only reads st.best_node_id (for the approve verb)
+        best_node_id = 7
+
+    st = _St()
+    assert _action_to_control(_Action(action="budget", nodes=10), st)["type"] == "budget_extend"
+    assert _action_to_control(_Action(action="budget", nodes=10), st)["data"]["add_nodes"] == 10
+    assert _action_to_control(_Action(action="note", node_id=3, text="nice"), st)["type"] == "annotation"
+    assert _action_to_control(_Action(action="budget", nodes=0), st) is None      # no-op budget -> dropped
+    assert _action_to_control(_Action(action="advise"), st) is None               # pure advice -> dropped
+
+    plan = _Plan(reply="on it", actions=[
+        _Action(action="budget", nodes=10, rationale="more room"),
+        _Action(action="hint", text="try a small MLP and a 1-D CNN", rationale="neural nets"),
+        _Action(action="inject", operator="draft", params={"hidden": 32}, rationale="MLP baseline"),
+        _Action(action="advise", text="just chatting"),                            # dropped
+    ])
+    acts = _plan_to_actions(plan, st)
+    assert [a["type"] for a in acts] == ["budget_extend", "hint", "inject_node"]
+    assert acts[0]["rationale"] == "more room"
+    assert acts[2]["data"]["idea"]["operator"] == "draft"
+
+
+def test_budget_action_clamps_nodes():
+    """A budget verb only ADDS room and is bounded: non-positive is a no-op, and a hallucinated huge
+    delta is capped so the boss LLM can't push max_nodes to a runaway value."""
+    from looplab.server import _Action, _action_to_control
+
+    class _St:
+        best_node_id = 1
+    s = _St()
+    assert _action_to_control(_Action(action="budget", nodes=0), s) is None       # zero -> no-op
+    assert _action_to_control(_Action(action="budget", nodes=-5), s) is None       # negative -> no-op
+    assert _action_to_control(_Action(action="budget", nodes=12), s)["data"]["add_nodes"] == 12
+    assert _action_to_control(_Action(action="budget", nodes=10 ** 9), s)["data"]["add_nodes"] == 1000  # capped
+
+
+def test_budget_extension_survives_policy_swap(tmp_path):
+    """Regression (review-found HIGH): a live add_nodes extension must NOT be dropped when a strategy
+    swap rebuilds the policy in the SAME reopened loop iteration. The override is applied AFTER the swap
+    (just before action selection), so the run runs the granted nodes instead of immediately
+    re-finishing. Engine & policy budgets MATCH here so the bug (re-finish at base) would be exposed."""
+    task = ToyTask.load(TASK); r, d = task.build_roles()
+    rd = tmp_path / "swap"
+    eng0 = Engine(rd, task=task, researcher=r, developer=d, sandbox=SubprocessSandbox(),
+                  policy=GreedyTree(n_seeds=2, max_nodes=4), max_nodes=4)
+    st0 = anyio.run(eng0.run)
+    n0 = len(st0.nodes)
+    assert st0.finished and n0 == 4
+    # grant +3 nodes AND swap the policy, both folded into the same reopened iteration
+    store = EventStore(rd / "events.jsonl")
+    store.append("budget_extend", {"add_nodes": 3})
+    store.append("set_strategy", {"strategy": {"policy": "evolutionary"}})
+    store.append("run_reopened", {})
+    eng1 = Engine(rd, task=task, researcher=r, developer=d, sandbox=SubprocessSandbox(),
+                  policy=GreedyTree(n_seeds=2, max_nodes=4), max_nodes=4)
+    st1 = anyio.run(eng1.run)
+    assert st1.finished and len(st1.nodes) > n0   # the +3 survived the swap and actually ran
+
+
+def test_budget_extend_add_nodes_accumulates(tmp_path):
+    """budget_extend(add_nodes) is ADDITIVE (several extensions sum) while time ceilings stay absolute —
+    so two '+N nodes' from the boss give the run N+M more room."""
+    rd = tmp_path / "acc"; rd.mkdir()
+    store = EventStore(rd / "events.jsonl")
+    store.append("budget_extend", {"add_nodes": 4})
+    store.append("budget_extend", {"add_nodes": 6, "max_eval_seconds": 300})
+    st = fold(store.read_all())
+    assert st.budget_overrides["add_nodes"] == 10           # summed
+    assert st.budget_overrides["max_eval_seconds"] == 300   # absolute (last write)
+
+
+def test_budget_extend_nodes_resumes_and_grows(tmp_path):
+    """End-to-end of the agentic 'you have N more nodes' path: a finished run, given add_nodes via
+    budget_extend + run_reopened, resumes and actually runs MORE experiments — capped at the extended
+    budget (the policy's live effective max_nodes = base + add_nodes)."""
+    st0 = _build_run(tmp_path, name="grow")                 # GreedyTree finishes at max_nodes=4
+    rd = tmp_path / "grow"
+    n0 = len(st0.nodes)
+    assert st0.finished and n0 >= 1
+    # the boss plan's effect on disk: extend the node budget, then reopen the finished run
+    store = EventStore(rd / "events.jsonl")
+    store.append("budget_extend", {"add_nodes": 3})
+    store.append("run_reopened", {})
+    # resume: a fresh Engine on the same dir re-enters the loop with the extended budget
+    task = ToyTask.load(TASK); r, d = task.build_roles()
+    eng = Engine(rd, task=task, researcher=r, developer=d,
+                 sandbox=SubprocessSandbox(), policy=GreedyTree(n_seeds=2, max_nodes=4))
+    st1 = anyio.run(eng.run)
+    assert st1.finished
+    assert len(st1.nodes) > n0           # it genuinely proposed + ran more experiments
+    assert len(st1.nodes) <= n0 + 3      # but never beyond the extended budget

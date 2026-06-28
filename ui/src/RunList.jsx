@@ -4,6 +4,8 @@ import { get, fmt, fmtDate, fmtAgo, listProjects, createProject, patchProject, d
 import MapView from './MapView.jsx'
 import GenesisChat from './GenesisChat.jsx'
 import ScopeReport from './ScopeReport.jsx'
+import ThemeSwitcher from './ThemeSwitcher.jsx'
+import { OpIcon } from './icons.jsx'
 
 const ALL = '__all__', UNASSIGNED = '__unassigned__'
 
@@ -45,7 +47,7 @@ function RunMenu({ r, projects, supertasks, onOpen, onMove, onSetSuper, onManage
       <div className="mi-scroll">
         <button className={'mi' + (!r.project_id ? ' on' : '')} onClick={() => { onClose(); onMove(r.run_id, UNASSIGNED) }}>○ — unassigned —</button>
         {projects.map(p => <button key={p.id} className={'mi' + (r.project_id === p.id ? ' on' : '')}
-          onClick={() => { onClose(); onMove(r.run_id, p.id) }}>📁 {p.name}</button>)}
+          onClick={() => { onClose(); onMove(r.run_id, p.id) }}><OpIcon name="folder" className="t-ic" /> {p.name}</button>)}
         {!projects.length && <div className="mi-empty">no projects yet</div>}
       </div>
       <div className="mi-sep" />
@@ -53,7 +55,7 @@ function RunMenu({ r, projects, supertasks, onOpen, onMove, onSetSuper, onManage
       <div className="mi-scroll">
         <button className={'mi' + (!r.supertask_id ? ' on' : '')} onClick={() => { onClose(); onSetSuper(r.run_id, UNASSIGNED) }}>○ — none —</button>
         {supertasks.map(s => <button key={s.id} className={'mi' + (r.supertask_id === s.id ? ' on' : '')}
-          onClick={() => { onClose(); onSetSuper(r.run_id, s.id) }}>🎯 {s.name}</button>)}
+          onClick={() => { onClose(); onSetSuper(r.run_id, s.id) }}><OpIcon name="target" className="t-ic" /> {s.name}</button>)}
         <button className="mi accent" onClick={() => { onClose(); onManageSupers() }}>＋ New / manage…</button>
       </div>
       <div className="mi-sep" />
@@ -76,7 +78,7 @@ function SuperTaskModal({ supertasks, onCreate, onRename, onDelete, onClose }) {
     </div>
     <div className="st-list">
       {supertasks.map(s => <div key={s.id} className="st-row">
-        <span className="st-ic">🎯</span>
+        <span className="st-ic"><OpIcon name="target" className="t-ic" /></span>
         <input className="text st-rename" defaultValue={s.name}
                onBlur={e => { const v = e.target.value.trim(); if (v && v !== s.name) onRename(s.id, v) }}
                onKeyDown={e => { if (e.key === 'Enter') e.currentTarget.blur() }} />
@@ -192,9 +194,9 @@ export default function RunList({ onOpen, onSettings }) {
   // is the user's intent to scope by it; otherwise the open folder. null = nothing reportable (All runs,
   // no filter) → hide the Report button.
   const scope = useMemo(() => {
-    if (stFilter !== ALL && stFilter !== UNASSIGNED) return { type: 'supertask', id: stFilter, label: '🎯 ' + (stName[stFilter] || stFilter) }
+    if (stFilter !== ALL && stFilter !== UNASSIGNED) return { type: 'supertask', id: stFilter, label: (stName[stFilter] || stFilter) }
     if (taskFilter !== ALL) return { type: 'task', id: taskFilter, label: 'task ' + taskFilter }
-    if (sel !== ALL && sel !== UNASSIGNED) return { type: 'project', id: sel, label: '📁 ' + (projName[sel] || sel) }
+    if (sel !== ALL && sel !== UNASSIGNED) return { type: 'project', id: sel, label: (projName[sel] || sel) }
     return null
   }, [stFilter, taskFilter, sel, stName, projName])
 
@@ -244,7 +246,7 @@ export default function RunList({ onOpen, onSettings }) {
                    onClick={e => e.stopPropagation()}
                    onBlur={e => commitRename(p.id, e.target.value)}
                    onKeyDown={e => { if (e.key === 'Enter') commitRename(p.id, e.target.value); if (e.key === 'Escape') setRenaming(null) }} />
-          : <span className="pname">📁 {p.name}</span>}
+          : <span className="pname"><OpIcon name="folder" className="t-ic" /> {p.name}</span>}
         <span className="pcount">{count(p.id)}</span>
         <span className="pacts" onClick={e => e.stopPropagation()}>
           <button className="ic" title="add sub-project" onClick={() => addProject(p.id)}>＋</button>
@@ -263,9 +265,10 @@ export default function RunList({ onOpen, onSettings }) {
         <span className="spacer" style={{ flex: 1 }} />
         <div className="seg">
           <button className={view === 'list' ? 'on' : ''} onClick={() => setView('list')}>☰ List</button>
-          <button className={view === 'map' ? 'on' : ''} onClick={() => setView('map')}>🗺 Map</button>
+          <button className={view === 'map' ? 'on' : ''} onClick={() => setView('map')}><OpIcon name="map" className="t-ic" /> Map</button>
         </div>
         <button className="btn sm primary" onClick={() => { setSeed(''); setStarting(true) }}>▶ New run</button>
+        <ThemeSwitcher />
         <button className="btn sm ghost" title="settings" onClick={() => onSettings && onSettings()}>⚙ Settings</button>
       </div>
 
@@ -314,7 +317,8 @@ export default function RunList({ onOpen, onSettings }) {
             </div>}
           </div>
           {runs && !!runsOf(sel).length && <div className="runbar">
-            <input className="text runbar-q" placeholder="🔎 filter runs…" value={query}
+            <OpIcon name="search" className="t-ic" />
+            <input className="text runbar-q" placeholder="filter runs…" value={query}
                    onChange={e => setQuery(e.target.value)} />
             <select className="sel" value={statusFilter} onChange={e => setStatusFilter(e.target.value)} title="status">
               <option value="all">all status</option>
@@ -328,9 +332,9 @@ export default function RunList({ onOpen, onSettings }) {
             <select className="sel" value={stFilter} onChange={e => setStFilter(e.target.value)} title="super-task">
               <option value={ALL}>all super-tasks</option>
               <option value={UNASSIGNED}>— no super-task —</option>
-              {superdata.supertasks.map(s => <option key={s.id} value={s.id}>🎯 {s.name}</option>)}
+              {superdata.supertasks.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
             </select>
-            <button className="btn sm ghost" title="create / manage super-tasks" onClick={() => setStModal(true)}>🎯 ＋</button>
+            <button className="btn sm ghost" title="create / manage super-tasks" onClick={() => setStModal(true)}><OpIcon name="target" className="t-ic" /> ＋</button>
             <span style={{ flex: 1 }} />
             <span className="muted runbar-count">{visible.length}/{runsOf(sel).length}</span>
             <select className="sel" value={sortKey} onChange={e => setSortKey(e.target.value)} title="sort by">
@@ -354,8 +358,8 @@ export default function RunList({ onOpen, onSettings }) {
               <span className="pill phase" onClick={() => onOpen(r.run_id)}>{r.phase}</span>
               <div onClick={() => onOpen(r.run_id)} style={{ cursor: 'pointer', flex: 1 }}>
                 <div><b>{r.label || r.run_id}</b> <span className="muted">· {r.label ? r.run_id + ' · ' : ''}{r.task_id}</span>
-                  {r.project_id && projName[r.project_id] && <span className="pill" style={{ marginLeft: 6 }}>📁 {projName[r.project_id]}</span>}
-                  {r.supertask_id && stName[r.supertask_id] && <span className="pill st-pill" style={{ marginLeft: 6 }}>🎯 {stName[r.supertask_id]}</span>}</div>
+                  {r.project_id && projName[r.project_id] && <span className="pill" style={{ marginLeft: 6 }}><OpIcon name="folder" className="t-ic" /> {projName[r.project_id]}</span>}
+                  {r.supertask_id && stName[r.supertask_id] && <span className="pill st-pill" style={{ marginLeft: 6 }}><OpIcon name="target" className="t-ic" /> {stName[r.supertask_id]}</span>}</div>
                 <div className="goal">{r.goal}</div>
               </div>
               <div style={{ textAlign: 'right' }}>

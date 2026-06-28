@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useState } from 'react'
 import { getSettings, saveSettings, llmHealth } from './util.js'
 import { toForm, fromForm, FIELD_BY_KEY } from './settingsSchema.js'
 import SettingsForm from './SettingsForm.jsx'
+import { OpIcon } from './icons.jsx'
 
 // LLM endpoint self-test (the UI equivalent of `LoopLab smoke`): pings the configured model so the
 // user knows it's reachable before launching a run against it.
@@ -10,7 +11,7 @@ export function LlmHealth() {
   const [busy, setBusy] = useState(false)
   const check = () => { setBusy(true); llmHealth().then(setS).catch(e => setS({ ok: false, error: e.message })).finally(() => setBusy(false)) }
   return <span className="llm-health">
-    <button className="btn sm" disabled={busy} onClick={check} title="ping the configured LLM endpoint">{busy ? '… pinging' : '⚡ Test LLM'}</button>
+    <button className="btn sm" disabled={busy} onClick={check} title="ping the configured LLM endpoint">{busy ? '… pinging' : <><OpIcon name="bolt" className="t-ic" /> Test LLM</>}</button>
     {s && <span className={'chip ' + (s.ok ? 'ok' : 'alarm')} title={s.ok ? s.text : s.error}>
       {s.ok ? '✓' : '✗'} {s.model}</span>}
   </span>

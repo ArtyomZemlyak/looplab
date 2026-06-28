@@ -3,6 +3,7 @@ import { get, fmt, fmtInt, isSweep } from './util.js'
 import { Trajectory, ParallelCoords, Scatter } from './charts.jsx'
 import { groupAggregate } from './grouping.js'
 import { mergeSummary, nodeChip } from './report.js'
+import { OpIcon } from './icons.jsx'
 import Markdown from './markdown.jsx'
 
 // One lifecycle "Trace" tab replaces the old Reasoning / LLM / Agent split: a node is worked on by
@@ -131,17 +132,18 @@ function traceBounds(spans) {
 // Friendly identity for each span kind — turns raw span names into "who did what" so the trace
 // reads as the node's life story rather than instrumentation. `tone` colours the waterfall bar so
 // phases are distinguishable at a glance. (Span names come from orchestrator.py.)
+// icon = an OpIcon glyph name (monochrome, inherits the stage tone via currentColor — no color emoji).
 const STAGE = {
-  onboard:      { icon: '🚀', role: 'Onboarding', desc: 'task setup & eval spec', tone: '#8a7bb0' },
-  create_node:  { icon: '🧬', role: 'Author node', desc: 'propose an idea, then build the solution', tone: '#6f8bb0' },
-  propose:      { icon: '🔬', role: 'Researcher', desc: 'propose the next idea', tone: '#6fa3b0' },
-  implement:    { icon: '⚙️', role: 'Developer', desc: 'write / edit the solution code', tone: '#6fae97' },
-  repair:       { icon: '🩹', role: 'Developer · repair', desc: 'fix a failed parent', tone: '#b0936f' },
-  evaluate:     { icon: '📊', role: 'Evaluation', desc: 'run the solution & score it', tone: '#a87da8' },
-  confirm_seed: { icon: '🎲', role: 'Confirmation', desc: 'multi-seed robustness check', tone: '#9aa06f' },
-  ablate:       { icon: '🧮', role: 'Ablation', desc: 'sensitivity probe', tone: '#6f8bb0' },
+  onboard:      { icon: 'flag', role: 'Onboarding', desc: 'task setup & eval spec', tone: '#8a7bb0' },
+  create_node:  { icon: 'trending', role: 'Author node', desc: 'propose an idea, then build the solution', tone: '#6f8bb0' },
+  propose:      { icon: 'search', role: 'Researcher', desc: 'propose the next idea', tone: '#6fa3b0' },
+  implement:    { icon: 'gear', role: 'Developer', desc: 'write / edit the solution code', tone: '#6fae97' },
+  repair:       { icon: 'bug', role: 'Developer · repair', desc: 'fix a failed parent', tone: '#b0936f' },
+  evaluate:     { icon: 'target', role: 'Evaluation', desc: 'run the solution & score it', tone: '#a87da8' },
+  confirm_seed: { icon: 'replay', role: 'Confirmation', desc: 'multi-seed robustness check', tone: '#9aa06f' },
+  ablate:       { icon: 'sliders', role: 'Ablation', desc: 'sensitivity probe', tone: '#6f8bb0' },
 }
-const stageMeta = (name) => STAGE[name] || { icon: '▸', role: name, desc: '', tone: 'var(--accent)' }
+const stageMeta = (name) => STAGE[name] || { icon: 'dot', role: name, desc: '', tone: 'var(--accent)' }
 
 function llmEvents(s) { return (s.events || []).filter(e => e.name === 'llm_call') }
 
@@ -188,7 +190,7 @@ function SpanRow({ s, depth, t0, total }) {
     <div className={'span-row' + (s.status === 'ERROR' ? ' err' : '')} style={{ paddingLeft: depth * 14 }}
          onClick={() => detail && setOpen(o => !o)} title={detail ? 'click for step detail' : ''}>
       <span className="span-tw">{detail ? (open ? '▾' : '▸') : '·'}</span>
-      <span className="span-name" title={m.desc}>{m.icon} {m.role !== s.name ? m.role : s.name}</span>
+      <span className="span-name" title={m.desc}><OpIcon name={m.icon} className="t-ic" /> {m.role !== s.name ? m.role : s.name}</span>
       <span className="span-bar"><span className="span-fill" style={{
         marginLeft: Math.min(98, off) + '%', width: wid + '%',
         background: s.status === 'ERROR' ? 'var(--fail)' : m.tone }} /></span>
@@ -227,7 +229,7 @@ export function LlmCall({ call, idx }) {
       {call.model && <span className="llm-model" title={call.model}>{shortModel(call.model)}</span>}
       {(t.in != null || t.out != null) && <span className="llm-tok" title={`${t.in || 0} prompt → ${t.out || 0} completion tokens`}>{ktok(t.in)}→{ktok(t.out)}</span>}
       {msgs > 2 && <span className="llm-msgs" title={`${msgs} messages in the prompt (context size)`}>{msgs}m</span>}
-      {call.thinking && <span className="llm-think" title="model reasoning captured">🧠</span>}
+      {call.thinking && <span className="llm-think" title="model reasoning captured"><OpIcon name="bulb" /></span>}
       {preview && <span className="llm-prev">{preview}</span>}
     </div>
     {open && <div className="llm-io">
@@ -258,7 +260,7 @@ function StageBlock({ s, t0, total }) {
   const roll = spanRollup(s)
   return <div className={'stage' + (s.status === 'ERROR' ? ' err' : '')}>
     <div className="stage-h" title={m.desc}>
-      <span className="stage-ic">{m.icon}</span>
+      <span className="stage-ic"><OpIcon name={m.icon} /></span>
       <b>{m.role}</b>
       {roll.calls > 0 && <span className="stage-roll" title={`${roll.calls} model call(s) · ~${roll.tok} tokens in this stage`}>{roll.calls} call{roll.calls > 1 ? 's' : ''} · {ktok(roll.tok)} tok</span>}
       <span className="spacer" style={{ flex: 1 }} />
@@ -286,7 +288,8 @@ export function NodeTrace({ spans }) {
 function AgentReport({ r }) {
   return <div className="stage">
     <div className="stage-h">
-      <span className="stage-ic">{r.ok && !r.fell_back ? '✅' : r.fell_back ? '↩️' : '❌'}</span>
+      <span className="stage-ic" style={{ color: r.ok && !r.fell_back ? 'var(--ok)' : r.fell_back ? 'var(--working)' : 'var(--fail)' }}>
+        <OpIcon name={r.ok && !r.fell_back ? 'check' : r.fell_back ? 'replay' : 'cross'} /></span>
       <b>Developer · agent validation</b>
       <span className="muted">{r.fell_back ? 'fell back to template' : r.ok ? 'shipped clean' : 'failed checks'}</span>
       <span className="spacer" style={{ flex: 1 }} />

@@ -188,9 +188,18 @@ def fold(events: Iterable[Event]) -> RunState:
             if nid is not None and nid not in st.aborted_nodes:
                 st.aborted_nodes.append(nid)
         elif t == "budget_extend":
+            # max_seconds / max_eval_seconds are ABSOLUTE new ceilings (last write wins). add_nodes is
+            # an ADDITIVE delta — "give the run N more nodes" — so several extensions accumulate; the
+            # orchestrator folds it into the policy's effective max_nodes so a finished run, once
+            # reopened, proposes more experiments instead of immediately re-finishing.
             for _k in ("max_seconds", "max_eval_seconds"):
                 if d.get(_k) is not None:
                     st.budget_overrides[_k] = d[_k]
+            if d.get("add_nodes") is not None:
+                try:
+                    st.budget_overrides["add_nodes"] = int(st.budget_overrides.get("add_nodes", 0)) + int(d["add_nodes"])
+                except (TypeError, ValueError):
+                    pass
         elif t == "hint":
             st.pending_hints.append(d)
         elif t == "set_strategy":
