@@ -410,6 +410,8 @@ function AppliedRow({ m, onUndo }) {
           <b className="pa-label">{a.label}</b>
           {m.highlight && <OpIcon name="star" size={12} className="fm-star" />}
           <span className="spacer" style={{ flex: 1 }} />
+          {m.tokens?.total ? <span className="chat-tok"
+            title={`${m.tokens.prompt || 0} prompt → ${m.tokens.completion || 0} completion tokens`}>{ktok(m.tokens.total)} tok</span> : null}
           <span className={'pa-status ' + m.status}>{
             m.status === 'running' ? '… applying' : m.status === 'done' ? '✓ applied'
               : m.status === 'failed' ? '✗ ' + (m.err || 'failed') : ''}</span>
@@ -610,7 +612,10 @@ export default function Dock({ runId, live, liveSeq, viewSeq, setViewSeq, onFocu
   // then every turn after it. This is what caps the O(n) context growth a long chat would otherwise hit.
   const buildHistory = () => {
     const after = coveredSeq >= 0 ? msgs.filter(m => (m.seq ?? 0) > coveredSeq) : msgs
-    const conv = after.filter(m => m.role === 'user' || m.role === 'assistant').map(m => ({ role: m.role, content: m.content }))
+    // Keep applied actions in the boss's memory as one-liners — else a recent tail dominated by a big
+    // plan's action rows would be stripped, leaving the boss only the recap with no recent context.
+    const conv = after.filter(m => m.role === 'user' || m.role === 'assistant' || m.role === 'action')
+      .map(m => m.role === 'action' ? { role: 'assistant', content: 'applied: ' + (m.action?.label || '') } : { role: m.role, content: m.content })
     return latestSummary
       ? [{ role: 'assistant', content: 'Recap of our earlier discussion (compacted):\n' + latestSummary.content }, ...conv]
       : conv
@@ -708,7 +713,7 @@ export default function Dock({ runId, live, liveSeq, viewSeq, setViewSeq, onFocu
   // re-reads the recap, not every turn). The recap is a durable `summary` turn placed at the fold
   // boundary; everything it covers is hidden from the feed + the boss's context until expanded.
   const onCompact = async () => {
-    if (compacting) return
+    if (compacting || busy) return   // one chat-side op at a time (send + compact share the op strip)
     const fold = compactableTurns.slice(0, Math.max(0, compactableTurns.length - KEEP_RECENT))
     if (fold.length < 2) { onToast?.('nothing to compact yet — keep chatting'); return }
     setCompacting(true)
@@ -725,8 +730,10 @@ export default function Dock({ runId, live, liveSeq, viewSeq, setViewSeq, onFocu
       const foldLast = fold[fold.length - 1]
       const upto = Math.max(...fold.map(m => m.seq ?? 0))
       // Sit the recap at the fold boundary (just after the last folded turn, before the kept tail).
+      // Stamp `folded` on the record so the card's count is exact PER-recap (not a live re-count that
+      // overstates after a 2nd compaction, or reads 0 if the folded turns failed to persist).
       const turn = { role: 'summary', content: r.summary, covers_upto_seq: upto, tokens: r.tokens || null,
-                     ts: (foldLast?.ts || tailTs()) + 1e-4, seq: upto + 0.5 }
+                     folded: fold.length, ts: (foldLast?.ts || tailTs()) + 1e-4, seq: upto + 0.5 }
       setMsgs(m => [...m, turn]); persistTurn(turn); setShowFolded(false)
       onToast?.(`compacted ${fold.length} messages into a recap`)
     } catch (e) { onToast?.('compact failed: ' + e.message) }
@@ -751,23 +758,25 @@ export default function Dock({ runId, live, liveSeq, viewSeq, setViewSeq, onFocu
   }
   const send = async () => {
     const text = input.trim()
-    if (!text || busy) return
+    if (!text || busy || compacting) return   // one chat-side op at a time (send + compact share the op strip)
     const nid = ctx.length ? ctx[ctx.length - 1] : (selectedId ?? null)
     const history = buildHistory()   // recap + post-recap turns, so the boss's context doesn't grow unbounded
     const userTurn = { role: 'user', content: text, ts: tailTs(), seq: chatSeq(), ctx: [...ctx] }
     setMsgs(m => [...m, userTurn]); persistTurn(userTurn)
     setInput(''); setCtx([]); setBusy(true)   // the feed.length effect scrolls the new turn into view
-    setOp({ label: 'Boss is reading & deciding', icon: 'chat', since: Date.now() / 1000 })
+    // Honest op label: a boss/LLM path says "reading & deciding"; a purely-local slash action does no
+    // model call, so it says "Applying" instead (autoApplyPlan relabels to "resuming" if it reopens).
+    const reading = () => setOp({ label: 'Boss is reading & deciding', icon: 'chat', since: Date.now() / 1000 })
     try {
       if (text.startsWith('/')) {
         const p = parseSlash(text, nid, live || {})
         if (p?.help) pushAssistant(HELP)
         else if (p?.error) pushAssistant('⚠ ' + p.error)
-        else if (p?.action) await autoApply(p.action)
-        else if (p?.llm) await runCommand(p.llm, nid, history)
+        else if (p?.action) { setOp({ label: 'Applying', icon: 'gear', since: Date.now() / 1000 }); await autoApply(p.action) }
+        else if (p?.llm) { reading(); await runCommand(p.llm, nid, history) }
         else pushAssistant('⚠ unrecognized — try /help')
       } else {
-        await runCommand(text, nid, history)
+        reading(); await runCommand(text, nid, history)
       }
     } catch (e) { pushAssistant('⚠ ' + e.message) }
     finally { setBusy(false); setOp(null) }
@@ -833,7 +842,7 @@ export default function Dock({ runId, live, liveSeq, viewSeq, setViewSeq, onFocu
                 title="a filter is active — open controls to change it" onClick={toggleControls}>⌕ filtered</span>}
         <span className="spacer" style={{ flex: 1 }} />
         {chatTokens > 0 && <span className="chat-tok hdr"
-              title="approx tokens this chat has cost (boss replies + compaction) — Compact to shrink what's re-sent each message">
+              title="approx tokens this chat has cost so far (boss replies + compaction) — a lifetime total, not the current context size">
           {ktok(chatTokens)} tok</span>}
         <button className={'btn sm ghost' + (showControls ? ' on' : '')} title="time-travel & filters"
                 onClick={toggleControls}><OpIcon name="sliders" size={13} /> controls</button>
@@ -864,7 +873,7 @@ export default function Dock({ runId, live, liveSeq, viewSeq, setViewSeq, onFocu
                 ? <EventRow key={'e' + it.seq} e={it.e} trace={trace} onFocusEvent={focusEvent}
                     autoOpen={it.e.type === 'node_created' && eventNode(it.e) === livePendingId} />
                 : it.m.role === 'summary'
-                  ? <SummaryRow key={'s' + it.i} m={it.m} folded={foldedCount}
+                  ? <SummaryRow key={'s' + it.i} m={it.m} folded={it.m.folded ?? foldedCount}
                       showFolded={showFolded} onToggleFolded={() => setShowFolded(v => !v)} />
                   : it.m.role === 'action'
                     ? <AppliedRow key={it.m.id || ('a' + it.i)} m={it.m} onUndo={onUndo} />
@@ -908,9 +917,9 @@ export default function Dock({ runId, live, liveSeq, viewSeq, setViewSeq, onFocu
             value={input} onChange={e => { setInput(e.target.value); setSugIdx(0); setSugOpen(true) }}
             onKeyDown={onInputKey} />
           <div className="toolbar" style={{ marginTop: 4 }}>
-            <button className="btn sm primary" disabled={busy || !input.trim()} onClick={send}>Send</button>
+            <button className="btn sm primary" disabled={busy || compacting || !input.trim()} onClick={send}>Send</button>
             <button className="btn sm ghost" title="list commands" onClick={() => pushAssistant(HELP)}>/help</button>
-            <button className="btn sm ghost" disabled={compacting || compactableTurns.length < KEEP_RECENT + 2}
+            <button className="btn sm ghost" disabled={busy || compacting || compactableTurns.length < KEEP_RECENT + 2}
                     title="Compact older chat turns into a recap — shrinks what the boss re-reads each message"
                     onClick={onCompact}>{compacting ? '…' : 'Compact'}</button>
             <span className="muted" style={{ fontSize: 11 }}>{busy ? 'thinking…' : 'boss mode — actions apply immediately'}</span>
