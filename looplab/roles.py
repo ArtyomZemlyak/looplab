@@ -30,6 +30,11 @@ _RESEARCHER_SYSTEM = ("You are an ML researcher proposing the next experiment as
                       "(loading the data once), so a sweep is far cheaper than the same points run "
                       "as separate nodes. Leave `space` empty for an ordinary single-config "
                       "experiment; fixed/shared hyperparameters still go in `params`. "
+                      "If THIS experiment is genuinely compute-heavy and needs more wall-clock than a "
+                      "light model — a neural network (CNN/RNN/transformer), a large ensemble, many CV "
+                      "folds/seeds, or a big grid — set `eval_timeout` to a realistic per-run budget in "
+                      "SECONDS (e.g. 300-1800). Leave it null for ordinary/light experiments so they use "
+                      "the run default. "
                       "Respond ONLY with the requested structured fields.")
 _DEVELOPER_SYSTEM = ("You are an expert ML engineer. Output ONLY a single fenced "
                      "```python``` block containing a complete, self-contained script. ")

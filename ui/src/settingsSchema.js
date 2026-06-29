@@ -8,13 +8,14 @@ export const SETTINGS_GROUPS = [
     title: 'Search & policy', sub: 'how the loop explores the solution tree',
     fields: [
       { key: 'policy', label: 'Policy', type: 'enum', options: ['greedy', 'evolutionary', 'mcts', 'asha', 'bohb'],
+        agents: ['strategist'],
         help: 'Search strategy: greedy, evolutionary, MCTS, ASHA (multi-fidelity racing), or BOHB (ASHA racing × surrogate proposal).' },
-      { key: 'max_nodes', label: 'Max nodes', type: 'int',
+      { key: 'max_nodes', label: 'Max nodes', type: 'int', agents: ['strategist', 'boss'],
         help: 'Node (experiment) budget — the loop stops after this many.' },
-      { key: 'n_seeds', label: 'Seeds', type: 'int', help: 'Eval seeds per node (variance handling).' },
-      { key: 'max_parallel', label: 'Max parallel', type: 'int',
+      { key: 'n_seeds', label: 'Seeds', type: 'int', agents: ['strategist'], help: 'Eval seeds per node (variance handling).' },
+      { key: 'max_parallel', label: 'Max parallel', type: 'int', agents: ['strategist', 'boss'],
         help: '>1 fans out concurrent evals; 1 = deterministic single eval at a time.' },
-      { key: 'ablate_every', label: 'Ablate every', type: 'int',
+      { key: 'ablate_every', label: 'Ablate every', type: 'int', agents: ['strategist'],
         help: 'Ablation-driven refinement every N improves (0 = off; greedy only).' },
       { key: 'archive_resolution', label: 'Archive resolution', type: 'float',
         help: 'Diversity-archive niche width in parameter space.' },
@@ -37,9 +38,9 @@ export const SETTINGS_GROUPS = [
         help: 'Optional meta-controller that picks policy/operators/fidelity at runtime. off = static config; rule = deterministic heuristics; llm = model-driven (default; falls back to rule).' },
       { key: 'strategist_every', label: 'Consult every', type: 'int',
         help: 'Strategist consult cadence in created nodes (bounded, so it never thrashes).' },
-      { key: 'merge_mode', label: 'Merge mode', type: 'enum', options: ['mean', 'ensemble'],
+      { key: 'merge_mode', label: 'Merge mode', type: 'enum', options: ['mean', 'ensemble'], agents: ['strategist'],
         help: 'A0b: mean = legacy mean-param merge; ensemble = Developer recombines parent solutions (code-level).' },
-      { key: 'complexity_cue', label: 'Complexity cue', type: 'bool',
+      { key: 'complexity_cue', label: 'Complexity cue', type: 'bool', agents: ['strategist'],
         help: 'A0d: inject a complexity hint keyed on a branch’s breadth (few children = minimal; many = advanced).' },
       { key: 'budget_aware', label: 'Budget-aware proposals', type: 'bool',
         help: 'A5: surface remaining eval budget into the proposal prompt (needs a max eval-time budget).' },
@@ -61,7 +62,7 @@ export const SETTINGS_GROUPS = [
         help: 'When a node crashes purely because a KNOWN library is missing (ModuleNotFoundError — e.g. torch/xgboost/catboost), pip-install it into the eval interpreter and re-run instead of rejecting the idea. Trusted_local tier only. On by default.' },
       { key: 'dep_install_timeout', label: '↳ install timeout (s)', type: 'float',
         help: 'Per-package wall-clock budget for an auto-install. Generous default (900s) — large wheels like torch take minutes.' },
-      { key: 'ablate_code_blocks', label: 'Ablate code blocks', type: 'bool',
+      { key: 'ablate_code_blocks', label: 'Ablate code blocks', type: 'bool', agents: ['strategist'],
         help: 'A0a: ablate generated pipeline code blocks (MLE-STAR), not just numeric params.' },
       { key: 'proxy_scoring', label: 'Proxy scoring', type: 'bool',
         help: 'A6: early-signal score candidates to skip doomed full evals.' },
@@ -95,8 +96,10 @@ export const SETTINGS_GROUPS = [
       { key: 'max_seconds', label: 'Max wall-clock (s)', type: 'float', placeholder: 'unbounded',
         help: 'Abort the run cleanly after this many seconds of wall-clock.' },
       { key: 'max_eval_seconds', label: 'Max eval time (s)', type: 'float', placeholder: 'unbounded',
+        agents: ['strategist', 'boss'],
         help: 'Ceiling on cumulative time spent INSIDE evals (survives resume).' },
-      { key: 'timeout', label: 'Per-eval timeout (s)', type: 'float', help: 'Kill a single eval after this long.' },
+      { key: 'timeout', label: 'Per-eval timeout (s)', type: 'float', agents: ['researcher', 'strategist', 'boss'],
+        help: 'Kill a single eval after this long. Researcher = the “auto” per-node mode (it sizes heavy/neural-net experiments; this is the fallback).' },
     ],
   },
   {
@@ -195,6 +198,15 @@ export const SETTINGS_GROUPS = [
     ],
   },
 ]
+
+// Agent-governance pills (Settings.agent_control): for a field with `agents`, render one toggle per
+// role showing whether that autonomous role may change the setting at runtime. R = Researcher (per
+// experiment, e.g. sizes a neural-net's eval timeout), S = Strategist (run-wide), B = Boss (run chat).
+export const AGENT_ROLE_PILLS = {
+  researcher: { short: 'R', title: 'Researcher may set this per experiment (auto)' },
+  strategist: { short: 'S', title: 'Strategist may change this run-wide' },
+  boss: { short: 'B', title: 'Boss (run chat) may change this run-wide' },
+}
 
 // Flat key → field-spec index (used to coerce values on the way out).
 export const FIELD_BY_KEY = Object.fromEntries(

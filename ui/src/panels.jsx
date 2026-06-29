@@ -269,11 +269,14 @@ export function ConfigPanel({ runId, state, live, onClose, onToast }) {
   const [cfg, setCfg] = useState(null)
   const [form, setForm] = useState(null)
   const [saved, setSaved] = useState(null)   // last-persisted form (to detect unsaved edits)
+  const [agentControl, setAgentControl] = useState({})   // per-run governance matrix (agent_control)
+  const [savedAC, setSavedAC] = useState({})
   const [sec, setSec] = useState('')
   const [busy, setBusy] = useState(false)
   const [raw, setRaw] = useState(false)
   const load = () => get(`/api/runs/${runId}/config`).then(c => {
     setCfg(c); const f = toForm(c); setForm(f); setSaved(f)
+    const ac = c.agent_control || {}; setAgentControl(ac); setSavedAC(ac)
   }).catch(() => {})
   useEffect(() => { load() }, [runId])
 
@@ -286,17 +289,25 @@ export function ConfigPanel({ runId, state, live, onClose, onToast }) {
     for (const k of Object.keys(FIELD_BY_KEY)) if (JSON.stringify(cur[k]) !== JSON.stringify(base[k])) s.add(k)
     return s
   }, [form, saved])
+  const acDirty = useMemo(() => JSON.stringify(agentControl) !== JSON.stringify(savedAC), [agentControl, savedAC])
+  const canSave = dirty.size > 0 || acDirty
   const onChange = (k, v) => setForm(f => ({ ...f, [k]: v }))
+  const onToggleAgent = (key, role) => setAgentControl(ac => {
+    const cur = new Set(ac[key] || []); cur.has(role) ? cur.delete(role) : cur.add(role)
+    return { ...ac, [key]: [...cur] }
+  })
   const sleep = ms => new Promise(r => setTimeout(r, ms))
 
   const onSave = async () => {
     const cur = fromForm(form), changed = {}
     for (const k of dirty) changed[k] = cur[k]    // send ONLY edited fields (minimal snapshot diff)
+    if (acDirty) changed.agent_control = agentControl
     if (!Object.keys(changed).length) return
     setBusy(true)
     try {
       const r = await saveRunConfig(runId, changed)
       const f = toForm(r.config); setCfg(r.config); setForm(f); setSaved(f)
+      const ac = r.config.agent_control || {}; setAgentControl(ac); setSavedAC(ac)
       const what = r.changed?.length ? `saved ${r.changed.join(', ')}` : 'saved'
       onToast(what + (r.engine_running ? ' — applies when the live run restarts' : ' — applies on next resume'))
     } catch (e) { onToast('save failed: ' + e.message) }   // e.message now carries the server detail (e.g. which field)
@@ -347,13 +358,13 @@ export function ConfigPanel({ runId, state, live, onClose, onToast }) {
         <div className="toolbar" style={{ marginBottom: 10 }}>
           <span className="spacer" style={{ flex: 1 }} />
           <button className="btn sm ghost" onClick={() => setRaw(r => !r)}>{raw ? 'form' : 'raw'}</button>
-          <button className="btn sm ghost" disabled={busy || !dirty.size} onClick={() => setForm(saved)}>↺ revert</button>
-          <button className="btn sm primary" disabled={busy || !dirty.size} onClick={onSave}>Save</button>
+          <button className="btn sm ghost" disabled={busy || !canSave} onClick={() => { setForm(saved); setAgentControl(savedAC) }}>↺ revert</button>
+          <button className="btn sm primary" disabled={busy || !canSave} onClick={onSave}>Save</button>
           {engineLive
-            ? <button className="btn sm" disabled={busy || dirty.size > 0} onClick={onPauseResume} title="pause the run, then resume it with the saved settings">Pause &amp; resume ▸</button>
-            : <button className="btn sm" disabled={busy || dirty.size > 0} onClick={onResume} title="continue this run with the saved settings">Resume ▸</button>}
+            ? <button className="btn sm" disabled={busy || canSave} onClick={onPauseResume} title="pause the run, then resume it with the saved settings">Pause &amp; resume ▸</button>
+            : <button className="btn sm" disabled={busy || canSave} onClick={onResume} title="continue this run with the saved settings">Resume ▸</button>}
         </div>
-        {raw ? rawTable : <SettingsForm form={form} onChange={onChange} dirty={dirty} />}
+        {raw ? rawTable : <SettingsForm form={form} onChange={onChange} dirty={dirty} agentControl={agentControl} onToggleAgent={onToggleAgent} />}
       </>}
     </Panel>
   )

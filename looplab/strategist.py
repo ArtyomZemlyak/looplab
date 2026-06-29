@@ -35,6 +35,8 @@ Strategy = TypedDict(
         "developer": str,       # "default"|"llm"|"opencode"|... (whatever the dev factory knows)
         "operators": dict,      # {"ablate_every":int, "merge_mode":str, "complexity_cue":bool, ...}
         "fidelity": str,        # "smoke"|"full"|"adaptive"
+        "timeout": float,       # per-eval wall-clock budget (s) — applied only if the matrix allows it
+        "max_parallel": int,    # concurrent evals — applied only if the matrix allows it
         "request_research": bool,  # ask the engine to run the Deep-Research stage before continuing
         "rationale": str,       # human-readable "why" (the UI panel)
         "source": str,          # "rule"|"llm"|"operator"|"config" (provenance, audit)
@@ -148,6 +150,14 @@ def validate_strategy(strat: Optional[Strategy], ctx: StrategyContext) -> Option
     fid = strat.get("fidelity")
     if fid in ("smoke", "full", "adaptive"):
         out["fidelity"] = fid
+    # Resource budgets (bounds match config: timeout>0, max_parallel>=1). Whitelisted here for shape;
+    # the engine's _apply_strategy applies them ONLY if the governance matrix grants the strategist.
+    tmo = strat.get("timeout")
+    if isinstance(tmo, (int, float)) and not isinstance(tmo, bool) and tmo > 0:
+        out["timeout"] = float(tmo)
+    mp = strat.get("max_parallel")
+    if isinstance(mp, int) and not isinstance(mp, bool) and mp >= 1:
+        out["max_parallel"] = mp
     if isinstance(strat.get("request_research"), bool) and strat["request_research"]:
         out["request_research"] = True   # ask the engine to run the Deep-Research stage
     if not out:

@@ -21,6 +21,12 @@ class Idea(BaseModel):
     # RepoTask Phase 2: the Researcher may pick which eval profile to run (e.g. cheap
     # "smoke" during search vs "full" on confirm) — eval depth is part of the action space.
     eval_profile: Optional[str] = None
+    # Per-node eval wall-clock budget (seconds) the Researcher may set for THIS experiment — e.g. a
+    # neural-net / large-ensemble idea that legitimately needs longer than the run's default `timeout`.
+    # Honored by the engine ONLY when the governance matrix grants the researcher the "timeout" setting
+    # (Settings.agent_control); otherwise ignored. None => use the run-wide timeout. Flows through the
+    # event log on the Idea automatically (no new event), so it's replay-safe.
+    eval_timeout: Optional[float] = None
     # Semantic grouping (UI #7): a short, reusable slug the Researcher assigns to cluster related
     # experiments in one search tree (e.g. "loss-fn", "architecture", "regularization"). Optional
     # and audit-only — never affects search/selection; the UI groups nodes by it. Flows through the
