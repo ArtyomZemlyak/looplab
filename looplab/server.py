@@ -17,6 +17,7 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 from typing import Optional
@@ -97,6 +98,10 @@ class _GenesisSpec(BaseModel):
     settings: dict = {}       # engine overrides only (llm_model, max_nodes, n_seeds, policy, …)
     rationale: str = ""       # one-line why-this-plan
     reply: str = ""           # conversational message to show in the genesis chat
+    # Adaptation checklist: concrete steps the operator must take to make their target ready (chiefly
+    # for kind="repo" — expose a metric, pin deps, choose the edit surface, protect the grader…). The
+    # UI renders these as a to-do list under the spec card. Empty for a ready-to-run catalogue task.
+    setup_steps: list[str] = []
 
 
 def _action_to_control(c: "_Action", st) -> Optional[dict]:
@@ -112,7 +117,11 @@ def _action_to_control(c: "_Action", st) -> Optional[dict]:
     if a == "promote" and nid is not None:
         return {"type": "promote", "data": {"node_id": nid, "alias": "champion"}, "label": f"Promote #{nid} to champion"}
     if a == "hint" and c.text:
-        return {"type": "hint", "data": {"text": c.text}, "label": f"Send hint: {c.text[:60]}"}
+        # The boss authors the COMPLETE current directive each turn (it has the full chat + run
+        # context), so a boss hint REPLACES the standing one rather than piling up — the researcher/
+        # agent/strategist then read a single, current directive instead of a contradictory stack.
+        return {"type": "hint", "data": {"text": c.text, "replace": True},
+                "label": f"Set directive: {c.text[:60]}"}
     if a in ("note", "annotate") and nid is not None and c.text:
         return {"type": "annotation", "data": {"node_id": nid, "text": c.text}, "label": f"Note on #{nid}: {c.text[:50]}"}
     if a in ("budget", "extend_budget"):
@@ -185,11 +194,11 @@ def _client_tokens(client) -> Optional[dict]:
 
 
 def _ui_dist() -> Path:
-    """Built React assets. Override with LOOPLAB_UI_DIST; default <repo>/ui/dist."""
-    env = os.environ.get("LOOPLAB_UI_DIST")
-    if env:
-        return Path(env)
-    return Path(__file__).resolve().parents[1] / "ui" / "dist"
+    """Built React assets. Override with LOOPLAB_UI_DIST; default <repo>/ui/dist.
+
+    Single source of truth shared with `uibuild` (the on-launch auto-builder)."""
+    from .uibuild import ui_dist_dir
+    return ui_dist_dir()
 
 
 # Per-theme rollup for the cross-run map: {theme: {count, best_metric}}. Now lives in `digest` so the
@@ -882,12 +891,67 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
         except (OSError, json.JSONDecodeError):
             return {}
 
-    def _resolved_settings() -> dict:
+    # --- Secret store (B3/ADR-11): secrets (the LLM API key) are NEVER written to ui_settings.json
+    # or a run's config.snapshot.json (which only ever record `***`). They live in a separate,
+    # owner-only file and are applied to this server process's env + every spawned engine via env —
+    # so the value transits as a credential, not as a persisted, reportable setting. The HTTP API
+    # only ever echoes the masked `***`, never the value.
+    _secrets_path = root / "secrets.json"
+    # Derive the secret -> env-var map from the SAME _SECRET_FIELDS set the rest of the server uses to
+    # strip secrets, via the standard env_prefix convention (the LOOPLAB_{KEY} rule _settings_env also
+    # uses). A NEW SecretStr field is then covered by editing ONE place (_SECRET_FIELDS), not three.
+    _secret_prefix = Settings.model_config.get("env_prefix", "LOOPLAB_")
+    _SECRET_ENV = {k: f"{_secret_prefix}{k.upper()}" for k in _SECRET_FIELDS}   # UI key -> LOOPLAB_* env
+
+    def _load_secrets() -> dict:
+        try:
+            d = json.loads(_secrets_path.read_text(encoding="utf-8"))
+            return {k: v for k, v in d.items() if k in _SECRET_ENV and isinstance(v, str) and v}
+        except (OSError, json.JSONDecodeError):
+            return {}
+
+    def _store_secret(key: str, value: str) -> None:
+        d = _load_secrets()
+        if value:
+            d[key] = value
+        else:
+            d.pop(key, None)
+        # Write through a temp file that is owner-only FROM CREATION (mkstemp creates 0600), then
+        # atomically rename. This closes the window where atomic_write_text + a later chmod would leave
+        # the plaintext key world-readable at the default umask between the rename and the chmod.
+        fd, tmp = tempfile.mkstemp(dir=str(_secrets_path.parent), prefix=".secrets-", suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write(json.dumps(d))
+            os.replace(tmp, _secrets_path)    # the 0600 mode rides along from the temp inode
+        finally:
+            try:
+                os.unlink(tmp)                # no-op once the rename consumed it; cleans up on write error
+            except OSError:
+                pass
+        try:                                  # belt-and-suspenders (no-op on Windows)
+            os.chmod(_secrets_path, 0o600)
+        except OSError:
+            pass
+        env_name = _SECRET_ENV[key]           # live-apply: in-process LLM + future spawns see it now
+        if value:
+            os.environ[env_name] = value
+        else:
+            os.environ.pop(env_name, None)
+
+    # Prime this process's env from the stored secrets at startup, WITHOUT clobbering a value the
+    # operator exported explicitly (an env var / .env wins over the saved store).
+    for _k, _v in _load_secrets().items():
+        os.environ.setdefault(_SECRET_ENV[_k], _v)
+
+    def _resolved_settings(s: Optional["Settings"] = None) -> dict:
         """Engine defaults (Settings(): defaults+env) overlaid with the saved UI overrides — i.e.
-        exactly what a new run gets if the launch dialog changes nothing. Secret masked."""
-        base = Settings().masked_snapshot()
+        exactly what a new run gets if the launch dialog changes nothing. Secret masked. Pass an
+        already-built Settings to avoid constructing one (and re-reading .env from disk) a 2nd time."""
+        base = (s or Settings()).masked_snapshot()
         base.update(_load_ui_settings())
-        base.pop("llm_api_key", None)
+        # Keep llm_api_key but ONLY as the mask masked_snapshot already applied ("***" when set, else
+        # None) — the UI needs the set/unset state to render the secret field; the value never leaks.
         return base
 
     def _settings_env(settings: dict) -> dict:
@@ -907,9 +971,10 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
 
     @app.get("/api/settings")
     def get_settings():
-        defaults = Settings().model_dump()
+        s = Settings()                        # build once — each Settings() now also reads .env off disk
+        defaults = s.model_dump()
         defaults.pop("llm_api_key", None)
-        return {"settings": _resolved_settings(), "overrides": _load_ui_settings(), "defaults": defaults}
+        return {"settings": _resolved_settings(s), "overrides": _load_ui_settings(), "defaults": defaults}
 
     @app.put("/api/settings")
     async def put_settings(request: Request):
@@ -926,6 +991,21 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
         tmp.write_text(json.dumps(overrides, indent=2), encoding="utf-8")
         os.replace(tmp, _ui_settings_path)
         return {"ok": True, "settings": _resolved_settings(), "overrides": overrides}
+
+    @app.put("/api/settings/secret")
+    async def put_secret(request: Request):
+        """Store (or clear) a secret credential securely. The value is written owner-only to
+        secrets.json (never ui_settings.json / a run snapshot) and applied to the server + spawned
+        engines as env. The response only reports whether a value is now set — never the value."""
+        body = await request.json()
+        key = body.get("key")
+        if key not in _SECRET_ENV:
+            raise HTTPException(400, f"unknown secret {key!r} (known: {sorted(_SECRET_ENV)})")
+        value = body.get("value")
+        if value is not None and not isinstance(value, str):
+            raise HTTPException(400, "value must be a string (or null to clear)")
+        _store_secret(key, (value or "").strip())
+        return {"ok": True, "key": key, "set": bool((value or "").strip())}
 
     # ------------------------------------------------------------------ task catalogue
     @app.get("/api/tasks")
@@ -1013,8 +1093,9 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
             run_id, n = f"{base}-{n}", n + 1
         settings = {k: v for k, v in (spec.settings or {}).items()
                     if k in _ALLOWED_FIELDS and k not in _SECRET_FIELDS and v is not None}
+        steps = [str(s).strip() for s in (spec.setup_steps or []) if str(s).strip()][:12]
         return {"run_id": run_id, "task": task, "task_file": task_file,
-                "settings": settings, "rationale": spec.rationale or ""}
+                "settings": settings, "rationale": spec.rationale or "", "setup_steps": steps}
 
     @app.post("/api/genesis")
     async def genesis(request: Request):
@@ -1045,6 +1126,26 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
             '{"kind":"mlebench_real","competition":"<id>"} with the FULL slug exactly as on Kaggle — '
             "e.g. 'nomad2018-predict-transparent-conductors' (NOT the short 'nomad2018'), "
             "'spooky-author-identification'.\n"
+            "- REPO task (the agent optimizes an EXISTING code repo on this machine): author "
+            '{"kind":"repo","goal":"<what to optimize>","direction":"max"|"min",'
+            '"editable_path":"<absolute path to the repo the agent may edit>",'
+            '"edit_surface":["**/*.py"],'
+            '"eval":{"command":["python","train.py"],"cwd":".",'
+            '"metric":{"kind":"stdout_json","key":"<the key the command prints>"},'
+            '"setup":["pip","install","-r","requirements.txt"],"timeout":1800}}. '
+            "The `eval.command` is the OPERATOR's trusted way to RUN and score the repo (argv, no "
+            "shell); it must print the metric the loop reads (e.g. a final JSON line "
+            '{"metric": 0.93}). If the user states HOW the repo is run but NOT how it is scored, set '
+            '"onboard": true with "onboard_command" = that run command and ask in `reply` how the '
+            "metric is emitted. Copy any path / command / metric-key the user gives VERBATIM; never "
+            "invent a path you weren't given (leave editable_path empty and ask instead).\n"
+            "- setup_steps: WHENEVER the task is a repo, return a concrete checklist of what the user "
+            "must do to make the repo LoopLab-ready, e.g.: 'Expose a metric — print one JSON line "
+            '{"metric": <score>} at the end of the eval command\'; \'Pin dependencies in '
+            "requirements.txt so setup can install them'; 'Set edit_surface to only the files the "
+            "agent should change (e.g. src/model/**.py)'; 'Protect the eval/grader/answer files so "
+            "the agent can't overwrite them'; 'Add a cheap smoke profile (few steps) so the search is "
+            "fast'. One actionable line each; [] for a ready-to-run catalogue task.\n"
             "- settings: ONLY the overrides the goal implies. CRITICAL: if the user mentions ANY model "
             "name — even mid-sentence ('on minimax/minimax-m3', 'with deepseek') — copy it VERBATIM into "
             "settings.llm_model; when it is an OpenRouter-style 'vendor/model' id (contains '/') also set "
@@ -1325,11 +1426,18 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
             "inject(operator='draft', params={...}, rationale='CNN baseline')].\n"
             "- Verbs: budget(nodes=N) raises the run's node budget by N (REQUIRED before asking for more "
             "experiments on a finished/near-budget run, else there's no room to run them); "
-            "hint(text=concrete directive distilled into specific techniques/features/params to try or "
-            "avoid); inject(operator one of draft/improve/debug/merge, params, rationale) for ONE "
+            "hint(text=the COMPLETE current standing directive distilled into specific techniques/"
+            "features/params to try or avoid — it REPLACES the previous directive the researcher "
+            "follows, so restate anything earlier that still applies; the researcher and strategist "
+            "both read it, so phrase exploration asks plainly, e.g. 'try several distinct neural "
+            "architectures'); inject(operator one of draft/improve/debug/merge, params, rationale) for ONE "
             "concrete experiment — emit several inject steps for several experiments; deep_research to "
             "read the literature first; note(node_id, text) to annotate a node; confirm(node_id), "
-            "ablate(node_id), fork(node_id), promote(node_id), strategy(policy,fidelity), "
+            "ablate(node_id), fork(node_id), promote(node_id); strategy(policy,fidelity) pins the "
+            "search policy/fidelity and OVERRIDES the autonomous strategist for the rest of the run "
+            "— pre-set it to match the request: an exploratory policy (evolutionary/asha) when the "
+            "user wants to TRY MANY distinct approaches (so the search doesn't just greedily refine "
+            "the current best), or greedy to exploit a clear leader; "
             "import(source_run, source_node) to SEED a winning experiment from a SIBLING run of this "
             "task into this run (use list_sibling_runs / read_sibling_experiment first to find one — the "
             "imported node records where it came from); "
@@ -1710,7 +1818,8 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
         def index_placeholder():
             return JSONResponse({
                 "looplab_ui": "backend up; the React app is not built yet",
-                "build": "cd ui && npm ci --strict-ssl=false && npm run build",
+                "build": "looplab build-ui   (or: cd ui && npm ci && npm run build)",
+                "note": "`looplab ui` auto-builds the bundle when Node/npm are on PATH.",
                 "api": ["/api/runs", "/api/runs/{id}/state", "/api/runs/{id}/events (SSE)"],
             })
 

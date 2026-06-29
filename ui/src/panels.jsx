@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState } from 'react'
-import { get, putText, post, fmt, fmtInt, CONTROL, gpuStat, saveRunConfig, resumeRun } from './util.js'
+import { get, putText, post, fmt, fmtInt, CONTROL, gpuStat, saveRunConfig, resumeRun, apiPrefix } from './util.js'
 import { Bars, ParallelCoords, Scatter } from './charts.jsx'
 import { hyperImportance } from './report.js'
 import Markdown from './markdown.jsx'
@@ -364,7 +364,7 @@ export function ConfigPanel({ runId, state, live, onClose, onToast }) {
             ? <button className="btn sm" disabled={busy || canSave} onClick={onPauseResume} title="pause the run, then resume it with the saved settings">Pause &amp; resume ▸</button>
             : <button className="btn sm" disabled={busy || canSave} onClick={onResume} title="continue this run with the saved settings">Resume ▸</button>}
         </div>
-        {raw ? rawTable : <SettingsForm form={form} onChange={onChange} dirty={dirty} agentControl={agentControl} onToggleAgent={onToggleAgent} />}
+        {raw ? rawTable : <SettingsForm form={form} onChange={onChange} dirty={dirty} agentControl={agentControl} onToggleAgent={onToggleAgent} hideSecret />}
       </>}
     </Panel>
   )
@@ -590,7 +590,7 @@ export function CollabPanel({ state, runId, onSelect, onClose, onToast }) {
     (notes || []).map((text, i) => ({ nid: Number(nid), i, text })))
     .sort((a, b) => a.nid - b.nid)
   const share = () => {
-    const url = `${location.origin}/#/run/${encodeURIComponent(runId)}`
+    const url = `${location.origin}${apiPrefix()}/#/run/${encodeURIComponent(runId)}`
     if (navigator.clipboard) navigator.clipboard.writeText(url).then(() => onToast && onToast('share link copied'))
     else onToast && onToast(url)
   }

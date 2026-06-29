@@ -215,7 +215,9 @@ def test_pending_hint_reaches_researcher_prompt(monkeypatch):
     st.pending_hints = [{"text": "use log1p targets + domain features"}]
     r.propose(st, None)
     user = next(m["content"] for m in captured["messages"] if m["role"] == "user")
-    assert "Operator directives" in user and "log1p targets + domain features" in user
+    # "Operator directive" matches both the single-hint ("…directive (follow it):") and the
+    # multi-hint ("…directives, oldest first…") renderings from looplab.hints.
+    assert "Operator directive" in user and "log1p targets + domain features" in user
 
 
 def test_chat_uses_the_runs_snapshot_model_not_ui_env(tmp_path, monkeypatch):
@@ -517,6 +519,43 @@ def test_genesis_soft_fails_offline(tmp_path, monkeypatch):
     monkeypatch.setattr("looplab.server.make_llm_client", _boom)
     r = client.post("/api/genesis", json={"instruction": "anything"})
     assert r.status_code == 200 and r.json()["ok"] is False and r.json()["reply"]  # usable, no crash
+
+
+def test_genesis_authors_repo_task_with_setup_steps(tmp_path, monkeypatch):
+    """The main-menu boss can plan a REPO run from a text description — repo path, how to run/score it,
+    edit surface — and returns an adaptation checklist. The authored task must be launch-valid."""
+    (tmp_path / "myrepo").mkdir()
+    client = TestClient(make_app(tmp_path))
+    from looplab.server import _GenesisSpec
+    repo_task = {
+        "kind": "repo", "goal": "maximize val accuracy", "direction": "max",
+        "editable_path": str(tmp_path / "myrepo"), "edit_surface": ["**/*.py"],
+        "eval": {"command": ["python", "train.py"], "cwd": ".",
+                 "metric": {"kind": "stdout_json", "key": "acc"},
+                 "setup": ["pip", "install", "-r", "requirements.txt"]},
+    }
+    monkeypatch.setattr("looplab.server.make_llm_client", lambda s: object())
+    monkeypatch.setattr(
+        "looplab.parse.parse_structured",
+        lambda *a, **k: _GenesisSpec(
+            run_id="my-repo-run", task=repo_task,
+            settings={"max_nodes": 20, "developer_backend": "opencode"},
+            setup_steps=['Print one JSON line {"acc": <score>} at the end of train.py',
+                         "Pin dependencies in requirements.txt", "Protect the grader/answer files"],
+            reply="Plan: optimize your repo.", rationale="repo run"))
+    r = client.post("/api/genesis",
+                    json={"instruction": "optimize my repo, run python train.py, metric acc"}).json()
+    assert r["ok"] is True
+    spec = r["spec"]
+    assert spec["task"]["kind"] == "repo"
+    assert spec["task"]["eval"]["command"] == ["python", "train.py"]
+    assert spec["task"]["eval"]["metric"]["key"] == "acc"
+    assert spec["settings"]["max_nodes"] == 20 and spec["settings"]["developer_backend"] == "opencode"
+    assert len(spec["setup_steps"]) == 3 and any("requirements.txt" in s for s in spec["setup_steps"])
+
+    # the authored task is a VALID repo task — /api/start would launch it, not 400.
+    from looplab.tasks import validate_task
+    validate_task(spec["task"])
 
 
 # ---- cross-run aggregate (scope) reports: project / task / super-task, one generator ----

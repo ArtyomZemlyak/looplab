@@ -483,6 +483,19 @@ def test_action_router_maps_plan_to_multiple_controls():
     assert acts[2]["data"]["idea"]["operator"] == "draft"
 
 
+def test_boss_hint_replaces_standing_directive():
+    """The boss authors the complete current directive each turn, so its hint REPLACES the standing
+    one (data.replace=True) rather than stacking contradictory directives."""
+    from looplab.server import _Action, _action_to_control
+
+    class _St:
+        best_node_id = 1
+    ctrl = _action_to_control(_Action(action="hint", text="try several neural nets"), _St())
+    assert ctrl["type"] == "hint"
+    assert ctrl["data"]["replace"] is True
+    assert ctrl["data"]["text"] == "try several neural nets"
+
+
 def test_budget_action_clamps_nodes():
     """A budget verb only ADDS room and is bounded: non-positive is a no-op, and a hallucinated huge
     delta is capped so the boss LLM can't push max_nodes to a runaway value."""

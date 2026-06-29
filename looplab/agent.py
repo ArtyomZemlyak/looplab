@@ -153,8 +153,8 @@ class ToolUsingResearcher:
     def propose(self, state: RunState, parent: Optional[Node]) -> Idea:
         if hasattr(self.tools, "bind_state"):    # let run-aware tools see the current search
             self.tools.bind_state(state, parent)
-        hints = [h.get("text", "") for h in (state.pending_hints or []) if h.get("text")]
-        hint_block = ("\nOperator directives (follow if sensible): " + "; ".join(hints)) if hints else ""
+        from .hints import render_hint_directives
+        hint_block = render_hint_directives(state.pending_hints)
         cue = getattr(self, "_complexity_hint", "")   # A0d breadth-keyed complexity cue (empty=off)
         messages = [
             {"role": "system",

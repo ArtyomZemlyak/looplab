@@ -5,8 +5,11 @@ human-readable provenance).
 from __future__ import annotations
 
 
-def generate_agents_md(task) -> str:
+def generate_agents_md(task, *, runtime_caps: str | None = None) -> str:
     direction = "minimize" if getattr(task, "direction", "min") == "min" else "maximize"
+    # Honest runtime line: real tasks with auto-install get the capability sentence (torch/xgboost +
+    # hardware); offline/synthetic tasks fall back to the conservative numpy+stdlib contract.
+    runtime = runtime_caps or "Python standard library + numpy. No network access."
     return f"""# AGENTS.md — {task.id}
 
 ## Task
@@ -18,7 +21,7 @@ def generate_agents_md(task) -> str:
 ## Solution contract
 - A solution is a self-contained Python script.
 - It MUST print exactly one final line of JSON: `{{"metric": <float>}}`.
-- Runtime: Python standard library + numpy. No network access.
+- Runtime: {runtime}
 - Datasets (if any) are provided as files in the working directory (e.g. `data.json`).
 
 ## Notes for agents

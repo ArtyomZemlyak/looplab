@@ -1,13 +1,15 @@
-import React from 'react'
+import React, { useState } from 'react'
 import { SETTINGS_GROUPS, AGENT_ROLE_PILLS } from './settingsSchema.js'
 
 // Renders the grouped settings form from the schema. Controlled: `form` is the editable shape
 // (see settingsSchema.toForm), `onChange(key, value)` reports edits. `dirty` (a Set of changed
 // keys) highlights fields that differ from the engine default. `only` optionally restricts to a
 // subset of group titles (the run dialog shows a compact subset by default).
-// Per-setting agent-governance pills: for a field with `agents`, a toggle per role (R/S/B) showing
-// whether that autonomous role may change this setting at runtime. `granted` = the role list from
-// Settings.agent_control[key]; clicking toggles a role on/off via onToggleAgent(key, role).
+//
+// Groups render as TABS (one per group) instead of one long scroll — the standard app tab look.
+// `secretState` (key→bool "is a value stored") drives the write-only secret fields; `onClearSecret`
+// removes a stored secret; `hideSecret` drops secret fields entirely (per-run / launch dialog, where
+// the global credential already applies via env).
 function AgentPills({ f, granted, onToggleAgent }) {
   if (!f.agents || !onToggleAgent) return null
   return <div className="sf-agents" title="who may change this setting at runtime">
@@ -19,7 +21,7 @@ function AgentPills({ f, granted, onToggleAgent }) {
   </div>
 }
 
-function Field({ f, value, onChange, changed, granted, onToggleAgent }) {
+function Field({ f, value, onChange, changed, granted, onToggleAgent, secretSet, onClearSecret }) {
   const set = (v) => onChange(f.key, v)
   let input
   if (f.type === 'bool') {
@@ -28,6 +30,17 @@ function Field({ f, value, onChange, changed, granted, onToggleAgent }) {
     input = <select className="text" value={value ?? ''} onChange={e => set(e.target.value)}>
       {f.options.map(o => <option key={o} value={o}>{o}</option>)}
     </select>
+  } else if (f.type === 'secret') {
+    // Write-only credential: the box is always blank (the value is never sent back from the server).
+    // Typing sets a new key; the status line + Clear reflect/remove the stored one.
+    input = <div className="sf-secret">
+      <input className="text" type="password" autoComplete="new-password" value={value ?? ''}
+             placeholder={secretSet ? '•••••••• stored — leave blank to keep' : 'not set'}
+             onChange={e => set(e.target.value)} />
+      {secretSet && onClearSecret &&
+        <button type="button" className="btn sm ghost" title="remove the stored key"
+                onClick={() => onClearSecret(f.key)}>Clear</button>}
+    </div>
   } else {
     input = <input className="text" type={f.type === 'int' || f.type === 'float' ? 'number' : 'text'}
                    step={f.type === 'float' ? 'any' : undefined} value={value ?? ''}
@@ -41,16 +54,36 @@ function Field({ f, value, onChange, changed, granted, onToggleAgent }) {
   </div>
 }
 
-export default function SettingsForm({ form, onChange, dirty, only, agentControl, onToggleAgent }) {
-  const groups = only ? SETTINGS_GROUPS.filter(g => only.includes(g.title)) : SETTINGS_GROUPS
-  return <div className="settings-form">
-    {groups.map(g => <div className="sf-group" key={g.title}>
-      <div className="sf-group-h"><b>{g.title}</b>{g.sub && <span className="muted">{g.sub}</span>}</div>
+export default function SettingsForm({ form, onChange, dirty, only, agentControl, onToggleAgent,
+                                       secretState, onClearSecret, hideSecret }) {
+  let groups = only ? SETTINGS_GROUPS.filter(g => only.includes(g.title)) : SETTINGS_GROUPS
+  if (hideSecret) {
+    groups = groups
+      .map(g => ({ ...g, fields: g.fields.filter(f => f.type !== 'secret') }))
+      .filter(g => g.fields.length)
+  }
+  const [active, setActive] = useState(0)
+  const idx = groups.length ? Math.min(active, groups.length - 1) : 0
+  const g = groups[idx]
+  if (!g) return null
+  const groupChanged = (gr) => gr.fields.some(f => dirty?.has(f.key))
+
+  return <div className="settings-form tabbed">
+    <div className="tabs sf-tabs">
+      {groups.map((gr, i) => <div key={gr.title}
+        className={'tab' + (i === idx ? ' active' : '')}
+        onClick={() => setActive(i)} title={gr.sub || ''}>
+        {gr.title}{groupChanged(gr) && <span className="sf-dot" title="has values changed from default">●</span>}
+      </div>)}
+    </div>
+    <div className="sf-group" key={g.title}>
+      {g.sub && <div className="sf-group-h"><span className="muted">{g.sub}</span></div>}
       <div className="sf-grid">
         {g.fields.map(f => <Field key={f.key} f={f} value={form[f.key]}
                                   changed={dirty?.has(f.key)} onChange={onChange}
-                                  granted={agentControl?.[f.key]} onToggleAgent={onToggleAgent} />)}
+                                  granted={agentControl?.[f.key]} onToggleAgent={onToggleAgent}
+                                  secretSet={secretState?.[f.key]} onClearSecret={onClearSecret} />)}
       </div>
-    </div>)}
+    </div>
   </div>
 }

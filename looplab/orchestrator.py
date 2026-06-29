@@ -418,9 +418,14 @@ class Engine:
                     "workspace": self._workspace_fingerprint(),
                 },
             )
-            # AGENTS.md (I18): task/contract context for coding-agent backends.
+            # AGENTS.md (I18): task/contract context for coding-agent backends. Runtime line is
+            # honest about libs/hardware — capable tasks get the auto-install capability sentence,
+            # offline/synthetic tasks stay numpy+stdlib (task_runtime_caps returns None for those).
+            from .hardware import detect_gpu, task_runtime_caps
+            _md_caps = task_runtime_caps(self.task, auto_install=self._auto_install_deps,
+                                         gpu=detect_gpu() if self._auto_install_deps else None)
             (self.run_dir / "AGENTS.md").write_text(
-                generate_agents_md(self.task), encoding="utf-8")
+                generate_agents_md(self.task, runtime_caps=_md_caps), encoding="utf-8")
             # D4 data provenance: pin a content hash of every task asset/dataset into the run so a
             # result is tied to the exact data (repo tasks also pin via `workspace`). Reproducibility.
             prov = {name: hashlib.sha256(
@@ -434,7 +439,7 @@ class Engine:
                 hg = self._host_grader
                 evt = {
                     "scorer": hg.get("scorer", "rmse"),
-                    "predictions": hg.get("predictions") or hg.get("submission", "predictions.json")}
+                    "predictions": self._graded_output_name()}
                 if hg.get("kind") == "mlebench":          # real MLE-bench: answers live in the
                     evt["competition"] = hg.get("competition")   # mle-bench data dir, never here —
                     # so there is no in-memory label list to count; n_labels=0 would mislead the Trust
@@ -920,23 +925,53 @@ class Engine:
                 pass
 
     def _maybe_consult_strategist(self, state: RunState) -> RunState:
-        """Operator override first (HITL parity), then the bounded-cadence Strategist consult.
-        Records a `strategy_decision` and re-folds only when the strategy actually changes."""
-        # Operator-pinned strategy (set_strategy control event) always wins over the Strategist.
-        if (state.pending_strategy
-                and self._strategy_core(state.pending_strategy) != self._strategy_core(state.active_strategy)):
-            ctx = self._strategy_ctx(state)
-            strat = validate_strategy({**state.pending_strategy, "source": "operator"}, ctx)
+        """Operator/boss pin first (HITL parity), then the bounded-cadence Strategist consult.
+        Records a `strategy_decision` and re-folds only when the strategy actually changes.
+
+        An operator/boss `set_strategy` pin owns ONLY the fields it names (policy / policy_params /
+        fidelity); those stay in force for the rest of the run (until re-pinned), while the
+        autonomous Strategist keeps tuning everything else. The pin is MERGED onto the live strategy
+        (not reset to the bare pin) and re-asserted only when a pinned field actually drifts — that,
+        plus overlaying the pinned fields onto the Strategist's own decision below, is what stops the
+        pin and the Strategist from thrashing (the old "reset to bare pin on any divergence"
+        oscillated the policy every consult and dropped the Strategist's fidelity/operators)."""
+        pin = state.pending_strategy or {}
+        raw_pin = {k: pin[k] for k in ("policy", "policy_params", "fidelity")
+                   if pin.get(k) is not None}
+        consulting = self.strategist is not None and self._should_consult(state)
+        active_core = self._strategy_core(state.active_strategy)
+        # Cheap pre-check (no ctx/validate): a pin "drifts" if a raw pinned field differs from what's
+        # active. For an INVALID pin this is a false alarm (it can never become active), so we still
+        # validate below before acting on it.
+        pin_drift = bool(raw_pin) and any(active_core.get(k) != v for k, v in raw_pin.items())
+        if not pin_drift and not consulting:
+            return state
+        ctx = self._strategy_ctx(state)
+        # Validate the pin against the SAME whitelist the engine applies, keeping only the pinned
+        # fields that survive. The boss `strategy` action carries free-text policy/fidelity (server
+        # `_Action.policy/fidelity`, unvalidated), so an out-of-whitelist value would otherwise be
+        # overlaid RAW onto the recorded strategy below — diverging from the live policy that
+        # make_policy silently rejects — and, never matching active_strategy, re-assert (and starve
+        # the autonomous Strategist + spam the log) on every consult. Dropping it here makes an
+        # invalid pin a harmless no-op.
+        vpin = validate_strategy({**raw_pin, "source": "operator"}, ctx) if raw_pin else None
+        pin_fields = {k: vpin[k] for k in raw_pin if vpin and k in vpin}
+        # 1. Re-assert the pin only if a VALID pinned field isn't currently in force (merge onto active).
+        if pin_fields and any(active_core.get(k) != v for k, v in pin_fields.items()):
+            strat = validate_strategy({**(state.active_strategy or {}), **pin_fields,
+                                       "source": "operator"}, ctx)
             if strat:
                 strat.setdefault("rationale", "operator-pinned strategy")
                 self._record_strategy(strat, state, ctx)
                 return fold(self.store.read_all())
-        if self.strategist is not None and self._should_consult(state):
-            ctx = self._strategy_ctx(state)
+        # 2. Bounded-cadence Strategist consult — but the pin wins over it for the pinned fields.
+        if consulting:
             strat = validate_strategy(self.strategist.decide(state, ctx), ctx)
-            if strat and self._strategy_core(strat) != self._strategy_core(state.active_strategy):
-                self._record_strategy(strat, state, ctx)
-                return fold(self.store.read_all())
+            if strat:
+                strat.update(pin_fields)   # pinned (validated) policy/fidelity are non-negotiable
+                if self._strategy_core(strat) != self._strategy_core(state.active_strategy):
+                    self._record_strategy(strat, state, ctx)
+                    return fold(self.store.read_all())
         return state
 
     # ----------------------------------------------------------------- Deep-Research stage (P2)
@@ -1623,6 +1658,20 @@ class Engine:
         if extra:
             res.extra_metrics = {**(res.extra_metrics or {}), **extra}
 
+    def _graded_output_name(self) -> Optional[str]:
+        """The filename the candidate must write for out-of-process grading (the file
+        `_apply_host_grade` scores), or None when grading is in-workdir. Single source of truth
+        for the host-grader output name so the host-grading audit event and the critic's
+        submission-output check resolve it identically and can't drift."""
+        hg = self._host_grader
+        if not hg:
+            return None
+        # Mirror `_apply_host_grade` EXACTLY so the name can't drift: real MLE-bench scores the
+        # `submission` file; every other host grader scores the `predictions` file.
+        if hg.get("kind") == "mlebench":
+            return hg.get("submission", "submission.csv")
+        return hg.get("predictions", "predictions.json")
+
     def _apply_host_grade(self, res, workdir):
         """B1+ out-of-process grading: read the candidate's predictions file from its workdir and score
         it on the HOST against the held-out labels (held in engine memory, never on the candidate FS).
@@ -1878,7 +1927,11 @@ class Engine:
                                          "detail": f"line {f['line']}: {f['code']}"})
                     if self._critic_check and scan_src:
                         from .critic import critique
-                        for c in critique(node.idea, scan_src):
+                        # Host-graded tasks (MLE-bench &c.) score a submission file out-of-process,
+                        # so the critic's in-code `metric` checks don't apply — hand it the expected
+                        # submission filename so it checks the right output contract instead.
+                        sub_file = self._graded_output_name()
+                        for c in critique(node.idea, scan_src, submission_file=sub_file):
                             sigs.append({"signal": "critic:" + c["issue"], "detail": c["detail"]})
                     if sigs:
                         self.store.append("reward_hack_suspected",

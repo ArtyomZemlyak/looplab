@@ -14,7 +14,18 @@ AGENT_ROLES = ("strategist", "boss", "researcher")
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_prefix="LOOPLAB_", extra="ignore")
+    # Config sources, highest priority first: explicit init kwargs (e.g. Settings(**snapshot)) >
+    # real OS env vars (LOOPLAB_*) > a `.env` file in the CWD > field defaults. The `.env` is read
+    # so `looplab run`/`looplab ui` pick up LOOPLAB_LLM_BASE_URL etc. without exporting them by hand
+    # (keys MUST carry the LOOPLAB_ prefix, same as the env vars). utf-8-sig tolerates a BOM from
+    # Windows editors. The test suite disables this (tests/conftest.py) so a dev's real .env in the
+    # repo root can't leak into assertions.
+    model_config = SettingsConfigDict(
+        env_prefix="LOOPLAB_",
+        env_file=".env",
+        env_file_encoding="utf-8-sig",
+        extra="ignore",
+    )
 
     # Lower bounds (review C/⚪): `max_parallel=0` silently stalls the loop; a non-positive
     # node/seed budget or timeout is never valid. Reject at config time, not mid-run.
@@ -155,7 +166,8 @@ class Settings(BaseSettings):
     # fit-on-test) surfaced into the Trust panel alongside reward-hack flags. Off by default.
     code_leakage_detect: bool = False
     # C4 independent critic: an execution-free critic of each solution (stub / hardcoded-metric /
-    # params-ignored) surfaced in the Trust panel. Audit-only. Off by default.
+    # params-ignored; on host-graded tasks the metric checks become a submission-output check)
+    # surfaced in the Trust panel. Audit-only. Off by default.
     critic_check: bool = False
     # A7 Strategist (NEW, user-requested): optional LLM/rule meta-controller that picks the search
     # policy/allocator + operator mix + fidelity (+ Developer backend) per situation. Config-first:

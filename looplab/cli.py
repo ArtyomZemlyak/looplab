@@ -442,11 +442,22 @@ def inspect(run_dir: Path = typer.Argument(...)):
 @app.command()
 def ui(run_root: Path = typer.Option(Path("runs"), help="Directory containing run subdirs."),
        host: str = typer.Option("127.0.0.1", help="Bind host."),
-       port: int = typer.Option(8765, help="Bind port.")):
+       port: int = typer.Option(8765, help="Bind port."),
+       build: bool = typer.Option(True, "--build/--no-build",
+                                  help="Auto-build the React bundle if it's missing (needs Node/npm)."),
+       rebuild: bool = typer.Option(False, "--rebuild",
+                                    help="Force a fresh `npm run build` even if a bundle exists.")):
     """Serve the live React UI over the run dirs (needs the [ui] extra: pip install 'looplab[ui]').
 
     A separate read/control process (ADR-18): tails events.jsonl -> SSE, serves the built React
-    app, and turns UI actions into appended control events. Does not change the engine."""
+    app, and turns UI actions into appended control events. Does not change the engine.
+
+    On launch the React bundle is built automatically when it's missing and Node/npm are on PATH,
+    so a fresh `pip install -e ".[ui]"` needs no manual `npm run build`. Use --no-build to skip or
+    --rebuild to force one."""
+    if build or rebuild:
+        from .uibuild import ensure_ui_built  # stdlib-only; fine to import before the [ui] check
+        ensure_ui_built(force=rebuild, log=typer.echo)
     try:
         from .server import serve  # lazy: keeps the core import-free of fastapi/uvicorn
     except ModuleNotFoundError as e:
@@ -454,6 +465,21 @@ def ui(run_root: Path = typer.Option(Path("runs"), help="Directory containing ru
         raise typer.Exit(1)
     typer.echo(f"LoopLab UI on http://{host}:{port}  (run-root={run_root})")
     serve(run_root, host=host, port=port)
+
+
+@app.command("build-ui")
+def build_ui(force: bool = typer.Option(False, "--force",
+                                        help="Rebuild even if a bundle already exists.")):
+    """Build the React UI bundle (ui/dist) so `looplab ui` can serve it.
+
+    Runs `npm ci` (first build) + `npm run build` in the UI source tree. Normally you don't need
+    this — `looplab ui` builds on demand — but it's handy for CI or a warm-up step."""
+    from .uibuild import ensure_ui_built, ui_dist_dir
+    ok = ensure_ui_built(force=force, log=typer.echo)
+    if ok:
+        typer.echo(f"UI bundle ready at {ui_dist_dir()}")
+    else:
+        raise typer.Exit(1)
 
 
 if __name__ == "__main__":

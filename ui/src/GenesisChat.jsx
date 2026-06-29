@@ -78,11 +78,23 @@ export default function GenesisChat({ onClose, onStarted, seed }) {
 
   const setSetting = (k, v) => setSpec(s => ({ ...s, settings: { ...(s?.settings || {}), [k]: v } }))
   const setTaskField = (k, v) => setSpec(s => ({ ...s, task: { ...(s?.task || {}), [k]: v } }))
+  // Nested eval edits for a repo task: command (argv as a space-joined string) + the metric key.
+  const setEvalField = (k, v) => setSpec(s => { const t = s?.task || {}; return { ...s, task: { ...t, eval: { ...(t.eval || {}), [k]: v } } } })
+  // Quote-aware tokenize so an argument containing spaces survives (e.g. --run-name "my model"): the
+  // engine runs this argv with NO shell, so a plain whitespace split would tear quoted args apart.
+  const setEvalCommand = (str) => setEvalField('command',
+    (String(str).match(/"[^"]*"|'[^']*'|\S+/g) || []).map(t => t.replace(/^(['"])([\s\S]*)\1$/, '$2')))
+  const setMetricKey = (v) => setSpec(s => { const t = s?.task || {}; const ev = t.eval || {}; return { ...s, task: { ...t, eval: { ...ev, metric: { kind: 'stdout_json', ...(ev.metric || {}), key: v } } } } })
 
-  // launchable when there's a name + a task; an mlebench_real task also needs a competition (else the
-  // engine would crash on an empty slug — the backend now 400s too, but gate it here for a clean UX).
-  const taskReady = spec?.task_file || (spec?.task?.kind &&
-    (spec.task.kind !== 'mlebench_real' || spec.task.competition?.trim()))
+  const task = spec?.task || {}
+  const isRepo = task.kind === 'repo'
+  // launchable when there's a name + a task; mlebench_real needs a competition, and a repo task needs
+  // an editable path + a way to score it (an eval command, or onboard mode). The backend 400s on an
+  // invalid task too, but gate here for a clean UX (no doomed launch).
+  const repoReady = !isRepo || (task.editable_path?.trim() &&
+    ((Array.isArray(task.eval?.command) && task.eval.command.length) || task.onboard))
+  const taskReady = spec?.task_file || (task.kind &&
+    (task.kind !== 'mlebench_real' || task.competition?.trim()) && repoReady)
   const ready = spec && spec.run_id?.trim() && taskReady
   const launch = async () => {
     if (!ready) { setErr('describe a goal first so the boss can pick a task (and a competition for MLE-bench)'); return }
@@ -161,6 +173,28 @@ export default function GenesisChat({ onClose, onStarted, seed }) {
                 : <div className="gen-ro">{taskLabel}</div>}
               <div className="gen-help">{spec.task?.kind === 'mlebench_real' ? 'MLE-bench / Kaggle competition' : (spec.task_file ? 'from the task catalogue' : (spec.task?.kind || ''))}</div>
             </div>
+            {isRepo && !spec.task_file && <div className="gen-repo">
+              <div className="gen-field"><div className="gen-lab">Goal</div>
+                <input className="text" value={task.goal || ''} onChange={e => setTaskField('goal', e.target.value)} placeholder="what to optimize, e.g. validation accuracy" /></div>
+              <div className="gen-field"><div className="gen-lab">Repo path (editable)</div>
+                <input className="text" value={task.editable_path || ''} onChange={e => setTaskField('editable_path', e.target.value)} placeholder="/abs/path/to/your/repo" />
+                <div className="gen-help">The repo the agent may edit — an absolute path on this machine.</div></div>
+              <div className="gen-field"><div className="gen-lab">Run / eval command</div>
+                <input className="text" value={(task.eval?.command || []).join(' ')} onChange={e => setEvalCommand(e.target.value)} placeholder="python train.py" />
+                <div className="gen-help">{task.onboard ? 'Onboarding: the agent will propose the eval from this run command.' : 'How LoopLab runs + scores the repo. It must print the metric (see steps below).'}</div></div>
+              <div className="gen-grid">
+                <div className="gen-field"><div className="gen-lab">Metric key</div>
+                  <input className="text" value={task.eval?.metric?.key || ''} onChange={e => setMetricKey(e.target.value)} placeholder="metric" />
+                  <div className="gen-help">JSON key the command prints, e.g. {'{'}&quot;metric&quot;: 0.93{'}'}.</div></div>
+                <div className="gen-field"><div className="gen-lab">Direction</div>
+                  <select className="text" value={task.direction || 'max'} onChange={e => setTaskField('direction', e.target.value)}>
+                    <option value="max">maximize</option><option value="min">minimize</option></select></div>
+                <div className="gen-field"><div className="gen-lab">Edit surface</div>
+                  <input className="text" value={Array.isArray(task.edit_surface) ? task.edit_surface.join(', ') : (task.edit_surface || '')}
+                    onChange={e => setTaskField('edit_surface', e.target.value.split(',').map(x => x.trim()).filter(Boolean))} placeholder="**/*.py" />
+                  <div className="gen-help">Comma-separated globs the agent may change.</div></div>
+              </div>
+            </div>}
             <div className="gen-grid">
               <div className="gen-field"><div className="gen-lab">Model</div>
                 <input className="text" value={sk.llm_model || ''} onChange={e => setSetting('llm_model', e.target.value || undefined)} placeholder="default" /></div>
@@ -174,6 +208,10 @@ export default function GenesisChat({ onClose, onStarted, seed }) {
                   {['greedy', 'evolutionary', 'mcts', 'asha'].map(p => <option key={p} value={p}>{p}</option>)}
                 </select></div>
             </div>
+            {spec.setup_steps?.length > 0 && <div className="gen-steps">
+              <div className="gen-lab">To make this LoopLab-ready{isRepo ? ' (adapt your repo)' : ''}</div>
+              <ol className="gen-steplist">{spec.setup_steps.map((s, i) => <li key={i}>{s}</li>)}</ol>
+            </div>}
           </>}
           {err && <div className="notice" style={{ borderColor: 'var(--fail)', color: '#ffd3d3', marginTop: 8 }}>{err}</div>}
           <div className="modal-actions" style={{ marginTop: 12 }}>

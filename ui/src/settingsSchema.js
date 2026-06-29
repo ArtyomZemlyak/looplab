@@ -1,7 +1,10 @@
 // One declarative description of every engine Settings field (looplab/config.py), grouped for a
 // readable form. Both the Settings page and the New-run dialog render from this — so the launch
 // dialog exposes exactly the same knobs the CLI `run` does, no more hand-maintained subset.
-// types: int | float | bool | text | enum | list  (float/text accept "" = unset → engine default)
+// types: int | float | bool | text | enum | list | secret
+//   (float/text accept "" = unset → engine default; secret is a write-only credential — see below)
+//
+// Groups are the TABS in the settings UI, so each is a coherent topic of roughly balanced size.
 
 export const SETTINGS_GROUPS = [
   {
@@ -32,7 +35,7 @@ export const SETTINGS_GROUPS = [
     ],
   },
   {
-    title: 'Strategist & operators', sub: 'A7 adaptive meta-control + richer operators (config-first)',
+    title: 'Strategist & operators', sub: 'A7 adaptive meta-control + richer proposal operators',
     fields: [
       { key: 'strategist_backend', label: 'Strategist', type: 'enum', options: ['off', 'rule', 'llm'],
         help: 'Optional meta-controller that picks policy/operators/fidelity at runtime. off = static config; rule = deterministic heuristics; llm = model-driven (default; falls back to rule).' },
@@ -42,6 +45,8 @@ export const SETTINGS_GROUPS = [
         help: 'A0b: mean = legacy mean-param merge; ensemble = Developer recombines parent solutions (code-level).' },
       { key: 'complexity_cue', label: 'Complexity cue', type: 'bool', agents: ['strategist'],
         help: 'A0d: inject a complexity hint keyed on a branch’s breadth (few children = minimal; many = advanced).' },
+      { key: 'ablate_code_blocks', label: 'Ablate code blocks', type: 'bool', agents: ['strategist'],
+        help: 'A0a: ablate generated pipeline code blocks (MLE-STAR), not just numeric params.' },
       { key: 'budget_aware', label: 'Budget-aware proposals', type: 'bool',
         help: 'A5: surface remaining eval budget into the proposal prompt (needs a max eval-time budget).' },
       { key: 'feature_engineering', label: 'Feature engineering', type: 'bool',
@@ -50,6 +55,17 @@ export const SETTINGS_GROUPS = [
         help: 'A4: feed recent failed-branch summaries into the proposal prompt so the proposer avoids repeating them.' },
       { key: 'localize_faults', label: 'Fault localization', type: 'bool',
         help: 'C1: rank the repo files most relevant to a failure and surface them in the prompt (repo tasks).' },
+      { key: 'novelty_gate', label: 'Novelty gate', type: 'bool',
+        help: 'E1: nudge near-duplicate proposals off each other so the search stops re-trying the same idea.' },
+      { key: 'novelty_epsilon', label: 'Novelty ε', type: 'float',
+        help: 'E1: normalized param-space distance below which a proposal counts as a near-duplicate.' },
+      { key: 'reflection_priors', label: 'Reflection priors', type: 'bool',
+        help: 'E4: distill a meta-review at run end and inject prior-run insights into the next run’s prompt (needs a memory dir).' },
+    ],
+  },
+  {
+    title: 'Resilience & efficiency', sub: 'crash recovery, dependency self-prep, and skipping doomed evals',
+    fields: [
       { key: 'deep_repair', label: 'Deep repair', type: 'bool',
         help: 'C3: give the Developer the failure taxonomy + a “reproduce then fix” directive on debug/inline repair. On by default.' },
       { key: 'inline_repair', label: 'Inline crash repair', type: 'bool',
@@ -62,36 +78,14 @@ export const SETTINGS_GROUPS = [
         help: 'When a node crashes purely because a KNOWN library is missing (ModuleNotFoundError — e.g. torch/xgboost/catboost), pip-install it into the eval interpreter and re-run instead of rejecting the idea. Trusted_local tier only. On by default.' },
       { key: 'dep_install_timeout', label: '↳ install timeout (s)', type: 'float',
         help: 'Per-package wall-clock budget for an auto-install. Generous default (900s) — large wheels like torch take minutes.' },
-      { key: 'ablate_code_blocks', label: 'Ablate code blocks', type: 'bool', agents: ['strategist'],
-        help: 'A0a: ablate generated pipeline code blocks (MLE-STAR), not just numeric params.' },
       { key: 'proxy_scoring', label: 'Proxy scoring', type: 'bool',
         help: 'A6: early-signal score candidates to skip doomed full evals.' },
       { key: 'proxy_kill_fraction', label: 'Proxy kill fraction', type: 'float',
         help: 'A6: skip the bottom fraction of candidates by proxy score (0 = never skip).' },
-      { key: 'reward_hack_detect', label: 'Reward-hack detector', type: 'bool',
-        help: 'B5: flag suspicious wins (grader/answer-key access, frozen-file writes, perfect metrics) in the Trust panel. Audit-only.' },
-      { key: 'code_leakage_detect', label: 'Code-leakage scan', type: 'bool',
-        help: 'I3: static scan of each solution for train→test leakage (fit-before-split, fit-on-test); surfaced in the Trust panel.' },
-      { key: 'critic_check', label: 'Independent critic', type: 'bool',
-        help: 'C4: execution-free critic of each solution (stub / hardcoded-metric / params-ignored); surfaced in the Trust panel.' },
-      { key: 'novelty_gate', label: 'Novelty gate', type: 'bool',
-        help: 'E1: nudge near-duplicate proposals off each other so the search stops re-trying the same idea.' },
-      { key: 'novelty_epsilon', label: 'Novelty ε', type: 'float',
-        help: 'E1: normalized param-space distance below which a proposal counts as a near-duplicate.' },
-      { key: 'reflection_priors', label: 'Reflection priors', type: 'bool',
-        help: 'E4: distill a meta-review at run end and inject prior-run insights into the next run’s prompt (needs a memory dir).' },
     ],
   },
   {
-    title: 'Confirmation', sub: 'guard against seed-lucky winners',
-    fields: [
-      { key: 'confirm_top_k', label: 'Confirm top-k', type: 'int',
-        help: 'Re-evaluate the best k nodes under multiple seeds before finishing (0 = off).' },
-      { key: 'confirm_seeds', label: 'Confirm seeds', type: 'int', help: 'Seeds used in the confirmation pass.' },
-    ],
-  },
-  {
-    title: 'Budgets', sub: 'hard ceilings (blank = unbounded)',
+    title: 'Budgets & confirmation', sub: 'hard ceilings (blank = unbounded) + guarding seed-lucky winners',
     fields: [
       { key: 'max_seconds', label: 'Max wall-clock (s)', type: 'float', placeholder: 'unbounded',
         help: 'Abort the run cleanly after this many seconds of wall-clock.' },
@@ -100,10 +94,13 @@ export const SETTINGS_GROUPS = [
         help: 'Ceiling on cumulative time spent INSIDE evals (survives resume).' },
       { key: 'timeout', label: 'Per-eval timeout (s)', type: 'float', agents: ['researcher', 'strategist', 'boss'],
         help: 'Kill a single eval after this long. Researcher = the “auto” per-node mode (it sizes heavy/neural-net experiments; this is the fallback).' },
+      { key: 'confirm_top_k', label: 'Confirm top-k', type: 'int',
+        help: 'Re-evaluate the best k nodes under multiple seeds before finishing (0 = off).' },
+      { key: 'confirm_seeds', label: 'Confirm seeds', type: 'int', help: 'Seeds used in the confirmation pass.' },
     ],
   },
   {
-    title: 'Roles & LLM', sub: 'who proposes ideas and writes code',
+    title: 'LLM', sub: 'the model endpoint(s) that propose ideas and write code',
     fields: [
       { key: 'backend', label: 'Role backend', type: 'enum', options: ['toy', 'llm'],
         help: 'toy = offline optimizer (no model); llm = live model Researcher/Developer.' },
@@ -114,6 +111,8 @@ export const SETTINGS_GROUPS = [
       { key: 'llm_model', label: 'Model', type: 'text', placeholder: 'qwen3:8b', help: 'LLM model id (when backend = llm).' },
       { key: 'llm_base_url', label: 'Base URL', type: 'text', placeholder: 'http://localhost:11434/v1',
         help: 'OpenAI-compatible endpoint (Ollama by default).' },
+      { key: 'llm_api_key', label: 'API key', type: 'secret',
+        help: 'Stored securely server-side (owner-only file, never written to a run snapshot or returned by the API) and passed to runs as LOOPLAB_LLM_API_KEY. Leave blank to keep the saved key; local servers (Ollama / vLLM with no auth) ignore it.' },
       { key: 'llm_temperature', label: 'Temperature', type: 'float', help: 'Sampling temperature.' },
       { key: 'llm_parser', label: 'Structured parser', type: 'enum', options: ['tool_call', 'baml', 'outlines'],
         help: 'How structured ideas are parsed from the model.' },
@@ -133,6 +132,8 @@ export const SETTINGS_GROUPS = [
         help: 'H3: per-role endpoint for the Researcher (blank = shared).' },
       { key: 'developer_base_url', label: 'Developer base URL', type: 'text', placeholder: 'shared',
         help: 'H3: per-role endpoint for the Developer (blank = shared).' },
+      { key: 'trace_llm_io', label: 'Capture LLM I/O', type: 'bool',
+        help: 'Record each LLM prompt + completion into spans (the per-node Trace tab).' },
     ],
   },
   {
@@ -155,7 +156,7 @@ export const SETTINGS_GROUPS = [
     ],
   },
   {
-    title: 'Sandbox & trust', sub: 'isolation and human-in-the-loop',
+    title: 'Safety & trust', sub: 'isolation, human-in-the-loop, and audit-only monitors',
     fields: [
       { key: 'trust_mode', label: 'Sandbox tier', type: 'enum', options: ['trusted_local', 'untrusted', 'hostile'],
         help: 'trusted_local = subprocess; untrusted = Docker --network none; hostile = + gVisor (runsc) true-isolation runtime (B4+).' },
@@ -168,10 +169,16 @@ export const SETTINGS_GROUPS = [
         help: 'Pause for human approval of the final best before finishing.' },
       { key: 'redact_output', label: 'Redact output secrets', type: 'bool',
         help: 'B3: mask credentials/high-entropy tokens in the persisted stdout/stderr tail (recommended for untrusted tiers).' },
+      { key: 'reward_hack_detect', label: 'Reward-hack detector', type: 'bool',
+        help: 'B5: flag suspicious wins (grader/answer-key access, frozen-file writes, perfect metrics) in the Trust panel. Audit-only.' },
+      { key: 'code_leakage_detect', label: 'Code-leakage scan', type: 'bool',
+        help: 'I3: static scan of each solution for train→test leakage (fit-before-split, fit-on-test); surfaced in the Trust panel.' },
+      { key: 'critic_check', label: 'Independent critic', type: 'bool',
+        help: 'C4: execution-free critic of each solution (stub / hardcoded-metric / params-ignored); surfaced in the Trust panel.' },
     ],
   },
   {
-    title: 'Authoring & memory', sub: 'directories the scientist reads',
+    title: 'Knowledge & memory', sub: 'directories the scientist reads + literature/deep research',
     fields: [
       { key: 'researcher_tools', label: 'Run-introspection tools', type: 'bool',
         help: 'On (default): the Researcher (and Deep-Research) can read its own experiments (list/read/find-analogous/themes/code) and the task data (schema/profile) mid-loop. Off: legacy single-shot proposer (richer default digest still added).' },
@@ -188,13 +195,6 @@ export const SETTINGS_GROUPS = [
         help: 'Overlap a due deep-research "think" with the GPU-bound eval, so the agent works while the node trains. Best with a REMOTE LLM (no GPU contention with eval); off by default — validate on your setup before enabling.' },
       { key: 'prompt_dir', label: 'Prompt dir', type: 'text', placeholder: 'unset', help: 'Editable, hot-reloaded role prompt .md files.' },
       { key: 'memory_dir', label: 'Memory dir', type: 'text', placeholder: 'unset', help: 'Cross-run case memory.' },
-    ],
-  },
-  {
-    title: 'Observability',
-    fields: [
-      { key: 'trace_llm_io', label: 'Capture LLM I/O', type: 'bool',
-        help: 'Record each LLM prompt + completion into spans (the per-node Trace tab).' },
     ],
   },
 ]
@@ -224,11 +224,14 @@ export function coerce(field, raw) {
 }
 
 // Turn a settings object into the form's editable shape (lists → comma string, null → '').
+// `secret` fields are write-only: the API only ever returns the masked "***", never the value, so
+// the input always starts BLANK (a non-empty edit means "set a new key" — see Settings.onSave).
 export function toForm(settings) {
   const out = {}
   for (const [k, f] of Object.entries(FIELD_BY_KEY)) {
     const v = settings?.[k]
-    if (f.type === 'bool') out[k] = !!v
+    if (f.type === 'secret') out[k] = ''
+    else if (f.type === 'bool') out[k] = !!v
     else if (f.type === 'list') out[k] = Array.isArray(v) ? v.join(', ') : (v ?? '')
     else out[k] = v == null ? '' : v
   }
@@ -236,8 +239,13 @@ export function toForm(settings) {
 }
 
 // Turn the form shape back into a coerced settings object (for PUT /api/settings or run launch).
+// `secret` fields are SKIPPED — they never travel in the settings payload (they go through the
+// dedicated, owner-only secret endpoint instead), so a credential can't land in ui_settings.json.
 export function fromForm(form) {
   const out = {}
-  for (const [k, f] of Object.entries(FIELD_BY_KEY)) out[k] = coerce(f, form[k])
+  for (const [k, f] of Object.entries(FIELD_BY_KEY)) {
+    if (f.type === 'secret') continue
+    out[k] = coerce(f, form[k])
+  }
   return out
 }

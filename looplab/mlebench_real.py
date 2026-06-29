@@ -165,17 +165,21 @@ class MLEBenchRealTask(BaseModel):
                 f"--- test.csv ---\n{head(pub / 'test.csv', 1)}\n"
                 f"--- {sample} (EXACT required output format) ---\n{head(pub / sample, 1)}\n")
 
-    def llm_roles(self, client: LLMClient, parser: str = "tool_call"):
+    def llm_roles(self, client: LLMClient, parser: str = "tool_call", runtime_caps: str | None = None):
         meta = self._meta()
         sample = meta["sample_name"]
         hint = (f"Choose ONE numeric hyperparameter 'p' in (0, {self.max_param}] for your model "
                 "(e.g. Naive-Bayes Laplace smoothing, or ridge regularization). Higher is more "
                 "regularized. The score is the competition metric; tune 'p' to improve it.")
+        # Honest capability sentence: when the engine auto-installs deps, `runtime_caps` tells the
+        # agent it MAY use torch/xgboost/etc. (so a neural-net idea isn't downgraded to sklearn).
+        # Falls back to the conservative legacy contract when not threaded in (unit-built roles).
+        caps = runtime_caps or ("You may use numpy, pandas and scikit-learn (all installed) plus the "
+                                "Python standard library; CPU only, no GPU/network.")
         brief = (
             f"This is the real Kaggle competition '{self.competition}'. Metric: {meta['scorer']} "
             f"({meta['direction']} is better). Read the training data from './train.csv' and the "
-            "test features from './test.csv' (CSV files). You may use numpy, pandas and scikit-learn "
-            "(all installed) plus the Python standard library; CPU only, no GPU/network. "
+            "test features from './test.csv' (CSV files). " + caps + " "
             f"A './description.md' explains the task and './{sample}' shows the EXACT required "
             "output format. IMPORTANT about columns: the column(s) you must predict are exactly the "
             f"non-id column(s) of './{sample}'. './test.csv' has the SAME columns as './train.csv' "
