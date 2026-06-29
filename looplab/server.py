@@ -1250,6 +1250,35 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
             "points you at their OWN repo (gives a path), ALWAYS author this inline repo task with that "
             "editable_path — do NOT substitute a similarly-named catalogue file; the catalogue is only "
             "for the bundled example tasks. An absolute path is best, but ~ and $HOME are expanded.\n"
+            "- REPO data: WHENEVER the user says where the data is, mount it — add "
+            '"data":{"<name>":"<abs path>"} (each is copied to ./<name> in the eval workdir; ~/$HOME '
+            'expand) and reference it by that relative path. Read-only runtime deps go in '
+            '"references":[{"name":..,"path":..,"mount":true}]. Never drop a data path the user gave.\n'
+            "- REPO with no entry script yet, OR a scorer but no trainer: the AGENT writes the missing "
+            'code. Point the command at a conventional file it will CREATE (e.g. ["python","run.py"]) '
+            "and INCLUDE that file in edit_surface so it may be created; when training must run before "
+            'scoring, put the trainer in eval.setup (e.g. ["python","train.py"] — it runs before the '
+            "eval each node). Keep the scorer in protect.\n"
+            "- REPO, let the AGENT choose the arguments (the user does NOT want to enumerate flags): keep "
+            'the command argument-free (e.g. ["python","run.py"]) and put a CONFIG the agent edits (e.g. '
+            "config.yaml) in edit_surface — the agent reads the code and rewrites the config to switch "
+            "implementations. The agent emits FILES, never the command line, so route variability through "
+            "an editable config/launcher, not by appending flags to the command.\n"
+            "- REPO pure hyperparameter tuning with NO code edits: set eval.params_style:\"cli_overrides\" "
+            'plus task "params":{"<name>":[lo,hi]} (NUMERIC bounds) so proposals become key=value CLI '
+            'overrides, and add eval.profiles {"smoke":{"overrides":[..],"timeout":..},"full":{..}} for a '
+            "cheap search + a full confirm. (Categorical impl-switches are NOT numeric — use the config "
+            "approach above for those.)\n"
+            "- metric.kind options: stdout_json (default) | stdout_regex | file_json / file_regex (read a "
+            "file the run writes; dotted key ok) | adapter (the onboarding-written reader). Choose file_* "
+            "when the metric lands in a FILE rather than stdout.\n"
+            "- NO repo/code, just DATA + a goal (\"here is my data, get the best metric you see fit\"): "
+            'author the fully-generative kind {"kind":"dataset","goal":"<what to do>","direction":"max",'
+            '"data_path":"<abs path to the data file/dir>"} — the Developer writes the WHOLE solution and '
+            "self-reports the metric, CHOOSING an appropriate one when the user didn't name it (set "
+            '"metric":"<name>" only if they did). Use mlebench_real instead for a known Kaggle '
+            "competition. (dataset self-reports its metric, so for a hard no-self-grading guarantee "
+            "prefer a repo task with the operator's own eval.)\n"
             "- setup_steps: WHENEVER the task is a repo, return a concrete checklist of what the user "
             "must do to make the repo LoopLab-ready, e.g.: 'Expose a metric — print one JSON line "
             '{"metric": <score>} at the end of the eval command\'; \'Pin dependencies in '
@@ -1301,8 +1330,11 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
                 "find_files(root, pattern). When the user points you at a repo (an editable_path or a path "
                 "they mention), ACTUALLY use them BEFORE emitting: list the repo, read its README for the "
                 "train/run command, read the eval/entry script (e.g. test.py) to see how the metric is "
-                "printed, note results/requirements files — then ground the eval command, metric key and "
-                "setup_steps in what you read. Don't just SAY you'll look — look, then call `emit` once.")
+                "printed AND what arguments / config file it accepts, note results/requirements/data and "
+                "config files — then ground the eval command, metric kind+key, edit_surface, any data mount "
+                "and (if it's argument- or config-driven) the params_style/config choice in what you read. "
+                "If there is NO entry/train script yet, say so and plan for the agent to write it (command "
+                "-> a file inside edit_surface). Don't just SAY you'll look — look, then call `emit` once.")
             emit_spec = {"type": "function", "function": {
                 "name": "emit", "description": "Emit the final run plan (run_id, task, settings, "
                 "setup_steps, reply, rationale).", "parameters": _GenesisSpec.model_json_schema()}}
