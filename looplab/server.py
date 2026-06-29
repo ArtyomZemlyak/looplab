@@ -2145,7 +2145,9 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
                 # Serve the index THROUGH _index_response so the auth <meta name="ll-token"> is injected
                 # here too. A proxy/bookmark that lands on `.../proxy/8765/index.html` (not the bare `/`)
                 # would otherwise get the un-injected file → no token → every mutating action 401s.
-                return _index_response()
+                # Pass `request` so the Sec-Fetch-Dest token-gating applies to /index.html too — else a
+                # `fetch('/index.html')` (dest=empty) would be handed the token, reopening the exfil hole.
+                return _index_response(request)
             base = dist.resolve()
             target = (dist / path).resolve()
             if (target == base or base in target.parents) and target.is_file():
