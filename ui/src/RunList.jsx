@@ -5,6 +5,7 @@ import MapView from './MapView.jsx'
 import GenesisChat from './GenesisChat.jsx'
 import ScopeReport from './ScopeReport.jsx'
 import ThemeSwitcher from './ThemeSwitcher.jsx'
+import EnergyToggle from './EnergyToggle.jsx'
 import { OpIcon } from './icons.jsx'
 
 const ALL = '__all__', UNASSIGNED = '__unassigned__'
@@ -277,6 +278,7 @@ export default function RunList({ onOpen, onSettings }) {
         </div>
         <button className="btn sm primary" onClick={() => { setSeed(''); setStarting(true) }}>▶ New run</button>
         <ThemeSwitcher />
+        <EnergyToggle />
         <button className="btn sm ghost" title="settings" onClick={() => onSettings && onSettings()}>⚙ Settings</button>
       </div>
 

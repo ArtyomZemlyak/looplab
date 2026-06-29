@@ -3,8 +3,10 @@ import RunList from './RunList.jsx'
 import RunView from './RunView.jsx'
 import Settings from './Settings.jsx'
 import { initTheme } from './ThemeSwitcher.jsx'
+import { initFx } from './fx.js'
 
 initTheme()   // restore the saved design theme before first paint
+initFx()      // restore the saved Energy/Reactor FX level (data-fx) before first paint
 
 // Tiny hash router: #/run/<id> opens a run, #/settings opens the settings page.
 const safeDecode = (s) => { try { return decodeURIComponent(s) } catch { return s } }

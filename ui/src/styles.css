@@ -75,6 +75,18 @@
 }
 :root[data-theme="old-green"] body { text-shadow: 0 0 2px rgba(80, 255, 140, .30); }
 
+/* Reactor — deep-space sci-fi: near-black blue-violet canvas, neon cyan accent, plasma statuses.
+   Designed to pair with the ⚡ Energy FX mode (data-fx) but reads fine as a static palette too. */
+:root[data-theme="reactor"] {
+  --bg: #05060f; --bg-1: #090b18; --bg-2: #0e1226; --bg-3: #161c3a;
+  --line: #243056; --line-2: #34468a;
+  --fg: #eaf2ff; --fg-dim: #9fb2e0; --fg-mut: #7184bb;   /* a11y: ≥4.6:1 on the dark surfaces */
+  --working: #ffb224; --ok: #2ff0c8; --fail: #ff476f; --best: #ffd23f;
+  --pending: #5d6da6; --infeasible: #9a6bff; --accent: #36e6ff; --accent-dim: #1f7fd6; --alarm: #ff476f;
+  --shadow: 0 8px 30px rgba(0, 20, 80, .6); --shadow-card: 0 2px 14px rgba(20, 60, 160, .35);
+}
+:root[data-theme="reactor"] .brand { letter-spacing: .07em; text-transform: uppercase; }
+
 * { box-sizing: border-box; }
 html, body, #root { height: 100%; margin: 0; }
 body { background: var(--bg); color: var(--fg); font-size: 13px; line-height: 1.45; }
@@ -949,3 +961,194 @@ textarea.text { min-height: 220px; font-family: ui-monospace, Consolas, monospac
 .sr-best:hover { border-color: var(--accent-dim); background: var(--bg-3); }
 .sr-best .sr-m { font-variant-numeric: tabular-nums; color: var(--best); }
 .sr-best .sr-rid { color: var(--fg-dim); }
+
+/* ═══════════════════════ Energy / Reactor FX (opt-in: data-fx="subtle"|"full") ═══════════════════════
+   A "game-y" animated layer on top of any theme. EVERYTHING here is scoped under [data-fx], so when the
+   mode is OFF (no attribute) nothing below matches and the canvas is byte-for-byte the calm default.
+   Channels stay semantic: glow/particle COLOUR is still the status/lineage token — motion just makes
+   the live search feel like a reactor. Pairs best with the Reactor theme but works on every palette. */
+
+/* the graph canvas gets a relative wrapper so the space backdrop can sit behind React Flow */
+.dag-wrap { position: relative; width: 100%; height: 100%; }
+.ll-fx-defs { position: absolute; width: 0; height: 0; overflow: hidden; }
+
+/* let the backdrop show through: React Flow paints an opaque pane by default. Also lift React Flow
+   ABOVE the backdrop — .reactor-bg is positioned (z-index:0), so an unpositioned flow would paint
+   under it; relative + z-index:1 keeps the graph on top. */
+[data-fx] .react-flow,
+[data-fx] .react-flow__background { background: transparent !important; }
+[data-fx] .dag-wrap > .react-flow { position: relative; z-index: 1; }
+
+/* ── deep-space backdrop: drifting energy grid + nebula glow + vignette (GPU-cheap, node-count-free) ── */
+.reactor-bg { position: absolute; inset: 0; z-index: 0; pointer-events: none; overflow: hidden;
+  background:
+    radial-gradient(120% 80% at 50% -10%, rgba(54, 230, 255, .10), transparent 60%),
+    radial-gradient(110% 90% at 50% 115%, rgba(154, 107, 255, .12), transparent 60%),
+    linear-gradient(180deg, #04050e, #080b1c 60%, #0a0e22); }
+/* the whole field breathes — a slow brightness/saturation pulse makes the nebula feel powered */
+[data-fx="full"] .reactor-bg { animation: reactor-pulse 7s ease-in-out infinite; }
+.reactor-bg::before { content: ''; position: absolute; inset: -48px;
+  background-image:
+    linear-gradient(rgba(54, 230, 255, .085) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(54, 230, 255, .085) 1px, transparent 1px);
+  background-size: 46px 46px, 46px 46px; }
+[data-fx="full"] .reactor-bg::before { animation: reactor-grid 11s linear infinite; }
+/* vignette (static radial) + a bright scan band sweeping top→bottom (full only) */
+.reactor-bg::after { content: ''; position: absolute; inset: 0;
+  background:
+    radial-gradient(125% 125% at 50% 45%, transparent 52%, rgba(0, 0, 0, .6) 100%),
+    linear-gradient(180deg, transparent 0%, rgba(54, 230, 255, .10) 48%, rgba(54, 230, 255, .16) 50%, rgba(54, 230, 255, .10) 52%, transparent 100%);
+  background-size: 100% 100%, 100% 26%;
+  background-position: 50% 50%, 50% -30%; background-repeat: no-repeat; }
+[data-fx="full"] .reactor-bg::after { animation: reactor-scan 6s linear infinite; }
+@keyframes reactor-grid { from { transform: translateY(0); } to { transform: translateY(46px); } }
+@keyframes reactor-pulse {
+  0%, 100% { filter: brightness(1) saturate(1); }
+  50%      { filter: brightness(1.35) saturate(1.3); } }
+@keyframes reactor-scan {
+  from { background-position: 50% 50%, 50% -30%; }
+  to   { background-position: 50% 50%, 50% 130%; } }
+
+/* ── energy edges ── the streaming particles (EnergyEdge.jsx) carry a neon glow; their colour is the
+   fill set per flow kind (working/best/accent). The PATH keeps its semantic stroke from the class. */
+.react-flow__edge .ll-spark { filter: url(#ll-energy-glow); }
+/* a glow on the few edges that already MEAN something (bounded — not every edge, for perf) */
+[data-fx] .react-flow__edge.lineage .react-flow__edge-path,
+[data-fx] .react-flow__edge.champion .react-flow__edge-path,
+[data-fx] .react-flow__edge.charge .react-flow__edge-path,
+[data-fx] .react-flow__edge.debug .react-flow__edge-path { filter: url(#ll-energy-glow); stroke-width: 2.4; }
+/* the plasma feed into the working node is the brightest line on the canvas */
+[data-fx] .react-flow__edge.charge .react-flow__edge-path { stroke: var(--working); stroke-width: 2.8; }
+/* plain (unclassified) edges adopt the energy gradient so the whole web reads as live circuitry */
+[data-fx] .react-flow__edge:not(.lineage):not(.champion):not(.charge):not(.debug):not(.leader) .react-flow__edge-path {
+  stroke: url(#ll-energy-grad); stroke-width: 1.7; opacity: .85; }
+#ll-energy-grad .g0 { stop-color: var(--accent); }
+#ll-energy-grad .g1 { stop-color: var(--best); }
+
+/* "full" cranks the energy: the semantic lines crackle like live arcs (animated displacement), and the
+   whole plain web shimmers (cheap opacity flicker). Both are FULL-only so "subtle" stays a calm glow. */
+[data-fx="full"] .react-flow__edge.lineage .react-flow__edge-path,
+[data-fx="full"] .react-flow__edge.champion .react-flow__edge-path,
+[data-fx="full"] .react-flow__edge.charge .react-flow__edge-path,
+[data-fx="full"] .react-flow__edge.debug .react-flow__edge-path { filter: url(#ll-arc); }
+[data-fx="full"] .react-flow__edge:not(.lineage):not(.champion):not(.charge):not(.debug):not(.leader):not(.faded) .react-flow__edge-path {
+  animation: ll-edge-shimmer 1.6s ease-in-out infinite; }
+@keyframes ll-edge-shimmer {
+  0%, 100% { opacity: .55; stroke-width: 1.4; }
+  50%      { opacity: 1;   stroke-width: 2.2; } }
+
+/* ── living nodes ── a status-coloured neon halo, sized by per-node "heat" (--core from improvement).
+   Pure box-shadow (no extra DOM, no stacking risk): only the rare working/best cards actually animate,
+   so at most ~2 cards move at once however large the forest. LOD glyphs inherit it → at overview the
+   tree reads as a field of glowing reactor cores. */
+[data-fx] .node-card { transition: box-shadow .25s ease, transform .12s ease, filter .12s ease; position: relative; }
+/* hover: the card leans toward you and brightens — works on every level */
+[data-fx] .node-card:hover { transform: scale(1.045); filter: brightness(1.18) saturate(1.12); z-index: 6; }
+/* power-on: each card MATERIALISES with an overshoot pop. Plays once on mount (a new live node appears),
+   on view re-entry, and — best of all — the moment you flip Energy to Full the whole forest powers up. */
+[data-fx="full"] .node-card { animation: ll-spawn .55s cubic-bezier(.2, .9, .3, 1.35) 1; }
+@keyframes ll-spawn {
+  0%   { transform: scale(.35); opacity: 0; filter: brightness(2); }
+  55%  { transform: scale(1.09); opacity: 1; filter: brightness(1.5); }
+  100% { transform: scale(1); opacity: 1; filter: brightness(1); } }
+[data-fx] .node-card.s-pending   { box-shadow: 0 0 calc(8px + 12px * var(--core, .3)) -4px var(--pending), var(--shadow-card); }
+[data-fx] .node-card.s-evaluated { box-shadow: 0 0 calc(14px + 26px * var(--core, .5)) -3px var(--ok), var(--shadow-card); }
+[data-fx] .node-card.infeasible  { box-shadow: 0 0 16px -5px var(--infeasible), var(--shadow-card); }
+[data-fx] .node-card.s-failed    { box-shadow: 0 0 18px -4px var(--fail), var(--shadow-card); }
+[data-fx] .node-card.working     { box-shadow: 0 0 30px -1px var(--working), var(--shadow-card); }
+[data-fx] .node-card.best        { box-shadow: 0 0 calc(26px + 20px * var(--core, 1)) -1px var(--best),
+                                     0 0 0 2px rgba(255, 210, 63, .6), var(--shadow-card); }
+/* choreography only at "full": working node pulses hard ("charging"), champion blazes with a fast aura,
+   a fresh failure flashes out. (Subtle = the static halos above, no looping motion.) */
+[data-fx="full"] .node-card.working { animation: ll-charge .8s ease-in-out infinite, ll-spawn .55s cubic-bezier(.2, .9, .3, 1.35) 1; }
+[data-fx="full"] .node-card.best    { animation: ll-aura 1.8s ease-in-out infinite, ll-spawn .55s cubic-bezier(.2, .9, .3, 1.35) 1; }
+[data-fx="full"] .node-card.s-failed { animation: shake .4s 1, ll-sparkdie .9s ease-out 1, ll-spawn .55s cubic-bezier(.2, .9, .3, 1.35) 1; }
+/* a selected node breathes an accent ring (full only; the static halo below covers subtle/off) */
+[data-fx="full"] .node-card.sel { animation: ll-sel-pulse 1.4s ease-in-out infinite, ll-spawn .55s cubic-bezier(.2, .9, .3, 1.35) 1; }
+@keyframes ll-sel-pulse {
+  0%, 100% { box-shadow: 0 0 0 2px var(--accent), 0 0 16px -3px var(--accent), var(--shadow-card); }
+  50%      { box-shadow: 0 0 0 2px var(--accent), 0 0 32px 1px var(--accent), var(--shadow-card); } }
+@keyframes ll-charge {
+  0%, 100% { box-shadow: 0 0 16px -4px var(--working), var(--shadow-card); }
+  50%      { box-shadow: 0 0 40px 3px var(--working), var(--shadow-card); } }
+@keyframes ll-aura {
+  0%, 100% { box-shadow: 0 0 22px -2px var(--best), 0 0 0 2px rgba(255, 210, 63, .45), var(--shadow-card); }
+  50%      { box-shadow: 0 0 52px 6px var(--best), 0 0 0 2px rgba(255, 210, 63, .85), var(--shadow-card); } }
+@keyframes ll-sparkdie {
+  0%   { box-shadow: 0 0 34px 4px var(--fail), var(--shadow-card); }
+  100% { box-shadow: 0 0 0 0 var(--fail), var(--shadow-card); } }
+
+/* selection halo reads on top of the glows */
+[data-fx] .node-card.sel { box-shadow: 0 0 0 2px var(--accent), 0 0 22px -2px var(--accent), var(--shadow-card); }
+
+/* ── champion lightning ── jagged arcs crackle around the best node (full only). Rendered for the best
+   node always; shown only under [data-fx="full"]. Each bolt strikes on its own staggered flicker so the
+   crown reads as live electricity. Pure overlay, pointer-events:none — never blocks the card. */
+[data-fx="full"] .node-card.best { position: relative; }
+.ll-bolts { display: none; }
+[data-fx="full"] .node-card.best > .ll-bolts {
+  display: block; position: absolute; inset: 0; width: 100%; height: 100%;
+  overflow: visible; pointer-events: none; z-index: 3; }
+[data-fx="full"] .node-card.best > .ll-bolts path {
+  fill: none; stroke: var(--best); stroke-width: 2.4; stroke-linecap: round; stroke-linejoin: round;
+  filter: url(#ll-energy-glow); opacity: .25; animation: ll-bolt .9s steps(1, end) infinite; }
+[data-fx="full"] .node-card.best > .ll-bolts path.b-accent { stroke: var(--accent); }
+/* slight per-bolt period variation → the crown crackles organically instead of pulsing in lock-step */
+[data-fx="full"] .node-card.best > .ll-bolts path:nth-child(3n+1) { animation-duration: 1.05s; }
+[data-fx="full"] .node-card.best > .ll-bolts path:nth-child(3n+2) { animation-duration: .78s; }
+/* always a faint arc present, with several hard strikes per cycle → reads as live, continuous lightning */
+@keyframes ll-bolt {
+  0%   { opacity: .22; }
+  10%  { opacity: 1; }
+  22%  { opacity: .28; }
+  40%  { opacity: .95; }
+  55%  { opacity: .2; }
+  70%  { opacity: 1; }
+  85%  { opacity: .3; }
+  100% { opacity: .22; } }
+
+/* ── champion sonar ping ── a gold ring expands out of the best node and fades, like a radar pulse. One
+   champion only, so it's free. Two staggered rings (::child + pseudo would need extra DOM — one element,
+   two animations via the element + its ::before) read as a steady "this is THE one" beacon. */
+.ll-ring { display: none; }
+[data-fx="full"] .node-card.best > .ll-ring,
+[data-fx="full"] .node-card.best > .ll-ring::before {
+  display: block; content: ''; position: absolute; inset: -2px; pointer-events: none;
+  border: 2px solid var(--best); border-radius: calc(var(--radius) + 2px); opacity: 0; }
+[data-fx="full"] .node-card.best > .ll-ring        { animation: ll-ring 2.4s ease-out infinite; }
+[data-fx="full"] .node-card.best > .ll-ring::before { animation: ll-ring 2.4s ease-out infinite 1.2s; }
+@keyframes ll-ring {
+  0%   { transform: scale(1);   opacity: .75; }
+  100% { transform: scale(1.7); opacity: 0; } }
+
+/* energy toggle popover — reuses the theme-switch menu chrome */
+.fx-switch { position: relative; display: inline-flex; }
+.fx-menu { min-width: 196px; }
+/* when FX is live, the ⚡ button itself pulses with accent energy so the mode is obvious in the topbar */
+[data-fx] .fx-switch > button.primary { animation: ll-toggle-glow 1.6s ease-in-out infinite; }
+@keyframes ll-toggle-glow {
+  0%, 100% { box-shadow: 0 0 7px -3px var(--accent); }
+  50%      { box-shadow: 0 0 16px 0 var(--accent); } }
+
+/* accessibility: honour reduced-motion — keep the palette + static glow, drop all movement */
+@media (prefers-reduced-motion: reduce) {
+  [data-fx="full"] .reactor-bg,
+  [data-fx="full"] .reactor-bg::before,
+  [data-fx="full"] .reactor-bg::after,
+  [data-fx="full"] .node-card,
+  [data-fx="full"] .node-card.working,
+  [data-fx="full"] .node-card.best,
+  [data-fx="full"] .node-card.sel,
+  [data-fx="full"] .node-card.s-failed,
+  [data-fx="full"] .node-card.best > .ll-bolts path,
+  [data-fx="full"] .node-card.best > .ll-ring,
+  [data-fx="full"] .node-card.best > .ll-ring::before,
+  [data-fx] .fx-switch > button.primary,
+  [data-fx="full"] .react-flow__edge .react-flow__edge-path { animation: none !important; }
+  /* swap the animated crackle filter back to the still bloom (the SMIL turbulence keeps ticking but
+     nothing references it, so there's no per-frame paint) */
+  [data-fx="full"] .react-flow__edge.lineage .react-flow__edge-path,
+  [data-fx="full"] .react-flow__edge.champion .react-flow__edge-path,
+  [data-fx="full"] .react-flow__edge.charge .react-flow__edge-path,
+  [data-fx="full"] .react-flow__edge.debug .react-flow__edge-path { filter: url(#ll-energy-glow); }
+}

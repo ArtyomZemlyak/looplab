@@ -6,6 +6,8 @@ import { nodeChip } from './report.js'
 import { OpIcon } from './icons.jsx'
 import { Spark } from './charts.jsx'
 import { GroupRegion, SuperShell } from './groupnodes.jsx'
+import EnergyEdge from './EnergyEdge.jsx'
+import { useFx } from './fx.js'
 import {
   computeGroups, nodeGroupMap, regionGeometry, rerouteForCollapse, groupColor,
   groupAggregate, superId, GROUP_MODES, isMergeEntryEdge,
@@ -37,6 +39,27 @@ function agentBadge(rep) {
   return null
 }
 
+// Champion lightning (Reactor/Energy "full" only): jagged arcs crackling around the best node's card.
+// Always rendered for the best node; CSS hides it unless [data-fx="full"]. There's exactly ONE champion,
+// so the extra SVG is negligible. Coords are in the card's 188×78 space; bolts spill outside via overflow.
+const BOLTS = [
+  'M22 4 L12 -10 L24 -18 L8 -34',          // top-left strike
+  'M166 4 L180 -10 L166 -20 L184 -34',     // top-right strike
+  'M4 28 L-14 24 L-4 40 L-20 50',          // left arc
+  'M184 30 L202 26 L190 42 L208 52',       // right arc
+  'M76 1 L84 -16 L98 -7 L106 -24 L114 -9', // top-centre crown
+  'M70 78 L62 92 L80 88 L70 104',          // bottom discharge
+]
+function Bolts() {
+  return (
+    <svg className="ll-bolts" viewBox="0 0 188 78" preserveAspectRatio="none" aria-hidden="true">
+      {BOLTS.map((d, i) => (
+        <path key={i} d={d} className={i % 3 === 1 ? 'b-accent' : ''} style={{ animationDelay: `${(i * 0.17).toFixed(2)}s` }} />
+      ))}
+    </svg>
+  )
+}
+
 function ExpNode({ data }) {
   const { node, state, workId, selectedId, onSelect, themeFilter, groupTint } = data
   const lod = useContext(LodContext)   // overview zoom → render the compact glyph instead of the full card
@@ -54,7 +77,11 @@ function ExpNode({ data }) {
   const dim = data.dim   // precomputed in the canvas memo: lineage-focus dimming OR the theme filter
   const confirmed = node.confirmed_mean != null
   const cardCls = nodeClass(node, state, workId) + (node.id === selectedId ? ' sel' : '') + (sweep ? ' sweep' : '') + (groupTint ? ' grouped' : '') + (dim ? ' dim' : '')
-  const cardStyle = groupTint ? { '--grp-tint': groupTint } : undefined
+  // FX "heat" (0..1) for the reactor-core glow — only read under [data-fx]; harmless when FX is off.
+  // Champion brightest, then an improving node, then plain evaluated; failed/pending stay dim.
+  const coreI = node.id === state.best_node_id ? 1 : (d && d.improved) ? 0.85
+    : node.status === 'evaluated' ? 0.55 : node.status === 'failed' ? 0.45 : 0.3
+  const cardStyle = { '--core': coreI, ...(groupTint ? { '--grp-tint': groupTint } : {}) }
   const cardTitle = op.label + (node.idea?.rationale ? ' — ' + node.idea.rationale : '')
   // Zoom LOD: below the threshold the full card is sub-pixel mush AND expensive (4 text rows + a Spark
   // SVG). Collapse to a glyph — the status-coloured body does the talking, plus the operator icon + id,
@@ -62,6 +89,7 @@ function ExpNode({ data }) {
   if (lod) return (
     <div className={cardCls + ' lod'} style={cardStyle} onClick={() => onSelect(node.id)} title={cardTitle}>
       <Handle type="target" position={Position.Top} style={{ opacity: 0 }} />
+      {node.id === state.best_node_id && <><span className="ll-ring" aria-hidden="true" /><Bolts /></>}
       <span className="lod-ic"><OpIcon name={op.icon} size={22} /></span>
       <span className="lod-id">#{node.id}</span>
       <Handle type="source" position={Position.Bottom} style={{ opacity: 0 }} />
@@ -71,6 +99,7 @@ function ExpNode({ data }) {
     <div className={cardCls} style={cardStyle}
          onClick={() => onSelect(node.id)} title={cardTitle}>
       <Handle type="target" position={Position.Top} style={{ opacity: 0 }} />
+      {node.id === state.best_node_id && <><span className="ll-ring" aria-hidden="true" /><Bolts /></>}
       <div className="row">
         <span className="nid">#{node.id}</span>
         {/* operator = icon only (the word is in the title + legend); kept monochrome so colour stays status */}
@@ -151,11 +180,13 @@ function GroupSuper({ data }) {
 // chips are a planned follow-up — they need the Researcher to attribute which direction it used.)
 
 const nodeTypes = { exp: ExpNode, groupLane: GroupLane, groupSuper: GroupSuper }
+const edgeTypes = { energy: EnergyEdge }   // used only in Reactor/Energy FX mode (edge.type === 'energy')
 
 export default function Dag({ state, selectedId, onSelect, groupMode = 'none', collapsed = new Set(),
                              onToggleGroup, onSetMode, onCollapseAll, onExpandAll, onAutoCollapse, selectedGroup, onSelectGroup,
                              themeFilter = null }) {
   const workId = workingId(state)
+  const fx = useFx()   // '' | 'subtle' | 'full' — Reactor/Energy FX: swaps edge rendering + the backdrop
   const [showMap, setShowMap] = useState(() => localStorage.getItem('ll.minimap') === '1')
   const [showLegend, setShowLegend] = useState(false)
   const [lod, setLod] = useState(false)   // zoom level-of-detail: full cards ↔ glyphs (set by LodWatcher)
@@ -263,21 +294,55 @@ export default function Dag({ state, selectedId, onSelect, groupMode = 'none', c
       if (isLeader) cls.push('leader')
       if (onLineage) cls.push('lineage')                 // accent: the path through the selected node
       else if (onChamp) cls.push('champion')             // faint gold: the winning lineage (persistent)
-      if (focusSet && !onLineage && !onChamp) cls.push('faded')   // everything off-path recedes
+      const faded = focusSet && !onLineage && !onChamp
+      if (faded) cls.push('faded')   // everything off-path recedes
+      const charging = e.dstId === workId && !hidden.has(e.dstId)   // this edge feeds the working node
+      const flow = onLineage ? 'lineage' : onChamp ? 'champion' : null
+      if (charging && !onLineage && !onChamp) cls.push('charge')   // plasma feed into the working node
       return {
         id: `${e.source}->${e.target}`, source: e.source, target: e.target,
-        type: isLeader ? 'smoothstep' : undefined,
+        // FX mode routes every edge through EnergyEdge (it draws the matching path shape itself);
+        // otherwise keep today's behaviour (smoothstep only for the merge "leader" bridge).
+        type: fx ? 'energy' : (isLeader ? 'smoothstep' : undefined),
         className: cls.join(' '),
-        animated: e.dstId === workId && !hidden.has(e.dstId),
+        // the built-in dashed flow only OUTSIDE FX mode — in FX mode the streaming particle is the cue
+        animated: charging && !fx,
+        data: { leader: isLeader, charging, flow, faded: !!faded, level: fx },
       }
     })
     return { nodes: rfNodes, edges: rfEdges, groupKeys: [...groups.keys()] }
   }, [state, selectedId, workId, onSelect, groupMode, collapsed, selectedGroup, onToggleGroup, onSelectGroup,
-      themeFilter])
+      themeFilter, fx])
 
   return (
     <LodContext.Provider value={lod}>
-    <ReactFlow nodes={nodes} edges={edges} nodeTypes={nodeTypes} fitView fitViewOptions={{ padding: 0.12 }}
+    <div className="dag-wrap">
+    {/* Reactor/Energy backdrop + shared SVG defs (the edge gradient + the neon glow filter), mounted
+        only while FX is on so there's zero cost otherwise. The defs ids are referenced from CSS. */}
+    {fx && <div className="reactor-bg" aria-hidden="true" />}
+    {fx && <svg className="ll-fx-defs" width="0" height="0" aria-hidden="true"><defs>
+      <linearGradient id="ll-energy-grad" x1="0" y1="0" x2="1" y2="1">
+        <stop className="g0" offset="0%" /><stop className="g1" offset="100%" />
+      </linearGradient>
+      {/* neon bloom for the streaming packets + the champion's lightning */}
+      <filter id="ll-energy-glow" x="-60%" y="-60%" width="220%" height="220%">
+        <feGaussianBlur stdDeviation="2.2" result="b" />
+        <feMerge><feMergeNode in="b" /><feMergeNode in="SourceGraphic" /></feMerge>
+      </filter>
+      {/* "barely jittering" electric arc — animated fractal turbulence displaces the path a pixel or two,
+          then a bloom is merged over it. Applied (full only) to the few SEMANTIC edge paths, so the
+          per-frame filter recompute stays bounded to the spine + lineage + charge feed, not every edge. */}
+      <filter id="ll-arc" x="-80%" y="-80%" width="260%" height="260%">
+        <feTurbulence type="fractalNoise" baseFrequency="0.018" numOctaves="1" seed="7" result="noise">
+          <animate attributeName="baseFrequency" dur="0.55s" values="0.012;0.03;0.012" repeatCount="indefinite" />
+        </feTurbulence>
+        <feDisplacementMap in="SourceGraphic" in2="noise" scale="2.4"
+                           xChannelSelector="R" yChannelSelector="G" result="disp" />
+        <feGaussianBlur in="disp" stdDeviation="2.4" result="b" />
+        <feMerge><feMergeNode in="b" /><feMergeNode in="disp" /></feMerge>
+      </filter>
+    </defs></svg>}
+    <ReactFlow nodes={nodes} edges={edges} nodeTypes={nodeTypes} edgeTypes={edgeTypes} fitView fitViewOptions={{ padding: 0.12 }}
                minZoom={0.05} maxZoom={1.8}
                onlyRenderVisibleElements proOptions={{ hideAttribution: true }} nodesDraggable={false}
                onPaneClick={() => { onSelect(null); onSelectGroup && onSelectGroup(null) }}>
@@ -320,6 +385,7 @@ export default function Dag({ state, selectedId, onSelect, groupMode = 'none', c
         return '#6b7686'
       }} style={{ background: '#12151c', width: 180, height: 130 }} />}
     </ReactFlow>
+    </div>
     </LodContext.Provider>
   )
 }

@@ -7,6 +7,7 @@ import Dock from './Dock.jsx'
 import { computeGroups, autoCollapseSet } from './grouping.js'
 import ReportView from './Report.jsx'
 import DirectionsOverview from './DirectionsOverview.jsx'
+import EnergyToggle from './EnergyToggle.jsx'
 import {
   TrustPanel, SensitivityPanel, FailuresPanel, ParetoPanel, DataQualityPanel,
   ConfigPanel, AuthoringPanel, MemoryPanel, RegistryPanel, EventExplorer,
@@ -147,6 +148,7 @@ export default function RunView({ runId, onBack }) {
           <button className={'vt' + (panel === 'overview' ? ' on' : '')} onClick={() => setPanel(panel === 'overview' ? null : 'overview')}
             title="at-a-glance run summary — best metric, budget, strategy, hints">Overview</button>
         </div>
+        <EnergyToggle />
         <span className="pill phase">{phaseLabel(state)}</span>
         <span className="muted" style={{ maxWidth: 280, overflow: 'hidden', whiteSpace: 'nowrap', textOverflow: 'ellipsis' }} title={state.goal}>{state.goal || state.task_id}</span>
         <span className={'live ' + liveStatus}><span className="led" />{liveLabel}{replaying && ' · replay'}</span>
