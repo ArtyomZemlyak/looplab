@@ -14,6 +14,7 @@ from typing import Any, Iterator
 
 import orjson
 
+from .atomicio import best_effort_fsync
 from .models import Event
 from .tracing import current_ids
 
@@ -124,7 +125,8 @@ class EventStore:
             with open(self.path, "ab") as f:    # advance _seq only AFTER a durable write succeeds
                 f.write(line + b"\n")
                 f.flush()
-                os.fsync(f.fileno())
+                best_effort_fsync(f.fileno())   # FUSE/S3 fsync may raise/throttle — must not abort the
+                #                                 engine mid-run (read tolerates a torn final line)
             self._seq = seq
         return e
 

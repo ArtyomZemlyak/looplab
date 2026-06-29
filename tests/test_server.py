@@ -143,6 +143,35 @@ def test_engine_alive_unsupported_flock_reads_not_alive(tmp_path, monkeypatch):
     assert _engine_alive(rd) is True            # genuinely held by a live engine
 
 
+def test_engine_singleton_fails_open_on_unsupported_flock(tmp_path, monkeypatch):
+    """The OTHER half of the lock: on a FUSE/S3 mount where flock raises a plain OSError, the engine
+    singleton must DEGRADE TO A NO-OP (yield True, run anyway) — NOT misread it as 'another engine holds
+    it' and silently refuse to run. Before the fix a bare `except OSError` failed CLOSED, so on a
+    JupyterHub geesefs home EVERY `run`/`resume` saw a phantom 'already running' and exited. Only a
+    genuine BlockingIOError = held. Mirrors _engine_alive's fail-open so the two halves agree on FUSE."""
+    fcntl = pytest.importorskip("fcntl")        # POSIX-only; Windows uses the msvcrt branch
+    from looplab.cli import _engine_singleton
+    rd = tmp_path / "r"
+
+    def _raise(exc):
+        def _f(*a, **k):
+            raise exc
+        return _f
+    monkeypatch.setattr(fcntl, "flock", _raise(OSError("flock not supported on this fs")))
+    with _engine_singleton(rd) as ok:
+        assert ok is True            # unsupported lock -> fail OPEN (engine still runs)
+    monkeypatch.setattr(fcntl, "flock", _raise(BlockingIOError("held")))
+    with _engine_singleton(rd) as ok:
+        assert ok is False           # genuinely HELD by a live engine -> caller no-ops
+
+
+def test_generic_job_unknown_id(tmp_path):
+    """The generic background-job poll endpoint reports `unknown` for an expired/never-seen id (the UI
+    re-issues the action) rather than 404ing."""
+    client = TestClient(make_app(tmp_path))
+    assert client.get("/api/jobs/deadbeef").json() == {"status": "unknown"}
+
+
 def test_settings_get_put_roundtrip(tmp_path):
     client = TestClient(make_app(tmp_path))
     base = client.get("/api/settings").json()

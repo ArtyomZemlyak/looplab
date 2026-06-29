@@ -14,6 +14,11 @@ export function useRunState(runId) {
     let stopped = false
     let timer = null
     let lastSeq = -2, lastAlive
+    // Reconnect backoff: behind a proxy a hard drop/504 on the GET (or a keepalive-starved idle drop)
+    // would otherwise retry on a fixed 1.5s tick forever — a GET storm that re-folds the run each time.
+    // Ramp 1.5s → ×2 → 30s cap; a live `state` frame proves the stream works and resets it.
+    const MIN_BACKOFF = 1500, MAX_BACKOFF = 30000
+    let backoff = MIN_BACKOFF
     const reconnect = (delay) => { if (stopped) return; clearTimeout(timer); timer = setTimeout(connect, delay) }
     function connect() {
       const es = new EventSource(apiUrl(`/api/runs/${runId}/events`))
@@ -21,6 +26,7 @@ export function useRunState(runId) {
       es.addEventListener('state', (e) => {
         let p
         try { p = JSON.parse(e.data) } catch { return }  // ignore a torn/partial SSE frame
+        backoff = MIN_BACKOFF   // a live frame proves the stream works — reset the error backoff
         setConnected(true)
         // Re-render on a seq change OR an engine_running flip (a zombie's liveness changes with no
         // new event/seq); track lastAlive in the closure (NOT stale React `live`) to avoid churn.
@@ -35,7 +41,8 @@ export function useRunState(runId) {
       es.addEventListener('done', () => { es.close(); reconnect(2500) })
       es.onerror = () => {
         setConnected(false); es.close()
-        reconnect(1500)
+        reconnect(backoff)
+        backoff = Math.min(backoff * 2, MAX_BACKOFF)   // ramp on repeated failure; reset on a live frame
       }
     }
     connect()

@@ -45,12 +45,27 @@ def _engine_singleton(run_dir: Path):
             if os.name == "nt":
                 import msvcrt
                 f.seek(0)
-                msvcrt.locking(f.fileno(), msvcrt.LK_NBLCK, 1)
+                try:
+                    msvcrt.locking(f.fileno(), msvcrt.LK_NBLCK, 1)
+                except OSError:
+                    acquired = False    # byte held by a live engine (Windows local FS supports locking)
             else:
                 import fcntl
-                fcntl.flock(f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                try:
+                    fcntl.flock(f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BlockingIOError:
+                    acquired = False    # genuinely HELD by a live engine (EWOULDBLOCK) -> caller no-ops
+                except OSError:
+                    # flock UNSUPPORTED on this filesystem (FUSE/S3 like geesefs, some NFS) raises
+                    # ENOTSUP/EINVAL — NOT a held lock. Degrade to a no-op (acquired stays True) so the
+                    # engine STILL RUNS, matching the docstring and server._engine_alive's fail-open.
+                    # The old bare `except OSError: acquired = False` failed CLOSED here: on a JupyterHub
+                    # home mounted via geesefs, every `run`/`resume` saw a phantom "already running" and
+                    # silently exited. Locking just isn't available on such a mount; single-writer
+                    # discipline (one engine per run dir) still holds in practice.
+                    pass
         except OSError:
-            acquired = False        # another engine holds it -> caller will skip running
+            acquired = False
         yield acquired
     finally:
         if acquired:
@@ -277,7 +292,18 @@ def run(
                               Path(task_file).read_text(encoding="utf-8"))
         except OSError:
             pass
-        state = anyio.run(eng.run)
+        try:
+            state = anyio.run(eng.run)
+        except Exception as e:  # noqa: BLE001 - any fatal abort (e.g. an unreachable LLM endpoint
+            # during implement/repair, a missing dep) must surface as a TERMINAL event, not a silent
+            # stalled run the UI shows "thinking" forever. Mark finished-with-error, then re-raise so
+            # the traceback still lands in engine.stderr.log. (A user Ctrl-C / cancel is BaseException,
+            # not Exception, so an intentional stop stays resumable.)
+            try:
+                eng.store.append("run_finished", {"reason": "error", "error": str(e)[:500]})
+            except Exception:  # noqa: BLE001 - best-effort; never mask the original failure
+                pass
+            raise
     _print_result(state)
 
 
@@ -314,7 +340,18 @@ def resume(
         if not ok:
             typer.echo(f"engine already running on {run_dir} — not resuming a second loop")
             return
-        state = anyio.run(eng.run)
+        try:
+            state = anyio.run(eng.run)
+        except Exception as e:  # noqa: BLE001 - any fatal abort (e.g. an unreachable LLM endpoint
+            # during implement/repair, a missing dep) must surface as a TERMINAL event, not a silent
+            # stalled run the UI shows "thinking" forever. Mark finished-with-error, then re-raise so
+            # the traceback still lands in engine.stderr.log. (A user Ctrl-C / cancel is BaseException,
+            # not Exception, so an intentional stop stays resumable.)
+            try:
+                eng.store.append("run_finished", {"reason": "error", "error": str(e)[:500]})
+            except Exception:  # noqa: BLE001 - best-effort; never mask the original failure
+                pass
+            raise
     _print_result(state)
 
 
@@ -440,9 +477,17 @@ def inspect(run_dir: Path = typer.Argument(...)):
 
 
 @app.command()
-def ui(run_root: Path = typer.Option(Path("runs"), help="Directory containing run subdirs."),
+def ui(run_root: Path = typer.Option(
+           Path(os.environ.get("LOOPLAB_RUN_ROOT", "runs")),
+           help="Directory containing run subdirs. Defaults to $LOOPLAB_RUN_ROOT or ./runs — under "
+                "JupyterHub set LOOPLAB_RUN_ROOT to a persistent home path (e.g. ~/looplab-runs) so "
+                "runs survive a pod cull/restart instead of landing in an ephemeral CWD."),
        host: str = typer.Option("127.0.0.1", help="Bind host."),
        port: int = typer.Option(8765, help="Bind port."),
+       root_path: str = typer.Option(
+           "", help="ASGI root_path for a NON-prefix-stripping proxy (e.g. /user/<name>/proxy/8765). "
+                    "Auto-derived from JUPYTERHUB_SERVICE_PREFIX when unset; harmless for a stripping "
+                    "proxy. Lets `looplab ui` work behind both proxy styles without raw uvicorn."),
        build: bool = typer.Option(True, "--build/--no-build",
                                   help="Auto-build the React bundle if it's missing (needs Node/npm)."),
        rebuild: bool = typer.Option(False, "--rebuild",
@@ -463,8 +508,21 @@ def ui(run_root: Path = typer.Option(Path("runs"), help="Directory containing ru
     except ModuleNotFoundError as e:
         typer.echo(f"UI extra not installed: {e}")
         raise typer.Exit(1)
-    typer.echo(f"LoopLab UI on http://{host}:{port}  (run-root={run_root})")
-    serve(run_root, host=host, port=port)
+    jh_prefix = os.environ.get("JUPYTERHUB_SERVICE_PREFIX")
+    # Default root_path to the JH proxied prefix when unset, so `looplab ui` works behind a
+    # NON-stripping proxy without dropping to raw uvicorn. A stripping proxy is unharmed: root_path
+    # only affects URL generation, and the SPA derives its own prefix from the served page path.
+    if not root_path and jh_prefix:
+        root_path = f"{jh_prefix.rstrip('/')}/proxy/{port}"
+    if jh_prefix:
+        # Behind JupyterHub the UI is reached through jupyter-server-proxy at the user's service
+        # prefix, NOT the bind address — advertising http://127.0.0.1:8765 would send the operator to
+        # an unreachable URL. Point them at the proxied path instead.
+        typer.echo(f"LoopLab UI — open it via your Jupyter proxy: "
+                   f"{jh_prefix.rstrip('/')}/proxy/{port}/  (run-root={run_root})")
+    else:
+        typer.echo(f"LoopLab UI on http://{host}:{port}  (run-root={run_root})")
+    serve(run_root, host=host, port=port, root_path=root_path)
 
 
 @app.command("build-ui")

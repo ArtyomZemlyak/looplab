@@ -735,7 +735,19 @@ class Engine:
             self._store_case(fold(self.store.read_all()))       # cross-run memory (I19)
             self._write_reflection_note(fold(self.store.read_all()))   # E4 cross-run meta-review prior
 
-        final = build_readmodel(self.store.read_all(), self.run_dir / "readmodel.sqlite")
+        # The SQLite read-model is a DERIVED, rebuildable cache that nothing in-process reads (the UI
+        # folds events.jsonl / reads trace.json). On a FUSE/S3 run dir (JupyterHub geesefs) sqlite's
+        # byte-range locks are unsupported and the write can raise `database is locked` / `disk I/O
+        # error` — which must NOT abort an otherwise-finished run. Build best-effort; the run state we
+        # actually need comes from the event fold regardless.
+        try:
+            final = build_readmodel(self.store.read_all(), self.run_dir / "readmodel.sqlite")
+        except Exception as e:  # noqa: BLE001 - derived cache; a FUSE sqlite failure must not kill finalize
+            final = fold(self.store.read_all())
+            try:
+                self.store.append("readmodel_skipped", {"error": str(e)[:300]})
+            except Exception:  # noqa: BLE001 - even the audit note is best-effort
+                pass
         # UI projection (ADR-17): join the research tree (events) to its execution detail
         # (spans) -> trace.json for the React UI + an inline span tree in the static HTML.
         from .traceview import build_trace_view, load_spans

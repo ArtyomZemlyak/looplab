@@ -27,7 +27,7 @@ from typing import Optional
 import anyio
 import orjson
 
-from .atomicio import atomic_write_text
+from .atomicio import atomic_write_text, best_effort_fsync
 from .config import Settings
 from .eventstore import EventStore, iter_jsonl
 from .models import Event
@@ -540,6 +540,15 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
         async def gen():
             last_sent = -2
             last_alive = None
+            last_beat = time.monotonic()
+            # A quiet/"thinking" run (a long LLM call or eval) advances no seq and flips no liveness,
+            # so without this the stream goes byte-silent. Behind jupyter-server-proxy (tornado) and
+            # any nginx hop, an idle read-timeout then tears the connection down → the client reconnects
+            # → full re-fold → drops again: a reconnect sawtooth that freezes the live UI. Emit an SSE
+            # comment every KEEPALIVE seconds of silence so the proxy's idle timer never fires; a failed
+            # keepalive write also surfaces a proxy-side disconnect promptly (X-Accel-Buffering is an
+            # nginx-only hint that tornado ignores, so the regular small write is what actually flows).
+            KEEPALIVE = 15.0
             # engine_running is a post-fold liveness probe with no seq of its own: a run that dies
             # AFTER its last event (a zombie) never advances seq, so also re-emit when liveness flips,
             # else the stalled/zombie UI never updates over a live stream.
@@ -552,6 +561,7 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
                 if payload["seq"] != last_sent or alive != last_alive:
                     last_sent = payload["seq"]
                     last_alive = alive
+                    last_beat = time.monotonic()
                     yield (f"id: {payload['seq']}\n"
                            f"event: state\n"
                            f"data: {json.dumps(payload)}\n\n")
@@ -562,6 +572,9 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
                         # open instead would never terminate, which hangs the TestClient SSE test.)
                         yield "event: done\ndata: {}\n\n"
                         break
+                elif time.monotonic() - last_beat >= KEEPALIVE:
+                    last_beat = time.monotonic()
+                    yield ": keepalive\n\n"     # ignored by EventSource; resets the proxy read-timer
                 await anyio.sleep(POLL_SECONDS)
 
         return StreamingResponse(gen(), media_type="text/event-stream",
@@ -765,7 +778,7 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
         if not task_file:
             raise HTTPException(400, "run is not resumable — no task.snapshot.json or ui_meta.json "
                                      "(it predates self-describing runs; start it via the UI to enable resume)")
-        _spawn_engine(["resume", str(rd), "--task-file", str(task_file)])
+        _spawn_engine(["resume", str(rd), "--task-file", str(task_file)], run_dir=rd)
         return {"ok": True}
 
     @app.post("/api/runs/{run_id}/reset")
@@ -817,7 +830,7 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
                                      if k in _ALLOWED_FIELDS and k not in _SECRET_FIELDS and v is not None})
             except (OSError, json.JSONDecodeError, ValueError):
                 env = None
-        _spawn_engine(["run", str(task_file), "--out", str(rd)], env=env)
+        _spawn_engine(["run", str(task_file), "--out", str(rd)], env=env, run_dir=rd)
         return {"ok": True}
 
     @app.post("/api/start")
@@ -878,16 +891,17 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
                         "role": m["role"], "content": str(m.get("content", "")),
                         "ts": t0 + i * 1e-3, "seq": int(1e15) + i, "genesis": True}) + b"\n")
                 f.flush()
-                os.fsync(f.fileno())
+                best_effort_fsync(f.fileno())   # FUSE/S3 fsync may raise — don't fail the launch
         # Per-run settings = the saved UI defaults overlaid with whatever the launch dialog set.
         # Everything reaches the engine as LOOPLAB_* env on the spawned process, so ANY Settings
         # field is configurable from the UI without growing the CLI surface (Settings() reads env).
         settings = {**_load_ui_settings(), **(body.get("settings") or {})}
         env = _settings_env(settings)
-        _spawn_engine(["run", str(task_file), "--out", str(rd)], env=env)
+        _spawn_engine(["run", str(task_file), "--out", str(rd)], env=env, run_dir=rd)
         return {"ok": True, "run_id": run_id}
 
-    def _spawn_engine(cli_args: list[str], env: Optional[dict] = None) -> None:
+    def _spawn_engine(cli_args: list[str], env: Optional[dict] = None,
+                      run_dir: Optional[Path] = None) -> None:
         cmd = [sys.executable, "-m", "looplab.cli", *cli_args]
         kw: dict = {"cwd": str(Path(__file__).resolve().parents[1])}
         if env:
@@ -896,7 +910,24 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
             kw["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP  # detached, survives request
         else:
             kw["start_new_session"] = True
-        subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, **kw)
+        # Capture the spawned engine's stderr to <run_dir>/engine.stderr.log instead of discarding it:
+        # an engine that dies BEFORE its first event (a FUSE-degraded lock that bails, a tool missing
+        # from PATH, no egress to the LLM) otherwise leaves a "phantom never-started run" with zero
+        # diagnostics. stdout stays discarded — the engine's truth is events.jsonl, not stdout.
+        err = subprocess.DEVNULL
+        err_f = None
+        if run_dir is not None:
+            try:
+                run_dir.mkdir(parents=True, exist_ok=True)
+                err_f = open(run_dir / "engine.stderr.log", "ab")
+                err = err_f
+            except OSError:
+                err = subprocess.DEVNULL
+        try:
+            subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=err, **kw)
+        finally:
+            if err_f is not None:
+                err_f.close()   # the child inherited its own dup; release the parent's handle
 
     # ------------------------------------------------------------------ settings (UI defaults)
     # The engine has no settings server (ADR-18); these are UI-chosen DEFAULTS for new runs,
@@ -1008,9 +1039,7 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
         for k, v in incoming.items():
             if k in _ALLOWED_FIELDS and k not in _SECRET_FIELDS and v is not None and base.get(k) != v:
                 overrides[k] = v
-        tmp = _ui_settings_path.with_suffix(".json.tmp")
-        tmp.write_text(json.dumps(overrides, indent=2), encoding="utf-8")
-        os.replace(tmp, _ui_settings_path)
+        atomic_write_text(_ui_settings_path, json.dumps(overrides, indent=2))   # unique temp + safe fsync
         return {"ok": True, "settings": _resolved_settings(), "overrides": overrides}
 
     @app.put("/api/settings/secret")
@@ -1081,7 +1110,10 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
                  "and terse."},
                 {"role": "user", "content": f"Research topic for an autonomous ML run:\n\n{topic}"},
             ]
-            text = client.complete_text(msgs)
+            # Offload the blocking completion to a worker thread: this is an `async def` handler, so a
+            # bare client.complete_text() would block the event loop (up to the 180s client timeout +
+            # retries) and stall EVERY other client — including the live SSE streams — until it returns.
+            text = await anyio.to_thread.run_sync(lambda: client.complete_text(msgs))
         except Exception as e:  # noqa: BLE001 - offline / no model -> soft fail
             return {"ok": False, "error": str(e), "model": s.llm_model, "base_url": s.llm_base_url}
         saved = None
@@ -1437,7 +1469,7 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
         with open(path, "ab") as f:
             f.write(orjson.dumps(turn) + b"\n")
             f.flush()
-            os.fsync(f.fileno())
+            best_effort_fsync(f.fileno())   # FUSE/S3 fsync may raise — don't fail the chat append
         return {"ok": True}
 
     @app.post("/api/runs/{run_id}/chat-compact")
@@ -1494,7 +1526,10 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
             "Here is the run you're discussing:\n" + _boss_context(st, nid, rd))
         try:
             client = make_llm_client(_llm_settings(rd))
-            text = client.complete_text([{"role": "system", "content": sys_prompt}, *msgs])
+            # Offload to a thread — an `async def` handler must not run the blocking completion on the
+            # event loop (it would freeze all other clients + the SSE streams for up to the 180s timeout).
+            text = await anyio.to_thread.run_sync(
+                lambda: client.complete_text([{"role": "system", "content": sys_prompt}, *msgs]))
         except Exception as e:  # noqa: BLE001 - offline / no model -> soft fail
             return JSONResponse({"ok": False, "error": str(e)}, status_code=200)
         # Return the LLM I/O so the chat row can expand into a langfuse-style trace. We include the
@@ -1533,16 +1568,19 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
         except Exception as e:  # noqa: BLE001 - offline / no model
             return JSONResponse({"ok": False, "error": str(e)}, status_code=200)
         try:
-            idea = parse_structured(client, [{"role": "user", "content": prompt}], Idea, s.llm_parser)
+            # Offload — `async def` handler; the blocking parse_structured / complete_text below would
+            # otherwise stall the event loop (and the SSE streams) for the whole LLM round-trip.
+            idea = await anyio.to_thread.run_sync(
+                lambda: parse_structured(client, [{"role": "user", "content": prompt}], Idea, s.llm_parser))
             return {"ok": True, "idea": idea.model_dump(mode="json"), "parsed": True}
         except Exception:  # noqa: BLE001 - small models fumble strict tool-call output; fall back to
             # a free-text suggestion the operator can finish editing in the inject dialog. Never the
             # difference between "got a starting point" and "got nothing".
             try:
-                text = client.complete_text([
+                text = await anyio.to_thread.run_sync(lambda: client.complete_text([
                     {"role": "system", "content": "Reply with a one-line experiment suggestion: the "
                      "operator (improve/draft/debug), suggested params, and why — plain text."},
-                    {"role": "user", "content": prompt}])
+                    {"role": "user", "content": prompt}]))
                 return {"ok": True, "parsed": False,
                         "idea": {"operator": "improve", "params": {}, "rationale": text.strip()[:600]}}
             except Exception as e:  # noqa: BLE001
@@ -1552,7 +1590,11 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
     async def command(run_id: str, request: Request):
         """Action-router (Workstream C): turn a free-text instruction into EITHER a concrete control
         action the UI confirms-then-executes, or a grounded advisory reply. Read-only itself — it
-        never appends events; the UI calls /control after the human confirms. Soft-fails offline."""
+        never appends events; the UI calls /control after the human confirms. Soft-fails offline.
+        Runs as a BACKGROUND JOB (like scope-report generate): the boss tool-loop can outlast a UI
+        proxy's gateway timeout, so a slow model hands back {status:'running', job_id} the UI awaits
+        via jobAwait instead of 504ing — a fast model still returns the plan inline within the wait,
+        so the confirm-card flow downstream is unchanged."""
         rd = _run_dir(run_id)
         body = await request.json()
         msgs = body.get("messages") or []
@@ -1635,10 +1677,10 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
             # max_turns kept TIGHT: the rich static context (digest + report) means the model usually
             # emits on turn 1; the tool turns are only for when it genuinely needs to look deeper. A
             # small cap bounds latency on slow/flaky hosted models (each turn is a network round-trip).
-            # time_budget_s is a wall-clock guard so a slow model's 2-3 tool turns can't accumulate past
-            # the UI proxy's gateway timeout (the same 504 class that hit genesis) — it finalizes from
-            # context instead. This endpoint stays inline (typically 1 turn); genesis, which is FORCED
-            # to read the repo over many turns, is the one that runs as a background job.
+            # time_budget_s is a wall-clock guard so a slow model's 2-3 tool turns can't run unbounded —
+            # it stops STARTING new turns and finalizes from context instead. (An in-flight turn still
+            # runs to its own client timeout, which is exactly why the whole route runs as a BACKGROUND
+            # JOB below: a slow turn returns {status:running} to the UI rather than 504ing behind a proxy.)
             drive_tool_loop(client, tools, [{"role": "system", "content": tool_sys},
                                             {"role": "user", "content": user}],
                             emit_spec, max_turns=3, time_budget_s=45.0,
@@ -1647,69 +1689,82 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
             # than None, so we don't burn extra round-trips on the single-call route for that case.
             return box.get("c") or _Plan()
 
-        # The LLM calls are blocking + network-bound; run them off the event loop (anyio worker
-        # thread) so a slow model doesn't stall SSE tails / other endpoints for every UI client.
-        plan = None
-        try:
-            plan = await anyio.to_thread.run_sync(_route_with_tools)
-        except Exception:  # noqa: BLE001 - model can't tool-call / loop error -> single-call route
+        # All the LLM/agent work below is blocking + network-bound AND can outlast a UI proxy's
+        # gateway timeout (the boss tool-loop's in-flight turn runs to its own client timeout — see
+        # _route_with_tools). So it runs as a BACKGROUND JOB in a worker thread: a fast model still
+        # returns inline within the wait (no polling; the confirm-card flow is unchanged), a slow one
+        # hands back {status:'running', job_id} the UI awaits via jobAwait. The thread keeps the
+        # blocking call off the event loop too, so it never stalls SSE tails / other clients. Each
+        # response dict below is the EXACT contract the UI's runCommand already handles.
+        def _compute() -> dict:
             plan = None
-        if plan is None:
             try:
-                plan = await anyio.to_thread.run_sync(
-                    lambda: parse_structured(client, [{"role": "system", "content": sys_prompt},
-                                                      {"role": "user", "content": user}], _Plan, s.llm_parser))
-            except Exception:  # noqa: BLE001 - parse fumble -> fall through to advisory reply
+                plan = _route_with_tools()
+            except Exception:  # noqa: BLE001 - model can't tool-call / loop error -> single-call route
                 plan = None
-        if plan is not None:
-            actions = _plan_to_actions(plan, st)
-            tok = _client_tokens(client)         # whole-turn token cost (incl. any tool-loop sub-calls)
-            if actions:
-                # An agentic plan: the ordered actions the UI applies in sequence, plus the boss's
-                # narration. `reply` (if any) is shown as the chat message above the applied rows.
-                return {"ok": True, "actions": actions, "reply": plan.reply or "", "tokens": tok}
-            if plan.reply:                       # the boss chose to only talk back — show its reply
-                return {"ok": True, "reply": plan.reply, "tokens": tok}
-        try:
-            advise_sys = ("You are an ML research collaborator embedded in an experiment loop. Answer "
-                          "concisely, grounded on the run.\n" + _boss_context(st, nid, rd))
-            advise_msgs = msgs + ([{"role": "user", "content": instruction}] if instruction else [])
-            text = await anyio.to_thread.run_sync(lambda: client.complete_text(
-                [{"role": "system", "content": advise_sys}, *advise_msgs]))
-            # Carry the LLM I/O back so the chat row can expand into a langfuse-style trace card. We
-            # include the user's instruction + system prompt so the trace shows the real input, but
-            # omit the rest of the echoed conversation (the client holds it) to avoid O(n²) growth.
-            user_msg = instruction or next(
-                (m.get("content", "") for m in reversed(msgs) if m.get("role") == "user"), "")
-            return {"ok": True, "reply": text,
-                    "trace": {"model": getattr(client, "model", None),
-                              "system": advise_sys, "user": user_msg, "completion": text,
-                              "tokens": _client_tokens(client)}}
-        except Exception as e:  # noqa: BLE001
-            return JSONResponse({"ok": False, "error": str(e)}, status_code=200)
+            if plan is None:
+                try:
+                    plan = parse_structured(client, [{"role": "system", "content": sys_prompt},
+                                                     {"role": "user", "content": user}], _Plan, s.llm_parser)
+                except Exception:  # noqa: BLE001 - parse fumble -> fall through to advisory reply
+                    plan = None
+            if plan is not None:
+                actions = _plan_to_actions(plan, st)
+                tok = _client_tokens(client)     # whole-turn token cost (incl. any tool-loop sub-calls)
+                if actions:
+                    # An agentic plan: the ordered actions the UI applies in sequence, plus the boss's
+                    # narration. `reply` (if any) is shown as the chat message above the applied rows.
+                    return {"ok": True, "actions": actions, "reply": plan.reply or "", "tokens": tok}
+                if plan.reply:                   # the boss chose to only talk back — show its reply
+                    return {"ok": True, "reply": plan.reply, "tokens": tok}
+            try:
+                advise_sys = ("You are an ML research collaborator embedded in an experiment loop. Answer "
+                              "concisely, grounded on the run.\n" + _boss_context(st, nid, rd))
+                advise_msgs = msgs + ([{"role": "user", "content": instruction}] if instruction else [])
+                text = client.complete_text([{"role": "system", "content": advise_sys}, *advise_msgs])
+                # Carry the LLM I/O back so the chat row can expand into a langfuse-style trace card. We
+                # include the user's instruction + system prompt so the trace shows the real input, but
+                # omit the rest of the echoed conversation (the client holds it) to avoid O(n²) growth.
+                user_msg = instruction or next(
+                    (m.get("content", "") for m in reversed(msgs) if m.get("role") == "user"), "")
+                return {"ok": True, "reply": text,
+                        "trace": {"model": getattr(client, "model", None),
+                                  "system": advise_sys, "user": user_msg, "completion": text,
+                                  "tokens": _client_tokens(client)}}
+            except Exception as e:  # noqa: BLE001 - offline / no model -> soft fail (advisory chat)
+                return {"ok": False, "error": str(e)}
+
+        return await _run_as_job(_compute)
 
     @app.post("/api/runs/{run_id}/report_refresh")
     async def report_refresh(run_id: str):
-        """Force a high-quality regeneration of the agent-authored run report NOW. Generates inline
-        (like /chat) and appends a `report_generated` event directly, so it works whether or not the
-        engine loop is alive — appends are lock-guarded, same as control events. Soft-fails offline:
-        the deterministic report keeps rendering and no event is written."""
+        """Force a high-quality regeneration of the agent-authored run report NOW. Appends a
+        `report_generated` event directly, so it works whether or not the engine loop is alive —
+        appends are lock-guarded, same as control events. Soft-fails offline: the deterministic
+        report keeps rendering and no event is written. Runs as a BACKGROUND JOB (like scope-report
+        generate): a slow/large model's full regeneration can outlast a UI proxy's gateway timeout,
+        so it hands back {status:'running', job_id} the UI awaits via jobAwait instead of 504ing — a
+        fast model still returns {ok, seq, content} inline within the wait."""
         rd = _run_dir(run_id)
         st = fold(_events(rd))
         s = _llm_settings(rd)
-        try:
-            from .report import generate_report
-            client = make_llm_client(s)
-            # Offload the (blocking, network-bound) synthesis to a worker thread so a slow model
-            # call doesn't freeze the event loop / SSE tails for every other connected UI client.
-            content = await anyio.to_thread.run_sync(
-                lambda: generate_report(st, client, parser=s.llm_parser, trigger="manual"))
-        except Exception as e:  # noqa: BLE001 — offline / no model -> soft fail, no event
-            return JSONResponse({"ok": False, "error": str(e)}, status_code=200)
-        ev = EventStore(rd / "events.jsonl").append(
-            "report_generated", {"content": content, "at_node": content.get("at_node"),
-                                 "trigger": "manual"})
-        return {"ok": True, "seq": ev.seq, "content": content}
+
+        def _compute() -> dict:
+            # Runs in a worker thread (see _run_as_job): the synthesis is blocking + network-bound, so
+            # inline it would freeze the event loop / SSE tails AND risk a proxy 504 on a slow model.
+            # Append the event from the thread too — appends are lock-guarded, same as a control event.
+            try:
+                from .report import generate_report
+                client = make_llm_client(s)
+                content = generate_report(st, client, parser=s.llm_parser, trigger="manual")
+            except Exception as e:  # noqa: BLE001 — offline / no model -> soft fail, no event
+                return {"ok": False, "error": str(e)}
+            ev = EventStore(rd / "events.jsonl").append(
+                "report_generated", {"content": content, "at_node": content.get("at_node"),
+                                     "trigger": "manual"})
+            return {"ok": True, "seq": ev.seq, "content": content}
+
+        return await _run_as_job(_compute)
 
     # ------------------------------------------------------------------ cross-run aggregate reports
     # On-demand portfolio reports over a SET of runs (a project folder, a task, or a super-task) — ONE
@@ -1805,6 +1860,64 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
             lines.append(line)
         return "\n".join(lines[:20])
 
+    # ---- generic background-job registry (generalizes the genesis pattern) -----------------------
+    # Slow, unbounded work (an agent synthesizing across many runs, a heavy report regen) must not run
+    # inline: behind a UI proxy (JupyterHub's jupyter-server-proxy) a request that outlasts the gateway
+    # timeout 504s and the work is lost. A handler hands the work to a worker thread, waits briefly
+    # inline (a fast/offline result still returns in the one request — no polling, no added latency),
+    # then returns {status:'running', job_id} the UI polls via GET /api/jobs/{job_id}. (genesis predates
+    # this and keeps its own copy; new routes share this one.)
+    _jobs: dict = {}
+    _jobs_lock = threading.Lock()
+    _JOB_INLINE_WAIT = float(os.environ.get("LOOPLAB_JOB_INLINE_WAIT", "8.0"))
+
+    def _job_put(job_id: str, **fields) -> None:
+        with _jobs_lock:
+            _jobs.setdefault(job_id, {}).update(fields)
+            if len(_jobs) > 64:     # bound memory: keep the most-recent 64
+                for k in sorted(_jobs, key=lambda j: _jobs[j].get("ts", 0))[:-64]:
+                    _jobs.pop(k, None)
+
+    def _job_get(job_id: str):
+        with _jobs_lock:
+            j = _jobs.get(job_id)
+            return dict(j) if j else None
+
+    async def _run_as_job(compute):
+        """Run `compute` (a 0-arg callable returning the final response dict) in a worker thread; return
+        its result inline when it finishes within the inline wait, else {status:'running', job_id}. The
+        thread keeps a blocking LLM/agent call off the event loop AND off the request's critical path,
+        so it can't stall other clients or 504 behind a proxy."""
+        job_id = secrets.token_hex(8)
+        _job_put(job_id, status="running", result=None, ts=time.time())
+
+        def _worker():
+            try:
+                res = compute()
+            except Exception as e:  # noqa: BLE001 - surface a usable error, never crash the worker
+                res = {"ok": False, "error": str(e)}
+            _job_put(job_id, status="done", result=res, ts=time.time())
+        threading.Thread(target=_worker, daemon=True).start()
+
+        deadline = time.monotonic() + _JOB_INLINE_WAIT
+        while time.monotonic() < deadline:
+            j = _job_get(job_id)
+            if j and j.get("status") == "done":
+                return j["result"]
+            await anyio.sleep(0.2)
+        return {"status": "running", "job_id": job_id}
+
+    @app.get("/api/jobs/{job_id}")
+    def get_job(job_id: str):
+        """Poll a generic background job (see _run_as_job): `running` until done, then the result dict
+        with status='done'; `unknown` if it expired/was evicted (the UI should re-issue the action)."""
+        j = _job_get(job_id)
+        if not j:
+            return {"status": "unknown"}
+        if j.get("status") != "done":
+            return {"status": "running"}
+        return {**j["result"], "status": "done"}
+
     @app.get("/api/scope-report/{scope_type}/{scope_id}")
     def get_scope_report(scope_type: str, scope_id: str):
         if scope_type not in ("project", "task", "supertask"):
@@ -1828,39 +1941,42 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
     async def generate_scope_report_ep(scope_type: str, scope_id: str):
         """Generate (or regenerate) the cross-run report for a scope. On-demand only — the agent reads
         every run in the set (their per-run reports, configs, metrics) and synthesizes, drilling into
-        any run when needed. Degrades to a metrics rollup offline."""
+        any run when needed. Degrades to a metrics rollup offline. Runs as a BACKGROUND JOB: reading +
+        synthesizing over many runs can outlast a UI proxy's gateway timeout, so a slow synthesis hands
+        back a job_id the UI polls (a fast/offline one still returns inline within the wait — no 504)."""
         if scope_type not in ("project", "task", "supertask"):
             raise HTTPException(400, "bad scope type")
         run_ids = _scope_run_ids(scope_type, scope_id)
         if not run_ids:
             raise HTTPException(400, "no runs in this scope")
-        labels = projects.load().get("labels", {})
-        briefs = []
-        for rid in run_ids:
+
+        def _compute() -> dict:
+            labels = projects.load().get("labels", {})
+            briefs = []
+            for rid in run_ids:
+                try:
+                    briefs.append(_run_brief(rid, labels))
+                except Exception:  # noqa: BLE001 - a half-written run shouldn't block the report
+                    continue
+            scope = {"type": scope_type, "id": scope_id, "label": _scope_label(scope_type, scope_id)}
+            from .scope_report import generate_scope_report as _gen
+            s = _llm_settings(None)
             try:
-                briefs.append(_run_brief(rid, labels))
-            except Exception:  # noqa: BLE001 - a half-written run shouldn't block the report
-                continue
-        scope = {"type": scope_type, "id": scope_id, "label": _scope_label(scope_type, scope_id)}
-        from .scope_report import generate_scope_report as _gen
-        s = _llm_settings(None)
-        try:
-            client = make_llm_client(s)
-            content = await anyio.to_thread.run_sync(
-                lambda: _gen(scope, briefs, client, parser=s.llm_parser, drill=_scope_drill))
-        except Exception:  # noqa: BLE001 - offline -> deterministic rollup still persists
-            content = _gen(scope, briefs, None)
-        # Record coverage + staleness over the runs that ACTUALLY contributed a brief — a run skipped
-        # above (corrupt log) wasn't read, so it must not count toward "over N runs" or the freshness sig.
-        brief_ids = [b["run_id"] for b in briefs]
-        rec = {"scope": scope, "generated_at": int(time.time() * 1000), "run_ids": brief_ids,
-               "sig": _scope_sig(brief_ids), "model": s.llm_model, "content": content}
-        _reports_dir.mkdir(parents=True, exist_ok=True)
-        dst = _scope_report_path(scope_type, scope_id)
-        tmp = dst.with_suffix(".json.tmp")
-        tmp.write_text(json.dumps(rec, indent=2), encoding="utf-8")
-        os.replace(tmp, dst)
-        return {"ok": True, **rec, "stale": False, "added": []}
+                client = make_llm_client(s)
+                content = _gen(scope, briefs, client, parser=s.llm_parser, drill=_scope_drill)
+            except Exception:  # noqa: BLE001 - offline -> deterministic rollup still persists
+                content = _gen(scope, briefs, None)
+            # Record coverage + staleness over the runs that ACTUALLY contributed a brief — a run skipped
+            # above (corrupt log) wasn't read, so it must not count toward "over N runs" or the sig.
+            brief_ids = [b["run_id"] for b in briefs]
+            rec = {"scope": scope, "generated_at": int(time.time() * 1000), "run_ids": brief_ids,
+                   "sig": _scope_sig(brief_ids), "model": s.llm_model, "content": content}
+            _reports_dir.mkdir(parents=True, exist_ok=True)
+            dst = _scope_report_path(scope_type, scope_id)
+            atomic_write_text(dst, json.dumps(rec, indent=2))   # unique temp + best-effort fsync (FUSE)
+            return {"ok": True, **rec, "stale": False, "added": []}
+
+        return await _run_as_job(_compute)
 
     @app.get("/api/llm/health")
     def llm_health():
@@ -1870,7 +1986,11 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
         s = _llm_settings()
         info = {"model": s.llm_model, "base_url": s.llm_base_url}
         try:
-            client = make_llm_client(s)
+            # Bound the probe well under any proxy gateway timeout: a reachable-but-hanging endpoint
+            # (queued model, heartbeat-only body) must NOT make the health check itself 504 — the very
+            # thing it exists to warn about. (Connection-refused already fails fast.) Env-tunable.
+            hc_timeout = float(os.environ.get("LOOPLAB_HEALTHCHECK_TIMEOUT", "10.0"))
+            client = make_llm_client(s, timeout=hc_timeout)
             txt = client.complete_text([{"role": "user", "content": "Reply with one word: ready"}])
             return {"ok": True, "text": (txt or "").strip()[:80], **info}
         except Exception as e:  # noqa: BLE001
@@ -1965,6 +2085,11 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
             # SPA fallback for client-side routes; never shadow /api. Resolve-guard the path so a
             # traversal (`/..%2f..%2fwin.ini`) can't read a file outside the built assets dir — the
             # other file routes guard, this one used to serve any readable file (review C3).
+            if path in ("", "index.html"):
+                # Serve the index THROUGH _index_response so the auth <meta name="ll-token"> is injected
+                # here too. A proxy/bookmark that lands on `.../proxy/8765/index.html` (not the bare `/`)
+                # would otherwise get the un-injected file → no token → every mutating action 401s.
+                return _index_response()
             base = dist.resolve()
             target = (dist / path).resolve()
             if (target == base or base in target.parents) and target.is_file():
@@ -1990,6 +2115,10 @@ def _f(s: str) -> Optional[float]:
         return None
 
 
-def serve(run_root: str | os.PathLike, host: str = "127.0.0.1", port: int = 8765) -> None:
+def serve(run_root: str | os.PathLike, host: str = "127.0.0.1", port: int = 8765,
+          root_path: str = "") -> None:
     import uvicorn
-    uvicorn.run(make_app(run_root), host=host, port=port, log_level="info")
+    # root_path: ASGI mount prefix for a NON-stripping proxy (JupyterHub non-strip / reverse-proxy
+    # subpath). Empty for local + the common prefix-stripping jupyter-server-proxy (the SPA derives
+    # its own prefix from the page path), so this is a no-op there.
+    uvicorn.run(make_app(run_root), host=host, port=port, root_path=root_path, log_level="info")

@@ -19,6 +19,10 @@ dev = ["pytest>=8.0", "httpx>=0.27"]   # httpx powers fastapi's TestClient (serv
 proc = ["psutil>=5.9"]
 # Live React UI server (ADR-18: a separate read/control process, never imported by the engine).
 ui = ["fastapi>=0.110", "uvicorn>=0.27"]
+# Run LoopLab as an auto-launched, proxied app INSIDE a JupyterHub single-user server. Pulls
+# jupyter-server-proxy (so the entry point below registers a Launcher tile + auto-launches the UI on
+# a free port) and psutil (the reliable cross-platform process-tree kill for spawned engines/evals).
+jupyterhub = ["jupyter-server-proxy>=4.1", "fastapi>=0.110", "uvicorn>=0.27", "psutil>=5.9"]
 # Real OpenTelemetry export. Without these, tracing still works fully into spans.jsonl
 # (files-as-truth, zero-dep); installing them + setting OTEL_* env sends the SAME spans to any
 # OTLP collector (Jaeger / Tempo / Honeycomb / …) with no code change.
@@ -31,6 +35,12 @@ otel = [
 [project.scripts]
 looplab = "looplab.cli:app"
 LoopLab = "looplab.cli:app"   # backwards-compatible alias
+
+# jupyter-server-proxy discovers LoopLab here: with `pip install looplab[jupyterhub]` in a JH
+# single-user server, the UI gets a Launcher tile that auto-launches it on a free port and proxies
+# it at /user/<name>/proxy/<port>/ — no terminal, no hand-typed URL. See looplab/jupyter.py.
+[project.entry-points."jupyter_serverproxy_servers"]
+looplab = "looplab.jupyter:setup_looplab"
 
 [build-system]
 requires = ["setuptools>=68"]

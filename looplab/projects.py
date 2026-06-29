@@ -27,6 +27,7 @@ import threading
 import uuid
 from pathlib import Path
 
+from .atomicio import atomic_write_text
 from .models import Project
 
 
@@ -80,10 +81,9 @@ class ProjectStore:
         return data
 
     def _save(self, data: dict) -> None:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = self.path.with_suffix(".json.tmp")
-        tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
-        os.replace(tmp, self.path)   # atomic on POSIX + Windows
+        # atomic_write_text gives a UNIQUE temp (no fixed `.json.tmp` two writers can collide on) +
+        # best-effort fsync, so a concurrent engine/UI write and a FUSE/S3 mount don't corrupt or abort.
+        atomic_write_text(self.path, json.dumps(data, indent=2))
 
     # ------------------------------------------------------------------ queries
     def _index(self, data: dict) -> dict[str, dict]:

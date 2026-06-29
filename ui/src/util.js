@@ -376,8 +376,10 @@ export const CONTROL = {
   // P2: ask the engine to run the Deep-Research stage now (read all results + the web, write a memo).
   deepResearch: (rid) => post(`/api/runs/${rid}/control`, { type: 'deep_research', data: {} }),
   // Workstream A: force a high-quality regeneration of the agent-authored run report now. Dedicated
-  // endpoint (not /control) — generates inline server-side and appends a `report_generated` event.
-  refreshReport: (rid) => post(`/api/runs/${rid}/report_refresh`, {}),
+  // endpoint (not /control) — appends a `report_generated` event. Runs as a background job, so we
+  // jobAwait the response (a slow/large regen can't 504 behind a proxy; a fast one returns inline).
+  // Contract preserved: resolves to {ok, seq, content} (or {ok:false} offline), never a job_id.
+  refreshReport: async (rid) => jobAwait(await post(`/api/runs/${rid}/report_refresh`, {})),
   // Workstream C: a generic control append by {type, data} — the single execution path every chat
   // action funnels through (slash commands and the LLM action-router both produce {type, data}).
   raw: (rid, type, data = {}) => post(`/api/runs/${rid}/control`, { type, data }),
@@ -423,9 +425,12 @@ export const chat = (rid, messages, node_id = null) => post(`/api/runs/${rid}/ch
 export const suggestIdea = (rid, { node_id = null, messages = [], instruction = '' }) =>
   post(`/api/runs/${rid}/suggest`, { node_id, messages, instruction })
 // Workstream C: the action-router — turn a free-text instruction into EITHER an advisory reply or a
-// concrete control action {type, data, label, rationale} the chat proposes for confirmation.
-export const command = (rid, { messages = [], node_id = null, instruction = '' }) =>
-  post(`/api/runs/${rid}/command`, { messages, node_id, instruction })
+// concrete control action {type, data, label, rationale} the chat proposes for confirmation. Runs as
+// a background job, so we jobAwait the response (a slow boss tool-loop can't 504 behind a proxy; a
+// fast plan returns inline). Resolves to the same {ok, actions?, reply?, trace?, tokens?} the
+// downstream confirm-card flow already handles — never a job_id.
+export const command = async (rid, { messages = [], node_id = null, instruction = '' }) =>
+  jobAwait(await post(`/api/runs/${rid}/command`, { messages, node_id, instruction }))
 export const llmHealth = () => get('/api/llm/health')
 
 // G1 server auth: when the server runs with LOOPLAB_UI_TOKEN it injects the token into the served
@@ -535,4 +540,27 @@ export const research = (topic, save = false) => post('/api/research', { topic, 
 // (re)synthesizes on demand via an agent with access to every run in the scope.
 const _scopeUrl = (type, id) => `/api/scope-report/${encodeURIComponent(type)}/${encodeURIComponent(id)}`
 export const getScopeReport = (type, id) => get(_scopeUrl(type, id))
-export const genScopeReport = (type, id) => post(`${_scopeUrl(type, id)}/generate`, {})
+// Generic background-job poll (mirrors genesisAwait): the server hands back {status:'running', job_id}
+// for slow work so it can't 504 behind a proxy. Returns the final result dict; tolerates transient
+// poll errors. `resp` that's already a result (fast inline path) is returned unchanged.
+const _job = (jobId) => get(`/api/jobs/${encodeURIComponent(jobId)}`)
+export async function jobAwait(resp, { intervalMs = 1500, timeoutMs = 600000 } = {}) {
+  if (!resp || resp.status !== 'running' || !resp.job_id) return resp
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    await new Promise(r => setTimeout(r, intervalMs))
+    let j
+    try { j = await _job(resp.job_id) } catch { continue }   // transient — keep polling
+    if (j.status === 'done') return j
+    if (j.status === 'unknown') return { ok: false, error: 'the job expired — try again' }
+  }
+  return { ok: false, error: 'timed out' }
+}
+// Cross-run synthesis can read many runs + drive an agent, so it runs as a background job; await it to
+// completion and surface a hard failure as a throw (the panel's catch shows it), preserving the old
+// "returns the final record" contract for callers.
+export async function genScopeReport(type, id) {
+  const r = await jobAwait(await post(`${_scopeUrl(type, id)}/generate`, {}))
+  if (r && r.ok === false && r.error) throw new Error(r.error)
+  return r
+}

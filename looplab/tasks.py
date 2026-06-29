@@ -70,18 +70,23 @@ def _agent_model(backend: str, model: str) -> str:
 
 
 def make_llm_client(settings, *, model: str | None = None,
-                    base_url: str | None = None) -> OpenAICompatibleClient:
+                    base_url: str | None = None,
+                    timeout: float | None = None) -> OpenAICompatibleClient:
     key = settings.llm_api_key.get_secret_value() if settings.llm_api_key else "local"
     mdl = model or settings.llm_model
     from .llm import reasoning_body
     reasoning = reasoning_body(mdl, getattr(settings, "llm_reasoning", ""),
                                getattr(settings, "llm_reasoning_style", "auto"),
                                getattr(settings, "llm_reasoning_extra", None))
+    # `timeout` lets a caller bound a UI-side probe (e.g. the health check) well under a proxy's
+    # gateway timeout; omitted -> the client's own default (180s), unchanged for run/agent calls.
+    extra = {"timeout": timeout} if timeout is not None else {}
     return OpenAICompatibleClient(
         model=mdl, base_url=base_url or settings.llm_base_url, api_key=key,
         temperature=settings.llm_temperature, accountant=CostAccountant(),
         guided_json=getattr(settings, "llm_guided_json", False),   # H1 constrained decoding
         reasoning=reasoning,                                        # provider-aware thinking toggle
+        **extra,
     )
 
 

@@ -120,6 +120,35 @@ def test_report_refresh_soft_fails_offline(tmp_path, monkeypatch):
     assert r.status_code == 200 and r.json()["ok"] is False  # soft-fail, no crash
 
 
+def test_report_refresh_async_job_path(tmp_path, monkeypatch):
+    """report_refresh runs as a BACKGROUND JOB so a slow/large regen can't 504 behind a proxy: with the
+    inline wait forced to 0 the POST hands back a job_id, the report generates + appends in the worker
+    thread, and GET /api/jobs/{id} returns the SAME {ok, seq, content} contract — folding into
+    state.report (so the live UI updates) exactly as the inline path did."""
+    import time as _t
+    monkeypatch.setenv("LOOPLAB_JOB_INLINE_WAIT", "0")          # always take the async path
+    _build_run(tmp_path, "demo", writer=None)
+    import looplab.report as report_mod
+    monkeypatch.setattr(report_mod, "generate_report",
+                        lambda st, c, **kw: {"headline": "live", "at_node": len(st.nodes),
+                                             "trigger": kw.get("trigger", "")})
+    monkeypatch.setattr("looplab.server.make_llm_client", lambda s: object())
+    client = TestClient(make_app(tmp_path))                     # reads the inline wait at construction
+    r = client.post("/api/runs/demo/report_refresh").json()
+    assert r["status"] == "running" and r["job_id"]            # handed back a job, didn't block
+    job = None
+    for _ in range(100):                                        # poll the background regen to completion
+        job = client.get(f"/api/jobs/{r['job_id']}").json()
+        if job.get("status") == "done":
+            break
+        _t.sleep(0.05)
+    assert job and job["status"] == "done" and job["ok"] is True
+    assert job["content"]["headline"] == "live" and "seq" in job   # full contract preserved
+    # the worker thread appended report_generated -> it folded into state.report
+    st = client.get("/api/runs/demo/state").json()["state"]
+    assert st["report"]["headline"] == "live"
+
+
 def _read_events(rd: Path):
     from looplab.eventstore import iter_jsonl
     return [Event(**o) for o in iter_jsonl(rd / "events.jsonl")]
@@ -396,6 +425,31 @@ def test_command_endpoint_soft_fails_offline(tmp_path, monkeypatch):
     monkeypatch.setattr("looplab.server.make_llm_client", _boom)
     r = client.post("/api/runs/demo/command", json={"instruction": "confirm 1"})
     assert r.status_code == 200 and r.json()["ok"] is False
+
+
+def test_command_async_job_path(tmp_path, monkeypatch):
+    """A slow boss plan must NOT block the request (proxy 504): the action-router runs as a BACKGROUND
+    JOB, so with the inline wait forced to 0 the POST hands back a job_id and the plan completes in the
+    worker thread, fetched via GET /api/jobs/{id}. The agentic-plan contract (ok/actions) the UI's
+    confirm-card flow depends on is preserved through the job result unchanged."""
+    import time as _t
+    monkeypatch.setenv("LOOPLAB_JOB_INLINE_WAIT", "0")          # always take the async path
+    _build_run(tmp_path, "demo", writer=None)
+    from looplab.server import _Action, _Plan
+    monkeypatch.setattr("looplab.server.make_llm_client", lambda s: object())
+    monkeypatch.setattr("looplab.parse.parse_structured",
+                        lambda *a, **k: _Plan(actions=[_Action(action="promote", node_id=2)]))
+    client = TestClient(make_app(tmp_path))                     # reads the inline wait at construction
+    r = client.post("/api/runs/demo/command", json={"instruction": "promote node 2"}).json()
+    assert r["status"] == "running" and r["job_id"]            # handed back a job, didn't block
+    job = None
+    for _ in range(100):                                        # poll the background plan to completion
+        job = client.get(f"/api/jobs/{r['job_id']}").json()
+        if job.get("status") == "done":
+            break
+        _t.sleep(0.05)
+    assert job and job["status"] == "done" and job["ok"] is True
+    assert job["actions"][0]["type"] == "promote" and job["actions"][0]["data"]["node_id"] == 2
 
 
 # ---- chat-first run creation: /api/start inline task + /api/genesis (pre-run BOSS) ----
