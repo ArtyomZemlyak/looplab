@@ -165,13 +165,21 @@ class UnifiedAgent:
 
     # --------------------------------------------------- Crash triage (in-node repair)
     _TRIAGE_SYSTEM = (
-        "You are debugging an autonomous ML research loop. One experiment node just CRASHED at "
-        "runtime. Decide what to do BEFORE spending another eval:\n"
-        "  - 'repair': the crash is mechanical (bad import, removed/renamed API, typo, wrong arg) "
-        "and the SAME idea is sound — fix the code and re-run in place.\n"
+        "You are debugging an autonomous ML research loop. One experiment node just FAILED at "
+        "runtime (the error is tagged with its kind: crash or timeout). Decide what to do BEFORE "
+        "spending another eval:\n"
+        "  - 'repair': the SAME idea is sound — fix the code and re-run in place. Choose this for a "
+        "mechanical crash (bad import, removed/renamed API, typo, wrong arg) AND for a 'timeout' "
+        "(the code was just too slow — reduce compute: fewer estimators/epochs/folds/seeds, early "
+        "stopping, a lighter model). A timeout is NOT evidence the idea is wrong.\n"
         "  - 'reject_idea': the idea itself is fundamentally flawed (e.g. the approach can't work, or "
         "nearby configs crash the same way) — abandon this lineage so the loop tries a different idea.\n"
         "  - 'abandon': stop here without judging the idea (e.g. not worth another attempt).\n"
+        "NOTE: a missing KNOWN library (ModuleNotFoundError) is auto-installed by the engine and the "
+        "node re-run BEFORE you are consulted, so you should rarely see one. If a ModuleNotFoundError "
+        "still reaches you, the install failed (offline / not on PyPI / a typo'd or local module) — "
+        "prefer 'repair' (switch to an available library or fix the import) over 'reject_idea' unless "
+        "the approach itself is unsound.\n"
         "Consult the run if useful (read the code, find analogous experiments), then call "
         "`triage_crash` exactly once with your `action` and a one-sentence `rationale`."
     )

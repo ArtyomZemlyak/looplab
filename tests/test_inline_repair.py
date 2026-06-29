@@ -59,6 +59,9 @@ class _AlwaysMechCrash:
 
 
 def _engine(run_dir, dev, **kw):
+    # auto_install_deps off: `_BAD` imports a deliberately fake module — env-prep must not try to
+    # pip-install it (it isn't on the install allowlist anyway, but keep these tests fully offline).
+    kw.setdefault("auto_install_deps", False)
     return Engine(run_dir, task=ToyTask.load(TASK), researcher=_Stub(), developer=dev,
                   sandbox=SubprocessSandbox(),
                   policy=GreedyTree(n_seeds=1, max_nodes=4, debug_depth=1), **kw)

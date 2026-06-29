@@ -12,6 +12,7 @@ from __future__ import annotations
 import functools
 import hashlib
 import os
+import sys
 import time
 from pathlib import Path
 from typing import Optional
@@ -120,6 +121,11 @@ def _failure_reason(res) -> str:
     return "no_metric"          # exit 0 but no parseable metric emitted
 
 
+# Env-prep: max auto-install + re-run rounds per node before giving up (a re-run can reveal a
+# *second* missing lib; bound it so an odd install state can't loop). The `_dep_failed` cache
+# already prevents re-attempting the same uninstallable module.
+_MAX_DEP_ROUNDS = 6
+
 # Mechanical-failure signatures: a crash whose stderr matches one of these is almost always a
 # code/runtime defect (bad import, removed/renamed API, typo) — repairable in place from the
 # traceback alone. Used by the deterministic crash-triage fallback when no LLM agent is wired.
@@ -131,11 +137,14 @@ _MECHANICAL_MARKERS = (
 
 
 def _rule_triage(reason: str, error: str, attempt: int, max_attempts: int) -> dict:
-    """Deterministic crash-triage fallback (no LLM): repair a clear MECHANICAL crash while attempts
-    remain, otherwise abandon. Conservatively NEVER returns "reject_idea" — killing a whole idea
-    lineage is a strong call reserved for the LLM agent, so the rule path stays safe with the
-    unified agent off (it only ever repairs obvious mechanical crashes or abandons)."""
+    """Deterministic crash-triage fallback (no LLM): repair a clear MECHANICAL crash — or a TIMEOUT
+    (too slow, not a wrong idea -> reduce compute) — while attempts remain, otherwise abandon.
+    Conservatively NEVER returns "reject_idea" — killing a whole idea lineage is a strong call
+    reserved for the LLM agent, so the rule path stays safe with the unified agent off (it only ever
+    repairs obvious mechanical crashes / timeouts or abandons)."""
     err = error or ""
+    if reason == "timeout" and attempt <= max_attempts:
+        return {"action": "repair", "rationale": "timeout — reduce compute to fit the budget (rule-based)"}
     mechanical = any(s in err for s in _MECHANICAL_MARKERS)
     if reason == "crash" and mechanical and attempt <= max_attempts:
         return {"action": "repair", "rationale": "mechanical crash (rule-based)"}
@@ -202,7 +211,10 @@ class Engine:
         agent_drives_actions: bool = False,  # agent picks the next macro action (within a legal gate)
         inline_repair: bool = True,          # hybrid: triage + repair a crashed node IN PLACE (no new node)
         inline_repair_attempts: int = 1,     # max in-place repair retries per node
-        inline_repair_reasons: tuple = ("crash",),  # failure reasons eligible for inline repair
+        inline_repair_reasons: tuple = ("crash", "timeout"),  # failure reasons eligible for inline repair
+        auto_install_deps: bool = True,      # pip-install a missing KNOWN lib + re-run (trusted_local only)
+        dep_install_timeout: float = 900.0,  # per-package install wall-clock budget (seconds)
+        dep_installer=None,                  # Optional[Callable] install hook (test seam; default = deps.install)
     ):
         self.run_dir = Path(run_dir)
         self.task = task
@@ -240,6 +252,18 @@ class Engine:
         self._inline_repair = inline_repair
         self._inline_repair_attempts = max(1, int(inline_repair_attempts))
         self._inline_repair_reasons = tuple(inline_repair_reasons or ("crash",))
+        # Environment self-prep (deps.py): auto-install a missing KNOWN library and re-run, instead
+        # of letting the crash-triage agent reject the idea. Trusted_local tier ONLY — the Docker
+        # tiers run --network none and must not mutate a shared image. `_dep_attempted` records every
+        # module we've already run pip for THIS run (one attempt per module: success => now present
+        # forever; failure => won't change on retry), so an offline/misnamed package can't loop.
+        # `_dep_lock` serializes pip + that set across parallel evals (pip is not concurrency-safe).
+        self._auto_install_deps = bool(auto_install_deps) and trust_mode == "trusted_local"
+        self._dep_install_timeout = float(dep_install_timeout)
+        self._dep_installer = dep_installer        # None => deps.install (real pip)
+        self._dep_attempted: set[str] = set()
+        import threading as _threading
+        self._dep_lock = _threading.Lock()
         self._localize_faults = localize_faults
         self._feature_engineering = feature_engineering
         self._ablate_code_blocks = ablate_code_blocks
@@ -1191,14 +1215,20 @@ class Engine:
         })
         return [chosen]
 
-    def _triage_crash(self, state: RunState, node, error: str, attempt: int) -> dict:
-        """Decide what to do with a just-crashed node BEFORE spending another eval:
+    def _triage_crash(self, state: RunState, node, error: str, attempt: int,
+                      reason: str = "crash") -> dict:
+        """Decide what to do with a just-failed node BEFORE spending another eval:
         {"action": "repair"|"abandon"|"reject_idea", "rationale": str}. Base mode: the unified
         agent decides (it can consult the run via its pilot tools — read_code / find_analogous —
         to judge whether nearby configs also fail, i.e. whether the IDEA is wrong vs the code).
         Falls back to a deterministic rule when no LLM triage agent is wired (unified_agent off),
-        which never rejects an idea — so the feature is safe without an agent."""
-        reason = "crash"
+        which never rejects an idea — so the feature is safe without an agent.
+
+        `reason` (crash|timeout) is surfaced to both paths so a timeout is triaged as "too slow ->
+        reduce compute" rather than mis-read as a wrong idea (a missing KNOWN lib never reaches here
+        — env-prep installs it and re-runs first)."""
+        # Tag the failure kind so the LLM agent (and the rule's marker scan) see crash vs timeout.
+        tagged = f"[failure kind: {reason}]\n{error}"
         fn = getattr(self.researcher, "triage_crash", None)
         if callable(fn):
             try:
@@ -1207,7 +1237,7 @@ class Engine:
                     brief = _state_brief(state, None)
                 except Exception:  # noqa: BLE001 - a brief is advisory; never block on it
                     brief = ""
-                out = fn(node, error, attempt, state=state, brief=brief)
+                out = fn(node, tagged, attempt, state=state, brief=brief)
                 if isinstance(out, dict) and out.get("action") in ("repair", "abandon", "reject_idea"):
                     return {"action": out["action"], "rationale": str(out.get("rationale", ""))[:300]}
             except Exception:  # noqa: BLE001 - agent triage is best-effort; fall through to the rule
@@ -1215,14 +1245,60 @@ class Engine:
         return _rule_triage(reason, error, attempt, self._inline_repair_attempts)
 
     def _repair_error_context(self, reason: str, error: str) -> str:
-        """Error context handed to Developer.repair(). With deep_repair (C3) enrich the raw stderr
-        tail with the failure taxonomy + a 'reproduce then fix' directive; else pass the raw tail.
-        Shared by the inter-node debug operator and the inline (in-node) repair loop."""
+        """Error context handed to Developer.repair(). A timeout gets an explicit cost-reduction
+        directive (the code was too slow, not wrong — shrink it to fit the budget). With deep_repair
+        (C3) a crash is enriched with the failure taxonomy + a 'reproduce then fix' directive; else
+        the raw tail. Shared by the inter-node debug operator and the inline (in-node) repair loop."""
+        if reason == "timeout":
+            # Don't quote a specific budget here: the wall-clock varies by node kind (a sweep node gets
+            # timeout×sweep_timeout_mult; a RepoTask uses its own per-profile timeout), so a hardcoded
+            # self.timeout would be misleading. The directive — cut compute — is what matters.
+            return ("[failure kind: timeout]\n" + error + "\n"
+                    "The script exceeded its evaluation time budget and was killed before it produced a "
+                    "metric. The IDEA is fine — it was just too slow. Return a corrected, complete script "
+                    "that finishes WELL within the budget by reducing compute: fewer estimators/boosting "
+                    "rounds, fewer epochs, fewer CV folds or seeds, early stopping, a smaller/lighter "
+                    "model, capped n_jobs, or a subsample — keep the approach, cut the cost.")
         if self._deep_repair:
             return (f"[failure kind: {reason or 'unknown'}]\n{error}\n"
                     "Diagnose the root cause; if it's unclear, add a tiny reproduction/"
                     "assert near the failure, then return a corrected, complete script.")
         return error
+
+    def _prepare_env(self, stderr: str) -> list[str]:
+        """Environment self-prep: pip-install the KNOWN libraries a crash reports as missing, into
+        the eval interpreter, so the engine can re-run instead of rejecting the idea. Returns the
+        pip packages successfully installed (empty => nothing to do / install failed -> normal
+        triage). Trusted_local only (gated by the caller via `self._auto_install_deps`).
+
+        Per-package so a partial failure only stops the bad name; `_dep_attempted` + `_dep_lock`
+        make it install-once-per-module and concurrency-safe (pip mutates one shared env)."""
+        from . import deps
+        # Parse the missing KNOWN libs BEFORE taking the lock — a crash with nothing to install (the
+        # common case, and every non-dep crash) must not block on `_dep_lock` while another eval holds
+        # it through a multi-minute pip install (max_parallel>1). Only contend for the lock when there
+        # is real installable work.
+        candidates = [m for m in deps.missing_modules(stderr) if deps.is_installable(m)]
+        if not candidates:
+            return []
+        with self._dep_lock:
+            mods = [m for m in candidates if m not in self._dep_attempted]  # re-check inside the lock
+            if not mods:
+                return []
+            python = getattr(self.sandbox, "python", sys.executable)
+            installer = self._dep_installer or deps.install
+            installed: list[str] = []
+            for mod in mods:
+                self._dep_attempted.add(mod)    # one pip attempt per module per run (success or fail)
+                pkg = deps.pip_package(mod)
+                try:
+                    with self.tracer.span("install_dep", package=pkg):
+                        res = installer(pkg, python=python, timeout=self._dep_install_timeout)
+                except Exception:  # noqa: BLE001 - a misbehaving installer must degrade to "not installed",
+                    res = None     # not crash the eval; the node then flows to normal triage/repair.
+                if getattr(res, "ok", False):
+                    installed.append(pkg)
+            return installed
 
     # ---------------------------------------------------------------- private
     def _create_node(self, action: dict) -> None:
@@ -1621,6 +1697,7 @@ class Engine:
             # only NON-terminal `node_repaired` events are written mid-loop.
             import threading
             attempt = 0
+            dep_rounds = 0                   # env-prep auto-install + re-run rounds (separate from repair attempts)
             total_eval = 0.0                 # summed subprocess wall-clock across all attempts (cost)
             triage_outcome = None            # ("abandon"|"reject_idea", rationale) for the terminal event
             err = ""
@@ -1671,6 +1748,20 @@ class Engine:
                     f"metric drift: {res.drift}" if res.drift is not None else
                     f"exit={res.exit_code} timed_out={res.timed_out} no_metric"
                 )
+                # Environment self-prep (deps.py): a crash that is purely a missing KNOWN library is
+                # not a bad idea — install it (trusted_local only) and re-run BEFORE the crash-triage
+                # agent can reject the idea. This is what lets torch/XGBoost/CatBoost (e.g. a GRU
+                # model) run on a fresh box instead of dying as `idea_rejected`. Bounded by
+                # _MAX_DEP_ROUNDS + the `_dep_failed` cache; does NOT consume a repair attempt (env
+                # prep is not a code fix), and the unchanged node is simply re-evaluated.
+                if (self._auto_install_deps and reason == "crash" and dep_rounds < _MAX_DEP_ROUNDS):
+                    installed = await anyio.to_thread.run_sync(self._prepare_env, res.stderr)
+                    if installed:
+                        dep_rounds += 1
+                        async with self._write_lock:
+                            self.store.append("deps_installed", {
+                                "node_id": node_id, "packages": installed, "round": dep_rounds})
+                        continue   # re-run now that the library is present (no repair attempt spent)
                 # Inline-repair gate: feature on, repairable reason, attempts left, a Developer that
                 # can repair, and something to repair (whole-file code, multi-file edits, or a repo).
                 if (not self._inline_repair
@@ -1679,7 +1770,7 @@ class Engine:
                         or not callable(getattr(self.developer, "repair", None))
                         or not (node.code or node.files or self._repo_spec)):
                     break
-                triage = self._triage_crash(state, node, err, attempt + 1)
+                triage = self._triage_crash(state, node, err, attempt + 1, reason=reason)
                 action = triage.get("action", "repair")
                 if action == "abandon":
                     triage_outcome = ("abandon", triage.get("rationale", ""))

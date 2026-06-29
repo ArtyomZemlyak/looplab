@@ -24,6 +24,7 @@ from typing import Optional
 import anyio
 import orjson
 
+from .atomicio import atomic_write_text
 from .config import Settings
 from .eventstore import EventStore, iter_jsonl
 from .models import Event
@@ -619,6 +620,52 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
         if snap.exists():
             return json.loads(snap.read_text(encoding="utf-8"))   # already secret-masked by `run`
         return Settings().masked_snapshot()
+
+    @app.put("/api/runs/{run_id}/config")
+    async def put_run_config(run_id: str, request: Request):
+        """Per-run settings edit: rewrite THIS run's config.snapshot.json so a later RESUME re-enters
+        the loop with the new values. Resume reads the snapshot via `Settings(**data)` (cli.py) — it
+        does NOT read the UI's global new-run defaults — so editing the snapshot is the only way to
+        change a specific run's settings (e.g. raise `timeout`, enable timeout repair) before continuing it.
+
+        Writing the snapshot is SAFE even while the engine is live: the only other writer is `run` at
+        startup (under the singleton lock, before the loop), and a running engine never re-reads the
+        snapshot — so a concurrent PUT can't corrupt or race it. A live engine just keeps its in-memory
+        settings until it's stopped & resumed; we return `engine_running` so the UI can say "applies on
+        the next restart" (and offer a pause→resume to apply now). Only known, non-secret fields are
+        applied (masked llm_api_key + any unknown keys preserved); the merged config is validated through
+        `Settings()` so a bad value (e.g. n_seeds<1, timeout<=0, bad enum) is rejected 422 — with the
+        offending field surfaced — instead of poisoning the next resume."""
+        from pydantic import ValidationError
+        rd = _run_dir(run_id)
+        snap = rd / "config.snapshot.json"
+        if not snap.exists():
+            raise HTTPException(404, "run has no config.snapshot.json (it predates self-describing runs)")
+        body = await request.json()
+        incoming = body.get("settings", body) or {}
+        allowed, secret = set(Settings.model_fields), {"llm_api_key"}
+        current = json.loads(snap.read_text(encoding="utf-8"))
+        updated = dict(current)
+        changed = {}
+        for k, v in incoming.items():        # apply only known, non-secret, actually-set fields
+            if k in allowed and k not in secret and v is not None and current.get(k) != v:
+                updated[k] = v
+                changed[k] = v
+        # Validate the MERGED config before persisting. Only KNOWN, non-secret fields are passed to
+        # Settings (the masked secret re-reads from env/default at resume; any unknown/forward-compat
+        # keys are preserved on disk but not validated). A ValidationError is reported per-field so the
+        # UI can tell the user EXACTLY what's wrong (the original bug: an opaque "422").
+        try:
+            Settings(**{k: v for k, v in updated.items() if k in allowed and k not in secret})
+        except ValidationError as e:
+            fields = "; ".join(f"{'.'.join(str(x) for x in err['loc']) or '?'}: {err['msg']}"
+                               for err in e.errors())
+            raise HTTPException(422, f"invalid settings — {fields}")
+        except Exception as e:               # noqa: BLE001 - any other coercion error
+            raise HTTPException(422, f"invalid settings: {e}")
+        atomic_write_text(snap, json.dumps(updated, indent=2))
+        return {"ok": True, "config": updated, "changed": sorted(changed),
+                "engine_running": _engine_alive(rd)}
 
     @app.get("/api/runs/{run_id}/cost")
     def run_cost(run_id: str):

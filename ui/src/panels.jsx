@@ -1,9 +1,11 @@
 import React, { useEffect, useMemo, useState } from 'react'
-import { get, putText, post, fmt, fmtInt, CONTROL, gpuStat } from './util.js'
+import { get, putText, post, fmt, fmtInt, CONTROL, gpuStat, saveRunConfig, resumeRun } from './util.js'
 import { Bars, ParallelCoords, Scatter } from './charts.jsx'
 import { hyperImportance } from './report.js'
 import Markdown from './markdown.jsx'
 import { OpIcon } from './icons.jsx'
+import SettingsForm from './SettingsForm.jsx'
+import { toForm, fromForm, FIELD_BY_KEY } from './settingsSchema.js'
 
 export function Panel({ title, sub, onClose, children, wide }) {
   return (
@@ -258,18 +260,101 @@ export function DataQualityPanel({ state, onClose }) {
   )
 }
 
-export function ConfigPanel({ runId, state, onClose, onToast }) {
+// Per-run config: shows the run's config.snapshot.json and lets you EDIT it. Edits are saved back to
+// the snapshot, which a later RESUME re-reads (resume does NOT pick up the UI's global new-run
+// defaults), so this is how you change a specific run's settings (e.g. raise `timeout`, enable timeout
+// repair). Works for live runs too: saving the snapshot is safe mid-run (the engine never re-reads it),
+// and a "Pause & resume" applies it now by restarting the engine (pause → wait for it to stop → resume).
+export function ConfigPanel({ runId, state, live, onClose, onToast }) {
   const [cfg, setCfg] = useState(null)
+  const [form, setForm] = useState(null)
+  const [saved, setSaved] = useState(null)   // last-persisted form (to detect unsaved edits)
   const [sec, setSec] = useState('')
-  useEffect(() => { get(`/api/runs/${runId}/config`).then(setCfg).catch(() => {}) }, [runId])
+  const [busy, setBusy] = useState(false)
+  const [raw, setRaw] = useState(false)
+  const load = () => get(`/api/runs/${runId}/config`).then(c => {
+    setCfg(c); const f = toForm(c); setForm(f); setSaved(f)
+  }).catch(() => {})
+  useEffect(() => { load() }, [runId])
+
+  // A live engine keeps its in-memory settings until it restarts; gate on `live` (not the possibly
+  // historical `state`) so time-travel doesn't misreport liveness.
+  const engineLive = live?.engine_running === true
+  const dirty = useMemo(() => {
+    if (!form || !saved) return new Set()
+    const cur = fromForm(form), base = fromForm(saved), s = new Set()
+    for (const k of Object.keys(FIELD_BY_KEY)) if (JSON.stringify(cur[k]) !== JSON.stringify(base[k])) s.add(k)
+    return s
+  }, [form, saved])
+  const onChange = (k, v) => setForm(f => ({ ...f, [k]: v }))
+  const sleep = ms => new Promise(r => setTimeout(r, ms))
+
+  const onSave = async () => {
+    const cur = fromForm(form), changed = {}
+    for (const k of dirty) changed[k] = cur[k]    // send ONLY edited fields (minimal snapshot diff)
+    if (!Object.keys(changed).length) return
+    setBusy(true)
+    try {
+      const r = await saveRunConfig(runId, changed)
+      const f = toForm(r.config); setCfg(r.config); setForm(f); setSaved(f)
+      const what = r.changed?.length ? `saved ${r.changed.join(', ')}` : 'saved'
+      onToast(what + (r.engine_running ? ' — applies when the live run restarts' : ' — applies on next resume'))
+    } catch (e) { onToast('save failed: ' + e.message) }   // e.message now carries the server detail (e.g. which field)
+    finally { setBusy(false) }
+  }
+  const onResume = async () => {           // stalled/finished: just spawn the engine (re-reads the snapshot)
+    setBusy(true)
+    try { await resumeRun(runId); onToast('resuming with the saved settings…') }
+    catch (e) { onToast('resume failed: ' + e.message) }
+    finally { setBusy(false) }
+  }
+  const onPauseResume = async () => {      // live: pause → wait for the engine to stop → resume with new settings
+    setBusy(true)
+    try {
+      onToast('pausing — the current experiment finishes first…')
+      await CONTROL.pause(runId)
+      let stopped = false
+      for (let i = 0; i < 900 && !stopped; i++) {   // poll up to ~15 min (a node can hold an eval that long)
+        await sleep(1000)
+        const s = await get(`/api/runs/${runId}/state`).then(r => r.state).catch(() => null)
+        if (s && s.engine_running === false) stopped = true
+      }
+      if (!stopped) { onToast('still busy — retry once the current experiment finishes'); return }
+      await CONTROL.resume(runId)          // clear the paused flag so the fresh engine doesn't immediately re-pause
+      await resumeRun(runId)               // new engine process re-reads the snapshot
+      onToast('resumed with the new settings')
+    } catch (e) { onToast('pause/resume failed: ' + e.message) }
+    finally { setBusy(false) }
+  }
+
+  const rawTable = <table className="tbl"><tbody>{cfg && Object.entries(cfg).map(([k, v]) =>
+    <tr key={k}><td className="muted">{k}</td><td>{typeof v === 'object' ? JSON.stringify(v) : String(v)}</td></tr>)}</tbody></table>
+
   return (
-    <Panel title="Run config" onClose={onClose} wide>
+    <Panel title="Run config" sub={engineLive ? 'live · applies on restart' : 'edit · applies on resume'} onClose={onClose} wide>
       <div className="toolbar" style={{ marginBottom: 12 }}>
         <span className="muted">extend eval budget:</span>
         <input className="text" style={{ width: 120 }} placeholder="seconds" value={sec} onChange={e => setSec(e.target.value)} />
         <button className="btn sm primary" disabled={!sec} onClick={async () => { await CONTROL.budget(runId, Number(sec)); onToast('budget extended +' + sec + 's') }}>apply</button>
       </div>
-      {cfg ? <table className="tbl"><tbody>{Object.entries(cfg).map(([k, v]) => <tr key={k}><td className="muted">{k}</td><td>{typeof v === 'object' ? JSON.stringify(v) : String(v)}</td></tr>)}</tbody></table> : <div className="muted">…</div>}
+      {!form ? <div className="muted">…</div> : <>
+        <div className="notice" style={{ marginBottom: 10 }}>
+          {engineLive
+            ? <>This run is <b>live</b>. Saving updates its <code>config.snapshot.json</code>, but the running engine keeps its current settings until it restarts — use <b>Pause &amp; resume</b> to stop it (the current experiment finishes first) and continue with the new settings.</>
+            : <>Edits are saved to this run's <code>config.snapshot.json</code> and applied on the next <b>resume</b>.</>}
+          {' '}<span style={{ color: 'var(--accent)' }}>●</span> = changed.
+        </div>
+        <div className="toolbar" style={{ marginBottom: 10 }}>
+          <span className="spacer" style={{ flex: 1 }} />
+          <button className="btn sm ghost" onClick={() => setRaw(r => !r)}>{raw ? 'form' : 'raw'}</button>
+          <button className="btn sm ghost" disabled={busy || !dirty.size} onClick={() => setForm(saved)}>↺ revert</button>
+          <button className="btn sm primary" disabled={busy || !dirty.size} onClick={onSave}>Save</button>
+          {engineLive
+            ? <button className="btn sm" disabled={busy || dirty.size > 0} onClick={onPauseResume} title="pause the run, then resume it with the saved settings">Pause &amp; resume ▸</button>
+            : <button className="btn sm" disabled={busy || dirty.size > 0} onClick={onResume} title="continue this run with the saved settings">Resume ▸</button>}
+        </div>
+        {raw ? rawTable : <SettingsForm form={form} onChange={onChange} dirty={dirty} />}
+      </>}
     </Panel>
   )
 }

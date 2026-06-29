@@ -72,8 +72,20 @@ class Settings(BaseSettings):
     # budgeted inter-node debug operator). 1 = a single repair retry.
     inline_repair_attempts: int = Field(default=1, ge=1)
     # Which failure reasons (_failure_reason: crash|timeout|setup|no_metric|drift) are eligible for
-    # inline repair. Default: only mechanical crashes. Env override expects a JSON array.
-    inline_repair_reasons: tuple[str, ...] = ("crash",)
+    # inline repair. Default: mechanical crashes AND timeouts — a timeout means the code was too slow
+    # for the eval budget, not that the idea is wrong, so the agent repairs it by reducing compute
+    # (fewer estimators/epochs/folds/seeds, or a lighter model) instead of letting the node die
+    # unrecovered. Env override expects a JSON array.
+    inline_repair_reasons: tuple[str, ...] = ("crash", "timeout")
+    # Environment self-prep: when a solution crashes purely because a KNOWN library isn't installed
+    # (ModuleNotFoundError), the engine pip-installs it into the eval interpreter and re-runs — so a
+    # torch/XGBoost/CatBoost idea (e.g. a GRU model) actually runs on a fresh box instead of being
+    # thrown away as `idea_rejected`. Trusted_local tier only (the untrusted/hostile Docker tiers run
+    # --network none). A typo'd or local helper module is NOT installed (that's a code bug to repair).
+    auto_install_deps: bool = True
+    # Per-package wall-clock budget for an auto-install (seconds). Generous: large wheels like torch
+    # can take minutes to download/build.
+    dep_install_timeout: float = Field(default=900.0, gt=0)
     # C1 (Agentless localization): for repo tasks, rank the source files most relevant to the most
     # recent failure (traceback + identifiers) and surface them in the proposal/repair prompt so the
     # Developer edits the right place. Off by default; repo tasks only.
