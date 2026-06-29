@@ -19,7 +19,7 @@ Every task shares these:
 | `direction` | `min` \| `max` | Whether lower or higher metric is better |
 | `seed` | int | Random seed for reproducible data generation |
 
-## The eight kinds
+## The nine kinds
 
 | `kind` | The agent's job | Metric source | Example |
 |---|---|---|---|
@@ -31,6 +31,7 @@ Every task shares these:
 | [`mlebench`](#mlebench) | Beat a private grader | Held-out grader | `examples/mlebench_task.json` |
 | [`mlebench_real`](#mlebench_real) | **Real Kaggle competition** | Official grader | `examples/mlebench_real_spooky.json` |
 | [`repo`](#repo) | Edit an existing repo | The repo's **own** eval | `examples/repo_task.json` |
+| [`dataset`](#dataset) | **Write the whole solution** on your data | Self-reported (agent-chosen) metric | `examples/dataset_task.json` |
 
 ---
 
@@ -197,16 +198,27 @@ success is the **repo's own eval command + metric** — never a metric the agent
 
 | Field | Description |
 |---|---|
-| `editable_path` | Path to the repo; mounted into each eval workdir (a worktree copy) |
-| `edit_surface` | Globs the agent may edit (reject-not-strip) |
+| `editable_path` | Path to the repo; mounted into each eval workdir (a worktree copy). `~`/`$VARS` expand |
+| `edit_surface` | Globs the agent may edit **or create** (reject-not-strip) |
 | `protect` | Files the agent may **never** touch (e.g. the eval entrypoint) |
-| `eval.command` | The command run to evaluate a candidate |
-| `eval.metric.kind` | How to read the metric: `stdout_json` / `stdout_regex` / `file_json` / `file_regex` |
+| `eval.command` | The command run to evaluate a candidate (**argv list, no shell** — no `&&`) |
+| `eval.setup` | Optional command run **before** each eval (e.g. install deps, **or train** — see below) |
+| `eval.metric.kind` | How to read the metric: `stdout_json` / `stdout_regex` / `file_json` / `file_regex` / `adapter` |
 | `eval.metric.key` | The JSON key / regex / file path to read |
 | `eval.timeout` | Per-eval timeout (seconds) |
+| `data` | `name → path` map; each is copied into the eval workdir as `./name`. `~`/`$VARS` expand |
+| `references` | Read-only inputs: `[{name, path, mount}]` — `mount: true` copies to `./name`, `false` is context-only |
+| `editables` | Multi-repo workspace: extra editable repos, each mounted at its own `name/` subdir |
 
 Eval and protected files cannot be overwritten by the agent (enforced by construction). Offline or
 on agent failure, a no-op developer leaves the repo unmodified.
+
+> **Have a test/eval but no training script?** The agent can write `train.py` for you — put it in
+> `edit_surface` and run it via `eval.setup` (which runs before the scorer each iteration), e.g.
+> `"setup": ["python","train.py"], "command": ["python","test.py"]`, while keeping `test.py` in
+> `protect`. See **[Generating train & test code](generating-code.md)** for this and every other
+> "let the agent write the code" case, including pointing at your data — and the **Genesis** flow that
+> authors the whole spec from a plain-text goal.
 
 ### Framework mode (tune with no code edits)
 
@@ -243,6 +255,50 @@ looplab run examples/repo_onboard_task.json --backend llm \
 # run pauses with a proposed eval+adapter; review it, then:
 looplab approve runs/run_local
 looplab resume  runs/run_local --task-file examples/repo_onboard_task.json
+```
+
+---
+
+## `dataset`
+
+The fully-generative *"here is my data — write the whole solution and get the best metric you see
+fit"* task. You bring only a **data path** and a goal; the LLM Developer writes a **complete solution
+from scratch** each iteration (read the data → build a model → evaluate → print the metric), and the
+self-repair operator fixes crashes. Requires `--backend llm`. Offline it falls back to a deterministic
+baseline that just reports the dataset row count, so the engine still runs without a model.
+
+```jsonc
+{
+  "kind": "dataset", "id": "dataset_example",
+  "goal": "predict `target` from the features; pick the metric you judge most appropriate",
+  "direction": "max",
+  "data_path": "examples/dataset_example/data.csv",   // your data (file or dir); ~/$VARS expand → absolute
+  "seed": 0
+}
+```
+
+| Field | Description |
+|---|---|
+| `data_path` | Path to your data (file or directory). Resolved to an absolute path the solution reads directly |
+| `data` | Optional extra named paths (`name → path`) for multi-file datasets |
+| `metric` | Optional metric **name** to optimize; leave empty to let the agent **choose** one (and report its `metric_name`) |
+| `direction` | `max` (default) / `min`. The agent reports the metric with that orientation (higher- or lower-is-better) |
+| `cv_k` | Cross-validation folds the brief suggests for honest evaluation |
+
+**Self-chosen metric.** With no `metric` set, the agent picks the most appropriate one (accuracy / F1 /
+AUC / R² / …) and prints both `metric` and `metric_name`. With `direction: "max"` it reports a
+higher-is-better value (an error metric is negated), so selection stays consistent.
+
+**Trust caveat.** Like `code_regression`, the solution **self-reports** its own metric — there is no
+private grader, so this trades the anti-cheat guarantee for zero-setup convenience (the reward-hack /
+code-leakage monitors still audit it). For the hard *"the agent never authors its own metric"*
+guarantee, use [`repo`](#repo) (your own eval command) or [`mlebench_real`](#mlebench_real) (held-out
+grader). **Data access** is by absolute path, which works under the default `trusted_local` tier; for
+the `untrusted`/`hostile` docker tiers mount the data via a `repo` task instead (an absolute host path
+isn't visible inside the container).
+
+```bash
+looplab run examples/dataset_task.json --backend llm --max-nodes 8
 ```
 
 ---

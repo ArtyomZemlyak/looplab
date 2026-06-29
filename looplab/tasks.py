@@ -13,6 +13,7 @@ from .mlebench import MLEBenchTask
 from .mlebench_real import MLEBenchRealTask
 from .prompts import PromptStore
 from .classification import ClassificationTask
+from .dataset_task import DatasetTask
 from .regression import CodeRegressionTask, RegressionTask
 from .repo_task import RepoTask
 from .roles import Developer, Researcher
@@ -33,7 +34,7 @@ _KINDS = {"quadratic": ToyTask, "regression": RegressionTask,
           "code_regression": CodeRegressionTask, "mlebench": MLEBenchTask,
           "mlebench_real": MLEBenchRealTask,
           "repo": RepoTask, "timeseries": TimeSeriesTask,
-          "classification": ClassificationTask}
+          "classification": ClassificationTask, "dataset": DatasetTask}
 
 
 def kinds() -> list[str]:

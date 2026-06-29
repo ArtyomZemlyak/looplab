@@ -1,0 +1,8 @@
+{
+  "kind": "dataset",
+  "id": "dataset_example",
+  "goal": "predict `target` from the features; pick the metric you judge most appropriate",
+  "direction": "max",
+  "data_path": "examples/dataset_example/data.csv",
+  "seed": 0
+}

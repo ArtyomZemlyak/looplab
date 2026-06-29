@@ -61,7 +61,7 @@ model by setting `LOOPLAB_LLM_BASE_URL` / `LOOPLAB_LLM_MODEL` / `LOOPLAB_LLM_API
 
 ## Task types
 
-A task is a small JSON file with a `kind`. LoopLab ships eight adapters:
+A task is a small JSON file with a `kind`. LoopLab ships nine adapters:
 
 | `kind` | What it optimizes | Example |
 |---|---|---|
@@ -73,6 +73,7 @@ A task is a small JSON file with a `kind`. LoopLab ships eight adapters:
 | `mlebench` | Competition-shaped task with a private held-out grader | `examples/mlebench_task.json` |
 | `mlebench_real` | **Real Kaggle competitions** scored by the official grader | `examples/mlebench_real_spooky.json` |
 | `repo` | Edit/tune an **existing repo**; success = the repo's own eval | `examples/repo_task.json` |
+| `dataset` | Point at your data; LLM **writes the whole solution** + picks the metric | `examples/dataset_task.json` |
 
 See the [Task reference](docs/guide/tasks.md) for every field and more examples.
 
@@ -128,6 +129,7 @@ The full guide lives in **[`docs/guide/`](docs/guide/index.md)**:
 | [CLI reference](docs/guide/cli-reference.md) | Every command and option |
 | [Configuration](docs/guide/configuration.md) | Every `LOOPLAB_*` setting, grouped |
 | [Tasks](docs/guide/tasks.md) | All eight task kinds and their fields |
+| [Generating train & test code](docs/guide/generating-code.md) | Let the agent write the code (Genesis-first); bring your own repo + data |
 | [LLM & coding agents](docs/guide/llm-and-agents.md) | Backends, external agents, per-role models, reasoning |
 | [Concepts](docs/guide/concepts.md) | Event log, replay, sandbox/trust, operators, gates, memory |
 | [Web UI](docs/guide/ui.md) | The live React control plane |

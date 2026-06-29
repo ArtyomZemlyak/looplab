@@ -45,7 +45,9 @@ Then open the printed URL. The server serves the **built** React bundle from `ui
   the edit surface, protect the grader). For a repo it's a real **agent**: it first *reads your repo
   on disk* (README, the eval/entry script, requirements, results files) through read-only scout tools
   so the command, metric, and steps are grounded in your actual code — not guessed. Tweak any field,
-  then launch.
+  then launch. See **[Generating train & test code](generating-code.md)** for the full Genesis flow
+  and every "let the agent write the code" case (from-scratch, repo edit, test-without-train,
+  onboarding) plus how to point at your data.
 - **Drive a run** — start, resume, fork, branch, or inject nodes from the browser; the server spawns
   the engine as a subprocess. A finished run can be extended with a new batch.
 - **Chat / boss** — an agentic run chat turns one message into a plan of ordered actions, with each
