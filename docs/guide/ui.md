@@ -55,6 +55,16 @@ Bind to `127.0.0.1` (the default) for local use. The control plane is **unauthen
 set a token, so it is not placed on the LAN implicitly. To serve beyond localhost, set
 `LOOPLAB_UI_TOKEN` and bind to `0.0.0.0`.
 
+### Behind a path-mounting proxy (JupyterHub, reverse-proxy subpath)
+
+The UI works when it's served under a path prefix — e.g. JupyterHub's
+`/user/<name>/proxy/8765/` (`jupyter-server-proxy`). The build references its assets relatively and
+joins the served prefix on every API/SSE call, so no extra config is needed for the common
+prefix-**stripping** proxy (`/proxy/<port>/`): keep the default `--host 127.0.0.1` (the proxy reaches
+it on localhost) and open the proxy URL. If your proxy does **not** strip the prefix before
+forwarding, start uvicorn with a matching `root_path` (set `--host`/port as usual and run behind
+`uvicorn ... --root-path /user/<name>/proxy/8765`).
+
 ## Developing the UI
 
 The frontend lives in `ui/` (Vite + React). Changes to the JSX require a rebuild — the server serves
