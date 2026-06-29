@@ -215,7 +215,9 @@ def test_pending_hint_reaches_researcher_prompt(monkeypatch):
     st.pending_hints = [{"text": "use log1p targets + domain features"}]
     r.propose(st, None)
     user = next(m["content"] for m in captured["messages"] if m["role"] == "user")
-    assert "Operator directives" in user and "log1p targets + domain features" in user
+    # "Operator directive" matches both the single-hint ("…directive (follow it):") and the
+    # multi-hint ("…directives, oldest first…") renderings from looplab.hints.
+    assert "Operator directive" in user and "log1p targets + domain features" in user
 
 
 def test_chat_uses_the_runs_snapshot_model_not_ui_env(tmp_path, monkeypatch):

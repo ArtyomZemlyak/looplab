@@ -172,8 +172,8 @@ class LLMResearcher:
         # Operator steering (Phase 5 `hint` control events): fold them into the prompt so a live
         # human can nudge the search ("try higher degree", "focus on regularization"). Advisory —
         # the model still proposes; bounds still clamp.
-        hints = [h.get("text", "") for h in (state.pending_hints or []) if h.get("text")]
-        hint_block = ("\nOperator directives (follow if sensible): " + "; ".join(hints)) if hints else ""
+        from .hints import render_hint_directives
+        hint_block = render_hint_directives(state.pending_hints)
         # A0d: an engine-set complexity cue keyed on the operated node's breadth (empty when off).
         cue = getattr(self, "_complexity_hint", "")
         # Strategist `prefer_sweep` bias (engine-set, empty when off): nudges — but never forces —

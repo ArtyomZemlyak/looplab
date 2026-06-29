@@ -299,6 +299,17 @@ class LLMStrategist:
             "stalled or confused and would benefit from a deep-research step over all results + the "
             "web before continuing)."
         )
+        # Active operator/boss directives (the same `pending_hints` the Researcher already follows,
+        # rendered the same way so recency/precedence read identically): the Strategist owns the
+        # policy/fidelity, so it MUST weigh standing directives or it will fight them — e.g. answer a
+        # "try 10 different neural nets" request with a pure-exploit greedy switch that just refines
+        # the current champion. Advisory; the Strategist still decides.
+        from .hints import render_hint_directives
+        directives = render_hint_directives(state.pending_hints)
+        if directives:
+            brief += (directives + "\n(When a directive calls for EXPLORATION or trying several "
+                      "distinct approaches, prefer an exploratory policy such as evolutionary/asha "
+                      "and do NOT switch to pure-exploit greedy.)")
         messages = [
             {"role": "system", "content": _STRATEGIST_SYSTEM},
             {"role": "user", "content": brief},

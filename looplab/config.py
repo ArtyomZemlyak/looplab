@@ -155,7 +155,8 @@ class Settings(BaseSettings):
     # fit-on-test) surfaced into the Trust panel alongside reward-hack flags. Off by default.
     code_leakage_detect: bool = False
     # C4 independent critic: an execution-free critic of each solution (stub / hardcoded-metric /
-    # params-ignored) surfaced in the Trust panel. Audit-only. Off by default.
+    # params-ignored; on host-graded tasks the metric checks become a submission-output check)
+    # surfaced in the Trust panel. Audit-only. Off by default.
     critic_check: bool = False
     # A7 Strategist (NEW, user-requested): optional LLM/rule meta-controller that picks the search
     # policy/allocator + operator mix + fidelity (+ Developer backend) per situation. Config-first:

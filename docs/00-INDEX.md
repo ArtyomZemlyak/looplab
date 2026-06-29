@@ -3,6 +3,10 @@
 **Project:** LoopLab — an open, backend-flexible **autonomous ML/DS research engine** (an LLM agent that invents → implements → tests → improves ML solutions in a loop, returning the best *verified* result).
 **Status:** design v0.1 · **Date:** 2026-06-20 · **Validated/consistency-checked:** 2026-06-20
 
+> 📖 **Looking for how to *use* LoopLab?** This index covers the *design* (the why). For practical,
+> task-oriented documentation — install, quickstart, CLI, configuration, tasks — see the
+> **[User Guide](guide/index.md)** and the [README](../README.md).
+
 ---
 
 ## Read in this order

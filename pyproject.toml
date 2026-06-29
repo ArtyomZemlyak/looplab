@@ -2,7 +2,10 @@
 name = "looplab"
 version = "0.1.0"
 description = "LoopLab — autonomous ML/DS research engine (P0 working-loop slice)"
+readme = "README.md"
 requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "Artyom Zemlyak", email = "artyom.zemlyak@gmail.com" }]
 dependencies = [
     "pydantic>=2.6",
     "pydantic-settings>=2.0",
@@ -26,7 +29,8 @@ otel = [
 ]
 
 [project.scripts]
-LoopLab = "looplab.cli:app"
+looplab = "looplab.cli:app"
+LoopLab = "looplab.cli:app"   # backwards-compatible alias
 
 [build-system]
 requires = ["setuptools>=68"]

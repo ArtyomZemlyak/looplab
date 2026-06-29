@@ -112,7 +112,11 @@ def _action_to_control(c: "_Action", st) -> Optional[dict]:
     if a == "promote" and nid is not None:
         return {"type": "promote", "data": {"node_id": nid, "alias": "champion"}, "label": f"Promote #{nid} to champion"}
     if a == "hint" and c.text:
-        return {"type": "hint", "data": {"text": c.text}, "label": f"Send hint: {c.text[:60]}"}
+        # The boss authors the COMPLETE current directive each turn (it has the full chat + run
+        # context), so a boss hint REPLACES the standing one rather than piling up — the researcher/
+        # agent/strategist then read a single, current directive instead of a contradictory stack.
+        return {"type": "hint", "data": {"text": c.text, "replace": True},
+                "label": f"Set directive: {c.text[:60]}"}
     if a in ("note", "annotate") and nid is not None and c.text:
         return {"type": "annotation", "data": {"node_id": nid, "text": c.text}, "label": f"Note on #{nid}: {c.text[:50]}"}
     if a in ("budget", "extend_budget"):
@@ -1325,11 +1329,18 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
             "inject(operator='draft', params={...}, rationale='CNN baseline')].\n"
             "- Verbs: budget(nodes=N) raises the run's node budget by N (REQUIRED before asking for more "
             "experiments on a finished/near-budget run, else there's no room to run them); "
-            "hint(text=concrete directive distilled into specific techniques/features/params to try or "
-            "avoid); inject(operator one of draft/improve/debug/merge, params, rationale) for ONE "
+            "hint(text=the COMPLETE current standing directive distilled into specific techniques/"
+            "features/params to try or avoid — it REPLACES the previous directive the researcher "
+            "follows, so restate anything earlier that still applies; the researcher and strategist "
+            "both read it, so phrase exploration asks plainly, e.g. 'try several distinct neural "
+            "architectures'); inject(operator one of draft/improve/debug/merge, params, rationale) for ONE "
             "concrete experiment — emit several inject steps for several experiments; deep_research to "
             "read the literature first; note(node_id, text) to annotate a node; confirm(node_id), "
-            "ablate(node_id), fork(node_id), promote(node_id), strategy(policy,fidelity), "
+            "ablate(node_id), fork(node_id), promote(node_id); strategy(policy,fidelity) pins the "
+            "search policy/fidelity and OVERRIDES the autonomous strategist for the rest of the run "
+            "— pre-set it to match the request: an exploratory policy (evolutionary/asha) when the "
+            "user wants to TRY MANY distinct approaches (so the search doesn't just greedily refine "
+            "the current best), or greedy to exploit a clear leader; "
             "import(source_run, source_node) to SEED a winning experiment from a SIBLING run of this "
             "task into this run (use list_sibling_runs / read_sibling_experiment first to find one — the "
             "imported node records where it came from); "

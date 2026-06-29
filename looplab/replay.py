@@ -212,11 +212,19 @@ def fold(events: Iterable[Event]) -> RunState:
                 except (TypeError, ValueError):
                     pass
         elif t == "hint":
-            st.pending_hints.append(d)
+            # Append-only by default; a `replace` hint supersedes all prior standing directives
+            # (mirrors set_strategy/pending_strategy) so the boss can rewrite the single directive
+            # instead of accumulating contradictory ones. Replay-safe: deterministic over the log.
+            if d.get("replace"):
+                st.pending_hints = [d]
+            else:
+                st.pending_hints.append(d)
         elif t == "set_strategy":
             # A7 operator override (HITL parity with pause/hint): the human pins a Strategy. The
-            # engine applies it before consulting the Strategist, so a human always wins. Cleared by
-            # the engine recording the matching strategy_decision (source="operator").
+            # engine applies it before consulting the Strategist, so a human always wins. The pin owns
+            # only the fields it names (policy/policy_params/fidelity) and STAYS in force for the rest
+            # of the run (it is not cleared on apply) — a later set_strategy overwrites it; the
+            # Strategist keeps tuning everything else (see Engine._maybe_consult_strategist).
             st.pending_strategy = d.get("strategy")
         elif t == "force_confirm":
             if d.get("node_id") is not None:

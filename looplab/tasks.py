@@ -191,7 +191,19 @@ def make_roles(task: TaskAdapter, settings, run_dir=None):
         agent = build_unified_agent(task, settings, run_dir)
         return agent, agent
     client = make_llm_client(settings)
-    researcher, developer = task.llm_roles(client, parser=settings.llm_parser)
+    # Honest runtime brief: when the engine will auto-install deps (and trust permits), tell tasks
+    # that support it they MAY use torch/xgboost/etc. + the real hardware — so a neural-net idea
+    # isn't silently downgraded to sklearn. `task_runtime_caps` returns None for offline/synthetic
+    # tasks (locked to numpy+stdlib), so only capable tasks (e.g. MLEBenchReal) get the kwarg.
+    from .hardware import detect_gpu, task_runtime_caps
+    _auto_install = bool(getattr(settings, "auto_install_deps", False)) and \
+        getattr(settings, "trust_mode", "trusted_local") == "trusted_local"
+    _caps = task_runtime_caps(task, auto_install=_auto_install,
+                              gpu=detect_gpu() if _auto_install else None)
+    _kw = {"parser": settings.llm_parser}
+    if _caps is not None:
+        _kw["runtime_caps"] = _caps
+    researcher, developer = task.llm_roles(client, **_kw)
 
     # External coding-agent Developer (ADR-7): an external CLI agent writes/repairs the
     # solution code, reusing the task's brief. Tool-agnostic via cli_agent presets.

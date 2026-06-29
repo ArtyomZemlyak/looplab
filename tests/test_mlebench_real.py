@@ -261,3 +261,19 @@ def test_nomad_direction_and_run(prepared_nomad, tmp_path):
     state = _run_engine(task, tmp_path / "run")
     best = state.best()
     assert best is not None and best.metric is not None and best.metric >= 0.0
+
+
+def test_llm_brief_uses_runtime_caps(prepared_nomad):
+    # When the engine threads in a capability sentence (auto-install on), it lands in the developer
+    # brief verbatim so the agent knows it may use torch/etc. — instead of the hardcoded sklearn-only
+    # contract that made it downgrade a neural-net idea (the bug under investigation).
+    task = MLEBenchRealTask(competition=NOMAD, data_dir=prepared_nomad)
+
+    class _C:  # fake client; LLMResearcher/LLMDeveloper only store it at construction
+        pass
+
+    _, dev = task.llm_roles(_C(), runtime_caps="SENTINEL_CAPS torch xgboost auto-installed")
+    assert "SENTINEL_CAPS" in dev.brief and "torch" in dev.brief
+    # No caps threaded (unit/legacy path) -> conservative contract, byte-compatible with before.
+    _, dev2 = task.llm_roles(_C())
+    assert "scikit-learn" in dev2.brief and "CPU only, no GPU/network" in dev2.brief

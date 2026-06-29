@@ -516,6 +516,104 @@ def test_data_provenance_pins_real_asset_hash(tmp_path):
 
 
 # --------------------------------------------------------------------------- #
+# Hints -> Strategist (so it doesn't fight standing operator/boss directives)
+# --------------------------------------------------------------------------- #
+
+class _CaptureClient:
+    """Captures the messages the LLMStrategist sends and returns a scripted strategy."""
+    def __init__(self, ret):
+        self.ret = ret
+        self.messages = None
+
+    def complete_tool(self, messages, schema):
+        self.messages = messages
+        return self.ret
+
+
+def test_llm_strategist_sees_pending_hints():
+    client = _CaptureClient({"policy": "asha", "rationale": "explore per directive"})
+    st = RunState()
+    st.pending_hints = [{"text": "try 10 different neural nets"}]
+    out = LLMStrategist(client).decide(st, _ctx(phase="explore"))
+    blob = " ".join(m["content"] for m in client.messages)
+    assert "try 10 different neural nets" in blob       # the directive reached the strategist's prompt
+    assert out["policy"] == "asha"
+
+
+def test_llm_strategist_no_hints_no_directive_block():
+    client = _CaptureClient({"policy": "greedy", "rationale": "exploit"})
+    LLMStrategist(client).decide(RunState(), _ctx(phase="exploit"))
+    blob = " ".join(m["content"] for m in client.messages)
+    assert "Operator directive" not in blob             # nothing injected when there are no hints
+
+
+def test_llm_strategist_orders_multiple_hints_by_recency():
+    client = _CaptureClient({"policy": "asha", "rationale": "ok"})
+    st = RunState()
+    st.pending_hints = [{"text": "old: tune the GBM"}, {"text": "new: try neural nets"}]
+    LLMStrategist(client).decide(st, _ctx(phase="explore"))
+    blob = " ".join(m["content"] for m in client.messages)
+    assert "MOST RECENT" in blob and "new: try neural nets" in blob   # recency conveyed
+    assert blob.index("old: tune the GBM") < blob.index("new: try neural nets")  # oldest first
+
+
+# --------------------------------------------------------------------------- #
+# Operator/boss policy pin persists and wins over the autonomous Strategist
+# --------------------------------------------------------------------------- #
+
+class _AlwaysGreedy:
+    """Strategist that would switch to greedy every consult — to expose a pin that doesn't hold."""
+    def decide(self, state, ctx):
+        return {"policy": "greedy", "fidelity": "smoke", "source": "rule", "rationale": "exploit"}
+
+
+def _policy_decisions(run_dir):
+    return [e.data["strategy"].get("policy") for e in _read(run_dir)
+            if e.type == "strategy_decision"]
+
+
+def test_operator_pin_policy_wins_over_strategist(tmp_path):
+    # Boss pins policy=asha; the (greedy-loving) strategist must never flip it back -> no thrash.
+    from looplab.eventstore import EventStore
+    rd = tmp_path / "pin"; rd.mkdir()
+    EventStore(rd / "events.jsonl").append("set_strategy", {"strategy": {"policy": "asha"}})
+    state = anyio.run(_engine(rd, strategist=_AlwaysGreedy(), strategist_every=1).run)
+    assert state.finished
+    decisions = _policy_decisions(rd)
+    assert decisions, "expected at least one strategy_decision"
+    assert all(p == "asha" for p in decisions), decisions   # pin held every consult
+    assert "greedy" not in decisions
+    assert state.active_strategy and state.active_strategy.get("policy") == "asha"
+
+
+def test_operator_pin_lets_strategist_tune_unpinned_fields(tmp_path):
+    # Pinned policy is locked, but the strategist may still set the (unpinned) fidelity.
+    from looplab.eventstore import EventStore
+    rd = tmp_path / "pin2"; rd.mkdir()
+    EventStore(rd / "events.jsonl").append("set_strategy", {"strategy": {"policy": "asha"}})
+    state = anyio.run(_engine(rd, strategist=_AlwaysGreedy(), strategist_every=1).run)
+    assert state.active_strategy.get("policy") == "asha"        # pin wins
+    assert state.active_strategy.get("fidelity") == "smoke"     # strategist's tuning survived
+
+
+def test_invalid_operator_pin_is_dropped_not_recorded(tmp_path):
+    # The boss `strategy` action carries free-text policy/fidelity (unvalidated). An out-of-whitelist
+    # pin must be DROPPED: never recorded (else it diverges from the live policy make_policy rejects)
+    # and never re-asserted every consult (which would starve the strategist + spam the log). The
+    # greedy strategist still drives.
+    from looplab.eventstore import EventStore
+    rd = tmp_path / "badpin"; rd.mkdir()
+    EventStore(rd / "events.jsonl").append("set_strategy", {"strategy": {"policy": "explore_lots"}})
+    state = anyio.run(_engine(rd, strategist=_AlwaysGreedy(), strategist_every=1).run)
+    assert state.finished
+    decisions = _policy_decisions(rd)
+    assert "explore_lots" not in decisions                  # invalid pin never recorded (no divergence)
+    assert all(p in (None, "greedy") for p in decisions)    # only valid policies; strategist not starved
+    assert len(decisions) <= 2                              # not re-asserted every consult (no log spam)
+    assert (state.active_strategy or {}).get("policy") in (None, "greedy")
+
+
+# --------------------------------------------------------------------------- #
 
 def _read(run_dir: Path):
     from looplab.eventstore import EventStore
