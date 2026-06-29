@@ -14,11 +14,17 @@ pip install -e ".[ui]"
 looplab ui                      # serves http://127.0.0.1:8765 over ./runs
 ```
 
+On the first launch `looplab ui` **builds the React bundle automatically** when it's missing and
+Node/npm are on your `PATH` (`npm ci` + `npm run build`, once) — so a fresh `pip install` needs no
+manual build step. If Node isn't installed it prints how to build by hand and still starts the API.
+
 | Option | Default | Description |
 |---|---|---|
 | `--run-root DIR` | `runs` | Directory containing run subdirectories |
 | `--host HOST` | `127.0.0.1` | Bind host |
 | `--port PORT` | `8765` | Bind port |
+| `--build / --no-build` | `--build` | Auto-build the bundle if missing (`--no-build` to skip) |
+| `--rebuild` | off | Force a fresh `npm run build` even if a bundle already exists |
 
 ```bash
 looplab ui --run-root runs --host 127.0.0.1 --port 8765
@@ -52,15 +58,47 @@ set a token, so it is not placed on the LAN implicitly. To serve beyond localhos
 ## Developing the UI
 
 The frontend lives in `ui/` (Vite + React). Changes to the JSX require a rebuild — the server serves
-the built bundle, not the source:
+the built bundle, not the source. Easiest is to let the CLI do it:
 
 ```bash
-cd ui
-npm install
-npm run build          # rebuild ui/dist so `looplab ui` serves the new bundle
+looplab build-ui --force   # npm ci (first time) + npm run build into ui/dist
+# or run vite directly:
+cd ui && npm install && npm run build
 ```
+
+`looplab ui --rebuild` does the same and then serves. For live HMR while hacking on the UI, run the
+Vite dev server (`cd ui && npm run dev`) against the API.
 
 A preview launcher (`ui_preview.py`) serves the built UI with the dev `.env.dev` on a dedicated port
 (`:8771`) so a review session can run alongside the main instance.
+
+## Troubleshooting
+
+**`EACCES` executing a file under `node_modules` (e.g. esbuild), or `vite: not found`.** Vite's
+`esbuild` runs a **native binary** during install/build. `EACCES` when *executing* it means the
+volume holding `node_modules` won't run binaries. Two common causes:
+
+- a **`noexec`** mount (NFS / mounted data volumes), or
+- an **object-store FUSE mount** — `fuse.geesefs`, `s3fs`, `goofys` (common on JupyterHub `~/data`).
+  S3-backed filesystems don't preserve the Unix executable bit and lack atomic renames/hardlinks, so
+  the install can't run the binary *and* often aborts half-way — which then shows up as
+  `vite: not found` (the `.bin` shims were never created). `chmod +x` can't fix either case.
+
+Confirm the mount, then build on the pod's **local** disk and copy only the built static bundle back
+(serving `dist/` is read-only, so an S3 mount handles it fine):
+
+```bash
+findmnt -T . -o TARGET,FSTYPE,OPTIONS        # fuse.geesefs / s3fs / a `noexec` option => build elsewhere
+
+# build on local exec disk (/tmp), then copy the bundle to the repo's DEFAULT ui/dist
+rm -rf /tmp/ll-ui && cp -r ./ui /tmp/ll-ui && rm -rf /tmp/ll-ui/node_modules
+cd /tmp/ll-ui && npm ci && npm run build
+rm -rf "$OLDPWD/ui/dist" && cp -r dist "$OLDPWD/ui/dist"   # back to the default path
+cd "$OLDPWD" && looplab ui                                  # finds ui/dist, no rebuild, no env var
+```
+
+Putting the bundle at the default `ui/dist` means no env var and it persists across pod restarts.
+Alternatively keep it on local disk and pin `export LOOPLAB_UI_DIST=/tmp/ll-ui/dist` (= "use this
+prebuilt bundle, never rebuild" — also how the Docker image ships its bundle).
 
 For the containerized UI + model + engine, see [Deployment](deployment.md).

@@ -189,11 +189,11 @@ def _client_tokens(client) -> Optional[dict]:
 
 
 def _ui_dist() -> Path:
-    """Built React assets. Override with LOOPLAB_UI_DIST; default <repo>/ui/dist."""
-    env = os.environ.get("LOOPLAB_UI_DIST")
-    if env:
-        return Path(env)
-    return Path(__file__).resolve().parents[1] / "ui" / "dist"
+    """Built React assets. Override with LOOPLAB_UI_DIST; default <repo>/ui/dist.
+
+    Single source of truth shared with `uibuild` (the on-launch auto-builder)."""
+    from .uibuild import ui_dist_dir
+    return ui_dist_dir()
 
 
 # Per-theme rollup for the cross-run map: {theme: {count, best_metric}}. Now lives in `digest` so the
@@ -1721,7 +1721,8 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
         def index_placeholder():
             return JSONResponse({
                 "looplab_ui": "backend up; the React app is not built yet",
-                "build": "cd ui && npm ci --strict-ssl=false && npm run build",
+                "build": "looplab build-ui   (or: cd ui && npm ci && npm run build)",
+                "note": "`looplab ui` auto-builds the bundle when Node/npm are on PATH.",
                 "api": ["/api/runs", "/api/runs/{id}/state", "/api/runs/{id}/events (SSE)"],
             })
 
