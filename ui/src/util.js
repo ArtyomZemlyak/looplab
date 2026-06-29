@@ -435,24 +435,32 @@ const _authHeaders = (base) => {
   const t = (typeof document !== 'undefined' && document.querySelector('meta[name="ll-token"]')?.content) || ''
   return t ? { ...base, 'X-LoopLab-Token': t } : { ...base }
 }
+// Surface the server's error DETAIL (FastAPI puts the human-readable reason in `detail`) instead of a
+// bare status code — so e.g. a 422 from a per-run config save reads "invalid settings — n_seeds: …"
+// in the toast rather than just "422". Falls back to status when there's no JSON body.
+async function _throw(r, path) {
+  let detail = ''
+  try { const j = await r.json(); detail = (j && (j.detail || j.error)) || '' } catch { /* no body */ }
+  throw new Error(detail ? String(detail) : `${path}: ${r.status}`)
+}
 export async function get(path) {
   const r = await fetch(path)
-  if (!r.ok) throw new Error(`${path}: ${r.status}`)
+  if (!r.ok) await _throw(r, path)
   return r.json()
 }
 export async function post(path, body) {
   const r = await fetch(path, { method: 'POST', headers: _authHeaders({ 'Content-Type': 'application/json' }), body: JSON.stringify(body) })
-  if (!r.ok) throw new Error(`${path}: ${r.status}`)
+  if (!r.ok) await _throw(r, path)
   return r.json()
 }
 export async function putText(path, text) {
   const r = await fetch(path, { method: 'PUT', headers: _authHeaders({ 'Content-Type': 'text/plain' }), body: text })
-  if (!r.ok) throw new Error(`${path}: ${r.status}`)
+  if (!r.ok) await _throw(r, path)
   return r.json()
 }
 async function send(path, method, body) {
   const r = await fetch(path, { method, headers: _authHeaders({ 'Content-Type': 'application/json' }), body: JSON.stringify(body || {}) })
-  if (!r.ok) throw new Error(`${path}: ${r.status}`)
+  if (!r.ok) await _throw(r, path)
   return r.json()
 }
 
@@ -478,6 +486,9 @@ export const gpuStat = () => get('/api/gpu')
 // ---- settings + run launch ----
 export const getSettings = () => get('/api/settings')
 export const saveSettings = (settings) => send('/api/settings', 'PUT', { settings })
+// Per-run settings: edit a specific run's config.snapshot.json so the next RESUME picks up the
+// change (only changed fields are sent). Blocked server-side while the run's engine is live.
+export const saveRunConfig = (rid, settings) => send(`/api/runs/${encodeURIComponent(rid)}/config`, 'PUT', { settings })
 export const listTasks = () => get('/api/tasks')
 export const startRun = (body) => post('/api/start', body)
 // chat-first run creation: the pre-run BOSS turns a goal into an editable spec {run_id, task|task_file,

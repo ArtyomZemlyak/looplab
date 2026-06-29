@@ -224,7 +224,7 @@ export default function RunView({ runId, onBack }) {
       {panel === 'compare' && <ComparePanel state={state} runId={runId} onClose={() => setPanel(null)} />}
       {panel === 'crossrun' && <CrossRunPanel state={state} onClose={() => setPanel(null)} />}
       {panel === 'collab' && <CollabPanel state={state} runId={runId} onSelect={selectNode} onToast={showToast} onClose={() => setPanel(null)} />}
-      {panel === 'config' && <ConfigPanel runId={runId} state={state} onToast={showToast} onClose={() => setPanel(null)} />}
+      {panel === 'config' && <ConfigPanel runId={runId} state={state} live={live} onToast={showToast} onClose={() => setPanel(null)} />}
       {panel === 'authoring' && <AuthoringPanel onToast={showToast} onClose={() => setPanel(null)} />}
       {panel === 'memory' && <MemoryPanel onClose={() => setPanel(null)} />}
       {panel === 'registry' && <RegistryPanel state={state} onClose={() => setPanel(null)} />}

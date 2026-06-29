@@ -128,6 +128,96 @@ def test_settings_get_put_roundtrip(tmp_path):
     assert "llm_api_key" not in client.get("/api/settings").json()["overrides"]
 
 
+def _write_snapshot(rd: Path, **overrides):
+    """Mimic what `cli run` writes: a masked Settings snapshot the resume path re-reads."""
+    import json
+    from looplab.config import Settings
+    (rd / "config.snapshot.json").write_text(
+        json.dumps(Settings(**overrides).masked_snapshot(), indent=2), encoding="utf-8")
+
+
+def test_put_run_config_edits_snapshot_for_resume(tmp_path):
+    import json
+    from looplab.config import Settings
+    _build_run(tmp_path)
+    rd = tmp_path / "demo"
+    # the problematic run's real shape: short timeout, timeout-repair NOT yet enabled
+    _write_snapshot(rd, timeout=30.0, inline_repair_reasons=["crash"])
+    client = TestClient(make_app(tmp_path))
+
+    r = client.put("/api/runs/demo/config",
+                   json={"settings": {"timeout": 120.0, "inline_repair_reasons": ["crash", "timeout"]}})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] and set(body["changed"]) == {"timeout", "inline_repair_reasons"}
+    # sending an UNCHANGED value is a no-op (only real diffs are written)
+    r2 = client.put("/api/runs/demo/config", json={"settings": {"timeout": 120.0}})
+    assert r2.json()["changed"] == []
+    # persisted to the snapshot that resume re-reads via Settings(**snap)
+    snap = json.loads((rd / "config.snapshot.json").read_text(encoding="utf-8"))
+    assert snap["timeout"] == 120.0 and snap["inline_repair_reasons"] == ["crash", "timeout"]
+    rebuilt = Settings(**{k: v for k, v in snap.items() if k != "llm_api_key"})
+    assert rebuilt.timeout == 120.0      # what Engine() would get on resume
+
+
+def test_put_run_config_rejects_invalid_value_naming_the_field(tmp_path):
+    import json
+    _build_run(tmp_path)
+    _write_snapshot(tmp_path / "demo", timeout=30.0)
+    client = TestClient(make_app(tmp_path))
+    # the exact bug the user hit: Seeds = -1 (n_seeds has ge=1)
+    r = client.put("/api/runs/demo/config", json={"settings": {"n_seeds": -1}})
+    assert r.status_code == 422
+    assert "n_seeds" in r.json()["detail"]          # the offending field is surfaced, not an opaque 422
+    # the bad value never reached disk
+    snap = json.loads((tmp_path / "demo" / "config.snapshot.json").read_text(encoding="utf-8"))
+    assert snap["n_seeds"] == 3
+
+
+def test_put_run_config_allowed_while_engine_live(tmp_path):
+    """Saving the snapshot while the engine is live is SAFE (the engine never re-reads it) — the write
+    succeeds and reports engine_running=True so the UI can say "applies on restart" / offer pause+resume."""
+    import json
+    from looplab.cli import _engine_singleton
+    _build_run(tmp_path)
+    rd = tmp_path / "demo"
+    _write_snapshot(rd, timeout=30.0)
+    client = TestClient(make_app(tmp_path))
+    with _engine_singleton(rd):          # a live engine holds the lock
+        r = client.put("/api/runs/demo/config", json={"settings": {"timeout": 99.0}})
+        assert r.status_code == 200
+        assert r.json()["engine_running"] is True
+    assert json.loads((rd / "config.snapshot.json").read_text(encoding="utf-8"))["timeout"] == 99.0
+
+
+def test_put_run_config_preserves_secret_and_unknown_keys(tmp_path):
+    import json
+    from looplab.config import Settings
+    _build_run(tmp_path)
+    rd = tmp_path / "demo"
+    snap = Settings(timeout=30.0).masked_snapshot()
+    snap["llm_api_key"] = "***"
+    snap["some_future_key"] = "keepme"   # forward-compat key not in Settings
+    (rd / "config.snapshot.json").write_text(json.dumps(snap), encoding="utf-8")
+    client = TestClient(make_app(tmp_path))
+
+    r = client.put("/api/runs/demo/config",
+                   json={"settings": {"timeout": 77.0, "llm_api_key": "leak"}})
+    assert r.status_code == 200
+    out = json.loads((rd / "config.snapshot.json").read_text(encoding="utf-8"))
+    assert out["timeout"] == 77.0
+    assert out["llm_api_key"] == "***"            # secret never overwritten via this endpoint
+    assert out["some_future_key"] == "keepme"     # unknown key preserved verbatim
+    assert "llm_api_key" not in r.json()["changed"]
+
+
+def test_put_run_config_404_without_snapshot(tmp_path):
+    _build_run(tmp_path)                  # _build_run does NOT write config.snapshot.json
+    client = TestClient(make_app(tmp_path))
+    r = client.put("/api/runs/demo/config", json={"settings": {"timeout": 50.0}})
+    assert r.status_code == 404
+
+
 def test_tasks_catalogue(tmp_path):
     client = TestClient(make_app(tmp_path))
     tasks = client.get("/api/tasks").json()["tasks"]
