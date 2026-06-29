@@ -201,7 +201,9 @@ def fold(events: Iterable[Event]) -> RunState:
             # an ADDITIVE delta — "give the run N more nodes" — so several extensions accumulate; the
             # orchestrator folds it into the policy's effective max_nodes so a finished run, once
             # reopened, proposes more experiments instead of immediately re-finishing.
-            for _k in ("max_seconds", "max_eval_seconds"):
+            # max_seconds/max_eval_seconds (budgets) + timeout/max_parallel (resource retune, gated by
+            # the governance matrix at apply time) are ABSOLUTE new values (last write wins).
+            for _k in ("max_seconds", "max_eval_seconds", "timeout", "max_parallel"):
                 if d.get(_k) is not None:
                     st.budget_overrides[_k] = d[_k]
             if d.get("add_nodes") is not None:

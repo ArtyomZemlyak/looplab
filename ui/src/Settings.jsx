@@ -24,9 +24,12 @@ export default function Settings({ onBack }) {
   const [defaults, setDefaults] = useState(null)
   const [form, setForm] = useState(null)
   const [saved, setSaved] = useState(null)   // last persisted form (to detect unsaved edits)
+  const [agentControl, setAgentControl] = useState({})   // Settings.agent_control matrix (governance pills)
+  const [savedAC, setSavedAC] = useState({})
   const [toast, setToast] = useState(null)
   const load = () => getSettings().then(d => {
     const f = toForm(d.settings); setDefaults(d.defaults); setForm(f); setSaved(f)
+    const ac = d.settings.agent_control || {}; setAgentControl(ac); setSavedAC(ac)
   }).catch(() => {})
   useEffect(() => { load() }, [])
 
@@ -39,15 +42,27 @@ export default function Settings({ onBack }) {
     }
     return s
   }, [form, defaults])
-  const unsaved = useMemo(() => form && saved && JSON.stringify(form) !== JSON.stringify(saved), [form, saved])
+  const unsaved = useMemo(() => form && saved &&
+    (JSON.stringify(form) !== JSON.stringify(saved) || JSON.stringify(agentControl) !== JSON.stringify(savedAC)),
+    [form, saved, agentControl, savedAC])
 
   const onChange = (k, v) => setForm(f => ({ ...f, [k]: v }))
+  // Toggle whether a role may change a setting (the governance pills).
+  const onToggleAgent = (key, role) => setAgentControl(ac => {
+    const cur = new Set(ac[key] || [])
+    cur.has(role) ? cur.delete(role) : cur.add(role)
+    return { ...ac, [key]: [...cur] }
+  })
   const show = (m) => { setToast(m); setTimeout(() => setToast(null), 2000) }
   const onSave = async () => {
-    try { const r = await saveSettings(fromForm(form)); const f = toForm(r.settings); setForm(f); setSaved(f); show('settings saved — applied to new runs') }
-    catch (e) { show('save failed: ' + e.message) }
+    try {
+      const r = await saveSettings({ ...fromForm(form), agent_control: agentControl })
+      const f = toForm(r.settings); setForm(f); setSaved(f)
+      const ac = r.settings.agent_control || {}; setAgentControl(ac); setSavedAC(ac)
+      show('settings saved — applied to new runs')
+    } catch (e) { show('save failed: ' + e.message) }
   }
-  const resetToDefaults = () => { if (defaults) setForm(toForm(defaults)) }
+  const resetToDefaults = () => { if (defaults) { setForm(toForm(defaults)); setAgentControl(defaults.agent_control || {}) } }
 
   return <div className="app">
     <div className="topbar">
@@ -67,8 +82,9 @@ export default function Settings({ onBack }) {
           <div className="muted" style={{ marginBottom: 14 }}>
             These are saved as defaults and applied to every new run via <code>LOOPLAB_*</code> env.
             Per-run overrides are still available in the <b>New run</b> dialog. A <span style={{ color: 'var(--accent)' }}>●</span> marks a value changed from the engine default.
+            The <span className="agpill on" style={{ position: 'static' }}>R</span><span className="agpill on" style={{ position: 'static' }}>S</span><span className="agpill on" style={{ position: 'static' }}>B</span> pills set whether the <b>R</b>esearcher (per experiment), <b>S</b>trategist, or <b>B</b>oss may change a setting at runtime.
           </div>
-          <SettingsForm form={form} onChange={onChange} dirty={dirty} />
+          <SettingsForm form={form} onChange={onChange} dirty={dirty} agentControl={agentControl} onToggleAgent={onToggleAgent} />
         </>}
     </div>
     {toast && <div className="toast">{toast}</div>}

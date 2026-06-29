@@ -7,6 +7,11 @@ from __future__ import annotations
 from pydantic import Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+# Autonomous roles that may be granted per-setting write access (see Settings.agent_control).
+# strategist = A7 meta-controller (run-wide); boss = run-chat operator-proxy (run-wide);
+# researcher = per-experiment proposer (per-node sizing, e.g. eval timeout for a heavy model).
+AGENT_ROLES = ("strategist", "boss", "researcher")
+
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="LOOPLAB_", extra="ignore")
@@ -86,6 +91,28 @@ class Settings(BaseSettings):
     # Per-package wall-clock budget for an auto-install (seconds). Generous: large wheels like torch
     # can take minutes to download/build.
     dep_install_timeout: float = Field(default=900.0, gt=0)
+    # --- Agent governance: who may change a setting at runtime (per-setting allow-list of roles) ---
+    # Roles: "strategist" (A7 meta-controller; run-wide), "boss" (run-chat operator-proxy; run-wide),
+    # "researcher" (per-experiment proposer; PER-NODE — e.g. set a longer eval timeout for a neural-net
+    # idea). A setting ABSENT from this map is LOCKED — no agent may change it, only a human via the
+    # snapshot/UI. Defaults are conservative: resource/search-shape knobs the agents already reason about;
+    # infra (llm_*, trust_mode, api_key, docker_image) stays locked. The UI shows S/B/R pills per setting.
+    # `timeout` granted to the researcher IS the "auto" per-node mode — the researcher sizes each
+    # experiment's wall-clock (Idea.eval_timeout); the config `timeout` is the fallback for nodes it
+    # doesn't size. Env override expects a JSON object.
+    agent_control: dict[str, list[str]] = Field(default_factory=lambda: {
+        "timeout": ["researcher", "strategist"],
+        "max_parallel": ["strategist"],
+        "max_nodes": ["strategist", "boss"],
+        "max_eval_seconds": ["strategist", "boss"],
+        "policy": ["strategist"],
+        "n_seeds": ["strategist"],
+        "ablate_every": ["strategist"],
+        "merge_mode": ["strategist"],
+        "complexity_cue": ["strategist"],
+        "ablate_code_blocks": ["strategist"],
+        "fidelity": ["strategist", "researcher"],
+    })
     # C1 (Agentless localization): for repo tasks, rank the source files most relevant to the most
     # recent failure (traceback + identifiers) and surface them in the proposal/repair prompt so the
     # Developer edits the right place. Off by default; repo tasks only.

@@ -609,6 +609,14 @@ textarea.text { min-height: 220px; font-family: ui-monospace, Consolas, monospac
 .sf-dot { color: var(--accent); font-size: 9px; }
 .sf-input .text { width: 100%; }
 .sf-help { font-size: 11px; color: var(--fg-mut); margin-top: 3px; line-height: 1.35; }
+/* Agent-governance pills (Settings.agent_control): R/S/B toggles after a setting's label showing which
+   autonomous roles may change it at runtime. */
+.sf-agents { display: inline-flex; gap: 3px; margin-left: auto; }
+.agpill { width: 18px; height: 18px; border-radius: 5px; border: 1px solid var(--line-2);
+  background: var(--bg-3); color: var(--fg-mut); font-size: 11px; font-weight: 700; line-height: 1;
+  cursor: pointer; padding: 0; display: inline-flex; align-items: center; justify-content: center; }
+.agpill:hover { border-color: var(--accent); color: var(--fg); }
+.agpill.on { background: color-mix(in srgb, var(--accent) 20%, var(--bg-3)); border-color: var(--accent); color: var(--accent); }
 
 /* toggle switch (bool fields) */
 .switch { display: inline-flex; cursor: pointer; }

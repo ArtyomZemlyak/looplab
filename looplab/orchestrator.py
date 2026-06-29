@@ -215,6 +215,7 @@ class Engine:
         auto_install_deps: bool = True,      # pip-install a missing KNOWN lib + re-run (trusted_local only)
         dep_install_timeout: float = 900.0,  # per-package install wall-clock budget (seconds)
         dep_installer=None,                  # Optional[Callable] install hook (test seam; default = deps.install)
+        agent_control: Optional[dict] = None,  # per-setting allow-list of roles that may change it (governance)
     ):
         self.run_dir = Path(run_dir)
         self.task = task
@@ -264,6 +265,10 @@ class Engine:
         self._dep_attempted: set[str] = set()
         import threading as _threading
         self._dep_lock = _threading.Lock()
+        # Agent governance (Settings.agent_control): per-setting allow-list of which roles may change it
+        # at runtime. A setting absent from the map is LOCKED (no agent). Enforced at the strategist /
+        # boss / researcher seams via `_agent_may`. None => the conservative defaults are off (locked).
+        self._agent_control: dict = dict(agent_control or {})
         self._localize_faults = localize_faults
         self._feature_engineering = feature_engineering
         self._ablate_code_blocks = ablate_code_blocks
@@ -512,6 +517,16 @@ class Engine:
             # control event (folded into state.budget_overrides), e.g. "keep going for 600s more".
             max_s = state.budget_overrides.get("max_seconds", self.max_seconds)
             max_es = state.budget_overrides.get("max_eval_seconds", self.max_eval_seconds)
+            # Boss (run-chat) resource retune: a `budget_extend` may carry timeout / max_parallel. Apply
+            # to self.* (read fresh per eval / per batch) only when the matrix grants the boss — so the
+            # operator can e.g. give the run more per-eval time or more parallelism mid-flight.
+            _bo = state.budget_overrides
+            if "timeout" in _bo and self._agent_may("boss", "timeout"):
+                try: self.timeout = max(0.1, float(_bo["timeout"]))
+                except (TypeError, ValueError): pass
+            if "max_parallel" in _bo and self._agent_may("boss", "max_parallel"):
+                try: self.max_parallel = max(1, int(_bo["max_parallel"]))
+                except (TypeError, ValueError): pass
             # Budget (I13): per-invocation wall-clock ceiling (resets on each resume).
             if max_s is not None and (time.time() - start) >= max_s:
                 self.store.append("run_finished", {"reason": "time_budget"})
@@ -855,6 +870,19 @@ class Engine:
             self._ablate_code_blocks = bool(ops["ablate_code_blocks"])
         if "prefer_sweep" in ops:
             self._prefer_sweep = bool(ops["prefer_sweep"])
+        # Resource budgets the Strategist may retune live (gated by the governance matrix). self.timeout
+        # is read fresh per eval and self.max_parallel rebuilds the CapacityLimiter each batch, so a
+        # mid-run change takes effect on the next node without any rewiring.
+        if "timeout" in strat and self._agent_may("strategist", "timeout"):
+            try:
+                self.timeout = max(0.1, float(strat["timeout"]))
+            except (TypeError, ValueError):
+                pass
+        if "max_parallel" in strat and self._agent_may("strategist", "max_parallel"):
+            try:
+                self.max_parallel = max(1, int(strat["max_parallel"]))
+            except (TypeError, ValueError):
+                pass
         pol = strat.get("policy")
         if pol:
             try:
@@ -1501,6 +1529,12 @@ class Engine:
             elif sp.is_file():
                 (wd / name).write_bytes(sp.read_bytes())
 
+    def _agent_may(self, role: str, setting: str) -> bool:
+        """Governance gate (Settings.agent_control): may `role` (strategist|boss|researcher) change
+        `setting` at runtime? A setting absent from the map is LOCKED for everyone. Pure + cheap —
+        called at each agent seam so the matrix is the single source of truth."""
+        return role in (self._agent_control.get(setting) or ())
+
     def _run_eval(self, node, workdir, env=None, profile=None, cancel=None):
         """Eval dispatcher: RepoTask runs the operator's command + reads its metric;
         otherwise the classic solution.py sandbox path. Both return a `RunResult`, so all
@@ -1548,6 +1582,12 @@ class Engine:
             timeout = self.timeout
             if node is not None and node.idea.is_sweep:
                 timeout = self.timeout * self.sweep_timeout_mult
+            # Researcher-sized per-node budget (e.g. a neural-net / large-ensemble idea that needs longer
+            # than the run default) — honored ONLY when the governance matrix grants the researcher the
+            # `timeout` setting; otherwise the run-wide budget stands. This is the "auto" per-node mode.
+            etv = getattr(node.idea, "eval_timeout", None) if node is not None else None
+            if etv and etv > 0 and self._agent_may("researcher", "timeout"):
+                timeout = float(etv)
             res = self.sandbox.run(node.code, str(workdir), timeout, env, cancel=cancel)
         # Intra-node sweep: if the solution reported a grid of trials, collapse them into the node's
         # scalar `metric` (the best feasible trial under the task direction) so fold/best-selection/
