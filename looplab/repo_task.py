@@ -240,7 +240,10 @@ class RepoTask(BaseModel):
         """Expand ~ and $ENV in every filesystem path the task points at, so a natural
         `editable_path: "~/data/vectorizer/dense-retrieval"` (or "$HOME/…") actually resolves —
         without this the `~` is treated as a literal directory and the repo mounts/scout tools come
-        up EMPTY. Runs once; the resolved path is what gets recorded + mounted (reproducible)."""
+        up EMPTY. Runs once; the resolved absolute path is what gets recorded + mounted. (A repo task
+        is inherently tied to a local path, so resuming on a DIFFERENT machine/user whose home differs
+        already needs editable_path re-pointed — the absolute snapshot just makes that explicit instead
+        of silently re-resolving `~` to a different repo.)"""
         exp = lambda p: os.path.expanduser(os.path.expandvars(p)) if isinstance(p, str) and p else p
         self.editable_path = exp(self.editable_path)
         for e in self.editables:

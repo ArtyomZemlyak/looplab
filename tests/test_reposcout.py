@@ -61,3 +61,47 @@ def test_unknown_tool_and_missing_path(tmp_path):
     t = RepoScoutTools([tmp_path])
     assert "unknown tool" in t.execute("nope", {})
     assert "no such" in t.execute("read_file", {"path": str(tmp_path / "ghost.py")}).lower()
+
+
+def test_secret_variants_refused_and_hidden(tmp_path):
+    """The secret gate is more than `.env`: credential file variants are refused AND hidden from
+    list_dir/find_files (so neither contents NOR names reach the model)."""
+    r = tmp_path / "repo"; (r / ".ssh").mkdir(parents=True)
+    (r / "secrets.yaml").write_text("api_key: sk-x", encoding="utf-8")
+    (r / "client_secret.json").write_text('{"k": "sk-y"}', encoding="utf-8")
+    (r / ".git-credentials").write_text("https://x:ghp_tok@h", encoding="utf-8")
+    (r / ".ssh" / "id_rsa").write_text("PRIVATE-KEY", encoding="utf-8")
+    (r / "README.md").write_text("ok", encoding="utf-8")
+    t = RepoScoutTools([r])
+    for f, leak in [("secrets.yaml", "sk-x"), ("client_secret.json", "sk-y"),
+                    (".git-credentials", "ghp_tok"), (".ssh/id_rsa", "PRIVATE-KEY")]:
+        out = t.execute("read_file", {"path": str(r / f)})
+        assert ("refused" in out.lower() or "not read" in out.lower()) and leak not in out, f
+    listing = t.execute("list_dir", {"path": str(r)})
+    assert "README.md" in listing
+    assert "secrets.yaml" not in listing and ".git-credentials" not in listing and ".ssh" not in listing
+    finds = t.execute("find_files", {"root": str(r), "pattern": "**/*"})
+    assert "id_rsa" not in finds and "secrets.yaml" not in finds
+
+
+def test_env_example_readable_but_env_refused(tmp_path):
+    """`.env.example` (a non-secret template the boss wants) is readable; the real `.env` is refused."""
+    r = tmp_path / "repo"; r.mkdir()
+    (r / ".env.example").write_text("LOOPLAB_LLM_MODEL=your-model\n", encoding="utf-8")
+    (r / ".env").write_text("LOOPLAB_LLM_API_KEY=sk-real\n", encoding="utf-8")
+    t = RepoScoutTools([r])
+    assert "your-model" in t.execute("read_file", {"path": str(r / ".env.example")})
+    assert "sk-real" not in t.execute("read_file", {"path": str(r / ".env")})
+
+
+def test_read_is_allowlist_no_false_positive_on_token(tmp_path):
+    """read_file is an allowlist (unknown extensions not read), but a legit code file whose NAME
+    contains 'token' (tokenizer.py — common in NLP repos) must still be readable."""
+    r = tmp_path / "repo"; r.mkdir()
+    (r / "tokenizer.py").write_text("# tokenize text\n", encoding="utf-8")
+    (r / "model.bin").write_bytes(b"\x00\x01\x02")
+    (r / "Makefile").write_text("build:\n\techo hi\n", encoding="utf-8")
+    t = RepoScoutTools([r])
+    assert "tokenize text" in t.execute("read_file", {"path": str(r / "tokenizer.py")})
+    assert "exists, not read" in t.execute("read_file", {"path": str(r / "model.bin")})
+    assert "build:" in t.execute("read_file", {"path": str(r / "Makefile")})   # safe extensionless name
