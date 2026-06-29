@@ -57,7 +57,9 @@
   --line: #cdd8e8; --line-2: #b4c2d8;
   --fg: #0f1b2d; --fg-dim: #45566d; --fg-mut: #5b6a80;   /* a11y: was #7889a0 (2.8–3.4:1) → ≥4.6:1 */
   --working: #df9426; --ok: #12b07a; --fail: #e2453f; --best: #c49616;
-  --pending: #9fb0c6; --infeasible: #8a93d6; --accent: #0aa6c9; --accent-dim: #077e9b; --alarm: #e2453f;
+  /* a11y: accent #0aa6c9 was 2.72:1 on --bg (fails the 3:1 UI-glyph / 4.5 text bar for links + active
+     tabs) → #0a7d97 (4.53:1, AA text) keeps the cyan HUD identity while passing. */
+  --pending: #9fb0c6; --infeasible: #8a93d6; --accent: #0a7d97; --accent-dim: #077e9b; --alarm: #e2453f;
   --shadow: 0 8px 26px rgba(20, 50, 90, .14); --shadow-card: 0 1px 6px rgba(20, 50, 90, .10);
 }
 
@@ -125,7 +127,12 @@ button { font: inherit; }
   border-radius: var(--radius-sm); padding: 5px 10px; cursor: pointer;
   display: inline-flex; align-items: center; gap: 6px; transition: all .12s ease;
 }
-.btn:hover { background: #283041; border-color: #44506a; }
+/* a11y/theming: was hardcoded dark (#283041) — on a LIGHT theme that made a hovered button dark slate
+   with dark text (near-invisible). Mix bg-3 toward --fg so the hover highlights in BOTH polarities, and
+   shift the border toward --fg too so the hover stays distinct (was border==base). `--bg-2` is the
+   plain fallback for engines without color-mix (no hover would otherwise show). */
+.btn:hover { background: var(--bg-2); background: color-mix(in srgb, var(--bg-3) 86%, var(--fg));
+  border-color: color-mix(in srgb, var(--line-2) 62%, var(--fg)); }
 .btn:active { transform: translateY(1px); }
 .btn:disabled { opacity: .4; cursor: not-allowed; }
 .btn.primary { background: var(--accent-dim); border-color: var(--accent); color: #fff; }
@@ -195,7 +202,7 @@ button { font: inherit; }
 .node-card.infeasible { opacity: .62; background-image: repeating-linear-gradient(45deg, transparent, transparent 7px, rgba(122,107,154,.10) 7px, rgba(122,107,154,.10) 14px); }
 .node-card.best { border-color: var(--best); box-shadow: 0 0 0 2px rgba(255,213,74,.35), var(--shadow-card); }
 /* confirmed/robust tick on the metric row (replaces the restated "robust …" sub-line) */
-.node-card .conf-chip { font-size: 10px; color: var(--ok); font-weight: 700; margin-left: 6px; white-space: nowrap; }
+.node-card .conf-chip { font-size: 11px; color: var(--ok); font-weight: 700; margin-left: 6px; white-space: nowrap; }
 /* zoom level-of-detail glyph (overview): the status-coloured body + operator icon + id, centred. The
    card keeps its footprint so the layout never shifts; only the contents collapse. */
 .node-card.lod { display: flex; align-items: center; justify-content: center; gap: 8px; height: 100%; }
@@ -204,7 +211,7 @@ button { font: inherit; }
 @keyframes pulse { 0%,100%{ box-shadow: 0 0 0 0 rgba(240,180,41,.0), var(--shadow-card);} 50%{ box-shadow: 0 0 0 5px rgba(240,180,41,.28), var(--shadow-card);} }
 @keyframes shake { 0%,100%{transform:translateX(0)} 20%{transform:translateX(-4px)} 60%{transform:translateX(4px)} }
 
-.badge { font-size: 10px; padding: 0 5px; border-radius: 4px; border: 1px solid var(--line-2); color: var(--fg-dim); }
+.badge { font-size: 11px; padding: 0 5px; border-radius: 4px; border: 1px solid var(--line-2); color: var(--fg-dim); }
 /* agent note: monochrome + exception-only, so it never competes with the status colour budget */
 .badge.agent-note { color: var(--fg-mut); border-color: var(--line-2); }
 .badge.reason { color: var(--fail); border-color: #7a2b2b; }
@@ -243,7 +250,9 @@ button { font: inherit; }
 /* zoom/fit controls — the library default is near-invisible on the dark canvas */
 .react-flow__controls { box-shadow: var(--shadow); border-radius: var(--radius-sm); overflow: hidden; border: 1px solid var(--line-2); }
 .react-flow__controls button { background: var(--bg-3); border-bottom: 1px solid var(--line); width: 26px; height: 26px; }
-.react-flow__controls button:hover { background: #283041; }
+/* a11y/theming: was hardcoded dark (#283041) — turned the zoom controls dark-on-dark (invisible icon)
+   on light themes. Theme-aware mix, with a --bg-2 fallback for engines without color-mix. */
+.react-flow__controls button:hover { background: var(--bg-2); background: color-mix(in srgb, var(--bg-3) 84%, var(--fg)); }
 .react-flow__controls button:last-child { border-bottom: none; }
 .react-flow__controls button svg { fill: var(--fg); }
 .react-flow__controls button:disabled svg { fill: var(--fg-mut); }
@@ -274,7 +283,7 @@ button { font: inherit; }
   box-shadow: var(--shadow); pointer-events: auto; z-index: 5; }
 .grp-tab:hover { background: color-mix(in srgb, var(--grp-tint) 45%, var(--bg-1)); }
 .grp-tab .grp-chev { color: var(--fg); opacity: .8; }
-.grp-tab .grp-n { background: rgba(0,0,0,.35); border-radius: 999px; padding: 0 7px; font-size: 10px; font-weight: 700; }
+.grp-tab .grp-n { background: rgba(0,0,0,.35); border-radius: 999px; padding: 0 7px; font-size: 11px; font-weight: 700; }
 
 /* round-8: a whisper-faint band behind an expanded cluster (the soft "box" without the heavy hull) +
    a compact label pill hugging its text at the top-left (replaces the full-width bar that stretched).
@@ -290,7 +299,7 @@ button { font: inherit; }
 .grp-pill:hover { background: color-mix(in srgb, var(--grp-tint) 38%, var(--bg-1)); color: var(--fg); }
 .grp-pill .grp-chev { opacity: .75; }
 .grp-pill .grp-pill-label { overflow: hidden; text-overflow: ellipsis; }
-.grp-pill .grp-n { background: rgba(0,0,0,.34); border-radius: 999px; padding: 0 6px; font-size: 10px; font-weight: 700; }
+.grp-pill .grp-n { background: rgba(0,0,0,.34); border-radius: 999px; padding: 0 6px; font-size: 11px; font-weight: 700; }
 
 .grp-super { width: 174px; background: var(--bg-2); border: 1px solid var(--grp-tint); border-left: 3px solid var(--grp-tint);
   border-radius: var(--radius); padding: 7px 10px; box-shadow: var(--shadow-card); cursor: pointer; }
@@ -301,7 +310,7 @@ button { font: inherit; }
 .grp-super .metric { font-weight: 600; margin-top: 3px; font-variant-numeric: tabular-nums; }
 .grp-super .btn-chev { background: transparent; border: none; color: var(--grp-tint); cursor: pointer; font-size: 13px; padding: 0 2px 0 0; line-height: 1; }
 .grp-spark { display: block; margin: 4px 0 2px; }
-.grp-dots { display: flex; gap: 8px; font-size: 10px; font-variant-numeric: tabular-nums; }
+.grp-dots { display: flex; gap: 8px; font-size: 11px; font-variant-numeric: tabular-nums; }
 .grp-dots .dot.ok { color: var(--ok); } .grp-dots .dot.fail { color: var(--fail); } .grp-dots .dot.pend { color: var(--pending); }
 
 /* ---------- cross-run Map view ---------- */
@@ -317,7 +326,7 @@ button { font: inherit; }
 .run-node b { font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .run-node .muted { font-size: 11px; }
 .run-node .chips { display: flex; flex-wrap: wrap; gap: 3px; margin-top: 5px; }
-.chip.sm { font-size: 10px; padding: 1px 6px; gap: 3px; }
+.chip.sm { font-size: 11px; padding: 1px 6px; gap: 3px; }
 
 /* ---------- inspector ---------- */
 .tabs { display: flex; gap: 2px; padding: 6px 8px 0; border-bottom: 1px solid var(--line); overflow-x: auto; }
@@ -376,7 +385,7 @@ pre.code { background: var(--bg); border: 1px solid var(--line); border-radius: 
 .llm-line .llm-prev { color: var(--fg-mut); font-style: italic; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; min-width: 0; flex: 1; }
 .llm-io { padding: 2px 6px 8px 24px; }
 .llm-io .msg { padding: 3px 0 5px; }
-.llm-io .msg-role { font-size: 10px; text-transform: uppercase; letter-spacing: .5px; margin: 4px 0 2px; color: var(--fg-mut); }
+.llm-io .msg-role { font-size: 11px; text-transform: uppercase; letter-spacing: .5px; margin: 4px 0 2px; color: var(--fg-mut); }
 .llm-io .role-system { color: var(--working); }
 .llm-io .role-user { color: var(--accent); }
 .llm-io .role-assistant { color: #c08af0; }
@@ -569,10 +578,13 @@ textarea.text { min-height: 220px; font-family: ui-monospace, Consolas, monospac
 .run-menu .mi.on { color: var(--accent); }
 .run-menu .mi.danger { color: var(--fail); }
 .run-menu .mi-sep { height: 1px; background: var(--line); margin: 5px 4px; }
-.run-menu .mi-label { font-size: 10px; text-transform: uppercase; letter-spacing: .5px; color: var(--fg-mut); padding: 4px 9px 2px; }
+.run-menu .mi-label { font-size: 11px; text-transform: uppercase; letter-spacing: .5px; color: var(--fg-mut); padding: 4px 9px 2px; }
 .run-menu .mi-scroll { max-height: 200px; overflow: auto; }
 .run-menu .mi-empty { color: var(--fg-mut); padding: 4px 9px; font-size: 12px; }
 .run-menu .mi.accent { color: var(--accent); }
+/* Run-view "More ▾" overflow: anchor the shared .run-menu dropdown below-left of the More button. */
+.more-wrap { position: relative; display: inline-flex; }
+.more-menu { left: 0; right: auto; top: 30px; min-width: 168px; }
 
 /* super-task: distinct from the project pill (a different organizational axis) */
 .pill.st-pill { border-color: color-mix(in srgb, var(--accent) 45%, var(--line-2));
@@ -705,7 +717,7 @@ textarea.text { min-height: 220px; font-family: ui-monospace, Consolas, monospac
 .feed-msg.chat { border-left-color: transparent; background: transparent; padding: 1px 4px;
   margin: 7px 0; max-width: 86%; flex-direction: row; flex: 0 0 auto; height: auto; }
 .feed-msg.chat .fm-body { display: flex; flex-direction: column; min-width: 0; }
-.feed-msg.chat .chat-who { font-size: 9.5px; text-transform: uppercase; letter-spacing: .6px;
+.feed-msg.chat .chat-who { font-size: 11px; text-transform: uppercase; letter-spacing: .6px;
   color: var(--fg-mut); margin-bottom: 2px; }
 .feed-msg.chat .chat-bubble { border-radius: 11px; padding: 6px 10px; }
 .feed-msg.chat .chat-text { font-size: 12.5px; line-height: 1.45; padding: 0; }
@@ -810,14 +822,14 @@ textarea.text { min-height: 220px; font-family: ui-monospace, Consolas, monospac
 .insp-hint code { background: var(--bg-3); padding: 0 4px; border-radius: 4px; }
 
 /* ── Graph redesign (Workstream E): diff-labeled nodes + directions overview ──── */
-.node-card .change-chip { font-size: 10px; color: var(--fg-dim); margin-top: 3px; background: var(--bg-3);
+.node-card .change-chip { font-size: 11px; color: var(--fg-dim); margin-top: 3px; background: var(--bg-3);
   border: 1px solid var(--line); border-radius: 5px; padding: 0 5px; display: inline-block;
   max-width: 168px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
-.node-card .merge-line { font-size: 10px; color: #c9b3e0; margin-top: 3px; max-width: 168px;
+.node-card .merge-line { font-size: 11px; color: #c9b3e0; margin-top: 3px; max-width: 168px;
   overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 /* cross-run provenance: a "seeded from a sibling run" chip — accent-tinted to stand apart from the
    neutral change-chip, and a real link (deep-links to the source run). */
-.node-card .origin-chip { font-size: 10px; color: var(--accent); margin-top: 3px; background: var(--bg-3);
+.node-card .origin-chip { font-size: 11px; color: var(--accent); margin-top: 3px; background: var(--bg-3);
   border: 1px solid var(--line); border-radius: 5px; padding: 0 5px; display: inline-block;
   max-width: 168px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis;
   text-decoration: none; cursor: pointer; }
@@ -855,7 +867,7 @@ textarea.text { min-height: 220px; font-family: ui-monospace, Consolas, monospac
 .th-backdrop { position: fixed; inset: 0; z-index: 40; }
 .th-menu { position: absolute; right: 0; top: calc(100% + 6px); z-index: 50; width: 228px;
   background: var(--bg-1); border: 1px solid var(--line-2); border-radius: 10px; box-shadow: var(--shadow); padding: 6px; }
-.th-menu-h { font-size: 10px; text-transform: uppercase; letter-spacing: .8px; color: var(--fg-mut); padding: 4px 8px 6px; }
+.th-menu-h { font-size: 11px; text-transform: uppercase; letter-spacing: .8px; color: var(--fg-mut); padding: 4px 8px 6px; }
 .th-opt { display: flex; align-items: center; gap: 10px; width: 100%; text-align: left; padding: 7px 8px;
   border: none; background: transparent; color: var(--fg); cursor: pointer; border-radius: 7px; }
 .th-opt:hover { background: var(--bg-2); }

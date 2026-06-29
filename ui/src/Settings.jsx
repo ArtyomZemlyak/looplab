@@ -18,8 +18,8 @@ export function LlmHealth() {
 }
 
 // Full-page editor for the engine DEFAULTS used by every new run (persisted server-side in
-// <run-root>/ui_settings.json and applied to a spawned run as LOOPLAB_* env). Read-only fields
-// like the resolved snapshot still live in each run's Config panel; this is the global default.
+// <run-root>/ui_settings.json and applied to a spawned run as LOOPLAB_* env). Per-run overrides
+// live in each run's "Settings" panel (the snapshot the next resume reads); this is the global default.
 export default function Settings({ onBack }) {
   const [defaults, setDefaults] = useState(null)
   const [form, setForm] = useState(null)
