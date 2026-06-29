@@ -13,6 +13,7 @@ Run it via `LoopLab ui --run-root runs/` (the CLI lazily imports this so the cor
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import secrets
@@ -34,6 +35,19 @@ from .models import Event
 from .projects import ProjectError, ProjectStore
 from .replay import fold
 from .tasks import make_llm_client
+
+_log = logging.getLogger("looplab.server")
+
+
+def _on_shared_hub() -> bool:
+    """True when this process looks like a JupyterHub single-user server reached through
+    `jupyter-server-proxy` (https://hub/user/<name>/proxy/<port>/). That is a SHARED origin: the
+    same-origin policy is per-ORIGIN, not per-path, so a same-origin page on a *different path*
+    (another proxied app, a file the user opens under /user/<name>/files/...) can read anything
+    served on this origin — including an injected UI token. Detected via env JupyterHub sets in
+    every single-user server; absent on the default local single-user path."""
+    return bool(os.environ.get("JUPYTERHUB_SERVICE_PREFIX")
+                or os.environ.get("JUPYTERHUB_API_TOKEN"))
 
 # These imports require the [ui] extra; importing this module without it raises a clear error.
 try:
@@ -275,9 +289,28 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
                        allow_headers=["*"])
     # G1 server auth (review C3): when LOOPLAB_UI_TOKEN is set, require a matching X-LoopLab-Token
     # header on every MUTATING /api/* request (GET/HEAD/OPTIONS + SSE stay open for read/stream). The
-    # SPA is served the token in a same-origin <meta> tag (see _index_response), so a cross-origin
-    # page can't read it. Unset (default local single-user) -> no auth, behaviour unchanged.
+    # SPA is served the token in a same-origin <meta> tag (see _index_response). NOTE: "same-origin"
+    # protects the token only when each principal has its OWN origin — true for the default local
+    # bind (127.0.0.1) and a per-user subdomain. On a SHARED origin (jupyter-server-proxy: every
+    # user under https://hub/user/<name>/proxy/<port>/ shares one origin) the token is a
+    # per-DEPLOYMENT secret, not per-user — see _on_shared_hub() and the deployment guide. Unset
+    # (default local single-user) -> no auth, behaviour unchanged.
     ui_token = os.environ.get("LOOPLAB_UI_TOKEN")
+    if _on_shared_hub():
+        if ui_token:
+            _log.warning(
+                "LoopLab UI is on a SHARED JupyterHub origin (jupyter-server-proxy). LOOPLAB_UI_TOKEN "
+                "is a PER-DEPLOYMENT secret here, NOT per-user: same-origin policy is per-origin, not "
+                "per-path, so any same-origin page (another proxied app, a file you open under "
+                "/user/<you>/files/...) can read the token and drive this control plane. For real "
+                "per-user isolation give each user a PRIVATE origin (per-user subdomain or a dedicated "
+                "host/port), not a shared hub path. See docs/guide/deployment.md (Shared JupyterHub).")
+        else:
+            _log.warning(
+                "LoopLab UI is on a SHARED JupyterHub origin with NO LOOPLAB_UI_TOKEN: the control "
+                "plane (start/delete runs, edit configs, shell-executing experiments) is "
+                "UNAUTHENTICATED and reachable by any same-origin page. Set LOOPLAB_UI_TOKEN, and for "
+                "real isolation serve each user from a PRIVATE origin. See docs/guide/deployment.md.")
     if ui_token:
         @app.middleware("http")
         async def _require_token(request: "Request", call_next):
@@ -2063,25 +2096,48 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
     # ------------------------------------------------------------------ static React app
     dist = _ui_dist()
 
-    def _index_response():
+    def _index_response(request: "Optional[Request]" = None):
         # G1: inject the UI token into the served page (same-origin <meta>) when auth is on, so the
-        # SPA can echo it on mutating requests. Without a token, serve the file unchanged.
+        # SPA can echo it on mutating requests. No token (default local single-user) -> serve the
+        # file unchanged, behaviour identical to before.
         html_path = dist / "index.html"
-        if ui_token:
-            html = html_path.read_text(encoding="utf-8")
+        if not ui_token:
+            return FileResponse(str(html_path))
+        # Token is set. The <meta> is readable by ANY code that can read this document, INCLUDING a
+        # same-origin page on a different path (the shared-JupyterHub-origin case). We can't make a
+        # shared origin per-user — that needs a private origin (see deployment guide) — but we DO
+        # refuse to hand the token to the easy automated exfil paths and forbid framing the
+        # token-bearing doc:
+        #   * a programmatic fetch()/XHR carries `Sec-Fetch-Dest: empty` (never a top-level nav);
+        #   * a framed load carries `Sec-Fetch-Dest: iframe` AND we send X-Frame-Options/CSP to
+        #     stop the frame rendering, so a same-origin parent can't read its contentDocument.
+        # Only a genuine top-level document navigation (Sec-Fetch-Dest: document, or a client too
+        # old to send the header / a non-browser client) receives the token. This blocks the common
+        # `fetch('/').then(r=>r.text())` token-scrape without touching the default local path.
+        # NOT a complete fix: a same-origin page can still window.open() the app and read the popup
+        # — only a private origin closes that. The headers below are defence-in-depth, not isolation.
+        dest = request.headers.get("sec-fetch-dest") if request is not None else None
+        html = html_path.read_text(encoding="utf-8")
+        if dest is None or dest == "document":
             meta = f'<meta name="ll-token" content="{ui_token}">'
-            return HTMLResponse(html.replace("</head>", meta + "</head>", 1))
-        return FileResponse(str(html_path))
+            html = html.replace("</head>", meta + "</head>", 1)
+        headers = {
+            "X-Frame-Options": "DENY",                       # no same-origin iframe -> contentDocument read
+            "Content-Security-Policy": "frame-ancestors 'none'",
+            "Cache-Control": "no-store",                      # never let a shared cache retain the token
+            "X-Content-Type-Options": "nosniff",
+        }
+        return HTMLResponse(html, headers=headers)
 
     if dist.exists():
         app.mount("/assets", StaticFiles(directory=str(dist / "assets")), name="assets")
 
         @app.get("/")
-        def index():
-            return _index_response()
+        def index(request: Request):
+            return _index_response(request)
 
         @app.get("/{path:path}")
-        def spa(path: str):
+        def spa(path: str, request: Request):
             # SPA fallback for client-side routes; never shadow /api. Resolve-guard the path so a
             # traversal (`/..%2f..%2fwin.ini`) can't read a file outside the built assets dir — the
             # other file routes guard, this one used to serve any readable file (review C3).
@@ -2094,7 +2150,7 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
             target = (dist / path).resolve()
             if (target == base or base in target.parents) and target.is_file():
                 return FileResponse(str(target))
-            return _index_response()
+            return _index_response(request)
     else:
         @app.get("/")
         def index_placeholder():

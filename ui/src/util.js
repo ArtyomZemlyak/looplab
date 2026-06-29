@@ -434,8 +434,12 @@ export const command = async (rid, { messages = [], node_id = null, instruction 
 export const llmHealth = () => get('/api/llm/health')
 
 // G1 server auth: when the server runs with LOOPLAB_UI_TOKEN it injects the token into the served
-// page as <meta name="ll-token">; same-origin only, so a cross-origin page can't read it. Send it on
-// every mutating request. No token (default local) -> header omitted, behaviour unchanged.
+// page as <meta name="ll-token">. A *cross-origin* page can't read it (that's per-origin SOP), but a
+// SAME-origin page on a different path CAN — so the token only isolates users when each has its own
+// origin (default 127.0.0.1 bind, or a per-user subdomain), NOT on a shared jupyter-server-proxy
+// origin where it's a per-deployment secret (server injects it only on top-level navigations + sets
+// X-Frame-Options/no-store; see looplab/server.py and docs/guide/deployment.md). Send it on every
+// mutating request. No token (default local) -> header omitted, behaviour unchanged.
 const _authHeaders = (base) => {
   const t = (typeof document !== 'undefined' && document.querySelector('meta[name="ll-token"]')?.content) || ''
   return t ? { ...base, 'X-LoopLab-Token': t } : { ...base }

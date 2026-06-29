@@ -71,6 +71,33 @@ artifacts land in `./runs`, shared with the host and the UI.
   unauthenticated unless `LOOPLAB_UI_TOKEN` is set, so it is not put on the LAN implicitly. To serve
   it beyond localhost, set a token and `UI_BIND=0.0.0.0` in `.env`.
 
+### Shared JupyterHub origin (important)
+
+`LOOPLAB_UI_TOKEN` isolates users **only when each principal has its own origin** — the default
+`127.0.0.1` bind, or a per-user subdomain. It does **not** make the token per-user on a shared
+origin.
+
+Behind `jupyter-server-proxy`, every user's app lives under one origin —
+`https://hub.example.org/user/alice/proxy/8765/`, `…/user/bob/proxy/8765/`, files at
+`…/user/alice/files/…`, other proxied apps — all on `hub.example.org`. The same-origin policy is
+**per-origin, not per-path**, so any same-origin page running in the user's browser can `fetch()`
+the app's index, regex out the injected `ll-token`, and replay it to drive the control plane
+(start/delete runs, edit configs, run shell-executing experiments). On a shared hub the token is a
+**per-deployment secret, not a per-user one.**
+
+LoopLab detects the hub (`JUPYTERHUB_SERVICE_PREFIX`) and logs a warning at startup. As
+defence-in-depth it injects the token only on a genuine top-level navigation (`Sec-Fetch-Dest:
+document`) — never on a programmatic `fetch`/XHR or a framed load — and serves the token-bearing
+page with `X-Frame-Options: DENY`, `Content-Security-Policy: frame-ancestors 'none'`, and
+`Cache-Control: no-store`. That blocks the common `fetch('/').then(r => r.text())` scrape and the
+iframe-reads-`contentDocument` trick, **but it is not a complete fix**: a same-origin page can still
+`window.open()` the app and read the popup.
+
+**For real per-user isolation, give each user a private origin** — a per-user subdomain
+(`alice.hub.example.org`), a dedicated host/port reachable only by that user, or network isolation —
+rather than a shared `…/proxy/<port>/` path. Treat `LOOPLAB_UI_TOKEN` on a shared hub as a
+deployment-wide gate (keeps *other* hubs/origins out), not as a wall between co-tenant users.
+
 ## Observability export
 
 Spans are always written to `spans.jsonl` (files-as-truth, zero-dep). To forward the *same* spans to

@@ -439,6 +439,95 @@ def test_g1_no_token_means_open(tmp_path, monkeypatch):
     assert r.status_code == 200
 
 
+def _fake_dist(tmp_path, monkeypatch):
+    """A minimal built UI bundle so the index routes are live without a real `npm run build`."""
+    dist = tmp_path / "dist"
+    (dist / "assets").mkdir(parents=True)
+    (dist / "index.html").write_text("<html><head></head><body>app</body></html>", encoding="utf-8")
+    monkeypatch.setenv("LOOPLAB_UI_DIST", str(dist))
+    return dist
+
+
+def test_g1_token_injected_only_on_top_level_navigation(tmp_path, monkeypatch):
+    """Shared-origin hardening: the ll-token <meta> is handed out ONLY on a genuine top-level
+    document navigation. A programmatic fetch()/XHR (Sec-Fetch-Dest: empty) or a framed load
+    (iframe) gets a tokenless page, so a same-origin different-path page can't scrape the token.
+    The token-bearing doc is also un-frameable and un-cacheable."""
+    _build_run(tmp_path)
+    _fake_dist(tmp_path, monkeypatch)
+    monkeypatch.setenv("LOOPLAB_UI_TOKEN", "s3cret")
+    client = TestClient(make_app(tmp_path))
+
+    # genuine top-level navigation -> token present + hardened
+    r = client.get("/", headers={"Sec-Fetch-Dest": "document"})
+    assert r.status_code == 200
+    assert 'name="ll-token" content="s3cret"' in r.text
+    assert r.headers.get("X-Frame-Options") == "DENY"
+    assert "frame-ancestors 'none'" in (r.headers.get("Content-Security-Policy") or "")
+    assert r.headers.get("Cache-Control") == "no-store"
+
+    # a programmatic fetch()/XHR must NOT receive the token, but stays un-frameable
+    r = client.get("/", headers={"Sec-Fetch-Dest": "empty"})
+    assert r.status_code == 200
+    assert "ll-token" not in r.text
+    assert r.headers.get("X-Frame-Options") == "DENY"
+
+    # a framed load (would let a same-origin parent read contentDocument) gets no token
+    r = client.get("/", headers={"Sec-Fetch-Dest": "iframe"})
+    assert "ll-token" not in r.text
+
+    # a client too old to send Sec-Fetch (header absent) still works -> fail-open on absence
+    r = client.get("/")
+    assert 'name="ll-token" content="s3cret"' in r.text
+
+    # the SPA fallback (client-side route) is gated the same way
+    r = client.get("/some/spa/route", headers={"Sec-Fetch-Dest": "empty"})
+    assert "ll-token" not in r.text
+
+
+def test_g1_no_token_index_unchanged(tmp_path, monkeypatch):
+    """Default local path (no token): the index is served raw — no Sec-Fetch gating, no extra
+    security headers — exactly as before."""
+    _build_run(tmp_path)
+    _fake_dist(tmp_path, monkeypatch)
+    monkeypatch.delenv("LOOPLAB_UI_TOKEN", raising=False)
+    client = TestClient(make_app(tmp_path))
+    r = client.get("/", headers={"Sec-Fetch-Dest": "empty"})
+    assert r.status_code == 200
+    assert "ll-token" not in r.text
+    assert r.headers.get("X-Frame-Options") is None     # local path untouched
+
+
+def test_g1_shared_hub_warns(tmp_path, monkeypatch, caplog):
+    """On a shared JupyterHub origin we warn that the token is per-deployment (not per-user), and
+    that with no token the control plane is unauthenticated. No warning off-hub."""
+    import logging
+    _build_run(tmp_path)
+
+    # off-hub (default) -> no shared-origin warning
+    monkeypatch.delenv("JUPYTERHUB_SERVICE_PREFIX", raising=False)
+    monkeypatch.delenv("JUPYTERHUB_API_TOKEN", raising=False)
+    monkeypatch.setenv("LOOPLAB_UI_TOKEN", "s3cret")
+    with caplog.at_level(logging.WARNING, logger="looplab.server"):
+        make_app(tmp_path)
+    assert "shared" not in " ".join(caplog.messages).lower()
+
+    # on-hub WITH a token -> "per-deployment, not per-user"
+    caplog.clear()
+    monkeypatch.setenv("JUPYTERHUB_SERVICE_PREFIX", "/user/alice/")
+    with caplog.at_level(logging.WARNING, logger="looplab.server"):
+        make_app(tmp_path)
+    msg = " ".join(caplog.messages).lower()
+    assert "shared jupyterhub origin" in msg and "per-deployment" in msg
+
+    # on-hub WITHOUT a token -> control plane unauthenticated
+    caplog.clear()
+    monkeypatch.delenv("LOOPLAB_UI_TOKEN", raising=False)
+    with caplog.at_level(logging.WARNING, logger="looplab.server"):
+        make_app(tmp_path)
+    assert "unauthenticated" in " ".join(caplog.messages).lower()
+
+
 def test_supertask_endpoints_round_trip(tmp_path):
     """Create a super-task, assign the run to it (so the run summary carries supertask_id), reassign
     to none, then delete — the whole HTTP flow the start-menu filter/assign UI drives."""
