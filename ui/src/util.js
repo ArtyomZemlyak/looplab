@@ -443,23 +443,36 @@ async function _throw(r, path) {
   try { const j = await r.json(); detail = (j && (j.detail || j.error)) || '' } catch { /* no body */ }
   throw new Error(detail ? String(detail) : `${path}: ${r.status}`)
 }
+
+// Path-mounting-proxy support. The UI may be served under a prefix (JupyterHub
+// `/user/<name>/proxy/8765/`, a reverse-proxy subpath, …) rather than at the domain root, so an
+// absolute `/api/…` would hit the proxy host's root and miss the backend. We route every request
+// through apiUrl(), which prepends the prefix the page itself was served from. Routing is hash-based
+// (`#/run/…`), so location.pathname is exactly that prefix; the proxy strips it before forwarding,
+// so the backend still sees `/api/…`. At the root (local `looplab ui`) the prefix is '' — unchanged.
+export function apiPrefix() {
+  if (typeof location === 'undefined') return ''
+  return location.pathname.replace(/\/index\.html$/, '').replace(/\/+$/, '')
+}
+export const apiUrl = (path) => apiPrefix() + path
+
 export async function get(path) {
-  const r = await fetch(path)
+  const r = await fetch(apiUrl(path))
   if (!r.ok) await _throw(r, path)
   return r.json()
 }
 export async function post(path, body) {
-  const r = await fetch(path, { method: 'POST', headers: _authHeaders({ 'Content-Type': 'application/json' }), body: JSON.stringify(body) })
+  const r = await fetch(apiUrl(path), { method: 'POST', headers: _authHeaders({ 'Content-Type': 'application/json' }), body: JSON.stringify(body) })
   if (!r.ok) await _throw(r, path)
   return r.json()
 }
 export async function putText(path, text) {
-  const r = await fetch(path, { method: 'PUT', headers: _authHeaders({ 'Content-Type': 'text/plain' }), body: text })
+  const r = await fetch(apiUrl(path), { method: 'PUT', headers: _authHeaders({ 'Content-Type': 'text/plain' }), body: text })
   if (!r.ok) await _throw(r, path)
   return r.json()
 }
 async function send(path, method, body) {
-  const r = await fetch(path, { method, headers: _authHeaders({ 'Content-Type': 'application/json' }), body: JSON.stringify(body || {}) })
+  const r = await fetch(apiUrl(path), { method, headers: _authHeaders({ 'Content-Type': 'application/json' }), body: JSON.stringify(body || {}) })
   if (!r.ok) await _throw(r, path)
   return r.json()
 }

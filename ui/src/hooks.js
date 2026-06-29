@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
+import { apiUrl } from './util'   // join the served path prefix so SSE works behind a proxy subpath
 
 // Subscribe to a run's live folded state over SSE. The server emits `event: state` frames whose
 // data is { state, seq }. Returns the latest live state + connection status. Auto-reconnects.
@@ -15,7 +16,7 @@ export function useRunState(runId) {
     let lastSeq = -2, lastAlive
     const reconnect = (delay) => { if (stopped) return; clearTimeout(timer); timer = setTimeout(connect, delay) }
     function connect() {
-      const es = new EventSource(`/api/runs/${runId}/events`)
+      const es = new EventSource(apiUrl(`/api/runs/${runId}/events`))
       esRef.current = es
       es.addEventListener('state', (e) => {
         let p
