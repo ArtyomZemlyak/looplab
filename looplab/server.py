@@ -15,9 +15,11 @@ from __future__ import annotations
 import json
 import os
 import re
+import secrets
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from pathlib import Path
 from typing import Optional
@@ -240,8 +242,15 @@ def _engine_alive(rd: Path) -> bool:
             import fcntl
             try:
                 fcntl.flock(f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                return True              # genuinely HELD by a live engine (EWOULDBLOCK)
             except OSError:
-                return True
+                # flock UNSUPPORTED on this filesystem (FUSE/S3 like geesefs, some NFS) raises ENOTSUP/
+                # EINVAL — NOT a held lock. Treat as "can't tell -> not alive" (best-effort, matches the
+                # docstring) so it doesn't falsely report every run as live and, e.g., block deleting a
+                # stalled run forever. (Locking simply degrades on such mounts — same as the engine
+                # singleton; it's a property of the FS.)
+                return False
             fcntl.flock(f.fileno(), fcntl.LOCK_UN)
             return False
     except OSError:
@@ -503,13 +512,18 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
         rd = _run_dir(run_id)
         if _engine_alive(rd):
             raise HTTPException(409, "run is live (engine running) — pause/stop it before deleting")
-        # Don't report success on a partial delete (e.g. a Windows open handle on a node dir) —
-        # that would leave a ghost run the UI thinks is gone. Only forget it if the dir is actually
-        # removed; otherwise surface the failure.
-        shutil.rmtree(rd, ignore_errors=True)
+        # Don't report success on a partial delete (e.g. a Windows open handle on a node dir) — that
+        # would leave a ghost run the UI thinks is gone. Retry once: an S3-backed FUSE mount (geesefs)
+        # can transiently leave entries on the first rmtree pass. Only forget it if the dir is actually
+        # gone; otherwise surface the failure with the leftover that blocked it.
+        for _ in range(2):
+            shutil.rmtree(rd, ignore_errors=True)
+            if not rd.exists():
+                break
         if rd.exists():
-            raise HTTPException(500, "run dir could not be fully removed (a file may be in use); "
-                                     "retry after the engine process exits")
+            leftover = next((str(p.relative_to(rd)) for p in rd.rglob("*")), "(dir)")
+            raise HTTPException(500, f"run dir could not be fully removed (e.g. {leftover!r} — a file "
+                                     "may be open or the storage is read-only); retry once nothing holds it")
         projects.forget(run_id)
         _summary_cache.pop(run_id, None)
         return {"ok": True}
@@ -1104,6 +1118,28 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
         return {"run_id": run_id, "task": task, "task_file": task_file,
                 "settings": settings, "rationale": spec.rationale or "", "setup_steps": steps}
 
+    # Genesis runs an AGENTIC, multi-turn tool loop (the boss reads the repo before planning). Done
+    # synchronously that can outlast a UI proxy's gateway timeout (it 504'd behind JupyterHub). So the
+    # POST runs the loop as a background JOB and waits briefly: a fast model finishes inside the inline
+    # wait and the spec comes back in the one request (no polling, no added latency); a slow one hands
+    # back a job_id the UI polls. No step cap is imposed for speed — the agent decides how long it needs.
+    _genesis_jobs: dict = {}
+    _genesis_lock = threading.Lock()
+    # seconds the POST waits inline before handing back a job_id (env-tunable; 0 = always async)
+    _GENESIS_INLINE_WAIT = float(os.environ.get("LOOPLAB_GENESIS_INLINE_WAIT", "8.0"))
+
+    def _genesis_put(job_id: str, **fields) -> None:
+        with _genesis_lock:
+            _genesis_jobs.setdefault(job_id, {}).update(fields)
+            if len(_genesis_jobs) > 64:     # bound memory: evict the oldest beyond the most-recent 64
+                for k in sorted(_genesis_jobs, key=lambda j: _genesis_jobs[j].get("ts", 0))[:-64]:
+                    _genesis_jobs.pop(k, None)
+
+    def _genesis_get(job_id: str):
+        with _genesis_lock:
+            j = _genesis_jobs.get(job_id)
+            return dict(j) if j else None
+
     @app.post("/api/genesis")
     async def genesis(request: Request):
         """Pre-run BOSS: turn a one-line goal into an editable run spec (name + task + key settings).
@@ -1227,24 +1263,63 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
                     box["c"] = _GenesisSpec()
                 return box["c"]
             try:
+                # The AGENT decides how many reads/turns it needs — there is no functional step limit.
+                # The endpoint runs this in a background job, so a long loop never blocks the HTTP
+                # request / trips a proxy timeout. The only bound is a 10-minute wall-clock RUNAWAY
+                # guard (a pathological model that never emits) — `max_turns` is just a hard ceiling far
+                # above any real scout, so it never binds in practice.
                 drive_tool_loop(client, tools, [{"role": "system", "content": tool_sys},
                                                 {"role": "user", "content": user}],
-                                emit_spec, max_turns=8, finalize=_fin, fallback=_fb)
+                                emit_spec, max_turns=1000, time_budget_s=600.0, finalize=_fin, fallback=_fb)
             except Exception:  # noqa: BLE001 - the model/endpoint can't drive tools AT ALL -> single-shot
                 return None
             return box.get("c")
 
-        try:
-            spec = await anyio.to_thread.run_sync(_plan_agentic)
-            if spec is None:    # tool loop unsupported -> plain structured call (legacy single-shot)
-                spec = await anyio.to_thread.run_sync(
-                    lambda: parse_structured(client, base_msgs, _GenesisSpec,
-                                             defaults.get("llm_parser", "tool_call")))
-        except Exception as e:  # noqa: BLE001 - planning failed -> soft fail with a usable message
-            return {"ok": False, "error": str(e), "spec": _soft,
-                    "reply": f"Couldn't plan this ({e}). You can still use the manual form."}
-        return {"ok": True, "spec": _normalize_genesis(spec, draft),
-                "reply": spec.reply or "Here's a plan — tweak the card and launch."}
+        def _compute_plan() -> dict:
+            """The whole agentic plan (runs in a worker thread): scout the repo + emit, with the legacy
+            single structured call as the fallback when the model can't drive tools. Returns the final
+            response dict the UI consumes (inline or via the poll endpoint)."""
+            try:
+                spec = _plan_agentic()
+                if spec is None:    # tool loop unsupported -> plain structured call (legacy single-shot)
+                    spec = parse_structured(client, base_msgs, _GenesisSpec,
+                                            defaults.get("llm_parser", "tool_call"))
+            except Exception as e:  # noqa: BLE001 - planning failed -> soft fail with a usable message
+                return {"ok": False, "error": str(e), "spec": _soft,
+                        "reply": f"Couldn't plan this ({e}). You can still use the manual form."}
+            return {"ok": True, "spec": _normalize_genesis(spec, draft),
+                    "reply": spec.reply or "Here's a plan — tweak the card and launch."}
+
+        job_id = secrets.token_hex(8)
+        _genesis_put(job_id, status="running", result=None, ts=time.time())
+
+        def _worker():
+            res = _compute_plan()
+            _genesis_put(job_id, status="done", result=res, ts=time.time())
+        threading.Thread(target=_worker, daemon=True).start()
+
+        # Adaptive fast-path: poll the job for a few seconds WITHOUT blocking the event loop. A quick
+        # model finishes here and the spec is returned in THIS request (no polling round-trips, no added
+        # latency for a normal environment); a slow one returns a job_id the UI polls (no 504).
+        deadline = time.monotonic() + _GENESIS_INLINE_WAIT
+        while time.monotonic() < deadline:
+            j = _genesis_get(job_id)
+            if j and j.get("status") == "done":
+                return j["result"]
+            await anyio.sleep(0.2)
+        return {"status": "running", "job_id": job_id}
+
+    @app.get("/api/genesis/{job_id}")
+    def genesis_job(job_id: str):
+        """Poll a pending genesis plan (the agentic loop runs in the background so a slow model doesn't
+        504 behind a proxy). `running` until the boss finishes; then the full plan; `unknown` if the
+        job expired/was evicted (the UI should re-POST)."""
+        j = _genesis_get(job_id)
+        if not j:
+            return {"status": "unknown"}
+        if j.get("status") != "done":
+            return {"status": "running"}
+        return {**j["result"], "status": "done"}
 
     # ------------------------------------------------------------------ LLM (chat / suggest / health)
     def _llm_settings(rd: Optional[Path] = None) -> "Settings":
@@ -1560,9 +1635,14 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
             # max_turns kept TIGHT: the rich static context (digest + report) means the model usually
             # emits on turn 1; the tool turns are only for when it genuinely needs to look deeper. A
             # small cap bounds latency on slow/flaky hosted models (each turn is a network round-trip).
+            # time_budget_s is a wall-clock guard so a slow model's 2-3 tool turns can't accumulate past
+            # the UI proxy's gateway timeout (the same 504 class that hit genesis) — it finalizes from
+            # context instead. This endpoint stays inline (typically 1 turn); genesis, which is FORCED
+            # to read the repo over many turns, is the one that runs as a background job.
             drive_tool_loop(client, tools, [{"role": "system", "content": tool_sys},
                                             {"role": "user", "content": user}],
-                            emit_spec, max_turns=3, finalize=_fin, fallback=lambda _m: box.get("c"))
+                            emit_spec, max_turns=3, time_budget_s=45.0,
+                            finalize=_fin, fallback=lambda _m: box.get("c"))
             # loop exhausted without an emit (model kept calling tools) -> default to advise rather
             # than None, so we don't burn extra round-trips on the single-call route for that case.
             return box.get("c") or _Plan()

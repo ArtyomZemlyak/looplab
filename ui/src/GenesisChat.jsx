@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react'
-import { genesis, startRun } from './util.js'
+import { genesis, genesisAwait, startRun } from './util.js'
 import StartRun from './StartRun.jsx'
 
 const slug = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '').slice(0, 40)
@@ -57,7 +57,9 @@ export default function GenesisChat({ onClose, onStarted, seed }) {
     const next = [...msgs, { role: 'user', content: goal }]
     setMsgs(next); setBusy(true)
     try {
-      const r = await genesis({ messages: next, instruction: goal, draft: spec })
+      // The boss may scout the repo across several turns server-side; a slow model hands back a job we
+      // poll (genesisAwait) so it can't 504. A fast model returns the plan inline — no extra latency.
+      const r = await genesisAwait(await genesis({ messages: next, instruction: goal, draft: spec }))
       setMsgs(m => [...m, { role: 'assistant', content: r.reply || '(planned — see the card)' }])
       // Only adopt a REAL spec — the offline soft-fail returns ok:false with an all-blank spec, which
       // must NOT wipe a good draft the user already tuned.
