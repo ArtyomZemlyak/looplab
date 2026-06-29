@@ -42,7 +42,10 @@ Then open the printed URL. The server serves the **built** React bundle from `ui
   node budget, seeds, policy). It also authors **repo runs** — point it at a repo to optimize and it
   fills the repo path, the run/eval command, the metric key, and the edit surface, plus an
   **adaptation checklist** (how to make the repo LoopLab-ready: expose a JSON metric, pin deps, choose
-  the edit surface, protect the grader). Tweak any field, then launch.
+  the edit surface, protect the grader). For a repo it's a real **agent**: it first *reads your repo
+  on disk* (README, the eval/entry script, requirements, results files) through read-only scout tools
+  so the command, metric, and steps are grounded in your actual code — not guessed. Tweak any field,
+  then launch.
 - **Drive a run** — start, resume, fork, branch, or inject nodes from the browser; the server spawns
   the engine as a subprocess. A finished run can be extended with a new batch.
 - **Chat / boss** — an agentic run chat turns one message into a plan of ordered actions, with each

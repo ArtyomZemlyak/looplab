@@ -22,6 +22,23 @@ FIXTURE = Path(__file__).resolve().parent / "fixtures" / "repo_fixture"
 
 # --------------------------- metric readers (unit) ---------------------------
 
+def test_editable_path_expands_user_and_env(monkeypatch):
+    """A `~`/`$VAR` editable_path must be expanded — otherwise the repo mounts + the Researcher's
+    repo_* scout tools resolve a literal `~` dir and come up EMPTY (the live-run symptom)."""
+    import os
+    norm = os.path.normpath                      # expanduser keeps the trailing "/" — compare normalized
+    home = os.path.expanduser("~")
+    t = RepoTask(goal="g", editable_path="~/myrepo")
+    assert "~" not in t.editable_path and norm(t.editable_path) == norm(os.path.join(home, "myrepo"))
+    assert norm(t._editable_mounts()[0]["path"]) == norm(os.path.join(home, "myrepo"))  # mounts carry it
+    monkeypatch.setenv("MYREPOROOT", home)
+    t2 = RepoTask(goal="g", editable_path="$MYREPOROOT/proj",
+                  references=[{"name": "ref", "path": "~/ref"}], data={"d": "~/data.csv"})
+    assert norm(t2.editable_path) == norm(os.path.join(home, "proj"))
+    assert norm(t2.references[0].path) == norm(os.path.join(home, "ref"))
+    assert norm(t2.data["d"]) == norm(os.path.join(home, "data.csv"))
+
+
 def test_read_metric_stdout_and_regex():
     assert read_metric('noise\n{"metric": 0.5}\n', ".", {"kind": "stdout_json", "key": "metric"}) == 0.5
     assert read_metric("acc=0.91 then acc=0.93", ".",
