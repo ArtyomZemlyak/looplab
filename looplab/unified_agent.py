@@ -34,7 +34,8 @@ class UnifiedAgent:
     """
 
     def __init__(self, *, researcher, developer, strategist=None,
-                 pilot_client=None, pilot_tools=None, stage_clients=None, prompts=None):
+                 pilot_client=None, pilot_tools=None, stage_clients=None, prompts=None,
+                 agent_max_turns: int = 0, agent_time_budget_s: float = 0.0):
         # Internal per-stage backends. Named `researcher`/`developer`/`strategist` (not _-prefixed)
         # so the engine's cost roll-up walk (_emit_llm_cost) descends into them and finds every
         # per-stage CostAccountant.
@@ -43,6 +44,10 @@ class UnifiedAgent:
         self.strategist = strategist
         self._pilot_client = pilot_client
         self._pilot_tools = pilot_tools
+        # Tool-loop limits for the pilot's self-driving + crash-triage calls (0/0 = unlimited;
+        # config-driven via Settings.agent_max_turns / agent_time_budget_s — never hardcoded).
+        self._agent_max_turns = agent_max_turns
+        self._agent_time_budget_s = agent_time_budget_s
         # Per-stage clients NOT reachable via researcher/developer (strategy, pilot) — surfaced so
         # the engine's cost roll-up can find their CostAccountants. Deduped by identity downstream.
         self.stage_clients = list(stage_clients or [])
@@ -161,7 +166,9 @@ class UnifiedAgent:
         if self._pilot_tools is not None and hasattr(self._pilot_tools, "bind_state"):
             self._pilot_tools.bind_state(state, None)
         return drive_tool_loop(self._pilot_client, self._pilot_tools, messages, emit_spec,
-                               max_turns=3, finalize=_finalize, fallback=_fallback)
+                               max_turns=self._agent_max_turns,
+                               time_budget_s=self._agent_time_budget_s,
+                               finalize=_finalize, fallback=_fallback)
 
     # --------------------------------------------------- Crash triage (in-node repair)
     _TRIAGE_SYSTEM = (
@@ -224,4 +231,6 @@ class UnifiedAgent:
         if state is not None and self._pilot_tools is not None and hasattr(self._pilot_tools, "bind_state"):
             self._pilot_tools.bind_state(state, None)   # enable read_code / find_analogous on the run
         return drive_tool_loop(self._pilot_client, self._pilot_tools, messages, emit_spec,
-                               max_turns=3, finalize=_finalize, fallback=_fallback)
+                               max_turns=self._agent_max_turns,
+                               time_budget_s=self._agent_time_budget_s,
+                               finalize=_finalize, fallback=_fallback)
