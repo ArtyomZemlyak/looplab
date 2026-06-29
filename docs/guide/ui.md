@@ -69,6 +69,13 @@ Bind to `127.0.0.1` (the default) for local use. The control plane is **unauthen
 set a token, so it is not placed on the LAN implicitly. To serve beyond localhost, set
 `LOOPLAB_UI_TOKEN` and bind to `0.0.0.0`.
 
+`LOOPLAB_UI_TOKEN` separates users **only when each has its own origin** (the `127.0.0.1` bind, or a
+per-user subdomain). On a **shared** origin — notably a JupyterHub `…/user/<name>/proxy/<port>/` path
+where every user shares one origin — the same-origin policy is per-origin, not per-path, so the token
+is a per-deployment secret rather than a per-user one. LoopLab warns at startup and hardens the
+token-bearing page (token injected only on a top-level navigation; `X-Frame-Options`/`no-store`), but
+the real fix is a **private origin per user**. See deployment.md → *Shared JupyterHub origin*.
+
 ### Behind a path-mounting proxy (JupyterHub, reverse-proxy subpath)
 
 The UI works when it's served under a path prefix — e.g. JupyterHub's
