@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState } from 'react'
-import { getSettings, saveSettings, llmHealth } from './util.js'
+import { getSettings, saveSettings, saveSecret, llmHealth } from './util.js'
 import { toForm, fromForm, FIELD_BY_KEY } from './settingsSchema.js'
 import SettingsForm from './SettingsForm.jsx'
 import { OpIcon } from './icons.jsx'
@@ -26,10 +26,12 @@ export default function Settings({ onBack }) {
   const [saved, setSaved] = useState(null)   // last persisted form (to detect unsaved edits)
   const [agentControl, setAgentControl] = useState({})   // Settings.agent_control matrix (governance pills)
   const [savedAC, setSavedAC] = useState({})
+  const [secretState, setSecretState] = useState({})     // key → is a value stored server-side (masked)
   const [toast, setToast] = useState(null)
   const load = () => getSettings().then(d => {
     const f = toForm(d.settings); setDefaults(d.defaults); setForm(f); setSaved(f)
     const ac = d.settings.agent_control || {}; setAgentControl(ac); setSavedAC(ac)
+    setSecretState({ llm_api_key: !!d.settings.llm_api_key })   // server reports a stored secret as "***"
   }).catch(() => {})
   useEffect(() => { load() }, [])
 
@@ -37,6 +39,7 @@ export default function Settings({ onBack }) {
     if (!form || !defaults) return new Set()
     const cur = fromForm(form); const s = new Set()
     for (const k of Object.keys(FIELD_BY_KEY)) {
+      if (FIELD_BY_KEY[k].type === 'secret') continue   // write-only; fromForm skips it, so it can't be compared
       const d = defaults[k] ?? (FIELD_BY_KEY[k].type === 'list' ? [] : null)
       if (JSON.stringify(cur[k]) !== JSON.stringify(d ?? null)) s.add(k)
     }
@@ -53,14 +56,26 @@ export default function Settings({ onBack }) {
     cur.has(role) ? cur.delete(role) : cur.add(role)
     return { ...ac, [key]: [...cur] }
   })
-  const show = (m) => { setToast(m); setTimeout(() => setToast(null), 2000) }
+  const show = (m) => { setToast(m); setTimeout(() => setToast(null), 2500) }
   const onSave = async () => {
     try {
+      // A secret field never travels in the settings payload (fromForm skips it) — store it via the
+      // dedicated owner-only endpoint. A non-empty value means "set a new key"; blank = keep existing.
+      const apiKey = (form.llm_api_key || '').trim()
       const r = await saveSettings({ ...fromForm(form), agent_control: agentControl })
-      const f = toForm(r.settings); setForm(f); setSaved(f)
+      if (apiKey) { const s = await saveSecret('llm_api_key', apiKey); setSecretState(st => ({ ...st, llm_api_key: !!s.set })) }
+      const f = toForm(r.settings); setForm(f); setSaved(f)   // toForm blanks the secret box again
       const ac = r.settings.agent_control || {}; setAgentControl(ac); setSavedAC(ac)
-      show('settings saved — applied to new runs')
+      show('settings saved' + (apiKey ? ' · API key stored securely' : '') + ' — applied to new runs')
     } catch (e) { show('save failed: ' + e.message) }
+  }
+  const onClearSecret = async (key) => {
+    try {
+      await saveSecret(key, '')
+      setSecretState(st => ({ ...st, [key]: false }))
+      setForm(f => ({ ...f, [key]: '' }))
+      show('API key cleared')
+    } catch (e) { show('clear failed: ' + e.message) }
   }
   const resetToDefaults = () => { if (defaults) { setForm(toForm(defaults)); setAgentControl(defaults.agent_control || {}) } }
 
@@ -84,7 +99,8 @@ export default function Settings({ onBack }) {
             Per-run overrides are still available in the <b>New run</b> dialog. A <span style={{ color: 'var(--accent)' }}>●</span> marks a value changed from the engine default.
             The <span className="agpill on" style={{ position: 'static' }}>R</span><span className="agpill on" style={{ position: 'static' }}>S</span><span className="agpill on" style={{ position: 'static' }}>B</span> pills set whether the <b>R</b>esearcher (per experiment), <b>S</b>trategist, or <b>B</b>oss may change a setting at runtime.
           </div>
-          <SettingsForm form={form} onChange={onChange} dirty={dirty} agentControl={agentControl} onToggleAgent={onToggleAgent} />
+          <SettingsForm form={form} onChange={onChange} dirty={dirty} agentControl={agentControl} onToggleAgent={onToggleAgent}
+                        secretState={secretState} onClearSecret={onClearSecret} />
         </>}
     </div>
     {toast && <div className="toast">{toast}</div>}

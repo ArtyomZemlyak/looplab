@@ -499,6 +499,9 @@ export const gpuStat = () => get('/api/gpu')
 // ---- settings + run launch ----
 export const getSettings = () => get('/api/settings')
 export const saveSettings = (settings) => send('/api/settings', 'PUT', { settings })
+// Store (or clear, value='') a secret credential. Goes to the dedicated owner-only secret store,
+// NOT ui_settings.json — the value is never echoed back (the GET reports it only as masked "***").
+export const saveSecret = (key, value) => send('/api/settings/secret', 'PUT', { key, value })
 // Per-run settings: edit a specific run's config.snapshot.json so the next RESUME picks up the
 // change (only changed fields are sent). Blocked server-side while the run's engine is live.
 export const saveRunConfig = (rid, settings) => send(`/api/runs/${encodeURIComponent(rid)}/config`, 'PUT', { settings })

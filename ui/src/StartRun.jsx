@@ -5,7 +5,7 @@ import SettingsForm from './SettingsForm.jsx'
 import { OpIcon } from './icons.jsx'
 
 // Compact subset shown by default in the launch dialog; "all settings" expands to the full form.
-const QUICK_GROUPS = ['Search & policy', 'Roles & LLM', 'Budgets']
+const QUICK_GROUPS = ['Search & policy', 'LLM', 'Budgets & confirmation']
 
 const slug = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '').slice(0, 32)
 
@@ -128,7 +128,7 @@ export default function StartRun({ onClose, onStarted }) {
           <span className="spacer" style={{ flex: 1 }} />
           <button className="btn sm ghost" onClick={() => setShowAll(v => !v)}>{showAll ? 'quick' : 'all settings'}</button>
         </div>
-        {form && <SettingsForm form={form} onChange={onChange} only={showAll ? null : QUICK_GROUPS} />}
+        {form && <SettingsForm form={form} onChange={onChange} only={showAll ? null : QUICK_GROUPS} hideSecret />}
 
         {err && <div className="notice" style={{ borderColor: 'var(--fail)', color: '#ffd3d3', marginTop: 10 }}>{err}</div>}
         <div className="modal-actions" style={{ marginTop: 14 }}>

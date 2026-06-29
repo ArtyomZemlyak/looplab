@@ -37,6 +37,12 @@ Then open the printed URL. The server serves the **built** React bundle from `ui
 - **Live runs** — watch a run unfold in real time over SSE: the lineage graph, per-node metrics,
   status, and tokens. Reopening a finished run still streams (runs are self-describing via
   `task.snapshot.json`).
+- **Create a run by describing it** — the main-menu chat ("New run") turns a plain-text goal into an
+  editable run spec: the boss invents a name, picks or authors the task, and sets the knobs (model,
+  node budget, seeds, policy). It also authors **repo runs** — point it at a repo to optimize and it
+  fills the repo path, the run/eval command, the metric key, and the edit surface, plus an
+  **adaptation checklist** (how to make the repo LoopLab-ready: expose a JSON metric, pin deps, choose
+  the edit surface, protect the grader). Tweak any field, then launch.
 - **Drive a run** — start, resume, fork, branch, or inject nodes from the browser; the server spawns
   the engine as a subprocess. A finished run can be extended with a new batch.
 - **Chat / boss** — an agentic run chat turns one message into a plan of ordered actions, with each
@@ -48,6 +54,11 @@ Then open the printed URL. The server serves the **built** React bundle from `ui
 - **Per-node trace** — when `trace_llm_io` is on, see exactly what the model read and wrote per node.
 - **Per-run settings** — edit a run's settings; `PUT /api/runs/{id}/config` rewrites that run's
   snapshot (resume reads it, not the global UI defaults).
+- **Settings page** — every engine knob, grouped into tabs (Search, Strategist & operators,
+  Resilience, Budgets, LLM, Developer agent, Safety & trust, Knowledge & memory). The **API key**
+  field (LLM tab) stores the credential securely: it's written to an owner-only `secrets.json`, never
+  to `ui_settings.json` or a run snapshot, and the API only ever echoes a masked `***`. Set it here or
+  via `LOOPLAB_LLM_API_KEY` (env / `.env`) — either way spawned runs inherit it.
 
 ## Exposure & auth
 
