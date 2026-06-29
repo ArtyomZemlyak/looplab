@@ -131,7 +131,15 @@ export default function RunList({ onOpen, onSettings }) {
   const loadRuns = () => get('/api/runs').then(setRuns).catch(() => setRuns([]))
   const loadProjects = () => listProjects().then(setProj).catch(() => {})
   const loadSupers = () => listSupertasks().then(setSuperdata).catch(() => {})
-  useEffect(() => { loadRuns(); loadProjects(); loadSupers(); const t = setInterval(loadRuns, 2500); return () => clearInterval(t) }, [])
+  // Poll the runs list every 2.5s, but skip the request while the tab is hidden (no point refreshing a
+  // list nobody's looking at) — and refresh once immediately when it becomes visible again.
+  useEffect(() => {
+    loadRuns(); loadProjects(); loadSupers()
+    const t = setInterval(() => { if (!document.hidden) loadRuns() }, 2500)
+    const onVis = () => { if (!document.hidden) loadRuns() }
+    document.addEventListener('visibilitychange', onVis)
+    return () => { clearInterval(t); document.removeEventListener('visibilitychange', onVis) }
+  }, [])
 
   const stName = useMemo(() => Object.fromEntries(superdata.supertasks.map(s => [s.id, s.name])), [superdata])
   const assignToSuper = async (runId, sid) => { await assignSupertask(runId, sid === UNASSIGNED ? null : sid); loadRuns() }

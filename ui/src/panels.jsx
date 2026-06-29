@@ -331,7 +331,7 @@ export function ConfigPanel({ runId, state, live, onClose, onToast }) {
     <tr key={k}><td className="muted">{k}</td><td>{typeof v === 'object' ? JSON.stringify(v) : String(v)}</td></tr>)}</tbody></table>
 
   return (
-    <Panel title="Run config" sub={engineLive ? 'live · applies on restart' : 'edit · applies on resume'} onClose={onClose} wide>
+    <Panel title="Run settings" sub={engineLive ? 'live · applies on restart' : 'edit · applies on resume'} onClose={onClose} wide>
       <div className="toolbar" style={{ marginBottom: 12 }}>
         <span className="muted">extend eval budget:</span>
         <input className="text" style={{ width: 120 }} placeholder="seconds" value={sec} onChange={e => setSec(e.target.value)} />

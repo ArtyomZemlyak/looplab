@@ -16,12 +16,16 @@ import {
 // The panel bar, grouped by importance then process order (Report is the [Search|Report] toggle, and
 // the deep-research/policy/strategist "why" cards now live in the chat — so those panels are gone).
 //   rigor → analysis → data/lab → ops
-const PANEL_GROUPS = [
-  [['trust', 'Trust'], ['failures', 'Failures']],
-  [['research', 'Research'], ['sensitivity', 'Sensitivity'], ['importance', 'Importance'], ['pareto', 'Pareto/Div'], ['compare', 'Compare']],
-  [['data', 'Data'], ['crossrun', 'Cross-run'], ['registry', 'Registry']],
-  [['config', 'Config'], ['gpu', 'GPU'], ['memory', 'Memory'], ['events', 'Events'], ['collab', 'Collab'], ['authoring', 'Authoring']],
+// Run-view panel IA (design audit 2026-06-28): keep the few most-used panels inline; fold the long
+// tail into a grouped "More ▾" overflow so the bar never wraps to a second row (was 17 buttons).
+const PRIMARY_PANELS = [['trust', 'Trust'], ['failures', 'Failures'], ['research', 'Research'],
+                        ['compare', 'Compare'], ['config', 'Settings']]
+const MORE_GROUPS = [
+  ['Analysis', [['sensitivity', 'Sensitivity'], ['importance', 'Importance'], ['pareto', 'Pareto/Div'], ['data', 'Data']]],
+  ['System', [['gpu', 'GPU'], ['memory', 'Memory'], ['events', 'Events'], ['registry', 'Registry'],
+              ['crossrun', 'Cross-run'], ['collab', 'Collab'], ['authoring', 'Authoring']]],
 ]
+const MORE_KEYS = new Set(MORE_GROUPS.flatMap(([, items]) => items.map(([k]) => k)))
 
 export default function RunView({ runId, onBack }) {
   const { live, seq, connected } = useRunState(runId)
@@ -33,6 +37,7 @@ export default function RunView({ runId, onBack }) {
   const [collapsed, setCollapsed] = useState(() => new Set())
   const [selectedGroup, setSelectedGroup] = useState(null)
   const [panel, setPanel] = useState(null)
+  const [moreOpen, setMoreOpen] = useState(false)            // run-view "More ▾" overflow menu
   const [view, setView] = useState('dag')                    // 'dag' | 'report' — primary destination
   const [themeFilter, setThemeFilter] = useState(null)       // E1: drill the tree to one direction
   const landedRef = useRef(false)                            // auto-land on Report once, on finish
@@ -170,10 +175,26 @@ export default function RunView({ runId, onBack }) {
         </div>}
 
       <div className="topbar panel-bar" style={{ minHeight: 38, paddingTop: 4, paddingBottom: 4 }}>
-        <div className="menu">{PANEL_GROUPS.map((group, gi) => <React.Fragment key={gi}>
-          {gi > 0 && <span className="panel-sep" />}
-          {group.map(([k, l]) => <button key={k} className={'btn sm ghost' + (panel === k ? ' on' : '')} onClick={() => setPanel(k)}>{l}</button>)}
-        </React.Fragment>)}</div>
+        <div className="menu">
+          {PRIMARY_PANELS.map(([k, l]) => <button key={k} className={'btn sm ghost' + (panel === k ? ' on' : '')} onClick={() => { setMoreOpen(false); setPanel(k) }}>{l}</button>)}
+          <span className="panel-sep" />
+          <div className="more-wrap">
+            {/* "More ▾" overflow: the long tail of panels, grouped — keeps the bar to one row. The
+                button shows active when the open panel lives inside the overflow. */}
+            <button className={'btn sm ghost' + (MORE_KEYS.has(panel) ? ' on' : '')}
+                    onClick={() => setMoreOpen(o => !o)}>More ▾</button>
+            {moreOpen && <>
+              <div className="menu-backdrop" onClick={() => setMoreOpen(false)} />
+              <div className="run-menu more-menu" onClick={e => e.stopPropagation()}>
+                {MORE_GROUPS.map(([label, items]) => <React.Fragment key={label}>
+                  <div className="mi-label">{label}</div>
+                  {items.map(([k, l]) => <button key={k} className={'mi' + (panel === k ? ' on' : '')}
+                    onClick={() => { setMoreOpen(false); setPanel(k) }}>{l}</button>)}
+                </React.Fragment>)}
+              </div>
+            </>}
+          </div>
+        </div>
       </div>
 
       {view === 'report'
