@@ -8,7 +8,7 @@
   --line-2: #353c47;
   --fg: #e6e9ef;
   --fg-dim: #9aa3b2;
-  --fg-mut: #6b7480;
+  --fg-mut: #7f8792;   /* a11y: was #6b7480 (3.2–4.1:1, fails WCAG AA) → 4.7:1+ on the card/panel surfaces */
 
   /* semantic palette — used by nodes, badges, charts, panels alike */
   --working: #f0b429;     /* amber: evaluating */
@@ -35,7 +35,7 @@
 :root[data-theme="retrowave"] {
   --bg: #150c28; --bg-1: #1c1036; --bg-2: #251544; --bg-3: #33205f;
   --line: #48306e; --line-2: #6b44a0;
-  --fg: #f6e9ff; --fg-dim: #c8a4e8; --fg-mut: #9070b8;
+  --fg: #f6e9ff; --fg-dim: #c8a4e8; --fg-mut: #987abe;   /* a11y: was #9070b8 → ≥4.6:1 */
   --working: #ffb13b; --ok: #2be3c9; --fail: #ff3d77; --best: #ffe93b;
   --pending: #6f5a92; --infeasible: #a06fd6; --accent: #ff2e97; --accent-dim: #b81f6e; --alarm: #ff3d77;
   --shadow: 0 8px 30px rgba(120, 20, 160, .55); --shadow-card: 0 2px 12px rgba(180, 30, 140, .30);
@@ -45,7 +45,7 @@
 :root[data-theme="paper"] {
   --bg: #f4f1ea; --bg-1: #efeae0; --bg-2: #e9e3d6; --bg-3: #e0d8c8;
   --line: #d9cfbd; --line-2: #c6bba4;
-  --fg: #2b2722; --fg-dim: #5c554a; --fg-mut: #8a8275;
+  --fg: #2b2722; --fg-dim: #5c554a; --fg-mut: #6a6359;   /* a11y: was #8a8275 (2.7–3.4:1) → ≥4.6:1 */
   --working: #c8941f; --ok: #3f9d5a; --fail: #c0392b; --best: #bb8a1e;
   --pending: #a99f8c; --infeasible: #9a7fb0; --accent: #346ba3; --accent-dim: #27517d; --alarm: #c0392b;
   --shadow: 0 8px 24px rgba(70, 55, 30, .16); --shadow-card: 0 1px 5px rgba(70, 55, 30, .12);
@@ -55,7 +55,7 @@
 :root[data-theme="white-scifi"] {
   --bg: #f6f9fd; --bg-1: #eef3f9; --bg-2: #e5edf6; --bg-3: #d9e4f1;
   --line: #cdd8e8; --line-2: #b4c2d8;
-  --fg: #0f1b2d; --fg-dim: #45566d; --fg-mut: #7889a0;
+  --fg: #0f1b2d; --fg-dim: #45566d; --fg-mut: #5b6a80;   /* a11y: was #7889a0 (2.8–3.4:1) → ≥4.6:1 */
   --working: #df9426; --ok: #12b07a; --fail: #e2453f; --best: #c49616;
   --pending: #9fb0c6; --infeasible: #8a93d6; --accent: #0aa6c9; --accent-dim: #077e9b; --alarm: #e2453f;
   --shadow: 0 8px 26px rgba(20, 50, 90, .14); --shadow-card: 0 1px 6px rgba(20, 50, 90, .10);
@@ -65,7 +65,7 @@
 :root[data-theme="old-green"] {
   --bg: #030a05; --bg-1: #05130a; --bg-2: #071c0e; --bg-3: #0b2916;
   --line: #10421f; --line-2: #1a6e35;
-  --fg: #3ff06d; --fg-dim: #1fa84a; --fg-mut: #157a35;
+  --fg: #3ff06d; --fg-dim: #1fa84a; --fg-mut: #1f9642;   /* a11y: was #157a35 (2.9–3.7:1) → ≥4.6:1 */
   --working: #b6ff3a; --ok: #3ff06d; --fail: #ff6a4d; --best: #c6ff3a;
   --pending: #157a35; --infeasible: #2a9e6e; --accent: #5bff95; --accent-dim: #1fa84a; --alarm: #ff6a4d;
   --shadow: 0 8px 28px rgba(0, 40, 12, .6); --shadow-card: 0 2px 10px rgba(0, 60, 18, .4);
@@ -132,19 +132,21 @@ button { font: inherit; }
 .btn.primary:hover { background: var(--accent); }
 .btn.warn { border-color: #7a5a1d; color: var(--working); }
 .btn.danger { border-color: #7a2b2b; color: var(--fail); }
-.btn.sm { padding: 2px 8px; font-size: 12px; }
+.btn.sm { padding: 2px 8px; font-size: 12px; min-height: 24px; }   /* a11y: WCAG 2.5.8 min 24×24 target (was 23px tall) */
 .btn.ghost { background: transparent; border-color: transparent; color: var(--fg-dim); }
 .btn.ghost:hover { background: var(--bg-3); color: var(--fg); }
 
 .chip { display: inline-flex; align-items: center; gap: 5px; padding: 2px 9px; white-space: nowrap;
   border-radius: 999px; font-size: 12px; background: var(--bg-3); border: 1px solid var(--line); }
-.chip .k { color: var(--fg-mut); }
+.chip .k { color: var(--fg-dim); }   /* a11y: fg-mut was 4.23:1 on the bg-3 chip; fg-dim is 5.7:1 */
 .chip.alarm { background: rgba(255,93,93,.14); border-color: var(--alarm); color: #ffd3d3; }
 .chip.warn { background: rgba(240,180,41,.14); border-color: var(--working); color: #e6c170; }
 .chip.ok { background: rgba(46,204,113,.12); border-color: #2c6e49; color: #b6f0cf; }
 
 .pill { font-size: 11px; padding: 1px 7px; border-radius: 999px; border: 1px solid var(--line-2);
   color: var(--fg-dim); text-transform: uppercase; letter-spacing: .5px; }
+/* zombie run in the list: amber so a dead-engine run doesn't read as actively searching */
+.pill.phase.stalled { color: var(--working); border-color: color-mix(in srgb, var(--working) 45%, var(--line-2)); }
 
 /* phase + liveness */
 .phase { text-transform: capitalize; }
@@ -154,6 +156,10 @@ button { font: inherit; }
 .live.off .led { background: var(--fail); }
 .live.done { color: var(--fg-mut); }
 .live.done .led { background: var(--fg-mut); box-shadow: none; }
+/* zombie: not finished, but no engine drives it — amber, non-breathing so it reads as "needs attention"
+   and is visually distinct from the green breathing "live" it used to be mistaken for. */
+.live.stalled { color: var(--working); }
+.live.stalled .led { background: var(--working); box-shadow: 0 0 8px var(--working); animation: none; }
 @keyframes breathe { 0%,100%{opacity:1} 50%{opacity:.35} }
 
 /* gauges */
@@ -218,19 +224,6 @@ button { font: inherit; }
   cursor: pointer; font-size: 12px; line-height: 1; border-radius: 4px; padding: 1px 4px; }
 .node-card .btn-chev:hover { border-color: var(--accent); }
 
-/* Deep-Research memo node (Phase 2) — a distinct, non-experiment node in the DAG. */
-.research-node {
-  width: 188px; background: var(--bg-2); border: 1px dashed #6f8bb0; border-left: 3px solid #6f8bb0;
-  border-radius: 8px; padding: 6px 9px; color: var(--fg); box-shadow: var(--shadow-card); cursor: pointer;
-  transition: border-color .12s, box-shadow .12s;
-}
-.research-node:hover { border-color: var(--accent-dim); }
-.research-node.sel { box-shadow: 0 0 0 2px rgba(74,163,255,.4); border-color: var(--accent); }
-.research-node .row { display: flex; align-items: center; gap: 5px; font-size: 12px; }
-.research-node .rn-ic { font-size: 13px; }
-.research-node .rn-summary { font-size: 11px; color: var(--fg-mut); margin: 4px 0; line-height: 1.3; }
-.research-node .rn-foot { display: flex; gap: 5px; }
-
 /* edges (react-flow) */
 .react-flow__edge-path { stroke: var(--line-2); }
 .react-flow__edge.lineage .react-flow__edge-path { stroke: var(--accent); stroke-width: 2; }
@@ -242,7 +235,6 @@ button { font: inherit; }
 /* Phase 2: a "leader" edge into a merge — orthogonal (smoothstep) + a faint accent dash, so a
    cross-cell fan-in reads as a routed bridge rather than a bezier slicing through a packed cell. */
 .react-flow__edge.leader .react-flow__edge-path { stroke: color-mix(in srgb, var(--accent) 55%, var(--line-2)); stroke-dasharray: 2 3; }
-.react-flow__edge.research-edge .react-flow__edge-path { stroke: #6f8bb0; stroke-dasharray: 5 4; opacity: .6; }
 /* cross-run map: a "derived-from" edge (run B seeded an experiment from run A) */
 .react-flow__edge.seed-edge .react-flow__edge-path { stroke: var(--accent); stroke-dasharray: 4 3; stroke-width: 1.5; }
 .react-flow__attribution { display: none; }
@@ -483,9 +475,9 @@ table.tbl tr.best-row td { color: var(--best); }
 .ptree-row:hover { background: var(--bg-2); }
 .ptree-row.sel { background: rgba(74,163,255,.16); }
 .ptree-row.pseudo { color: var(--fg-dim); }
-.ptree-row .ptw { width: 14px; color: var(--fg-mut); text-align: center; }
+.ptree-row .ptw { width: 14px; color: var(--fg-dim); text-align: center; }
 .ptree-row .pname { flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.ptree-row .pcount { font-size: 11px; color: var(--fg-mut); background: var(--bg-3); border-radius: 999px; padding: 0 7px; }
+.ptree-row .pcount { font-size: 11px; color: var(--fg-dim); background: var(--bg-3); border-radius: 999px; padding: 0 7px; }   /* a11y: fg-mut was 4.23:1 on bg-3 */
 .ptree-row .pacts { display: none; gap: 2px; }
 .ptree-row:hover .pacts { display: inline-flex; }
 .ptree-row .ic { background: transparent; border: none; color: var(--fg-dim); cursor: pointer; padding: 0 3px; border-radius: 4px; }
@@ -794,7 +786,7 @@ textarea.text { min-height: 220px; font-family: ui-monospace, Consolas, monospac
 .pa-undo { margin-top: 3px; }
 
 /* ── Context usage (round-8): per-turn + running token badge, and the "Compact" recap card ──── */
-.chat-tok { font-size: 10.5px; color: var(--fg-mut); font-variant-numeric: tabular-nums; white-space: nowrap;
+.chat-tok { font-size: 10.5px; color: var(--fg-dim); font-variant-numeric: tabular-nums; white-space: nowrap;
   background: var(--bg-3); border: 1px solid var(--line); border-radius: 5px; padding: 0 5px; margin-left: 6px; }
 .chat-tok.hdr { margin-left: 0; margin-right: 6px; }       /* the header running-total variant */
 /* the recap row left by Compact: neutral, slightly inset, with a doc glyph — clearly a fold marker */

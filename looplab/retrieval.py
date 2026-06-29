@@ -56,4 +56,8 @@ def glob_files(pattern: str, root: str) -> list[str]:
 
 
 def read_file(path: str, max_bytes: int = 200_000) -> str:
-    return Path(path).read_text(encoding="utf-8", errors="replace")[:max_bytes]
+    # Bound the read BEFORE decoding so max_bytes is a real memory guard (mirrors grep's size
+    # cap); otherwise a multi-GB file is fully decoded into memory before the slice.
+    with open(path, "rb") as f:
+        data = f.read(max_bytes)
+    return data.decode("utf-8", errors="replace")

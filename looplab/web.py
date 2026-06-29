@@ -8,9 +8,30 @@ Dependency-free (stdlib urllib + tiny regex parsing), exactly like `LiteratureTo
 """
 from __future__ import annotations
 
+import ipaddress
 import re
+import socket
 import urllib.parse
 import urllib.request
+
+
+def _ssrf_blocked(url: str) -> str | None:
+    """SSRF guard: reject a URL whose host resolves to a private / loopback / link-local / reserved
+    address (incl. the cloud-metadata endpoint 169.254.169.254), so a model- or page-supplied URL can't
+    pull internal services / credentials into the run. Returns a reason when blocked, else None. Best
+    effort (checks the initial host; a DNS failure falls through to let urlopen surface its own error)."""
+    try:
+        host = urllib.parse.urlparse(url).hostname
+        if not host:
+            return "no host"
+        for info in socket.getaddrinfo(host, None):
+            ip = ipaddress.ip_address(info[4][0])
+            if (ip.is_private or ip.is_loopback or ip.is_link_local
+                    or ip.is_reserved or ip.is_multicast or ip.is_unspecified):
+                return f"refusing to fetch internal address {ip} (host {host})"
+    except (socket.gaierror, ValueError):
+        return None
+    return None
 
 from .knowledge_tools import _fn_spec
 
@@ -100,6 +121,9 @@ class WebTools:
     def _fetch(self, url: str) -> str:
         if not url or not url.startswith(("http://", "https://")):
             return "(web_fetch needs an http(s) URL)"
+        blocked = _ssrf_blocked(url)
+        if blocked:
+            return f"(web_fetch refused: {blocked})"
         try:
             html = self._get(url)
         except Exception as e:  # noqa: BLE001 — network is best-effort; never crash the run

@@ -35,7 +35,9 @@ def purged_walk_forward(n: int, n_splits: int, embargo: int = 0
     splits = []
     for i in range(1, n_splits + 1):
         test_start = i * fold
-        test_end = (i + 1) * fold if i < n_splits else n
+        if test_start >= n:            # no samples left for a test window
+            break
+        test_end = n if i == n_splits else min(n, (i + 1) * fold)
         train_end = max(0, test_start - embargo)
         train = list(range(0, train_end))
         test = list(range(test_start, test_end))

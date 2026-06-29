@@ -21,12 +21,12 @@ def _predict(params: dict, hist: list[tuple[dict, float]], bounds, k: int = 3) -
               if (not bounds or key in bounds) and isinstance(v, (int, float))}
     if not target:
         return None
+    tkeys = set(target)
     pts = []
     for p, m in hist:
-        keys = set(target) & set(p)
-        if not keys:
+        if not tkeys.issubset(p):          # only full-dimensional points are comparable
             continue
-        pts.append((math.sqrt(sum((target[x] - p[x]) ** 2 for x in keys)), m))
+        pts.append((math.sqrt(sum((target[x] - p[x]) ** 2 for x in tkeys)), m))
     if not pts:
         return None
     pts.sort(key=lambda t: t[0])

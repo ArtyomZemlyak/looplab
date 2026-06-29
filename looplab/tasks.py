@@ -55,7 +55,9 @@ def validate_task(data: dict) -> TaskAdapter:
 
 
 def load_task(path: str | Path) -> TaskAdapter:
-    return validate_task(json.loads(Path(path).read_text(encoding="utf-8")))
+    # utf-8-sig reads plain UTF-8 identically but also strips a leading BOM (common on
+    # Windows-authored / PowerShell Out-File JSON), which plain utf-8 would choke on.
+    return validate_task(json.loads(Path(path).read_text(encoding="utf-8-sig")))
 
 
 def _agent_model(backend: str, model: str) -> str:

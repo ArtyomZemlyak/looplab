@@ -5,6 +5,15 @@ import React, { useMemo } from 'react'
 // avoid a library (local-first, zero-dep UI) and we don't use dangerouslySetInnerHTML, so user/LLM
 // text can never inject HTML — every node is built as React elements from parsed tokens.
 
+// Only allow SAFE link schemes. LLM/research-authored Markdown could otherwise emit a
+// `javascript:`/`data:`/`vbscript:` href that runs script in the app origin on click (React does NOT
+// neutralize those schemes). Returns the url for http(s)/mailto/relative/anchor links, else null.
+function safeHref(url) {
+  const u = String(url || '').trim()
+  if (/^[/\\]{2}/.test(u)) return null   // //host, \\host, /\host, \/host -> scheme-relative, reject
+  return /^(https?:|mailto:|[/#.?])/i.test(u) ? u : null
+}
+
 // --- inline: split a line into bold / italic / code / link spans (escapes are literal text) ---
 function inline(text, keyBase) {
   const out = []
@@ -20,7 +29,10 @@ function inline(text, keyBase) {
     if (tok.startsWith('`')) out.push(<code key={`${keyBase}-c${k++}`}>{tok.slice(1, -1)}</code>)
     else if (tok.startsWith('[')) {
       const mm = /\[([^\]]+)\]\(([^)\s]+)\)/.exec(tok)
-      out.push(<a key={`${keyBase}-l${k++}`} href={mm[2]} target="_blank" rel="noreferrer noopener">{mm[1]}</a>)
+      const href = safeHref(mm[2])
+      out.push(href
+        ? <a key={`${keyBase}-l${k++}`} href={href} target="_blank" rel="noreferrer noopener">{mm[1]}</a>
+        : <span key={`${keyBase}-l${k++}`}>{mm[1]}</span>)   // unsafe scheme (javascript:/data:) → plain text
     } else if (tok.startsWith('**') || tok.startsWith('__'))
       out.push(<strong key={`${keyBase}-b${k++}`}>{tok.slice(2, -2)}</strong>)
     else out.push(<em key={`${keyBase}-i${k++}`}>{tok.slice(1, -1)}</em>)

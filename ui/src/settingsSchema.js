@@ -177,8 +177,6 @@ export const SETTINGS_GROUPS = [
         help: 'Run the Deep-Research stage automatically every N created nodes (0 = manual button / Strategist only).' },
       { key: 'concurrent_research', label: 'Concurrent research (overlap eval)', type: 'bool',
         help: 'Overlap a due deep-research "think" with the GPU-bound eval, so the agent works while the node trains. Best with a REMOTE LLM (no GPU contention with eval); off by default — validate on your setup before enabling.' },
-      { key: 'speculative_pipeline', label: 'Speculative pipeline (prefetch next node)', type: 'bool',
-        help: 'While a node trains, speculatively propose+implement the likely next "improve off best" so it is ready the instant the eval finishes (propose latency overlaps the eval). Match-or-discard — the search is unchanged. Best with a REMOTE LLM + a slow eval; single-eval mode only; off by default.' },
       { key: 'prompt_dir', label: 'Prompt dir', type: 'text', placeholder: 'unset', help: 'Editable, hot-reloaded role prompt .md files.' },
       { key: 'memory_dir', label: 'Memory dir', type: 'text', placeholder: 'unset', help: 'Cross-run case memory.' },
     ],

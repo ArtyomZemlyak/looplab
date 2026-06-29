@@ -11,9 +11,13 @@ from typing import Sequence
 
 
 def _pearson(a: Sequence[float], b: Sequence[float]) -> float:
-    n = len(a)
-    if n == 0 or n != len(b):
+    # Compare the overlapping prefix when columns are ragged (a dropped NaN row, a mismatched slice)
+    # rather than silently returning 0.0 — returning 0 would HIDE a near-perfect proxy that happens to
+    # be one row short, letting a leaking solution through the hard gate.
+    n = min(len(a), len(b))
+    if n < 3:   # a 2-point overlap is always perfectly collinear -> meaningless |r|==1.0 against the hard gate
         return 0.0
+    a, b = list(a)[:n], list(b)[:n]
     ma, mb = sum(a) / n, sum(b) / n
     cov = sum((x - ma) * (y - mb) for x, y in zip(a, b))
     va = sum((x - ma) ** 2 for x in a)

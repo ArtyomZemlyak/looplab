@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState } from 'react'
-import { ReactFlow, Background, Controls, MarkerType, Handle, Position } from '@xyflow/react'
+import { ReactFlow, Background, Controls, Handle, Position } from '@xyflow/react'
 import '@xyflow/react/dist/style.css'
 import { get, fmt, listProjects } from './util.js'
 import { regionGeometry, groupColor } from './grouping.js'
@@ -113,9 +113,10 @@ function buildGraph(projects, runs, collapsed, onOpen, onToggle) {
   runs.forEach(r => (r.seeded_from || []).forEach(src => {
     if (runPos[r.run_id] && runPos[src]) {
       // minimal edge object (styling via the .seed-edge CSS class) — mirrors the in-run canvas's
-      // proven pattern; an inline style/label/markerEnd here prevents the path from rendering in v12.
+      // proven pattern; an inline style/label/markerEnd here prevents the path from rendering in v12,
+      // so do NOT set markerEnd (the comment warned against exactly what the line below used to do).
       edges.push({ id: `seed:${src}->${r.run_id}`, source: 'run:' + src, target: 'run:' + r.run_id,
-        className: 'seed-edge', markerEnd: { type: MarkerType.ArrowClosed } })
+        className: 'seed-edge' })
     }
   }))
   return { nodes: rfNodes, edges }

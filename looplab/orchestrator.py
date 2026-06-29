@@ -177,7 +177,6 @@ class Engine:
         deep_researcher=None,       # Optional[DeepResearcher]; None => Deep-Research stage off
         deep_research_every: int = 0,  # run the stage every N created nodes (0 = manual/strategist only)
         concurrent_research: bool = False,  # overlap a due research "think" with the GPU-bound eval (opt-in)
-        speculative_pipeline: bool = False,  # precompute the next improve-off-best while a node evals (opt-in)
         report_writer=None,         # Optional[ReportWriter]; None => agent report off (deterministic only)
         report_every: int = 0,      # regenerate the run report every N created nodes (0 = manual only)
         developer_factory=None,     # Optional[Callable[[str], Developer]] for live backend swap
@@ -227,8 +226,6 @@ class Engine:
         self.deep_researcher = deep_researcher
         self.deep_research_every = max(0, deep_research_every)
         self.concurrent_research = concurrent_research
-        self.speculative_pipeline = speculative_pipeline
-        self._spec_build = None   # cached speculative (improve) build, consumed match-or-discard next iter
         self.report_writer = report_writer
         self.report_every = max(0, report_every)
         self.developer_factory = developer_factory
@@ -610,11 +607,6 @@ class Engine:
                     if a.get("_rung") is not None:   # A1 ASHA: surface the successive-halving promotion
                         self.store.append("rung_promoted",
                                           {"rung": a["_rung"], "survivors": a.get("_promoted", [])})
-                    # Speculative pipeline: if we precomputed this exact improve while the prior node was
-                    # training, append it from cache (the propose/implement already overlapped the eval).
-                    # Match-or-discard, so the search is identical to the un-speculated policy choice.
-                    if self.speculative_pipeline and self._consume_speculation(a):
-                        continue
                     self._create_node(a)  # sequential -> deterministic ids/proposals
                 continue
 
@@ -629,26 +621,13 @@ class Engine:
                 # engine stays the SOLE writer: the memo is recorded from THIS (main) task after the evals.
                 # Only a real win when the LLM is remote (no GPU contention); needs live-run validation.
                 rtrig = self._due_research_trigger(state) if self.concurrent_research else None
-                # Speculative pipeline (opt-in): while the node trains, precompute the likely next
-                # "improve off best" in a worker thread (pure propose+implement, no log writes/spans) so
-                # it's ready to append the instant the eval finishes. Cached for the next iteration's
-                # creates, consumed match-or-discard. Needs a current best (a parent) to improve off.
-                spec_pid = (state.best_node_id if (self.speculative_pipeline
-                            and state.best_node_id is not None
-                            and state.best_node_id in state.nodes) else None)
                 rbox: dict = {}
-                sbox: dict = {}
                 async with anyio.create_task_group() as tg:
                     if rtrig is not None:
                         async def _bg_research(snap=state, trig=rtrig):
                             rbox["memo"] = await anyio.to_thread.run_sync(
                                 functools.partial(self._compute_deep_research, snap, trig, trace=False))
                         tg.start_soon(_bg_research)
-                    if spec_pid is not None:
-                        async def _bg_spec(snap=state, pid=spec_pid):
-                            sbox["build"] = await anyio.to_thread.run_sync(
-                                functools.partial(self._precompute_improve, snap, pid))
-                        tg.start_soon(_bg_spec)
                     for a in evals:
                         cur = fold(self.store.read_all())
                         # Operator stopped this specific node (`node_abort`): skip the eval and record
@@ -670,8 +649,6 @@ class Engine:
                 # Record the overlapped memo now — main task is the sole writer, AFTER the eval events.
                 if rbox.get("memo") is not None:
                     self._record_deep_research(rbox["memo"], trigger=rtrig, manual=False)
-                # Cache the speculative build (if any) for the next iteration's creates (None = no hit).
-                self._spec_build = sbox.get("build")
             else:
                 # G3 distributed/parallel eval: fan out under a CapacityLimiter (worker pool). The
                 # eval-budget guard the review flagged for this path: cap the number STARTED so an
@@ -688,10 +665,13 @@ class Engine:
                                     "node_id": a["node_id"], "error": "aborted by operator",
                                     "reason": "aborted", "eval_seconds": 0.0})
                             continue
-                        # Budget guard (parallel path): stop launching once the folded eval-budget is
-                        # spent, and never start more than max_parallel beyond it in one batch.
-                        if (max_es is not None and cur.total_eval_seconds >= max_es
-                                and started >= self.max_parallel):
+                        # Budget guard (parallel path): cap each fan-out batch to the worker-pool size.
+                        # `cur` is folded ONCE before this loop and never changes mid-batch (the evals
+                        # join only at the task-group exit), so a budget check on cur here is dead — the
+                        # real enforcement is the per-iteration outer guard (it re-folds and finishes the
+                        # run once total_eval_seconds >= max_es). Capping the batch to max_parallel bounds
+                        # the overshoot to ~one batch instead of launching the whole `evals` list at once.
+                        if started >= self.max_parallel:
                             break
                         tg.start_soon(self._evaluate, a["node_id"], limiter)
                         started += 1
@@ -767,7 +747,7 @@ class Engine:
         REAL change so the engine doesn't re-record/re-apply an identical strategy every iteration."""
         if not s:
             return {}
-        return {k: s.get(k) for k in ("policy", "policy_params", "developer", "operators", "fidelity")}
+        return {k: s.get(k) for k in ("policy", "policy_params", "developer", "operators", "fidelity", "request_research")}
 
     def _available_developers(self) -> list[str]:
         from .cli_agent import PRESETS
@@ -1247,7 +1227,7 @@ class Engine:
     # ---------------------------------------------------------------- private
     def _create_node(self, action: dict) -> None:
         state = fold(self.store.read_all())
-        node_id = len(state.nodes)  # monotonic across the whole run -> unique
+        node_id = max(state.nodes, default=-1) + 1  # monotonic across the whole run -> unique
         kind = action["kind"]
         with self.tracer.span("create_node", new_trace=True, node_id=node_id, operator=kind):
             if kind == "draft":
@@ -1327,61 +1307,6 @@ class Engine:
             )
         self._emit_agent_report(node_id)
 
-    # --------------------------------------------------------------- speculative pipeline (opt-in)
-    def _precompute_improve(self, state: RunState, parent_id: int):
-        """Build the LIKELY next 'improve off best' node as PURE compute (propose + implement only),
-        so it can run in a worker thread overlapping the GPU eval. No store writes, no spans → the
-        engine stays the sole writer (the matching node is APPENDED later, from the main task). Skips
-        the novelty-dedup nudge / complexity cue / per-node span deliberately (those have store/prompt
-        side effects that can't run off the main task). Returns a build dict, or None on any miss/error
-        — a discarded speculation costs only the LLM call, never correctness."""
-        try:
-            parent = state.nodes.get(parent_id)
-            if parent is None:
-                return None
-            node_id = len(state.nodes)
-            idea = self.researcher.propose(state, parent)
-            idea.operator = "improve"
-            code = self.developer.implement(idea)
-            return {
-                "parent_id": parent_id, "node_id": node_id, "idea": idea, "code": code,
-                "parents": [parent.id],
-                "files": getattr(self.developer, "last_files", {}) or {},
-                "deleted": getattr(self.developer, "last_deleted", []) or [],
-            }
-        except Exception:  # noqa: BLE001 — speculation is best-effort; a miss just means a normal propose
-            return None
-
-    def _consume_speculation(self, action: dict) -> bool:
-        """If the cached speculative build matches this create action (improve off the SAME parent, with
-        no node appended since it was built), append it from cache — overlapping the propose/implement
-        latency with the just-finished eval — and return True. Else discard and return False (the caller
-        proposes normally). The append happens on the main task, so the engine stays the sole writer, and
-        the match-or-discard rule means the SEARCH never diverges from what the real policy chose."""
-        b = self._spec_build
-        self._spec_build = None
-        if not b or action.get("kind") != "improve":
-            return False
-        state = fold(self.store.read_all())
-        # valid only if nothing was created since (node_id still lines up) AND the policy still wants to
-        # improve off the SAME parent (best unchanged across the eval) — otherwise discard.
-        if action.get("parent_id") != b["parent_id"] or b["node_id"] != len(state.nodes):
-            return False
-        research_origin = None
-        if state.research:
-            _m = state.research[-1]; _ra = _m.get("at_node")
-            if _ra is not None and _ra <= b["node_id"] < _ra + 2:
-                research_origin = {"at_node": _ra, "trigger": _m.get("trigger")}
-        with self.tracer.span("create_node", new_trace=True, node_id=b["node_id"],
-                              operator="improve", speculative=True):
-            self.store.append("node_created", {
-                "node_id": b["node_id"], "parent_ids": b["parents"], "operator": "improve",
-                "idea": b["idea"].model_dump(mode="json"), "code": b["code"],
-                "files": b["files"], "deleted": b["deleted"], "research_origin": research_origin,
-            })
-        self._emit_agent_report(b["node_id"])
-        return True
-
     def _create_injected_node(self, req: dict) -> None:
         """Materialize an operator-authored experiment (`inject_node` control event) into a real
         pending node. The operator supplies an idea (operator label, params, rationale, optional
@@ -1393,7 +1318,7 @@ class Engine:
         researcher here — but everything downstream (eval, confirmation, best-selection, lineage)
         is identical to an agent-authored node, so a hand-added winner can be selected as best."""
         state = fold(self.store.read_all())
-        node_id = len(state.nodes)
+        node_id = max(state.nodes, default=-1) + 1
         idea_d = dict(req.get("idea") or {})
         idea_d.setdefault("operator", "manual")
         # Coerce params to floats defensively (a manual form may send strings); drop unparseable.
@@ -1618,11 +1543,14 @@ class Engine:
         preds_path = Path(workdir) / g.get("predictions", "predictions.json")
         m = None
         if preds_path.is_file():
+            from .sandbox import _to_float
             try:
                 preds = _json.loads(preds_path.read_text(encoding="utf-8-sig", errors="replace"))
                 # .get (not g["labels"]): a host_grader() dict missing labels yields metric None
                 # (node fails) rather than an uncaught KeyError that would crash the eval worker.
-                m = host_score(g.get("scorer", "rmse"), preds, g.get("labels"), key=g.get("key"))
+                # _to_float: a non-finite (NaN/Inf) host score reads as None so an untrusted candidate
+                # can't self-elect champion via a crafted prediction (mirrors command_eval/sweep paths).
+                m = _to_float(host_score(g.get("scorer", "rmse"), preds, g.get("labels"), key=g.get("key")))
             except (ValueError, OSError):
                 m = None
         res.metric = m
@@ -1800,19 +1728,26 @@ class Engine:
                     # suspicious win / leaky pipeline without ever changing selection. Both surface in
                     # the Trust panel via the same reward_hack_suspected event.
                     sigs = []
+                    # Scan the WHOLE solution surface, not just solution.py — a patch-gated multi-file
+                    # agent can hide answer-key access / leakage / the real computation in an in-surface
+                    # helper module that solution.py imports. Concatenate node.files so the reward-hack /
+                    # leakage / critic scans cover the imported code too (not only the clean entrypoint).
+                    scan_src = node.code + "".join(
+                        f"\n\n# --- {fn} ---\n{src}" for fn, src in (node.files or {}).items()
+                        if str(fn).replace("\\", "/").lower() != "solution.py")
                     if self.reward_hack_detect:
                         from .reward_hack import detect_reward_hacks
                         protected = set(self._repo_spec.get("protected_names", [])) | set(self._assets)
-                        sigs += detect_reward_hacks(node.code, res.metric, state.direction,
+                        sigs += detect_reward_hacks(scan_src, res.metric, state.direction,
                                                     protected_names=protected, stdout=res.stdout)
-                    if self._code_leakage_detect and node.code:
+                    if self._code_leakage_detect and scan_src:
                         from .leakage import code_leakage_scan
-                        for f in code_leakage_scan(node.code)["flags"]:
+                        for f in code_leakage_scan(scan_src)["flags"]:
                             sigs.append({"signal": "data_leakage:" + f["signal"],
                                          "detail": f"line {f['line']}: {f['code']}"})
-                    if self._critic_check and node.code:
+                    if self._critic_check and scan_src:
                         from .critic import critique
-                        for c in critique(node.idea, node.code):
+                        for c in critique(node.idea, scan_src):
                             sigs.append({"signal": "critic:" + c["issue"], "detail": c["detail"]})
                     if sigs:
                         self.store.append("reward_hack_suspected",
@@ -1990,7 +1925,7 @@ class Engine:
         idea = Idea(operator="refine_block", params=new_params,
                     rationale=f"ablation: refine highest-impact '{top}' (impacts={impacts})")
         code = self.developer.implement(idea)
-        node_id = len(fold(self.store.read_all()).nodes)
+        node_id = max(fold(self.store.read_all()).nodes, default=-1) + 1
         self.store.append("node_created", {
             "node_id": node_id, "parent_ids": [parent_id], "operator": "refine_block",
             "idea": idea.model_dump(mode="json"), "code": code,
@@ -2066,7 +2001,7 @@ class Engine:
                     rationale=("code-block ablation: refine the highest-impact pipeline block "
                                f"#{top} and keep the rest. Block:\n{top_src}"))
         new_code = self.developer.implement(idea)
-        node_id = len(fold(self.store.read_all()).nodes)
+        node_id = max(fold(self.store.read_all()).nodes, default=-1) + 1
         self.store.append("node_created", {
             "node_id": node_id, "parent_ids": [parent_id], "operator": "refine_block",
             "idea": idea.model_dump(mode="json"), "code": new_code,

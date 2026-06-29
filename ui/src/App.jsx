@@ -7,11 +7,12 @@ import { initTheme } from './ThemeSwitcher.jsx'
 initTheme()   // restore the saved design theme before first paint
 
 // Tiny hash router: #/run/<id> opens a run, #/settings opens the settings page.
+const safeDecode = (s) => { try { return decodeURIComponent(s) } catch { return s } }
 function parseHash() {
   const h = location.hash
   if (h === '#/settings') return { view: 'settings' }
   const m = h.match(/^#\/run\/(.+)$/)
-  return m ? { view: 'run', id: decodeURIComponent(m[1]) } : { view: 'list' }
+  return m ? { view: 'run', id: safeDecode(m[1]) } : { view: 'list' }
 }
 
 export default function App() {

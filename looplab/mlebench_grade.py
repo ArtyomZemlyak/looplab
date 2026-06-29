@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import sys
 from pathlib import Path
 from typing import Optional
@@ -43,7 +44,9 @@ def grade_in_subprocess(competition_id: str, submission_path, data_dir: Optional
     argv = [sys.executable, "-m", "looplab.mlebench_grade",
             "-c", competition_id, "-s", str(submission_path)]
     if data_dir:
-        argv += ["--data-dir", str(data_dir)]
+        # Resolve to an absolute path HERE (host/engine cwd) — the child runs with cwd=repo root,
+        # so passing a relative data_dir would let it resolve to a different dir than the engine did.
+        argv += ["--data-dir", str(Path(data_dir).resolve())]
     # cwd = repo root so `-m looplab.mlebench_grade` resolves; capped output, tree-kill on timeout.
     root = str(Path(__file__).resolve().parents[1])
     rc, out, _err, to = _run_argv(argv, root, timeout, None, 256_000)
@@ -62,8 +65,8 @@ def grade_in_subprocess(competition_id: str, submission_path, data_dir: Optional
             continue
         if isinstance(obj, dict) and "metric" in obj:
             m = obj.get("metric")
-            return (float(m) if isinstance(m, (int, float)) and not isinstance(m, bool) else None,
-                    obj.get("report"))
+            ok = isinstance(m, (int, float)) and not isinstance(m, bool) and math.isfinite(m)
+            return (float(m) if ok else None, obj.get("report"))
     return None, None
 
 

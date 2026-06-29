@@ -9,6 +9,7 @@ import json
 from pathlib import Path
 from typing import Callable, Optional
 
+from .atomicio import atomic_write_text
 from .vectorstore import Hit, Item, VectorStore, hash_embed
 
 
@@ -24,12 +25,18 @@ class JsonlCaseLibrary:
         if self.path.exists():
             for line in self.path.read_text(encoding="utf-8").splitlines():
                 line = line.strip()
-                if line:
-                    self.cases.append(json.loads(line))
+                if not line:
+                    continue
+                try:                       # one malformed/truncated line must not make the whole
+                    self.cases.append(json.loads(line))   # cross-run memory permanently unloadable
+                except json.JSONDecodeError:
+                    continue
 
     def _flush(self) -> None:
-        self.path.write_text(
-            "\n".join(json.dumps(c) for c in self.cases) + "\n", encoding="utf-8")
+        # Atomic (temp + os.replace): the file is rewritten WHOLE on every add(), so a non-atomic
+        # write killed mid-flush would truncate and lose the entire accumulated case library.
+        atomic_write_text(
+            self.path, "\n".join(json.dumps(c) for c in self.cases) + "\n")
 
     def add(self, case: dict) -> bool:
         """Upsert by task_id, retaining the better metric. Returns True if stored."""
@@ -37,11 +44,13 @@ class JsonlCaseLibrary:
         direction = case.get("direction", "min")
         metric = case.get("metric")
         prev = next((c for c in self.cases if c.get("task_id") == tid), None)
-        if prev is not None and metric is not None and prev.get("metric") is not None:
-            better = metric < prev["metric"] if direction == "min" else metric > prev["metric"]
-            if not better:
-                return False
-            self.cases.remove(prev)
+        if prev is not None:
+            # Keep the old case only when both metrics are comparable and the new one is not better.
+            if metric is not None and prev.get("metric") is not None:
+                better = metric < prev["metric"] if direction == "min" else metric > prev["metric"]
+                if not better:
+                    return False
+            self.cases.remove(prev)   # replace (incl. metric-None cases) — upsert by task_id
         self.cases.append(case)
         self._flush()
         return True

@@ -6,6 +6,7 @@ than crashing the run. Dependency-free (stdlib urllib + a tiny Atom regex parse)
 """
 from __future__ import annotations
 
+import html
 import re
 import urllib.parse
 import urllib.request
@@ -53,7 +54,7 @@ class LiteratureTools:
         for i, entry in enumerate(_ENTRY.findall(xml)[: self.max_results], 1):
             t = _TITLE.search(entry)
             s = _SUMMARY.search(entry)
-            title = re.sub(r"\s+", " ", (t.group(1) if t else "")).strip()
-            summary = re.sub(r"\s+", " ", (s.group(1) if s else "")).strip()[:300]
+            title = html.unescape(re.sub(r"\s+", " ", (t.group(1) if t else "")).strip())
+            summary = html.unescape(re.sub(r"\s+", " ", (s.group(1) if s else "")).strip())[:300]
             out.append(f"{i}. {title}\n   {summary}")
         return "\n".join(out) if out else "(no results)"

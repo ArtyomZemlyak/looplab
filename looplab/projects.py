@@ -64,12 +64,19 @@ class ProjectStore:
     def load(self) -> dict:
         if not self.path.exists():
             return self._empty()
+        # Only treat genuinely-corrupt CONTENT (unparseable JSON, or valid-but-wrong-shape) as empty.
+        # A transient OSError (Windows sharing violation, AV/indexer lock, disk hiccup) is NOT caught
+        # here: returning _empty() on a transient read failure would let the next mutating op _save() an
+        # empty store over a perfectly good file, wiping every project/label/assignment. Let it raise.
         try:
             data = json.loads(self.path.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError):
+        except (json.JSONDecodeError, UnicodeDecodeError):   # corrupt content (bad JSON or bad UTF-8) -> skeleton; OSError still raises
             return self._empty()
-        for k, v in self._empty().items():       # backfill any key a pre-super-task file lacks
-            data.setdefault(k, v)
+        if not isinstance(data, dict):           # hand-edited to a list/str/number -> skeleton, not AttributeError
+            return self._empty()
+        for k, v in self._empty().items():       # backfill missing keys AND coerce wrong-typed ones
+            cur = data.get(k)
+            data[k] = cur if isinstance(cur, type(v)) else v
         return data
 
     def _save(self, data: dict) -> None:

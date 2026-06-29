@@ -289,7 +289,7 @@ export function toMarkdown(state, best) {
   L.push(`- **Run:** ${state.run_id}`)
   L.push(`- **Direction:** ${state.direction}`)
   L.push(`- **Status:** ${state.phase || (state.finished ? 'finished' : 'running')}${state.stop_reason ? ` (${state.stop_reason})` : ''}`)
-  L.push(`- **Nodes:** ${Object.keys(state.nodes).length} — ${a.nEval} evaluated, ${Object.values(state.failures || {}).reduce((s, x) => s + x.length, 0)} failed`)
+  L.push(`- **Nodes:** ${Object.keys(state.nodes).length} — ${a.nEval} evaluated, ${Object.values(a.failures || {}).reduce((s, x) => s + x.length, 0)} failed`)
   if (best) L.push(`- **Best:** node #${best.id} · metric ${fmt(best.confirmed_mean ?? best.metric)}${best.confirmed_mean != null ? ` ±${fmt(best.confirmed_std)} (${best.confirmed_seeds}×)` : ''} · params ${JSON.stringify(best.idea?.params)}`)
   if (state.llm_cost) L.push(`- **LLM:** ${state.llm_cost.total_tokens} tokens · $${fmt(state.llm_cost.cost)}`)
   if (rep?.champion_summary) { L.push(''); L.push('### Champion'); L.push(''); L.push(rep.champion_summary) }

@@ -65,7 +65,13 @@ export default function ReportView({ state, runId, onOpenPanel, onToast }) {
   const [openMemo, setOpenMemo] = useState(memos.length ? memos.length - 1 : null)
   const [refreshing, setRefreshing] = useState(false)
   const lastAt = useRef(rep?.at_node)
-  useEffect(() => { setBestCode(null); if (best) get(`/api/runs/${runId}/nodes/${best.id}`).then(setBestCode).catch(() => {}) }, [runId, best?.id])
+  useEffect(() => {
+    setBestCode(null)
+    if (!best) return
+    let alive = true
+    get(`/api/runs/${runId}/nodes/${best.id}`).then(d => { if (alive) setBestCode(d) }).catch(() => {})
+    return () => { alive = false }
+  }, [runId, best?.id])
   // Refresh completes when a newer report (different at_node / trigger) folds in via SSE.
   useEffect(() => {
     if (refreshing && (rep?.at_node !== lastAt.current || rep?.trigger === 'manual')) setRefreshing(false)

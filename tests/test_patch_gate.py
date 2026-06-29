@@ -141,7 +141,7 @@ def test_engine_protects_grader_asset_from_agent_overwrite(tmp_path):
                     developer=_CheatDev(), sandbox=SubprocessSandbox(),
                     policy=GreedyTree(n_seeds=2, max_nodes=2))
     state = anyio.run(engine.run)
-    # The fake grader was rejected; the real grader scored the all-zeros submission, so the
-    # metric is the TRUE held-out accuracy (~0.5 for one class), never the cheated 1.0.
+    # The fake grader (return 1.0) was rejected; the real grader scored the length-1 cheat
+    # submission as malformed (wrong length vs the 10-element held-out key) -> exactly 0.0, never 1.0.
     for n in state.evaluated_nodes():
-        assert n.metric != 1.0
+        assert n.metric == 0.0

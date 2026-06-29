@@ -214,6 +214,10 @@ function collectThinking(trace, nid) {
 function agentStatus(live, log) {
   if (!live || live.finished) return null
   if (live.paused) return 'Paused'
+  // Zombie guard: the run isn't finished but no engine process holds the lock (engine_running===false,
+  // server-probed). Without this the strip would pulse "Thinking about the next step…" forever even
+  // though nothing is running — the exact symptom of a resume that died without emitting run_finished.
+  if (live.engine_running === false) return '⚠ Engine stopped — resume to keep going'
   const phase = live.phase
   if (phase === 'grounding' || phase === 'onboarding') return 'Setting up the task & data…'
   if (phase === 'approval') return 'Waiting for your approval…'
@@ -540,7 +544,11 @@ export default function Dock({ runId, live, liveSeq, viewSeq, setViewSeq, onFocu
   // Durably append one feed turn to the run's transcript. Fire-and-forget + soft-fail: the in-memory
   // feed already shows it, so a disk hiccup must never break the chat — it just won't survive a reload.
   const persistTurn = (turn) => { appendChatTurn(runId, turn).catch(() => {}) }
-  useEffect(() => { get(`/api/runs/${runId}/log`).then(setLog).catch(() => {}) }, [runId, liveSeq])
+  useEffect(() => {
+    let alive = true
+    get(`/api/runs/${runId}/log`).then(d => { if (alive) setLog(d) }).catch(() => {})
+    return () => { alive = false }
+  }, [runId, liveSeq])
   // The trace re-folds the whole spans.jsonl server-side, and it only backs the inline "thinking"
   // cards — so refetch when a NODE is added (or the run finishes), not on every SSE seq tick.
   const nodeCount = live ? Object.keys(live.nodes || {}).length : 0
@@ -661,10 +669,15 @@ export default function Dock({ runId, live, liveSeq, viewSeq, setViewSeq, onFocu
       : a.type === 'resume' ? { label: 'pause', type: 'pause', data: {} } : null
   // Agentic apply: a PLAN is a list of actions. Each becomes its own applied-row (running→done/failed,
   // persisted), appended IN ORDER as append-only intents; then we reopen+resume the run ONCE if any
-  // step needs the engine (on a finished run the intents otherwise just sit in the log unrun). A live
-  // run needs no resume — the engine drains the intents between nodes. Reversible steps keep their Undo.
+  // step needs the engine AND no engine is alive to drain it. "Engine dead" is finished OR a ZOMBIE
+  // (reopened but the engine died without run_finished, so finished=false yet engine_running=false) —
+  // resuming only on `finished` was the bug that left injected nodes sitting unrun forever. A genuinely
+  // live run (engine_running===true) needs no resume — it drains the intents between nodes. (undefined
+  // engine_running, e.g. an older server, falls back to the old finished-only behaviour.) Reversible
+  // steps keep their Undo.
   const autoApplyPlan = async (actions, planTokens = null) => {
     if (!actions || !actions.length) return
+    const engineDead = !!live?.finished || live?.engine_running === false
     let needsResume = false, anyFailed = false
     for (let i = 0; i < actions.length; i++) {
       const action = actions[i]
@@ -678,7 +691,7 @@ export default function Dock({ runId, live, liveSeq, viewSeq, setViewSeq, onFocu
         await appendAction(runId, action)                // append-only intent — no resume yet
         setMsgs(m => m.map(x => x.id === id ? { ...x, status: 'done' } : x))
         persistTurn({ ...base, status: 'done' })         // persist only the SETTLED row (never 'running')
-        if (live?.finished && actionNeedsEngine(action)) needsResume = true
+        if (engineDead && actionNeedsEngine(action)) needsResume = true
       } catch (e) {
         anyFailed = true
         setMsgs(m => m.map(x => x.id === id ? { ...x, status: 'failed', err: e.message } : x))
@@ -696,9 +709,9 @@ export default function Dock({ runId, live, liveSeq, viewSeq, setViewSeq, onFocu
     } else if (anyFailed) {
       onToast?.('plan partially applied — a step failed (see the feed)')
     } else {
-      // No engine resume needed. A live run drains these intents between nodes; on a FINISHED run a
-      // hint/note step is only BUFFERED (it runs on the next reopen, not now) — say so honestly.
-      const note = live?.finished ? ' — saved for the next reopen' : ''
+      // No engine resume needed. A live run drains these intents between nodes; with no live engine
+      // (finished or zombie) a hint/note step is only BUFFERED (it runs on the next reopen) — say so.
+      const note = engineDead ? ' — saved for the next reopen' : ''
       onToast?.((actions.length > 1 ? `applied ${actions.length} steps` : 'applied: ' + actions[0].label) + note)
     }
   }
@@ -783,7 +796,11 @@ export default function Dock({ runId, live, liveSeq, viewSeq, setViewSeq, onFocu
   }
   // round-7 transport: mode derived from live state; wired to existing control endpoints + reset.
   const paused = !!live?.paused, finished = !!live?.finished
-  const mode = finished ? 'finished' : paused ? 'paused' : 'running'
+  // Zombie: not finished, not paused, but no engine holds the lock (engine_running===false) — the run
+  // looks "running" in the event log yet nothing drives it. Give it its own transport so the user gets a
+  // resume button instead of the running-run's pause/stop (which would do nothing useful).
+  const stalled = !finished && !paused && live?.engine_running === false
+  const mode = finished ? 'finished' : stalled ? 'stalled' : paused ? 'paused' : 'running'
   const onPause = () => CONTROL.pause(runId).then(() => onToast?.('paused')).catch(e => onToast?.('pause failed: ' + e.message))
   const onResume = () => CONTROL.resume(runId).then(() => onToast?.('resumed')).catch(e => onToast?.('resume failed: ' + e.message))
   const onStop = () => CONTROL.abort(runId).then(() => onToast?.('stop requested')).catch(e => onToast?.('stop failed: ' + e.message))
@@ -931,6 +948,9 @@ export default function Dock({ runId, live, liveSeq, viewSeq, setViewSeq, onFocu
               {mode === 'paused' && <>
                 <button className="btn sm primary" title="resume the run" onClick={onResume}><OpIcon name="play" size={13} /></button>
                 <button className="btn sm danger" title="stop the run" onClick={onStop}><OpIcon name="stop" size={13} /></button></>}
+              {mode === 'stalled' && <>
+                <button className="btn sm primary" title="engine stopped — resume to keep going" onClick={onReopen}><OpIcon name="play" size={13} /></button>
+                <button className="btn sm danger" title="give up — mark the run finished" onClick={onStop}><OpIcon name="stop" size={13} /></button></>}
               {mode === 'finished' && <>
                 <button className="btn sm primary" title="reopen & resume" onClick={onReopen}><OpIcon name="play" size={13} /></button>
                 <button className="btn sm" title="reset & restart from scratch" onClick={onReplay}><OpIcon name="replay" size={13} /></button></>}

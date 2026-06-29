@@ -108,7 +108,9 @@ class EventStore:
                 continue
             if isinstance(obj, dict) and "seq" in obj:
                 return int(obj["seq"])
-        return -1
+        # Tail window missed the last seq (e.g. a >64KB final line with no newline in the window):
+        # fall back to a full scan so a concurrent writer can't mint a duplicate seq. Non-recursive.
+        return self._scan_last_seq()
 
     def append(self, type: str, data: dict[str, Any]) -> Event:
         trace_id, span_id = current_ids()

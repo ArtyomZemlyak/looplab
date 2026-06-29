@@ -12,7 +12,7 @@ export function useRunState(runId) {
     if (!runId) return
     let stopped = false
     let timer = null
-    let lastSeq = -2
+    let lastSeq = -2, lastAlive
     const reconnect = (delay) => { if (stopped) return; clearTimeout(timer); timer = setTimeout(connect, delay) }
     function connect() {
       const es = new EventSource(`/api/runs/${runId}/events`)
@@ -21,8 +21,11 @@ export function useRunState(runId) {
         let p
         try { p = JSON.parse(e.data) } catch { return }  // ignore a torn/partial SSE frame
         setConnected(true)
-        if (p.seq === lastSeq) return   // unchanged (a reconnect-poll on a finished run) — no churn
-        lastSeq = p.seq; setLive(p.state); setSeq(p.seq)
+        // Re-render on a seq change OR an engine_running flip (a zombie's liveness changes with no
+        // new event/seq); track lastAlive in the closure (NOT stale React `live`) to avoid churn.
+        const alive = p.state && p.state.engine_running
+        if (p.seq === lastSeq && alive === lastAlive) return
+        lastSeq = p.seq; lastAlive = alive; setLive(p.state); setSeq(p.seq)
       })
       // `done` = the run reached a terminal state and the server ends the stream. We do NOT treat it
       // as "stop forever": reconnect-poll so a reopen (fork / branch / add-experiment) is picked up

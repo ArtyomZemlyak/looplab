@@ -19,21 +19,48 @@ from pathlib import Path
 _DRIVE = re.compile(r"^[A-Za-z]:")
 
 
+def _unquote_git_path(p: str) -> str:
+    r"""git C-quotes a path containing non-ASCII / control / quote bytes (core.quotePath, ON by
+    default): `café.py` -> `"caf\303\251.py"` (octal-escaped UTF-8). Decode it back so the surface
+    gate sees the real path; a non-quoted path is returned unchanged."""
+    if len(p) >= 2 and p[0] == '"' and p[-1] == '"':
+        try:
+            return (p[1:-1]
+                    .encode("latin-1", "backslashreplace")
+                    .decode("unicode_escape")
+                    .encode("latin-1")
+                    .decode("utf-8", "replace"))
+        except (UnicodeDecodeError, UnicodeEncodeError):
+            return p[1:-1]
+    return p
+
+
 def changed_paths(diff_text: str) -> list[str]:
-    """Target paths referenced by a unified diff (a/ b/ prefixes stripped, /dev/null
-    ignored)."""
+    """Target paths referenced by a unified diff (a/ b/ prefixes stripped, /dev/null ignored).
+    Decodes git's C-quoting (core.quotePath) so a non-ASCII filename gates correctly. The +++/---
+    header lines are AUTHORITATIVE — they carry the whole path including spaces — so the ambiguous
+    `diff --git a/X b/X` line (which `split()` mangles when X has spaces) is used only as a FALLBACK
+    for a block with no +++/--- header (a pure rename / mode change / binary file)."""
     paths: set[str] = set()
+    git_fallback: list[str] = []      # a/ b/ paths from the current `diff --git` block's line
+    block_has_header = True           # suppress the fallback once a +++/--- header is seen
     for line in diff_text.splitlines():
-        if line.startswith("+++ ") or line.startswith("--- "):
-            p = line[4:].strip().split("\t")[0]
+        if line.startswith("diff --git "):
+            if not block_has_header:
+                paths.update(git_fallback)            # previous block had no +++/--- header
+            block_has_header = False
+            git_fallback = [(t[2:] if t[:2] in ("a/", "b/") else t)
+                            for t in (_unquote_git_path(tok) for tok in line.split()[2:])]
+        elif line.startswith("+++ ") or line.startswith("--- "):
+            block_has_header = True
+            p = _unquote_git_path(line[4:].strip().split("\t")[0])
             if p == "/dev/null":
                 continue
             if p[:2] in ("a/", "b/"):
                 p = p[2:]
             paths.add(p)
-        elif line.startswith("diff --git "):
-            for tok in line.split()[2:]:
-                paths.add(tok[2:] if tok[:2] in ("a/", "b/") else tok)
+    if not block_has_header:
+        paths.update(git_fallback)                    # last block had no +++/--- header
     return sorted(paths)
 
 
@@ -56,7 +83,12 @@ def _match(path: str, glob: str) -> bool:
     slash and would silently reject root files."""
     if fnmatch.fnmatch(path, glob):
         return True
-    return glob.startswith("**/") and fnmatch.fnmatch(path, glob[3:])
+    if glob.startswith("**/") and fnmatch.fnmatch(path, glob[3:]):
+        return True
+    # A `**/` segment anywhere means 'zero OR more directories' (e.g. a namespaced
+    # `model/**/*.py` must also match the ROOT file `model/train.py`). plain fnmatch has no
+    # `**` semantics, so collapse one `**/` and retry.
+    return "**/" in glob and fnmatch.fnmatch(path, glob.replace("**/", "", 1))
 
 
 def _in_surface(p: str, allow: list[str], prefixes: list[str]) -> bool:
@@ -89,14 +121,17 @@ def gate(diff_text: str, allow: list[str], protect: list[str] | None = None,
     rejected = [p for p in paths
                 if _escapes(p)
                 or not _in_surface(p, allow, pre)
-                or any(_ci(p) == g or fnmatch.fnmatchcase(_ci(p), g) for g in prot)]
+                or any(_ci(p) == g or _match(_ci(p), g) for g in prot)]
     return {"ok": bool(paths) and not rejected, "paths": paths, "rejected": rejected}
 
 
-def apply_patch(diff_text: str, repo_dir: str, allow: list[str]) -> dict:
+def apply_patch(diff_text: str, repo_dir: str, allow: list[str],
+                protect: list[str] | None = None, prefixes: list[str] | None = None) -> dict:
     """Gate, then `git apply --check` then apply, inside `repo_dir`. Never applies a
-    patch that fails the surface gate or the dry-run."""
-    g = gate(diff_text, allow)
+    patch that fails the surface gate or the dry-run. `protect` (reject, don't strip — for the
+    eval/metric/adapter/grader files) MUST be threaded through so this entry point can't be used to
+    overwrite the score source; the live cli_agent path passes it and so should every caller."""
+    g = gate(diff_text, allow, protect, prefixes)
     if not g["ok"]:
         return {"applied": False, "paths": g["paths"], "rejected": g["rejected"],
                 "error": "out-of-surface" if g["rejected"] else "empty patch"}

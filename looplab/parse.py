@@ -110,7 +110,10 @@ def _coerce_value(val, ann):
                 return val          # unrecognized string: don't silently coerce to False — return it
             return bool(val)        # so model validation rejects it rather than flipping a flag off
         if ann is int:
-            return int(float(val)) if isinstance(val, (str, float)) else int(val)
+            if isinstance(val, bool):       # a JSON bool for an int field is a type error — don't flip
+                return val                  # it to 1/0; let model validation reject it
+            # round, don't truncate: a weak model emitting 3.9 for an int field means ~4, not 3
+            return int(round(float(val))) if isinstance(val, (str, float)) else int(val)
         if ann is float:
             return float(val)
         if ann is str:

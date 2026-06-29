@@ -19,9 +19,13 @@ def available() -> bool:
 
 
 def export_run(state: RunState, *, tracking_uri: str | None = None,
-               experiment: str | None = None, code: str | None = None) -> str:
+               experiment: str | None = None, code: str | None = None,
+               node=None) -> str:
     """Log the run's champion to MLflow and return the MLflow run id. Raises RuntimeError if MLflow
-    isn't installed (install the optional `mlflow` extra)."""
+    isn't installed (install the optional `mlflow` extra). `node` overrides which node's params/
+    metrics are logged (defaults to state.best()); pass the SAME node whose `code` is exported so the
+    logged params/metrics and the solution.py artifact describe ONE node (a pinned champion may
+    differ from the metric-best node)."""
     if not available():
         raise RuntimeError(
             "MLflow export needs the optional `mlflow` package: pip install mlflow")
@@ -31,7 +35,7 @@ def export_run(state: RunState, *, tracking_uri: str | None = None,
         mlflow.set_tracking_uri(tracking_uri)
     if experiment:
         mlflow.set_experiment(experiment)
-    best = state.best()
+    best = node if node is not None else state.best()
     with mlflow.start_run(run_name=state.run_id) as run:
         mlflow.set_tags({
             "looplab.run_id": state.run_id, "looplab.task_id": state.task_id,
@@ -66,4 +70,4 @@ def export_run_dir(run_dir, **kwargs) -> str:
     rd = Path(run_dir)
     state = fold(EventStore(rd / "events.jsonl").read_all())
     champ = state.nodes.get(state.champion) if state.champion is not None else state.best()
-    return export_run(state, code=(champ.code if champ else None), **kwargs)
+    return export_run(state, code=(champ.code if champ else None), node=champ, **kwargs)

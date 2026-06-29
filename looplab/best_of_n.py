@@ -99,5 +99,6 @@ class BestOfNDeveloper:
         if callable(repair):
             out = repair(idea, code, error)
             self.last_files = getattr(self.inner, "last_files", {}) or {}
+            self.last_deleted = getattr(self.inner, "last_deleted", []) or []   # else stale from prior implement()
             return out
         return self.implement(idea)

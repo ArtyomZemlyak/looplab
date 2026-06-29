@@ -362,7 +362,7 @@ class LiteLLMClient:
             cost = resp._hidden_params.get("response_cost")  # type: ignore[attr-defined]
         except Exception:
             cost = None
-        self.accountant.add(cost or 0.0)
+        self.accountant.add(cost or 0.0, usage=self._usage(resp))
 
     def _usage(self, resp) -> Optional[dict]:
         try:
@@ -407,4 +407,4 @@ class LiteLLMClient:
         record_llm_call(op="complete_tool", model=self.model, messages=messages,
                         completion=args if isinstance(args, str) else json.dumps(args),
                         thinking=thinking or None, usage=self._usage(resp))
-        return json.loads(args)
+        return json.loads(args) if isinstance(args, str) else (args or {})

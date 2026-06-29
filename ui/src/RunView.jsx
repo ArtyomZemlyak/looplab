@@ -72,7 +72,11 @@ export default function RunView({ runId, onBack }) {
   }, [live?.finished])
   useEffect(() => {
     if (viewSeq == null || viewSeq >= seq) { setHist(null); return }
-    get(`/api/runs/${runId}/state?seq=${viewSeq}`).then(p => setHist(p.state)).catch(() => {})
+    let alive = true; const want = viewSeq
+    get(`/api/runs/${runId}/state?seq=${want}`)
+      .then(p => { if (alive && want === viewSeq) setHist(p.state) })
+      .catch(() => {})
+    return () => { alive = false }
   }, [viewSeq, seq, runId])
   const showToast = (m) => { setToast(m); setTimeout(() => setToast(null), 2200) }
   // Members of the selected group — memoized so unrelated re-renders (toast, live ticks) don't
@@ -116,8 +120,11 @@ export default function RunView({ runId, onBack }) {
   const replaying = hist != null
   // Liveness reflects the ACTUAL run, not the viewed snapshot: green+breathing only while a
   // connected run is still going; a finished run shows a calm "finished", a dropped SSE "offline".
-  const liveStatus = !connected ? 'off' : (live.finished ? 'done' : 'on')
-  const liveLabel = !connected ? 'offline' : (live.finished ? 'finished' : 'live')
+  // A ZOMBIE (not finished, but no engine holds the lock) gets its own "stalled" badge — otherwise it
+  // would falsely breathe green "live" while nothing actually runs.
+  const stalled = live.engine_running === false && !live.finished
+  const liveStatus = !connected ? 'off' : (live.finished ? 'done' : stalled ? 'stalled' : 'on')
+  const liveLabel = !connected ? 'offline' : (live.finished ? 'finished' : stalled ? 'stalled' : 'live')
   const evalSec = state.total_eval_seconds || 0
   const maxEval = cfg?.max_eval_seconds
   const cost = state.llm_cost

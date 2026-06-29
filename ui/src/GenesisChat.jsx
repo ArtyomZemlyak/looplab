@@ -165,9 +165,9 @@ export default function GenesisChat({ onClose, onStarted, seed }) {
               <div className="gen-field"><div className="gen-lab">Model</div>
                 <input className="text" value={sk.llm_model || ''} onChange={e => setSetting('llm_model', e.target.value || undefined)} placeholder="default" /></div>
               <div className="gen-field"><div className="gen-lab">Max nodes</div>
-                <input className="text" type="number" value={sk.max_nodes ?? ''} onChange={e => setSetting('max_nodes', e.target.value === '' ? undefined : Number(e.target.value))} placeholder="default" /></div>
+                <input className="text" type="number" value={sk.max_nodes ?? ''} onChange={e => { const n = Math.round(Number(e.target.value)); setSetting('max_nodes', e.target.value === '' || !Number.isFinite(n) ? undefined : n) }} placeholder="default" /></div>
               <div className="gen-field"><div className="gen-lab">Seeds</div>
-                <input className="text" type="number" value={sk.n_seeds ?? ''} onChange={e => setSetting('n_seeds', e.target.value === '' ? undefined : Number(e.target.value))} placeholder="default" /></div>
+                <input className="text" type="number" value={sk.n_seeds ?? ''} onChange={e => { const n = Math.round(Number(e.target.value)); setSetting('n_seeds', e.target.value === '' || !Number.isFinite(n) ? undefined : n) }} placeholder="default" /></div>
               <div className="gen-field"><div className="gen-lab">Policy</div>
                 <select className="text" value={sk.policy || ''} onChange={e => setSetting('policy', e.target.value || undefined)}>
                   <option value="">default</option>

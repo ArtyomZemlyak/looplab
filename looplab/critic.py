@@ -26,7 +26,8 @@ def critique(idea: Idea, code: str) -> list[dict]:
     # metric from a name/expression. Otherwise a legitimate `print(json.dumps({"metric": score}))`
     # — or a placeholder `{"metric": 0.0}` later overwritten with a computed value — false-positives.
     hardcoded = re.search(r'["\']metric["\']\s*:\s*[0-9.+\-eE]+\s*[}\)]', code)
-    computed = re.search(r'["\']?metric["\']?\s*[:=]\s*[A-Za-z_]', code)
+    computed = re.search(r'["\']?metric["\']?\s*[:=]\s*[A-Za-z_]', code) or \
+        re.search(r'\[\s*["\']metric["\']\s*\]\s*=\s*[A-Za-z_]', code)
     if hardcoded and not computed:
         issues.append({"issue": "hardcoded_metric",
                        "detail": "the metric appears to be a hard-coded constant, not computed"})

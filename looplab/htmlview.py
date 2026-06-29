@@ -87,10 +87,12 @@ def render_html(state: RunState, trace_view: dict | None = None) -> str:
             f"</tr>"
         )
     best = state.best()
-    best_line = (
-        f"<b>Best:</b> node {best.id} — metric {best.metric:.6g} — params {html.escape(str(best.idea.params))}"
-        if best else "<b>Best:</b> (none yet)"
-    )
+    if best:
+        bm = best.confirmed_mean if best.confirmed_mean is not None else best.metric
+        bm_s = "—" if bm is None else f"{bm:.6g}"
+        best_line = f"<b>Best:</b> node {best.id} — metric {bm_s} — params {html.escape(str(best.idea.params))}"
+    else:
+        best_line = "<b>Best:</b> (none yet)"
     return f"""<!doctype html>
 <html><head><meta charset="utf-8"><title>LoopLab — {html.escape(state.run_id)}</title>
 <style>

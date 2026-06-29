@@ -223,7 +223,7 @@ def test_asha_seeds_rung0_then_promotes():
     acts = pol.next_actions(st)
     assert acts[0]["kind"] == "improve"
     assert acts[0]["_rung"] == 1
-    assert set(acts[0]["_promoted"]) <= {0, 1}   # top-2 by min metric
+    assert set(acts[0]["_promoted"]) == {0, 1}   # top-2 by min metric
 
 
 def test_asha_end_to_end_emits_rung_promoted(tmp_path):
@@ -500,6 +500,19 @@ def test_data_provenance_hashes_assets():
     import hashlib
     h = hashlib.sha256("col_a,col_b\n1,2\n".encode("utf-8")).hexdigest()[:16]
     assert len(h) == 16 and all(c in "0123456789abcdef" for c in h)
+
+
+def test_data_provenance_pins_real_asset_hash(tmp_path):
+    # Exercise the REAL engine provenance path end-to-end (the two tests above never invoke it):
+    # inject an asset, run, and assert the engine pinned the exact sha256[:16] of its content.
+    import hashlib
+    content = "col_a,col_b\n1,2\n"
+    eng = _engine(tmp_path / "provreal")
+    eng._assets = {"data.csv": content}            # inject a real asset (cf. test at line ~307)
+    state = anyio.run(eng.run)
+    assets = (state.data_provenance or {}).get("assets")
+    assert isinstance(assets, dict) and assets     # non-empty {name: hash}
+    assert assets["data.csv"] == hashlib.sha256(content.encode("utf-8")).hexdigest()[:16]
 
 
 # --------------------------------------------------------------------------- #

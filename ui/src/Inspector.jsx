@@ -390,7 +390,8 @@ function Trials({ n, detail, state }) {
   const rowsAll = trials.map((t, i) => ({ ...t, _i: i })).sort((a, b) => {
     const av = val(a, sortKey), bv = val(b, sortKey)
     if (av == null) return 1; if (bv == null) return -1
-    return sortDir === 'asc' ? av - bv : bv - av
+    const cmp = (typeof av === 'number' && typeof bv === 'number') ? av - bv : String(av).localeCompare(String(bv))
+    return sortDir === 'asc' ? cmp : -cmp
   })
   const CAP = 100
   const rows = showAll ? rowsAll : rowsAll.slice(0, CAP)

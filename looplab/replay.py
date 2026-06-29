@@ -27,17 +27,24 @@ def fold(events: Iterable[Event]) -> RunState:
             st.config_hash = d.get("config_hash", "")
             st.workspace = d.get("workspace")
         elif t == "node_created":
-            n = Node(
-                id=d["node_id"],
-                parent_ids=d.get("parent_ids", []),
-                operator=d["operator"],
-                idea=Idea(**d["idea"]),
-                code=d.get("code", ""),
-                files=d.get("files", {}) or {},
-                deleted=d.get("deleted", []) or [],
-                origin=d.get("origin"),   # cross-run provenance (None for ordinary nodes)
-                research_origin=d.get("research_origin"),   # 💡 proposed just after a deep-research memo
-            )
+            # Defensive like the per-trial / unknown-node tolerance below: a malformed or incomplete
+            # node_created (missing key, non-coercible idea param in a hand-edited / bring-your-own-script
+            # log) must not crash the WHOLE fold — skip the bad event instead (the engine, sole writer,
+            # always round-trips a validated Idea, so this only fires on a corrupt log).
+            try:
+                n = Node(
+                    id=d["node_id"],
+                    parent_ids=d.get("parent_ids", []),
+                    operator=d["operator"],
+                    idea=Idea(**d["idea"]),
+                    code=d.get("code", ""),
+                    files=d.get("files", {}) or {},
+                    deleted=d.get("deleted", []) or [],
+                    origin=d.get("origin"),   # cross-run provenance (None for ordinary nodes)
+                    research_origin=d.get("research_origin"),   # 💡 proposed just after a deep-research memo
+                )
+            except Exception:
+                continue
             st.nodes[n.id] = n
         elif t == "node_evaluated":
             n = st.nodes.get(d["node_id"])              # tolerate an event for an unknown node
@@ -252,7 +259,11 @@ def fold(events: Iterable[Event]) -> RunState:
     # Multi-objective (#5): a constraint-violating node is excluded from selection — it keeps
     # its metric for the audit trail but can never be chosen best. If NOTHING is feasible,
     # there is no valid best (best_node_id stays None).
-    evaluated = [n for n in st.evaluated_nodes() if n.feasible]
+    # Exclude nodes with no usable metric: a hand-edited / BYO-script node_evaluated event can carry
+    # metric=null yet fold to status=evaluated, and comparing None vs a float in the chooser below
+    # would raise TypeError and brick every re-fold/resume. Such a node simply can't be "best".
+    evaluated = [n for n in st.evaluated_nodes()
+                 if n.feasible and (n.confirmed_mean if n.confirmed_mean is not None else n.metric) is not None]
     if evaluated:
         # If any node has been confirmed (multi-seed), the final answer must be the
         # robust winner: rank confirmed nodes by confirmed_mean. With no confirmations

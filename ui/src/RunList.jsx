@@ -355,7 +355,13 @@ export default function RunList({ onOpen, onSettings }) {
           {runs && visible.map(r => (
             <div className="run-card" key={r.run_id} draggable
                  onDragStart={() => setDragRun(r.run_id)} onDragEnd={() => setDragRun(null)}>
-              <span className="pill phase" onClick={() => onOpen(r.run_id)}>{r.phase}</span>
+              {(() => {
+                // A zombie (not finished, but no engine holds the lock) reads as "search" from phase
+                // alone — surface it as "stalled" so the list matches the run header's badge.
+                const zombie = !r.finished && r.engine_running === false
+                return <span className={'pill phase' + (zombie ? ' stalled' : '')} onClick={() => onOpen(r.run_id)}
+                             title={zombie ? 'engine stopped — open to resume' : undefined}>{zombie ? 'stalled' : r.phase}</span>
+              })()}
               <div onClick={() => onOpen(r.run_id)} style={{ cursor: 'pointer', flex: 1 }}>
                 <div><b>{r.label || r.run_id}</b> <span className="muted">· {r.label ? r.run_id + ' · ' : ''}{r.task_id}</span>
                   {r.project_id && projName[r.project_id] && <span className="pill" style={{ marginLeft: 6 }}><OpIcon name="folder" className="t-ic" /> {projName[r.project_id]}</span>}

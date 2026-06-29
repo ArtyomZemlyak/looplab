@@ -12,6 +12,18 @@ from __future__ import annotations
 import math
 import re
 
+# Field names that merely CONTAIN a credential substring but are benign diagnostic output
+# (tokenizer / max_tokens / *_tokens) — never mask these so operators keep model/token diagnostics.
+_BENIGN_KEYS = {"tokenizer", "max_tokens", "num_tokens", "n_tokens",
+                "total_tokens", "prompt_tokens", "completion_tokens", "tokens"}
+
+
+def _keyval_repl(m: re.Match) -> str:
+    if m.group(1).lower() in _BENIGN_KEYS:
+        return m.group(0)                      # benign field name -> leave the value intact
+    return f"{m.group(1)}{m.group(2)}***"
+
+
 # Known credential shapes — always redacted (negligible false-positive risk).
 _PATTERNS = [
     (re.compile(r"sk-[A-Za-z0-9]{16,}"), "sk-***"),                       # OpenAI-style
@@ -27,7 +39,7 @@ _PATTERNS = [
                 r"(?:api[_-]?key|secret|access[_-]?key|token|password|passwd|credential)"
                 r"[A-Za-z0-9_\-]*)"
                 r"(['\"]?\s*[:=]\s*['\"]?)"
-                r"([^\s'\"]{4,})"), r"\1\2***"),
+                r"([^\s'\"]{4,})"), _keyval_repl),
 ]
 
 

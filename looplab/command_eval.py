@@ -95,7 +95,7 @@ def read_metric(stdout: str, workdir: str, spec: dict, wrap=None) -> Optional[fl
             labels = json.loads(labels_path.read_text(encoding="utf-8-sig", errors="replace"))
         except (json.JSONDecodeError, OSError):
             return None
-        return host_score(spec.get("scorer", "rmse"), preds, labels, key=spec.get("key"))
+        return _to_float(host_score(spec.get("scorer", "rmse"), preds, labels, key=spec.get("key")))
     if kind == "adapter":
         # A (human-ratified, frozen) agent-written module exposing read_metric(workdir)->
         # float, for an arbitrary tracker (TensorBoard/ClearML/custom). Run as a SUBPROCESS

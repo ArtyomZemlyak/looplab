@@ -157,7 +157,6 @@ def _engine(run_dir: Path, task: TaskAdapter, settings: Settings,
         deep_researcher=deep_researcher,
         deep_research_every=settings.deep_research_every,
         concurrent_research=settings.concurrent_research,
-        speculative_pipeline=settings.speculative_pipeline,
         report_writer=report_writer,
         report_every=settings.report_every,
         developer_factory=dev_factory,
@@ -192,7 +191,9 @@ def _print_result(state) -> None:
     typer.echo(f"run={state.run_id} task={state.task_id} finished={state.finished}")
     typer.echo(f"nodes={len(state.nodes)} evaluated={len(state.evaluated_nodes())}")
     if best is not None:
-        typer.echo(f"BEST node {best.id}: metric={best.metric:.6g} params={best.idea.params}")
+        m = best.confirmed_mean if best.confirmed_mean is not None else best.metric
+        ms = f"{m:.6g}" if m is not None else "n/a"
+        typer.echo(f"BEST node {best.id}: metric={ms} params={best.idea.params}")
 
 
 @app.command()
@@ -256,21 +257,23 @@ def run(
     if confirm_seeds is not None:
         settings.confirm_seeds = confirm_seeds
     out.mkdir(parents=True, exist_ok=True)
-    atomic_write_text(out / "config.snapshot.json",
-                      json.dumps(settings.masked_snapshot(), indent=2))
-    # Self-describing run: keep a verbatim copy of the task so `resume` (CLI or UI) can re-enter the
-    # loop from the run dir alone — no need to remember the original task-file path. This is what
-    # lets the UI's Fork / Branch reopen-and-continue a finished run that wasn't UI-started.
-    try:
-        atomic_write_text(out / "task.snapshot.json",
-                          Path(task_file).read_text(encoding="utf-8"))
-    except OSError:
-        pass
     eng = _engine(out, task, settings, crash_after)
     with _engine_singleton(out) as ok:
         if not ok:
             typer.echo(f"engine already running on {out} — not starting a second loop")
             return
+        # Write the run snapshots only AFTER winning the singleton lock — a second `run` on a dir a
+        # live engine already owns must NOT clobber config.snapshot.json / task.snapshot.json. A later
+        # `resume` reads them, so a stale overwrite would re-enter the run with the wrong settings/task.
+        atomic_write_text(out / "config.snapshot.json",
+                          json.dumps(settings.masked_snapshot(), indent=2))
+        # Self-describing run: keep a verbatim copy of the task so `resume` (CLI or UI) can re-enter the
+        # loop from the run dir alone — no need to remember the original task-file path.
+        try:
+            atomic_write_text(out / "task.snapshot.json",
+                              Path(task_file).read_text(encoding="utf-8"))
+        except OSError:
+            pass
         state = anyio.run(eng.run)
     _print_result(state)
 

@@ -21,6 +21,8 @@ class DiversityArchive:
         better = (lambda a, b: a < b) if state.direction == "min" else (lambda a, b: a > b)
         elites: dict[tuple, Node] = {}
         for n in state.evaluated_nodes():
+            if n.metric is None:   # a hand-edited/BYO node_evaluated can carry metric=null; None<float crashes
+                continue
             niche = self._niche(n.idea.params)
             cur = elites.get(niche)
             if cur is None or better(n.metric, cur.metric):

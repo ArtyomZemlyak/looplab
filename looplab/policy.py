@@ -379,7 +379,7 @@ def legal_actions(state: RunState, policy: SearchPolicy, *, max_nodes: int) -> l
     total = len(state.nodes)
     if total >= max_nodes:
         return []
-    n_seeds = getattr(policy, "n_seeds", getattr(policy, "pop", 3))
+    n_seeds = getattr(policy, "rung0", None) or getattr(policy, "n_seeds", getattr(policy, "pop", 3))
     if total < n_seeds:
         return [{"kind": "draft"}]
     actions: list[dict] = [{"kind": "draft"}]

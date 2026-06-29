@@ -200,6 +200,46 @@ from .digest import theme_rollup as _theme_rollup
 _RESERVED_RUN_IDS = {"reports"}
 
 
+def _engine_alive(rd: Path) -> bool:
+    """True iff a LIVE engine process currently drives this run. The engine holds an exclusive OS lock on
+    <run_dir>/engine.lock for its whole lifetime (cli._engine_singleton) and the OS frees it on exit —
+    even on crash — so this is a race-free, staleness-free liveness signal: a non-blocking acquire that
+    FAILS means a process holds it (alive); one that SUCCEEDS means none does (a finished run, or a
+    ZOMBIE whose engine died without emitting run_finished — the bug this distinguishes from "thinking").
+
+    Probe-and-release: we never hold the lock past this call, and close the handle in `finally` so even a
+    mid-probe error can't leak a lock that would block a real resume. Best-effort — any error → False."""
+    lock = rd / "engine.lock"
+    if not lock.exists():
+        return False                     # no engine has ever locked this dir (or it predates the lock)
+    try:
+        f = open(lock, "a+")
+    except OSError:
+        return False
+    try:
+        if os.name == "nt":
+            import msvcrt
+            f.seek(0)
+            try:
+                msvcrt.locking(f.fileno(), msvcrt.LK_NBLCK, 1)
+            except OSError:
+                return True              # byte held by a live engine
+            msvcrt.locking(f.fileno(), msvcrt.LK_UNLCK, 1)   # we got it → no engine; release at once
+            return False
+        else:
+            import fcntl
+            try:
+                fcntl.flock(f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError:
+                return True
+            fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+            return False
+    except OSError:
+        return False                     # platform without file locking → can't tell → assume not alive
+    finally:
+        f.close()
+
+
 def make_app(run_root: str | os.PathLike) -> "FastAPI":
     root = Path(run_root).resolve()
     root.mkdir(parents=True, exist_ok=True)
@@ -273,6 +313,10 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
                     "series": vals[:64],   # cap the inline sparkline series
                 }
         d["phase"] = _phase(st)
+        # Liveness: is a real engine process driving this run RIGHT NOW? (lock probe, not the event log).
+        # A run with finished=False but engine_running=False is a ZOMBIE — the UI uses this to stop
+        # showing a perpetual "thinking" strip and to resume on the next engine-needing chat action.
+        d["engine_running"] = _engine_alive(rd)
         return {"state": d, "seq": last_seq, "max_seq": last_seq}
 
     def _phase(st) -> str:
@@ -332,9 +376,12 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
         pdata = projects.load()
         assignments, labels = pdata["assignments"], pdata.get("labels", {})
         st_assign = pdata.get("supertask_assignments", {})
+        # engine_running is a live fact (lock probe), so it stays OUT of the mtime-keyed summary cache —
+        # a zombie's events.jsonl is unchanged, yet its liveness flips the instant its engine dies.
         return [{**s, "project_id": assignments.get(s["run_id"]),
                  "label": labels.get(s["run_id"]),
-                 "supertask_id": st_assign.get(s["run_id"])} for s in out]
+                 "supertask_id": st_assign.get(s["run_id"]),
+                 "engine_running": _engine_alive(root / s["run_id"])} for s in out]
 
     # ------------------------------------------------------------------ projects (ClearML-style)
     @app.get("/api/projects")
@@ -461,13 +508,19 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
 
         async def gen():
             last_sent = -2
+            last_alive = None
+            # engine_running is a post-fold liveness probe with no seq of its own: a run that dies
+            # AFTER its last event (a zombie) never advances seq, so also re-emit when liveness flips,
+            # else the stalled/zombie UI never updates over a live stream.
             # Initial snapshot so a fresh/reconnecting client is immediately correct.
             while True:
                 if await request.is_disconnected():
                     break
                 payload = await anyio.to_thread.run_sync(_state_payload, rd)
-                if payload["seq"] != last_sent:
+                alive = payload["state"].get("engine_running")
+                if payload["seq"] != last_sent or alive != last_alive:
                     last_sent = payload["seq"]
+                    last_alive = alive
                     yield (f"id: {payload['seq']}\n"
                            f"event: state\n"
                            f"data: {json.dumps(payload)}\n\n")
@@ -526,7 +579,11 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
     def trace(run_id: str):
         rd = _run_dir(run_id)
         from .traceview import build_trace_view, load_spans
-        return build_trace_view(fold(_events(rd)), load_spans(rd / "spans.jsonl"))
+        try:
+            return build_trace_view(fold(_events(rd)), load_spans(rd / "spans.jsonl"))
+        except Exception:  # noqa: BLE001 — a malformed/foreign spans.jsonl must degrade, not 500
+            return {"run_id": run_id, "task_id": "", "nodes": {}, "unscoped": [],
+                    "summary": {"spans": 0, "errors": 0, "total_eval_seconds": 0}}
 
     @app.get("/api/runs/{run_id}/prov")
     def prov(run_id: str):
@@ -615,6 +672,11 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
     @app.post("/api/runs/{run_id}/resume")
     def resume_run(run_id: str):
         rd = _run_dir(run_id)
+        # Don't spawn a second engine when one is already alive: the engine-singleton lock would make it
+        # no-op anyway, but skipping the detached Popen keeps the signal honest (and avoids a phantom
+        # process flash). The UI's auto-resume already gates on engine_running; this is the backstop.
+        if _engine_alive(rd):
+            return {"ok": True, "already_running": True}
         # Prefer the UI's recorded task_file; fall back to the verbatim task.snapshot.json that
         # `run` now writes into every run dir, so even a CLI-started run can be resumed/continued.
         task_file: Optional[str] = None
@@ -640,7 +702,11 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
         # one and spawning a second engine would corrupt the log. (A sub-second window remains right
         # after run_finished while the engine appends llm_cost + builds the readmodel; that's narrow and
         # a re-reset heals it. This guard is what makes a direct/stale API call safe.)
-        if not fold(_events(rd)).finished:
+        # Also gate on the race-free liveness probe (the engine still holds engine.lock through its
+        # sub-second post-finish tail: llm_cost append + readmodel build). fold().finished alone has a
+        # window where st.finished is True but the engine is still the sole writer; _engine_alive closes
+        # it, matching resume_run. Archiving events.jsonl out from under a live engine corrupts the log.
+        if _engine_alive(rd) or not fold(_events(rd)).finished:
             raise HTTPException(409, "run is still active — stop it first (Replay resets a finished run)")
         task_file: Optional[str] = None
         meta = rd / "ui_meta.json"
