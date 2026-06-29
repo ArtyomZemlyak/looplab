@@ -493,7 +493,12 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
         engine still holds the run (its engine.lock) — so a finished run AND a stalled/zombie one (the
         engine died without emitting run_finished, so `finished` stays False) can both be deleted. The
         old guard keyed on `finished`, which wrongly blocked deleting a stalled run even though no
-        engine was running. We still never yank the dir out from under a running engine."""
+        engine was running. We still never yank the dir out from under a running engine.
+
+        Caveat: liveness is the OS file lock (the SAME mechanism cli._engine_singleton uses to prevent
+        two engines). On a filesystem where flock is a no-op (some FUSE/NFS mounts), a live engine
+        can't be detected here — but it equally can't be guarded against a second engine, so this is a
+        property of that environment, not of delete. The UI confirms the delete with the operator."""
         import shutil
         rd = _run_dir(run_id)
         if _engine_alive(rd):
@@ -1207,11 +1212,25 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
                 except Exception:  # noqa: BLE001 - junk emit -> empty spec (still returns a usable card)
                     box["c"] = _GenesisSpec()
                 return box["c"]
+            def _fb(msgs):
+                # Loop ran but the model never called `emit` (drove tools without finalizing, OR ignored
+                # tools). Finalize from the ACCUMULATED messages (which carry what it read) rather than
+                # discarding that and making the caller fire a fresh single-shot plan — saves a whole
+                # extra LLM round-trip and keeps the repo context the model just gathered.
+                if box.get("c"):
+                    return box["c"]
+                try:
+                    box["c"] = parse_structured(client, msgs + [{"role": "user",
+                                "content": "Now emit the final plan."}], _GenesisSpec,
+                                defaults.get("llm_parser", "tool_call"))
+                except Exception:  # noqa: BLE001 - even a forced emit failed -> blank (usable) card
+                    box["c"] = _GenesisSpec()
+                return box["c"]
             try:
                 drive_tool_loop(client, tools, [{"role": "system", "content": tool_sys},
                                                 {"role": "user", "content": user}],
-                                emit_spec, max_turns=8, finalize=_fin, fallback=lambda _m: box.get("c"))
-            except Exception:  # noqa: BLE001 - endpoint/model can't drive tools -> single-shot fallback
+                                emit_spec, max_turns=8, finalize=_fin, fallback=_fb)
+            except Exception:  # noqa: BLE001 - the model/endpoint can't drive tools AT ALL -> single-shot
                 return None
             return box.get("c")
 
