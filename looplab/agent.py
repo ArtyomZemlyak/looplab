@@ -9,6 +9,7 @@ orchestrator is unchanged.
 from __future__ import annotations
 
 import json
+import time
 from typing import Optional
 
 from .models import Idea, Node, RunState
@@ -44,18 +45,27 @@ class CompositeTools:
 
 def drive_tool_loop(client, tools, messages: list, emit_spec: dict, *,
                     max_turns: int = 4, context_budget_chars: int = 0,
-                    finalize=None, fallback=None):
+                    time_budget_s: float = 0.0, finalize=None, fallback=None):
     """Bounded multi-turn tool loop shared by the tool-using Researcher and the unified
     agent. The model MAY call the provided retrieval tools across turns; when it calls the
     emit function (named in `emit_spec`), `finalize(args)` is returned. If the loop exhausts
     without an emit, `fallback(messages)` is returned. `tools` may be None (emit-only).
+
+    `time_budget_s` (0 = off) caps the WALL-CLOCK spent across turns: a new turn is not started
+    once the budget is exceeded, so the loop falls through to `fallback` instead of burning many
+    slow round-trips. This is what keeps an interactive request (e.g. the genesis endpoint behind a
+    proxy with a gateway timeout) from accumulating round-trips past that timeout — a turn already in
+    flight isn't interrupted (that's the LLM client's per-call timeout's job).
 
     Pure mechanics: callers own prompt construction, the emit schema, and result coercion —
     so the SAME loop drives an Idea emit, a code emit, an action choice, or a strategy emit.
     """
     emit_name = emit_spec["function"]["name"]
     tool_specs = ((tools.specs() if tools is not None else []) + [emit_spec])
+    started = time.monotonic()
     for _ in range(max_turns):
+        if time_budget_s and (time.monotonic() - started) > time_budget_s:
+            break                       # out of wall-clock budget -> finalize from what we have
         if context_budget_chars:        # H4: middle-truncate stale tool output if too long
             from .context_budget import truncate_history
             messages = truncate_history(messages, context_budget_chars)

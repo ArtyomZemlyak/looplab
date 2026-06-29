@@ -601,6 +601,29 @@ def test_genesis_boss_scouts_repo_before_planning(tmp_path, monkeypatch):
     assert spec["setup_steps"] and any("recall@100" in s for s in spec["setup_steps"])
 
 
+def test_genesis_async_job_path(tmp_path, monkeypatch):
+    """A slow agentic plan must NOT block the request (proxy 504): the POST hands back a job_id and the
+    plan completes in the background, fetched via GET /api/genesis/{id}. Forced here with inline-wait=0."""
+    import time as _t
+    monkeypatch.setenv("LOOPLAB_GENESIS_INLINE_WAIT", "0")     # always take the async path
+    repo = tmp_path / "myrepo"; repo.mkdir()
+    (repo / "README.md").write_text("BEST TRAIN: python train.py\n", encoding="utf-8")
+    boss = _ToolBoss(repo)
+    monkeypatch.setattr("looplab.server.make_llm_client", lambda s: boss)
+    client = TestClient(make_app(tmp_path))
+    r = client.post("/api/genesis", json={"instruction": f"optimize my repo at {repo}"}).json()
+    assert r["status"] == "running" and r["job_id"]            # handed back a job, didn't block
+    job = None
+    for _ in range(100):                                       # poll the background plan to completion
+        job = client.get(f"/api/genesis/{r['job_id']}").json()
+        if job.get("status") == "done":
+            break
+        _t.sleep(0.05)
+    assert job and job["status"] == "done" and job["ok"] is True
+    assert job["spec"]["task"]["kind"] == "repo" and boss.turn >= 2
+    assert client.get("/api/genesis/deadbeef0000").json()["status"] == "unknown"   # unknown id
+
+
 # ---- cross-run aggregate (scope) reports: project / task / super-task, one generator ----
 def test_scope_report_module_deterministic_ranks_and_degrades():
     """The generator with no client returns an honest metrics rollup, ranks by the dominant direction,

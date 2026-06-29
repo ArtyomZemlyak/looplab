@@ -124,6 +124,25 @@ def test_delete_finished_and_stalled_runs(tmp_path):
     assert r.status_code == 200 and not sr.exists()             # was a spurious 409 before the fix
 
 
+def test_engine_alive_unsupported_flock_reads_not_alive(tmp_path, monkeypatch):
+    """On a FUSE/S3 mount (geesefs) flock is unsupported and raises a plain OSError — that must read as
+    NOT alive (can't tell), not 'engine held'. The old code returned True for ANY OSError, which made
+    every run look live forever and blocked deleting a stalled run. Only BlockingIOError = held."""
+    fcntl = pytest.importorskip("fcntl")        # POSIX-only; Windows uses the msvcrt branch
+    from looplab.server import _engine_alive
+    rd = tmp_path / "r"; rd.mkdir()
+    (rd / "engine.lock").write_text("", encoding="utf-8")
+
+    def _raise(exc):
+        def _f(*a, **k):
+            raise exc
+        return _f
+    monkeypatch.setattr(fcntl, "flock", _raise(OSError("flock not supported on this fs")))
+    assert _engine_alive(rd) is False           # unsupported -> not alive (delete not blocked)
+    monkeypatch.setattr(fcntl, "flock", _raise(BlockingIOError("held")))
+    assert _engine_alive(rd) is True            # genuinely held by a live engine
+
+
 def test_settings_get_put_roundtrip(tmp_path):
     client = TestClient(make_app(tmp_path))
     base = client.get("/api/settings").json()
