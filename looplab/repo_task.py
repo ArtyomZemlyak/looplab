@@ -12,6 +12,7 @@ See the architecture study (plans/) for the full workspace/eval model and phases
 """
 from __future__ import annotations
 
+import os
 import random
 from typing import Optional
 
@@ -233,6 +234,21 @@ class RepoTask(BaseModel):
         if v not in ("min", "max"):     # silently treating typos as 'minimize' flips the objective
             raise ValueError(f"direction must be 'min' or 'max', got {v!r}")
         return v
+
+    @model_validator(mode="after")
+    def _expand_repo_paths(self):
+        """Expand ~ and $ENV in every filesystem path the task points at, so a natural
+        `editable_path: "~/data/vectorizer/dense-retrieval"` (or "$HOME/…") actually resolves —
+        without this the `~` is treated as a literal directory and the repo mounts/scout tools come
+        up EMPTY. Runs once; the resolved path is what gets recorded + mounted (reproducible)."""
+        exp = lambda p: os.path.expanduser(os.path.expandvars(p)) if isinstance(p, str) and p else p
+        self.editable_path = exp(self.editable_path)
+        for e in self.editables:
+            e.path = exp(e.path)
+        for r in self.references:
+            r.path = exp(r.path)
+        self.data = {k: exp(v) for k, v in self.data.items()}
+        return self
 
     @field_validator("editables")
     @classmethod

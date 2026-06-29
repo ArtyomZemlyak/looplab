@@ -6,6 +6,7 @@ directory (no arbitrary reads).
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 from .retrieval import glob_files, grep, read_file
@@ -28,7 +29,9 @@ class RepoTools:
 
     def __init__(self, mounts: list[dict], max_bytes: int = 4000):
         # mounts: [{"name": ".|subdir", "path": "<repo>"}]; "." is shown as the repo root.
-        self.roots = {(m["name"] or "."): Path(m["path"]).resolve() for m in mounts}
+        # expanduser/expandvars so a `~/repo` mount (e.g. from an older snapshot) still resolves.
+        self.roots = {(m["name"] or "."): Path(os.path.expanduser(os.path.expandvars(m["path"]))).resolve()
+                      for m in mounts}
         self.max_bytes = max_bytes
 
     def specs(self) -> list[dict]:

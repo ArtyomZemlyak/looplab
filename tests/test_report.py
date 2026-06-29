@@ -558,6 +558,49 @@ def test_genesis_authors_repo_task_with_setup_steps(tmp_path, monkeypatch):
     validate_task(spec["task"])
 
 
+class _ToolBoss:
+    """Fake tool-calling LLM: turn 1 reads the repo README via the scout tool, turn 2 emits the spec.
+    Exercises the AGENTIC genesis path (drive_tool_loop + RepoScoutTools) end to end. Returns tool
+    arguments as dicts (drive_tool_loop accepts non-string args), so no JSON plumbing is needed."""
+    def __init__(self, repo):
+        self.repo = repo
+        self.turn = 0
+
+    def chat(self, messages, tools=None, tool_choice=None):
+        self.turn += 1
+        if self.turn == 1:                         # first: actually read the repo
+            return {"tool_calls": [{"id": "t1", "function": {
+                "name": "read_file", "arguments": {"path": str(self.repo / "README.md")}}}]}
+        return {"tool_calls": [{"id": "t2", "function": {"name": "emit", "arguments": {
+            "run_id": "vec-dense",
+            "task": {"kind": "repo", "goal": "maximize recall@100", "direction": "max",
+                     "editable_path": str(self.repo),
+                     "eval": {"command": ["python", "test_looplab.py"],
+                              "metric": {"kind": "stdout_json", "key": "recall@100"}}},
+            "settings": {"max_nodes": 8},
+            "setup_steps": ['Create test_looplab.py that prints {"recall@100": <score>} as JSON'],
+            "reply": "Read the README; here's the repo plan.", "rationale": "grounded in README"}}}]}
+
+
+def test_genesis_boss_scouts_repo_before_planning(tmp_path, monkeypatch):
+    """The main-menu boss now ACTS like an agent: it reads the repo (README/entry script) via the
+    read-only scout tools before emitting the spec, instead of just promising to."""
+    repo = tmp_path / "myrepo"; repo.mkdir()
+    (repo / "README.md").write_text("BEST TRAIN: python train.py --epochs 50\n", encoding="utf-8")
+    boss = _ToolBoss(repo)
+    monkeypatch.setattr("looplab.server.make_llm_client", lambda s: boss)
+    client = TestClient(make_app(tmp_path))
+    r = client.post("/api/genesis", json={"instruction": f"optimize my repo at {repo}, metric recall@100"}).json()
+    assert r["ok"] is True
+    assert boss.turn >= 2                          # drove a tool turn, THEN emitted (didn't single-shot)
+    spec = r["spec"]
+    assert spec["task"]["kind"] == "repo"
+    assert spec["task"]["editable_path"].endswith("myrepo")
+    assert spec["task"]["eval"]["command"] == ["python", "test_looplab.py"]
+    assert spec["settings"]["max_nodes"] == 8
+    assert spec["setup_steps"] and any("recall@100" in s for s in spec["setup_steps"])
+
+
 # ---- cross-run aggregate (scope) reports: project / task / super-task, one generator ----
 def test_scope_report_module_deterministic_ranks_and_degrades():
     """The generator with no client returns an honest metrics rollup, ranks by the dominant direction,

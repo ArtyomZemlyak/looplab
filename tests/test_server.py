@@ -110,6 +110,20 @@ def test_config_masked_and_gpu_softfail(tmp_path):
     assert "available" in gpu  # True or False, never an error
 
 
+def test_delete_finished_and_stalled_runs(tmp_path):
+    """A finished run deletes; so does a STALLED/zombie one (events but no run_finished, no live
+    engine) — the old guard keyed on `finished` and wrongly 409'd a stalled run."""
+    _build_run(tmp_path, "done")
+    client = TestClient(make_app(tmp_path))
+    assert client.delete("/api/runs/done").status_code == 200
+    assert not (tmp_path / "done").exists()
+
+    sr = tmp_path / "stalled"; sr.mkdir()                       # engine died without run_finished
+    (sr / "events.jsonl").write_text('{"seq":0,"type":"run_started","data":{}}\n', encoding="utf-8")
+    r = client.delete("/api/runs/stalled")
+    assert r.status_code == 200 and not sr.exists()             # was a spurious 409 before the fix
+
+
 def test_settings_get_put_roundtrip(tmp_path):
     client = TestClient(make_app(tmp_path))
     base = client.get("/api/settings").json()
@@ -209,6 +223,29 @@ def test_put_run_config_preserves_secret_and_unknown_keys(tmp_path):
     assert out["llm_api_key"] == "***"            # secret never overwritten via this endpoint
     assert out["some_future_key"] == "keepme"     # unknown key preserved verbatim
     assert "llm_api_key" not in r.json()["changed"]
+
+
+def test_boss_command_flags_stalled_run(tmp_path, monkeypatch):
+    """On a STALLED run the boss must be TOLD so (its context says RUN STATUS: STALLED) — otherwise it
+    can't tell a dead run from a healthy one and only chats instead of resuming/repairing."""
+    sr = tmp_path / "z"; sr.mkdir()                         # engine died after run_started (zombie)
+    (sr / "events.jsonl").write_text(
+        '{"seq":0,"type":"run_started","data":{"run_id":"z","task_id":"t","goal":"g","direction":"max"}}\n',
+        encoding="utf-8")
+
+    class _Capture:                                         # records the system prompt; emits on turn 1
+        def __init__(self):
+            self.sys = ""
+        def chat(self, messages, tools=None, tool_choice=None):
+            self.sys = messages[0]["content"]
+            return {"tool_calls": [{"id": "e", "function": {
+                "name": "emit", "arguments": {"reply": "ok", "actions": []}}}]}
+    cap = _Capture()
+    monkeypatch.setattr("looplab.server.make_llm_client", lambda s: cap)
+    client = TestClient(make_app(tmp_path))
+    r = client.post("/api/runs/z/command", json={"instruction": "what now?"}).json()
+    assert r["ok"] is True
+    assert "STALLED" in cap.sys                             # boss was told the run is stalled -> can act
 
 
 def test_put_run_config_404_without_snapshot(tmp_path):

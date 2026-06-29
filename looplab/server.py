@@ -489,13 +489,15 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
 
     @app.delete("/api/runs/{run_id}")
     def delete_run(run_id: str):
-        """Permanently remove a run's directory and forget its UI metadata. Refuses to delete a
-        run that is still live (not finished) so we never yank the dir out from under the engine."""
+        """Permanently remove a run's directory and forget its UI metadata. Refuses ONLY while a LIVE
+        engine still holds the run (its engine.lock) — so a finished run AND a stalled/zombie one (the
+        engine died without emitting run_finished, so `finished` stays False) can both be deleted. The
+        old guard keyed on `finished`, which wrongly blocked deleting a stalled run even though no
+        engine was running. We still never yank the dir out from under a running engine."""
         import shutil
         rd = _run_dir(run_id)
-        st = fold(_events(rd))
-        if not st.finished:
-            raise HTTPException(409, "run is still live — pause/stop it before deleting")
+        if _engine_alive(rd):
+            raise HTTPException(409, "run is live (engine running) — pause/stop it before deleting")
         # Don't report success on a partial delete (e.g. a Windows open handle on a node dir) —
         # that would leave a ghost run the UI thinks is gone. Only forget it if the dir is actually
         # removed; otherwise surface the failure.
@@ -1138,7 +1140,10 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
             '{"metric": 0.93}). If the user states HOW the repo is run but NOT how it is scored, set '
             '"onboard": true with "onboard_command" = that run command and ask in `reply` how the '
             "metric is emitted. Copy any path / command / metric-key the user gives VERBATIM; never "
-            "invent a path you weren't given (leave editable_path empty and ask instead).\n"
+            "invent a path you weren't given (leave editable_path empty and ask instead). When the user "
+            "points you at their OWN repo (gives a path), ALWAYS author this inline repo task with that "
+            "editable_path — do NOT substitute a similarly-named catalogue file; the catalogue is only "
+            "for the bundled example tasks. An absolute path is best, but ~ and $HOME are expanded.\n"
             "- setup_steps: WHENEVER the task is a repo, return a concrete checklist of what the user "
             "must do to make the repo LoopLab-ready, e.g.: 'Expose a metric — print one JSON line "
             '{"metric": <score>} at the end of the eval command\'; \'Pin dependencies in '
@@ -1169,16 +1174,56 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
         convo = "\n".join(f"{m.get('role')}: {m.get('content')}" for m in msgs)
         user = (f"Goal: {instruction}" if instruction else "") + (f"\n\nConversation:\n{convo}" if convo else "")
         from .parse import parse_structured
+        _soft = {"run_id": "", "task": {}, "task_file": "", "settings": {}, "rationale": "", "setup_steps": []}
         try:
             client = make_llm_client(_llm_settings(None))
-            spec = await anyio.to_thread.run_sync(
-                lambda: parse_structured(client, [{"role": "system", "content": sys_prompt},
-                                                  {"role": "user", "content": user}],
-                                         _GenesisSpec, defaults.get("llm_parser", "tool_call")))
         except Exception as e:  # noqa: BLE001 - offline / no model -> soft fail with a usable message
-            return {"ok": False, "error": str(e),
-                    "spec": {"run_id": "", "task": {}, "task_file": "", "settings": {}, "rationale": ""},
+            return {"ok": False, "error": str(e), "spec": _soft,
                     "reply": f"Couldn't reach the model to plan this ({e}). You can still use the manual form."}
+        base_msgs = [{"role": "system", "content": sys_prompt}, {"role": "user", "content": user}]
+
+        def _plan_agentic() -> Optional["_GenesisSpec"]:
+            """AGENTIC: let the boss actually INSPECT the repo on disk (read-only) before authoring the
+            spec — so a repo task is grounded in the real README / entry-script / results, not a
+            promise. Returns None when the model can't drive tools (caller does a single structured call)."""
+            from .agent import drive_tool_loop
+            from .reposcout import RepoScoutTools
+            tools = RepoScoutTools([Path.home(), root, root.parent])
+            tool_sys = sys_prompt + (
+                "\n\nYou have READ-ONLY tools to inspect this machine: list_dir(path), read_file(path), "
+                "find_files(root, pattern). When the user points you at a repo (an editable_path or a path "
+                "they mention), ACTUALLY use them BEFORE emitting: list the repo, read its README for the "
+                "train/run command, read the eval/entry script (e.g. test.py) to see how the metric is "
+                "printed, note results/requirements files — then ground the eval command, metric key and "
+                "setup_steps in what you read. Don't just SAY you'll look — look, then call `emit` once.")
+            emit_spec = {"type": "function", "function": {
+                "name": "emit", "description": "Emit the final run plan (run_id, task, settings, "
+                "setup_steps, reply, rationale).", "parameters": _GenesisSpec.model_json_schema()}}
+            box: dict = {}
+            def _fin(args):
+                try:
+                    box["c"] = _GenesisSpec(**{k: v for k, v in (args or {}).items()
+                                               if k in _GenesisSpec.model_fields})
+                except Exception:  # noqa: BLE001 - junk emit -> empty spec (still returns a usable card)
+                    box["c"] = _GenesisSpec()
+                return box["c"]
+            try:
+                drive_tool_loop(client, tools, [{"role": "system", "content": tool_sys},
+                                                {"role": "user", "content": user}],
+                                emit_spec, max_turns=8, finalize=_fin, fallback=lambda _m: box.get("c"))
+            except Exception:  # noqa: BLE001 - endpoint/model can't drive tools -> single-shot fallback
+                return None
+            return box.get("c")
+
+        try:
+            spec = await anyio.to_thread.run_sync(_plan_agentic)
+            if spec is None:    # tool loop unsupported -> plain structured call (legacy single-shot)
+                spec = await anyio.to_thread.run_sync(
+                    lambda: parse_structured(client, base_msgs, _GenesisSpec,
+                                             defaults.get("llm_parser", "tool_call")))
+        except Exception as e:  # noqa: BLE001 - planning failed -> soft fail with a usable message
+            return {"ok": False, "error": str(e), "spec": _soft,
+                    "reply": f"Couldn't plan this ({e}). You can still use the manual form."}
         return {"ok": True, "spec": _normalize_genesis(spec, draft),
                 "reply": spec.reply or "Here's a plan — tweak the card and launch."}
 
@@ -1231,7 +1276,20 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
         what failed) instead of just the single best node — and can still reach for the run-tools
         when even this isn't enough."""
         from .digest import experiments_digest
-        parts = [_node_context(st, nid, full)]
+        # Run liveness UP FRONT: without it the boss can't tell a stalled run (engine died without
+        # finishing — e.g. its only node crashed / never started) from a healthy one, so it tends to
+        # only chat. A stalled run almost always needs the boss to ACT (resume + fix), not advise.
+        if st.finished:
+            status = ("RUN STATUS: finished. Raise the node budget — budget(nodes=N) — before asking "
+                      "for more experiments, else there's no room to run them.")
+        elif _engine_alive(full):
+            status = "RUN STATUS: live — the engine is running and applies your actions between nodes."
+        else:
+            status = ("RUN STATUS: STALLED — the engine is NOT running and the run hasn't finished (a "
+                      "node likely crashed or never started). To make progress you MUST act: `resume` to "
+                      "restart the loop, and if a node is failing add a debug/inject step to fix it — "
+                      "don't just advise.")
+        parts = [status, _node_context(st, nid, full)]
         dg = experiments_digest(st)
         if dg:
             parts.append(dg)
