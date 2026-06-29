@@ -8,6 +8,7 @@ orchestrator is unchanged.
 """
 from __future__ import annotations
 
+import itertools
 import json
 import time
 from typing import Optional
@@ -43,19 +44,42 @@ class CompositeTools:
                 p.bind_state(state, parent)
 
 
-def drive_tool_loop(client, tools, messages: list, emit_spec: dict, *,
-                    max_turns: int = 4, context_budget_chars: int = 0,
-                    time_budget_s: float = 0.0, finalize=None, fallback=None):
-    """Bounded multi-turn tool loop shared by the tool-using Researcher and the unified
-    agent. The model MAY call the provided retrieval tools across turns; when it calls the
-    emit function (named in `emit_spec`), `finalize(args)` is returned. If the loop exhausts
-    without an emit, `fallback(messages)` is returned. `tools` may be None (emit-only).
+def _force_emit(client, messages: list, emit_spec: dict) -> Optional[dict]:
+    """Force the model to return the structured emit via a forced `tool_choice`, returning the parsed
+    args dict — or None when the client/endpoint can't force a tool call (a fake without
+    `complete_tool`, an endpoint that ignores tool_choice, or a transport blip). Used when the model
+    answered in prose instead of calling a tool: rather than nudge-and-hope (a reasoning model often
+    keeps replying in prose — the bug that left the boss "talking but not acting"), we make ONE
+    forced-emit call so we deterministically get a structured result. `complete_tool` always names
+    the forced tool `emit` and returns `calls[0].arguments`, so it works for any emit schema
+    regardless of `emit_spec`'s function name."""
+    schema = (emit_spec.get("function") or {}).get("parameters") or {}
+    try:
+        return client.complete_tool(list(messages), schema)
+    except Exception:  # noqa: BLE001 - no complete_tool / endpoint ignored tool_choice / transport
+        return None
 
-    `time_budget_s` (0 = off) caps the WALL-CLOCK spent across turns: a new turn is not started
-    once the budget is exceeded, so the loop falls through to `fallback` instead of burning many
-    slow round-trips. This is what keeps an interactive request (e.g. the genesis endpoint behind a
-    proxy with a gateway timeout) from accumulating round-trips past that timeout — a turn already in
-    flight isn't interrupted (that's the LLM client's per-call timeout's job).
+
+def drive_tool_loop(client, tools, messages: list, emit_spec: dict, *,
+                    max_turns: int = 0, context_budget_chars: int = 0,
+                    time_budget_s: float = 0.0, finalize=None, fallback=None):
+    """Multi-turn tool loop shared by every tool-using agent (Researcher, unified-agent pilot/triage,
+    Boss, genesis scout, cross-run report). The model MAY call the provided retrieval tools across
+    turns; when it calls the emit function (named in `emit_spec`), `finalize(args)` is returned. If
+    the loop ends without an emit, `fallback(messages)` is returned. `tools` may be None (emit-only).
+
+    Limits are caller-supplied (and ultimately config-driven, NOT hardcoded), and default to
+    UNLIMITED so the agent is never cut off mid-reasoning:
+      - `max_turns` (0 = unlimited): max number of tool turns before falling through to `fallback`.
+      - `time_budget_s` (0 = off): WALL-CLOCK ceiling across turns — a new turn is not started once
+        exceeded (a turn already in flight isn't interrupted — that's the LLM client's per-call
+        timeout's job). Set it to bound an interactive request behind a proxy gateway timeout.
+
+    Termination under "unlimited": when the model answers WITHOUT calling a tool (it considers
+    itself done), we FORCE the structured emit immediately (`_force_emit`) and finish — so a prose
+    reply becomes a real result instead of looping forever. If the client can't force a tool call,
+    we fall back to a bounded nudge-and-retry (two consecutive prose turns ⇒ stop) so the loop
+    always terminates regardless of `max_turns`.
 
     Pure mechanics: callers own prompt construction, the emit schema, and result coercion —
     so the SAME loop drives an Idea emit, a code emit, an action choice, or a strategy emit.
@@ -63,7 +87,9 @@ def drive_tool_loop(client, tools, messages: list, emit_spec: dict, *,
     emit_name = emit_spec["function"]["name"]
     tool_specs = ((tools.specs() if tools is not None else []) + [emit_spec])
     started = time.monotonic()
-    for _ in range(max_turns):
+    stalls = 0                          # consecutive prose turns we couldn't turn into a forced emit
+    turns = itertools.count() if max_turns is None or max_turns <= 0 else range(max_turns)
+    for _ in turns:
         if time_budget_s and (time.monotonic() - started) > time_budget_s:
             break                       # out of wall-clock budget -> finalize from what we have
         if context_budget_chars:        # H4: middle-truncate stale tool output if too long
@@ -72,9 +98,19 @@ def drive_tool_loop(client, tools, messages: list, emit_spec: dict, *,
         msg = client.chat(messages, tool_specs, tool_choice="auto")
         calls = msg.get("tool_calls") or []
         if not calls:
+            # Model replied in prose instead of calling a tool — it's done exploring. Force the
+            # emit now so we always get a structured result; only if that's unsupported do we nudge
+            # and retry (bounded, so an unlimited loop can't spin forever on a model that won't emit).
             messages.append({"role": "assistant", "content": msg.get("content") or ""})
+            forced = _force_emit(client, messages, emit_spec)
+            if forced is not None:
+                return finalize(forced)
+            stalls += 1
+            if stalls >= 2:
+                break
             messages.append({"role": "user", "content": f"Now call `{emit_name}` with your final answer."})
             continue
+        stalls = 0
         messages.append({"role": "assistant", "content": msg.get("content") or "",
                          "tool_calls": calls})
         for tc in calls:
@@ -104,14 +140,15 @@ class ToolUsingResearcher:
 
     def __init__(self, client, tools, space_hint: str = "",
                  bounds: Optional[dict] = None, parser: str = "tool_call",
-                 max_turns: int = 4, prompts: Optional[PromptStore] = None,
-                 context_budget_chars: int = 0):
+                 max_turns: int = 0, prompts: Optional[PromptStore] = None,
+                 context_budget_chars: int = 0, time_budget_s: float = 0.0):
         self.client = client
         self.tools = tools          # object with .specs() and .execute(name, args)
         self.space_hint = space_hint
         self.bounds = bounds
         self.parser = parser
-        self.max_turns = max_turns
+        self.max_turns = max_turns          # 0 = unlimited (config-driven via Settings.agent_max_turns)
+        self.time_budget_s = time_budget_s  # 0 = no wall-clock cap (Settings.agent_time_budget_s)
         self.prompts = prompts
         self.context_budget_chars = context_budget_chars   # H4: cap the growing tool-call history
 
@@ -176,4 +213,5 @@ class ToolUsingResearcher:
         return drive_tool_loop(
             self.client, self.tools, messages, self._emit_spec(),
             max_turns=self.max_turns, context_budget_chars=self.context_budget_chars,
+            time_budget_s=self.time_budget_s,
             finalize=self._finalize, fallback=self._fallback)

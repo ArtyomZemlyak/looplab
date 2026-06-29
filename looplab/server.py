@@ -1216,8 +1216,9 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
         user = (f"Goal: {instruction}" if instruction else "") + (f"\n\nConversation:\n{convo}" if convo else "")
         from .parse import parse_structured
         _soft = {"run_id": "", "task": {}, "task_file": "", "settings": {}, "rationale": "", "setup_steps": []}
+        gset = _llm_settings(None)   # carries the agent-loop limits (unlimited by default)
         try:
-            client = make_llm_client(_llm_settings(None))
+            client = make_llm_client(gset)
         except Exception as e:  # noqa: BLE001 - offline / no model -> soft fail with a usable message
             return {"ok": False, "error": str(e), "spec": _soft,
                     "reply": f"Couldn't reach the model to plan this ({e}). You can still use the manual form."}
@@ -1263,14 +1264,16 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
                     box["c"] = _GenesisSpec()
                 return box["c"]
             try:
-                # The AGENT decides how many reads/turns it needs — there is no functional step limit.
-                # The endpoint runs this in a background job, so a long loop never blocks the HTTP
-                # request / trips a proxy timeout. The only bound is a 10-minute wall-clock RUNAWAY
-                # guard (a pathological model that never emits) — `max_turns` is just a hard ceiling far
-                # above any real scout, so it never binds in practice.
+                # The AGENT decides how many reads/turns it needs — limits are CONFIG-DRIVEN
+                # (Settings.agent_max_turns / agent_time_budget_s) and default to UNLIMITED, not the
+                # old hardcoded 1000-turn / 600s ceiling. The endpoint runs this in a background job,
+                # so a long scout never blocks the HTTP request / trips a proxy timeout; set a positive
+                # cap in settings only if you want to bound a pathological model that never emits.
                 drive_tool_loop(client, tools, [{"role": "system", "content": tool_sys},
                                                 {"role": "user", "content": user}],
-                                emit_spec, max_turns=1000, time_budget_s=600.0, finalize=_fin, fallback=_fb)
+                                emit_spec, max_turns=getattr(gset, "agent_max_turns", 0),
+                                time_budget_s=getattr(gset, "agent_time_budget_s", 0.0),
+                                finalize=_fin, fallback=_fb)
             except Exception:  # noqa: BLE001 - the model/endpoint can't drive tools AT ALL -> single-shot
                 return None
             return box.get("c")
@@ -1330,12 +1333,16 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
         different model. Falls back to the UI's saved LLM overrides + env when there's no snapshot (or
         for a run-less call). The api_key is NEVER read from the snapshot (it's masked there) — it
         always comes from the server env."""
+        # The agentic tool-loop limits ride along so the UI-side agents (boss/genesis/scope-report)
+        # honor the same per-run / global caps as the engine agents — unlimited by default.
+        _keys = ("llm_model", "llm_base_url", "llm_temperature",
+                 "agent_max_turns", "agent_time_budget_s")
         over = {k: v for k, v in _load_ui_settings().items()
-                if k in {"llm_model", "llm_base_url", "llm_temperature"}}
+                if k in _keys and v is not None}
         if rd is not None:
             try:
                 cfg = json.loads((rd / "config.snapshot.json").read_text(encoding="utf-8"))
-                for k in ("llm_model", "llm_base_url", "llm_temperature"):
+                for k in _keys:
                     if cfg.get(k) is not None:
                         over[k] = cfg[k]
             except (OSError, json.JSONDecodeError, ValueError):
@@ -1632,20 +1639,20 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
                 except Exception:  # noqa: BLE001 - junk emit -> treat as advise (empty plan)
                     box["c"] = _Plan()
                 return box["c"]
-            # max_turns kept TIGHT: the rich static context (digest + report) means the model usually
-            # emits on turn 1; the tool turns are only for when it genuinely needs to look deeper. A
-            # small cap bounds latency on slow/flaky hosted models (each turn is a network round-trip).
-            # time_budget_s is a wall-clock guard so a slow model's 2-3 tool turns can't accumulate past
-            # the UI proxy's gateway timeout (the same 504 class that hit genesis) — it finalizes from
-            # context instead. This endpoint stays inline (typically 1 turn); genesis, which is FORCED
-            # to read the repo over many turns, is the one that runs as a background job.
+            # Loop limits are CONFIG-DRIVEN (Settings.agent_max_turns / agent_time_budget_s), default
+            # UNLIMITED — never hardcoded. The old hardcoded 3-turn / 45s cap cut a slow reasoning
+            # model (e.g. minimax-m3 with reasoning=high) off BEFORE it emitted, silently dropping the
+            # plan to a no-op advisory reply. With the limits open, drive_tool_loop forces the emit as
+            # soon as the model stops calling tools, so the boss reliably returns a real plan. Set a
+            # positive cap in settings if you need to bound latency behind a proxy gateway timeout.
             drive_tool_loop(client, tools, [{"role": "system", "content": tool_sys},
                                             {"role": "user", "content": user}],
-                            emit_spec, max_turns=3, time_budget_s=45.0,
+                            emit_spec, max_turns=getattr(s, "agent_max_turns", 0),
+                            time_budget_s=getattr(s, "agent_time_budget_s", 0.0),
                             finalize=_fin, fallback=lambda _m: box.get("c"))
-            # loop exhausted without an emit (model kept calling tools) -> default to advise rather
-            # than None, so we don't burn extra round-trips on the single-call route for that case.
-            return box.get("c") or _Plan()
+            # Return None (not an empty _Plan) when the loop produced no emit, so the caller falls
+            # through to the forced-emit single-call route instead of short-circuiting to advisory.
+            return box.get("c")
 
         # The LLM calls are blocking + network-bound; run them off the event loop (anyio worker
         # thread) so a slow model doesn't stall SSE tails / other endpoints for every UI client.
@@ -1847,7 +1854,9 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
         try:
             client = make_llm_client(s)
             content = await anyio.to_thread.run_sync(
-                lambda: _gen(scope, briefs, client, parser=s.llm_parser, drill=_scope_drill))
+                lambda: _gen(scope, briefs, client, parser=s.llm_parser, drill=_scope_drill,
+                             max_turns=getattr(s, "agent_max_turns", 0),
+                             time_budget_s=getattr(s, "agent_time_budget_s", 0.0)))
         except Exception:  # noqa: BLE001 - offline -> deterministic rollup still persists
             content = _gen(scope, briefs, None)
         # Record coverage + staleness over the runs that ACTUALLY contributed a brief — a run skipped

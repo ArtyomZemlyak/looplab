@@ -172,7 +172,9 @@ def build_unified_agent(task: TaskAdapter, settings, run_dir=None):
     extra_clients = [c for c in (strat_client, pilot_client) if c is not None]
     return UnifiedAgent(researcher=researcher, developer=developer, strategist=strategist,
                         pilot_client=pilot_client, pilot_tools=pilot_tools,
-                        stage_clients=extra_clients, prompts=getattr(researcher, "prompts", None))
+                        stage_clients=extra_clients, prompts=getattr(researcher, "prompts", None),
+                        agent_max_turns=getattr(settings, "agent_max_turns", 0),
+                        agent_time_budget_s=getattr(settings, "agent_time_budget_s", 0.0))
 
 
 def make_roles(task: TaskAdapter, settings, run_dir=None):
@@ -297,6 +299,8 @@ def make_roles(task: TaskAdapter, settings, run_dir=None):
             bounds=getattr(researcher, "bounds", None),
             parser=settings.llm_parser, prompts=prompts,
             context_budget_chars=getattr(settings, "context_budget_chars", 0),   # H4
+            max_turns=getattr(settings, "agent_max_turns", 0),                   # 0 = unlimited
+            time_budget_s=getattr(settings, "agent_time_budget_s", 0.0),         # 0 = no cap
         )
     # C2 best-of-N: wrap the in-house LLM developer to generate N candidates and keep the best by an
     # execution-free reward. Skipped for external coding agents (cost rule) and the no-edit param mode.

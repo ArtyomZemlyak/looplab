@@ -154,7 +154,8 @@ class _CrossRunTools:
 
 
 def generate_scope_report(scope: dict, briefs: list, client, *, parser: str = "tool_call",
-                          drill: Optional[Callable[[str, int], str]] = None, max_turns: int = 4) -> dict:
+                          drill: Optional[Callable[[str, int], str]] = None,
+                          max_turns: int = 0, time_budget_s: float = 0.0) -> dict:
     """Synthesize a cross-run report. `scope` = {type,id,label}; `briefs` = per-run dicts (run_id,
     label, task_id, goal, direction, model, policy, best_metric, phase, nodes, report). `drill(run_id,
     node_id) -> str` optionally exposes deep experiment access. Returns a content dict; never raises."""
@@ -200,7 +201,8 @@ def generate_scope_report(scope: dict, briefs: list, client, *, parser: str = "t
                 return None
 
         result = drive_tool_loop(client, _CrossRunTools(briefs, drill), messages, emit_spec,
-                                 max_turns=max_turns, finalize=_fin, fallback=_force)
+                                 max_turns=max_turns, time_budget_s=time_budget_s,
+                                 finalize=_fin, fallback=_force)
         # Prefer a SUBSTANTIVE agent report; a blank/all-default emit (or empty forced synthesis) drops
         # through to the honest metrics rollup rather than persisting an empty report.
         for cand in (result, box.get("r")):

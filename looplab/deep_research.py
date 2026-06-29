@@ -69,13 +69,14 @@ class DeepResearcher:
     """Run-wide agentic research step. `tools` is any object with .specs()/.execute(); None = no
     external grounding (the memo is then formed from the results summary alone)."""
 
-    def __init__(self, client, tools=None, parser: str = "tool_call", max_turns: int = 5,
-                 context_budget_chars: int = 0):
+    def __init__(self, client, tools=None, parser: str = "tool_call", max_turns: int = 0,
+                 context_budget_chars: int = 0, time_budget_s: float = 0.0):
         self.client = client
         self.tools = tools
         self.parser = parser
-        self.max_turns = max_turns
+        self.max_turns = max_turns          # 0 = unlimited (config-driven via Settings.agent_max_turns)
         self.context_budget_chars = context_budget_chars
+        self.time_budget_s = time_budget_s  # 0 = no wall-clock cap (Settings.agent_time_budget_s)
 
     def _emit_spec(self) -> dict:
         return {"type": "function", "function": {
@@ -94,16 +95,34 @@ class DeepResearcher:
         ]
         sources: list[dict] = []
         try:
-            for _ in range(self.max_turns):
+            import itertools
+            import time as _time
+            from .agent import _force_emit
+            started = _time.monotonic()
+            stalls = 0                  # consecutive prose turns we couldn't force into an emit
+            turns = (itertools.count() if self.max_turns is None or self.max_turns <= 0
+                     else range(self.max_turns))   # 0 = unlimited (config-driven)
+            for _ in turns:
+                if self.time_budget_s and (_time.monotonic() - started) > self.time_budget_s:
+                    break               # out of wall-clock budget -> force a memo from what we have
                 if self.context_budget_chars:
                     from .context_budget import truncate_history
                     messages = truncate_history(messages, self.context_budget_chars)
                 msg = self.client.chat(messages, tool_specs, tool_choice="auto")
                 calls = msg.get("tool_calls") or []
                 if not calls:
+                    # Replied in prose instead of a tool call — force the memo emit now (deterministic)
+                    # rather than nudge-and-hope; bounded nudge fallback if the client can't force one.
                     messages.append({"role": "assistant", "content": msg.get("content") or ""})
+                    forced = _force_emit(self.client, messages, self._emit_spec())
+                    if forced is not None:
+                        return self._finalize(forced, memo, sources)
+                    stalls += 1
+                    if stalls >= 2:
+                        break
                     messages.append({"role": "user", "content": "Now call `emit` with your memo."})
                     continue
+                stalls = 0
                 messages.append({"role": "assistant", "content": msg.get("content") or "",
                                  "tool_calls": calls})
                 for tc in calls:
@@ -191,4 +210,6 @@ def make_deep_researcher(settings, *, client=None, task=None) -> Optional[DeepRe
         from .agent import CompositeTools
         tools = providers[0] if len(providers) == 1 else CompositeTools(providers)
     return DeepResearcher(client, tools, parser=getattr(settings, "llm_parser", "tool_call"),
-                          context_budget_chars=getattr(settings, "context_budget_chars", 0))
+                          context_budget_chars=getattr(settings, "context_budget_chars", 0),
+                          max_turns=getattr(settings, "agent_max_turns", 0),
+                          time_budget_s=getattr(settings, "agent_time_budget_s", 0.0))

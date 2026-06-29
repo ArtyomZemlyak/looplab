@@ -260,6 +260,15 @@ class Settings(BaseSettings):
     # H4: cap the growing agentic-researcher tool-call history (chars) by middle-truncating stale
     # tool output, so a long trace doesn't blow the context window. 0 = off (unbounded).
     context_budget_chars: int = 0
+    # Agentic tool-loop limits — apply to EVERY tool-using agent (the LLM Researcher, the unified
+    # agent's pilot + crash-triage, Deep-Research, the run-chat Boss, the genesis repo-scout, and the
+    # cross-run report synthesizer). The loop lets the model call read-only tools across turns before
+    # emitting its structured result. Both default to UNLIMITED so the agent takes as many turns / as
+    # long as it needs — it is never cut off mid-reasoning; set a positive value here (or per-run, or
+    # in the UI settings) to bound latency/cost. These used to be hardcoded per call site (e.g. the
+    # boss at max_turns=3 / 45s), which silently dropped a slow reasoning model to a no-op reply.
+    agent_max_turns: int = 0           # max tool turns before the emit is forced (0 = unlimited)
+    agent_time_budget_s: float = 0.0   # wall-clock ceiling across the loop's turns (0 = no cap)
     # Observability (ADR-17): capture each LLM call's full prompt + completion into the active
     # span (spans.jsonl) so the UI can show exactly what the model read and wrote per node.
     # Diagnostics only — `replay.fold` never reads spans. Default on for local single-user; set
