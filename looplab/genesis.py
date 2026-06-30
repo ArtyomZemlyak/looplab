@@ -5,14 +5,19 @@ This is the headless counterpart of the Web UI's "New run" Genesis chat (`server
 same idea — a model reads your words (and any data/repo path you mention) and decides *what kind of
 task this is* — exposed for `looplab run --goal "..."` with no `--kind`.
 
-Agent vs. single call: the Web Genesis is an AGENT — it drives read-only filesystem tools
-(`reposcout.RepoScoutTools`: list_dir/read_file/find_files) to actually inspect a repo before
-authoring. This CLI Genesis is a single structured LLM call (no tools), so it can't browse the disk.
-To still keep it from handing back a task that points nowhere, `author_task` ends with a PATH GATE
-(`check_paths`): every local path the authored task references is verified to exist, and a missing one
-is REFUSED with a clarifying reply (`path_error`) — *before* any run dir is created. Without this a
-mistyped/hallucinated path would create a run that crashes mid-flight, and a re-run would then land in
-that finished/errored run and exit at once.
+Agentic, like the Web Genesis: when the LLM client can drive tools, this CLI Genesis runs as an AGENT
+too — it drives the same read-only filesystem tools (`reposcout.RepoScoutTools`:
+list_dir/read_file/find_files) to actually inspect (and VERIFY the paths of) a dataset/repo before
+authoring. The one difference from the Web agent is the headless contract (`GENESIS_E2E_RULE`): on
+`looplab run --goal` there is no human to answer a follow-up, so the agent is told it runs END-TO-END
+and must resolve every ambiguity itself and never ask — it decides and emits a complete task. When the
+client can't tool-call (or `agentic=False`), it falls back to a single structured call.
+
+On TOP of the agent, `author_task` ends with a deterministic PATH GATE (`check_paths`): every local
+path the authored task references is verified to exist, and a missing one is REFUSED with a clarifying
+reply (`path_error`) — *before* any run dir is created. Without this backstop a mistyped/hallucinated
+path would create a run that crashes mid-flight, and a re-run would then land in that finished/errored
+run and exit at once.
 
 On `kind` itself: it is **not** removed. It is the dispatch key that selects one of nine
 ``TaskAdapter`` semantics (each a different eval / grader / trust / data model — e.g. a self-reported
@@ -25,7 +30,9 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Optional
 
 from pydantic import BaseModel
@@ -72,6 +79,36 @@ DATA_GUIDE = (
     "didn't mention. If they clearly have data but named no location, ask ONE clarifying question in "
     "`reply` instead of guessing."
 )
+
+
+# Headless contract for the agentic CLI genesis: there is NO human in the loop on `looplab run
+# --goal`, so the agent must decide everything itself and never stall on a question. This is the one
+# difference from the Web genesis agent (which CAN come back with a clarifying question to the chat).
+GENESIS_E2E_RULE = (
+    "\n\nYOU RUN END-TO-END AND HEADLESS. This is the `looplab run --goal` path: there is NO human to "
+    "answer a follow-up. So you MUST NOT ask a clarifying question and MUST NOT leave the task empty — "
+    "resolve every ambiguity YOURSELF (which file is the data, how the repo is run/scored) using your "
+    "tools, then make the best autonomous decision and emit ONE complete, runnable task. `reply` is a "
+    "one-line statement of what you decided, NEVER a question.")
+
+# Tool-usage rule for the agentic genesis: inspect the disk before authoring, and — crucially for the
+# path bug — VERIFY every path it puts in the task actually exists, fixing a wrong one by searching.
+GENESIS_SCOUT_RULE = (
+    "\n\nYou have READ-ONLY filesystem tools on THIS machine: list_dir(path), read_file(path), "
+    "find_files(root, pattern). Use them BEFORE you emit:\n"
+    "- Confirm EVERY path you put in the task (data_path / data / editable_path / editables / "
+    "references) ACTUALLY EXISTS — list_dir or find_files it first. NEVER emit a path you haven't "
+    "verified.\n"
+    "- If a path the user gave is wrong (doesn't exist), search for the real one nearby (find_files on "
+    "its parent / the home dir for the named file or repo) and use THAT. Only if you genuinely cannot "
+    "locate it, emit your best guess and state the problem in `reply`.\n"
+    "- For a repo: read the README and the entry/eval script to ground the eval command, metric kind+"
+    "key, edit_surface and any data mount in what you actually read.\n"
+    "Don't just SAY you'll look — look, then call `emit` exactly once.")
+
+# A path-ish token in free text: starts with /, ~, or $VAR. Used to widen the scout's allowed roots to
+# whatever locations the user named in the goal, so the agent can actually read+verify them.
+_PATHISH = re.compile(r"(?:~|\$[A-Za-z_]\w*|/)[^\s\"'<>|,;]*")
 
 
 # Kinds whose work is inherently LLM-driven (the agent writes/edits code or reasons over data). When
@@ -154,10 +191,73 @@ def _missing_local_paths(task: dict) -> list[str]:
     return missing
 
 
+def _scout_roots(goal: str, data: Optional[str], repo: Optional[str]) -> list[Path]:
+    """The directories the read-only scout is allowed to browse: the user's home + CWD (the common
+    case) PLUS every location the user named — the explicit --data/--repo paths and any path-ish token
+    in the goal — so the agent can actually reach and verify a dataset/repo that lives outside home
+    (e.g. /mnt/data). RepoScoutTools bounds reads to these roots and refuses anything outside them."""
+    roots: list[Path] = [Path.home(), Path.cwd()]
+    named: list[str] = [p for p in (data, repo) if isinstance(p, str) and p.strip()]
+    named += _PATHISH.findall(goal or "")
+    for raw in named:
+        try:
+            p = Path(_expanded(raw))
+        except (OSError, ValueError):
+            continue
+        roots.append(p)
+        roots.append(p.parent)         # so the agent can find the real file/repo NEXT TO a wrong path
+    return roots
+
+
+def _author_agentic(client, *, sys_prompt: str, user: str, roots: list[Path], settings,
+                    parser: str) -> Optional["_TaskPlan"]:
+    """Agentic authoring: let genesis actually INSPECT the filesystem (read-only) before authoring, so
+    it grounds (and verifies) every path in what's really on disk — the CLI counterpart of the Web
+    genesis agent, but told it runs headless and must never ask. Returns the emitted `_TaskPlan`, or
+    None when the client can't drive tools at all (caller falls back to a single structured call)."""
+    from .agent import drive_tool_loop, loop_opts_from_settings
+    from .reposcout import RepoScoutTools
+    tools = RepoScoutTools(roots)
+    tool_sys = sys_prompt + GENESIS_E2E_RULE + GENESIS_SCOUT_RULE
+    emit_spec = {"type": "function", "function": {
+        "name": "emit",
+        "description": "Emit the final task plan (task, rationale, reply).",
+        "parameters": _TaskPlan.model_json_schema()}}
+
+    def _coerce(args) -> "_TaskPlan":
+        try:
+            return _TaskPlan(**{k: v for k, v in (args or {}).items() if k in _TaskPlan.model_fields})
+        except Exception:  # noqa: BLE001 - a junk emit -> empty plan (the gate/kind-check handle it)
+            return _TaskPlan()
+
+    def _finalize(args):
+        return _coerce(args)
+
+    def _fallback(msgs):
+        # The loop ran (the model drove tools) but never called `emit` — force one final structured
+        # emit from the accumulated context rather than discard everything it just read.
+        try:
+            return parse_structured(client, msgs + [{"role": "user",
+                                    "content": "Now call `emit` with the final task plan."}],
+                                    _TaskPlan, parser)
+        except Exception:  # noqa: BLE001 - even a forced emit failed -> empty plan (still usable)
+            return _TaskPlan()
+
+    opts = loop_opts_from_settings(settings) if settings is not None else {}
+    return drive_tool_loop(
+        client, tools,
+        [{"role": "system", "content": tool_sys}, {"role": "user", "content": user}],
+        emit_spec,
+        max_turns=int(getattr(settings, "agent_max_turns", 0) or 0),
+        time_budget_s=float(getattr(settings, "agent_time_budget_s", 0.0) or 0.0),
+        finalize=_finalize, fallback=_fallback, **opts)
+
+
 def author_task(goal: str, *, client, kinds: tuple[str, ...], data: Optional[str] = None,
                 repo: Optional[str] = None, direction: Optional[str] = None,
                 kind: Optional[str] = None, draft: Optional[dict] = None,
-                parser: str = "tool_call", check_paths: bool = True) -> GenesisResult:
+                parser: str = "tool_call", check_paths: bool = True,
+                agentic: bool = True, settings=None) -> GenesisResult:
     """Ask the model to author an inline task from a plain goal. With `kind=None` it also CHOOSES the
     kind; with `kind` set it is CONSTRAINED to that kind and only fills the rest (the user pinned the
     type, Genesis does the rest within it). `draft` is an existing task dict (e.g. from a config file)
@@ -165,12 +265,17 @@ def author_task(goal: str, *, client, kinds: tuple[str, ...], data: Optional[str
     empty with a clarifying `reply`, and on a model/endpoint failure `error` is set (so the caller can
     tell 'reach the model' apart from 'your goal was too vague').
 
-    `check_paths` (default on) makes Genesis VERIFY that every local path the authored task references
-    exists on disk and REFUSE (returning `path_error` + a clarifying `reply`, no task) when one is
-    missing — the CLI genesis has no filesystem tools of its own (unlike the Web genesis agent, which
-    scouts the repo before authoring), so without this a hallucinated or mistyped path would sail
-    through, create a run dir and crash mid-flight. Programmatic callers that only want the authoring
-    logic (no disk) can pass `check_paths=False`."""
+    `agentic` (default on): when the `client` can drive tools, genesis runs as an AGENT — it inspects
+    the filesystem read-only (RepoScoutTools) and verifies/locates every path before authoring, told
+    explicitly that it runs HEADLESS and must never ask a question (GENESIS_E2E_RULE). When the client
+    can't drive tools (or `agentic=False`), it falls back to a single structured call. `settings`
+    carries the agent-loop limits/options (unlimited by default).
+
+    `check_paths` (default on) is the deterministic BACKSTOP under the agent: every local path the
+    authored task references is verified to exist and a missing one is REFUSED (returning `path_error`
+    + a clarifying `reply`, no task) — so even if the agent emits an unverified/mistyped path it can't
+    create a run dir that crashes mid-flight. Programmatic callers that only want the authoring logic
+    (no disk) can pass `check_paths=False` (and `agentic=False`)."""
     hints = []
     if data:
         hints.append(f"The user named a data/input path: {data} (use it; add others they mention).")
@@ -193,12 +298,24 @@ def author_task(goal: str, *, client, kinds: tuple[str, ...], data: Optional[str
         f"\n\nRegistered task kinds: {list(kinds)}.")
     user = f"Goal: {goal}{hint_block}"
     messages = [{"role": "system", "content": sys_prompt}, {"role": "user", "content": user}]
-    try:
-        plan = parse_structured(client, messages, _TaskPlan, parser)
-    except Exception as e:  # noqa: BLE001 - transport/parse failure: report it as an ERROR, distinct
-        # from a vague goal (which parses fine but returns an empty task). The caller surfaces the two
-        # differently — "reach the model" vs "your goal was too vague".
-        return GenesisResult(error=str(e))
+    plan = None
+    # Agentic first: if the client can drive tools, let genesis scout the disk (and verify paths)
+    # before authoring. Any failure here (e.g. the client can't tool-call at all) drops to the single
+    # structured call below, so a tool-less/offline client still works.
+    if agentic and callable(getattr(client, "chat", None)):
+        try:
+            plan = _author_agentic(client, sys_prompt=sys_prompt, user=user,
+                                   roots=_scout_roots(goal, data, repo), settings=settings,
+                                   parser=parser)
+        except Exception:  # noqa: BLE001 - tool loop unsupported/failed -> single-shot fallback
+            plan = None
+    if plan is None:
+        try:
+            plan = parse_structured(client, messages, _TaskPlan, parser)
+        except Exception as e:  # noqa: BLE001 - transport/parse failure: report it as an ERROR,
+            # distinct from a vague goal (which parses fine but returns an empty task). The caller
+            # surfaces the two differently — "reach the model" vs "your goal was too vague".
+            return GenesisResult(error=str(e))
     task = plan.task if isinstance(plan.task, dict) else {}
     # Honor the pin: the kind the user gave wins over whatever the model emitted.
     if task and kind:

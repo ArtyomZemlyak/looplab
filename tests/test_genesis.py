@@ -2,7 +2,10 @@
 names a `kind`. These exercise the authoring logic with a scripted client (no network)."""
 from __future__ import annotations
 
-from looplab.genesis import GENERATIVE_KINDS, author_task, _missing_local_paths
+import json
+
+from looplab.genesis import (GENERATIVE_KINDS, author_task, _missing_local_paths, _scout_roots,
+                             GENESIS_E2E_RULE)
 
 KINDS = ("quadratic", "dataset", "repo", "mlebench_real", "classification")
 
@@ -162,5 +165,74 @@ def test_author_check_paths_false_skips_the_gate():
     # Opt-out for programmatic callers that only want the authoring logic (no disk).
     client = _ScriptedClient({"task": {"kind": "dataset", "goal": "g", "direction": "max",
                                        "data_path": "/no/such/path"}})
-    res = author_task("predict", client=client, kinds=KINDS, check_paths=False)
+    res = author_task("predict", client=client, kinds=KINDS, check_paths=False, agentic=False)
     assert res.kind == "dataset" and res.path_error == ""
+
+
+def test_scout_roots_widens_to_named_paths(tmp_path):
+    # The scout's allowed roots include home/CWD plus every location named in the goal/--data, so the
+    # agent can actually reach (and verify) a dataset/repo that lives outside home.
+    f = tmp_path / "sub" / "train.csv"
+    f.parent.mkdir(parents=True)
+    f.write_text("x\n", encoding="utf-8")
+    roots = _scout_roots(f"predict from {f}", data=None, repo=None)
+    assert f in roots and f.parent in roots          # the named path AND its parent are reachable
+
+
+class _ToolClient:
+    """A fake tool-driving client: first .chat() inspects the disk, second emits the task. Records the
+    system prompt so a test can assert the headless/e2e contract reached the model."""
+    def __init__(self, list_path: str, emit_task: dict):
+        self._calls = 0
+        self._list_path = list_path
+        self._emit_task = emit_task
+        self.system = ""
+
+    def chat(self, messages, tools, tool_choice="auto"):
+        if not self.system:
+            self.system = next((m["content"] for m in messages if m["role"] == "system"), "")
+        self._calls += 1
+        if self._calls == 1:          # turn 1: verify the data location on disk before authoring
+            return {"content": "let me check the path",
+                    "tool_calls": [{"id": "a", "type": "function",
+                                    "function": {"name": "list_dir",
+                                                 "arguments": json.dumps({"path": self._list_path})}}]}
+        return {"content": "", "tool_calls": [{"id": "b", "type": "function",   # turn 2: emit
+                "function": {"name": "emit",
+                             "arguments": json.dumps({"task": self._emit_task,
+                                                      "rationale": "verified on disk"})}}]}
+
+
+def test_author_agentic_scouts_then_emits(tmp_path):
+    # When the client can drive tools, genesis runs as an AGENT: it calls a filesystem tool, then
+    # emits — and the headless/e2e contract is in the system prompt.
+    f = tmp_path / "train.csv"
+    f.write_text("a,b\n1,2\n", encoding="utf-8")
+    client = _ToolClient(str(tmp_path), {"kind": "dataset", "goal": "predict", "direction": "max",
+                                         "data_path": str(f)})
+    res = author_task(f"predict from {f}", client=client, kinds=KINDS, data=str(f))
+    assert res.kind == "dataset" and res.task["data_path"] == str(f)
+    assert res.path_error == ""
+    assert "HEADLESS" in client.system and GENESIS_E2E_RULE.strip()[:20] in client.system
+
+
+def test_author_agentic_emit_still_path_gated(tmp_path):
+    # Even via the agent, a bad emitted path is caught by the deterministic backstop (the agent is
+    # supposed to verify, but the gate guarantees a doomed task never escapes).
+    client = _ToolClient(str(tmp_path), {"kind": "dataset", "goal": "p", "direction": "max",
+                                         "data_path": str(tmp_path / "ghost.csv")})
+    res = author_task("predict", client=client, kinds=KINDS)
+    assert res.task == {} and res.path_error
+    assert "ghost.csv" in res.path_error
+
+
+def test_author_agentic_falls_back_when_tools_unsupported():
+    # A client whose .chat raises (can't tool-call) must fall back to the single structured call.
+    class _BadChat:
+        def chat(self, messages, tools, tool_choice="auto"):
+            raise RuntimeError("no tool support")
+        def complete_tool(self, messages, schema):
+            return {"task": {"kind": "quadratic", "goal": "g", "direction": "min",
+                             "bounds": {"x": [-1, 1]}}, "rationale": "fallback"}
+    res = author_task("minimize x^2", client=_BadChat(), kinds=KINDS)
+    assert res.kind == "quadratic" and res.rationale == "fallback"

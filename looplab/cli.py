@@ -411,7 +411,7 @@ def run(
         # Pass the file's task: block (if any) as a draft so --goal refines it instead of discarding it.
         result = _genesis.author_task(goal, client=client, kinds=_TASK_KINDS, kind=kind, data=data,
                                       direction=direction, draft=(file_task or None),
-                                      parser=settings.llm_parser)
+                                      parser=settings.llm_parser, settings=settings)
         if result.error:    # transport/endpoint failure -> NOT a vague goal; say so plainly
             raise typer.BadParameter(
                 f"Genesis couldn't reach the model to author the task ({result.error}). Check "
