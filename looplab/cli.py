@@ -522,6 +522,73 @@ def smoke(model: Optional[str] = typer.Option(None, help="Override model id.")):
         typer.echo(f"structured FAILED (will rely on fallback at runtime): {e}")
 
 
+def _run_curator(goal: str, *, from_file: Optional[Path], web: Optional[bool],
+                 model: Optional[str]) -> None:
+    """Shared driver for `curate` / `remember`: build the curator from config and run one session,
+    printing what it changed. Reuses the resolved memory + KB dirs (on by default — no path needed)."""
+    settings = Settings()
+    if model is not None:
+        settings.llm_model = model
+    if web is not None:
+        settings.web_search = web
+    context = ""
+    if from_file is not None:
+        if not from_file.exists():
+            typer.echo(f"file not found: {from_file}")
+            raise typer.Exit(2)
+        context = from_file.read_text(encoding="utf-8", errors="replace")
+    from .curator import make_curator
+    try:
+        client = make_llm_client(settings)
+    except Exception as e:  # noqa: BLE001 - no endpoint configured/reachable
+        typer.echo(f"curation needs a reachable LLM ({e}). Point --model / LOOPLAB_LLM_BASE_URL at one.")
+        raise typer.Exit(1)
+    curator = make_curator(settings, client=client)
+    if curator is None:
+        typer.echo("both memory and the knowledge base are disabled — nothing to curate "
+                   "(enable with --memory / --knowledge or memory_enabled/knowledge_enabled).")
+        raise typer.Exit(1)
+    typer.echo(f"curating → memory={settings.resolved_memory_dir()} kb={settings.resolved_knowledge_dir()}")
+    res = curator.run(goal, context=context)
+    if not res.ok:
+        typer.echo(f"curation failed: {res.error}")
+        raise typer.Exit(1)
+    typer.echo(res.summary or "(done)")
+    for c in res.changes:
+        typer.echo(f"  changed: {c}")
+    for f in res.followups:
+        typer.echo(f"  follow-up: {f}")
+
+
+@app.command()
+def curate(
+    goal: str = typer.Argument(..., help="What to add/organize, e.g. 'research mixup augmentation "
+                               "and add it to the KB' or 'consolidate this report into the KB'."),
+    from_file: Optional[Path] = typer.Option(None, "--from", help="File whose contents to file/structure "
+                                             "into the stores (e.g. a run report)."),
+    web: Optional[bool] = typer.Option(None, "--web/--no-web", help="Allow web search while curating."),
+    model: Optional[str] = typer.Option(None, help="Override LLM model id."),
+):
+    """Run a goal-driven curator session that reads, edits, and grows the markdown memory +
+    knowledge base — a full agentic task, not a single write. Memory and KB are on by default and
+    need no path; the agent surveys what exists, then files new material where it belongs."""
+    _run_curator(goal, from_file=from_file, web=web, model=model)
+
+
+@app.command()
+def remember(
+    lesson: str = typer.Argument(..., help="The lesson/mistake to record in cross-run memory."),
+    model: Optional[str] = typer.Option(None, help="Override LLM model id."),
+):
+    """Record a dev-process lesson in cross-run memory via the curator (it places the note into the
+    right topic file, extending an existing one instead of duplicating)."""
+    _run_curator(
+        f"Record this lesson in cross-run MEMORY (not the knowledge base). Read the existing memory "
+        f"notes first and extend the most relevant one if it fits; otherwise file it under a sensible "
+        f"topic. Lesson: {lesson}",
+        from_file=None, web=False, model=model)
+
+
 @app.command()
 def approve(run_dir: Path = typer.Argument(..., help="Run dir awaiting approval."),
             node_id: Optional[int] = typer.Option(None, help="Node to approve (default: best).")):

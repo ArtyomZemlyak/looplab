@@ -1,18 +1,18 @@
-"""Agentic retrieval toolset (ADR-16) for the LLM Researcher: lexical (grep), file
-(list/read), and semantic (kb_search) tools over a knowledge directory of markdown
-notes. The model chooses which to call. File access is restricted to the knowledge
-directory (no arbitrary reads).
+"""Agentic retrieval + curation toolset (ADR-16) for the LLM agents: lexical (grep), file
+(list/read/tree), semantic (kb_search), and WRITE (kb_write/append/edit, memory_*) tools over the
+markdown knowledge base and cross-run memory. The model chooses which to call; file access is
+restricted to the store roots (no arbitrary reads/writes). Both stores are hierarchical markdown —
+see `mdstore.MarkdownStore` — so the agent can read what exists and EDIT it, not just append blindly.
 """
 from __future__ import annotations
 
 import json
 import os
-import time
 from pathlib import Path
 
-from .atomicio import atomic_write_text
+from .mdstore import MarkdownStore
 from .retrieval import glob_files, grep, read_file
-from .vectorstore import InMemoryVectorStore, Item, hash_embed
+from .vectorstore import hash_embed
 
 
 def _fn_spec(name: str, desc: str, props: dict, required: list) -> dict:
@@ -96,167 +96,183 @@ class RepoTools:
         return f"(unknown tool: {name})"
 
 
+def _case_extras(cases_path: Path | None) -> list[tuple[str, str]]:
+    """Past-best-solution CASES (I19) rendered as searchable (id, text) snippets — folded into the
+    semantic index so the agent can recall what worked on a similar task. Read-only (never edited as
+    files; they're appended automatically at run end). One malformed line never kills the rest."""
+    out: list[tuple[str, str]] = []
+    if not (cases_path and cases_path.exists()):
+        return out
+    for i, line in enumerate(cases_path.read_text(encoding="utf-8").splitlines()):
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            c = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(c, dict):
+            continue
+        text = (f"PAST CASE — task {c.get('task_id')}: {c.get('goal','')}\n"
+                f"best params={c.get('params')} metric={c.get('metric')}\n"
+                f"{c.get('rationale','')}")
+        out.append((f"case:{c.get('task_id') or i}", text))
+    return out
+
+
 class KnowledgeTools:
-    """Read + write tools over the agent's persistent stores. `knowledge_dir` is the knowledge
-    base (markdown notes the agent searches AND grows); `cases_path`/`memory_dir` is the cross-run
-    memory (past best solutions + free-form lessons). When `writable` is true and a dir exists, the
-    agent also gets kb_write/kb_append (grow the KB) and remember (note a memory) — so an operator
-    can tell the Boss "research X and add it to the KB" or "you keep making this mistake, remember it"."""
+    """Read + write tools over the agent's two persistent markdown stores.
+
+    `knowledge_dir` is the KNOWLEDGE BASE — a hierarchy of folders + markdown notes (expert/domain
+    knowledge) the agent can search, read, and grow/edit. `memory_dir` is cross-run MEMORY — topic
+    markdown files (lessons, recurring mistakes) plus the auto-appended `cases.jsonl` of past best
+    solutions (read-only). When `writable` is true the agent also gets the write/edit tools, so an
+    operator can tell the Boss "research X and add it to the KB", "consolidate this report", or "you
+    keep making this mistake — remember it". `kb_search` spans BOTH stores + the cases."""
 
     def __init__(self, knowledge_dir: str | None = None,
                  cases_path: str | None = None, k: int = 3,
                  memory_dir: str | None = None, writable: bool = True):
-        self.dir = Path(knowledge_dir).resolve() if knowledge_dir else None
         self.cases_path = Path(cases_path) if cases_path else None
-        self.memory_dir = Path(memory_dir).resolve() if memory_dir else None
-        # Free-form memory notes (lessons / recurring mistakes) live alongside the cases. They are
-        # searchable knowledge too, so they get folded into the same kb_search index below.
-        self.notes_path = (self.memory_dir / "notes.jsonl") if self.memory_dir else None
         self.writable = writable
         self.k = k
-        self._index = InMemoryVectorStore()
-        self._build_index()
+        # The KB store carries the cases in its semantic index (kb_search has always surfaced past
+        # solutions); the memory store owns its own markdown notes. Either may be absent.
+        self.kb = MarkdownStore(knowledge_dir, extra=_case_extras(self.cases_path)) if knowledge_dir else None
+        self.mem = MarkdownStore(memory_dir) if memory_dir else None
+        # When there is no KB dir we still need kb_search to work over cases alone (I19): keep a
+        # lightweight store rooted at the memory dir (or cases' dir) just for the index.
+        self._cases_only = None
+        if self.kb is None and (self.cases_path or self.mem):
+            root = (self.mem.root if self.mem else self.cases_path.parent)
+            self._cases_only = MarkdownStore(root, extra=_case_extras(self.cases_path))
 
-    def _build_index(self) -> None:
-        items = []
-        if self.dir:
-            for p in glob_files("*.md", str(self.dir)):
-                text = read_file(p)
-                items.append(Item(id=p, vector=hash_embed(Path(p).name + " " + text),
-                                  payload={"path": p, "text": text}))
-        # Cross-run memory (I19): past best solutions become searchable knowledge.
-        if self.cases_path and self.cases_path.exists():
-            for i, line in enumerate(self.cases_path.read_text(encoding="utf-8").splitlines()):
-                line = line.strip()
-                if not line:
-                    continue
-                try:                       # a single malformed case line must not kill indexing
-                    c = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                if not isinstance(c, dict):
-                    continue
-                text = (f"PAST CASE — task {c.get('task_id')}: {c.get('goal','')}\n"
-                        f"best params={c.get('params')} metric={c.get('metric')}\n"
-                        f"{c.get('rationale','')}")
-                items.append(Item(id=f"case:{i}", vector=hash_embed(c.get("goal", "") + " " + text),
-                                  payload={"path": f"case:{c.get('task_id')}", "text": text}))
-        # Free-form memory notes: agent-recorded lessons ("X often fails, do Y") are searchable too.
-        if self.notes_path and self.notes_path.exists():
-            for i, line in enumerate(self.notes_path.read_text(encoding="utf-8").splitlines()):
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    n = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                if not isinstance(n, dict):
-                    continue
-                tags = " ".join(n.get("tags", []) or [])
-                text = f"MEMORY NOTE{(' [' + tags + ']') if tags else ''}: {n.get('text','')}"
-                items.append(Item(id=f"note:{i}", vector=hash_embed(text),
-                                  payload={"path": "memory:note", "text": text}))
-        # Rebuild from scratch each call (upsert over a fresh store), so a write tool can re-index.
-        self._index = InMemoryVectorStore()
-        if items:
-            self._index.upsert("kb", items)
+    # ---- the index kb_search/grep span (KB + memory notes + cases) -----------------------------
+    def _search(self, query: str) -> list[tuple[str, str]]:
+        seen: dict[str, str] = {}
+        for store in (self.kb, self.mem, self._cases_only):
+            if store is None:
+                continue
+            for label, text in store.search(query, self.k):
+                seen.setdefault(label, text)
+        # Re-rank the merged set by the same hash-embedding similarity used inside a store, so the
+        # top-k across both stores is coherent (not just "KB first, then memory").
+        qv = hash_embed(query or "")
+
+        def _sim(t: str) -> float:
+            from .vectorstore import _cosine
+            return _cosine(qv, hash_embed(t))
+        ranked = sorted(seen.items(), key=lambda kv: -_sim(kv[1]))
+        return ranked[: self.k]
 
     # ---- tool schemas (OpenAI function format) ----
     def specs(self) -> list[dict]:
         specs = [
-            _fn_spec("kb_search", "Semantic search over the knowledge base; returns relevant note snippets.",
-                     {"query": {"type": "string"}}, ["query"]),
-            _fn_spec("grep", "Regex search across knowledge notes (*.md). Returns matching lines.",
+            _fn_spec("kb_search", "Semantic search across the knowledge base + memory; returns relevant "
+                     "note snippets (and past solved-case notes).", {"query": {"type": "string"}}, ["query"]),
+            _fn_spec("grep", "Regex search across knowledge-base notes (*.md, recursive). Matching lines.",
                      {"pattern": {"type": "string"}}, ["pattern"]),
-            _fn_spec("list_notes", "List available knowledge note filenames.", {}, []),
-            _fn_spec("read_note", "Read a knowledge note by filename.",
-                     {"name": {"type": "string"}}, ["name"]),
+            _fn_spec("list_notes", "List knowledge-base note paths (relative, includes sub-folders).", {}, []),
+            _fn_spec("kb_tree", "Show the knowledge-base folder/file hierarchy, so you can see what "
+                     "already exists before adding to it.", {}, []),
+            _fn_spec("read_note", "Read a knowledge-base note by its (relative) path, e.g. "
+                     "'nlp/tokenization.md'.", {"name": {"type": "string"}}, ["name"]),
         ]
-        if self.writable and self.dir is not None:
+        if self.writable and self.kb is not None:
             specs += [
-                _fn_spec("kb_write", "Create or overwrite a knowledge-base note (markdown). Use to add "
-                         "expert/domain knowledge, a structured report, or a researched topic to the "
-                         "persistent KB so future runs can retrieve it. `name` ends in .md.",
-                         {"name": {"type": "string"}, "content": {"type": "string"}},
-                         ["name", "content"]),
-                _fn_spec("kb_append", "Append a markdown section to an existing knowledge-base note "
-                         "(creates it if absent). Use to extend a note without rewriting it.",
-                         {"name": {"type": "string"}, "content": {"type": "string"}},
-                         ["name", "content"]),
+                _fn_spec("kb_write", "Create or overwrite a knowledge-base note (markdown). `name` is a "
+                         "relative path and MAY include folders (they're created), e.g. "
+                         "'cv/augmentation/mixup.md'. Use to add domain knowledge, a structured report, "
+                         "or a researched topic. Read the tree/existing note first to avoid duplication.",
+                         {"name": {"type": "string"}, "content": {"type": "string"}}, ["name", "content"]),
+                _fn_spec("kb_append", "Append a markdown section to a knowledge-base note (creates it if "
+                         "absent). Extend a note without rewriting it.",
+                         {"name": {"type": "string"}, "content": {"type": "string"}}, ["name", "content"]),
+                _fn_spec("kb_edit", "Revise a knowledge-base note in place: replace the exact (unique) "
+                         "substring `old` with `new`. Use to FIX or update existing knowledge. Read the "
+                         "note first to copy an exact snippet.",
+                         {"name": {"type": "string"}, "old": {"type": "string"}, "new": {"type": "string"}},
+                         ["name", "old", "new"]),
             ]
-        if self.writable and self.notes_path is not None:
-            specs.append(
-                _fn_spec("remember", "Save a lesson to cross-run memory — a recurring mistake to avoid, a "
-                         "tip, or a fact worth recalling on future runs of similar tasks. Becomes "
-                         "searchable knowledge. Add `tags` (e.g. domain/task) to make it easier to find.",
-                         {"text": {"type": "string"},
-                          "tags": {"type": "array", "items": {"type": "string"}}}, ["text"]))
+        if self.mem is not None:
+            specs += [
+                _fn_spec("memory_list", "List cross-run memory note paths (relative markdown files).", {}, []),
+                _fn_spec("memory_read", "Read a memory note by its (relative) path.",
+                         {"name": {"type": "string"}}, ["name"]),
+            ]
+            if self.writable:
+                specs += [
+                    _fn_spec("memory_write", "Create or overwrite a memory note (markdown topic file), e.g. "
+                             "'pitfalls.md'. Memory is for dev-process lessons learned across runs.",
+                             {"name": {"type": "string"}, "content": {"type": "string"}}, ["name", "content"]),
+                    _fn_spec("memory_edit", "Revise a memory note in place (replace unique `old` with `new`).",
+                             {"name": {"type": "string"}, "old": {"type": "string"}, "new": {"type": "string"}},
+                             ["name", "old", "new"]),
+                    _fn_spec("remember", "Quickly save a lesson to cross-run memory — a recurring mistake to "
+                             "avoid or a tip for future runs. Appended as a dated bullet to a topic file "
+                             "(default 'lessons.md'; pass `topic` to group it). Becomes searchable.",
+                             {"text": {"type": "string"}, "topic": {"type": "string"}}, ["text"]),
+                ]
         return specs
-
-    @staticmethod
-    def _safe_md_name(name: str) -> str:
-        """A bare, path-traversal-free filename ending in .md (restricts writes to the KB dir)."""
-        base = Path(name or "").name.strip() or "note"
-        return base if base.endswith(".md") else base + ".md"
 
     # ---- dispatch ----
     def execute(self, name: str, args: dict) -> str:
         try:
             if name == "kb_search":
-                hits = self._index.search("kb", hash_embed(args.get("query", "")), self.k)
-                return "\n---\n".join(
-                    f"{Path(h.payload['path']).name}:\n{h.payload['text'][:600]}" for h in hits
-                ) or "(no notes)"
+                hits = self._search(args.get("query", ""))
+                return "\n---\n".join(f"{label}:\n{text[:600]}" for label, text in hits) or "(no notes)"
             if name == "grep":
-                if not self.dir:
-                    return "(no notes directory)"
-                hits = grep(args.get("pattern", ""), str(self.dir), glob="*.md", max_hits=20)
-                return "\n".join(f"{Path(h.path).name}:{h.lineno}: {h.line}" for h in hits) or "(no matches)"
+                if self.kb is None:
+                    return "(no knowledge base configured)"
+                return "\n".join(self.kb.grep(args.get("pattern", ""), max_hits=20)) or "(no matches)"
             if name == "list_notes":
-                if not self.dir:
-                    return "(no notes directory)"
-                return "\n".join(Path(p).name for p in glob_files("*.md", str(self.dir))) or "(empty)"
+                if self.kb is None:
+                    return "(no knowledge base configured)"
+                return "\n".join(self.kb.list()) or "(empty)"
+            if name == "kb_tree":
+                if self.kb is None:
+                    return "(no knowledge base configured)"
+                return self.kb.tree()
             if name == "read_note":
-                if not self.dir:
-                    return "(no notes directory)"
-                target = (self.dir / Path(args.get("name", "")).name)  # restrict to kb dir
-                if not target.exists():
-                    return f"(no such note: {args.get('name')})"
-                return read_file(str(target))[:4000]
-            if name == "kb_write":
-                if not (self.writable and self.dir is not None):
+                if self.kb is None:
+                    return "(no knowledge base configured)"
+                text = self.kb.read(args.get("name", ""))
+                return text if text is not None else f"(no such note: {args.get('name')})"
+            if name in ("kb_write", "kb_append", "kb_edit"):
+                if not (self.writable and self.kb is not None):
                     return "(knowledge base is read-only or not configured)"
-                self.dir.mkdir(parents=True, exist_ok=True)
-                fn = self._safe_md_name(args.get("name", ""))
-                atomic_write_text(self.dir / fn, (args.get("content", "") or "").rstrip("\n") + "\n")
-                self._build_index()        # so a follow-up kb_search sees the new note
-                return f"(wrote {fn})"
-            if name == "kb_append":
-                if not (self.writable and self.dir is not None):
-                    return "(knowledge base is read-only or not configured)"
-                self.dir.mkdir(parents=True, exist_ok=True)
-                fn = self._safe_md_name(args.get("name", ""))
-                target = self.dir / fn
-                prev = target.read_text(encoding="utf-8").rstrip("\n") + "\n\n" if target.exists() else ""
-                atomic_write_text(target, prev + (args.get("content", "") or "").rstrip("\n") + "\n")
-                self._build_index()
-                return f"(appended to {fn})"
+                return self._mutate(self.kb, name.split("_", 1)[1], args, "knowledge-base note")
+            if name == "memory_list":
+                return ("\n".join(self.mem.list()) or "(empty)") if self.mem else "(no memory configured)"
+            if name == "memory_read":
+                if self.mem is None:
+                    return "(no memory configured)"
+                text = self.mem.read(args.get("name", ""))
+                return text if text is not None else f"(no such note: {args.get('name')})"
+            if name in ("memory_write", "memory_edit"):
+                if not (self.writable and self.mem is not None):
+                    return "(memory is read-only or not configured)"
+                return self._mutate(self.mem, name.split("_", 1)[1], args, "memory note")
             if name == "remember":
-                if not (self.writable and self.notes_path is not None):
+                if not (self.writable and self.mem is not None):
                     return "(memory is read-only or not configured)"
                 text = (args.get("text", "") or "").strip()
                 if not text:
                     return "(nothing to remember: empty text)"
-                self.notes_path.parent.mkdir(parents=True, exist_ok=True)
-                tags = args.get("tags") or []
-                if not isinstance(tags, list):
-                    tags = [str(tags)]
-                rec = {"text": text, "tags": [str(t) for t in tags], "ts": time.time()}
-                with self.notes_path.open("a", encoding="utf-8") as f:   # append-only memory log
-                    f.write(json.dumps(rec) + "\n")
-                self._build_index()
-                return "(remembered)"
+                topic = Path((args.get("topic") or "lessons")).name or "lessons"
+                rel = self.mem.append(topic, f"- {text}")
+                return f"(remembered in {rel})" if rel else "(could not write memory note)"
         except Exception as e:  # noqa: BLE001 — tool errors are fed back to the model
             return f"(tool error: {e})"
         return f"(unknown tool: {name})"
+
+    @staticmethod
+    def _mutate(store: MarkdownStore, op: str, args: dict, label: str) -> str:
+        """Shared write/append/edit dispatch for either store (KB or memory)."""
+        if op == "edit":
+            return store.edit(args.get("name", ""), args.get("old", ""), args.get("new", ""))
+        fn = store.write(args.get("name", ""), args.get("content", "")) if op == "write" \
+            else store.append(args.get("name", ""), args.get("content", ""))
+        if fn is None:
+            return f"(bad {label} path: {args.get('name')!r})"
+        return f"({'wrote' if op == 'write' else 'appended to'} {fn})"

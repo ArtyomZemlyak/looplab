@@ -134,9 +134,11 @@ Give the agentic Researcher extra context and tools:
 
 | Setting | What it adds |
 |---|---|
-| `knowledge_enabled` | (on) The knowledge base — the agent gets `grep` / `kb_search` / `list_notes` / `read_note` to consult it **and** `kb_write` / `kb_append` to grow it. Defaults to `<home_dir>/knowledge`; no path needed |
-| `memory_enabled` | (on) Cross-run case memory + the `remember` tool to record lessons. Defaults to `<home_dir>/memory` |
+| `knowledge_enabled` | (on) The hierarchical markdown knowledge base — the agent gets `kb_search` / `grep` / `list_notes` / `kb_tree` / `read_note` to consult it **and** `kb_write` / `kb_append` / `kb_edit` to grow + revise it. Defaults to `<home_dir>/knowledge`; no path needed |
+| `memory_enabled` | (on) Cross-run memory: markdown topic files (`memory_read` / `memory_write` / `memory_edit` / `remember`) for dev-process lessons, plus the auto-stored best-result cases. Defaults to `<home_dir>/memory` |
 | `knowledge_dir` / `memory_dir` | Point either store at a custom directory (overrides the `<home_dir>` default) |
+
+To populate or reorganize the stores deliberately, run a **Curator** session ([`looplab curate`](cli-reference.md#curate) / `looplab remember` / `POST /api/curate`): a goal-driven tool loop that surveys the existing structure, reads related notes, and files new material where it belongs — "research X and add it", "consolidate this report", "remember this mistake". The run-chat **Boss** carries the same read+write tools, so you can ask it inline too.
 | `skills_dir` | A directory of `SKILL.md` files the Researcher can list and load |
 | `prompt_dir` | Editable, hot-reloaded role-prompt `.md` files (override the built-in prompts) |
 | `researcher_tools` | (on) Read its own experiments + the task data mid-loop |

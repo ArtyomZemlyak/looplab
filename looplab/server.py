@@ -1384,6 +1384,39 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
                 saved = str(fp)
         return {"ok": True, "text": text, "model": s.llm_model, "saved": saved}
 
+    # ------------------------------------------------------------------ curate memory / KB
+    @app.post("/api/curate")
+    async def curate(request: Request):
+        """Run a dedicated, goal-driven Curator session that reads + edits + grows the markdown
+        memory and knowledge base (a full agentic loop, not a single write). Body: {goal, context?}.
+        Runs the (blocking, network-bound) tool loop off the event loop. Soft-fails with no model."""
+        body = await request.json()
+        goal = (body.get("goal") or "").strip()
+        if not goal:
+            raise HTTPException(400, "goal is required")
+        # Start from the run-aware LLM settings, then overlay any store/search overrides the UI saved
+        # (custom dirs, enable flags, web/literature) so curation honors the same config as a run.
+        s = _llm_settings()
+        _store_keys = ("knowledge_dir", "memory_dir", "knowledge_enabled", "memory_enabled",
+                       "home_dir", "web_search", "literature_search")
+        over = {k: v for k, v in _load_ui_settings().items() if k in _store_keys and v is not None}
+        if over:
+            s = Settings(**{**s.model_dump(exclude={"llm_api_key"}), **over})
+        from .curator import make_curator
+        try:
+            from .tasks import make_llm_client
+            client = make_llm_client(s)
+            curator = make_curator(s, client=client)
+        except Exception as e:  # noqa: BLE001 - offline / no model -> soft fail
+            return {"ok": False, "error": str(e)}
+        if curator is None:
+            return {"ok": False, "error": "memory and knowledge base are both disabled"}
+        res = await anyio.to_thread.run_sync(
+            lambda: curator.run(goal, context=str(body.get("context") or "")))
+        return {"ok": res.ok, "error": res.error, "summary": res.summary,
+                "changes": res.changes, "followups": res.followups,
+                "memory_dir": s.resolved_memory_dir(), "knowledge_dir": s.resolved_knowledge_dir()}
+
     # ------------------------------------------------------------------ genesis (pre-run BOSS)
     def _normalize_genesis(spec: "_GenesisSpec", draft: dict) -> dict:
         """Turn the boss's raw proposal into a launch-ready, editable card: slugify + de-dup the run_id

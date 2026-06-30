@@ -185,10 +185,20 @@ See [Concepts → Trust & sandbox](concepts.md#trust--the-sandbox) for what each
 
 Memory and the knowledge base are **on by default** — you don't have to wire up a path. Both
 default to a sub-dir of `home_dir` (`.looplab/memory`, `.looplab/knowledge`); set a `*_dir` only
-for a custom location, or flip the `*_enabled` flag off to disable a store entirely. The agent
-**writes** to both: it stores each run's best result as a case, and (when the KB is on) can grow the
-notes with `kb_write`/`kb_append` and record lessons with `remember` — so you can tell the Boss
-"research X and add it to the knowledge base" or "you keep making this mistake — remember it".
+for a custom location, or flip the `*_enabled` flag off to disable a store entirely.
+
+Both stores are **hierarchical markdown** (`mdstore.MarkdownStore`): the knowledge base is a tree of
+folders + `.md` notes (e.g. `cv/augmentation/mixup.md`) holding durable domain knowledge; memory is
+short topic files of dev-process lessons. The agent doesn't just append — it can **read, search,
+tree, write, and edit** both (`kb_search` / `kb_tree` / `read_note` / `kb_write` / `kb_append` /
+`kb_edit`, and `memory_*` / `remember`), so it extends or fixes an existing note instead of
+duplicating. Each run's best result is also auto-stored as a retrievable case.
+
+Populating the stores is a **goal-driven agentic session**, not a one-shot write — see
+[`looplab curate`](cli-reference.md#curate) (and `looplab remember`), plus the `/api/curate`
+endpoint. The curator surveys what exists, then files new material where it belongs. So you can tell
+the Boss (or run `curate`) "research X and add it to the knowledge base", "consolidate this report
+into the KB, structured", or "you keep making this mistake — remember it".
 
 | Setting | Env | Default | Description |
 |---|---|---|---|

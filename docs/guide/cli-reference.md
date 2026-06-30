@@ -10,6 +10,8 @@ looplab resume          Resume a crashed/incomplete run by replay
 looplab inspect         Show the resolved config + best result
 looplab replay          Pure fold of the event log → state (read-only)
 looplab smoke           Ping the configured LLM endpoint (self-test)
+looplab curate          Agentic session: grow/organize the memory + knowledge base
+looplab remember        Record a dev-process lesson in cross-run memory
 looplab approve         Ratify a paused run (HITL / onboarding)
 looplab bench           Capability self-benchmark across tasks
 looplab ui              Serve the live React UI (needs the [ui] extra)
@@ -154,6 +156,41 @@ looplab smoke [--model ID]
 
 Use this before a `--backend llm` run to confirm the endpoint, model id, and tool-calling are wired
 correctly.
+
+---
+
+## `curate`
+
+Run a **goal-driven agentic session** that reads, edits, and grows the markdown **memory** +
+**knowledge base** — a full tool loop, not a single write. The curator first surveys what already
+exists (`kb_tree`/`list_notes`), reads the relevant notes, then files new material where it belongs
+(extending or editing an existing note rather than duplicating a topic). Both stores are on by
+default and need no path.
+
+```bash
+looplab curate "research mixup augmentation and add it to the KB"
+looplab curate "consolidate this report into the KB, structured" --from runs/demo/report.md
+looplab curate "..." --web            # allow web search while curating
+```
+
+| Option | Default | Meaning |
+|---|---|---|
+| `--from FILE` | — | File whose contents to file/structure into the stores (e.g. a run report) |
+| `--web / --no-web` | config | Allow web search during the session |
+| `--model ID` | config | Override the LLM model id |
+
+The knowledge base becomes a hierarchy of folders + `.md` notes (e.g. `cv/augmentation/mixup.md`);
+memory holds short topic files of dev-process lessons. Requires a reachable LLM endpoint.
+
+## `remember`
+
+Shortcut for `curate` aimed at memory: record a dev-process lesson (a recurring mistake, a gotcha)
+in cross-run memory. The curator places it into the right topic file, extending an existing note
+instead of duplicating.
+
+```bash
+looplab remember "always set random_state for reproducible CV splits"
+```
 
 ---
 

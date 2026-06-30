@@ -156,8 +156,8 @@ def test_past_cases_become_searchable_knowledge(tmp_path):
     kt = KnowledgeTools(knowledge_dir=None, cases_path=str(cases))
     out = kt.execute("kb_search", {"query": "polynomial degree"})
     assert "PAST CASE" in out and "degree" in out.lower()
-    # file tools degrade gracefully without a notes dir
-    assert "no notes directory" in kt.execute("grep", {"pattern": "x"}).lower()
+    # file tools degrade gracefully without a knowledge-base dir
+    assert "no knowledge base" in kt.execute("grep", {"pattern": "x"}).lower()
 
 
 class _FailsUnderConfirmDeveloper:
