@@ -196,9 +196,14 @@ def make_deep_researcher(settings, *, client=None, task=None) -> Optional[DeepRe
         from .run_tools import DataTools, RunTools
         providers.append(RunTools())
         providers.append(DataTools(task))
-    if getattr(settings, "knowledge_dir", None):
+    _kb_dir = settings.resolved_knowledge_dir() if hasattr(settings, "resolved_knowledge_dir") \
+        else getattr(settings, "knowledge_dir", None)
+    _mem_dir = settings.resolved_memory_dir() if hasattr(settings, "resolved_memory_dir") else None
+    if _kb_dir:
+        # Deep-Research can read web/arXiv AND fold findings straight into the KB: pass the memory
+        # dir too so `remember` is available for "research X and add it to the knowledge base".
         from .knowledge_tools import KnowledgeTools
-        providers.append(KnowledgeTools(settings.knowledge_dir))
+        providers.append(KnowledgeTools(_kb_dir, memory_dir=_mem_dir))
     if getattr(settings, "literature_search", False):
         from .literature import LiteratureTools
         providers.append(LiteratureTools(enabled=True))

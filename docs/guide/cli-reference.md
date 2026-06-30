@@ -76,8 +76,10 @@ defaults the backend to `llm`; offline kinds (`quadratic`/…) don't. Genesis ne
 | `--validate-agent / --no-validate-agent` | on | Validate external-agent output, retry with feedback, fall back to the in-house Developer |
 | `--agent-patch-gate / --no-agent-patch-gate` | on | Run the agent in a git worktree and surface-gate its diff |
 | `--agent-surface GLOBS` | `*.py` | Comma-separated edit-surface allow-list for the agent |
-| `--knowledge-dir DIR` | — | Notes directory for agentic retrieval (grep/kb_search/read tools) |
-| `--memory-dir DIR` | — | Cross-run case-memory directory |
+| `--memory / --no-memory` | on | Cross-run case memory (learn across runs). On by default — no path needed |
+| `--knowledge / --no-knowledge` | on | Knowledge base the agent can search + grow. On by default — no path needed |
+| `--knowledge-dir DIR` | `<home_dir>/knowledge` | Custom KB notes dir (grep/kb_search/read **+ kb_write/kb_append** tools) |
+| `--memory-dir DIR` | `<home_dir>/memory` | Custom cross-run case-memory dir |
 | `--max-seconds SECS` | — | Wall-clock budget; the run aborts cleanly when exceeded |
 | `--ablate-every N` | `0` | Run ablation-driven refinement every N improvements (0 = off) |
 | `--confirm-top-k K` | `0` | Confirm the top-k candidates under multiple seeds before finishing |

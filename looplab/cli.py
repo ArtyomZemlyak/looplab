@@ -221,7 +221,7 @@ def _engine(run_dir: Path, task: TaskAdapter, settings: Settings,
         confirm_seeds=settings.confirm_seeds,
         max_seconds=settings.max_seconds,
         max_eval_seconds=settings.max_eval_seconds,
-        memory_dir=settings.memory_dir,
+        memory_dir=settings.resolved_memory_dir(),
         require_approval=settings.require_approval,
         archive_resolution=settings.archive_resolution,
         onboarder=onboarder,
@@ -311,8 +311,12 @@ def run(
     agent_surface: Optional[str] = typer.Option(
         None, help="Comma-separated edit-surface globs for the agent (default '*.py')."),
     model: Optional[str] = typer.Option(None, help="LLM model id (when backend=llm)."),
-    knowledge_dir: Optional[str] = typer.Option(None, help="Notes dir for agentic retrieval."),
-    memory_dir: Optional[str] = typer.Option(None, help="Cross-run case memory dir."),
+    memory: Optional[bool] = typer.Option(
+        None, "--memory/--no-memory", help="Cross-run case memory (learn across runs). Default on."),
+    knowledge: Optional[bool] = typer.Option(
+        None, "--knowledge/--no-knowledge", help="Knowledge base the agent can search + grow. Default on."),
+    knowledge_dir: Optional[str] = typer.Option(None, help="Custom KB notes dir (default: <home_dir>/knowledge)."),
+    memory_dir: Optional[str] = typer.Option(None, help="Custom cross-run memory dir (default: <home_dir>/memory)."),
     max_seconds: Optional[float] = typer.Option(None, help="Wall-clock budget; abort when exceeded."),
     ablate_every: Optional[int] = typer.Option(None, help="Ablation refinement every N improves (0=off)."),
     require_approval: bool = typer.Option(False, help="HITL: pause for `approve` before finishing."),
@@ -354,6 +358,7 @@ def run(
                         ("developer_backend", developer_backend), ("agent_cmd", agent_cmd),
                         ("validate_agent", validate_agent), ("agent_patch_gate", agent_patch_gate),
                         ("llm_model", model), ("knowledge_dir", knowledge_dir),
+                        ("memory_enabled", memory), ("knowledge_enabled", knowledge),
                         ("memory_dir", memory_dir), ("max_seconds", max_seconds),
                         ("ablate_every", ablate_every), ("confirm_top_k", confirm_top_k),
                         ("confirm_seeds", confirm_seeds)):

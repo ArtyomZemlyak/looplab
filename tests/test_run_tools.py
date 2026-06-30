@@ -283,6 +283,9 @@ def test_make_roles_wraps_tool_researcher_by_default():
 
 
 def test_make_roles_flag_off_is_plain_researcher():
-    researcher, _ = make_roles(ToyTask(), Settings(backend="llm", unified_agent=False,
-                                                   researcher_tools=False))
+    # A plain researcher needs EVERY tool source off: run-introspection AND the now-default-on
+    # memory + knowledge stores (which also wrap the researcher as a tool-using agent).
+    researcher, _ = make_roles(ToyTask(), Settings(
+        backend="llm", unified_agent=False, researcher_tools=False,
+        memory_enabled=False, knowledge_enabled=False))
     assert isinstance(researcher, LLMResearcher)

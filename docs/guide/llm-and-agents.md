@@ -134,7 +134,9 @@ Give the agentic Researcher extra context and tools:
 
 | Setting | What it adds |
 |---|---|
-| `knowledge_dir` | A notes directory; the Researcher gets `grep` / `kb_search` / `list_notes` / `read_note` tools and chooses when to use them |
+| `knowledge_enabled` | (on) The knowledge base — the agent gets `grep` / `kb_search` / `list_notes` / `read_note` to consult it **and** `kb_write` / `kb_append` to grow it. Defaults to `<home_dir>/knowledge`; no path needed |
+| `memory_enabled` | (on) Cross-run case memory + the `remember` tool to record lessons. Defaults to `<home_dir>/memory` |
+| `knowledge_dir` / `memory_dir` | Point either store at a custom directory (overrides the `<home_dir>` default) |
 | `skills_dir` | A directory of `SKILL.md` files the Researcher can list and load |
 | `prompt_dir` | Editable, hot-reloaded role-prompt `.md` files (override the built-in prompts) |
 | `researcher_tools` | (on) Read its own experiments + the task data mid-loop |

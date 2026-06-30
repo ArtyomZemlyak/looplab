@@ -4,6 +4,8 @@ reproducibility. (No real secrets in P0, but the masking discipline is in place.
 """
 from __future__ import annotations
 
+from pathlib import Path
+
 from pydantic import Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -186,8 +188,17 @@ class Settings(BaseSettings):
     # runs), separate from wall-clock. Survives resume (summed from the event log). The real
     # guard against a silent multi-hour sweep when an eval is a minutes-hours training run.
     max_eval_seconds: float | None = None
-    # Cross-run memory (I19, ADR-10): if set, the best result of each run is stored as
-    # a case here, and the cases become retrievable knowledge for future runs.
+    # Base dir for the agent's persistent memory + knowledge base when their own dirs are not
+    # set explicitly. These stores are cross-RUN (and cross-project) by design — memory only
+    # pays off when it accumulates across runs, so the default lives OUTSIDE any single run dir.
+    # Override with LOOPLAB_HOME_DIR or set memory_dir/knowledge_dir directly for a custom layout.
+    home_dir: str = ".looplab"
+    # Cross-run memory (I19, ADR-10): the best result of each run is stored as a case, and the
+    # cases become retrievable knowledge for future runs. ON by default — no path needed; it
+    # defaults to `<home_dir>/memory`. Set `memory_enabled: false` to turn it off entirely, or
+    # `memory_dir` to point it somewhere specific. Use `resolved_memory_dir()` to read the effective
+    # path (honors the flag + the default) — never read `memory_dir` directly at a consumer.
+    memory_enabled: bool = True
     memory_dir: str | None = None
     # HITL (I21, ADR-11): pause for human approval of the final best before finishing.
     require_approval: bool = False
@@ -286,8 +297,12 @@ class Settings(BaseSettings):
     # learned instead of rediscovering it. Advisory; never changes best-selection. Needs the run's
     # own dir wired through (no-op for unit-built roles). Off = the legacy single-run view only.
     cross_run_tools: bool = True
-    # Agentic retrieval (ADR-16): if set, the LLM Researcher gets grep/kb_search/read
-    # tools over this directory of markdown notes and chooses when to use them.
+    # Knowledge base / agentic retrieval (ADR-16): a dir of markdown notes the agent can SEARCH
+    # (grep/kb_search/read) AND WRITE (kb_write/kb_append) — expert domain knowledge, structured
+    # reports, researched topics. ON by default — no path needed; it defaults to
+    # `<home_dir>/knowledge`. Set `knowledge_enabled: false` to turn it off, or `knowledge_dir`
+    # to point it somewhere specific. Use `resolved_knowledge_dir()` to read the effective path.
+    knowledge_enabled: bool = True
     knowledge_dir: str | None = None
     # E3 literature-grounded ideation (network-OPTIONAL): give the agentic Researcher an arXiv search
     # tool to ground ideas in real techniques. Off by default (egress is unreliable on some boxes);
@@ -317,6 +332,23 @@ class Settings(BaseSettings):
     # API key as a reference, never serialized as a value (ADR-11). Local servers
     # ignore it; default to a placeholder.
     llm_api_key: SecretStr | None = None
+
+    def resolved_memory_dir(self) -> str | None:
+        """Effective cross-run memory dir, honoring the enable flag + the default-path convention.
+        Returns None when memory is disabled (so a consumer's `if not dir` cleanly turns it off).
+        An explicit `memory_dir` wins; otherwise it defaults to `<home_dir>/memory`. The disable
+        flag beats an explicit path (so `memory_enabled: false` is a hard off regardless of dir)."""
+        if not self.memory_enabled:
+            return None
+        return self.memory_dir or str(Path(self.home_dir) / "memory")
+
+    def resolved_knowledge_dir(self) -> str | None:
+        """Effective knowledge-base dir, honoring the enable flag + the default-path convention.
+        Returns None when the KB is disabled. An explicit `knowledge_dir` wins; otherwise it
+        defaults to `<home_dir>/knowledge`. The disable flag beats an explicit path."""
+        if not self.knowledge_enabled:
+            return None
+        return self.knowledge_dir or str(Path(self.home_dir) / "knowledge")
 
     def masked_snapshot(self) -> dict:
         d = self.model_dump()

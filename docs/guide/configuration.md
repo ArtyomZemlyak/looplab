@@ -183,10 +183,20 @@ See [Concepts → Trust & sandbox](concepts.md#trust--the-sandbox) for what each
 
 ## Knowledge, research & memory
 
+Memory and the knowledge base are **on by default** — you don't have to wire up a path. Both
+default to a sub-dir of `home_dir` (`.looplab/memory`, `.looplab/knowledge`); set a `*_dir` only
+for a custom location, or flip the `*_enabled` flag off to disable a store entirely. The agent
+**writes** to both: it stores each run's best result as a case, and (when the KB is on) can grow the
+notes with `kb_write`/`kb_append` and record lessons with `remember` — so you can tell the Boss
+"research X and add it to the knowledge base" or "you keep making this mistake — remember it".
+
 | Setting | Env | Default | Description |
 |---|---|---|---|
-| `memory_dir` | `LOOPLAB_MEMORY_DIR` | — | Cross-run case library (best result of each run becomes retrievable knowledge) |
-| `knowledge_dir` | `LOOPLAB_KNOWLEDGE_DIR` | — | Notes dir; the Researcher gets grep/kb_search/read tools over it |
+| `memory_enabled` | `LOOPLAB_MEMORY_ENABLED` | `true` | Cross-run case memory (learn across runs). Off → no memory store |
+| `knowledge_enabled` | `LOOPLAB_KNOWLEDGE_ENABLED` | `true` | Knowledge base the agent can search **and grow**. Off → no KB tools |
+| `home_dir` | `LOOPLAB_HOME_DIR` | `.looplab` | Base dir for the default memory/knowledge stores |
+| `memory_dir` | `LOOPLAB_MEMORY_DIR` | `<home_dir>/memory` | Custom cross-run case-library dir (overrides the default) |
+| `knowledge_dir` | `LOOPLAB_KNOWLEDGE_DIR` | `<home_dir>/knowledge` | Custom KB notes dir; the agent gets grep/kb_search/read **+ kb_write/kb_append** over it |
 | `skills_dir` | `LOOPLAB_SKILLS_DIR` | — | Dir of `SKILL.md` files the Researcher can list/load |
 | `prompt_dir` | `LOOPLAB_PROMPT_DIR` | — | Dir of editable, hot-reloaded role-prompt `.md` files |
 | `researcher_tools` | `LOOPLAB_RESEARCHER_TOOLS` | `true` | Let the Researcher read its own experiments + task data mid-loop |

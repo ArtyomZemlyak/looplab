@@ -269,7 +269,11 @@ def make_roles(task: TaskAdapter, settings, run_dir=None):
             developer.prompts = prompts
 
     # Tool providers for the agentic Researcher: run-introspection + knowledge + memory + skills.
-    cases_path = str(Path(settings.memory_dir) / "cases.jsonl") if settings.memory_dir else None
+    # Memory + KB resolve through the enable-flag + default-path helpers (ON by default, no path
+    # needed) — never read settings.memory_dir/knowledge_dir directly here.
+    _mem_dir = settings.resolved_memory_dir()
+    _kb_dir = settings.resolved_knowledge_dir()
+    cases_path = str(Path(_mem_dir) / "cases.jsonl") if _mem_dir else None
     providers = []
     # Run-introspection (default on): let the Researcher read its OWN experiments + the task data
     # mid-loop instead of optimizing blind. This alone makes the Researcher a tool-using agent.
@@ -282,9 +286,9 @@ def make_roles(task: TaskAdapter, settings, run_dir=None):
     if run_dir is not None and getattr(settings, "cross_run_tools", True):
         from .run_tools import SiblingRunTools
         providers.append(SiblingRunTools(Path(run_dir).parent, Path(run_dir).name))
-    if settings.knowledge_dir or cases_path:
+    if _kb_dir or cases_path:
         from .knowledge_tools import KnowledgeTools
-        providers.append(KnowledgeTools(settings.knowledge_dir, cases_path=cases_path))
+        providers.append(KnowledgeTools(_kb_dir, cases_path=cases_path, memory_dir=_mem_dir))
     if settings.skills_dir:
         from .skills import SkillTools
         providers.append(SkillTools(settings.skills_dir))

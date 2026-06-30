@@ -195,8 +195,11 @@ def render_template(kind: str = "dataset") -> str:
         ("llm_model", "qwen3:8b", "model id (only used when backend: llm)"),
         ("llm_base_url", "http://localhost:11434/v1", "any OpenAI-compatible endpoint"),
         ("developer_backend", "default", "default | opencode | aider | goose | continue"),
-        ("knowledge_dir", "null", "dir of markdown notes the agent may search"),
-        ("memory_dir", "null", "cross-run case memory dir (learn across runs)"),
+        ("memory_enabled", "true", "cross-run case memory (learn across runs); on by default"),
+        ("knowledge_enabled", "true", "knowledge base the agent can search + grow; on by default"),
+        ("home_dir", ".looplab", "base dir for default memory/knowledge stores"),
+        ("knowledge_dir", "null", "custom KB notes dir (null = <home_dir>/knowledge)"),
+        ("memory_dir", "null", "custom memory dir (null = <home_dir>/memory)"),
     ]
     shown = {k for k, _, _ in common} | {"llm_api_key"}
     lines: list[str] = [

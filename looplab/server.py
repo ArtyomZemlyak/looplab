@@ -1375,7 +1375,7 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
             return {"ok": False, "error": str(e), "model": s.llm_model, "base_url": s.llm_base_url}
         saved = None
         if body.get("save"):
-            kd = _load_ui_settings().get("knowledge_dir") or Settings().knowledge_dir
+            kd = _load_ui_settings().get("knowledge_dir") or Settings().resolved_knowledge_dir()
             if kd:
                 d = Path(kd); d.mkdir(parents=True, exist_ok=True)
                 slug = "".join(c if c.isalnum() else "-" for c in topic.lower())[:48].strip("-") or "topic"
@@ -1952,6 +1952,18 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
                     providers.append(DataTools(load_task(snap)))
             except Exception:  # noqa: BLE001 - tools are best-effort; RunTools alone is fine
                 pass
+            # Knowledge base + memory (read AND write): so an operator can tell the Boss in chat
+            # "add this report to the KB", "research X and save it", or "you keep making this
+            # mistake — remember it". Resolves through the enable-flags + default-path helpers.
+            try:
+                _kb = s.resolved_knowledge_dir()
+                _mem = s.resolved_memory_dir()
+                if _kb or _mem:
+                    from .knowledge_tools import KnowledgeTools
+                    _cases = str(Path(_mem) / "cases.jsonl") if _mem else None
+                    providers.append(KnowledgeTools(_kb, cases_path=_cases, memory_dir=_mem))
+            except Exception:  # noqa: BLE001 - KB tools are best-effort
+                pass
             tools = providers[0] if len(providers) == 1 else CompositeTools(providers)
             tools.bind_state(st, st.nodes.get(nid) if nid is not None else None)
             emit_spec = {"type": "function", "function": {
@@ -2322,7 +2334,8 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
     # ------------------------------------------------------------------ authoring (files-as-truth)
     def _author_dir(kind: str) -> Optional[Path]:
         s = Settings()
-        m = {"prompts": s.prompt_dir, "skills": s.skills_dir, "knowledge": s.knowledge_dir}
+        m = {"prompts": s.prompt_dir, "skills": s.skills_dir,
+             "knowledge": s.resolved_knowledge_dir()}
         d = m.get(kind)
         return Path(d) if d else None
 
@@ -2355,9 +2368,10 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
     @app.get("/api/memory")
     def memory():
         s = Settings()
-        if not s.memory_dir:
+        mem = s.resolved_memory_dir()
+        if not mem:
             return {"dir": None, "cases": []}
-        md = Path(s.memory_dir)
+        md = Path(mem)
         cases: list[dict] = []
         for f in sorted(md.glob("*.jsonl")) if md.exists() else []:
             cases.extend(iter_jsonl(f))

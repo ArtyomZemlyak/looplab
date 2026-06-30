@@ -136,7 +136,10 @@ class ToolUsingResearcher:
     _SYSTEM = ("You are an ML researcher. You MAY call the retrieval tools to consult "
                "prior knowledge, then call `emit` exactly once with your final Idea "
                "(operator, params, rationale, and a short reusable `theme` slug that groups "
-               "this experiment with related ones, e.g. \"loss-fn\" or \"regularization\"). ")
+               "this experiment with related ones, e.g. \"loss-fn\" or \"regularization\"). "
+               "If you learn something reusable — a recurring failure to avoid, or a domain fact "
+               "worth keeping — record it with `remember` (memory) or `kb_write`/`kb_append` "
+               "(knowledge base) so future runs benefit, when those tools are available. ")
 
     def __init__(self, client, tools, space_hint: str = "",
                  bounds: Optional[dict] = None, parser: str = "tool_call",
