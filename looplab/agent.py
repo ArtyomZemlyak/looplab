@@ -156,14 +156,13 @@ def drive_tool_loop(client, tools, messages: list, emit_spec: dict, *,
     for turn_idx in turns:
         if time_budget_s and (time.monotonic() - started) > time_budget_s:
             break                       # out of wall-clock budget -> finalize from what we have
-        if context_budget_chars:        # H4: keep the growing tool-call history under budget
-            if auto_summary:
-                from .context_budget import compact_history
-                messages = compact_history(messages, context_budget_chars,
-                                           _summarizer(client))
-            else:
-                from .context_budget import truncate_history
-                messages = truncate_history(messages, context_budget_chars)
+        if auto_summary:                # C2: summarize the stale middle once the history grows long
+            from .context_budget import DEFAULT_SUMMARY_CHARS, compact_history
+            messages = compact_history(messages, context_budget_chars or DEFAULT_SUMMARY_CHARS,
+                                       _summarizer(client))
+        elif context_budget_chars:      # H4: else just middle-truncate stale tool output
+            from .context_budget import truncate_history
+            messages = truncate_history(messages, context_budget_chars)
         # C1: re-surface the agent's own plan periodically so a long loop can't drift off-goal.
         if current_plan and plan_reinject_every and turn_idx and turn_idx % plan_reinject_every == 0:
             messages.append({"role": "system",
@@ -248,9 +247,9 @@ def loop_opts_from_settings(settings) -> dict:
         "stuck_detection": bool(g(settings, "agent_stuck_detection", True)),
         "stuck_repeat": int(g(settings, "agent_stuck_repeat", 4)),
         "stuck_alternate": int(g(settings, "agent_stuck_alternate", 4)),
-        "self_plan": bool(g(settings, "agent_self_plan", False)),
+        "self_plan": bool(g(settings, "agent_self_plan", True)),
         "plan_reinject_every": int(g(settings, "agent_plan_reinject_every", 5)),
-        "auto_summary": bool(g(settings, "agent_auto_summary", False)),
+        "auto_summary": bool(g(settings, "agent_auto_summary", True)),
     }
 
 

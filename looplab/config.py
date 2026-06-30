@@ -280,13 +280,15 @@ class Settings(BaseSettings):
     agent_stuck_alternate: int = 4     # ping-pong cycles between two calls that count as "stuck" (>=2)
     # C1 · Self-plan (TodoWrite-style): expose an `update_plan` tool so a long-running agent keeps its
     # OWN working TODO and re-surfaces it every `agent_plan_reinject_every` turns — keeps the goal in
-    # view across a long loop so the agent "writes its own context" (Claude Code style).
-    agent_self_plan: bool = False
+    # view across a long loop so the agent "writes its own context" (Claude Code style). ON by default.
+    agent_self_plan: bool = True
     agent_plan_reinject_every: int = 5
-    # C2 · Auto-summary: when the tool-loop history exceeds `context_budget_chars`, LLM-summarize the
-    # stale middle instead of only middle-truncating it (needs `context_budget_chars` > 0; falls back
-    # to truncation on any summarizer error). Costs one extra model call per over-budget turn.
-    agent_auto_summary: bool = False
+    # C2 · Auto-summary (ON by default): when the tool-loop history grows long, LLM-summarize the
+    # stale middle instead of only middle-truncating it. The trigger is `context_budget_chars` if set,
+    # else a built-in high-water mark (context_budget.DEFAULT_SUMMARY_CHARS ≈ 120k chars) so short
+    # loops are untouched. Falls back to truncation on any summarizer error; one extra model call per
+    # over-budget turn.
+    agent_auto_summary: bool = True
     # Observability (ADR-17): capture each LLM call's full prompt + completion into the active
     # span (spans.jsonl) so the UI can show exactly what the model read and wrote per node.
     # Diagnostics only — `replay.fold` never reads spans. Default on for local single-user; set

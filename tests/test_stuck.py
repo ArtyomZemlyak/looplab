@@ -166,8 +166,16 @@ def test_compact_history_noop_under_budget():
 def test_loop_opts_from_settings_defaults():
     class _S:
         pass
-    opts = loop_opts_from_settings(_S())
+    opts = loop_opts_from_settings(_S())     # bare object -> getattr fallbacks (match config defaults)
     assert opts["stuck_detection"] is True
     assert opts["stuck_repeat"] == 4
-    assert opts["self_plan"] is False
-    assert opts["auto_summary"] is False
+    assert opts["self_plan"] is True
+    assert opts["auto_summary"] is True
+
+
+def test_config_enables_plan_and_summary_by_default():
+    from looplab.config import Settings
+    s = Settings()
+    assert s.agent_self_plan is True
+    assert s.agent_auto_summary is True
+    assert s.agent_stuck_detection is True

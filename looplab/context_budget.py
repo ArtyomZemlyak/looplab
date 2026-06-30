@@ -6,6 +6,11 @@ turns intact), which is where stale tool output accumulates. Pure + deterministi
 """
 from __future__ import annotations
 
+# High-water mark (chars) at which auto-summary compacts a long tool-loop history when no explicit
+# `context_budget_chars` is set. ~120k chars ≈ ~30k tokens: short loops never hit it; a genuinely
+# long agent run gets its stale middle summarized before it can crowd the context window.
+DEFAULT_SUMMARY_CHARS = 120_000
+
 
 def truncate_history(messages: list[dict], max_chars: int, *, keep_last: int = 2,
                      per_msg_cap: int = 400) -> list[dict]:

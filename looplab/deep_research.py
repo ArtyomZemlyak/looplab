@@ -71,7 +71,8 @@ class DeepResearcher:
 
     def __init__(self, client, tools=None, parser: str = "tool_call", max_turns: int = 0,
                  context_budget_chars: int = 0, time_budget_s: float = 0.0,
-                 stuck_detection: bool = True, stuck_repeat: int = 4, stuck_alternate: int = 4):
+                 stuck_detection: bool = True, stuck_repeat: int = 4, stuck_alternate: int = 4,
+                 auto_summary: bool = True):
         self.client = client
         self.tools = tools
         self.parser = parser
@@ -82,6 +83,7 @@ class DeepResearcher:
         self.stuck_detection = stuck_detection
         self.stuck_repeat = stuck_repeat
         self.stuck_alternate = stuck_alternate
+        self.auto_summary = auto_summary    # C2: summarize the stale middle when the memo trace grows
 
     def _emit_spec(self) -> dict:
         return {"type": "function", "function": {
@@ -114,7 +116,13 @@ class DeepResearcher:
             for _ in turns:
                 if self.time_budget_s and (_time.monotonic() - started) > self.time_budget_s:
                     break               # out of wall-clock budget -> force a memo from what we have
-                if self.context_budget_chars:
+                if self.auto_summary:
+                    from .agent import _summarizer
+                    from .context_budget import DEFAULT_SUMMARY_CHARS, compact_history
+                    messages = compact_history(
+                        messages, self.context_budget_chars or DEFAULT_SUMMARY_CHARS,
+                        _summarizer(self.client))
+                elif self.context_budget_chars:
                     from .context_budget import truncate_history
                     messages = truncate_history(messages, self.context_budget_chars)
                 msg = self.client.chat(messages, tool_specs, tool_choice="auto")
@@ -234,4 +242,5 @@ def make_deep_researcher(settings, *, client=None, task=None) -> Optional[DeepRe
                           time_budget_s=getattr(settings, "agent_time_budget_s", 0.0),
                           stuck_detection=bool(getattr(settings, "agent_stuck_detection", True)),
                           stuck_repeat=int(getattr(settings, "agent_stuck_repeat", 4)),
-                          stuck_alternate=int(getattr(settings, "agent_stuck_alternate", 4)))
+                          stuck_alternate=int(getattr(settings, "agent_stuck_alternate", 4)),
+                          auto_summary=bool(getattr(settings, "agent_auto_summary", True)))
