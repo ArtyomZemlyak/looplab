@@ -25,6 +25,7 @@ Design (why this is a thin *converter*, not a new source of truth):
 from __future__ import annotations
 
 import json
+import math
 from pathlib import Path
 from typing import Any, Optional
 
@@ -76,11 +77,16 @@ def load_document(path: Path) -> tuple[dict, dict, Optional[str]]:
 def coerce_scalar(raw: str) -> Any:
     """Turn a ``--set key=value`` string into a typed value: try JSON (so ``3``, ``true``, ``1.5``,
     ``["*.py"]``, ``{"a":1}`` parse as their natural types), else keep the literal string (so
-    ``--set llm_model=qwen3:8b`` stays a string and doesn't need quoting)."""
+    ``--set llm_model=qwen3:8b`` stays a string and doesn't need quoting). JSON's non-finite
+    extensions (``NaN``/``Infinity``/``-Infinity``) are kept as the literal string a user clearly
+    meant, never coerced to a float — those are never valid setting values."""
     try:
-        return json.loads(raw)
+        val = json.loads(raw)
     except (json.JSONDecodeError, ValueError):
         return raw
+    if isinstance(val, float) and not math.isfinite(val):   # NaN / inf / -inf -> literal string
+        return raw
+    return val
 
 
 def parse_sets(pairs: list[str]) -> dict:
@@ -97,16 +103,21 @@ def parse_sets(pairs: list[str]) -> dict:
         if key not in valid:
             raise ValueError(f"unknown setting {key!r}; see `looplab init` or "
                              f"docs/guide/configuration.md for the full list")
-        out[key] = coerce_scalar(value)
+        out[key] = coerce_scalar(value.strip())
     return out
 
 
-# Convenience CLI flags that map to a task field, so simple runs need no file. `--data` maps to the
-# field that names the input for that kind (repo edits a tree; everything else points at a data file).
+# `--data` only names an input for the two kinds that take one: a repo (an editable tree) and a
+# dataset (a data file/dir). Mapping it onto any other kind would inject a field the model drops
+# silently (pydantic extra="ignore"), losing the path with no warning — so we reject it instead.
+_DATA_FIELD = {"repo": "editable_path", "dataset": "data_path"}
+
+
 def apply_task_flags(task: dict, *, kind: Optional[str], goal: Optional[str],
                      direction: Optional[str], data: Optional[str]) -> dict:
     """Overlay the task-building CLI flags onto a (possibly empty) task dict. Only provided flags are
-    applied, so they refine a file without clobbering its other fields."""
+    applied, so they refine a file without clobbering its other fields. Raises ValueError if ``--data``
+    is given for a kind that has nowhere to put it (so the path is never silently dropped)."""
     task = dict(task)
     if kind is not None:
         task["kind"] = kind
@@ -115,7 +126,14 @@ def apply_task_flags(task: dict, *, kind: Optional[str], goal: Optional[str],
     if direction is not None:
         task["direction"] = direction
     if data is not None:
-        field = "editable_path" if task.get("kind") == "repo" else "data_path"
+        k = task.get("kind")
+        # kind unknown yet (Genesis will pick it) -> default to data_path; it's overwritten when
+        # Genesis authors the task and passed to it as a hint anyway.
+        field = _DATA_FIELD.get(k, "data_path") if k in (None, *_DATA_FIELD) else None
+        if field is None:
+            raise ValueError(
+                f"--data is only meaningful for a dataset or repo task, not kind={k!r}. "
+                f"Put the data in a config file, or describe its location in --goal for Genesis.")
         task[field] = data
     return task
 
@@ -129,38 +147,82 @@ def build_settings(file_settings: dict, typed_overrides: dict, sets: dict) -> Se
 
 
 # --- `looplab init` template -------------------------------------------------------------------
-# The three example task blocks correspond to the user-facing difficulty ladder: describe-and-run
-# (point at data, the agent writes everything), run-an-existing-script (a repo with its own eval),
-# and a pure offline objective (no LLM, no data). The simplest is active; the rest are commented.
-_TASK_EXAMPLES = {
-    "dataset": """\
-task:
-  # ── Describe-and-run: point at a data file and say what to predict in plain words.
-  #    The agent writes the whole solution and picks the metric. Simplest real-data start.
-  kind: dataset
-  goal: predict `target` from the features; pick the metric you judge most appropriate
-  direction: max          # max (accuracy/score) or min (error/loss)
-  data_path: data.csv     # CSV/Parquet with your columns (a `target` column here)
-
-  # ── Run-an-existing-script: tune/edit a repo you already have; success = the repo's own eval.
-  # kind: repo
-  # goal: tune config.json to maximize the eval metric
-  # direction: max
-  # editable_path: ./my_project       # the repo the agent may edit
-  # edit_surface: ["*.json"]          # globs the agent is allowed to touch
-  # protect: ["train.py"]             # files it must never edit (the grader/metric)
-  # eval:
-  #   command: ["python", "train.py"] # how to score a candidate
-  #   metric: {kind: stdout_json, key: metric}
-  #   timeout: 60
-
-  # ── Pure offline objective: no LLM, no data — a toy numeric optimum (great for a smoke test).
-  # kind: quadratic
-  # goal: minimize (x-3)^2 + (y+1)^2
-  # direction: min
-  # bounds: {x: [-10.0, 10.0], y: [-10.0, 10.0]}
-""",
+# An ACTIVE (uncommented) task: block per kind, so `looplab init --kind <k>` always scaffolds the
+# kind the user asked for (not a one-size-fits-all dataset block). The four hand-authored kinds are
+# the common hand-written entry points; the synthetic/templated kinds get a concise correct starter.
+_TASK_BLOCKS = {
+    "dataset": (
+        "  # Describe-and-run: point at data, say what to predict; the agent writes the whole solution.\n"
+        "  kind: dataset\n"
+        "  goal: predict `target` from the features; pick the metric you judge most appropriate\n"
+        "  direction: max          # max (accuracy/score) or min (error/loss)\n"
+        "  data_path: data.csv     # a file OR folder; multiple inputs -> data: {train: a.csv, extra: b/}"),
+    "repo": (
+        "  # Edit/tune an existing repo; success = the repo's own eval. The agent edits only edit_surface.\n"
+        "  kind: repo\n"
+        "  goal: improve the eval metric\n"
+        "  direction: max\n"
+        "  editable_path: ./my_project        # the repo the agent may edit\n"
+        '  edit_surface: ["**/*.py"]          # globs the agent is allowed to touch\n'
+        '  protect: ["eval.py"]               # files it must never edit (the grader/metric)\n'
+        "  eval:\n"
+        '    command: ["python", "eval.py"]   # must print a final line like {"metric": 0.93}\n'
+        "    metric: {kind: stdout_json, key: metric}\n"
+        "    timeout: 1800"),
+    "quadratic": (
+        "  # Pure offline numeric objective — no LLM, no data (great for a smoke test).\n"
+        "  kind: quadratic\n"
+        "  goal: minimize (x-3)^2 + (y+1)^2\n"
+        "  direction: min\n"
+        "  bounds: {x: [-10.0, 10.0], y: [-10.0, 10.0]}"),
+    "mlebench_real": (
+        "  # A real Kaggle / MLE-bench competition (official split + grader). See docs/MLEBENCH.md.\n"
+        "  kind: mlebench_real\n"
+        "  competition: spooky-author-identification   # the FULL Kaggle slug\n"
+        "  direction: max"),
+    "regression": (
+        "  # Synthetic polynomial+ridge model selection via CV (templated knobs, not free-form code).\n"
+        "  kind: regression\n"
+        "  goal: select polynomial degree + ridge lambda minimizing 5-fold CV MSE\n"
+        "  direction: min\n"
+        "  max_degree: 6\n"
+        "  cv_k: 5"),
+    "classification": (
+        "  # Synthetic classifier tuning via K-fold CV.\n"
+        "  kind: classification\n"
+        "  goal: tune a logistic-regression learner to maximize K-fold CV accuracy\n"
+        "  direction: max\n"
+        "  cv_k: 5"),
+    "timeseries": (
+        "  # Synthetic forecaster smoothing/seasonality via backtest.\n"
+        "  kind: timeseries\n"
+        "  goal: choose smoothing weight + seasonal period to minimize backtest MASE\n"
+        "  direction: min\n"
+        "  period: 7\n"
+        "  max_period: 12"),
+    "code_regression": (
+        "  # The LLM writes a numpy script scored by a held-out grader (needs settings.backend: llm).\n"
+        "  kind: code_regression\n"
+        "  goal: write numpy code fitting a polynomial+ridge model minimizing 5-fold CV MSE\n"
+        "  direction: min\n"
+        "  max_degree: 6\n"
+        "  cv_k: 5"),
+    "mlebench": (
+        "  # Competition-shaped synthetic task with a private held-out grader the agent can't see.\n"
+        "  kind: mlebench\n"
+        "  goal: train a classifier and maximize held-out accuracy (private grader)\n"
+        "  direction: max"),
 }
+
+
+def _task_block(kind: str) -> str:
+    """The active `task:` block for `kind`. Falls back to a minimal but correctly-typed stub for any
+    kind without a hand-authored block, so the scaffold always matches the requested kind."""
+    body = _TASK_BLOCKS.get(kind)
+    if body is None:
+        body = (f"  kind: {kind}\n  goal: describe what to optimize\n  direction: max\n"
+                f"  # see docs/guide/tasks.md for the fields this kind accepts")
+    return "task:\n" + body
 
 
 def _render_default(name: str, field) -> str:
@@ -185,7 +247,7 @@ def render_template(kind: str = "dataset") -> str:
     """Build a documented config template: a curated, commented `settings:` section with the knobs
     most runs touch, then a complete (commented-out) appendix of every remaining setting at its
     default — so the file is both approachable and exhaustive, doubling as living documentation."""
-    task_block = _TASK_EXAMPLES.get(kind, _TASK_EXAMPLES["dataset"])
+    task_block = _task_block(kind)
     # Curated common knobs shown live with a one-line comment each.
     common = [
         ("backend", "toy", "toy = offline optimizer (no LLM); llm = drive a real model"),
@@ -209,6 +271,8 @@ def render_template(kind: str = "dataset") -> str:
         "out: runs/demo            # where the run is written (resumable from this dir alone)",
         "",
         task_block.rstrip("\n"),
+        "  # Other task shapes: re-run `looplab init --kind repo|quadratic|mlebench_real|...`,",
+        "  # or see docs/guide/tasks.md for every kind and its fields.",
         "",
         "settings:",
         "  # ── Common knobs ──────────────────────────────────────────────────────────────────────",

@@ -347,8 +347,11 @@ def run(
         except ValueError as e:
             raise typer.BadParameter(f"could not read {task_file}: {e}")
     # 2. Overlay the task-building flags onto the (possibly empty) file task.
-    task_dict = appconfig.apply_task_flags(
-        file_task, kind=kind, goal=goal, direction=direction, data=data)
+    try:
+        task_dict = appconfig.apply_task_flags(
+            file_task, kind=kind, goal=goal, direction=direction, data=data)
+    except ValueError as e:
+        raise typer.BadParameter(str(e))
     # 3. Merge engine settings (file < typed flags < --set). Typed bool flags only override when set,
     # so a settings: file can still enable them.
     typed: dict = {}
@@ -378,7 +381,8 @@ def run(
     # is affected). --kind does NOT skip it: it PINS the kind and Genesis fills the rest within it;
     # describe data locations in the goal and Genesis authors the mounts (no --data needed). Opt out
     # with --no-genesis (then --kind + flags are used as written), or run a complete file with no --goal.
-    backend_chosen = backend is not None or "backend" in file_settings or "backend" in sets
+    backend_chosen = (backend is not None or "backend" in file_settings or "backend" in sets
+                      or "LOOPLAB_BACKEND" in os.environ)
     if genesis and goal is not None:
         from . import genesis as _genesis
         try:
@@ -387,8 +391,14 @@ def run(
             raise typer.BadParameter(
                 f"Genesis needs an LLM to author the task ({e}). Point LOOPLAB_LLM_BASE_URL/--model "
                 f"at a reachable model, or use --no-genesis to build the task from --kind/--set alone.")
+        # Pass the file's task: block (if any) as a draft so --goal refines it instead of discarding it.
         result = _genesis.author_task(goal, client=client, kinds=_TASK_KINDS, kind=kind, data=data,
-                                      direction=direction, parser=settings.llm_parser)
+                                      direction=direction, draft=(file_task or None),
+                                      parser=settings.llm_parser)
+        if result.error:    # transport/endpoint failure -> NOT a vague goal; say so plainly
+            raise typer.BadParameter(
+                f"Genesis couldn't reach the model to author the task ({result.error}). Check "
+                f"LOOPLAB_LLM_BASE_URL/--model, or use --no-genesis to build it from --kind/--set.")
         if not result.kind:
             typer.echo("Genesis couldn't author a task from that goal. "
                        + (result.reply or "Add detail (e.g. where the data is), or pass --kind."))
@@ -399,6 +409,12 @@ def run(
         if not backend_chosen and result.kind in _genesis.GENERATIVE_KINDS:
             settings.backend = "llm"
         typer.echo(f"Genesis -> kind={result.kind}: {result.rationale or result.reply}".rstrip())
+    # A goal described in words but no kind, with Genesis off: do NOT silently fall back to the
+    # quadratic toy optimizer (validate_task's default) — that would run nonsense on a real goal and
+    # drop --data. Make the user pin a kind or let Genesis infer it.
+    if goal is not None and not task_dict.get("kind"):
+        raise typer.BadParameter(
+            "no task kind for this goal: pass --kind, or drop --no-genesis to let Genesis infer it.")
     # 4. Validate the resolved task, then resolve the run dir: explicit --out > file out: > default.
     if not task_dict:
         raise typer.BadParameter(
@@ -632,11 +648,17 @@ def replay(run_dir: Path = typer.Argument(...)):
 @app.command()
 def inspect(run_dir: Path = typer.Argument(...)):
     """Show the resolved config snapshot + the run's best result."""
-    store = _require_run_dir(run_dir)
     snap = run_dir / "config.snapshot.json"
+    events = run_dir / "events.jsonl"
+    # Tolerate a run that crashed after writing config.snapshot.json but before its first event: still
+    # show the config. Only error when the dir is neither — a typo'd path, not a real (if partial) run.
+    if not snap.exists() and not events.exists():
+        typer.echo(f"no run found at {run_dir} (no config.snapshot.json or events.jsonl).")
+        raise typer.Exit(2)
     if snap.exists():
         typer.echo(snap.read_text(encoding="utf-8"))
-    _print_result(fold(store.read_all()))
+    if events.exists():
+        _print_result(fold(EventStore(events).read_all()))
 
 
 @app.command()

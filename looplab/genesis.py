@@ -14,6 +14,7 @@ kind from the goal instead of making the human pick.
 """
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -82,6 +83,7 @@ class GenesisResult:
     task: dict = field(default_factory=dict)
     rationale: str = ""
     reply: str = ""
+    error: str = ""           # set when the model/endpoint failed (vs an empty task from a vague goal)
 
     @property
     def kind(self) -> Optional[str]:
@@ -90,11 +92,14 @@ class GenesisResult:
 
 def author_task(goal: str, *, client, kinds: tuple[str, ...], data: Optional[str] = None,
                 repo: Optional[str] = None, direction: Optional[str] = None,
-                kind: Optional[str] = None, parser: str = "tool_call") -> GenesisResult:
+                kind: Optional[str] = None, draft: Optional[dict] = None,
+                parser: str = "tool_call") -> GenesisResult:
     """Ask the model to author an inline task from a plain goal. With `kind=None` it also CHOOSES the
     kind; with `kind` set it is CONSTRAINED to that kind and only fills the rest (the user pinned the
-    type, Genesis does the rest within it). Returns a GenesisResult; on a vague goal the task may be
-    empty and `reply` carries a clarifying question. Never raises on a model hiccup."""
+    type, Genesis does the rest within it). `draft` is an existing task dict (e.g. from a config file)
+    to refine in place rather than discard. Returns a GenesisResult; on a vague goal the task may be
+    empty with a clarifying `reply`, and on a model/endpoint failure `error` is set (so the caller can
+    tell 'reach the model' apart from 'your goal was too vague')."""
     hints = []
     if data:
         hints.append(f"The user named a data/input path: {data} (use it; add others they mention).")
@@ -102,6 +107,9 @@ def author_task(goal: str, *, client, kinds: tuple[str, ...], data: Optional[str
         hints.append(f"The user's repository is at: {repo}")
     if direction:
         hints.append(f"Optimization direction: {direction}")
+    if draft:
+        hints.append("Refine this existing task draft in place, keeping fields the user didn't ask to "
+                     f"change:\n{json.dumps(draft)[:1200]}")
     hint_block = ("\n" + "\n".join(hints)) if hints else ""
     if kind:
         kind_rule = (f"The user has PINNED the task kind to `{kind}` — author a task of EXACTLY that "
@@ -116,8 +124,10 @@ def author_task(goal: str, *, client, kinds: tuple[str, ...], data: Optional[str
     messages = [{"role": "system", "content": sys_prompt}, {"role": "user", "content": user}]
     try:
         plan = parse_structured(client, messages, _TaskPlan, parser)
-    except Exception:  # noqa: BLE001 - any parse/transport failure -> empty result (caller reports it)
-        return GenesisResult()
+    except Exception as e:  # noqa: BLE001 - transport/parse failure: report it as an ERROR, distinct
+        # from a vague goal (which parses fine but returns an empty task). The caller surfaces the two
+        # differently — "reach the model" vs "your goal was too vague".
+        return GenesisResult(error=str(e))
     task = plan.task if isinstance(plan.task, dict) else {}
     # Honor the pin: the kind the user gave wins over whatever the model emitted.
     if task and kind:
@@ -128,4 +138,8 @@ def author_task(goal: str, *, client, kinds: tuple[str, ...], data: Optional[str
         task["direction"] = direction
     if task and "goal" not in task:
         task["goal"] = goal
+    # A user-given --data path the model dropped: put it where this kind expects it, so an explicit
+    # path is never silently lost.
+    if task and data and not (task.get("data_path") or task.get("editable_path") or task.get("data")):
+        task["editable_path" if task.get("kind") == "repo" else "data_path"] = data
     return GenesisResult(task=task, rationale=plan.rationale, reply=plan.reply)

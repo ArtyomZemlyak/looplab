@@ -160,13 +160,119 @@ def test_run_goal_only_infers_kind_and_runs(tmp_path, monkeypatch):
     assert "finished=True" in result.output                   # …and actually ran it
 
 
-def test_run_no_genesis_falls_back_without_llm(tmp_path):
-    # --no-genesis must NOT call the model: a goal with no kind uses the legacy default kind.
+def test_run_no_genesis_no_kind_requires_kind(tmp_path):
+    # --no-genesis with a goal but no kind must NOT silently become a quadratic toy run — it errors.
     result = runner.invoke(app, [
-        "run", "--no-genesis", "--goal", "anything", "-s", "max_nodes=1", "--out", str(tmp_path / "n"),
+        "run", "--no-genesis", "--goal", "predict churn from data.csv",
+        "-s", "max_nodes=1", "--out", str(tmp_path / "n"),
     ])
+    assert result.exit_code != 0
+    assert "no task kind" in result.output
+
+
+def _stub_author(monkeypatch, **task):
+    import looplab.cli as cli
+    import looplab.genesis as genesis
+    monkeypatch.setattr(cli, "make_llm_client", lambda settings, **k: object())
+    monkeypatch.setattr(genesis, "author_task",
+                        lambda goal, **k: genesis.GenesisResult(task=dict(task), rationale="r"))
+
+
+def _capture_backend(monkeypatch):
+    """Replace the engine factory so a (would-be LLM) run aborts right after we read its backend."""
+    import looplab.cli as cli
+    seen = {}
+
+    def _cap(out, task, settings, crash_after):
+        seen["backend"] = settings.backend
+        raise RuntimeError("stop-before-run")
+    monkeypatch.setattr(cli, "_engine", _cap)
+    return seen
+
+
+def test_run_generative_kind_bumps_backend_to_llm(tmp_path, monkeypatch):
+    # A generative inferred kind with no chosen backend must flip the run to backend=llm (cli.py:399).
+    # code_regression is generative AND validates offline (synthetic data), so the engine is reached.
+    _stub_author(monkeypatch, kind="code_regression", goal="write code", direction="min")
+    seen = _capture_backend(monkeypatch)
+    runner.invoke(app, ["run", "--goal", "fit a model in code", "--out", str(tmp_path / "g")])
+    assert seen.get("backend") == "llm"
+
+
+def test_run_generative_kind_respects_explicit_backend(tmp_path, monkeypatch):
+    # An explicit --backend toy must NOT be overridden by the generative-kind bump.
+    _stub_author(monkeypatch, kind="code_regression", goal="write code", direction="min")
+    seen = _capture_backend(monkeypatch)
+    runner.invoke(app, ["run", "--goal", "fit a model in code", "--backend", "toy",
+                        "--out", str(tmp_path / "g")])
+    assert seen.get("backend") == "toy"
+
+
+def test_run_genesis_endpoint_error_is_attributed_to_the_model(tmp_path, monkeypatch):
+    import looplab.cli as cli
+    import looplab.genesis as genesis
+    monkeypatch.setattr(cli, "make_llm_client", lambda settings, **k: object())
+    monkeypatch.setattr(genesis, "author_task",
+                        lambda goal, **k: genesis.GenesisResult(error="connection refused"))
+    result = runner.invoke(app, ["run", "--goal", "predict x", "--out", str(tmp_path / "e")])
+    assert result.exit_code != 0
+    assert "couldn't reach the model" in result.output and "connection refused" in result.output
+
+
+def test_run_genesis_vague_goal_asks_for_detail(tmp_path, monkeypatch):
+    import looplab.cli as cli
+    import looplab.genesis as genesis
+    monkeypatch.setattr(cli, "make_llm_client", lambda settings, **k: object())
+    monkeypatch.setattr(genesis, "author_task",
+                        lambda goal, **k: genesis.GenesisResult(task={}, reply="What data do you have?"))
+    result = runner.invoke(app, ["run", "--goal", "make it good", "--out", str(tmp_path / "v")])
+    assert result.exit_code != 0
+    assert "couldn't author a task" in result.output and "What data do you have?" in result.output
+
+
+def test_file_settings_override_env(tmp_path, monkeypatch):
+    # The documented precedence: a file's settings: block wins over a LOOPLAB_* env var.
+    monkeypatch.setenv("LOOPLAB_MAX_NODES", "99")
+    cfg = tmp_path / "r.yaml"
+    cfg.write_text("task:\n  kind: quadratic\n  goal: g\n  direction: min\nsettings:\n  max_nodes: 2\n")
+    result = runner.invoke(app, ["run", str(cfg), "--out", str(tmp_path / "r")])
     assert result.exit_code == 0, result.output
-    assert "Genesis ->" not in result.output
+    assert "nodes=2" in result.output          # file beat env (99)
+
+
+def test_out_flag_overrides_file_out(tmp_path):
+    cfg = tmp_path / "r.yaml"
+    cfg.write_text(f"out: {tmp_path / 'fromfile'}\n"
+                   "task:\n  kind: quadratic\n  goal: g\n  direction: min\nsettings:\n  max_nodes: 1\n")
+    result = runner.invoke(app, ["run", str(cfg), "--out", str(tmp_path / "fromflag")])
+    assert result.exit_code == 0, result.output
+    assert (tmp_path / "fromflag" / "events.jsonl").exists()     # --out won
+    assert not (tmp_path / "fromfile").exists()
+
+
+def test_data_flag_rejected_for_incompatible_kind(tmp_path):
+    result = runner.invoke(app, [
+        "run", "--no-genesis", "--kind", "quadratic", "--goal", "g", "--data", "x.csv",
+        "--out", str(tmp_path / "d"),
+    ])
+    assert result.exit_code != 0
+    assert "only meaningful for a dataset or repo" in result.output
+
+
+def test_init_scaffolds_the_requested_kind(tmp_path):
+    import yaml
+    dest = tmp_path / "r.yaml"
+    result = runner.invoke(app, ["init", "--out", str(dest), "--kind", "repo"])
+    assert result.exit_code == 0, result.output
+    doc = yaml.safe_load(dest.read_text())
+    assert doc["task"]["kind"] == "repo"        # active block matches --kind (not always dataset)
+
+
+def test_set_value_stripped_and_nonfinite_kept_as_string():
+    from looplab.appconfig import coerce_scalar, parse_sets
+    assert parse_sets(["llm_model =  qwen3:8b "]) == {"llm_model": "qwen3:8b"}   # key + value stripped
+    assert coerce_scalar("NaN") == "NaN" and coerce_scalar("Infinity") == "Infinity"
+    assert coerce_scalar("null") is None and coerce_scalar("3") == 3
 
 
 def test_run_kind_pins_genesis(tmp_path, monkeypatch):

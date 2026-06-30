@@ -72,7 +72,7 @@ from `--kind`/`--set` alone (offline), or run a complete file with no `--goal`.
 | `--kind NAME` | — | Task kind (`quadratic`, `dataset`, `repo`, … — see [Tasks](tasks.md)). With `--goal` it **pins** the kind for Genesis; omit it to let Genesis pick. |
 | `--genesis / --no-genesis` | on | With `--goal`, let the LLM author the task (pinning to `--kind` if given, and reading data locations from your words). `--no-genesis` builds it from `--kind`/`--set` alone. |
 | `--direction min\|max` | — | Optimization direction |
-| `--data PATH` | — | Optional shortcut for your data/repo path; under Genesis you can instead name the location(s) in `--goal` |
+| `--data PATH` | — | Shortcut for a **dataset**'s data path or a **repo**'s path (rejected for other kinds); under Genesis you can instead name the location(s) in `--goal` |
 | `-s, --set KEY=VALUE` | — | Override **any** engine setting (repeatable); same keys as `settings:` / `LOOPLAB_*` |
 | `--out DIR` | the file's `out:` or `runs/run_local` | Run directory (created if missing) |
 | `--max-nodes N` | `8` | Node (candidate) budget for the search |

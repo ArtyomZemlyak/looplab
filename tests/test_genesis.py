@@ -46,12 +46,36 @@ def test_author_vague_goal_returns_empty_with_reply():
     assert res.reply == "What data do you have?"
 
 
-def test_author_survives_model_error():
+def test_author_reports_endpoint_error_distinct_from_vague_goal():
+    # A transport/model failure sets `error` (and leaves task empty) so the CLI can say "reach the
+    # model" instead of mis-blaming the user's goal.
     class _Boom:
         def complete_tool(self, messages, schema):
-            raise RuntimeError("endpoint down")
-    res = author_task("anything", client=_Boom(), kinds=KINDS)
+            raise RuntimeError("connection refused")
+    res = author_task("predict churn from data.csv", client=_Boom(), kinds=KINDS)
     assert res.kind is None and res.task == {}
+    assert res.error and "connection refused" in res.error
+    assert res.reply == ""          # not a vague-goal clarifying reply
+
+
+def test_author_backfills_explicit_data_path_when_model_omits_it():
+    client = _ScriptedClient({"task": {"kind": "dataset", "goal": "predict", "direction": "max"}})
+    res = author_task("predict from my file", client=client, kinds=KINDS, data="/d/train.csv")
+    assert res.task["data_path"] == "/d/train.csv"     # the named --data path is never lost
+
+
+def test_author_backfills_editable_path_for_repo():
+    client = _ScriptedClient({"task": {"kind": "repo", "goal": "improve", "direction": "max"}})
+    res = author_task("improve my repo", client=client, kinds=KINDS, data="/my/repo", kind="repo")
+    assert res.task["editable_path"] == "/my/repo"
+
+
+def test_author_refines_a_draft_in_place():
+    client = _ScriptedClient({"task": {"kind": "repo", "goal": "g", "direction": "max"}})
+    author_task("make it faster", client=client, kinds=KINDS,
+                draft={"kind": "repo", "eval": {"command": ["python", "score.py"]}})
+    blob = " ".join(m["content"] for m in client.seen)
+    assert "draft" in blob and "score.py" in blob      # the file's task block reached the model
 
 
 def test_generative_kinds_membership():
