@@ -134,9 +134,9 @@ export function hyperImportance(state) {
   return rows.sort((a, b) => b.imp - a.imp)
 }
 
-// Normalize free text to a compact, single-line caption. The card's .change-chip CSS already
-// ellipsizes at 168px, so we return the FULL text (the card's title tooltip shows it whole) and only
-// guard against a pathologically long string bloating the tooltip.
+// Normalize free text to a compact, single-line caption: collapse whitespace and cap the length.
+// The card's .change-chip CSS ellipsizes the VISIBLE chip at 168px; this additionally caps the string
+// at `max` chars so an enormous rationale can't bloat the hover-title tooltip.
 function brief(text, max = 140) {
   const s = String(text || '').replace(/\s+/g, ' ').trim()
   return s.length > max ? s.slice(0, max - 1).trimEnd() + '…' : s
@@ -158,7 +158,6 @@ export function nodeChip(node, nodes) {
   // a node with a dangling 2nd parent id isn't mis-classified as a merge and left with no chip.
   const parents = (node.parent_ids || []).map(p => nodes[p]).filter(Boolean)
   if (parents.length > 1) return ''                        // real merge → renders its ⊕ combines line
-  const why = brief(node.idea?.rationale)                  // the agent's "why this experiment", one line
   if (isSweep(node)) {
     const sp = node.idea?.space || {}
     const keys = Object.keys(sp)
@@ -172,14 +171,14 @@ export function nodeChip(node, nodes) {
   }
   const parent = parents[0]
   if (!parent) {                                           // draft / root — nothing to diff against
-    const what = why || brief(node.idea?.theme)
+    const what = brief(node.idea?.rationale) || brief(node.idea?.theme)
     return what ? `baseline · ${what}` : 'baseline'        // describe the baseline, don't just label it
   }
   if (node.idea?.change_summary) return brief(node.idea.change_summary)
   const lbl = paramDiffLabel(paramDiff(node, parent))      // diff vs the resolved parent directly
   if (lbl !== '—') return lbl
   // No param change vs the parent — still carry an explanatory caption rather than a blank card.
-  return why || operatorMeta(node.operator).label
+  return brief(node.idea?.rationale) || operatorMeta(node.operator).label
 }
 
 // Nodes that ran but made things worse than their parent (regressions) — the "tried, didn't help".

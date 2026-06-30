@@ -45,18 +45,21 @@ export default function Settings({ onBack }) {
     }
     return s
   }, [form, defaults])
-  const unsaved = useMemo(() => form && saved &&
-    (JSON.stringify(form) !== JSON.stringify(saved) || JSON.stringify(agentControl) !== JSON.stringify(savedAC)),
-    [form, saved, agentControl, savedAC])
-  // Per-field UNSAVED set (form value ≠ last-saved) — drives the amber dot that DOES clear on Save,
-  // distinct from `dirty` above (value ≠ engine default, which persists after saving a custom value).
+  // Per-field UNSAVED set — the field's VALUE or its governance (agent_control) differs from last-saved.
+  // Drives the amber dot that DOES clear on Save (distinct from `dirty`, which is value ≠ engine default
+  // and persists). Folding agent_control in means toggling an R/S/B pill also marks its field unsaved.
   const unsavedKeys = useMemo(() => {
     const s = new Set()
     if (form && saved) for (const k of Object.keys(form)) {
       if (JSON.stringify(form[k]) !== JSON.stringify(saved[k])) s.add(k)
     }
+    const acKeys = new Set([...Object.keys(agentControl || {}), ...Object.keys(savedAC || {})])
+    for (const k of acKeys) {
+      if (JSON.stringify((agentControl || {})[k] || []) !== JSON.stringify((savedAC || {})[k] || [])) s.add(k)
+    }
     return s
-  }, [form, saved])
+  }, [form, saved, agentControl, savedAC])
+  const unsaved = unsavedKeys.size > 0   // page-level flag derives from the per-field set (single source)
 
   const onChange = (k, v) => setForm(f => ({ ...f, [k]: v }))
   // Toggle whether a role may change a setting (the governance pills).
@@ -102,8 +105,8 @@ export default function Settings({ onBack }) {
           <div className="muted" style={{ marginBottom: 14 }}>
             These are saved as defaults and applied to every new run via <code>LOOPLAB_*</code> env.
             Per-run overrides are still available in the <b>New run</b> dialog.
-            A <span style={{ color: 'var(--working)' }}>●</span> marks an <b>unsaved</b> edit (clears on Save);
-            a <span style={{ color: 'var(--accent)', opacity: .6 }}>●</span> marks a saved value that differs from the engine default.
+            A <span className="sf-dot unsaved">●</span> marks an <b>unsaved</b> edit (clears on Save);
+            a <span className="sf-dot fromdefault">●</span> marks a saved value that differs from the engine default.
             The <span className="agpill on" style={{ position: 'static' }}>R</span><span className="agpill on" style={{ position: 'static' }}>S</span><span className="agpill on" style={{ position: 'static' }}>B</span> pills set whether the <b>R</b>esearcher (per experiment), <b>S</b>trategist, or <b>B</b>oss may change a setting at runtime.
           </div>
           <SettingsForm form={form} onChange={onChange} dirty={dirty} unsaved={unsavedKeys} agentControl={agentControl} onToggleAgent={onToggleAgent}

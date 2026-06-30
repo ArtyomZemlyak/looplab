@@ -353,7 +353,7 @@ export function ConfigPanel({ runId, state, live, onClose, onToast }) {
           {engineLive
             ? <>This run is <b>live</b>. Saving updates its <code>config.snapshot.json</code>, but the running engine keeps its current settings until it restarts — use <b>Pause &amp; resume</b> to stop it (the current experiment finishes first) and continue with the new settings.</>
             : <>Edits are saved to this run's <code>config.snapshot.json</code> and applied on the next <b>resume</b>.</>}
-          {' '}<span style={{ color: 'var(--accent)' }}>●</span> = changed.
+          {' '}<span className="sf-dot unsaved">●</span> = changed.
         </div>
         <div className="toolbar" style={{ marginBottom: 10 }}>
           <span className="spacer" style={{ flex: 1 }} />

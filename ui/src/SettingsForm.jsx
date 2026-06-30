@@ -21,6 +21,14 @@ function AgentPills({ f, granted, onToggleAgent }) {
   </div>
 }
 
+// One source of truth for the two-tier change dot (unsaved wins over differs-from-default), shared by
+// the per-field label and the per-tab header so they can never disagree.
+function changeDot(unsaved, changed) {
+  if (unsaved) return <span className="sf-dot unsaved" title="unsaved — clears on Save">●</span>
+  if (changed) return <span className="sf-dot fromdefault" title="differs from the engine default">●</span>
+  return null
+}
+
 function Field({ f, value, onChange, changed, unsaved, granted, onToggleAgent, secretSet, onClearSecret }) {
   const set = (v) => onChange(f.key, v)
   let input
@@ -46,10 +54,7 @@ function Field({ f, value, onChange, changed, unsaved, granted, onToggleAgent, s
                    step={f.type === 'float' ? 'any' : undefined} value={value ?? ''}
                    placeholder={f.placeholder || ''} onChange={e => set(e.target.value)} />
   }
-  // Two distinct markers, unsaved WINS: amber ● = edited but not yet saved (clears on Save);
-  // faint ● = the saved value differs from the engine default (persists — "what you've customized").
-  const dot = unsaved ? <span className="sf-dot unsaved" title="unsaved change — clears on Save">●</span>
-    : changed ? <span className="sf-dot fromdefault" title="differs from the engine default">●</span> : null
+  const dot = changeDot(unsaved, changed)   // amber (unsaved) wins over faint (differs-from-default)
   return <div className={'sf-field' + (unsaved ? ' unsaved' : changed ? ' changed' : '')}>
     <div className="sf-label">{f.label}{dot}
       <AgentPills f={f} granted={granted || []} onToggleAgent={onToggleAgent} /></div>
@@ -78,9 +83,7 @@ export default function SettingsForm({ form, onChange, dirty, unsaved, only, age
       {groups.map((gr, i) => <div key={gr.title}
         className={'tab' + (i === idx ? ' active' : '')}
         onClick={() => setActive(i)} title={gr.sub || ''}>
-        {gr.title}{groupUnsaved(gr)
-          ? <span className="sf-dot unsaved" title="has unsaved changes">●</span>
-          : groupChanged(gr) ? <span className="sf-dot fromdefault" title="has values changed from default">●</span> : null}
+        {gr.title}{changeDot(groupUnsaved(gr), groupChanged(gr))}
       </div>)}
     </div>
     <div className="sf-group" key={g.title}>

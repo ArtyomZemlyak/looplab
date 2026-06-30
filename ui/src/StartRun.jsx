@@ -5,7 +5,7 @@ import SettingsForm from './SettingsForm.jsx'
 import { OpIcon } from './icons.jsx'
 
 // Compact subset shown by default in the launch dialog; "all settings" expands to the full form.
-const QUICK_GROUPS = ['Search & policy', 'LLM', 'Budgets & confirmation']
+const QUICK_GROUPS = ['Search & policy', 'LLM', 'Agent loop & models', 'Budgets & confirmation']
 
 const slug = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '').slice(0, 32)
 
