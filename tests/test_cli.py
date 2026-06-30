@@ -266,6 +266,26 @@ def test_run_refuses_to_reenter_a_finished_run(tmp_path):
     assert "resume" in flat and "inspect" in flat
 
 
+def test_run_finished_guard_fires_before_genesis(tmp_path, monkeypatch):
+    # The finished-run guard runs BEFORE Genesis, so a re-run into an occupied dir fails immediately
+    # instead of spending a whole Genesis agent loop. If Genesis were reached, make_llm_client (stubbed
+    # to raise) would change the error — assert we get the occupied-dir message instead.
+    import looplab.cli as cli
+    out = tmp_path / "g"
+    first = runner.invoke(app, [
+        "run", "--no-genesis", "--kind", "quadratic", "--goal", "min x^2", "--direction", "min",
+        "--set", "max_nodes=2", "--out", str(out)])
+    assert first.exit_code == 0, first.output
+
+    def _boom(*a, **k):
+        raise AssertionError("Genesis (make_llm_client) must not be reached before the finished guard")
+    monkeypatch.setattr(cli, "make_llm_client", _boom)
+    second = runner.invoke(app, ["run", "--goal", "predict something", "--out", str(out)])
+    assert second.exit_code != 0
+    flat = " ".join(second.output.translate({ord(c): " " for c in "│╭╮╰╯─"}).split())
+    assert "already holds a finished run" in flat
+
+
 def test_file_settings_override_env(tmp_path, monkeypatch):
     # The documented precedence: a file's settings: block wins over a LOOPLAB_* env var.
     monkeypatch.setenv("LOOPLAB_MAX_NODES", "99")

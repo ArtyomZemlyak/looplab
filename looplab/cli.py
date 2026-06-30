@@ -398,6 +398,25 @@ def run(
     # is affected). --kind does NOT skip it: it PINS the kind and Genesis fills the rest within it;
     # describe data locations in the goal and Genesis authors the mounts (no --data needed). Opt out
     # with --no-genesis (then --kind + flags are used as written), or run a complete file with no --goal.
+    # Resolve the run dir now and REFUSE up front if it already holds a finished run — do this BEFORE
+    # Genesis so a re-run into an occupied dir (often the default runs/run_local) fails immediately
+    # instead of spending a whole Genesis agent loop only to be rejected. Re-entering a finished dir
+    # would otherwise fold the old event log, see `finished`, and exit 0 printing the OLD result — so a
+    # user who (e.g.) fixed a bad path and re-ran into the same dir would watch the previous run
+    # "finish immediately" and never get their new run. An UNFINISHED dir still continues (the
+    # documented `run` = start-or-continue); `resume` is unaffected (the UI relies on it re-entering a
+    # finished run).
+    out = out or (Path(file_out) if file_out else Path("runs/run_local"))
+    _events = out / "events.jsonl"
+    if _events.exists():
+        _prior = fold(EventStore(_events).read_all())
+        if _prior.finished:
+            _why = (f" (it ended with reason={_prior.stop_reason})"
+                    if _prior.stop_reason else "")
+            raise typer.BadParameter(
+                f"{out} already holds a finished run{_why}. To start a NEW run, pass --out <dir> or "
+                f"remove {out}; to continue or view this one use `looplab resume {out}` / "
+                f"`looplab inspect {out}`.")
     backend_chosen = (backend is not None or "backend" in file_settings or "backend" in sets
                       or "LOOPLAB_BACKEND" in os.environ)
     if genesis and goal is not None:
@@ -446,23 +465,7 @@ def run(
         task = validate_task(task_dict)
     except (ValueError, KeyError, TypeError) as e:
         raise typer.BadParameter(f"invalid task: {e}")
-    out = out or (Path(file_out) if file_out else Path("runs/run_local"))
-    # A fresh `run` must not silently RE-ENTER an already-finished run dir. Re-entering folds the old
-    # event log, sees `finished`, and exits 0 printing the OLD result — so a user who (e.g.) fixed a
-    # bad path and re-ran into the same dir (often the default runs/run_local) would watch the previous
-    # run "finish immediately" and never get their new run. Refuse with a clear next step instead. An
-    # UNFINISHED dir still continues (the documented `run` = start-or-continue), and `resume` is
-    # unaffected (the UI relies on it re-entering a finished run).
-    _events = out / "events.jsonl"
-    if _events.exists():
-        _prior = fold(EventStore(_events).read_all())
-        if _prior.finished:
-            _why = (f" (it ended with reason={_prior.stop_reason})"
-                    if _prior.stop_reason else "")
-            raise typer.BadParameter(
-                f"{out} already holds a finished run{_why}. To start a NEW run, pass --out <dir> or "
-                f"remove {out}; to continue or view this one use `looplab resume {out}` / "
-                f"`looplab inspect {out}`.")
+    # `out` was resolved and the finished-run guard already applied above (before Genesis).
     out.mkdir(parents=True, exist_ok=True)
     eng = _engine(out, task, settings, crash_after)
     with _engine_singleton(out) as ok:

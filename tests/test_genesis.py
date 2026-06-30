@@ -179,6 +179,25 @@ def test_scout_roots_widens_to_named_paths(tmp_path):
     assert f in roots and f.parent in roots          # the named path AND its parent are reachable
 
 
+def test_scout_roots_never_widens_to_filesystem_root():
+    from pathlib import Path
+    # An incidental slash in prose (a ratio/units, NOT a path) must NOT add `/` as a root — that would
+    # let the scout read any allowlisted file anywhere on the machine (root is an ancestor of all).
+    for goal in ("maximize throughput in req/s", "fit f(x)=x^2/2", "optimize cost per km/h"):
+        roots = _scout_roots(goal, data=None, repo=None)
+        assert Path("/") not in roots, (goal, roots)
+
+
+def test_scout_roots_drops_nonexistent_goal_paths_but_keeps_explicit():
+    from pathlib import Path
+    # A made-up absolute path in the GOAL (doesn't exist) is dropped; an explicit --data/--repo path
+    # keeps typo-recovery (its parent is added so the agent can find the real file nearby).
+    g_roots = _scout_roots("predict from /no/such/ghost.csv", data=None, repo=None)
+    assert Path("/no/such/ghost.csv") not in g_roots and Path("/no/such") not in g_roots
+    d_roots = _scout_roots("improve my repo", data="/no/such/repo", repo=None)
+    assert Path("/no/such/repo") in d_roots and Path("/no/such") in d_roots
+
+
 class _ToolClient:
     """A fake tool-driving client: first .chat() inspects the disk, second emits the task. Records the
     system prompt so a test can assert the headless/e2e contract reached the model."""

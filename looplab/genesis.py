@@ -195,17 +195,34 @@ def _scout_roots(goal: str, data: Optional[str], repo: Optional[str]) -> list[Pa
     """The directories the read-only scout is allowed to browse: the user's home + CWD (the common
     case) PLUS every location the user named — the explicit --data/--repo paths and any path-ish token
     in the goal — so the agent can actually reach and verify a dataset/repo that lives outside home
-    (e.g. /mnt/data). RepoScoutTools bounds reads to these roots and refuses anything outside them."""
+    (e.g. /mnt/data). RepoScoutTools bounds reads to these roots and refuses anything outside them.
+
+    Two safeguards keep that bound real: the filesystem ROOT (`/`) is never added — it is an ancestor
+    of everything, so allowing it would let the scout read any allowlisted file anywhere — and
+    GOAL-extracted tokens are only added when they actually exist on disk. The path-ish regex happily
+    matches incidental slashes in prose ("req/s", "f(x)=x^2/2"), whose parent is `/`; requiring
+    existence (and dropping `/`) stops a stray slash from widening the scope to the whole machine. The
+    explicit --data/--repo args are deliberate, so they keep typo-recovery (their parent is added even
+    when the exact path is wrong, so the agent can find the real file nearby)."""
     roots: list[Path] = [Path.home(), Path.cwd()]
-    named: list[str] = [p for p in (data, repo) if isinstance(p, str) and p.strip()]
-    named += _PATHISH.findall(goal or "")
-    for raw in named:
+
+    def _add(raw: str, *, require_exists: bool) -> None:
         try:
             p = Path(_expanded(raw))
         except (OSError, ValueError):
-            continue
-        roots.append(p)
-        roots.append(p.parent)         # so the agent can find the real file/repo NEXT TO a wrong path
+            return
+        for c in (p, p.parent):
+            if c == c.parent:               # the filesystem root ('/') — never widen the scope to it
+                continue
+            if require_exists and not c.exists():
+                continue
+            roots.append(c)
+
+    for arg in (data, repo):                # explicit paths: deliberate -> keep typo-recovery
+        if isinstance(arg, str) and arg.strip():
+            _add(arg, require_exists=False)
+    for tok in _PATHISH.findall(goal or ""):  # goal prose: only ground paths that REALLY exist
+        _add(tok, require_exists=True)
     return roots
 
 
