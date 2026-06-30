@@ -49,13 +49,22 @@ def _version_cb(value: bool) -> None:
         raise typer.Exit()
 
 
-@app.callback()
+@app.callback(invoke_without_command=True)
 def _main(
+    ctx: typer.Context,
     version: bool = typer.Option(
         False, "--version", "-V", callback=_version_cb, is_eager=True,
         help="Show the LoopLab version and exit."),
 ) -> None:
-    """LoopLab CLI: run / resume / inspect / replay a research loop. See `looplab COMMAND --help`."""
+    """LoopLab CLI: run / resume / inspect / replay a research loop. See `looplab COMMAND --help`.
+
+    Run bare `looplab` (no command) to open the terminal control plane (the `tui` command) — a
+    chat-first dashboard to start, watch and steer runs."""
+    if ctx.invoked_subcommand is None:
+        # Bare `looplab` -> the terminal control plane. `looplab --help` / `--version` are handled by
+        # Typer's eager options before we get here, so this fires only on a genuine no-arg invocation.
+        from .tui import main as tui_main
+        raise typer.Exit(tui_main(None, os.environ.get("LOOPLAB_RUN_ROOT", "runs")))
 
 
 def _choice(value: str, choices: tuple[str, ...], param: str) -> str:

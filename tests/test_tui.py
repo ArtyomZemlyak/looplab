@@ -96,7 +96,82 @@ def test_action_needs_engine():
     assert tui.action_needs_engine({}) is False
 
 
+def test_is_critical():
+    assert tui.is_critical({"type": "run_abort"}) is True
+    assert tui.is_critical({"type": "node_abort"}) is True
+    assert tui.is_critical({"type": "hint"}) is False
+    assert tui.is_critical({}) is False
+
+
+def test_parse_pick():
+    # apply-all forms
+    assert tui.parse_pick("", 3) == [0, 1, 2]
+    assert tui.parse_pick("y", 3) == [0, 1, 2]
+    assert tui.parse_pick("all", 2) == [0, 1]
+    # cancel forms
+    assert tui.parse_pick("n", 3) == []
+    assert tui.parse_pick("cancel", 3) == []
+    # explicit picks: 1-based in, 0-based out, deduped + ordered, out-of-range dropped
+    assert tui.parse_pick("1,3", 3) == [0, 2]
+    assert tui.parse_pick("3 1 3", 3) == [2, 0]
+    assert tui.parse_pick("2", 3) == [1]
+    assert tui.parse_pick("9", 3) == []          # out of range -> nothing
+    # unrecognised -> None (caller re-asks)
+    assert tui.parse_pick("huh?", 3) is None
+
+
+def test_signatures_detect_change():
+    # dashboard signature changes when a drawn field changes (nodes advanced), not on untouched data
+    a = [{"run_id": "r", "phase": "search", "nodes": 3, "engine_running": True, "mtime": 1}]
+    b = [{"run_id": "r", "phase": "search", "nodes": 4, "engine_running": True, "mtime": 2}]
+    assert tui.dashboard_sig(a) == tui.dashboard_sig(list(a))
+    assert tui.dashboard_sig(a) != tui.dashboard_sig(b)
+    # run signature changes when an in-flight node appears or the phase flips
+    s1 = {"phase": "search", "nodes": {"0": {"status": "done", "metric": 1.0}}}
+    s2 = {"phase": "search", "nodes": {"0": {"status": "done", "metric": 1.0},
+                                       "1": {"status": "pending"}}}
+    assert tui.run_sig(s1) != tui.run_sig(s2)
+    assert tui.run_sig(s1) == tui.run_sig(dict(s1))
+
+
 # ----------------------------------------------------------------------------- Api job polling
+
+def test_live_prompt_refreshes_then_reads(monkeypatch):
+    """The live loop must redraw when the data signature changes while waiting, and still return the
+    typed line. Drive it with a real OS pipe as stdin so select() behaves like a terminal."""
+    import os
+    import sys
+    import threading
+
+    if not hasattr(__import__("select"), "select"):
+        pytest.skip("no select()")
+
+    api = tui.Api("http://x")
+    app = tui.Tui.__new__(tui.Tui)                          # bypass __init__ (no server needed)
+    app.api = api
+    from rich.console import Console
+    app.console = Console(file=open(os.devnull, "w"))       # swallow drawing output
+
+    r_fd, w_fd = os.pipe()
+    monkeypatch.setattr(sys, "stdin", os.fdopen(r_fd, "r"))
+    monkeypatch.setattr(app, "_interactive", lambda: True)
+
+    ticks = {"n": 0}
+    renders = {"n": 0}
+
+    def fetch():
+        ticks["n"] += 1
+        return ticks["n"]                                   # data changes every poll -> every poll redraws
+
+    def render(_data):
+        renders["n"] += 1
+
+    # After a couple of refresh ticks, "type" a line into the pipe so the prompt returns it.
+    threading.Timer(0.12, lambda: (os.write(w_fd, b"hello\n"), os.close(w_fd))).start()
+    line, data = app._live_prompt("» ", fetch=fetch, render=render, sig=lambda d: d, interval=0.02)
+    assert line == "hello"
+    assert renders["n"] >= 2                                # initial draw + at least one live refresh
+
 
 def test_await_job_fast_path():
     """A result that is already the final dict (no job_id) is returned unchanged — no polling."""

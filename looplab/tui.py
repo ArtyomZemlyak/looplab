@@ -26,6 +26,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import select
 import socket
 import subprocess
 import sys
@@ -33,7 +34,7 @@ import time
 import urllib.error
 import urllib.request
 from contextlib import closing
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 # ----------------------------------------------------------------------------- HTTP client
 
@@ -266,6 +267,55 @@ def action_needs_engine(action: dict) -> bool:
     return (action or {}).get("type") in _NEEDS_RESUME
 
 
+# Destructive verbs worth a louder confirm marker — the Python twin of the web Dock's isCritical.
+_CRITICAL = {"run_abort", "node_abort", "reset", "run_reopened"}
+
+
+def is_critical(action: dict) -> bool:
+    return (action or {}).get("type") in _CRITICAL
+
+
+def parse_pick(text: str, n: int) -> Optional[list[int]]:
+    """Parse a confirm-prompt answer into the 0-based indices to apply, over `n` proposed actions:
+      ""/"y"/"yes"/"a"/"all"  -> everything ([0..n-1])
+      "n"/"no"/"cancel"/"q"   -> nothing ([])
+      "1,3" / "1 3" / "2"     -> just those (1-based in, deduped, in order, out-of-range dropped)
+    Returns None when the answer is unrecognised (caller re-asks). Pure, so the "tap to pick" behaviour
+    is unit-tested without a terminal."""
+    t = (text or "").strip().lower()
+    if t in ("", "y", "yes", "a", "all", "apply"):
+        return list(range(n))
+    if t in ("n", "no", "cancel", "q", "quit", "none"):
+        return []
+    nums = re.findall(r"\d+", t)
+    if not nums:
+        return None
+    seen: list[int] = []
+    for s in nums:
+        i = int(s) - 1
+        if 0 <= i < n and i not in seen:
+            seen.append(i)
+    return seen
+
+
+def dashboard_sig(runs: list) -> tuple:
+    """A cheap signature of the runs list — only what's drawn — so the live dashboard redraws when (and
+    only when) something visible changed (no flicker while idle)."""
+    return tuple((r.get("run_id"), r.get("phase"), r.get("finished"), r.get("engine_running"),
+                  r.get("nodes"), r.get("best_confirmed"), r.get("best_metric"), r.get("mtime"))
+                 for r in runs)
+
+
+def run_sig(state: dict) -> tuple:
+    """A cheap signature of a run's live state — phase/engine/node-counts/best — so the run view redraws
+    only on a real change."""
+    nodes = state.get("nodes") or {}
+    in_flight = sum(1 for n in nodes.values() if n.get("status") == "pending")
+    scored = sum(1 for n in nodes.values() if n.get("metric") is not None and not n.get("error"))
+    return (state.get("phase"), state.get("finished"), state.get("engine_running"),
+            len(nodes), scored, in_flight, state.get("best_node_id"), state.get("stop_reason"))
+
+
 # ----------------------------------------------------------------------------- server autostart
 
 def _free_port() -> int:
@@ -323,6 +373,55 @@ class Tui:
         self.run_root = run_root
         self.console = Console()
 
+    # ---- input: blocking, and live (auto-refresh while waiting) -------------
+    def _interactive(self) -> bool:
+        """True only on a real terminal where we can poll stdin for live refresh. Piped stdin (tests,
+        scripts) or no select() falls back to a plain blocking prompt — deterministic, no redraws."""
+        try:
+            return sys.stdin.isatty() and sys.stdout.isatty() and hasattr(select, "select")
+        except (ValueError, OSError):
+            return False
+
+    def _prompt(self, prompt: str) -> Optional[str]:
+        """A single blocking prompt. Returns the stripped line, or None on EOF/^C (caller treats as
+        quit/back)."""
+        try:
+            return self.console.input(prompt).strip()
+        except (EOFError, KeyboardInterrupt):
+            return None
+
+    def _live_prompt(self, prompt: str, fetch: Callable[[], Any], render: Callable[[Any], None],
+                     sig: Callable[[Any], Any], interval: float = 2.0):
+        """Render fetch()→render(), then wait for a line; while waiting, re-fetch every `interval`s and
+        redraw ONLY when the signature changes (so an idle screen never flickers and a live run updates
+        itself the instant something happens). Returns (line, data): `line` is the stripped input or None
+        on EOF/^C; `data` is the latest fetched payload the render reflects (so a selection maps to what's
+        on screen). Non-tty → a plain blocking prompt over one fetch (no refresh)."""
+        data = fetch()
+        render(data)
+        if not self._interactive():
+            self.console.print(prompt, end="")
+            try:
+                line = sys.stdin.readline()
+            except (KeyboardInterrupt, OSError):
+                return None, data
+            return (None if line == "" else line.strip()), data
+        cur = sig(data)
+        self.console.print(prompt, end="")
+        while True:
+            try:
+                ready, _, _ = select.select([sys.stdin], [], [], interval)
+            except (KeyboardInterrupt, OSError):
+                return None, data
+            if ready:
+                line = sys.stdin.readline()
+                return (None if line == "" else line.strip()), data
+            new = fetch()
+            if sig(new) != cur:
+                data, cur = new, sig(new)
+                render(data)                                 # something changed → redraw + reprint prompt
+                self.console.print(prompt, end="")
+
     # ---- small rich builders ------------------------------------------------
     def _rule(self, title: str):
         from rich.rule import Rule
@@ -372,32 +471,39 @@ class Tui:
             lines.append(f"[dim]stopped: {state['stop_reason']}[/dim]")
         return Panel("\n".join(lines), title=f"[bold]{run_id}[/bold]", border_style=colour, expand=True)
 
-    # ---- data fetch with a spinner -----------------------------------------
+    # ---- data fetch (quiet: the live loop polls on a timer, so no per-poll spinner/flicker) ---------
     def _fetch_runs(self) -> list:
-        with self.console.status("loading runs…", spinner="dots"):
-            try:
-                return sort_runs(self.api.get("/api/runs") or [])
-            except ApiError as e:
-                self.console.print(f"[red]could not load runs: {e}[/red]")
-                return []
+        try:
+            return sort_runs(self.api.get("/api/runs") or [])
+        except ApiError:
+            return []
+
+    def _fetch_state(self, run_id: str) -> Optional[dict]:
+        try:
+            return (self.api.get(f"/api/runs/{run_id}/state") or {}).get("state") or {}
+        except ApiError:
+            return None
 
     # ---- dashboard ----------------------------------------------------------
+    def _draw_dashboard(self, runs: list) -> None:
+        self.console.clear()
+        live = "[green]● live[/green]" if self._interactive() else ""
+        self.console.print("[bold cyan]LoopLab[/bold cyan] [dim]· terminal control plane[/dim]   "
+                           f"[dim]{self.api.base}[/dim]  {live}")
+        if runs:
+            self.console.print(self._runs_table(runs))
+        else:
+            self.console.print("[dim]no runs yet — type a goal below to start your first one.[/dim]\n")
+        self.console.print("[dim]Pick a run by number · type a goal to start one · "
+                           "[bold]n[/bold]ew · [bold]r[/bold]efresh · [bold]q[/bold]uit[/dim]")
+
     def dashboard(self) -> None:
-        """The home surface: a table of runs + a one-line command bar. Returns when the user quits."""
+        """The home surface: a LIVE table of runs (auto-refreshes when anything changes) + a command bar.
+        Returns when the user quits."""
         while True:
-            self.console.clear()
-            self.console.print("[bold cyan]LoopLab[/bold cyan] [dim]· terminal control plane[/dim]   "
-                               f"[dim]{self.api.base}[/dim]")
-            runs = self._fetch_runs()
-            if runs:
-                self.console.print(self._runs_table(runs))
-            else:
-                self.console.print("[dim]no runs yet — type a goal below to start your first one.[/dim]\n")
-            self.console.print("[dim]Pick a run by number · type a goal to start one · "
-                               "[bold]n[/bold]ew · [bold]r[/bold]efresh · [bold]q[/bold]uit[/dim]")
-            try:
-                raw = self.console.input("[bold green]» [/bold green]").strip()
-            except (EOFError, KeyboardInterrupt):
+            raw, runs = self._live_prompt("[bold green]» [/bold green]",
+                                          fetch=self._fetch_runs, render=self._draw_dashboard, sig=dashboard_sig)
+            if raw is None:                                  # EOF / ^C
                 return
             if not raw:
                 continue
@@ -521,12 +627,15 @@ class Tui:
 
     # ---- run view (status + boss chat) -------------------------------------
     def run_view(self, run_id: str) -> None:
+        """A LIVE per-run view: the status panel auto-refreshes the instant the engine ticks, and a chat
+        steers the boss. Returns to the dashboard on `back`."""
         history = self._load_chat(run_id)
-        self._draw_run(run_id, history, redraw=True)
         while True:
-            try:
-                raw = self.console.input("[bold green]» [/bold green]").strip()
-            except (EOFError, KeyboardInterrupt):
+            raw, _ = self._live_prompt("[bold green]» [/bold green]",
+                                       fetch=lambda: self._fetch_state(run_id),
+                                       render=lambda st: self._draw_run(run_id, st, history),
+                                       sig=lambda st: run_sig(st or {}))
+            if raw is None:                                  # EOF / ^C -> back to dashboard
                 return
             if not raw:
                 continue
@@ -536,36 +645,34 @@ class Tui:
             if low in ("q", "quit", "exit"):
                 raise _Quit()
             if low in ("s", "status", "r", "refresh"):
-                self._draw_run(run_id, history, redraw=True)
-                continue
+                continue                                     # _live_prompt redraws on the next loop
             if low in ("?", "help"):
                 self._run_help()
+                self._pause("")                              # let them read it before the live redraw
                 continue
             # Quick controls map to the same /control endpoint the web buttons use — deterministic, no LLM.
             if low in ("pause", "resume", "stop"):
+                if low == "stop" and not self._confirm("Stop this run? (it aborts the loop)"):
+                    continue
                 self._control(run_id, "run_abort" if low == "stop" else low,
                               {"reason": "tui"} if low == "stop" else {})
-                self._draw_run(run_id, history, redraw=True)
                 continue
-            # Anything else: talk to the boss. It may just reply, or return a plan the engine runs.
+            # Anything else: talk to the boss. It may just reply, or propose a plan we confirm then run.
             history.append({"role": "user", "content": raw})
             self.console.print(f"[green]you ›[/green] {raw}")
             self._boss_turn(run_id, raw, history)
 
-    def _draw_run(self, run_id: str, history: list, redraw: bool) -> None:
-        if redraw:
-            self.console.clear()
-        with self.console.status("loading run…", spinner="dots"):
-            try:
-                payload = self.api.get(f"/api/runs/{run_id}/state")
-            except ApiError as e:
-                self.console.print(f"[red]could not load {run_id}: {e}[/red]")
-                return
-        state = (payload or {}).get("state") or {}
-        self.console.print(self._status_panel(run_id, state))
+    def _draw_run(self, run_id: str, state: Optional[dict], history: list) -> None:
+        self.console.clear()
+        if state is None:
+            self.console.print(f"[red]could not load {run_id} — is the server still up?[/red]")
+        else:
+            self.console.print(self._status_panel(run_id, state))
         self._render_chat(history)
-        self.console.print("[dim]Chat with the boss · [bold]s[/bold]tatus · [bold]pause/resume/stop[/bold] "
-                           "· [bold]?[/bold] help · [bold]back[/bold] · [bold]q[/bold]uit[/dim]")
+        live = "[green]● live[/green] · " if self._interactive() else ""
+        self.console.print(f"[dim]{live}Chat with the boss · [bold]s[/bold]tatus · "
+                           "[bold]pause/resume/stop[/bold] · [bold]?[/bold] help · "
+                           "[bold]back[/bold] · [bold]q[/bold]uit[/dim]")
 
     def _render_chat(self, history: list, tail: int = 8) -> None:
         from rich.markdown import Markdown
@@ -602,13 +709,42 @@ class Tui:
         if r.get("ok") and r.get("actions"):
             if r.get("reply"):
                 self._append_and_show(run_id, history, {"role": "assistant", "content": r["reply"]})
-            self._apply_plan(run_id, history, r["actions"])
+            chosen = self._confirm_plan(r["actions"])        # the human picks what (if anything) to apply
+            if chosen:
+                self._apply_plan(run_id, history, chosen)
+            else:
+                self.console.print("[dim]nothing applied.[/dim]")
         elif r.get("ok") and r.get("reply"):
             self._append_and_show(run_id, history, {"role": "assistant", "content": r["reply"]})
         elif r.get("error"):
             self.console.print(f"[yellow]⚠ {r['error']}[/yellow]")
         else:
             self.console.print("[yellow]⚠ no reply from the boss[/yellow]")
+
+    def _confirm(self, question: str) -> bool:
+        """A yes/no gate for a single destructive control (default: no)."""
+        ans = self._prompt(f"[yellow]{question}[/yellow] [dim](y/N)[/dim] ")
+        return (ans or "").strip().lower() in ("y", "yes")
+
+    def _confirm_plan(self, actions: list) -> list:
+        """Show the boss's proposed actions and let the human apply all, pick a subset, or cancel — the
+        terminal twin of the web confirm cards. Critical steps (abort/reset) are flagged. Returns the
+        actions to apply (possibly empty)."""
+        self.console.print("[bold]Boss proposes:[/bold]")
+        for i, a in enumerate(actions, 1):
+            label = a.get("label") or a.get("type", "action")
+            mark = "[red]⚠[/red]" if is_critical(a) else "[cyan]▸[/cyan]"
+            why = a.get("rationale")
+            self.console.print(f"  [bold]{i}[/bold] {mark} {label}" + (f" [dim]— {why}[/dim]" if why else ""))
+        while True:
+            ans = self._prompt("[green]Apply?[/green] [dim]Enter=all · numbers to pick (e.g. 1,3) · n=cancel[/dim] » ")
+            if ans is None:                                  # EOF/^C -> treat as cancel (safe default)
+                return []
+            picks = parse_pick(ans, len(actions))
+            if picks is None:
+                self.console.print("[dim]…didn’t catch that — Enter for all, numbers like 1,3, or n to cancel[/dim]")
+                continue
+            return [actions[i] for i in picks]
 
     def _apply_plan(self, run_id: str, history: list, actions: list) -> None:
         # Probe liveness once: a finished or zombie run needs reopen+resume to actually run engine steps.
@@ -681,7 +817,8 @@ class Tui:
             "[bold]status[/bold] · [bold]back[/bold] · [bold]q[/bold]uit[/dim]")
 
     def _pause(self, msg: str) -> None:
-        self.console.print(f"[yellow]{msg}[/yellow]")
+        if msg:
+            self.console.print(f"[yellow]{msg}[/yellow]")
         try:
             self.console.input("[dim]press Enter…[/dim]")
         except (EOFError, KeyboardInterrupt):

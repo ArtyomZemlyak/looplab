@@ -177,18 +177,26 @@ See the [Web UI](ui.md) guide.
 A chat-first **terminal control plane** — the most-used slice of the web UI, no browser needed. From
 one dashboard you can:
 
-- see every run at a glance (status · nodes · best metric · age),
+- see every run at a glance (status · nodes · best metric · age), **auto-refreshing live** so changes
+  show up the instant they happen,
 - **describe a goal** and the boss plans + launches a run (the genesis flow), and
-- open a run to see its status and **chat with the boss to steer it** — free text becomes a plan the
-  live run applies (the same action-router the web Dock uses).
+- open a run to see its **live** status and **chat with the boss to steer it** — free text becomes a
+  plan the run applies (the same action-router the web Dock uses). Action plans and destructive
+  controls ask for **confirmation** first: apply all, pick a subset (e.g. `1,3`), or cancel.
+
+Just run bare **`looplab`** (no command) to open it, or `looplab tui` explicitly.
 
 It is a thin HTTP client of the same server `looplab ui` serves (ADR-18). When you don't pass
 `--server`, it reuses a local server if one is already up, otherwise it auto-launches one (API only —
 no React build) and stops it on exit. Point it at a remote/shared server with `--server`.
 
 ```bash
+looplab                       # bare command opens the TUI
 looplab tui [--server URL] [--run-root DIR]
 ```
+
+The live auto-refresh activates on a real terminal; piped/non-interactive stdin falls back to a plain
+prompt (no redraws), so scripts stay deterministic.
 
 | Option | Default | Description |
 |---|---|---|
