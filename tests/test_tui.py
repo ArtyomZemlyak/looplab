@@ -120,6 +120,28 @@ def test_parse_pick():
     assert tui.parse_pick("huh?", 3) is None
 
 
+def test_history_for_boss_cleans_turns():
+    """Stored turns -> {role,content} the boss endpoints want: actions collapse to 'applied: …',
+    summaries become recaps, contentless/unknown turns are dropped (no 'action: None' noise)."""
+    hist = [
+        {"role": "user", "content": "hi"},
+        {"role": "assistant", "content": "hey"},
+        {"role": "action", "action": {"type": "hint", "label": "hint: try MLPs"}, "status": "done"},
+        {"role": "action", "action": {"type": "budget_extend"}},          # no label -> falls back to type
+        {"role": "summary", "content": "we agreed to try neural nets"},
+        {"role": "user", "content": ""},                                  # empty -> dropped
+        {"role": "system", "content": "ignore"},                          # unknown role -> dropped
+    ]
+    out = tui.history_for_boss(hist)
+    assert out == [
+        {"role": "user", "content": "hi"},
+        {"role": "assistant", "content": "hey"},
+        {"role": "assistant", "content": "applied: hint: try MLPs"},
+        {"role": "assistant", "content": "applied: budget_extend"},
+        {"role": "assistant", "content": "Earlier recap: we agreed to try neural nets"},
+    ]
+
+
 def test_signatures_detect_change():
     # dashboard signature changes when a drawn field changes (nodes advanced), not on untouched data
     a = [{"run_id": "r", "phase": "search", "nodes": 3, "engine_running": True, "mtime": 1}]
@@ -150,10 +172,12 @@ def test_live_prompt_refreshes_then_reads(monkeypatch):
     app = tui.Tui.__new__(tui.Tui)                          # bypass __init__ (no server needed)
     app.api = api
     from rich.console import Console
-    app.console = Console(file=open(os.devnull, "w"))       # swallow drawing output
 
     r_fd, w_fd = os.pipe()
-    monkeypatch.setattr(sys, "stdin", os.fdopen(r_fd, "r"))
+    stdin = os.fdopen(r_fd, "r")
+    devnull = open(os.devnull, "w")
+    app.console = Console(file=devnull)                     # swallow drawing output
+    monkeypatch.setattr(sys, "stdin", stdin)
     monkeypatch.setattr(app, "_interactive", lambda: True)
 
     ticks = {"n": 0}
@@ -166,11 +190,19 @@ def test_live_prompt_refreshes_then_reads(monkeypatch):
     def render(_data):
         renders["n"] += 1
 
-    # After a couple of refresh ticks, "type" a line into the pipe so the prompt returns it.
-    threading.Timer(0.12, lambda: (os.write(w_fd, b"hello\n"), os.close(w_fd))).start()
-    line, data = app._live_prompt("» ", fetch=fetch, render=render, sig=lambda d: d, interval=0.02)
-    assert line == "hello"
-    assert renders["n"] >= 2                                # initial draw + at least one live refresh
+    try:
+        # After a couple of refresh ticks, "type" a line into the pipe so the prompt returns it.
+        threading.Timer(0.12, lambda: (os.write(w_fd, b"hello\n"), os.close(w_fd))).start()
+        line, data = app._live_prompt("» ", fetch=fetch, render=render, sig=lambda d: d, interval=0.02)
+        assert line == "hello"
+        assert renders["n"] >= 2                            # initial draw + at least one live refresh
+    finally:
+        stdin.close()                                      # closes r_fd
+        devnull.close()
+        try:
+            os.close(w_fd)                                 # idempotent guard if the timer didn't fire
+        except OSError:
+            pass
 
 
 def test_await_job_fast_path():
@@ -204,6 +236,71 @@ def test_await_job_unknown_is_expired(monkeypatch):
     out = api._await_job({"status": "running", "job_id": "abc"}, lambda j: f"/api/jobs/{j}",
                          interval=0.001, deadline_s=5)
     assert out["ok"] is False and "expired" in out["error"]
+
+
+def test_await_job_bails_when_server_lost(monkeypatch):
+    """A transport failure (status None = can't reach the server) should bail fast after a few misses,
+    not spin out the whole deadline."""
+    api = tui.Api("http://x")
+
+    def dead(path, timeout=None):
+        raise tui.ApiError("connection refused", status=None)
+
+    monkeypatch.setattr(api, "get", dead)
+    out = api._await_job({"status": "running", "job_id": "abc"}, lambda j: f"/api/jobs/{j}",
+                         interval=0.001, deadline_s=60)        # huge deadline; must NOT spin it out
+    assert out["ok"] is False and "lost contact" in out["error"]
+
+
+def test_await_job_tolerates_5xx_then_done(monkeypatch):
+    """A 5xx (status set) is transient — keep polling — and a later 'done' still wins."""
+    api = tui.Api("http://x")
+    seq = [tui.ApiError("boom", status=503), tui.ApiError("boom", status=503),
+           {"status": "done", "ok": True, "reply": "ok"}]
+    calls = {"n": 0}
+
+    def get(path, timeout=None):
+        i = min(calls["n"], len(seq) - 1)
+        calls["n"] += 1
+        v = seq[i]
+        if isinstance(v, tui.ApiError):
+            raise v
+        return v
+
+    monkeypatch.setattr(api, "get", get)
+    out = api._await_job({"status": "running", "job_id": "abc"}, lambda j: f"/api/jobs/{j}",
+                         interval=0.001, deadline_s=5)
+    assert out["ok"] is True and out["reply"] == "ok"
+
+
+def test_live_prompt_falls_back_when_select_unusable(monkeypatch):
+    """If select()/readline can't be used (raises TypeError/ValueError/OSError) the loop must degrade to
+    a plain blocking read instead of crashing the REPL."""
+    import os
+    import select as _select
+    import sys
+
+    api = tui.Api("http://x")
+    app = tui.Tui.__new__(tui.Tui)
+    app.api = api
+    from rich.console import Console
+
+    r_fd, w_fd = os.pipe()
+    os.write(w_fd, b"typed\n")
+    os.close(w_fd)
+    stdin = os.fdopen(r_fd, "r")
+    devnull = open(os.devnull, "w")
+    app.console = Console(file=devnull)
+    monkeypatch.setattr(sys, "stdin", stdin)
+    monkeypatch.setattr(app, "_interactive", lambda: True)
+    monkeypatch.setattr(_select, "select", lambda *a, **k: (_ for _ in ()).throw(TypeError("bad fd")))
+
+    try:
+        line, _ = app._live_prompt("» ", fetch=lambda: 1, render=lambda d: None, sig=lambda d: d, interval=0.01)
+        assert line == "typed"
+    finally:
+        stdin.close()
+        devnull.close()
 
 
 # ----------------------------------------------------------------------------- Api ↔ real server

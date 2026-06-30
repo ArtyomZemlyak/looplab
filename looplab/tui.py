@@ -105,12 +105,21 @@ class Api:
         if not isinstance(resp, dict) or resp.get("status") != "running" or not resp.get("job_id"):
             return resp                                     # fast path: already the final result
         deadline = time.monotonic() + deadline_s
+        misses = 0
         while time.monotonic() < deadline:
             time.sleep(interval)
             try:
                 j = self.get(poll_path(resp["job_id"]))
-            except ApiError:
-                continue                                    # transient — keep polling
+                misses = 0
+            except ApiError as e:
+                # A 5xx (status set) is treated as transient — keep polling. A transport failure
+                # (status None: connection refused/timeout) usually means the server died; bail fast
+                # after a few in a row instead of spinning out the whole 5-10 min deadline.
+                if e.status is None:
+                    misses += 1
+                    if misses >= 5:
+                        return {"ok": False, "error": "lost contact with the server"}
+                continue
             if isinstance(j, dict) and j.get("status") == "done":
                 return j
             if isinstance(j, dict) and j.get("status") == "unknown":
@@ -275,6 +284,28 @@ def is_critical(action: dict) -> bool:
     return (action or {}).get("type") in _CRITICAL
 
 
+def history_for_boss(history: list) -> list[dict]:
+    """Convert stored chat turns into the {role, content} messages the boss endpoints expect — the Python
+    twin of the web Dock's buildHistory(). Action rows collapse to a one-line "applied: <label>" note and
+    summaries pass through as recaps; turns with no usable content are dropped. (A stored action turn has
+    no `content`, so sending it raw would feed the boss "action: None" noise.)"""
+    out: list[dict] = []
+    for m in history:
+        role = m.get("role")
+        if role in ("user", "assistant"):
+            content = (m.get("content") or "").strip()
+            if content:
+                out.append({"role": role, "content": content})
+        elif role == "action":
+            act = m.get("action") or {}
+            out.append({"role": "assistant", "content": "applied: " + (act.get("label") or act.get("type") or "action")})
+        elif role == "summary":
+            content = (m.get("content") or "").strip()
+            if content:
+                out.append({"role": "assistant", "content": "Earlier recap: " + content})
+    return out
+
+
 def parse_pick(text: str, n: int) -> Optional[list[int]]:
     """Parse a confirm-prompt answer into the 0-based indices to apply, over `n` proposed actions:
       ""/"y"/"yes"/"a"/"all"  -> everything ([0..n-1])
@@ -324,6 +355,22 @@ def _free_port() -> int:
         return s.getsockname()[1]
 
 
+def _stop_child(child: Optional[subprocess.Popen]) -> None:
+    """Terminate a server WE launched and reap it, so it never lingers or zombies — SIGTERM first, then
+    SIGKILL if it won't go. A no-op for a reused/external server (child is None) or one already dead."""
+    if child is None or child.poll() is not None:
+        return
+    child.terminate()
+    try:
+        child.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        child.kill()
+        try:
+            child.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            pass
+
+
 def ensure_server(base_url: Optional[str], run_root: str, *, log=lambda m: None) -> tuple[str, Optional[subprocess.Popen]]:
     """Return a (base_url, child) for a reachable server. If `base_url` already answers, reuse it (no
     child). Otherwise launch our own `looplab ui --no-build` (API only — the TUI never needs the React
@@ -349,15 +396,19 @@ def ensure_server(base_url: Optional[str], run_root: str, *, log=lambda m: None)
         env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     api = Api(url)
-    for _ in range(120):                                   # up to ~24s for uvicorn to bind
-        if child.poll() is not None:                       # died early (missing [ui] extra, bad port…)
-            raise ApiError("the auto-launched server exited — is the [ui] extra installed? (pip install 'looplab[ui]')")
-        if api.ping():
-            log("server is up.")
-            return url, child
-        time.sleep(0.2)
-    child.terminate()
-    raise ApiError("timed out waiting for the auto-launched server to start")
+    try:
+        for _ in range(120):                               # up to ~24s for uvicorn to bind
+            if child.poll() is not None:                   # died early (no [ui] extra, port taken, …)
+                raise ApiError("the auto-launched server exited before it came up — check the [ui] extra "
+                               "is installed (pip install 'looplab[ui]') and the port is free")
+            if api.ping():
+                log("server is up.")
+                return url, child
+            time.sleep(0.2)
+        raise ApiError("timed out waiting for the auto-launched server to start")
+    except BaseException:                                  # timeout, ApiError, or Ctrl-C during startup
+        _stop_child(child)                                 # never leak the half-started server
+        raise
 
 
 # ----------------------------------------------------------------------------- the interactive app
@@ -400,27 +451,36 @@ class Tui:
         data = fetch()
         render(data)
         if not self._interactive():
-            self.console.print(prompt, end="")
-            try:
-                line = sys.stdin.readline()
-            except (KeyboardInterrupt, OSError):
-                return None, data
-            return (None if line == "" else line.strip()), data
+            return self._read_line_fallback(prompt), data
         cur = sig(data)
         self.console.print(prompt, end="")
         while True:
             try:
                 ready, _, _ = select.select([sys.stdin], [], [], interval)
-            except (KeyboardInterrupt, OSError):
+                if ready:
+                    line = sys.stdin.readline()
+                    return (None if line == "" else line.strip()), data
+            except (KeyboardInterrupt, EOFError):
                 return None, data
-            if ready:
-                line = sys.stdin.readline()
-                return (None if line == "" else line.strip()), data
+            except (OSError, ValueError, TypeError):
+                # stdin became unusable for select/readline (closed, replaced by a non-fd object, …):
+                # fall back to a plain blocking prompt instead of crashing the REPL with a traceback.
+                return self._read_line_fallback(prompt), data
             new = fetch()
             if sig(new) != cur:
                 data, cur = new, sig(new)
                 render(data)                                 # something changed → redraw + reprint prompt
                 self.console.print(prompt, end="")
+
+    def _read_line_fallback(self, prompt: str) -> Optional[str]:
+        """A plain blocking read of one line (no live refresh). Returns the stripped line, or None on
+        EOF/^C. Used for non-tty stdin and as the safety net when select()/readline() can't be used."""
+        self.console.print(prompt, end="")
+        try:
+            line = sys.stdin.readline()
+        except (KeyboardInterrupt, EOFError, OSError, ValueError):
+            return None
+        return None if line == "" else line.strip()
 
     # ---- small rich builders ------------------------------------------------
     def _rule(self, title: str):
@@ -570,6 +630,10 @@ class Tui:
                 self.console.print(f"[red]planner unreachable: {e}[/red]")
                 msgs.pop()
                 continue
+            except KeyboardInterrupt:
+                self.console.print("[dim]cancelled.[/dim]")
+                msgs.pop()
+                continue
             reply = (r or {}).get("reply") or "(planned — see the card)"
             msgs.append({"role": "assistant", "content": reply})
             self.console.print(Panel(reply, title="boss", border_style="cyan", expand=True))
@@ -612,16 +676,22 @@ class Tui:
             else:
                 self.console.print(f"[red]launch failed: {e}[/red]")
             return False
+        except KeyboardInterrupt:
+            self.console.print("[dim]cancelled.[/dim]")
+            return False
         self.console.print(f"[green]▶ started [bold]{rid}[/bold][/green]")
         # The engine is a freshly-spawned subprocess; its events.jsonl appears a beat later, before which
         # /state 404s. Wait briefly so the run view opens on real status instead of a transient error.
-        with self.console.status("waiting for the engine to start…", spinner="dots"):
-            for _ in range(25):
-                try:
-                    self.api.get(f"/api/runs/{rid}/state")
-                    break
-                except ApiError:
-                    time.sleep(0.2)
+        try:
+            with self.console.status("waiting for the engine to start…", spinner="dots"):
+                for _ in range(25):
+                    try:
+                        self.api.get(f"/api/runs/{rid}/state")
+                        break
+                    except ApiError:
+                        time.sleep(0.2)
+        except KeyboardInterrupt:
+            pass                                             # the run did start — drop straight into it
         self.run_view(rid)
         return True
 
@@ -658,7 +728,9 @@ class Tui:
                               {"reason": "tui"} if low == "stop" else {})
                 continue
             # Anything else: talk to the boss. It may just reply, or propose a plan we confirm then run.
-            history.append({"role": "user", "content": raw})
+            user_turn = {"role": "user", "content": raw}
+            history.append(user_turn)
+            self._persist(run_id, user_turn)                 # save the question too (the web persists it)
             self.console.print(f"[green]you ›[/green] {raw}")
             self._boss_turn(run_id, raw, history)
 
@@ -697,13 +769,15 @@ class Tui:
     def _boss_turn(self, run_id: str, instruction: str, history: list) -> None:
         """One boss command: free text -> a plan applied in order (then reopen+resume if needed), or an
         advisory reply. Mirrors the web Dock's runCommand + autoApplyPlan."""
-        prior = history[:-1]                                # history minus the just-appended user turn
+        prior = history_for_boss(history[:-1])              # cleaned history minus the new user turn
         try:
             with self.console.status("boss is reading & deciding…", spinner="dots"):
                 r = self.api.command(run_id, prior, instruction)
         except ApiError as e:
             self.console.print(f"[red]boss unreachable: {e}[/red]")
-            history.pop()
+            return                                           # the question stays in the (persisted) history
+        except KeyboardInterrupt:
+            self.console.print("[dim]cancelled.[/dim]")      # Ctrl-C during the (possibly multi-minute) call
             return
         r = r or {}
         if r.get("ok") and r.get("actions"):
@@ -775,7 +849,7 @@ class Tui:
                     self.api.post(f"/api/runs/{run_id}/control", {"type": "run_reopened", "data": {}})
                     self.api.post(f"/api/runs/{run_id}/resume", {})
                 self.console.print("[green]↻ resumed — running the plan[/green]")
-            except ApiError as e:
+            except (ApiError, KeyboardInterrupt) as e:
                 self.console.print(f"[red]resume failed: {e}[/red]")
         elif engine_dead:
             self.console.print("[dim]saved — these take effect on the next reopen[/dim]")
@@ -837,21 +911,20 @@ def main(server: Optional[str], run_root: str) -> int:
         print("The TUI needs `rich` (it ships with Typer). Try: pip install -e .", file=sys.stderr)
         return 1
     console = Console()
+    child = None
     try:
         base, child = ensure_server(server, run_root, log=lambda m: console.print(f"[dim]{m}[/dim]"))
     except ApiError as e:
         console.print(f"[red]{e}[/red]")
         return 1
+    except KeyboardInterrupt:                               # Ctrl-C while waiting for autostart
+        console.print("[dim]bye[/dim]")
+        return 0
     try:
         Tui(Api(base), run_root).dashboard()
-    except _Quit:
+    except (_Quit, KeyboardInterrupt):                      # global quit / a Ctrl-C that escaped a turn
         pass
     finally:
-        if child is not None:
-            child.terminate()
-            try:
-                child.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                child.kill()
+        _stop_child(child)                                  # never leak the server we launched
     console.print("[dim]bye[/dim]")
     return 0
