@@ -416,6 +416,11 @@ def run(
             raise typer.BadParameter(
                 f"Genesis couldn't reach the model to author the task ({result.error}). Check "
                 f"LOOPLAB_LLM_BASE_URL/--model, or use --no-genesis to build it from --kind/--set.")
+        if result.path_error:    # the model authored a task, but it points at a path that doesn't
+            # exist -> refuse here rather than create a run dir that crashes mid-flight (and then
+            # traps a re-run in the finished/errored dir). This is Genesis checking the path.
+            typer.echo("Genesis stopped — " + (result.reply or result.path_error))
+            raise typer.Exit(2)
         if not result.kind:
             typer.echo("Genesis couldn't author a task from that goal. "
                        + (result.reply or "Add detail (e.g. where the data is), or pass --kind."))
@@ -442,6 +447,22 @@ def run(
     except (ValueError, KeyError, TypeError) as e:
         raise typer.BadParameter(f"invalid task: {e}")
     out = out or (Path(file_out) if file_out else Path("runs/run_local"))
+    # A fresh `run` must not silently RE-ENTER an already-finished run dir. Re-entering folds the old
+    # event log, sees `finished`, and exits 0 printing the OLD result — so a user who (e.g.) fixed a
+    # bad path and re-ran into the same dir (often the default runs/run_local) would watch the previous
+    # run "finish immediately" and never get their new run. Refuse with a clear next step instead. An
+    # UNFINISHED dir still continues (the documented `run` = start-or-continue), and `resume` is
+    # unaffected (the UI relies on it re-entering a finished run).
+    _events = out / "events.jsonl"
+    if _events.exists():
+        _prior = fold(EventStore(_events).read_all())
+        if _prior.finished:
+            _why = (f" (it ended with reason={_prior.stop_reason})"
+                    if _prior.stop_reason else "")
+            raise typer.BadParameter(
+                f"{out} already holds a finished run{_why}. To start a NEW run, pass --out <dir> or "
+                f"remove {out}; to continue or view this one use `looplab resume {out}` / "
+                f"`looplab inspect {out}`.")
     out.mkdir(parents=True, exist_ok=True)
     eng = _engine(out, task, settings, crash_after)
     with _engine_singleton(out) as ok:

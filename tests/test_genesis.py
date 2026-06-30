@@ -2,7 +2,7 @@
 names a `kind`. These exercise the authoring logic with a scripted client (no network)."""
 from __future__ import annotations
 
-from looplab.genesis import GENERATIVE_KINDS, author_task
+from looplab.genesis import GENERATIVE_KINDS, author_task, _missing_local_paths
 
 KINDS = ("quadratic", "dataset", "repo", "mlebench_real", "classification")
 
@@ -23,7 +23,8 @@ def test_author_infers_kind_and_grounds_prompt():
         "task": {"kind": "dataset", "goal": "predict target", "direction": "max",
                  "data_path": "d.csv"},
         "rationale": "a data file plus a prediction goal"})
-    res = author_task("predict target from my data", client=client, kinds=KINDS, data="d.csv")
+    res = author_task("predict target from my data", client=client, kinds=KINDS, data="d.csv",
+                      check_paths=False)
     assert res.kind == "dataset"
     assert res.task["data_path"] == "d.csv"
     # The kind guide and the goal both reached the model.
@@ -60,13 +61,15 @@ def test_author_reports_endpoint_error_distinct_from_vague_goal():
 
 def test_author_backfills_explicit_data_path_when_model_omits_it():
     client = _ScriptedClient({"task": {"kind": "dataset", "goal": "predict", "direction": "max"}})
-    res = author_task("predict from my file", client=client, kinds=KINDS, data="/d/train.csv")
+    res = author_task("predict from my file", client=client, kinds=KINDS, data="/d/train.csv",
+                      check_paths=False)
     assert res.task["data_path"] == "/d/train.csv"     # the named --data path is never lost
 
 
 def test_author_backfills_editable_path_for_repo():
     client = _ScriptedClient({"task": {"kind": "repo", "goal": "improve", "direction": "max"}})
-    res = author_task("improve my repo", client=client, kinds=KINDS, data="/my/repo", kind="repo")
+    res = author_task("improve my repo", client=client, kinds=KINDS, data="/my/repo", kind="repo",
+                      check_paths=False)
     assert res.task["editable_path"] == "/my/repo"
 
 
@@ -100,8 +103,64 @@ def test_author_describes_multiple_data_locations_in_prompt():
         "kind": "dataset", "goal": "merge and predict", "direction": "max",
         "data": {"train": "/d/train.csv", "extra": "/other/feats"}}})
     res = author_task("data is in /d/train.csv and the folder /other/feats; predict the label",
-                      client=client, kinds=KINDS)
+                      client=client, kinds=KINDS, check_paths=False)
     assert res.task["data"] == {"train": "/d/train.csv", "extra": "/other/feats"}
     blob = " ".join(m["content"] for m in client.seen)
     assert "SEVERAL" in blob or "several" in blob          # the data guide reached the model
     assert "folder" in blob
+
+
+def test_author_refuses_a_missing_data_path():
+    # The model authored a dataset task pointing at a path that doesn't exist -> Genesis REFUSES with
+    # a path_error + clarifying reply, and hands back NO task (so the CLI never spawns a doomed run).
+    client = _ScriptedClient({"task": {"kind": "dataset", "goal": "predict", "direction": "max",
+                                       "data_path": "/no/such/data.csv"}})
+    res = author_task("predict from my file", client=client, kinds=KINDS)
+    assert res.kind is None and res.task == {}
+    assert res.path_error and "/no/such/data.csv" in res.path_error
+    assert "/no/such/data.csv" in res.reply
+    assert res.error == ""                                  # distinct from an endpoint failure
+
+
+def test_author_accepts_an_existing_data_path(tmp_path):
+    # A real on-disk path passes the gate and the task is returned normally.
+    f = tmp_path / "train.csv"
+    f.write_text("a,b\n1,2\n", encoding="utf-8")
+    client = _ScriptedClient({"task": {"kind": "dataset", "goal": "predict", "direction": "max",
+                                       "data_path": str(f)}})
+    res = author_task("predict from my file", client=client, kinds=KINDS)
+    assert res.kind == "dataset" and res.path_error == ""
+    assert res.task["data_path"] == str(f)
+
+
+def test_author_refuses_missing_repo_editable_path(tmp_path):
+    # Repo task: a non-existent editable_path is refused too (it's the repo the agent would edit).
+    client = _ScriptedClient({"task": {"kind": "repo", "goal": "improve", "direction": "max",
+                                       "editable_path": str(tmp_path / "ghost")}})
+    res = author_task("improve my repo", client=client, kinds=KINDS, kind="repo")
+    assert res.task == {} and res.path_error
+    assert str(tmp_path / "ghost") in res.path_error
+
+
+def test_missing_local_paths_covers_repo_mounts(tmp_path):
+    # The collector reaches data{}, editables[].path and references[].path — not eval targets.
+    real = tmp_path / "repo"
+    real.mkdir()
+    task = {"kind": "repo", "editable_path": str(real),
+            "editables": [{"name": "model", "path": str(tmp_path / "missing_repo")}],
+            "references": [{"name": "ref", "path": str(real)}],
+            "data": {"d": str(tmp_path / "missing_data")},
+            "eval": {"command": ["python", "not_written_yet.py"]}}
+    missing = _missing_local_paths(task)
+    assert str(tmp_path / "missing_repo") in missing
+    assert str(tmp_path / "missing_data") in missing
+    assert str(real) not in missing                        # the existing repo/reference are fine
+    assert "not_written_yet.py" not in " ".join(missing)   # eval targets are NOT existence-checked
+
+
+def test_author_check_paths_false_skips_the_gate():
+    # Opt-out for programmatic callers that only want the authoring logic (no disk).
+    client = _ScriptedClient({"task": {"kind": "dataset", "goal": "g", "direction": "max",
+                                       "data_path": "/no/such/path"}})
+    res = author_task("predict", client=client, kinds=KINDS, check_paths=False)
+    assert res.kind == "dataset" and res.path_error == ""

@@ -230,6 +230,42 @@ def test_run_genesis_vague_goal_asks_for_detail(tmp_path, monkeypatch):
     assert "couldn't author a task" in result.output and "What data do you have?" in result.output
 
 
+def test_run_genesis_bad_path_is_refused_before_a_run_is_created(tmp_path, monkeypatch):
+    # Genesis authored a task pointing at a path that doesn't exist -> the CLI refuses up front and
+    # creates NO run dir (so a later re-run can't trap itself in a finished/errored run).
+    import looplab.cli as cli
+    import looplab.genesis as genesis
+    monkeypatch.setattr(cli, "make_llm_client", lambda settings, **k: object())
+    monkeypatch.setattr(genesis, "author_task",
+                        lambda goal, **k: genesis.GenesisResult(
+                            path_error="path(s) not found on this machine: /no/such/data.csv",
+                            reply="I couldn't find /no/such/data.csv on this machine."))
+    out = tmp_path / "p"
+    result = runner.invoke(app, ["run", "--goal", "predict from /no/such/data.csv", "--out", str(out)])
+    assert result.exit_code != 0
+    assert "Genesis stopped" in result.output and "/no/such/data.csv" in result.output
+    assert not (out / "events.jsonl").exists()       # no doomed run was spawned
+
+
+def test_run_refuses_to_reenter_a_finished_run(tmp_path):
+    # First run finishes; a second `run` into the SAME dir must NOT silently re-fold + exit 0 printing
+    # the old result — it errors with how to start fresh / inspect, fixing the "lands in an existing
+    # run and finishes immediately" trap.
+    out = tmp_path / "g"
+    args = ["run", "--no-genesis", "--kind", "quadratic", "--goal", "min x^2", "--direction", "min",
+            "--set", "max_nodes=2", "--out", str(out)]
+    first = runner.invoke(app, args)
+    assert first.exit_code == 0, first.output
+    assert "finished=True" in first.output
+    second = runner.invoke(app, args)
+    assert second.exit_code != 0
+    # Typer renders the error inside a wrapping panel; drop the box-drawing border chars and collapse
+    # whitespace so the matched phrases aren't split by a wrap boundary on a long tmp path.
+    flat = " ".join(second.output.translate({ord(c): " " for c in "│╭╮╰╯─"}).split())
+    assert "already holds a finished run" in flat
+    assert "resume" in flat and "inspect" in flat
+
+
 def test_file_settings_override_env(tmp_path, monkeypatch):
     # The documented precedence: a file's settings: block wins over a LOOPLAB_* env var.
     monkeypatch.setenv("LOOPLAB_MAX_NODES", "99")

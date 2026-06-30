@@ -5,6 +5,15 @@ This is the headless counterpart of the Web UI's "New run" Genesis chat (`server
 same idea — a model reads your words (and any data/repo path you mention) and decides *what kind of
 task this is* — exposed for `looplab run --goal "..."` with no `--kind`.
 
+Agent vs. single call: the Web Genesis is an AGENT — it drives read-only filesystem tools
+(`reposcout.RepoScoutTools`: list_dir/read_file/find_files) to actually inspect a repo before
+authoring. This CLI Genesis is a single structured LLM call (no tools), so it can't browse the disk.
+To still keep it from handing back a task that points nowhere, `author_task` ends with a PATH GATE
+(`check_paths`): every local path the authored task references is verified to exist, and a missing one
+is REFUSED with a clarifying reply (`path_error`) — *before* any run dir is created. Without this a
+mistyped/hallucinated path would create a run that crashes mid-flight, and a re-run would then land in
+that finished/errored run and exit at once.
+
 On `kind` itself: it is **not** removed. It is the dispatch key that selects one of nine
 ``TaskAdapter`` semantics (each a different eval / grader / trust / data model — e.g. a self-reported
 ``dataset`` metric vs a held-out ``mlebench`` grader vs your own protected ``repo`` eval). Collapsing
@@ -15,6 +24,7 @@ kind from the goal instead of making the human pick.
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -84,22 +94,83 @@ class GenesisResult:
     rationale: str = ""
     reply: str = ""
     error: str = ""           # set when the model/endpoint failed (vs an empty task from a vague goal)
+    path_error: str = ""      # set when the authored task names a local path that doesn't exist — a
+    # third, distinct outcome from `error` (couldn't reach the model) and an empty task (vague goal):
+    # the model authored a task fine, but it points at a path the run would crash on. The caller
+    # refuses up front instead of spawning a doomed run.
 
     @property
     def kind(self) -> Optional[str]:
         return self.task.get("kind") if isinstance(self.task, dict) else None
 
 
+def _expanded(p: str) -> str:
+    """~ / $VAR-expand then make absolute — the same resolution the task adapters do at load time, so
+    the existence check sees the path the run will actually read."""
+    return os.path.abspath(os.path.expanduser(os.path.expandvars(p)))
+
+
+def _task_local_paths(task: dict) -> list[str]:
+    """The on-disk locations an authored task points at that MUST already exist: the data the agent
+    reads (`data_path` / `data`), the repo it edits (`editable_path` / `editables[].path`) and runtime
+    mounts (`references[].path`). Eval *targets* are deliberately excluded — a repo task may name an
+    entry script the agent has yet to write (a documented "the agent creates run.py" flow), so checking
+    eval.command paths would false-refuse those."""
+    paths: list[str] = []
+
+    def _add(v) -> None:
+        if isinstance(v, str) and v.strip():
+            paths.append(v)
+
+    _add(task.get("data_path"))
+    _add(task.get("editable_path"))
+    data = task.get("data")
+    if isinstance(data, dict):
+        for v in data.values():
+            _add(v)
+    elif isinstance(data, str):                 # a bare string `data` (single location) is also valid
+        _add(data)
+    for key in ("editables", "references"):
+        items = task.get(key)
+        if isinstance(items, list):
+            for it in items:
+                if isinstance(it, dict):
+                    _add(it.get("path"))
+    return paths
+
+
+def _missing_local_paths(task: dict) -> list[str]:
+    """Paths the task references that don't exist on this machine (after ~/$VAR expansion), de-duped
+    and preserving the order/spelling the user/model gave so the refusal message echoes their input."""
+    seen: set[str] = set()
+    missing: list[str] = []
+    for p in _task_local_paths(task):
+        ep = _expanded(p)
+        if ep in seen:
+            continue
+        seen.add(ep)
+        if not os.path.exists(ep):
+            missing.append(p)
+    return missing
+
+
 def author_task(goal: str, *, client, kinds: tuple[str, ...], data: Optional[str] = None,
                 repo: Optional[str] = None, direction: Optional[str] = None,
                 kind: Optional[str] = None, draft: Optional[dict] = None,
-                parser: str = "tool_call") -> GenesisResult:
+                parser: str = "tool_call", check_paths: bool = True) -> GenesisResult:
     """Ask the model to author an inline task from a plain goal. With `kind=None` it also CHOOSES the
     kind; with `kind` set it is CONSTRAINED to that kind and only fills the rest (the user pinned the
     type, Genesis does the rest within it). `draft` is an existing task dict (e.g. from a config file)
     to refine in place rather than discard. Returns a GenesisResult; on a vague goal the task may be
     empty with a clarifying `reply`, and on a model/endpoint failure `error` is set (so the caller can
-    tell 'reach the model' apart from 'your goal was too vague')."""
+    tell 'reach the model' apart from 'your goal was too vague').
+
+    `check_paths` (default on) makes Genesis VERIFY that every local path the authored task references
+    exists on disk and REFUSE (returning `path_error` + a clarifying `reply`, no task) when one is
+    missing — the CLI genesis has no filesystem tools of its own (unlike the Web genesis agent, which
+    scouts the repo before authoring), so without this a hallucinated or mistyped path would sail
+    through, create a run dir and crash mid-flight. Programmatic callers that only want the authoring
+    logic (no disk) can pass `check_paths=False`."""
     hints = []
     if data:
         hints.append(f"The user named a data/input path: {data} (use it; add others they mention).")
@@ -142,4 +213,18 @@ def author_task(goal: str, *, client, kinds: tuple[str, ...], data: Optional[str
     # path is never silently lost.
     if task and data and not (task.get("data_path") or task.get("editable_path") or task.get("data")):
         task["editable_path" if task.get("kind") == "repo" else "data_path"] = data
+    # Path gate (the "Genesis can check the path and refuse" ask): a task that points at a location
+    # that doesn't exist would create a run dir and then crash with a path error mid-run — and a
+    # re-run would land in that finished/errored dir and exit at once. Catch it here and refuse with a
+    # clarifying reply, BEFORE any run is created, instead of handing back a doomed task.
+    if check_paths and task:
+        missing = _missing_local_paths(task)
+        if missing:
+            joined = ", ".join(missing)
+            return GenesisResult(
+                rationale=plan.rationale,
+                path_error=f"path(s) not found on this machine: {joined}",
+                reply=(f"I couldn't find {joined} on this machine. Point the goal/--data at a path "
+                       "that exists (an absolute path is safest; ~ and $VARS are expanded), then "
+                       "re-run."))
     return GenesisResult(task=task, rationale=plan.rationale, reply=plan.reply)
