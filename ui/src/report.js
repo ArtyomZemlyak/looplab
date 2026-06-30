@@ -3,7 +3,7 @@
 // set. Mirrors the engine's selection rule — only FEASIBLE evaluated nodes move the frontier — so
 // the report never credits a result the engine itself rejected.
 
-import { fmt, isSweep } from './util.js'
+import { fmt, isSweep, operatorMeta } from './util.js'
 
 const metricOf = (n) => (n.confirmed_mean ?? n.metric)
 const isEvaluated = (n) => n.status === 'evaluated' && metricOf(n) != null
@@ -134,18 +134,31 @@ export function hyperImportance(state) {
   return rows.sort((a, b) => b.imp - a.imp)
 }
 
-// The card's one-line "what this node did" chip. Deterministic so it shows IMMEDIATELY (no waiting on
-// the late LLM `change_summary`), and correct for the cases the bare param-diff got wrong:
+// Normalize free text to a compact, single-line caption. The card's .change-chip CSS already
+// ellipsizes at 168px, so we return the FULL text (the card's title tooltip shows it whole) and only
+// guard against a pathologically long string bloating the tooltip.
+function brief(text, max = 140) {
+  const s = String(text || '').replace(/\s+/g, ' ').trim()
+  return s.length > max ? s.slice(0, max - 1).trimEnd() + '…' : s
+}
+
+// The card's one-line "what this node did" caption. Deterministic so it shows IMMEDIATELY (no waiting
+// on a late LLM summary), and — by request — EVERY non-merge node carries a non-empty, explanatory
+// caption (the card is never left blank):
 //   • sweep  → what was SEARCHED (the grid), not the single best value (the old `p=2.5` bug);
-//   • draft / root (no parent) → `baseline` (nothing to diff against — it used to render nothing);
-//   • else   → the agent's `change_summary` if it wrote one, else the param-diff vs the first parent.
-// Returns '' for a merge (it renders its own ⊕ line) and when there's genuinely nothing to say.
+//   • draft / root (no parent) → `baseline` PLUS a brief description (its rationale/theme) so the
+//       starting point is explained too, instead of a bare label;
+//   • param change → the agent's `change_summary` if it wrote one, else the param-diff vs the parent;
+//   • no param change (code-only edit / re-run / repair) → the agent's rationale if any, else the
+//       operator's role ("improve — hill-climb around best", …) so the card still says something.
+// Returns '' ONLY for a real merge — it renders its own ⊕ combines line in its place.
 export function nodeChip(node, nodes) {
   if (!node) return ''
   // Resolve parents the SAME way the card's isMerge does (filter out ids missing from the fold), so
   // a node with a dangling 2nd parent id isn't mis-classified as a merge and left with no chip.
   const parents = (node.parent_ids || []).map(p => nodes[p]).filter(Boolean)
   if (parents.length > 1) return ''                        // real merge → renders its ⊕ combines line
+  const why = brief(node.idea?.rationale)                  // the agent's "why this experiment", one line
   if (isSweep(node)) {
     const sp = node.idea?.space || {}
     const keys = Object.keys(sp)
@@ -158,10 +171,15 @@ export function nodeChip(node, nodes) {
     return 'swept ' + (keys.length <= 2 ? keys.map(tok).join(', ') : `${keys.length} params`)
   }
   const parent = parents[0]
-  if (!parent) return 'baseline'                           // draft / root — nothing to diff against
-  if (node.idea?.change_summary) return node.idea.change_summary
+  if (!parent) {                                           // draft / root — nothing to diff against
+    const what = why || brief(node.idea?.theme)
+    return what ? `baseline · ${what}` : 'baseline'        // describe the baseline, don't just label it
+  }
+  if (node.idea?.change_summary) return brief(node.idea.change_summary)
   const lbl = paramDiffLabel(paramDiff(node, parent))      // diff vs the resolved parent directly
-  return lbl === '—' ? '' : lbl
+  if (lbl !== '—') return lbl
+  // No param change vs the parent — still carry an explanatory caption rather than a blank card.
+  return why || operatorMeta(node.operator).label
 }
 
 // Nodes that ran but made things worse than their parent (regressions) — the "tried, didn't help".

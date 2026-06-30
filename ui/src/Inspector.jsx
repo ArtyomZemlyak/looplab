@@ -101,7 +101,7 @@ function Overview({ n, state }) {
       <KV k="feasible" v={String(n.feasible)} />
       <KV k="eval seconds" v={fmt(n.eval_seconds)} />
     </div>
-    {chg && <><div className="section-h">What changed vs parent</div><div className="v">{chg}</div></>}
+    {chg && <><div className="section-h">What this node did</div><div className="v">{chg}</div></>}
     {uses.length > 0 && <><div className="section-h">Merge — techniques fused</div>
       <ul className="bul">{uses.map(u => <li key={u.parentId}>
         <b>#{u.parentId}</b>{u.theme ? ` · ${u.theme}` : ''}{u.change && u.change !== '—' ? ` — ${u.change}` : ''}</li>)}</ul></>}
