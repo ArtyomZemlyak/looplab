@@ -408,7 +408,9 @@ class SiblingRunTools:
 class DataTools:
     """Read the concrete task data — schema, column profiling, and asset samples — so the Researcher
     proposes from the REAL data rather than guessing. Degrades gracefully for tasks with no dataset
-    (e.g. toy/repo tasks). Uses only the documented TaskAdapter surface (`columns`/`assets`)."""
+    (e.g. toy/repo tasks). Uses the documented TaskAdapter surface (`columns`/`assets`), plus the
+    optional `data_samples()` hook as a fallback for tasks that read their data by absolute path and
+    expose `assets()=={}` (the `dataset` kind) — so their on-disk data is still visible here."""
 
     def __init__(self, task, max_chars: int = 3500):
         self.task = task
@@ -446,27 +448,41 @@ class DataTools:
 
     def _assets(self) -> dict:
         fn = getattr(self.task, "assets", None)
-        return (fn() if callable(fn) else {}) or {}
+        assets = (fn() if callable(fn) else {}) or {}
+        if assets:
+            return assets
+        # Fallback for tasks that read their data by absolute path and expose assets()=={} (the
+        # `dataset` kind): preview the on-disk data as bounded head samples so read_asset /
+        # data_schema / data_profile aren't blind. Read-only — NOT materialized into the sandbox.
+        sampler = getattr(self.task, "data_samples", None)
+        if callable(sampler):
+            try:
+                return sampler() or {}
+            except Exception:  # noqa: BLE001 — previews are best-effort
+                return {}
+        return {}
 
     _PROFILE_ROWS = 5000          # cap on retained rows (bounds the parse + the sample size)
     _MAX_TABLE_CHARS = 4_000_000  # cap on the text actually parsed, so neither the StringIO copy
                                   # nor the parse scales with a multi-hundred-MB table
 
     def _primary_table(self):
-        """Pick the most representative training table among the CSV assets (prefer ``train*.csv``,
-        else the first CSV) and parse a bounded prefix into at most ``_PROFILE_ROWS`` rows. Returns
-        ``(name, header, rows)`` or ``None`` when no parseable CSV asset exists — so schema/profile
-        can derive a real view from the actual data even when the task declares no structured
-        ``columns()``. Only the first ``_MAX_TABLE_CHARS`` are wrapped/parsed, so a huge file isn't
-        copied whole here. (The task's ``assets()`` still materializes each file once upstream — that
-        read is outside this read-only tool's control.)"""
+        """Pick the most representative training table among the CSV/TSV assets (prefer
+        ``train*``, else the first one) and parse a bounded prefix into at most ``_PROFILE_ROWS``
+        rows — a ``.tsv`` table is split on tabs. Returns ``(name, header, rows)`` or ``None`` when
+        no parseable CSV/TSV asset exists — so schema/profile can derive a real view from the actual
+        data even when the task declares no structured ``columns()``. Only the first
+        ``_MAX_TABLE_CHARS`` are wrapped/parsed, so a huge file isn't copied whole here. (The task's
+        ``assets()`` still materializes each file once upstream — that read is outside this read-only
+        tool's control.)"""
         tables = {n: v for n, v in self._assets().items()
-                  if isinstance(v, str) and n.lower().endswith(".csv")}
+                  if isinstance(v, str) and n.lower().endswith((".csv", ".tsv"))}
         if not tables:
             return None
         name = next((n for n in tables if n.lower().startswith("train")), None) or sorted(tables)[0]
+        delim = "\t" if name.lower().endswith(".tsv") else ","
         try:
-            reader = csv.reader(io.StringIO(tables[name][:self._MAX_TABLE_CHARS]))
+            reader = csv.reader(io.StringIO(tables[name][:self._MAX_TABLE_CHARS]), delimiter=delim)
             header = next(reader, None)
             if not header:
                 return None

@@ -44,6 +44,38 @@ def _resolve(p: str) -> str:
     return os.path.abspath(os.path.expanduser(os.path.expandvars(p)))
 
 
+_SAMPLE_CHARS = 65536       # head-sample cap per source for the read-only DataTools preview (≤64 KiB)
+_DIR_LISTING_MAX = 100      # max entries shown when previewing a directory source
+
+
+def _head_sample(path: str) -> str:
+    """A bounded head sample of a text file: at most ``_SAMPLE_CHARS`` chars, trimmed back to the
+    last complete line when the file is longer — so a CSV/TSV preview never ends on a half-row that
+    would mislead the schema/profile parser (and read_asset shows whole lines). Reads only one char
+    past the cap to detect truncation, so a multi-GB file is never slurped."""
+    with open(path, encoding="utf-8-sig", errors="replace") as f:
+        text = f.read(_SAMPLE_CHARS + 1)
+    if len(text) > _SAMPLE_CHARS:               # file is longer than the cap → we truncated it
+        text = text[:_SAMPLE_CHARS]
+        nl = text.rfind("\n")
+        if nl > 0:                              # drop the dangling partial last line (keep the rest)
+            text = text[:nl + 1]
+    return text
+
+
+def _add_sample(out: dict[str, str], key: str, text: str) -> None:
+    """Insert a preview sample under `key`, de-duplicating by suffixing `_2`/`_3`… before the
+    extension so two sources that share a basename don't clobber each other (and a `.csv` suffix —
+    which the schema/profile fallback keys off — is preserved)."""
+    if key in out:
+        base, ext = os.path.splitext(key)
+        i = 2
+        while f"{base}_{i}{ext}" in out:
+            i += 1
+        key = f"{base}_{i}{ext}"
+    out[key] = text
+
+
 def _coerce(v):
     """Coerce a CSV cell string to int/float when it is fully numeric, else leave it as-is. CSV cells
     are always strings, so without this the grounding profiler would label every numeric column as
@@ -205,6 +237,53 @@ class DatasetTask(BaseModel):
 
     def assets(self) -> dict[str, str]:
         return {}                               # data is read by absolute path, not embedded
+
+    def data_samples(self) -> dict[str, str]:
+        """Bounded head-sample PREVIEWS of the on-disk data sources, for the read-only introspection
+        tools (DataTools' read_asset / data_schema / data_profile). This is distinct from
+        ``assets()`` (which stays ``{}``): a dataset run reads its data by absolute path and never
+        materializes it into the sandbox, so without these previews the tool layer would be blind to
+        a dataset's real on-disk data. Keyed by file name (a ``.csv`` key stays recognizable to the
+        schema/profile fallback). For a directory source, returns a bounded entry listing plus — when
+        present — a head sample of the primary table inside it. Best-effort: an unreadable source is
+        skipped, never raised. Bounded by ``_SAMPLE_CHARS`` per file, so a multi-GB file is not
+        slurped."""
+        out: dict[str, str] = {}
+        for _label, path in self._paths():
+            try:
+                if os.path.isdir(path):
+                    entries = sorted(os.listdir(path))
+                    shown = entries[:_DIR_LISTING_MAX]
+                    more = ("" if len(entries) <= _DIR_LISTING_MAX
+                            else f"\n… (+{len(entries) - _DIR_LISTING_MAX} more)")
+                    plural = "entry" if len(entries) == 1 else "entries"
+                    _add_sample(out, os.path.basename(os.path.normpath(path)) + "/",
+                                f"directory: {len(entries)} {plural}\n" + "\n".join(shown) + more)
+                    tbl = self._dir_primary_table(path, entries)
+                    if tbl is not None:
+                        _add_sample(out, tbl[0], tbl[1])
+                elif os.path.isfile(path):
+                    _add_sample(out, os.path.basename(path), _head_sample(path))
+            except OSError:
+                continue
+        return out
+
+    def _dir_primary_table(self, dirpath: str, entries: list[str]) -> Optional[tuple[str, str]]:
+        """A bounded head sample of the most representative table inside a directory source — prefer
+        ``train*``, else the first CSV/TSV among the already-listed ``entries`` — so schema/profile
+        have a real table to parse for a directory-pointed dataset. Returns ``(filename, sample
+        text)`` or ``None``. (Takes the caller's directory listing to avoid a second ``os.listdir``.)"""
+        files = [f for f in entries if f.lower().endswith((".csv", ".tsv"))]
+        if not files:
+            return None
+        pick = next((f for f in files if f.lower().startswith("train")), None) or files[0]
+        fp = os.path.join(dirpath, pick)
+        try:
+            if not os.path.isfile(fp):
+                return None
+            return pick, _head_sample(fp)
+        except OSError:
+            return None
 
     def build_roles(self):                      # offline: deterministic data-reading baseline
         return (DatasetResearcher(seed=self.seed),

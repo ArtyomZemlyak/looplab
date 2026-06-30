@@ -7,11 +7,12 @@ from pathlib import Path
 import anyio
 import pytest
 
-from looplab.dataset_task import DatasetBaselineDeveloper, DatasetTask
+from looplab.dataset_task import DatasetBaselineDeveloper, DatasetTask, _SAMPLE_CHARS
 from looplab.eventstore import EventStore
-from looplab.models import Idea
+from looplab.models import Idea, RunState
 from looplab.orchestrator import Engine
 from looplab.policy import GreedyTree
+from looplab.run_tools import DataTools
 from looplab.sandbox import SubprocessSandbox
 from looplab.tasks import kinds, load_task, validate_task
 
@@ -88,3 +89,92 @@ def test_dataset_run_end_to_end_and_replays(tmp_path):
     # Pure-fold replay reproduces the same state.
     s2 = fold(EventStore(tmp_path / "run" / "events.jsonl").read_all())
     assert s2.model_dump() == state.model_dump()
+
+
+# --- on-disk data visible to the read-only DataTools layer (assets()=={} by design) -------------
+def test_data_samples_file_source():
+    """A CSV-file dataset previews its on-disk data as a bounded head sample keyed by file name."""
+    task = load_task(TASK_FILE)
+    samples = task.data_samples()
+    assert "data.csv" in samples
+    body = samples["data.csv"]
+    assert "x1" in body and "x2" in body and "target" in body    # the CSV header is in the sample
+    assert len(body) <= _SAMPLE_CHARS                            # bounded
+
+
+def test_data_samples_directory_source(tmp_path):
+    """A directory-pointed dataset previews a bounded listing PLUS a head sample of the primary
+    table inside it (so schema/profile have a real table to parse)."""
+    d = tmp_path / "ds"
+    d.mkdir()
+    (d / "train.csv").write_text("a,b,target\n1,2.0,yes\n3,4.0,no\n", encoding="utf-8")
+    (d / "readme.txt").write_text("hello", encoding="utf-8")
+    samples = DatasetTask(data_path=str(d)).data_samples()
+    listing_key = next(k for k in samples if k.endswith("/"))     # "<dirname>/" listing entry
+    assert "train.csv" in samples[listing_key] and "readme.txt" in samples[listing_key]
+    assert "train.csv" in samples                                # primary table surfaced for parsing
+    assert "target" in samples["train.csv"]
+
+
+def test_data_samples_bounded_for_large_file(tmp_path):
+    """A large data file is truncated to a bounded head sample (never slurped whole), trimmed back
+    to a clean line boundary so the preview never ends on a half-row."""
+    big = tmp_path / "big.csv"
+    big.write_text("a,b,c\n" + ("1,2,3\n" * 50000), encoding="utf-8")   # ≫ 64 KiB
+    sample = DatasetTask(data_path=str(big)).data_samples()["big.csv"]
+    assert len(sample) <= _SAMPLE_CHARS                          # capped, not the whole file
+    assert sample.startswith("a,b,c")                            # it's the HEAD of the file
+    assert sample.endswith("\n")                                 # trimmed to a whole line, no half-row
+    assert _SAMPLE_CHARS - len(sample) < 16                      # only the dangling partial row dropped
+
+
+def test_data_tools_sees_dataset_csv_on_disk():
+    """read_asset / data_schema / data_profile all surface a CSV-file dataset's real on-disk data,
+    even though the task's assets() is empty by design (was: "(this task has no data assets)")."""
+    dt = DataTools(load_task(TASK_FILE))
+    dt.bind_state(RunState())                                    # no recorded data_profile -> CSV fallback
+    listing = dt.execute("read_asset", {})
+    assert "no data assets" not in listing.lower() and "data.csv" in listing
+    asset = dt.execute("read_asset", {"name": "data.csv"})
+    assert "x1" in asset and "target" in asset
+    sch = dt.execute("data_schema", {})
+    assert "x1" in sch and "target" in sch
+    prof = dt.execute("data_profile", {})
+    assert "target" in prof and "numeric" in prof
+
+
+def test_data_tools_sees_dataset_directory_on_disk(tmp_path):
+    """For a DIRECTORY-pointed dataset columns() is empty (not a file), so DataTools' schema/profile
+    fallback must parse the primary table inside the directory instead of finding nothing."""
+    d = tmp_path / "ds"
+    d.mkdir()
+    (d / "train.csv").write_text("id,height,city,target\n1,1.8,NY,0\n2,1.6,LA,1\n3,,NY,0\n",
+                                 encoding="utf-8")
+    task = DatasetTask(data_path=str(d))
+    assert task.columns() == {}                                  # a directory exposes no columns()
+    dt = DataTools(task)
+    dt.bind_state(RunState())
+    assert "train.csv" in dt.execute("read_asset", {})
+    sch = dt.execute("data_schema", {})
+    assert "inferred from train.csv" in sch                      # used the in-dir primary table
+    assert "height (numeric)" in sch and "city (categorical)" in sch
+    prof = dt.execute("data_profile", {})
+    assert "height: numeric" in prof and "min=1.6" in prof and "max=1.8" in prof
+    assert "missing=0.33" in prof                                # 1 of 3 height values is blank
+
+
+def test_data_tools_sees_dataset_tsv_directory(tmp_path):
+    """A directory-pointed dataset whose primary table is a TSV is also parsed for schema/profile:
+    _dir_primary_table surfaces the train.tsv sample and DataTools._primary_table parses it with a
+    tab delimiter (else a tab-separated row would read as a single column)."""
+    d = tmp_path / "ds"
+    d.mkdir()
+    (d / "train.tsv").write_text("id\theight\tcity\n1\t1.8\tNY\n2\t1.6\tLA\n", encoding="utf-8")
+    dt = DataTools(DatasetTask(data_path=str(d)))
+    dt.bind_state(RunState())
+    assert "train.tsv" in dt.execute("read_asset", {})
+    sch = dt.execute("data_schema", {})
+    assert "inferred from train.tsv" in sch
+    assert "height (numeric)" in sch and "city (categorical)" in sch    # tab-split, not one column
+    prof = dt.execute("data_profile", {})
+    assert "height: numeric" in prof and "min=1.6" in prof and "max=1.8" in prof
