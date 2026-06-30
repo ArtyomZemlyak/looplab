@@ -21,7 +21,7 @@ function AgentPills({ f, granted, onToggleAgent }) {
   </div>
 }
 
-function Field({ f, value, onChange, changed, granted, onToggleAgent, secretSet, onClearSecret }) {
+function Field({ f, value, onChange, changed, unsaved, granted, onToggleAgent, secretSet, onClearSecret }) {
   const set = (v) => onChange(f.key, v)
   let input
   if (f.type === 'bool') {
@@ -46,15 +46,19 @@ function Field({ f, value, onChange, changed, granted, onToggleAgent, secretSet,
                    step={f.type === 'float' ? 'any' : undefined} value={value ?? ''}
                    placeholder={f.placeholder || ''} onChange={e => set(e.target.value)} />
   }
-  return <div className={'sf-field' + (changed ? ' changed' : '')}>
-    <div className="sf-label">{f.label}{changed && <span className="sf-dot" title="changed from default">●</span>}
+  // Two distinct markers, unsaved WINS: amber ● = edited but not yet saved (clears on Save);
+  // faint ● = the saved value differs from the engine default (persists — "what you've customized").
+  const dot = unsaved ? <span className="sf-dot unsaved" title="unsaved change — clears on Save">●</span>
+    : changed ? <span className="sf-dot fromdefault" title="differs from the engine default">●</span> : null
+  return <div className={'sf-field' + (unsaved ? ' unsaved' : changed ? ' changed' : '')}>
+    <div className="sf-label">{f.label}{dot}
       <AgentPills f={f} granted={granted || []} onToggleAgent={onToggleAgent} /></div>
     <div className="sf-input">{input}</div>
     {f.help && <div className="sf-help">{f.help}</div>}
   </div>
 }
 
-export default function SettingsForm({ form, onChange, dirty, only, agentControl, onToggleAgent,
+export default function SettingsForm({ form, onChange, dirty, unsaved, only, agentControl, onToggleAgent,
                                        secretState, onClearSecret, hideSecret }) {
   let groups = only ? SETTINGS_GROUPS.filter(g => only.includes(g.title)) : SETTINGS_GROUPS
   if (hideSecret) {
@@ -66,6 +70,7 @@ export default function SettingsForm({ form, onChange, dirty, only, agentControl
   const idx = groups.length ? Math.min(active, groups.length - 1) : 0
   const g = groups[idx]
   if (!g) return null
+  const groupUnsaved = (gr) => gr.fields.some(f => unsaved?.has(f.key))
   const groupChanged = (gr) => gr.fields.some(f => dirty?.has(f.key))
 
   return <div className="settings-form tabbed">
@@ -73,14 +78,16 @@ export default function SettingsForm({ form, onChange, dirty, only, agentControl
       {groups.map((gr, i) => <div key={gr.title}
         className={'tab' + (i === idx ? ' active' : '')}
         onClick={() => setActive(i)} title={gr.sub || ''}>
-        {gr.title}{groupChanged(gr) && <span className="sf-dot" title="has values changed from default">●</span>}
+        {gr.title}{groupUnsaved(gr)
+          ? <span className="sf-dot unsaved" title="has unsaved changes">●</span>
+          : groupChanged(gr) ? <span className="sf-dot fromdefault" title="has values changed from default">●</span> : null}
       </div>)}
     </div>
     <div className="sf-group" key={g.title}>
       {g.sub && <div className="sf-group-h"><span className="muted">{g.sub}</span></div>}
       <div className="sf-grid">
         {g.fields.map(f => <Field key={f.key} f={f} value={form[f.key]}
-                                  changed={dirty?.has(f.key)} onChange={onChange}
+                                  changed={dirty?.has(f.key)} unsaved={unsaved?.has(f.key)} onChange={onChange}
                                   granted={agentControl?.[f.key]} onToggleAgent={onToggleAgent}
                                   secretSet={secretState?.[f.key]} onClearSecret={onClearSecret} />)}
       </div>

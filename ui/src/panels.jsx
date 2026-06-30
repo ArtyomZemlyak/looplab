@@ -364,7 +364,8 @@ export function ConfigPanel({ runId, state, live, onClose, onToast }) {
             ? <button className="btn sm" disabled={busy || canSave} onClick={onPauseResume} title="pause the run, then resume it with the saved settings">Pause &amp; resume ▸</button>
             : <button className="btn sm" disabled={busy || canSave} onClick={onResume} title="continue this run with the saved settings">Resume ▸</button>}
         </div>
-        {raw ? rawTable : <SettingsForm form={form} onChange={onChange} dirty={dirty} agentControl={agentControl} onToggleAgent={onToggleAgent} hideSecret />}
+        {/* This panel's `dirty` is changed-vs-saved (unsaved), so feed it as `unsaved` → the amber dot that clears on Save. */}
+        {raw ? rawTable : <SettingsForm form={form} onChange={onChange} unsaved={dirty} agentControl={agentControl} onToggleAgent={onToggleAgent} hideSecret />}
       </>}
     </Panel>
   )
