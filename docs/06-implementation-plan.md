@@ -97,7 +97,7 @@
 - [x] **I14 — Observability** ✅ (custom JSONL spans wired; OTel/MLflow = seam)
   - [x] custom JSONL span exporter + `span()` + **wired into the orchestrator** (per-evaluation spans → `spans.jsonl`) — `tracing.py`, `orchestrator.py`; tested `test_partials_wired.py`
   - [ ] 🧱 OTel-SDK wrapping + MLflow optional exporter
-- [~] **I15 — Textual TUI** — **CUT** (decision 2026-06-22). The static-HTML lineage tree + `replay`/`inspect` CLI cover observation; a live TUI isn't worth the dependency/maintenance for the CLI-first tool. Revisit only if a live interactive view is requested.
+- [x] **I15 — Terminal control plane (`looplab tui`)** — the Textual TUI was originally **CUT** (2026-06-22) to avoid a heavy widget dependency. Shipped instead as a **dependency-free, chat-first TUI** (`looplab/tui.py`): a thin HTTP client of the existing UI server (ADR-18), built on stdlib `urllib` + `rich` (already shipped with Typer) — no Textual, no curses. It is deliberately the *control* slice, not a graph explorer: a run dashboard (status · nodes · best · age), the genesis flow (describe a goal → the boss plans + launches), and a per-run boss chat that applies actions to the live run (the same action-router the web Dock uses). Auto-launches an API-only server when none is found. Tested `test_tui.py` (pure render/gate helpers + the client contract via TestClient).
 
 ---
 
@@ -156,7 +156,7 @@ Remaining offline-buildable features, roughly by value:
 - [x] ~~Skills + prompt store + AGENTS.md (I18)~~ ✅ done
 - [x] ~~Diversity archive (I22)~~ ✅ done — `archive.py`
 - [x] ~~HITL-as-events (I21)~~ ✅ done — `orchestrator.py` + `LoopLab approve`
-- [~] ~~Textual TUI (I15)~~ — CUT
+- [x] Terminal control plane (I15) — shipped as a dependency-free chat-first TUI (`looplab tui`), not Textual
 
 - [x] ~~Git/patch path (I4)~~ ✅ done — `patch.py` (surface gate; ready for a diff-emitting backend)
 

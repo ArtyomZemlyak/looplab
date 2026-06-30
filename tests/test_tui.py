@@ -1,0 +1,213 @@
+"""The terminal control plane (`looplab tui`). The TUI is a thin HTTP client of the UI server, so the
+pure rendering/gating helpers are unit-tested directly, and the client (Api) is exercised against a
+real server via FastAPI's TestClient (no sockets) so the request/response contracts stay in lockstep
+with the React `util.js` they mirror.
+"""
+from __future__ import annotations
+
+from pathlib import Path
+
+import pytest
+
+from looplab import tui
+
+
+# ----------------------------------------------------------------------------- pure helpers
+
+def test_fmt_metric():
+    assert tui.fmt_metric(None) == "—"
+    assert tui.fmt_metric(float("nan")) == "—"
+    assert tui.fmt_metric(1.34289) == "1.343"
+    assert tui.fmt_metric(0) == "0"
+    assert tui.fmt_metric("pending") == "pending"
+    # very small / very large -> exponential, like util.js fmt
+    assert "e" in tui.fmt_metric(1e-9)
+    assert "e" in tui.fmt_metric(5e8)
+
+
+def test_fmt_ago():
+    now = 1_000_000.0
+    assert tui.fmt_ago(None) == "—"
+    assert tui.fmt_ago(now - 5, now) == "just now"
+    assert tui.fmt_ago(now - 120, now) == "2m ago"
+    assert tui.fmt_ago(now - 7200, now) == "2h ago"
+    assert tui.fmt_ago(now - 2 * 86400, now) == "2d ago"
+
+
+def test_phase_meta_running_vs_stalled():
+    # a searching run with a live engine reads as bright "running"
+    g, colour, label = tui.phase_meta({"phase": "search", "engine_running": True})
+    assert label == "running" and colour == "green"
+    # not finished + no engine == stalled/zombie (the bug the web UI also surfaces)
+    g, colour, label = tui.phase_meta({"phase": "search", "engine_running": False})
+    assert "stalled" in label and colour == "red"
+    # finished is finished regardless of engine flag
+    _, colour, label = tui.phase_meta({"phase": "finished", "engine_running": False})
+    assert label == "finished" and colour == "green"
+    # a bare summary with only `finished` set still resolves
+    _, _, label = tui.phase_meta({"finished": True})
+    assert label == "finished"
+
+
+def test_sort_runs_recent_first():
+    runs = [{"run_id": "a", "mtime": 1}, {"run_id": "b", "mtime": 3}, {"run_id": "c", "mtime": 2}]
+    assert [r["run_id"] for r in tui.sort_runs(runs)] == ["b", "c", "a"]
+
+
+def test_slug():
+    assert tui.slug("My Run!") == "my-run"
+    assert tui.slug("  spaces  and---dashes ") == "spaces-and-dashes"
+    assert tui.slug("x" * 80) == "x" * 40
+
+
+def test_spec_lines_catalogue_and_inline():
+    lines = tui.spec_lines({"run_id": "demo", "task_file": "examples/toy_task.json",
+                            "settings": {"max_nodes": 14, "policy": "greedy"}, "rationale": "toy smoke"})
+    blob = "\n".join(lines)
+    assert "demo" in blob and "toy_task.json" in blob and "catalogue" in blob
+    assert "max_nodes=14" in blob and "policy=greedy" in blob and "toy smoke" in blob
+    # inline mlebench_real shows the competition; setup steps are numbered
+    lines = tui.spec_lines({"run_id": "k", "task": {"kind": "mlebench_real", "competition": "titanic"},
+                            "settings": {}, "setup_steps": ["download data", "set the metric"]})
+    blob = "\n".join(lines)
+    assert "mlebench_real · titanic" in blob and "step 1." in blob and "step 2." in blob
+
+
+def test_spec_ready_gates():
+    assert tui.spec_ready(None) is not None                 # no plan
+    assert tui.spec_ready({"task": {"kind": "quadratic"}}) is not None    # missing name
+    assert tui.spec_ready({"run_id": "x", "task": {}}) is not None        # no task kind
+    # mlebench_real needs a competition
+    assert tui.spec_ready({"run_id": "x", "task": {"kind": "mlebench_real"}}) is not None
+    assert tui.spec_ready({"run_id": "x", "task": {"kind": "mlebench_real", "competition": "titanic"}}) is None
+    # repo task needs a path AND (eval command or onboard)
+    assert tui.spec_ready({"run_id": "x", "task": {"kind": "repo", "editable_path": "/r"}}) is not None
+    assert tui.spec_ready({"run_id": "x", "task": {"kind": "repo", "editable_path": "/r", "onboard": True}}) is None
+    assert tui.spec_ready({"run_id": "x", "task": {"kind": "repo", "editable_path": "/r",
+                                                   "eval": {"command": ["python", "t.py"]}}}) is None
+    # a catalogue task_file is always launchable once named
+    assert tui.spec_ready({"run_id": "x", "task_file": "examples/toy_task.json"}) is None
+
+
+def test_action_needs_engine():
+    assert tui.action_needs_engine({"type": "inject_node"}) is True
+    assert tui.action_needs_engine({"type": "budget_extend"}) is True
+    assert tui.action_needs_engine({"type": "hint"}) is False
+    assert tui.action_needs_engine({}) is False
+
+
+# ----------------------------------------------------------------------------- Api job polling
+
+def test_await_job_fast_path():
+    """A result that is already the final dict (no job_id) is returned unchanged — no polling."""
+    api = tui.Api("http://x")
+    out = api._await_job({"ok": True, "reply": "hi"}, lambda j: f"/p/{j}", interval=0.01, deadline_s=1)
+    assert out == {"ok": True, "reply": "hi"}
+
+
+def test_await_job_polls_to_done(monkeypatch):
+    """A {status:'running', job_id} is polled until the server reports done."""
+    api = tui.Api("http://x")
+    seq = [{"status": "running"}, {"status": "running"}, {"status": "done", "ok": True, "reply": "done!"}]
+    calls = {"n": 0}
+
+    def fake_get(path, timeout=None):
+        i = min(calls["n"], len(seq) - 1)
+        calls["n"] += 1
+        return seq[i]
+
+    monkeypatch.setattr(api, "get", fake_get)
+    out = api._await_job({"status": "running", "job_id": "abc"}, lambda j: f"/api/jobs/{j}",
+                         interval=0.001, deadline_s=5)
+    assert out["ok"] is True and out["reply"] == "done!"
+    assert calls["n"] >= 3
+
+
+def test_await_job_unknown_is_expired(monkeypatch):
+    api = tui.Api("http://x")
+    monkeypatch.setattr(api, "get", lambda path, timeout=None: {"status": "unknown"})
+    out = api._await_job({"status": "running", "job_id": "abc"}, lambda j: f"/api/jobs/{j}",
+                         interval=0.001, deadline_s=5)
+    assert out["ok"] is False and "expired" in out["error"]
+
+
+# ----------------------------------------------------------------------------- Api ↔ real server
+
+fastapi = pytest.importorskip("fastapi")
+from fastapi.testclient import TestClient  # noqa: E402
+
+import anyio  # noqa: E402
+
+from looplab.orchestrator import Engine  # noqa: E402
+from looplab.policy import GreedyTree  # noqa: E402
+from looplab.sandbox import SubprocessSandbox  # noqa: E402
+from looplab.server import make_app  # noqa: E402
+from looplab.toytask import ToyTask  # noqa: E402
+
+ROOT = Path(__file__).resolve().parents[1]
+TASK = ROOT / "examples" / "toy_task.json"
+
+
+def _build_run(root: Path, name: str = "demo"):
+    task = ToyTask.load(TASK)
+    r, d = task.build_roles()
+    eng = Engine(root / name, task=task, researcher=r, developer=d,
+                 sandbox=SubprocessSandbox(), policy=GreedyTree(n_seeds=2, max_nodes=4))
+    return anyio.run(eng.run)
+
+
+def _bind(api: tui.Api, client: TestClient) -> None:
+    """Route the TUI's stdlib Api through the in-process TestClient (no real sockets) so the client's
+    request building + error/detail unwrapping is exercised against the actual server routes."""
+    def _request(method, path, body=None, timeout=None):
+        r = client.request(method, path, json=body)
+        if r.status_code >= 400:
+            detail = ""
+            try:
+                detail = (r.json() or {}).get("detail", "")
+            except Exception:  # noqa: BLE001
+                pass
+            raise tui.ApiError(detail or f"{path}: HTTP {r.status_code}", status=r.status_code)
+        return r.json() if r.content else None
+    api._request = _request  # type: ignore[assignment]
+
+
+def test_api_ping_and_runs(tmp_path):
+    _build_run(tmp_path)
+    api = tui.Api("http://test")
+    _bind(api, TestClient(make_app(tmp_path)))
+    assert api.ping() is True
+    runs = tui.sort_runs(api.get("/api/runs"))
+    assert runs and runs[0]["run_id"] == "demo" and runs[0]["finished"] is True
+
+
+def test_api_state_payload(tmp_path):
+    _build_run(tmp_path)
+    api = tui.Api("http://test")
+    _bind(api, TestClient(make_app(tmp_path)))
+    state = api.get("/api/runs/demo/state")["state"]
+    assert state["finished"] is True and state["nodes"]
+
+
+def test_api_error_detail_unwrapped(tmp_path):
+    """A 4xx from the server surfaces FastAPI's `detail` (human reason), not a bare status — same as
+    util.js _throw, so the TUI shows "already exists …" not "409"."""
+    _build_run(tmp_path)
+    api = tui.Api("http://test")
+    _bind(api, TestClient(make_app(tmp_path)))
+    with pytest.raises(tui.ApiError) as ei:
+        api.get("/api/runs/nope/state")
+    assert ei.value.status == 404
+    # starting a run that already exists -> 409 with a clear detail
+    with pytest.raises(tui.ApiError) as ei:
+        api.post("/api/start", {"run_id": "demo", "task_file": str(TASK)})
+    assert ei.value.status == 409 and "exists" in ei.value.detail
+
+
+def test_genesis_offline_soft_fails(tmp_path):
+    """With no LLM reachable the genesis boss soft-fails (ok:false) instead of throwing, so the TUI can
+    keep the user's draft and show the reason (mirrors GenesisChat's offline handling)."""
+    api = tui.Api("http://test")
+    _bind(api, TestClient(make_app(tmp_path)))
+    r = api.genesis([{"role": "user", "content": "a toy run"}], "a toy run", None)
+    assert isinstance(r, dict) and r.get("ok") is False
