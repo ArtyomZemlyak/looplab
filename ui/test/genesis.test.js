@@ -4,7 +4,7 @@
 // fields) rather than a dead end behind the manual form — these lock down that per-kind contract.
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { genesisTaskReady, genesisLaunchReady, GENESIS_TASK_KINDS } from '../src/util.js'
+import { genesisTaskReady, genesisLaunchReady, GENESIS_TASK_KINDS, genesisDefaultDirection } from '../src/util.js'
 
 test('a blank plan is not launchable (the boss-left-it-empty case the user hit)', () => {
   assert.equal(genesisTaskReady(null), false)
@@ -49,6 +49,16 @@ test('launchability also requires a run name', () => {
   assert.equal(genesisLaunchReady({ run_id: '', task }), false)
   assert.equal(genesisLaunchReady({ run_id: '  ', task }), false)
   assert.equal(genesisLaunchReady({ run_id: 'spooky', task }), true)
+})
+
+test('the Direction default matches each task model default (so the select never lies)', () => {
+  // toytask.py / regression.py / timeseries.py default direction='min'; the rest 'max'. The card shows
+  // this default without persisting it, so a mismatch would launch a run optimizing the opposite way.
+  for (const kind of ['quadratic', 'regression', 'code_regression', 'timeseries'])
+    assert.equal(genesisDefaultDirection(kind), 'min', kind)
+  for (const kind of ['classification', 'dataset', 'mlebench', 'mlebench_real', 'repo'])
+    assert.equal(genesisDefaultDirection(kind), 'max', kind)
+  assert.equal(genesisDefaultDirection(undefined), 'max')   // catch-all for an unpicked/unknown kind
 })
 
 test('every advertised kind is one the readiness gate understands', () => {

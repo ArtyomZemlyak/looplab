@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react'
-import { genesis, genesisAwait, startRun, GENESIS_TASK_KINDS, genesisLaunchReady } from './util.js'
+import { genesis, genesisAwait, startRun, GENESIS_TASK_KINDS, genesisLaunchReady, genesisDefaultDirection } from './util.js'
 import StartRun from './StartRun.jsx'
 
 const slug = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '').slice(0, 40)
@@ -209,7 +209,7 @@ export default function GenesisChat({ onClose, onStarted, seed }) {
                   <input className="text" value={task.data_path || ''} onChange={e => setTaskField('data_path', e.target.value)} placeholder="/abs/path/to/data.csv or a folder" />
                   <div className="gen-help">Absolute path to the data the agent reads (a file or a directory).</div></div>
                 <div className="gen-field"><div className="gen-lab">Direction</div>
-                  <select className="text" value={task.direction || 'max'} onChange={e => setTaskField('direction', e.target.value)}>
+                  <select className="text" value={task.direction || genesisDefaultDirection('dataset')} onChange={e => setTaskField('direction', e.target.value)}>
                     <option value="max">maximize</option><option value="min">minimize</option></select></div>
               </div>
             </div>}
@@ -217,7 +217,7 @@ export default function GenesisChat({ onClose, onStarted, seed }) {
               <div className="gen-field"><div className="gen-lab">Goal</div>
                 <input className="text" value={task.goal || ''} onChange={e => setTaskField('goal', e.target.value)} placeholder="what to optimize" /></div>
               <div className="gen-field"><div className="gen-lab">Direction</div>
-                <select className="text" value={task.direction || (task.kind === 'quadratic' ? 'min' : 'max')} onChange={e => setTaskField('direction', e.target.value)}>
+                <select className="text" value={task.direction || genesisDefaultDirection(task.kind)} onChange={e => setTaskField('direction', e.target.value)}>
                   <option value="max">maximize</option><option value="min">minimize</option></select></div>
             </div>}
             {isRepo && !spec.task_file && <div className="gen-repo">
@@ -234,7 +234,7 @@ export default function GenesisChat({ onClose, onStarted, seed }) {
                   <input className="text" value={task.eval?.metric?.key || ''} onChange={e => setMetricKey(e.target.value)} placeholder="metric" />
                   <div className="gen-help">JSON key the command prints, e.g. {'{'}&quot;metric&quot;: 0.93{'}'}.</div></div>
                 <div className="gen-field"><div className="gen-lab">Direction</div>
-                  <select className="text" value={task.direction || 'max'} onChange={e => setTaskField('direction', e.target.value)}>
+                  <select className="text" value={task.direction || genesisDefaultDirection('repo')} onChange={e => setTaskField('direction', e.target.value)}>
                     <option value="max">maximize</option><option value="min">minimize</option></select></div>
                 <div className="gen-field"><div className="gen-lab">Edit surface</div>
                   <input className="text" value={Array.isArray(task.edit_surface) ? task.edit_surface.join(', ') : (task.edit_surface || '')}

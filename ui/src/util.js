@@ -559,6 +559,17 @@ export function genesisLaunchReady(spec) {
   return !!(spec && spec.run_id && spec.run_id.trim() && genesisTaskReady(spec))
 }
 
+// Per-kind default optimization direction — MIRRORS each task model's own default (toytask/regression/
+// timeseries → 'min'; classification/dataset/mlebench*/repo → 'max'). The card shows this in its
+// Direction <select> but does NOT write it to the spec unless the user changes it, so it MUST match the
+// model default the engine falls back to on /api/start — otherwise the select would display 'maximize'
+// while a regression run actually minimizes. 'max' is the catch-all for any kind not listed.
+const _GENESIS_DIRECTION = {
+  quadratic: 'min', regression: 'min', code_regression: 'min', timeseries: 'min',
+  classification: 'max', dataset: 'max', mlebench: 'max', mlebench_real: 'max', repo: 'max',
+}
+export const genesisDefaultDirection = (kind) => _GENESIS_DIRECTION[kind] || 'max'
+
 // chat-first run creation: the pre-run BOSS turns a goal into an editable spec {run_id, task|task_file,
 // settings, rationale} + a conversational reply. `draft` carries the current card on refine turns.
 export const genesis = ({ messages = [], instruction = '', draft = null }) =>
