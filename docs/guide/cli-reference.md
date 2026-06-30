@@ -4,7 +4,8 @@ Every command is available as `looplab <command>` (after `pip install -e .`) or,
 `python -m looplab.cli <command>`.
 
 ```text
-looplab run             Start (or continue) a run from a task file
+looplab init            Scaffold a documented looplab.yaml config template
+looplab run             Start (or continue) a run from a config/task file or --goal/--kind
 looplab resume          Resume a crashed/incomplete run by replay
 looplab inspect         Show the resolved config + best result
 looplab replay          Pure fold of the event log → state (read-only)
@@ -17,23 +18,64 @@ looplab export-mlflow   Log the champion to MLflow
 looplab export-notebook Export the champion as a runnable .ipynb
 ```
 
-Anything set on the command line can also be set via a `LOOPLAB_*` environment variable — see
-[Configuration](configuration.md). CLI flags win over env vars for that run.
+Anything set on the command line can also be set via a `LOOPLAB_*` environment variable or the
+`settings:` block of a config file — see [Configuration](configuration.md). Precedence: `--set`/flags
+win over the file, which wins over env vars, for that run. Add `--version` to print the version.
+
+---
+
+## `init`
+
+Scaffold a documented config template (YAML) you can edit and run. The template leads with the task
+and the knobs most runs touch (each commented), then lists every remaining setting at its default —
+so it doubles as living documentation.
+
+```bash
+looplab init [--out looplab.yaml] [--kind dataset] [--force]
+looplab run looplab.yaml
+```
 
 ---
 
 ## `run`
 
-Start a new run, or continue one if the output directory already has events.
+Start a new run, or continue one if the output directory already has events. Ways to say what to
+solve:
 
 ```bash
-looplab run TASK.json [OPTIONS]
+looplab run --goal "predict target; data is in ~/proj/data"   # Genesis authors the whole task
+looplab run config.yaml                          # one file: task + settings + out
+looplab run task.json --max-nodes 20             # a bare task file + flags (legacy)
+looplab run --kind dataset --goal "..." -s backend=llm        # pin the kind, Genesis fills the rest
 ```
+
+A config file may be **unified** (top-level `task:` / `settings:` / `out:` keys) or a **bare task**
+(the legacy format — the whole file is the task). YAML and JSON are both accepted.
+
+**Genesis (author the task from a plain goal).** Pass `--goal` and the LLM authors the task — the
+headless counterpart of the Web UI's "New run" planner. It announces its choice (`Genesis -> kind=…`)
+before launching, and:
+
+- picks the `kind` from your words — *or* stays within the kind you **pin** with `--kind` (it doesn't
+  skip Genesis, it constrains it; what the run does within a kind depends on the model);
+- reads **where your data lives** straight from the goal — one path or several, a file or a folder —
+  and authors the data mounts, so you don't need `--data` (it remains an optional shortcut);
+- defaults the backend to `llm` for a generative kind (`dataset`/`repo`/`mlebench_real`/…); offline
+  kinds (`quadratic`/…) keep their default and still run with no model.
+
+Genesis needs a reachable model (it reasons about your goal). Add `--no-genesis` to build the task
+from `--kind`/`--set` alone (offline), or run a complete file with no `--goal`.
 
 | Option | Default | Description |
 |---|---|---|
-| `TASK.json` | *(required)* | Path to a task JSON file (see [Tasks](tasks.md)) |
-| `--out DIR` | `runs/run_local` | Run directory (created if missing) |
+| `[CONFIG\|TASK]` | *(optional)* | Config or task file (YAML/JSON). Omit it and build the task from the flags below. |
+| `--goal TEXT` | — | Task goal in plain words (build a task with no file) |
+| `--kind NAME` | — | Task kind (`quadratic`, `dataset`, `repo`, … — see [Tasks](tasks.md)). With `--goal` it **pins** the kind for Genesis; omit it to let Genesis pick. |
+| `--genesis / --no-genesis` | on | With `--goal`, let the LLM author the task (pinning to `--kind` if given, and reading data locations from your words). `--no-genesis` builds it from `--kind`/`--set` alone. |
+| `--direction min\|max` | — | Optimization direction |
+| `--data PATH` | — | Optional shortcut for your data/repo path; under Genesis you can instead name the location(s) in `--goal` |
+| `-s, --set KEY=VALUE` | — | Override **any** engine setting (repeatable); same keys as `settings:` / `LOOPLAB_*` |
+| `--out DIR` | the file's `out:` or `runs/run_local` | Run directory (created if missing) |
 | `--max-nodes N` | `8` | Node (candidate) budget for the search |
 | `--backend toy\|llm` | `toy` | Role backend: offline optimizer or a live LLM |
 | `--model ID` | `qwen3:8b` | LLM model id (when `--backend llm`) |
@@ -56,7 +98,10 @@ looplab run TASK.json [OPTIONS]
 **Examples**
 
 ```bash
+looplab init && looplab run looplab.yaml                  # scaffold a config, edit, run
+looplab run --kind quadratic --goal "minimize x^2+y^2" --direction min   # no file
 looplab run examples/toy_task.json --out runs/demo --max-nodes 14
+looplab run examples/toy_task.json -s policy=asha -s n_seeds=5            # --set any setting
 looplab run examples/code_regression_task.json --backend llm --max-nodes 6
 looplab run examples/regression_task.json --backend llm \
     --knowledge-dir examples/knowledge --max-nodes 6

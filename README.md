@@ -31,8 +31,8 @@ Requires **Python ≥ 3.11**. Core dependencies are small and pure-Python (`pyda
 ## Quick start
 
 ```bash
-# 1. Run a toy optimization task offline (no LLM, no network).
-looplab run examples/toy_task.json --out runs/demo --max-nodes 14
+# 1. Run a toy optimization task offline (no LLM, no network) — no file needed:
+looplab run --kind quadratic --goal "minimize (x-3)^2+(y+1)^2" --direction min --out runs/demo
 
 # 2. Inspect the result and verify reproducibility.
 looplab inspect runs/demo          # resolved config + best result
@@ -40,6 +40,47 @@ looplab replay  runs/demo          # rebuild full state from the event log
 
 # 3. A real ML task: polynomial-degree + ridge selection via 5-fold CV.
 looplab run examples/regression_task.json --out runs/reg --max-nodes 14
+```
+
+### Three ways to configure a run
+
+You don't have to hand-write JSON. Pick whichever fits:
+
+```bash
+# a) Just describe it — Genesis (the LLM) authors the whole task from your words, including where
+#    your data lives. No file, no --kind, no --data:
+looplab run --goal "predict the target column; my data is in ~/proj/data and ~/extra/feats.csv"
+
+# b) One readable YAML file — what to solve AND how. Scaffold a documented template, edit, run:
+looplab init                       # writes looplab.yaml (every setting, commented)
+looplab run looplab.yaml
+
+# c) Pin the kind but still let Genesis fill the rest:
+looplab run --kind dataset --goal "predict target, data in data.csv" -s max_nodes=20
+
+# d) A bare task file + flags (the original style still works):
+looplab run examples/toy_task.json --max-nodes 14
+```
+
+When you pass `--goal`, **Genesis** (the same "New run" planner the Web UI uses) authors the task for
+you: it picks the `kind` — `dataset`, `repo`, `mlebench_real`, … — and reads your words for where the
+data lives (one path or several, a file or a folder), so you don't pre-format anything. `--kind`
+**pins** the kind and lets Genesis fill the rest within it; `--data` is an optional shortcut for the
+path. Add `--no-genesis` to build the task from `--kind`/`--set` alone (offline, no model).
+
+`-s/--set key=value` overrides **any** engine setting (full parity with the `settings:` block and the
+`LOOPLAB_*` env vars). A unified `looplab.yaml` looks like:
+
+```yaml
+out: runs/demo
+task:
+  kind: dataset
+  goal: predict `target` from the features
+  direction: max
+  data_path: data.csv
+settings:
+  backend: llm
+  max_nodes: 20
 ```
 
 Open `runs/demo/tree.html` for a static lineage view of every candidate the loop tried.
@@ -80,7 +121,8 @@ See the [Task reference](docs/guide/tasks.md) for every field and more examples.
 ## CLI
 
 ```bash
-looplab run     TASK.json [--out DIR] [--backend toy|llm] [--max-nodes N] ...
+looplab init                             # scaffold a documented looplab.yaml (config-as-docs)
+looplab run     [CONFIG|TASK] [-s k=v]   # YAML/JSON config, a bare task, or --goal/--kind (no file)
 looplab resume  RUN_DIR                  # continue a crashed/incomplete run by replay
 looplab inspect RUN_DIR                  # resolved config snapshot + best result
 looplab replay  RUN_DIR                  # pure fold of the event log → state (read-only)
