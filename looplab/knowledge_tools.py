@@ -136,16 +136,16 @@ class KnowledgeTools:
         self.cases_path = Path(cases_path) if cases_path else None
         self.writable = writable
         self.k = k
-        # The KB store carries the cases in its semantic index (kb_search has always surfaced past
-        # solutions); the memory store owns its own markdown notes. Either may be absent.
-        self.kb = MarkdownStore(knowledge_dir, extra=_case_extras(self.cases_path)) if knowledge_dir else None
-        self.mem = MarkdownStore(memory_dir) if memory_dir else None
-        # When there is no KB dir we still need kb_search to work over cases alone (I19): keep a
-        # lightweight store rooted at the memory dir (or cases' dir) just for the index.
+        # Past-best-solution cases (I19) are folded into exactly ONE store's index so kb_search
+        # surfaces them without double-indexing any directory: the KB if present (kb_search has
+        # always carried cases), else memory, else a tiny cases-only store rooted at the cases file.
+        cases_extra = _case_extras(self.cases_path)
+        self.kb = MarkdownStore(knowledge_dir, extra=cases_extra) if knowledge_dir else None
+        self.mem = MarkdownStore(memory_dir, extra=(cases_extra if self.kb is None else None)) \
+            if memory_dir else None
         self._cases_only = None
-        if self.kb is None and (self.cases_path or self.mem):
-            root = (self.mem.root if self.mem else self.cases_path.parent)
-            self._cases_only = MarkdownStore(root, extra=_case_extras(self.cases_path))
+        if self.kb is None and self.mem is None and self.cases_path:
+            self._cases_only = MarkdownStore(self.cases_path.parent, extra=cases_extra)
 
     # ---- the index kb_search/grep span (KB + memory notes + cases) -----------------------------
     def _search(self, query: str) -> list[tuple[str, str]]:
@@ -259,7 +259,14 @@ class KnowledgeTools:
                 text = (args.get("text", "") or "").strip()
                 if not text:
                     return "(nothing to remember: empty text)"
-                topic = Path((args.get("topic") or "lessons")).name or "lessons"
+                # Sanitize the topic to a clean filename: strip any path, then inspect the base name
+                # (without a trailing '.md'). Fall back to 'lessons' for a degenerate value — empty,
+                # a bare extension like '.md', or a dotfile — so the store's forced '.md' suffix can
+                # never build a '.md.md' or hidden-file note name.
+                topic = Path((args.get("topic") or "lessons")).name
+                base = topic[:-3] if topic.endswith(".md") else topic
+                if not base or base.startswith(".") or not any(c.isalnum() for c in base):
+                    topic = "lessons"
                 rel = self.mem.append(topic, f"- {text}")
                 return f"(remembered in {rel})" if rel else "(could not write memory note)"
         except Exception as e:  # noqa: BLE001 — tool errors are fed back to the model

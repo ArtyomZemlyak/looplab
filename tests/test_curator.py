@@ -51,6 +51,17 @@ def test_store_search_indexes_extra(tmp_path):
     assert "case:poly" in labels
 
 
+def test_store_edit_updates_index_not_stale(tmp_path):
+    # Incremental indexing must not leave a stale snapshot: after an edit, search returns the new
+    # text (and the extra survives the per-write upsert, never dropped by a partial reindex).
+    s = MarkdownStore(tmp_path, extra=[("case:x", "PAST CASE about boosting")])
+    s.write("note.md", "the answer is alpha")
+    s.edit("note.md", "alpha", "omega")
+    hits = dict(s.search("the answer", k=3))
+    assert "omega" in hits.get("note.md", "") and "alpha" not in hits.get("note.md", "")
+    assert "case:x" in dict(s.search("boosting", k=3))      # extra still indexed after the write
+
+
 # ---- Curator agent session -----------------------------------------------------------------------
 
 class _FakeChatClient:

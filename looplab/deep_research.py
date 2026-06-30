@@ -196,14 +196,17 @@ def make_deep_researcher(settings, *, client=None, task=None) -> Optional[DeepRe
         from .run_tools import DataTools, RunTools
         providers.append(RunTools())
         providers.append(DataTools(task))
-    _kb_dir = settings.resolved_knowledge_dir() if hasattr(settings, "resolved_knowledge_dir") \
-        else getattr(settings, "knowledge_dir", None)
-    _mem_dir = settings.resolved_memory_dir() if hasattr(settings, "resolved_memory_dir") else None
-    if _kb_dir:
-        # Deep-Research can read web/arXiv AND fold findings straight into the KB: pass the memory
-        # dir too so `remember` is available for "research X and add it to the knowledge base".
+    _kb_dir = settings.resolved_knowledge_dir()
+    _mem_dir = settings.resolved_memory_dir()
+    if _kb_dir or _mem_dir:
+        # Deep-Research can read web/arXiv AND fold findings straight into the KB/memory: pass the
+        # cases + memory dir so kb_search surfaces past solutions (I19) and `remember` is available
+        # for "research X and add it to the knowledge base".
+        from pathlib import Path
+
         from .knowledge_tools import KnowledgeTools
-        providers.append(KnowledgeTools(_kb_dir, memory_dir=_mem_dir))
+        _cases = str(Path(_mem_dir) / "cases.jsonl") if _mem_dir else None
+        providers.append(KnowledgeTools(_kb_dir, cases_path=_cases, memory_dir=_mem_dir))
     if getattr(settings, "literature_search", False):
         from .literature import LiteratureTools
         providers.append(LiteratureTools(enabled=True))

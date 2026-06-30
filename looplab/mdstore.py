@@ -79,7 +79,7 @@ class MarkdownStore:
         if target is None:
             return None
         if not target.exists():
-            alt = self.resolve(rel, for_write=True)    # retry with an implied .md
+            alt = self.resolve(rel, for_write=True)    # resolve again with the .md suffix forced on
             if alt is None or not alt.exists():
                 return None
             target = alt
@@ -105,8 +105,9 @@ class MarkdownStore:
         if target is None:
             return None
         target.parent.mkdir(parents=True, exist_ok=True)
-        atomic_write_text(target, (content or "").rstrip("\n") + "\n")
-        self.reindex()
+        body = (content or "").rstrip("\n") + "\n"
+        atomic_write_text(target, body)
+        self._index_one(self._rel(target), body)
         return self._rel(target)
 
     def append(self, rel: str, content: str) -> Optional[str]:
@@ -116,8 +117,9 @@ class MarkdownStore:
             return None
         prev = target.read_text(encoding="utf-8").rstrip("\n") + "\n\n" if target.exists() else ""
         target.parent.mkdir(parents=True, exist_ok=True)
-        atomic_write_text(target, prev + (content or "").rstrip("\n") + "\n")
-        self.reindex()
+        body = prev + (content or "").rstrip("\n") + "\n"
+        atomic_write_text(target, body)
+        self._index_one(self._rel(target), body)
         return self._rel(target)
 
     def edit(self, rel: str, old: str, new: str) -> str:
@@ -137,11 +139,19 @@ class MarkdownStore:
             return "(the `old` text was not found in the note — read it first to copy an exact snippet)"
         if count > 1:
             return f"(the `old` text appears {count}× — make it longer/unique so the edit is unambiguous)"
-        atomic_write_text(target, text.replace(old, new, 1))
-        self.reindex()
+        body = text.replace(old, new, 1)
+        atomic_write_text(target, body)
+        self._index_one(self._rel(target), body)
         return f"(edited {self._rel(target)})"
 
     # ---- indexing ------------------------------------------------------------------------------
+    def _index_one(self, rel: str, text: str) -> None:
+        """Upsert a SINGLE note into the live index after a write/append/edit. Item ids are the
+        relative path, so this replaces the prior version of that note in place — no need to re-read
+        and re-embed the whole tree on every mutation (the curator does many writes per session)."""
+        self._index.upsert("md", [Item(id=rel, vector=hash_embed(rel + " " + text),
+                                       payload={"label": rel, "text": text})])
+
     def reindex(self) -> None:
         items: list[Item] = []
         for p in glob_files("*.md", str(self.root)):

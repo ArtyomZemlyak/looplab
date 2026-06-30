@@ -110,3 +110,23 @@ def test_write_tools_absent_when_read_only_or_no_dir():
 def test_remember_rejects_empty_text(tmp_path):
     kt = KnowledgeTools(None, memory_dir=str(tmp_path))
     assert "nothing to remember" in kt.execute("remember", {"text": "   "})
+
+
+def test_remember_degenerate_topic_falls_back_to_lessons(tmp_path):
+    # A degenerate topic ('.md', all-dots, empty) must not produce a '.md.md' file.
+    kt = KnowledgeTools(None, memory_dir=str(tmp_path))
+    kt.execute("remember", {"text": "guard against this", "topic": ".md"})
+    assert (tmp_path / "lessons.md").exists()
+    assert not (tmp_path / ".md.md").exists()
+
+
+def test_cases_searchable_when_only_memory_configured(tmp_path):
+    # No KB dir, but memory + cases: kb_search must still surface past cases (folded into memory's
+    # index — not double-indexed in a separate store).
+    cases = tmp_path / "mem" / "cases.jsonl"
+    cases.parent.mkdir(parents=True)
+    cases.write_text('{"task_id": "t1", "goal": "predict churn", "params": {"a": 1}, '
+                     '"metric": 0.9, "rationale": "gbdt won"}\n', encoding="utf-8")
+    kt = KnowledgeTools(None, cases_path=str(cases), memory_dir=str(tmp_path / "mem"))
+    out = kt.execute("kb_search", {"query": "how to predict churn"})
+    assert "PAST CASE" in out
