@@ -1,0 +1,59 @@
+# syntax=docker/dockerfile:1
+#
+# LoopLab as a FIRST-CLASS app inside a JupyterHub single-user server.
+#
+# Use this as the JH single-user image (Zero-to-JupyterHub `singleuser.image`, or
+# `c.Spawner.image` / DockerSpawner). The `jupyter_serverproxy_servers` entry point shipped by
+# `looplab[jupyterhub]` then registers a "LoopLab" tile in the JupyterHub Launcher that auto-launches
+# the UI on a free port and proxies it at `/user/<name>/proxy/<port>/` — no terminal, no hand-typed
+# URL. The React bundle is prebaked and PINNED (LOOPLAB_UI_DIST), so no build ever runs on the user's
+# noexec / object-store-FUSE (geesefs) home.
+#
+# This is SEPARATE from the standalone `Dockerfile` (compose deploy): that one is a single-purpose
+# app container (FROM python:slim, CMD = `looplab ui`); JupyterHub instead needs a single-user
+# *notebook server* image, which is what this builds.
+
+# ---- Stage 1: build the React UI -> /ui/dist (Node only in this stage) -------
+FROM node:20-slim AS ui-build
+WORKDIR /ui
+COPY ui/package.json ui/package-lock.json ./
+RUN npm ci
+COPY ui/ ./
+RUN npm run build   # vite build -> /ui/dist
+
+# ---- Stage 2: a JupyterHub single-user server with LoopLab installed ---------
+FROM quay.io/jupyter/base-notebook:latest
+
+USER root
+# git: the agent patch-gate (git worktree) when an external coding-agent Developer is used.
+# curl: handy for in-pod healthchecks/debugging.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends git curl \
+ && rm -rf /var/lib/apt/lists/*
+
+# Install LoopLab with the UI + process + JupyterHub extras. [jupyterhub] pulls jupyter-server-proxy
+# (so the entry point registers the Launcher tile + auto-launch) and psutil (the reliable engine/eval
+# process-tree kill the JH-cull reaper uses). Copy only what's needed so dependency layers cache.
+COPY pyproject.toml README.md /opt/looplab/
+COPY looplab/ /opt/looplab/looplab/
+COPY examples/ /opt/looplab/examples/
+COPY tools/ /opt/looplab/tools/
+RUN pip install --no-cache-dir "/opt/looplab[ui,proc,jupyterhub]"
+
+# Bake the prebuilt bundle and PIN it: `looplab ui --no-build` serves it instantly and never attempts
+# a (doomed) npm build on the user's FUSE/noexec home.
+COPY --from=ui-build /ui/dist /opt/looplab/ui/dist
+ENV LOOPLAB_UI_DIST=/opt/looplab/ui/dist \
+    PYTHONUNBUFFERED=1
+
+# Persist runs on the user's home volume so they survive a hub idle-cull + pod restart. Operators can
+# override (e.g. point at a mounted data volume — but NOT an S3/geesefs path: the append-only event
+# log needs atomic rename, which object-store FUSE lacks).
+ENV LOOPLAB_RUN_ROOT=/home/jovyan/looplab-runs
+
+# Set a per-user UI token so the in-pod control plane is gated even from other localhost processes.
+# (JupyterHub's per-user proxy auth is the primary boundary; this is defence-in-depth. Override or set
+# a real secret via the spawner env.)
+# ENV LOOPLAB_UI_TOKEN=change-me
+
+USER ${NB_UID}

@@ -73,7 +73,7 @@ class Node(BaseModel):
     metric: Optional[float] = None
     status: NodeStatus = NodeStatus.pending
     error: str = ""
-    # Failure taxonomy (set by node_failed): setup | timeout | crash | no_metric | drift.
+    # Failure taxonomy (set by node_failed): setup | timeout | oom | crash | no_metric | drift.
     # Audit/observability only — lets a UI/operator see WHY runs fail across a search.
     error_reason: str = ""
     stdout_tail: str = ""

@@ -12,11 +12,13 @@ Run it via `LoopLab ui --run-root runs/` (the CLI lazily imports this so the cor
 """
 from __future__ import annotations
 
+import atexit
 import json
 import logging
 import os
 import re
 import secrets
+import signal
 import subprocess
 import sys
 import tempfile
@@ -271,6 +273,48 @@ def _engine_alive(rd: Path) -> bool:
         return False                     # platform without file locking → can't tell → assume not alive
     finally:
         f.close()
+
+
+def _kill_process_tree(pid: int) -> None:
+    """Best-effort terminate a spawned engine + its eval descendants. Guards against PID RECYCLING (a
+    finished engine's pid reused by an unrelated process) by confirming the process still looks like a
+    looplab engine before signalling — so the JupyterHub-cull reaper can never kill an innocent
+    bystander. psutil (in the [proc]/[jupyterhub] extra) is the reliable recursive path; the POSIX
+    process-group fallback (the engine leads its own session) is used only when psutil is absent."""
+    try:
+        import psutil  # optional extra
+        proc = psutil.Process(pid)
+        if "looplab" not in " ".join(proc.cmdline()).lower():
+            return                       # pid recycled to something else — do NOT kill it
+        victims = proc.children(recursive=True) + [proc]
+        for p in victims:
+            try:
+                p.terminate()
+            except psutil.Error:
+                pass
+        _gone, alive = psutil.wait_procs(victims, timeout=3)
+        for p in alive:
+            try:
+                p.kill()
+            except psutil.Error:
+                pass
+        return
+    except ImportError:
+        pass                             # no psutil — fall through to the POSIX group signal
+    except Exception:                    # noqa: BLE001 - psutil: process already gone / access denied
+        return
+    if os.name == "nt":
+        return                           # no psutil on Windows → can't safely reap a detached group
+    try:
+        with open(f"/proc/{pid}/cmdline", "rb") as f:
+            if b"looplab" not in f.read():
+                return                   # PID-recycle guard: not our engine anymore
+    except OSError:
+        return                           # no /proc, or the pid is already gone — nothing to reap
+    try:
+        os.killpg(os.getpgid(pid), signal.SIGTERM)
+    except (OSError, ProcessLookupError):
+        pass
 
 
 def make_app(run_root: str | os.PathLike) -> "FastAPI":
@@ -933,6 +977,9 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
         _spawn_engine(["run", str(task_file), "--out", str(rd)], env=env, run_dir=rd)
         return {"ok": True, "run_id": run_id}
 
+    # PIDs of engines THIS server spawned — reaped on shutdown ONLY under JupyterHub (see below).
+    _spawned_engine_pids: set[int] = set()
+
     def _spawn_engine(cli_args: list[str], env: Optional[dict] = None,
                       run_dir: Optional[Path] = None) -> None:
         cmd = [sys.executable, "-m", "looplab.cli", *cli_args]
@@ -957,10 +1004,34 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
             except OSError:
                 err = subprocess.DEVNULL
         try:
-            subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=err, **kw)
+            proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=err, **kw)
+            pid = getattr(proc, "pid", None)   # defensive: tests stub Popen; a real Popen always has it
+            if pid is not None:
+                _spawned_engine_pids.add(pid)
         finally:
             if err_f is not None:
                 err_f.close()   # the child inherited its own dup; release the parent's handle
+
+    def _reap_spawned_engines() -> None:
+        # Reap engines THIS server spawned — but ONLY under JupyterHub. A detached engine (own session,
+        # so it survives an HTTP request) ALSO survives the single-user server's process-group SIGTERM
+        # when the hub idle-culler stops the pod: it's orphaned (reparented to PID 1), keeps consuming
+        # the GPU/CPU JupyterHub bills the user, AND keeps engine.lock held so the run shows "live"
+        # forever (masking the zombie-detect / auto-resume recovery). Locally we must NOT do this — a
+        # detached engine is deliberately meant to outlive a UI restart — so we guard on the JH env.
+        # _kill_process_tree re-checks each pid is still a looplab engine (PID-recycle safe).
+        if not _on_shared_hub():
+            return
+        for pid in list(_spawned_engine_pids):
+            _kill_process_tree(pid)
+            _spawned_engine_pids.discard(pid)
+
+    @app.on_event("shutdown")
+    def _reap_on_shutdown():
+        _reap_spawned_engines()
+
+    if _on_shared_hub():            # backstop for a hard exit where the ASGI shutdown hook doesn't fire
+        atexit.register(_reap_spawned_engines)
 
     # ------------------------------------------------------------------ settings (UI defaults)
     # The engine has no settings server (ADR-18); these are UI-chosen DEFAULTS for new runs,

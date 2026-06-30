@@ -139,20 +139,40 @@ class PrepResult:
         return bool(self.installed)
 
 
+# Stop auto-installing after pip TIMES OUT repeatedly: on a no-/restricted-egress JupyterHub pod pip
+# hangs to the full timeout on EVERY distinct missing lib (torch, xgboost, …), so without a circuit
+# breaker a multi-node run could burn dep_install_timeout × N minutes hanging. We use a CONSECUTIVE
+# count (latch only after _EGRESS_TIMEOUT_LATCH timeouts in a row), so a single transient slow-mirror
+# timeout — or one genuinely huge wheel that legitimately overran — doesn't disable self-prep for the
+# whole run; ANY pip RESPONSE (a success, or a clean "no matching distribution" failure — both prove
+# egress works) resets the count. The clean fix for a true no-egress pod is a pre-baked image with
+# auto_install_deps off. A connection-REFUSED fails fast and is handled per-package by the caller.
+_consecutive_install_timeouts = 0
+_EGRESS_TIMEOUT_LATCH = 2
+
+
 def install(package: str, *, python: Optional[str] = None, timeout: float = 900.0) -> InstallResult:
     """``<python> -m pip install <package>`` against the EVAL interpreter (so the install lands in
     the same env the solution runs in). Generous default timeout — wheels like torch are large.
     Best-effort and self-contained: any launch failure is returned as ``ok=False`` (never raises),
     so a missing-pip / offline box degrades to the normal triage/repair path."""
+    global _consecutive_install_timeouts
+    if _consecutive_install_timeouts >= _EGRESS_TIMEOUT_LATCH:
+        return InstallResult(package=package, ok=False, returncode=-1,
+                             output=f"skipped: pip timed out {_consecutive_install_timeouts}× in a row "
+                                    "(egress looks blocked); pre-bake deps or set auto_install_deps=false",
+                             timed_out=True)
     py = python or sys.executable
     argv = [py, "-m", "pip", "install", "--disable-pip-version-check", "--no-input", package]
     try:
         proc = subprocess.run(argv, capture_output=True, text=True, encoding="utf-8",
                               errors="replace", timeout=timeout)
     except subprocess.TimeoutExpired:
+        _consecutive_install_timeouts += 1   # latch only after several in a row (true no-egress signal)
         return InstallResult(package=package, ok=False, returncode=-1,
                              output="pip install timed out", timed_out=True)
     except OSError as e:
         return InstallResult(package=package, ok=False, returncode=-1, output=f"failed to launch pip: {e}")
     tail = ((proc.stdout or "") + (proc.stderr or ""))[-2000:]
+    _consecutive_install_timeouts = 0   # pip RESPONDED (success or clean fail) → egress works → reset latch
     return InstallResult(package=package, ok=proc.returncode == 0, returncode=proc.returncode, output=tail)

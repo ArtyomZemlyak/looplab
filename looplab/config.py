@@ -87,12 +87,13 @@ class Settings(BaseSettings):
     # Max in-place repair attempts per node before it fails normally (and stays eligible for the
     # budgeted inter-node debug operator). 1 = a single repair retry.
     inline_repair_attempts: int = Field(default=1, ge=1)
-    # Which failure reasons (_failure_reason: crash|timeout|setup|no_metric|drift) are eligible for
-    # inline repair. Default: mechanical crashes AND timeouts — a timeout means the code was too slow
-    # for the eval budget, not that the idea is wrong, so the agent repairs it by reducing compute
-    # (fewer estimators/epochs/folds/seeds, or a lighter model) instead of letting the node die
-    # unrecovered. Env override expects a JSON array.
-    inline_repair_reasons: tuple[str, ...] = ("crash", "timeout")
+    # Which failure reasons (_failure_reason: crash|timeout|oom|setup|no_metric|drift) are eligible for
+    # inline repair. Default: mechanical crashes, timeouts AND OOM-kills — a timeout/OOM means the code
+    # was too slow / too memory-hungry for the budget (or the pod's cgroup limit), not that the idea is
+    # wrong, so the agent repairs it by reducing compute/memory (fewer estimators/epochs/folds/seeds, a
+    # lighter model, a smaller batch, subsampling) instead of letting the node die unrecovered. Env
+    # override expects a JSON array.
+    inline_repair_reasons: tuple[str, ...] = ("crash", "timeout", "oom")
     # Environment self-prep: when a solution crashes purely because a KNOWN library isn't installed
     # (ModuleNotFoundError), the engine pip-installs it into the eval interpreter and re-runs — so a
     # torch/XGBoost/CatBoost idea (e.g. a GRU model) actually runs on a fresh box instead of being

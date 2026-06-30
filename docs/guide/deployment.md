@@ -71,6 +71,38 @@ artifacts land in `./runs`, shared with the host and the UI.
   unauthenticated unless `LOOPLAB_UI_TOKEN` is set, so it is not put on the LAN implicitly. To serve
   it beyond localhost, set a token and `UI_BIND=0.0.0.0` in `.env`.
 
+## Run as a JupyterHub app (jupyter-server-proxy)
+
+LoopLab can launch as a **first-class app inside a JupyterHub single-user server** — a tile in the
+Launcher that opens the live UI in-frame, no terminal and no hand-typed URL. Install the extra:
+
+```bash
+pip install "looplab[jupyterhub]"      # fastapi + uvicorn + jupyter-server-proxy + psutil
+```
+
+The `jupyter_serverproxy_servers` entry point (`looplab/jupyter.py`) registers the tile: clicking it
+runs `looplab ui` on a free port and proxies it at `/user/<name>/proxy/<port>/`. Three env knobs
+matter on a hub:
+
+| Env | Why |
+|---|---|
+| `LOOPLAB_RUN_ROOT` | Where runs persist. Defaults to `~/looplab-runs` (the user's home volume) so runs survive a hub idle-cull + pod restart instead of landing in an ephemeral CWD. **Don't** point it at an S3/geesefs FUSE mount — the append-only event log needs atomic rename. |
+| `LOOPLAB_UI_DIST` | A prebuilt React bundle. Set it (the image bakes one) so `looplab ui --no-build` serves instantly and never attempts an `npm build` on the noexec/FUSE home. |
+| `LOOPLAB_LLM_BASE_URL` | The cluster LLM endpoint (the default is localhost Ollama). A wrong/unreachable endpoint now surfaces as a terminal `run_finished{reason:error}` event rather than a silent stuck run. |
+
+**Behind a non-stripping proxy** `looplab ui` auto-derives `root_path` from `JUPYTERHUB_SERVICE_PREFIX`
+(no raw-uvicorn fallback needed); a stripping proxy (jsp's default) is unaffected.
+
+**Single-user image.** `Dockerfile.jupyterhub` builds a `quay.io/jupyter/base-notebook` image with
+LoopLab installed, the bundle baked + pinned, and `LOOPLAB_RUN_ROOT` set. Point your Z2JH
+`singleuser.image` (or `c.Spawner.image`) at it and every user gets a working LoopLab tile.
+
+**Resource lifecycle.** Under JupyterHub the UI server reaps the engines it spawned on shutdown (a
+hub cull would otherwise orphan a detached engine that keeps billing GPU/CPU and holds the run's
+lock); eval subprocesses cap their BLAS/OpenMP threads to the pod's CPU quota; and an OOM-killed eval
+is recognised and repaired (reduce batch/model size) instead of dying silently. These are no-ops on a
+local box.
+
 ### Shared JupyterHub origin (important)
 
 `LOOPLAB_UI_TOKEN` isolates users **only when each principal has its own origin** — the default
