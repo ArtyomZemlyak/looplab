@@ -5,6 +5,12 @@ run's `events.jsonl`, folds it with `replay.fold`, streams the state to the brow
 the built React app, and turns UI actions into appended control events. It never changes the engine
 and is never imported by it (ADR-18).
 
+> **No browser? Use the terminal.** `looplab tui` is a chat-first **terminal control plane** over the
+> same server — a run dashboard, the "describe a goal → the boss launches it" genesis flow, and a
+> per-run boss chat that steers the live run. It auto-launches an API-only server when none is found,
+> so `looplab tui` works on its own. See the [CLI reference](cli-reference.md#tui). It's the *control*
+> slice; come back to this web UI to explore the search DAG, traces and per-node detail.
+
 ## Install & launch
 
 The UI needs the `[ui]` extra:

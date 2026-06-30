@@ -130,6 +130,7 @@ looplab smoke                            # ping the configured LLM endpoint
 looplab approve RUN_DIR                  # ratify a paused run (HITL / onboarding)
 looplab bench   TASK.json ...            # capability self-benchmark across tasks
 looplab ui                               # serve the live React UI (auto-builds the bundle; needs [ui])
+looplab          # (or `looplab tui`) terminal control plane: start/steer runs by chat, no browser
 looplab export-mlflow    RUN_DIR         # log the champion to MLflow
 looplab export-notebook  RUN_DIR         # export the champion as a runnable .ipynb
 ```
