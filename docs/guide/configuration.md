@@ -1,25 +1,53 @@
 # Configuration
 
 LoopLab is configured by a single layered `Settings` object (`looplab/config.py`). Every field can
-be set three ways, in increasing priority:
+be set four ways, in increasing priority:
 
 1. **Default** (shown below).
 2. **Environment variable** — uppercase the field name and prefix with `LOOPLAB_`
    (e.g. `max_nodes` → `LOOPLAB_MAX_NODES`). A `.env` file in the working directory is read too.
-3. **CLI flag** — for the subset exposed on `looplab run` (see the [CLI reference](cli-reference.md)).
+3. **A config file** — the `settings:` block of a unified YAML/JSON file passed to `looplab run`
+   (see below). `looplab init` scaffolds a fully-commented template.
+4. **CLI flag** — a named flag for the common knobs, **or** `-s/--set key=value` (repeatable) for
+   **any** setting by its exact field name.
 
 The resolved, **secret-masked** settings are written to `config.snapshot.json` in every run dir, so
 each run records exactly how it was configured. `resume` reads that snapshot back.
 
 ```bash
-# All three are equivalent ways to raise the node budget for one run:
+# All of these are equivalent ways to raise the node budget for one run:
 looplab run task.json --max-nodes 30
+looplab run task.json -s max_nodes=30          # --set works for ANY field, not just the named flags
 LOOPLAB_MAX_NODES=30 looplab run task.json
 echo "LOOPLAB_MAX_NODES=30" >> .env && looplab run task.json
 ```
 
-> Env values for structured fields (lists/dicts/tuples) expect JSON, e.g.
-> `LOOPLAB_AGENT_SURFACE='["*.py","*.json"]'`.
+> Structured values (lists/dicts) are JSON in all three string forms, e.g.
+> `--set agent_surface='["*.py","*.json"]'` or `LOOPLAB_AGENT_SURFACE='["*.py","*.json"]'`. In a YAML
+> file they are just native YAML lists/maps.
+
+### One file for the whole run
+
+Instead of a JSON task plus a wall of env vars, a single YAML (or JSON) file can describe both *what*
+to solve and *how* to run it. Run it with `looplab run looplab.yaml`:
+
+```yaml
+out: runs/demo            # where the run is written
+task:                     # WHAT to solve (the task spec; same fields as a task JSON)
+  kind: dataset
+  goal: predict `target` from the features
+  direction: max
+  data_path: data.csv
+settings:                 # HOW to run it (any Settings field on this page)
+  backend: llm
+  max_nodes: 20
+  policy: asha
+```
+
+A file with no top-level `task:` key is treated as a bare task (the legacy JSON format), so existing
+task files keep working. The file is **input only** — the run dir still records canonical JSON
+snapshots, so `resume`/`replay` are unchanged. Precedence within one run: `--set`/flags **>** the
+file's `settings:` **>** env/`.env` **>** defaults.
 
 ---
 

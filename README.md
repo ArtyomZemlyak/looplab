@@ -31,8 +31,8 @@ Requires **Python ≥ 3.11**. Core dependencies are small and pure-Python (`pyda
 ## Quick start
 
 ```bash
-# 1. Run a toy optimization task offline (no LLM, no network).
-looplab run examples/toy_task.json --out runs/demo --max-nodes 14
+# 1. Run a toy optimization task offline (no LLM, no network) — no file needed:
+looplab run --kind quadratic --goal "minimize (x-3)^2+(y+1)^2" --direction min --out runs/demo
 
 # 2. Inspect the result and verify reproducibility.
 looplab inspect runs/demo          # resolved config + best result
@@ -40,6 +40,37 @@ looplab replay  runs/demo          # rebuild full state from the event log
 
 # 3. A real ML task: polynomial-degree + ridge selection via 5-fold CV.
 looplab run examples/regression_task.json --out runs/reg --max-nodes 14
+```
+
+### Three ways to configure a run
+
+You don't have to hand-write JSON. Pick whichever fits:
+
+```bash
+# a) One readable YAML file — what to solve AND how. Scaffold a documented template, edit, run:
+looplab init                       # writes looplab.yaml (every setting, commented)
+looplab run looplab.yaml
+
+# b) No file at all — describe it on the command line:
+looplab run --kind dataset --goal "predict target" --data data.csv -s backend=llm -s max_nodes=20
+
+# c) A bare task file + flags (the original style still works):
+looplab run examples/toy_task.json --max-nodes 14
+```
+
+`-s/--set key=value` overrides **any** engine setting (full parity with the `settings:` block and the
+`LOOPLAB_*` env vars). A unified `looplab.yaml` looks like:
+
+```yaml
+out: runs/demo
+task:
+  kind: dataset
+  goal: predict `target` from the features
+  direction: max
+  data_path: data.csv
+settings:
+  backend: llm
+  max_nodes: 20
 ```
 
 Open `runs/demo/tree.html` for a static lineage view of every candidate the loop tried.
@@ -80,7 +111,8 @@ See the [Task reference](docs/guide/tasks.md) for every field and more examples.
 ## CLI
 
 ```bash
-looplab run     TASK.json [--out DIR] [--backend toy|llm] [--max-nodes N] ...
+looplab init                             # scaffold a documented looplab.yaml (config-as-docs)
+looplab run     [CONFIG|TASK] [-s k=v]   # YAML/JSON config, a bare task, or --goal/--kind (no file)
 looplab resume  RUN_DIR                  # continue a crashed/incomplete run by replay
 looplab inspect RUN_DIR                  # resolved config snapshot + best result
 looplab replay  RUN_DIR                  # pure fold of the event log → state (read-only)

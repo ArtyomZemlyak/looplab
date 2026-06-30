@@ -56,9 +56,12 @@ def validate_task(data: dict) -> TaskAdapter:
 
 
 def load_task(path: str | Path) -> TaskAdapter:
-    # utf-8-sig reads plain UTF-8 identically but also strips a leading BOM (common on
-    # Windows-authored / PowerShell Out-File JSON), which plain utf-8 would choke on.
-    return validate_task(json.loads(Path(path).read_text(encoding="utf-8-sig")))
+    # Accepts a bare task file (legacy JSON, or YAML) OR a unified config file — in which case only
+    # its `task:` block is validated here (the engine settings are read separately by the CLI). The
+    # reader handles JSON/YAML and a BOM from Windows editors.
+    from .appconfig import load_document
+    task, _settings, _out = load_document(Path(path))
+    return validate_task(task)
 
 
 def _agent_model(backend: str, model: str) -> str:

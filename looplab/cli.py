@@ -15,6 +15,7 @@ from typing import Optional
 import anyio
 import orjson
 import typer
+from pydantic import ValidationError
 
 from . import __version__
 from .atomicio import atomic_write_text
@@ -24,7 +25,10 @@ from .orchestrator import Engine
 from .policy import make_policy
 from .replay import fold
 from .sandbox import make_sandbox
-from .tasks import TaskAdapter, load_task, make_llm_client, make_roles
+from .tasks import TaskAdapter, kinds, load_task, make_llm_client, make_roles, validate_task
+from . import appconfig
+
+_TASK_KINDS = tuple(kinds())
 
 # rich_markup_mode="markdown" (not the Typer default "rich"): in "rich" mode square brackets are
 # parsed as console style tags, so help text like `pip install 'looplab[ui]'` silently renders as
@@ -277,8 +281,19 @@ def _print_result(state) -> None:
 
 @app.command()
 def run(
-    task_file: Path = typer.Argument(..., help="Path to a task JSON file (e.g. examples/toy_task.json)."),
-    out: Path = typer.Option(Path("runs/run_local"), help="Run directory."),
+    task_file: Optional[Path] = typer.Argument(
+        None, help="Config or task file (YAML or JSON). A unified file has task:/settings:/out: keys; "
+                   "a bare task file is just the task. Omit it and build the task from --goal/--kind."),
+    goal: Optional[str] = typer.Option(None, help="Task goal in plain words (build a task with no file)."),
+    kind: Optional[str] = typer.Option(None, help=f"Task kind (build a task with no file). One of: "
+                                                  f"{', '.join(_TASK_KINDS)}."),
+    direction: Optional[str] = typer.Option(None, help="Optimize: min | max."),
+    data: Optional[str] = typer.Option(None, help="Path to your data (dataset) or repo (repo task)."),
+    set_: list[str] = typer.Option(
+        [], "--set", "-s", metavar="KEY=VALUE",
+        help="Override ANY engine setting, repeatable (e.g. -s max_nodes=20 -s policy=asha). "
+             "Same keys as the settings: block / LOOPLAB_* env."),
+    out: Optional[Path] = typer.Option(None, help="Run directory (default: the file's out: or runs/run_local)."),
     max_nodes: Optional[int] = typer.Option(None, help="Override node budget."),
     backend: Optional[str] = typer.Option(None, help="Role backend: toy | llm."),
     developer_backend: Optional[str] = typer.Option(
@@ -302,43 +317,66 @@ def run(
     crash_after: Optional[int] = typer.Option(None, hidden=True,
                                               help="Test hook: hard-exit after N evals."),
 ):
-    """Start a new run (or continue if the run dir already has events)."""
+    """Start a new run (or continue if the run dir already has events).
+
+    Three equivalent ways to say what to solve:
+
+      - looplab run config.yaml                # one file: task + settings + out
+      - looplab run task.json --max-nodes 20   # a bare task file + flags (legacy)
+      - looplab run --kind dataset --goal "predict target" --data data.csv -s backend=llm
+
+    Any engine setting can be overridden with `-s/--set key=value` (full parity with the settings:
+    block and LOOPLAB_* env). Run `looplab init` to scaffold a documented config file."""
     if backend is not None:
         _choice(backend, _BACKENDS, "--backend")
     if developer_backend is not None:
         _choice(developer_backend, _DEV_BACKENDS, "--developer-backend")
-    task = _load_task(task_file)
-    settings = Settings()
-    if max_nodes is not None:
-        settings.max_nodes = max_nodes
-    if backend is not None:
-        settings.backend = backend
-    if developer_backend is not None:
-        settings.developer_backend = developer_backend
-    if agent_cmd is not None:
-        settings.agent_cmd = agent_cmd
-    if validate_agent is not None:
-        settings.validate_agent = validate_agent
-    if agent_patch_gate is not None:
-        settings.agent_patch_gate = agent_patch_gate
+    # 1. Read the file (if any): a unified doc yields task + settings + out; a bare file is the task.
+    file_task, file_settings, file_out = {}, {}, None
+    if task_file is not None:
+        try:
+            file_task, file_settings, file_out = appconfig.load_document(task_file)
+        except FileNotFoundError:
+            raise typer.BadParameter(f"config file not found: {task_file}")
+        except ValueError as e:
+            raise typer.BadParameter(f"could not read {task_file}: {e}")
+    # 2. Overlay the task-building flags, then validate the resolved task dict.
+    task_dict = appconfig.apply_task_flags(
+        file_task, kind=kind, goal=goal, direction=direction, data=data)
+    if not task_dict:
+        raise typer.BadParameter(
+            "no task: pass a config/task file, or build one with --goal/--kind "
+            "(scaffold one with `looplab init`).")
+    try:
+        task = validate_task(task_dict)
+    except (ValueError, KeyError, TypeError) as e:
+        raise typer.BadParameter(f"invalid task: {e}")
+    # 3. Merge engine settings (file < typed flags < --set). Typed bool flags only override when set,
+    # so a settings: file can still enable them.
+    typed: dict = {}
+    for name, value in (("max_nodes", max_nodes), ("backend", backend),
+                        ("developer_backend", developer_backend), ("agent_cmd", agent_cmd),
+                        ("validate_agent", validate_agent), ("agent_patch_gate", agent_patch_gate),
+                        ("llm_model", model), ("knowledge_dir", knowledge_dir),
+                        ("memory_dir", memory_dir), ("max_seconds", max_seconds),
+                        ("ablate_every", ablate_every), ("confirm_top_k", confirm_top_k),
+                        ("confirm_seeds", confirm_seeds)):
+        if value is not None:
+            typed[name] = value
     if agent_surface is not None:
-        settings.agent_surface = [g.strip() for g in agent_surface.split(",") if g.strip()]
-    if model is not None:
-        settings.llm_model = model
-    if knowledge_dir is not None:
-        settings.knowledge_dir = knowledge_dir
-    if memory_dir is not None:
-        settings.memory_dir = memory_dir
-    if max_seconds is not None:
-        settings.max_seconds = max_seconds
-    if ablate_every is not None:
-        settings.ablate_every = ablate_every
+        typed["agent_surface"] = [g.strip() for g in agent_surface.split(",") if g.strip()]
     if require_approval:
-        settings.require_approval = True
-    if confirm_top_k is not None:
-        settings.confirm_top_k = confirm_top_k
-    if confirm_seeds is not None:
-        settings.confirm_seeds = confirm_seeds
+        typed["require_approval"] = True
+    try:
+        sets = appconfig.parse_sets(set_)
+    except ValueError as e:
+        raise typer.BadParameter(str(e))
+    try:
+        settings = appconfig.build_settings(file_settings, typed, sets)
+    except ValidationError as e:
+        raise typer.BadParameter(f"invalid settings: {e}")
+    # 4. Resolve the run dir: explicit --out > the file's out: > default.
+    out = out or (Path(file_out) if file_out else Path("runs/run_local"))
     out.mkdir(parents=True, exist_ok=True)
     eng = _engine(out, task, settings, crash_after)
     with _engine_singleton(out) as ok:
@@ -350,11 +388,11 @@ def run(
         # `resume` reads them, so a stale overwrite would re-enter the run with the wrong settings/task.
         atomic_write_text(out / "config.snapshot.json",
                           json.dumps(settings.masked_snapshot(), indent=2))
-        # Self-describing run: keep a verbatim copy of the task so `resume` (CLI or UI) can re-enter the
-        # loop from the run dir alone — no need to remember the original task-file path.
+        # Self-describing run: write the RESOLVED task dict (after file + flags) as canonical JSON so
+        # `resume` (CLI or UI) can re-enter the loop from the run dir alone — no need to remember the
+        # original file, and it works for a unified config or a no-file --goal/--kind run too.
         try:
-            atomic_write_text(out / "task.snapshot.json",
-                              Path(task_file).read_text(encoding="utf-8"))
+            atomic_write_text(out / "task.snapshot.json", json.dumps(task_dict, indent=2))
         except OSError:
             pass
         try:
@@ -529,6 +567,25 @@ def export_notebook(
     dest = out or (run_dir / "champion.ipynb")
     atomic_write_text(dest, json.dumps(nb, indent=1))
     typer.echo(f"wrote {dest}")
+
+
+@app.command()
+def init(
+    out: Path = typer.Option(Path("looplab.yaml"), help="Where to write the config template."),
+    kind: str = typer.Option("dataset", help=f"Task kind to scaffold. One of: {', '.join(_TASK_KINDS)}."),
+    force: bool = typer.Option(False, "--force", help="Overwrite an existing file."),
+):
+    """Scaffold a documented config file (YAML) you can edit and `looplab run`.
+
+    The template leads with the task and the knobs most runs touch (each commented), then lists every
+    remaining setting at its default — so it doubles as living documentation. Run it with
+    `looplab run looplab.yaml`."""
+    if out.exists() and not force:
+        typer.echo(f"{out} already exists (use --force to overwrite)"); raise typer.Exit(1)
+    if kind not in _TASK_KINDS:
+        raise typer.BadParameter(f"unknown task kind {kind!r}; choose one of: {', '.join(_TASK_KINDS)}")
+    atomic_write_text(out, appconfig.render_template(kind))
+    typer.echo(f"wrote {out} — edit it, then: looplab run {out}")
 
 
 @app.command()

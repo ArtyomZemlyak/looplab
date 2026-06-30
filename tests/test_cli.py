@@ -73,3 +73,65 @@ def test_ui_help_keeps_extra_name():
     result = runner.invoke(app, ["ui", "--help"])
     assert result.exit_code == 0, result.output
     assert "looplab[ui]" in result.output
+
+
+# --- YAML / unified config + no-file runs --------------------------------------------------------
+
+def test_init_writes_parseable_documented_template(tmp_path):
+    import yaml
+    dest = tmp_path / "looplab.yaml"
+    result = runner.invoke(app, ["init", "--out", str(dest)])
+    assert result.exit_code == 0, result.output
+    doc = yaml.safe_load(dest.read_text())
+    assert set(("task", "settings", "out")) <= set(doc)
+    # The whole template must be valid YAML, incl. the comment alignment (a `#` glued to a value
+    # would corrupt e.g. llm_base_url).
+    assert doc["settings"]["llm_base_url"].endswith("/v1")
+
+
+def test_run_unified_yaml_applies_task_and_settings(tmp_path):
+    cfg = tmp_path / "run.yaml"
+    cfg.write_text(
+        "out: %s\n"
+        "task:\n  kind: quadratic\n  goal: min\n  direction: min\n"
+        "settings:\n  max_nodes: 2\n" % (tmp_path / "r"))
+    result = runner.invoke(app, ["run", str(cfg)])
+    assert result.exit_code == 0, result.output
+    assert "finished=True" in result.output
+    assert "nodes=2" in result.output                       # settings: block was honored
+    assert (tmp_path / "r" / "events.jsonl").exists()       # out: was honored
+
+
+def test_run_no_file_from_flags(tmp_path):
+    result = runner.invoke(app, [
+        "run", "--kind", "quadratic", "--goal", "min x^2", "--direction", "min",
+        "--set", "max_nodes=2", "--out", str(tmp_path / "r"),
+    ])
+    assert result.exit_code == 0, result.output
+    assert "finished=True" in result.output
+    # Self-describing: a no-file run still writes a task snapshot it can resume from.
+    assert (tmp_path / "r" / "task.snapshot.json").exists()
+
+
+def test_run_set_unknown_key_errors(tmp_path):
+    result = runner.invoke(app, [
+        "run", "--kind", "quadratic", "--goal", "g", "--out", str(tmp_path / "r"),
+        "--set", "max_node=9",
+    ])
+    assert result.exit_code != 0
+    assert "unknown setting" in result.output
+
+
+def test_run_set_overrides_file(tmp_path):
+    cfg = tmp_path / "run.yaml"
+    cfg.write_text("task:\n  kind: quadratic\n  goal: g\n  direction: min\n"
+                   "settings:\n  max_nodes: 5\n")
+    result = runner.invoke(app, ["run", str(cfg), "--out", str(tmp_path / "r"), "-s", "max_nodes=1"])
+    assert result.exit_code == 0, result.output
+    assert "nodes=1" in result.output                       # --set wins over the file
+
+
+def test_run_no_task_errors():
+    result = runner.invoke(app, ["run"])
+    assert result.exit_code != 0
+    assert "no task" in result.output
