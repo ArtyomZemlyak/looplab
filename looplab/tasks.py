@@ -123,6 +123,42 @@ def make_developer_factory(task: TaskAdapter, settings):
     return factory
 
 
+def build_strategist_tools(task: TaskAdapter, settings, run_dir=None):
+    """Read-only toolset for the agentic Strategist (`strategist_backend="agent"`): its OWN run
+    (experiments/code/themes) + the task data + SIBLING runs + the knowledge base & memory of past
+    cases (+ skills / literature / web when enabled). Mirrors the Researcher's providers so the
+    Strategist can ground its meta-decision in what actually happened. Returns a CompositeTools (or a
+    lone provider), or None when nothing is available."""
+    providers = []
+    if getattr(settings, "researcher_tools", True):
+        from .run_tools import DataTools, RunTools
+        providers.append(RunTools())                        # own experiments + code + themes
+        providers.append(DataTools(task))                   # task schema / profile / data
+    if run_dir is not None and getattr(settings, "cross_run_tools", True):
+        from .run_tools import SiblingRunTools
+        providers.append(SiblingRunTools(Path(run_dir).parent, Path(run_dir).name))   # other runs
+    cases_path = (str(Path(settings.memory_dir) / "cases.jsonl")
+                  if getattr(settings, "memory_dir", None) else None)
+    if getattr(settings, "knowledge_dir", None) or cases_path:
+        from .knowledge_tools import KnowledgeTools
+        providers.append(KnowledgeTools(settings.knowledge_dir, cases_path=cases_path))  # KB + memory
+    if getattr(settings, "skills_dir", None):
+        from .skills import SkillTools
+        providers.append(SkillTools(settings.skills_dir))
+    if getattr(settings, "literature_search", False):       # arXiv (network-optional)
+        from .literature import LiteratureTools
+        providers.append(LiteratureTools(enabled=True))
+    if getattr(settings, "web_search", False):              # web search/fetch (network-optional)
+        from .web import WebTools
+        providers.append(WebTools(enabled=True))
+    if not providers:
+        return None
+    if len(providers) == 1:
+        return providers[0]
+    from .agent import CompositeTools
+    return CompositeTools(providers)
+
+
 def build_unified_agent(task: TaskAdapter, settings, run_dir=None):
     """Compose the unified self-driving agent from the normal split-role backends.
 
@@ -157,8 +193,10 @@ def build_unified_agent(task: TaskAdapter, settings, run_dir=None):
     # Strategy stage: mirror cli._engine's strategist wiring exactly (off => None => no strategy
     # events => byte-parity with split mode when agent_drives_actions is also off).
     strat_client = (client_for(stage_models.get("strategy"), stage_urls.get("strategy"))
-                    if settings.strategist_backend == "llm" else None)
-    strategist = make_strategist(split, client=strat_client, n_seeds=settings.n_seeds)
+                    if settings.strategist_backend in ("llm", "agent") else None)
+    strat_tools = (build_strategist_tools(task, split, run_dir)
+                   if settings.strategist_backend == "agent" else None)
+    strategist = make_strategist(split, client=strat_client, n_seeds=settings.n_seeds, tools=strat_tools)
 
     # Pilot stage: its own client + read-only run-introspection tools for self-driving the next
     # macro action (only consulted when agent_drives_actions is on, gated by legal_actions).

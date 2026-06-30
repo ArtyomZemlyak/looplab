@@ -37,8 +37,8 @@ export const SETTINGS_GROUPS = [
   {
     title: 'Strategist & operators', sub: 'A7 adaptive meta-control + richer proposal operators',
     fields: [
-      { key: 'strategist_backend', label: 'Strategist', type: 'enum', options: ['off', 'rule', 'llm'],
-        help: 'Optional meta-controller that picks policy/operators/fidelity at runtime. off = static config; rule = deterministic heuristics; llm = model-driven (default; falls back to rule).' },
+      { key: 'strategist_backend', label: 'Strategist', type: 'enum', options: ['off', 'rule', 'llm', 'agent'],
+        help: 'Optional meta-controller that picks policy/operators/fidelity at runtime. off = static config; rule = deterministic heuristics; llm = model-driven single call (default); agent = tool-using — reads the run, data, sibling runs, knowledge base & memory before deciding (B1 stuck-guarded). All fall back to rule.' },
       { key: 'strategist_every', label: 'Consult every', type: 'int',
         help: 'Strategist consult cadence in created nodes (bounded, so it never thrashes).' },
       { key: 'merge_mode', label: 'Merge mode', type: 'enum', options: ['mean', 'ensemble'], agents: ['strategist'],

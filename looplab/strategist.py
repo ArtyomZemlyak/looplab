@@ -276,6 +276,58 @@ class _StrategyOut(BaseModel):
     rationale: str = ""
 
 
+def _strategist_brief(state: RunState, ctx: StrategyContext) -> str:
+    """The compact decision brief shared by the structured-output and tool-using Strategists."""
+    brief = (
+        f"phase={ctx.phase} nodes={ctx.node_count} failure_rate={ctx.failure_rate:.2f} "
+        f"improves_since_best={ctx.improves_since_best} numeric_space={ctx.is_numeric_space} "
+        f"eval_budget_remaining={ctx.eval_budget_remaining}\n"
+        f"available_policies={ctx.available_policies} avg_eval_seconds={ctx.avg_eval_seconds}\n"
+        "Choose the next strategy (policy from the available list; fidelity smoke|full|adaptive; "
+        "optional ablate_every, merge_mode mean|ensemble, complexity_cue, prefer_sweep — set "
+        "prefer_sweep=true to bias the researcher toward an in-process hyperparameter sweep when "
+        "evals are costly and the space is numeric; set request_research=true when the run is "
+        "stalled or confused and would benefit from a deep-research step over all results + the "
+        "web before continuing)."
+    )
+    # Active operator/boss directives (the same `pending_hints` the Researcher already follows,
+    # rendered the same way so recency/precedence read identically): the Strategist owns the
+    # policy/fidelity, so it MUST weigh standing directives or it will fight them — e.g. answer a
+    # "try 10 different neural nets" request with a pure-exploit greedy switch that just refines
+    # the current champion. Advisory; the Strategist still decides.
+    from .hints import render_hint_directives
+    directives = render_hint_directives(state.pending_hints)
+    if directives:
+        brief += (directives + "\n(When a directive calls for EXPLORATION or trying several "
+                  "distinct approaches, prefer an exploratory policy such as evolutionary/asha "
+                  "and do NOT switch to pure-exploit greedy.)")
+    return brief
+
+
+def _assemble_strategy(out: "_StrategyOut", *, source: str = "llm") -> Strategy:
+    """Build the validated Strategy dict from the model's structured fields (shared by both LLM
+    Strategist variants). `validate_strategy` still clamps this against the governance whitelist."""
+    strat: Strategy = {"source": source, "rationale": out.rationale or f"{source}-chosen strategy"}
+    if out.policy:
+        strat["policy"] = out.policy
+    if out.fidelity:
+        strat["fidelity"] = out.fidelity
+    if out.request_research:
+        strat["request_research"] = True
+    ops: dict = {}
+    if out.ablate_every is not None:
+        ops["ablate_every"] = out.ablate_every
+    if out.merge_mode:
+        ops["merge_mode"] = out.merge_mode
+    if out.complexity_cue is not None:
+        ops["complexity_cue"] = out.complexity_cue
+    if out.prefer_sweep is not None:
+        ops["prefer_sweep"] = out.prefer_sweep
+    if ops:
+        strat["operators"] = ops
+    return strat
+
+
 class LLMStrategist:
     """Structured-output meta-controller. Falls back to the rule baseline (and ultimately None) on
     any parse/transport failure, so a flaky local model never crashes the run."""
@@ -287,69 +339,103 @@ class LLMStrategist:
 
     def decide(self, state: RunState, ctx: StrategyContext) -> Optional[Strategy]:
         from .parse import ParseError, parse_structured
-        brief = (
-            f"phase={ctx.phase} nodes={ctx.node_count} failure_rate={ctx.failure_rate:.2f} "
-            f"improves_since_best={ctx.improves_since_best} numeric_space={ctx.is_numeric_space} "
-            f"eval_budget_remaining={ctx.eval_budget_remaining}\n"
-            f"available_policies={ctx.available_policies} avg_eval_seconds={ctx.avg_eval_seconds}\n"
-            "Choose the next strategy (policy from the available list; fidelity smoke|full|adaptive; "
-            "optional ablate_every, merge_mode mean|ensemble, complexity_cue, prefer_sweep — set "
-            "prefer_sweep=true to bias the researcher toward an in-process hyperparameter sweep when "
-            "evals are costly and the space is numeric; set request_research=true when the run is "
-            "stalled or confused and would benefit from a deep-research step over all results + the "
-            "web before continuing)."
-        )
-        # Active operator/boss directives (the same `pending_hints` the Researcher already follows,
-        # rendered the same way so recency/precedence read identically): the Strategist owns the
-        # policy/fidelity, so it MUST weigh standing directives or it will fight them — e.g. answer a
-        # "try 10 different neural nets" request with a pure-exploit greedy switch that just refines
-        # the current champion. Advisory; the Strategist still decides.
-        from .hints import render_hint_directives
-        directives = render_hint_directives(state.pending_hints)
-        if directives:
-            brief += (directives + "\n(When a directive calls for EXPLORATION or trying several "
-                      "distinct approaches, prefer an exploratory policy such as evolutionary/asha "
-                      "and do NOT switch to pure-exploit greedy.)")
         messages = [
             {"role": "system", "content": _STRATEGIST_SYSTEM},
-            {"role": "user", "content": brief},
+            {"role": "user", "content": _strategist_brief(state, ctx)},
         ]
         try:
             out = parse_structured(self.client, messages, _StrategyOut, self.parser)
         except (ParseError, Exception):  # noqa: BLE001 — never crash the run on a strategy call
             return self._rule.decide(state, ctx)   # graceful fallback to deterministic heuristics
-        strat: Strategy = {"source": "llm", "rationale": out.rationale or "llm-chosen strategy"}
-        if out.policy:
-            strat["policy"] = out.policy
-        if out.fidelity:
-            strat["fidelity"] = out.fidelity
-        if out.request_research:
-            strat["request_research"] = True
-        ops: dict = {}
-        if out.ablate_every is not None:
-            ops["ablate_every"] = out.ablate_every
-        if out.merge_mode:
-            ops["merge_mode"] = out.merge_mode
-        if out.complexity_cue is not None:
-            ops["complexity_cue"] = out.complexity_cue
-        if out.prefer_sweep is not None:
-            ops["prefer_sweep"] = out.prefer_sweep
-        if ops:
-            strat["operators"] = ops
-        return strat
+        return _assemble_strategy(out)
 
 
-def make_strategist(settings, *, client=None, n_seeds: int = 3) -> Optional[Strategist]:
-    """Select the Strategist backend from config (config-first). `off` (default) -> None (engine
-    uses the static config policy, == today). `rule` -> deterministic. `llm` -> structured output,
-    needs an LLM client (falls back to the rule baseline when none is available)."""
+_TOOL_STRATEGIST_SYSTEM = (
+    _STRATEGIST_SYSTEM + " You MAY first investigate before deciding: call the read-only tools to "
+    "read this run's experiments, code and themes, the task data/schema, SIBLING runs of the same "
+    "task, the knowledge base and memory of past cases, and (if available) skills/literature/web. "
+    "Ground your strategy in what actually happened — then call `emit` exactly once with the chosen "
+    "strategy."
+)
+
+
+class ToolUsingStrategist:
+    """Agentic Strategist (same `Strategist` protocol): a `drive_tool_loop` agent that can READ the
+    run, the data, sibling runs, the knowledge base + memory (and skills/literature/web when wired)
+    before emitting one Strategy — so meta-decisions are evidence-based, not stats-only. Inherits the
+    shared loop's B1 stuck guard + C1 self-plan + C2 auto-summary. Falls back to the deterministic
+    RuleStrategist on any parse/transport failure, so a flaky model never crashes the run."""
+
+    def __init__(self, client, tools=None, n_seeds: int = 3, parser: str = "tool_call",
+                 loop_opts: Optional[dict] = None, max_turns: int = 0,
+                 time_budget_s: float = 0.0, context_budget_chars: int = 0):
+        self.client = client
+        self.tools = tools          # CompositeTools of read-only providers (None = emit-only, like LLM)
+        self.parser = parser
+        self._rule = RuleStrategist(n_seeds=n_seeds)
+        self.loop_opts = loop_opts or {}
+        self.max_turns = max_turns
+        self.time_budget_s = time_budget_s
+        self.context_budget_chars = context_budget_chars
+
+    def _emit_spec(self) -> dict:
+        return {"type": "function", "function": {
+            "name": "emit", "description": "Emit the chosen search strategy.",
+            "parameters": _StrategyOut.model_json_schema()}}
+
+    def decide(self, state: RunState, ctx: StrategyContext) -> Optional[Strategy]:
+        from .agent import drive_tool_loop
+        if self.tools is not None and hasattr(self.tools, "bind_state"):
+            self.tools.bind_state(state)        # let the run-aware tools read the current search
+        messages = [
+            {"role": "system", "content": _TOOL_STRATEGIST_SYSTEM},
+            {"role": "user", "content": _strategist_brief(state, ctx)
+                + "\nInvestigate with the tools if useful, then emit the strategy."},
+        ]
+
+        def _finalize(args: dict) -> Optional[Strategy]:
+            try:
+                return _assemble_strategy(_StrategyOut.model_validate(args), source="agent")
+            except Exception:  # noqa: BLE001 — a junk emit must not crash the run
+                return self._rule.decide(state, ctx)
+
+        def _fallback(_messages) -> Optional[Strategy]:
+            return self._rule.decide(state, ctx)   # no emit -> deterministic baseline
+
+        try:
+            return drive_tool_loop(
+                self.client, self.tools, messages, self._emit_spec(),
+                max_turns=self.max_turns, time_budget_s=self.time_budget_s,
+                context_budget_chars=self.context_budget_chars,
+                finalize=_finalize, fallback=_fallback, **self.loop_opts)
+        except Exception:  # noqa: BLE001 — the model/endpoint can't drive tools at all -> rule baseline
+            return self._rule.decide(state, ctx)
+
+
+def make_strategist(settings, *, client=None, n_seeds: int = 3, tools=None) -> Optional[Strategist]:
+    """Select the Strategist backend from config (config-first). `off` -> None (engine uses the static
+    config policy). `rule` -> deterministic. `llm` -> single structured-output call. `agent` -> a
+    tool-using agent that reads the run/data/siblings/KB/memory before deciding (`tools` is the
+    read-only toolset; None falls back to emit-only). `llm`/`agent` need an LLM client (else the rule
+    baseline)."""
     backend = getattr(settings, "strategist_backend", "off")
     if backend == "off":
         return None
     if backend == "rule":
         return RuleStrategist(n_seeds=n_seeds)
+    parser = getattr(settings, "llm_parser", "tool_call")
     if backend == "llm":
         if client is None:
             return RuleStrategist(n_seeds=n_seeds)   # no model wired -> deterministic fallback
-        return LLMStrategist(client, n_seeds=n_seeds, parser=getattr(settings, "llm_parser", "tool_call"))
+        return LLMStrategist(client, n_seeds=n_seeds, parser=parser)
+    if backend == "agent":
+        if client is None:
+            return RuleStrategist(n_seeds=n_seeds)
+        from .agent import loop_opts_from_settings
+        return ToolUsingStrategist(
+            client, tools=tools, n_seeds=n_seeds, parser=parser,
+            loop_opts=loop_opts_from_settings(settings),
+            max_turns=getattr(settings, "agent_max_turns", 0),
+            time_budget_s=getattr(settings, "agent_time_budget_s", 0.0),
+            context_budget_chars=getattr(settings, "context_budget_chars", 0))
     raise ValueError(f"unknown strategist_backend: {backend!r}")

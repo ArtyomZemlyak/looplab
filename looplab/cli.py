@@ -195,8 +195,13 @@ def _engine(run_dir: Path, task: TaskAdapter, settings: Settings,
         strategist = researcher
     else:
         strat_client = (make_llm_client(settings)
-                        if settings.backend == "llm" and settings.strategist_backend == "llm" else None)
-        strategist = make_strategist(settings, client=strat_client, n_seeds=settings.n_seeds)
+                        if settings.backend == "llm" and settings.strategist_backend in ("llm", "agent")
+                        else None)
+        from .tasks import build_strategist_tools
+        strat_tools = (build_strategist_tools(task, settings, run_dir)
+                       if settings.strategist_backend == "agent" else None)
+        strategist = make_strategist(settings, client=strat_client, n_seeds=settings.n_seeds,
+                                     tools=strat_tools)
     # Deep-Research stage (Phase 2): reachable only with an LLM backend. Reuses the run's LLM client;
     # tools (arXiv/web/knowledge) are wired from config inside make_deep_researcher. None when off.
     from .deep_research import make_deep_researcher

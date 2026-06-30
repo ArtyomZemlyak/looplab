@@ -618,3 +618,84 @@ def test_invalid_operator_pin_is_dropped_not_recorded(tmp_path):
 def _read(run_dir: Path):
     from looplab.eventstore import EventStore
     return EventStore(run_dir / "events.jsonl").read_all()
+
+
+# --------------------------------------------------------------------------- #
+# ToolUsingStrategist (strategist_backend="agent"): reads the run/data/etc. then emits
+# --------------------------------------------------------------------------- #
+import json as _json
+
+from looplab.config import Settings
+from looplab.strategist import ToolUsingStrategist
+from looplab.tasks import build_strategist_tools
+
+
+def _tc(name, args):
+    return {"content": "", "tool_calls": [
+        {"id": "c1", "function": {"name": name, "arguments": _json.dumps(args)}}]}
+
+
+class _ChatScript:
+    """Scripts assistant messages and records messages + offered tool names each turn."""
+    def __init__(self, scripted):
+        self.scripted = list(scripted)
+        self.turns = []
+        self.tool_names = []
+
+    def chat(self, messages, tools, tool_choice="auto"):
+        self.turns.append([dict(m) for m in messages])
+        self.tool_names.append({t["function"]["name"] for t in tools})
+        return self.scripted.pop(0)
+
+
+class _StratToolStub:
+    def __init__(self):
+        self.called = []
+
+    def specs(self):
+        return [{"type": "function", "function": {
+            "name": "read_experiments", "description": "", "parameters": {"type": "object", "properties": {}}}}]
+
+    def execute(self, name, args):
+        self.called.append(name)
+        return "node n1 failed: OOM; node n2 metric=0.9"
+
+    def bind_state(self, state, parent=None):
+        pass
+
+
+def test_agent_strategist_reads_tools_then_emits():
+    client = _ChatScript([
+        _tc("read_experiments", {}),                       # consult the run first
+        _tc("emit", {"policy": "mcts", "rationale": "saw an OOM and a strong node"}),
+    ])
+    tools = _StratToolStub()
+    out = ToolUsingStrategist(client, tools=tools).decide(RunState(), _ctx(phase="exploit"))
+    assert out["source"] == "agent" and out["policy"] == "mcts"
+    assert "read_experiments" in tools.called               # it actually investigated
+    assert "emit" in client.tool_names[0]                   # the emit tool was offered
+
+
+def test_agent_strategist_falls_back_to_rule_without_emit():
+    class _ProseOnly:                                        # never calls a tool, no complete_tool
+        def chat(self, messages, tools, tool_choice="auto"):
+            return {"content": "I think greedy is fine", "tool_calls": []}
+    out = ToolUsingStrategist(_ProseOnly()).decide(RunState(), _ctx(phase="seed"))
+    assert isinstance(out, dict) and "policy" in out        # deterministic rule baseline, not a crash
+
+
+def test_make_strategist_agent_backend_selects_tool_using():
+    s = Settings(strategist_backend="agent")
+    assert isinstance(make_strategist(s, client=_ChatScript([]), n_seeds=3),
+                      ToolUsingStrategist)
+    # no client wired -> deterministic rule baseline, never a hard failure
+    assert isinstance(make_strategist(s, client=None), RuleStrategist)
+
+
+def test_build_strategist_tools_includes_run_and_data():
+    task = ToyTask.load(TASK_FILE)
+    tools = build_strategist_tools(task, Settings(strategist_backend="agent"), run_dir=None)
+    names = {f["function"]["name"] for f in tools.specs()}
+    # run-introspection + task-data tools are always present (read its own run + the data)
+    assert any(("experiment" in n) or ("node" in n) or ("code" in n) or ("read" in n)
+               for n in names), names
