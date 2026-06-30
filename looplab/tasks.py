@@ -179,11 +179,13 @@ def build_unified_agent(task: TaskAdapter, settings, run_dir=None):
         pilot_tools = CompositeTools(_pilot_providers)
 
     extra_clients = [c for c in (strat_client, pilot_client) if c is not None]
+    from .agent import loop_opts_from_settings
     return UnifiedAgent(researcher=researcher, developer=developer, strategist=strategist,
                         pilot_client=pilot_client, pilot_tools=pilot_tools,
                         stage_clients=extra_clients, prompts=getattr(researcher, "prompts", None),
                         agent_max_turns=getattr(settings, "agent_max_turns", 0),
-                        agent_time_budget_s=getattr(settings, "agent_time_budget_s", 0.0))
+                        agent_time_budget_s=getattr(settings, "agent_time_budget_s", 0.0),
+                        loop_opts=loop_opts_from_settings(settings))   # B1 stuck + C1 plan + C2 summary
 
 
 def make_roles(task: TaskAdapter, settings, run_dir=None):
@@ -300,7 +302,7 @@ def make_roles(task: TaskAdapter, settings, run_dir=None):
         from .knowledge_tools import RepoTools
         providers.append(RepoTools(rs["editables"]))
     if providers:
-        from .agent import CompositeTools, ToolUsingResearcher
+        from .agent import CompositeTools, ToolUsingResearcher, loop_opts_from_settings
         tools = providers[0] if len(providers) == 1 else CompositeTools(providers)
         researcher = ToolUsingResearcher(
             client, tools,
@@ -310,6 +312,7 @@ def make_roles(task: TaskAdapter, settings, run_dir=None):
             context_budget_chars=getattr(settings, "context_budget_chars", 0),   # H4
             max_turns=getattr(settings, "agent_max_turns", 0),                   # 0 = unlimited
             time_budget_s=getattr(settings, "agent_time_budget_s", 0.0),         # 0 = no cap
+            loop_opts=loop_opts_from_settings(settings),     # B1 stuck + C1 self-plan + C2 summary
         )
     # C2 best-of-N: wrap the in-house LLM developer to generate N candidates and keep the best by an
     # execution-free reward. Skipped for external coding agents (cost rule) and the no-edit param mode.

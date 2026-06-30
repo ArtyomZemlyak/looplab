@@ -1,0 +1,173 @@
+"""B1/C1/C2 · No-progress stuck detection, self-plan, and auto-summary for the shared agent loop.
+Offline (fake chat client), no model needed."""
+from __future__ import annotations
+
+import json
+
+from looplab.agent import drive_tool_loop, loop_opts_from_settings
+from looplab.context_budget import compact_history
+from looplab.stuck import StuckDetector
+
+
+# --------------------------------------------------------------------------- detector unit
+def test_stuck_repeated_pair_trips_at_threshold():
+    d = StuckDetector(repeat_threshold=4)
+    assert d.push("read", {"f": "a"}, "same") is None      # 1
+    assert d.push("read", {"f": "a"}, "same") is None      # 2
+    assert d.push("read", {"f": "a"}, "same") is None      # 3
+    assert d.push("read", {"f": "a"}, "same") is not None   # 4 -> stuck
+
+
+def test_stuck_distinct_args_not_flagged_even_with_same_observation():
+    # A tool that returns the SAME observation for DIFFERENT args must NOT be flagged: the action
+    # part of the pair differs, so this is legitimate progress (reading different files).
+    d = StuckDetector(repeat_threshold=3)
+    assert d.push("read", {"f": "a"}, "obs") is None
+    assert d.push("read", {"f": "b"}, "obs") is None
+    assert d.push("read", {"f": "c"}, "obs") is None
+    assert d.push("read", {"f": "d"}, "obs") is None
+
+
+def test_stuck_single_long_call_not_flagged():
+    # One long-running command appears once -> never flagged (avoids OpenHands' early bug).
+    d = StuckDetector(repeat_threshold=4)
+    assert d.push("run", {"cmd": "train.py"}, "still running...") is None
+
+
+def test_stuck_alternating_two_calls():
+    d = StuckDetector(alternate_threshold=4)
+    reason = None
+    for i in range(8):                       # A B A B A B A B  (4 cycles)
+        reason = d.push("read", {"f": "a" if i % 2 == 0 else "b"}, "x")
+    assert reason is not None and "alternating" in reason
+
+
+def test_stuck_disabled_is_noop():
+    d = StuckDetector(enabled=False, repeat_threshold=2)
+    assert d.push("read", {"f": "a"}, "x") is None
+    assert d.push("read", {"f": "a"}, "x") is None
+    assert d.push("read", {"f": "a"}, "x") is None
+
+
+# --------------------------------------------------------------------------- loop integration
+_EMIT = {"type": "function", "function": {
+    "name": "emit", "description": "final", "parameters": {"type": "object", "properties": {}}}}
+
+
+class _Tools:
+    def specs(self):
+        return [{"type": "function", "function": {
+            "name": "peek", "description": "", "parameters": {"type": "object", "properties": {}}}}]
+
+    def execute(self, name, args):
+        return "constant-observation"
+
+
+def _tool_call(name, args):
+    return {"content": "", "tool_calls": [
+        {"id": "c1", "function": {"name": name, "arguments": json.dumps(args)}}]}
+
+
+class _RepeatClient:
+    """Always returns the SAME tool call — a model genuinely stuck in a loop. No `complete_tool`,
+    so `_force_emit` returns None and the loop must terminate via the stuck guard -> fallback."""
+    def __init__(self):
+        self.calls = 0
+
+    def chat(self, messages, tools, tool_choice="auto"):
+        self.calls += 1
+        return _tool_call("peek", {"q": "x"})
+
+
+def test_loop_terminates_on_no_progress():
+    client = _RepeatClient()
+    out = drive_tool_loop(client, _Tools(), [{"role": "user", "content": "go"}], _EMIT,
+                          stuck_repeat=4,
+                          finalize=lambda a: ("emit", a), fallback=lambda _m: ("fallback", None))
+    assert out == ("fallback", None)         # stopped gracefully instead of looping forever
+    assert client.calls <= 6                 # bounded: ~repeat_threshold turns, not unbounded
+
+
+class _ScriptClient:
+    """Scripts assistant messages; records the messages AND tool specs seen each turn."""
+    def __init__(self, scripted):
+        self.scripted = list(scripted)
+        self.turns = []
+        self.tool_names = []
+
+    def chat(self, messages, tools, tool_choice="auto"):
+        self.turns.append([dict(m) for m in messages])
+        self.tool_names.append({t["function"]["name"] for t in tools})
+        return self.scripted.pop(0)
+
+
+def test_loop_still_emits_normally_with_stuck_on():
+    client = _ScriptClient([
+        _tool_call("peek", {"q": "a"}),
+        _tool_call("emit", {"ok": True}),
+    ])
+    out = drive_tool_loop(client, _Tools(), [{"role": "user", "content": "go"}], _EMIT,
+                          finalize=lambda a: ("emit", a), fallback=lambda _m: ("fallback", None))
+    assert out == ("emit", {"ok": True})
+
+
+# --------------------------------------------------------------------------- self-plan (C1)
+def test_self_plan_tool_exposed_stored_and_reinjected():
+    client = _ScriptClient([
+        _tool_call("update_plan", {"plan": "do X", "todos": [{"item": "step a", "status": "pending"}]}),
+        _tool_call("peek", {"q": "a"}),       # turn 1 (distinct -> no stuck)
+        _tool_call("peek", {"q": "b"}),       # turn 2 -> reinjection fires (every=2)
+        _tool_call("emit", {"ok": True}),
+    ])
+    out = drive_tool_loop(client, _Tools(), [{"role": "user", "content": "go"}], _EMIT,
+                          self_plan=True, plan_reinject_every=2,
+                          finalize=lambda a: ("emit", a), fallback=lambda _m: ("fallback", None))
+    assert out == ("emit", {"ok": True})
+    # the update_plan tool is offered to the model
+    assert "update_plan" in client.tool_names[0]
+    # at turn_idx=2 the current plan is re-injected as a system reminder
+    reinjected = any("do X" in str(m.get("content")) and m.get("role") == "system"
+                     for m in client.turns[2])
+    assert reinjected
+
+
+# --------------------------------------------------------------------------- auto-summary (C2)
+def test_compact_history_summarizes_stale_middle():
+    msgs = [{"role": "system", "content": "task"},
+            {"role": "assistant", "content": "A" * 400},
+            {"role": "tool", "content": "B" * 400},
+            {"role": "assistant", "content": "C" * 400},
+            {"role": "user", "content": "recent"}]
+    out = compact_history(msgs, max_chars=100, summarize=lambda _t: "SHORT SUMMARY", keep_last=2)
+    assert out[0]["content"] == "task"                       # system kept
+    assert any("SHORT SUMMARY" in str(m.get("content")) for m in out)
+    assert out[-1]["content"] == "recent"                   # last turn kept verbatim
+    assert not any("A" * 400 == m.get("content") for m in out)   # stale middle gone
+
+
+def test_compact_history_falls_back_to_truncation_on_summarizer_error():
+    def _boom(_t):
+        raise RuntimeError("summarizer down")
+    msgs = [{"role": "system", "content": "task"},
+            {"role": "assistant", "content": "A" * 400},
+            {"role": "tool", "content": "B" * 400},
+            {"role": "user", "content": "recent"}]
+    out = compact_history(msgs, max_chars=100, summarize=_boom, keep_last=1)
+    assert not any("Summary of earlier steps" in str(m.get("content")) for m in out)
+    assert out[0]["content"] == "task"
+
+
+def test_compact_history_noop_under_budget():
+    msgs = [{"role": "system", "content": "task"}, {"role": "user", "content": "hi"}]
+    assert compact_history(msgs, max_chars=10_000, summarize=lambda _t: "x") is msgs
+
+
+# --------------------------------------------------------------------------- settings wiring
+def test_loop_opts_from_settings_defaults():
+    class _S:
+        pass
+    opts = loop_opts_from_settings(_S())
+    assert opts["stuck_detection"] is True
+    assert opts["stuck_repeat"] == 4
+    assert opts["self_plan"] is False
+    assert opts["auto_summary"] is False

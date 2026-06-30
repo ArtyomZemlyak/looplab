@@ -70,13 +70,18 @@ class DeepResearcher:
     external grounding (the memo is then formed from the results summary alone)."""
 
     def __init__(self, client, tools=None, parser: str = "tool_call", max_turns: int = 0,
-                 context_budget_chars: int = 0, time_budget_s: float = 0.0):
+                 context_budget_chars: int = 0, time_budget_s: float = 0.0,
+                 stuck_detection: bool = True, stuck_repeat: int = 4, stuck_alternate: int = 4):
         self.client = client
         self.tools = tools
         self.parser = parser
         self.max_turns = max_turns          # 0 = unlimited (config-driven via Settings.agent_max_turns)
         self.context_budget_chars = context_budget_chars
         self.time_budget_s = time_budget_s  # 0 = no wall-clock cap (Settings.agent_time_budget_s)
+        # B1: no-progress guard so this "think hard" loop can't spin forever on repeated searches.
+        self.stuck_detection = stuck_detection
+        self.stuck_repeat = stuck_repeat
+        self.stuck_alternate = stuck_alternate
 
     def _emit_spec(self) -> dict:
         return {"type": "function", "function": {
@@ -98,6 +103,10 @@ class DeepResearcher:
             import itertools
             import time as _time
             from .agent import _force_emit
+            from .stuck import StuckDetector
+            detector = (StuckDetector(repeat_threshold=self.stuck_repeat,
+                                      alternate_threshold=self.stuck_alternate)
+                        if self.stuck_detection else None)
             started = _time.monotonic()
             stalls = 0                  # consecutive prose turns we couldn't force into an emit
             turns = (itertools.count() if self.max_turns is None or self.max_turns <= 0
@@ -125,6 +134,7 @@ class DeepResearcher:
                 stalls = 0
                 messages.append({"role": "assistant", "content": msg.get("content") or "",
                                  "tool_calls": calls})
+                stuck_reason = None
                 for tc in calls:
                     fn = tc.get("function", {})
                     name = fn.get("name", "")
@@ -141,6 +151,15 @@ class DeepResearcher:
                                     "url": _arg_url(args), "snippet": str(result)[:200]})
                     messages.append({"role": "tool", "tool_call_id": tc.get("id", ""),
                                      "name": name, "content": str(result)[:4000]})
+                    if detector is not None:    # B1: stop searching in circles -> force the memo
+                        stuck_reason = detector.push(name, args, str(result)[:4000]) or stuck_reason
+                if stuck_reason:
+                    messages.append({"role": "user", "content": (
+                        f"Stop: you appear to be stuck ({stuck_reason}). Call `emit` with your memo now.")})
+                    forced = _force_emit(self.client, messages, self._emit_spec())
+                    if forced is not None:
+                        return self._finalize(forced, memo, sources)
+                    break
             # Ran out of turns without an emit — force a structured memo from the accumulated context.
             return self._forced(messages, memo, sources)
         except Exception as e:  # noqa: BLE001 — research is best-effort; never crash the run
@@ -212,4 +231,7 @@ def make_deep_researcher(settings, *, client=None, task=None) -> Optional[DeepRe
     return DeepResearcher(client, tools, parser=getattr(settings, "llm_parser", "tool_call"),
                           context_budget_chars=getattr(settings, "context_budget_chars", 0),
                           max_turns=getattr(settings, "agent_max_turns", 0),
-                          time_budget_s=getattr(settings, "agent_time_budget_s", 0.0))
+                          time_budget_s=getattr(settings, "agent_time_budget_s", 0.0),
+                          stuck_detection=bool(getattr(settings, "agent_stuck_detection", True)),
+                          stuck_repeat=int(getattr(settings, "agent_stuck_repeat", 4)),
+                          stuck_alternate=int(getattr(settings, "agent_stuck_alternate", 4)))

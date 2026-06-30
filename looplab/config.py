@@ -270,6 +270,23 @@ class Settings(BaseSettings):
     # boss at max_turns=3 / 45s), which silently dropped a slow reasoning model to a no-op reply.
     agent_max_turns: int = 0           # max tool turns before the emit is forced (0 = unlimited)
     agent_time_budget_s: float = 0.0   # wall-clock ceiling across the loop's turns (0 = no cap)
+    # B1 · No-progress / stuck detection — the safety net that makes "unlimited turns" safe. The
+    # turn/time ceilings above are only BACKSTOPS; this is what actually stops a runaway loop, on the
+    # cheapest signal: when the model repeats the SAME tool call (or ping-pongs between two, or keeps
+    # hitting the SAME error) with no progress, the loop forces the final emit and finishes. ON by
+    # default; reading DIFFERENT files or running ONE long command never trips it. (OpenHands-style.)
+    agent_stuck_detection: bool = True
+    agent_stuck_repeat: int = 4        # identical calls in a row that count as "stuck" (>=2)
+    agent_stuck_alternate: int = 4     # ping-pong cycles between two calls that count as "stuck" (>=2)
+    # C1 · Self-plan (TodoWrite-style): expose an `update_plan` tool so a long-running agent keeps its
+    # OWN working TODO and re-surfaces it every `agent_plan_reinject_every` turns — keeps the goal in
+    # view across a long loop so the agent "writes its own context" (Claude Code style).
+    agent_self_plan: bool = False
+    agent_plan_reinject_every: int = 5
+    # C2 · Auto-summary: when the tool-loop history exceeds `context_budget_chars`, LLM-summarize the
+    # stale middle instead of only middle-truncating it (needs `context_budget_chars` > 0; falls back
+    # to truncation on any summarizer error). Costs one extra model call per over-budget turn.
+    agent_auto_summary: bool = False
     # Observability (ADR-17): capture each LLM call's full prompt + completion into the active
     # span (spans.jsonl) so the UI can show exactly what the model read and wrote per node.
     # Diagnostics only — `replay.fold` never reads spans. Default on for local single-user; set

@@ -60,9 +60,54 @@ def _force_emit(client, messages: list, emit_spec: dict) -> Optional[dict]:
         return None
 
 
+_PLAN_TOOL_NAME = "update_plan"
+
+
+def _plan_spec() -> dict:
+    """C1 (TodoWrite-style) self-plan tool: the agent records/updates its OWN working TODO so it
+    keeps the goal in view across a long tool-loop. Recording a plan never finishes the task."""
+    return {"type": "function", "function": {
+        "name": _PLAN_TOOL_NAME,
+        "description": ("Record or update your working TODO/plan for THIS task so you don't lose "
+                        "track across turns. Call it whenever your plan changes. It does NOT finish "
+                        "the task — you still emit your final answer separately."),
+        "parameters": {"type": "object", "properties": {
+            "plan": {"type": "string", "description": "Short free-form plan / next steps."},
+            "todos": {"type": "array", "description": "Checklist items with a status.",
+                      "items": {"type": "object", "properties": {
+                          "item": {"type": "string"},
+                          "status": {"type": "string",
+                                     "enum": ["pending", "in_progress", "done"]}},
+                          "required": ["item"]}}}}}}
+
+
+def _render_plan(args: dict) -> str:
+    """Flatten an update_plan call into a compact human-readable TODO block."""
+    args = args or {}
+    parts: list[str] = []
+    plan = str(args.get("plan") or "").strip()
+    if plan:
+        parts.append(plan)
+    todos = args.get("todos")
+    if isinstance(todos, list):
+        marks = {"done": "[x]", "in_progress": "[~]", "pending": "[ ]"}
+        for t in todos:
+            if not isinstance(t, dict):
+                continue
+            item = str(t.get("item") or "").strip()
+            if not item:
+                continue
+            parts.append(f"{marks.get(str(t.get('status') or 'pending'), '[ ]')} {item}")
+    return "\n".join(parts).strip()
+
+
 def drive_tool_loop(client, tools, messages: list, emit_spec: dict, *,
                     max_turns: int = 0, context_budget_chars: int = 0,
-                    time_budget_s: float = 0.0, finalize=None, fallback=None):
+                    time_budget_s: float = 0.0, finalize=None, fallback=None,
+                    stuck=None, stuck_detection: bool = True,
+                    stuck_repeat: int = 4, stuck_alternate: int = 4,
+                    self_plan: bool = False, plan_reinject_every: int = 5,
+                    auto_summary: bool = False):
     """Multi-turn tool loop shared by every tool-using agent (Researcher, unified-agent pilot/triage,
     Boss, genesis scout, cross-run report). The model MAY call the provided retrieval tools across
     turns; when it calls the emit function (named in `emit_spec`), `finalize(args)` is returned. If
@@ -75,6 +120,19 @@ def drive_tool_loop(client, tools, messages: list, emit_spec: dict, *,
         exceeded (a turn already in flight isn't interrupted — that's the LLM client's per-call
         timeout's job). Set it to bound an interactive request behind a proxy gateway timeout.
 
+    Safe-by-default unlimited operation (the point of "the agents may loop forever in their own
+    loop"): `max_turns`/`time_budget_s` are only BACKSTOPS. What actually stops a stuck loop is the
+    `StuckDetector` (B1, default ON via `stuck_detection`): when the model repeats the SAME call (or
+    ping-pongs between two, or keeps hitting the SAME error) with no progress, we force the final
+    emit and finish instead of spinning forever. Pass a pre-built `stuck` detector for config-driven
+    thresholds, or rely on the default one.
+
+    Optional long-horizon aids:
+      - `self_plan` (C1): expose a TodoWrite-style `update_plan` tool so the agent keeps its OWN
+        TODO; the current plan is re-injected as a reminder every `plan_reinject_every` turns.
+      - `auto_summary` (C2): when the history exceeds `context_budget_chars`, LLM-summarize the
+        stale middle instead of only middle-truncating it (falls back to truncation on any error).
+
     Termination under "unlimited": when the model answers WITHOUT calling a tool (it considers
     itself done), we FORCE the structured emit immediately (`_force_emit`) and finish — so a prose
     reply becomes a real result instead of looping forever. If the client can't force a tool call,
@@ -85,16 +143,32 @@ def drive_tool_loop(client, tools, messages: list, emit_spec: dict, *,
     so the SAME loop drives an Idea emit, a code emit, an action choice, or a strategy emit.
     """
     emit_name = emit_spec["function"]["name"]
+    if stuck is None and stuck_detection:   # a FRESH detector per call — never share state across loops
+        from .stuck import StuckDetector
+        stuck = StuckDetector(repeat_threshold=stuck_repeat, alternate_threshold=stuck_alternate)
     tool_specs = ((tools.specs() if tools is not None else []) + [emit_spec])
+    if self_plan:
+        tool_specs = tool_specs + [_plan_spec()]
+    current_plan = ""
     started = time.monotonic()
     stalls = 0                          # consecutive prose turns we couldn't turn into a forced emit
     turns = itertools.count() if max_turns is None or max_turns <= 0 else range(max_turns)
-    for _ in turns:
+    for turn_idx in turns:
         if time_budget_s and (time.monotonic() - started) > time_budget_s:
             break                       # out of wall-clock budget -> finalize from what we have
-        if context_budget_chars:        # H4: middle-truncate stale tool output if too long
-            from .context_budget import truncate_history
-            messages = truncate_history(messages, context_budget_chars)
+        if context_budget_chars:        # H4: keep the growing tool-call history under budget
+            if auto_summary:
+                from .context_budget import compact_history
+                messages = compact_history(messages, context_budget_chars,
+                                           _summarizer(client))
+            else:
+                from .context_budget import truncate_history
+                messages = truncate_history(messages, context_budget_chars)
+        # C1: re-surface the agent's own plan periodically so a long loop can't drift off-goal.
+        if current_plan and plan_reinject_every and turn_idx and turn_idx % plan_reinject_every == 0:
+            messages.append({"role": "system",
+                             "content": "Your current plan/TODO (update it via update_plan as you "
+                                        "make progress):\n" + current_plan})
         msg = client.chat(messages, tool_specs, tool_choice="auto")
         calls = msg.get("tool_calls") or []
         if not calls:
@@ -113,6 +187,7 @@ def drive_tool_loop(client, tools, messages: list, emit_spec: dict, *,
         stalls = 0
         messages.append({"role": "assistant", "content": msg.get("content") or "",
                          "tool_calls": calls})
+        stuck_reason = None
         for tc in calls:
             fn = tc.get("function", {})
             name = fn.get("name", "")
@@ -126,10 +201,57 @@ def drive_tool_loop(client, tools, messages: list, emit_spec: dict, *,
                 args = {}
             if name == emit_name:
                 return finalize(args)
-            result = tools.execute(name, args) if tools is not None else f"(unknown tool: {name})"
+            if self_plan and name == _PLAN_TOOL_NAME:
+                current_plan = _render_plan(args) or current_plan
+                result = "plan updated"
+            else:
+                result = tools.execute(name, args) if tools is not None else f"(unknown tool: {name})"
+            result = str(result)[:4000]
             messages.append({"role": "tool", "tool_call_id": tc.get("id", ""),
-                             "name": name, "content": str(result)[:4000]})
+                             "name": name, "content": result})
+            if stuck is not None:       # B1: flag no-progress on the cheapest signal (a repeat)
+                stuck_reason = stuck.push(name, args, result) or stuck_reason
+        if stuck_reason:
+            # No progress — stop gracefully WITH a result instead of spinning forever. Nudge once,
+            # then force the structured emit; if the client can't force it, fall through to fallback.
+            messages.append({"role": "user",
+                             "content": f"Stop: you appear to be stuck ({stuck_reason}). "
+                                        f"Call `{emit_name}` now with your best answer."})
+            forced = _force_emit(client, messages, emit_spec)
+            if forced is not None:
+                return finalize(forced)
+            break
     return fallback(messages)
+
+
+def _summarizer(client):
+    """Build a `summarize(text) -> str` callable from an LLM client for `compact_history` (C2).
+    Best-effort: any failure makes the caller fall back to deterministic truncation."""
+    def _summarize(text: str) -> str:
+        msg = client.chat(
+            [{"role": "system",
+              "content": "Summarize the earlier agent steps below into a few tight bullet points: "
+                         "what was tried, what was learned, and any decisions. Keep only what future "
+                         "turns need."},
+             {"role": "user", "content": text}],
+            [], tool_choice="none")
+        return str((msg or {}).get("content") or "").strip()
+    return _summarize
+
+
+def loop_opts_from_settings(settings) -> dict:
+    """Collect the config-driven tool-loop options (B1 stuck detection + C1 self-plan + C2
+    auto-summary) into a dict to spread into `drive_tool_loop`. Plain scalars only — safe to reuse
+    across calls (the loop builds a FRESH StuckDetector per invocation from these thresholds)."""
+    g = getattr
+    return {
+        "stuck_detection": bool(g(settings, "agent_stuck_detection", True)),
+        "stuck_repeat": int(g(settings, "agent_stuck_repeat", 4)),
+        "stuck_alternate": int(g(settings, "agent_stuck_alternate", 4)),
+        "self_plan": bool(g(settings, "agent_self_plan", False)),
+        "plan_reinject_every": int(g(settings, "agent_plan_reinject_every", 5)),
+        "auto_summary": bool(g(settings, "agent_auto_summary", False)),
+    }
 
 
 class ToolUsingResearcher:
@@ -141,7 +263,8 @@ class ToolUsingResearcher:
     def __init__(self, client, tools, space_hint: str = "",
                  bounds: Optional[dict] = None, parser: str = "tool_call",
                  max_turns: int = 0, prompts: Optional[PromptStore] = None,
-                 context_budget_chars: int = 0, time_budget_s: float = 0.0):
+                 context_budget_chars: int = 0, time_budget_s: float = 0.0,
+                 loop_opts: Optional[dict] = None):
         self.client = client
         self.tools = tools          # object with .specs() and .execute(name, args)
         self.space_hint = space_hint
@@ -151,6 +274,7 @@ class ToolUsingResearcher:
         self.time_budget_s = time_budget_s  # 0 = no wall-clock cap (Settings.agent_time_budget_s)
         self.prompts = prompts
         self.context_budget_chars = context_budget_chars   # H4: cap the growing tool-call history
+        self.loop_opts = loop_opts or {}    # B1/C1/C2 tool-loop options (loop_opts_from_settings)
 
     def _emit_spec(self) -> dict:
         return {"type": "function", "function": {
@@ -214,4 +338,4 @@ class ToolUsingResearcher:
             self.client, self.tools, messages, self._emit_spec(),
             max_turns=self.max_turns, context_budget_chars=self.context_budget_chars,
             time_budget_s=self.time_budget_s,
-            finalize=self._finalize, fallback=self._fallback)
+            finalize=self._finalize, fallback=self._fallback, **self.loop_opts)

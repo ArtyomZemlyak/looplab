@@ -1546,7 +1546,7 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
             """AGENTIC: let the boss actually INSPECT the repo on disk (read-only) before authoring the
             spec — so a repo task is grounded in the real README / entry-script / results, not a
             promise. Returns None when the model can't drive tools (caller does a single structured call)."""
-            from .agent import drive_tool_loop
+            from .agent import drive_tool_loop, loop_opts_from_settings
             from .reposcout import RepoScoutTools
             tools = RepoScoutTools([Path.home(), root, root.parent])
             tool_sys = sys_prompt + (
@@ -1594,7 +1594,8 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
                                                 {"role": "user", "content": user}],
                                 emit_spec, max_turns=getattr(gset, "agent_max_turns", 0),
                                 time_budget_s=getattr(gset, "agent_time_budget_s", 0.0),
-                                finalize=_fin, fallback=_fb)
+                                finalize=_fin, fallback=_fb,
+                                **loop_opts_from_settings(gset))     # B1 stuck (+ C1/C2 if configured)
             except Exception:  # noqa: BLE001 - the model/endpoint can't drive tools AT ALL -> single-shot
                 return None
             return box.get("c")
@@ -1941,7 +1942,7 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
             """Boss decision grounded by the run-introspection tools: it MAY read experiments / data
             before choosing, then emits ONE _Plan (reply + ordered actions). None when the model can't
             drive the tool loop (then the caller falls back to a plain single-call route)."""
-            from .agent import CompositeTools, drive_tool_loop
+            from .agent import CompositeTools, drive_tool_loop, loop_opts_from_settings
             from .run_tools import RunTools, SiblingRunTools
             providers = [RunTools(), SiblingRunTools(rd.parent, rd.name)]
             try:                                  # DataTools needs the task; add it when we can load it
@@ -1982,7 +1983,8 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
                                             {"role": "user", "content": user}],
                             emit_spec, max_turns=getattr(s, "agent_max_turns", 0),
                             time_budget_s=getattr(s, "agent_time_budget_s", 0.0),
-                            finalize=_fin, fallback=lambda _m: box.get("c"))
+                            finalize=_fin, fallback=lambda _m: box.get("c"),
+                            **loop_opts_from_settings(s))     # B1 stuck (+ C1 self-plan / C2 if set)
             # Return None (not an empty _Plan) when the loop produced no emit, so the caller falls
             # through to the forced-emit single-call route instead of short-circuiting to advisory.
             return box.get("c")

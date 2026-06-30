@@ -35,7 +35,8 @@ class UnifiedAgent:
 
     def __init__(self, *, researcher, developer, strategist=None,
                  pilot_client=None, pilot_tools=None, stage_clients=None, prompts=None,
-                 agent_max_turns: int = 0, agent_time_budget_s: float = 0.0):
+                 agent_max_turns: int = 0, agent_time_budget_s: float = 0.0,
+                 loop_opts: Optional[dict] = None):
         # Internal per-stage backends. Named `researcher`/`developer`/`strategist` (not _-prefixed)
         # so the engine's cost roll-up walk (_emit_llm_cost) descends into them and finds every
         # per-stage CostAccountant.
@@ -48,6 +49,7 @@ class UnifiedAgent:
         # config-driven via Settings.agent_max_turns / agent_time_budget_s — never hardcoded).
         self._agent_max_turns = agent_max_turns
         self._agent_time_budget_s = agent_time_budget_s
+        self._loop_opts = loop_opts or {}   # B1 stuck + C1 self-plan + C2 summary (config-driven)
         # Per-stage clients NOT reachable via researcher/developer (strategy, pilot) — surfaced so
         # the engine's cost roll-up can find their CostAccountants. Deduped by identity downstream.
         self.stage_clients = list(stage_clients or [])
@@ -168,7 +170,7 @@ class UnifiedAgent:
         return drive_tool_loop(self._pilot_client, self._pilot_tools, messages, emit_spec,
                                max_turns=self._agent_max_turns,
                                time_budget_s=self._agent_time_budget_s,
-                               finalize=_finalize, fallback=_fallback)
+                               finalize=_finalize, fallback=_fallback, **self._loop_opts)
 
     # --------------------------------------------------- Crash triage (in-node repair)
     _TRIAGE_SYSTEM = (
@@ -235,4 +237,4 @@ class UnifiedAgent:
         return drive_tool_loop(self._pilot_client, self._pilot_tools, messages, emit_spec,
                                max_turns=self._agent_max_turns,
                                time_budget_s=self._agent_time_budget_s,
-                               finalize=_finalize, fallback=_fallback)
+                               finalize=_finalize, fallback=_fallback, **self._loop_opts)

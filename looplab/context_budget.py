@@ -34,3 +34,36 @@ def truncate_history(messages: list[dict], max_chars: int, *, keep_last: int = 2
         total -= len(content) - len(trimmed)
         out.append({**m, "content": trimmed})
     return out
+
+
+def compact_history(messages: list[dict], max_chars: int, summarize, *, keep_last: int = 3):
+    """C2 · Auto-summary upgrade over `truncate_history`: when the history exceeds `max_chars`,
+    LLM-summarize the STALE MIDDLE (everything except the system messages at the front and the last
+    `keep_last` turns) into a single compact note, rather than just middle-truncating it. `summarize`
+    is a ``callable(text) -> str``. Defensive: on an empty/failed summary it falls back to
+    deterministic `truncate_history`, so a flaky summarizer never loses the loop's context.
+
+    Returns a NEW message list (input untouched). Off when `max_chars <= 0` or nothing to compact."""
+    if max_chars <= 0:
+        return messages
+    total = sum(len(str(m.get("content") or "")) for m in messages)
+    if total <= max_chars:
+        return messages
+    n = len(messages)
+    # Front: leading system messages (task/goal) — never summarized away.
+    head = 0
+    while head < n and messages[head].get("role") == "system":
+        head += 1
+    tail = max(head, n - keep_last)     # keep the last `keep_last` turns verbatim
+    middle = messages[head:tail]
+    if len(middle) < 2:                 # not enough stale context to be worth a summary call
+        return truncate_history(messages, max_chars)
+    body = "\n".join(f"[{m.get('role', '?')}] {str(m.get('content') or '')}" for m in middle)
+    try:
+        summary = summarize(body)
+    except Exception:                   # noqa: BLE001 - a flaky summarizer must never break the loop
+        summary = ""
+    if not summary:
+        return truncate_history(messages, max_chars)
+    note = {"role": "system", "content": "Summary of earlier steps:\n" + summary}
+    return messages[:head] + [note] + messages[tail:]
