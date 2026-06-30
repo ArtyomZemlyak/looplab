@@ -198,8 +198,11 @@ def _engine(run_dir: Path, task: TaskAdapter, settings: Settings,
                         if settings.backend == "llm" and settings.strategist_backend in ("llm", "agent")
                         else None)
         from .tasks import build_strategist_tools
+        # Only build the (KB-indexing) strategist toolset when an agent strategist will actually use
+        # it — i.e. a client is wired. Without one, make_strategist falls back to RuleStrategist and
+        # the toolset would be built (paying KnowledgeTools' vector-index cost) only to be discarded.
         strat_tools = (build_strategist_tools(task, settings, run_dir)
-                       if settings.strategist_backend == "agent" else None)
+                       if strat_client is not None and settings.strategist_backend == "agent" else None)
         strategist = make_strategist(settings, client=strat_client, n_seeds=settings.n_seeds,
                                      tools=strat_tools)
     # Deep-Research stage (Phase 2): reachable only with an LLM backend. Reuses the run's LLM client;

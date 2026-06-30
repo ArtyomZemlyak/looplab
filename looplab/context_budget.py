@@ -60,6 +60,12 @@ def compact_history(messages: list[dict], max_chars: int, summarize, *, keep_las
     while head < n and messages[head].get("role") == "system":
         head += 1
     tail = max(head, n - keep_last)     # keep the last `keep_last` turns verbatim
+    # Never start the kept tail on a `tool` message whose owning assistant(tool_calls) turn is about
+    # to be summarized away — an orphaned role:tool is rejected by OpenAI-compatible endpoints (HTTP
+    # 400 "messages with role 'tool' must be a response to a preceding message with tool_calls").
+    # Pull the boundary back so the owning assistant rides into the tail with its tool replies.
+    while tail > head and messages[tail].get("role") == "tool":
+        tail -= 1
     middle = messages[head:tail]
     if len(middle) < 2:                 # not enough stale context to be worth a summary call
         return truncate_history(messages, max_chars)

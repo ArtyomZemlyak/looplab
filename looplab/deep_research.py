@@ -104,11 +104,12 @@ class DeepResearcher:
         try:
             import itertools
             import time as _time
-            from .agent import _force_emit
+            from .agent import _force_emit, _summarizer
             from .stuck import StuckDetector
             detector = (StuckDetector(repeat_threshold=self.stuck_repeat,
                                       alternate_threshold=self.stuck_alternate)
                         if self.stuck_detection else None)
+            summarize = _summarizer(self.client) if self.auto_summary else None  # build once, not per turn
             started = _time.monotonic()
             stalls = 0                  # consecutive prose turns we couldn't force into an emit
             turns = (itertools.count() if self.max_turns is None or self.max_turns <= 0
@@ -117,11 +118,9 @@ class DeepResearcher:
                 if self.time_budget_s and (_time.monotonic() - started) > self.time_budget_s:
                     break               # out of wall-clock budget -> force a memo from what we have
                 if self.auto_summary:
-                    from .agent import _summarizer
                     from .context_budget import DEFAULT_SUMMARY_CHARS, compact_history
                     messages = compact_history(
-                        messages, self.context_budget_chars or DEFAULT_SUMMARY_CHARS,
-                        _summarizer(self.client))
+                        messages, self.context_budget_chars or DEFAULT_SUMMARY_CHARS, summarize)
                 elif self.context_budget_chars:
                     from .context_budget import truncate_history
                     messages = truncate_history(messages, self.context_budget_chars)

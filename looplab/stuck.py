@@ -84,11 +84,14 @@ class StuckDetector:
         return None
 
     def _alternating_actions(self) -> Optional[str]:
+        # Keyed on the action+observation PAIR (not the bare action): a legitimate fixed two-step
+        # loop (e.g. poll A / wait B with constant args) whose OBSERVATIONS evolve is making progress
+        # and must NOT be flagged — only a true ping-pong where both calls AND their results repeat is.
         k = self.alternate_threshold
         need = 2 * k
-        if len(self._actions) < need:
+        if len(self._pairs) < need:
             return None
-        last = list(self._actions)[-need:]
+        last = list(self._pairs)[-need:]
         evens, odds = set(last[0::2]), set(last[1::2])
         if len(evens) == 1 and len(odds) == 1 and evens != odds:
             return (f"alternating between two calls ({last[0][:80]} / {last[1][:80]}) "

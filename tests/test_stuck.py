@@ -42,6 +42,23 @@ def test_stuck_alternating_two_calls():
     assert reason is not None and "alternating" in reason
 
 
+def test_stuck_alternating_not_flagged_when_observations_evolve():
+    # A legitimate two-step poll (same two calls, same args) whose OBSERVATIONS change is progress.
+    d = StuckDetector(alternate_threshold=4)
+    reason = None
+    for i in range(8):
+        reason = d.push("status" if i % 2 == 0 else "wait", {"job": "x"}, f"state-{i}")
+    assert reason is None
+
+
+def test_stuck_alternating_flagged_when_pairs_repeat():
+    d = StuckDetector(alternate_threshold=4)
+    reason = None
+    for i in range(8):                       # A=>x, B=>y repeating: both calls AND results repeat
+        reason = d.push("a" if i % 2 == 0 else "b", {}, "x" if i % 2 == 0 else "y")
+    assert reason is not None and "alternating" in reason
+
+
 def test_stuck_disabled_is_noop():
     d = StuckDetector(enabled=False, repeat_threshold=2)
     assert d.push("read", {"f": "a"}, "x") is None
@@ -155,6 +172,25 @@ def test_compact_history_falls_back_to_truncation_on_summarizer_error():
     out = compact_history(msgs, max_chars=100, summarize=_boom, keep_last=1)
     assert not any("Summary of earlier steps" in str(m.get("content")) for m in out)
     assert out[0]["content"] == "task"
+
+
+def test_compact_history_does_not_orphan_tool_message():
+    # assistant(tool_calls) + tool reply pairs. Summarizing the middle must not leave the kept tail
+    # starting on a role:tool whose owning assistant was summarized away (endpoints reject that).
+    def _asst(cid, pad):
+        return {"role": "assistant", "content": "",
+                "tool_calls": [{"id": cid, "function": {"name": "read", "arguments": "{}"}}],
+                "_pad": pad}
+    msgs = [{"role": "system", "content": "S" * 200},
+            {"role": "user", "content": "go"},
+            _asst("a1", "A" * 300), {"role": "tool", "tool_call_id": "a1", "content": "R1" * 150},
+            _asst("a2", "B" * 300), {"role": "tool", "tool_call_id": "a2", "content": "R2" * 150},
+            _asst("a3", "C" * 300), {"role": "tool", "tool_call_id": "a3", "content": "R3" * 150}]
+    out = compact_history(msgs, max_chars=300, summarize=lambda _t: "SUMMARY", keep_last=3)
+    for i, m in enumerate(out):                 # every kept tool reply must follow its assistant(tc)
+        if m.get("role") == "tool":
+            prev = out[i - 1] if i > 0 else {}
+            assert prev.get("tool_calls"), f"orphaned tool at index {i} (prev role={prev.get('role')})"
 
 
 def test_compact_history_noop_under_budget():

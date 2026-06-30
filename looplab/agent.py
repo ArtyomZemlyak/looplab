@@ -104,7 +104,7 @@ def _render_plan(args: dict) -> str:
 def drive_tool_loop(client, tools, messages: list, emit_spec: dict, *,
                     max_turns: int = 0, context_budget_chars: int = 0,
                     time_budget_s: float = 0.0, finalize=None, fallback=None,
-                    stuck=None, stuck_detection: bool = True,
+                    stuck_detection: bool = True,
                     stuck_repeat: int = 4, stuck_alternate: int = 4,
                     self_plan: bool = False, plan_reinject_every: int = 5,
                     auto_summary: bool = False):
@@ -124,8 +124,8 @@ def drive_tool_loop(client, tools, messages: list, emit_spec: dict, *,
     loop"): `max_turns`/`time_budget_s` are only BACKSTOPS. What actually stops a stuck loop is the
     `StuckDetector` (B1, default ON via `stuck_detection`): when the model repeats the SAME call (or
     ping-pongs between two, or keeps hitting the SAME error) with no progress, we force the final
-    emit and finish instead of spinning forever. Pass a pre-built `stuck` detector for config-driven
-    thresholds, or rely on the default one.
+    emit and finish instead of spinning forever. Thresholds are config-driven (`stuck_repeat` /
+    `stuck_alternate`); a FRESH detector is built per call so state never leaks across loops.
 
     Optional long-horizon aids:
       - `self_plan` (C1): expose a TodoWrite-style `update_plan` tool so the agent keeps its OWN
@@ -143,7 +143,8 @@ def drive_tool_loop(client, tools, messages: list, emit_spec: dict, *,
     so the SAME loop drives an Idea emit, a code emit, an action choice, or a strategy emit.
     """
     emit_name = emit_spec["function"]["name"]
-    if stuck is None and stuck_detection:   # a FRESH detector per call — never share state across loops
+    stuck = None
+    if stuck_detection:                 # a FRESH detector per call — never share state across loops
         from .stuck import StuckDetector
         stuck = StuckDetector(repeat_threshold=stuck_repeat, alternate_threshold=stuck_alternate)
     tool_specs = ((tools.specs() if tools is not None else []) + [emit_spec])
@@ -151,6 +152,7 @@ def drive_tool_loop(client, tools, messages: list, emit_spec: dict, *,
         tool_specs = tool_specs + [_plan_spec()]
     current_plan = ""
     started = time.monotonic()
+    summarize = _summarizer(client) if auto_summary else None   # loop-invariant: build once, not per turn
     stalls = 0                          # consecutive prose turns we couldn't turn into a forced emit
     turns = itertools.count() if max_turns is None or max_turns <= 0 else range(max_turns)
     for turn_idx in turns:
@@ -159,7 +161,7 @@ def drive_tool_loop(client, tools, messages: list, emit_spec: dict, *,
         if auto_summary:                # C2: summarize the stale middle once the history grows long
             from .context_budget import DEFAULT_SUMMARY_CHARS, compact_history
             messages = compact_history(messages, context_budget_chars or DEFAULT_SUMMARY_CHARS,
-                                       _summarizer(client))
+                                       summarize)
         elif context_budget_chars:      # H4: else just middle-truncate stale tool output
             from .context_budget import truncate_history
             messages = truncate_history(messages, context_budget_chars)
@@ -226,14 +228,20 @@ def drive_tool_loop(client, tools, messages: list, emit_spec: dict, *,
 def _summarizer(client):
     """Build a `summarize(text) -> str` callable from an LLM client for `compact_history` (C2).
     Best-effort: any failure makes the caller fall back to deterministic truncation."""
+    msgs_for = lambda text: [
+        {"role": "system",
+         "content": "Summarize the earlier agent steps below into a few tight bullet points: "
+                    "what was tried, what was learned, and any decisions. Keep only what future "
+                    "turns need."},
+        {"role": "user", "content": text}]
+
     def _summarize(text: str) -> str:
-        msg = client.chat(
-            [{"role": "system",
-              "content": "Summarize the earlier agent steps below into a few tight bullet points: "
-                         "what was tried, what was learned, and any decisions. Keep only what future "
-                         "turns need."},
-             {"role": "user", "content": text}],
-            [], tool_choice="none")
+        # Prefer the tool-free text completion: a `chat(..., tools=[], tool_choice="none")` is
+        # rejected by some OpenAI-compatible backends (vLLM/older Ollama) when tools is empty.
+        complete_text = getattr(client, "complete_text", None)
+        if callable(complete_text):
+            return str(complete_text(msgs_for(text)) or "").strip()
+        msg = client.chat(msgs_for(text), [], tool_choice="none")
         return str((msg or {}).get("content") or "").strip()
     return _summarize
 

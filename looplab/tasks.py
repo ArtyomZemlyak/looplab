@@ -195,7 +195,7 @@ def build_unified_agent(task: TaskAdapter, settings, run_dir=None):
     strat_client = (client_for(stage_models.get("strategy"), stage_urls.get("strategy"))
                     if settings.strategist_backend in ("llm", "agent") else None)
     strat_tools = (build_strategist_tools(task, split, run_dir)
-                   if settings.strategist_backend == "agent" else None)
+                   if strat_client is not None and settings.strategist_backend == "agent" else None)
     strategist = make_strategist(split, client=strat_client, n_seeds=settings.n_seeds, tools=strat_tools)
 
     # Pilot stage: its own client + read-only run-introspection tools for self-driving the next
