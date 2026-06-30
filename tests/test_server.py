@@ -72,6 +72,26 @@ def test_artifacts_list_and_view(tmp_path):
                       params={"root": "nope", "path": "x"}).status_code == 404
 
 
+def test_artifacts_token_gated(tmp_path, monkeypatch):
+    """The artifact routes serve raw file CONTENT, so when LOOPLAB_UI_TOKEN is set they're gated like a
+    mutation — while other (projection-only) read routes stay open."""
+    monkeypatch.setenv("LOOPLAB_UI_TOKEN", "sekret")
+    _build_run(tmp_path)
+    (tmp_path / "demo" / "out.txt").write_bytes(b"hi\n")
+    client = TestClient(make_app(tmp_path))
+    # raw-file reads require the token
+    assert client.get("/api/runs/demo/artifacts").status_code == 401
+    assert client.get("/api/runs/demo/artifact",
+                      params={"root": "run", "path": "out.txt"}).status_code == 401
+    # a folded-projection GET stays open (unchanged behaviour)
+    assert client.get("/api/runs/demo/state").status_code == 200
+    # with the token, content is served
+    h = {"X-LoopLab-Token": "sekret"}
+    assert client.get("/api/runs/demo/artifacts", headers=h).status_code == 200
+    assert client.get("/api/runs/demo/artifact", params={"root": "run", "path": "out.txt"},
+                      headers=h).json()["content"] == "hi\n"
+
+
 def test_runs_list_state_and_node_detail(tmp_path):
     st = _build_run(tmp_path)
     client = TestClient(make_app(tmp_path))

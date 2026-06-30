@@ -17,6 +17,7 @@ import logging
 import os
 import re
 import secrets
+import stat
 import subprocess
 import sys
 import tempfile
@@ -308,36 +309,40 @@ def _artifact_roots(rd: Path) -> list[dict]:
     roots = [{"id": "run", "label": "run directory", "base": rd}]
     snap = rd / "task.snapshot.json"
     if snap.exists():
+        # Whole block is best-effort: a non-JSON / foreign / malformed snapshot (a `data` that isn't a
+        # dict, a path with illegal chars) must degrade to "run dir only", never 500 the listing.
         try:
             data = json.loads(snap.read_text(encoding="utf-8"))
-        except Exception:  # noqa: BLE001 — a non-JSON / foreign snapshot just yields no extra roots
-            data = {}
-        if isinstance(data, dict):
-            if data.get("editable_path"):
-                p = _art_expand(data["editable_path"])
-                roots.append({"id": "editable:.", "label": f"repo: {Path(p).name or p}", "base": Path(p)})
-            for e in data.get("editables") or []:
-                if isinstance(e, dict) and e.get("path") and e.get("name"):
-                    roots.append({"id": f"editable:{e['name']}", "label": f"repo: {e['name']}",
-                                  "base": Path(_art_expand(e["path"]))})
-            for r in data.get("references") or []:
-                if isinstance(r, dict) and r.get("path") and r.get("name"):
-                    roots.append({"id": f"reference:{r['name']}", "label": f"ref: {r['name']}",
-                                  "base": Path(_art_expand(r["path"]))})
-            for name, p in (data.get("data") or {}).items():
-                if isinstance(name, str) and p:
-                    roots.append({"id": f"data:{name}", "label": f"data: {name}",
-                                  "base": Path(_art_expand(p))})
+            if isinstance(data, dict):
+                if data.get("editable_path"):
+                    p = _art_expand(data["editable_path"])
+                    roots.append({"id": "editable:.", "label": f"repo: {Path(p).name or p}", "base": Path(p)})
+                for e in data.get("editables") or []:
+                    if isinstance(e, dict) and e.get("path") and e.get("name"):
+                        roots.append({"id": f"editable:{e['name']}", "label": f"repo: {e['name']}",
+                                      "base": Path(_art_expand(e["path"]))})
+                for ref in data.get("references") or []:
+                    if isinstance(ref, dict) and ref.get("path") and ref.get("name"):
+                        roots.append({"id": f"reference:{ref['name']}", "label": f"ref: {ref['name']}",
+                                      "base": Path(_art_expand(ref["path"]))})
+                dm = data.get("data")
+                if isinstance(dm, dict):
+                    for name, p in dm.items():
+                        if isinstance(name, str) and isinstance(p, str) and p:
+                            roots.append({"id": f"data:{name}", "label": f"data: {name}",
+                                          "base": Path(_art_expand(p))})
+        except Exception:  # noqa: BLE001 — best-effort discovery; any parse error → no extra roots
+            pass
     out: list[dict] = []
     seen: set = set()
     for r in roots:
         try:
             b = Path(r["base"]).resolve()
-        except OSError:
+        except (OSError, ValueError):              # illegal-char path (esp. Windows) → skip
             continue
-        if b in seen or not b.is_dir():
+        if r["id"] in seen or b in seen or not b.is_dir():   # de-dup by id AND by resolved path
             continue
-        seen.add(b)
+        seen.add(r["id"]); seen.add(b)
         out.append({**r, "base": b})
     return out
 
@@ -349,17 +354,19 @@ def _artifact_is_text(p: Path) -> bool:
 
 
 def _list_artifact_files(base: Path) -> tuple[list[dict], bool]:
-    """Walk `base`, pruning heavy/noise dirs, capped at _ART_MAX_FILES. Returns (files, truncated)."""
+    """Walk `base`, pruning heavy/noise dirs, capped at _ART_MAX_FILES. Returns (files, truncated). The
+    walk is sorted (dirs + files) so a truncated listing is deterministic across calls/platforms rather
+    than whatever arbitrary subset os.scandir happened to yield first."""
     out: list[dict] = []
     for dirpath, dirnames, filenames in os.walk(base):
-        dirnames[:] = [d for d in dirnames if d not in _ART_SKIP_DIRS]
-        for fn in filenames:
+        dirnames[:] = sorted(d for d in dirnames if d not in _ART_SKIP_DIRS)
+        for fn in sorted(filenames):
             fp = Path(dirpath) / fn
             try:
-                stt = fp.stat()
-                if not fp.is_file():
-                    continue
+                stt = fp.stat()                  # one stat (follows symlink; broken link → OSError → skip)
             except OSError:
+                continue
+            if not stat.S_ISREG(stt.st_mode):    # regular files only — skip fifos/sockets/dir symlinks
                 continue
             out.append({"path": fp.relative_to(base).as_posix(), "size": stt.st_size,
                         "mtime": stt.st_mtime, "is_text": _artifact_is_text(fp)})
@@ -411,8 +418,15 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
     if ui_token:
         @app.middleware("http")
         async def _require_token(request: "Request", call_next):
-            if (request.method in ("POST", "PUT", "PATCH", "DELETE")
-                    and request.url.path.startswith("/api/")
+            p = request.url.path
+            # Raw-file-content reads are as sensitive as mutations (the artifact routes can serve repo
+            # secrets — a checked-in .env, credentials, a log that printed a key), so gate those GETs
+            # too. Every OTHER GET only returns folded projections (events/state), never raw files, so
+            # they stay open exactly as before.
+            sensitive_get = (request.method == "GET"
+                             and (p.endswith("/artifact") or p.endswith("/artifacts")))
+            mutating = request.method in ("POST", "PUT", "PATCH", "DELETE")
+            if ((mutating or sensitive_get) and p.startswith("/api/")
                     and request.headers.get("X-LoopLab-Token") != ui_token):
                 return JSONResponse({"detail": "unauthorized (missing/invalid UI token)"},
                                     status_code=401)
@@ -783,12 +797,13 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
         size = target.stat().st_size
         with open(target, "rb") as f:
             head = f.read(_ART_MAX_BYTES + 1)
-        if b"\x00" in head[:8192]:                             # binary → no inline content
+        body = head[:_ART_MAX_BYTES]
+        if b"\x00" in body:                                    # a NUL anywhere in the read → binary
             return {"root": root, "path": path, "size": size, "is_text": False,
                     "truncated": False, "content": None}
         return {"root": root, "path": path, "size": size, "is_text": True,
                 "truncated": size > _ART_MAX_BYTES,
-                "content": head[:_ART_MAX_BYTES].decode("utf-8", errors="replace")}
+                "content": body.decode("utf-8", errors="replace")}
 
     @app.get("/api/runs/{run_id}/trace")
     def trace(run_id: str):

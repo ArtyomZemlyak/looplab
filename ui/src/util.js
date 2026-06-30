@@ -13,6 +13,14 @@ export function fmtInt(v) {
   return Number(v).toLocaleString()
 }
 
+// Human-readable byte size (file listings, etc.).
+export function fmtBytes(n) {
+  if (n == null) return ''
+  if (n < 1024) return n + ' B'
+  if (n < 1024 * 1024) return (n / 1024).toFixed(1) + ' KB'
+  return (n / 1024 / 1024).toFixed(1) + ' MB'
+}
+
 // Epoch-SECONDS timestamp helpers (run mtime/created come from os.stat → seconds, not ms).
 export function fmtDate(sec, withTime = true) {
   if (!sec) return '—'
@@ -466,7 +474,10 @@ export function apiPrefix() {
 export const apiUrl = (path) => apiPrefix() + path
 
 export async function get(path) {
-  const r = await fetch(apiUrl(path))
+  // Carry the UI token on reads too: most GETs don't need it, but the artifact routes (raw file
+  // content) are token-gated server-side. _authHeaders is a no-op when no token is set (local), so
+  // ordinary local use is unchanged.
+  const r = await fetch(apiUrl(path), { headers: _authHeaders({}) })
   if (!r.ok) await _throw(r, path)
   return r.json()
 }

@@ -21,8 +21,9 @@ import {
 // Run-view panel IA (design audit 2026-06-28): keep the few most-used panels inline; fold the long
 // tail into a grouped "More ▾" overflow so the bar never wraps to a second row (was 17 buttons).
 const PRIMARY_PANELS = [['trust', 'Trust'], ['failures', 'Failures'], ['research', 'Research'],
-                        ['artifacts', 'Artifacts'], ['compare', 'Compare'], ['config', 'Settings']]
+                        ['compare', 'Compare'], ['config', 'Settings']]
 const MORE_GROUPS = [
+  ['Output', [['artifacts', 'Artifacts']]],
   ['Analysis', [['sensitivity', 'Sensitivity'], ['importance', 'Importance'], ['pareto', 'Pareto/Div'], ['data', 'Data']]],
   ['System', [['gpu', 'GPU'], ['memory', 'Memory'], ['events', 'Events'], ['registry', 'Registry'],
               ['crossrun', 'Cross-run'], ['collab', 'Collab'], ['authoring', 'Authoring']]],
