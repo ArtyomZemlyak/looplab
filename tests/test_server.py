@@ -4,6 +4,7 @@ node detail, the control append, and config masking through FastAPI's TestClient
 """
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import anyio
@@ -30,6 +31,45 @@ def _build_run(root: Path, name: str = "demo"):
     eng = Engine(root / name, task=task, researcher=r, developer=d,
                  sandbox=SubprocessSandbox(), policy=GreedyTree(n_seeds=2, max_nodes=4))
     return anyio.run(eng.run)
+
+
+def test_artifacts_list_and_view(tmp_path):
+    """Artifacts: list the run dir AND a declared separate repo path, view text content, flag binary,
+    and block path traversal / unknown roots."""
+    _build_run(tmp_path)                                   # tmp_path/demo with events.jsonl, nodes/, …
+    rd = tmp_path / "demo"
+    (rd / "out.txt").write_bytes(b"hello artifact\n")      # bytes: no CRLF translation, exact-content check
+    (rd / "blob.bin").write_bytes(b"\x00\x01\x02binary")
+    # a RepoTask-style snapshot pointing at a SEPARATE repo path on disk (not under runs/)
+    repo = tmp_path / "myrepo"; (repo / "outputs").mkdir(parents=True)
+    (repo / "train.py").write_text("print('train')\n", encoding="utf-8")
+    (repo / "outputs" / "submission.csv").write_text("id,pred\n1,0.5\n", encoding="utf-8")
+    (rd / "task.snapshot.json").write_text(
+        json.dumps({"kind": "repo", "editable_path": str(repo)}), encoding="utf-8")
+
+    client = TestClient(make_app(tmp_path))
+    roots = {r["id"]: r for r in client.get("/api/runs/demo/artifacts").json()["roots"]}
+    assert "run" in roots and "editable:." in roots         # run dir + the separate repo path
+    run_files = {f["path"] for f in roots["run"]["files"]}
+    assert {"out.txt", "blob.bin"} <= run_files
+    repo_files = {f["path"] for f in roots["editable:."]["files"]}
+    assert {"train.py", "outputs/submission.csv"} <= repo_files
+
+    # view a text file in the run dir
+    v = client.get("/api/runs/demo/artifact", params={"root": "run", "path": "out.txt"}).json()
+    assert v["is_text"] is True and v["content"] == "hello artifact\n"
+    # view a file under the SEPARATE repo root (incl. a nested subdir)
+    v2 = client.get("/api/runs/demo/artifact",
+                    params={"root": "editable:.", "path": "outputs/submission.csv"}).json()
+    assert "id,pred" in v2["content"]
+    # binary file → flagged, no inline content
+    vb = client.get("/api/runs/demo/artifact", params={"root": "run", "path": "blob.bin"}).json()
+    assert vb["is_text"] is False and vb["content"] is None
+    # path-traversal and unknown root are both rejected
+    assert client.get("/api/runs/demo/artifact",
+                      params={"root": "run", "path": "../../secret"}).status_code == 404
+    assert client.get("/api/runs/demo/artifact",
+                      params={"root": "nope", "path": "x"}).status_code == 404
 
 
 def test_runs_list_state_and_node_detail(tmp_path):

@@ -273,6 +273,103 @@ def _engine_alive(rd: Path) -> bool:
         f.close()
 
 
+# ----------------------------------------------------------------- artifacts (run files + repo paths)
+# Surface the files a run produced. Two kinds of root: the run directory itself (events/snapshots, the
+# per-node eval workdirs under nodes/<id>/, operator subdirs) AND — for a RepoTask — the host repo /
+# reference / data paths the task declared, since a training command may write its outputs (checkpoints,
+# submissions, logs) straight into the editable repo rather than under runs/. Both are read-only, walked
+# with heavy/noise dirs pruned, and served with a path-traversal guard + a size cap. Pure helpers (no
+# FastAPI) so the routes own the HTTP errors.
+_ART_SKIP_DIRS = {".git", "__pycache__", ".venv", "venv", "env", "node_modules", ".mypy_cache",
+                  ".pytest_cache", ".ipynb_checkpoints", ".idea", ".vscode", ".tox", ".cache",
+                  ".DS_Store", ".eggs"}
+_ART_BIN_EXT = {".png", ".jpg", ".jpeg", ".gif", ".bmp", ".ico", ".webp", ".svgz", ".pdf", ".zip",
+                ".gz", ".tar", ".tgz", ".bz2", ".xz", ".7z", ".rar", ".pyc", ".pyo", ".pyd", ".so",
+                ".dll", ".dylib", ".o", ".a", ".bin", ".exe", ".pkl", ".pickle", ".joblib", ".pt",
+                ".pth", ".ckpt", ".safetensors", ".onnx", ".pb", ".h5", ".hdf5", ".npy", ".npz",
+                ".parquet", ".feather", ".arrow", ".db", ".sqlite", ".sqlite3", ".woff", ".woff2",
+                ".ttf", ".otf", ".eot", ".mp3", ".mp4", ".wav", ".ogg", ".avi", ".mov", ".mkv",
+                ".jar", ".class", ".wasm"}
+_ART_MAX_FILES = 1500          # per root — keep listings bounded even for a big repo / data dir
+_ART_MAX_BYTES = 2_000_000     # 2 MB cap for an inline text view (the tail is dropped, `truncated` set)
+
+
+def _art_expand(p: str) -> str:
+    """Resolve ~ and $ENV the way RepoTask._expand_repo_paths does (task.snapshot.json is verbatim, so a
+    natural `editable_path: "~/proj"` would otherwise be a literal dir that never exists)."""
+    return os.path.expanduser(os.path.expandvars(p)) if isinstance(p, str) and p else p
+
+
+def _artifact_roots(rd: Path) -> list[dict]:
+    """Allowed artifact roots for a run: the run dir, plus any host repo / reference / data paths the
+    task snapshot declares (RepoTask). Each is {id, label, base(Path resolved)}; only EXISTING dirs are
+    returned, de-duplicated. The fixed id set is what the content route validates a request against, so a
+    browser can never reach a path outside these roots."""
+    roots = [{"id": "run", "label": "run directory", "base": rd}]
+    snap = rd / "task.snapshot.json"
+    if snap.exists():
+        try:
+            data = json.loads(snap.read_text(encoding="utf-8"))
+        except Exception:  # noqa: BLE001 — a non-JSON / foreign snapshot just yields no extra roots
+            data = {}
+        if isinstance(data, dict):
+            if data.get("editable_path"):
+                p = _art_expand(data["editable_path"])
+                roots.append({"id": "editable:.", "label": f"repo: {Path(p).name or p}", "base": Path(p)})
+            for e in data.get("editables") or []:
+                if isinstance(e, dict) and e.get("path") and e.get("name"):
+                    roots.append({"id": f"editable:{e['name']}", "label": f"repo: {e['name']}",
+                                  "base": Path(_art_expand(e["path"]))})
+            for r in data.get("references") or []:
+                if isinstance(r, dict) and r.get("path") and r.get("name"):
+                    roots.append({"id": f"reference:{r['name']}", "label": f"ref: {r['name']}",
+                                  "base": Path(_art_expand(r["path"]))})
+            for name, p in (data.get("data") or {}).items():
+                if isinstance(name, str) and p:
+                    roots.append({"id": f"data:{name}", "label": f"data: {name}",
+                                  "base": Path(_art_expand(p))})
+    out: list[dict] = []
+    seen: set = set()
+    for r in roots:
+        try:
+            b = Path(r["base"]).resolve()
+        except OSError:
+            continue
+        if b in seen or not b.is_dir():
+            continue
+        seen.add(b)
+        out.append({**r, "base": b})
+    return out
+
+
+def _artifact_is_text(p: Path) -> bool:
+    """Cheap text/binary guess for the LISTING (no file read). The content route re-checks authoritatively
+    by sniffing for NUL bytes."""
+    return p.suffix.lower() not in _ART_BIN_EXT
+
+
+def _list_artifact_files(base: Path) -> tuple[list[dict], bool]:
+    """Walk `base`, pruning heavy/noise dirs, capped at _ART_MAX_FILES. Returns (files, truncated)."""
+    out: list[dict] = []
+    for dirpath, dirnames, filenames in os.walk(base):
+        dirnames[:] = [d for d in dirnames if d not in _ART_SKIP_DIRS]
+        for fn in filenames:
+            fp = Path(dirpath) / fn
+            try:
+                stt = fp.stat()
+                if not fp.is_file():
+                    continue
+            except OSError:
+                continue
+            out.append({"path": fp.relative_to(base).as_posix(), "size": stt.st_size,
+                        "mtime": stt.st_mtime, "is_text": _artifact_is_text(fp)})
+            if len(out) >= _ART_MAX_FILES:
+                out.sort(key=lambda f: f["path"])
+                return out, True
+    out.sort(key=lambda f: f["path"])
+    return out, False
+
+
 def make_app(run_root: str | os.PathLike) -> "FastAPI":
     root = Path(run_root).resolve()
     root.mkdir(parents=True, exist_ok=True)
@@ -651,6 +748,47 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
         seq lower bound."""
         rd = _run_dir(run_id)
         return [o for o in iter_jsonl(rd / "events.jsonl") if o.get("seq", -1) > since]
+
+    @app.get("/api/runs/{run_id}/artifacts")
+    def artifacts(run_id: str):
+        """List every file the run produced, grouped by root: the run directory (events/snapshots, the
+        per-node eval workdirs under nodes/<id>/, operator subdirs) PLUS — for a RepoTask — the host
+        repo / reference / data paths the task declared, so outputs a training command wrote straight
+        into the actual repo (not under runs/) are reachable too. Each file carries size + mtime + a
+        cheap is_text guess; /artifact serves the content."""
+        rd = _run_dir(run_id)
+        out = []
+        for r in _artifact_roots(rd):
+            files, truncated = _list_artifact_files(r["base"])
+            out.append({"id": r["id"], "label": r["label"], "path": str(r["base"]),
+                        "is_run_dir": r["id"] == "run", "truncated": truncated,
+                        "n_files": len(files), "files": files})
+        return {"run_id": run_id, "roots": out}
+
+    @app.get("/api/runs/{run_id}/artifact")
+    def artifact(run_id: str, root: str, path: str):
+        """Serve ONE artifact's content for inline viewing. `root` must be one of the ids returned by
+        /artifacts; `path` is resolved within that root and traversal-guarded (a browser can never read
+        outside the declared roots). Text is returned UTF-8 (errors replaced) capped at 2 MB; binary or
+        oversize files return is_text=false / truncated=true with no inline content."""
+        rd = _run_dir(run_id)
+        base = next((r["base"] for r in _artifact_roots(rd) if r["id"] == root), None)
+        if base is None:
+            raise HTTPException(404, "no such artifact root")
+        target = (base / path).resolve()
+        if target != base and base not in target.parents:     # path-traversal guard
+            raise HTTPException(404, "no such artifact")
+        if not target.is_file():
+            raise HTTPException(404, "no such artifact")
+        size = target.stat().st_size
+        with open(target, "rb") as f:
+            head = f.read(_ART_MAX_BYTES + 1)
+        if b"\x00" in head[:8192]:                             # binary → no inline content
+            return {"root": root, "path": path, "size": size, "is_text": False,
+                    "truncated": False, "content": None}
+        return {"root": root, "path": path, "size": size, "is_text": True,
+                "truncated": size > _ART_MAX_BYTES,
+                "content": head[:_ART_MAX_BYTES].decode("utf-8", errors="replace")}
 
     @app.get("/api/runs/{run_id}/trace")
     def trace(run_id: str):

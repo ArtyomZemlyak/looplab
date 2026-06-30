@@ -656,3 +656,106 @@ export function EventExplorer({ runId, onClose }) {
     </Panel>
   )
 }
+
+const _MAX_VIEW = 2_000_000
+function fmtBytes(n) {
+  if (n == null) return ''
+  if (n < 1024) return n + ' B'
+  if (n < 1024 * 1024) return (n / 1024).toFixed(1) + ' KB'
+  return (n / 1024 / 1024).toFixed(1) + ' MB'
+}
+
+// Artifacts browser: lists every file a run produced — the run directory (events/snapshots, per-node
+// eval workdirs, operator subdirs) AND, for a RepoTask, the separate host repo / reference / data paths
+// the task declared (where a training command may have written checkpoints / submissions / logs). Text
+// files open inline; binary / oversize ones are flagged. Backed by GET /api/runs/{id}/artifacts (the
+// listing) + /artifact (one file's content, traversal-guarded + 2 MB cap, both server-side).
+export function ArtifactsPanel({ runId, onToast, onClose }) {
+  const [roots, setRoots] = useState(null)
+  const [err, setErr] = useState(null)
+  const [open, setOpen] = useState({})        // root id -> expanded?
+  const [sel, setSel] = useState(null)        // { root, path, is_text }
+  const [content, setContent] = useState(null)
+  const [busy, setBusy] = useState(false)
+  const [filter, setFilter] = useState('')
+
+  useEffect(() => {
+    let alive = true
+    get(`/api/runs/${runId}/artifacts`).then(d => {
+      if (!alive) return
+      const rs = d.roots || []
+      setRoots(rs)
+      const o = {}; rs.forEach(r => { o[r.id] = !!r.is_run_dir })   // expand the run dir, collapse repos
+      setOpen(o)
+    }).catch(e => alive && setErr(e.message))
+    return () => { alive = false }
+  }, [runId])
+
+  const view = (rootId, f) => {
+    setSel({ root: rootId, path: f.path, is_text: f.is_text })
+    setContent(null)
+    if (!f.is_text) return
+    setBusy(true)
+    get(`/api/runs/${runId}/artifact?root=${encodeURIComponent(rootId)}&path=${encodeURIComponent(f.path)}`)
+      .then(c => setContent(c))
+      .catch(e => { setContent(null); onToast && onToast('view failed: ' + e.message) })
+      .finally(() => setBusy(false))
+  }
+
+  const ql = filter.trim().toLowerCase()
+  const binary = sel && (!sel.is_text || (content && content.is_text === false))
+  return (
+    <Panel title="Artifacts" sub={runId} wide onClose={onClose}>
+      {err && <div className="notice">Could not load artifacts: {err}</div>}
+      {!roots ? <div className="muted">Loading…</div> :
+        <div className="art-wrap">
+          <div className="art-list">
+            <input className="text art-filter" placeholder="filter files…" value={filter}
+                   onChange={e => setFilter(e.target.value)} />
+            {roots.length === 0 && <div className="muted">No artifacts found for this run.</div>}
+            {roots.map(r => {
+              const files = ql ? r.files.filter(f => f.path.toLowerCase().includes(ql)) : r.files
+              const isOpen = !!open[r.id]
+              return (
+                <div className="art-root" key={r.id}>
+                  <div className="art-root-h" title={r.path}
+                       onClick={() => setOpen(o => ({ ...o, [r.id]: !isOpen }))}>
+                    <span className="art-chev">{isOpen ? '▾' : '▸'}</span>
+                    <b>{r.label}</b>
+                    <span className="muted art-root-n">{r.n_files}{r.truncated ? '+' : ''}</span>
+                    {!r.is_run_dir && <span className="pill art-tag" title={r.path}>repo path</span>}
+                  </div>
+                  {isOpen && <div className="art-files">
+                    {files.length === 0 ? <div className="muted art-empty">{ql ? 'no match' : 'empty'}</div>
+                      : files.map(f => (
+                        <div key={f.path} title={f.path + (f.is_text ? '' : ' · binary')}
+                             className={'art-file' + (sel && sel.root === r.id && sel.path === f.path ? ' sel' : '')
+                               + (f.is_text ? '' : ' bin')}
+                             onClick={() => view(r.id, f)}>
+                          <span className="art-name">{f.path}</span>
+                          <span className="art-size">{fmtBytes(f.size)}</span>
+                        </div>))}
+                    {r.truncated && <div className="muted art-empty">… listing capped at {r.n_files} files</div>}
+                  </div>}
+                </div>
+              )
+            })}
+          </div>
+          <div className="art-view">
+            {!sel ? <div className="muted art-hint">Select a text file to view its contents.</div> : <>
+              <div className="art-view-h">
+                <span className="art-view-path" title={sel.path}>{sel.path}</span>
+                {content && <span className="muted">{fmtBytes(content.size)}</span>}
+              </div>
+              {busy ? <div className="muted">Loading…</div>
+                : binary ? <div className="notice">Binary file — not shown inline{content ? ` (${fmtBytes(content.size)})` : ''}.</div>
+                : content ? <>
+                    {content.truncated && <div className="notice art-trunc">Showing the first {fmtBytes(_MAX_VIEW)} — the file is larger.</div>}
+                    <pre className="art-pre">{content.content}</pre>
+                  </> : <div className="muted">…</div>}
+            </>}
+          </div>
+        </div>}
+    </Panel>
+  )
+}

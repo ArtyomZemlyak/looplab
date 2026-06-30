@@ -12,6 +12,7 @@ import {
   TrustPanel, SensitivityPanel, FailuresPanel, ParetoPanel, DataQualityPanel,
   ConfigPanel, AuthoringPanel, MemoryPanel, RegistryPanel, EventExplorer,
   ComparePanel, GpuPanel, HyperImportancePanel, CrossRunPanel, CollabPanel, OverviewPanel, ResearchPanel,
+  ArtifactsPanel,
 } from './panels.jsx'
 
 // The panel bar, grouped by importance then process order (Report is the [Search|Report] toggle, and
@@ -20,7 +21,7 @@ import {
 // Run-view panel IA (design audit 2026-06-28): keep the few most-used panels inline; fold the long
 // tail into a grouped "More ▾" overflow so the bar never wraps to a second row (was 17 buttons).
 const PRIMARY_PANELS = [['trust', 'Trust'], ['failures', 'Failures'], ['research', 'Research'],
-                        ['compare', 'Compare'], ['config', 'Settings']]
+                        ['artifacts', 'Artifacts'], ['compare', 'Compare'], ['config', 'Settings']]
 const MORE_GROUPS = [
   ['Analysis', [['sensitivity', 'Sensitivity'], ['importance', 'Importance'], ['pareto', 'Pareto/Div'], ['data', 'Data']]],
   ['System', [['gpu', 'GPU'], ['memory', 'Memory'], ['events', 'Events'], ['registry', 'Registry'],
@@ -253,6 +254,7 @@ export default function RunView({ runId, onBack }) {
       {panel === 'registry' && <RegistryPanel state={state} onClose={() => setPanel(null)} />}
       {panel === 'gpu' && <GpuPanel onClose={() => setPanel(null)} />}
       {panel === 'events' && <EventExplorer runId={runId} onClose={() => setPanel(null)} />}
+      {panel === 'artifacts' && <ArtifactsPanel runId={runId} onToast={showToast} onClose={() => setPanel(null)} />}
 
       {toast && <div className="toast">{toast}</div>}
     </div>

@@ -1158,3 +1158,31 @@ textarea.text { min-height: 220px; font-family: ui-monospace, Consolas, monospac
   [data-fx="full"] .react-flow__edge.charge .react-flow__edge-path,
   [data-fx="full"] .react-flow__edge.debug .react-flow__edge-path { filter: url(#ll-energy-glow); }
 }
+
+/* ---------- artifacts browser (run files + repo-path outputs) ---------- */
+.art-wrap { display: flex; gap: 12px; min-height: 380px; height: min(64vh, 560px); }
+.art-list { flex: 0 0 320px; overflow: auto; border-right: 1px solid var(--line); padding-right: 8px; }
+.art-filter { width: 100%; margin-bottom: 8px; }
+.art-root-h { display: flex; align-items: center; gap: 6px; cursor: pointer; padding: 4px 2px; font-size: 13px; }
+.art-root-h:hover { color: var(--fg); }
+.art-chev { width: 12px; color: var(--fg-mut); display: inline-block; }
+.art-root-n { margin-left: 4px; font-size: 11px; font-variant-numeric: tabular-nums; }
+.art-tag { margin-left: auto; }
+.art-files { margin: 2px 0 10px 14px; }
+.art-file { display: flex; align-items: center; gap: 8px; padding: 2px 6px; border-radius: 5px; cursor: pointer; }
+.art-file:hover { background: var(--bg-2); }
+.art-file.sel { background: color-mix(in srgb, var(--accent) 22%, var(--bg-2)); }
+.art-file.bin { opacity: .62; }
+.art-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-family: ui-monospace, Consolas, monospace; font-size: 12px; }
+.art-size { font-size: 11px; color: var(--fg-mut); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.art-empty { font-size: 11px; padding: 2px 6px; }
+.art-view { flex: 1; min-width: 0; display: flex; flex-direction: column; overflow: hidden; }
+.art-view-h { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 6px; }
+.art-view-path { font-family: ui-monospace, Consolas, monospace; font-size: 12px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.art-hint { margin-top: 6px; }
+.art-trunc { margin-bottom: 6px; }
+.art-pre { flex: 1; overflow: auto; margin: 0; background: var(--bg-1); border: 1px solid var(--line);
+  border-radius: 8px; padding: 10px; font-family: ui-monospace, Consolas, monospace; font-size: 12px;
+  line-height: 1.45; white-space: pre; tab-size: 4; }
