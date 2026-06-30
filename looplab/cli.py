@@ -16,6 +16,7 @@ import anyio
 import orjson
 import typer
 
+from . import __version__
 from .atomicio import atomic_write_text
 from .config import Settings
 from .eventstore import EventStore
@@ -25,7 +26,67 @@ from .replay import fold
 from .sandbox import make_sandbox
 from .tasks import TaskAdapter, load_task, make_llm_client, make_roles
 
-app = typer.Typer(add_completion=False, help="LoopLab — autonomous ML research engine (P0).")
+# rich_markup_mode="markdown" (not the Typer default "rich"): in "rich" mode square brackets are
+# parsed as console style tags, so help text like `pip install 'looplab[ui]'` silently renders as
+# `pip install 'looplab'` — the [ui]/[dev]/[otel] extra names vanish. Markdown mode keeps the pretty
+# help panels but treats brackets literally, so install hints stay correct.
+app = typer.Typer(
+    add_completion=False,
+    rich_markup_mode="markdown",
+    help="LoopLab — autonomous ML/DS research engine. Give it a goal; it invents -> implements -> "
+         "tests -> improves candidate solutions in a loop and returns the best *verified* result.",
+)
+
+# Accepted choices for the role/developer backends, surfaced in errors so a typo gets a clear list
+# instead of silently degrading (e.g. `--backend ll` would otherwise run the offline `toy` backend).
+_BACKENDS = ("toy", "llm")
+_DEV_BACKENDS = ("default", "opencode", "aider", "goose", "continue")
+
+
+def _version_cb(value: bool) -> None:
+    if value:
+        typer.echo(f"LoopLab {__version__}")
+        raise typer.Exit()
+
+
+@app.callback()
+def _main(
+    version: bool = typer.Option(
+        False, "--version", "-V", callback=_version_cb, is_eager=True,
+        help="Show the LoopLab version and exit."),
+) -> None:
+    """LoopLab CLI: run / resume / inspect / replay a research loop. See `looplab COMMAND --help`."""
+
+
+def _choice(value: str, choices: tuple[str, ...], param: str) -> str:
+    """Validate `value` against `choices`, raising a clear BadParameter (lists the valid options)
+    instead of letting an unknown value silently fall through to a degraded default."""
+    if value not in choices:
+        raise typer.BadParameter(f"{value!r} is not valid for {param}; choose one of: "
+                                 f"{', '.join(choices)}")
+    return value
+
+
+def _load_task(task_file: Path) -> TaskAdapter:
+    """Load a task JSON with friendly CLI errors: a missing file or malformed/invalid task becomes a
+    one-line BadParameter (exit 2), not a raw multi-frame Python traceback dumped at the user."""
+    try:
+        return load_task(task_file)
+    except FileNotFoundError:
+        raise typer.BadParameter(f"task file not found: {task_file}")
+    except (ValueError, KeyError, TypeError) as e:
+        raise typer.BadParameter(f"could not load task {task_file}: {e}")
+
+
+def _require_run_dir(run_dir: Path) -> EventStore:
+    """Open a run's event log, erroring clearly if the dir has none. Without this guard a typo'd path
+    folds to an empty state and the read commands print a blank `run=` line with exit 0 — looking like
+    a real but empty run rather than a wrong path."""
+    if not (run_dir / "events.jsonl").exists():
+        typer.echo(f"no run found at {run_dir} (no events.jsonl). "
+                   f"Pass the run directory created by `looplab run --out <dir>`.")
+        raise typer.Exit(2)
+    return EventStore(run_dir / "events.jsonl")
 
 
 @contextmanager
@@ -216,7 +277,7 @@ def _print_result(state) -> None:
 
 @app.command()
 def run(
-    task_file: Path = typer.Argument(..., help="Path to a toy task JSON file."),
+    task_file: Path = typer.Argument(..., help="Path to a task JSON file (e.g. examples/toy_task.json)."),
     out: Path = typer.Option(Path("runs/run_local"), help="Run directory."),
     max_nodes: Optional[int] = typer.Option(None, help="Override node budget."),
     backend: Optional[str] = typer.Option(None, help="Role backend: toy | llm."),
@@ -242,7 +303,11 @@ def run(
                                               help="Test hook: hard-exit after N evals."),
 ):
     """Start a new run (or continue if the run dir already has events)."""
-    task = load_task(task_file)
+    if backend is not None:
+        _choice(backend, _BACKENDS, "--backend")
+    if developer_backend is not None:
+        _choice(developer_backend, _DEV_BACKENDS, "--developer-backend")
+    task = _load_task(task_file)
     settings = Settings()
     if max_nodes is not None:
         settings.max_nodes = max_nodes
@@ -315,6 +380,10 @@ def resume(
     max_nodes: Optional[int] = typer.Option(None),
 ):
     """Resume a crashed/incomplete run by re-entering the loop (replay-based)."""
+    if not (run_dir / "events.jsonl").exists():
+        typer.echo(f"no run found at {run_dir} (no events.jsonl). "
+                   f"`resume` continues a run started by `looplab run`; use `run` to start one.")
+        raise typer.Exit(2)
     # Fall back to the verbatim task snapshot `run` wrote into the run dir, so a run can be resumed
     # from the dir alone (the UI relies on this to continue a finished run without ui_meta.json).
     snap = run_dir / "task.snapshot.json"
@@ -323,7 +392,7 @@ def resume(
             raise typer.BadParameter(
                 "no --task-file given and no task.snapshot.json in the run dir")
         task_file = snap
-    task = load_task(task_file)
+    task = _load_task(task_file)
     # Restore the ORIGINAL run's settings from the snapshot `run` wrote — a fresh Settings()
     # would silently drop run-only flags (require_approval, trust_mode, confirm_*, eval_trust_mode,
     # backend, …), e.g. finishing a paused not-yet-approved run without any approval.
@@ -357,7 +426,7 @@ def resume(
 
 @app.command()
 def smoke(model: Optional[str] = typer.Option(None, help="Override model id.")):
-    """Ping the configured LLM endpoint (a startup self-test, per ADR-11)."""
+    """Ping the configured LLM endpoint to verify it's reachable and tool-calling works."""
     settings = Settings()
     if model is not None:
         settings.llm_model = model
@@ -385,9 +454,9 @@ def smoke(model: Optional[str] = typer.Option(None, help="Override model id.")):
 @app.command()
 def approve(run_dir: Path = typer.Argument(..., help="Run dir awaiting approval."),
             node_id: Optional[int] = typer.Option(None, help="Node to approve (default: best).")):
-    """HITL: ratify whatever the paused run is waiting on — an onboarding eval spec (Phase 3)
-    or the final-best node (I21) — by appending the matching event so resume continues."""
-    store = EventStore(run_dir / "events.jsonl")
+    """Approve a paused run (human-in-the-loop): ratify whatever it's waiting on — an agent-proposed
+    eval spec, or the final-best node — by appending the matching event so `resume` can finish."""
+    store = _require_run_dir(run_dir)
     state = fold(store.read_all())
     if state.proposed_spec is not None and not state.spec_confirmed:
         store.append("spec_approved", {})       # ratify the agent-proposed eval/adapter
@@ -406,8 +475,12 @@ def bench(
     backend: str = typer.Option("toy", help="Role backend: toy | llm."),
     max_nodes: int = typer.Option(8, help="Node budget per task."),
 ):
-    """D2: capability self-benchmark — run each task e2e and report best-metric / eval-seconds /
+    """Capability self-benchmark — run each task end-to-end and report best-metric / eval-seconds /
     reward-hack flags (a regression test for capability, not just code)."""
+    _choice(backend, _BACKENDS, "--backend")
+    for tf in task_files:
+        if not tf.exists():
+            raise typer.BadParameter(f"task file not found: {tf}")
     from .bench import run_benchmark
     settings = Settings()
     settings.backend = backend
@@ -429,7 +502,8 @@ def export_mlflow(
     tracking_uri: Optional[str] = typer.Option(None, help="MLflow tracking URI (default: local ./mlruns)."),
     experiment: Optional[str] = typer.Option(None, help="MLflow experiment name."),
 ):
-    """G5: log the run's champion (params/metrics/solution) to MLflow (needs the optional mlflow pkg)."""
+    """Log the run's champion (params/metrics/solution) to MLflow (needs the optional mlflow pkg)."""
+    _require_run_dir(run_dir)
     from .mlflow_export import available, export_run_dir
     if not available():
         typer.echo("MLflow not installed: pip install mlflow"); raise typer.Exit(1)
@@ -442,9 +516,9 @@ def export_notebook(
     run_dir: Path = typer.Argument(..., help="Run dir to export the champion from."),
     out: Optional[Path] = typer.Option(None, help="Output .ipynb path (default: <run>/champion.ipynb)."),
 ):
-    """I4: export the run's champion solution as a runnable Jupyter notebook (.ipynb)."""
+    """Export the run's champion solution as a runnable Jupyter notebook (.ipynb)."""
     from .notebook import champion_notebook
-    store = EventStore(run_dir / "events.jsonl")
+    store = _require_run_dir(run_dir)
     state = fold(store.read_all())
     champ = state.nodes.get(state.champion) if state.champion is not None else state.best()
     if champ is None:
@@ -460,7 +534,7 @@ def export_notebook(
 @app.command()
 def replay(run_dir: Path = typer.Argument(...)):
     """Pure fold of the event log -> current state (read-only)."""
-    store = EventStore(run_dir / "events.jsonl")
+    store = _require_run_dir(run_dir)
     state = fold(store.read_all())
     typer.echo(orjson.dumps(state.model_dump(mode="json"),
                             option=orjson.OPT_INDENT_2).decode())
@@ -469,10 +543,10 @@ def replay(run_dir: Path = typer.Argument(...)):
 @app.command()
 def inspect(run_dir: Path = typer.Argument(...)):
     """Show the resolved config snapshot + the run's best result."""
+    store = _require_run_dir(run_dir)
     snap = run_dir / "config.snapshot.json"
     if snap.exists():
         typer.echo(snap.read_text(encoding="utf-8"))
-    store = EventStore(run_dir / "events.jsonl")
     _print_result(fold(store.read_all()))
 
 
