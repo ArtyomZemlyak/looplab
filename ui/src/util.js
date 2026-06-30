@@ -458,7 +458,9 @@ const _authHeaders = (base) => {
 async function _throw(r, path) {
   let detail = ''
   try { const j = await r.json(); detail = (j && (j.detail || j.error)) || '' } catch { /* no body */ }
-  throw new Error(detail ? String(detail) : `${path}: ${r.status}`)
+  const err = new Error(detail ? String(detail) : `${path}: ${r.status}`)
+  err.status = r.status   // callers branch on the code (e.g. 409 = run live / name taken), not a regex on the message
+  throw err
 }
 
 // Path-mounting-proxy support. The UI may be served under a prefix (JupyterHub
@@ -536,13 +538,14 @@ export const genesis = ({ messages = [], instruction = '', draft = null }) =>
 // agentic plan can't 504 behind a proxy). Generous overall cap — the agent decides how many turns it
 // needs. Transient poll errors are tolerated (keep polling).
 export const genesisJob = (jobId) => get(`/api/genesis/${encodeURIComponent(jobId)}`)
-export async function genesisAwait(resp, { intervalMs = 1500, timeoutMs = 300000 } = {}) {
+export async function genesisAwait(resp, { intervalMs = 1500, timeoutMs = 300000, onProgress } = {}) {
   if (!resp || resp.status !== 'running' || !resp.job_id) return resp   // fast-path: already the plan
   const deadline = Date.now() + timeoutMs
   while (Date.now() < deadline) {
     await new Promise(r => setTimeout(r, intervalMs))
     let j
     try { j = await genesisJob(resp.job_id) } catch { continue }        // transient — keep polling
+    if (j.status === 'running' && j.progress && onProgress) onProgress(j.progress)  // live scout step
     if (j.status === 'done') return j
     if (j.status === 'unknown') return { ok: false, error: 'planning expired — send the goal again' }
   }

@@ -1515,7 +1515,10 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
             "settings.llm_model; when it is an OpenRouter-style 'vendor/model' id (contains '/') also set "
             "settings.llm_base_url='https://openrouter.ai/api/v1'. Map phrasing like '100 nodes' → "
             "max_nodes, 'N seeds' → n_seeds. Leave everything else to the defaults.\n"
-            "- reply: a short, friendly message stating the plan in one or two sentences.\n"
+            "- reply: a friendly message (two or three sentences) that states the plan in plain words — "
+            "the task you chose, where its data/repo is, and the key settings — so the user can confirm "
+            "or correct it. Don't be one-word terse; if anything is ambiguous, end with ONE specific "
+            "question. Never reply with just '-' or 'ok'.\n"
             "- rationale: one terse line on why.\n"
             "When the goal is too vague to choose a task, still invent a sensible run_id, leave task / "
             "task_file empty, and ask ONE clarifying question in `reply`.\n\n"
@@ -1542,7 +1545,7 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
                     "reply": f"Couldn't reach the model to plan this ({e}). You can still use the manual form."}
         base_msgs = [{"role": "system", "content": sys_prompt}, {"role": "user", "content": user}]
 
-        def _plan_agentic() -> Optional["_GenesisSpec"]:
+        def _plan_agentic(on_step=None) -> Optional["_GenesisSpec"]:
             """AGENTIC: let the boss actually INSPECT the repo on disk (read-only) before authoring the
             spec — so a repo task is grounded in the real README / entry-script / results, not a
             promise. Returns None when the model can't drive tools (caller does a single structured call)."""
@@ -1579,7 +1582,10 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
                     return box["c"]
                 try:
                     box["c"] = parse_structured(client, msgs + [{"role": "user",
-                                "content": "Now emit the final plan."}], _GenesisSpec,
+                                "content": "Now emit the final plan. Either set task_file to a "
+                                "catalogue entry, OR author a complete inline `task` with a concrete "
+                                "`kind` (repo / dataset / mlebench_real / …) — never leave the task "
+                                "empty. Write a clear two-to-three-sentence `reply`."}], _GenesisSpec,
                                 defaults.get("llm_parser", "tool_call"))
                 except Exception:  # noqa: BLE001 - even a forced emit failed -> blank (usable) card
                     box["c"] = _GenesisSpec()
@@ -1594,18 +1600,18 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
                                                 {"role": "user", "content": user}],
                                 emit_spec, max_turns=getattr(gset, "agent_max_turns", 0),
                                 time_budget_s=getattr(gset, "agent_time_budget_s", 0.0),
-                                finalize=_fin, fallback=_fb,
+                                finalize=_fin, fallback=_fb, on_step=on_step,
                                 **loop_opts_from_settings(gset))     # B1 stuck (+ C1/C2 if configured)
             except Exception:  # noqa: BLE001 - the model/endpoint can't drive tools AT ALL -> single-shot
                 return None
             return box.get("c")
 
-        def _compute_plan() -> dict:
+        def _compute_plan(on_step=None) -> dict:
             """The whole agentic plan (runs in a worker thread): scout the repo + emit, with the legacy
             single structured call as the fallback when the model can't drive tools. Returns the final
             response dict the UI consumes (inline or via the poll endpoint)."""
             try:
-                spec = _plan_agentic()
+                spec = _plan_agentic(on_step)
                 if spec is None:    # tool loop unsupported -> plain structured call (legacy single-shot)
                     spec = parse_structured(client, base_msgs, _GenesisSpec,
                                             defaults.get("llm_parser", "tool_call"))
@@ -1618,8 +1624,20 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
         job_id = secrets.token_hex(8)
         _genesis_put(job_id, status="running", result=None, ts=time.time())
 
+        def _on_step(ev: dict) -> None:
+            # Turn a raw tool event into a short human line so the UI can show what the boss is doing
+            # instead of an opaque spinner (the "it just thinks for ages" complaint is opacity, not
+            # latency — we add NO budget/cap here). Best-effort; this only annotates the running job.
+            tool = (ev or {}).get("tool", "")
+            arg = str((ev or {}).get("arg", ""))
+            short = arg.rsplit("/", 1)[-1] if arg else ""
+            label = ({"read_file": f"reading {short}", "list_dir": f"listing {short or 'the repo'}",
+                      "find_files": f"searching {short or 'files'}"}.get(tool)
+                     or (f"{tool} {short}".strip() if tool else "scouting the repo"))
+            _genesis_put(job_id, progress={"label": label, "step": int((ev or {}).get("turn", 0)) + 1})
+
         def _worker():
-            res = _compute_plan()
+            res = _compute_plan(_on_step)
             _genesis_put(job_id, status="done", result=res, ts=time.time())
         threading.Thread(target=_worker, daemon=True).start()
 
@@ -1643,7 +1661,9 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
         if not j:
             return {"status": "unknown"}
         if j.get("status") != "done":
-            return {"status": "running"}
+            # Carry the latest scout step so the UI can show "reading README.md…" instead of an
+            # opaque spinner while a slow boss inspects the repo (transparency, not a time cap).
+            return {"status": "running", "progress": j.get("progress")}
         return {**j["result"], "status": "done"}
 
     # ------------------------------------------------------------------ LLM (chat / suggest / health)

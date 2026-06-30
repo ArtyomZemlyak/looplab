@@ -32,6 +32,7 @@ export default function GenesisChat({ onClose, onStarted, seed }) {
   const [msgs, setMsgs] = useState(() => fresh ? [] : (readDraft()?.msgs || []))   // {role:'user'|'assistant', content}
   const [input, setInput] = useState('')
   const [busy, setBusy] = useState(false)
+  const [progress, setProgress] = useState(null)   // live scout step while the boss inspects the repo
   const [spec, setSpec] = useState(() => fresh ? null : (readDraft()?.spec || null))  // {run_id, task, task_file, settings, rationale}
   const [err, setErr] = useState(null)
   const [advanced, setAdvanced] = useState(false)
@@ -55,11 +56,13 @@ export default function GenesisChat({ onClose, onStarted, seed }) {
     if (!goal || busy) return
     setErr(null); setInput('')
     const next = [...msgs, { role: 'user', content: goal }]
-    setMsgs(next); setBusy(true)
+    setMsgs(next); setBusy(true); setProgress(null)
     try {
       // The boss may scout the repo across several turns server-side; a slow model hands back a job we
       // poll (genesisAwait) so it can't 504. A fast model returns the plan inline — no extra latency.
-      const r = await genesisAwait(await genesis({ messages: next, instruction: goal, draft: spec }))
+      // onProgress surfaces each scout step ("reading README.md…") so a long plan isn't an opaque wait.
+      const r = await genesisAwait(await genesis({ messages: next, instruction: goal, draft: spec }),
+        { onProgress: p => setProgress(p) })
       setMsgs(m => [...m, { role: 'assistant', content: r.reply || '(planned — see the card)' }])
       // Only adopt a REAL spec — the offline soft-fail returns ok:false with an all-blank spec, which
       // must NOT wipe a good draft the user already tuned.
@@ -68,7 +71,7 @@ export default function GenesisChat({ onClose, onStarted, seed }) {
     } catch (e) {
       setMsgs(m => [...m, { role: 'assistant', content: 'Could not reach the planner — use the manual form.' }])
       setErr(e.message)
-    } finally { setBusy(false) }
+    } finally { setBusy(false); setProgress(null) }
   }
 
   // Seeded from the main-menu global chat bar: auto-send the typed message once on mount so the boss
@@ -90,13 +93,15 @@ export default function GenesisChat({ onClose, onStarted, seed }) {
 
   const task = spec?.task || {}
   const isRepo = task.kind === 'repo'
-  // launchable when there's a name + a task; mlebench_real needs a competition, and a repo task needs
-  // an editable path + a way to score it (an eval command, or onboard mode). The backend 400s on an
-  // invalid task too, but gate here for a clean UX (no doomed launch).
+  const isDataset = task.kind === 'dataset'
+  // launchable when there's a name + a task; mlebench_real needs a competition, a repo task needs an
+  // editable path + a way to score it (an eval command, or onboard mode), a dataset task needs a data
+  // path. The backend 400s on an invalid task too, but gate here for a clean UX (no doomed launch).
   const repoReady = !isRepo || (task.editable_path?.trim() &&
     ((Array.isArray(task.eval?.command) && task.eval.command.length) || task.onboard))
+  const datasetReady = !isDataset || !!task.data_path?.trim()
   const taskReady = spec?.task_file || (task.kind &&
-    (task.kind !== 'mlebench_real' || task.competition?.trim()) && repoReady)
+    (task.kind !== 'mlebench_real' || task.competition?.trim()) && repoReady && datasetReady)
   const ready = spec && spec.run_id?.trim() && taskReady
   const launch = async () => {
     if (!ready) { setErr('describe a goal first so the boss can pick a task (and a competition for MLE-bench)'); return }
@@ -148,7 +153,10 @@ export default function GenesisChat({ onClose, onStarted, seed }) {
             </div>)}
             {busy && <div className="feed-msg chat assistant"><div className="fm-body">
               <div className="chat-who">boss</div>
-              <div className="chat-bubble"><div className="chat-text muted">… planning</div></div>
+              <div className="chat-bubble"><div className="chat-text muted">
+                {progress?.label ? `… ${progress.label}` : '… planning'}
+                {progress?.step ? ` (step ${progress.step})` : ''}
+              </div></div>
             </div></div>}
           </div>
           <div className="chat-in">
@@ -170,11 +178,34 @@ export default function GenesisChat({ onClose, onStarted, seed }) {
             <div className="gen-field"><div className="gen-lab">Run name</div>
               <input className="text" value={spec.run_id || ''} onChange={e => setSpec(s => ({ ...s, run_id: slugLoose(e.target.value) }))} placeholder="run-name" /></div>
             <div className="gen-field"><div className="gen-lab">Task</div>
-              {spec.task?.kind === 'mlebench_real' && !spec.task_file
-                ? <input className="text" value={spec.task.competition || ''} onChange={e => setTaskField('competition', e.target.value)} placeholder="kaggle-competition-id" />
-                : <div className="gen-ro">{taskLabel}</div>}
-              <div className="gen-help">{spec.task?.kind === 'mlebench_real' ? 'MLE-bench / Kaggle competition' : (spec.task_file ? 'from the task catalogue' : (spec.task?.kind || ''))}</div>
+              {/* Catalogue tasks are fixed; an INLINE task is fully editable here — so even when the
+                  boss returns an incomplete/empty task (no kind), the user can pick the type and fill
+                  it in rather than being stuck on a read-only "—". */}
+              {spec.task_file
+                ? <div className="gen-ro">{taskLabel}</div>
+                : <select className="text" value={task.kind || ''} onChange={e => setTaskField('kind', e.target.value || undefined)}>
+                    <option value="">— choose a task type —</option>
+                    <option value="repo">repo — optimize an existing code project</option>
+                    <option value="dataset">dataset — here's my data, get the best metric</option>
+                    <option value="mlebench_real">mlebench_real — a Kaggle / MLE-bench competition</option>
+                    {task.kind && !['repo', 'dataset', 'mlebench_real'].includes(task.kind) &&
+                      <option value={task.kind}>{task.kind}</option>}
+                  </select>}
+              <div className="gen-help">{spec.task_file ? 'from the task catalogue' : (task.kind ? '' : 'pick a type, then fill the fields below')}</div>
             </div>
+            {!spec.task_file && task.kind === 'mlebench_real' && <div className="gen-field"><div className="gen-lab">Competition</div>
+              <input className="text" value={task.competition || ''} onChange={e => setTaskField('competition', e.target.value)} placeholder="kaggle-competition-id" />
+              <div className="gen-help">MLE-bench / Kaggle competition id (the full slug).</div></div>}
+            {isDataset && !spec.task_file && <div className="gen-repo">
+              <div className="gen-field"><div className="gen-lab">Goal</div>
+                <input className="text" value={task.goal || ''} onChange={e => setTaskField('goal', e.target.value)} placeholder="what to predict, e.g. the target column" /></div>
+              <div className="gen-field"><div className="gen-lab">Data path</div>
+                <input className="text" value={task.data_path || ''} onChange={e => setTaskField('data_path', e.target.value)} placeholder="/abs/path/to/data.csv or a folder" />
+                <div className="gen-help">The data the agent reads — an absolute path (a file or a folder).</div></div>
+              <div className="gen-field"><div className="gen-lab">Direction</div>
+                <select className="text" value={task.direction || 'max'} onChange={e => setTaskField('direction', e.target.value)}>
+                  <option value="max">maximize</option><option value="min">minimize</option></select></div>
+            </div>}
             {isRepo && !spec.task_file && <div className="gen-repo">
               <div className="gen-field"><div className="gen-lab">Goal</div>
                 <input className="text" value={task.goal || ''} onChange={e => setTaskField('goal', e.target.value)} placeholder="what to optimize, e.g. validation accuracy" /></div>

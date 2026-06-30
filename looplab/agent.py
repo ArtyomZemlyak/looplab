@@ -107,7 +107,7 @@ def drive_tool_loop(client, tools, messages: list, emit_spec: dict, *,
                     stuck_detection: bool = True,
                     stuck_repeat: int = 4, stuck_alternate: int = 4,
                     self_plan: bool = False, plan_reinject_every: int = 5,
-                    auto_summary: bool = False):
+                    auto_summary: bool = False, on_step=None):
     """Multi-turn tool loop shared by every tool-using agent (Researcher, unified-agent pilot/triage,
     Boss, genesis scout, cross-run report). The model MAY call the provided retrieval tools across
     turns; when it calls the emit function (named in `emit_spec`), `finalize(args)` is returned. If
@@ -132,6 +132,11 @@ def drive_tool_loop(client, tools, messages: list, emit_spec: dict, *,
         TODO; the current plan is re-injected as a reminder every `plan_reinject_every` turns.
       - `auto_summary` (C2): when the history exceeds `context_budget_chars`, LLM-summarize the
         stale middle instead of only middle-truncating it (falls back to truncation on any error).
+      - `on_step(event)` (optional): a best-effort PROGRESS callback so a long agentic loop is not an
+        opaque "thinking" spinner. Called with a small dict — {"turn", "tool", "arg"} as the model
+        invokes a retrieval tool — so a caller (e.g. the genesis endpoint) can surface "reading
+        README.md" / "listing /repo" live to the UI. Never affects control flow; any exception it
+        raises is swallowed (transparency must not change behaviour).
 
     Termination under "unlimited": when the model answers WITHOUT calling a tool (it considers
     itself done), we FORCE the structured emit immediately (`_force_emit`) and finish — so a prose
@@ -143,6 +148,13 @@ def drive_tool_loop(client, tools, messages: list, emit_spec: dict, *,
     so the SAME loop drives an Idea emit, a code emit, an action choice, or a strategy emit.
     """
     emit_name = emit_spec["function"]["name"]
+    def _step(**ev):                    # best-effort progress ping; never let it perturb the loop
+        if on_step is None:
+            return
+        try:
+            on_step(ev)
+        except Exception:               # noqa: BLE001 - transparency must not change behaviour
+            pass
     stuck = None
     if stuck_detection:                 # a FRESH detector per call — never share state across loops
         from .stuck import StuckDetector
@@ -206,6 +218,10 @@ def drive_tool_loop(client, tools, messages: list, emit_spec: dict, *,
                 current_plan = _render_plan(args) or current_plan
                 result = "plan updated"
             else:
+                # Surface what the agent is about to do BEFORE the (possibly slow) tool runs, so a
+                # live progress view advances turn-by-turn instead of jumping only at the end.
+                _step(turn=turn_idx, tool=name,
+                      arg=next((str(v) for v in (args or {}).values() if v), ""))
                 result = tools.execute(name, args) if tools is not None else f"(unknown tool: {name})"
             result = str(result)[:4000]
             messages.append({"role": "tool", "tool_call_id": tc.get("id", ""),

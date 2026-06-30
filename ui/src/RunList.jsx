@@ -210,7 +210,7 @@ export default function RunList({ onOpen, onSettings }) {
   }, [stFilter, taskFilter, sel, stName, projName])
 
   const toggle = (id) => setExpanded(s => { const n = new Set(s); n.has(id) ? n.delete(id) : n.add(id); return n })
-  const refresh = () => { loadProjects(); loadRuns() }
+  const refresh = () => Promise.all([loadProjects(), loadRuns()])
 
   const addProject = (parent_id) => setProjModal({ parent_id })
   const submitProject = async (name) => {
@@ -230,8 +230,14 @@ export default function RunList({ onOpen, onSettings }) {
   const removeRun = async (r) => {
     setRunMenu(null)
     if (!confirm(`Delete run "${r.label || r.run_id}" permanently? This removes its files on disk and cannot be undone.`)) return
-    try { await deleteRun(r.run_id); refresh() }
-    catch (e) { alert(/409/.test(e.message) ? 'This run is still live — pause or stop it before deleting.' : 'Delete failed: ' + e.message) }
+    try { await deleteRun(r.run_id); await refresh() }
+    catch (e) {
+      // A live engine still holds the run → backend 409 (the detail text has no "409" in it, so branch
+      // on the status code _throw now attaches, not a regex on the message). Anything else: surface it.
+      alert(e.status === 409 || /409/.test(e.message)
+        ? 'This run is still live — pause or stop it before deleting.'
+        : 'Delete failed: ' + e.message)
+    }
   }
   // super-task CRUD (the buckets themselves; per-run assignment is assignToSuper above).
   const createSuper = async (name) => { await createSupertask(name); loadSupers() }

@@ -286,6 +286,36 @@ def _engine(run_dir: Path, task: TaskAdapter, settings: Settings,
     )
 
 
+def _missing_task_paths(task_dict: dict) -> list[tuple[str, str]]:
+    """Return (field, expanded_path) for every input path the task names that does NOT exist on disk.
+    CLI Genesis is a single LLM call (not an agent) — it can author a path the user mis-stated or that
+    the model invented, and the run then dies deep inside the first eval with a cryptic
+    'No such file or directory'. Surfacing it up front (a warning, since some paths are created by a
+    repo's setup step) lets the user fix the path before spending a run. ~ and $VARS are expanded."""
+    if not isinstance(task_dict, dict):
+        return []
+    candidates: list[tuple[str, object]] = []
+    for key in ("data_path", "editable_path"):
+        if task_dict.get(key):
+            candidates.append((key, task_dict[key]))
+    data = task_dict.get("data")
+    if isinstance(data, dict):
+        candidates += [(f"data.{k}", v) for k, v in data.items() if v]
+    elif isinstance(data, str) and data:
+        candidates.append(("data", data))
+    for ref in (task_dict.get("references") or []):
+        if isinstance(ref, dict) and ref.get("path"):
+            candidates.append((f"references[{ref.get('name', '?')}]", ref["path"]))
+    missing = []
+    for field, raw in candidates:
+        if not isinstance(raw, str):
+            continue
+        p = os.path.expandvars(os.path.expanduser(raw))
+        if not Path(p).exists():
+            missing.append((field, p))
+    return missing
+
+
 def _print_result(state) -> None:
     best = state.best()
     typer.echo(f"run={state.run_id} task={state.task_id} finished={state.finished}")
@@ -441,6 +471,12 @@ def run(
         task = validate_task(task_dict)
     except (ValueError, KeyError, TypeError) as e:
         raise typer.BadParameter(f"invalid task: {e}")
+    # Path sanity-check (esp. for Genesis-authored tasks): warn loudly when an input path doesn't
+    # exist, so a mistyped/invented data/repo path is caught HERE — not as a cryptic mid-run
+    # 'No such file or directory'. A warning (not a hard stop): a repo's setup step may create some
+    # paths, and the user may know better. Use --no-genesis or fix the path to silence it.
+    for field, p in _missing_task_paths(task_dict):
+        typer.echo(f"⚠ task {field} does not exist on disk: {p}", err=True)
     out = out or (Path(file_out) if file_out else Path("runs/run_local"))
     out.mkdir(parents=True, exist_ok=True)
     eng = _engine(out, task, settings, crash_after)
@@ -460,6 +496,20 @@ def run(
             atomic_write_text(out / "task.snapshot.json", json.dumps(task_dict, indent=2))
         except OSError:
             pass
+        # Continue a run dir that ALREADY FINISHED. Without this, re-entering the loop folds the log,
+        # sees finished=True and breaks at once — printing the OLD best and doing no work. That silently
+        # no-ops a re-run with a bigger --max-nodes, and (worse) makes a run that finished with
+        # reason=error un-retryable: fixing the cause and re-running the same command does nothing.
+        # Reopen it (the same event the Web UI/TUI append to continue a finished run) so the loop
+        # processes the new budget / retries the failure, and SAY so — never silently no-op.
+        prior = fold(eng.store.read_all())
+        if prior.finished:
+            typer.echo(
+                f"run dir {out} already finished"
+                + (f" (reason={prior.stop_reason})" if prior.stop_reason else "")
+                + " — reopening to continue with the current task/settings "
+                  "(use a new --out for a fresh run).")
+            eng.store.append("run_reopened", {})
         try:
             state = anyio.run(eng.run)
         except Exception as e:  # noqa: BLE001 - any fatal abort (e.g. an unreachable LLM endpoint
