@@ -58,3 +58,26 @@ def test_generative_kinds_membership():
     # The kinds that imply an LLM-driven run (so genesis defaults backend=llm for them).
     assert {"dataset", "repo", "mlebench_real"} <= GENERATIVE_KINDS
     assert "quadratic" not in GENERATIVE_KINDS
+
+
+def test_author_pins_kind_even_if_model_drifts():
+    # The user pinned kind=repo; even if the model emits a different kind, the pin wins, and the
+    # prompt instructs it to stay within the pinned kind.
+    client = _ScriptedClient({"task": {"kind": "dataset", "goal": "x"}, "rationale": "drifted"})
+    res = author_task("optimize my project", client=client, kinds=KINDS, kind="repo")
+    assert res.kind == "repo"
+    blob = " ".join(m["content"] for m in client.seen)
+    assert "PINNED" in blob and "repo" in blob
+
+
+def test_author_describes_multiple_data_locations_in_prompt():
+    # No --data passed: the model is told it may author one or many data locations from the words.
+    client = _ScriptedClient({"task": {
+        "kind": "dataset", "goal": "merge and predict", "direction": "max",
+        "data": {"train": "/d/train.csv", "extra": "/other/feats"}}})
+    res = author_task("data is in /d/train.csv and the folder /other/feats; predict the label",
+                      client=client, kinds=KINDS)
+    assert res.task["data"] == {"train": "/d/train.csv", "extra": "/other/feats"}
+    blob = " ".join(m["content"] for m in client.seen)
+    assert "SEVERAL" in blob or "several" in blob          # the data guide reached the model
+    assert "folder" in blob

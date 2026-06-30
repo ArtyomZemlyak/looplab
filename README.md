@@ -47,23 +47,26 @@ looplab run examples/regression_task.json --out runs/reg --max-nodes 14
 You don't have to hand-write JSON. Pick whichever fits:
 
 ```bash
-# a) Just describe it — Genesis (the LLM) infers the task type from your words. No file, no --kind:
-looplab run --goal "predict the target column in data.csv; maximize accuracy" --data data.csv
+# a) Just describe it — Genesis (the LLM) authors the whole task from your words, including where
+#    your data lives. No file, no --kind, no --data:
+looplab run --goal "predict the target column; my data is in ~/proj/data and ~/extra/feats.csv"
 
 # b) One readable YAML file — what to solve AND how. Scaffold a documented template, edit, run:
 looplab init                       # writes looplab.yaml (every setting, commented)
 looplab run looplab.yaml
 
-# c) Spell out the kind yourself (skips Genesis):
-looplab run --kind dataset --goal "predict target" --data data.csv -s backend=llm -s max_nodes=20
+# c) Pin the kind but still let Genesis fill the rest:
+looplab run --kind dataset --goal "predict target, data in data.csv" -s max_nodes=20
 
 # d) A bare task file + flags (the original style still works):
 looplab run examples/toy_task.json --max-nodes 14
 ```
 
-In **(a)** you never name a task type: when you pass `--goal` without `--kind`, Genesis (the same
-"New run" planner the Web UI uses) reads your words and picks the right `kind` — `dataset`, `repo`,
-`mlebench_real`, … — then runs it. Add `--no-genesis` to opt out.
+When you pass `--goal`, **Genesis** (the same "New run" planner the Web UI uses) authors the task for
+you: it picks the `kind` — `dataset`, `repo`, `mlebench_real`, … — and reads your words for where the
+data lives (one path or several, a file or a folder), so you don't pre-format anything. `--kind`
+**pins** the kind and lets Genesis fill the rest within it; `--data` is an optional shortcut for the
+path. Add `--no-genesis` to build the task from `--kind`/`--set` alone (offline, no model).
 
 `-s/--set key=value` overrides **any** engine setting (full parity with the `settings:` block and the
 `LOOPLAB_*` env vars). A unified `looplab.yaml` looks like:

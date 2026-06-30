@@ -103,8 +103,9 @@ def test_run_unified_yaml_applies_task_and_settings(tmp_path):
 
 
 def test_run_no_file_from_flags(tmp_path):
+    # --no-genesis builds the task purely from flags, offline (no model needed).
     result = runner.invoke(app, [
-        "run", "--kind", "quadratic", "--goal", "min x^2", "--direction", "min",
+        "run", "--no-genesis", "--kind", "quadratic", "--goal", "min x^2", "--direction", "min",
         "--set", "max_nodes=2", "--out", str(tmp_path / "r"),
     ])
     assert result.exit_code == 0, result.output
@@ -115,7 +116,7 @@ def test_run_no_file_from_flags(tmp_path):
 
 def test_run_set_unknown_key_errors(tmp_path):
     result = runner.invoke(app, [
-        "run", "--kind", "quadratic", "--goal", "g", "--out", str(tmp_path / "r"),
+        "run", "--no-genesis", "--kind", "quadratic", "--goal", "g", "--out", str(tmp_path / "r"),
         "--set", "max_node=9",
     ])
     assert result.exit_code != 0
@@ -168,15 +169,23 @@ def test_run_no_genesis_falls_back_without_llm(tmp_path):
     assert "Genesis ->" not in result.output
 
 
-def test_run_explicit_kind_skips_genesis(tmp_path, monkeypatch):
-    # An explicit --kind must short-circuit genesis entirely (no model call).
+def test_run_kind_pins_genesis(tmp_path, monkeypatch):
+    # --kind does NOT skip genesis: it pins the kind, and genesis fills the rest within it.
     import looplab.cli as cli
-    def _boom(*a, **k):  # would raise if genesis tried to build a client
-        raise AssertionError("genesis must not run when --kind is given")
-    monkeypatch.setattr(cli, "make_llm_client", _boom)
+    import looplab.genesis as genesis
+    seen = {}
+    monkeypatch.setattr(cli, "make_llm_client", lambda settings, **k: object())
+
+    def _author(goal, **k):
+        seen["kind"] = k.get("kind")                          # capture the pinned kind passed through
+        return genesis.GenesisResult(
+            task={"kind": k.get("kind"), "goal": goal, "direction": "min",
+                  "bounds": {"x": [-10.0, 10.0], "y": [-10.0, 10.0]}}, rationale="pinned")
+    monkeypatch.setattr(genesis, "author_task", _author)
     result = runner.invoke(app, [
-        "run", "--kind", "quadratic", "--goal", "g", "--direction", "min",
-        "-s", "max_nodes=1", "--out", str(tmp_path / "k"),
+        "run", "--kind", "quadratic", "--goal", "minimize x^2", "-s", "max_nodes=1",
+        "--out", str(tmp_path / "k"),
     ])
     assert result.exit_code == 0, result.output
-    assert "Genesis ->" not in result.output
+    assert seen["kind"] == "quadratic"                        # the pin reached genesis
+    assert "Genesis -> kind=quadratic" in result.output and "finished=True" in result.output

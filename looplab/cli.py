@@ -285,14 +285,16 @@ def run(
         None, help="Config or task file (YAML or JSON). A unified file has task:/settings:/out: keys; "
                    "a bare task file is just the task. Omit it and build the task from --goal/--kind."),
     goal: Optional[str] = typer.Option(None, help="Task goal in plain words (build a task with no file)."),
-    kind: Optional[str] = typer.Option(None, help=f"Task kind (build a task with no file). One of: "
-                                                  f"{', '.join(_TASK_KINDS)}."),
+    kind: Optional[str] = typer.Option(None, help=f"Task kind. With --goal it PINS the kind and "
+                                                  f"Genesis fills the rest; with --no-genesis it's used "
+                                                  f"as written. One of: {', '.join(_TASK_KINDS)}."),
     direction: Optional[str] = typer.Option(None, help="Optimize: min | max."),
-    data: Optional[str] = typer.Option(None, help="Path to your data (dataset) or repo (repo task)."),
+    data: Optional[str] = typer.Option(None, help="Path to your data/repo. Optional under Genesis — "
+                                                  "you can instead just say where the data is in --goal."),
     genesis: bool = typer.Option(
         True, "--genesis/--no-genesis",
-        help="When you give --goal but no --kind, let the LLM infer the task kind from your words. "
-             "--no-genesis falls back to the legacy default kind."),
+        help="With --goal, let the LLM author the task (--kind pins the kind, Genesis fills the rest, "
+             "including data locations you mention). --no-genesis builds it from --kind/--set as written."),
     set_: list[str] = typer.Option(
         [], "--set", "-s", metavar="KEY=VALUE",
         help="Override ANY engine setting, repeatable (e.g. -s max_nodes=20 -s policy=asha). "
@@ -371,23 +373,25 @@ def run(
         settings = appconfig.build_settings(file_settings, typed, sets)
     except ValidationError as e:
         raise typer.BadParameter(f"invalid settings: {e}")
-    # 3b. Genesis: you described the goal in words but didn't name a kind — let the LLM infer it (the
-    # headless counterpart of the UI's "New run"). Only fires on an explicit --goal with no kind, so
-    # no file-based / legacy flow is affected.
+    # 3b. Genesis: you described the goal in words — let the LLM author the task (the headless
+    # counterpart of the UI's "New run"). Fires on an explicit --goal (so no file-based / legacy flow
+    # is affected). --kind does NOT skip it: it PINS the kind and Genesis fills the rest within it;
+    # describe data locations in the goal and Genesis authors the mounts (no --data needed). Opt out
+    # with --no-genesis (then --kind + flags are used as written), or run a complete file with no --goal.
     backend_chosen = backend is not None or "backend" in file_settings or "backend" in sets
-    if genesis and goal is not None and "kind" not in task_dict:
+    if genesis and goal is not None:
         from . import genesis as _genesis
         try:
             client = make_llm_client(settings)
         except Exception as e:  # noqa: BLE001 - no endpoint configured/reachable
             raise typer.BadParameter(
-                f"Genesis needs an LLM to infer the task kind ({e}). Either pass --kind explicitly, "
-                f"or point LOOPLAB_LLM_BASE_URL/--model at a reachable model.")
-        result = _genesis.author_task(goal, client=client, kinds=_TASK_KINDS, data=data,
+                f"Genesis needs an LLM to author the task ({e}). Point LOOPLAB_LLM_BASE_URL/--model "
+                f"at a reachable model, or use --no-genesis to build the task from --kind/--set alone.")
+        result = _genesis.author_task(goal, client=client, kinds=_TASK_KINDS, kind=kind, data=data,
                                       direction=direction, parser=settings.llm_parser)
         if not result.kind:
-            typer.echo("Genesis couldn't infer the task from that goal. "
-                       + (result.reply or "Add detail, or pass --kind explicitly."))
+            typer.echo("Genesis couldn't author a task from that goal. "
+                       + (result.reply or "Add detail (e.g. where the data is), or pass --kind."))
             raise typer.Exit(2)
         task_dict = result.task
         # A generative kind (the agent writes/edits code) implies an LLM-driven run; default the

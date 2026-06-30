@@ -10,9 +10,11 @@ The fastest way to set any of this up is **[Genesis](#preferred-let-genesis-auth
 first*), so reach for it before hand-writing JSON. Every case below shows both the Genesis path and
 the equivalent task file.
 
-> **On the command line**, Genesis runs headless too: `looplab run --goal "<what you want>"` with no
-> `--kind` lets the LLM infer the task kind from your words and launch it. It's the same idea as the
-> UI planner, minus the editable card — add `--no-genesis` to opt out, or pass `--kind` to name it.
+> **On the command line**, Genesis runs headless too: `looplab run --goal "<what you want>"` lets the
+> LLM author the task from your words — it picks the kind *and* reads where your data lives (one path
+> or several, a file or a folder), so you needn't pass `--data`. Pin the kind with `--kind` and Genesis
+> fills the rest within it; add `--no-genesis` to build the task from flags alone. It's the same idea as
+> the UI planner, minus the editable card.
 
 ---
 

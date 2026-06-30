@@ -46,6 +46,22 @@ TASK_KIND_GUIDE = (
     "If the goal is too vague to choose, leave `task` empty and ask ONE clarifying question in `reply`."
 )
 
+# How to turn data locations the user mentions in plain words into the task's data fields. The user
+# may not pass an explicit path — they just say where things live; author the mounts yourself.
+DATA_GUIDE = (
+    "DATA: the user may describe where their data lives in plain words — ONE path or SEVERAL, a single "
+    "file or a whole folder, possibly in different places. Author it from what they say; don't make "
+    "them pre-format it:\n"
+    '- A dataset task: put a single file/folder in "data_path", and/or several named locations in '
+    '"data" ({"<short_name>":"<abs path>", ...}) when there are multiple. A folder is fine as one '
+    "entry — the agent reads what's inside.\n"
+    '- A repo task: runtime data goes in "data" ({"<name>":"<abs path>"}) — each is copied to '
+    "./<name> in the eval workdir.\n"
+    "Use the paths EXACTLY as given (~ and $HOME/$VARS are expanded); never invent a path the user "
+    "didn't mention. If they clearly have data but named no location, ask ONE clarifying question in "
+    "`reply` instead of guessing."
+)
+
 
 # Kinds whose work is inherently LLM-driven (the agent writes/edits code or reasons over data). When
 # Genesis infers one of these and the user didn't choose a backend, the run defaults to backend=llm —
@@ -74,21 +90,27 @@ class GenesisResult:
 
 def author_task(goal: str, *, client, kinds: tuple[str, ...], data: Optional[str] = None,
                 repo: Optional[str] = None, direction: Optional[str] = None,
-                parser: str = "tool_call") -> GenesisResult:
-    """Ask the model to author an inline task from a plain goal (it chooses the kind). Returns a
-    GenesisResult; on a vague goal the task may be empty and `reply` carries a clarifying question.
-    Never raises on a model hiccup — a failed parse yields an empty result the caller reports."""
+                kind: Optional[str] = None, parser: str = "tool_call") -> GenesisResult:
+    """Ask the model to author an inline task from a plain goal. With `kind=None` it also CHOOSES the
+    kind; with `kind` set it is CONSTRAINED to that kind and only fills the rest (the user pinned the
+    type, Genesis does the rest within it). Returns a GenesisResult; on a vague goal the task may be
+    empty and `reply` carries a clarifying question. Never raises on a model hiccup."""
     hints = []
     if data:
-        hints.append(f"The user's data/input is at: {data}")
+        hints.append(f"The user named a data/input path: {data} (use it; add others they mention).")
     if repo:
         hints.append(f"The user's repository is at: {repo}")
     if direction:
         hints.append(f"Optimization direction: {direction}")
     hint_block = ("\n" + "\n".join(hints)) if hints else ""
+    if kind:
+        kind_rule = (f"The user has PINNED the task kind to `{kind}` — author a task of EXACTLY that "
+                     f"kind (do not switch kinds); fill in everything else from the goal.")
+    else:
+        kind_rule = TASK_KIND_GUIDE
     sys_prompt = (
-        "You bootstrap a new autonomous-ML run from the user's goal. Decide what KIND of task this is "
-        "and author it.\n\n" + TASK_KIND_GUIDE +
+        "You bootstrap a new autonomous-ML run from the user's goal. Decide the TASK and author it as "
+        "an inline `task` object.\n\n" + kind_rule + "\n\n" + DATA_GUIDE +
         f"\n\nRegistered task kinds: {list(kinds)}.")
     user = f"Goal: {goal}{hint_block}"
     messages = [{"role": "system", "content": sys_prompt}, {"role": "user", "content": user}]
@@ -97,8 +119,11 @@ def author_task(goal: str, *, client, kinds: tuple[str, ...], data: Optional[str
     except Exception:  # noqa: BLE001 - any parse/transport failure -> empty result (caller reports it)
         return GenesisResult()
     task = plan.task if isinstance(plan.task, dict) else {}
-    # The model may echo the kind under a different key or forget direction we were told — fill the
-    # obvious gaps so the result validates without a second round-trip.
+    # Honor the pin: the kind the user gave wins over whatever the model emitted.
+    if task and kind:
+        task["kind"] = kind
+    # The model may forget a direction/goal we already know — fill the obvious gaps so the result
+    # validates without a second round-trip.
     if task and direction and not task.get("direction"):
         task["direction"] = direction
     if task and "goal" not in task:
