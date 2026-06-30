@@ -22,9 +22,9 @@
 | P0 — working loop | ✅ done (one deviation: git/patch path, see I4) |
 | P1 — result levers (operators, CV, leakage, gate) | ✅ done (ablation operator still todo); leakage + >1-SE gate now wired |
 | P2 — ensemble + multi-seed rigor | ✅ done |
-| P3 — scale, obs, TUI | 🟡 concurrency + budget + span tracing wired; OTel/MLflow + TUI todo |
+| P3 — scale, obs, TUI | 🟡 concurrency + budget + span tracing wired; **TUI shipped** (`looplab tui`); OTel/MLflow todo |
 | P3.5/.6/.7 — grounding, knowledge, memory | ✅ profiling + agentic retrieval + cross-run memory + skills + prompt store |
-| P4 — breadth, hardening, web UI | 🟡 3 policies + diversity archive + secret/trust/leakage + **HITL** done; adapters + git/patch + (Docker/gVisor seam) todo; web UI/TUI cut/seam |
+| P4 — breadth, hardening, web UI | 🟡 3 policies + diversity archive + secret/trust/leakage + **HITL** + **terminal TUI** done; adapters + git/patch + (Docker/gVisor seam) todo |
 | **Beyond plan** — real ML task, LLM-writes-code, live serving | ✅ done |
 
 ---
