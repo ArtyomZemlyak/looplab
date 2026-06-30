@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react'
-import { genesis, genesisAwait, startRun } from './util.js'
+import { genesis, genesisAwait, startRun, GENESIS_TASK_KINDS, genesisLaunchReady } from './util.js'
 import StartRun from './StartRun.jsx'
 
 const slug = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '').slice(0, 40)
@@ -21,6 +21,22 @@ const SEEDS = [
   'Spooky author identification with deepseek, 50 nodes',
   'A quick toy quadratic run to smoke-test',
 ]
+
+// One-line "what this task type is" help shown under the task-type picker, so a user fixing a plan the
+// boss left blank (or switching kinds by hand) knows what each kind expects before filling its fields.
+const KIND_HELP = {
+  dataset: 'Point at a data file/folder — the agent writes the whole solution and picks a metric.',
+  repo: 'Optimize an existing code repo on this machine with your own run/eval command.',
+  mlebench_real: 'A known Kaggle / MLE-bench competition — use the full slug.',
+  quadratic: 'A pure numeric objective with named variables — runs offline, needs no data.',
+  classification: 'Tune a fixed classifier template on a synthetic/tabular objective.',
+  regression: 'Tune a fixed regression template on a synthetic/tabular objective.',
+  timeseries: 'Tune a fixed forecasting template on a synthetic objective.',
+  code_regression: 'The agent writes a numpy script scored by a held-out grader it can’t see.',
+  mlebench: 'Offline MLE-bench-style task graded by a held-out scorer.',
+}
+// Kinds whose only required field for launch is a goal/direction (no data path, repo, or competition).
+const SIMPLE_KINDS = new Set(['quadratic', 'classification', 'regression', 'timeseries', 'code_regression', 'mlebench'])
 
 // Chat-first run creation: describe a goal, the BOSS proposes a run name + task + key settings as an
 // editable card; tweak and launch (or drop to the manual form). The graph/run only exists AFTER launch,
@@ -80,6 +96,10 @@ export default function GenesisChat({ onClose, onStarted, seed }) {
 
   const setSetting = (k, v) => setSpec(s => ({ ...s, settings: { ...(s?.settings || {}), [k]: v } }))
   const setTaskField = (k, v) => setSpec(s => ({ ...s, task: { ...(s?.task || {}), [k]: v } }))
+  // Switch the inline task's kind in place — keeps any fields the user already filled and clears a
+  // catalogue task_file so the picker (not the read-only label) is what shows. This is the recovery
+  // path when the boss handed back a blank task: the user picks a kind and fills it themselves.
+  const setKind = (k) => setSpec(s => ({ ...s, task_file: '', task: { ...(s?.task || {}), kind: k || undefined } }))
   // Nested eval edits for a repo task: command (argv as a space-joined string) + the metric key.
   const setEvalField = (k, v) => setSpec(s => { const t = s?.task || {}; return { ...s, task: { ...t, eval: { ...(t.eval || {}), [k]: v } } } })
   // Quote-aware tokenize so an argument containing spaces survives (e.g. --run-name "my model"): the
@@ -90,14 +110,9 @@ export default function GenesisChat({ onClose, onStarted, seed }) {
 
   const task = spec?.task || {}
   const isRepo = task.kind === 'repo'
-  // launchable when there's a name + a task; mlebench_real needs a competition, and a repo task needs
-  // an editable path + a way to score it (an eval command, or onboard mode). The backend 400s on an
-  // invalid task too, but gate here for a clean UX (no doomed launch).
-  const repoReady = !isRepo || (task.editable_path?.trim() &&
-    ((Array.isArray(task.eval?.command) && task.eval.command.length) || task.onboard))
-  const taskReady = spec?.task_file || (task.kind &&
-    (task.kind !== 'mlebench_real' || task.competition?.trim()) && repoReady)
-  const ready = spec && spec.run_id?.trim() && taskReady
+  // launchable when there's a name + a task ready for its kind. The per-kind gate lives in util.js so
+  // the card and its tests share one definition (and the backend re-validates on /api/start anyway).
+  const ready = genesisLaunchReady(spec)
   const launch = async () => {
     if (!ready) { setErr('describe a goal first so the boss can pick a task (and a competition for MLE-bench)'); return }
     const rid = slug(spec.run_id)
@@ -121,9 +136,8 @@ export default function GenesisChat({ onClose, onStarted, seed }) {
   if (advanced) return <StartRun onClose={() => setAdvanced(false)} onStarted={onStarted} />
 
   const sk = spec?.settings || {}
-  const taskLabel = spec?.task_file
-    ? spec.task_file.split(/[\\/]/).pop() + ' · catalogue'
-    : (spec?.task?.kind || '—')
+  // Label for a catalogue task_file (the only place this renders now — inline tasks use the kind picker).
+  const taskLabel = spec?.task_file ? spec.task_file.split(/[\\/]/).pop() + ' · catalogue' : '—'
 
   return <div className="overlay" onMouseDown={onClose}>
     <div className="panel gen-panel" onMouseDown={e => e.stopPropagation()}>
@@ -169,12 +183,43 @@ export default function GenesisChat({ onClose, onStarted, seed }) {
           {spec && <>
             <div className="gen-field"><div className="gen-lab">Run name</div>
               <input className="text" value={spec.run_id || ''} onChange={e => setSpec(s => ({ ...s, run_id: slugLoose(e.target.value) }))} placeholder="run-name" /></div>
-            <div className="gen-field"><div className="gen-lab">Task</div>
-              {spec.task?.kind === 'mlebench_real' && !spec.task_file
-                ? <input className="text" value={spec.task.competition || ''} onChange={e => setTaskField('competition', e.target.value)} placeholder="kaggle-competition-id" />
-                : <div className="gen-ro">{taskLabel}</div>}
-              <div className="gen-help">{spec.task?.kind === 'mlebench_real' ? 'MLE-bench / Kaggle competition' : (spec.task_file ? 'from the task catalogue' : (spec.task?.kind || ''))}</div>
-            </div>
+            {/* Task: a catalogue file is shown as a read-only label (with an escape to author a custom
+                task); otherwise an editable KIND picker so a blank/under-specified plan is never a dead
+                end — the user can choose the kind and fill its fields right here. */}
+            {spec.task_file
+              ? <div className="gen-field"><div className="gen-lab">Task</div>
+                  <div className="gen-ro">{taskLabel}</div>
+                  <div className="gen-help">from the task catalogue · <button className="btn sm ghost" onClick={() => setSpec(s => ({ ...s, task_file: '' }))}>author a custom task instead</button></div>
+                </div>
+              : <div className="gen-field"><div className="gen-lab">Task type</div>
+                  <select className="text" value={task.kind || ''} onChange={e => setKind(e.target.value)}>
+                    <option value="">choose a task type…</option>
+                    {GENESIS_TASK_KINDS.map(k => <option key={k} value={k}>{k}</option>)}
+                  </select>
+                  <div className="gen-help">{KIND_HELP[task.kind] || 'The boss didn’t pick one — choose the task type, then fill the fields below.'}</div>
+                </div>}
+            {task.kind === 'mlebench_real' && !spec.task_file && <div className="gen-field"><div className="gen-lab">Competition</div>
+              <input className="text" value={task.competition || ''} onChange={e => setTaskField('competition', e.target.value)} placeholder="full-kaggle-slug e.g. spooky-author-identification" />
+              <div className="gen-help">The full Kaggle / MLE-bench slug (not the short name).</div></div>}
+            {task.kind === 'dataset' && !spec.task_file && <div className="gen-repo">
+              <div className="gen-field"><div className="gen-lab">Goal</div>
+                <input className="text" value={task.goal || ''} onChange={e => setTaskField('goal', e.target.value)} placeholder="what to predict, e.g. the target column" /></div>
+              <div className="gen-grid">
+                <div className="gen-field"><div className="gen-lab">Data path</div>
+                  <input className="text" value={task.data_path || ''} onChange={e => setTaskField('data_path', e.target.value)} placeholder="/abs/path/to/data.csv or a folder" />
+                  <div className="gen-help">Absolute path to the data the agent reads (a file or a directory).</div></div>
+                <div className="gen-field"><div className="gen-lab">Direction</div>
+                  <select className="text" value={task.direction || 'max'} onChange={e => setTaskField('direction', e.target.value)}>
+                    <option value="max">maximize</option><option value="min">minimize</option></select></div>
+              </div>
+            </div>}
+            {SIMPLE_KINDS.has(task.kind) && !spec.task_file && <div className="gen-grid">
+              <div className="gen-field"><div className="gen-lab">Goal</div>
+                <input className="text" value={task.goal || ''} onChange={e => setTaskField('goal', e.target.value)} placeholder="what to optimize" /></div>
+              <div className="gen-field"><div className="gen-lab">Direction</div>
+                <select className="text" value={task.direction || (task.kind === 'quadratic' ? 'min' : 'max')} onChange={e => setTaskField('direction', e.target.value)}>
+                  <option value="max">maximize</option><option value="min">minimize</option></select></div>
+            </div>}
             {isRepo && !spec.task_file && <div className="gen-repo">
               <div className="gen-field"><div className="gen-lab">Goal</div>
                 <input className="text" value={task.goal || ''} onChange={e => setTaskField('goal', e.target.value)} placeholder="what to optimize, e.g. validation accuracy" /></div>

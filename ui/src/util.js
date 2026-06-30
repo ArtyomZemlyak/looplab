@@ -527,6 +527,38 @@ export const saveSecret = (key, value) => send('/api/settings/secret', 'PUT', { 
 export const saveRunConfig = (rid, settings) => send(`/api/runs/${encodeURIComponent(rid)}/config`, 'PUT', { settings })
 export const listTasks = () => get('/api/tasks')
 export const startRun = (body) => post('/api/start', body)
+// The registered task kinds the New-run card lets you author/switch between (mirrors looplab/tasks.py's
+// _KINDS). Ordered most-common-first so the picker reads top-to-bottom by likely use. The server
+// re-validates the kind on /api/start, so this list is a UX convenience, not a security boundary.
+export const GENESIS_TASK_KINDS = ['dataset', 'repo', 'mlebench_real', 'quadratic',
+  'classification', 'regression', 'timeseries', 'code_regression', 'mlebench']
+
+// Is the inline task (or catalogue task_file) on a Genesis spec complete enough to LAUNCH? Mirrors the
+// server's per-kind pre-launch validation so the card can gate Start cleanly (no doomed launch that
+// just 400s): a repo needs an editable path + a way to score it (eval command or onboard); an
+// mlebench_real needs a competition; a dataset needs a data path; the synthetic kinds (quadratic,
+// classification, …) need only their kind. A catalogue task_file is always ready. Pure so the card and
+// its tests share ONE definition — and so a blank plan the boss couldn't fill is recoverable in-card
+// (pick a kind, fill the fields) instead of being a dead end behind the "manual form".
+export function genesisTaskReady(spec) {
+  if (!spec) return false
+  if (spec.task_file) return true
+  const t = spec.task || {}
+  if (!t.kind) return false
+  if (t.kind === 'mlebench_real') return !!(t.competition && t.competition.trim())
+  if (t.kind === 'repo') {
+    const hasCmd = Array.isArray(t.eval?.command) && t.eval.command.length > 0
+    return !!((t.editable_path && t.editable_path.trim()) && (hasCmd || t.onboard))
+  }
+  if (t.kind === 'dataset') return !!((t.data_path && t.data_path.trim()) || (t.data && Object.keys(t.data).length))
+  return true
+}
+
+// Whole-spec launchability: a launch name AND a ready task. Drives the Start button's disabled state.
+export function genesisLaunchReady(spec) {
+  return !!(spec && spec.run_id && spec.run_id.trim() && genesisTaskReady(spec))
+}
+
 // chat-first run creation: the pre-run BOSS turns a goal into an editable spec {run_id, task|task_file,
 // settings, rationale} + a conversational reply. `draft` carries the current card on refine turns.
 export const genesis = ({ messages = [], instruction = '', draft = null }) =>
