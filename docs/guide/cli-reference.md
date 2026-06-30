@@ -38,23 +38,32 @@ looplab run looplab.yaml
 
 ## `run`
 
-Start a new run, or continue one if the output directory already has events. Three equivalent ways
-to say what to solve:
+Start a new run, or continue one if the output directory already has events. Ways to say what to
+solve:
 
 ```bash
+looplab run --goal "predict target in data.csv" --data data.csv   # Genesis infers the kind
 looplab run config.yaml                          # one file: task + settings + out
 looplab run task.json --max-nodes 20             # a bare task file + flags (legacy)
-looplab run --kind dataset --goal "..." --data data.csv -s backend=llm   # no file
+looplab run --kind dataset --goal "..." --data data.csv -s backend=llm   # name the kind yourself
 ```
 
 A config file may be **unified** (top-level `task:` / `settings:` / `out:` keys) or a **bare task**
 (the legacy format — the whole file is the task). YAML and JSON are both accepted.
 
+**Genesis (auto-infer the task kind).** Pass `--goal` *without* `--kind` and the LLM picks the task
+kind from your words — the headless counterpart of the Web UI's "New run" planner. It announces its
+choice (`Genesis -> kind=…`) before launching. A generative kind (`dataset`/`repo`/`mlebench_real`/…)
+defaults the backend to `llm`; offline kinds (`quadratic`/…) don't. Genesis needs a reachable model
+(it reasons about your goal); add `--no-genesis` to fall back to the legacy default kind, or pass
+`--kind` to skip it. `--data` maps to the dataset's `data_path` or a repo task's `editable_path`.
+
 | Option | Default | Description |
 |---|---|---|
 | `[CONFIG\|TASK]` | *(optional)* | Config or task file (YAML/JSON). Omit it and build the task from the flags below. |
 | `--goal TEXT` | — | Task goal in plain words (build a task with no file) |
-| `--kind NAME` | — | Task kind (`quadratic`, `dataset`, `repo`, … — see [Tasks](tasks.md)) |
+| `--kind NAME` | — | Task kind (`quadratic`, `dataset`, `repo`, … — see [Tasks](tasks.md)). Omit it with `--goal` set to let Genesis infer it. |
+| `--genesis / --no-genesis` | on | With `--goal` but no `--kind`, let the LLM infer the kind. `--no-genesis` uses the legacy default kind instead. |
 | `--direction min\|max` | — | Optimization direction |
 | `--data PATH` | — | Your data file (dataset) or repo path (repo task) |
 | `-s, --set KEY=VALUE` | — | Override **any** engine setting (repeatable); same keys as `settings:` / `LOOPLAB_*` |

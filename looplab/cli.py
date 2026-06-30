@@ -289,6 +289,10 @@ def run(
                                                   f"{', '.join(_TASK_KINDS)}."),
     direction: Optional[str] = typer.Option(None, help="Optimize: min | max."),
     data: Optional[str] = typer.Option(None, help="Path to your data (dataset) or repo (repo task)."),
+    genesis: bool = typer.Option(
+        True, "--genesis/--no-genesis",
+        help="When you give --goal but no --kind, let the LLM infer the task kind from your words. "
+             "--no-genesis falls back to the legacy default kind."),
     set_: list[str] = typer.Option(
         [], "--set", "-s", metavar="KEY=VALUE",
         help="Override ANY engine setting, repeatable (e.g. -s max_nodes=20 -s policy=asha). "
@@ -340,17 +344,9 @@ def run(
             raise typer.BadParameter(f"config file not found: {task_file}")
         except ValueError as e:
             raise typer.BadParameter(f"could not read {task_file}: {e}")
-    # 2. Overlay the task-building flags, then validate the resolved task dict.
+    # 2. Overlay the task-building flags onto the (possibly empty) file task.
     task_dict = appconfig.apply_task_flags(
         file_task, kind=kind, goal=goal, direction=direction, data=data)
-    if not task_dict:
-        raise typer.BadParameter(
-            "no task: pass a config/task file, or build one with --goal/--kind "
-            "(scaffold one with `looplab init`).")
-    try:
-        task = validate_task(task_dict)
-    except (ValueError, KeyError, TypeError) as e:
-        raise typer.BadParameter(f"invalid task: {e}")
     # 3. Merge engine settings (file < typed flags < --set). Typed bool flags only override when set,
     # so a settings: file can still enable them.
     typed: dict = {}
@@ -375,7 +371,39 @@ def run(
         settings = appconfig.build_settings(file_settings, typed, sets)
     except ValidationError as e:
         raise typer.BadParameter(f"invalid settings: {e}")
-    # 4. Resolve the run dir: explicit --out > the file's out: > default.
+    # 3b. Genesis: you described the goal in words but didn't name a kind — let the LLM infer it (the
+    # headless counterpart of the UI's "New run"). Only fires on an explicit --goal with no kind, so
+    # no file-based / legacy flow is affected.
+    backend_chosen = backend is not None or "backend" in file_settings or "backend" in sets
+    if genesis and goal is not None and "kind" not in task_dict:
+        from . import genesis as _genesis
+        try:
+            client = make_llm_client(settings)
+        except Exception as e:  # noqa: BLE001 - no endpoint configured/reachable
+            raise typer.BadParameter(
+                f"Genesis needs an LLM to infer the task kind ({e}). Either pass --kind explicitly, "
+                f"or point LOOPLAB_LLM_BASE_URL/--model at a reachable model.")
+        result = _genesis.author_task(goal, client=client, kinds=_TASK_KINDS, data=data,
+                                      direction=direction, parser=settings.llm_parser)
+        if not result.kind:
+            typer.echo("Genesis couldn't infer the task from that goal. "
+                       + (result.reply or "Add detail, or pass --kind explicitly."))
+            raise typer.Exit(2)
+        task_dict = result.task
+        # A generative kind (the agent writes/edits code) implies an LLM-driven run; default the
+        # backend to llm when the user didn't pick one. Offline-optimizable kinds keep their default.
+        if not backend_chosen and result.kind in _genesis.GENERATIVE_KINDS:
+            settings.backend = "llm"
+        typer.echo(f"Genesis -> kind={result.kind}: {result.rationale or result.reply}".rstrip())
+    # 4. Validate the resolved task, then resolve the run dir: explicit --out > file out: > default.
+    if not task_dict:
+        raise typer.BadParameter(
+            "no task: pass a config/task file, or build one with --goal/--kind "
+            "(scaffold one with `looplab init`).")
+    try:
+        task = validate_task(task_dict)
+    except (ValueError, KeyError, TypeError) as e:
+        raise typer.BadParameter(f"invalid task: {e}")
     out = out or (Path(file_out) if file_out else Path("runs/run_local"))
     out.mkdir(parents=True, exist_ok=True)
     eng = _engine(out, task, settings, crash_after)

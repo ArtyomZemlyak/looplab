@@ -47,16 +47,23 @@ looplab run examples/regression_task.json --out runs/reg --max-nodes 14
 You don't have to hand-write JSON. Pick whichever fits:
 
 ```bash
-# a) One readable YAML file — what to solve AND how. Scaffold a documented template, edit, run:
+# a) Just describe it — Genesis (the LLM) infers the task type from your words. No file, no --kind:
+looplab run --goal "predict the target column in data.csv; maximize accuracy" --data data.csv
+
+# b) One readable YAML file — what to solve AND how. Scaffold a documented template, edit, run:
 looplab init                       # writes looplab.yaml (every setting, commented)
 looplab run looplab.yaml
 
-# b) No file at all — describe it on the command line:
+# c) Spell out the kind yourself (skips Genesis):
 looplab run --kind dataset --goal "predict target" --data data.csv -s backend=llm -s max_nodes=20
 
-# c) A bare task file + flags (the original style still works):
+# d) A bare task file + flags (the original style still works):
 looplab run examples/toy_task.json --max-nodes 14
 ```
+
+In **(a)** you never name a task type: when you pass `--goal` without `--kind`, Genesis (the same
+"New run" planner the Web UI uses) reads your words and picks the right `kind` — `dataset`, `repo`,
+`mlebench_real`, … — then runs it. Add `--no-genesis` to opt out.
 
 `-s/--set key=value` overrides **any** engine setting (full parity with the `settings:` block and the
 `LOOPLAB_*` env vars). A unified `looplab.yaml` looks like:

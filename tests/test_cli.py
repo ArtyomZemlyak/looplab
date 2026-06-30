@@ -135,3 +135,48 @@ def test_run_no_task_errors():
     result = runner.invoke(app, ["run"])
     assert result.exit_code != 0
     assert "no task" in result.output
+
+
+# --- Genesis: --goal with no --kind lets the LLM infer the task kind ------------------------------
+
+def _patch_genesis(monkeypatch, task):
+    """Stub the LLM client construction and the authoring call so the genesis path runs offline."""
+    import looplab.cli as cli
+    import looplab.genesis as genesis
+    monkeypatch.setattr(cli, "make_llm_client", lambda settings, **k: object())
+    monkeypatch.setattr(genesis, "author_task",
+                        lambda goal, **k: genesis.GenesisResult(task=task, rationale="inferred"))
+
+
+def test_run_goal_only_infers_kind_and_runs(tmp_path, monkeypatch):
+    _patch_genesis(monkeypatch, {"kind": "quadratic", "goal": "g", "direction": "min",
+                                 "bounds": {"x": [-10.0, 10.0], "y": [-10.0, 10.0]}})
+    result = runner.invoke(app, [
+        "run", "--goal", "minimize (x-3)^2", "-s", "max_nodes=2", "--out", str(tmp_path / "g"),
+    ])
+    assert result.exit_code == 0, result.output
+    assert "Genesis -> kind=quadratic" in result.output       # it inferred + announced the kind
+    assert "finished=True" in result.output                   # …and actually ran it
+
+
+def test_run_no_genesis_falls_back_without_llm(tmp_path):
+    # --no-genesis must NOT call the model: a goal with no kind uses the legacy default kind.
+    result = runner.invoke(app, [
+        "run", "--no-genesis", "--goal", "anything", "-s", "max_nodes=1", "--out", str(tmp_path / "n"),
+    ])
+    assert result.exit_code == 0, result.output
+    assert "Genesis ->" not in result.output
+
+
+def test_run_explicit_kind_skips_genesis(tmp_path, monkeypatch):
+    # An explicit --kind must short-circuit genesis entirely (no model call).
+    import looplab.cli as cli
+    def _boom(*a, **k):  # would raise if genesis tried to build a client
+        raise AssertionError("genesis must not run when --kind is given")
+    monkeypatch.setattr(cli, "make_llm_client", _boom)
+    result = runner.invoke(app, [
+        "run", "--kind", "quadratic", "--goal", "g", "--direction", "min",
+        "-s", "max_nodes=1", "--out", str(tmp_path / "k"),
+    ])
+    assert result.exit_code == 0, result.output
+    assert "Genesis ->" not in result.output

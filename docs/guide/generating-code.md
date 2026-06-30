@@ -10,6 +10,10 @@ The fastest way to set any of this up is **[Genesis](#preferred-let-genesis-auth
 first*), so reach for it before hand-writing JSON. Every case below shows both the Genesis path and
 the equivalent task file.
 
+> **On the command line**, Genesis runs headless too: `looplab run --goal "<what you want>"` with no
+> `--kind` lets the LLM infer the task kind from your words and launch it. It's the same idea as the
+> UI planner, minus the editable card — add `--no-genesis` to opt out, or pass `--kind` to name it.
+
 ---
 
 ## Two ways the agent writes code
