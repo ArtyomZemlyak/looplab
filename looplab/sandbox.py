@@ -139,6 +139,19 @@ def _run_argv(argv: list[str], workdir: str, timeout: float,
     # SubprocessSandbox path.) setdefault: an explicit engine/env value still wins.
     full_env.setdefault("PYTHONUTF8", "1")
     full_env.setdefault("PYTHONIOENCODING", "utf-8")
+    # Cap BLAS/OpenMP thread pools to the pod's CPU QUOTA, not the host core count. torch/numpy/sklearn
+    # size their pools from os.cpu_count() (the HOST's cores), so one eval on a 4-vCPU JupyterHub pod
+    # sharing a 64-core node would spin ~64 threads → context-switch thrash + CPU throttling billed to
+    # the user. sched_getaffinity respects the cgroup cpuset where cpu_count does not; on an unconstrained
+    # box it returns every core, so this setdefault equals the library default (no local regression).
+    # setdefault: an explicit operator/engine value still wins. POSIX/Linux only (guarded).
+    try:
+        _ncpu = str(len(os.sched_getaffinity(0)))   # type: ignore[attr-defined]
+        for _var in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS",
+                     "NUMEXPR_NUM_THREADS", "VECLIB_MAXIMUM_THREADS"):
+            full_env.setdefault(_var, _ncpu)
+    except AttributeError:
+        pass   # no sched_getaffinity (Windows/macOS) — leave the libraries' own defaults
     try:
         proc = subprocess.Popen(
             argv, cwd=str(wd), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
@@ -261,7 +274,14 @@ class DockerSandbox:
                  "-v", f"{wd.as_posix()}:/work", "-w", "/work"] + envs
                 + [self.image, "timeout", "-k", "5", str(secs), "python", "solution.py"])
         rc, out, err, to = _run_argv(argv, str(wd), timeout + 15.0, None, self.max_output_bytes, cancel)
-        timed_out = to or rc == 124          # coreutils timeout exits 124 when it fires
+        # coreutils `timeout` exits 124 when SIGTERM stopped the process at the deadline, and 137
+        # (128+9) when the process outlived the `-k 5` grace and needed the SIGKILL escalation — common
+        # for a tight BLAS/numpy loop that never hits a Python signal check. BOTH are this run's
+        # wall-clock timeout, so flag both: otherwise the 137 falls through to _failure_reason's OOM
+        # heuristic and a real timeout is mislabeled "oom" (wrong repair directive). A container OOM
+        # also exits 137, but in this `timeout -k` tier the escalation is the dominant 137 source and
+        # "reduce compute" is a fine response either way.
+        timed_out = to or rc in (124, 137)
         return RunResult(exit_code=rc, stdout=out, stderr=err,
                          metric=(None if timed_out else _parse_metric(out)), timed_out=timed_out,
                          trials=(None if timed_out else _json_line_trials(out)))

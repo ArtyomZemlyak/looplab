@@ -117,6 +117,14 @@ def _failure_reason(res) -> str:
     if (res.stderr or "").startswith("setup failed:"):
         return "setup"
     if res.exit_code != 0:
+        # OOM-kill: on a memory-capped pod (a JupyterHub cgroup limit) the kernel SIGKILLs a too-big
+        # eval — exit -9 (POSIX, Python returns -signal) or 137 (128+9) — with little/no Python
+        # traceback. Distinguish it from an ordinary crash so it's triaged as REPAIRABLE (reduce
+        # memory: batch/model size, subsample) instead of a silent abandon that recurs on every heavy
+        # eval. Heuristic: the SIGKILL signature with no real traceback in stderr (a timeout-kill is
+        # also SIGKILL but `res.timed_out` already returned "timeout" above, so it never reaches here).
+        if res.exit_code in (-9, 137) and "Traceback" not in (res.stderr or ""):
+            return "oom"
         return "crash"
     return "no_metric"          # exit 0 but no parseable metric emitted
 
@@ -143,8 +151,10 @@ def _rule_triage(reason: str, error: str, attempt: int, max_attempts: int) -> di
     reserved for the LLM agent, so the rule path stays safe with the unified agent off (it only ever
     repairs obvious mechanical crashes / timeouts or abandons)."""
     err = error or ""
-    if reason == "timeout" and attempt <= max_attempts:
-        return {"action": "repair", "rationale": "timeout — reduce compute to fit the budget (rule-based)"}
+    if reason in ("timeout", "oom") and attempt <= max_attempts:
+        why = ("timeout — reduce compute to fit the budget (rule-based)" if reason == "timeout"
+               else "OOM-killed — reduce memory: batch/model size or subsample to fit the pod limit (rule-based)")
+        return {"action": "repair", "rationale": why}
     mechanical = any(s in err for s in _MECHANICAL_MARKERS)
     if reason == "crash" and mechanical and attempt <= max_attempts:
         return {"action": "repair", "rationale": "mechanical crash (rule-based)"}
@@ -211,7 +221,7 @@ class Engine:
         agent_drives_actions: bool = False,  # agent picks the next macro action (within a legal gate)
         inline_repair: bool = True,          # hybrid: triage + repair a crashed node IN PLACE (no new node)
         inline_repair_attempts: int = 1,     # max in-place repair retries per node
-        inline_repair_reasons: tuple = ("crash", "timeout"),  # failure reasons eligible for inline repair
+        inline_repair_reasons: tuple = ("crash", "timeout", "oom"),  # reasons eligible for inline repair
         auto_install_deps: bool = True,      # pip-install a missing KNOWN lib + re-run (trusted_local only)
         dep_install_timeout: float = 900.0,  # per-package install wall-clock budget (seconds)
         dep_installer=None,                  # Optional[Callable] install hook (test seam; default = deps.install)
@@ -1334,6 +1344,19 @@ class Engine:
                     "that finishes WELL within the budget by reducing compute: fewer estimators/boosting "
                     "rounds, fewer epochs, fewer CV folds or seeds, early stopping, a smaller/lighter "
                     "model, capped n_jobs, or a subsample — keep the approach, cut the cost.")
+        if reason == "oom":
+            # The OOM-kill usually leaves NO Python traceback (the kernel SIGKILLs the process — that's
+            # how _failure_reason recognised it), so a "diagnose the root cause" directive has nothing
+            # to read. Give the actionable memory-reduction directive instead, mirroring the timeout one.
+            return ("[failure kind: oom]\n" + error + "\n"
+                    "The script was KILLED by the out-of-memory killer — it exceeded the available "
+                    "RAM/VRAM (e.g. a JupyterHub pod's cgroup memory limit) before producing a metric, "
+                    "typically with no Python traceback. The IDEA is fine — it was just too "
+                    "memory-hungry. Return a corrected, complete script that fits in LESS memory: a "
+                    "smaller batch size, a lighter/smaller model, fewer features or a subsample of the "
+                    "rows, gradient accumulation instead of one large batch, lower precision "
+                    "(float16/bfloat16), or freeing large intermediates — keep the approach, cut the "
+                    "memory.")
         if self._deep_repair:
             return (f"[failure kind: {reason or 'unknown'}]\n{error}\n"
                     "Diagnose the root cause; if it's unclear, add a tiny reproduction/"

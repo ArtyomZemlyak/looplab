@@ -73,7 +73,7 @@ export const SETTINGS_GROUPS = [
       { key: 'inline_repair_attempts', label: '↳ inline repair attempts', type: 'int',
         help: 'Max in-place repair retries per node before it fails normally (and stays eligible for the budgeted inter-node debug operator).' },
       { key: 'inline_repair_reasons', label: '↳ inline repair reasons', type: 'list',
-        help: 'Comma-separated failure reasons eligible for inline repair (crash | timeout | setup | no_metric | drift). Default "crash, timeout" — a timeout is repaired by reducing compute, not abandoned. Drop "timeout" to leave timed-out nodes to fail.' },
+        help: 'Comma-separated failure reasons eligible for inline repair (crash | timeout | oom | setup | no_metric | drift). Default "crash, timeout, oom" — a timeout is repaired by reducing compute, an OOM by reducing memory, not abandoned. Drop "timeout"/"oom" to leave those nodes to fail.' },
       { key: 'auto_install_deps', label: 'Auto-install missing libs', type: 'bool',
         help: 'When a node crashes purely because a KNOWN library is missing (ModuleNotFoundError — e.g. torch/xgboost/catboost), pip-install it into the eval interpreter and re-run instead of rejecting the idea. Trusted_local tier only. On by default.' },
       { key: 'dep_install_timeout', label: '↳ install timeout (s)', type: 'float',
