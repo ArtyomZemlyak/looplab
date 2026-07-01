@@ -595,6 +595,36 @@ export const assistantFork = (sid) => post(`/api/assistant/sessions/${encodeURIC
 export const assistantMessagePost = (sid, instruction, mode) =>
   post(`/api/assistant/sessions/${encodeURIComponent(sid)}/message`, { instruction, mode })
 export const getJob = (jobId) => get(`/api/jobs/${encodeURIComponent(jobId)}`)
+// Streaming turn: POST and read the SSE stream, invoking callbacks for token/step/todos/done/error.
+// Real token streaming of the final answer (Claude-Desktop feel). Returns the final result dict.
+export async function assistantMessageStream(sid, instruction, mode, cbs = {}) {
+  const r = await fetch(apiUrl(`/api/assistant/sessions/${encodeURIComponent(sid)}/message_stream`),
+    { method: 'POST', headers: _authHeaders({ 'Content-Type': 'application/json' }), body: JSON.stringify({ instruction, mode }) })
+  if (!r.ok || !r.body) { await _throw(r, 'message_stream'); return null }
+  const reader = r.body.getReader(); const dec = new TextDecoder()
+  let buf = ''; let result = null
+  for (;;) {
+    const { done, value } = await reader.read()
+    if (done) break
+    buf += dec.decode(value, { stream: true })
+    let i
+    while ((i = buf.indexOf('\n\n')) >= 0) {
+      const block = buf.slice(0, i); buf = buf.slice(i + 2)
+      let ev = 'message'; let data = ''
+      for (const line of block.split('\n')) {
+        if (line.startsWith('event:')) ev = line.slice(6).trim()
+        else if (line.startsWith('data:')) data += line.slice(5).trim()
+      }
+      let parsed; try { parsed = JSON.parse(data) } catch { parsed = data }
+      if (ev === 'token') cbs.onToken && cbs.onToken(parsed)
+      else if (ev === 'step') cbs.onStep && cbs.onStep(parsed)
+      else if (ev === 'todos') cbs.onTodos && cbs.onTodos(parsed)
+      else if (ev === 'error') { cbs.onError && cbs.onError(parsed); result = { ok: false, error: parsed } }
+      else if (ev === 'done') { result = parsed; cbs.onDone && cbs.onDone(parsed) }
+    }
+  }
+  return result
+}
 // Live tool steps while a turn runs (so the UI shows "reading X…" instead of an opaque spinner).
 export const assistantProgress = (sid) => get(`/api/assistant/progress?session=${encodeURIComponent(sid)}`)
 export const assistantCommands = () => get('/api/assistant/commands')

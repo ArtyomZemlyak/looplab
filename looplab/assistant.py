@@ -250,7 +250,7 @@ def build_read_tools(run_root, alive_fn: Optional[Callable] = None, *, extra_roo
 def run_turn(client, run_root, messages: list, instruction: str, mode: str = DEFAULT_MODE, *,
              alive_fn: Optional[Callable] = None, settings=None, on_step: Optional[Callable] = None,
              approver: Optional[Callable] = None, extra_roots=(), _subagent: bool = False,
-             on_todos: Optional[Callable] = None) -> dict:
+             on_todos: Optional[Callable] = None, reply_sink: Optional[Callable] = None) -> dict:
     """Run ONE assistant turn: drive the shared tool loop over the mode's toolset and return a
     response dict {ok, reply, steps, applied, mode}. `messages` is the prior conversation
     (role/content); `instruction` is the new user message. Pure orchestration — the caller injects the
@@ -314,7 +314,28 @@ def run_turn(client, run_root, messages: list, instruction: str, mode: str = DEF
         return {"ok": False, "error": str(e), "reply": f"(assistant error: {e})", "steps": steps,
                 "applied": _collect("applied"), "proposals": _collect("proposals"),
                 "todos": _collect("todos"), "refs": refs, "mode": mode}
-    return {"ok": True, "reply": reply or box.get("reply") or "(no reply)", "steps": steps,
+    reply = reply or box.get("reply") or "(no reply)"
+    # Real token streaming of the FINAL answer: after the tool loop has acted, generate the
+    # user-facing answer with a streaming call over the accumulated trace, pushing tokens to the sink.
+    # (One extra call; reuses the context the loop built. The loop's emit reply is the fallback.)
+    if reply_sink is not None:
+        try:
+            base = convo[:-1] if (convo and convo[-1].get("role") == "assistant"
+                                  and convo[-1].get("tool_calls")) else convo
+            stream_msgs = base + [{"role": "user", "content": "Now write your final answer to the "
+                                   "user in Markdown, based on everything above. Be concise."}]
+            streamed = []
+            for piece in client.complete_text_stream(stream_msgs):
+                streamed.append(piece)
+                try:
+                    reply_sink(piece)
+                except Exception:  # noqa: BLE001 - a sink failure must not abort the turn
+                    pass
+            if "".join(streamed).strip():
+                reply = "".join(streamed)
+        except Exception:  # noqa: BLE001 - streaming is an enhancement; keep the loop's reply
+            pass
+    return {"ok": True, "reply": reply, "steps": steps,
             "applied": _collect("applied"), "proposals": _collect("proposals"),
             "todos": _collect("todos"), "refs": refs, "mode": mode}
 

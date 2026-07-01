@@ -3,7 +3,7 @@ import Markdown from './markdown.jsx'
 import { fmtAgo, fmt, get, startRun } from './util.js'
 import {
   assistantSessions, assistantCreate, assistantGet, assistantDelete, assistantFork,
-  assistantMessagePost, getJob, assistantPermissions, assistantResolve, assistantProgress,
+  assistantMessageStream, assistantPermissions, assistantResolve,
   assistantCommands, assistantShare, assistantRevert,
 } from './util.js'
 
@@ -50,11 +50,11 @@ export function Turn({ m, runsById, onRevert }) {
             {onRevert && a.abs_path && <button className="asst-undo" title="undo this change"
               onClick={() => onRevert(a.abs_path)}>undo</button>}</span>)}</div>}
       {m.role === 'assistant' && <Todos items={m.todos} />}
-      <div className="chat-bubble">
+      {(m.content || !m.streaming) && <div className="chat-bubble">
         {m.role === 'assistant'
-          ? <Markdown text={m.content || ''} className="chat-text" />
+          ? <><Markdown text={m.content || ''} className="chat-text" />{m.streaming && <span className="asst-cursor">▍</span>}</>
           : <div className="chat-text">{m.content}</div>}
-      </div>
+      </div>}
       {mentions.length > 0 && <div className="asst-runchips">
         {mentions.map(id => <RunChip key={id} id={id} run={runsById && runsById[id]} />)}
       </div>}
@@ -211,23 +211,12 @@ export default function AssistantChat({ onBack }) {
     try { await assistantResolve(reqId, decision) } catch (e) { setErr(e.message) }
   }
 
-  // Drive one turn: POST, then poll the job to completion while ALSO polling for permission requests
-  // (a mutating action pauses the turn until the user approves a confirm-card).
-  const runTurn = async (id, text) => {
-    const resp = await assistantMessagePost(id, text, mode)
-    if (!resp || resp.status !== 'running' || !resp.job_id) return resp   // fast inline result
-    const deadline = Date.now() + 20 * 60 * 1000
-    while (Date.now() < deadline) {
-      await sleep(800)
-      try { const p = await assistantPermissions(id); setPending(p.pending || []) } catch { /* transient */ }
-      try { const pr = await assistantProgress(id); setLiveSteps(pr.steps || []); setLiveTodos(pr.todos || []) } catch { /* transient */ }
-      let j
-      try { j = await getJob(resp.job_id) } catch { continue }
-      if (j.status === 'done') { setPending([]); setLiveSteps([]); setLiveTodos([]); return j }
-      if (j.status === 'unknown') return { ok: false, error: 'the turn expired — try again' }
-    }
-    return { ok: false, error: 'timed out' }
-  }
+  // Update the last (streaming) assistant message in place as tokens/metadata arrive.
+  const patchLast = (patch) => setMsgs(m => {
+    const c = [...m]; const i = c.length - 1
+    if (i >= 0) c[i] = { ...c[i], ...(typeof patch === 'function' ? patch(c[i]) : patch) }
+    return c
+  })
 
   const send = async (text) => {
     const t = (text ?? input).trim()
@@ -238,20 +227,32 @@ export default function AssistantChat({ onBack }) {
       try { const m = await assistantCreate(t.slice(0, 60), mode); id = m.id; setSid(id); refreshSessions() }
       catch (e) { setErr(e.message); return }
     }
-    setMsgs(m => [...m, { role: 'user', content: t }])
+    setMsgs(m => [...m, { role: 'user', content: t }, { role: 'assistant', content: '', streaming: true }])
     setBusy(true)
+    // poll permissions concurrently so a mutating action that pauses the turn can be approved.
+    let polling = true
+    ;(async () => { while (polling) { try { const p = await assistantPermissions(id); setPending(p.pending || []) } catch { /* transient */ } await sleep(800) } })()
+    let acc = ''
     try {
-      const r = await runTurn(id, t)
-      if (r && r.ok === false && r.error) setErr(r.error)
-      setMsgs(m => [...m, { role: 'assistant', content: (r && r.reply) || '(no reply)', steps: r && r.steps, applied: r && r.applied, proposals: r && r.proposals, todos: r && r.todos }])
+      const res = await assistantMessageStream(id, t, mode, {
+        onToken: (tok) => { acc += (tok && tok.text != null ? tok.text : (typeof tok === 'string' ? tok : '')); patchLast({ content: acc }) },
+        onStep: (s) => setLiveSteps(x => [...x, s]),
+        onTodos: (items) => { setLiveTodos(items); patchLast({ todos: items }) },
+        onError: (e) => setErr(e),
+      })
+      if (res && res.ok === false && res.error) setErr(res.error)
+      patchLast({ content: (res && res.reply) || acc || '(no reply)', streaming: false,
+        steps: res && res.steps, applied: res && res.applied, proposals: res && res.proposals, todos: res && res.todos })
       refreshSessions()
     } catch (e) {
       setErr(e.message)
-      setMsgs(m => [...m, { role: 'assistant', content: 'Could not reach the assistant.' }])
-    } finally { setBusy(false); setPending([]); setLiveSteps([]); setLiveTodos([]) }
+      patchLast({ content: acc || 'Could not reach the assistant.', streaming: false })
+    } finally { polling = false; setBusy(false); setPending([]); setLiveSteps([]); setLiveTodos([]) }
   }
 
   const activeMode = MODES.find(x => x.id === mode) || MODES[0]
+  const last = msgs[msgs.length - 1]
+  const streamingStarted = !!(last && last.streaming && last.content)
 
   return <div className="asst-view">
     <div className="asst-side">
@@ -296,7 +297,7 @@ export default function AssistantChat({ onBack }) {
         </div>}
         {msgs.map((m, i) => <Turn key={i} m={m} runsById={runsById} onRevert={onRevert} />)}
         {pending.map(req => <PermCard key={req.id} req={req} onResolve={resolvePerm} />)}
-        {busy && pending.length === 0 && <div className="feed-msg chat assistant"><div className="fm-body">
+        {busy && pending.length === 0 && !streamingStarted && <div className="feed-msg chat assistant"><div className="fm-body">
           <div className="chat-who">assistant</div>
           <Todos items={liveTodos} />
           {liveSteps.length > 0 && <div className="asst-steps">{liveSteps.slice(-6).map((s, i) =>

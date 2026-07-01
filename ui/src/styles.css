@@ -1255,3 +1255,5 @@ textarea.text { min-height: 220px; font-family: ui-monospace, Consolas, monospac
 .asst-todo.completed .asst-todo-box { color: var(--best); }
 .asst-todo.in_progress { color: var(--fg); }
 .asst-todo.in_progress .asst-todo-box { color: var(--accent); }
+.asst-cursor { display: inline-block; margin-left: 1px; color: var(--accent); animation: asstBlink 1s step-end infinite; }
+@keyframes asstBlink { 50% { opacity: 0; } }

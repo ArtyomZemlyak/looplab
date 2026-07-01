@@ -1893,6 +1893,88 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
 
         return await _run_as_job(_compute)
 
+    @app.post("/api/assistant/sessions/{sid}/message_stream")
+    async def assistant_message_stream(sid: str, request: Request):
+        """Streaming variant: SSE of `token` (final-answer tokens), `step`, `todos`, then `done` (the
+        full result) — real token streaming for the Claude-Desktop feel. HITL still works: a mutating
+        action pauses the worker on the permission registry while the client polls /permissions."""
+        import queue as _queue
+        body = await request.json()
+        instruction = (body.get("instruction") or body.get("content") or "").strip()
+        mode = body.get("mode")
+        try:
+            sess = _asst.get(sid)
+        except ValueError:
+            raise HTTPException(404, "no such session")
+        if sess is None:
+            raise HTTPException(404, "no such session")
+        if not instruction:
+            raise HTTPException(400, "empty message")
+        history = list(sess["messages"])
+        eff_mode = mode or sess["meta"].get("mode") or "plan"
+        _asst.append(sid, {"role": "user", "content": instruction, "mode": eff_mode})
+        s = _llm_settings()
+        q: "_queue.Queue" = _queue.Queue()
+        try:
+            client = make_llm_client(s)
+        except Exception as e:  # noqa: BLE001 - offline -> stream a single error event
+            async def _err_gen():
+                yield f"event: error\ndata: {json.dumps(str(e))}\n\n"
+            return StreamingResponse(_err_gen(), media_type="text/event-stream")
+        approver = _make_approver(sid)
+        with _perm_lock:
+            _asst_progress[sid] = {"steps": [], "todos": [], "updated": time.time()}
+
+        def _on_step(ev):
+            with _perm_lock:
+                p = _asst_progress.setdefault(sid, {"steps": [], "todos": [], "updated": 0})
+                p["steps"] = (p["steps"] + [ev.get("label") or ev.get("tool") or "…"])[-40:]
+            q.put(("step", ev.get("label") or ev.get("tool") or "…"))
+
+        def _on_todos(items):
+            q.put(("todos", items))
+
+        def _worker():
+            try:
+                res = _assistant_run_turn(client, root, history, instruction, eff_mode,
+                                          alive_fn=_engine_alive, settings=s, approver=approver,
+                                          on_step=_on_step, on_todos=_on_todos,
+                                          reply_sink=lambda piece: q.put(("token", piece)))
+                res["tokens"] = _client_tokens(client)
+                _asst.append(sid, {"role": "assistant", "content": res.get("reply", ""),
+                                   "steps": res.get("steps") or [], "applied": res.get("applied") or [],
+                                   "proposals": res.get("proposals") or [], "todos": res.get("todos") or [],
+                                   "tokens": res.get("tokens")})
+                if not history:
+                    try:
+                        t = client.complete_text([
+                            {"role": "system", "content": "Reply with a SHORT title (<= 6 words, no "
+                             "quotes) for this chat based on the user's first message."},
+                            {"role": "user", "content": instruction[:400]}]).strip().strip('"')[:60]
+                        if t:
+                            _asst.update_meta(sid, title=t)
+                    except Exception:  # noqa: BLE001
+                        pass
+                q.put(("done", {k: res.get(k) for k in
+                                ("reply", "steps", "applied", "proposals", "todos", "refs", "tokens", "mode")}))
+            except Exception as e:  # noqa: BLE001
+                q.put(("error", str(e)))
+            finally:
+                with _perm_lock:
+                    _asst_progress.pop(sid, None)
+                q.put(("__end__", None))
+        threading.Thread(target=_worker, daemon=True).start()
+
+        async def gen():
+            while True:
+                kind, data = await anyio.to_thread.run_sync(q.get)
+                if kind == "__end__":
+                    break
+                yield f"event: {kind}\ndata: {json.dumps(data)}\n\n"
+
+        return StreamingResponse(gen(), media_type="text/event-stream",
+                                 headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
     # ------------------------------------------------------------------ LLM (chat / suggest / health)
     def _llm_settings(rd: Optional[Path] = None) -> "Settings":
         """Settings for the UI-side LLM calls (chat/command/suggest/report). ONE source of truth per
