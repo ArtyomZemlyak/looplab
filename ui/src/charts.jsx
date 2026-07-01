@@ -195,3 +195,41 @@ export function Spark({ series, width = 120, height = 22 }) {
 }
 
 function Empty({ children }) { return <div className="muted" style={{ padding: 20 }}>{children}</div> }
+
+// Online training/eval curves — a small line chart per logged metric tag (loss, every recall@k, lr,
+// grad norms, …) from a node's TensorBoard series {tag: [{step, value}]}. ALL metrics, not just the
+// objective — the "a la TensorBoard" per-node view.
+export function MetricLines({ series, cols = 2 }) {
+  const tags = Object.keys(series || {}).filter(t => (series[t] || []).length > 0).sort()
+  if (!tags.length) return <Empty>no metric curves logged yet — they appear once training starts writing TensorBoard events</Empty>
+  return (
+    <div style={{ display: 'grid', gridTemplateColumns: `repeat(${cols}, minmax(0,1fr))`, gap: 10 }}>
+      {tags.map(t => <MiniLine key={t} label={t} pts={series[t]} />)}
+    </div>
+  )
+}
+
+function MiniLine({ label, pts, width = 340, height = 130 }) {
+  const xs = pts.map(p => p.step), ys = pts.map(p => p.value)
+  const minX = Math.min(...xs), maxX = Math.max(...xs)
+  const minY = Math.min(...ys), maxY = Math.max(...ys)
+  const pad = 30, w = width, h = height
+  const X = v => pad + (v - minX) / Math.max(1e-9, maxX - minX) * (w - pad - 8)
+  const Y = v => h - pad - (v - minY) / Math.max(1e-9, maxY - minY) * (h - pad - 16)
+  const d = pts.map((p, i) => (i ? 'L' : 'M') + X(p.step).toFixed(1) + ' ' + Y(p.value).toFixed(1)).join(' ')
+  const last = ys[ys.length - 1]
+  return (
+    <div style={{ border: `1px solid ${GRID}`, borderRadius: 6, padding: 6, background: '#0d1017' }}>
+      <div className="muted" style={{ fontSize: 11, marginBottom: 2, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+        {label} · <span style={{ color: '#4aa3ff' }}>{fmt(last)}</span> <span style={{ opacity: .6 }}>({pts.length} pts)</span>
+      </div>
+      <svg width="100%" viewBox={`0 0 ${w} ${h}`}>
+        {[0, .5, 1].map((t, i) => { const y = pad / 2 + t * (h - pad - 16); return <line key={i} x1={pad} x2={w - 8} y1={y} y2={y} stroke={GRID} /> })}
+        <path d={d} fill="none" stroke="#2ecc71" strokeWidth="1.6" />
+        <text x={2} y={pad / 2 + 4} fill={AX} fontSize="9">{fmt(maxY)}</text>
+        <text x={2} y={h - pad + 4} fill={AX} fontSize="9">{fmt(minY)}</text>
+        <text x={pad} y={h - 6} fill={AX} fontSize="9">step {minX}–{maxX}</text>
+      </svg>
+    </div>
+  )
+}

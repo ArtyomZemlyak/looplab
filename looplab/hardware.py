@@ -114,6 +114,13 @@ def operational_attention_points(*, include_env: bool = True) -> str:
         "- HYPERPARAMETERS/BUDGET: when the task doesn't pin them, estimate sane values from the "
         "model size, available GPU memory, and any documented recipe; keep each experiment within the "
         "eval timeout; use ABSOLUTE paths for inputs outside the repo.\n"
+        "- IDEMPOTENT / RESUMABLE EVAL: put the EXPENSIVE step (training) behind a checkpoint so a "
+        "re-run doesn't repeat it. Write outputs to a STABLE path inside the eval workdir (it persists "
+        "across inline-repair attempts) and SKIP the expensive step when its output already exists "
+        "(e.g. `if a best_*.ckpt is already in save_path: reuse it, don't retrain`). Then when a CHEAP "
+        "later step (metric parsing, model conversion, evaluation) fails, the repair fixes just that "
+        "and re-runs in SECONDS — reusing the trained checkpoint instead of retraining from scratch. "
+        "Never throw away a completed expensive result over a trivial downstream bug.\n"
         "- ENVIRONMENT-FIRST: inspect the interpreter, installed packages and paths before assuming; "
         "when a sensitive choice is ambiguous (what to copy, how much to install, how long to train), "
         "prefer the cheap/safe option and surface the question.")

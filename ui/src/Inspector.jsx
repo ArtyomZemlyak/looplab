@@ -1,6 +1,6 @@
-import React, { useEffect, useState } from 'react'
+import React, { useEffect, useState, useRef } from 'react'
 import { get, fmt, fmtInt, isSweep } from './util.js'
-import { Trajectory, ParallelCoords, Scatter } from './charts.jsx'
+import { Trajectory, ParallelCoords, Scatter, MetricLines } from './charts.jsx'
 import { groupAggregate } from './grouping.js'
 import { mergeSummary, nodeChip } from './report.js'
 import { OpIcon } from './icons.jsx'
@@ -12,7 +12,7 @@ import Markdown from './markdown.jsx'
 // LLM I/O, and the coding-agent's validation — instead of three disconnected panes. The Inspector is
 // READ-ONLY (Workstream C): every node action — confirm/ablate/fork/promote/note — is done from the
 // chat (add the node via its ＋#id chip, or use a /command), so there's no per-node button toolbar.
-const TABS = ['Overview', 'Trace', 'Code', 'Metrics', 'Trust', 'Cost']
+const TABS = ['Overview', 'Trace', 'Code', 'Metrics', 'Training', 'Trust', 'Cost']
 
 export default function Inspector({ runId, nodeId, state, live, tab, setTab, onToast }) {
   const [detail, setDetail] = useState(null)
@@ -49,6 +49,7 @@ export default function Inspector({ runId, nodeId, state, live, tab, setTab, onT
         {activeTab === 'Trace' && <Trace n={n} />}
         {activeTab === 'Code' && <Code n={n} />}
         {activeTab === 'Metrics' && <Metrics n={n} detail={detail} />}
+        {activeTab === 'Training' && <Training runId={runId} nodeId={nodeId} n={n} />}
         {activeTab === 'Trust' && <Trust n={n} drifts={nodeDrifts} />}
         {activeTab === 'Cost' && <Cost state={state} />}
       </div>
@@ -57,6 +58,54 @@ export default function Inspector({ runId, nodeId, state, live, tab, setTab, onT
 }
 
 function KV({ k, v }) { return <><div className="k">{k}</div><div className="v">{v}</div></> }
+
+// "Training" tab: the node's LIVE training/eval logs (streamed eval.log) + online metric curves for
+// EVERY metric the training framework logged (loss, each recall@k, lr, grad norms, …) — read from the
+// node's TensorBoard events via the metrics adapters. Polls while open so it updates as training runs.
+function Training({ runId, nodeId, n }) {
+  const [logs, setLogs] = useState({ eval: '', setup: '', run_setup: '' })
+  const [metrics, setMetrics] = useState({})
+  const [tick, setTick] = useState(0)
+  const [follow, setFollow] = useState(true)
+  const preRef = useRef(null)
+  const done = ['evaluated', 'failed', 'confirmed'].includes(n?.status)
+  useEffect(() => {
+    if (nodeId == null) return
+    let on = true
+    const load = () => {
+      get(`/api/runs/${runId}/nodes/${nodeId}/logs`).then(d => on && setLogs(d || {})).catch(() => {})
+      get(`/api/runs/${runId}/nodes/${nodeId}/metrics`).then(d => on && setMetrics((d && d.metrics) || {})).catch(() => {})
+    }
+    load()
+    // Poll faster while the node is still running; slow to a light refresh once it's terminal.
+    const iv = setInterval(() => { load(); setTick(x => x + 1) }, done ? 15000 : 3000)
+    return () => { on = false; clearInterval(iv) }
+  }, [runId, nodeId, done])
+  useEffect(() => { if (follow && preRef.current) preRef.current.scrollTop = preRef.current.scrollHeight }, [logs.eval, tick, follow])
+
+  const evalLog = logs.eval || ''
+  return (
+    <div className="training-tab">
+      <div className="section-title">Metric curves <span className="muted" style={{ fontWeight: 400 }}>· live, all logged metrics</span></div>
+      <MetricLines series={metrics} />
+      <div className="section-title" style={{ marginTop: 14 }}>
+        Training / eval log
+        <span className="muted" style={{ fontWeight: 400, marginLeft: 8 }}>{done ? 'finished' : 'live'}</span>
+        <label className="muted" style={{ fontWeight: 400, marginLeft: 10, fontSize: 12 }}>
+          <input type="checkbox" checked={follow} onChange={e => setFollow(e.target.checked)} /> follow
+        </label>
+      </div>
+      <pre ref={preRef} className="training-log" style={{
+        maxHeight: 360, overflow: 'auto', background: '#0b0e14', border: '1px solid #20252f',
+        borderRadius: 6, padding: 8, fontSize: 11.5, lineHeight: 1.4, whiteSpace: 'pre-wrap', wordBreak: 'break-word'
+      }}>{evalLog || (done ? '(no eval log)' : 'waiting for the eval to start…')}</pre>
+      {logs.run_setup ? <>
+        <div className="section-title" style={{ marginTop: 12 }}>Run setup (deps, once)</div>
+        <pre className="training-log muted" style={{ maxHeight: 120, overflow: 'auto', background: '#0b0e14', border: '1px solid #20252f', borderRadius: 6, padding: 8, fontSize: 11 }}>{logs.run_setup.slice(-4000)}</pre>
+      </> : null}
+    </div>
+  )
+}
 
 // Summary for a COLLAPSED group's super-node (semantic zoom): aggregate + drill back to members.
 export function GroupSummary({ groupKey, memberIds, state, onSelectNode, onClose }) {

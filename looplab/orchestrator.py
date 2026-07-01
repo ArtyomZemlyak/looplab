@@ -221,7 +221,8 @@ class Engine:
         unified_agent: bool = False,        # one agent plays Researcher+Developer(+Strategist)
         agent_drives_actions: bool = False,  # agent picks the next macro action (within a legal gate)
         inline_repair: bool = True,          # hybrid: triage + repair a crashed node IN PLACE (no new node)
-        inline_repair_attempts: int = 1,     # max in-place repair retries per node
+        inline_repair_attempts: int = 0,     # max in-place repair retries per node (0 = UNLIMITED)
+        inline_repair_stuck_repeat: int = 4, # abandon when the SAME error repeats this many times in a row
         inline_repair_reasons: tuple = ("crash", "timeout", "oom"),  # reasons eligible for inline repair
         auto_install_deps: bool = True,      # pip-install a missing KNOWN lib + re-run (trusted_local only)
         dep_install_timeout: float = 900.0,  # per-package install wall-clock budget (seconds)
@@ -262,7 +263,8 @@ class Engine:
         self._deep_repair = deep_repair
         # Hybrid in-node crash repair (triage + inline repair). See Settings.inline_repair.
         self._inline_repair = inline_repair
-        self._inline_repair_attempts = max(1, int(inline_repair_attempts))
+        self._inline_repair_attempts = max(0, int(inline_repair_attempts))   # 0 = unlimited
+        self._inline_repair_stuck_repeat = max(2, int(inline_repair_stuck_repeat))
         self._inline_repair_reasons = tuple(inline_repair_reasons or ("crash",))
         # Environment self-prep (deps.py): auto-install a missing KNOWN library and re-run, instead
         # of letting the crash-triage agent reject the idea. Trusted_local tier ONLY — the Docker
@@ -1330,7 +1332,10 @@ class Engine:
                     return {"action": out["action"], "rationale": str(out.get("rationale", ""))[:300]}
             except Exception:  # noqa: BLE001 - agent triage is best-effort; fall through to the rule
                 pass
-        return _rule_triage(reason, error, attempt, self._inline_repair_attempts)
+        # 0 = unlimited attempts -> pass a large cap so the rule path keeps repairing mechanical
+        # crashes (the anti-stuck guard, not a count, stops a genuinely stuck node).
+        cap = self._inline_repair_attempts or 10**9
+        return _rule_triage(reason, error, attempt, cap)
 
     def _repair_error_context(self, reason: str, error: str) -> str:
         """Error context handed to Developer.repair(). A timeout gets an explicit cost-reduction
@@ -1953,6 +1958,7 @@ class Engine:
             triage_outcome = None            # ("abandon"|"reject_idea", rationale) for the terminal event
             err = ""
             reason = "crash"
+            stuck_sig = None; stuck_n = 0    # anti-stuck: consecutive identical-error signatures
             while True:
                 _t0 = time.time()
                 # Mid-eval per-node intervention (v2): a watcher polls the log while the eval runs in a
@@ -2013,13 +2019,22 @@ class Engine:
                             self.store.append("deps_installed", {
                                 "node_id": node_id, "packages": installed, "round": dep_rounds})
                         continue   # re-run now that the library is present (no repair attempt spent)
-                # Inline-repair gate: feature on, repairable reason, attempts left, a Developer that
-                # can repair, and something to repair (whole-file code, multi-file edits, or a repo).
+                # Anti-stuck: when the SAME error recurs with no progress, stop (even under unlimited
+                # repair) so the agent doesn't loop forever on an unfixable failure.
+                _sig = " ".join((err or "").strip().split())[-160:]
+                stuck_n = (stuck_n + 1) if _sig and _sig == stuck_sig else 1
+                stuck_sig = _sig
+                # Inline-repair gate: feature on, repairable reason, a Developer that can repair, and
+                # something to repair (whole-file code, multi-file edits, or a repo). The attempt CAP is
+                # skipped when unlimited (_inline_repair_attempts == 0); the anti-stuck guard bounds it.
                 if (not self._inline_repair
                         or reason not in self._inline_repair_reasons
-                        or attempt >= self._inline_repair_attempts
+                        or (self._inline_repair_attempts and attempt >= self._inline_repair_attempts)
+                        or stuck_n >= self._inline_repair_stuck_repeat
                         or not callable(getattr(self.developer, "repair", None))
                         or not (node.code or node.files or self._repo_spec)):
+                    if stuck_n >= self._inline_repair_stuck_repeat and self._inline_repair:
+                        triage_outcome = ("abandon", f"same error repeated {stuck_n}x — stuck, abandoning")
                     break
                 triage = self._triage_crash(state, node, err, attempt + 1, reason=reason)
                 action = triage.get("action", "repair")

@@ -790,6 +790,38 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
         out["trace"] = _node_trace(rd, nid)
         return out
 
+    def _node_dir(rd: Path, nid: int) -> Path:
+        return rd / "nodes" / f"node_{nid}"
+
+    @app.get("/api/runs/{run_id}/nodes/{nid}/logs")
+    def node_logs(run_id: str, nid: int, tail: int = 200_000):
+        """Live training/eval logs for a node — the streamed stdout/stderr of its eval + setup
+        subprocesses (eval.log / setup.log in the node workdir). `tail` caps bytes returned (from the
+        end) so the UI can poll cheaply. Empty strings when a log doesn't exist yet."""
+        nd = _node_dir(_run_dir(run_id), nid)
+        def _tail(name: str) -> str:
+            p = nd / name
+            try:
+                b = p.read_bytes()
+            except OSError:
+                return ""
+            return b[-max(0, tail):].decode("utf-8", "replace")
+        return {"eval": _tail("eval.log"), "setup": _tail("setup.log"),
+                "run_setup": (_run_dir(run_id) / "run_setup.log").read_text("utf-8", "replace")
+                             if (_run_dir(run_id) / "run_setup.log").exists() else ""}
+
+    @app.get("/api/runs/{run_id}/nodes/{nid}/metrics")
+    def node_metrics(run_id: str, nid: int):
+        """Online metric SERIES a node's training logged — every scalar (loss, each recall@k, grad
+        norms, lr, …), not just the objective — read via the pluggable metrics adapters (TensorBoard
+        today). Shape: {"metrics": {tag: [{step, value, wall_time}, …]}}. Empty until logs appear."""
+        from .metrics_adapters import read_node_metrics
+        try:
+            m = read_node_metrics(str(_node_dir(_run_dir(run_id), nid)))
+        except Exception:  # noqa: BLE001 - observability must never 500
+            m = {}
+        return {"metrics": m}
+
     def _node_trace(rd: Path, nid: int) -> dict:
         try:
             from .traceview import build_trace_view, load_spans

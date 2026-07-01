@@ -265,6 +265,7 @@ def _engine(run_dir: Path, task: TaskAdapter, settings: Settings,
         deep_repair=settings.deep_repair,
         inline_repair=settings.inline_repair,
         inline_repair_attempts=settings.inline_repair_attempts,
+        inline_repair_stuck_repeat=settings.inline_repair_stuck_repeat,
         inline_repair_reasons=settings.inline_repair_reasons,
         auto_install_deps=settings.auto_install_deps,
         dep_install_timeout=settings.dep_install_timeout,
@@ -727,6 +728,32 @@ def inspect(run_dir: Path = typer.Argument(...)):
         typer.echo(snap.read_text(encoding="utf-8"))
     if events.exists():
         _print_result(fold(EventStore(events).read_all()))
+
+
+@app.command()
+def tensorboard(
+    run_dir: Path = typer.Argument(..., help="Run dir; its nodes/ hold each experiment's training logs."),
+    port: int = typer.Option(6006, help="Port to serve on."),
+    host: str = typer.Option("0.0.0.0", help="Bind address."),
+):
+    """Serve TensorBoard over a run's per-node training logs — online curves for ALL metrics the
+    training framework logged (loss, recall@k, grad norms, lr, …), one comparable run per experiment.
+    RepoTask training scripts (e.g. PyTorch Lightning's TensorBoardLogger) write event files under each
+    node's workdir; this points TensorBoard at nodes/ so every node shows up."""
+    import shutil
+    import subprocess
+    import sys
+    logdir = run_dir / "nodes"
+    if not logdir.exists():
+        logdir = run_dir
+    exe = shutil.which("tensorboard")
+    cmd = ([exe] if exe else [sys.executable, "-m", "tensorboard.main"]) + \
+          ["--logdir", str(logdir), "--port", str(port), "--host", host]
+    typer.echo(f"Serving TensorBoard for {run_dir} on http://{host}:{port}  (logdir={logdir})")
+    try:
+        subprocess.run(cmd)
+    except KeyboardInterrupt:
+        pass
 
 
 @app.command()

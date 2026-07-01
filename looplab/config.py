@@ -84,9 +84,15 @@ class Settings(BaseSettings):
     # Semantic failures still flow to a new idea/debug node via the policy. ON by default; set False
     # to restore the prior behavior (every crash waits for a budgeted inter-node debug node).
     inline_repair: bool = True
-    # Max in-place repair attempts per node before it fails normally (and stays eligible for the
-    # budgeted inter-node debug operator). 1 = a single repair retry.
-    inline_repair_attempts: int = Field(default=1, ge=1)
+    # Max in-place repair attempts per node before it fails normally. Default 0 = UNLIMITED: the same
+    # agent keeps fixing + re-evaluating IN THE SAME node until it produces a clean metric — no new
+    # node just to retry. Runaway is prevented not by a count but by the anti-stuck guard
+    # (`inline_repair_stuck_repeat`): when the SAME error signature repeats with no progress, or the
+    # agent's crash-triage says "abandon", the node fails. Set a positive N to cap the retries instead.
+    inline_repair_attempts: int = Field(default=0, ge=0)
+    # Anti-stuck: abandon in-node repair when the SAME error recurs this many times in a row (no
+    # progress). Keeps "unlimited" repair from looping forever on an unfixable error.
+    inline_repair_stuck_repeat: int = Field(default=4, ge=2)
     # Which failure reasons (_failure_reason: crash|timeout|oom|setup|no_metric|drift) are eligible for
     # inline repair. Default: mechanical crashes, timeouts AND OOM-kills — a timeout/OOM means the code
     # was too slow / too memory-hungry for the budget (or the pod's cgroup limit), not that the idea is

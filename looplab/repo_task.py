@@ -442,6 +442,23 @@ class LLMRepoDeveloper:
             "the README will not resolve from the eval workdir); mounted inputs appear at ./<name> in "
             "the workdir. When a script already computes + reports the metric (e.g. in a produced "
             "checkpoint filename or a results file), read it from there rather than re-deriving it.\n\n"
+            "DEFINITION OF DONE for this node: ONE clean experiment run (exit 0, no errors) that prints "
+            "the required metric as the last stdout JSON line. Structure the entrypoint as SEPARATE, "
+            "IDEMPOTENT STAGES so a failure in a cheap late stage never repeats an expensive early one:\n"
+            "  • TRAIN stage: run the training to a STABLE output path in the workdir (e.g. ./ckpt). At "
+            "its start, if a valid checkpoint already exists there, SKIP training and reuse it.\n"
+            "  • TEST/METRIC stage: load that checkpoint, evaluate, and print the metric. This stage must "
+            "be runnable on its OWN against an existing checkpoint — WITHOUT retraining.\n"
+            "The eval is re-run in this SAME workdir after each fix (outputs persist), so when a later "
+            "stage (metric parse, conversion, evaluation) fails, your fix + re-run reuses the already-"
+            "trained checkpoint and finishes in seconds. NEVER discard a completed training over a "
+            "trivial downstream bug, and never silently emit a fake/zero metric to hide an error — fail "
+            "loudly (non-zero exit) so the failing stage can be repaired.\n"
+            "LOGGING: keep the training framework's logger (e.g. PyTorch Lightning's TensorBoardLogger) "
+            "ENABLED and log SEVERAL metrics (the target metric AND related ones — loss, other recalls, "
+            "lr), not just the objective; point its log dir at a STABLE path under the workdir so the "
+            "curves persist (viewable via `looplab tensorboard <run_dir>`). Also print readable progress "
+            "(epoch/step + current metrics) to stdout — it streams to the live eval log.\n\n"
             + operational_attention_points() + "\n\n"
             "=== CANONICAL COMMANDS (from the repo README — adapt paths to absolute + your "
             "hyperparameters) ===\n" + self._recipes() + "\n\n"
@@ -453,8 +470,11 @@ class LLMRepoDeveloper:
                 "Write the eval entrypoint (and any edits) now with write_file, then call done.")
         if error:
             already = ", ".join(self.last_files) or "(none)"
-            user += ("\n\nThe PREVIOUS attempt FAILED — fix it by RE-WRITING the offending file(s) with "
-                     f"write_file. Files you already wrote: {already}.\n"
+            user += ("\n\nThe PREVIOUS attempt FAILED — fix ONLY the stage that failed (see the error) by "
+                     "RE-WRITING the offending file(s) with write_file. This runs in the SAME workdir, so "
+                     "any checkpoint/output an earlier stage already produced is STILL THERE: make the "
+                     "code reuse it (skip retraining) and go straight to the failing step. Do not start "
+                     f"over from scratch. Files you already wrote: {already}.\n"
                      "--- eval error (stderr/stdout tail) ---\n" + error[:4000])
         messages = [{"role": "system", "content": system}, {"role": "user", "content": user}]
         try:
