@@ -104,7 +104,7 @@ function indexProjects(projects) {
   return { byParent, subtree }
 }
 
-export default function RunList({ onOpen, onSettings }) {
+export default function RunList({ onOpen, onSettings, onAssistant }) {
   const [runs, setRuns] = useState(null)
   const [proj, setProj] = useState({ projects: [], assignments: {} })
   const [sel, setSel] = useState(ALL)
@@ -126,8 +126,7 @@ export default function RunList({ onOpen, onSettings }) {
   const [superdata, setSuperdata] = useState({ supertasks: [], assignments: {} })
   const [stModal, setStModal] = useState(false)             // manage-super-tasks popup open?
   const [showReport, setShowReport] = useState(false)       // cross-run scope-report panel open?
-  const [seed, setSeed] = useState('')                      // global-chat text seeded into the genesis flow
-  const [chatInput, setChatInput] = useState('')            // the global chat bar input
+  const [seed, setSeed] = useState('')                      // seed passed into the New-run (Genesis) flow
 
   const loadRuns = () => get('/api/runs').then(setRuns).catch(() => setRuns([]))
   const loadProjects = () => listProjects().then(setProj).catch(() => {})
@@ -282,23 +281,15 @@ export default function RunList({ onOpen, onSettings }) {
           <button className={view === 'list' ? 'on' : ''} onClick={() => setView('list')}>☰ List</button>
           <button className={view === 'map' ? 'on' : ''} onClick={() => setView('map')}><OpIcon name="map" className="t-ic" /> Map</button>
         </div>
-        <button className="btn sm primary" onClick={() => { setSeed(''); setStarting(true) }}>▶ New run</button>
+        {/* The assistant is the primary entry point — ask it anything, create/steer runs, fix LoopLab. */}
+        <button className="btn sm primary" title="the assistant — inspect, edit and fix LoopLab, create & steer runs"
+          onClick={() => onAssistant && onAssistant()}>✦ Assistant</button>
+        <button className="btn sm" onClick={() => { setSeed(''); setStarting(true) }}>▶ New run</button>
         <ThemeSwitcher />
         <EnergyToggle />
         <button className="btn sm ghost" title="settings" onClick={() => onSettings && onSettings()}>⚙ Settings</button>
       </div>
 
-      {/* universal chat: type anything in the main menu — describe a run to create, the boss plans it.
-          Submitting seeds the same genesis flow as the New-run button. */}
-      <div className="global-chat">
-        <span className="gc-spark">✦</span>
-        <input className="text gc-input"
-          placeholder="Ask or start anything — “run nomad2018 on minimax, 100 nodes”, “a quick titanic baseline”…"
-          value={chatInput} onChange={e => setChatInput(e.target.value)}
-          onKeyDown={e => { if (e.key === 'Enter' && chatInput.trim()) { setSeed(chatInput.trim()); setStarting(true); setChatInput('') } }} />
-        <button className="btn primary" disabled={!chatInput.trim()}
-          onClick={() => { setSeed(chatInput.trim()); setStarting(true); setChatInput('') }}>Go</button>
-      </div>
       {view === 'map' && <div style={{ flex: 1, minHeight: 0 }}><MapView onOpen={onOpen} /></div>}
       {view === 'list' && <div className="runlayout">
         <aside className="psidebar">

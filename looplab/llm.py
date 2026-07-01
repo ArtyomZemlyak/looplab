@@ -264,6 +264,53 @@ class OpenAICompatibleClient:
                         usage=body.get("usage"))
         return out
 
+    def complete_text_stream(self, messages: list[dict]):
+        """Stream a plain-text completion token-by-token (an OpenAI `stream:true` SSE call). Yields
+        content deltas as they arrive; used by the assistant to stream its final answer live. Falls
+        back to a single yield of the whole text if the endpoint doesn't stream. Best-effort — any
+        transport error mid-stream ends the generator (the caller keeps what it got)."""
+        payload = {"model": self.model, "messages": messages, "temperature": self.temperature,
+                   "stream": True, "stream_options": {"include_usage": True}}
+        if self.reasoning:
+            payload = {**payload, **self.reasoning}
+        req = urllib.request.Request(
+            f"{self.base_url}/chat/completions", data=json.dumps(payload).encode("utf-8"),
+            method="POST", headers={"Content-Type": "application/json",
+                                    "Authorization": f"Bearer {self.api_key}"})
+        pieces: list[str] = []
+        usage: dict = {}
+        try:
+            with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+                for raw in resp:
+                    line = raw.decode("utf-8", "replace").strip()
+                    if not line or not line.startswith("data:"):
+                        continue
+                    chunk = line[5:].strip()
+                    if chunk == "[DONE]":
+                        break
+                    try:
+                        obj = json.loads(chunk)
+                    except ValueError:
+                        continue
+                    if obj.get("usage"):                       # final usage chunk (include_usage)
+                        usage = obj["usage"]
+                    delta = ((obj.get("choices") or [{}])[0] or {}).get("delta") or {}
+                    piece = delta.get("content") or ""
+                    if piece:
+                        pieces.append(piece)
+                        yield piece
+        except (urllib.error.URLError, TimeoutError, OSError, http.client.IncompleteRead):
+            if not pieces:                     # never streamed -> fall back to a single blocking call
+                text = self.complete_text(messages)
+                if text:
+                    yield text
+                return
+        if usage:                              # account the streamed answer's tokens like every other call
+            self.accountant.add(0.0, usage=usage)
+            self._last_usage = usage
+        record_llm_call(op="complete_text_stream", model=self.model, messages=messages,
+                        completion="".join(pieces), usage=usage or None)
+
     def chat(self, messages: list[dict], tools: list[dict],
              tool_choice: str = "auto") -> dict:
         """General multi-turn tool-calling step. Returns the raw assistant message

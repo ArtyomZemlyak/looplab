@@ -912,12 +912,6 @@ textarea.text { min-height: 220px; font-family: ui-monospace, Consolas, monospac
 .th-sub { font-size: 10.5px; color: var(--fg-mut); }
 .th-check { color: var(--accent); font-weight: 700; }
 
-/* ── Universal chat bar in the main menu (seeds the genesis flow) ───────────────── */
-.global-chat { display: flex; align-items: center; gap: 8px; padding: 9px 16px; flex: none;
-  border-bottom: 1px solid var(--line); background: var(--bg-1); }
-.global-chat .gc-spark { color: var(--accent); font-size: 14px; flex: none; }
-.global-chat .gc-input { flex: 1; min-width: 0; }
-.global-chat .btn { flex: none; }
 
 /* ── Genesis: chat-first run creation (boss proposes an editable spec card) ─────── */
 .gen-panel { width: min(960px, 96%); }
@@ -1186,3 +1180,74 @@ textarea.text { min-height: 220px; font-family: ui-monospace, Consolas, monospac
 .art-pre { flex: 1; overflow: auto; margin: 0; background: var(--bg-1); border: 1px solid var(--line);
   border-radius: 8px; padding: 10px; font-family: ui-monospace, Consolas, monospace; font-size: 12px;
   line-height: 1.45; white-space: pre; tab-size: 4; }
+
+/* ---- Assistant (general chat agent — the evolution of Genesis) ---- */
+.asst-view { display: flex; height: 100vh; min-height: 0; background: var(--bg-0); }
+.asst-side { width: 250px; flex: none; display: flex; flex-direction: column;
+  border-right: 1px solid var(--line); background: var(--bg-1); }
+.asst-side-h { display: flex; align-items: center; gap: 8px; padding: 10px; border-bottom: 1px solid var(--line); }
+.asst-sessions { flex: 1; overflow: auto; padding: 6px; }
+.asst-sess { position: relative; padding: 8px 10px; border-radius: 8px; cursor: pointer;
+  border: 1px solid transparent; }
+.asst-sess:hover { background: var(--bg-2); }
+.asst-sess.active { background: var(--bg-2); border-color: var(--accent-dim); }
+.asst-sess-t { font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding-right: 18px; }
+.asst-sess-m { font-size: 10.5px; color: var(--fg-mut); margin-top: 2px; }
+.asst-sess-x { position: absolute; top: 6px; right: 6px; opacity: 0; }
+.asst-sess:hover .asst-sess-x { opacity: .7; }
+.asst-main { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.asst-main-h { display: flex; align-items: center; gap: 10px; padding: 8px 12px; border-bottom: 1px solid var(--line); }
+.asst-modes { display: inline-flex; gap: 2px; background: var(--bg-1); border: 1px solid var(--line);
+  border-radius: 8px; padding: 2px; }
+.asst-mode { font-size: 11.5px; padding: 3px 9px; border-radius: 6px; border: none; background: transparent;
+  color: var(--fg-dim); cursor: pointer; }
+.asst-mode.on { background: var(--accent); color: #07101c; font-weight: 600; }
+.asst-feed { flex: 1; overflow: auto; display: flex; flex-direction: column; gap: 8px; padding: 16px; }
+.asst-in { border-top: 1px solid var(--line); padding: 10px 14px; }
+.asst-steps { display: flex; flex-wrap: wrap; gap: 4px; margin-bottom: 4px; }
+.asst-step { font-size: 10.5px; color: var(--fg-mut); background: var(--bg-1); border: 1px solid var(--line);
+  border-radius: 6px; padding: 1px 7px; }
+.asst-step.done { color: var(--best); border-color: color-mix(in srgb, var(--best) 40%, var(--line)); }
+/* human-in-the-loop confirm card */
+.asst-perm { border: 1px solid var(--accent-dim); border-radius: 10px; background: var(--bg-1); padding: 10px 12px;
+  align-self: flex-start; max-width: 82%; }
+.asst-perm-h { display: flex; align-items: center; gap: 8px; font-size: 13px; }
+.asst-perm-badge { font-size: 10px; text-transform: uppercase; letter-spacing: .6px; color: #07101c;
+  background: var(--accent); border-radius: 5px; padding: 1px 6px; font-weight: 700; }
+.asst-perm-pre { margin: 8px 0 0; max-height: 220px; overflow: auto; background: var(--bg-0);
+  border: 1px solid var(--line); border-radius: 7px; padding: 8px; font-family: ui-monospace, Consolas, monospace;
+  font-size: 11.5px; line-height: 1.4; white-space: pre; tab-size: 4; }
+.asst-perm-pre.diff { white-space: pre-wrap; }
+.asst-perm-actions { display: flex; gap: 6px; justify-content: flex-end; margin-top: 8px; }
+/* @run inline cards + @-mention picker */
+.asst-runchips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+.asst-runchip { display: inline-flex; align-items: center; gap: 6px; font-size: 11.5px; text-decoration: none;
+  color: var(--fg); background: var(--bg-1); border: 1px solid var(--line); border-radius: 999px; padding: 2px 10px; }
+.asst-runchip:hover { border-color: var(--accent-dim); }
+.asst-run-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--fg-mut); flex: none; }
+.asst-run-dot.live { background: var(--best); box-shadow: 0 0 0 0 color-mix(in srgb, var(--best) 60%, transparent);
+  animation: asstPulse 1.6s infinite; }
+@keyframes asstPulse { 0% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--best) 55%, transparent); }
+  70% { box-shadow: 0 0 0 6px transparent; } 100% { box-shadow: 0 0 0 0 transparent; } }
+.asst-mention-pop { position: absolute; bottom: 100%; left: 12px; margin-bottom: 4px; z-index: 20;
+  background: var(--bg-2); border: 1px solid var(--line); border-radius: 9px; padding: 4px; min-width: 240px;
+  box-shadow: 0 6px 20px rgba(0,0,0,.35); }
+.asst-mention-item { display: flex; align-items: center; gap: 7px; width: 100%; text-align: left;
+  background: transparent; border: none; color: var(--fg); font-size: 12.5px; padding: 5px 8px; border-radius: 6px; cursor: pointer; }
+.asst-mention-item:hover { background: var(--bg-1); }
+/* propose_run launch card */
+.asst-launch { border: 1px solid var(--accent-dim); border-radius: 10px; background: var(--bg-1);
+  padding: 10px 12px; align-self: flex-start; max-width: 82%; margin-top: 6px; }
+.asst-launch-h { display: flex; align-items: center; gap: 8px; font-size: 13px; }
+.asst-undo { margin-left: 6px; font-size: 10px; background: transparent; border: none; color: var(--accent);
+  cursor: pointer; text-decoration: underline; padding: 0; }
+/* assistant TODO list */
+.asst-todos { margin: 4px 0; display: flex; flex-direction: column; gap: 2px; }
+.asst-todo { display: flex; align-items: baseline; gap: 7px; font-size: 12.5px; }
+.asst-todo-box { color: var(--fg-mut); width: 12px; flex: none; }
+.asst-todo.completed { color: var(--fg-mut); text-decoration: line-through; }
+.asst-todo.completed .asst-todo-box { color: var(--best); }
+.asst-todo.in_progress { color: var(--fg); }
+.asst-todo.in_progress .asst-todo-box { color: var(--accent); }
+.asst-cursor { display: inline-block; margin-left: 1px; color: var(--accent); animation: asstBlink 1s step-end infinite; }
+@keyframes asstBlink { 50% { opacity: 0; } }

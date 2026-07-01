@@ -20,78 +20,27 @@ to the model (possibly a REMOTE provider):
 """
 from __future__ import annotations
 
-import os
 from pathlib import Path
 
+from . import _pathsafe
 from .knowledge_tools import _fn_spec   # shared OpenAI function-schema builder (one schema shape)
+
+# Path/secret guards now live in _pathsafe (shared with the write/shell/git providers so every tool
+# enforces the same rules). Re-exported under the historical private names for back-compat.
+_looks_secret = _pathsafe.looks_secret
+_readable = _pathsafe.readable
 
 _MAX_READ = 16000          # bytes returned from one read_file
 _MAX_ENTRIES = 200         # entries per list_dir / find_files
 
-# read-file ALLOWLIST: extensions we'll return the contents of, ...
-_TEXT_EXT = {".py", ".md", ".txt", ".json", ".yaml", ".yml", ".toml", ".cfg", ".ini", ".sh",
-             ".csv", ".tsv", ".rst", ".lock", ".bat", ".ps1", ".r", ".jl", ".sql", ".html", ".css",
-             ".js", ".ts", ".tsx", ".jsx", ".java", ".go", ".rs", ".cpp", ".cc", ".c", ".h", ".hpp",
-             ".xml", ".properties", ".gradle", ".tf"}
-# ... plus a few KNOWN-safe files that have no usable suffix (Path.suffix wouldn't match them).
-_SAFE_NAMES = {"makefile", "dockerfile", "readme", "license", "licence", "changelog", "notice",
-               "authors", "requirements", "pipfile", "procfile", "manifest.in", "containerfile",
-               ".gitignore", ".dockerignore", ".env.example"}
-
-# Credential files — never read, and hidden from listings. Defense in depth on TOP of the allowlist.
-_SECRET_NAMES = {"secrets.json", "credentials", ".netrc", ".pgpass", ".npmrc", ".pypirc",
-                 ".git-credentials", ".dockercfg", ".boto", ".s3cfg", ".pg_service.conf"}
-_SECRET_SUFFIX = {".pem", ".key", ".pfx", ".p12", ".keystore", ".jks", ".ovpn", ".kdbx", ".asc"}
-_SECRET_DIRS = {".ssh", ".aws", ".gnupg", ".gpg", ".kube", ".docker", "gcloud", ".azure", ".config"}
-# Substrings that strongly imply a credential. Deliberately NOT bare "token"/"secret" alone (would
-# false-block ML files like tokenizer.py); these are specific enough to avoid that.
-_SECRET_SUBSTR = ("credential", "password", "passwd", "_secret", "secret_", ".secret", "secrets.",
-                  "apikey", "api_key", "private_key", "privatekey", "id_rsa", "id_ed25519", "id_ecdsa")
-
-
-def _looks_secret(p: Path) -> bool:
-    name = p.name.lower()
-    if name in _SECRET_NAMES:
-        return True
-    if name.startswith(".env") and name != ".env.example":      # .env, .env.local, .env.prod, …
-        return True
-    if p.suffix.lower() in _SECRET_SUFFIX:
-        return True
-    if any(tok in name for tok in _SECRET_SUBSTR):              # secrets.yaml, client_secret.json, id_rsa
-        return True
-    parts = {part.lower() for part in p.parts}                  # any ancestor dir is a known secret dir
-    return bool(parts & _SECRET_DIRS)
-
-
-def _readable(p: Path) -> bool:
-    """Allowlist gate: a known source/doc/config extension, or a known safe extensionless name."""
-    return p.suffix.lower() in _TEXT_EXT or p.name.lower() in _SAFE_NAMES
-
 
 class RepoScoutTools:
     def __init__(self, roots):
-        self._roots = []
-        for r in roots:
-            if not r:
-                continue
-            try:
-                self._roots.append(Path(os.path.expanduser(str(r))).resolve())
-            except OSError:
-                pass
+        self._roots = _pathsafe.resolve_roots(roots)
 
     def _resolve(self, path: str):
-        """Resolve a user/model-supplied path and confirm it's inside an allowed root (else None).
-        resolve() canonicalizes `..` and follows symlinks, so an escape lands outside the roots."""
-        if not path:
-            return None
-        try:
-            p = Path(os.path.expanduser(str(path))).resolve()
-        except OSError:
-            return None
-        for r in self._roots:
-            if p == r or r in p.parents:
-                return p
-        return None
+        """Resolve a user/model-supplied path and confirm it's inside an allowed root (else None)."""
+        return _pathsafe.resolve_within(self._roots, path)
 
     def specs(self) -> list[dict]:
         return [

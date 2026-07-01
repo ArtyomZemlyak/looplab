@@ -582,3 +582,49 @@ export async function genScopeReport(type, id) {
   if (r && r.ok === false && r.error) throw new Error(r.error)
   return r
 }
+
+// ---- assistant (general chat agent — the evolution of Genesis) ----
+export const assistantSessions = () => get('/api/assistant/sessions')
+export const assistantCreate = (title = '', mode = 'plan') => post('/api/assistant/sessions', { title, mode })
+export const assistantGet = (sid) => get(`/api/assistant/sessions/${encodeURIComponent(sid)}`)
+export const assistantDelete = (sid) => send(`/api/assistant/sessions/${encodeURIComponent(sid)}`, 'DELETE')
+export const assistantFork = (sid) => post(`/api/assistant/sessions/${encodeURIComponent(sid)}/fork`, {})
+// Streaming turn: POST and read the SSE stream, invoking callbacks for token/step/todos/done/error.
+// Real token streaming of the final answer (Claude-Desktop feel). Returns the final result dict.
+export async function assistantMessageStream(sid, instruction, mode, cbs = {}, signal) {
+  const r = await fetch(apiUrl(`/api/assistant/sessions/${encodeURIComponent(sid)}/message_stream`),
+    { method: 'POST', headers: _authHeaders({ 'Content-Type': 'application/json' }), body: JSON.stringify({ instruction, mode }), signal })
+  if (!r.ok || !r.body) { await _throw(r, 'message_stream'); return null }
+  const reader = r.body.getReader(); const dec = new TextDecoder()
+  let buf = ''; let result = null
+  for (;;) {
+    let chunk
+    try { chunk = await reader.read() } catch { break }   // aborted (unmount) — stop cleanly
+    const { done, value } = chunk
+    if (done) break
+    buf += dec.decode(value, { stream: true })
+    let i
+    while ((i = buf.indexOf('\n\n')) >= 0) {
+      const block = buf.slice(0, i); buf = buf.slice(i + 2)
+      let ev = 'message'; let data = ''
+      for (const line of block.split('\n')) {
+        if (line.startsWith('event:')) ev = line.slice(6).trim()
+        else if (line.startsWith('data:')) data += line.slice(5).trim()
+      }
+      let parsed; try { parsed = JSON.parse(data) } catch { parsed = data }
+      if (ev === 'token') cbs.onToken && cbs.onToken(parsed)
+      else if (ev === 'step') cbs.onStep && cbs.onStep(parsed)
+      else if (ev === 'todos') cbs.onTodos && cbs.onTodos(parsed)
+      else if (ev === 'error') { cbs.onError && cbs.onError(parsed); result = { ok: false, error: parsed } }
+      else if (ev === 'done') { result = parsed; cbs.onDone && cbs.onDone(parsed) }
+    }
+  }
+  return result
+}
+export const assistantCommands = () => get('/api/assistant/commands')
+export const assistantRevert = (path) => post('/api/assistant/revert', { path })
+export const assistantShare = (sid) => post(`/api/assistant/sessions/${encodeURIComponent(sid)}/share`, {})
+// Pending human-in-the-loop confirm requests for a session, and resolving one.
+export const assistantPermissions = (sid) => get(`/api/assistant/permissions?session=${encodeURIComponent(sid)}`)
+export const assistantResolve = (reqId, decision) =>
+  post(`/api/assistant/permissions/${encodeURIComponent(reqId)}`, { decision })

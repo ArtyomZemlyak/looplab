@@ -36,6 +36,7 @@ from .config import Settings
 from .eventstore import EventStore, iter_jsonl
 from .models import Event
 from .projects import ProjectError, ProjectStore
+from .assistant import REPO_ROOT as _ASSISTANT_REPO_ROOT, SessionStore, run_turn as _assistant_run_turn
 from .replay import fold
 from .tasks import make_llm_client
 
@@ -226,7 +227,7 @@ from .digest import theme_rollup as _theme_rollup
 
 # run-root subdirectories that are NOT runs and must never be used as a run_id (would collide with the
 # cross-run scope-report store at <run-root>/reports/).
-_RESERVED_RUN_IDS = {"reports"}
+_RESERVED_RUN_IDS = {"reports", "assistant"}
 
 
 def _engine_alive(rd: Path) -> bool:
@@ -1703,6 +1704,320 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
             # opaque spinner while a slow boss inspects the repo (transparency, not a time cap).
             return {"status": "running", "progress": j.get("progress")}
         return {**j["result"], "status": "done"}
+
+    # ------------------------------------------------------------------ assistant (general chat agent)
+    # The evolution of Genesis: a persistent, general-purpose chat agent with its OWN sessions (not
+    # tied to a run). Read-only tools work in every mode; write/shell/git are gated by the permission
+    # MODE. Sessions live under <run_root>/assistant/ (a RESERVED id), separate from any run's chat.
+    _asst = SessionStore(root)
+
+    # --- pause-resume human-in-the-loop permission registry -------------------------------------
+    # A mutating tool in a confirm mode calls the injected approver, which registers a request here
+    # and BLOCKS the (background) turn thread on an Event; the UI polls GET .../permissions, shows a
+    # confirm-card, and POST .../permissions/{id} sets the decision + unblocks the thread. This keeps
+    # the synchronous drive_tool_loop unchanged while giving true mid-loop approval (the tool sees the
+    # REAL result). "allow_always" remembers the tool kind for the session so it stops asking.
+    _perm_lock = threading.Lock()
+    _perm_reqs: dict = {}
+    _perm_always: dict = {}
+    _asst_progress: dict = {}      # sid -> {steps:[label,…], updated} — live tool steps during a turn
+    _PERM_TIMEOUT = float(os.environ.get("LOOPLAB_ASSISTANT_PERM_TIMEOUT", "900"))
+
+    def _make_approver(sid: str):
+        def approver(action: dict) -> str:
+            kind = (action or {}).get("tool_kind", "")
+            with _perm_lock:
+                if kind and kind in _perm_always.get(sid, set()):
+                    return "allow_always"
+            req_id = secrets.token_hex(8)
+            ev = threading.Event()
+            safe_action = {k: v for k, v in (action or {}).items()
+                           if k in ("tool", "tool_kind", "label", "verb", "path", "preview", "cwd")}
+            with _perm_lock:
+                _perm_reqs[req_id] = {"id": req_id, "session": sid, "action": safe_action,
+                                      "status": "pending", "decision": None, "event": ev,
+                                      "created": time.time()}
+                if len(_perm_reqs) > 128:      # evict oldest RESOLVED beyond 128 — NEVER a pending
+                    # request (its approver thread is blocked on that entry's Event; evicting it would
+                    # 404 the resolve and hang the worker for the whole _PERM_TIMEOUT).
+                    stale = [k for k in sorted(_perm_reqs, key=lambda j: _perm_reqs[j]["created"])
+                             if _perm_reqs[k]["status"] != "pending"]
+                    for k in stale[:max(0, len(_perm_reqs) - 128)]:
+                        _perm_reqs.pop(k, None)
+            got = ev.wait(timeout=_PERM_TIMEOUT)
+            with _perm_lock:
+                req = _perm_reqs.get(req_id) or {}
+                dec = (req.get("decision") if got else "deny") or "deny"
+                req["status"] = "resolved"
+                if dec == "allow_always" and kind:
+                    _perm_always.setdefault(sid, set()).add(kind)
+            return dec
+        return approver
+
+    @app.get("/api/assistant/permissions")
+    def assistant_permissions(session: Optional[str] = None):
+        with _perm_lock:
+            out = [{"id": r["id"], "session": r["session"], "action": r["action"],
+                    "created": r["created"]}
+                   for r in _perm_reqs.values()
+                   if r["status"] == "pending" and (not session or r["session"] == session)]
+        return {"pending": out}
+
+    @app.post("/api/assistant/permissions/{req_id}")
+    async def assistant_resolve(req_id: str, request: Request):
+        body = await request.json()
+        dec = body.get("decision", "deny")
+        with _perm_lock:
+            r = _perm_reqs.get(req_id)
+            if not r:
+                raise HTTPException(404, "no such permission request")
+            r["decision"] = dec if dec in ("allow_once", "allow_always", "deny") else "deny"
+            r["event"].set()
+        return {"ok": True}
+
+    @app.get("/api/assistant/commands")
+    def assistant_commands():
+        from .assistant_commands import list_commands
+        return {"commands": list_commands()}
+
+    @app.post("/api/assistant/revert")
+    async def assistant_revert(request: Request):
+        """Undo the assistant's most recent change to a file (restore the pre-edit snapshot)."""
+        body = await request.json()
+        path = (body.get("path") or "").strip()
+        if not path:
+            raise HTTPException(400, "path is required")
+        from .write_tools import WriteTools
+        wt = WriteTools([Path.home(), _ASSISTANT_REPO_ROOT, root], mode="auto",
+                        repo_root=_ASSISTANT_REPO_ROOT, backup_dir=root / "assistant" / "backups")
+        return {"ok": True, "result": wt.revert(path)}
+
+    @app.get("/api/assistant/progress")
+    def assistant_progress(session: str):
+        with _perm_lock:
+            p = _asst_progress.get(session)
+            return {"steps": list(p["steps"]) if p else [],
+                    "todos": list(p.get("todos", [])) if p else [], "active": bool(p)}
+
+    @app.get("/api/assistant/sessions")
+    def assistant_sessions():
+        return {"sessions": _asst.list()}
+
+    @app.post("/api/assistant/sessions")
+    async def assistant_create(request: Request):
+        body = await request.json()
+        meta = _asst.create(title=(body.get("title") or ""),
+                            mode=body.get("mode") or "plan")
+        return meta
+
+    @app.get("/api/assistant/sessions/{sid}")
+    def assistant_get(sid: str):
+        try:
+            sess = _asst.get(sid)
+        except ValueError:
+            raise HTTPException(404, "no such session")
+        if sess is None:
+            raise HTTPException(404, "no such session")
+        return sess
+
+    @app.delete("/api/assistant/sessions/{sid}")
+    def assistant_delete(sid: str):
+        import shutil
+        try:
+            d = _asst._sdir(sid)
+        except ValueError:
+            raise HTTPException(404, "no such session")
+        if d.exists():
+            shutil.rmtree(d, ignore_errors=True)
+        with _perm_lock:      # drop the deleted session's in-memory grants/progress (no slow leak)
+            _perm_always.pop(sid, None)
+            _asst_progress.pop(sid, None)
+            for k in [k for k, r in _perm_reqs.items()
+                      if r.get("session") == sid and r.get("status") != "pending"]:
+                _perm_reqs.pop(k, None)
+        return {"ok": True}
+
+    @app.post("/api/assistant/sessions/{sid}/share")
+    def assistant_share(sid: str):
+        meta = _asst.update_meta(sid, shared=True)
+        if meta is None:
+            raise HTTPException(404, "no such session")
+        return {"ok": True, "url": f"#/assistant/shared/{sid}", "session": sid}
+
+    @app.get("/api/assistant/shared/{sid}")
+    def assistant_shared(sid: str):
+        try:
+            sess = _asst.get(sid)
+        except ValueError:
+            raise HTTPException(404, "no such session")
+        if sess is None or not sess["meta"].get("shared"):
+            raise HTTPException(404, "not shared")
+        return sess
+
+    @app.post("/api/assistant/sessions/{sid}/fork")
+    def assistant_fork(sid: str):
+        try:
+            child = _asst.fork(sid)
+        except ValueError:
+            raise HTTPException(404, "no such session")
+        if child is None:
+            raise HTTPException(404, "no such session")
+        return child
+
+    @app.post("/api/assistant/sessions/{sid}/message")
+    async def assistant_message(sid: str, request: Request):
+        """One assistant turn. Persists the user turn, drives the read-only tool loop as a BACKGROUND
+        JOB (so a long turn returns {status:'running', job_id} the UI awaits via jobAwait instead of
+        504ing), then persists the assistant reply. Soft-fails offline."""
+        body = await request.json()
+        instruction = (body.get("instruction") or body.get("content") or "").strip()
+        mode = body.get("mode")
+        try:
+            sess = _asst.get(sid)
+        except ValueError:
+            raise HTTPException(404, "no such session")
+        if sess is None:
+            raise HTTPException(404, "no such session")
+        if not instruction:
+            raise HTTPException(400, "empty message")
+        history = list(sess["messages"])          # BEFORE appending the new user turn
+        eff_mode = mode or sess["meta"].get("mode") or "plan"
+        _asst.append(sid, {"role": "user", "content": instruction, "mode": eff_mode})
+        s = _llm_settings()
+        try:
+            client = make_llm_client(s)
+        except Exception as e:  # noqa: BLE001 - offline / no model -> soft fail with a usable message
+            reply = f"Couldn't reach the model ({e})."
+            _asst.append(sid, {"role": "assistant", "content": reply})
+            return {"ok": False, "error": str(e), "reply": reply, "mode": eff_mode}
+
+        approver = _make_approver(sid)
+        with _perm_lock:
+            _asst_progress[sid] = {"steps": [], "updated": time.time()}
+
+        def _on_step(ev: dict) -> None:
+            with _perm_lock:
+                p = _asst_progress.setdefault(sid, {"steps": [], "todos": [], "updated": 0})
+                p["steps"] = (p["steps"] + [ev.get("label") or ev.get("tool") or "…"])[-40:]
+                p["updated"] = time.time()
+
+        def _on_todos(items: list) -> None:
+            with _perm_lock:
+                p = _asst_progress.setdefault(sid, {"steps": [], "todos": [], "updated": 0})
+                p["todos"] = items
+                p["updated"] = time.time()
+
+        def _compute() -> dict:
+            try:
+                res = _assistant_run_turn(client, root, history, instruction, eff_mode,
+                                          alive_fn=_engine_alive, settings=s, approver=approver,
+                                          on_step=_on_step, on_todos=_on_todos)
+                res["tokens"] = _client_tokens(client)
+                try:
+                    _asst.append(sid, {"role": "assistant", "content": res.get("reply", ""),
+                                       "steps": res.get("steps") or [], "applied": res.get("applied") or [],
+                                       "proposals": res.get("proposals") or [], "todos": res.get("todos") or [],
+                                       "tokens": res.get("tokens")})
+                except Exception:  # noqa: BLE001 - persistence is best-effort; still return the reply
+                    pass
+                if not history:             # first turn -> title the session from the exchange (cheap)
+                    try:
+                        title = client.complete_text([
+                            {"role": "system", "content": "Reply with a SHORT title (<= 6 words, no "
+                             "quotes) for this chat based on the user's first message."},
+                            {"role": "user", "content": instruction[:400]}]).strip().strip('"')[:60]
+                        if title:
+                            _asst.update_meta(sid, title=title)
+                    except Exception:  # noqa: BLE001 - titling is best-effort
+                        pass
+                return res
+            finally:
+                with _perm_lock:            # always drop the live-progress entry (no leak on error)
+                    _asst_progress.pop(sid, None)
+
+        return await _run_as_job(_compute)
+
+    @app.post("/api/assistant/sessions/{sid}/message_stream")
+    async def assistant_message_stream(sid: str, request: Request):
+        """Streaming variant: SSE of `token` (final-answer tokens), `step`, `todos`, then `done` (the
+        full result) — real token streaming for the Claude-Desktop feel. HITL still works: a mutating
+        action pauses the worker on the permission registry while the client polls /permissions."""
+        import queue as _queue
+        body = await request.json()
+        instruction = (body.get("instruction") or body.get("content") or "").strip()
+        mode = body.get("mode")
+        try:
+            sess = _asst.get(sid)
+        except ValueError:
+            raise HTTPException(404, "no such session")
+        if sess is None:
+            raise HTTPException(404, "no such session")
+        if not instruction:
+            raise HTTPException(400, "empty message")
+        history = list(sess["messages"])
+        eff_mode = mode or sess["meta"].get("mode") or "plan"
+        _asst.append(sid, {"role": "user", "content": instruction, "mode": eff_mode})
+        s = _llm_settings()
+        q: "_queue.Queue" = _queue.Queue()
+        try:
+            client = make_llm_client(s)
+        except Exception as e:  # noqa: BLE001 - offline -> stream a single error event
+            async def _err_gen():
+                yield f"event: error\ndata: {json.dumps(str(e))}\n\n"
+            return StreamingResponse(_err_gen(), media_type="text/event-stream")
+        approver = _make_approver(sid)
+        with _perm_lock:
+            _asst_progress[sid] = {"steps": [], "todos": [], "updated": time.time()}
+
+        def _on_step(ev):
+            with _perm_lock:
+                p = _asst_progress.setdefault(sid, {"steps": [], "todos": [], "updated": 0})
+                p["steps"] = (p["steps"] + [ev.get("label") or ev.get("tool") or "…"])[-40:]
+            q.put(("step", ev.get("label") or ev.get("tool") or "…"))
+
+        def _on_todos(items):
+            q.put(("todos", items))
+
+        def _worker():
+            try:
+                res = _assistant_run_turn(client, root, history, instruction, eff_mode,
+                                          alive_fn=_engine_alive, settings=s, approver=approver,
+                                          on_step=_on_step, on_todos=_on_todos,
+                                          reply_sink=lambda piece: q.put(("token", piece)))
+                res["tokens"] = _client_tokens(client)
+                _asst.append(sid, {"role": "assistant", "content": res.get("reply", ""),
+                                   "steps": res.get("steps") or [], "applied": res.get("applied") or [],
+                                   "proposals": res.get("proposals") or [], "todos": res.get("todos") or [],
+                                   "tokens": res.get("tokens")})
+                if not history:
+                    try:
+                        t = client.complete_text([
+                            {"role": "system", "content": "Reply with a SHORT title (<= 6 words, no "
+                             "quotes) for this chat based on the user's first message."},
+                            {"role": "user", "content": instruction[:400]}]).strip().strip('"')[:60]
+                        if t:
+                            _asst.update_meta(sid, title=t)
+                    except Exception:  # noqa: BLE001
+                        pass
+                q.put(("done", {k: res.get(k) for k in
+                                ("reply", "steps", "applied", "proposals", "todos", "refs", "tokens", "mode")}))
+            except Exception as e:  # noqa: BLE001
+                q.put(("error", str(e)))
+            finally:
+                with _perm_lock:
+                    _asst_progress.pop(sid, None)
+                q.put(("__end__", None))
+        threading.Thread(target=_worker, daemon=True).start()
+
+        async def gen():
+            while True:
+                kind, data = await anyio.to_thread.run_sync(q.get)
+                if kind == "__end__":
+                    break
+                yield f"event: {kind}\ndata: {json.dumps(data)}\n\n"
+
+        return StreamingResponse(gen(), media_type="text/event-stream",
+                                 headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
     # ------------------------------------------------------------------ LLM (chat / suggest / health)
     def _llm_settings(rd: Optional[Path] = None) -> "Settings":
