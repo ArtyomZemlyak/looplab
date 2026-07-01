@@ -1,12 +1,26 @@
 import React, { useEffect, useRef, useState } from 'react'
 import Markdown from './markdown.jsx'
-import { fmtAgo } from './util.js'
+import { fmtAgo, fmt, get } from './util.js'
 import {
   assistantSessions, assistantCreate, assistantGet, assistantDelete, assistantFork,
   assistantMessagePost, getJob, assistantPermissions, assistantResolve,
 } from './util.js'
 
 const sleep = (ms) => new Promise(r => setTimeout(r, ms))
+const RUN_MENTION = /@run:([^\s.,;:!?)]+)/g
+const runMentions = (s) => [...new Set([...(s || '').matchAll(RUN_MENTION)].map(m => m[1]))]
+
+// A live inline card for a run referenced with @run:<id> — so a running run shows up right in the chat
+// (a direct ask). Links to the run view; the dot pulses while its engine is live.
+function RunChip({ id, run }) {
+  const phase = run ? (run.phase || (run.finished ? 'finished' : 'running')) : '—'
+  return <a className="asst-runchip" href={`#/run/${encodeURIComponent(id)}`}
+    title={run ? (run.goal || id) : id}>
+    <span className={'asst-run-dot' + (run && run.engine_running ? ' live' : '')} />
+    <b>{id}</b>
+    {run && <span className="muted"> {phase}{run.best_metric != null ? ' · ' + fmt(run.best_metric) : ''}</span>}
+  </a>
+}
 
 // The general-purpose assistant — the evolution of Genesis into a persistent chat agent (like Claude
 // Desktop). P0 is read-only (inspect files + runs); write/shell/git + the permission modes below
@@ -18,9 +32,11 @@ const MODES = [
   { id: 'auto', label: 'Auto', hint: 'runs everything without asking' },
 ]
 
-// One assistant/user turn in the feed. Tool steps (what the agent read) render as a compact sub-line.
-function Turn({ m }) {
+// One assistant/user turn in the feed. Tool steps (what the agent read) render as a compact sub-line;
+// any @run:<id> mention gets a live inline run card.
+function Turn({ m, runsById }) {
   const who = m.role === 'user' ? 'you' : 'assistant'
+  const mentions = runMentions(m.content)
   return <div className={'feed-msg chat ' + m.role}>
     <div className="fm-body">
       <div className="chat-who">{who}</div>
@@ -35,6 +51,9 @@ function Turn({ m }) {
           ? <Markdown text={m.content || ''} className="chat-text" />
           : <div className="chat-text">{m.content}</div>}
       </div>
+      {mentions.length > 0 && <div className="asst-runchips">
+        {mentions.map(id => <RunChip key={id} id={id} run={runsById && runsById[id]} />)}
+      </div>}
     </div>
   </div>
 }
@@ -65,7 +84,27 @@ export default function AssistantChat({ onBack }) {
   const [mode, setMode] = useState('plan')
   const [err, setErr] = useState(null)
   const [pending, setPending] = useState([])   // live human-in-the-loop confirm requests
+  const [runs, setRuns] = useState([])          // /api/runs, for @run cards + the @-picker
   const feedRef = useRef(null)
+  const inputRef = useRef(null)
+
+  const runsById = React.useMemo(() => Object.fromEntries(runs.map(r => [r.run_id, r])), [runs])
+  useEffect(() => {
+    let alive = true
+    const load = async () => { try { const r = await get('/api/runs'); if (alive) setRuns(r || []) } catch { /* offline */ } }
+    load(); const t = setInterval(load, 5000)
+    return () => { alive = false; clearInterval(t) }
+  }, [])
+
+  // @-mention picker: when the word under the cursor starts with @, suggest runs to reference.
+  const mentionMatch = /(^|\s)@(?:run:)?([\w./-]*)$/.exec(input)
+  const mentionQuery = mentionMatch ? mentionMatch[2].toLowerCase() : null
+  const mentionRuns = mentionQuery === null ? [] :
+    runs.filter(r => r.run_id.toLowerCase().includes(mentionQuery)).slice(0, 6)
+  const pickMention = (rid) => {
+    setInput(v => v.replace(/(^|\s)@(?:run:)?[\w./-]*$/, (all, pre) => `${pre}@run:${rid} `))
+    if (inputRef.current) inputRef.current.focus()
+  }
 
   const refreshSessions = async () => {
     try { const r = await assistantSessions(); setSessions(r.sessions || []) } catch { /* offline */ }
@@ -184,7 +223,7 @@ export default function AssistantChat({ onBack }) {
             'Read the README and summarize LoopLab'].map(s =>
             <button key={s} className="gen-seed" onClick={() => send(s)}>{s}</button>)}
         </div>}
-        {msgs.map((m, i) => <Turn key={i} m={m} />)}
+        {msgs.map((m, i) => <Turn key={i} m={m} runsById={runsById} />)}
         {pending.map(req => <PermCard key={req.id} req={req} onResolve={resolvePerm} />)}
         {busy && pending.length === 0 && <div className="feed-msg chat assistant"><div className="fm-body">
           <div className="chat-who">assistant</div>
@@ -195,9 +234,15 @@ export default function AssistantChat({ onBack }) {
       {err && <div className="notice" style={{ borderColor: 'var(--fail)', color: '#ffd3d3', margin: '0 12px' }}>{err}</div>}
 
       <div className="chat-in asst-in">
-        <textarea className="text" placeholder="Message the assistant…  (Enter to send · Shift+Enter for a newline)"
+        {mentionRuns.length > 0 && <div className="asst-mention-pop">
+          {mentionRuns.map(r => <button key={r.run_id} className="asst-mention-item" onClick={() => pickMention(r.run_id)}>
+            <span className={'asst-run-dot' + (r.engine_running ? ' live' : '')} />
+            <b>{r.run_id}</b><span className="muted"> {r.phase || (r.finished ? 'finished' : 'running')}</span>
+          </button>)}
+        </div>}
+        <textarea className="text" ref={inputRef} placeholder="Message the assistant…  (@ to reference a run · Enter to send · Shift+Enter newline)"
           value={input} onChange={e => setInput(e.target.value)}
-          onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send() } }} />
+          onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey && mentionRuns.length === 0) { e.preventDefault(); send() } }} />
         <div className="toolbar" style={{ marginTop: 6 }}>
           <span className="muted" style={{ flex: 1, fontSize: 11 }}>mode: <b>{activeMode.label}</b></span>
           <button className="btn sm primary" disabled={!input.trim() || busy} onClick={() => send()}>{busy ? '…' : 'Send'}</button>

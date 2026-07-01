@@ -12,7 +12,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from fastapi.testclient import TestClient  # noqa: E402
 
-from looplab.assistant import SessionStore, run_turn, normalize_mode  # noqa: E402
+from looplab.assistant import SessionStore, run_turn, normalize_mode, expand_mentions  # noqa: E402
 from looplab.server import make_app  # noqa: E402
 
 
@@ -62,6 +62,23 @@ def test_session_store_rejects_traversal(tmp_path):
             assert False, f"expected traversal guard to reject {bad!r}"
         except ValueError:
             pass
+
+
+def test_expand_mentions(tmp_path):
+    # @run:<id> grounds on a real run; @file:<path> injects file contents; both are reported in refs.
+    rd = tmp_path / "demo"; rd.mkdir()
+    (rd / "events.jsonl").write_text(
+        '{"seq":0,"type":"run_started","data":{"run_id":"demo","task_id":"t","goal":"g","direction":"max"}}\n',
+        encoding="utf-8")
+    f = tmp_path / "note.md"; f.write_text("hello file")
+    text, refs = expand_mentions(f"look at @run:demo and @file:{f}", tmp_path,
+                                 alive_fn=lambda p: False, roots=[tmp_path])
+    assert "[@run:demo]" in text and "hello file" in text
+    kinds = {r["type"] for r in refs}
+    assert kinds == {"run", "file"}
+    # an unknown run is left as-is (no crash, no ref)
+    text2, refs2 = expand_mentions("see @run:ghost", tmp_path)
+    assert refs2 == [] and "@run:ghost" in text2
 
 
 def test_normalize_mode():

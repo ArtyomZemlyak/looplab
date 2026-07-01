@@ -15,6 +15,7 @@ pause-resume approval flow arrive in P1.
 from __future__ import annotations
 
 import json
+import re
 import secrets
 import time
 from pathlib import Path
@@ -161,6 +162,34 @@ def system_prompt(mode: str, *, repo_root: Path = REPO_ROOT) -> str:
         "the answer, call `final_answer` exactly once with your reply.")
 
 
+# @-mentions: `@run:<id>` and `@file:<path>` in the user's message are expanded (server-side, before
+# the model sees it) into grounding blocks — the OpenCode/Claude-Code pattern. The UI ALSO renders a
+# live inline card for each `@run:<id>`, so a running run shows up right in the chat.
+_MENTION = re.compile(r"@(run|file):([^\s]+)")
+
+
+def expand_mentions(text: str, run_root, *, alive_fn: Optional[Callable] = None, roots=()) -> tuple:
+    """Return (expanded_text, refs). For each @run:<id> append a run summary; for each @file:<path>
+    append the file's contents (path/secret-gated via the read scout). `refs` lists what was
+    referenced so the caller/UI can render live cards. Unknown/refused mentions are left as-is."""
+    blocks, refs = [], []
+    for m in _MENTION.finditer(text or ""):
+        kind, raw = m.group(1), m.group(2).rstrip(".,;:!?)")
+        if kind == "run":
+            from .runs_tools import RunsTools
+            summary = RunsTools(run_root, alive_fn=alive_fn)._read_run(raw, "best", 6)
+            if not summary.startswith("(no such run"):
+                blocks.append(f"[@run:{raw}]\n{summary}")
+                refs.append({"type": "run", "id": raw})
+        elif kind == "file":
+            from .reposcout import RepoScoutTools
+            body = RepoScoutTools(list(roots) or [Path.home(), REPO_ROOT, Path(run_root)])._read_file(raw)
+            blocks.append(f"[@file:{raw}]\n```\n{body}\n```")
+            refs.append({"type": "file", "path": raw})
+    expanded = text if not blocks else (text + "\n\n--- Referenced context ---\n" + "\n\n".join(blocks))
+    return expanded, refs
+
+
 def _emit_spec() -> dict:
     return {"type": "function", "function": {
         "name": "final_answer",
@@ -210,12 +239,14 @@ def run_turn(client, run_root, messages: list, instruction: str, mode: str = DEF
     trust_mode = getattr(settings, "trust_mode", "trusted_local") if settings is not None else "trusted_local"
     tools = build_tools(run_root, alive_fn=alive_fn, mode=mode, approver=approver,
                         trust_mode=trust_mode, extra_roots=extra_roots)
+    roots = [Path.home(), REPO_ROOT, Path(run_root)] + list(extra_roots)
+    grounded, refs = expand_mentions(instruction, run_root, alive_fn=alive_fn, roots=roots)
     convo = [{"role": "system", "content": system_prompt(mode)}]
     for m in messages:
         role = m.get("role")
         if role in ("user", "assistant") and m.get("content"):
             convo.append({"role": role, "content": m["content"]})
-    convo.append({"role": "user", "content": instruction})
+    convo.append({"role": "user", "content": grounded})
 
     steps: list[dict] = []
 
@@ -255,9 +286,9 @@ def run_turn(client, run_root, messages: list, instruction: str, mode: str = DEF
                                 finalize=_fin, fallback=_fb, on_step=_on_step, **opts)
     except Exception as e:  # noqa: BLE001 - surface a usable error, never crash the request
         return {"ok": False, "error": str(e), "reply": f"(assistant error: {e})",
-                "steps": steps, "applied": _collect_applied(), "mode": mode}
+                "steps": steps, "applied": _collect_applied(), "refs": refs, "mode": mode}
     return {"ok": True, "reply": reply or box.get("reply") or "(no reply)",
-            "steps": steps, "applied": _collect_applied(), "mode": mode}
+            "steps": steps, "applied": _collect_applied(), "refs": refs, "mode": mode}
 
 
 def _step_label(ev: dict) -> str:
