@@ -1833,7 +1833,8 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
                 _asst_progress.pop(sid, None)
             try:
                 _asst.append(sid, {"role": "assistant", "content": res.get("reply", ""),
-                                   "steps": res.get("steps") or [], "tokens": res.get("tokens")})
+                                   "steps": res.get("steps") or [], "applied": res.get("applied") or [],
+                                   "proposals": res.get("proposals") or [], "tokens": res.get("tokens")})
             except Exception:  # noqa: BLE001 - persistence is best-effort; still return the reply
                 pass
             return res

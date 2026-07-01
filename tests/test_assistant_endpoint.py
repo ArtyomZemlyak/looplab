@@ -126,6 +126,17 @@ def test_run_turn_write_declined(tmp_path):
     assert res["ok"] and not target.exists() and not res["applied"]
 
 
+def test_run_turn_propose_run(tmp_path):
+    spec = {"run_id": "titanic-baseline", "task": {"kind": "dataset", "goal": "predict survival",
+            "direction": "max", "data_path": "/d/train.csv"}, "settings": {"max_nodes": 20}}
+    client = _FakeChatClient([_call("propose_run", spec), _final("Proposed a titanic run.")])
+    res = run_turn(client, tmp_path, [], "start a titanic run", "plan")
+    assert res["ok"] and res["proposals"]
+    p = res["proposals"][0]
+    assert p["run_id"] == "titanic-baseline" and p["task"]["kind"] == "dataset"
+    assert p["settings"]["max_nodes"] == 20
+
+
 def test_plan_mode_has_no_write_tool(tmp_path):
     # In plan mode the mutating tools are dropped from the schema, so a write attempt is unknown.
     client = _FakeChatClient([_call("write_file", {"path": str(tmp_path / "x"), "content": "y"}),

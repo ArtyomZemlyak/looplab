@@ -1241,3 +1241,7 @@ textarea.text { min-height: 220px; font-family: ui-monospace, Consolas, monospac
 .asst-mention-item { display: flex; align-items: center; gap: 7px; width: 100%; text-align: left;
   background: transparent; border: none; color: var(--fg); font-size: 12.5px; padding: 5px 8px; border-radius: 6px; cursor: pointer; }
 .asst-mention-item:hover { background: var(--bg-1); }
+/* propose_run launch card */
+.asst-launch { border: 1px solid var(--accent-dim); border-radius: 10px; background: var(--bg-1);
+  padding: 10px 12px; align-self: flex-start; max-width: 82%; margin-top: 6px; }
+.asst-launch-h { display: flex; align-items: center; gap: 8px; font-size: 13px; }

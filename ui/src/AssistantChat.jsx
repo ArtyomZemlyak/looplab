@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react'
 import Markdown from './markdown.jsx'
-import { fmtAgo, fmt, get } from './util.js'
+import { fmtAgo, fmt, get, startRun } from './util.js'
 import {
   assistantSessions, assistantCreate, assistantGet, assistantDelete, assistantFork,
   assistantMessagePost, getJob, assistantPermissions, assistantResolve, assistantProgress,
@@ -54,6 +54,7 @@ function Turn({ m, runsById }) {
       {mentions.length > 0 && <div className="asst-runchips">
         {mentions.map(id => <RunChip key={id} id={id} run={runsById && runsById[id]} />)}
       </div>}
+      {Array.isArray(m.proposals) && m.proposals.map((sp, i) => <LaunchCard key={i} spec={sp} />)}
     </div>
   </div>
 }
@@ -71,6 +72,37 @@ function PermCard({ req, onResolve }) {
       <button className="btn xs ghost" onClick={() => onResolve(req.id, 'deny')}>Reject</button>
       <button className="btn xs" onClick={() => onResolve(req.id, 'allow_always')} title="allow this kind for the session">Always</button>
       <button className="btn xs primary" onClick={() => onResolve(req.id, 'allow_once')}>Approve</button>
+    </div>
+  </div>
+}
+
+// A launch card for a run the assistant proposed (propose_run). The user reviews and starts it via
+// the existing /api/start; the New-run flow becomes one assistant capability.
+function LaunchCard({ spec }) {
+  const [busy, setBusy] = useState(false)
+  const [err, setErr] = useState(null)
+  const [done, setDone] = useState(false)
+  const task = spec.task || {}
+  const what = spec.task_file ? spec.task_file.split(/[\\/]/).pop() : (task.kind || 'task')
+  const launch = async () => {
+    setBusy(true); setErr(null)
+    try {
+      const body = { run_id: spec.run_id, settings: spec.settings || {} }
+      if (spec.task_file) body.task_file = spec.task_file; else body.task = task
+      await startRun(body)
+      setDone(true); location.hash = `#/run/${encodeURIComponent(spec.run_id)}`
+    } catch (e) { setErr(/409/.test(e.message) ? `"${spec.run_id}" already exists — rename it` : e.message); setBusy(false) }
+  }
+  return <div className="asst-launch">
+    <div className="asst-launch-h"><span className="asst-perm-badge">new run</span><b>{spec.run_id}</b>
+      <span className="muted"> · {what}</span></div>
+    {spec.rationale && <div className="muted" style={{ fontSize: 12, margin: '4px 0' }}>{spec.rationale}</div>}
+    {spec.settings && Object.keys(spec.settings).length > 0 &&
+      <div className="asst-steps">{Object.entries(spec.settings).map(([k, v]) =>
+        <span key={k} className="asst-step">{k}={String(v)}</span>)}</div>}
+    {err && <div className="notice" style={{ borderColor: 'var(--fail)', color: '#ffd3d3', marginTop: 6 }}>{err}</div>}
+    <div className="asst-perm-actions">
+      <button className="btn xs primary" disabled={busy || done} onClick={launch}>{done ? 'started ✓' : (busy ? '…' : '▶ Start run')}</button>
     </div>
   </div>
 }
@@ -175,7 +207,7 @@ export default function AssistantChat({ onBack }) {
     try {
       const r = await runTurn(id, t)
       if (r && r.ok === false && r.error) setErr(r.error)
-      setMsgs(m => [...m, { role: 'assistant', content: (r && r.reply) || '(no reply)', steps: r && r.steps, applied: r && r.applied }])
+      setMsgs(m => [...m, { role: 'assistant', content: (r && r.reply) || '(no reply)', steps: r && r.steps, applied: r && r.applied, proposals: r && r.proposals }])
       refreshSessions()
     } catch (e) {
       setErr(e.message)

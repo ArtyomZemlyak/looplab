@@ -158,8 +158,12 @@ def system_prompt(mode: str, *, repo_root: Path = REPO_ROOT) -> str:
         f"The LoopLab source tree is at {repo_root}. You have read-only tools to inspect this machine "
         "(list_dir, read_file, find_files) and to view runs (list_runs, read_run). Ground your answers "
         "in what you actually read — inspect before you assert. When the user refers to a run, use "
-        "list_runs/read_run to find and read it. Be concise and concrete; use Markdown. When you have "
-        "the answer, call `final_answer` exactly once with your reply.")
+        "list_runs/read_run to find and read it.\n"
+        "When the user wants to START a new autonomous-ML run, call `propose_run` with a run name + an "
+        "inline `task` (pick the kind: dataset/repo/mlebench_real/…) or a catalogue `task_file`, plus "
+        "any settings (model, max_nodes) implied by their words — they get an editable launch card.\n"
+        "Be concise and concrete; use Markdown. When you have the answer, call `final_answer` exactly "
+        "once with your reply.")
 
 
 # @-mentions: `@run:<id>` and `@file:<path>` in the user's message are expanded (server-side, before
@@ -207,10 +211,10 @@ def build_tools(run_root, alive_fn: Optional[Callable] = None, mode: str = DEFAU
     the mode + the injected `approver` (which blocks on a UI confirm-card in `ask` situations)."""
     from .agent import CompositeTools
     from .reposcout import RepoScoutTools
-    from .runs_tools import RunsTools
+    from .runs_tools import RunsTools, RunLauncherTools
     mode = normalize_mode(mode)
     roots = [Path.home(), REPO_ROOT, Path(run_root)] + list(extra_roots)
-    providers = [RepoScoutTools(roots), RunsTools(run_root, alive_fn=alive_fn)]
+    providers = [RepoScoutTools(roots), RunsTools(run_root, alive_fn=alive_fn), RunLauncherTools()]
     if mode != "plan":
         from .write_tools import WriteTools
         from .shell_tools import ShellTools
@@ -277,18 +281,18 @@ def run_turn(client, run_root, messages: list, instruction: str, mode: str = DEF
     opts = loop_opts_from_settings(settings) if settings is not None else {}
     max_turns = int(getattr(settings, "agent_max_turns", 0) or 0)
     time_budget = float(getattr(settings, "agent_time_budget_s", 0.0) or 0.0)
-    def _collect_applied():
-        return [a for p in getattr(tools, "providers", []) if hasattr(p, "applied") for a in p.applied]
+    def _collect(attr):
+        return [a for p in getattr(tools, "providers", []) if hasattr(p, attr) for a in getattr(p, attr)]
 
     try:
         reply = drive_tool_loop(client, tools, convo, _emit_spec(),
                                 max_turns=max_turns, time_budget_s=time_budget,
                                 finalize=_fin, fallback=_fb, on_step=_on_step, **opts)
     except Exception as e:  # noqa: BLE001 - surface a usable error, never crash the request
-        return {"ok": False, "error": str(e), "reply": f"(assistant error: {e})",
-                "steps": steps, "applied": _collect_applied(), "refs": refs, "mode": mode}
-    return {"ok": True, "reply": reply or box.get("reply") or "(no reply)",
-            "steps": steps, "applied": _collect_applied(), "refs": refs, "mode": mode}
+        return {"ok": False, "error": str(e), "reply": f"(assistant error: {e})", "steps": steps,
+                "applied": _collect("applied"), "proposals": _collect("proposals"), "refs": refs, "mode": mode}
+    return {"ok": True, "reply": reply or box.get("reply") or "(no reply)", "steps": steps,
+            "applied": _collect("applied"), "proposals": _collect("proposals"), "refs": refs, "mode": mode}
 
 
 def _step_label(ev: dict) -> str:

@@ -181,3 +181,50 @@ class RunsTools:
         self._reader.bind_state(st, None)
         return f"run {run_id} · " + self._reader.execute(
             "read_experiment", {"node_id": nid, "trials": trials_arg})
+
+
+class RunLauncherTools:
+    """Lets the assistant PROPOSE a new run (the evolution of the Genesis 'New run' flow). It does not
+    launch anything itself — it records an editable spec that the UI shows as a launch card, and the
+    user starts it via the existing /api/start. So run-creation is one assistant capability rather than
+    a separate modal."""
+
+    def __init__(self):
+        self.proposals: list[dict] = []
+
+    def bind_state(self, state=None, parent=None) -> None:
+        return None
+
+    def specs(self) -> list[dict]:
+        return [
+            _fn("propose_run",
+                "Propose a NEW LoopLab run for the user to launch (a run name + a task + optional "
+                "settings). The user reviews an editable card and starts it — you do not launch it. "
+                "Give EITHER an inline `task` object (with a `kind`: dataset/repo/mlebench_real/…) OR a "
+                "`task_file` from the catalogue. Put model/max_nodes/etc. in `settings`.",
+                {"run_id": {"type": "string", "description": "short kebab-case name you invent"},
+                 "task": {"type": "object", "description": "inline task object with a `kind`"},
+                 "task_file": {"type": "string", "description": "a catalogue task path (alternative to task)"},
+                 "settings": {"type": "object", "description": "engine overrides, e.g. {\"llm_model\":..,\"max_nodes\":..}"},
+                 "rationale": {"type": "string"}},
+                ["run_id"]),
+        ]
+
+    def execute(self, name: str, args: dict) -> str:
+        if name != "propose_run":
+            return f"(unknown tool: {name})"
+        args = args or {}
+        rid = str(args.get("run_id") or "").strip()
+        if not rid:
+            return "(propose_run needs a run_id)"
+        task = args.get("task") if isinstance(args.get("task"), dict) else None
+        task_file = args.get("task_file") or None
+        if not task and not task_file:
+            return "(propose_run needs an inline `task` object with a kind, or a `task_file`)"
+        spec = {"run_id": rid, "task": task or {}, "task_file": task_file,
+                "settings": args.get("settings") if isinstance(args.get("settings"), dict) else {},
+                "rationale": str(args.get("rationale") or "")}
+        self.proposals.append(spec)
+        what = (task.get("kind") if task else None) or task_file or "a task"
+        return (f"(proposed run '{rid}' ({what}) — shown to the user as a launch card; they will start "
+                "it. Tell them what you proposed.)")
