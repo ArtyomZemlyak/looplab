@@ -103,7 +103,7 @@ function indexProjects(projects) {
   return { byParent, subtree }
 }
 
-export default function RunList({ onOpen, onSettings, onAssistant }) {
+export default function RunList({ onOpen, onSettings }) {
   const [runs, setRuns] = useState(null)
   const [proj, setProj] = useState({ projects: [], assignments: {} })
   const [sel, setSel] = useState(ALL)

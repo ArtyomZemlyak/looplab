@@ -117,8 +117,8 @@ function ExpNode({ data }) {
       </div>
       {isMerge
         ? (() => { const ml = '⊕ ' + mergeThemes.join(' + ')
-            return <div className="merge-line" style={{ fontSize: chipFontSize(ml) }} title={'combines: ' + mergeThemes.join(' + ')}>{ml}</div> })()
-        : chg ? <div className="change-chip" style={{ fontSize: chipFontSize(chg) }} title={chg}>{chg}</div> : null}
+            return <div className="merge-line" style={{ fontSize: chipFontSize(ml) + 'px' }} title={'combines: ' + mergeThemes.join(' + ')}>{ml}</div> })()
+        : chg ? <div className="change-chip" style={{ fontSize: chipFontSize(chg) + 'px' }} title={chg}>{chg}</div> : null}
       {/* cross-run provenance: this experiment was seeded from a sibling run — deep-link to it */}
       {node.origin?.run_id && <a className="origin-chip" href={`#/run/${node.origin.run_id}`}
         onClick={(e) => e.stopPropagation()}

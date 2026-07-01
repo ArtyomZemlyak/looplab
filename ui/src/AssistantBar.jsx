@@ -1,8 +1,9 @@
 import React, { useEffect, useRef, useState } from 'react'
 import { Turn, PermCard } from './AssistantChat.jsx'
 import {
-  CONTROL, get, fmtAgo, assistantCreate, assistantMessageStream, assistantCommands, assistantRevert,
-  assistantSessions, assistantGet, assistantDelete, assistantPermissions, assistantResolve,
+  CONTROL, get, fmtAgo, ASSISTANT_MODES as MODES, tokText, assistantCreate, assistantMessageStream,
+  assistantCommands, assistantRevert, assistantSessions, assistantGet, assistantDelete,
+  assistantPermissions, assistantResolve,
 } from './util.js'
 
 // ── ONE assistant, three flowing views: bar ⇄ drawer(right) ⇄ full ────────────────────────────────
@@ -47,14 +48,6 @@ function parseDirect(t) {
 }
 
 const firstLine = (s) => (s || '').replace(/[#*`>_-]/g, '').split('\n').map(l => l.trim()).find(Boolean) || ''
-const tokText = (tok) => (tok && tok.text != null) ? tok.text : (typeof tok === 'string' ? tok : '')
-
-const MODES = [
-  { id: 'plan', label: 'Plan', hint: 'read-only — inspect & propose (safe)' },
-  { id: 'default', label: 'Ask', hint: 'confirm every change' },
-  { id: 'acceptEdits', label: 'Auto-edit', hint: 'edits apply; commands ask' },
-  { id: 'auto', label: 'Auto', hint: 'runs everything without asking' },
-]
 
 export default function AssistantBar({ runId, hidden = false }) {
   const [input, setInput] = useState('')

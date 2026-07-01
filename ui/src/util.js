@@ -13,6 +13,18 @@ export function fmtInt(v) {
   return Number(v).toLocaleString()
 }
 
+// Assistant permission modes — shared by the docked assistant (AssistantBar) and the full-page view
+// (AssistantChat) so the list stays defined once.
+export const ASSISTANT_MODES = [
+  { id: 'plan', label: 'Plan', hint: 'read-only — inspect & propose (safe)' },
+  { id: 'default', label: 'Ask', hint: 'confirm every change' },
+  { id: 'acceptEdits', label: 'Auto-edit', hint: 'edits apply; commands ask' },
+  { id: 'auto', label: 'Auto', hint: 'runs everything without asking' },
+]
+// One streamed token's text: the SSE stream sends {text} objects, but some paths hand back a bare
+// string — one reader so both assistant surfaces decode identically.
+export const tokText = (tok) => (tok && tok.text != null) ? tok.text : (typeof tok === 'string' ? tok : '')
+
 // Dynamic font size for a node card's one-line caption ("what this node did"). The chip is a fixed
 // width (~168px) and single line, so a long param-diff / change-summary used to hit the hard ellipsis
 // almost immediately. Instead of clipping, shrink the font as the text grows so MORE of the caption

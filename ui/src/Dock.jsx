@@ -544,7 +544,7 @@ export default function Dock({ runId, live, liveSeq, viewSeq, setViewSeq, onFocu
       msgCtr.current = Math.max(msgCtr.current, turns.length)   // keep new seqs past the restored turns
     }).catch(() => {})
     return () => { alive = false }
-  }, [runId])
+  }, [runId, eventsOnly])
   // Durably append one feed turn to the run's transcript. Fire-and-forget + soft-fail: the in-memory
   // feed already shows it, so a disk hiccup must never break the chat — it just won't survive a reload.
   const persistTurn = (turn) => { appendChatTurn(runId, turn).catch(() => {}) }
