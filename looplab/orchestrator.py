@@ -417,60 +417,82 @@ class Engine:
     async def run(self) -> RunState:
         state = fold(self.store.read_all())
         if not state.run_id:
-            cfg_hash = hashlib.sha256(
-                orjson.dumps(self.task.model_dump(mode="json"))
-            ).hexdigest()[:12]
-            self.store.append(
-                "run_started",
-                {
-                    "run_id": self.run_dir.name,
-                    "task_id": self.task.id,
-                    "goal": self.task.goal,
-                    "direction": self.task.direction,
-                    "config_hash": cfg_hash,
-                    # Reproducibility (item #4): pin the editable repo(s)+data fingerprint at
-                    # start so a resume can tell whether the source workspace changed underneath.
-                    "workspace": self._workspace_fingerprint(),
-                },
-            )
-            # AGENTS.md (I18): task/contract context for coding-agent backends. Runtime line is
-            # honest about libs/hardware — capable tasks get the auto-install capability sentence,
-            # offline/synthetic tasks stay numpy+stdlib (task_runtime_caps returns None for those).
-            from .hardware import detect_gpu, task_runtime_caps
-            _md_caps = task_runtime_caps(self.task, auto_install=self._auto_install_deps,
-                                         gpu=detect_gpu() if self._auto_install_deps else None)
-            (self.run_dir / "AGENTS.md").write_text(
-                generate_agents_md(self.task, runtime_caps=_md_caps), encoding="utf-8")
-            # D4 data provenance: pin a content hash of every task asset/dataset into the run so a
-            # result is tied to the exact data (repo tasks also pin via `workspace`). Reproducibility.
-            prov = {name: hashlib.sha256(
-                        c.encode("utf-8") if isinstance(c, str) else bytes(c)).hexdigest()[:16]
-                    for name, c in (self._assets or {}).items()}
-            if prov:
-                self.store.append("data_provenance", {"assets": prov})
-            # Out-of-process host-side grading active: record WHICH scorer + how many held-out labels
-            # (NEVER the labels themselves — the log is readable). Surfaced in the Trust panel.
-            if self._host_grader is not None:
-                hg = self._host_grader
-                evt = {
-                    "scorer": hg.get("scorer", "rmse"),
-                    "predictions": self._graded_output_name()}
-                if hg.get("kind") == "mlebench":          # real MLE-bench: answers live in the
-                    evt["competition"] = hg.get("competition")   # mle-bench data dir, never here —
-                    # so there is no in-memory label list to count; n_labels=0 would mislead the Trust
-                    # panel into "nothing held out". Omit it; `competition` signals host-held answers.
-                else:
-                    evt["n_labels"] = len(hg.get("labels") or [])
-                self.store.append("host_grading", evt)
-            # Grounding pre-phase (I16): profile the dataset if the task exposes one.
-            cols = getattr(self.task, "columns", None)
-            if callable(cols):
-                self.store.append("data_profiled", {"columns": profile_dataset(cols())})
-            # Leakage-first grounding (I9): if the task exposes split/feature/target/time
-            # data and a leak is detected, refuse to run — don't produce results on
-            # leaky data.
-            if self._leakage_blocks():
-                self.store.append("run_finished", {"reason": "leakage"})
+            # SETUP PHASE (task + data), made an explicit, ONLINE-watchable phase: the pre-node work
+            # (fingerprint the workspace, hash data provenance, profile columns, write AGENTS.md) is
+            # otherwise silent between run_started and the first node. `setup_started` +/ `setup_step`
+            # + `setup_finished` events land in the activity feed live, and a `setup` span (node_id=-1)
+            # captures the trace so the UI's Setup pseudo-node shows what happened. fold ignores these
+            # (forward-compat), so they're pure observability.
+            _su_t0 = time.time()
+            self.store.append("setup_started",
+                              {"phase": "task+data", "repo": bool(self._repo_spec),
+                               "goal": (self.task.goal or "")[:200]})
+            def _su_step(step: str, **detail):
+                self.store.append("setup_step", {"step": step, **detail})
+            with self.tracer.span("setup", new_trace=True, node_id=-1) as _su:
+                def _ev(name, **kv):
+                    if _su is not None:
+                        _su.event(name, **kv)
+                cfg_hash = hashlib.sha256(
+                    orjson.dumps(self.task.model_dump(mode="json"))
+                ).hexdigest()[:12]
+                # Reproducibility (item #4): pin the editable repo(s)+data fingerprint at start so a
+                # resume can tell whether the source workspace changed underneath.
+                _ev("workspace_fingerprint")
+                wf = self._workspace_fingerprint()
+                _su_step("workspace fingerprint", sources=list(wf.keys()))
+                self.store.append(
+                    "run_started",
+                    {
+                        "run_id": self.run_dir.name,
+                        "task_id": self.task.id,
+                        "goal": self.task.goal,
+                        "direction": self.task.direction,
+                        "config_hash": cfg_hash,
+                        "workspace": wf,
+                    },
+                )
+                # AGENTS.md (I18): task/contract context for coding-agent backends. Runtime line is
+                # honest about libs/hardware — capable tasks get the auto-install capability sentence,
+                # offline/synthetic tasks stay numpy+stdlib (task_runtime_caps returns None for those).
+                from .hardware import detect_gpu, task_runtime_caps
+                _md_caps = task_runtime_caps(self.task, auto_install=self._auto_install_deps,
+                                             gpu=detect_gpu() if self._auto_install_deps else None)
+                (self.run_dir / "AGENTS.md").write_text(
+                    generate_agents_md(self.task, runtime_caps=_md_caps), encoding="utf-8")
+                _ev("agents_md"); _su_step("wrote AGENTS.md")
+                # D4 data provenance: pin a content hash of every task asset/dataset into the run so a
+                # result is tied to the exact data (repo tasks also pin via `workspace`). Reproducibility.
+                prov = {name: hashlib.sha256(
+                            c.encode("utf-8") if isinstance(c, str) else bytes(c)).hexdigest()[:16]
+                        for name, c in (self._assets or {}).items()}
+                if prov:
+                    self.store.append("data_provenance", {"assets": prov})
+                    _ev("data_provenance", n=len(prov)); _su_step("data provenance", assets=list(prov))
+                # Out-of-process host-side grading active: record WHICH scorer + how many held-out labels
+                # (NEVER the labels themselves — the log is readable). Surfaced in the Trust panel.
+                if self._host_grader is not None:
+                    hg = self._host_grader
+                    evt = {
+                        "scorer": hg.get("scorer", "rmse"),
+                        "predictions": self._graded_output_name()}
+                    if hg.get("kind") == "mlebench":          # real MLE-bench: answers live in the
+                        evt["competition"] = hg.get("competition")   # mle-bench data dir, never here —
+                        # so there is no in-memory label list to count; n_labels=0 would mislead the Trust
+                        # panel into "nothing held out". Omit it; `competition` signals host-held answers.
+                    else:
+                        evt["n_labels"] = len(hg.get("labels") or [])
+                    self.store.append("host_grading", evt)
+                # Grounding pre-phase (I16): profile the dataset if the task exposes one.
+                cols = getattr(self.task, "columns", None)
+                if callable(cols):
+                    self.store.append("data_profiled", {"columns": profile_dataset(cols())})
+                    _ev("data_profiled"); _su_step("data profiled")
+                # Leakage-first grounding (I9): if the task exposes split/feature/target/time
+                # data and a leak is detected, refuse to run — don't produce results on leaky data.
+                if self._leakage_blocks():
+                    self.store.append("run_finished", {"reason": "leakage"})
+            self.store.append("setup_finished", {"seconds": round(time.time() - _su_t0, 3)})
         elif self._repo_spec and state.workspace and not state.workspace_changed:
             # Resume (item #4): the editable workspace is copied fresh each node, so if the
             # operator's repo changed since the run started, later nodes silently evaluate a
@@ -1611,6 +1633,14 @@ class Engine:
                 seeded.append(f"data:{name}->link")
             if _h is not None:
                 _h.set_many(materialized=", ".join(seeded))
+            # Observability: surface WHAT got materialized into this node's workdir (the "data setup"
+            # step) in the activity feed — which editable trees were seeded (tracked vs full copy) and
+            # which data/reference inputs were mounted. node_id parsed from the workdir name.
+            try:
+                nid = int(str(wd.name).split("_")[-1])
+            except (ValueError, IndexError):
+                nid = None
+            self.store.append("workspace_seeded", {"node_id": nid, "materialized": seeded})
 
     def _seed_repo_tree(self, src, dst, ignore, mode: str = "auto") -> int:
         """Materialize an editable repo's *source* into the node workdir under a seeding `mode`:

@@ -62,7 +62,13 @@ class GitTools:
                 msg = str(args.get("message") or "").strip()
                 if not msg:
                     return "(git_commit needs a message)"
-                return self._mut(["git", "commit", "-m", msg], f"git commit -m {msg[:50]}")
+                # Inject a fallback committer identity so an auto-commit succeeds on a fresh box where
+                # git user.name/user.email aren't configured (otherwise git aborts with "Author identity
+                # unknown / Please tell me who you are"). A real global/local git config still wins —
+                # `-c` only sets a default for this one invocation.
+                return self._mut(["git", "-c", "user.name=LoopLab",
+                                  "-c", "user.email=looplab@localhost", "commit", "-m", msg],
+                                 f"git commit -m {msg[:50]}")
             if name == "git_checkout":
                 ref = str(args.get("ref") or "").strip()
                 if not ref:
