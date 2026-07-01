@@ -1213,3 +1213,15 @@ textarea.text { min-height: 220px; font-family: ui-monospace, Consolas, monospac
 .asst-steps { display: flex; flex-wrap: wrap; gap: 4px; margin-bottom: 4px; }
 .asst-step { font-size: 10.5px; color: var(--fg-mut); background: var(--bg-1); border: 1px solid var(--line);
   border-radius: 6px; padding: 1px 7px; }
+.asst-step.done { color: var(--best); border-color: color-mix(in srgb, var(--best) 40%, var(--line)); }
+/* human-in-the-loop confirm card */
+.asst-perm { border: 1px solid var(--accent-dim); border-radius: 10px; background: var(--bg-1); padding: 10px 12px;
+  align-self: flex-start; max-width: 82%; }
+.asst-perm-h { display: flex; align-items: center; gap: 8px; font-size: 13px; }
+.asst-perm-badge { font-size: 10px; text-transform: uppercase; letter-spacing: .6px; color: #07101c;
+  background: var(--accent); border-radius: 5px; padding: 1px 6px; font-weight: 700; }
+.asst-perm-pre { margin: 8px 0 0; max-height: 220px; overflow: auto; background: var(--bg-0);
+  border: 1px solid var(--line); border-radius: 7px; padding: 8px; font-family: ui-monospace, Consolas, monospace;
+  font-size: 11.5px; line-height: 1.4; white-space: pre; tab-size: 4; }
+.asst-perm-pre.diff { white-space: pre-wrap; }
+.asst-perm-actions { display: flex; gap: 6px; justify-content: flex-end; margin-top: 8px; }

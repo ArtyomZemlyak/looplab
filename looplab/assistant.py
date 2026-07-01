@@ -170,25 +170,46 @@ def _emit_spec() -> dict:
                        "properties": {"reply": {"type": "string"}}, "required": ["reply"]}}}
 
 
-def build_read_tools(run_root, alive_fn: Optional[Callable] = None, *, extra_roots=()):
-    """The read-only toolset available in every mode: filesystem scout + cross-run introspection."""
+def build_tools(run_root, alive_fn: Optional[Callable] = None, mode: str = DEFAULT_MODE, *,
+                approver: Optional[Callable] = None, trust_mode: str = "trusted_local", extra_roots=()):
+    """The assistant's toolset. Read tools (filesystem scout + cross-run introspection) are present in
+    EVERY mode; the mutating write/shell/git providers are added only when the mode allows mutation
+    (plan is read-only), mirroring "deny drops the tool from the schema". Each mutating provider gets
+    the mode + the injected `approver` (which blocks on a UI confirm-card in `ask` situations)."""
     from .agent import CompositeTools
     from .reposcout import RepoScoutTools
     from .runs_tools import RunsTools
+    mode = normalize_mode(mode)
     roots = [Path.home(), REPO_ROOT, Path(run_root)] + list(extra_roots)
-    return CompositeTools([RepoScoutTools(roots), RunsTools(run_root, alive_fn=alive_fn)])
+    providers = [RepoScoutTools(roots), RunsTools(run_root, alive_fn=alive_fn)]
+    if mode != "plan":
+        from .write_tools import WriteTools
+        from .shell_tools import ShellTools
+        from .git_tools import GitTools
+        sh = ShellTools(roots, mode=mode, trust_mode=trust_mode, approver=approver)
+        providers += [WriteTools(roots, mode=mode, approver=approver, repo_root=REPO_ROOT),
+                      sh, GitTools(sh, cwd=REPO_ROOT)]
+    return CompositeTools(providers)
+
+
+# Back-compat: the read-only toolset (P0 callers / tests).
+def build_read_tools(run_root, alive_fn: Optional[Callable] = None, *, extra_roots=()):
+    return build_tools(run_root, alive_fn, "plan", extra_roots=extra_roots)
 
 
 def run_turn(client, run_root, messages: list, instruction: str, mode: str = DEFAULT_MODE, *,
              alive_fn: Optional[Callable] = None, settings=None, on_step: Optional[Callable] = None,
-             extra_roots=()) -> dict:
-    """Run ONE assistant turn: drive the shared tool loop over the read-only (P0) toolset and return
-    a response dict {ok, reply, steps, mode}. `messages` is the prior conversation (role/content);
-    `instruction` is the new user message. Pure orchestration — the caller injects the LLM client,
-    the run-liveness probe and Settings (so it is unit-testable with a scripted fake client)."""
+             approver: Optional[Callable] = None, extra_roots=()) -> dict:
+    """Run ONE assistant turn: drive the shared tool loop over the mode's toolset and return a
+    response dict {ok, reply, steps, applied, mode}. `messages` is the prior conversation
+    (role/content); `instruction` is the new user message. Pure orchestration — the caller injects the
+    LLM client, the run-liveness probe, Settings and the `approver` (so it is unit-testable with a
+    scripted fake client + a stub approver)."""
     from .agent import drive_tool_loop, loop_opts_from_settings
     mode = normalize_mode(mode)
-    tools = build_read_tools(run_root, alive_fn=alive_fn, extra_roots=extra_roots)
+    trust_mode = getattr(settings, "trust_mode", "trusted_local") if settings is not None else "trusted_local"
+    tools = build_tools(run_root, alive_fn=alive_fn, mode=mode, approver=approver,
+                        trust_mode=trust_mode, extra_roots=extra_roots)
     convo = [{"role": "system", "content": system_prompt(mode)}]
     for m in messages:
         role = m.get("role")
@@ -225,15 +246,18 @@ def run_turn(client, run_root, messages: list, instruction: str, mode: str = DEF
     opts = loop_opts_from_settings(settings) if settings is not None else {}
     max_turns = int(getattr(settings, "agent_max_turns", 0) or 0)
     time_budget = float(getattr(settings, "agent_time_budget_s", 0.0) or 0.0)
+    def _collect_applied():
+        return [a for p in getattr(tools, "providers", []) if hasattr(p, "applied") for a in p.applied]
+
     try:
         reply = drive_tool_loop(client, tools, convo, _emit_spec(),
                                 max_turns=max_turns, time_budget_s=time_budget,
                                 finalize=_fin, fallback=_fb, on_step=_on_step, **opts)
     except Exception as e:  # noqa: BLE001 - surface a usable error, never crash the request
         return {"ok": False, "error": str(e), "reply": f"(assistant error: {e})",
-                "steps": steps, "mode": mode}
+                "steps": steps, "applied": _collect_applied(), "mode": mode}
     return {"ok": True, "reply": reply or box.get("reply") or "(no reply)",
-            "steps": steps, "mode": mode}
+            "steps": steps, "applied": _collect_applied(), "mode": mode}
 
 
 def _step_label(ev: dict) -> str:

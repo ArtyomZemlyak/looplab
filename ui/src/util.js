@@ -589,9 +589,13 @@ export const assistantCreate = (title = '', mode = 'plan') => post('/api/assista
 export const assistantGet = (sid) => get(`/api/assistant/sessions/${encodeURIComponent(sid)}`)
 export const assistantDelete = (sid) => send(`/api/assistant/sessions/${encodeURIComponent(sid)}`, 'DELETE')
 export const assistantFork = (sid) => post(`/api/assistant/sessions/${encodeURIComponent(sid)}/fork`, {})
-// Send one message; the turn runs as a background job (so a long turn can't 504 behind a proxy), so
-// await it to completion via jobAwait. Returns {ok, reply, steps, tokens, mode}.
-export async function assistantMessage(sid, instruction, mode) {
-  const resp = await post(`/api/assistant/sessions/${encodeURIComponent(sid)}/message`, { instruction, mode })
-  return jobAwait(resp)
-}
+// POST one message; the turn runs as a background job. Returns either the inline result (fast turn) or
+// {status:'running', job_id} the caller awaits — while ALSO polling permissions so a mutating action
+// that pauses the turn can be approved mid-flight (see AssistantChat's runTurn).
+export const assistantMessagePost = (sid, instruction, mode) =>
+  post(`/api/assistant/sessions/${encodeURIComponent(sid)}/message`, { instruction, mode })
+export const getJob = (jobId) => get(`/api/jobs/${encodeURIComponent(jobId)}`)
+// Pending human-in-the-loop confirm requests for a session, and resolving one.
+export const assistantPermissions = (sid) => get(`/api/assistant/permissions?session=${encodeURIComponent(sid)}`)
+export const assistantResolve = (reqId, decision) =>
+  post(`/api/assistant/permissions/${encodeURIComponent(reqId)}`, { decision })

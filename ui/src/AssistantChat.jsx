@@ -2,8 +2,11 @@ import React, { useEffect, useRef, useState } from 'react'
 import Markdown from './markdown.jsx'
 import { fmtAgo } from './util.js'
 import {
-  assistantSessions, assistantCreate, assistantGet, assistantDelete, assistantFork, assistantMessage,
+  assistantSessions, assistantCreate, assistantGet, assistantDelete, assistantFork,
+  assistantMessagePost, getJob, assistantPermissions, assistantResolve,
 } from './util.js'
+
+const sleep = (ms) => new Promise(r => setTimeout(r, ms))
 
 // The general-purpose assistant — the evolution of Genesis into a persistent chat agent (like Claude
 // Desktop). P0 is read-only (inspect files + runs); write/shell/git + the permission modes below
@@ -24,11 +27,31 @@ function Turn({ m }) {
       {m.role === 'assistant' && Array.isArray(m.steps) && m.steps.length > 0 &&
         <div className="asst-steps">{m.steps.map((s, i) =>
           <span key={i} className="asst-step">{s.label || s.tool}</span>)}</div>}
+      {m.role === 'assistant' && Array.isArray(m.applied) && m.applied.length > 0 &&
+        <div className="asst-steps">{m.applied.map((a, i) =>
+          <span key={i} className="asst-step done">✓ {a.label || a.tool}</span>)}</div>}
       <div className="chat-bubble">
         {m.role === 'assistant'
           ? <Markdown text={m.content || ''} className="chat-text" />
           : <div className="chat-text">{m.content}</div>}
       </div>
+    </div>
+  </div>
+}
+
+// A human-in-the-loop confirm card: the turn paused to ask before a mutating action. Approve/Reject
+// resolves it server-side and the turn resumes.
+function PermCard({ req, onResolve }) {
+  const a = req.action || {}
+  const isDiff = a.tool === 'write_file' || a.tool === 'edit_file' || a.tool === 'apply_patch'
+  return <div className="asst-perm">
+    <div className="asst-perm-h"><span className="asst-perm-badge">approve?</span>
+      <b>{a.label || a.tool}</b>{a.cwd && <span className="muted"> · {a.cwd}</span>}</div>
+    {a.preview && <pre className={'asst-perm-pre' + (isDiff ? ' diff' : '')}>{a.preview}</pre>}
+    <div className="asst-perm-actions">
+      <button className="btn xs ghost" onClick={() => onResolve(req.id, 'deny')}>Reject</button>
+      <button className="btn xs" onClick={() => onResolve(req.id, 'allow_always')} title="allow this kind for the session">Always</button>
+      <button className="btn xs primary" onClick={() => onResolve(req.id, 'allow_once')}>Approve</button>
     </div>
   </div>
 }
@@ -41,6 +64,7 @@ export default function AssistantChat({ onBack }) {
   const [busy, setBusy] = useState(false)
   const [mode, setMode] = useState('plan')
   const [err, setErr] = useState(null)
+  const [pending, setPending] = useState([])   // live human-in-the-loop confirm requests
   const feedRef = useRef(null)
 
   const refreshSessions = async () => {
@@ -74,6 +98,28 @@ export default function AssistantChat({ onBack }) {
     try { const c = await assistantFork(sid); await refreshSessions(); openSession(c.id) } catch (e) { setErr(e.message) }
   }
 
+  const resolvePerm = async (reqId, decision) => {
+    setPending(p => p.filter(x => x.id !== reqId))     // optimistic — the turn resumes server-side
+    try { await assistantResolve(reqId, decision) } catch (e) { setErr(e.message) }
+  }
+
+  // Drive one turn: POST, then poll the job to completion while ALSO polling for permission requests
+  // (a mutating action pauses the turn until the user approves a confirm-card).
+  const runTurn = async (id, text) => {
+    const resp = await assistantMessagePost(id, text, mode)
+    if (!resp || resp.status !== 'running' || !resp.job_id) return resp   // fast inline result
+    const deadline = Date.now() + 20 * 60 * 1000
+    while (Date.now() < deadline) {
+      await sleep(1000)
+      try { const p = await assistantPermissions(id); setPending(p.pending || []) } catch { /* transient */ }
+      let j
+      try { j = await getJob(resp.job_id) } catch { continue }
+      if (j.status === 'done') { setPending([]); return j }
+      if (j.status === 'unknown') return { ok: false, error: 'the turn expired — try again' }
+    }
+    return { ok: false, error: 'timed out' }
+  }
+
   const send = async (text) => {
     const t = (text ?? input).trim()
     if (!t || busy) return
@@ -86,14 +132,14 @@ export default function AssistantChat({ onBack }) {
     setMsgs(m => [...m, { role: 'user', content: t }])
     setBusy(true)
     try {
-      const r = await assistantMessage(id, t, mode)
+      const r = await runTurn(id, t)
       if (r && r.ok === false && r.error) setErr(r.error)
-      setMsgs(m => [...m, { role: 'assistant', content: (r && r.reply) || '(no reply)', steps: r && r.steps }])
+      setMsgs(m => [...m, { role: 'assistant', content: (r && r.reply) || '(no reply)', steps: r && r.steps, applied: r && r.applied }])
       refreshSessions()
     } catch (e) {
       setErr(e.message)
       setMsgs(m => [...m, { role: 'assistant', content: 'Could not reach the assistant.' }])
-    } finally { setBusy(false) }
+    } finally { setBusy(false); setPending([]) }
   }
 
   const activeMode = MODES.find(x => x.id === mode) || MODES[0]
@@ -139,7 +185,8 @@ export default function AssistantChat({ onBack }) {
             <button key={s} className="gen-seed" onClick={() => send(s)}>{s}</button>)}
         </div>}
         {msgs.map((m, i) => <Turn key={i} m={m} />)}
-        {busy && <div className="feed-msg chat assistant"><div className="fm-body">
+        {pending.map(req => <PermCard key={req.id} req={req} onResolve={resolvePerm} />)}
+        {busy && pending.length === 0 && <div className="feed-msg chat assistant"><div className="fm-body">
           <div className="chat-who">assistant</div>
           <div className="chat-bubble"><div className="chat-text muted">… thinking</div></div>
         </div></div>}

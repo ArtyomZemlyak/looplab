@@ -1675,9 +1675,68 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
 
     # ------------------------------------------------------------------ assistant (general chat agent)
     # The evolution of Genesis: a persistent, general-purpose chat agent with its OWN sessions (not
-    # tied to a run). P0 is read-only (inspect files + runs); write/shell/git + permission modes land
-    # in P1. Sessions live under <run_root>/assistant/ (a RESERVED id), separate from any run's chat.
+    # tied to a run). Read-only tools work in every mode; write/shell/git are gated by the permission
+    # MODE. Sessions live under <run_root>/assistant/ (a RESERVED id), separate from any run's chat.
     _asst = SessionStore(root)
+
+    # --- pause-resume human-in-the-loop permission registry -------------------------------------
+    # A mutating tool in a confirm mode calls the injected approver, which registers a request here
+    # and BLOCKS the (background) turn thread on an Event; the UI polls GET .../permissions, shows a
+    # confirm-card, and POST .../permissions/{id} sets the decision + unblocks the thread. This keeps
+    # the synchronous drive_tool_loop unchanged while giving true mid-loop approval (the tool sees the
+    # REAL result). "allow_always" remembers the tool kind for the session so it stops asking.
+    _perm_lock = threading.Lock()
+    _perm_reqs: dict = {}
+    _perm_always: dict = {}
+    _PERM_TIMEOUT = float(os.environ.get("LOOPLAB_ASSISTANT_PERM_TIMEOUT", "900"))
+
+    def _make_approver(sid: str):
+        def approver(action: dict) -> str:
+            kind = (action or {}).get("tool_kind", "")
+            with _perm_lock:
+                if kind and kind in _perm_always.get(sid, set()):
+                    return "allow_always"
+            req_id = secrets.token_hex(8)
+            ev = threading.Event()
+            safe_action = {k: v for k, v in (action or {}).items()
+                           if k in ("tool", "tool_kind", "label", "verb", "path", "preview", "cwd")}
+            with _perm_lock:
+                _perm_reqs[req_id] = {"id": req_id, "session": sid, "action": safe_action,
+                                      "status": "pending", "decision": None, "event": ev,
+                                      "created": time.time()}
+                if len(_perm_reqs) > 128:      # evict oldest beyond the most-recent 128
+                    for k in sorted(_perm_reqs, key=lambda j: _perm_reqs[j]["created"])[:-128]:
+                        _perm_reqs.pop(k, None)
+            got = ev.wait(timeout=_PERM_TIMEOUT)
+            with _perm_lock:
+                req = _perm_reqs.get(req_id) or {}
+                dec = (req.get("decision") if got else "deny") or "deny"
+                req["status"] = "resolved"
+                if dec == "allow_always" and kind:
+                    _perm_always.setdefault(sid, set()).add(kind)
+            return dec
+        return approver
+
+    @app.get("/api/assistant/permissions")
+    def assistant_permissions(session: Optional[str] = None):
+        with _perm_lock:
+            out = [{"id": r["id"], "session": r["session"], "action": r["action"],
+                    "created": r["created"]}
+                   for r in _perm_reqs.values()
+                   if r["status"] == "pending" and (not session or r["session"] == session)]
+        return {"pending": out}
+
+    @app.post("/api/assistant/permissions/{req_id}")
+    async def assistant_resolve(req_id: str, request: Request):
+        body = await request.json()
+        dec = body.get("decision", "deny")
+        with _perm_lock:
+            r = _perm_reqs.get(req_id)
+            if not r:
+                raise HTTPException(404, "no such permission request")
+            r["decision"] = dec if dec in ("allow_once", "allow_always", "deny") else "deny"
+            r["event"].set()
+        return {"ok": True}
 
     @app.get("/api/assistant/sessions")
     def assistant_sessions():
@@ -1748,9 +1807,11 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
             _asst.append(sid, {"role": "assistant", "content": reply})
             return {"ok": False, "error": str(e), "reply": reply, "mode": eff_mode}
 
+        approver = _make_approver(sid)
+
         def _compute() -> dict:
             res = _assistant_run_turn(client, root, history, instruction, eff_mode,
-                                      alive_fn=_engine_alive, settings=s)
+                                      alive_fn=_engine_alive, settings=s, approver=approver)
             res["tokens"] = _client_tokens(client)
             try:
                 _asst.append(sid, {"role": "assistant", "content": res.get("reply", ""),

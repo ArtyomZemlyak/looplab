@@ -94,6 +94,31 @@ def test_run_turn_soft_fails_on_client_error(tmp_path):
     assert res["ok"] is False and "no endpoint" in res["error"]
 
 
+def test_run_turn_write_with_approval(tmp_path):
+    target = tmp_path / "new.txt"
+    client = _FakeChatClient([_call("write_file", {"path": str(target), "content": "hi"}), _final("done")])
+    res = run_turn(client, tmp_path, [], "make a file", "default", approver=lambda a: "allow_once")
+    assert res["ok"] and target.read_text() == "hi"
+    assert res["applied"] and res["applied"][0]["tool"] == "write_file"
+
+
+def test_run_turn_write_declined(tmp_path):
+    target = tmp_path / "no.txt"
+    client = _FakeChatClient([_call("write_file", {"path": str(target), "content": "x"}), _final("ok")])
+    res = run_turn(client, tmp_path, [], "make a file", "default", approver=lambda a: "deny")
+    assert res["ok"] and not target.exists() and not res["applied"]
+
+
+def test_plan_mode_has_no_write_tool(tmp_path):
+    # In plan mode the mutating tools are dropped from the schema, so a write attempt is unknown.
+    client = _FakeChatClient([_call("write_file", {"path": str(tmp_path / "x"), "content": "y"}),
+                              _final("can't in plan mode")])
+    res = run_turn(client, tmp_path, [], "write x", "plan")
+    assert res["ok"] and not (tmp_path / "x").exists()
+    tool_msgs = [m for turn in client.turns for m in turn if m.get("role") == "tool"]
+    assert any("unknown tool" in (m.get("content") or "") for m in tool_msgs)
+
+
 # --------------------------------------------------------------------------- HTTP routes
 def test_assistant_endpoints_roundtrip(tmp_path, monkeypatch):
     monkeypatch.setattr("looplab.server.make_llm_client",
@@ -119,6 +144,42 @@ def test_assistant_endpoints_roundtrip(tmp_path, monkeypatch):
     assert child["parent"] == sid
     assert client.delete(f"/api/assistant/sessions/{sid}").json()["ok"]
     assert client.get(f"/api/assistant/sessions/{sid}").status_code == 404
+
+
+def test_assistant_permission_pause_resume(tmp_path, monkeypatch):
+    """default mode: a write blocks on a permission request; resolving it unblocks the turn thread and
+    the file is written (true mid-loop human-in-the-loop, not an 'assume applied' buffer)."""
+    import time
+    monkeypatch.setenv("LOOPLAB_JOB_INLINE_WAIT", "0.3")     # return {running} fast; the turn blocks on approval
+    target = tmp_path / "made.txt"
+    monkeypatch.setattr("looplab.server.make_llm_client",
+                        lambda s: _FakeChatClient([_call("write_file", {"path": str(target), "content": "yo"}),
+                                                   _final("wrote it")]))
+    client = TestClient(make_app(tmp_path))
+    sid = client.post("/api/assistant/sessions", json={"mode": "default"}).json()["id"]
+    resp = client.post(f"/api/assistant/sessions/{sid}/message",
+                       json={"instruction": "make it", "mode": "default"}).json()
+    assert resp.get("status") == "running" and resp.get("job_id")
+
+    # a permission request appears; approve it
+    req = None
+    for _ in range(100):
+        pend = client.get(f"/api/assistant/permissions?session={sid}").json()["pending"]
+        if pend:
+            req = pend[0]; break
+        time.sleep(0.1)
+    assert req and req["action"]["tool"] == "write_file"
+    assert client.post(f"/api/assistant/permissions/{req['id']}", json={"decision": "allow_once"}).json()["ok"]
+
+    # the job now completes and the file is on disk
+    result = None
+    for _ in range(100):
+        j = client.get(f"/api/jobs/{resp['job_id']}").json()
+        if j.get("status") == "done":
+            result = j; break        # GET /api/jobs spreads the result at top level
+        time.sleep(0.1)
+    assert result and result["reply"] == "wrote it"
+    assert target.read_text() == "yo"
 
 
 def test_assistant_message_soft_fails_offline(tmp_path, monkeypatch):
