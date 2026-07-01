@@ -598,6 +598,7 @@ export const getJob = (jobId) => get(`/api/jobs/${encodeURIComponent(jobId)}`)
 // Live tool steps while a turn runs (so the UI shows "reading X…" instead of an opaque spinner).
 export const assistantProgress = (sid) => get(`/api/assistant/progress?session=${encodeURIComponent(sid)}`)
 export const assistantCommands = () => get('/api/assistant/commands')
+export const assistantRevert = (path) => post('/api/assistant/revert', { path })
 export const assistantShare = (sid) => post(`/api/assistant/sessions/${encodeURIComponent(sid)}/share`, {})
 // Pending human-in-the-loop confirm requests for a session, and resolving one.
 export const assistantPermissions = (sid) => get(`/api/assistant/permissions?session=${encodeURIComponent(sid)}`)

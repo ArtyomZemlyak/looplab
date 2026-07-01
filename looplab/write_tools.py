@@ -13,6 +13,8 @@ shared `agent.drive_tool_loop` via `CompositeTools`. Every mutation is:
 from __future__ import annotations
 
 import difflib
+import hashlib
+import json
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -24,6 +26,51 @@ from .perm_modes import DEFAULT_PROTECT, decide, default_approver
 _MAX_PREVIEW = 4000
 
 
+class FileBackups:
+    """Pre-mutation snapshots so a file edit can be reverted (undo). Each mutated path gets a stack of
+    `.bak` snapshots under `<dir>/<hash(path)>/`; `revert` restores (or deletes, if the file was newly
+    created) the most recent one and pops it. Best-effort — a backup failure never blocks the edit."""
+
+    def __init__(self, directory):
+        self.dir = Path(directory)
+
+    def _key(self, path) -> Path:
+        return self.dir / hashlib.sha1(str(Path(path).resolve()).encode()).hexdigest()[:16]
+
+    def save(self, path) -> None:
+        try:
+            p = Path(path)
+            d = self._key(p)
+            d.mkdir(parents=True, exist_ok=True)
+            n = len(list(d.glob("*.bak")))
+            (d / f"{n}.bak").write_bytes(p.read_bytes() if p.is_file() else b"")
+            (d / f"{n}.meta").write_text(json.dumps({"path": str(p), "existed": p.is_file()}))
+        except OSError:
+            pass
+
+    def revert(self, path) -> bool:
+        p = Path(path)
+        d = self._key(p)
+        if not d.is_dir():
+            return False
+        baks = sorted(d.glob("*.bak"), key=lambda x: int(x.stem))
+        if not baks:
+            return False
+        last = baks[-1]
+        try:
+            meta = json.loads((d / f"{last.stem}.meta").read_text())
+        except (OSError, ValueError):
+            meta = {"existed": True}
+        if meta.get("existed"):
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_bytes(last.read_bytes())
+        elif p.exists():
+            p.unlink()
+        last.unlink(missing_ok=True)
+        (d / f"{last.stem}.meta").unlink(missing_ok=True)
+        return True
+
+
 def _diff(path: str, old: str, new: str) -> str:
     d = difflib.unified_diff(old.splitlines(keepends=True), new.splitlines(keepends=True),
                              fromfile=f"a/{path}", tofile=f"b/{path}")
@@ -32,13 +79,14 @@ def _diff(path: str, old: str, new: str) -> str:
 
 class WriteTools:
     def __init__(self, roots, mode: str = "plan", protect: Optional[list] = None,
-                 approver: Optional[Callable[[dict], str]] = None, repo_root=None):
+                 approver: Optional[Callable[[dict], str]] = None, repo_root=None, backup_dir=None):
         self._roots = _pathsafe.resolve_roots(roots)
         self.mode = mode
         self.protect = list(protect if protect is not None else DEFAULT_PROTECT)
         self.approver = approver or default_approver
         self.repo_root = Path(repo_root).resolve() if repo_root else (self._roots[0] if self._roots else Path.cwd())
         self.applied: list[dict] = []
+        self.backups = FileBackups(backup_dir) if backup_dir else None
 
     def bind_state(self, state=None, parent=None) -> None:
         return None
@@ -63,6 +111,9 @@ class WriteTools:
             _fn_spec("delete_file",
                      "Delete a file (within the allowed roots; refused for protected/secret paths).",
                      {"path": {"type": "string"}}, ["path"]),
+            _fn_spec("revert_file",
+                     "Undo your most recent change to a file (restore the pre-edit snapshot).",
+                     {"path": {"type": "string"}}, ["path"]),
         ]
 
     def execute(self, name: str, args: dict) -> str:
@@ -76,6 +127,8 @@ class WriteTools:
                 return self._patch(args.get("diff", ""))
             if name == "delete_file":
                 return self._delete(args.get("path", ""))
+            if name == "revert_file":
+                return self.revert(args.get("path", ""))
             return f"(unknown tool: {name})"
         except Exception as e:  # noqa: BLE001 - tools are advisory; never crash the loop
             return f"(error: {e})"
@@ -127,10 +180,12 @@ class WriteTools:
         old = p.read_text(encoding="utf-8", errors="replace") if p.exists() else ""
         preview = _diff(rel, old, content)
         action = {"tool": "write_file", "tool_kind": "write", "path": rel, "verb": f"write {rel}",
-                  "label": f"{'overwrite' if old else 'create'} {rel}", "preview": preview}
+                  "label": f"{'overwrite' if old else 'create'} {rel}", "preview": preview, "abs_path": str(p)}
         refusal = self._authorize("write", action)
         if refusal:
             return refusal
+        if self.backups:
+            self.backups.save(p)
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(content, encoding="utf-8")
         self.applied.append(action)
@@ -153,10 +208,12 @@ class WriteTools:
         new_text = text.replace(old_str, new_str, 1)
         preview = _diff(rel, text, new_text)
         action = {"tool": "edit_file", "tool_kind": "write", "path": rel, "verb": f"edit {rel}",
-                  "label": f"edit {rel}", "preview": preview}
+                  "label": f"edit {rel}", "preview": preview, "abs_path": str(p)}
         refusal = self._authorize("write", action)
         if refusal:
             return refusal
+        if self.backups:
+            self.backups.save(p)
         p.write_text(new_text, encoding="utf-8")
         self.applied.append(action)
         return f"(edited {rel})"
@@ -176,6 +233,9 @@ class WriteTools:
         refusal = self._authorize("write", action)
         if refusal:
             return refusal
+        if self.backups:
+            for rp in g["paths"]:
+                self.backups.save(self.repo_root / rp)
         res = _apply_patch(diff, str(self.repo_root), allow, self.protect)
         if not res.get("applied"):
             return f"(patch failed: {res.get('error', 'unknown')})"
@@ -191,10 +251,21 @@ class WriteTools:
         if p.is_dir():
             return f"(refused: {rel} is a directory — delete files, not directories)"
         action = {"tool": "delete_file", "tool_kind": "write", "path": rel, "verb": f"delete {rel}",
-                  "label": f"delete {rel}", "preview": f"delete {rel}"}
+                  "label": f"delete {rel}", "preview": f"delete {rel}", "abs_path": str(p)}
         refusal = self._authorize("write", action)
         if refusal:
             return refusal
+        if self.backups:
+            self.backups.save(p)
         p.unlink()
         self.applied.append(action)
         return f"(deleted {rel})"
+
+    def revert(self, path: str) -> str:
+        p, rel, err = self._check(path)
+        if err:
+            return err
+        if not self.backups:
+            return "(no snapshots available to revert)"
+        ok = self.backups.revert(p)
+        return f"(reverted {rel})" if ok else f"(no snapshot to revert for {rel})"

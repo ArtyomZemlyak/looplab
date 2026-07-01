@@ -4,7 +4,7 @@ import { fmtAgo, fmt, get, startRun } from './util.js'
 import {
   assistantSessions, assistantCreate, assistantGet, assistantDelete, assistantFork,
   assistantMessagePost, getJob, assistantPermissions, assistantResolve, assistantProgress,
-  assistantCommands, assistantShare,
+  assistantCommands, assistantShare, assistantRevert,
 } from './util.js'
 
 const sleep = (ms) => new Promise(r => setTimeout(r, ms))
@@ -35,7 +35,7 @@ const MODES = [
 
 // One assistant/user turn in the feed. Tool steps (what the agent read) render as a compact sub-line;
 // any @run:<id> mention gets a live inline run card.
-export function Turn({ m, runsById }) {
+export function Turn({ m, runsById, onRevert }) {
   const who = m.role === 'user' ? 'you' : 'assistant'
   const mentions = runMentions(m.content)
   return <div className={'feed-msg chat ' + m.role}>
@@ -46,7 +46,10 @@ export function Turn({ m, runsById }) {
           <span key={i} className="asst-step">{s.label || s.tool}</span>)}</div>}
       {m.role === 'assistant' && Array.isArray(m.applied) && m.applied.length > 0 &&
         <div className="asst-steps">{m.applied.map((a, i) =>
-          <span key={i} className="asst-step done">✓ {a.label || a.tool}</span>)}</div>}
+          <span key={i} className="asst-step done">✓ {a.label || a.tool}
+            {onRevert && a.abs_path && <button className="asst-undo" title="undo this change"
+              onClick={() => onRevert(a.abs_path)}>undo</button>}</span>)}</div>}
+      {m.role === 'assistant' && <Todos items={m.todos} />}
       <div className="chat-bubble">
         {m.role === 'assistant'
           ? <Markdown text={m.content || ''} className="chat-text" />
@@ -58,6 +61,16 @@ export function Turn({ m, runsById }) {
       {Array.isArray(m.proposals) && m.proposals.map((sp, i) => <LaunchCard key={i} spec={sp} />)}
     </div>
   </div>
+}
+
+// The assistant's live TODO list for a multi-step task.
+function Todos({ items }) {
+  if (!items || !items.length) return null
+  const mark = (s) => s === 'completed' ? '✓' : (s === 'in_progress' ? '▸' : '○')
+  return <div className="asst-todos">{items.map((t, i) =>
+    <div key={i} className={'asst-todo ' + (t.status || 'pending')}>
+      <span className="asst-todo-box">{mark(t.status)}</span><span>{t.content}</span>
+    </div>)}</div>
 }
 
 // A human-in-the-loop confirm card: the turn paused to ask before a mutating action. Approve/Reject
@@ -118,6 +131,7 @@ export default function AssistantChat({ onBack }) {
   const [err, setErr] = useState(null)
   const [pending, setPending] = useState([])   // live human-in-the-loop confirm requests
   const [liveSteps, setLiveSteps] = useState([])   // tool steps streamed while a turn runs
+  const [liveTodos, setLiveTodos] = useState([])   // the assistant's TODO list, streamed live
   const [runs, setRuns] = useState([])          // /api/runs, for @run cards + the @-picker
   const [commands, setCommands] = useState([])  // slash commands
   const feedRef = useRef(null)
@@ -187,6 +201,11 @@ export default function AssistantChat({ onBack }) {
     } catch (e) { setErr(e.message) }
   }
 
+  const onRevert = async (absPath) => {
+    try { const r = await assistantRevert(absPath); setErr(null); window.alert(r.result || 'reverted') }
+    catch (e) { setErr(e.message) }
+  }
+
   const resolvePerm = async (reqId, decision) => {
     setPending(p => p.filter(x => x.id !== reqId))     // optimistic — the turn resumes server-side
     try { await assistantResolve(reqId, decision) } catch (e) { setErr(e.message) }
@@ -201,10 +220,10 @@ export default function AssistantChat({ onBack }) {
     while (Date.now() < deadline) {
       await sleep(800)
       try { const p = await assistantPermissions(id); setPending(p.pending || []) } catch { /* transient */ }
-      try { const pr = await assistantProgress(id); setLiveSteps(pr.steps || []) } catch { /* transient */ }
+      try { const pr = await assistantProgress(id); setLiveSteps(pr.steps || []); setLiveTodos(pr.todos || []) } catch { /* transient */ }
       let j
       try { j = await getJob(resp.job_id) } catch { continue }
-      if (j.status === 'done') { setPending([]); setLiveSteps([]); return j }
+      if (j.status === 'done') { setPending([]); setLiveSteps([]); setLiveTodos([]); return j }
       if (j.status === 'unknown') return { ok: false, error: 'the turn expired — try again' }
     }
     return { ok: false, error: 'timed out' }
@@ -224,12 +243,12 @@ export default function AssistantChat({ onBack }) {
     try {
       const r = await runTurn(id, t)
       if (r && r.ok === false && r.error) setErr(r.error)
-      setMsgs(m => [...m, { role: 'assistant', content: (r && r.reply) || '(no reply)', steps: r && r.steps, applied: r && r.applied, proposals: r && r.proposals }])
+      setMsgs(m => [...m, { role: 'assistant', content: (r && r.reply) || '(no reply)', steps: r && r.steps, applied: r && r.applied, proposals: r && r.proposals, todos: r && r.todos }])
       refreshSessions()
     } catch (e) {
       setErr(e.message)
       setMsgs(m => [...m, { role: 'assistant', content: 'Could not reach the assistant.' }])
-    } finally { setBusy(false); setPending([]); setLiveSteps([]) }
+    } finally { setBusy(false); setPending([]); setLiveSteps([]); setLiveTodos([]) }
   }
 
   const activeMode = MODES.find(x => x.id === mode) || MODES[0]
@@ -275,10 +294,11 @@ export default function AssistantChat({ onBack }) {
             'Read the README and summarize LoopLab'].map(s =>
             <button key={s} className="gen-seed" onClick={() => send(s)}>{s}</button>)}
         </div>}
-        {msgs.map((m, i) => <Turn key={i} m={m} runsById={runsById} />)}
+        {msgs.map((m, i) => <Turn key={i} m={m} runsById={runsById} onRevert={onRevert} />)}
         {pending.map(req => <PermCard key={req.id} req={req} onResolve={resolvePerm} />)}
         {busy && pending.length === 0 && <div className="feed-msg chat assistant"><div className="fm-body">
           <div className="chat-who">assistant</div>
+          <Todos items={liveTodos} />
           {liveSteps.length > 0 && <div className="asst-steps">{liveSteps.slice(-6).map((s, i) =>
             <span key={i} className="asst-step">{s}</span>)}</div>}
           <div className="chat-bubble"><div className="chat-text muted">

@@ -36,7 +36,7 @@ from .config import Settings
 from .eventstore import EventStore, iter_jsonl
 from .models import Event
 from .projects import ProjectError, ProjectStore
-from .assistant import SessionStore, run_turn as _assistant_run_turn
+from .assistant import REPO_ROOT as _ASSISTANT_REPO_ROOT, SessionStore, run_turn as _assistant_run_turn
 from .replay import fold
 from .tasks import make_llm_client
 
@@ -1744,11 +1744,24 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
         from .assistant_commands import list_commands
         return {"commands": list_commands()}
 
+    @app.post("/api/assistant/revert")
+    async def assistant_revert(request: Request):
+        """Undo the assistant's most recent change to a file (restore the pre-edit snapshot)."""
+        body = await request.json()
+        path = (body.get("path") or "").strip()
+        if not path:
+            raise HTTPException(400, "path is required")
+        from .write_tools import WriteTools
+        wt = WriteTools([Path.home(), _ASSISTANT_REPO_ROOT, root], mode="auto",
+                        repo_root=_ASSISTANT_REPO_ROOT, backup_dir=root / "assistant" / "backups")
+        return {"ok": True, "result": wt.revert(path)}
+
     @app.get("/api/assistant/progress")
     def assistant_progress(session: str):
         with _perm_lock:
             p = _asst_progress.get(session)
-            return {"steps": list(p["steps"]) if p else [], "active": bool(p)}
+            return {"steps": list(p["steps"]) if p else [],
+                    "todos": list(p.get("todos", [])) if p else [], "active": bool(p)}
 
     @app.get("/api/assistant/sessions")
     def assistant_sessions():
@@ -1842,21 +1855,28 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
 
         def _on_step(ev: dict) -> None:
             with _perm_lock:
-                p = _asst_progress.setdefault(sid, {"steps": [], "updated": 0})
+                p = _asst_progress.setdefault(sid, {"steps": [], "todos": [], "updated": 0})
                 p["steps"] = (p["steps"] + [ev.get("label") or ev.get("tool") or "…"])[-40:]
+                p["updated"] = time.time()
+
+        def _on_todos(items: list) -> None:
+            with _perm_lock:
+                p = _asst_progress.setdefault(sid, {"steps": [], "todos": [], "updated": 0})
+                p["todos"] = items
                 p["updated"] = time.time()
 
         def _compute() -> dict:
             res = _assistant_run_turn(client, root, history, instruction, eff_mode,
                                       alive_fn=_engine_alive, settings=s, approver=approver,
-                                      on_step=_on_step)
+                                      on_step=_on_step, on_todos=_on_todos)
             res["tokens"] = _client_tokens(client)
             with _perm_lock:
                 _asst_progress.pop(sid, None)
             try:
                 _asst.append(sid, {"role": "assistant", "content": res.get("reply", ""),
                                    "steps": res.get("steps") or [], "applied": res.get("applied") or [],
-                                   "proposals": res.get("proposals") or [], "tokens": res.get("tokens")})
+                                   "proposals": res.get("proposals") or [], "todos": res.get("todos") or [],
+                                   "tokens": res.get("tokens")})
             except Exception:  # noqa: BLE001 - persistence is best-effort; still return the reply
                 pass
             if not history:                 # first turn -> title the session from the exchange (cheap)

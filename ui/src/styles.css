@@ -1245,3 +1245,13 @@ textarea.text { min-height: 220px; font-family: ui-monospace, Consolas, monospac
 .asst-launch { border: 1px solid var(--accent-dim); border-radius: 10px; background: var(--bg-1);
   padding: 10px 12px; align-self: flex-start; max-width: 82%; margin-top: 6px; }
 .asst-launch-h { display: flex; align-items: center; gap: 8px; font-size: 13px; }
+.asst-undo { margin-left: 6px; font-size: 10px; background: transparent; border: none; color: var(--accent);
+  cursor: pointer; text-decoration: underline; padding: 0; }
+/* assistant TODO list */
+.asst-todos { margin: 4px 0; display: flex; flex-direction: column; gap: 2px; }
+.asst-todo { display: flex; align-items: baseline; gap: 7px; font-size: 12.5px; }
+.asst-todo-box { color: var(--fg-mut); width: 12px; flex: none; }
+.asst-todo.completed { color: var(--fg-mut); text-decoration: line-through; }
+.asst-todo.completed .asst-todo-box { color: var(--best); }
+.asst-todo.in_progress { color: var(--fg); }
+.asst-todo.in_progress .asst-todo-box { color: var(--accent); }

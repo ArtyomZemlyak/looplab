@@ -205,7 +205,8 @@ def _emit_spec() -> dict:
 
 def build_tools(run_root, alive_fn: Optional[Callable] = None, mode: str = DEFAULT_MODE, *,
                 approver: Optional[Callable] = None, trust_mode: str = "trusted_local", extra_roots=(),
-                client=None, subagents: bool = False, mcp: bool = False, settings=None):
+                client=None, subagents: bool = False, mcp: bool = False, settings=None,
+                on_todos: Optional[Callable] = None):
     """The assistant's toolset. Read tools (filesystem scout + cross-run introspection) are present in
     EVERY mode; the mutating write/shell/git providers are added only when the mode allows mutation
     (plan is read-only), mirroring "deny drops the tool from the schema". Each mutating provider gets
@@ -223,8 +224,11 @@ def build_tools(run_root, alive_fn: Optional[Callable] = None, mode: str = DEFAU
         from .shell_tools import ShellTools
         from .git_tools import GitTools
         sh = ShellTools(roots, mode=mode, trust_mode=trust_mode, approver=approver)
-        providers += [WriteTools(roots, mode=mode, approver=approver, repo_root=REPO_ROOT),
+        backup_dir = Path(run_root) / "assistant" / "backups"
+        providers += [WriteTools(roots, mode=mode, approver=approver, repo_root=REPO_ROOT,
+                                 backup_dir=backup_dir),
                       sh, GitTools(sh, cwd=REPO_ROOT)]
+    providers.append(TodoTools(on_todos=on_todos))
     if subagents and client is not None:
         providers.append(SubagentTools(client, run_root, alive_fn=alive_fn, settings=settings))
     if mcp:
@@ -245,7 +249,8 @@ def build_read_tools(run_root, alive_fn: Optional[Callable] = None, *, extra_roo
 
 def run_turn(client, run_root, messages: list, instruction: str, mode: str = DEFAULT_MODE, *,
              alive_fn: Optional[Callable] = None, settings=None, on_step: Optional[Callable] = None,
-             approver: Optional[Callable] = None, extra_roots=(), _subagent: bool = False) -> dict:
+             approver: Optional[Callable] = None, extra_roots=(), _subagent: bool = False,
+             on_todos: Optional[Callable] = None) -> dict:
     """Run ONE assistant turn: drive the shared tool loop over the mode's toolset and return a
     response dict {ok, reply, steps, applied, mode}. `messages` is the prior conversation
     (role/content); `instruction` is the new user message. Pure orchestration — the caller injects the
@@ -256,7 +261,8 @@ def run_turn(client, run_root, messages: list, instruction: str, mode: str = DEF
     trust_mode = getattr(settings, "trust_mode", "trusted_local") if settings is not None else "trusted_local"
     tools = build_tools(run_root, alive_fn=alive_fn, mode=mode, approver=approver,
                         trust_mode=trust_mode, extra_roots=extra_roots,
-                        client=client, subagents=not _subagent, mcp=not _subagent, settings=settings)
+                        client=client, subagents=not _subagent, mcp=not _subagent, settings=settings,
+                        on_todos=on_todos)
     roots = [Path.home(), REPO_ROOT, Path(run_root)] + list(extra_roots)
     from .assistant_commands import expand_command
     grounded, refs = expand_mentions(expand_command(instruction), run_root, alive_fn=alive_fn, roots=roots)
@@ -294,6 +300,7 @@ def run_turn(client, run_root, messages: list, instruction: str, mode: str = DEF
         return "(no reply)"
 
     opts = loop_opts_from_settings(settings) if settings is not None else {}
+    opts["self_plan"] = False        # the assistant uses the visible write_todos tool instead
     max_turns = int(getattr(settings, "agent_max_turns", 0) or 0)
     time_budget = float(getattr(settings, "agent_time_budget_s", 0.0) or 0.0)
     def _collect(attr):
@@ -305,9 +312,11 @@ def run_turn(client, run_root, messages: list, instruction: str, mode: str = DEF
                                 finalize=_fin, fallback=_fb, on_step=_on_step, **opts)
     except Exception as e:  # noqa: BLE001 - surface a usable error, never crash the request
         return {"ok": False, "error": str(e), "reply": f"(assistant error: {e})", "steps": steps,
-                "applied": _collect("applied"), "proposals": _collect("proposals"), "refs": refs, "mode": mode}
+                "applied": _collect("applied"), "proposals": _collect("proposals"),
+                "todos": _collect("todos"), "refs": refs, "mode": mode}
     return {"ok": True, "reply": reply or box.get("reply") or "(no reply)", "steps": steps,
-            "applied": _collect("applied"), "proposals": _collect("proposals"), "refs": refs, "mode": mode}
+            "applied": _collect("applied"), "proposals": _collect("proposals"),
+            "todos": _collect("todos"), "refs": refs, "mode": mode}
 
 
 def _step_label(ev: dict) -> str:
@@ -319,6 +328,44 @@ def _step_label(ev: dict) -> str:
              "list_runs": "listing runs", "read_run": f"reading run {short or ''}".strip(),
              "task": "delegating a subtask"}.get(tool)
             or (f"{tool} {short}".strip() if tool else "thinking"))
+
+
+class TodoTools:
+    """A visible TODO list for multi-step work (Claude-Code TodoWrite). The model calls `write_todos`
+    to keep an up-to-date checklist; the latest list is surfaced live to the UI (via `on_todos`) and
+    returned with the turn, so a long task shows its plan and progress instead of an opaque wait."""
+
+    def __init__(self, on_todos: Optional[Callable] = None):
+        self.todos: list[dict] = []
+        self.on_todos = on_todos
+
+    def bind_state(self, state=None, parent=None) -> None:
+        return None
+
+    def specs(self) -> list[dict]:
+        from .knowledge_tools import _fn_spec
+        return [_fn_spec(
+            "write_todos",
+            "Record/update your TODO list for a multi-step task (replaces the previous list). Mark each "
+            "item pending / in_progress / completed as you go. Use it for any task with 3+ steps.",
+            {"todos": {"type": "array", "items": {"type": "object", "properties": {
+                "content": {"type": "string"},
+                "status": {"type": "string", "enum": ["pending", "in_progress", "completed"]}}}}},
+            ["todos"])]
+
+    def execute(self, name: str, args: dict) -> str:
+        if name != "write_todos":
+            return f"(unknown tool: {name})"
+        items = [{"content": str(t.get("content", "")), "status": t.get("status", "pending")}
+                 for t in ((args or {}).get("todos") or []) if isinstance(t, dict)]
+        self.todos = items
+        if self.on_todos:
+            try:
+                self.on_todos(items)
+            except Exception:  # noqa: BLE001 - live surface is best-effort
+                pass
+        done = sum(1 for t in items if t["status"] == "completed")
+        return f"(todos updated: {done}/{len(items)} done)"
 
 
 class SubagentTools:
