@@ -204,11 +204,14 @@ def _emit_spec() -> dict:
 
 
 def build_tools(run_root, alive_fn: Optional[Callable] = None, mode: str = DEFAULT_MODE, *,
-                approver: Optional[Callable] = None, trust_mode: str = "trusted_local", extra_roots=()):
+                approver: Optional[Callable] = None, trust_mode: str = "trusted_local", extra_roots=(),
+                client=None, subagents: bool = False, mcp: bool = False, settings=None):
     """The assistant's toolset. Read tools (filesystem scout + cross-run introspection) are present in
     EVERY mode; the mutating write/shell/git providers are added only when the mode allows mutation
     (plan is read-only), mirroring "deny drops the tool from the schema". Each mutating provider gets
-    the mode + the injected `approver` (which blocks on a UI confirm-card in `ask` situations)."""
+    the mode + the injected `approver` (which blocks on a UI confirm-card in `ask` situations).
+    `subagents`/`mcp` add the `task` delegation tool and any configured MCP-server tools (top level
+    only — a subagent runs with subagents=False to prevent unbounded nesting)."""
     from .agent import CompositeTools
     from .reposcout import RepoScoutTools
     from .runs_tools import RunsTools, RunLauncherTools
@@ -222,6 +225,16 @@ def build_tools(run_root, alive_fn: Optional[Callable] = None, mode: str = DEFAU
         sh = ShellTools(roots, mode=mode, trust_mode=trust_mode, approver=approver)
         providers += [WriteTools(roots, mode=mode, approver=approver, repo_root=REPO_ROOT),
                       sh, GitTools(sh, cwd=REPO_ROOT)]
+    if subagents and client is not None:
+        providers.append(SubagentTools(client, run_root, alive_fn=alive_fn, settings=settings))
+    if mcp:
+        try:
+            from .mcp_tools import McpTools
+            m = McpTools.from_config()
+            if m.specs():
+                providers.append(m)
+        except Exception:  # noqa: BLE001 - MCP is optional; never break the toolset
+            pass
     return CompositeTools(providers)
 
 
@@ -232,7 +245,7 @@ def build_read_tools(run_root, alive_fn: Optional[Callable] = None, *, extra_roo
 
 def run_turn(client, run_root, messages: list, instruction: str, mode: str = DEFAULT_MODE, *,
              alive_fn: Optional[Callable] = None, settings=None, on_step: Optional[Callable] = None,
-             approver: Optional[Callable] = None, extra_roots=()) -> dict:
+             approver: Optional[Callable] = None, extra_roots=(), _subagent: bool = False) -> dict:
     """Run ONE assistant turn: drive the shared tool loop over the mode's toolset and return a
     response dict {ok, reply, steps, applied, mode}. `messages` is the prior conversation
     (role/content); `instruction` is the new user message. Pure orchestration — the caller injects the
@@ -242,7 +255,8 @@ def run_turn(client, run_root, messages: list, instruction: str, mode: str = DEF
     mode = normalize_mode(mode)
     trust_mode = getattr(settings, "trust_mode", "trusted_local") if settings is not None else "trusted_local"
     tools = build_tools(run_root, alive_fn=alive_fn, mode=mode, approver=approver,
-                        trust_mode=trust_mode, extra_roots=extra_roots)
+                        trust_mode=trust_mode, extra_roots=extra_roots,
+                        client=client, subagents=not _subagent, mcp=not _subagent, settings=settings)
     roots = [Path.home(), REPO_ROOT, Path(run_root)] + list(extra_roots)
     from .assistant_commands import expand_command
     grounded, refs = expand_mentions(expand_command(instruction), run_root, alive_fn=alive_fn, roots=roots)
@@ -302,5 +316,47 @@ def _step_label(ev: dict) -> str:
     short = arg.rsplit("/", 1)[-1] if arg else ""
     return ({"read_file": f"reading {short}", "list_dir": f"listing {short or 'a directory'}",
              "find_files": f"searching {short or 'files'}",
-             "list_runs": "listing runs", "read_run": f"reading run {short or ''}".strip()}.get(tool)
+             "list_runs": "listing runs", "read_run": f"reading run {short or ''}".strip(),
+             "task": "delegating a subtask"}.get(tool)
             or (f"{tool} {short}".strip() if tool else "thinking"))
+
+
+class SubagentTools:
+    """Delegate a self-contained subtask to a FRESH agent with its own context (Claude-Code `task`).
+    The subagent runs a full read-only inner turn and returns ONLY its final text — the token-saving
+    point (the main loop never sees the subagent's intermediate tool churn). Runs in `plan` mode
+    (read-only) so a subagent can research/inspect freely without mutating behind the user's back; the
+    main agent applies any change itself (under the user's mode/approval). Nesting is prevented — the
+    inner turn is built with subagents=False."""
+
+    def __init__(self, client, run_root, alive_fn: Optional[Callable] = None, settings=None):
+        self.client = client
+        self.run_root = run_root
+        self.alive_fn = alive_fn
+        self.settings = settings
+
+    def bind_state(self, state=None, parent=None) -> None:
+        return None
+
+    def specs(self) -> list[dict]:
+        from .knowledge_tools import _fn_spec
+        return [_fn_spec(
+            "task",
+            "Delegate a focused, self-contained subtask to a fresh sub-agent that has its OWN context "
+            "and read-only tools (inspect files, read runs). It returns only its final answer — use it "
+            "to research/summarize a big area without cluttering your own context. Give a complete, "
+            "standalone prompt.",
+            {"prompt": {"type": "string", "description": "the full standalone subtask"}},
+            ["prompt"])]
+
+    def execute(self, name: str, args: dict) -> str:
+        if name != "task":
+            return f"(unknown tool: {name})"
+        prompt = str((args or {}).get("prompt") or "").strip()
+        if not prompt:
+            return "(task needs a prompt)"
+        # Inner turn: read-only, no further subagents (build_tools called with subagents=False by
+        # passing client=None to the recursive run_turn's build — enforced by _subagent flag).
+        res = run_turn(self.client, self.run_root, [], prompt, "plan",
+                       alive_fn=self.alive_fn, settings=self.settings, _subagent=True)
+        return res.get("reply") or "(subagent returned nothing)"
