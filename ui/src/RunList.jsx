@@ -127,6 +127,15 @@ export default function RunList({ onOpen, onSettings, onAssistant }) {
   const [stModal, setStModal] = useState(false)             // manage-super-tasks popup open?
   const [showReport, setShowReport] = useState(false)       // cross-run scope-report panel open?
   const [seed, setSeed] = useState('')                      // seed passed into the New-run (Genesis) flow
+  const [cmd, setCmd] = useState('')                        // the always-on command bar (describe → Genesis)
+
+  // Submitting the command bar IS how a run is started now (the old "▶ New run" button is gone): the
+  // typed goal seeds the Genesis planner, which names it / picks the task / sets the knobs. Empty →
+  // still opens Genesis (blank), so the bar doubles as the "new run" affordance.
+  const submitCmd = (e) => {
+    e?.preventDefault?.()
+    setSeed(cmd.trim()); setStarting(true); setCmd('')
+  }
 
   const loadRuns = () => get('/api/runs').then(setRuns).catch(() => setRuns([]))
   const loadProjects = () => listProjects().then(setProj).catch(() => {})
@@ -281,10 +290,17 @@ export default function RunList({ onOpen, onSettings, onAssistant }) {
           <button className={view === 'list' ? 'on' : ''} onClick={() => setView('list')}>☰ List</button>
           <button className={view === 'map' ? 'on' : ''} onClick={() => setView('map')}><OpIcon name="map" className="t-ic" /> Map</button>
         </div>
-        {/* The assistant is the primary entry point — ask it anything, create/steer runs, fix LoopLab. */}
-        <button className="btn sm primary" title="the assistant — inspect, edit and fix LoopLab, create & steer runs"
-          onClick={() => onAssistant && onAssistant()}>✦ Assistant</button>
-        <button className="btn sm" onClick={() => { setSeed(''); setStarting(true) }}>▶ New run</button>
+        {/* Always-on command bar (replaces the ▶ New run + ✦ Assistant buttons): describe a run and
+            press Enter — the Genesis planner names it, picks the task and sets the knobs. The full
+            assistant (fix/steer LoopLab) hangs off the ✦ affordance inside the bar, not a top button. */}
+        <form className="cmdbar" onSubmit={submitCmd}>
+          <button type="button" className="cmdbar-ic" title="open the full assistant — inspect, edit & fix LoopLab, steer runs"
+            onClick={() => onAssistant && onAssistant()}>✦</button>
+          <input className="cmdbar-in" value={cmd} onChange={e => setCmd(e.target.value)}
+            placeholder="Describe a run to start — e.g. “titanic baseline on deepseek, 30 nodes”…"
+            title="press Enter to plan & start a run with the Genesis assistant" />
+          <button type="submit" className="cmdbar-go" title="plan & start this run">▶</button>
+        </form>
         <ThemeSwitcher />
         <EnergyToggle />
         <button className="btn sm ghost" title="settings" onClick={() => onSettings && onSettings()}>⚙ Settings</button>

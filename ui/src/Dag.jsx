@@ -1,7 +1,7 @@
 import React, { useContext, useEffect, useMemo, useState } from 'react'
 import { ReactFlow, Background, Controls, MiniMap, Handle, Position, Panel, useViewport } from '@xyflow/react'
 import '@xyflow/react/dist/style.css'
-import { fmt, layoutWithGroups, nodeClass, delta, workingId, operatorMeta, OPERATOR_LEGEND, isSweep, sweepInfo } from './util.js'
+import { fmt, layoutWithGroups, nodeClass, delta, workingId, operatorMeta, OPERATOR_LEGEND, isSweep, sweepInfo, chipFontSize } from './util.js'
 import { nodeChip } from './report.js'
 import { OpIcon } from './icons.jsx'
 import { Spark } from './charts.jsx'
@@ -116,8 +116,9 @@ function ExpNode({ data }) {
         {confirmed && <span className="conf-chip" title={`robust ${fmt(node.confirmed_mean, 3)} ±${fmt(node.confirmed_std, 2)} over ${node.confirmed_seeds} seeds`}>✓{node.confirmed_seeds}×</span>}
       </div>
       {isMerge
-        ? <div className="merge-line" title={'combines: ' + mergeThemes.join(' + ')}>⊕ {mergeThemes.join(' + ')}</div>
-        : chg ? <div className="change-chip" title={chg}>{chg}</div> : null}
+        ? (() => { const ml = '⊕ ' + mergeThemes.join(' + ')
+            return <div className="merge-line" style={{ fontSize: chipFontSize(ml) }} title={'combines: ' + mergeThemes.join(' + ')}>{ml}</div> })()
+        : chg ? <div className="change-chip" style={{ fontSize: chipFontSize(chg) }} title={chg}>{chg}</div> : null}
       {/* cross-run provenance: this experiment was seeded from a sibling run — deep-link to it */}
       {node.origin?.run_id && <a className="origin-chip" href={`#/run/${node.origin.run_id}`}
         onClick={(e) => e.stopPropagation()}

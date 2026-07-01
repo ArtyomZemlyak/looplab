@@ -12,7 +12,10 @@ import Markdown from './markdown.jsx'
 // LLM I/O, and the coding-agent's validation — instead of three disconnected panes. The Inspector is
 // READ-ONLY (Workstream C): every node action — confirm/ablate/fork/promote/note — is done from the
 // chat (add the node via its ＋#id chip, or use a /command), so there's no per-node button toolbar.
-const TABS = ['Overview', 'Trace', 'Code', 'Metrics', 'Training', 'Trust', 'Cost']
+// Tab order follows a node's story top-to-bottom: what it is (Overview) → the solution (Code) → what
+// it scored (Metrics, Training) → is it trustworthy (Trust) → how it ran (Trace) → what it cost (Cost).
+// The everyday "what/results" tabs lead; the diagnostic lifecycle Trace + LLM Cost trail at the end.
+const TABS = ['Overview', 'Code', 'Metrics', 'Training', 'Trust', 'Trace', 'Cost']
 
 export default function Inspector({ runId, nodeId, state, live, tab, setTab, onToast }) {
   const [detail, setDetail] = useState(null)
