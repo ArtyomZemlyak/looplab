@@ -218,19 +218,33 @@ class OpenAICompatibleClient:
         #      chunks) blocks inside recv() so the in-loop check below never even runs (observed: a
         #      ~15-min hang on glm-5.1 during a big implement prompt).
         # So we track wall-clock since the last REAL token and (a) check it at the top of the loop AND
-        # (b) run a watchdog thread that force-closes the response when it's exceeded — closing the fd
-        # makes the blocked recv() raise, which _post catches and retries on a fresh connection. A
+        # (b) run a watchdog thread that, when it's exceeded, SHUTS DOWN the underlying socket — which
+        # is what actually interrupts a recv() already blocked in the kernel (resp.close() alone does
+        # NOT: it drops the file object but the blocked syscall keeps waiting on the fd). shutdown()
+        # makes the recv raise OSError, which _post catches and retries on a fresh connection. A
         # long-but-alive generation keeps emitting content, resetting the clock — no hard deadline.
+        import socket as _socket
         import threading
         idle_limit = self.timeout
         last_progress = [time.monotonic()]
+        _killed = [False]
         _stop = threading.Event()
+        # Best-effort grab of the raw socket behind the urllib response (http.client wraps it in a
+        # BufferedReader over a SocketIO). None for a non-socket body (e.g. a test mock) -> close() path.
+        _fp = getattr(resp, "fp", None)
+        _sock = getattr(getattr(_fp, "raw", None), "_sock", None) or getattr(_fp, "_sock", None)
 
         def _watchdog():
             while not _stop.wait(min(5.0, idle_limit / 4)):
                 if time.monotonic() - last_progress[0] > idle_limit:
+                    _killed[0] = True           # so the loop's EOF is read as a stall, not a clean end
+                    if _sock is not None:
+                        try:
+                            _sock.shutdown(_socket.SHUT_RDWR)   # unblocks a recv() stuck in the kernel
+                        except Exception:  # noqa: BLE001
+                            pass
                     try:
-                        resp.close()            # interrupt a recv() blocked on a stalled connection
+                        resp.close()            # fallback (and mock-friendly for tests)
                     except Exception:  # noqa: BLE001
                         pass
                     return
@@ -287,6 +301,9 @@ class OpenAICompatibleClient:
                     finish = ch["finish_reason"]
         finally:
             _stop.set()                         # stop the watchdog before we return / propagate
+        if _killed[0]:                          # watchdog shut the socket -> a stall, not a real end;
+            raise TimeoutError(f"LLM stream stalled — no new tokens for {idle_limit:.0f}s; "
+                               f"retrying on a fresh connection")   # _post catches -> retry
         # Not actually an SSE stream (a non-streaming endpoint, or a test mock that returns one JSON
         # body): parse the whole body as a normal chat completion so streaming stays transparent.
         if not got_sse and not content and not tcs:

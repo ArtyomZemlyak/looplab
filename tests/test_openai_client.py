@@ -118,26 +118,36 @@ def test_post_drops_reasoning_on_unsupported_param_400(monkeypatch):
 
 
 def test_read_stream_watchdog_breaks_a_stalled_connection():
-    """A streamed response that BLOCKS in recv() with no new tokens (a stalled generation / a server
-    that trickles bytes without completing a line) must not hang forever: a watchdog force-closes it
-    after `timeout` s so the read raises and _post can retry. Regression for a ~15-min live hang."""
-    import threading
+    """A streamed response that BLOCKS in recv() with no new tokens (a stalled generation, or a server
+    trickling keepalive bytes without completing a line) must not hang forever: a watchdog SHUTS DOWN
+    the underlying socket after `timeout` s — which actually interrupts the blocked recv (resp.close()
+    alone does not) — so the read ends and _post retries. Regression for a ~70-min / ~15-min live hang.
+    Uses a real socketpair so the socket.shutdown() path (not just the close() fallback) is exercised."""
+    import socket
     import time as _t
     import looplab.llm as llm
 
-    class _StallResp:
-        def __init__(self):
-            self._ev = threading.Event()
+    a, _b = socket.socketpair()                   # _b never sends -> a.recv blocks like a stalled server
+
+    class _SockResp:
+        def __init__(self, s):
+            self.fp = type("FP", (), {"raw": type("R", (), {"_sock": s})()})()
+            self._s = s
 
         def __iter__(self):
             return self
 
         def __next__(self):
-            self._ev.wait()                       # block like a recv() that never gets data
-            raise OSError("connection closed by watchdog")
+            data = self._s.recv(100)              # blocks; watchdog shutdown() -> returns b'' (EOF)
+            if not data:
+                raise StopIteration
+            return data
 
         def close(self):
-            self._ev.set()                        # watchdog close() unblocks the read -> it raises
+            try:
+                self._s.close()
+            except OSError:
+                pass
 
         def read(self):
             return b""
@@ -145,7 +155,7 @@ def test_read_stream_watchdog_breaks_a_stalled_connection():
     c = llm.OpenAICompatibleClient("m", base_url="http://x/v1", timeout=2)   # 2s idle limit
     t0 = _t.monotonic()
     with pytest.raises((OSError, TimeoutError)):
-        c._read_stream(_StallResp())
+        c._read_stream(_SockResp(a))
     assert _t.monotonic() - t0 < 6                # fired near the 2s limit, did NOT hang
 
 
