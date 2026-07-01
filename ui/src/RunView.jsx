@@ -235,7 +235,7 @@ export default function RunView({ runId, onBack }) {
 
       {!dockC && <div className="splitter h" onMouseDown={startDrag('dock')} title="drag to resize" />}
       <Dock runId={runId} live={live} liveSeq={seq} viewSeq={viewSeq} setViewSeq={setViewSeq} onFocus={focusNode}
-            selectedId={selectedId} onToast={showToast}
+            selectedId={selectedId} onToast={showToast} eventsOnly
             collapsed={dockC} onToggleCollapse={() => setDockC(c => !c)} height={dockH} />
         </>}
 

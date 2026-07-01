@@ -75,7 +75,7 @@ function Todos({ items }) {
 
 // A human-in-the-loop confirm card: the turn paused to ask before a mutating action. Approve/Reject
 // resolves it server-side and the turn resumes.
-function PermCard({ req, onResolve }) {
+export function PermCard({ req, onResolve }) {
   const a = req.action || {}
   const isDiff = a.tool === 'write_file' || a.tool === 'edit_file' || a.tool === 'apply_patch'
   return <div className="asst-perm">

@@ -496,7 +496,10 @@ function SummaryRow({ m, folded, showFolded, onToggleFolded }) {
   )
 }
 
-export default function Dock({ runId, live, liveSeq, viewSeq, setViewSeq, onFocus, collapsed, onToggleCollapse, height = 230, selectedId, onToast }) {
+// `eventsOnly` (round-9): the per-run "boss" chat has moved to the single persistent assistant, so the
+// Dock is now purely the run's EVENTS window — the timeline feed + scrubber + filters + transport. The
+// chat composer / conversation turns / compaction are not rendered in that mode.
+export default function Dock({ runId, live, liveSeq, viewSeq, setViewSeq, onFocus, collapsed, onToggleCollapse, height = 230, selectedId, onToast, eventsOnly = false }) {
   const [log, setLog] = useState([])
   const [trace, setTrace] = useState(null)
   const [filter, setFilter] = useState('')
@@ -525,6 +528,7 @@ export default function Dock({ runId, live, liveSeq, viewSeq, setViewSeq, onFocu
   // Dock remount — a Search↔Report toggle, the finish-auto-land, reopening the run, or a full reload.
   // The in-memory feed stays the live truth; this just rehydrates it from the run's chat.jsonl.
   useEffect(() => {
+    if (eventsOnly) return                      // events window: no per-run chat to restore
     let alive = true
     getChatLog(runId).then(turns => {
       if (!alive || !Array.isArray(turns)) return
@@ -846,7 +850,7 @@ export default function Dock({ runId, live, liveSeq, viewSeq, setViewSeq, onFocu
   return (
     <div className="dock chat-dock">
       <div className="dock-tabs">
-        <span className="chat-label"><OpIcon name="chat" size={14} /> chat &amp; timeline</span>
+        <span className="chat-label"><OpIcon name={eventsOnly ? 'flag' : 'chat'} size={14} /> {eventsOnly ? 'events' : 'chat'} &amp; timeline</span>
         {/* clickable so the user can return to live even when the controls (with the Live button) are hidden */}
         <span className={'hist-tag-mini ' + (atLive ? 'live' : 'hist')}
               onClick={() => { if (!atLive) { setViewSeq(null); setDrag(null) } }}
@@ -858,7 +862,7 @@ export default function Dock({ runId, live, liveSeq, viewSeq, setViewSeq, onFocu
           <span className="hist-tag-mini hist" style={{ cursor: 'pointer' }}
                 title="a filter is active — open controls to change it" onClick={toggleControls}>⌕ filtered</span>}
         <span className="spacer" style={{ flex: 1 }} />
-        {chatTokens > 0 && <span className="chat-tok hdr"
+        {!eventsOnly && chatTokens > 0 && <span className="chat-tok hdr"
               title="approx tokens this chat has cost so far (boss replies + compaction) — a lifetime total, not the current context size">
           {ktok(chatTokens)} tok</span>}
         <button className={'btn sm ghost' + (showControls ? ' on' : '')} title="time-travel & filters"
@@ -885,7 +889,7 @@ export default function Dock({ runId, live, liveSeq, viewSeq, setViewSeq, onFocu
         </div>}
         <div className="feed chat-feed" ref={feedRef}>
           {feed.length === 0
-            ? <div className="muted">{(filter || kinds.size) ? 'nothing matches the filter' : 'no events yet — say hello below'}</div>
+            ? <div className="muted">{(filter || kinds.size) ? 'nothing matches the filter' : (eventsOnly ? 'no events yet' : 'no events yet — say hello below')}</div>
             : feed.map(it => it.t === 'ev'
                 ? <EventRow key={'e' + it.seq} e={it.e} trace={trace} onFocusEvent={focusEvent}
                     autoOpen={it.e.type === 'node_created' && eventNode(it.e) === livePendingId} />
@@ -910,7 +914,26 @@ export default function Dock({ runId, live, liveSeq, viewSeq, setViewSeq, onFocu
             </div>
           })()}
         </div>
-        <div className={'chat-in' + (dropActive ? ' drop' : '')}
+        {eventsOnly ? <div className="dock-foot">
+          <span className="muted" style={{ fontSize: 11, flex: 1 }}>
+            Steer this run from the assistant bar below — say what to do, or use <code className="cmd-hint">/pause</code> · <code className="cmd-hint">/stop</code> · <code className="cmd-hint">/approve #id</code>.
+          </span>
+          <div className="transport">
+            {mode === 'running' && <>
+              <button className="btn sm" title="pause the run" onClick={onPause}><OpIcon name="pause" size={13} /></button>
+              <button className="btn sm danger" title="stop the run" onClick={onStop}><OpIcon name="stop" size={13} /></button></>}
+            {mode === 'paused' && <>
+              <button className="btn sm primary" title="resume the run" onClick={onResume}><OpIcon name="play" size={13} /></button>
+              <button className="btn sm danger" title="stop the run" onClick={onStop}><OpIcon name="stop" size={13} /></button></>}
+            {mode === 'stalled' && <>
+              <button className="btn sm primary" title="engine stopped — resume to keep going" onClick={onReopen}><OpIcon name="play" size={13} /></button>
+              <button className="btn sm danger" title="give up — mark the run finished" onClick={onStop}><OpIcon name="stop" size={13} /></button></>}
+            {mode === 'finished' && <>
+              <button className="btn sm primary" title="reopen & resume" onClick={onReopen}><OpIcon name="play" size={13} /></button>
+              <button className="btn sm" title="reset & restart from scratch" onClick={onReplay}><OpIcon name="replay" size={13} /></button></>}
+          </div>
+        </div>
+        : <div className={'chat-in' + (dropActive ? ' drop' : '')}
              onDragOver={e => { e.preventDefault(); setDropActive(true) }}
              onDragLeave={() => setDropActive(false)} onDrop={onDrop}>
           {showSuggest && <div className="cmd-suggest" role="listbox" aria-label="commands">
@@ -956,7 +979,7 @@ export default function Dock({ runId, live, liveSeq, viewSeq, setViewSeq, onFocu
                 <button className="btn sm" title="reset & restart from scratch" onClick={onReplay}><OpIcon name="replay" size={13} /></button></>}
             </div>
           </div>
-        </div>
+        </div>}
       </div>}
     </div>
   )
