@@ -53,7 +53,7 @@ function List({ items }) {
   return <ul className="bul">{items.map((x, i) => <li key={i}>{x}</li>)}</ul>
 }
 
-export default function ReportView({ state, runId, onOpenPanel, onToast }) {
+export default function ReportView({ state, runId, onOpenPanel, onToast, onPickNode }) {
   const best = state.best_node_id != null ? state.nodes[state.best_node_id] : null
   const failed = Object.values(state.nodes).filter(n => n.status === 'failed')
   const a = useMemo(() => analyze(state), [state])
@@ -126,7 +126,7 @@ export default function ReportView({ state, runId, onOpenPanel, onToast }) {
 
       {a.steps.length > 0 && <>
         <div className="section-h">How the metric got better</div>
-        <Trajectory nodes={Object.values(state.nodes)} direction={state.direction} steps={a.steps} />
+        <Trajectory nodes={Object.values(state.nodes)} direction={state.direction} steps={a.steps} onPick={onPickNode} />
         <ImprovementWaterfall steps={a.steps} direction={state.direction} />
         <table className="tbl"><thead><tr><th>#</th><th>node</th><th>operator</th><th>metric</th><th>Δ</th><th>what changed</th></tr></thead><tbody>
           {a.steps.map((s, i) => <tr key={s.id}>

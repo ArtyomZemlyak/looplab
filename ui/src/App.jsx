@@ -4,6 +4,7 @@ import RunView from './RunView.jsx'
 import Settings from './Settings.jsx'
 import AssistantChat from './AssistantChat.jsx'
 import SharedAssistant from './SharedAssistant.jsx'
+import AssistantBar from './AssistantBar.jsx'
 import { initTheme } from './ThemeSwitcher.jsx'
 import { initFx } from './fx.js'
 
@@ -18,6 +19,10 @@ function parseHash() {
   if (h === '#/assistant') return { view: 'assistant' }
   const sh = h.match(/^#\/assistant\/shared\/(.+)$/)
   if (sh) return { view: 'shared', id: safeDecode(sh[1]) }
+  // #/assistant/s/<sid> — the full-page assistant opened on a specific session (carried over from the
+  // bottom command bar so the conversation continues rather than starting fresh).
+  const as = h.match(/^#\/assistant\/s\/(.+)$/)
+  if (as) return { view: 'assistant', sid: safeDecode(as[1]) }
   const m = h.match(/^#\/run\/(.+)$/)
   return m ? { view: 'run', id: safeDecode(m[1]) } : { view: 'list' }
 }
@@ -33,9 +38,18 @@ export default function App() {
   const back = () => { location.hash = '' }
   const settings = () => { location.hash = '#/settings' }
   const assistant = () => { location.hash = '#/assistant' }
-  if (route.view === 'run') return <RunView key={route.id} runId={route.id} onBack={back} />
-  if (route.view === 'settings') return <Settings onBack={back} />
-  if (route.view === 'assistant') return <AssistantChat onBack={back} />
-  if (route.view === 'shared') return <SharedAssistant sid={route.id} onBack={back} />
-  return <RunList onOpen={open} onSettings={settings} onAssistant={assistant} />
+
+  // The full-page assistant and the shared read-only view own the whole screen (they ARE the chat), so
+  // the docked command bar is hidden there; everywhere else it stays pinned to the bottom.
+  let content, showBar = true
+  if (route.view === 'run') content = <RunView key={route.id} runId={route.id} onBack={back} />
+  else if (route.view === 'settings') content = <Settings onBack={back} />
+  else if (route.view === 'assistant') { content = <AssistantChat key={route.sid || 'new'} initialSid={route.sid} onBack={back} />; showBar = false }
+  else if (route.view === 'shared') { content = <SharedAssistant sid={route.id} onBack={back} />; showBar = false }
+  else content = <RunList onOpen={open} onSettings={settings} onAssistant={assistant} />
+
+  return <div className="app-shell">
+    <div className="app-shell-main">{content}</div>
+    {showBar && <AssistantBar runId={route.view === 'run' ? route.id : null} />}
+  </div>
 }

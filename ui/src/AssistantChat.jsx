@@ -121,7 +121,7 @@ function LaunchCard({ spec }) {
   </div>
 }
 
-export default function AssistantChat({ onBack }) {
+export default function AssistantChat({ onBack, initialSid = null }) {
   const [sessions, setSessions] = useState([])
   const [sid, setSid] = useState(null)
   const [msgs, setMsgs] = useState([])
@@ -168,6 +168,8 @@ export default function AssistantChat({ onBack }) {
     try { const r = await assistantSessions(); setSessions(r.sessions || []) } catch { /* offline */ }
   }
   useEffect(() => { refreshSessions() }, [])
+  // Continue a session carried over from the docked command bar (#/assistant/s/<sid>).
+  useEffect(() => { if (initialSid) openSession(initialSid) }, [initialSid])   // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => {
     const f = feedRef.current
     if (f) requestAnimationFrame(() => { f.scrollTop = f.scrollHeight })

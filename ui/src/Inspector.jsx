@@ -129,7 +129,7 @@ export function GroupSummary({ groupKey, memberIds, state, onSelectNode, onClose
         {themes.length > 0 && <KV k="themes" v={themes.join(', ')} />}
       </div>
       <div className="section-h">Best over members</div>
-      <Trajectory nodes={members} direction={dir} height={150} />
+      <Trajectory nodes={members} direction={dir} height={150} onPick={onSelectNode} />
       <div className="section-h">Members <span className="pill">{members.length}</span></div>
       <table className="tbl"><thead><tr><th>node</th><th>operator</th><th>metric</th><th>status</th></tr></thead>
         <tbody>{members.map(n => <tr key={n.id} style={{ cursor: 'pointer' }} onClick={() => onSelectNode(n.id)}>
