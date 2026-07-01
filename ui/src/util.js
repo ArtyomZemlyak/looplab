@@ -582,3 +582,16 @@ export async function genScopeReport(type, id) {
   if (r && r.ok === false && r.error) throw new Error(r.error)
   return r
 }
+
+// ---- assistant (general chat agent — the evolution of Genesis) ----
+export const assistantSessions = () => get('/api/assistant/sessions')
+export const assistantCreate = (title = '', mode = 'plan') => post('/api/assistant/sessions', { title, mode })
+export const assistantGet = (sid) => get(`/api/assistant/sessions/${encodeURIComponent(sid)}`)
+export const assistantDelete = (sid) => send(`/api/assistant/sessions/${encodeURIComponent(sid)}`, 'DELETE')
+export const assistantFork = (sid) => post(`/api/assistant/sessions/${encodeURIComponent(sid)}/fork`, {})
+// Send one message; the turn runs as a background job (so a long turn can't 504 behind a proxy), so
+// await it to completion via jobAwait. Returns {ok, reply, steps, tokens, mode}.
+export async function assistantMessage(sid, instruction, mode) {
+  const resp = await post(`/api/assistant/sessions/${encodeURIComponent(sid)}/message`, { instruction, mode })
+  return jobAwait(resp)
+}

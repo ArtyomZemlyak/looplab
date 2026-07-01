@@ -1,0 +1,246 @@
+"""The general-purpose assistant: a persistent chat agent embedded in the Web UI that can read the
+machine, reference/steer runs, and (in later phases) write files, run commands and edit LoopLab
+itself. It is the evolution of the pre-run Genesis chat into a full assistant.
+
+This module is the DEPENDENCY-LIGHT core: a `SessionStore` (append-only per-session transcripts under
+`<run_root>/assistant/`) and a `run_turn` that assembles a toolset and drives the shared
+`agent.drive_tool_loop`. The FastAPI server wires the LLM client, run-liveness probe and settings in;
+keeping those injected makes the whole thing unit-testable with a scripted fake client (see
+`tests/test_assistant_endpoint.py`), exactly like `genesis`/`server` are tested today.
+
+Permission MODES (Claude-Code-style) are honored by the tool PROVIDERS, not here: `run_turn` just
+passes the mode down. In P0 the toolset is read-only (`plan` mode); write/shell/git providers and the
+pause-resume approval flow arrive in P1.
+"""
+from __future__ import annotations
+
+import json
+import secrets
+import time
+from pathlib import Path
+from typing import Callable, Optional
+
+from .atomicio import atomic_write_text, best_effort_fsync
+from .eventstore import iter_jsonl
+
+# The LoopLab source tree (…/looplab/looplab/assistant.py -> repo root two levels up). The assistant
+# may read (and, in later phases, edit) the code that runs it — this is what "fix LoopLab itself"
+# needs — so the repo root is always an allowed root alongside the run-root and the user's home.
+REPO_ROOT = Path(__file__).resolve().parent.parent
+
+# Permission modes, mirroring Claude Code. `plan` is read-only (the safe default); the mutating modes
+# are honored by the write/shell/git providers in P1.
+MODES = ("plan", "default", "acceptEdits", "auto")
+DEFAULT_MODE = "plan"
+
+
+def normalize_mode(mode: Optional[str]) -> str:
+    return mode if mode in MODES else DEFAULT_MODE
+
+
+# --------------------------------------------------------------------------- session persistence
+class SessionStore:
+    """Append-only assistant sessions under `<run_root>/assistant/<sid>/`.
+
+    `meta.json` holds {id,title,created,updated,parent,mode}; `messages.jsonl` holds one turn per line
+    ({role,content,ts,...}). Append is single-writer + best-effort fsync like the run chat log. The
+    `assistant` dir sits beside runs but is a RESERVED id (server refuses a run named `assistant`), so
+    it never collides with a real run."""
+
+    def __init__(self, run_root):
+        self.dir = Path(run_root) / "assistant"
+
+    def _sdir(self, sid: str) -> Path:
+        d = (self.dir / sid).resolve()
+        if d.parent != self.dir.resolve():        # path-traversal guard (sid must be a direct child)
+            raise ValueError("bad session id")
+        return d
+
+    def _meta_path(self, sid: str) -> Path:
+        return self._sdir(sid) / "meta.json"
+
+    def _msgs_path(self, sid: str) -> Path:
+        return self._sdir(sid) / "messages.jsonl"
+
+    def create(self, title: str = "", parent: Optional[str] = None, mode: str = DEFAULT_MODE,
+               *, now: Optional[float] = None) -> dict:
+        sid = secrets.token_hex(8)
+        d = self._sdir(sid)
+        d.mkdir(parents=True, exist_ok=True)
+        ts = time.time() if now is None else now
+        meta = {"id": sid, "title": (title or "New chat")[:120], "created": ts, "updated": ts,
+                "parent": parent, "mode": normalize_mode(mode)}
+        atomic_write_text(self._meta_path(sid), json.dumps(meta))
+        return meta
+
+    def _read_meta(self, sid: str) -> Optional[dict]:
+        try:
+            return json.loads(self._meta_path(sid).read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+
+    def update_meta(self, sid: str, **fields) -> Optional[dict]:
+        meta = self._read_meta(sid)
+        if meta is None:
+            return None
+        meta.update({k: v for k, v in fields.items() if v is not None})
+        meta["updated"] = fields.get("updated", time.time())
+        atomic_write_text(self._meta_path(sid), json.dumps(meta))
+        return meta
+
+    def list(self) -> list[dict]:
+        if not self.dir.exists():
+            return []
+        out = []
+        for d in self.dir.iterdir():
+            if d.is_dir():
+                m = self._read_meta(d.name)
+                if m:
+                    out.append(m)
+        out.sort(key=lambda m: m.get("updated", 0), reverse=True)
+        return out
+
+    def messages(self, sid: str) -> list[dict]:
+        try:
+            return list(iter_jsonl(self._msgs_path(sid)))
+        except OSError:
+            return []
+
+    def get(self, sid: str) -> Optional[dict]:
+        meta = self._read_meta(sid)
+        if meta is None:
+            return None
+        return {"meta": meta, "messages": self.messages(sid)}
+
+    def append(self, sid: str, turn: dict) -> None:
+        d = self._sdir(sid)
+        if not d.exists():
+            raise ValueError("no such session")
+        line = {**turn, "ts": turn.get("ts", time.time())}
+        with open(self._msgs_path(sid), "ab") as f:
+            f.write((json.dumps(line, ensure_ascii=False) + "\n").encode("utf-8"))
+            try:
+                best_effort_fsync(f.fileno())
+            except OSError:
+                pass
+        self.update_meta(sid, updated=line["ts"])
+
+    def fork(self, sid: str, *, now: Optional[float] = None) -> Optional[dict]:
+        """Clone a session's transcript into a fresh child session (OpenCode-style fork)."""
+        src = self.get(sid)
+        if src is None:
+            return None
+        child = self.create(title="Fork of " + src["meta"].get("title", "chat"),
+                            parent=sid, mode=src["meta"].get("mode", DEFAULT_MODE), now=now)
+        for turn in src["messages"]:
+            self.append(child["id"], turn)
+        return child
+
+
+# --------------------------------------------------------------------------- system prompt + toolset
+def system_prompt(mode: str, *, repo_root: Path = REPO_ROOT) -> str:
+    mode = normalize_mode(mode)
+    mode_line = {
+        "plan": "MODE=plan: you are READ-ONLY. You may inspect files and runs and PROPOSE changes in "
+                "prose, but you cannot write files or run commands. Say what you would do.",
+        "default": "MODE=default: reads run immediately; every mutating action (writing a file, "
+                   "running a command, git, launching a run) is PROPOSED for the user to approve.",
+        "acceptEdits": "MODE=acceptEdits: file edits apply immediately; commands, git and launching a "
+                       "run are still proposed for approval.",
+        "auto": "MODE=auto: you may write files and run commands directly without asking. Be careful.",
+    }[mode]
+    return (
+        "You are the LoopLab assistant — a capable coding/research agent embedded in the LoopLab Web "
+        "UI. LoopLab is an autonomous ML research engine; you help the user do ANYTHING: understand and "
+        "steer runs, work in their repos and data, and edit/repair LoopLab's OWN codebase.\n\n"
+        + mode_line + "\n\n"
+        f"The LoopLab source tree is at {repo_root}. You have read-only tools to inspect this machine "
+        "(list_dir, read_file, find_files) and to view runs (list_runs, read_run). Ground your answers "
+        "in what you actually read — inspect before you assert. When the user refers to a run, use "
+        "list_runs/read_run to find and read it. Be concise and concrete; use Markdown. When you have "
+        "the answer, call `final_answer` exactly once with your reply.")
+
+
+def _emit_spec() -> dict:
+    return {"type": "function", "function": {
+        "name": "final_answer",
+        "description": "Provide your final reply to the user (Markdown). Call this exactly once when "
+                       "you are done using tools.",
+        "parameters": {"type": "object",
+                       "properties": {"reply": {"type": "string"}}, "required": ["reply"]}}}
+
+
+def build_read_tools(run_root, alive_fn: Optional[Callable] = None, *, extra_roots=()):
+    """The read-only toolset available in every mode: filesystem scout + cross-run introspection."""
+    from .agent import CompositeTools
+    from .reposcout import RepoScoutTools
+    from .runs_tools import RunsTools
+    roots = [Path.home(), REPO_ROOT, Path(run_root)] + list(extra_roots)
+    return CompositeTools([RepoScoutTools(roots), RunsTools(run_root, alive_fn=alive_fn)])
+
+
+def run_turn(client, run_root, messages: list, instruction: str, mode: str = DEFAULT_MODE, *,
+             alive_fn: Optional[Callable] = None, settings=None, on_step: Optional[Callable] = None,
+             extra_roots=()) -> dict:
+    """Run ONE assistant turn: drive the shared tool loop over the read-only (P0) toolset and return
+    a response dict {ok, reply, steps, mode}. `messages` is the prior conversation (role/content);
+    `instruction` is the new user message. Pure orchestration — the caller injects the LLM client,
+    the run-liveness probe and Settings (so it is unit-testable with a scripted fake client)."""
+    from .agent import drive_tool_loop, loop_opts_from_settings
+    mode = normalize_mode(mode)
+    tools = build_read_tools(run_root, alive_fn=alive_fn, extra_roots=extra_roots)
+    convo = [{"role": "system", "content": system_prompt(mode)}]
+    for m in messages:
+        role = m.get("role")
+        if role in ("user", "assistant") and m.get("content"):
+            convo.append({"role": role, "content": m["content"]})
+    convo.append({"role": "user", "content": instruction})
+
+    steps: list[dict] = []
+
+    def _on_step(ev: dict) -> None:
+        label = _step_label(ev)
+        steps.append({"tool": (ev or {}).get("tool", ""), "arg": str((ev or {}).get("arg", "")),
+                      "label": label, "turn": (ev or {}).get("turn", 0)})
+        if on_step is not None:
+            try:
+                on_step({**(ev or {}), "label": label})
+            except Exception:  # noqa: BLE001 - progress must never perturb the loop
+                pass
+
+    box: dict = {}
+
+    def _fin(args):
+        box["reply"] = (args or {}).get("reply", "") if isinstance(args, dict) else ""
+        return box["reply"]
+
+    def _fb(msgs):
+        if box.get("reply"):
+            return box["reply"]
+        for m in reversed(msgs):
+            if m.get("role") == "assistant" and isinstance(m.get("content"), str) and m["content"].strip():
+                return m["content"].strip()
+        return "(no reply)"
+
+    opts = loop_opts_from_settings(settings) if settings is not None else {}
+    max_turns = int(getattr(settings, "agent_max_turns", 0) or 0)
+    time_budget = float(getattr(settings, "agent_time_budget_s", 0.0) or 0.0)
+    try:
+        reply = drive_tool_loop(client, tools, convo, _emit_spec(),
+                                max_turns=max_turns, time_budget_s=time_budget,
+                                finalize=_fin, fallback=_fb, on_step=_on_step, **opts)
+    except Exception as e:  # noqa: BLE001 - surface a usable error, never crash the request
+        return {"ok": False, "error": str(e), "reply": f"(assistant error: {e})",
+                "steps": steps, "mode": mode}
+    return {"ok": True, "reply": reply or box.get("reply") or "(no reply)",
+            "steps": steps, "mode": mode}
+
+
+def _step_label(ev: dict) -> str:
+    tool = (ev or {}).get("tool", "")
+    arg = str((ev or {}).get("arg", ""))
+    short = arg.rsplit("/", 1)[-1] if arg else ""
+    return ({"read_file": f"reading {short}", "list_dir": f"listing {short or 'a directory'}",
+             "find_files": f"searching {short or 'files'}",
+             "list_runs": "listing runs", "read_run": f"reading run {short or ''}".strip()}.get(tool)
+            or (f"{tool} {short}".strip() if tool else "thinking"))

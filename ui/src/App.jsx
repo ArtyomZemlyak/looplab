@@ -2,6 +2,7 @@ import React, { useEffect, useState } from 'react'
 import RunList from './RunList.jsx'
 import RunView from './RunView.jsx'
 import Settings from './Settings.jsx'
+import AssistantChat from './AssistantChat.jsx'
 import { initTheme } from './ThemeSwitcher.jsx'
 import { initFx } from './fx.js'
 
@@ -13,6 +14,7 @@ const safeDecode = (s) => { try { return decodeURIComponent(s) } catch { return 
 function parseHash() {
   const h = location.hash
   if (h === '#/settings') return { view: 'settings' }
+  if (h === '#/assistant') return { view: 'assistant' }
   const m = h.match(/^#\/run\/(.+)$/)
   return m ? { view: 'run', id: safeDecode(m[1]) } : { view: 'list' }
 }
@@ -27,7 +29,9 @@ export default function App() {
   const open = (id) => { location.hash = `#/run/${encodeURIComponent(id)}` }
   const back = () => { location.hash = '' }
   const settings = () => { location.hash = '#/settings' }
+  const assistant = () => { location.hash = '#/assistant' }
   if (route.view === 'run') return <RunView key={route.id} runId={route.id} onBack={back} />
   if (route.view === 'settings') return <Settings onBack={back} />
-  return <RunList onOpen={open} onSettings={settings} />
+  if (route.view === 'assistant') return <AssistantChat onBack={back} />
+  return <RunList onOpen={open} onSettings={settings} onAssistant={assistant} />
 }

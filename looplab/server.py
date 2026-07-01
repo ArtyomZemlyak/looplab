@@ -36,6 +36,7 @@ from .config import Settings
 from .eventstore import EventStore, iter_jsonl
 from .models import Event
 from .projects import ProjectError, ProjectStore
+from .assistant import SessionStore, run_turn as _assistant_run_turn
 from .replay import fold
 from .tasks import make_llm_client
 
@@ -226,7 +227,7 @@ from .digest import theme_rollup as _theme_rollup
 
 # run-root subdirectories that are NOT runs and must never be used as a run_id (would collide with the
 # cross-run scope-report store at <run-root>/reports/).
-_RESERVED_RUN_IDS = {"reports"}
+_RESERVED_RUN_IDS = {"reports", "assistant"}
 
 
 def _engine_alive(rd: Path) -> bool:
@@ -1671,6 +1672,94 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
             # opaque spinner while a slow boss inspects the repo (transparency, not a time cap).
             return {"status": "running", "progress": j.get("progress")}
         return {**j["result"], "status": "done"}
+
+    # ------------------------------------------------------------------ assistant (general chat agent)
+    # The evolution of Genesis: a persistent, general-purpose chat agent with its OWN sessions (not
+    # tied to a run). P0 is read-only (inspect files + runs); write/shell/git + permission modes land
+    # in P1. Sessions live under <run_root>/assistant/ (a RESERVED id), separate from any run's chat.
+    _asst = SessionStore(root)
+
+    @app.get("/api/assistant/sessions")
+    def assistant_sessions():
+        return {"sessions": _asst.list()}
+
+    @app.post("/api/assistant/sessions")
+    async def assistant_create(request: Request):
+        body = await request.json()
+        meta = _asst.create(title=(body.get("title") or ""),
+                            mode=body.get("mode") or "plan")
+        return meta
+
+    @app.get("/api/assistant/sessions/{sid}")
+    def assistant_get(sid: str):
+        try:
+            sess = _asst.get(sid)
+        except ValueError:
+            raise HTTPException(404, "no such session")
+        if sess is None:
+            raise HTTPException(404, "no such session")
+        return sess
+
+    @app.delete("/api/assistant/sessions/{sid}")
+    def assistant_delete(sid: str):
+        import shutil
+        try:
+            d = _asst._sdir(sid)
+        except ValueError:
+            raise HTTPException(404, "no such session")
+        if d.exists():
+            shutil.rmtree(d, ignore_errors=True)
+        return {"ok": True}
+
+    @app.post("/api/assistant/sessions/{sid}/fork")
+    def assistant_fork(sid: str):
+        try:
+            child = _asst.fork(sid)
+        except ValueError:
+            raise HTTPException(404, "no such session")
+        if child is None:
+            raise HTTPException(404, "no such session")
+        return child
+
+    @app.post("/api/assistant/sessions/{sid}/message")
+    async def assistant_message(sid: str, request: Request):
+        """One assistant turn. Persists the user turn, drives the read-only tool loop as a BACKGROUND
+        JOB (so a long turn returns {status:'running', job_id} the UI awaits via jobAwait instead of
+        504ing), then persists the assistant reply. Soft-fails offline."""
+        body = await request.json()
+        instruction = (body.get("instruction") or body.get("content") or "").strip()
+        mode = body.get("mode")
+        try:
+            sess = _asst.get(sid)
+        except ValueError:
+            raise HTTPException(404, "no such session")
+        if sess is None:
+            raise HTTPException(404, "no such session")
+        if not instruction:
+            raise HTTPException(400, "empty message")
+        history = list(sess["messages"])          # BEFORE appending the new user turn
+        eff_mode = mode or sess["meta"].get("mode") or "plan"
+        _asst.append(sid, {"role": "user", "content": instruction, "mode": eff_mode})
+        s = _llm_settings()
+        try:
+            client = make_llm_client(s)
+        except Exception as e:  # noqa: BLE001 - offline / no model -> soft fail with a usable message
+            reply = f"Couldn't reach the model ({e})."
+            _asst.append(sid, {"role": "assistant", "content": reply})
+            return {"ok": False, "error": str(e), "reply": reply, "mode": eff_mode}
+
+        def _compute() -> dict:
+            res = _assistant_run_turn(client, root, history, instruction, eff_mode,
+                                      alive_fn=_engine_alive, settings=s)
+            res["tokens"] = _client_tokens(client)
+            try:
+                _asst.append(sid, {"role": "assistant", "content": res.get("reply", ""),
+                                   "steps": res.get("steps") or [], "tokens": res.get("tokens")})
+            except Exception:  # noqa: BLE001 - persistence is best-effort; still return the reply
+                pass
+            return res
+
+        return await _run_as_job(_compute)
 
     # ------------------------------------------------------------------ LLM (chat / suggest / health)
     def _llm_settings(rd: Optional[Path] = None) -> "Settings":

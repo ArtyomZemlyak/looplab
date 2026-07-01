@@ -104,7 +104,7 @@ function indexProjects(projects) {
   return { byParent, subtree }
 }
 
-export default function RunList({ onOpen, onSettings }) {
+export default function RunList({ onOpen, onSettings, onAssistant }) {
   const [runs, setRuns] = useState(null)
   const [proj, setProj] = useState({ projects: [], assignments: {} })
   const [sel, setSel] = useState(ALL)
@@ -283,6 +283,7 @@ export default function RunList({ onOpen, onSettings }) {
           <button className={view === 'map' ? 'on' : ''} onClick={() => setView('map')}><OpIcon name="map" className="t-ic" /> Map</button>
         </div>
         <button className="btn sm primary" onClick={() => { setSeed(''); setStarting(true) }}>▶ New run</button>
+        <button className="btn sm" title="general assistant — inspect, edit and fix LoopLab" onClick={() => onAssistant && onAssistant()}>✦ Assistant</button>
         <ThemeSwitcher />
         <EnergyToggle />
         <button className="btn sm ghost" title="settings" onClick={() => onSettings && onSettings()}>⚙ Settings</button>
