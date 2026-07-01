@@ -4,6 +4,7 @@ import { fmtAgo, fmt, get, startRun } from './util.js'
 import {
   assistantSessions, assistantCreate, assistantGet, assistantDelete, assistantFork,
   assistantMessagePost, getJob, assistantPermissions, assistantResolve, assistantProgress,
+  assistantCommands, assistantShare,
 } from './util.js'
 
 const sleep = (ms) => new Promise(r => setTimeout(r, ms))
@@ -34,7 +35,7 @@ const MODES = [
 
 // One assistant/user turn in the feed. Tool steps (what the agent read) render as a compact sub-line;
 // any @run:<id> mention gets a live inline run card.
-function Turn({ m, runsById }) {
+export function Turn({ m, runsById }) {
   const who = m.role === 'user' ? 'you' : 'assistant'
   const mentions = runMentions(m.content)
   return <div className={'feed-msg chat ' + m.role}>
@@ -118,8 +119,15 @@ export default function AssistantChat({ onBack }) {
   const [pending, setPending] = useState([])   // live human-in-the-loop confirm requests
   const [liveSteps, setLiveSteps] = useState([])   // tool steps streamed while a turn runs
   const [runs, setRuns] = useState([])          // /api/runs, for @run cards + the @-picker
+  const [commands, setCommands] = useState([])  // slash commands
   const feedRef = useRef(null)
   const inputRef = useRef(null)
+
+  useEffect(() => { assistantCommands().then(r => setCommands(r.commands || [])).catch(() => {}) }, [])
+  // slash-command picker: when the message is a bare "/name" (no space yet), suggest commands.
+  const slashMatch = /^\/(\w*)$/.exec(input)
+  const slashCmds = slashMatch ? commands.filter(c => c.name.startsWith(slashMatch[1].toLowerCase())) : []
+  const pickCmd = (name) => { setInput(`/${name} `); if (inputRef.current) inputRef.current.focus() }
 
   const runsById = React.useMemo(() => Object.fromEntries(runs.map(r => [r.run_id, r])), [runs])
   useEffect(() => {
@@ -168,6 +176,15 @@ export default function AssistantChat({ onBack }) {
   const fork = async () => {
     if (!sid) return
     try { const c = await assistantFork(sid); await refreshSessions(); openSession(c.id) } catch (e) { setErr(e.message) }
+  }
+  const share = async () => {
+    if (!sid) return
+    try {
+      const r = await assistantShare(sid)
+      const url = location.origin + location.pathname + r.url
+      try { await navigator.clipboard.writeText(url) } catch { /* clipboard blocked */ }
+      setErr(null); window.alert('Read-only share link copied:\n' + url)
+    } catch (e) { setErr(e.message) }
   }
 
   const resolvePerm = async (reqId, decision) => {
@@ -245,6 +262,7 @@ export default function AssistantChat({ onBack }) {
         </div>
         <span className="muted" style={{ flex: 1, fontSize: 11 }}>{activeMode.hint}</span>
         {sid && <button className="btn sm ghost" onClick={fork} title="clone this chat">fork</button>}
+        {sid && <button className="btn sm ghost" onClick={share} title="copy a read-only link">share</button>}
       </div>
 
       <div className="asst-feed" ref={feedRef}>
@@ -277,9 +295,14 @@ export default function AssistantChat({ onBack }) {
             <b>{r.run_id}</b><span className="muted"> {r.phase || (r.finished ? 'finished' : 'running')}</span>
           </button>)}
         </div>}
-        <textarea className="text" ref={inputRef} placeholder="Message the assistant…  (@ to reference a run · Enter to send · Shift+Enter newline)"
+        {slashCmds.length > 0 && <div className="asst-mention-pop">
+          {slashCmds.map(c => <button key={c.name} className="asst-mention-item" onClick={() => pickCmd(c.name)}>
+            <b>/{c.name}</b><span className="muted"> {c.desc}</span>
+          </button>)}
+        </div>}
+        <textarea className="text" ref={inputRef} placeholder="Message the assistant…  (/ for commands · @ to reference a run · Enter to send)"
           value={input} onChange={e => setInput(e.target.value)}
-          onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey && mentionRuns.length === 0) { e.preventDefault(); send() } }} />
+          onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey && mentionRuns.length === 0 && slashCmds.length === 0) { e.preventDefault(); send() } }} />
         <div className="toolbar" style={{ marginTop: 6 }}>
           <span className="muted" style={{ flex: 1, fontSize: 11 }}>mode: <b>{activeMode.label}</b></span>
           <button className="btn sm primary" disabled={!input.trim() || busy} onClick={() => send()}>{busy ? '…' : 'Send'}</button>

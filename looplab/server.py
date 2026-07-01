@@ -1739,6 +1739,11 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
             r["event"].set()
         return {"ok": True}
 
+    @app.get("/api/assistant/commands")
+    def assistant_commands():
+        from .assistant_commands import list_commands
+        return {"commands": list_commands()}
+
     @app.get("/api/assistant/progress")
     def assistant_progress(session: str):
         with _perm_lock:
@@ -1776,6 +1781,23 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
         if d.exists():
             shutil.rmtree(d, ignore_errors=True)
         return {"ok": True}
+
+    @app.post("/api/assistant/sessions/{sid}/share")
+    def assistant_share(sid: str):
+        meta = _asst.update_meta(sid, shared=True)
+        if meta is None:
+            raise HTTPException(404, "no such session")
+        return {"ok": True, "url": f"#/assistant/shared/{sid}", "session": sid}
+
+    @app.get("/api/assistant/shared/{sid}")
+    def assistant_shared(sid: str):
+        try:
+            sess = _asst.get(sid)
+        except ValueError:
+            raise HTTPException(404, "no such session")
+        if sess is None or not sess["meta"].get("shared"):
+            raise HTTPException(404, "not shared")
+        return sess
 
     @app.post("/api/assistant/sessions/{sid}/fork")
     def assistant_fork(sid: str):
@@ -1837,6 +1859,16 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
                                    "proposals": res.get("proposals") or [], "tokens": res.get("tokens")})
             except Exception:  # noqa: BLE001 - persistence is best-effort; still return the reply
                 pass
+            if not history:                 # first turn -> title the session from the exchange (cheap)
+                try:
+                    title = client.complete_text([
+                        {"role": "system", "content": "Reply with a SHORT title (<= 6 words, no quotes) "
+                         "for this chat based on the user's first message."},
+                        {"role": "user", "content": instruction[:400]}]).strip().strip('"')[:60]
+                    if title:
+                        _asst.update_meta(sid, title=title)
+                except Exception:  # noqa: BLE001 - titling is best-effort
+                    pass
             return res
 
         return await _run_as_job(_compute)

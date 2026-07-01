@@ -244,7 +244,8 @@ def run_turn(client, run_root, messages: list, instruction: str, mode: str = DEF
     tools = build_tools(run_root, alive_fn=alive_fn, mode=mode, approver=approver,
                         trust_mode=trust_mode, extra_roots=extra_roots)
     roots = [Path.home(), REPO_ROOT, Path(run_root)] + list(extra_roots)
-    grounded, refs = expand_mentions(instruction, run_root, alive_fn=alive_fn, roots=roots)
+    from .assistant_commands import expand_command
+    grounded, refs = expand_mentions(expand_command(instruction), run_root, alive_fn=alive_fn, roots=roots)
     convo = [{"role": "system", "content": system_prompt(mode)}]
     for m in messages:
         role = m.get("role")
