@@ -26,8 +26,9 @@ _MAX_READ = 8000
 
 def _child_env(argv) -> dict:
     base = {k: v for k, v in os.environ.items() if not _SECRET_ENV.search(k)}
-    if argv and argv[0] == "git":     # git needs its (partially secret-named) config vars intact
-        base.update({k: v for k, v in os.environ.items() if k.startswith("GIT_")})
+    if argv and argv[0] == "git":     # restore ONLY git config + identity (not credential-bearing vars)
+        from .shell_tools import git_config_env
+        base.update(git_config_env())
     base.setdefault("PYTHONUNBUFFERED", "1")
     return base
 
@@ -52,6 +53,17 @@ class BackgroundManager:
                                 "cmd": " ".join(argv), "cwd": cwd}
         return tid
 
+    @staticmethod
+    def _reap(t) -> None:
+        """Close our copy of the log write-handle once the child has exited (else one fd leaks per
+        background command for the life of the process)."""
+        if t["proc"].poll() is not None and not t.get("closed"):
+            try:
+                t["fh"].close()
+            except OSError:
+                pass
+            t["closed"] = True
+
     def read(self, tid: str) -> dict:
         with self._lock:
             t = self._tasks.get(tid)
@@ -66,6 +78,7 @@ class BackgroundManager:
         text = new.decode("utf-8", "replace")
         if len(text) > _MAX_READ:
             text = "…(truncated)…\n" + text[-_MAX_READ:]
+        self._reap(t)
         rc = t["proc"].poll()
         return {"ok": True, "task_id": tid, "cmd": t["cmd"],
                 "status": "running" if rc is None else "exited", "exit_code": rc, "new_output": text}
@@ -75,6 +88,7 @@ class BackgroundManager:
             items = list(self._tasks.items())
         out = []
         for tid, t in items:
+            self._reap(t)
             rc = t["proc"].poll()
             out.append({"task_id": tid, "cmd": t["cmd"],
                         "status": "running" if rc is None else "exited", "exit_code": rc})
@@ -94,6 +108,11 @@ class BackgroundManager:
                     proc.terminate()
             except (OSError, ProcessLookupError):
                 pass
+        try:
+            t["fh"].close()
+        except OSError:
+            pass
+        t["closed"] = True
         return {"ok": True, "task_id": tid, "status": "killed"}
 
 

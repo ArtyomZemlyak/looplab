@@ -20,6 +20,19 @@ from .perm_modes import decide, default_approver
 _MAX_OUTPUT = 64_000
 _MAX_TIMEOUT = 600.0
 
+# Only these host GIT_* vars are passed through to a `git` child (see exec_argv): the multi-var config
+# (which `_run_argv` would partially scrub because GIT_CONFIG_KEY_* contains "KEY") + commit identity.
+# Deliberately EXCLUDES credential-bearing vars (GIT_ASKPASS, GIT_SSH_COMMAND, GIT_HTTP_EXTRAHEADER,
+# GIT_TOKEN, …) so a token can't reach a git subprocess whose stdout is returned to a remote model.
+_GIT_IDENTITY = {"GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_AUTHOR_DATE",
+                 "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL", "GIT_COMMITTER_DATE"}
+
+
+def git_config_env() -> dict:
+    import os as _os
+    return {k: v for k, v in _os.environ.items()
+            if k.startswith("GIT_CONFIG_") or k in _GIT_IDENTITY}
+
 
 def _tail(s: str, n: int = 4000) -> str:
     s = s or ""
@@ -136,11 +149,10 @@ class ShellTools:
         run_argv = self._wrap(argv, str(wd)) if self._wrap else argv
         # `_run_argv` scrubs env vars whose NAME looks secret (…KEY…), which would drop only PART of a
         # multi-var git config (GIT_CONFIG_KEY_0 gone, GIT_CONFIG_COUNT kept) and break `git` with
-        # "missing config key". For a git command, pass the host's GIT_* vars back so git sees the exact
-        # host config it needs (identity, proxy routing) — restoring, not weakening, correctness.
-        import os as _os
-        env = ({k: v for k, v in _os.environ.items() if k.startswith("GIT_")}
-               if argv and argv[0] == "git" else None)
+        # "missing config key". For a git command, pass back ONLY the host's git config + identity vars
+        # (NOT credential-bearing GIT_ASKPASS/SSH_COMMAND/HTTP_EXTRAHEADER) so git works without leaking
+        # a token into output the model sees.
+        env = git_config_env() if (argv and argv[0] == "git") else None
         from .sandbox import _run_argv
         rc, out, err, timed_out = _run_argv(run_argv, str(wd), to, env=env, max_output_bytes=self.max_output)
         if d != "inline" or tool_kind != "git_ro":     # record real mutations/commands (not ro peeks)

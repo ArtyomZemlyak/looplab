@@ -1705,8 +1705,12 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
                 _perm_reqs[req_id] = {"id": req_id, "session": sid, "action": safe_action,
                                       "status": "pending", "decision": None, "event": ev,
                                       "created": time.time()}
-                if len(_perm_reqs) > 128:      # evict oldest beyond the most-recent 128
-                    for k in sorted(_perm_reqs, key=lambda j: _perm_reqs[j]["created"])[:-128]:
+                if len(_perm_reqs) > 128:      # evict oldest RESOLVED beyond 128 — NEVER a pending
+                    # request (its approver thread is blocked on that entry's Event; evicting it would
+                    # 404 the resolve and hang the worker for the whole _PERM_TIMEOUT).
+                    stale = [k for k in sorted(_perm_reqs, key=lambda j: _perm_reqs[j]["created"])
+                             if _perm_reqs[k]["status"] != "pending"]
+                    for k in stale[:max(0, len(_perm_reqs) - 128)]:
                         _perm_reqs.pop(k, None)
             got = ev.wait(timeout=_PERM_TIMEOUT)
             with _perm_lock:
@@ -1793,6 +1797,12 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
             raise HTTPException(404, "no such session")
         if d.exists():
             shutil.rmtree(d, ignore_errors=True)
+        with _perm_lock:      # drop the deleted session's in-memory grants/progress (no slow leak)
+            _perm_always.pop(sid, None)
+            _asst_progress.pop(sid, None)
+            for k in [k for k, r in _perm_reqs.items()
+                      if r.get("session") == sid and r.get("status") != "pending"]:
+                _perm_reqs.pop(k, None)
         return {"ok": True}
 
     @app.post("/api/assistant/sessions/{sid}/share")
@@ -1866,30 +1876,32 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
                 p["updated"] = time.time()
 
         def _compute() -> dict:
-            res = _assistant_run_turn(client, root, history, instruction, eff_mode,
-                                      alive_fn=_engine_alive, settings=s, approver=approver,
-                                      on_step=_on_step, on_todos=_on_todos)
-            res["tokens"] = _client_tokens(client)
-            with _perm_lock:
-                _asst_progress.pop(sid, None)
             try:
-                _asst.append(sid, {"role": "assistant", "content": res.get("reply", ""),
-                                   "steps": res.get("steps") or [], "applied": res.get("applied") or [],
-                                   "proposals": res.get("proposals") or [], "todos": res.get("todos") or [],
-                                   "tokens": res.get("tokens")})
-            except Exception:  # noqa: BLE001 - persistence is best-effort; still return the reply
-                pass
-            if not history:                 # first turn -> title the session from the exchange (cheap)
+                res = _assistant_run_turn(client, root, history, instruction, eff_mode,
+                                          alive_fn=_engine_alive, settings=s, approver=approver,
+                                          on_step=_on_step, on_todos=_on_todos)
+                res["tokens"] = _client_tokens(client)
                 try:
-                    title = client.complete_text([
-                        {"role": "system", "content": "Reply with a SHORT title (<= 6 words, no quotes) "
-                         "for this chat based on the user's first message."},
-                        {"role": "user", "content": instruction[:400]}]).strip().strip('"')[:60]
-                    if title:
-                        _asst.update_meta(sid, title=title)
-                except Exception:  # noqa: BLE001 - titling is best-effort
+                    _asst.append(sid, {"role": "assistant", "content": res.get("reply", ""),
+                                       "steps": res.get("steps") or [], "applied": res.get("applied") or [],
+                                       "proposals": res.get("proposals") or [], "todos": res.get("todos") or [],
+                                       "tokens": res.get("tokens")})
+                except Exception:  # noqa: BLE001 - persistence is best-effort; still return the reply
                     pass
-            return res
+                if not history:             # first turn -> title the session from the exchange (cheap)
+                    try:
+                        title = client.complete_text([
+                            {"role": "system", "content": "Reply with a SHORT title (<= 6 words, no "
+                             "quotes) for this chat based on the user's first message."},
+                            {"role": "user", "content": instruction[:400]}]).strip().strip('"')[:60]
+                        if title:
+                            _asst.update_meta(sid, title=title)
+                    except Exception:  # noqa: BLE001 - titling is best-effort
+                        pass
+                return res
+            finally:
+                with _perm_lock:            # always drop the live-progress entry (no leak on error)
+                    _asst_progress.pop(sid, None)
 
         return await _run_as_job(_compute)
 

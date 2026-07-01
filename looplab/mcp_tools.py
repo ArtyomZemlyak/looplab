@@ -100,3 +100,15 @@ class McpTools:
             except Exception:  # noqa: BLE001 - a server that won't connect is skipped
                 continue
         return cls([s for s in servers if s is not None])
+
+    @classmethod
+    def cached(cls) -> "McpTools":
+        """Process-global instance: connect to each MCP server ONCE (a live server owns a background
+        thread + event loop + subprocess), not on every assistant turn. build_tools calls this."""
+        global _CACHED
+        if _CACHED is None:
+            _CACHED = cls.from_config()
+        return _CACHED
+
+
+_CACHED: Optional["McpTools"] = None

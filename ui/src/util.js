@@ -589,22 +589,18 @@ export const assistantCreate = (title = '', mode = 'plan') => post('/api/assista
 export const assistantGet = (sid) => get(`/api/assistant/sessions/${encodeURIComponent(sid)}`)
 export const assistantDelete = (sid) => send(`/api/assistant/sessions/${encodeURIComponent(sid)}`, 'DELETE')
 export const assistantFork = (sid) => post(`/api/assistant/sessions/${encodeURIComponent(sid)}/fork`, {})
-// POST one message; the turn runs as a background job. Returns either the inline result (fast turn) or
-// {status:'running', job_id} the caller awaits — while ALSO polling permissions so a mutating action
-// that pauses the turn can be approved mid-flight (see AssistantChat's runTurn).
-export const assistantMessagePost = (sid, instruction, mode) =>
-  post(`/api/assistant/sessions/${encodeURIComponent(sid)}/message`, { instruction, mode })
-export const getJob = (jobId) => get(`/api/jobs/${encodeURIComponent(jobId)}`)
 // Streaming turn: POST and read the SSE stream, invoking callbacks for token/step/todos/done/error.
 // Real token streaming of the final answer (Claude-Desktop feel). Returns the final result dict.
-export async function assistantMessageStream(sid, instruction, mode, cbs = {}) {
+export async function assistantMessageStream(sid, instruction, mode, cbs = {}, signal) {
   const r = await fetch(apiUrl(`/api/assistant/sessions/${encodeURIComponent(sid)}/message_stream`),
-    { method: 'POST', headers: _authHeaders({ 'Content-Type': 'application/json' }), body: JSON.stringify({ instruction, mode }) })
+    { method: 'POST', headers: _authHeaders({ 'Content-Type': 'application/json' }), body: JSON.stringify({ instruction, mode }), signal })
   if (!r.ok || !r.body) { await _throw(r, 'message_stream'); return null }
   const reader = r.body.getReader(); const dec = new TextDecoder()
   let buf = ''; let result = null
   for (;;) {
-    const { done, value } = await reader.read()
+    let chunk
+    try { chunk = await reader.read() } catch { break }   // aborted (unmount) — stop cleanly
+    const { done, value } = chunk
     if (done) break
     buf += dec.decode(value, { stream: true })
     let i
@@ -625,8 +621,6 @@ export async function assistantMessageStream(sid, instruction, mode, cbs = {}) {
   }
   return result
 }
-// Live tool steps while a turn runs (so the UI shows "reading X…" instead of an opaque spinner).
-export const assistantProgress = (sid) => get(`/api/assistant/progress?session=${encodeURIComponent(sid)}`)
 export const assistantCommands = () => get('/api/assistant/commands')
 export const assistantRevert = (path) => post('/api/assistant/revert', { path })
 export const assistantShare = (sid) => post(`/api/assistant/sessions/${encodeURIComponent(sid)}/share`, {})

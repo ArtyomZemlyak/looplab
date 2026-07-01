@@ -136,6 +136,9 @@ export default function AssistantChat({ onBack }) {
   const [commands, setCommands] = useState([])  // slash commands
   const feedRef = useRef(null)
   const inputRef = useRef(null)
+  const mountedRef = useRef(true)
+  const abortRef = useRef(null)
+  useEffect(() => () => { mountedRef.current = false; if (abortRef.current) abortRef.current.abort() }, [])
 
   useEffect(() => { assistantCommands().then(r => setCommands(r.commands || [])).catch(() => {}) }, [])
   // slash-command picker: when the message is a bare "/name" (no space yet), suggest commands.
@@ -229,25 +232,28 @@ export default function AssistantChat({ onBack }) {
     }
     setMsgs(m => [...m, { role: 'user', content: t }, { role: 'assistant', content: '', streaming: true }])
     setBusy(true)
-    // poll permissions concurrently so a mutating action that pauses the turn can be approved.
+    const ctrl = new AbortController(); abortRef.current = ctrl
+    // poll permissions concurrently so a mutating action that pauses the turn can be approved. Stops
+    // on turn end OR component unmount (mountedRef), so it can't leak or setState after unmount.
     let polling = true
-    ;(async () => { while (polling) { try { const p = await assistantPermissions(id); setPending(p.pending || []) } catch { /* transient */ } await sleep(800) } })()
-    let acc = ''
+    ;(async () => { while (polling && mountedRef.current) { try { const p = await assistantPermissions(id); if (mountedRef.current) setPending(p.pending || []) } catch { /* transient */ } await sleep(800) } })()
+    const safe = (fn) => (...a) => { if (mountedRef.current) fn(...a) }
+    let acc = ''; let errored = null
     try {
       const res = await assistantMessageStream(id, t, mode, {
-        onToken: (tok) => { acc += (tok && tok.text != null ? tok.text : (typeof tok === 'string' ? tok : '')); patchLast({ content: acc }) },
-        onStep: (s) => setLiveSteps(x => [...x, s]),
-        onTodos: (items) => { setLiveTodos(items); patchLast({ todos: items }) },
-        onError: (e) => setErr(e),
-      })
-      if (res && res.ok === false && res.error) setErr(res.error)
-      patchLast({ content: (res && res.reply) || acc || '(no reply)', streaming: false,
+        onToken: safe((tok) => { acc += (tok && tok.text != null ? tok.text : (typeof tok === 'string' ? tok : '')); patchLast({ content: acc }) }),
+        onStep: safe((s) => setLiveSteps(x => [...x, s])),
+        onTodos: safe((items) => { setLiveTodos(items); patchLast({ todos: items }) }),
+        onError: safe((e) => { errored = e; setErr(e) }),
+      }, ctrl.signal)
+      if (!mountedRef.current) return
+      if (res && res.ok === false && res.error) { errored = res.error; setErr(res.error) }
+      patchLast({ content: (res && res.reply) || acc || (errored ? `⚠ ${errored}` : '(no reply)'), streaming: false,
         steps: res && res.steps, applied: res && res.applied, proposals: res && res.proposals, todos: res && res.todos })
       refreshSessions()
     } catch (e) {
-      setErr(e.message)
-      patchLast({ content: acc || 'Could not reach the assistant.', streaming: false })
-    } finally { polling = false; setBusy(false); setPending([]); setLiveSteps([]); setLiveTodos([]) }
+      if (mountedRef.current) { setErr(e.message); patchLast({ content: acc || 'Could not reach the assistant.', streaming: false }) }
+    } finally { polling = false; abortRef.current = null; if (mountedRef.current) { setBusy(false); setPending([]); setLiveSteps([]); setLiveTodos([]) } }
   }
 
   const activeMode = MODES.find(x => x.id === mode) || MODES[0]

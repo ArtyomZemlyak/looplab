@@ -42,7 +42,10 @@ class FileBackups:
             p = Path(path)
             d = self._key(p)
             d.mkdir(parents=True, exist_ok=True)
-            n = len(list(d.glob("*.bak")))
+            # max(index)+1, NOT len(): a gap (from a revert pop or a failed save) must not reuse a
+            # live slot and clobber an existing backup.
+            existing = [int(b.stem) for b in d.glob("*.bak") if b.stem.isdigit()]
+            n = (max(existing) + 1) if existing else 0
             (d / f"{n}.bak").write_bytes(p.read_bytes() if p.is_file() else b"")
             (d / f"{n}.meta").write_text(json.dumps({"path": str(p), "existed": p.is_file()}))
         except OSError:
@@ -151,9 +154,13 @@ class WriteTools:
         p = _pathsafe.resolve_within(self._roots, path)
         if p is None:
             return None, None, f"(refused: {path} is outside the allowed roots)"
-        if _pathsafe.looks_secret(p):
-            return None, None, f"(refused: {p.name} looks like a secret/credential — not writable)"
         rel = self._rel(p)
+        # Secret check on the ROOT-RELATIVE path, not the absolute one: otherwise a secret-named
+        # component in the ROOT prefix (e.g. a workspace under /srv/.docker/… or ~/.config/…) would
+        # falsely refuse EVERY file under it. A real secret inside the workspace (`.env`, `.ssh/…`)
+        # still matches on the relative path.
+        if _pathsafe.looks_secret(Path(rel)):
+            return None, None, f"(refused: {p.name} looks like a secret/credential — not writable)"
         if self._protected(rel):
             return None, None, f"(refused: {rel} is protected — run-integrity/grader/.git files are read-only)"
         return p, rel, None

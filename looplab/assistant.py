@@ -169,7 +169,7 @@ def system_prompt(mode: str, *, repo_root: Path = REPO_ROOT) -> str:
 # @-mentions: `@run:<id>` and `@file:<path>` in the user's message are expanded (server-side, before
 # the model sees it) into grounding blocks — the OpenCode/Claude-Code pattern. The UI ALSO renders a
 # live inline card for each `@run:<id>`, so a running run shows up right in the chat.
-_MENTION = re.compile(r"@(run|file):([^\s]+)")
+_MENTION = re.compile(r"""@(run|file):([^\s\])"'>}]+)""")
 
 
 def expand_mentions(text: str, run_root, *, alive_fn: Optional[Callable] = None, roots=()) -> tuple:
@@ -234,7 +234,7 @@ def build_tools(run_root, alive_fn: Optional[Callable] = None, mode: str = DEFAU
     if mcp:
         try:
             from .mcp_tools import McpTools
-            m = McpTools.from_config()
+            m = McpTools.cached()      # connect to MCP servers ONCE per process, not per turn
             if m.specs():
                 providers.append(m)
         except Exception:  # noqa: BLE001 - MCP is optional; never break the toolset
@@ -318,7 +318,12 @@ def run_turn(client, run_root, messages: list, instruction: str, mode: str = DEF
     # Real token streaming of the FINAL answer: after the tool loop has acted, generate the
     # user-facing answer with a streaming call over the accumulated trace, pushing tokens to the sink.
     # (One extra call; reuses the context the loop built. The loop's emit reply is the fallback.)
-    if reply_sink is not None:
+    # GUARD: drive_tool_loop REBINDS its `messages` to a NEW list when auto_summary compacts a long
+    # trace (context_budget), so `convo` can be orphaned — missing the tool results. If tools ran but
+    # `convo` holds no tool-result messages, it was compacted away; stream over a stale trace would
+    # make the model re-answer BLIND, so we skip streaming and keep the loop's (correct) reply.
+    trace_ok = (not steps) or any(m.get("role") == "tool" for m in convo)
+    if reply_sink is not None and trace_ok:
         try:
             base = convo[:-1] if (convo and convo[-1].get("role") == "assistant"
                                   and convo[-1].get("tool_calls")) else convo

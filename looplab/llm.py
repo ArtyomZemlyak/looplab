@@ -270,7 +270,7 @@ class OpenAICompatibleClient:
         back to a single yield of the whole text if the endpoint doesn't stream. Best-effort — any
         transport error mid-stream ends the generator (the caller keeps what it got)."""
         payload = {"model": self.model, "messages": messages, "temperature": self.temperature,
-                   "stream": True}
+                   "stream": True, "stream_options": {"include_usage": True}}
         if self.reasoning:
             payload = {**payload, **self.reasoning}
         req = urllib.request.Request(
@@ -278,6 +278,7 @@ class OpenAICompatibleClient:
             method="POST", headers={"Content-Type": "application/json",
                                     "Authorization": f"Bearer {self.api_key}"})
         pieces: list[str] = []
+        usage: dict = {}
         try:
             with urllib.request.urlopen(req, timeout=self.timeout) as resp:
                 for raw in resp:
@@ -291,6 +292,8 @@ class OpenAICompatibleClient:
                         obj = json.loads(chunk)
                     except ValueError:
                         continue
+                    if obj.get("usage"):                       # final usage chunk (include_usage)
+                        usage = obj["usage"]
                     delta = ((obj.get("choices") or [{}])[0] or {}).get("delta") or {}
                     piece = delta.get("content") or ""
                     if piece:
@@ -302,8 +305,11 @@ class OpenAICompatibleClient:
                 if text:
                     yield text
                 return
+        if usage:                              # account the streamed answer's tokens like every other call
+            self.accountant.add(0.0, usage=usage)
+            self._last_usage = usage
         record_llm_call(op="complete_text_stream", model=self.model, messages=messages,
-                        completion="".join(pieces))
+                        completion="".join(pieces), usage=usage or None)
 
     def chat(self, messages: list[dict], tools: list[dict],
              tool_choice: str = "auto") -> dict:
