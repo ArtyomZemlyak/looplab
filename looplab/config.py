@@ -272,6 +272,12 @@ class Settings(BaseSettings):
     # H1: drive structured calls with the endpoint's constrained decoding (vLLM/SGLang guided_json +
     # response_format json_schema) so weak models can't emit invalid JSON. Off for Ollama (default).
     llm_guided_json: bool = False
+    # Stream every LLM request (SSE) and reassemble it, so the request `timeout` is an INTER-TOKEN
+    # idle timeout rather than a whole-request deadline: a long-but-alive generation is never cut off
+    # (tokens keep resetting the timer), while a genuinely STALLED endpoint (no token for `timeout` s)
+    # is detected and retried on a fresh connection — the fix for silent multi-minute hangs. Set False
+    # to use one blocking read (old per-op timeout semantics) if an endpoint streams badly.
+    llm_stream: bool = True
     # H4: cap the growing agentic-researcher tool-call history (chars) by middle-truncating stale
     # tool output, so a long trace doesn't blow the context window. 0 = off (unbounded).
     context_budget_chars: int = 0

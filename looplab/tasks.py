@@ -90,6 +90,7 @@ def make_llm_client(settings, *, model: str | None = None,
         temperature=settings.llm_temperature, accountant=CostAccountant(),
         guided_json=getattr(settings, "llm_guided_json", False),   # H1 constrained decoding
         reasoning=reasoning,                                        # provider-aware thinking toggle
+        stream=getattr(settings, "llm_stream", True),              # inter-token idle-timeout via SSE
         **extra,
     )
 

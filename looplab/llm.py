@@ -167,12 +167,20 @@ class OpenAICompatibleClient:
     def __init__(self, model: str, base_url: str = "http://localhost:11434/v1",
                  api_key: str = "ollama", temperature: float = 0.7,
                  timeout: float = 180.0, accountant: Optional["CostAccountant"] = None,
-                 guided_json: bool = False, reasoning: Optional[dict] = None):
+                 guided_json: bool = False, reasoning: Optional[dict] = None,
+                 stream: bool = True):
         self.model = model
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key or "x"
         self.temperature = temperature
         self.timeout = timeout
+        # Stream EVERY request (SSE) and reassemble it, so `timeout` acts as an INTER-TOKEN idle
+        # timeout, NOT a whole-request deadline: a long-but-alive generation keeps streaming tokens
+        # (each resets the timer, so it's never cut off), while a genuinely STALLED endpoint (no data
+        # for `timeout` s) trips the socket read timeout and is retried on a fresh connection. This is
+        # what stops the "27-minute hang" without ever capping a slow reasoning model. Opt out
+        # (stream=False) to use one blocking read (subject to the old per-op timeout semantics).
+        self.stream = stream
         self.accountant = accountant or CostAccountant()
         # Provider-specific reasoning toggle (from `reasoning_body`) merged into EVERY request, so the
         # whole agent loop (propose/chat/tool) runs with the same thinking setting. Empty = unchanged.
@@ -184,9 +192,87 @@ class OpenAICompatibleClient:
         # (Ollama needs no constraint and some builds reject unknown fields).
         self.guided_json = guided_json
 
+    def _read_stream(self, resp) -> dict:
+        """Reassemble an OpenAI SSE stream into the non-streaming response body shape
+        ({"choices":[{"message":{content,reasoning?,tool_calls?}, "finish_reason"}], "usage"}). Each
+        `for raw in resp` line is bounded by the socket `timeout`, so with streaming that timeout is an
+        INTER-TOKEN idle timeout: a stall (no line for `timeout` s) raises socket.timeout here and
+        propagates to `_post`'s transient-retry path; a steady stream is never cut off however long the
+        generation runs. tool_call deltas are merged by `index` (partial name/arguments concatenated)."""
+        content: list[str] = []
+        reasoning: list[str] = []
+        tcs: dict[int, dict] = {}
+        finish = None
+        usage: dict = {}
+        raw_lines: list[str] = []
+        got_sse = False
+        try:
+            lines = iter(resp)                  # SSE responses iterate line-by-line
+        except TypeError:
+            lines = iter(())                    # a non-iterable body (e.g. a test mock) -> read() below
+        for raw in lines:                       # each readline() is bounded by self.timeout
+            s = raw.decode("utf-8", "replace") if isinstance(raw, (bytes, bytearray)) else str(raw)
+            raw_lines.append(s)
+            line = s.strip()
+            if not line or not line.startswith("data:"):
+                continue
+            got_sse = True
+            chunk = line[5:].strip()
+            if chunk == "[DONE]":
+                break
+            try:
+                obj = json.loads(chunk)
+            except ValueError:
+                continue                        # keepalive / non-JSON heartbeat line
+            if obj.get("usage"):
+                usage = obj["usage"]
+            ch = (obj.get("choices") or [{}])[0] or {}
+            delta = ch.get("delta") or {}
+            if delta.get("content"):
+                content.append(delta["content"])
+            r = delta.get("reasoning") or delta.get("reasoning_content")
+            if r:
+                reasoning.append(r)
+            for tc in (delta.get("tool_calls") or []):
+                slot = tcs.setdefault(tc.get("index", 0),
+                                      {"id": None, "type": "function",
+                                       "function": {"name": "", "arguments": []}})
+                if tc.get("id"):
+                    slot["id"] = tc["id"]
+                fn = tc.get("function") or {}
+                if fn.get("name"):
+                    slot["function"]["name"] = fn["name"]
+                if fn.get("arguments"):
+                    slot["function"]["arguments"].append(fn["arguments"])
+            if ch.get("finish_reason"):
+                finish = ch["finish_reason"]
+        # Not actually an SSE stream (a non-streaming endpoint, or a test mock that returns one JSON
+        # body): parse the whole body as a normal chat completion so streaming stays transparent.
+        if not got_sse and not content and not tcs:
+            blob = "".join(raw_lines)
+            if not blob and hasattr(resp, "read"):
+                try:
+                    blob = resp.read().decode("utf-8", "replace")
+                except Exception:  # noqa: BLE001
+                    blob = ""
+            whole = _parse_chat_body(blob)
+            if whole is not None:               # any parsed JSON body (incl. an {"error":…} envelope,
+                return whole                    # which the caller fails fast on at the no-choices check)
+        msg: dict = {"role": "assistant", "content": "".join(content)}
+        if reasoning:
+            msg["reasoning"] = "".join(reasoning)
+        if tcs:
+            msg["tool_calls"] = [
+                {"id": s["id"] or f"call_{i}", "type": "function",
+                 "function": {"name": s["function"]["name"], "arguments": "".join(s["function"]["arguments"])}}
+                for i, s in sorted(tcs.items())]
+        return {"choices": [{"message": msg, "finish_reason": finish}], "usage": usage}
+
     def _post(self, payload: dict) -> dict:
         if self.reasoning:                  # inject the reasoning toggle into every request
             payload = {**payload, **self.reasoning}
+        if self.stream:                     # force streaming so `timeout` is an inter-token idle guard
+            payload = {**payload, "stream": True, "stream_options": {"include_usage": True}}
         data = json.dumps(payload).encode("utf-8")
         req = urllib.request.Request(
             f"{self.base_url}/chat/completions", data=data, method="POST",
@@ -203,7 +289,10 @@ class OpenAICompatibleClient:
         for attempt in range(self._max_retries + 1):
             try:
                 with urllib.request.urlopen(req, timeout=self.timeout) as resp:
-                    raw = resp.read().decode("utf-8")
+                    # Streaming: reassemble SSE lines (a stall raises socket.timeout HERE, inside the
+                    # `with`, and lands in the transient-retry handler below). Non-streaming: one read.
+                    parsed = self._read_stream(resp) if self.stream \
+                        else _parse_chat_body(resp.read().decode("utf-8"))
             except urllib.error.HTTPError as e:
                 if e.code in (429, 500, 502, 503, 504) and attempt < self._max_retries:
                     ra = _retry_after_seconds(e.headers.get("Retry-After") if e.headers else None)
@@ -227,19 +316,23 @@ class OpenAICompatibleClient:
                 # HTTP 200 read cleanly, but the body can still be unusable: a hosted gateway
                 # sometimes returns an empty / whitespace / SSE-keepalive-only body (OpenRouter sends
                 # ': OPENROUTER PROCESSING' heartbeats while a model is queued and can finish with no
-                # JSON payload). (A mid-read socket drop is caught above as IncompleteRead.) Treat an
-                # unparseable 200 like a transient network failure — retry with backoff — rather than
-                # crash the run on a single gateway hiccup. `_parse_chat_body`
-                # returns the dict for any valid JSON object (so an `{"error": ...}` envelope still
-                # fails fast at the no-`choices` check below), and None only when truly unrecoverable.
-                parsed = _parse_chat_body(raw)
-                if parsed is not None:
+                # JSON payload), or a stream that carried no content/tool-call. (A mid-read socket drop
+                # is caught above as IncompleteRead.) Treat an empty/unparseable 200 like a transient
+                # network failure — retry with backoff — rather than crash the run on a gateway hiccup.
+                # `parsed` was computed in the try (streamed-and-reassembled, or _parse_chat_body).
+                # A parsed dict is accepted (an `{"error": ...}` envelope has no `choices` and fails
+                # fast at the post-loop check). Only two cases retry: an unparseable body (None), or a
+                # STREAM that produced an empty message (keepalive-only heartbeats, no content/tool_call).
+                m = ((parsed.get("choices") or [{}])[0] or {}).get("message") or {} if parsed else {}
+                empty_stream = (self.stream and parsed is not None and parsed.get("choices")
+                                and not m.get("content") and not m.get("tool_calls"))
+                if parsed is not None and not empty_stream:
                     body = parsed
                     break
                 if attempt < self._max_retries:
                     time.sleep(min(2.0 * (2 ** attempt), 30.0))
                     continue
-                raise LLMError(f"LLM returned non-JSON after {self._max_retries + 1} attempts: {raw[:200]!r}")
+                raise LLMError(f"LLM returned non-JSON/empty after {self._max_retries + 1} attempts")
         if body is None:  # loop exhausted retries on a transient code without ever succeeding
             raise LLMError(f"LLM request to {self.base_url} failed: no response after retries")
         if "choices" not in body or not body["choices"]:
