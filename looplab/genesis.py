@@ -64,6 +64,28 @@ DATA_GUIDE = (
 )
 
 
+# How to author a `repo` task for maximum autonomy — the optional knobs that let the run adapt to the
+# environment. Author them from the user's WORDS (they may say "use all GPUs", "install deps once",
+# "the repo is huge, only touch code"); when unsaid, prefer the sensible defaults noted here.
+REPO_AUTONOMY_GUIDE = (
+    "REPO TASK AUTONOMY KNOBS (optional; author from the user's words, else use the default):\n"
+    "- seed_mode (\"auto\"|\"tracked\"|\"all\"): how the editable repo is copied into each experiment "
+    "workdir. Default \"auto\" = copy only git-tracked source when it's a git repo (so a tree bloated "
+    "with untracked model checkpoints/data is NOT deep-copied). Use \"all\" only for a small repo or "
+    "when untracked files are needed at eval time. If the repo is large, keep \"auto\"/\"tracked\".\n"
+    "- Data/large inputs that live OUTSIDE the repo go in `data` ({name: abs_path}) — they are mounted "
+    "(symlinked) at ./<name>, never deep-copied. Prefer this for multi-GB datasets/pretrained models.\n"
+    "- Dependencies: put a ONE-TIME install in `eval.run_setup` (runs once at run start into the shared "
+    "interpreter — the default when deps are stable) OR a per-experiment install in `eval.setup` (runs "
+    "before EVERY eval — use when the agent edits requirements and each node needs its own). Don't set "
+    "either if deps are already present.\n"
+    "- Hyperparameters: only set `params` bounds when the user wants a specific bounded search; "
+    "otherwise LEAVE `params` EMPTY and let the coding agent estimate sane values from the model size, "
+    "available GPU memory and any README recipe — and use ALL available GPUs by default.\n"
+    "- Put operational guidance the agent needs (use all GPUs, expected metric, which script to run) in "
+    "the task `goal` in plain words — the coding agent reads it.\n")
+
+
 # Kinds whose work is inherently LLM-driven (the agent writes/edits code or reasons over data). When
 # Genesis infers one of these and the user didn't choose a backend, the run defaults to backend=llm —
 # the offline-optimizable kinds (quadratic/classification/regression/timeseries) stay on their default.
@@ -116,10 +138,15 @@ def author_task(goal: str, *, client, kinds: tuple[str, ...], data: Optional[str
                      f"kind (do not switch kinds); fill in everything else from the goal.")
     else:
         kind_rule = TASK_KIND_GUIDE
+    try:
+        from .hardware import operational_attention_points
+        _attn = "\n\n" + operational_attention_points()
+    except Exception:  # noqa: BLE001
+        _attn = ""
     sys_prompt = (
         "You bootstrap a new autonomous-ML run from the user's goal. Decide the TASK and author it as "
-        "an inline `task` object.\n\n" + kind_rule + "\n\n" + DATA_GUIDE +
-        f"\n\nRegistered task kinds: {list(kinds)}.")
+        "an inline `task` object.\n\n" + kind_rule + "\n\n" + DATA_GUIDE + "\n\n" + REPO_AUTONOMY_GUIDE +
+        f"\n\nRegistered task kinds: {list(kinds)}." + _attn)
     user = f"Goal: {goal}{hint_block}"
     messages = [{"role": "system", "content": sys_prompt}, {"role": "user", "content": user}]
     try:
@@ -142,4 +169,47 @@ def author_task(goal: str, *, client, kinds: tuple[str, ...], data: Optional[str
     # path is never silently lost.
     if task and data and not (task.get("data_path") or task.get("editable_path") or task.get("data")):
         task["editable_path" if task.get("kind") == "repo" else "data_path"] = data
+    if task and task.get("kind") == "repo":
+        _normalize_repo_task(task)
     return GenesisResult(task=task, rationale=plan.rationale, reply=plan.reply)
+
+
+def _normalize_repo_task(task: dict) -> None:
+    """Coerce a repo task the model authored in a LOOSE shape into the canonical RepoTask schema —
+    the model reliably picks the right VALUES (paths, seed_mode, run_setup) but often uses near-miss
+    field names/types (repo_path, eval-as-string, metric-as-string, string setup commands). Fixing
+    them here means an autonomy-authored task validates without a second round-trip. In place; only
+    fills/renames — never overwrites a field already in canonical form."""
+    import shlex
+    def _as_list(v):
+        return shlex.split(v) if isinstance(v, str) else (list(v) if isinstance(v, (list, tuple)) else v)
+    # editable repo path under any of the common aliases
+    if not task.get("editable_path"):
+        for alias in ("repo_path", "repo", "path", "editable"):
+            if isinstance(task.get(alias), str) and task[alias]:
+                task["editable_path"] = task.pop(alias)
+                break
+    if not task.get("direction") and isinstance(task.get("optimization_direction"), str):
+        task["direction"] = task.pop("optimization_direction")
+    # eval: a bare string command, or a dict with loose command/metric/setup shapes
+    ev = task.get("eval")
+    if isinstance(ev, str):
+        ev = {"command": _as_list(ev)}
+        task["eval"] = ev
+    if isinstance(ev, dict):
+        if isinstance(ev.get("command"), str):
+            ev["command"] = _as_list(ev["command"])
+        for k in ("setup", "run_setup"):
+            if isinstance(ev.get(k), str):
+                ev[k] = _as_list(ev[k])
+        # metric as a bare key string -> the stdout_json reader the repo eval prints
+        m = ev.get("metric")
+        if isinstance(m, str):
+            ev["metric"] = {"kind": "stdout_json", "key": m}
+        elif m is None and isinstance(task.get("metric"), str):
+            ev["metric"] = {"kind": "stdout_json", "key": task["metric"]}
+    # a top-level metric string with no eval yet -> stash it on a minimal eval so it isn't lost
+    if isinstance(task.get("metric"), str) and isinstance(task.get("eval"), dict) \
+            and "metric" not in task["eval"]:
+        task["eval"]["metric"] = {"kind": "stdout_json", "key": task["metric"]}
+    task.pop("metric", None)

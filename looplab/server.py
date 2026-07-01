@@ -1533,6 +1533,12 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
         if draft:
             sys_prompt += ("\nThe user is refining this current draft — edit it in place, keeping the "
                            "fields they didn't ask to change:\n" + json.dumps(draft)[:1200])
+        try:
+            from .genesis import REPO_AUTONOMY_GUIDE
+            from .hardware import operational_attention_points
+            sys_prompt += "\n\n" + REPO_AUTONOMY_GUIDE + "\n\n" + operational_attention_points()
+        except Exception:  # noqa: BLE001 - env-awareness is additive; never block genesis
+            pass
         convo = "\n".join(f"{m.get('role')}: {m.get('content')}" for m in msgs)
         user = (f"Goal: {instruction}" if instruction else "") + (f"\n\nConversation:\n{convo}" if convo else "")
         from .parse import parse_structured
@@ -1732,7 +1738,13 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
                       "node likely crashed or never started). To make progress you MUST act: `resume` to "
                       "restart the loop, and if a node is failing add a debug/inject step to fix it — "
                       "don't just advise.")
-        parts = [status, _node_context(st, nid, full)]
+        parts = [status]
+        try:
+            from .hardware import operational_attention_points
+            parts.append(operational_attention_points())
+        except Exception:  # noqa: BLE001 - env-awareness is additive
+            pass
+        parts.append(_node_context(st, nid, full))
         dg = experiments_digest(st)
         if dg:
             parts.append(dg)

@@ -108,7 +108,8 @@ def _json_line_trials(text: str) -> Optional[list]:
 
 
 def _run_argv(argv: list[str], workdir: str, timeout: float,
-              env: Optional[dict] = None, max_output_bytes: int = 64_000, cancel=None):
+              env: Optional[dict] = None, max_output_bytes: int = 64_000, cancel=None,
+              log_path: Optional[str] = None):
     """Run one subprocess (argv, no shell) in `workdir` with timeout + process-tree kill +
     capped UTF-8/replace capture. Returns (returncode, stdout, stderr, timed_out). The single
     place process management lives — SubprocessSandbox, DockerSandbox, and command_eval all
@@ -118,7 +119,12 @@ def _run_argv(argv: list[str], workdir: str, timeout: float,
     early — this is how an operator's `node_abort` interrupts an in-flight eval (the engine watches
     the event log and sets it). When `cancel` is None the original single-`communicate` fast path
     runs unchanged. Repeated `communicate(timeout=)` after a TimeoutExpired is the documented,
-    output-preserving way to poll, so capping a chatty run's pipe never deadlocks."""
+    output-preserving way to poll, so capping a chatty run's pipe never deadlocks.
+
+    `log_path` (optional): mirror the child's stdout+stderr to this file *live*, line by line, so a
+    long eval (training epochs, tqdm) is tail-able in real time instead of opaque until it returns.
+    The returned (capped) stdout/stderr are unchanged, so the metric reader + repair feedback see
+    exactly what they did before. When None the original buffered fast path runs (zero regression)."""
     wd = Path(workdir).resolve()
     wd.mkdir(parents=True, exist_ok=True)
     kwargs: dict = {}
@@ -146,18 +152,30 @@ def _run_argv(argv: list[str], workdir: str, timeout: float,
     # box it returns every core, so this setdefault equals the library default (no local regression).
     # setdefault: an explicit operator/engine value still wins. POSIX/Linux only (guarded).
     try:
-        _ncpu = str(len(os.sched_getaffinity(0)))   # type: ignore[attr-defined]
+        _aff = len(os.sched_getaffinity(0))         # type: ignore[attr-defined]
+        # Cap at 64: numexpr HARD-rejects NUMEXPR_NUM_THREADS > NUMEXPR_MAX_THREADS (default 64) with a
+        # loud "Error." line, and >64 BLAS/OpenMP threads on a big host (e.g. 192 vCPUs) just thrash a
+        # GPU-bound training job. 64 keeps dataloader/BLAS parallelism without either problem.
+        _ncpu = str(min(_aff, 64))
         for _var in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS",
-                     "NUMEXPR_NUM_THREADS", "VECLIB_MAXIMUM_THREADS"):
+                     "NUMEXPR_NUM_THREADS", "NUMEXPR_MAX_THREADS", "VECLIB_MAXIMUM_THREADS"):
             full_env.setdefault(_var, _ncpu)
     except AttributeError:
         pass   # no sched_getaffinity (Windows/macOS) — leave the libraries' own defaults
+    # Unbuffered child stdio so the live log (log_path) updates line-by-line rather than only when
+    # the child's block buffer flushes. setdefault: an explicit value still wins. Harmless on the
+    # buffered path (the parent reads pipes either way).
+    if log_path:
+        full_env.setdefault("PYTHONUNBUFFERED", "1")
     try:
         proc = subprocess.Popen(
             argv, cwd=str(wd), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             text=True, encoding="utf-8", errors="replace", env=full_env, **kwargs)
     except OSError as e:
         return -1, "", f"failed to launch: {e}", False
+    if log_path:
+        rc, out, err, timed_out = _tee_drain(proc, log_path, timeout, max_output_bytes, cancel)
+        return rc, out[-max_output_bytes:], err[-max_output_bytes:], timed_out
     timed_out = False
     if cancel is None:
         try:
@@ -181,6 +199,66 @@ def _run_argv(argv: list[str], workdir: str, timeout: float,
                     break
     rc = proc.returncode if proc.returncode is not None else -1
     return rc, (out or "")[-max_output_bytes:], (err or "")[-max_output_bytes:], timed_out
+
+
+def _tee_drain(proc, log_path, timeout, max_output_bytes, cancel):
+    """Drain `proc`'s stdout+stderr concurrently: mirror every line to `log_path` (a live,
+    tail-able combined log) while accumulating bounded per-stream buffers for the return value.
+    Honors the same wall-clock timeout + cancel-event tree-kill as the buffered path. Reader
+    threads (daemon) own the pipes so the parent never deadlocks on a chatty child."""
+    import threading
+    import time as _time
+
+    cap = max(max_output_bytes * 4, 256_000)        # bound memory; the FILE keeps the full log
+    try:
+        logf = open(log_path, "a", encoding="utf-8", errors="replace")
+    except OSError:
+        logf = None
+    lock = threading.Lock()
+    bufs = {"out": [], "err": []}
+
+    def _pump(stream, key):
+        size = 0
+        try:
+            for line in iter(stream.readline, ""):
+                buf = bufs[key]
+                buf.append(line)
+                size += len(line)
+                if size > cap * 2:                  # collapse to the last `cap` chars (metric is last line)
+                    joined = "".join(buf)[-cap:]
+                    buf.clear(); buf.append(joined); size = len(joined)
+                if logf is not None:
+                    with lock:
+                        logf.write(line)
+                        logf.flush()
+        except Exception:
+            pass
+        finally:
+            try: stream.close()
+            except Exception: pass
+
+    t_out = threading.Thread(target=_pump, args=(proc.stdout, "out"), daemon=True)
+    t_err = threading.Thread(target=_pump, args=(proc.stderr, "err"), daemon=True)
+    t_out.start(); t_err.start()
+    timed_out = False
+    deadline = _time.monotonic() + timeout
+    while True:
+        try:
+            proc.wait(timeout=0.25)
+            break
+        except subprocess.TimeoutExpired:
+            if (cancel is not None and cancel.is_set()) or _time.monotonic() >= deadline:
+                _kill_tree(proc)
+                try: proc.wait(timeout=10)
+                except Exception: pass
+                timed_out = True
+                break
+    t_out.join(timeout=5); t_err.join(timeout=5)    # let the final lines flush before we read the buffers
+    if logf is not None:
+        try: logf.close()
+        except Exception: pass
+    rc = proc.returncode if proc.returncode is not None else -1
+    return rc, "".join(bufs["out"]), "".join(bufs["err"]), timed_out
 
 
 def _kill_tree(proc: "subprocess.Popen") -> None:

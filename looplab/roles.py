@@ -18,6 +18,15 @@ from .parse import LLMClient, ParseError, extract_code, parse_structured
 from .prompts import PromptStore, render
 from .validate import AgentReport, validate_agent_code
 
+
+def _attention_points() -> str:
+    """Shared environment-awareness cues for the LLM roles (best-effort; never break role building)."""
+    try:
+        from .hardware import operational_attention_points
+        return operational_attention_points()
+    except Exception:  # noqa: BLE001
+        return ""
+
 _RESEARCHER_SYSTEM = ("You are an ML researcher proposing the next experiment as "
                       "parameters to try. Also set `theme`: a short, reusable lower-case slug "
                       "(e.g. \"loss-fn\", \"architecture\", \"regularization\", \"learning-rate\") "
@@ -181,7 +190,8 @@ class LLMResearcher:
         sweep_hint = getattr(self, "_sweep_hint", "")
         messages = [
             {"role": "system",
-             "content": render(self.prompts, "researcher_system", _RESEARCHER_SYSTEM)},
+             "content": render(self.prompts, "researcher_system", _RESEARCHER_SYSTEM)
+                        + "\n\n" + _attention_points()},
             {"role": "user", "content": _state_brief(state, parent) + "\n" + self.space_hint +
                                         hint_block + cue + sweep_hint +
                                         "\nPropose the next Idea (operator, params, rationale; "
@@ -218,7 +228,8 @@ class LLMDeveloper:
         self.prompts = prompts
 
     def implement(self, idea: Idea) -> str:
-        system = render(self.prompts, "developer_system", _DEVELOPER_SYSTEM) + self.brief
+        system = (render(self.prompts, "developer_system", _DEVELOPER_SYSTEM) + self.brief
+                  + "\n\n" + _attention_points())
         # Render whatever params the task's Researcher proposed (task-agnostic): degree/lam
         # for regression, k for mlebench, etc. — hardcoding names dropped the value on
         # tasks that use a different hyperparameter.

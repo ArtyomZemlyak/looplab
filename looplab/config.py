@@ -221,6 +221,12 @@ class Settings(BaseSettings):
     # "ratify_freeze_drift". Selected per project. Not yet enforced (Phase 1 uses an
     # explicit operator-written eval_spec).
     eval_trust_mode: str = "ratify_freeze"
+    # RepoTask node seeding policy (run-wide fallback; a task/editable `seed_mode` overrides):
+    # "auto" (default) copies git-tracked files when the editable is a git repo (so a tree bloated
+    # with untracked artifacts isn't deep-copied per node), else a full copy; "tracked" forces
+    # code-only; "all" forces a full recursive copy (legacy). Genesis authors per-task from the
+    # user's words; this is the global default when unspecified.
+    seed_mode: str = "auto"
     llm_model: str = "qwen3:8b"
     llm_base_url: str = "http://localhost:11434/v1"  # Ollama OpenAI-compatible endpoint
     llm_temperature: float = 0.6

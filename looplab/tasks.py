@@ -256,9 +256,26 @@ def make_roles(task: TaskAdapter, settings, run_dir=None):
         _kw["runtime_caps"] = _caps
     researcher, developer = task.llm_roles(client, **_kw)
 
+    # In-house repo code-writer: a RepoTask ships a NoOp in-house developer because repo editing was
+    # designed for external coding agents (opencode/aider/…). When none is configured, give the agent
+    # an in-house LLM developer that reads the repo + AUTHORS the files the eval needs (e.g. the eval
+    # entrypoint) within the surface, via the shared tool loop — so a repo task runs on JUST the
+    # in-house LLM. An external coding-agent preset (below) still takes precedence when requested.
+    from .cli_agent import PRESETS
+    if (settings.developer_backend not in PRESETS
+            and callable(getattr(task, "repo_spec", None))
+            and task.repo_spec().get("editables")):
+        from .repo_task import LLMRepoDeveloper
+        from .agent import loop_opts_from_settings as _loop_opts
+        developer = LLMRepoDeveloper(client, task, parser=settings.llm_parser,
+                                     loop_opts=_loop_opts(settings))
+
     # External coding-agent Developer (ADR-7): an external CLI agent writes/repairs the
     # solution code, reusing the task's brief. Tool-agnostic via cli_agent presets.
-    from .cli_agent import PRESETS
+    # A cli_overrides hyperparameter-search RepoTask (`params` set) is a NO-code-edit mode:
+    # the experiment varies via CLI overrides, not edits, so the baseline (NoOp) developer
+    # from build_roles/llm_roles is correct — do NOT wire the editing agent even if a
+    # developer_backend preset was requested (that would conflate tuning with code edits).
     # A cli_overrides hyperparameter-search RepoTask (`params` set) is a NO-code-edit mode:
     # the experiment varies via CLI overrides, not edits, so the baseline (NoOp) developer
     # from build_roles/llm_roles is correct — do NOT wire the editing agent even if a

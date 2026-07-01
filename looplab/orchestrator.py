@@ -186,6 +186,7 @@ class Engine:
         eval_trust_mode: str = "ratify_freeze",
         trust_mode: str = "trusted_local",
         docker_image: str = "python:3.12-slim",
+        seed_mode: str = "auto",    # RepoTask node seeding fallback: auto|tracked|all (per-editable overrides)
         # --- A7 Strategist + richer-operator knobs (config-first; defaults == today's behavior) ---
         n_seeds: int = 3,
         max_nodes: int = 8,
@@ -318,6 +319,8 @@ class Engine:
         # "trusted_local" runs it directly. The solution.py path uses self.sandbox instead.
         self.trust_mode = trust_mode
         self.docker_image = docker_image
+        self._seed_mode = seed_mode or "auto"   # run-wide fallback for per-editable seeding
+        self._run_setup_done = False             # run-level (once) dependency setup guard
         self._drift_warned = False   # one-shot guard for the #8 drift-coverage warning
         # Fail loud at START, not mid-sweep: the untrusted tier needs docker, so verify it once
         # here instead of re-discovering (and re-scanning PATH) on every eval's make_docker_wrap.
@@ -1585,25 +1588,147 @@ class Engine:
         wd = _P(workdir)
         wd.mkdir(parents=True, exist_ok=True)
         ignore = shutil.ignore_patterns(".git", "__pycache__", "*.pyc", ".venv", "node_modules")
-        for ed in self._repo_spec.get("editables", []):
-            dst = wd if ed["name"] in (".", "") else wd / ed["name"]
-            shutil.copytree(ed["path"], dst, dirs_exist_ok=True, ignore=ignore)
-        for ref in self._repo_spec.get("references", []):
-            if ref.get("mount"):                 # runtime dependency -> copy in read context
-                dst = wd / ref["name"]
-                shutil.copytree(ref["path"], dst, dirs_exist_ok=True, ignore=ignore)
-        for name, src in self._repo_spec.get("data", {}).items():
-            sp = _P(src)
-            if sp.is_dir():
-                shutil.copytree(sp, wd / name, dirs_exist_ok=True, ignore=ignore)
-            elif sp.is_file():
-                (wd / name).write_bytes(sp.read_bytes())
+        sp = (self.tracer.span("seed_workspace") if self.tracer is not None
+              else __import__("contextlib").nullcontext(None))
+        with sp as _h:
+            seeded: list[str] = []
+            for ed in self._repo_spec.get("editables", []):
+                dst = wd if ed["name"] in (".", "") else wd / ed["name"]
+                mode = (ed.get("seed_mode") or self._seed_mode or "auto")
+                n = self._seed_repo_tree(ed["path"], dst, ignore, mode)
+                seeded.append(f"{ed['name']}[{mode}]:{'copytree' if n < 0 else str(n)+' tracked'}")
+            for ref in self._repo_spec.get("references", []):
+                if ref.get("mount"):             # runtime dependency -> symlink read-only input
+                    self._link_input(ref["path"], wd / ref["name"])
+                    seeded.append(f"ref:{ref['name']}->link")
+            for name, src in self._repo_spec.get("data", {}).items():
+                self._link_input(src, wd / name)
+                seeded.append(f"data:{name}->link")
+            if _h is not None:
+                _h.set_many(materialized=", ".join(seeded))
+
+    def _seed_repo_tree(self, src, dst, ignore, mode: str = "auto") -> int:
+        """Materialize an editable repo's *source* into the node workdir under a seeding `mode`:
+        - "auto" (default) / "tracked": copy the git-TRACKED files (the real code surface — fast,
+          deterministic) so a working tree bloated with untracked artifacts (model checkpoints,
+          datasets — often many GB) is NOT deep-copied into every node. "auto" silently falls back
+          to a full copy when `src` is not a git repo; "tracked" also falls back (there's nothing
+          else to copy) but is the explicit "code only" intent.
+        - "all": force a full recursive copytree (legacy behavior) — use for small repos or when
+          untracked files are needed at eval time.
+        Returns the number of tracked files copied, or -1 when a full copytree was used."""
+        import shutil
+        import subprocess
+        from pathlib import Path as _P
+        src = _P(src); dst = _P(dst)
+        tracked = None
+        if mode != "all":
+            # Ask git directly (no `.git`-at-root check): the editable repo is often a SUBDIR of a
+            # larger git repo whose `.git` lives in a parent, so `(src/'.git').exists()` is False even
+            # though `git -C src ls-files` correctly lists the files tracked under src. Use it whenever
+            # git returns a non-empty tracked set; otherwise (non-git / nothing tracked) fall back.
+            try:
+                out = subprocess.run(["git", "-C", str(src), "ls-files", "-z"],
+                                     capture_output=True, text=True, timeout=120)
+                if out.returncode == 0:
+                    files = [p for p in out.stdout.split("\0") if p]
+                    if files:
+                        tracked = files
+            except Exception:
+                tracked = None                   # git missing / not a repo -> copytree fallback
+        if tracked is None:
+            shutil.copytree(src, dst, dirs_exist_ok=True, ignore=ignore)
+            return -1
+        dst.mkdir(parents=True, exist_ok=True)
+        n = 0
+        for rel in tracked:
+            s = src / rel
+            if s.is_dir() or not s.exists():     # submodule dir / deleted-but-tracked path
+                continue
+            d = dst / rel
+            d.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(s, d)
+            n += 1
+        return n
+
+    def _link_input(self, src, dst) -> None:
+        """Mount a large, read-only task input (dataset / reference repo) into the node workdir as a
+        SYMLINK rather than a deep copy: these are immutable inputs the eval reads, not the agent's
+        edit target, so per-node copies just burn wall-clock + disk (acute on an S3-backed FUSE
+        mount). Idempotent (resume / re-seed); falls back to a copy if the symlink can't be made."""
+        import os as _os
+        import shutil
+        from pathlib import Path as _P
+        src = _P(src); dst = _P(dst)
+        if dst.is_symlink() or dst.exists():
+            return
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            _os.symlink(src, dst, target_is_directory=src.is_dir())
+            return
+        except OSError:
+            pass
+        if src.is_dir():
+            shutil.copytree(src, dst, dirs_exist_ok=True)
+        elif src.is_file():
+            shutil.copy2(src, dst)
 
     def _agent_may(self, role: str, setting: str) -> bool:
         """Governance gate (Settings.agent_control): may `role` (strategist|boss|researcher) change
         `setting` at runtime? A setting absent from the map is LOCKED for everyone. Pure + cheap —
         called at each agent seam so the matrix is the single source of truth."""
         return role in (self._agent_control.get(setting) or ())
+
+    def _ensure_run_setup(self) -> None:
+        """Run the eval's RUN-LEVEL `run_setup` exactly ONCE, before the first eval — e.g. a one-time
+        dependency install into the shared interpreter (the autonomy default when deps are stable
+        across experiments). Distinct from per-node `setup`, which reinstalls before EVERY eval. Runs
+        in the first editable repo's SOURCE dir so `-r requirements.txt` resolves; output streams to
+        `run_setup.log`. A non-zero/timed-out run_setup ABORTS the run (the env would be unusable).
+        Only in trusted_local (an untrusted/docker eval is a fresh container — use per-node `setup`).
+        No-op when `run_setup` is unset. The guard is set BEFORE running so a crash can't retry-loop."""
+        if self._run_setup_done:
+            return
+        cmd = list((self._eval_spec or {}).get("run_setup") or [])
+        if not cmd or self.trust_mode != "trusted_local":
+            self._run_setup_done = True
+            return
+        self._run_setup_done = True
+        from .sandbox import _run_argv
+        eds = (self._repo_spec or {}).get("editables", [])
+        cwd = eds[0]["path"] if eds else str(self.run_dir)
+        to = float((self._eval_spec or {}).get("run_setup_timeout", 1800.0))
+        self.store.append("run_setup_started", {"command": cmd, "cwd": cwd})
+        log = str(Path(self.run_dir) / "run_setup.log")
+        rc, out, err, timed = _run_argv(cmd, cwd, to, log_path=log)
+        self.store.append("run_setup_finished",
+                          {"exit_code": rc, "timed_out": timed, "stderr_tail": (err or "")[-2000:]})
+        if rc != 0 or timed:
+            raise RuntimeError(f"run_setup failed (exit={rc}, timed_out={timed}); see {log}\n"
+                               + (err or out or "")[-500:])
+
+    def _sandbox_cwd(self, workdir, cwd_spec) -> str:
+        """Resolve the eval `cwd` against the node's sandbox workdir. A relative cwd joins the
+        workdir (the conventional case). An ABSOLUTE cwd that points inside an editable repo's
+        *source* is remapped onto the node workdir, so the eval runs in the sandboxed copy (with
+        the agent's edits + the seeded tree) instead of the shared original repo — `Path(wd)/'/abs'`
+        would otherwise collapse to '/abs', silently bypassing the sandbox. An absolute cwd that is
+        not under any editable source is trusted as given (e.g. an external tool dir)."""
+        from pathlib import Path as _P
+        wd = _P(workdir).resolve()
+        p = _P(cwd_spec)
+        if not p.is_absolute():
+            return str((wd / cwd_spec).resolve())
+        ap = p.resolve()
+        for ed in (self._repo_spec or {}).get("editables", []):
+            src = _P(ed["path"]).resolve()
+            base = wd if ed["name"] in (".", "") else wd / ed["name"]
+            try:
+                rel = ap.relative_to(src)
+            except ValueError:
+                continue
+            return str((base / rel).resolve())
+        return str(ap)
 
     def _run_eval(self, node, workdir, env=None, profile=None, cancel=None):
         """Eval dispatcher: RepoTask runs the operator's command + reads its metric;
@@ -1616,6 +1741,7 @@ class Engine:
         if self._eval_spec:
             from . import command_eval
             es = self._eval_spec
+            self._ensure_run_setup()             # one-time run-level dep install (before the first eval)
             prof = profile or (node.idea.eval_profile if node is not None else None)
             # A7 Strategist fidelity override: when the active strategy pins smoke/full and the node
             # didn't request a profile, use the strategy's. An explicit `profile` arg (confirm=full)
@@ -1625,7 +1751,7 @@ class Engine:
             params = node.idea.params if node is not None else {}
             cmd, timeout = command_eval.build_command(es, params, prof)
             root = str(Path(workdir).resolve())               # repo/workdir root
-            cwd = str((Path(workdir) / es.get("cwd", ".")).resolve())
+            cwd = self._sandbox_cwd(workdir, es.get("cwd", "."))
             # untrusted tier (Phase 4): sandbox the eval in docker, mounting the workspace
             # root so the cwd subdir + host metric reading line up. Fails loudly w/o docker.
             wrap = (command_eval.make_docker_wrap(
@@ -1643,7 +1769,8 @@ class Engine:
                 metrics=es.get("metrics") or None,            # #5 multi-objective …
                 constraints=es.get("constraints") or None,
                 tracer=self.tracer,                           # child spans: setup/command/read
-                cancel=cancel)                                # operator mid-eval node_abort
+                cancel=cancel,                                # operator mid-eval node_abort
+                log_dir=root)                                 # live setup.log/eval.log in the node workdir
         else:
             # Intra-node sweep nodes run a whole grid in one process, so they need ~N× the
             # single-eval budget. `sweep_timeout_mult` scales the wall-clock for sweep nodes only;
