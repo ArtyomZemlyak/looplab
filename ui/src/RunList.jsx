@@ -2,7 +2,6 @@ import React, { useEffect, useMemo, useState } from 'react'
 import { get, fmt, fmtDate, fmtAgo, listProjects, createProject, patchProject, deleteProject, assignRun, renameRun, deleteRun,
   listSupertasks, createSupertask, renameSupertask, deleteSupertask, assignSupertask } from './util.js'
 import MapView from './MapView.jsx'
-import GenesisChat from './GenesisChat.jsx'
 import ScopeReport from './ScopeReport.jsx'
 import ThemeSwitcher from './ThemeSwitcher.jsx'
 import EnergyToggle from './EnergyToggle.jsx'
@@ -115,7 +114,6 @@ export default function RunList({ onOpen, onSettings, onAssistant }) {
   const [projModal, setProjModal] = useState(null) // {parent_id} → show create-project popup
   const [runMenu, setRunMenu] = useState(null)     // run_id whose ⋮ menu is open
   const [runRename, setRunRename] = useState(null) // run object being renamed (popup)
-  const [starting, setStarting] = useState(false)  // show the New-run launch dialog
   // Sort + filter of the run list (client-side over the loaded summaries).
   const [sortKey, setSortKey] = useState('time')   // time | name | metric | task | nodes | phase
   const [sortDir, setSortDir] = useState('desc')   // asc | desc
@@ -126,21 +124,8 @@ export default function RunList({ onOpen, onSettings, onAssistant }) {
   const [superdata, setSuperdata] = useState({ supertasks: [], assignments: {} })
   const [stModal, setStModal] = useState(false)             // manage-super-tasks popup open?
   const [showReport, setShowReport] = useState(false)       // cross-run scope-report panel open?
-  const [seed, setSeed] = useState('')                      // seed passed into the New-run (Genesis) flow
-
-  // Run creation now flows through the global bottom command bar (there's no "▶ New run" button): a
-  // bare "/new" there fires this event, which opens the Genesis planner. An optional seed goal (from
-  // "/new titanic on deepseek") is carried in.
-  useEffect(() => {
-    const onNew = (e) => { setSeed((e.detail && e.detail.seed) || ''); setStarting(true) }
-    window.addEventListener('ll:new-run', onNew)
-    // cross-view: the bar set a flag then navigated here — honor it on mount.
-    try {
-      const flag = sessionStorage.getItem('ll.openGenesis')
-      if (flag != null) { sessionStorage.removeItem('ll.openGenesis'); setSeed(flag === '1' ? '' : flag); setStarting(true) }
-    } catch { /* private mode */ }
-    return () => window.removeEventListener('ll:new-run', onNew)
-  }, [])
+  // Run creation is no longer a modal here — it happens INSIDE the assistant (the bottom command bar's
+  // "/new" asks the assistant to propose a run, which renders as an inline launch card in the chat).
 
   const loadRuns = () => get('/api/runs').then(setRuns).catch(() => setRuns([]))
   const loadProjects = () => listProjects().then(setProj).catch(() => {})
@@ -422,9 +407,6 @@ export default function RunList({ onOpen, onSettings, onAssistant }) {
       {stModal && <SuperTaskModal supertasks={superdata.supertasks}
         onCreate={createSuper} onRename={renameSuper} onDelete={removeSuper}
         onClose={() => setStModal(false)} />}
-
-      {starting && <GenesisChat seed={seed} onClose={() => { setStarting(false); setSeed('') }}
-        onStarted={(id) => { setStarting(false); setSeed(''); loadRuns(); onOpen(id) }} />}
 
       {showReport && scope && <ScopeReport scope={scope}
         onOpen={(id) => { setShowReport(false); onOpen(id) }} onClose={() => setShowReport(false)} />}

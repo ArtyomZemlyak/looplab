@@ -93,7 +93,7 @@ export default function AssistantBar({ runId }) {
   // slash-command suggestions when typing a bare "/name" (direct run-control + assistant commands).
   const slashMatch = /^\/(\w*)$/.exec(input)
   const directNames = [
-    { name: 'new', desc: 'start a run — open the planner' },
+    { name: 'new', desc: 'plan & start a run — in this chat' },
     ...Object.keys(DIRECT).map(n => ({ name: n, desc: 'run control · no LLM' })),
   ]
   const suggestions = slashMatch
@@ -111,35 +111,24 @@ export default function AssistantBar({ runId }) {
     catch (e) { flash('failed: ' + (e.message || e)) }
   }
 
-  // Open the Genesis run-planner. Works from any view: a flag survives the hop to the run list (which
-  // owns the planner modal), and an event covers the case where the list is already mounted.
-  const openGenesis = (seed = '') => {
-    try { sessionStorage.setItem('ll.openGenesis', seed || '1') } catch { /* private mode */ }
-    if (location.hash && location.hash !== '#' && location.hash !== '#/') location.hash = ''
-    window.dispatchEvent(new CustomEvent('ll:new-run', { detail: { seed } }))
-  }
-
-  const send = async () => {
-    const t = input.trim()
-    if (!t || busy) return
-    // 0) bare "/new" (or "/genesis") → open the run planner directly, no LLM.
-    if (t === '/new' || t === '/genesis') { setInput(''); openGenesis(''); return }
-    // 1) algorithmic, unambiguous → no LLM
-    const direct = parseDirect(t)
-    if (direct) { setInput(''); runDirect(direct); return }
-    // 2) natural language / ambiguous → the assistant (streamed)
-    setInput(''); setPreview(''); setHasNew(false)
+  // Stream one instruction to the assistant. `userText` is what the user's bubble shows; `instruction`
+  // is what the model receives. `pop` opens the drawer first — used by /new so the run-planning
+  // conversation and its inline launch card are visible as they stream in.
+  const runLLM = async (instruction, { userText = null, pop = false } = {}) => {
+    if (pop) openDrawer()
+    const wasOpen = open || pop
+    setPreview(''); setHasNew(false)
     let id = sid
     if (!id) {
-      try { const m = await assistantCreate(t.slice(0, 60), mode); id = m.id; if (mountedRef.current) setSid(id) }
+      try { const m = await assistantCreate((userText || instruction).slice(0, 60), mode); id = m.id; if (mountedRef.current) setSid(id) }
       catch { flash('assistant offline'); return }
     }
-    setMsgs(m => [...m, { role: 'user', content: t }, { role: 'assistant', content: '', streaming: true }])
+    setMsgs(m => [...m, { role: 'user', content: userText || instruction }, { role: 'assistant', content: '', streaming: true }])
     setBusy(true)
     const ctrl = new AbortController(); abortRef.current = ctrl
     let acc = ''
     try {
-      const res = await assistantMessageStream(id, t, mode, {
+      const res = await assistantMessageStream(id, instruction, mode, {
         onToken: safe((tok) => { acc += tokText(tok); patchLast({ content: acc }) }),
         onTodos: safe((items) => patchLast({ todos: items })),
         onError: safe((e) => flash(e)),
@@ -148,11 +137,33 @@ export default function AssistantBar({ runId }) {
       const reply = (res && res.reply) || acc || '(no reply)'
       patchLast({ content: reply, streaming: false, steps: res && res.steps, applied: res && res.applied,
                   proposals: res && res.proposals, todos: res && res.todos })
-      // the bar stays collapsed — only the BEGINNING of the reply surfaces, with a "new" highlight.
-      setPreview(firstLine(reply).slice(0, 120)); setHasNew(!open)
+      // collapsed bar surfaces only the reply's start + a "new" glow — unless the drawer's already open.
+      setPreview(firstLine(reply).slice(0, 120)); setHasNew(!wasOpen)
     } catch (e) {
       if (mountedRef.current) { patchLast({ content: acc || 'Could not reach the assistant.', streaming: false }); flash(e.message) }
     } finally { if (mountedRef.current) { setBusy(false) } abortRef.current = null }
+  }
+
+  const send = () => {
+    const t = input.trim()
+    if (!t || busy) return
+    // /new [goal] · /run [goal] · /genesis → plan + launch a run INSIDE the assistant chat: the
+    // assistant proposes a run spec that renders as an inline launch card (no separate modal).
+    const mNew = /^\/(new|genesis|run)\b\s*([\s\S]*)$/i.exec(t)
+    if (mNew) {
+      setInput('')
+      const goal = mNew[2].trim()
+      runLLM(
+        goal ? `Plan a new run for this goal and show me a launch card to start it: ${goal}`
+             : 'I want to start a new run. Propose a run spec (name, task, key settings) as a launch card I can start; ask me for anything you need first.',
+        { userText: goal ? `/new ${goal}` : '/new', pop: true })
+      return
+    }
+    // unambiguous slash command → run control, no LLM
+    const direct = parseDirect(t)
+    if (direct) { setInput(''); runDirect(direct); return }
+    // everything else → the assistant
+    setInput(''); runLLM(t)
   }
 
   const onRevert = async (absPath) => {
