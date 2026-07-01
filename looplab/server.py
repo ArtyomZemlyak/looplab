@@ -1688,6 +1688,7 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
     _perm_lock = threading.Lock()
     _perm_reqs: dict = {}
     _perm_always: dict = {}
+    _asst_progress: dict = {}      # sid -> {steps:[label,…], updated} — live tool steps during a turn
     _PERM_TIMEOUT = float(os.environ.get("LOOPLAB_ASSISTANT_PERM_TIMEOUT", "900"))
 
     def _make_approver(sid: str):
@@ -1737,6 +1738,12 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
             r["decision"] = dec if dec in ("allow_once", "allow_always", "deny") else "deny"
             r["event"].set()
         return {"ok": True}
+
+    @app.get("/api/assistant/progress")
+    def assistant_progress(session: str):
+        with _perm_lock:
+            p = _asst_progress.get(session)
+            return {"steps": list(p["steps"]) if p else [], "active": bool(p)}
 
     @app.get("/api/assistant/sessions")
     def assistant_sessions():
@@ -1808,11 +1815,22 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
             return {"ok": False, "error": str(e), "reply": reply, "mode": eff_mode}
 
         approver = _make_approver(sid)
+        with _perm_lock:
+            _asst_progress[sid] = {"steps": [], "updated": time.time()}
+
+        def _on_step(ev: dict) -> None:
+            with _perm_lock:
+                p = _asst_progress.setdefault(sid, {"steps": [], "updated": 0})
+                p["steps"] = (p["steps"] + [ev.get("label") or ev.get("tool") or "…"])[-40:]
+                p["updated"] = time.time()
 
         def _compute() -> dict:
             res = _assistant_run_turn(client, root, history, instruction, eff_mode,
-                                      alive_fn=_engine_alive, settings=s, approver=approver)
+                                      alive_fn=_engine_alive, settings=s, approver=approver,
+                                      on_step=_on_step)
             res["tokens"] = _client_tokens(client)
+            with _perm_lock:
+                _asst_progress.pop(sid, None)
             try:
                 _asst.append(sid, {"role": "assistant", "content": res.get("reply", ""),
                                    "steps": res.get("steps") or [], "tokens": res.get("tokens")})

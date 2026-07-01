@@ -3,7 +3,7 @@ import Markdown from './markdown.jsx'
 import { fmtAgo, fmt, get } from './util.js'
 import {
   assistantSessions, assistantCreate, assistantGet, assistantDelete, assistantFork,
-  assistantMessagePost, getJob, assistantPermissions, assistantResolve,
+  assistantMessagePost, getJob, assistantPermissions, assistantResolve, assistantProgress,
 } from './util.js'
 
 const sleep = (ms) => new Promise(r => setTimeout(r, ms))
@@ -84,6 +84,7 @@ export default function AssistantChat({ onBack }) {
   const [mode, setMode] = useState('plan')
   const [err, setErr] = useState(null)
   const [pending, setPending] = useState([])   // live human-in-the-loop confirm requests
+  const [liveSteps, setLiveSteps] = useState([])   // tool steps streamed while a turn runs
   const [runs, setRuns] = useState([])          // /api/runs, for @run cards + the @-picker
   const feedRef = useRef(null)
   const inputRef = useRef(null)
@@ -149,11 +150,12 @@ export default function AssistantChat({ onBack }) {
     if (!resp || resp.status !== 'running' || !resp.job_id) return resp   // fast inline result
     const deadline = Date.now() + 20 * 60 * 1000
     while (Date.now() < deadline) {
-      await sleep(1000)
+      await sleep(800)
       try { const p = await assistantPermissions(id); setPending(p.pending || []) } catch { /* transient */ }
+      try { const pr = await assistantProgress(id); setLiveSteps(pr.steps || []) } catch { /* transient */ }
       let j
       try { j = await getJob(resp.job_id) } catch { continue }
-      if (j.status === 'done') { setPending([]); return j }
+      if (j.status === 'done') { setPending([]); setLiveSteps([]); return j }
       if (j.status === 'unknown') return { ok: false, error: 'the turn expired — try again' }
     }
     return { ok: false, error: 'timed out' }
@@ -178,7 +180,7 @@ export default function AssistantChat({ onBack }) {
     } catch (e) {
       setErr(e.message)
       setMsgs(m => [...m, { role: 'assistant', content: 'Could not reach the assistant.' }])
-    } finally { setBusy(false); setPending([]) }
+    } finally { setBusy(false); setPending([]); setLiveSteps([]) }
   }
 
   const activeMode = MODES.find(x => x.id === mode) || MODES[0]
@@ -227,7 +229,10 @@ export default function AssistantChat({ onBack }) {
         {pending.map(req => <PermCard key={req.id} req={req} onResolve={resolvePerm} />)}
         {busy && pending.length === 0 && <div className="feed-msg chat assistant"><div className="fm-body">
           <div className="chat-who">assistant</div>
-          <div className="chat-bubble"><div className="chat-text muted">… thinking</div></div>
+          {liveSteps.length > 0 && <div className="asst-steps">{liveSteps.slice(-6).map((s, i) =>
+            <span key={i} className="asst-step">{s}</span>)}</div>}
+          <div className="chat-bubble"><div className="chat-text muted">
+            … {liveSteps.length ? liveSteps[liveSteps.length - 1] : 'thinking'}</div></div>
         </div></div>}
       </div>
 

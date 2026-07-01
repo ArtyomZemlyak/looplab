@@ -595,6 +595,8 @@ export const assistantFork = (sid) => post(`/api/assistant/sessions/${encodeURIC
 export const assistantMessagePost = (sid, instruction, mode) =>
   post(`/api/assistant/sessions/${encodeURIComponent(sid)}/message`, { instruction, mode })
 export const getJob = (jobId) => get(`/api/jobs/${encodeURIComponent(jobId)}`)
+// Live tool steps while a turn runs (so the UI shows "reading X…" instead of an opaque spinner).
+export const assistantProgress = (sid) => get(`/api/assistant/progress?session=${encodeURIComponent(sid)}`)
 // Pending human-in-the-loop confirm requests for a session, and resolving one.
 export const assistantPermissions = (sid) => get(`/api/assistant/permissions?session=${encodeURIComponent(sid)}`)
 export const assistantResolve = (reqId, decision) =>
