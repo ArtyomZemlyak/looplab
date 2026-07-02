@@ -252,11 +252,12 @@ The UI is already unusually strong (live DAG, Inspector with diff-vs-parent/trac
 chat-first bar, boss-mode, HITL gates, time-travel, cross-run map). The gaps are about *showing
 the system's mind* and *direct manipulation*:
 
-### U1 · Experiment queue / scheduler view *(top gap)*
-Pending/planned work is invisible — users infer state from the event feed. A first-class queue
-panel: what the policy plans next, injected experiments waiting, confirm/ablate backlog — each row
-reorderable/cancelable (append `priority_hint` control events; the engine already consumes hints).
-This is the direct-manipulation steering surface the Dock's slash commands approximate in text.
+### U1 · Experiment queue / scheduler view *(top gap)* — ✅ SHIPPED
+Pending/planned work was invisible — users inferred state from the event feed. Now a primary
+`Queue` panel (`ui/src/panels.jsx` `QueuePanel`): pending experiments (op / parents / hypothesis)
+each cancelable via `node_abort`, plus queued inject/fork/confirm/ablate requests as read-only
+chips. Order is policy-driven (the engine picks next), so it's see + cancel + add, not a fake manual
+reorder (no engine event supports reordering the policy's choice).
 
 ### U2 · Hypothesis board (needs P1) — ✅ SHIPPED
 A kanban: open / testing / supported / tested / abandoned, each card linking to its evidence nodes
@@ -264,31 +265,38 @@ and its best Δ-over-parent. This answers the researcher's actual question ("wha
 which no metric chart answers, and makes the deep-research directions actionable and auditable.
 - **Implemented** as a primary `Hypotheses` panel (`ui/src/panels.jsx` `HypothesisBoard`, wired in
   `RunView.jsx`, styled in `styles.css`): five verdict columns, source icons
-  (🔬 researcher / 💡 deep-research / 🧑 human), click-through to evidence nodes, a "+ Add" box and
-  per-card abandon (✕) via the `hypothesis_added` / `hypothesis_updated` control events. Pure
-  projection of `state.hypotheses`; UI bundle builds clean.
+  monochrome source glyphs (`OpIcon` search/bulb/user/compass — no emoji), click-through to evidence
+  nodes, a "+ Add" box and per-card abandon via the `hypothesis_added` / `hypothesis_updated`
+  control events. Pure projection of `state.hypotheses`; UI bundle builds clean.
 
-### U3 · Canvas as control surface, not just a view
-Right-click a node → "explore from here" / "ablate this" / "diff vs champion" / "kill branch";
-drag a node onto another → propose merge. All of these map to existing control events
-(`inject_node`, `force_ablate`, `fork`) — it's affordance work, not engine work.
+### U3 · Canvas as control surface, not just a view — ✅ SHIPPED
+Right-click a node → Explore from here (`fork`) / Ablate (`force_ablate`) / Diff vs champion (opens
+Compare seeded champion-vs-node) / Inspect / Kill branch (aborts the node's pending subtree); and
+drag a node onto another → merge (manual intersection over the laid-out positions). A "Merge with…"
+arm mode (next click, Esc cancels) is the layout-friendly alt to drag. Engine: `_create_injected_node`
+grew a multi-parent `parent_ids` path that routes a 2-parent `merge` through the real merge/ensemble
+operator, so a canvas merge is a genuine recombination — the only engine change; the rest is
+affordances over existing events.
 
-### U4 · Diff any-vs-any + multi-run overlay
-Line-level diff exists only vs parent; ComparePanel is field-by-field. Add arbitrary node-A-vs-B
-code diff (the diff machinery exists in Inspector) and a chart overlaying several runs' metric
-trajectories on one axis (CrossRunPanel compares structurally only).
+### U4 · Diff any-vs-any + multi-run overlay — ✅ SHIPPED
+`ComparePanel` gains a `diff` toggle → line diff of ANY two selected nodes' code (`diffLines`
+exported from Inspector). `CrossRunPanel` gains `overlay trajectories` → fetches each same-task
+run's node metrics, builds a running-best series, and overlays them on one axis via a new monochrome
+`MultiTrajectory` chart (`charts.jsx`).
 
-### U5 · Finish the command-bar model: `#`-context and pre-routing
-The chat-first research doc's own recommendations that remain unbuilt: `#node-12`-style context
-attach (chips that pin a node/log/artifact into the assistant's context) and a cheap heuristic
-pre-router so bare text doesn't always hit the LLM router. `@`-scoping matters less now that the
-assistant is unified.
+### U5 · Finish the command-bar model: `#`-context and pre-routing — ✅ SHIPPED
+`AssistantBar` now (a) extracts `#12` / `#node-12` refs from the input, shows them as live context
+chips, and folds "the user means experiment(s) #… — read them with the run tools" into the
+instruction; and (b) a cheap `preRoute` catches bare NL control phrases ("stop", "pause the run")
+and fires the control event directly — no LLM round-trip. `@`-scoping is moot with the unified
+assistant.
 
-### U6 · Trust panel actions + "why" narration
-Trust flags are view-only — add per-flag actions (quarantine node / re-run under gate / accept
-risk) that map to T2's enforcing modes. And surface the already-logged `policy_decision` /
-`strategy_decision` rationales as a live narration strip ("exploring because 3 stalls; switched to
-ASHA"), which builds exactly the operator trust that makes people leave runs unattended longer.
+### U6 · Trust panel actions + "why" narration — ✅ SHIPPED
+`TrustPanel` reward-hack rows show the enforcement mode (`trust_gate`) and a `quarantine` action
+(`node_abort`) so a flagged node can be pulled from the search live, plus click-through. And a
+`WhyStrip` (`ui/src/panels.jsx`, mounted above the canvas) narrates the loop's latest autonomous
+decisions live — A7 strategy rationale, unified-agent action, policy why-this-node — folded from
+events already logged; click a referenced node to jump to it.
 
 ### U7 · Lower-priority but real
 Mobile/readonly responsive view for monitoring long runs from a phone; chart interactivity

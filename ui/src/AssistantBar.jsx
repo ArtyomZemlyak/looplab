@@ -49,6 +49,21 @@ function parseDirect(t) {
 
 const firstLine = (s) => (s || '').replace(/[#*`>_-]/g, '').split('\n').map(l => l.trim()).find(Boolean) || ''
 
+// U5 · cheap pre-router: catch a few natural-language control phrases WITHOUT paying for an LLM
+// round-trip (the research doc's "don't route every input through the model"). Only fires on an
+// unambiguous lone phrase; anything with extra prose falls through to the assistant.
+const _NL_CONTROL = { stop: 'abort', abort: 'abort', halt: 'abort', pause: 'pause',
+  resume: 'resume', continue: 'resume', unpause: 'resume' }
+function preRoute(t) {
+  const norm = t.toLowerCase().replace(/^(please\s+|can you\s+)/, '').replace(/\b(the\s+)?run\b/g, '')
+    .replace(/[.!]+$/, '').trim()
+  const name = _NL_CONTROL[norm]
+  return name && DIRECT[name] ? { name, spec: DIRECT[name], arg: null } : null
+}
+// U5 · #-context: pull node references (#12 / #node-12) out of an input so the assistant is told
+// exactly which experiments the user means (it then reads them with the run tools).
+const refNodes = (t) => [...new Set([...(t || '').matchAll(/#(?:node-)?(\d+)/gi)].map(m => Number(m[1])))]
+
 export default function AssistantBar({ runId, hidden = false }) {
   const [input, setInput] = useState('')
   const [sid, setSid] = useState(null)
@@ -186,12 +201,17 @@ export default function AssistantBar({ runId, hidden = false }) {
     // unambiguous slash command → run control, no LLM
     const direct = parseDirect(t)
     if (direct) { setInput(''); runDirect(direct); return }
-    // everything else → the assistant. In a run, inject ONLY "run X is open"; it reads the rest itself.
+    // U5 cheap pre-router: a bare NL control phrase ("stop", "pause the run") → control, no LLM.
+    const pr = runId ? preRoute(t) : null
+    if (pr) { setInput(''); runDirect(pr); return }
+    // everything else → the assistant. In a run, inject "run X is open" + any #-referenced experiments
+    // (U5 context attach) so the assistant reads exactly the nodes the user pointed at.
     setInput('')
-    const instruction = runId
-      ? `${t}\n\n[UI context: run "${runId}" is currently open. Use the run tools if this is about it.]`
-      : t
-    runLLM(instruction, { userText: t })
+    const refs = runId ? refNodes(t) : []
+    const ctx = runId
+      ? `\n\n[UI context: run "${runId}" is open.${refs.length ? ` The user is referring to experiment(s) ${refs.map(i => '#' + i).join(', ')} — read them with the run tools.` : ''} Use the run tools if this is about it.]`
+      : ''
+    runLLM(t + ctx, { userText: t })
   }
 
   const activeMode = MODES.find(x => x.id === mode) || MODES[0]
@@ -233,6 +253,10 @@ export default function AssistantBar({ runId, hidden = false }) {
          onDoubleClick={openDrawer}>
       <button className="cmdbar-ic" title="open the full assistant" onClick={openFull}>✦</button>
       <div className="cmdbar-field">
+        {runId && refNodes(input).length > 0 && <div className="cmdbar-ctx" title="experiments attached as context for the assistant">
+          <span className="muted">context:</span>
+          {refNodes(input).map(id => <span key={id} className="chip xs">#{id}</span>)}
+        </div>}
         {suggestions.length > 0 && <div className="cmdbar-pop">
           {suggestions.map(c => <button key={c.name} className="cmdbar-pop-item"
             onMouseDown={(e) => { e.preventDefault(); setInput(`/${c.name} `); inputRef.current?.focus() }}>
@@ -241,7 +265,7 @@ export default function AssistantBar({ runId, hidden = false }) {
         <input className="cmdbar-in" ref={inputRef} value={input} disabled={busy}
           onChange={e => setInput(e.target.value)} onKeyDown={onKey}
           placeholder={runId
-            ? 'Command or ask…  /stop · /pause · /approve #12 · or describe what to do'
+            ? 'Command or ask…  /stop · pause · #12 to attach an experiment · or describe what to do'
             : 'Describe a run to start, or ask the assistant…  ( / for commands )'} />
       </div>
       {busy
