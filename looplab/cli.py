@@ -461,9 +461,10 @@ def run(
     # A goal described in words but no kind, with Genesis off: do NOT silently fall back to the
     # quadratic toy optimizer (validate_task's default) — that would run nonsense on a real goal and
     # drop --data. Make the user pin a kind or let Genesis infer it.
-    if goal is not None and not task_dict.get("kind"):
+    if (goal is not None or data is not None) and not task_dict.get("kind"):
         raise typer.BadParameter(
-            "no task kind for this goal: pass --kind, or drop --no-genesis to let Genesis infer it.")
+            "no task kind: pass --kind, or drop --no-genesis to let Genesis infer it "
+            "(a bare --data would otherwise run the quadratic toy and drop your data path).")
     # 4. Validate the resolved task, then resolve the run dir: explicit --out > file out: > default.
     if not task_dict:
         raise typer.BadParameter(

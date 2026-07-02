@@ -266,7 +266,8 @@ class JsonlSpanExporter:
         self._lock = threading.Lock()   # spans export from worker threads (to_thread eval)
 
     def export(self, span: dict) -> None:
-        line = orjson.dumps(span) + b"\n"
+        # default=str so a stray non-serializable attribute stashed on the span doesn't drop it.
+        line = orjson.dumps(span, default=str) + b"\n"
         # Serialize writes: child spans export from to_thread worker threads while the parent
         # span exports from the event-loop thread; without the lock concurrent appends from
         # distinct handles can interleave into a corrupt JSON line (max_parallel>1).
@@ -378,4 +379,8 @@ class Tracer:
                     pass
             _stack.reset(token)
             _current_tracer.reset(tok_tr)
-            self.exporter.export(rec)
+            try:
+                self.exporter.export(rec)
+            except Exception:  # noqa: BLE001 - spans are diagnostics: an export failure (disk full,
+                pass           # a non-serializable attribute) must never mask the in-flight exception
+                #                or crash the traced engine operation.

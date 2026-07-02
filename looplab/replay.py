@@ -47,13 +47,13 @@ def fold(events: Iterable[Event]) -> RunState:
                 continue
             st.nodes[n.id] = n
         elif t == "node_evaluated":
-            n = st.nodes.get(d["node_id"])              # tolerate an event for an unknown node
+            n = st.nodes.get(d.get("node_id"))          # tolerate an event for an unknown/missing node
             if n is not None:                           # (corrupt/hand-edited log) — skip, don't crash
                 # Idempotent (C4): only a node's FIRST terminal event contributes its eval time, so
                 # a duplicate node_evaluated/node_failed (corrupt log / double-fold) can't inflate
                 # total_eval_seconds or make the budget order-dependent.
                 first_terminal = n.status is NodeStatus.pending
-                n.metric = d["metric"]
+                n.metric = d.get("metric")              # missing -> None (feasible_nodes filters it)
                 n.status = NodeStatus.evaluated
                 n.stdout_tail = d.get("stdout_tail", "")
                 n.eval_seconds = d.get("eval_seconds")
@@ -73,7 +73,7 @@ def fold(events: Iterable[Event]) -> RunState:
                 if first_terminal:
                     st.total_eval_seconds += d.get("eval_seconds") or 0.0
         elif t == "node_failed":
-            n = st.nodes.get(d["node_id"])
+            n = st.nodes.get(d.get("node_id"))
             if n is not None:
                 first_terminal = n.status is NodeStatus.pending
                 n.status = NodeStatus.failed
@@ -90,7 +90,7 @@ def fold(events: Iterable[Event]) -> RunState:
             # or post-terminal node_repaired (corrupt/double-fold) is a no-op — mirrors the
             # `first_terminal` guard above. The LLM/subprocess are never re-invoked; the final code
             # and metric/status are reconstructed purely from this event + the terminal event.
-            n = st.nodes.get(d["node_id"])
+            n = st.nodes.get(d.get("node_id"))
             if n is not None and n.status is NodeStatus.pending:
                 n.code = d.get("code", n.code)
                 if d.get("files"):
@@ -102,13 +102,13 @@ def fold(events: Iterable[Event]) -> RunState:
             if "node_id" in d and "seed" in d:                       # per-seed resume memo (#0)
                 st.confirm_seed_results.setdefault(d["node_id"], {})[d["seed"]] = d.get("metric")
         elif t == "node_confirmed":
-            n = st.nodes.get(d["node_id"])
+            n = st.nodes.get(d.get("node_id"))
             if n is not None:
-                n.confirmed_mean = d["mean"]
+                n.confirmed_mean = d.get("mean")
                 n.confirmed_std = d.get("std")
                 n.confirmed_seeds = d.get("seeds")
         elif t == "agent_validated":
-            n = st.nodes.get(d["node_id"])
+            n = st.nodes.get(d.get("node_id"))
             if n is not None:                       # audit only; never affects selection
                 n.agent_report = {
                     "ok": d.get("ok"), "checks": d.get("checks", []),
@@ -145,7 +145,13 @@ def fold(events: Iterable[Event]) -> RunState:
         elif t == "ablate":
             st.ablations.append(d)   # {parent_id, impacts} — parameter-sensitivity audit
         elif t == "policy_decision":
-            st.policy_scores = {int(k): v for k, v in (d.get("scores") or {}).items()}
+            _scores = {}
+            for k, v in (d.get("scores") or {}).items():
+                try:
+                    _scores[int(k)] = v                 # a non-integer key (corrupt log) is skipped
+                except (TypeError, ValueError):
+                    continue
+            st.policy_scores = _scores
             st.policy_chosen = d.get("chosen")
             st.policy_reason = d.get("reason") or ""
         elif t == "strategy_decision":
@@ -173,7 +179,7 @@ def fold(events: Iterable[Event]) -> RunState:
             if d.get("skipped") and nid is not None and nid not in st.proxy_skipped:
                 st.proxy_skipped.append(nid)
         elif t == "best_confirmed":
-            best_confirmed = d["node_id"]
+            best_confirmed = d.get("node_id", best_confirmed)
             st.confirmed_done = True   # the confirmation phase ran to completion
         elif t == "run_finished":
             st.finished = True

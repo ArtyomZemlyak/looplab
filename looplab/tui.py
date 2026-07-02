@@ -304,7 +304,10 @@ def history_for_boss(history: list) -> list[dict]:
                 out.append({"role": role, "content": content})
         elif role == "action":
             act = m.get("action") or {}
-            out.append({"role": "assistant", "content": "applied: " + (act.get("label") or act.get("type") or "action")})
+            # A failed action must not be reported to the boss as "applied" — it would plan on top of
+            # a change that never happened.
+            verb = "failed: " if m.get("status") == "failed" else "applied: "
+            out.append({"role": "assistant", "content": verb + (act.get("label") or act.get("type") or "action")})
         elif role == "summary":
             content = (m.get("content") or "").strip()
             if content:
