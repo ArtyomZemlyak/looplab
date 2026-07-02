@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react'
-import { get, putText, post, fmt, fmtInt, fmtBytes, CONTROL, gpuStat, saveRunConfig, resumeRun, apiPrefix } from './util.js'
+import { get, putText, post, fmt, fmtInt, fmtBytes, CONTROL, gpuStat, saveRunConfig, resumeRun, apiPrefix, operatorMeta } from './util.js'
 import { Bars, ParallelCoords, Scatter } from './charts.jsx'
 import { hyperImportance } from './report.js'
 import Markdown from './markdown.jsx'
@@ -101,9 +101,13 @@ export function ResearchPanel({ state, runId, onToast, onClose }) {
   )
 }
 
-export function TrustPanel({ state, runId, onClose }) {
+export function TrustPanel({ state, runId, onClose, onSelect, onToast }) {
   const [cfg, setCfg] = useState(null)
   useEffect(() => { get(`/api/runs/${runId}/config`).then(setCfg).catch(() => {}) }, [runId])
+  const quarantine = async (id) => {   // U6: act on a flagged node — remove it from the search
+    try { await CONTROL.nodeAbort(runId, id); onToast && onToast(`quarantined #${id} (aborted)`) }
+    catch { onToast && onToast('could not quarantine (run not live?)') }
+  }
   const nodes = Object.values(state.nodes)
   const evald = nodes.filter(n => n.metric != null && n.feasible !== false)
   const chooser = state.direction === 'min' ? (a, b) => a < b : (a, b) => a > b
@@ -148,11 +152,19 @@ export function TrustPanel({ state, runId, onClose }) {
         : <div className="chip ok">no metric drift detected</div>}
 
       <div className="section-h">Reward-hacking monitor (B5) {(state.reward_hacks || []).length > 0 && <span className="chip alarm">{state.reward_hacks.length} flagged</span>}</div>
+      {cfg && <div className="muted" style={{ marginBottom: 6 }}>
+        enforcement: <b>{cfg.trust_gate || 'audit'}</b>{(cfg.trust_gate || 'audit') === 'audit'
+          ? ' — flags are logged only; set trust_gate=gate/block (or the thorough profile) to keep a flagged node from winning.'
+          : ' — a flagged node is excluded from best-selection.'}</div>}
       {(state.reward_hacks || []).length
-        ? <table className="tbl"><thead><tr><th>node</th><th>signal</th><th>detail</th></tr></thead><tbody>
-          {state.reward_hacks.flatMap((h, i) => (h.signals || []).map((s, j) =>
-            <tr key={`${i}-${j}`}><td className="flag">#{h.node_id}</td><td>{s.signal}</td>
-              <td className="muted">{s.detail}</td></tr>))}</tbody></table>
+        ? <table className="tbl"><thead><tr><th>node</th><th>signal</th><th>detail</th><th /></tr></thead><tbody>
+          {state.reward_hacks.map((h, i) => <tr key={i}>
+            <td className="flag"><button className="btn xs ghost" onClick={() => { onSelect && onSelect(h.node_id); onClose() }}>#{h.node_id}</button></td>
+            <td>{(h.signals || []).map(s => s.signal).join(', ')}</td>
+            <td className="muted">{(h.signals || []).map(s => s.detail).filter(Boolean).join(' · ')}</td>
+            <td><button className="btn xs ghost" title="quarantine: abort this node so it can't be selected"
+              onClick={() => quarantine(h.node_id)}>quarantine</button></td>
+          </tr>)}</tbody></table>
         : <div className="chip ok">no suspicious wins flagged{cfg && !cfg.reward_hack_detect ? ' (detector off — enable reward_hack_detect)' : ''}</div>}
     </Panel>
   )
@@ -189,6 +201,87 @@ export function FailuresPanel({ state, onClose, onSelect }) {
           <td>#{n.id}</td><td className="flag">{n.error_reason}</td><td className="muted">{(n.error || '').slice(0, 80)}</td></tr>)}
       </tbody></table>
     </Panel>
+  )
+}
+
+// U1 · experiment queue: the search's planned/in-flight work, made VISIBLE and cancelable. Pending
+// nodes (created, not yet evaluated) are the concrete queue — each cancelable via node_abort; queued
+// control requests (injects/forks/confirm/ablate not yet materialized) show as read-only chips so
+// the operator can see what's coming. Order is policy-driven (the engine picks next), so this is
+// "see + cancel + add", not manual reordering (which no engine event supports).
+export function QueuePanel({ state, runId, onSelect, onClose, onToast }) {
+  const nodes = Object.values(state.nodes || {})
+  const pending = nodes.filter(n => n.status === 'pending').sort((a, b) => a.id - b.id)
+  const working = nodes.filter(n => n.status === 'running')   // (if the fold ever exposes it)
+  const injects = (state.inject_requests || []).slice(state.injects_done || 0)
+  const forks = (state.fork_requests || []).slice(state.forks_done || 0)
+  const confirmReq = (state.confirm_requests || []).filter(id => !(state.confirmed_forced || []).includes(id))
+  const ablateReq = state.ablate_requests || []
+  const cancel = async (id) => {
+    try { await CONTROL.nodeAbort(runId, id); onToast && onToast(`cancelled #${id}`) }
+    catch { onToast && onToast('could not cancel (run not live?)') }
+  }
+  const queuedCount = pending.length + injects.length + forks.length + confirmReq.length + ablateReq.length
+  return (
+    <Panel title="Queue" sub={`${queuedCount} planned / in-flight`} onClose={onClose}>
+      <div className="muted" style={{ marginBottom: 10 }}>
+        The next experiment is chosen by the search policy; this is the live work-list — cancel a
+        pending experiment, or add one from the chat (<code>/experiment</code>) or a node’s “explore”.
+      </div>
+      <div className="section-h">Pending experiments {pending.length > 0 && <span className="pill">{pending.length}</span>}</div>
+      {pending.length
+        ? <table className="tbl"><thead><tr><th>node</th><th>op</th><th>parents</th><th>hypothesis / rationale</th><th /></tr></thead><tbody>
+          {pending.map(n => <tr key={n.id}>
+            <td><button className="btn xs ghost" onClick={() => { onSelect && onSelect(n.id); onClose() }}>#{n.id}</button></td>
+            <td><span className="op-icon"><OpIcon name={operatorMeta(n.operator).icon} size={12} /></span> {n.operator}</td>
+            <td className="muted">{(n.parent_ids || []).map(p => '#' + p).join(', ') || '—'}</td>
+            <td className="muted">{(n.idea?.hypothesis || n.idea?.rationale || '').slice(0, 70)}</td>
+            <td><button className="btn xs ghost" title="cancel this experiment (node_abort)" onClick={() => cancel(n.id)}><OpIcon name="cross" size={11} /></button></td>
+          </tr>)}
+        </tbody></table>
+        : <div className="muted">No experiment is queued right now — the loop is idle or between picks.</div>}
+      {(injects.length + forks.length + confirmReq.length + ablateReq.length) > 0 && <>
+        <div className="section-h">Queued control requests</div>
+        <div className="chips">
+          {injects.map((q, i) => <span key={'i' + i} className="chip sm" title="operator-injected experiment awaiting materialization">inject: {(q.idea?.operator || 'experiment')}</span>)}
+          {forks.map((q, i) => <span key={'f' + i} className="chip sm" title="fork awaiting materialization">fork #{q.from_node_id ?? q.parent_id ?? '?'}</span>)}
+          {confirmReq.map((id, i) => <span key={'c' + i} className="chip sm">confirm #{id}</span>)}
+          {ablateReq.map((id, i) => <span key={'a' + i} className="chip sm">ablate #{id}</span>)}
+        </div>
+      </>}
+    </Panel>
+  )
+}
+
+// U6 · live "why" strip: a compact, always-visible narration of the loop's latest AUTONOMOUS
+// decisions — folded from the events LoopLab already logs (policy "why-this-node", A7 Strategist,
+// the unified agent's macro-action). Builds operator trust ("it explored because it stalled") so a
+// run can be left unattended. Click a referenced node to jump to it. Pure projection; no new events.
+export function WhyStrip({ state, onSelect }) {
+  const items = []
+  const strat = (state.strategy_history || [])[(state.strategy_history || []).length - 1]
+  if (strat && (strat.strategy?.rationale || strat.strategy?.policy)) {
+    items.push({ icon: 'compass', label: 'strategy',
+      text: strat.strategy.rationale || `policy → ${strat.strategy.policy}`, at: strat.at_node })
+  }
+  const dec = (state.agent_decisions || [])[(state.agent_decisions || []).length - 1]
+  if (dec && (dec.rationale || dec.chosen)) {
+    items.push({ icon: 'bolt', label: dec.chosen || 'action', text: dec.rationale || '', at: dec.at_node })
+  }
+  if (state.policy_reason) {
+    items.push({ icon: 'target', label: 'policy', node: state.policy_chosen,
+      text: `${state.policy_reason}${state.policy_chosen != null ? ` → #${state.policy_chosen}` : ''}` })
+  }
+  if (!items.length) return null
+  return (
+    <div className="why-strip" title="why the loop is doing what it's doing (live)">
+      {items.slice(0, 3).map((it, i) => <span key={i} className="why-item"
+        onClick={() => it.node != null && onSelect && onSelect(it.node)}
+        style={{ cursor: it.node != null ? 'pointer' : 'default' }}>
+        <OpIcon name={it.icon} size={12} className="why-ic" />
+        <b>{it.label}</b> {it.text}{it.at != null ? <span className="muted"> @{it.at}</span> : null}
+      </span>)}
+    </div>
   )
 }
 

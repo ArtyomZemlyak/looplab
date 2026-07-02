@@ -421,6 +421,14 @@ button { font: inherit; }
 .hyp-card { background: var(--bg-3); border: 1px solid var(--border); border-radius: 6px; padding: 6px 7px; margin-bottom: 6px; }
 .hyp-stmt { font-size: 12px; line-height: 1.35; }
 .hyp-src { display: inline-flex; vertical-align: -1px; color: var(--fg-dim); }
+
+/* U6 live "why" strip: a one-line narration of the loop's latest autonomous decisions. */
+.why-strip { display: flex; gap: 14px; align-items: center; flex-wrap: wrap; padding: 4px 12px;
+  background: var(--bg-2); border-bottom: 1px solid var(--border); font-size: 12px; color: var(--fg-mut); }
+.why-item { display: inline-flex; align-items: center; gap: 5px; max-width: 46ch; overflow: hidden;
+  text-overflow: ellipsis; white-space: nowrap; }
+.why-item b { color: var(--fg); font-weight: 600; }
+.why-ic { color: var(--fg-dim); flex: none; }
 .hyp-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 3px; margin-top: 5px; }
 .hyp-empty { font-size: 11px; text-align: center; padding: 4px 0; }
 @media (max-width: 900px) { .hyp-board { grid-template-columns: 1fr 1fr; } }
