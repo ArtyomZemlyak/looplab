@@ -17,17 +17,16 @@ import orjson
 import typer
 from pydantic import ValidationError
 
-from . import __version__
-from .atomicio import atomic_write_text
-from .config import Settings
-from .eventstore import EventStore
-from .orchestrator import Engine
-from .policy import make_policy
-from .replay import fold
-from .sandbox import make_sandbox
-from .tasks import TaskAdapter, kinds, load_task, make_llm_client, make_roles, validate_task
-from . import appconfig
-
+from looplab import __version__
+from looplab.core.atomicio import atomic_write_text
+from looplab.core.config import Settings
+from looplab.events.eventstore import EventStore
+from looplab.engine.orchestrator import Engine
+from looplab.search.policy import make_policy
+from looplab.events.replay import fold
+from looplab.runtime.sandbox import make_sandbox
+from looplab.adapters.tasks import TaskAdapter, kinds, load_task, make_llm_client, make_roles, validate_task
+from looplab.core import appconfig
 _TASK_KINDS = tuple(kinds())
 
 # rich_markup_mode="markdown" (not the Typer default "rich"): in "rich" mode square brackets are
@@ -67,7 +66,7 @@ def _main(
     if ctx.invoked_subcommand is None:
         # Bare `looplab` -> the terminal control plane. `looplab --help` / `--version` are handled by
         # Typer's eager options before we get here, so this fires only on a genuine no-arg invocation.
-        from .tui import main as tui_main
+        from looplab.serve.tui import main as tui_main
         raise typer.Exit(tui_main(None, os.environ.get("LOOPLAB_RUN_ROOT", "runs")))
 
 
@@ -158,7 +157,7 @@ def _engine_singleton(run_dir: Path):
 
 def _engine(run_dir: Path, task: TaskAdapter, settings: Settings,
             crash_after: Optional[int]) -> Engine:
-    from .tracing import set_llm_capture
+    from looplab.core.tracing import set_llm_capture
     # Capture LLM prompts/completions into spans (UI per-node trace) unless disabled. Diagnostics
     # only; never read by replay.fold. Honors LOOPLAB_TRACE_LLM_IO via Settings.
     set_llm_capture(settings.trace_llm_io)
@@ -172,22 +171,22 @@ def _engine(run_dir: Path, task: TaskAdapter, settings: Settings,
         # (it bootstraps via the wrapped Researcher and delegates on non-numeric spaces). A3 BOHB =
         # ASHA racing + the surrogate, so `policy=bohb` auto-enables it.
         if settings.surrogate_proposer or settings.policy == "bohb":
-            from .surrogate import SurrogateResearcher
+            from looplab.search.surrogate import SurrogateResearcher
             _bounds = getattr(researcher, "bounds", None)
             if _bounds:
                 researcher = SurrogateResearcher(_bounds, fallback=researcher,
                                                  explore=settings.surrogate_explore)
         # E2 researcher panel: generate K ideas and keep the best by the empirical surrogate.
         if settings.researcher_panel > 1:
-            from .panel import PanelResearcher
+            from looplab.serve.panel import PanelResearcher
             researcher = PanelResearcher(researcher, k=settings.researcher_panel)
     # RepoTask onboarding (Phase 3): if the task can propose its own eval spec, build the
     # onboarder (Researcher proposes + Developer writes the adapter).
     mk = getattr(task, "make_onboarder", None)
     onboarder = mk(settings) if callable(mk) else None
     # A7 Strategist (optional adaptive meta-control) + live Developer-backend swap factory.
-    from .strategist import make_strategist
-    from .tasks import make_developer_factory
+    from looplab.agents.strategist import make_strategist
+    from looplab.adapters.tasks import make_developer_factory
     if _unified:
         # The unified agent IS the strategist: its `.decide()` delegates to the strategy-stage
         # backend it built internally (None when strategist_backend="off"). One identity, replay
@@ -197,7 +196,7 @@ def _engine(run_dir: Path, task: TaskAdapter, settings: Settings,
         strat_client = (make_llm_client(settings)
                         if settings.backend == "llm" and settings.strategist_backend in ("llm", "agent")
                         else None)
-        from .tasks import build_strategist_tools
+        from looplab.adapters.tasks import build_strategist_tools
         # Only build the (KB-indexing) strategist toolset when an agent strategist will actually use
         # it — i.e. a client is wired. Without one, make_strategist falls back to RuleStrategist and
         # the toolset would be built (paying KnowledgeTools' vector-index cost) only to be discarded.
@@ -207,18 +206,18 @@ def _engine(run_dir: Path, task: TaskAdapter, settings: Settings,
                                      tools=strat_tools)
     # Deep-Research stage (Phase 2): reachable only with an LLM backend. Reuses the run's LLM client;
     # tools (arXiv/web/knowledge) are wired from config inside make_deep_researcher. None when off.
-    from .deep_research import make_deep_researcher
+    from looplab.agents.deep_research import make_deep_researcher
     deep_researcher = (make_deep_researcher(settings, client=make_llm_client(settings), task=task)
                        if settings.backend == "llm" else None)
     # Agent-authored run report (Workstream A): reachable only with an LLM backend; reuses the run's
     # LLM client. None in toy mode -> the UI shows the deterministic report only.
-    from .report import make_report_writer
+    from looplab.serve.report import make_report_writer
     report_writer = (make_report_writer(settings, client=make_llm_client(settings))
                      if settings.backend == "llm" else None)
     dev_factory = make_developer_factory(task, settings) if settings.backend == "llm" else None
     proxy_scorer = None
     if settings.proxy_scoring or settings.proxy_kill_fraction > 0:
-        from .proxy import ProxyScorer
+        from looplab.runtime.proxy import ProxyScorer
         proxy_scorer = ProxyScorer(kill_fraction=settings.proxy_kill_fraction)
     return Engine(
         run_dir,
@@ -438,7 +437,7 @@ def run(
                       # Genesis doesn't clobber an explicit user choice.
                       or "backend" in getattr(settings, "model_fields_set", set()))
     if genesis and goal is not None:
-        from . import genesis as _genesis
+        from looplab.engine import genesis as _genesis
         try:
             client = make_llm_client(settings)
         except Exception as e:  # noqa: BLE001 - no endpoint configured/reachable
@@ -600,8 +599,8 @@ def smoke(model: Optional[str] = typer.Option(None, help="Override model id.")):
         typer.echo(f"text FAILED: {e}")
         raise typer.Exit(1)
     try:
-        from .models import Idea
-        from .parse import parse_structured
+        from looplab.core.models import Idea
+        from looplab.core.parse import parse_structured
         idea = parse_structured(
             client,
             [{"role": "user", "content": "Propose params x=1.0, y=2.0 to try."}],
@@ -642,7 +641,7 @@ def bench(
     for tf in task_files:
         if not tf.exists():
             raise typer.BadParameter(f"task file not found: {tf}")
-    from .bench import run_benchmark
+    from looplab.bench import run_benchmark
     settings = Settings()
     settings.backend = backend
     settings.max_nodes = max_nodes
@@ -665,7 +664,7 @@ def export_mlflow(
 ):
     """Log the run's champion (params/metrics/solution) to MLflow (needs the optional mlflow pkg)."""
     _require_run_dir(run_dir)
-    from .mlflow_export import available, export_run_dir
+    from looplab.events.mlflow_export import available, export_run_dir
     if not available():
         typer.echo("MLflow not installed: pip install mlflow"); raise typer.Exit(1)
     rid = export_run_dir(run_dir, tracking_uri=tracking_uri, experiment=experiment)
@@ -678,7 +677,7 @@ def export_notebook(
     out: Optional[Path] = typer.Option(None, help="Output .ipynb path (default: <run>/champion.ipynb)."),
 ):
     """Export the run's champion solution as a runnable Jupyter notebook (.ipynb)."""
-    from .notebook import champion_notebook
+    from looplab.runtime.notebook import champion_notebook
     store = _require_run_dir(run_dir)
     state = fold(store.read_all())
     champ = state.nodes.get(state.champion) if state.champion is not None else state.best()
@@ -787,10 +786,10 @@ def ui(run_root: Path = typer.Option(
     so a fresh `pip install -e ".[ui]"` needs no manual `npm run build`. Use --no-build to skip or
     --rebuild to force one."""
     if build or rebuild:
-        from .uibuild import ensure_ui_built  # stdlib-only; fine to import before the [ui] check
+        from looplab.serve.uibuild import ensure_ui_built  # stdlib-only; fine to import before the [ui] check
         ensure_ui_built(force=rebuild, log=typer.echo)
     try:
-        from .server import serve  # lazy: keeps the core import-free of fastapi/uvicorn
+        from looplab.serve.server import serve  # lazy: keeps the core import-free of fastapi/uvicorn
     except ModuleNotFoundError as e:
         typer.echo(f"UI extra not installed: {e}")
         raise typer.Exit(1)
@@ -826,7 +825,7 @@ def tui(server: Optional[str] = typer.Option(
     glance and chat with the boss to change course (its actions apply to the live run). It is a thin
     client of the same control plane `looplab ui` serves, so a server is auto-started when none is found
     (API only — no React build); point it at a remote one with --server."""
-    from .tui import main as tui_main
+    from looplab.serve.tui import main as tui_main
     raise typer.Exit(tui_main(server, str(run_root)))
 
 
@@ -837,7 +836,7 @@ def build_ui(force: bool = typer.Option(False, "--force",
 
     Runs `npm ci` (first build) + `npm run build` in the UI source tree. Normally you don't need
     this — `looplab ui` builds on demand — but it's handy for CI or a warm-up step."""
-    from .uibuild import ensure_ui_built, ui_dist_dir
+    from looplab.serve.uibuild import ensure_ui_built, ui_dist_dir
     ok = ensure_ui_built(force=force, log=typer.echo)
     if ok:
         typer.echo(f"UI bundle ready at {ui_dist_dir()}")

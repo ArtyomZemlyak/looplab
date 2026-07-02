@@ -1,7 +1,7 @@
 # Tasks
 
 A **task** is a small JSON file telling LoopLab *what to optimize*. It's dispatched on a `kind`
-field to a `TaskAdapter` (`looplab/tasks.py`). Pass it to `looplab run`:
+field to a `TaskAdapter` (`looplab/adapters/tasks.py`). Pass it to `looplab run`:
 
 ```bash
 looplab run path/to/task.json
@@ -171,7 +171,7 @@ This needs the competition data prepared first. See the full **[MLE-bench runboo
 (Kaggle token, per-competition rule acceptance, the untrusted tier).
 
 ```bash
-python -m looplab.mlebench_prep --selected            # download + prepare CPU-lite comps
+python -m looplab.adapters.mlebench_prep --selected            # download + prepare CPU-lite comps
 looplab run examples/mlebench_real_spooky.json --out runs/spooky --backend llm
 ```
 
@@ -307,5 +307,5 @@ looplab run examples/dataset_task.json --backend llm --max-nodes 8
 
 Any object exposing `id`, `goal`, `direction`, and `build_roles()` is a valid `TaskAdapter`
 (optionally `columns()` to enable the grounding/profiling pre-phase). For built-in kinds you only
-write JSON; for a new kind, add an adapter to `looplab/tasks.py`'s `_KINDS` registry. See
+write JSON; for a new kind, add an adapter to `looplab/adapters/tasks.py`'s `_KINDS` registry. See
 [Concepts](concepts.md) for how a task plugs into the loop.

@@ -35,20 +35,20 @@ These recur across multiple subsystems; fix them at the mechanism, not per-site.
 ### C1 · Metric integrity is not enforced on any tier
 The whole selection loop (`policy`/`gate`/`confirm`) trusts `node.metric`, but on the default path
 the **graded code prints its own metric** (`stdout_json` takes the last JSON line with a `metric`
-key — [sandbox.py:63](../looplab/sandbox.py)). `print(json.dumps({"metric": 0.0}))` wins the search.
+key — [sandbox.py:63](../looplab/runtime/sandbox.py)). `print(json.dumps({"metric": 0.0}))` wins the search.
 Reinforcing failures:
 - Docker eval mounts the workspace **read-write** (no `:ro`, no `--read-only` —
-  [command_eval.py:175](../looplab/command_eval.py)), so code can overwrite the metric file or the
+  [command_eval.py:175](../looplab/runtime/command_eval.py)), so code can overwrite the metric file or the
   "frozen" grader/adapter at runtime; the drift cross-check is opt-in **and reads from the same
   writable mount**.
 - RepoTask protects only the *primary* metric reader; `metrics` / `constraints` / `cross_check`
-  reader paths are **never added to `_protected_names`** ([repo_task.py:305](../looplab/repo_task.py)),
+  reader paths are **never added to `_protected_names`** ([repo_task.py:305](../looplab/adapters/repo_task.py)),
   so secondary/constraint/drift values are forgeable.
-- `protect` is matched by **exact string, not glob** ([repo_task.py:296](../looplab/repo_task.py)) —
+- `protect` is matched by **exact string, not glob** ([repo_task.py:296](../looplab/adapters/repo_task.py)) —
   `protect=["*.py"]` silently protects nothing.
 - mlebench grader with the answer key `_Y` runs **in the candidate's own interpreter/workdir**
-  ([mlebench.py:194](../looplab/mlebench.py)); `import grader; grader._Y` or unlimited oracle
-  probing of `score()` ([mlebench.py:105](../looplab/mlebench.py)) reconstructs all labels.
+  ([mlebench.py:194](../looplab/adapters/mlebench.py)); `import grader; grader._Y` or unlimited oracle
+  probing of `score()` ([mlebench.py:105](../looplab/adapters/mlebench.py)) reconstructs all labels.
 - **No test** proves a label-reading solution is blocked or scores 0 (test review H3).
 
 → For any non-trusted run, compute the metric **host-side** from artifacts the code cannot rewrite;
@@ -58,10 +58,10 @@ grade out-of-process; mount inputs `:ro`; protect every reader path; glob-match 
 `leakage.py` is **ML** data-leakage detection, not secret scanning. There is no runtime
 redaction/scan of generated-code stdout/stderr or LLM completions — only config masking
 (`masked_snapshot()`). Worse, the child process inherits the **entire host environment**
-(`full_env = {**os.environ, …}` — [sandbox.py:102](../looplab/sandbox.py)), including
+(`full_env = {**os.environ, …}` — [sandbox.py:102](../looplab/runtime/sandbox.py)), including
 `LLM_API_KEY`/cloud creds, and stdout/stderr tails are persisted verbatim into the event log/UI
-([orchestrator.py:752](../looplab/orchestrator.py)) and into `spans.jsonl`
-([tracing.py:104](../looplab/tracing.py)). One `print(os.environ)` or a stack trace exfiltrates
+([orchestrator.py:752](../looplab/engine/orchestrator.py)) and into `spans.jsonl`
+([tracing.py:104](../looplab/core/tracing.py)). One `print(os.environ)` or a stack trace exfiltrates
 secrets into durable artifacts served over CORS `*`. Docs (`README:15`, `03-decisions.md:301`:
 "redaction filter + gitleaks over the event log") claim a control that isn't implemented.
 
@@ -72,12 +72,12 @@ correct the docs to "config-masking only."
 No auth on any endpoint. `POST /api/start` spawns `subprocess.Popen([... "looplab.cli", "run",
 task_file …])`; `PUT /api/{kind}/{name}` writes arbitrary `.md` into prompt/skill dirs the engine
 hot-loads; the new `DELETE /api/runs/{id}` does `shutil.rmtree`. With `allow_origins=["*"]`
-([server.py:87](../looplab/server.py)) **any web page the operator has open** can drive all of it
+([server.py:87](../looplab/serve/server.py)) **any web page the operator has open** can drive all of it
 cross-origin (CSRF). Plus an **arbitrary-file-read**: the SPA fallback `GET /{path:path}` →
-`FileResponse(dist / path)` has **no traversal guard** ([server.py:488](../looplab/server.py)) while
+`FileResponse(dist / path)` has **no traversal guard** ([server.py:488](../looplab/serve/server.py)) while
 every other file route does — `GET /..%2f..%2f..%2fWindows%2fwin.ini` returns any readable file.
 `task_file` from the request body is executed without an allow-list
-([server.py:388](../looplab/server.py)).
+([server.py:388](../looplab/serve/server.py)).
 
 → Token on all mutating `/api/*`; CORS allow-list to `http://localhost:5173`; resolve-guard the SPA
 route; bind loopback-only; validate `task_file`.
@@ -85,14 +85,14 @@ route; bind loopback-only; validate `task_file`.
 ### C4 · Replay/durability invariant holds only within one schema version
 - `Event` has no `model_config` → Pydantic v2 `extra="ignore"`; the `v` version field is **written
   but never read**, and `fold` silently ignores unknown event *types*
-  ([replay.py:147](../looplab/replay.py)). A v2 log read by v1 code produces a **different, wrong
+  ([replay.py:147](../looplab/events/replay.py)). A v2 log read by v1 code produces a **different, wrong
   state with no error** — the opposite of a trustworthy source of truth.
 - The interprocess append lock **swallows `OSError` and writes unsynchronized**
-  ([eventstore.py:38](../looplab/eventstore.py)) exactly when two writers contend; `iter_jsonl` then
-  truncates the log at the first torn line ([eventstore.py:71](../looplab/eventstore.py)) → **silent
+  ([eventstore.py:38](../looplab/events/eventstore.py)) exactly when two writers contend; `iter_jsonl` then
+  truncates the log at the first torn line ([eventstore.py:71](../looplab/events/eventstore.py)) → **silent
   event loss**.
 - `fold` is **not idempotent** for terminal node events: two `node_evaluated`/`node_failed` both add
-  to `total_eval_seconds` and leave status order-dependent ([replay.py:46](../looplab/replay.py)).
+  to `total_eval_seconds` and leave status order-dependent ([replay.py:46](../looplab/events/replay.py)).
 - **No test** proves crash+resume reconstructs *identical* state or that no node is re-evaluated
   (test review H1); the two-writer lock has **no test that can fail** (test review H2).
 
@@ -102,7 +102,7 @@ test.
 
 ### C5 · Read-model can permanently diverge from the log, undetectably
 SQLite read-model is rebuilt **only at engine exit**, non-atomically (`DROP`+`INSERT` on the live
-file — [readmodel.py:27](../looplab/readmodel.py)), is **never refreshed** for post-run control
+file — [readmodel.py:27](../looplab/events/readmodel.py)), is **never refreshed** for post-run control
 events (pause/promote/annotate), and stores **no source watermark** (last seq/hash). "Always
 reconstructable" is true on paper but nothing reconstructs it on the live UI path.
 

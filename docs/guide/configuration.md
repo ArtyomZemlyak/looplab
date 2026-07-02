@@ -1,6 +1,6 @@
 # Configuration
 
-LoopLab is configured by a single layered `Settings` object (`looplab/config.py`). Every field can
+LoopLab is configured by a single layered `Settings` object (`looplab/core/config.py`). Every field can
 be set four ways, in increasing priority:
 
 1. **Default** (shown below).

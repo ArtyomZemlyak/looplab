@@ -80,7 +80,7 @@ Launcher that opens the live UI in-frame, no terminal and no hand-typed URL. Ins
 pip install "looplab[jupyterhub]"      # fastapi + uvicorn + jupyter-server-proxy + psutil
 ```
 
-The `jupyter_serverproxy_servers` entry point (`looplab/jupyter.py`) registers the tile: clicking it
+The `jupyter_serverproxy_servers` entry point (`looplab/runtime/jupyter.py`) registers the tile: clicking it
 runs `looplab ui` on a free port and proxies it at `/user/<name>/proxy/<port>/`. Three env knobs
 matter on a hub:
 

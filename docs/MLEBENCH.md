@@ -14,10 +14,10 @@ used for offline tests.
 
 - **Auth.** The modern Kaggle `KGAT_…` tokens are **Bearer** tokens. The official `kaggle` PyPI
   client only speaks legacy Basic auth / OAuth and **cannot** use them. So LoopLab downloads
-  competition data itself over HTTPS with stdlib `urllib` (`looplab/kaggle_dl.py`) — no kaggle
+  competition data itself over HTTPS with stdlib `urllib` (`looplab/adapters/kaggle_dl.py`) — no kaggle
   client needed — then feeds the raw zip to mle-bench's real `prepare_fn`
-  (`looplab/mlebench_prep.py`).
-- **Grading is host-side and out-of-process** (`looplab/mlebench_grade.py`): the answer key lives
+  (`looplab/adapters/mlebench_prep.py`).
+- **Grading is host-side and out-of-process** (`looplab/adapters/mlebench_grade.py`): the answer key lives
   only in the mle-bench data dir; `assets()` copies *only* the public files into the candidate
   workspace; grading runs in a child host process. The candidate can neither read nor self-report
   the score (trust model B1).
@@ -68,9 +68,9 @@ website (the API cannot do this for you). Click **"I Understand and Accept"** on
 ## Prepare the data
 
 ```bash
-python -m looplab.mlebench_prep --selected           # the 3 CPU-lite comps
+python -m looplab.adapters.mlebench_prep --selected           # the 3 CPU-lite comps
 # or one at a time:
-python -m looplab.mlebench_prep -c spooky-author-identification
+python -m looplab.adapters.mlebench_prep -c spooky-author-identification
 # add --verify to check the prepared split matches mle-bench's committed checksums
 ```
 
@@ -125,5 +125,5 @@ For **true isolation** of LLM-written candidate code, set the untrusted tier (ne
   tabular features only (the competition is solvable from them). Mounting geometry is a future add.
 - Only mle-bench's bundled competitions (with a committed leaderboard) are supported — that's where
   the medal thresholds come from.
-- To run other lite comps, add an offline baseline in `looplab/mlebench_real.py::_BASELINES` (or
+- To run other lite comps, add an offline baseline in `looplab/adapters/mlebench_real.py::_BASELINES` (or
   just use `--backend llm`, which needs no baseline).

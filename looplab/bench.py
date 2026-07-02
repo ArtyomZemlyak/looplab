@@ -13,14 +13,14 @@ from pathlib import Path
 import anyio
 import orjson
 
-from .config import Settings
-from .tasks import load_task
+from looplab.core.config import Settings
+from looplab.adapters.tasks import load_task
 
 
 def run_benchmark(task_files, settings: Settings, out_dir) -> list[dict]:
     """Run each task to completion and return a capability summary per task. Writes
     `<out_dir>/benchmark.json` with the full report."""
-    from .cli import _engine   # lazy to avoid an import cycle (cli imports bench in its command)
+    from looplab.cli import _engine   # lazy to avoid an import cycle (cli imports bench in its command)
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     results: list[dict] = []

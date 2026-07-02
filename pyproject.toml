@@ -39,16 +39,16 @@ LoopLab = "looplab.cli:app"   # backwards-compatible alias
 
 # jupyter-server-proxy discovers LoopLab here: with `pip install looplab[jupyterhub]` in a JH
 # single-user server, the UI gets a Launcher tile that auto-launches it on a free port and proxies
-# it at /user/<name>/proxy/<port>/ — no terminal, no hand-typed URL. See looplab/jupyter.py.
+# it at /user/<name>/proxy/<port>/ — no terminal, no hand-typed URL. See looplab/runtime/jupyter.py.
 [project.entry-points."jupyter_serverproxy_servers"]
-looplab = "looplab.jupyter:setup_looplab"
+looplab = "looplab.runtime.jupyter:setup_looplab"
 
 [build-system]
 requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
-[tool.setuptools]
-packages = ["looplab"]
+[tool.setuptools.packages.find]
+include = ["looplab*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

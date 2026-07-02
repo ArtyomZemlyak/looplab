@@ -15,12 +15,12 @@
 ## 1. Why this shape (fit with LoopLab)
 
 - **Reuses the role-swap seam.** `Engine` already takes an injected `policy: SearchPolicy`
-  ([orchestrator.py:113](../looplab/orchestrator.py)) and calls `self.policy.next_actions(state)` in
-  one place ([orchestrator.py:381](../looplab/orchestrator.py)). Policies are **pure functions of
+  ([orchestrator.py:113](../looplab/engine/orchestrator.py)) and calls `self.policy.next_actions(state)` in
+  one place ([orchestrator.py:381](../looplab/engine/orchestrator.py)). Policies are **pure functions of
   `RunState` sharing one action vocabulary** (`draft/improve/debug/merge/ablate/evaluate`), so they
   are hot-swappable between loop iterations with zero state migration.
 - **Reuses the event-sourced control plane.** It mirrors the existing `policy_decision` "why-this-node"
-  event ([orchestrator.py:415](../looplab/orchestrator.py)) — the Strategist gets a `strategy_decision`
+  event ([orchestrator.py:415](../looplab/engine/orchestrator.py)) — the Strategist gets a `strategy_decision`
   event and a "why this strategy" panel, exactly parallel.
 - **Replay-safe by construction.** Like an LLM `Idea` (recorded in `node_created`, never re-called on
   replay), the Strategist's decision is **recorded in the log** and reconstructed by `fold`; the LLM is
@@ -32,7 +32,7 @@
 
 ## 2. Core types
 
-New module **`looplab/strategist.py`** (keeps `roles.py`/`policy.py` focused; depends only on
+New module **`looplab/agents/strategist.py`** (keeps `roles.py`/`policy.py` focused; depends only on
 `models`, `config`, `llm`, `parse`).
 
 ```python
@@ -117,13 +117,13 @@ def _apply_strategy(self, strat: dict) -> None:
 ```
 *Safety:* policies share the action vocabulary and are pure → swapping between iterations is safe.
 Developer is swapped only **between** sequential `_create_node` calls (creation is awaited
-sequentially, [orchestrator.py:417](../looplab/orchestrator.py)), so no in-flight node sees two
+sequentially, [orchestrator.py:417](../looplab/engine/orchestrator.py)), so no in-flight node sees two
 Developers.
 
 **Resume:** right after the initial fold in `run()`, `if state.active_strategy: self._apply_strategy(state.active_strategy)`.
 
 **Consult point** — at the top of the loop, *before* `self.policy.next_actions(state)`
-([orchestrator.py:381](../looplab/orchestrator.py)), guarded so it can't thrash:
+([orchestrator.py:381](../looplab/engine/orchestrator.py)), guarded so it can't thrash:
 ```python
 if self.strategist and self._should_consult(state):
     ctx = self._strategy_ctx(state)
