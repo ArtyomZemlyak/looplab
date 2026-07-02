@@ -431,7 +431,10 @@ def run(
     # describe data locations in the goal and Genesis authors the mounts (no --data needed). Opt out
     # with --no-genesis (then --kind + flags are used as written), or run a complete file with no --goal.
     backend_chosen = (backend is not None or "backend" in file_settings or "backend" in sets
-                      or "LOOPLAB_BACKEND" in os.environ)
+                      or "LOOPLAB_BACKEND" in os.environ
+                      # also covers a backend set via the .env file (env vars alone miss it), so
+                      # Genesis doesn't clobber an explicit user choice.
+                      or "backend" in getattr(settings, "model_fields_set", set()))
     if genesis and goal is not None:
         from . import genesis as _genesis
         try:

@@ -24,9 +24,19 @@ def run_benchmark(task_files, settings: Settings, out_dir) -> list[dict]:
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     results: list[dict] = []
+    seen_stems: dict[str, int] = {}
     for tf in task_files:
         tf = Path(tf)
-        rd = out_dir / tf.stem
+        # Unique run dir per task: two suites with a same-named task file (suiteA/task.json,
+        # suiteB/task.json) both map to out/task otherwise, and Engine.run would FOLD the first
+        # task's event log and "resume" the wrong run. Suffix a counter on collision.
+        stem = tf.stem
+        if stem in seen_stems:
+            seen_stems[stem] += 1
+            rd = out_dir / f"{stem}_{seen_stems[stem]}"
+        else:
+            seen_stems[stem] = 1
+            rd = out_dir / stem
         t0 = time.time()
         try:
             task = load_task(tf)
