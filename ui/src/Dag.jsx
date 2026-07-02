@@ -185,8 +185,10 @@ const edgeTypes = { energy: EnergyEdge }   // used only in Reactor/Energy FX mod
 
 export default function Dag({ state, selectedId, onSelect, groupMode = 'none', collapsed = new Set(),
                              onToggleGroup, onSetMode, onCollapseAll, onExpandAll, onAutoCollapse, selectedGroup, onSelectGroup,
-                             themeFilter = null }) {
+                             themeFilter = null, onNodeAction, mergeArm = null }) {
   const workId = workingId(state)
+  const [menu, setMenu] = useState(null)   // U3: right-click node menu {x,y,nodeId}
+  const act = (action) => { const id = menu?.nodeId; setMenu(null); if (id != null && onNodeAction) onNodeAction(action, id) }
   const fx = useFx()   // '' | 'subtle' | 'full' — Reactor/Energy FX: swaps edge rendering + the backdrop
   const [showMap, setShowMap] = useState(() => localStorage.getItem('ll.minimap') === '1')
   const [showLegend, setShowLegend] = useState(false)
@@ -345,8 +347,29 @@ export default function Dag({ state, selectedId, onSelect, groupMode = 'none', c
     </defs></svg>}
     <ReactFlow nodes={nodes} edges={edges} nodeTypes={nodeTypes} edgeTypes={edgeTypes} fitView fitViewOptions={{ padding: 0.12 }}
                minZoom={0.05} maxZoom={1.8}
-               onlyRenderVisibleElements proOptions={{ hideAttribution: true }} nodesDraggable={false}
-               onPaneClick={() => { onSelect(null); onSelectGroup && onSelectGroup(null) }}>
+               onlyRenderVisibleElements proOptions={{ hideAttribution: true }}
+               nodesDraggable={!!onNodeAction}
+               onNodeContextMenu={(e, rf) => {
+                 const id = rf?.data?.node?.id
+                 if (id == null || !onNodeAction) return
+                 e.preventDefault(); setMenu({ x: e.clientX, y: e.clientY, nodeId: id })
+               }}
+               onNodeDragStop={(e, rf) => {
+                 // U3 drag-to-merge: dropped a node near another -> merge the two. Manual intersection
+                 // over the laid-out positions (nodes are otherwise controlled, so the node snaps back).
+                 const from = rf?.data?.node?.id
+                 if (from == null || !onNodeAction) return
+                 const p = rf.position || {}
+                 let hit = null, bestD = 9999
+                 for (const n of nodes) {
+                   if (n.type !== 'exp' || n.id === rf.id) continue
+                   const dx = (n.position.x - p.x), dy = (n.position.y - p.y)
+                   const dd = Math.hypot(dx, dy)
+                   if (dd < 90 && dd < bestD) { bestD = dd; hit = n.data?.node?.id }
+                 }
+                 if (hit != null) onNodeAction('merge', { from, to: hit })
+               }}
+               onPaneClick={() => { setMenu(null); onSelect(null); onSelectGroup && onSelectGroup(null) }}>
       <LodWatcher lod={lod} onChange={setLod} />
       <Background color="#20252f" gap={22} />
       <Controls showInteractive={false} />
@@ -386,6 +409,19 @@ export default function Dag({ state, selectedId, onSelect, groupMode = 'none', c
         return '#6b7686'
       }} style={{ background: '#12151c', width: 180, height: 130 }} />}
     </ReactFlow>
+    {mergeArm != null && <div className="merge-arm-hint">click a node to merge with #{mergeArm} · Esc to cancel</div>}
+    {menu && <>
+      <div className="menu-backdrop" onClick={() => setMenu(null)} onContextMenu={(e) => { e.preventDefault(); setMenu(null) }} />
+      <div className="node-menu" style={{ left: menu.x, top: menu.y }} onClick={e => e.stopPropagation()}>
+        <div className="nm-h">experiment #{menu.nodeId}</div>
+        <button className="nm-item" onClick={() => act('explore')}><OpIcon name="gitbranch" size={13} /> Explore from here</button>
+        <button className="nm-item" onClick={() => act('merge')}><OpIcon name="confluence" size={13} /> Merge with…</button>
+        <button className="nm-item" onClick={() => act('ablate')}><OpIcon name="target" size={13} /> Ablate</button>
+        <button className="nm-item" onClick={() => act('diff')}><OpIcon name="doc" size={13} /> Diff vs champion</button>
+        <button className="nm-item" onClick={() => act('inspect')}><OpIcon name="search" size={13} /> Inspect</button>
+        <button className="nm-item danger" onClick={() => act('kill')}><OpIcon name="cross" size={13} /> Kill branch</button>
+      </div>
+    </>}
     </div>
     </LodContext.Provider>
   )

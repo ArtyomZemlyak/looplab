@@ -403,6 +403,10 @@ export const CONTROL = {
   inject: (rid, { idea, parent_id = null, code = null }) =>
     post(`/api/runs/${rid}/control`, { type: 'inject_node', data: { idea, parent_id, code } }),
   reopen: (rid) => post(`/api/runs/${rid}/control`, { type: 'run_reopened', data: {} }),
+  // U3: merge two nodes — inject a multi-parent `merge` node; the engine recombines the parents'
+  // solutions via its real merge/ensemble operator (not a blank manual node).
+  merge: (rid, ids) => post(`/api/runs/${rid}/control`, { type: 'inject_node', data: {
+    idea: { operator: 'merge', rationale: `merge ${ids.map(i => '#' + i).join(' + ')}` }, parent_ids: ids } }),
   // A7: pin/override the Strategist's choice live (HITL parity). `strategy` = a Strategy dict
   // {policy?, policy_params?, developer?, operators?, fidelity?, rationale?}.
   setStrategy: (rid, strategy) => post(`/api/runs/${rid}/control`, { type: 'set_strategy', data: { strategy } }),

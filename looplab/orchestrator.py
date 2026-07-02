@@ -1668,12 +1668,26 @@ class Engine:
             except (TypeError, ValueError):
                 continue
         idea_d["params"] = params
-        idea = Idea(**idea_d)
-        parent_id = req.get("parent_id")
-        parents = [parent_id] if parent_id is not None and parent_id in state.nodes else []
+        # Parents: accept a multi-parent `parent_ids` list (U3 drag-to-merge) or the legacy single
+        # `parent_id`. Keep only ids that exist, preserving order.
+        raw_parents = req.get("parent_ids")
+        if isinstance(raw_parents, list):
+            parents = [p for p in raw_parents if p in state.nodes]
+        else:
+            pid = req.get("parent_id")
+            parents = [pid] if pid is not None and pid in state.nodes else []
+        code = req.get("code")
+        # U3 real merge: two parents + a merge operator + no ready-made code => build the idea via the
+        # engine's own merge/ensemble path (code recombination), identical to a policy-driven merge —
+        # so dragging node A onto node B produces a genuine combined child, not a blank manual node.
+        if not code and idea_d.get("operator") == "merge" and len(parents) >= 2:
+            pnodes = [state.nodes[i] for i in parents]
+            idea = (self._ensemble_idea(pnodes) if self._merge_mode == "ensemble"
+                    else merge_idea(pnodes))
+        else:
+            idea = Idea(**idea_d)
         with self.tracer.span("create_node", new_trace=True, node_id=node_id,
                               operator=idea.operator, source="manual"):
-            code = req.get("code")
             if not code:
                 with self.tracer.span("implement"):
                     code = self.developer.implement(idea)

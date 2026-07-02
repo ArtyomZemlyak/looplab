@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { useRunState } from './hooks.js'
-import { get, fmt, fmtInt, phaseLabel, workingId } from './util.js'
+import { get, fmt, fmtInt, phaseLabel, workingId, CONTROL } from './util.js'
 import Dag from './Dag.jsx'
 import Inspector, { GroupSummary } from './Inspector.jsx'
 import Dock from './Dock.jsx'
@@ -102,6 +102,52 @@ export default function RunView({ runId, onBack }) {
   }, [hist, live, groupMode, selectedGroup])
   // Node selection clears any group selection (the side panel shows one or the other).
   const selectNode = (id) => { setSelectedId(id); if (id != null) setSelectedGroup(null) }
+  // U3 · canvas as a control surface: right-click actions + drag-to-merge + a "merge with…" arm mode.
+  const [mergeFrom, setMergeFrom] = useState(null)   // arm: next node click merges with this one
+  const [comparePair, setComparePair] = useState(null)   // seed ComparePanel for "diff vs champion"
+  const live2 = hist || live
+  const pendingDescendants = (rootId) => {   // for "kill branch": abort the node + its PENDING subtree
+    const ns = live2?.nodes || {}
+    const kids = {}; Object.values(ns).forEach(n => (n.parent_ids || []).forEach(p => { (kids[p] ||= []).push(n.id) }))
+    const out = []; const stack = [rootId]; const seen = new Set()
+    while (stack.length) { const x = stack.pop(); if (seen.has(x)) continue; seen.add(x)
+      if (ns[x] && ns[x].status === 'pending') out.push(x)
+      ;(kids[x] || []).forEach(k => stack.push(k)) }
+    return out
+  }
+  const onNodeAction = async (action, arg) => {
+    try {
+      if (action === 'merge' && arg && typeof arg === 'object') {   // drag drop A->B
+        await CONTROL.merge(runId, [arg.from, arg.to]); showToast(`merging #${arg.from} + #${arg.to}`); return
+      }
+      const id = arg
+      if (action === 'explore') { await CONTROL.fork(runId, id); showToast(`exploring from #${id}`) }
+      else if (action === 'ablate') { await CONTROL.forceAblate(runId, id); showToast(`ablating #${id}`) }
+      else if (action === 'inspect') { selectNode(id) }
+      else if (action === 'diff') { setComparePair([live2?.best_node_id ?? id, id]); setPanel('compare') }
+      else if (action === 'merge') { setMergeFrom(id); showToast(`click a node to merge with #${id}`) }
+      else if (action === 'kill') {
+        const ids = pendingDescendants(id)
+        if (!ids.length) { showToast(`#${id}: nothing pending to kill (already evaluated)`); return }
+        for (const k of ids) await CONTROL.nodeAbort(runId, k)
+        showToast(`killed ${ids.length} pending experiment(s) under #${id}`)
+      }
+    } catch { showToast('action failed (run not live?)') }
+  }
+  // When armed for merge, a node click completes the merge instead of selecting.
+  const onCanvasSelect = (id) => {
+    if (mergeFrom != null && id != null && id !== mergeFrom) {
+      CONTROL.merge(runId, [mergeFrom, id]).then(() => showToast(`merging #${mergeFrom} + #${id}`)).catch(() => showToast('merge failed'))
+      setMergeFrom(null); return
+    }
+    if (mergeFrom != null) setMergeFrom(null)
+    selectNode(id)
+  }
+  useEffect(() => {   // Esc cancels the merge-arm
+    if (mergeFrom == null) return
+    const h = (e) => { if (e.key === 'Escape') setMergeFrom(null) }
+    window.addEventListener('keydown', h); return () => window.removeEventListener('keydown', h)
+  }, [mergeFrom])
   // Drill-down from the dock/timeline: select a node, optionally open a tab + jump the scrubber.
   const focusNode = (id, tab, seq) => {
     selectNode(id)
@@ -217,10 +263,10 @@ export default function RunView({ runId, onBack }) {
       <DirectionsOverview state={state} active={themeFilter} onPick={setThemeFilter} />
       <WhyStrip state={state} onSelect={selectNode} />
       <div className="main">
-        <div className="canvas-wrap"><Dag state={state} selectedId={selectedId} onSelect={selectNode}
+        <div className="canvas-wrap"><Dag state={state} selectedId={selectedId} onSelect={onCanvasSelect}
           groupMode={groupMode} collapsed={collapsed} onToggleGroup={toggleGroup} onSetMode={changeMode}
           onCollapseAll={(keys) => setCollapsed(new Set(keys))} onExpandAll={() => setCollapsed(new Set())}
-          onAutoCollapse={autoCollapse}
+          onAutoCollapse={autoCollapse} onNodeAction={onNodeAction} mergeArm={mergeFrom}
           selectedGroup={selectedGroup} onSelectGroup={selectGroup} themeFilter={themeFilter} /></div>
         {sideC
           ? <div className="side-rail" title="show panel" onClick={() => setSideC(false)}>‹ {selectedGroup != null ? 'group' : 'inspector'}</div>
@@ -257,7 +303,8 @@ export default function RunView({ runId, onBack }) {
       {panel === 'failures' && <FailuresPanel state={state} onSelect={setSelectedId} onClose={() => setPanel(null)} />}
       {panel === 'pareto' && <ParetoPanel state={state} onSelect={selectNode} onClose={() => setPanel(null)} />}
       {panel === 'data' && <DataQualityPanel state={state} onClose={() => setPanel(null)} />}
-      {panel === 'compare' && <ComparePanel state={state} runId={runId} onClose={() => setPanel(null)} />}
+      {panel === 'compare' && <ComparePanel state={state} runId={runId} initialPair={comparePair}
+        onClose={() => { setPanel(null); setComparePair(null) }} />}
       {panel === 'crossrun' && <CrossRunPanel state={state} onClose={() => setPanel(null)} />}
       {panel === 'collab' && <CollabPanel state={state} runId={runId} onSelect={selectNode} onToast={showToast} onClose={() => setPanel(null)} />}
       {panel === 'config' && <ConfigPanel runId={runId} state={state} live={live} onToast={showToast} onClose={() => setPanel(null)} />}

@@ -187,6 +187,22 @@ def test_inject_node_with_parent_and_replay_safe(tmp_path):
     assert s3.injects_done == 1                        # processed exactly once across resumes
 
 
+def test_inject_merge_with_parent_ids_builds_multiparent_node(tmp_path):
+    # U3 drag-to-merge: an inject_node with a `parent_ids` list + operator "merge" and no code
+    # materializes a REAL multi-parent node via the engine's merge/ensemble path (not a blank manual
+    # node), so a canvas merge gesture produces a genuine combined child.
+    rd = tmp_path / "run"
+    s1 = _paused(rd)
+    ids = sorted(s1.nodes)[:2]
+    assert len(ids) == 2
+    n0 = len(s1.nodes)
+    EventStore(rd / "events.jsonl").append("inject_node", {
+        "idea": {"operator": "merge", "rationale": "canvas merge"}, "parent_ids": ids})
+    s2 = _paused(rd)
+    child = next(n for n in s2.nodes.values() if n.id >= n0 and len(n.parent_ids) >= 2)
+    assert set(child.parent_ids) == set(ids) and child.operator == "merge"
+
+
 def test_reopen_finished_run_with_injected_node(tmp_path):
     rd = tmp_path / "run"
     s1 = anyio.run(_engine(rd).run)

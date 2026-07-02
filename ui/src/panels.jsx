@@ -811,11 +811,19 @@ function CmpCol({ d }) {
   </div> : <div className="muted" style={{ flex: 1 }}>…</div>
 }
 
-export function ComparePanel({ state, runId, onClose }) {
+export function ComparePanel({ state, runId, onClose, initialPair = null }) {
   const ids = Object.keys(state.nodes).map(Number).sort((a, b) => a - b)
   const [a, setA] = useState(null), [b, setB] = useState(null)
   const [da, setDa] = useState(null), [db, setDb] = useState(null)
   const [diff, setDiff] = useState(false)   // U4: line diff between ANY two nodes (not just vs parent)
+  // Seed from an explicit pair (e.g. canvas "diff vs champion"), else best vs latest.
+  useEffect(() => {
+    if (initialPair && initialPair.length === 2) {
+      if (initialPair[0] != null) setA(initialPair[0])
+      if (initialPair[1] != null) setB(initialPair[1])
+      setDiff(true)
+    }
+  }, [initialPair && initialPair.join(',')])
   // Seed/repair the selectors once nodes exist (the panel may open before any node arrives).
   useEffect(() => {
     if (!ids.length) return
