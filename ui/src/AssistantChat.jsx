@@ -133,6 +133,8 @@ export default function AssistantChat({ onBack }) {
   const inputRef = useRef(null)
   const mountedRef = useRef(true)
   const abortRef = useRef(null)
+  const sidRef = useRef(null)   // the session the stream callbacks belong to; guards against tokens
+  //   from session A's in-flight turn bleeding into session B after the user switches sessions
   useEffect(() => () => { mountedRef.current = false; if (abortRef.current) abortRef.current.abort() }, [])
 
   useEffect(() => { assistantCommands().then(r => setCommands(r.commands || [])).catch(() => {}) }, [])
@@ -169,14 +171,15 @@ export default function AssistantChat({ onBack }) {
   }, [msgs, busy])
 
   const openSession = async (id) => {
-    setSid(id); setErr(null)
+    if (abortRef.current) abortRef.current.abort()   // stop an in-flight turn before switching away
+    sidRef.current = id; setSid(id); setErr(null)
     try {
       const s = await assistantGet(id)
       setMsgs(s.messages || [])
       if (s.meta && s.meta.mode) setMode(s.meta.mode)
     } catch (e) { setErr(e.message) }
   }
-  const newChat = () => { setSid(null); setMsgs([]); setErr(null); setInput('') }
+  const newChat = () => { if (abortRef.current) abortRef.current.abort(); sidRef.current = null; setSid(null); setMsgs([]); setErr(null); setInput('') }
   const del = async (id, e) => {
     e?.stopPropagation()
     try {
@@ -222,7 +225,7 @@ export default function AssistantChat({ onBack }) {
     setErr(null); setInput('')
     let id = sid
     if (!id) {
-      try { const m = await assistantCreate(t.slice(0, 60), mode); id = m.id; setSid(id); refreshSessions() }
+      try { const m = await assistantCreate(t.slice(0, 60), mode); id = m.id; sidRef.current = id; setSid(id); refreshSessions() }
       catch (e) { setErr(e.message); return }
     }
     setMsgs(m => [...m, { role: 'user', content: t }, { role: 'assistant', content: '', streaming: true }])
@@ -232,7 +235,9 @@ export default function AssistantChat({ onBack }) {
     // on turn end OR component unmount (mountedRef), so it can't leak or setState after unmount.
     let polling = true
     ;(async () => { while (polling && mountedRef.current) { try { const p = await assistantPermissions(id); if (mountedRef.current) setPending(p.pending || []) } catch { /* transient */ } await sleep(800) } })()
-    const safe = (fn) => (...a) => { if (mountedRef.current) fn(...a) }
+    // Guard on the session too: after the user switches sessions, a late token from this turn must
+    // not patch the now-displayed other session's transcript.
+    const safe = (fn) => (...a) => { if (mountedRef.current && sidRef.current === id) fn(...a) }
     let acc = ''; let errored = null
     try {
       const res = await assistantMessageStream(id, t, mode, {
@@ -241,14 +246,20 @@ export default function AssistantChat({ onBack }) {
         onTodos: safe((items) => { setLiveTodos(items); patchLast({ todos: items }) }),
         onError: safe((e) => { errored = e; setErr(e) }),
       }, ctrl.signal)
-      if (!mountedRef.current) return
+      if (!mountedRef.current || sidRef.current !== id) return   // switched away: don't touch the feed
       if (res && res.ok === false && res.error) { errored = res.error; setErr(res.error) }
       patchLast({ content: (res && res.reply) || acc || (errored ? `⚠ ${errored}` : '(no reply)'), streaming: false,
         steps: res && res.steps, applied: res && res.applied, proposals: res && res.proposals, todos: res && res.todos })
       refreshSessions()
     } catch (e) {
-      if (mountedRef.current) { setErr(e.message); patchLast({ content: acc || 'Could not reach the assistant.', streaming: false }) }
-    } finally { polling = false; abortRef.current = null; if (mountedRef.current) { setBusy(false); setPending([]); setLiveSteps([]); setLiveTodos([]) } }
+      // AbortError from a session switch is expected; only report/patch if we're still on this session.
+      if (mountedRef.current && sidRef.current === id && e.name !== 'AbortError') { setErr(e.message); patchLast({ content: acc || 'Could not reach the assistant.', streaming: false }) }
+    } finally {
+      // Turn-global UI state (busy/pending/live) is reset regardless of session so a switch mid-turn
+      // can't wedge the composer in a busy state; only the per-session message feed is guarded above.
+      polling = false; abortRef.current = null
+      if (mountedRef.current) { setBusy(false); setPending([]); setLiveSteps([]); setLiveTodos([]) }
+    }
   }
 
   const activeMode = MODES.find(x => x.id === mode) || MODES[0]

@@ -20,7 +20,8 @@ const TABS = ['Overview', 'Code', 'Metrics', 'Training', 'Trust', 'Trace', 'Cost
 export default function Inspector({ runId, nodeId, state, live, tab, setTab, onToast }) {
   const [detail, setDetail] = useState(null)
   useEffect(() => {
-    if (nodeId == null) { setDetail(null); return }
+    setDetail(null)               // clear stale detail immediately so we never render node A's
+    if (nodeId == null) return    // payload under node B while B's fetch is in flight (or failed)
     let on = true
     get(`/api/runs/${runId}/nodes/${nodeId}`).then(d => on && setDetail(d)).catch(() => {})
     return () => { on = false }

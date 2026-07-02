@@ -86,7 +86,13 @@ export default function RunView({ runId, onBack }) {
       .catch(() => {})
     return () => { alive = false }
   }, [viewSeq, seq, runId])
-  const showToast = (m) => { setToast(m); setTimeout(() => setToast(null), 2200) }
+  const toastTimer = useRef(null)
+  const showToast = (m) => {
+    // Clear the previous timer so a second toast doesn't get hidden early by the first one's timeout.
+    if (toastTimer.current) clearTimeout(toastTimer.current)
+    setToast(m)
+    toastTimer.current = setTimeout(() => setToast(null), 2200)
+  }
   // Members of the selected group — memoized so unrelated re-renders (toast, live ticks) don't
   // re-walk all nodes; only recomputes when the node set / mode / selection actually changes.
   const groupMembers = useMemo(() => {

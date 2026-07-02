@@ -9,6 +9,37 @@ import { OpIcon } from './icons.jsx'
 
 const ALL = '__all__', UNASSIGNED = '__unassigned__'
 
+// Module-scope so its identity is stable across re-renders (the runs list polls every 2.5s). Defined
+// inside RunList it got a fresh identity each render, so React remounted the whole project subtree and
+// the uncontrolled inline-rename <input> lost its text/focus mid-edit. All render state is threaded
+// through `ctx`.
+function TreeNode({ p, depth, ctx }) {
+  const { byParent, expanded, sel, setSel, onDrop, toggle, renaming, commitRename, setRenaming,
+          count, addProject, removeProject } = ctx
+  const kids = byParent[p.id] || []
+  const open = expanded.has(p.id)
+  return <div className="ptree-node">
+    <div className={'ptree-row' + (sel === p.id ? ' sel' : '')} style={{ paddingLeft: 6 + depth * 14 }}
+         onClick={() => setSel(p.id)}
+         onDragOver={e => { e.preventDefault() }} onDrop={() => onDrop(p.id)}>
+      <span className="ptw" onClick={e => { e.stopPropagation(); toggle(p.id) }}>{kids.length ? (open ? '▾' : '▸') : '·'}</span>
+      {renaming === p.id
+        ? <input className="text ptree-rename" autoFocus defaultValue={p.name}
+                 onClick={e => e.stopPropagation()}
+                 onBlur={e => commitRename(p.id, e.target.value)}
+                 onKeyDown={e => { if (e.key === 'Enter') commitRename(p.id, e.target.value); if (e.key === 'Escape') setRenaming(null) }} />
+        : <span className="pname"><OpIcon name="folder" className="t-ic" /> {p.name}</span>}
+      <span className="pcount">{count(p.id)}</span>
+      <span className="pacts" onClick={e => e.stopPropagation()}>
+        <button className="ic" title="add sub-project" onClick={() => addProject(p.id)}>＋</button>
+        <button className="ic" title="rename" onClick={() => setRenaming(p.id)}>✎</button>
+        <button className="ic" title="delete" onClick={() => removeProject(p.id)}>✕</button>
+      </span>
+    </div>
+    {open && kids.map(k => <TreeNode key={k.id} p={k} depth={depth + 1} ctx={ctx} />)}
+  </div>
+}
+
 // Small centered popup (replaces window.prompt for project create / run rename).
 function Modal({ title, onClose, children }) {
   return <div className="overlay" onMouseDown={onClose}>
@@ -246,30 +277,10 @@ export default function RunList({ onOpen, onSettings }) {
     await deleteSupertask(s.id); loadSupers(); loadRuns()
   }
 
-  const TreeNode = ({ p, depth }) => {
-    const kids = byParent[p.id] || []
-    const open = expanded.has(p.id)
-    return <div className="ptree-node">
-      <div className={'ptree-row' + (sel === p.id ? ' sel' : '')} style={{ paddingLeft: 6 + depth * 14 }}
-           onClick={() => setSel(p.id)}
-           onDragOver={e => { e.preventDefault() }} onDrop={() => onDrop(p.id)}>
-        <span className="ptw" onClick={e => { e.stopPropagation(); toggle(p.id) }}>{kids.length ? (open ? '▾' : '▸') : '·'}</span>
-        {renaming === p.id
-          ? <input className="text ptree-rename" autoFocus defaultValue={p.name}
-                   onClick={e => e.stopPropagation()}
-                   onBlur={e => commitRename(p.id, e.target.value)}
-                   onKeyDown={e => { if (e.key === 'Enter') commitRename(p.id, e.target.value); if (e.key === 'Escape') setRenaming(null) }} />
-          : <span className="pname"><OpIcon name="folder" className="t-ic" /> {p.name}</span>}
-        <span className="pcount">{count(p.id)}</span>
-        <span className="pacts" onClick={e => e.stopPropagation()}>
-          <button className="ic" title="add sub-project" onClick={() => addProject(p.id)}>＋</button>
-          <button className="ic" title="rename" onClick={() => setRenaming(p.id)}>✎</button>
-          <button className="ic" title="delete" onClick={() => removeProject(p.id)}>✕</button>
-        </span>
-      </div>
-      {open && kids.map(k => <TreeNode key={k.id} p={k} depth={depth + 1} />)}
-    </div>
-  }
+  // TreeNode lives at MODULE scope (below) so its component identity is stable across the 2.5s runs
+  // poll; defined inline it remounted the whole subtree every poll, wiping the inline-rename input.
+  const treeCtx = { byParent, expanded, sel, setSel, onDrop, toggle, renaming, commitRename, setRenaming,
+                    count, addProject, removeProject }
 
   return (
     <div className="app">
@@ -305,7 +316,7 @@ export default function RunList({ onOpen, onSettings }) {
             <span className="ptw">○</span><span className="pname">Unassigned</span><span className="pcount">{count(UNASSIGNED)}</span>
           </div>
           <div className="ptree">
-            {(byParent[null] || []).map(p => <TreeNode key={p.id} p={p} depth={0} />)}
+            {(byParent[null] || []).map(p => <TreeNode key={p.id} p={p} depth={0} ctx={treeCtx} />)}
             {!proj.projects.length && <div className="muted" style={{ padding: 10, fontSize: 12 }}>No projects yet. Create one to organize runs.</div>}
           </div>
         </aside>

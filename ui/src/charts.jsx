@@ -172,10 +172,14 @@ export function ParallelCoords({ nodes, direction, width = 760, height = 260, on
   const ev = nodes.filter(n => (n.metric ?? null) !== null)
   if (!ev.length) return <Empty>no evaluated nodes</Empty>
   const pick = onPick || null
+  const isNum = v => v != null && Number.isFinite(Number(v))
+  // Only numeric params can be plotted on a value axis; a string param (optimizer=adam) would give
+  // NaN coordinates and blank the whole chart, so drop non-numeric axes here.
   const params = Array.from(new Set(ev.flatMap(n => Object.keys(n.idea?.params || {}))))
+    .filter(a => ev.some(n => isNum(n.idea?.params?.[a])))
   const axes = [...params, 'metric']
   if (axes.length < 2) return <Empty>not enough dimensions</Empty>
-  const vals = (n, a) => a === 'metric' ? (n.confirmed_mean ?? n.metric) : n.idea?.params?.[a]
+  const vals = (n, a) => { const v = a === 'metric' ? (n.confirmed_mean ?? n.metric) : n.idea?.params?.[a]; return isNum(v) ? Number(v) : null }
   const ranges = {}
   axes.forEach(a => { const xs = ev.map(n => vals(n, a)).filter(v => v != null); ranges[a] = [Math.min(...xs), Math.max(...xs)] })
   const pad = 40, w = width, h = height

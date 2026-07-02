@@ -71,7 +71,10 @@ export function ResearchPanel({ state, runId, onToast, onClose }) {
     <Panel title="Deep research" sub={memos.length ? `${memos.length} memo${memos.length === 1 ? '' : 's'}` : 'none yet'} onClose={onClose} wide>
       {!memos.length && <div className="muted">No deep-research memos yet. Trigger one with <code>/deep-research</code> in the chat, or set a cadence in Config.</div>}
       {memos.map((m, i) => (
-        <div className="rsch-memo" key={i}>
+        // Key by the STABLE original index (research is append-only), not the reversed position:
+        // keyed by `i`, a new memo landing at index 0 reuses the prior memo's DOM node and its open
+        // <details> state bleeds onto the new one.
+        <div className="rsch-memo" key={memos.length - 1 - i}>
           <div className="rsch-h">
             <span className="rsch-ic"><OpIcon name="search" /></span>
             <b>{m.summary || '(no summary)'}</b>
@@ -612,6 +615,23 @@ export function CollabPanel({ state, runId, onSelect, onClose, onToast }) {
   )
 }
 
+// Module scope so their identity is stable across SSE frames (ComparePanel re-renders on every live
+// fold); defined inline they remounted the <select> each frame, closing an open dropdown mid-pick.
+function CmpSel({ v, set, ids }) {
+  return <select className="text" style={{ width: 90 }} value={v} onChange={e => set(Number(e.target.value))}>{ids.map(i => <option key={i} value={i}>#{i}</option>)}</select>
+}
+function CmpCol({ d }) {
+  return d ? <div style={{ flex: 1 }}>
+    <div className="kv">
+      <div className="k">operator</div><div className="v">{d.operator}</div>
+      <div className="k">metric</div><div className="v">{fmt(d.confirmed_mean ?? d.metric)}</div>
+      <div className="k">status</div><div className="v">{d.status}</div>
+      <div className="k">params</div><div className="v">{JSON.stringify(d.idea?.params)}</div>
+    </div>
+    <pre className="code" style={{ maxHeight: 280 }}>{d.code || '(no code)'}</pre>
+  </div> : <div className="muted" style={{ flex: 1 }}>…</div>
+}
+
 export function ComparePanel({ state, runId, onClose }) {
   const ids = Object.keys(state.nodes).map(Number).sort((a, b) => a - b)
   const [a, setA] = useState(null), [b, setB] = useState(null)
@@ -625,20 +645,10 @@ export function ComparePanel({ state, runId, onClose }) {
   useEffect(() => { if (a != null) get(`/api/runs/${runId}/nodes/${a}`).then(setDa).catch(() => {}) }, [runId, a])
   useEffect(() => { if (b != null) get(`/api/runs/${runId}/nodes/${b}`).then(setDb).catch(() => {}) }, [runId, b])
   if (!ids.length) return <Panel title="Compare nodes" onClose={onClose}><div className="muted">No nodes yet.</div></Panel>
-  const Sel = ({ v, set }) => <select className="text" style={{ width: 90 }} value={v} onChange={e => set(Number(e.target.value))}>{ids.map(i => <option key={i} value={i}>#{i}</option>)}</select>
-  const Col = ({ d }) => d ? <div style={{ flex: 1 }}>
-    <div className="kv">
-      <div className="k">operator</div><div className="v">{d.operator}</div>
-      <div className="k">metric</div><div className="v">{fmt(d.confirmed_mean ?? d.metric)}</div>
-      <div className="k">status</div><div className="v">{d.status}</div>
-      <div className="k">params</div><div className="v">{JSON.stringify(d.idea?.params)}</div>
-    </div>
-    <pre className="code" style={{ maxHeight: 280 }}>{d.code || '(no code)'}</pre>
-  </div> : <div className="muted" style={{ flex: 1 }}>…</div>
   return (
     <Panel title="Compare nodes" onClose={onClose} wide>
-      <div className="toolbar" style={{ marginBottom: 10 }}><Sel v={a} set={setA} /><span className="muted">vs</span><Sel v={b} set={setB} /></div>
-      <div style={{ display: 'flex', gap: 14 }}><Col d={da} /><Col d={db} /></div>
+      <div className="toolbar" style={{ marginBottom: 10 }}><CmpSel v={a} set={setA} ids={ids} /><span className="muted">vs</span><CmpSel v={b} set={setB} ids={ids} /></div>
+      <div style={{ display: 'flex', gap: 14 }}><CmpCol d={da} /><CmpCol d={db} /></div>
     </Panel>
   )
 }

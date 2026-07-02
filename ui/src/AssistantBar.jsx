@@ -66,6 +66,7 @@ export default function AssistantBar({ runId, hidden = false }) {
 
   const mountedRef = useRef(true)
   const abortRef = useRef(null)
+  const sidRef = useRef(null)   // session the stream callbacks belong to (guards cross-session bleed)
   const inputRef = useRef(null)
   const feedRef = useRef(null)
   useEffect(() => () => { mountedRef.current = false; if (abortRef.current) abortRef.current.abort() }, [])
@@ -85,7 +86,6 @@ export default function AssistantBar({ runId, hidden = false }) {
   useEffect(() => { if (feedOpen && feedRef.current) requestAnimationFrame(() => { feedRef.current.scrollTop = feedRef.current.scrollHeight }) }, [msgs, view, busy])
 
   const flash = (m) => { setToast(m); setTimeout(() => mountedRef.current && setToast(null), 2600) }
-  const safe = (fn) => (...a) => { if (mountedRef.current) fn(...a) }
   const patchLast = (patch) => setMsgs(m => {
     const c = [...m]; const i = c.length - 1
     if (i >= 0) c[i] = { ...c[i], ...(typeof patch === 'function' ? patch(c[i]) : patch) }
@@ -106,11 +106,12 @@ export default function AssistantBar({ runId, hidden = false }) {
 
   // ── sessions (full view) ──
   const openSession = async (id) => {
-    setSid(id)
+    if (abortRef.current) abortRef.current.abort()   // stop an in-flight turn before switching away
+    sidRef.current = id; setSid(id)
     try { const s = await assistantGet(id); if (mountedRef.current) { setMsgs(s.messages || []); if (s.meta?.mode) setMode(s.meta.mode) } }
     catch (e) { flash(e.message) }
   }
-  const newChat = () => { setSid(null); setMsgs([]); setPreview(''); setHasNew(false); setInput('') }
+  const newChat = () => { if (abortRef.current) abortRef.current.abort(); sidRef.current = null; setSid(null); setMsgs([]); setPreview(''); setHasNew(false); setInput('') }
   const delSession = async (id, e) => {
     e?.stopPropagation()
     try { await assistantDelete(id); if (id === sid) newChat(); refreshSessions() } catch (e2) { flash(e2.message) }
@@ -139,7 +140,7 @@ export default function AssistantBar({ runId, hidden = false }) {
     setPreview(''); setHasNew(false)
     let id = sid
     if (!id) {
-      try { const m = await assistantCreate((userText || instruction).slice(0, 60), mode); id = m.id; if (mountedRef.current) setSid(id) }
+      try { const m = await assistantCreate((userText || instruction).slice(0, 60), mode); id = m.id; sidRef.current = id; if (mountedRef.current) setSid(id) }
       catch { flash('assistant offline'); return }
     }
     setMsgs(m => [...m, { role: 'user', content: userText || instruction }, { role: 'assistant', content: '', streaming: true }])
@@ -148,20 +149,23 @@ export default function AssistantBar({ runId, hidden = false }) {
     // poll permissions so a mutating action that pauses the turn can be approved from any view.
     let polling = true
     ;(async () => { while (polling && mountedRef.current) { try { const p = await assistantPermissions(id); if (mountedRef.current) setPending(p.pending || []) } catch { /* transient */ } await sleep(800) } })()
+    // Session-guarded callback wrapper: a late token from this turn must not patch another session's
+    // feed after the user switches sessions.
+    const safeSid = (fn) => (...a) => { if (mountedRef.current && sidRef.current === id) fn(...a) }
     let acc = ''
     try {
       const res = await assistantMessageStream(id, instruction, mode, {
-        onToken: safe((tok) => { acc += tokText(tok); patchLast({ content: acc }) }),
-        onTodos: safe((items) => patchLast({ todos: items })),
-        onError: safe((e) => flash(e)),
+        onToken: safeSid((tok) => { acc += tokText(tok); patchLast({ content: acc }) }),
+        onTodos: safeSid((items) => patchLast({ todos: items })),
+        onError: safeSid((e) => flash(e)),
       }, ctrl.signal)
-      if (!mountedRef.current) return
+      if (!mountedRef.current || sidRef.current !== id) return
       const reply = (res && res.reply) || acc || '(no reply)'
       patchLast({ content: reply, streaming: false, steps: res && res.steps, applied: res && res.applied,
                   proposals: res && res.proposals, todos: res && res.todos })
       setPreview(firstLine(reply).slice(0, 120)); setHasNew(wasBar)   // glow only if it landed while collapsed
     } catch (e) {
-      if (mountedRef.current) { patchLast({ content: acc || 'Could not reach the assistant.', streaming: false }); flash(e.message) }
+      if (mountedRef.current && sidRef.current === id && e.name !== 'AbortError') { patchLast({ content: acc || 'Could not reach the assistant.', streaming: false }); flash(e.message) }
     } finally { polling = false; abortRef.current = null; if (mountedRef.current) { setBusy(false); setPending([]) } }
   }
 

@@ -29,7 +29,9 @@ export function groupKey(node, mode, ctx) {
   if (mode === 'niche') {
     const p = node.idea?.params || {}; const keys = Object.keys(p).sort()
     if (!keys.length) return null
-    return keys.map(k => `${k}=${Math.round(Number(p[k]))}`).join(' · ')
+    // Round numeric params, but keep a non-numeric param's raw value: Math.round(Number('adam')) is
+    // NaN, which would collapse every distinct string value (optimizer=adam, =sgd) into one bucket.
+    return keys.map(k => { const n = Number(p[k]); return `${k}=${Number.isFinite(n) ? Math.round(n) : p[k]}` }).join(' · ')
   }
   return null
 }
