@@ -8,6 +8,7 @@ import { computeGroups, autoCollapseSet } from './grouping.js'
 import ReportView from './Report.jsx'
 import DirectionsOverview from './DirectionsOverview.jsx'
 import EnergyToggle from './EnergyToggle.jsx'
+import { OpIcon } from './icons.jsx'
 import {
   TrustPanel, SensitivityPanel, FailuresPanel, ParetoPanel, DataQualityPanel,
   ConfigPanel, AuthoringPanel, MemoryPanel, RegistryPanel, EventExplorer,
@@ -199,7 +200,7 @@ export default function RunView({ runId, onBack }) {
         <div className="view-toggle" role="tablist">
           <button className={'vt' + (view === 'dag' ? ' on' : '')} onClick={() => setView('dag')}>Search</button>
           <button className={'vt report' + (view === 'report' ? ' on' : '')} onClick={() => setView('report')}
-            title="conclusion-first run report">★ Report</button>
+            title="conclusion-first run report"><OpIcon name="doc" size={12} /> Report</button>
           <button className={'vt' + (panel === 'overview' ? ' on' : '')} onClick={() => setPanel(panel === 'overview' ? null : 'overview')}
             title="at-a-glance run summary — best metric, budget, strategy, hints">Overview</button>
         </div>
@@ -216,8 +217,8 @@ export default function RunView({ runId, onBack }) {
         {cost && <span className="chip" title="tokens — open Overview" onClick={() => setPanel('overview')} style={{ cursor: 'pointer' }}>
           <span className="k">tokens</span> {fmtInt(cost.total_tokens)}</span>}
         {state.reward_hacks?.length > 0 && <span className="chip alarm" title="suspicious wins flagged (B5) — open Trust" onClick={() => setPanel('trust')} style={{ cursor: 'pointer' }}>
-          <span className="k">⚠ hack?</span> {state.reward_hacks.length}</span>}
-        {live.paused && <span className="chip warn">⏸ paused</span>}
+          <span className="k"><OpIcon name="alert" size={11} /> hack?</span> {state.reward_hacks.length}</span>}
+        {live.paused && <span className="chip warn"><OpIcon name="pause" size={11} /> paused</span>}
       </div>
 
       {/* All actions now run through the chat (type a /command or just say what to do). The approval

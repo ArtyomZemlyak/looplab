@@ -4,6 +4,7 @@ import { Trajectory, ImprovementWaterfall } from './charts.jsx'
 import { analyze, verdict, paramDiffLabel, toMarkdown, hyperImportance } from './report.js'
 import { MemoCard } from './panels.jsx'
 import Markdown from './markdown.jsx'
+import { OpIcon } from './icons.jsx'
 
 const TRUST_CLASS = { trustworthy: 'ok', caveats: 'warn', suspect: 'alarm' }
 const OUTCOME_LABEL = { improved: '▲ improved', flat: '— flat', regressed: '▼ regressed', none: 'no result' }
@@ -23,7 +24,7 @@ function VerdictBanner({ v, rep, onOpenPanel }) {
       {rep?.verdict && <div className="verdict-text"><Markdown text={rep.verdict} /></div>}
       {v.caveats.length > 0 && <div className="caveat-chips">
         {v.caveats.map((c, i) => <button key={i} className={'caveat-chip ' + c.severity}
-          title={`see ${c.panel} →`} onClick={() => onOpenPanel?.(c.panel)}>⚠ {c.text}</button>)}
+          title={`see ${c.panel} →`} onClick={() => onOpenPanel?.(c.panel)}><OpIcon name="alert" size={11} /> {c.text}</button>)}
       </div>}
     </div>
   )
@@ -42,7 +43,7 @@ function ChampionCard({ state, best }) {
         <div className="k">params</div><div className="v">{Object.keys(best.idea?.params || {}).length
           ? Object.entries(best.idea.params).map(([k, val]) => `${k}=${fmt(val)}`).join(', ') : '—'}</div>
         {(best.parent_ids || []).length > 0 && <><div className="k">lineage</div><div className="v">{best.parent_ids.map(p => '#' + p).join(' → ')}</div></>}
-        <div className="k">feasible</div><div className="v">{best.feasible === false ? '⚠ constraint violated' : 'yes'}</div>
+        <div className="k">feasible</div><div className="v">{best.feasible === false ? 'no — constraint violated' : 'yes'}</div>
       </div>
     </div>
   )
@@ -102,15 +103,15 @@ export default function ReportView({ state, runId, onOpenPanel, onToast, onPickN
     <div className="report-view">
       <div className="toolbar report-toolbar">
         <button className="btn sm primary" disabled={refreshing} onClick={refresh}
-          title="Agent rewrites the report from all results so far">{refreshing ? '⟳ Refreshing…' : '🔄 Refresh report'}</button>
+          title="Agent rewrites the report from all results so far"><OpIcon name="replay" size={12} /> {refreshing ? 'Refreshing…' : 'Refresh report'}</button>
         <span className="muted report-fresh">{rep
           ? `agent report @ ${rep.at_node} nodes${rep.trigger ? ` · ${rep.trigger}` : ''}`
           : 'deterministic report (no agent narrative yet)'}</span>
         <span className="spacer" style={{ flex: 1 }} />
-        <button className="btn sm" onClick={() => window.print()}>🖨 Print / PDF</button>
-        <button className="btn sm" onClick={() => dl(`${state.run_id}_report.md`, toMarkdown(state, best), 'text/markdown')}>⬇ Markdown</button>
-        {best && <button className="btn sm" disabled={!bestCode?.code} onClick={() => dl(`solution_node${best.id}.py`, bestCode.code, 'text/x-python')}>⬇ Solution</button>}
-        <button className="btn sm" onClick={() => dl(`${state.run_id}_model_card.json`, modelCard(), 'application/json')}>⬇ Model card</button>
+        <button className="btn sm" onClick={() => window.print()}><OpIcon name="printer" size={12} /> Print / PDF</button>
+        <button className="btn sm" onClick={() => dl(`${state.run_id}_report.md`, toMarkdown(state, best), 'text/markdown')}><OpIcon name="download" size={12} /> Markdown</button>
+        {best && <button className="btn sm" disabled={!bestCode?.code} onClick={() => dl(`solution_node${best.id}.py`, bestCode.code, 'text/x-python')}><OpIcon name="download" size={12} /> Solution</button>}
+        <button className="btn sm" onClick={() => dl(`${state.run_id}_model_card.json`, modelCard(), 'application/json')}><OpIcon name="download" size={12} /> Model card</button>
       </div>
 
       <h1 className="report-title">{state.goal || state.task_id}</h1>

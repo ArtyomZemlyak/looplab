@@ -7,7 +7,7 @@ export const THEMES = [
   { id: 'paper', name: 'Paper', sub: 'warm light', bg: '#f4f1ea', ac: '#346ba3', fg: '#2b2722' },
   { id: 'white-scifi', name: 'White Sci-Fi', sub: 'clean HUD', bg: '#f6f9fd', ac: '#0aa6c9', fg: '#0f1b2d' },
   { id: 'old-green', name: 'Old Green', sub: 'phosphor CRT', bg: '#030a05', ac: '#5bff95', fg: '#3ff06d' },
-  { id: 'reactor', name: 'Reactor', sub: 'sci-fi · pair with ⚡ Energy', bg: '#05060f', ac: '#36e6ff', fg: '#eaf2ff' },
+  { id: 'reactor', name: 'Reactor', sub: 'sci-fi · pair with Energy FX', bg: '#05060f', ac: '#36e6ff', fg: '#eaf2ff' },
 ]
 
 const KEY = 'll.theme'

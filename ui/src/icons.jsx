@@ -66,6 +66,19 @@ const GLYPHS = {
   // status: ok / failed (color via the semantic vars at the call site)
   check: <path d="M3.5 8.4 6.4 11.3 12.5 4.7" />,
   cross: <path d="M4.6 4.6l6.8 6.8M11.4 4.6l-6.8 6.8" />,
+  // ---- replacing legacy colour emoji with monochrome glyphs ----
+  // rename / annotate = pencil (was ✎)
+  pencil: <><path d="M11.2 2.8 13.2 4.8 5.6 12.4 3 13l0.6-2.6Z" /><path d="M10 4l2 2" /></>,
+  // share link = two chain links (was 🔗)
+  link: <><path d="M6.4 9.6 9.6 6.4" /><path d="M8.4 4.6 9.8 3.2a2.4 2.4 0 0 1 3.4 3.4l-1.4 1.4" /><path d="M7.6 11.4 6.2 12.8a2.4 2.4 0 0 1-3.4-3.4l1.4-1.4" /></>,
+  // download / export (was ⬇)
+  download: <><path d="M8 2.6v7.2" /><path d="M5 7l3 3 3-3" /><path d="M3.4 13.2h9.2" /></>,
+  // print (was 🖨)
+  printer: <><path d="M5 6.2V2.8h6v3.4" /><rect x="3" y="6.2" width="10" height="5" rx="1" /><path d="M5 10.4h6v2.8H5Z" /></>,
+  // champion = crown (was ♚ / ★ on the champion)
+  crown: <><path d="M2.6 5.4 4.8 8l3.2-4 3.2 4 2.2-2.6-1 6.2H3.6Z" /></>,
+  // list view (was ☰)
+  list: <><path d="M3 4.5h10M3 8h10M3 11.5h10" /></>,
 }
 
 export function OpIcon({ name, size = 14, className }) {

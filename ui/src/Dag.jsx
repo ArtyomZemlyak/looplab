@@ -128,7 +128,7 @@ function ExpNode({ data }) {
       {/* deep-research provenance: this experiment was proposed right after a research memo (its
           directions were the active steering) — the 💡 marks where research landed in the tree */}
       {node.research_origin && <span className="origin-chip rsch"
-        title={`proposed just after deep research (${node.research_origin.trigger || 'auto'}) at node ${node.research_origin.at_node} — its directions were steering`}>💡 from research</span>}
+        title={`proposed just after deep research (${node.research_origin.trigger || 'auto'}) at node ${node.research_origin.at_node} — its directions were steering`}><OpIcon name="bulb" size={11} /> from research</span>}
       {/* one optional sub-line, reserved for the ONE thing shown nowhere else: why it failed / infeasible */}
       {sweep
         ? <div className="sub sweep-foot">

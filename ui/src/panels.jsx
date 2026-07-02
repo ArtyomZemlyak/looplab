@@ -43,7 +43,7 @@ export function OverviewPanel({ state, maxEval, onClose, onOpenPanel }) {
         <Stat n={failed} l="failed" />
         <Stat n={fmt(evalSec, 1) + 's' + (maxEval ? ' / ' + maxEval : '')} l="eval time" />
         {cost && <Stat n={fmtInt(cost.total_tokens)} l="tokens" />}
-        {state.paused ? <Stat n="⏸ paused" l="status" /> : null}
+        {state.paused ? <Stat n="paused" l="status" /> : null}
       </div>
       {strat && <div className="ov-row"><span className="k"><OpIcon name="compass" className="t-ic" /> strategy</span>{' '}
         {(strat.policy || 'greedy') + (strat.fidelity ? '/' + strat.fidelity : '')}
@@ -53,7 +53,7 @@ export function OverviewPanel({ state, maxEval, onClose, onOpenPanel }) {
       {(state.novelty_events?.length > 0 || state.reward_hacks?.length > 0) && <div className="ov-row ov-alerts">
         {state.novelty_events?.length > 0 && <span className="chip" title="near-duplicate proposals nudged to diversify (E1)"><OpIcon name="replay" className="t-ic" /> dedup {state.novelty_events.length}</span>}
         {state.reward_hacks?.length > 0 && <span className="chip alarm" style={{ cursor: 'pointer' }}
-          title="suspicious wins flagged (B5)" onClick={() => onOpenPanel && onOpenPanel('trust')}>⚠ hack? {state.reward_hacks.length}</span>}
+          title="suspicious wins flagged (B5)" onClick={() => onOpenPanel && onOpenPanel('trust')}><OpIcon name="alert" size={11} /> hack? {state.reward_hacks.length}</span>}
       </div>}
     </Panel>
   )
@@ -121,7 +121,7 @@ export function TrustPanel({ state, runId, onClose, onSelect, onToast }) {
         <Stat n={cfg?.trust_mode || '—'} l="sandbox tier" />
         <Stat n={cfg?.eval_trust_mode || '—'} l="eval trust mode" />
         <Stat n={state.host_grading ? 'host-side' : 'self-reported'} l="metric scoring" />
-        <Stat n={state.workspace_changed ? '⚠ changed' : 'pinned'} l="workspace repro" />
+        <Stat n={state.workspace_changed ? 'changed' : 'pinned'} l="workspace repro" />
       </div>
       {state.host_grading && <div className="chip ok" style={{ marginBottom: 12 }}>
         Out-of-process grading: the candidate writes predictions only; the host scores them
@@ -323,7 +323,7 @@ export function ParetoPanel({ state, onClose, onSelect }) {
           {keys.length
             ? <table className="tbl"><thead><tr><th>node</th><th>metric</th>{keys.map(k => <th key={k}>{k}</th>)}</tr></thead><tbody>
                 {front.sort((a, b) => (state.direction === 'min' ? a.metric - b.metric : b.metric - a.metric)).map(n =>
-                  <tr key={n.id}><td>#{n.id}{n.id === state.best_node_id ? ' ★' : ''}</td><td>{fmt(n.confirmed_mean ?? n.metric)}</td>
+                  <tr key={n.id}><td>#{n.id}{n.id === state.best_node_id ? <OpIcon name="crown" size={10} /> : ''}</td><td>{fmt(n.confirmed_mean ?? n.metric)}</td>
                     {keys.map(k => <td key={k} className="muted">{fmt(n.extra_metrics?.[k])}</td>)}</tr>)}
               </tbody></table>
             : <div className="muted">Single-objective task — the Pareto front is just the best node (#{state.best_node_id ?? '—'}). Add extra_metrics (e.g. latency, size) to trade off.</div>}
@@ -527,12 +527,12 @@ export function RegistryPanel({ state, onClose }) {
           const blob = new Blob([JSON.stringify(p, null, 2)], { type: 'application/json' })
           const a = document.createElement('a'); a.href = URL.createObjectURL(blob)
           a.download = `${state.run_id}_prov.json`; a.click(); URL.revokeObjectURL(a.href)
-        }}>⬇ W3C-PROV graph (JSON)</button>
+        }}><OpIcon name="download" size={12} /> W3C-PROV graph (JSON)</button>
       </div>
       <div className="section-h">Promotions</div>
       {(state.promotions || []).length
         ? <table className="tbl"><thead><tr><th>node</th><th>alias</th></tr></thead><tbody>{state.promotions.map((p, i) => <tr key={i}><td>#{p.node_id}</td><td>{p.alias || 'champion'}</td></tr>)}</tbody></table>
-        : <div className="muted">none — use ★ Promote on a node</div>}
+        : <div className="muted">none — use Promote on a node</div>}
       <div className="section-h">Cross-run leaderboard</div>
       <table className="tbl"><thead><tr><th>run</th><th>task</th><th>phase</th><th>best</th><th>nodes</th></tr></thead><tbody>
         {[...runs].sort((a, b) => (b.best_confirmed ?? b.best_metric ?? -Infinity) - (a.best_confirmed ?? a.best_metric ?? -Infinity))
@@ -688,7 +688,7 @@ export function CrossRunPanel({ state, onClose }) {
       {rows.length
         ? <table className="tbl"><thead><tr><th>run</th><th>best metric</th><th>nodes</th><th>status</th><th></th></tr></thead><tbody>
             {rows.map((r, i) => <tr key={r.run_id} className={i === 0 ? 'sel' : ''}>
-              <td>{r.label || r.run_id}{i === 0 ? ' ★' : ''}</td>
+              <td>{r.label || r.run_id}{i === 0 ? <OpIcon name="crown" size={10} /> : ''}</td>
               <td>{fmt(r.m)}{r.best_confirmed != null ? ' (conf)' : ''}</td>
               <td className="muted">{r.nodes}</td><td className="muted">{r.phase || (r.finished ? 'finished' : '—')}</td>
               <td style={{ width: 180 }}><div className="bar" style={{ height: 8 }}>
@@ -715,14 +715,14 @@ export function CollabPanel({ state, runId, onSelect, onClose, onToast }) {
   return (
     <Panel title="Collaboration" sub={`${entries.length} note(s)`} onClose={onClose}>
       <div className="toolbar" style={{ marginBottom: 10 }}>
-        <button className="btn sm" onClick={share}>🔗 Copy read-only share link</button>
+        <button className="btn sm" onClick={share}><OpIcon name="link" size={12} /> Copy read-only share link</button>
       </div>
-      <div className="muted" style={{ marginBottom: 8 }}>Annotations are appended as events (any reviewer with the run can add them via a node’s ✎ Note); they read back here as a thread.</div>
+      <div className="muted" style={{ marginBottom: 8 }}>Annotations are appended as events (any reviewer with the run can add them via a node’s Note action); they read back here as a thread.</div>
       {entries.length
         ? <div className="thread">{entries.map((e, k) => <div key={k} className="kv" style={{ alignItems: 'baseline' }}>
             <div className="k"><button className="btn sm ghost" onClick={() => { onSelect && onSelect(e.nid); onClose() }}>#{e.nid}</button></div>
             <div className="v">{e.text}</div></div>)}</div>
-        : <div className="muted">No annotations yet — add one from a node’s Inspector (✎ Note).</div>}
+        : <div className="muted">No annotations yet — add one from a node’s Inspector (Note).</div>}
     </Panel>
   )
 }

@@ -248,7 +248,7 @@ export default function AssistantChat({ onBack }) {
       }, ctrl.signal)
       if (!mountedRef.current || sidRef.current !== id) return   // switched away: don't touch the feed
       if (res && res.ok === false && res.error) { errored = res.error; setErr(res.error) }
-      patchLast({ content: (res && res.reply) || acc || (errored ? `⚠ ${errored}` : '(no reply)'), streaming: false,
+      patchLast({ content: (res && res.reply) || acc || (errored ? `${errored}` : '(no reply)'), streaming: false,
         steps: res && res.steps, applied: res && res.applied, proposals: res && res.proposals, todos: res && res.todos })
       refreshSessions()
     } catch (e) {

@@ -148,7 +148,7 @@ function Overview({ n, state }) {
       <KV k="node" v={`#${n.id}`} />
       <KV k="operator" v={n.operator} />
       <KV k="parents" v={(n.parent_ids || []).join(', ') || '—'} />
-      <KV k="status" v={n.status + (n.id === state.best_node_id ? '  ♚ champion' : '')} />
+      <KV k="status" v={n.status + (n.id === state.best_node_id ? ' — champion' : '')} />
       <KV k="metric" v={fmt(n.metric)} />
       {n.confirmed_mean != null && <KV k="robust mean" v={`${fmt(n.confirmed_mean)} ± ${fmt(n.confirmed_std)} (${n.confirmed_seeds}×)`} />}
       <KV k="feasible" v={String(n.feasible)} />
@@ -566,7 +566,7 @@ function Trials({ n, detail, state }) {
       <thead><tr><Th k="idx">#</Th>{params.map(p => <Th key={p} k={p}>{p}</Th>)}<Th k="metric">metric</Th><Th k="seconds">s</Th></tr></thead>
       <tbody>{rows.map(t => <tr key={t._i}
         className={t._i === bestIdx ? 'best-row' : ''}>
-        <td>#{t._i}{t._i === bestIdx ? ' ♚' : ''}</td>
+        <td>#{t._i}{t._i === bestIdx ? <OpIcon name="crown" size={10} /> : ''}</td>
         {params.map(p => <td key={p}>{t.params?.[p] != null ? fmt(t.params[p]) : '—'}</td>)}
         <td>{t.metric != null ? fmt(t.metric) : <span className="badge reason">{t.error ? 'error' : 'failed'}</span>}</td>
         <td className="muted">{fmt(t.seconds)}</td></tr>)}</tbody>

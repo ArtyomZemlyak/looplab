@@ -32,7 +32,7 @@ function TreeNode({ p, depth, ctx }) {
       <span className="pcount">{count(p.id)}</span>
       <span className="pacts" onClick={e => e.stopPropagation()}>
         <button className="ic" title="add sub-project" onClick={() => addProject(p.id)}>＋</button>
-        <button className="ic" title="rename" onClick={() => setRenaming(p.id)}>✎</button>
+        <button className="ic" title="rename" onClick={() => setRenaming(p.id)}><OpIcon name="pencil" size={12} /></button>
         <button className="ic" title="delete" onClick={() => removeProject(p.id)}>✕</button>
       </span>
     </div>
@@ -72,7 +72,7 @@ function RunMenu({ r, projects, supertasks, onOpen, onMove, onSetSuper, onManage
     <div className="menu-backdrop" onClick={onClose} onDragStart={onClose} />
     <div className="run-menu" onClick={e => e.stopPropagation()}>
       <button className="mi" onClick={() => { onClose(); onOpen(r.run_id) }}>↗ Open</button>
-      <button className="mi" onClick={() => { onClose(); onRename(r) }}>✎ Rename</button>
+      <button className="mi" onClick={() => { onClose(); onRename(r) }}><OpIcon name="pencil" size={12} /> Rename</button>
       <div className="mi-sep" />
       <div className="mi-label">Move to project</div>
       <div className="mi-scroll">
@@ -288,7 +288,7 @@ export default function RunList({ onOpen, onSettings }) {
         <span className="muted">autonomous R&D — live runs</span>
         <span className="spacer" style={{ flex: 1 }} />
         <div className="seg">
-          <button className={view === 'list' ? 'on' : ''} onClick={() => setView('list')}>☰ List</button>
+          <button className={view === 'list' ? 'on' : ''} onClick={() => setView('list')}><OpIcon name="list" className="t-ic" /> List</button>
           <button className={view === 'map' ? 'on' : ''} onClick={() => setView('map')}><OpIcon name="map" className="t-ic" /> Map</button>
         </div>
         {/* The ▶ New run + ✦ Assistant buttons are gone: both now live in the always-docked bottom
@@ -297,7 +297,7 @@ export default function RunList({ onOpen, onSettings }) {
         <span className="spacer" style={{ flex: 1 }} />
         <ThemeSwitcher />
         <EnergyToggle />
-        <button className="btn sm ghost" title="settings" onClick={() => onSettings && onSettings()}>⚙ Settings</button>
+        <button className="btn sm ghost" title="settings" onClick={() => onSettings && onSettings()}><OpIcon name="gear" className="t-ic" /> Settings</button>
       </div>
 
       {view === 'map' && <div style={{ flex: 1, minHeight: 0 }}><MapView onOpen={onOpen} /></div>}
@@ -330,7 +330,7 @@ export default function RunList({ onOpen, onSettings }) {
             <span style={{ flex: 1 }} />
             {scope && <div className="view-toggle crumb-report">
               <button className={'vt report' + (showReport ? ' on' : '')} title={`cross-run report for ${scope.label}`}
-                onClick={() => setShowReport(true)}>★ Report<span className="vt-scope"> · {scope.label}</span></button>
+                onClick={() => setShowReport(true)}><OpIcon name="doc" size={12} /> Report<span className="vt-scope"> · {scope.label}</span></button>
             </div>}
           </div>
           {runs && !!runsOf(sel).length && <div className="runbar">

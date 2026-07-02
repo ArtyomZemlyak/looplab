@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react'
 import { Turn, PermCard } from './AssistantChat.jsx'
+import { OpIcon } from './icons.jsx'
 import {
   CONTROL, get, fmtAgo, ASSISTANT_MODES as MODES, tokText, assistantCreate, assistantMessageStream,
   assistantCommands, assistantRevert, assistantSessions, assistantGet, assistantDelete,
@@ -274,7 +275,7 @@ export default function AssistantBar({ runId, hidden = false }) {
           ? <button className="cmdbar-status preview" title="open the conversation" onClick={openDrawer}>
               <span className="cmdbar-who">assistant</span> {preview}<span className="cmdbar-more"> ▸</span></button>
           : msgs.length > 0
-            ? <button className="cmdbar-status" title="open the conversation" onClick={openDrawer}>💬 chat</button>
+            ? <button className="cmdbar-status" title="open the conversation" onClick={openDrawer}><OpIcon name="chat" size={12} /> chat</button>
             : null}
       <button className="cmdbar-go" title="send (Enter)" disabled={!input.trim() || busy} onClick={send}>▶</button>
       <button className={'cmdbar-drawer-btn' + (view === 'drawer' ? ' on' : '')}

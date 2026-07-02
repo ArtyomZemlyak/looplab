@@ -226,7 +226,7 @@ function agentStatus(live, log) {
   // Zombie guard: the run isn't finished but no engine process holds the lock (engine_running===false,
   // server-probed). Without this the strip would pulse "Thinking about the next step…" forever even
   // though nothing is running — the exact symptom of a resume that died without emitting run_finished.
-  if (live.engine_running === false) return '⚠ Engine stopped — resume to keep going'
+  if (live.engine_running === false) return 'Engine stopped — resume to keep going'
   const phase = live.phase
   if (phase === 'grounding' || phase === 'onboarding') return 'Setting up the task & data…'
   if (phase === 'approval') return 'Waiting for your approval…'
@@ -781,7 +781,7 @@ export default function Dock({ runId, live, liveSeq, viewSeq, setViewSeq, onFocu
       // Soft-fail to advisory chat. `history` is the PRIOR turns; the current instruction must be
       // appended or the model answers the previous message (it's not in `history` yet).
       const c = await chat(runId, [...history, { role: 'user', content: instruction }], nid)
-      pushAssistant(c.ok ? c.text : `⚠ ${c.error || 'no model reachable'}`, c.ok ? c.trace : null)
+      pushAssistant(c.ok ? c.text : `${c.error || 'no model reachable'}`, c.ok ? c.trace : null)
     }
   }
   const send = async () => {
@@ -799,14 +799,14 @@ export default function Dock({ runId, live, liveSeq, viewSeq, setViewSeq, onFocu
       if (text.startsWith('/')) {
         const p = parseSlash(text, nid, live || {})
         if (p?.help) pushAssistant(HELP)
-        else if (p?.error) pushAssistant('⚠ ' + p.error)
+        else if (p?.error) pushAssistant('' + p.error)
         else if (p?.action) { setOp({ label: 'Applying', icon: 'gear', since: Date.now() / 1000 }); await autoApply(p.action) }
         else if (p?.llm) { reading(); await runCommand(p.llm, nid, history) }
-        else pushAssistant('⚠ unrecognized — try /help')
+        else pushAssistant('unrecognized — try /help')
       } else {
         reading(); await runCommand(text, nid, history)
       }
-    } catch (e) { pushAssistant('⚠ ' + e.message) }
+    } catch (e) { pushAssistant('' + e.message) }
     finally { setBusy(false); setOp(null) }
   }
   // round-7 transport: mode derived from live state; wired to existing control endpoints + reset.

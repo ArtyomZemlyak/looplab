@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from 'react'
 import { FX_LEVELS, readFx, applyFx } from './fx.js'
+import { OpIcon } from './icons.jsx'
 
 // Topbar control for the Energy / Reactor FX mode (Off / Subtle / Full). Mirrors ThemeSwitcher's
 // popover so it reads as a sibling of the theme picker. Mounted in both the run-view and run-list
@@ -21,7 +22,7 @@ export default function EnergyToggle() {
 
   return <div className="fx-switch">
     <button className={'btn sm ghost' + (on ? ' primary' : '')} title="Energy / Reactor FX — animated graph"
-            onClick={() => setOpen(o => !o)}>⚡ Energy{on ? `: ${cur.name}` : ''}</button>
+            onClick={() => setOpen(o => !o)}><OpIcon name="bolt" size={12} /> Energy{on ? `: ${cur.name}` : ''}</button>
     {open && <>
       <div className="th-backdrop" onClick={() => setOpen(false)} />
       <div className="th-menu fx-menu">

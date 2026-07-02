@@ -278,7 +278,7 @@ export function verdict(state, a) {
     const rob = robustness === 'robust' ? `robust across ${best.confirmed_seeds} seeds`
       : robustness === 'fragile' ? `but the multi-seed spread is wide` : `single-seed so far`
     headline = `Improved the metric by ${gainStr} over baseline — champion #${best.id} is ${rob}`
-      + (trust === 'suspect' ? '; ⚠ the win is flagged, treat with caution.'
+      + (trust === 'suspect' ? '; the win is flagged, treat with caution.'
         : trust === 'caveats' ? ' (with caveats).' : ' and passes the trust checks.')
   } else if (outcome === 'flat') {
     headline = `No improvement over the baseline yet — best stays at ${fmt(finalv)} (#${best.id}).`
