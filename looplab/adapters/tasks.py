@@ -94,21 +94,37 @@ def make_llm_client(settings, *, model: str | None = None,
     )
 
 
+def _memora_cache_path(settings):
+    """Where the LLM-abstraction cache lives: an explicit `memora_cache`, else derived from
+    `memory_dir` / `knowledge_dir`, else None (in-memory only)."""
+    explicit = getattr(settings, "memora_cache", None)
+    if explicit:
+        return str(explicit)
+    if getattr(settings, "memory_dir", None):
+        return str(Path(settings.memory_dir) / "memora_cache.json")
+    if getattr(settings, "knowledge_dir", None):
+        return str(Path(settings.knowledge_dir) / ".memora_cache.json")
+    return None
+
+
 def _make_abstractor(settings):
     """Memora abstractor for the tool-building sites. Returns None unless `memora` is on. When
-    `memora_llm` is also on, wire a live chat client (via `chat_completer`) so abstractions are
-    model-written — degrading to the deterministic lexical abstractor if the client can't be built or
-    the endpoint fails at call time. `memora_llm` off (default) = lexical, zero LLM calls."""
+    `memora_llm` is also on (default), wire a live chat client (via `chat_completer`) so abstractions
+    are model-written and CACHED by content hash — degrading to the deterministic lexical abstractor if
+    the client can't be built or the endpoint fails at call time. `memora_llm` off = lexical, zero LLM
+    calls."""
     if not getattr(settings, "memora", False):
         return None
     from looplab.tools.memora import chat_completer, make_abstractor
     complete = None
+    cache_path = None
     if getattr(settings, "memora_llm", False):
         try:
             complete = chat_completer(make_llm_client(settings))
         except Exception:  # noqa: BLE001 — a client we can't build just means lexical abstractions
             complete = None
-    return make_abstractor(settings, complete=complete)
+        cache_path = _memora_cache_path(settings)
+    return make_abstractor(settings, complete=complete, cache_path=cache_path)
 
 
 def _set_role_client(obj, client) -> None:

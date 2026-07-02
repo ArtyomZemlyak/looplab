@@ -392,17 +392,23 @@ class Settings(BaseSettings):
     # Harmonic memory (Memora, ICML'26 — idea import). When ON, cross-run cases and knowledge notes are
     # indexed by a short ABSTRACTION + cue ANCHORS instead of their raw text, near-duplicate memories are
     # CONSOLIDATED into one entry under a matching abstraction, and `kb_search`/case retrieval EXPAND
-    # through the top hits' anchors to surface related-but-not-similar memories. ON by default, using the
-    # deterministic offline LEXICAL abstractor (zero LLM calls) — so the structure/consolidation/expansion
-    # work everywhere; set `memora_llm` to have a wired chat model write richer abstractions instead. Set
-    # `memora=false` to restore the pre-Memora raw-text index. Never a source of truth — abstractions live
-    # only in the derived, rebuildable retrieval index (never the event log or canonical cases.jsonl).
+    # through the top hits' anchors to surface related-but-not-similar memories. ON by default. Set
+    # `memora=false` to restore the pre-Memora raw-text index. Never a source of truth — abstractions
+    # live only in the derived, rebuildable retrieval index (never the event log or canonical cases.jsonl).
     memora: bool = True
-    memora_llm: bool = False          # use an LLM to write abstractions (needs a wired chat client); else lexical
+    # Write abstractions with the wired chat model (richer than the deterministic lexical fallback). ON
+    # by default; results are CACHED by content hash (see `memora_cache`) so a re-built index doesn't
+    # re-call the model on unchanged notes/cases, and any endpoint failure degrades to lexical at call
+    # time — so an offline box just gets lexical abstractions, never a crash. Set false to force lexical.
+    memora_llm: bool = True
     memora_anchors: int = 6           # max cue anchors kept per memory
     # Cosine similarity at/above which a new case is CONSOLIDATED into an existing one (same evolving
     # topic) rather than stored as a separate entry. Only used when `memora` is on.
     memora_consolidate_threshold: float = 0.86
+    # Where the LLM-abstraction cache lives (JSON). Blank (default) derives it from `memory_dir`
+    # (`<memory_dir>/memora_cache.json`) or else `knowledge_dir` (`<knowledge_dir>/.memora_cache.json`);
+    # with neither set the cache is in-memory only (per process). No-op unless `memora_llm` is on.
+    memora_cache: str | None = None
     # E3 literature-grounded ideation (network-OPTIONAL): give the agentic Researcher an arXiv search
     # tool to ground ideas in real techniques. Off by default (egress is unreliable on some boxes);
     # fails gracefully if the network is blocked.

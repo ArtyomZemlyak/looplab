@@ -149,11 +149,13 @@ giving alternative retrieval paths). Three things follow:
 3. **Anchor-expansion on retrieval** — `kb_search` / case lookup follow the top hits' anchors to
    surface *related-but-not-similar* memories the plain query missed.
 
-**LLM-optional by design.** Abstractions are written by a live model when `memora_llm=true` and a chat
-client is wired, else by a deterministic **lexical** abstractor (the default) — so the structure works
-with zero LLM calls (only the abstraction quality differs). Set `memora=false` to restore the pre-Memora
-raw-text index. Like the rest of cross-run memory, abstractions live only in the derived, rebuildable
-retrieval index — never in the event log or the canonical `cases.jsonl`.
+**LLM-optional by design.** Abstractions are written by the wired chat model (`memora_llm=true`, the
+default) — **cached** by content hash so a re-built index never re-calls the model on unchanged
+notes/cases, and degrading to a deterministic **lexical** abstractor whenever the endpoint is
+unreachable (so an offline box just gets lexical abstractions, never a crash). Set `memora_llm=false`
+to force lexical everywhere, or `memora=false` to restore the pre-Memora raw-text index. Like the rest
+of cross-run memory, abstractions live only in the derived, rebuildable retrieval index — never in the
+event log or the canonical `cases.jsonl`.
 
 ## Observability
 

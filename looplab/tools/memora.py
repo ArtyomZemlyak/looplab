@@ -15,9 +15,11 @@ or the canonical `cases.jsonl`. Consolidation only ever collapses duplicates *in
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Callable, Optional
 
 from looplab.tools.vectorstore import Hit, Vector, VectorStore
@@ -158,6 +160,56 @@ class LLMAbstractor:
         return Abstraction(primary=primary or " ".join(anchors), anchors=anchors)
 
 
+class CachedAbstractor:
+    """Memoize an abstractor by content hash so a re-built index (roles are reconstructed often)
+    doesn't re-abstract unchanged notes/cases — the fix that makes LLM abstraction affordable as a
+    default. In-memory always; also persisted to `path` (a JSON map) when given, so the cache survives
+    across runs/processes. Best-effort and never raises: an unreadable/corrupt cache starts empty, an
+    unwritable one just skips persistence. Namespaced by model id so switching `llm_model` doesn't
+    serve stale abstractions."""
+
+    def __init__(self, inner: Callable[[str], Abstraction], path: Optional[str] = None,
+                 namespace: str = ""):
+        self.inner = inner
+        self.path = Path(path) if path else None
+        self.namespace = namespace or ""
+        self._cache: dict[str, dict] = {}
+        if self.path and self.path.exists():
+            try:
+                raw = json.loads(self.path.read_text(encoding="utf-8"))
+                if isinstance(raw, dict):
+                    self._cache = raw
+            except (OSError, ValueError, json.JSONDecodeError):
+                self._cache = {}
+
+    def _key(self, text: str) -> str:
+        h = hashlib.sha256()
+        h.update(self.namespace.encode("utf-8"))
+        h.update(b"\x00")
+        h.update((text or "").encode("utf-8"))
+        return h.hexdigest()
+
+    def __call__(self, text: str) -> Abstraction:
+        key = self._key(text)
+        hit = self._cache.get(key)
+        if isinstance(hit, dict) and ("primary" in hit or "anchors" in hit):
+            return Abstraction(str(hit.get("primary", "")), list(hit.get("anchors", [])))
+        ab = self.inner(text)
+        self._cache[key] = {"primary": ab.primary, "anchors": list(ab.anchors)}
+        self._persist()
+        return ab
+
+    def _persist(self) -> None:
+        if not self.path:
+            return
+        try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            from looplab.core.atomicio import atomic_write_text
+            atomic_write_text(self.path, json.dumps(self._cache))
+        except Exception:  # noqa: BLE001 — a cache we can't persist is a perf miss, not an error
+            pass
+
+
 def chat_completer(client) -> Callable[[str], str]:
     """Adapt a LoopLab chat client (`.chat(messages, tools, tool_choice)`) into the plain
     `complete(prompt) -> str` callable `LLMAbstractor` wants — one user turn, no tools."""
@@ -167,17 +219,20 @@ def chat_completer(client) -> Callable[[str], str]:
     return _complete
 
 
-def make_abstractor(settings, complete: Optional[Callable[[str], str]] = None
-                    ) -> Optional[Callable[[str], Abstraction]]:
+def make_abstractor(settings, complete: Optional[Callable[[str], str]] = None,
+                    cache_path: Optional[str] = None) -> Optional[Callable[[str], Abstraction]]:
     """Config-driven abstractor, or None to keep callers byte-identical to pre-Memora behavior.
-    Returns None unless `settings.memora` is on. When on: an `LLMAbstractor` if `settings.memora_llm`
-    is set AND a `complete` callable was supplied, else the deterministic `lexical_abstraction`
-    (so the harmonic index still works with zero LLM calls). Never raises."""
+    Returns None unless `settings.memora` is on. When on: an `LLMAbstractor` (wrapped in a
+    `CachedAbstractor` so a re-built index doesn't re-call the model on unchanged content) if
+    `settings.memora_llm` is set AND a `complete` callable was supplied, else the deterministic
+    `lexical_abstraction` (so the harmonic index still works with zero LLM calls). Never raises."""
     if not getattr(settings, "memora", False):
         return None
     max_anchors = int(getattr(settings, "memora_anchors", 6) or 6)
     if complete is not None and getattr(settings, "memora_llm", False):
-        return LLMAbstractor(complete, max_anchors=max_anchors)
+        inner = LLMAbstractor(complete, max_anchors=max_anchors)
+        return CachedAbstractor(inner, path=cache_path,
+                                namespace=str(getattr(settings, "llm_model", "")))
     return lambda text: lexical_abstraction(text, max_anchors=max_anchors)
 
 
