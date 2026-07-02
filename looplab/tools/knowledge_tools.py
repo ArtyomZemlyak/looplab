@@ -11,7 +11,13 @@ from pathlib import Path
 
 from looplab.core import _pathsafe
 from looplab.tools.retrieval import glob_files, grep, read_file
-from looplab.tools.vectorstore import InMemoryVectorStore, Item, hash_embed
+from looplab.tools.vectorstore import InMemoryVectorStore, Item, _cosine, hash_embed
+
+
+def _abstraction_of(payload: dict):
+    """Rebuild the `Abstraction` a harmonic payload carries (for merging during a consolidating build)."""
+    from looplab.tools.memora import Abstraction
+    return Abstraction(str(payload.get("abstraction", "")), list(payload.get("anchors", [])))
 
 
 def _fn_spec(name: str, desc: str, props: dict, required: list) -> dict:
@@ -109,23 +115,31 @@ class RepoTools:
 
 class KnowledgeTools:
     def __init__(self, knowledge_dir: str | None = None,
-                 cases_path: str | None = None, k: int = 3, embed=None):
+                 cases_path: str | None = None, k: int = 3, embed=None,
+                 abstract=None, expand: bool = True, consolidate_threshold: float = 0.86):
         self.dir = Path(knowledge_dir).resolve() if knowledge_dir else None
         self.cases_path = Path(cases_path) if cases_path else None
         self.k = k
         # T4: one embedder builds AND queries the index (consistent dim). Defaults to the lexical
         # hash_embed; `make_embedder(settings)` supplies a real LLM embedder when configured.
         self.embed = embed or hash_embed
+        # Memora (opt-in): an `abstract` callable (see tools.memora.make_abstractor) switches the index
+        # from raw-text to abstraction+anchor keying, CONSOLIDATES near-duplicate notes/cases at build
+        # time, and lets `kb_search` EXPAND through anchors. None -> byte-identical legacy indexing.
+        self.abstract = abstract
+        self.expand = expand
+        self.consolidate_threshold = consolidate_threshold
         self._index = InMemoryVectorStore()
         self._build_index()
 
-    def _build_index(self) -> None:
-        items = []
+    def _records(self):
+        """(id, index_source, payload) triples for every note + case, before embedding — so the raw
+        vs. harmonic build paths share one collection pass."""
+        recs = []
         if self.dir:
             for p in glob_files("*.md", str(self.dir)):
                 text = read_file(p)
-                items.append(Item(id=p, vector=self.embed(Path(p).name + " " + text),
-                                  payload={"path": p, "text": text}))
+                recs.append((p, Path(p).name + " " + text, {"path": p, "text": text}))
         # Cross-run memory (I19): past best solutions become searchable knowledge.
         if self.cases_path and self.cases_path.exists():
             for i, line in enumerate(self.cases_path.read_text(encoding="utf-8").splitlines()):
@@ -141,10 +155,43 @@ class KnowledgeTools:
                 text = (f"PAST CASE — task {c.get('task_id')}: {c.get('goal','')}\n"
                         f"best params={c.get('params')} metric={c.get('metric')}\n"
                         f"{c.get('rationale','')}")
-                items.append(Item(id=f"case:{i}", vector=self.embed(c.get("goal", "") + " " + text),
-                                  payload={"path": f"case:{c.get('task_id')}", "text": text}))
-        if items:
-            self._index.upsert("kb", items)
+                recs.append((f"case:{i}", c.get("goal", "") + " " + text,
+                             {"path": f"case:{c.get('task_id')}", "text": text}))
+        return recs
+
+    def _build_index(self) -> None:
+        recs = self._records()
+        if not recs:
+            return
+        if self.abstract is None:                        # legacy: embed raw text, no anchors/merge
+            self._index.upsert("kb", [Item(id=rid, vector=self.embed(src), payload=pl)
+                                      for rid, src, pl in recs])
+            return
+        # Harmonic build: key each entry by its abstraction+anchors and CONSOLIDATE near-duplicates
+        # (same abstraction) into one entry, keeping the richer text — so the index carries roughly
+        # half the entries of a flat store instead of a chain of partial duplicates.
+        kept: list[Item] = []
+        for rid, src, pl in recs:
+            ab = self.abstract(src)
+            vec = self.embed(ab.index_text())
+            merged = False
+            for it in kept:
+                if _cosine(vec, it.vector) >= self.consolidate_threshold:
+                    prev = _abstraction_of(it.payload)
+                    m = prev.merge(ab)
+                    if len(pl["text"]) > len(it.payload["text"]):
+                        it.payload["text"] = pl["text"]     # keep the richer memory value
+                        it.payload["path"] = pl["path"]
+                    it.payload["abstraction"] = m.primary
+                    it.payload["anchors"] = list(m.anchors)
+                    it.payload["merged"] = int(it.payload.get("merged", 1)) + 1
+                    it.vector = self.embed(m.index_text())
+                    merged = True
+                    break
+            if not merged:
+                kept.append(Item(id=rid, vector=vec,
+                                 payload={**pl, "abstraction": ab.primary, "anchors": list(ab.anchors)}))
+        self._index.upsert("kb", kept)
 
     # ---- tool schemas (OpenAI function format) ----
     def specs(self) -> list[dict]:
@@ -163,9 +210,15 @@ class KnowledgeTools:
         try:
             if name == "kb_search":
                 hits = self._index.search("kb", self.embed(args.get("query", "")), self.k)
-                return "\n---\n".join(
-                    f"{Path(h.payload['path']).name}:\n{h.payload['text'][:600]}" for h in hits
-                ) or "(no notes)"
+                out = [f"{Path(h.payload['path']).name}:\n{h.payload['text'][:600]}" for h in hits]
+                # Anchor-expansion (Memora): follow the top hits' cue anchors to related-but-not-
+                # similar notes the plain query missed. No-op on a legacy (no-anchor) index.
+                if self.expand and self.abstract is not None:
+                    from looplab.tools.memora import expand_by_anchors
+                    for h in expand_by_anchors(self._index, "kb", hits, self.embed, k=self.k):
+                        out.append(f"[related via anchors] {Path(h.payload['path']).name}:\n"
+                                   f"{h.payload['text'][:600]}")
+                return "\n---\n".join(out) or "(no notes)"
             if name == "grep":
                 if not self.dir:
                     return "(no notes directory)"

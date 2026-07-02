@@ -70,6 +70,7 @@ _LAYOUT = {
     "llm": "core",
     "localize": "engine",
     "mcp_tools": "tools",
+    "memora": "tools",
     "memory": "engine",
     "metrics_adapters": "serve",
     "mlebench": "adapters",

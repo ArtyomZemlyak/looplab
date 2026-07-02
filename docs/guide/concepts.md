@@ -134,6 +134,27 @@ knowledge for future runs (retain-on-improvement). With `reflection_priors`, a o
 is distilled at run end and injected into the proposal prompt at the next run's start — gradient-free
 cross-run meta-learning.
 
+### Harmonic memory (`memora`, optional)
+
+An idea import from [Memora](https://github.com/microsoft/Memora) (Microsoft Research, ICML'26).
+**On by default** (`memora=true`): the case library + knowledge index key each memory not by its
+**raw text** but by a short **abstraction** (a 6–8 word essence) plus a few **cue anchors** (tags
+giving alternative retrieval paths). Three things follow:
+
+1. **Abstraction + anchors as the index** — only the abstraction/anchors are embedded; the rich memory
+   value is stored alongside, unindexed.
+2. **Consolidation on write** — a new memory whose abstraction closely matches an existing one is
+   *merged* into it (union of anchors, better metric kept) instead of adding a near-duplicate, so the
+   index carries roughly half the entries of a flat store.
+3. **Anchor-expansion on retrieval** — `kb_search` / case lookup follow the top hits' anchors to
+   surface *related-but-not-similar* memories the plain query missed.
+
+**LLM-optional by design.** Abstractions are written by a live model when `memora_llm=true` and a chat
+client is wired, else by a deterministic **lexical** abstractor (the default) — so the structure works
+with zero LLM calls (only the abstraction quality differs). Set `memora=false` to restore the pre-Memora
+raw-text index. Like the rest of cross-run memory, abstractions live only in the derived, rebuildable
+retrieval index — never in the event log or the canonical `cases.jsonl`.
+
 ## Observability
 
 Every step emits a trace **span** to `spans.jsonl` (files-as-truth, zero-dep). With `trace_llm_io`

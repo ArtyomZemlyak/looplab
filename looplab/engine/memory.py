@@ -97,21 +97,83 @@ class JsonlCaseLibrary:
 
 
 class CaseLibrary:
+    """Episodic case store over a `VectorStore`. Optionally *harmonic* (Memora): pass an `abstract`
+    callable (see `tools.memora.make_abstractor`) to index each case by a short abstraction + cue
+    anchors instead of its raw task text, CONSOLIDATE a near-duplicate case into the existing entry on
+    `add`, and EXPAND `retrieve` through the top hits' anchors. With `abstract=None` (the default) every
+    method is byte-identical to the pre-Memora behavior."""
+
     def __init__(self, store: VectorStore, embed: Callable[[str], list[float]] = hash_embed,
-                 index: str = "cases"):
+                 index: str = "cases", abstract: Optional[Callable[[str], object]] = None,
+                 consolidate_threshold: float = 0.86, expand: bool = True):
         self.store = store
         self.embed = embed
         self.index = index
+        self.abstract = abstract
+        self.consolidate_threshold = consolidate_threshold
+        self.expand = expand
+
+    @staticmethod
+    def _content(task_desc: str, payload: dict) -> str:
+        """The rich memory VALUE the abstraction summarizes: the task plus the case's own words."""
+        extra = " ".join(str(payload.get(k, "")) for k in ("rationale", "params", "operator"))
+        return f"{task_desc} {extra}".strip()
+
+    def _harmonic_item(self, case_id: str, task_desc: str, payload: dict):
+        """Build the `(vector, payload, abstraction)` for a harmonic case: embed the abstraction+anchors
+        (not the raw text) and carry the anchors in the payload so retrieval can expand through them."""
+        ab = self.abstract(self._content(task_desc, payload))  # type: ignore[misc]
+        vec = self.embed(ab.index_text())
+        p = {**payload, "abstraction": ab.primary, "anchors": list(ab.anchors)}
+        return Item(case_id, vec, p), ab
 
     def add(self, case_id: str, task_desc: str, payload: dict) -> None:
-        self.store.upsert(self.index, [Item(case_id, self.embed(task_desc), payload)])
+        if self.abstract is None:                       # legacy path — byte-identical to before
+            self.store.upsert(self.index, [Item(case_id, self.embed(task_desc), payload)])
+            return
+        item, ab = self._harmonic_item(case_id, task_desc, payload)
+        # Consolidation: if a stored case sits at/above the threshold under the SAME abstraction, merge
+        # into it rather than growing a chain of near-duplicates (Memora: ~half the entries of a flat
+        # store). Never merge onto self (a re-add of the same id is a plain upsert).
+        near = self.store.search(self.index, item.vector, 1)
+        if near and near[0].id != case_id and near[0].score >= self.consolidate_threshold:
+            self._consolidate(near[0], ab, payload)
+            return
+        self.store.upsert(self.index, [item])
+
+    def _consolidate(self, target: Hit, ab, payload: dict) -> None:
+        """Fold a new case into `target`: union the anchors, keep the richer abstraction, keep the
+        better metric, and re-embed the merged abstraction under the target's id."""
+        from looplab.tools.memora import Abstraction
+        prev = Abstraction(str(target.payload.get("abstraction", "")),
+                           list(target.payload.get("anchors", [])))
+        merged_ab = prev.merge(ab)
+        direction = payload.get("direction") or target.payload.get("direction") or "min"
+        p = {**target.payload, **payload}               # newer content wins for scalar fields
+        om, nm = target.payload.get("metric"), payload.get("metric")
+        if om is not None and nm is not None:
+            p["metric"] = min(om, nm) if direction == "min" else max(om, nm)
+        elif om is not None:
+            p["metric"] = om
+        p["abstraction"] = merged_ab.primary
+        p["anchors"] = list(merged_ab.anchors)
+        p["merged"] = int(target.payload.get("merged", 1)) + 1
+        self.store.upsert(self.index, [Item(target.id, self.embed(merged_ab.index_text()), p)])
 
     def retrieve(self, task_desc: str, k: int = 3) -> list[Hit]:
-        return self.store.search(self.index, self.embed(task_desc), k)
+        hits = self.store.search(self.index, self.embed(task_desc), k)
+        if self.abstract is None or not self.expand:    # legacy: exactly k, no expansion
+            return hits
+        from looplab.tools.memora import expand_by_anchors
+        extra = expand_by_anchors(self.store, self.index, hits, self.embed, k=k)
+        seen = {h.id for h in hits}
+        return hits + [h for h in extra if h.id not in seen]
 
     def retain_if_improved(self, case_id: str, task_desc: str, payload: dict,
                            metric: float, direction: str = "min") -> bool:
-        """Store/replace only if better than the existing case. Returns True if stored."""
+        """Store/replace only if better than the existing case. Returns True if stored. Keyed by
+        `case_id` (no consolidation here — that would break the id-based lookup); when harmonic, the
+        stored entry still carries abstraction+anchors so retrieval can expand through them."""
         existing: Optional[Hit] = None
         getter = getattr(self.store, "get", None)
         if callable(getter):
@@ -122,5 +184,11 @@ class CaseLibrary:
                 better = metric < prev if direction == "min" else metric > prev
                 if not better:
                     return False
-        self.add(case_id, task_desc, {**payload, "metric": metric})
+        if self.abstract is None:                       # legacy: unchanged payload shape
+            self.store.upsert(self.index, [Item(case_id, self.embed(task_desc),
+                                                {**payload, "metric": metric})])
+        else:
+            item, _ = self._harmonic_item(case_id, task_desc,
+                                          {**payload, "metric": metric, "direction": direction})
+            self.store.upsert(self.index, [item])
         return True
