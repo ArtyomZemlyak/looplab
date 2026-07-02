@@ -26,10 +26,12 @@ def _keyval_repl(m: re.Match) -> str:
 
 # Known credential shapes — always redacted (negligible false-positive risk).
 _PATTERNS = [
-    (re.compile(r"sk-[A-Za-z0-9]{16,}"), "sk-***"),                       # OpenAI-style
+    (re.compile(r"sk-[A-Za-z0-9_-]{16,}"), "sk-***"),                     # OpenAI-style (incl. sk-proj-)
     (re.compile(r"AKIA[0-9A-Z]{16}"), "AKIA***"),                         # AWS access key id
-    (re.compile(r"gh[pousr]_[A-Za-z0-9]{20,}"), "gh***"),                 # GitHub token
-    (re.compile(r"xox[baprs]-[A-Za-z0-9-]{10,}"), "xox***"),              # Slack token
+    (re.compile(r"github_pat_[A-Za-z0-9_]{20,}"), "github_pat_***"),      # GitHub fine-grained PAT
+    (re.compile(r"gh[pousr]_[A-Za-z0-9]{20,}"), "gh***"),                 # GitHub token (classic)
+    (re.compile(r"hf_[A-Za-z0-9]{20,}"), "hf_***"),                       # HuggingFace token
+    (re.compile(r"xox[baprse]-[A-Za-z0-9-]{10,}"), "xox***"),             # Slack token
     (re.compile(r"(?i)bearer\s+[A-Za-z0-9._\-]{16,}"), "bearer ***"),     # Authorization: Bearer
     # key=VALUE / 'key': 'VALUE' assignments. The key NAME may be a compound identifier that merely
     # CONTAINS a credential word (AWS_SECRET_ACCESS_KEY, db_password, MY_API_KEY) — matching the

@@ -323,6 +323,9 @@ class Engine:
         self.docker_image = docker_image
         self._seed_mode = seed_mode or "auto"   # run-wide fallback for per-editable seeding
         self._run_setup_done = False             # run-level (once) dependency setup guard
+        import threading as _threading2
+        self._run_setup_lock = _threading2.Lock()   # _run_eval runs on parallel worker threads; the
+        #   check-then-set on _run_setup_done races without this, launching run_setup (pip) N times
         self._drift_warned = False   # one-shot guard for the #8 drift-coverage warning
         # Fail loud at START, not mid-sweep: the untrusted tier needs docker, so verify it once
         # here instead of re-discovering (and re-scanning PATH) on every eval's make_docker_wrap.
@@ -392,11 +395,22 @@ class Engine:
                      ("solution.py", *self._assets, *self._repo_spec.get("protected_names", []))}
         wd = _P(workdir).resolve()
         wd.mkdir(parents=True, exist_ok=True)
+        def _protected_after_resolve(target) -> bool:
+            # Check the RESOLVED relative path against the protected set, not the raw name: a name like
+            # "sub/../grader.py" passes a raw-string compare yet resolves to wd/grader.py and would
+            # overwrite the protected grader otherwise.
+            try:
+                rel = target.relative_to(wd).as_posix()
+            except ValueError:
+                return False
+            return _os.path.normcase(rel) in protected
         for name, content in files.items():
             if _os.path.normcase(str(name).replace("\\", "/")) in protected:
                 continue
             target = (wd / name).resolve()
             if wd not in target.parents:        # defense-in-depth: never escape workdir
+                continue
+            if _protected_after_resolve(target):
                 continue
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text(content, encoding="utf-8")
@@ -407,6 +421,8 @@ class Engine:
                 continue
             target = (wd / name).resolve()
             if wd not in target.parents:
+                continue
+            if _protected_after_resolve(target):
                 continue
             try:
                 target.unlink(missing_ok=True)
@@ -597,7 +613,13 @@ class Engine:
             # `inject_done` so a resume never re-creates it — deterministic under replay.
             if len(state.inject_requests) > state.injects_done:
                 req = state.inject_requests[state.injects_done]
-                self._create_injected_node(req)
+                try:
+                    self._create_injected_node(req)
+                except Exception as e:  # noqa: BLE001 - a malformed operator/API inject must not
+                    # crash-loop the engine: without advancing the gate, every resume replays the same
+                    # bad request and dies again, leaving the run unrecoverable. Record + skip it.
+                    self.store.append("inject_failed",
+                                      {"idx": state.injects_done, "error": str(e)[:500]})
                 self.store.append("inject_done", {"idx": state.injects_done})
                 continue
             forced_ablate = next((p for p in state.ablate_requests
@@ -1527,6 +1549,8 @@ class Engine:
         idea_d.setdefault("operator", "manual")
         # Coerce params to floats defensively (a manual form may send strings); drop unparseable.
         raw_params = idea_d.get("params") or {}
+        if not isinstance(raw_params, dict):
+            raw_params = {}   # a non-dict params (e.g. "lr=0.1") would AttributeError on .items()
         params: dict[str, float] = {}
         for k, v in raw_params.items():
             try:
@@ -1724,11 +1748,19 @@ class Engine:
         No-op when `run_setup` is unset. The guard is set BEFORE running so a crash can't retry-loop."""
         if self._run_setup_done:
             return
-        cmd = list((self._eval_spec or {}).get("run_setup") or [])
-        if not cmd or self.trust_mode != "trusted_local":
+        # Serialize the check-then-set: parallel eval worker threads would otherwise all see
+        # _run_setup_done == False and launch pip (not concurrency-safe) N times into one interpreter.
+        with self._run_setup_lock:
+            if self._run_setup_done:
+                return
+            cmd = list((self._eval_spec or {}).get("run_setup") or [])
+            if not cmd or self.trust_mode != "trusted_local":
+                self._run_setup_done = True
+                return
             self._run_setup_done = True
-            return
-        self._run_setup_done = True
+            self._do_run_setup(cmd)
+
+    def _do_run_setup(self, cmd: list) -> None:
         from .sandbox import _run_argv
         eds = (self._repo_spec or {}).get("editables", [])
         cwd = eds[0]["path"] if eds else str(self.run_dir)
