@@ -137,8 +137,8 @@ def test_make_roles_wires_repo_agent():
     assert isinstance(dev, ValidatingDeveloper) and dev.repo_mode is True
     inner = dev.inner
     assert isinstance(inner, CliAgentDeveloper)
-    assert inner.seed_dirs == [{"name": ".", "path": str(FIXTURE),
-                                "surface": ["*.json"], "protect": ["ttrain.py"]}]
+    assert inner.seed_dirs == [{"name": ".", "path": str(FIXTURE), "surface": ["*.json"],
+                                "protect": ["ttrain.py"], "seed_mode": ""}]
     assert inner.surface == ["*.json"]
     assert inner.patch_gate is True
     assert isinstance(dev.fallback, NoOpRepoDeveloper)        # baseline fallback, not LLM

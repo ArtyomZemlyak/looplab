@@ -13,6 +13,7 @@ import json
 import time
 from typing import Optional
 
+from . import tracing
 from .models import Idea, Node, RunState
 from .parse import ParseError, parse_structured
 from .prompts import PromptStore, render
@@ -222,7 +223,11 @@ def drive_tool_loop(client, tools, messages: list, emit_spec: dict, *,
                 # live progress view advances turn-by-turn instead of jumping only at the end.
                 _step(turn=turn_idx, tool=name,
                       arg=next((str(v) for v in (args or {}).values() if v), ""))
-                result = tools.execute(name, args) if tools is not None else f"(unknown tool: {name})"
+                # First-class TOOL observation (Langfuse-style): input=args, output=result, nested
+                # under the active operation span next to the generations that decided the call.
+                with tracing.tool(name, args) as _tool_obs:
+                    result = tools.execute(name, args) if tools is not None else f"(unknown tool: {name})"
+                    _tool_obs.output(result)
             result = str(result)[:4000]
             messages.append({"role": "tool", "tool_call_id": tc.get("id", ""),
                              "name": name, "content": result})

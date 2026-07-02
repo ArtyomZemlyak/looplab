@@ -39,6 +39,39 @@ def test_nesting_and_trace_ids(tmp_path):
     assert all("duration_s" in r for r in recs)
 
 
+def test_generation_and_tool_are_first_class_observations(tmp_path):
+    """Langfuse-style: an LLM call is a `generation` child span (input/output/model/usage), a tool
+    invocation is a `tool` child span (input/output) — both nested under the operation span."""
+    from looplab import tracing
+    tracing.set_llm_capture(True)
+    t = Tracer(JsonlSpanExporter(tmp_path / "s.jsonl"), run_id="r")
+    with t.span("propose", new_trace=True, node_id=1):
+        with tracing.generation(op="chat", model="m", messages=[{"role": "user", "content": "hi"}],
+                                model_parameters={"temperature": 0.5}) as g:
+            g.output("hey").usage({"prompt_tokens": 5, "completion_tokens": 2, "total_tokens": 7}).cost(0.0)
+        with tracing.tool("kb_search", {"q": "x"}) as to:
+            to.output("(3 hits)")
+    recs = [orjson.loads(l) for l in (tmp_path / "s.jsonl").read_bytes().splitlines()]
+    by = {r["name"]: r for r in recs}
+    assert by["generation"]["kind"] == "generation" and by["tool"]["kind"] == "tool"
+    assert by["generation"]["parent_id"] == by["propose"]["span_id"]          # nested under the op
+    assert by["tool"]["parent_id"] == by["propose"]["span_id"]
+    ga = by["generation"]["attributes"]
+    assert ga["op"] == "chat" and ga["model"] == "m" and ga["model_parameters"]["temperature"] == 0.5
+    assert ga["input"][0]["content"] == "hi" and ga["output"] == "hey" and ga["usage"]["total"] == 7
+    ta = by["tool"]["attributes"]
+    assert ta["tool"] == "kb_search" and ta["input"] == {"q": "x"} and ta["output"] == "(3 hits)"
+
+
+def test_generation_noop_without_active_tracer():
+    """A generation/tool opened with no traced operation active is a harmless no-op (no crash)."""
+    from looplab import tracing
+    with tracing.generation(op="x", model="m", messages=[{"role": "user", "content": "z"}]) as g:
+        g.output("y").usage({"prompt_tokens": 1}).cost(0.0)          # must not raise
+    with tracing.tool("t", {"a": 1}) as to:
+        to.output("r")
+
+
 def test_new_trace_starts_fresh_trace(tmp_path):
     t = Tracer(JsonlSpanExporter(tmp_path / "s.jsonl"), run_id="r")
     with t.span("a", new_trace=True):

@@ -214,42 +214,124 @@ function callPreview(c) {
   return firstLine(lastUser && lastUser.content)
 }
 // Roll the whole subtree of a span up to "how many model calls and how many tokens it cost" — shown on
-// the stage/span header so you see the expensive steps without expanding anything.
+// the stage/span header so you see the expensive steps without expanding anything. Counts first-class
+// GENERATION spans (kind), and legacy `llm_call` events (older runs) so both render.
 function spanRollup(s) {
   let calls = 0, tok = 0
   const walk = (x) => {
-    (x.events || []).forEach(e => { if (e.name === 'llm_call') { calls++; const t = callTok(e); tok += t.total || 0 } })
+    if (x.kind === 'generation') { calls++; const u = (x.attributes || {}).usage || {}; tok += (u.total != null ? u.total : (u.prompt || 0) + (u.completion || 0)) }
+    ;(x.events || []).forEach(e => { if (e.name === 'llm_call') { calls++; const t = callTok(e); tok += t.total || 0 } })
     ;(x.children || []).forEach(walk)
   }
   walk(s)
   return { calls, tok }
 }
 
+// Adapt a first-class GENERATION span (kind='generation', I/O held in attributes) to the same
+// {op,model,prompt,completion,tokens,thinking,tool_calls} shape the legacy llm_call renderer uses —
+// so a generation span and an old llm_call event display identically.
+function genToCall(s) {
+  const a = s.attributes || {}, u = a.usage || {}
+  return {
+    op: a.op, model: a.model, prompt: a.input || [],
+    completion: typeof a.output === 'string' ? a.output : (a.output != null ? JSON.stringify(a.output, null, 2) : ''),
+    thinking: a.thinking, tool_calls: a.tool_calls, model_parameters: a.model_parameters, cost: a.cost,
+    tokens: { prompt: u.prompt, completion: u.completion, total: u.total },
+  }
+}
+const asText = (v) => v == null ? '' : (typeof v === 'string' ? v : JSON.stringify(v, null, 2))
+
+// The expandable body of a generation: input messages, any tool_calls it decided, the output, and a
+// collapsed reasoning disclosure — the full input→output record (nothing truncated).
+function GenBody({ c }) {
+  const [think, setThink] = useState(false)
+  return <div className="llm-io">
+    {(c.model || c.model_parameters || c.cost != null) && <div className="kv">
+      {c.model && <KV k="model" v={c.model} />}
+      {c.model_parameters && <KV k="params" v={JSON.stringify(c.model_parameters)} />}
+      {c.cost ? <KV k="cost" v={'$' + c.cost} /> : null}</div>}
+    {(c.prompt || []).map((m, i) => <div key={i} className="msg">
+      <div className={'msg-role role-' + (m.role || 'user')}>{m.role}</div>
+      <pre className="code">{m.content}</pre></div>)}
+    {(c.tool_calls || []).map((tc, i) => <div key={i} className="msg">
+      <div className="msg-role role-tool">→ calls {tc.name}</div>
+      <pre className="code">{asText(tc.arguments)}</pre></div>)}
+    <div className="msg"><div className="msg-role role-completion">output</div>
+      <pre className="code">{c.completion || '(empty)'}</pre></div>
+    {c.thinking && <div className="msg think-debug">
+      <div className="msg-role role-think" onClick={() => setThink(v => !v)} style={{ cursor: 'pointer' }}>
+        {think ? '▾' : '▸'} reasoning (debug)</div>
+      {think && <Markdown className="think-body" text={c.thinking} />}</div>}
+  </div>
+}
+
 // One span and its subtree, drawn as a langfuse-style waterfall row: the bar is positioned by the
-// span's OFFSET from the trace start (t0) and sized by its duration, so concurrency/sequence reads at
-// a glance. LLM I/O is inlined (expand the span to read it) so a step's prompt/response sits next to
-// the step that made it.
+// span's OFFSET from the trace start (t0) and sized by its duration, so sequence reads at a glance.
+// Renders three observation kinds distinctly — GENERATION (an LLM call: op·model·in→out·preview, its
+// prompt/output on expand), TOOL (name·arg, its input/output on expand), and OPERATION (a phase of
+// work) — so the tree shows exactly what called what and what each produced. Nothing is truncated.
 function SpanRow({ s, depth, t0, total }) {
   const [open, setOpen] = useState(false)
+  const kind = s.kind || 'operation'
+  const err = s.status === 'ERROR'
+  const off = (typeof s.start === 'number') ? Math.max(0, (s.start - t0) / total * 100) : 0
+  const wid = Math.max(1.5, (s.duration_s || 0) / total * 100)
+  const barTone = err ? 'var(--fail)' : kind === 'generation' ? 'var(--accent)' : kind === 'tool' ? 'var(--working)' : stageMeta(s.name).tone
+  const bar = <span className="span-bar"><span className="span-fill" style={{ marginLeft: Math.min(98, off) + '%', width: wid + '%', background: barTone }} /></span>
+  const kids = (s.children || []).map((c, i) => <SpanRow key={i} s={c} depth={depth + 1} t0={t0} total={total} />)
+
+  if (kind === 'generation') {
+    const c = genToCall(s), t = callTok(c), preview = callPreview(c), msgs = (c.prompt || []).length
+    return <>
+      <div className={'span-row gen' + (err ? ' err' : '')} style={{ paddingLeft: depth * 14 }} onClick={() => setOpen(o => !o)} title={preview || 'expand for prompt & output'}>
+        <span className="span-tw">{open ? '▾' : '▸'}</span>
+        <span className="span-name gen"><OpIcon name="bulb" className="t-ic" /> <span className="llm-op">{c.op || 'llm'}</span>{c.model && <span className="llm-model" title={c.model}>{shortModel(c.model)}</span>}</span>
+        {bar}
+        <span className="t">{fmt(s.duration_s, 3)}s</span>
+        {(t.in != null || t.out != null) && <span className="badge" title={`${t.in || 0} prompt → ${t.out || 0} completion tokens`}>{ktok(t.in)}→{ktok(t.out)}</span>}
+        {msgs > 2 && <span className="llm-msgs" title={`${msgs} messages in the prompt`}>{msgs}m</span>}
+        {c.thinking && <span className="llm-think" title="model reasoning captured"><OpIcon name="bulb" /></span>}
+        {err && <span className="badge reason">ERROR</span>}
+      </div>
+      {open && <div className="span-detail" style={{ marginLeft: depth * 14 + 16 }}><GenBody c={c} /></div>}
+      {kids}
+    </>
+  }
+  if (kind === 'tool') {
+    const a = s.attributes || {}, inp = asText(a.input), outp = asText(a.output), name = a.tool || 'tool'
+    const arg = inp ? inp.replace(/\s+/g, ' ').slice(0, 64) : ''
+    const detail = inp || outp
+    return <>
+      <div className={'span-row tool' + (err ? ' err' : '')} style={{ paddingLeft: depth * 14 }} onClick={() => detail && setOpen(o => !o)} title={detail ? 'expand for input & output' : ''}>
+        <span className="span-tw">{detail ? (open ? '▾' : '▸') : '·'}</span>
+        <span className="span-name tool"><OpIcon name="gear" className="t-ic" /> <b className="tool-name">{name}</b>{arg && <span className="muted"> {arg}</span>}</span>
+        {bar}
+        <span className="t">{fmt(s.duration_s, 3)}s</span>
+        {err && <span className="badge reason">ERROR</span>}
+      </div>
+      {open && detail && <div className="span-detail" style={{ marginLeft: depth * 14 + 16 }}>
+        {inp && <div className="msg"><div className="msg-role role-user">input</div><pre className="code">{inp}</pre></div>}
+        {outp && <div className="msg"><div className="msg-role role-completion">output</div><pre className="code">{outp}</pre></div>}
+      </div>}
+      {kids}
+    </>
+  }
+  // OPERATION span (a phase of work): its attributes, non-llm events, + legacy llm_call events (old runs).
   const attrs = Object.entries(s.attributes || {}).filter(([k]) => k !== 'node_id')
   const events = (s.events || []).filter(e => e.name !== 'llm_call')
   const calls = llmEvents(s)
   const m = stageMeta(s.name)
   const detail = attrs.length || events.length || calls.length
-  const off = (typeof s.start === 'number') ? Math.max(0, (s.start - t0) / total * 100) : 0
-  const wid = Math.max(1.5, (s.duration_s || 0) / total * 100)
   return <>
-    <div className={'span-row' + (s.status === 'ERROR' ? ' err' : '')} style={{ paddingLeft: depth * 14 }}
+    <div className={'span-row' + (err ? ' err' : '')} style={{ paddingLeft: depth * 14 }}
          onClick={() => detail && setOpen(o => !o)} title={detail ? 'click for step detail' : ''}>
       <span className="span-tw">{detail ? (open ? '▾' : '▸') : '·'}</span>
       <span className="span-name" title={m.desc}><OpIcon name={m.icon} className="t-ic" /> {m.role !== s.name ? m.role : s.name}</span>
-      <span className="span-bar"><span className="span-fill" style={{
-        marginLeft: Math.min(98, off) + '%', width: wid + '%',
-        background: s.status === 'ERROR' ? 'var(--fail)' : m.tone }} /></span>
+      {bar}
       <span className="t">{fmt(s.duration_s, 3)}s</span>
       {calls.length > 0 && (() => { const tok = calls.reduce((a, c) => a + (callTok(c).total || 0), 0)
         return <span className="badge" title="model calls in this step — expand to read prompt & completion">{calls.length}×LLM{tok ? ` · ${ktok(tok)}` : ''}</span> })()}
-      {s.status === 'ERROR' && <span className="badge reason">ERROR</span>}
+      {err && <span className="badge reason">ERROR</span>}
     </div>
     {open && detail && <div className="span-detail" style={{ marginLeft: depth * 14 + 16 }}>
       {attrs.length > 0 && <div className="kv">{attrs.map(([k, v]) =>
@@ -260,7 +342,7 @@ function SpanRow({ s, depth, t0, total }) {
       </div>)}
       {calls.map((c, i) => <LlmCall key={i} call={{ ...c, span: s.name }} idx={i} />)}
     </div>}
-    {(s.children || []).map((c, i) => <SpanRow key={i} s={c} depth={depth + 1} t0={t0} total={total} />)}
+    {kids}
   </>
 }
 
@@ -363,10 +445,18 @@ function Trace({ n }) {
   // create_node already nests propose→implement; if an agent wrote the node, the report belongs
   // right after that authoring stage (placed by index), otherwise it trails the whole lifecycle.
   const authorIdx = spans.findIndex(s => ['create_node', 'implement', 'repair'].includes(s.name))
+  const roll = n.trace?.rollup || {}
+  const rtok = roll.tokens || {}
   return <div className="trace">
     <div className="muted" style={{ marginBottom: 10 }}>
       Lifecycle of node #{n.id} — each part on a shared timeline (offset = when it ran, bar = how long).
-      Expand a step to read its LLM prompt &amp; completion.
+      Expand any observation to read its input &amp; output.
+      {(roll.generations || roll.tools) ? <span className="trace-totals">
+        {' · '}{roll.generations || 0} generation{roll.generations === 1 ? '' : 's'}
+        {roll.tools ? ` · ${roll.tools} tool call${roll.tools === 1 ? '' : 's'}` : ''}
+        {rtok.total ? ` · ${ktok(rtok.total)} tok` : ''}
+        {roll.cost ? ` · $${roll.cost}` : ''}
+      </span> : null}
     </div>
     {spans.map((s, i) => <React.Fragment key={i}>
       <StageBlock s={s} t0={t0} total={total} />

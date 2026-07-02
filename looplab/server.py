@@ -828,10 +828,13 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
             from .traceview import build_trace_view, load_spans
             st = fold(_events(rd))
             tv = build_trace_view(st, load_spans(rd / "spans.jsonl"))
+            # `rollup` = this node's Langfuse-style totals (generations, tool calls, tokens, cost)
+            # so the UI shows the trace header without re-summing the tree.
             return {"nodes": tv.get("nodes", {}).get(str(nid), []),
+                    "rollup": tv.get("rollups", {}).get(str(nid), {}),
                     "summary": tv.get("summary", {})}
         except Exception:  # noqa: BLE001
-            return {"nodes": [], "summary": {}}
+            return {"nodes": [], "rollup": {}, "summary": {}}
 
     @app.get("/api/runs/{run_id}/log")
     def event_log(run_id: str, since: int = -1):

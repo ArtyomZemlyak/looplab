@@ -153,13 +153,17 @@ def _run_argv(argv: list[str], workdir: str, timeout: float,
     # setdefault: an explicit operator/engine value still wins. POSIX/Linux only (guarded).
     try:
         _aff = len(os.sched_getaffinity(0))         # type: ignore[attr-defined]
-        # Cap at 64: numexpr HARD-rejects NUMEXPR_NUM_THREADS > NUMEXPR_MAX_THREADS (default 64) with a
-        # loud "Error." line, and >64 BLAS/OpenMP threads on a big host (e.g. 192 vCPUs) just thrash a
-        # GPU-bound training job. 64 keeps dataloader/BLAS parallelism without either problem.
-        _ncpu = str(min(_aff, 64))
+        _quota = str(_aff)
+        # BLAS/OpenMP pools track the pod's CPU QUOTA (the cgroup cpuset), so an eval uses its cores
+        # without oversubscribing a shared node. NUMEXPR is the exception: it HARD-rejects
+        # NUMEXPR_NUM_THREADS > NUMEXPR_MAX_THREADS (default 64) with a loud "Error." line, so its two
+        # vars are capped at 64 while the general BLAS/OpenMP vars get the full quota.
+        _nx = str(min(_aff, 64))
         for _var in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS",
-                     "NUMEXPR_NUM_THREADS", "NUMEXPR_MAX_THREADS", "VECLIB_MAXIMUM_THREADS"):
-            full_env.setdefault(_var, _ncpu)
+                     "VECLIB_MAXIMUM_THREADS"):
+            full_env.setdefault(_var, _quota)
+        for _var in ("NUMEXPR_NUM_THREADS", "NUMEXPR_MAX_THREADS"):
+            full_env.setdefault(_var, _nx)
     except AttributeError:
         pass   # no sched_getaffinity (Windows/macOS) — leave the libraries' own defaults
     # Unbuffered child stdio so the live log (log_path) updates line-by-line rather than only when

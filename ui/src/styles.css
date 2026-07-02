@@ -448,6 +448,19 @@ pre.code { background: var(--bg); border: 1px solid var(--line); border-radius: 
 .span-detail { margin: 2px 0 6px; padding: 6px 8px; background: var(--bg); border: 1px solid var(--line); border-radius: 6px; }
 .span-ev { font-family: ui-monospace, Consolas, monospace; padding: 1px 0; }
 .span-ev .ty { color: var(--working); margin-right: 6px; }
+/* Observation-kind row variants: a GENERATION (LLM call) and a TOOL call render distinctly from a
+   plain operation span, so the Langfuse-style tree reads what called what at a glance. */
+.span-row .span-name { display: flex; align-items: center; gap: 6px; }
+.span-row .span-name.gen { color: var(--accent); }
+.span-row .span-name.gen .llm-op { color: var(--accent); font-family: ui-monospace, Consolas, monospace; }
+.span-row .span-name.gen .llm-model { color: var(--fg-dim); max-width: 150px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.span-row .span-name.tool { color: var(--working); }
+.span-row .span-name.tool .tool-name { color: var(--working); font-family: ui-monospace, Consolas, monospace; }
+.span-row.gen .span-fill { background: linear-gradient(90deg, var(--accent-dim), var(--accent)); }
+.span-row.tool .span-fill { background: var(--working); }
+.span-row .llm-msgs { color: var(--fg-mut); font-size: 11px; flex: none; }
+.span-row .llm-think { color: var(--working); display: inline-flex; }
+.trace-totals { color: var(--fg-dim); font-variant-numeric: tabular-nums; }
 
 /* ---------- LLM call: compact, info-dense rows (langfuse-style "generation" line) ---------- */
 /* Each call is ONE line carrying what differentiates it — op · model · in→out tokens · #msgs · a

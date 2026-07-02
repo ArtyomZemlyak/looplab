@@ -33,6 +33,13 @@ import orjson
 # and task spawns, so nesting works through the worker-thread eval too).
 _stack: contextvars.ContextVar[tuple] = contextvars.ContextVar("LOOPLAB_spans", default=())
 
+# The Tracer whose span is currently open on THIS task/thread. Set by `Tracer.span` for the span's
+# lifetime so nested code (the LLM client, the tool loop) can open child observations
+# (generations / tools) via the module-level `generation()` / `tool()` helpers WITHOUT threading a
+# Tracer reference through every call. contextvar => concurrency-safe: a second run/assistant on
+# another task sees its own tracer (or None when nothing is traced). None => the helpers no-op.
+_current_tracer: contextvars.ContextVar = contextvars.ContextVar("LOOPLAB_tracer", default=None)
+
 def _init_otel():  # pragma: no cover - exercised only with the [otel] extra installed
     """Return an OpenTelemetry tracer if the SDK is installed, configuring an OTLP exporter
     from the standard OTEL_* env when an endpoint is set (so `OTEL_EXPORTER_OTLP_ENDPOINT=…`
@@ -154,6 +161,101 @@ def _as_text(content) -> str:
     return "" if content is None else str(content)
 
 
+def _norm_usage(tokens) -> dict:
+    """Accept either OpenAI usage ({prompt_tokens,…}) or our short form ({prompt,…})."""
+    t = tokens or {}
+    p = int(t.get("prompt_tokens") or t.get("prompt") or 0)
+    c = int(t.get("completion_tokens") or t.get("completion") or 0)
+    return {"prompt": p, "completion": c, "total": int(t.get("total_tokens") or t.get("total") or (p + c))}
+
+
+class ObservationHandle:
+    """Fluent handle for a first-class observation (a `generation` = one LLM call, or a `tool` = one
+    tool invocation) — the Langfuse-style tree node. Wraps a SpanHandle (or None when untraced) and
+    lets the caller attach the OUTPUT / token usage / cost / reasoning AFTER the call returns, so the
+    span carries the full input→output record with real latency (the enclosing span's duration)."""
+
+    def __init__(self, h: "SpanHandle | None"):
+        self._h = h
+
+    @property
+    def active(self) -> bool:
+        return self._h is not None
+
+    def set(self, key: str, value) -> "ObservationHandle":
+        if self._h is not None:
+            self._h.set(key, value)
+        return self
+
+    def output(self, text) -> "ObservationHandle":
+        if self._h is not None and _CAPTURE_LLM_IO and text is not None:
+            self._h.set("output", text if isinstance(text, str) else _as_text(text))
+        return self
+
+    def usage(self, tokens) -> "ObservationHandle":
+        if self._h is not None and tokens:
+            self._h.set("usage", _norm_usage(tokens))
+        return self
+
+    def cost(self, c) -> "ObservationHandle":
+        if self._h is not None and c is not None:
+            try:
+                self._h.set("cost", float(c))
+            except (TypeError, ValueError):
+                pass
+        return self
+
+    def thinking(self, t) -> "ObservationHandle":
+        if self._h is not None and _CAPTURE_LLM_IO and t:
+            self._h.set("thinking", t)
+        return self
+
+    def error(self, msg: str) -> "ObservationHandle":
+        if self._h is not None:
+            self._h.set("level", "ERROR").event("exception", error=str(msg)[:500])
+        return self
+
+
+_NULL_OBS = ObservationHandle(None)
+
+
+@contextmanager
+def generation(*, op: str, model: str, messages: Optional[list] = None,
+               model_parameters: Optional[dict] = None):
+    """Open a first-class GENERATION observation (one LLM call) as a child of the active span — the
+    Langfuse `generation` node. Nests under whatever operation span is live (propose/implement/repair,
+    or a tool-loop iteration). Records the input messages up front; the caller attaches output/usage/
+    cost/thinking on the yielded handle. No-op (yields a null handle) when nothing is being traced."""
+    tr = _current_tracer.get()
+    if tr is None:
+        yield _NULL_OBS
+        return
+    attrs = {"op": op, "model": model}
+    if model_parameters:
+        attrs["model_parameters"] = model_parameters
+    with tr.span("generation", kind="generation", **attrs) as h:
+        if messages is not None and _CAPTURE_LLM_IO:
+            h.set("input", [{"role": m.get("role", "user"), "content": _as_text(m.get("content"))}
+                            for m in messages])
+        yield ObservationHandle(h)
+
+
+@contextmanager
+def tool(name: str, arguments=None):
+    """Open a first-class TOOL observation (one tool invocation) as a child of the active span — the
+    Langfuse `tool` node. Records the call arguments up front; the caller attaches the result via
+    `.output(...)` (and `.error(...)` on failure). No-op when nothing is being traced."""
+    tr = _current_tracer.get()
+    if tr is None:
+        yield _NULL_OBS
+        return
+    with tr.span("tool", kind="tool", tool=name) as h:
+        if arguments is not None and _CAPTURE_LLM_IO:
+            h.set("input", arguments if isinstance(arguments, (str, int, float, bool, dict, list))
+                  else str(arguments))
+        yield ObservationHandle(h)
+
+
 class JsonlSpanExporter:
     """Default exporter: one JSON span per line in `spans.jsonl` (files-as-truth, offline)."""
 
@@ -211,7 +313,7 @@ class Tracer:
         self.run_id = run_id
 
     @contextmanager
-    def span(self, name: str, *, new_trace: bool = False, **attributes):
+    def span(self, name: str, *, new_trace: bool = False, kind: str = "operation", **attributes):
         st = _stack.get()
         parent = st[-1] if st else None
         otel_cm = _OTEL.start_as_current_span(name) if _OTEL is not None else None
@@ -233,8 +335,11 @@ class Tracer:
             trace_id = parent["trace_id"] if (parent and not new_trace) else _hex(16)
             span_id = _hex(8)
         parent_id = parent["span_id"] if parent else None
-        rec = {"name": name, "trace_id": trace_id, "span_id": span_id, "parent_id": parent_id,
-               "run_id": self.run_id, "attributes": dict(attributes), "events": [], "status": "OK"}
+        # kind ∈ {operation, generation, tool, retrieval}: the Langfuse-style observation type, so the
+        # UI can render generations (LLM calls) and tools distinctly from plain operation spans.
+        rec = {"name": name, "kind": kind, "trace_id": trace_id, "span_id": span_id,
+               "parent_id": parent_id, "run_id": self.run_id, "attributes": dict(attributes),
+               "events": [], "status": "OK"}
         if otel_span is not None:
             for k, v in attributes.items():
                 try:
@@ -242,6 +347,9 @@ class Tracer:
                 except Exception:  # noqa: BLE001
                     pass
         token = _stack.set(st + (rec,))
+        # Expose THIS tracer to nested code (LLM client / tool loop) so generation()/tool() open
+        # child observations against the right run's exporter. Reset with the stack in `finally`.
+        tok_tr = _current_tracer.set(self)
         start, mono0 = time.time(), time.monotonic()
         exc: BaseException | None = None
         try:
@@ -269,4 +377,5 @@ class Tracer:
                 except Exception:  # noqa: BLE001
                     pass
             _stack.reset(token)
+            _current_tracer.reset(tok_tr)
             self.exporter.export(rec)

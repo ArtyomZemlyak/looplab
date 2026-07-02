@@ -133,6 +133,13 @@ const NARR = {
   drift_unavailable: (d) => `drift check unavailable${d.reason ? ' — ' + String(d.reason).slice(0, 80) : ''}`,
   data_profiled: (d) => { const c = d.columns; const n = Array.isArray(c) ? c.length : Object.keys(c || {}).length; return `dataset profiled (${n} column${n === 1 ? '' : 's'})` },
   data_provenance: (d) => { const n = Object.keys(d.assets || {}).length; return `dataset provenance pinned (${n} asset${n === 1 ? '' : 's'})` },
+  // Setup phase (task + data), made watchable: these appear live between run start and the first node.
+  setup_started: (d) => `setting up task & data${d.repo ? ' (repo)' : ''}…`,
+  setup_step: (d) => `setup: ${d.step}${d.detail ? ' — ' + String(d.detail).slice(0, 80) : (d.sources?.length ? ' (' + d.sources.join(', ') + ')' : '')}`,
+  setup_finished: (d) => `setup done${d.seconds != null ? ` (${d.seconds}s)` : ''}`,
+  workspace_seeded: (d) => `seeded node #${d.node_id ?? '?'} workspace: ${(d.materialized || []).join(', ').slice(0, 90)}`,
+  run_setup_started: (d) => `run setup (once): ${(d.command || []).join(' ').slice(0, 80)}`,
+  run_setup_finished: (d) => `run setup ${d.exit_code === 0 ? 'ok' : 'FAILED (exit ' + d.exit_code + ')'}`,
   host_grading: (d) => `host-side grading active${d.scorer ? ' (' + d.scorer + ')' : ''}${d.competition ? ' · ' + d.competition : ''}`,
   diversity_archive: () => 'diversity archive updated',
   workspace_changed: () => 'workspace changed since the last run — re-grounding',
@@ -174,6 +181,8 @@ const TYPE2GROUP = {
   drift_unavailable: 'trust', workspace_changed: 'trust',
   run_started: 'lifecycle', run_finished: 'lifecycle', llm_cost: 'lifecycle', budget: 'lifecycle',
   data_profiled: 'lifecycle', data_provenance: 'lifecycle', host_grading: 'lifecycle', diversity_archive: 'lifecycle',
+  setup_started: 'lifecycle', setup_step: 'lifecycle', setup_finished: 'lifecycle', workspace_seeded: 'lifecycle',
+  run_setup_started: 'lifecycle', run_setup_finished: 'lifecycle',
 }
 // Monochrome glyph per kind (default) + a few high-signal per-type overrides. Names resolve in
 // icons.jsx GLYPHS (unknown → 'dot' fallback). Color is carried by CSS (only user/trust/highlighted).
@@ -225,6 +234,8 @@ function agentStatus(live, log) {
   const wid = workingId(live)                                   // a node is pending → it's evaluating
   if (wid != null) return `Running experiment #${wid}…`
   const last = log.length ? log[log.length - 1].type : null     // between nodes → infer from last event
+  if (last === 'setup_started' || last === 'setup_step' || last === 'workspace_seeded') return 'Setting up task & data…'
+  if (last === 'run_setup_started') return 'Installing dependencies…'
   if (last === 'strategy_decision' || last === 'set_strategy') return 'Choosing a strategy…'
   if (last === 'policy_decision' || last === 'agent_decision') return 'Planning the next experiment…'
   if (last === 'research_completed' || last === 'deep_research') return 'Reading the literature…'

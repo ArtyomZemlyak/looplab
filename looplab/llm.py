@@ -15,7 +15,7 @@ import urllib.error
 import urllib.request
 from typing import Optional
 
-from .tracing import record_llm_call
+from . import tracing
 
 
 class BudgetExceeded(Exception):
@@ -185,6 +185,11 @@ class OpenAICompatibleClient:
         # Provider-specific reasoning toggle (from `reasoning_body`) merged into EVERY request, so the
         # whole agent loop (propose/chat/tool) runs with the same thinking setting. Empty = unchanged.
         self.reasoning = reasoning or {}
+        # Flips to False permanently for this client the first time the endpoint rejects our reasoning
+        # toggle with a 400 (e.g. litellm UnsupportedParamsError for reasoning_effort on glm-5.1), so
+        # the request is retried without it and the model works. Deepseek keeps its reasoning; glm-5.1
+        # silently drops it. Per-client (per-model), detected once and cached.
+        self._reasoning_ok = True
         self._max_retries = 4               # 429/5xx backoff retries before surfacing an LLMError
         # H1: when the endpoint supports constrained decoding (vLLM/SGLang), drive structured calls
         # from the Pydantic JSON schema — `response_format` json_schema (OpenAI-standard, vLLM+SGLang)
@@ -206,46 +211,99 @@ class OpenAICompatibleClient:
         usage: dict = {}
         raw_lines: list[str] = []
         got_sse = False
+        # Idle timeout by PROGRESS, enforced two ways because a stall can hide from either alone:
+        #  (a) the per-socket read timeout resets on ANY byte, so SSE keepalive heartbeats keep a
+        #      STALLED generation's connection "alive" forever (observed: a ~70-min hang); and
+        #  (b) a server that trickles bytes WITHOUT completing a line (huge-prompt prefill, partial
+        #      chunks) blocks inside recv() so the in-loop check below never even runs (observed: a
+        #      ~15-min hang on glm-5.1 during a big implement prompt).
+        # So we track wall-clock since the last REAL token and (a) check it at the top of the loop AND
+        # (b) run a watchdog thread that, when it's exceeded, SHUTS DOWN the underlying socket — which
+        # is what actually interrupts a recv() already blocked in the kernel (resp.close() alone does
+        # NOT: it drops the file object but the blocked syscall keeps waiting on the fd). shutdown()
+        # makes the recv raise OSError, which _post catches and retries on a fresh connection. A
+        # long-but-alive generation keeps emitting content, resetting the clock — no hard deadline.
+        import socket as _socket
+        import threading
+        idle_limit = self.timeout
+        last_progress = [time.monotonic()]
+        _killed = [False]
+        _stop = threading.Event()
+        # Best-effort grab of the raw socket behind the urllib response (http.client wraps it in a
+        # BufferedReader over a SocketIO). None for a non-socket body (e.g. a test mock) -> close() path.
+        _fp = getattr(resp, "fp", None)
+        _sock = getattr(getattr(_fp, "raw", None), "_sock", None) or getattr(_fp, "_sock", None)
+
+        def _watchdog():
+            while not _stop.wait(min(5.0, idle_limit / 4)):
+                if time.monotonic() - last_progress[0] > idle_limit:
+                    _killed[0] = True           # so the loop's EOF is read as a stall, not a clean end
+                    if _sock is not None:
+                        try:
+                            _sock.shutdown(_socket.SHUT_RDWR)   # unblocks a recv() stuck in the kernel
+                        except Exception:  # noqa: BLE001
+                            pass
+                    try:
+                        resp.close()            # fallback (and mock-friendly for tests)
+                    except Exception:  # noqa: BLE001
+                        pass
+                    return
+
+        _wd = threading.Thread(target=_watchdog, daemon=True)
+        _wd.start()
         try:
-            lines = iter(resp)                  # SSE responses iterate line-by-line
-        except TypeError:
-            lines = iter(())                    # a non-iterable body (e.g. a test mock) -> read() below
-        for raw in lines:                       # each readline() is bounded by self.timeout
-            s = raw.decode("utf-8", "replace") if isinstance(raw, (bytes, bytearray)) else str(raw)
-            raw_lines.append(s)
-            line = s.strip()
-            if not line or not line.startswith("data:"):
-                continue
-            got_sse = True
-            chunk = line[5:].strip()
-            if chunk == "[DONE]":
-                break
             try:
-                obj = json.loads(chunk)
-            except ValueError:
-                continue                        # keepalive / non-JSON heartbeat line
-            if obj.get("usage"):
-                usage = obj["usage"]
-            ch = (obj.get("choices") or [{}])[0] or {}
-            delta = ch.get("delta") or {}
-            if delta.get("content"):
-                content.append(delta["content"])
-            r = delta.get("reasoning") or delta.get("reasoning_content")
-            if r:
-                reasoning.append(r)
-            for tc in (delta.get("tool_calls") or []):
-                slot = tcs.setdefault(tc.get("index", 0),
-                                      {"id": None, "type": "function",
-                                       "function": {"name": "", "arguments": []}})
-                if tc.get("id"):
-                    slot["id"] = tc["id"]
-                fn = tc.get("function") or {}
-                if fn.get("name"):
-                    slot["function"]["name"] = fn["name"]
-                if fn.get("arguments"):
-                    slot["function"]["arguments"].append(fn["arguments"])
-            if ch.get("finish_reason"):
-                finish = ch["finish_reason"]
+                lines = iter(resp)              # SSE responses iterate line-by-line
+            except TypeError:
+                lines = iter(())                # a non-iterable body (e.g. a test mock) -> read() below
+            for raw in lines:
+                if time.monotonic() - last_progress[0] > idle_limit:
+                    raise TimeoutError(f"LLM stream stalled — no new tokens for {idle_limit:.0f}s; "
+                                       f"retrying on a fresh connection")
+                s = raw.decode("utf-8", "replace") if isinstance(raw, (bytes, bytearray)) else str(raw)
+                raw_lines.append(s)
+                line = s.strip()
+                if not line or not line.startswith("data:"):
+                    continue
+                got_sse = True
+                chunk = line[5:].strip()
+                if chunk == "[DONE]":
+                    break
+                try:
+                    obj = json.loads(chunk)
+                except ValueError:
+                    continue                    # keepalive / non-JSON heartbeat line
+                if obj.get("usage"):
+                    usage = obj["usage"]
+                    last_progress[0] = time.monotonic()
+                ch = (obj.get("choices") or [{}])[0] or {}
+                delta = ch.get("delta") or {}
+                if delta.get("content"):
+                    content.append(delta["content"])
+                    last_progress[0] = time.monotonic()   # real token => progress
+                r = delta.get("reasoning") or delta.get("reasoning_content")
+                if r:
+                    reasoning.append(r)
+                    last_progress[0] = time.monotonic()
+                for tc in (delta.get("tool_calls") or []):
+                    last_progress[0] = time.monotonic()
+                    slot = tcs.setdefault(tc.get("index", 0),
+                                          {"id": None, "type": "function",
+                                           "function": {"name": "", "arguments": []}})
+                    if tc.get("id"):
+                        slot["id"] = tc["id"]
+                    fn = tc.get("function") or {}
+                    if fn.get("name"):
+                        slot["function"]["name"] = fn["name"]
+                    if fn.get("arguments"):
+                        slot["function"]["arguments"].append(fn["arguments"])
+                if ch.get("finish_reason"):
+                    finish = ch["finish_reason"]
+        finally:
+            _stop.set()                         # stop the watchdog before we return / propagate
+        if _killed[0]:                          # watchdog shut the socket -> a stall, not a real end;
+            raise TimeoutError(f"LLM stream stalled — no new tokens for {idle_limit:.0f}s; "
+                               f"retrying on a fresh connection")   # _post catches -> retry
         # Not actually an SSE stream (a non-streaming endpoint, or a test mock that returns one JSON
         # body): parse the whole body as a normal chat completion so streaming stays transparent.
         if not got_sse and not content and not tcs:
@@ -269,16 +327,6 @@ class OpenAICompatibleClient:
         return {"choices": [{"message": msg, "finish_reason": finish}], "usage": usage}
 
     def _post(self, payload: dict) -> dict:
-        if self.reasoning:                  # inject the reasoning toggle into every request
-            payload = {**payload, **self.reasoning}
-        if self.stream:                     # force streaming so `timeout` is an inter-token idle guard
-            payload = {**payload, "stream": True, "stream_options": {"include_usage": True}}
-        data = json.dumps(payload).encode("utf-8")
-        req = urllib.request.Request(
-            f"{self.base_url}/chat/completions", data=data, method="POST",
-            headers={"Content-Type": "application/json",
-                     "Authorization": f"Bearer {self.api_key}"},
-        )
         # A network blip / HTTP error / non-JSON body must surface as a clean LLMError, not an
         # unhandled URLError/HTTPError/JSONDecodeError that aborts the whole run — the role layer
         # already retries + falls back on LLMError. (urllib.error was imported but unused before.)
@@ -287,6 +335,19 @@ class OpenAICompatibleClient:
         # free tier) rate-limit bursts, and a single 429 shouldn't crash the whole run.
         body = None
         for attempt in range(self._max_retries + 1):
+            # Build the request per attempt so a param-compat retry (below) can drop the reasoning
+            # toggle. `_reasoning_ok` starts True and flips off permanently for THIS client the first
+            # time the endpoint rejects our reasoning param.
+            p = dict(payload)
+            if self.reasoning and self._reasoning_ok:   # inject the reasoning toggle
+                p = {**p, **self.reasoning}
+            if self.stream:                     # force streaming so `timeout` is an inter-token idle guard
+                p = {**p, "stream": True, "stream_options": {"include_usage": True}}
+            req = urllib.request.Request(
+                f"{self.base_url}/chat/completions", data=json.dumps(p).encode("utf-8"), method="POST",
+                headers={"Content-Type": "application/json",
+                         "Authorization": f"Bearer {self.api_key}"},
+            )
             try:
                 with urllib.request.urlopen(req, timeout=self.timeout) as resp:
                     # Streaming: reassemble SSE lines (a stall raises socket.timeout HERE, inside the
@@ -294,6 +355,20 @@ class OpenAICompatibleClient:
                     parsed = self._read_stream(resp) if self.stream \
                         else _parse_chat_body(resp.read().decode("utf-8"))
             except urllib.error.HTTPError as e:
+                # A 400 that rejects our REASONING toggle — e.g. a litellm-proxied model like glm-5.1
+                # returns UnsupportedParamsError for `reasoning_effort` — isn't a real bad request:
+                # drop reasoning for this client and retry immediately, so the model still works
+                # (deepseek accepts reasoning_effort, glm-5.1 doesn't; the client adapts per model).
+                if e.code == 400 and self.reasoning and self._reasoning_ok:
+                    try:
+                        eb = e.read().decode("utf-8", "replace").lower()
+                    except Exception:  # noqa: BLE001
+                        eb = ""
+                    if any(k in eb for k in ("reasoning", "unsupportedparams",
+                                             "does not support parameters", "extra_forbidden",
+                                             "unexpected keyword", "unrecognized")):
+                        self._reasoning_ok = False
+                        continue
                 if e.code in (429, 500, 502, 503, 504) and attempt < self._max_retries:
                     ra = _retry_after_seconds(e.headers.get("Retry-After") if e.headers else None)
                     delay = ra if ra is not None else 2.0 * (2 ** attempt)
@@ -344,18 +419,23 @@ class OpenAICompatibleClient:
         self._last_usage = usage
         return body
 
+    def _model_params(self) -> dict:
+        """The generation's model_parameters (Langfuse generation metadata): sampling temperature +
+        any provider reasoning toggle, so the trace shows HOW the model was called."""
+        return {"temperature": self.temperature, **(self.reasoning or {})}
+
     def complete_text(self, messages: list[dict]) -> str:
-        body = self._post({"model": self.model, "messages": messages,
-                           "temperature": self.temperature, "stream": False})
-        msg = body["choices"][0]["message"]
-        out = msg.get("content") or ""
-        # Record the clean answer as the completion (the conclusion) and the raw reasoning
-        # separately; return the original text so downstream parsing is unchanged.
-        thinking, answer = _clean_thinking(out, msg.get("reasoning") or msg.get("reasoning_content") or "")
-        record_llm_call(op="complete_text", model=self.model, messages=messages,
-                        completion=answer or out, thinking=thinking or None,
-                        usage=body.get("usage"))
-        return out
+        with tracing.generation(op="complete_text", model=self.model, messages=messages,
+                                model_parameters=self._model_params()) as gen:
+            body = self._post({"model": self.model, "messages": messages,
+                               "temperature": self.temperature, "stream": False})
+            msg = body["choices"][0]["message"]
+            out = msg.get("content") or ""
+            # Record the clean answer as the completion (the conclusion) and the raw reasoning
+            # separately; return the original text so downstream parsing is unchanged.
+            thinking, answer = _clean_thinking(out, msg.get("reasoning") or msg.get("reasoning_content") or "")
+            gen.output(answer or out).thinking(thinking).usage(body.get("usage"))
+            return out
 
     def complete_text_stream(self, messages: list[dict]):
         """Stream a plain-text completion token-by-token (an OpenAI `stream:true` SSE call). Yields
@@ -372,53 +452,61 @@ class OpenAICompatibleClient:
                                     "Authorization": f"Bearer {self.api_key}"})
         pieces: list[str] = []
         usage: dict = {}
-        try:
-            with urllib.request.urlopen(req, timeout=self.timeout) as resp:
-                for raw in resp:
-                    line = raw.decode("utf-8", "replace").strip()
-                    if not line or not line.startswith("data:"):
-                        continue
-                    chunk = line[5:].strip()
-                    if chunk == "[DONE]":
-                        break
-                    try:
-                        obj = json.loads(chunk)
-                    except ValueError:
-                        continue
-                    if obj.get("usage"):                       # final usage chunk (include_usage)
-                        usage = obj["usage"]
-                    delta = ((obj.get("choices") or [{}])[0] or {}).get("delta") or {}
-                    piece = delta.get("content") or ""
-                    if piece:
-                        pieces.append(piece)
-                        yield piece
-        except (urllib.error.URLError, TimeoutError, OSError, http.client.IncompleteRead):
-            if not pieces:                     # never streamed -> fall back to a single blocking call
-                text = self.complete_text(messages)
-                if text:
-                    yield text
-                return
-        if usage:                              # account the streamed answer's tokens like every other call
-            self.accountant.add(0.0, usage=usage)
-            self._last_usage = usage
-        record_llm_call(op="complete_text_stream", model=self.model, messages=messages,
-                        completion="".join(pieces), usage=usage or None)
+        # The generation span stays open for the whole stream (its duration = time-to-full-answer).
+        with tracing.generation(op="complete_text_stream", model=self.model, messages=messages,
+                                model_parameters=self._model_params()) as gen:
+            try:
+                with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+                    for raw in resp:
+                        line = raw.decode("utf-8", "replace").strip()
+                        if not line or not line.startswith("data:"):
+                            continue
+                        chunk = line[5:].strip()
+                        if chunk == "[DONE]":
+                            break
+                        try:
+                            obj = json.loads(chunk)
+                        except ValueError:
+                            continue
+                        if obj.get("usage"):                       # final usage chunk (include_usage)
+                            usage = obj["usage"]
+                        delta = ((obj.get("choices") or [{}])[0] or {}).get("delta") or {}
+                        piece = delta.get("content") or ""
+                        if piece:
+                            pieces.append(piece)
+                            yield piece
+            except (urllib.error.URLError, TimeoutError, OSError, http.client.IncompleteRead):
+                if not pieces:                 # never streamed -> fall back to a single blocking call
+                    text = self.complete_text(messages)   # its own nested generation span
+                    if text:
+                        yield text
+                    return
+            if usage:                          # account the streamed answer's tokens like every other call
+                self.accountant.add(0.0, usage=usage)
+                self._last_usage = usage
+            gen.output("".join(pieces)).usage(usage or None)
 
     def chat(self, messages: list[dict], tools: list[dict],
              tool_choice: str = "auto") -> dict:
         """General multi-turn tool-calling step. Returns the raw assistant message
         (content + optional tool_calls) so the caller can run an agent loop."""
-        body = self._post({
-            "model": self.model, "messages": messages, "tools": tools,
-            "tool_choice": tool_choice, "temperature": self.temperature, "stream": False,
-        })
-        msg = body["choices"][0]["message"]
-        thinking, answer = _clean_thinking(msg.get("content") or "",
-                                           msg.get("reasoning") or msg.get("reasoning_content") or "")
-        record_llm_call(op="chat", model=self.model, messages=messages,
-                        completion=_assistant_text({**msg, "content": answer}),
-                        thinking=thinking or None, usage=body.get("usage"))
-        return msg
+        with tracing.generation(op="chat", model=self.model, messages=messages,
+                                model_parameters=self._model_params()) as gen:
+            body = self._post({
+                "model": self.model, "messages": messages, "tools": tools,
+                "tool_choice": tool_choice, "temperature": self.temperature, "stream": False,
+            })
+            msg = body["choices"][0]["message"]
+            thinking, answer = _clean_thinking(msg.get("content") or "",
+                                               msg.get("reasoning") or msg.get("reasoning_content") or "")
+            # The output records BOTH the assistant text AND any tool_calls it decided to make, so the
+            # trace shows what this generation produced (its content + the tool calls the loop will run).
+            gen.output(_assistant_text({**msg, "content": answer})).thinking(thinking).usage(body.get("usage"))
+            if msg.get("tool_calls"):
+                gen.set("tool_calls", [{"name": (c.get("function") or {}).get("name"),
+                                        "arguments": (c.get("function") or {}).get("arguments")}
+                                       for c in msg["tool_calls"]])
+            return msg
 
     def complete_tool(self, messages: list[dict], json_schema: dict) -> dict:
         tool = {"type": "function",
@@ -433,21 +521,22 @@ class OpenAICompatibleClient:
             payload["response_format"] = {"type": "json_schema",
                                           "json_schema": {"name": "emit", "schema": json_schema}}
             payload["guided_json"] = json_schema
-        body = self._post(payload)
-        msg = body["choices"][0]["message"]
-        calls = msg.get("tool_calls")
-        if not calls:  # endpoint ignored tool_choice -> let parse.py fall back to text
-            raise KeyError("no tool_calls in response")
-        args = calls[0]["function"]["arguments"]
-        # Reasoning models emit their chain-of-thought (a `reasoning` field, or inline <think> in
-        # `content`) alongside the tool call; capture it (debug channel) instead of discarding it.
-        # The completion stays the structured tool args — the clean conclusion the UI renders.
-        thinking, _ = _clean_thinking(msg.get("content") or "",
-                                      msg.get("reasoning") or msg.get("reasoning_content") or "")
-        record_llm_call(op="complete_tool", model=self.model, messages=messages,
-                        completion=args if isinstance(args, str) else json.dumps(args),
-                        thinking=thinking or None, usage=body.get("usage"))
-        return json.loads(args) if isinstance(args, str) else args
+        with tracing.generation(op="complete_tool", model=self.model, messages=messages,
+                                model_parameters=self._model_params()) as gen:
+            body = self._post(payload)
+            msg = body["choices"][0]["message"]
+            calls = msg.get("tool_calls")
+            if not calls:  # endpoint ignored tool_choice -> let parse.py fall back to text
+                gen.usage(body.get("usage")).error("no tool_calls in response")
+                raise KeyError("no tool_calls in response")
+            args = calls[0]["function"]["arguments"]
+            # Reasoning models emit their chain-of-thought (a `reasoning` field, or inline <think> in
+            # `content`) alongside the tool call; capture it (debug channel) instead of discarding it.
+            # The completion stays the structured tool args — the clean conclusion the UI renders.
+            thinking, _ = _clean_thinking(msg.get("content") or "",
+                                          msg.get("reasoning") or msg.get("reasoning_content") or "")
+            gen.output(args if isinstance(args, str) else json.dumps(args)).thinking(thinking).usage(body.get("usage"))
+            return json.loads(args) if isinstance(args, str) else args
 
 
 class CostAccountant:
@@ -514,16 +603,22 @@ class LiteLLMClient:
             return None
 
     def complete_text(self, messages: list[dict]) -> str:
-        resp = self._litellm().completion(model=self.model, messages=messages, **self.kwargs)
-        self._account(resp)
-        m = resp.choices[0].message
-        out = m.content or ""
-        thinking, answer = _clean_thinking(
-            out, getattr(m, "reasoning_content", None) or getattr(m, "reasoning", None) or "")
-        record_llm_call(op="complete_text", model=self.model, messages=messages,
-                        completion=answer or out, thinking=thinking or None,
-                        usage=self._usage(resp))
-        return out
+        with tracing.generation(op="complete_text", model=self.model, messages=messages) as gen:
+            resp = self._litellm().completion(model=self.model, messages=messages, **self.kwargs)
+            self._account(resp)
+            m = resp.choices[0].message
+            out = m.content or ""
+            thinking, answer = _clean_thinking(
+                out, getattr(m, "reasoning_content", None) or getattr(m, "reasoning", None) or "")
+            u = self._usage(resp)
+            gen.output(answer or out).thinking(thinking).usage(u).cost(self._cost(resp))
+            return out
+
+    def _cost(self, resp):
+        try:
+            return resp._hidden_params.get("response_cost")  # type: ignore[attr-defined]
+        except Exception:  # noqa: BLE001
+            return None
 
     def complete_tool(self, messages: list[dict], json_schema: dict) -> dict:
         tool = {
@@ -531,20 +626,21 @@ class LiteLLMClient:
             "function": {"name": "emit", "description": "Emit the structured result.",
                          "parameters": json_schema},
         }
-        resp = self._litellm().completion(
-            model=self.model, messages=messages, tools=[tool],
-            tool_choice={"type": "function", "function": {"name": "emit"}}, **self.kwargs,
-        )
-        self._account(resp)
-        calls = resp.choices[0].message.tool_calls
-        if not calls:  # endpoint ignored tool_choice -> KeyError so parse.py falls back
-            raise KeyError("no tool_calls in response")
-        args = calls[0].function.arguments
-        m = resp.choices[0].message
-        thinking, _ = _clean_thinking(
-            getattr(m, "content", None) or "",
-            getattr(m, "reasoning_content", None) or getattr(m, "reasoning", None) or "")
-        record_llm_call(op="complete_tool", model=self.model, messages=messages,
-                        completion=args if isinstance(args, str) else json.dumps(args),
-                        thinking=thinking or None, usage=self._usage(resp))
-        return json.loads(args) if isinstance(args, str) else (args or {})
+        with tracing.generation(op="complete_tool", model=self.model, messages=messages) as gen:
+            resp = self._litellm().completion(
+                model=self.model, messages=messages, tools=[tool],
+                tool_choice={"type": "function", "function": {"name": "emit"}}, **self.kwargs,
+            )
+            self._account(resp)
+            calls = resp.choices[0].message.tool_calls
+            if not calls:  # endpoint ignored tool_choice -> KeyError so parse.py falls back
+                gen.usage(self._usage(resp)).error("no tool_calls in response")
+                raise KeyError("no tool_calls in response")
+            args = calls[0].function.arguments
+            m = resp.choices[0].message
+            thinking, _ = _clean_thinking(
+                getattr(m, "content", None) or "",
+                getattr(m, "reasoning_content", None) or getattr(m, "reasoning", None) or "")
+            gen.output(args if isinstance(args, str) else json.dumps(args)).thinking(thinking) \
+               .usage(self._usage(resp)).cost(self._cost(resp))
+            return json.loads(args) if isinstance(args, str) else (args or {})

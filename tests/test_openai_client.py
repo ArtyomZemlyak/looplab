@@ -90,6 +90,75 @@ def test_post_retries_transient_timeout(monkeypatch):
     assert calls["n"] == 3                                     # retried twice, succeeded on the 3rd
 
 
+def test_post_drops_reasoning_on_unsupported_param_400(monkeypatch):
+    """A litellm-proxied model (e.g. glm-5.1) returns 400 UnsupportedParamsError for `reasoning_effort`.
+    The client must DROP the reasoning toggle and retry — so the model works — and remember it (deepseek
+    keeps reasoning; glm-5.1 silently drops it). Without this glm-5.1 hard-fails and 'produces nothing'."""
+    import io
+    import looplab.llm as llm
+    seen = []
+
+    def fake_urlopen(req, timeout=None):
+        seen.append(json.loads(req.data.decode()))
+        if len(seen) == 1:                                  # first attempt carries reasoning_effort
+            body = json.dumps({"error": {"message": "litellm.UnsupportedParamsError: openai does "
+                                         "not support parameters: ['reasoning_effort']"}}).encode()
+            raise llm.urllib.error.HTTPError(req.full_url, 400, "Bad Request", {}, io.BytesIO(body))
+        return _OkResp()
+
+    monkeypatch.setattr(llm.urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(llm.time, "sleep", lambda *_a: None)
+    c = llm.OpenAICompatibleClient("glm-5.1", base_url="http://x/v1",
+                                   reasoning={"reasoning_effort": "high"})
+    assert c._reasoning_ok is True
+    assert c.complete_text([{"role": "user", "content": "go"}]) == "ok"
+    assert c._reasoning_ok is False                         # adapted — won't send reasoning again
+    assert "reasoning_effort" in seen[0] and "reasoning_effort" not in seen[1]  # dropped on retry
+    assert len(seen) == 2
+
+
+def test_read_stream_watchdog_breaks_a_stalled_connection():
+    """A streamed response that BLOCKS in recv() with no new tokens (a stalled generation, or a server
+    trickling keepalive bytes without completing a line) must not hang forever: a watchdog SHUTS DOWN
+    the underlying socket after `timeout` s — which actually interrupts the blocked recv (resp.close()
+    alone does not) — so the read ends and _post retries. Regression for a ~70-min / ~15-min live hang.
+    Uses a real socketpair so the socket.shutdown() path (not just the close() fallback) is exercised."""
+    import socket
+    import time as _t
+    import looplab.llm as llm
+
+    a, _b = socket.socketpair()                   # _b never sends -> a.recv blocks like a stalled server
+
+    class _SockResp:
+        def __init__(self, s):
+            self.fp = type("FP", (), {"raw": type("R", (), {"_sock": s})()})()
+            self._s = s
+
+        def __iter__(self):
+            return self
+
+        def __next__(self):
+            data = self._s.recv(100)              # blocks; watchdog shutdown() -> returns b'' (EOF)
+            if not data:
+                raise StopIteration
+            return data
+
+        def close(self):
+            try:
+                self._s.close()
+            except OSError:
+                pass
+
+        def read(self):
+            return b""
+
+    c = llm.OpenAICompatibleClient("m", base_url="http://x/v1", timeout=2)   # 2s idle limit
+    t0 = _t.monotonic()
+    with pytest.raises((OSError, TimeoutError)):
+        c._read_stream(_SockResp(a))
+    assert _t.monotonic() - t0 < 6                # fired near the 2s limit, did NOT hang
+
+
 def test_post_raises_after_exhausting_timeouts(monkeypatch):
     """A persistently dead endpoint still surfaces a clean LLMError once retries are exhausted."""
     import looplab.llm as llm
