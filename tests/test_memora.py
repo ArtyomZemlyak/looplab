@@ -5,8 +5,8 @@ LLM. All offline (no real network/model)."""
 from __future__ import annotations
 
 from looplab.config import Settings
-from looplab.memora import (Abstraction, LLMAbstractor, chat_completer, expand_by_anchors,
-                            lexical_abstraction, make_abstractor)
+from looplab.memora import (Abstraction, CachedAbstractor, LLMAbstractor, chat_completer,
+                            expand_by_anchors, lexical_abstraction, make_abstractor)
 from looplab.memory import CaseLibrary
 from looplab.knowledge_tools import KnowledgeTools
 from looplab.vectorstore import InMemoryVectorStore, hash_embed
@@ -58,13 +58,62 @@ def test_llm_abstractor_degrades_to_lexical_and_stays_degraded():
     assert calls["n"] == 1
 
 
-def test_make_abstractor_uses_llm_when_enabled_and_client_wired():
+def test_make_abstractor_uses_cached_llm_when_enabled():
     def complete(prompt):
         return '{"abstraction": "x y z", "anchors": ["a"]}'
     ab = make_abstractor(Settings(memora=True, memora_llm=True), complete=complete)
-    assert isinstance(ab, LLMAbstractor)
-    # without memora_llm it stays lexical even with a client available
-    assert not isinstance(make_abstractor(Settings(memora=True), complete=complete), LLMAbstractor)
+    assert isinstance(ab, CachedAbstractor)              # LLM path is cache-wrapped
+    out = ab("some memory content")
+    assert out.primary == "x y z" and out.anchors == ["a"]
+    # memora_llm off -> deterministic lexical, not the LLM/cache path
+    lex = make_abstractor(Settings(memora=True, memora_llm=False), complete=complete)
+    assert not isinstance(lex, CachedAbstractor)
+    assert isinstance(lex("hello ridge ridge"), Abstraction)
+
+
+# ------------------------------ cached abstractor -------------------------- #
+def test_cached_abstractor_calls_inner_once_per_content():
+    calls = {"n": 0}
+
+    def inner(text):
+        calls["n"] += 1
+        return Abstraction("p", ["a"])
+    ca = CachedAbstractor(inner)
+    assert ca("hello world") == ca("hello world") and calls["n"] == 1  # second is a hit
+    ca("different")
+    assert calls["n"] == 2
+
+
+def test_cached_abstractor_persists_across_instances(tmp_path):
+    p = tmp_path / "cache.json"
+    calls = {"n": 0}
+
+    def inner(text):
+        calls["n"] += 1
+        return Abstraction("essence", ["anchor"])
+    CachedAbstractor(inner, path=str(p))("mem")
+    assert p.exists() and calls["n"] == 1
+    out = CachedAbstractor(inner, path=str(p))("mem")    # fresh instance loads the persisted cache
+    assert out.primary == "essence" and out.anchors == ["anchor"] and calls["n"] == 1
+
+
+def test_cached_abstractor_namespaced_by_model(tmp_path):
+    p = tmp_path / "cache.json"
+    CachedAbstractor(lambda t: Abstraction("m1", []), path=str(p), namespace="model-1")("x")
+    calls = {"n": 0}
+
+    def inner(t):
+        calls["n"] += 1
+        return Abstraction("m2", [])
+    out = CachedAbstractor(inner, path=str(p), namespace="model-2")("x")  # different model -> miss
+    assert out.primary == "m2" and calls["n"] == 1
+
+
+def test_cached_abstractor_tolerates_corrupt_cache(tmp_path):
+    p = tmp_path / "cache.json"
+    p.write_text("{ not json", encoding="utf-8")
+    out = CachedAbstractor(lambda t: Abstraction("ok", []), path=str(p))("x")
+    assert out.primary == "ok"                           # corrupt cache -> start empty, still works
 
 
 def test_chat_completer_adapts_a_chat_client():
