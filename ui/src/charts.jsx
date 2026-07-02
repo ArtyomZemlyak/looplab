@@ -244,6 +244,42 @@ export function Spark({ series, width = 120, height = 22 }) {
 
 function Empty({ children }) { return <div className="muted" style={{ padding: 20 }}>{children}</div> }
 
+// U4 · overlay several runs' running-best trajectories on ONE axis, to compare convergence at a
+// glance. `runs` = [{label, run_id, series:[running-best value per evaluated node]}]. x = experiment
+// index (runs have different lengths — each line just stops at its own end); y = shared metric range.
+const _RUN_COLORS = ['#4aa3ff', '#2ecc71', '#f0b429', '#e0559a', '#8b5cf6', '#22d3d3', '#ff7a45', '#9aa7b5']
+export function MultiTrajectory({ runs, width = 760, height = 240 }) {
+  const withData = (runs || []).filter(r => (r.series || []).length > 0)
+  if (!withData.length) return <Empty>no comparable run trajectories yet</Empty>
+  const allV = withData.flatMap(r => r.series)
+  const lo = Math.min(...allV), hi = Math.max(...allV), span = (hi - lo) || 1
+  const maxLen = Math.max(...withData.map(r => r.series.length))
+  const pad = 34, w = width, h = height
+  const X = i => pad + (maxLen <= 1 ? 0 : i / (maxLen - 1) * (w - pad - 10))
+  const Y = v => h - pad - (v - lo) / span * (h - pad - 12)
+  return (
+    <div>
+      <svg width={w} height={h} role="img">
+        <line x1={pad} y1={h - pad} x2={w - 8} y2={h - pad} stroke="var(--border)" />
+        <line x1={pad} y1={12} x2={pad} y2={h - pad} stroke="var(--border)" />
+        <text x={pad - 6} y={16} textAnchor="end" fontSize="10" fill="var(--fg-mut)">{fmt(hi)}</text>
+        <text x={pad - 6} y={h - pad} textAnchor="end" fontSize="10" fill="var(--fg-mut)">{fmt(lo)}</text>
+        <text x={(w + pad) / 2} y={h - 6} textAnchor="middle" fontSize="10" fill="var(--fg-mut)">experiment #</text>
+        {withData.map((r, k) => {
+          const c = _RUN_COLORS[k % _RUN_COLORS.length]
+          const pts = r.series.map((v, i) => `${X(i).toFixed(1)},${Y(v).toFixed(1)}`).join(' ')
+          return <polyline key={r.run_id || k} points={pts} fill="none" stroke={c} strokeWidth="1.8" opacity="0.9" />
+        })}
+      </svg>
+      <div className="row" style={{ flexWrap: 'wrap', gap: 10, marginTop: 4 }}>
+        {withData.map((r, k) => <span key={r.run_id || k} className="muted" style={{ fontSize: 11, display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+          <span style={{ width: 10, height: 3, background: _RUN_COLORS[k % _RUN_COLORS.length], display: 'inline-block' }} />
+          {r.label || r.run_id}</span>)}
+      </div>
+    </div>
+  )
+}
+
 // Online training/eval curves — a small line chart per logged metric tag (loss, every recall@k, lr,
 // grad norms, …) from a node's TensorBoard series {tag: [{step, value}]}. ALL metrics, not just the
 // objective — the "a la TensorBoard" per-node view.

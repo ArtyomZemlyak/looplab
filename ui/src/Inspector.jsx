@@ -467,7 +467,7 @@ function Trace({ n }) {
   </div>
 }
 
-function diffLines(a, b) {
+export function diffLines(a, b) {
   const A = (a || '').split('\n'), B = (b || '').split('\n')
   const setA = new Set(A), setB = new Set(B)
   return B.map(l => ({ l, cls: setA.has(l) ? '' : 'diff-add' }))

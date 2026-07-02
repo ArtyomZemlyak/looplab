@@ -1,9 +1,10 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { get, putText, post, fmt, fmtInt, fmtBytes, CONTROL, gpuStat, saveRunConfig, resumeRun, apiPrefix, operatorMeta } from './util.js'
-import { Bars, ParallelCoords, Scatter } from './charts.jsx'
+import { Bars, ParallelCoords, Scatter, MultiTrajectory } from './charts.jsx'
 import { hyperImportance } from './report.js'
 import Markdown from './markdown.jsx'
 import { OpIcon } from './icons.jsx'
+import { diffLines } from './Inspector.jsx'
 import SettingsForm from './SettingsForm.jsx'
 import { toForm, fromForm, FIELD_BY_KEY } from './settingsSchema.js'
 
@@ -647,6 +648,8 @@ export function HyperImportancePanel({ state, onClose }) {
 export function CrossRunPanel({ state, onClose }) {
   const [runs, setRuns] = useState(null)
   const [task, setTask] = useState(state.task_id || '')
+  const [overlay, setOverlay] = useState(false)   // U4: convergence-trajectory overlay
+  const [traj, setTraj] = useState([])
   useEffect(() => { get('/api/runs').then(setRuns).catch(() => setRuns([])) }, [])
   if (!runs) return <Panel title="Cross-run sweep" onClose={onClose} wide><div className="muted">Loading runs…</div></Panel>
   const tasks = [...new Set(runs.map(r => r.task_id).filter(Boolean))].sort()
@@ -658,6 +661,18 @@ export function CrossRunPanel({ state, onClose }) {
   const top = rows[0]?.m
   const worst = rows.length ? rows[rows.length - 1].m : 0
   const span = Math.abs((top ?? 0) - worst) || 1
+  const rowKey = rows.map(r => r.run_id).join(',')
+  useEffect(() => {   // U4: fetch each run's node metrics and build a running-best trajectory to overlay
+    if (!overlay || !rows.length) { setTraj([]); return }
+    let cancelled = false
+    Promise.all(rows.slice(0, 8).map(r => get(`/api/runs/${r.run_id}/state`).then(p => {
+      const ns = Object.values(p.state?.nodes || {}).filter(n => n.metric != null && n.feasible !== false).sort((a, b) => a.id - b.id)
+      let best = null; const series = []
+      for (const n of ns) { best = best == null ? n.metric : (dir === 'min' ? Math.min(best, n.metric) : Math.max(best, n.metric)); series.push(best) }
+      return { run_id: r.run_id, label: r.label || r.run_id, series }
+    }).catch(() => ({ run_id: r.run_id, label: r.label || r.run_id, series: [] })))).then(res => { if (!cancelled) setTraj(res) })
+    return () => { cancelled = true }
+  }, [overlay, task, rowKey])
   return (
     <Panel title="Cross-run sweep" sub={`${runs.length} runs · ${tasks.length} tasks`} onClose={onClose} wide>
       <div className="row" style={{ gap: 8, alignItems: 'center', marginBottom: 8 }}>
@@ -665,7 +680,11 @@ export function CrossRunPanel({ state, onClose }) {
         <select className="inp sm" value={task} onChange={e => setTask(e.target.value)}>
           {tasks.map(t => <option key={t} value={t}>{t}</option>)}</select>
         <span className="muted">{rows.length} comparable run(s) · {dir}</span>
+        <span className="spacer" style={{ flex: 1 }} />
+        {rows.length > 0 && <button className={'btn sm' + (overlay ? ' primary' : '')}
+          onClick={() => setOverlay(o => !o)} title="overlay each run's running-best trajectory on one axis">overlay trajectories</button>}
       </div>
+      {overlay && <div style={{ marginBottom: 12 }}><MultiTrajectory runs={traj} /></div>}
       {rows.length
         ? <table className="tbl"><thead><tr><th>run</th><th>best metric</th><th>nodes</th><th>status</th><th></th></tr></thead><tbody>
             {rows.map((r, i) => <tr key={r.run_id} className={i === 0 ? 'sel' : ''}>
@@ -796,6 +815,7 @@ export function ComparePanel({ state, runId, onClose }) {
   const ids = Object.keys(state.nodes).map(Number).sort((a, b) => a - b)
   const [a, setA] = useState(null), [b, setB] = useState(null)
   const [da, setDa] = useState(null), [db, setDb] = useState(null)
+  const [diff, setDiff] = useState(false)   // U4: line diff between ANY two nodes (not just vs parent)
   // Seed/repair the selectors once nodes exist (the panel may open before any node arrives).
   useEffect(() => {
     if (!ids.length) return
@@ -807,8 +827,18 @@ export function ComparePanel({ state, runId, onClose }) {
   if (!ids.length) return <Panel title="Compare nodes" onClose={onClose}><div className="muted">No nodes yet.</div></Panel>
   return (
     <Panel title="Compare nodes" onClose={onClose} wide>
-      <div className="toolbar" style={{ marginBottom: 10 }}><CmpSel v={a} set={setA} ids={ids} /><span className="muted">vs</span><CmpSel v={b} set={setB} ids={ids} /></div>
-      <div style={{ display: 'flex', gap: 14 }}><CmpCol d={da} /><CmpCol d={db} /></div>
+      <div className="toolbar" style={{ marginBottom: 10 }}>
+        <CmpSel v={a} set={setA} ids={ids} /><span className="muted">vs</span><CmpSel v={b} set={setB} ids={ids} />
+        <span className="spacer" style={{ flex: 1 }} />
+        <button className={'btn sm' + (diff ? ' primary' : '')} onClick={() => setDiff(d => !d)}
+          title="line diff of the two nodes' code">diff</button>
+      </div>
+      {diff
+        ? (da?.code != null && db?.code != null
+            ? <pre className="code" style={{ maxHeight: 460 }}>{diffLines(da.code, db.code).map((d, i) =>
+                <span key={i} className={d.cls}>{d.l + '\n'}</span>)}</pre>
+            : <div className="muted">Loading code for both nodes…</div>)
+        : <div style={{ display: 'flex', gap: 14 }}><CmpCol d={da} /><CmpCol d={db} /></div>}
     </Panel>
   )
 }
