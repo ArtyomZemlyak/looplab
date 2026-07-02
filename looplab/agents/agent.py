@@ -287,12 +287,20 @@ def loop_opts_from_settings(settings) -> dict:
 
 
 class ToolUsingResearcher:
-    _SYSTEM = ("You are an ML researcher. You MAY call the retrieval tools to consult "
-               "prior knowledge, then call `emit` exactly once with your final Idea "
-               "(operator, params, rationale, and a short reusable `theme` slug that groups "
-               "this experiment with related ones, e.g. \"loss-fn\" or \"regularization\"). "
-               "Propose ONLY what to try and why (the experiment concept + expected learning) — "
-               "do NOT write code or design the implementation; the Developer owns how to build it. ")
+    _SYSTEM = ("You are an ML researcher driving experiments to improve the objective. You MAY call the "
+               "retrieval tools to consult prior knowledge/results, then call `emit` exactly once with "
+               "your final Idea (operator, params, rationale, and a short reusable `theme` slug that "
+               "groups related experiments, e.g. \"loss-fn\" or \"architecture\").\n"
+               "Your idea space is the WHOLE experiment, not just hyperparameters: you may propose "
+               "changes to the model ARCHITECTURE, the LOSS/objective, the DATA (features, augmentation, "
+               "filtering, negatives, sampling), the TRAINING procedure, or the evaluation — anything "
+               "that could move the metric. Do NOT limit yourself to parameter tuning when a structural "
+               "change is the stronger experiment. Numeric knobs go in `params`; describe any non-numeric "
+               "or structural change (a new loss, an architecture tweak, a data-pipeline change) clearly "
+               "in `rationale` so the Developer can build it.\n"
+               "Propose WHAT to try and WHY (the concept + expected learning). You do not write the code "
+               "yourself — the Developer owns HOW, and is free to edit the repo's code to realise your "
+               "idea — but you ARE free to direct structural, code-level changes when they're warranted. ")
 
     def __init__(self, client, tools, space_hint: str = "",
                  bounds: Optional[dict] = None, parser: str = "tool_call",
@@ -361,12 +369,19 @@ class ToolUsingResearcher:
         from looplab.agents.hints import render_hint_directives
         hint_block = render_hint_directives(state.pending_hints)
         cue = getattr(self, "_complexity_hint", "")   # A0d breadth-keyed complexity cue (empty=off)
+        # Hypotheses ledger (P1): honor track_hypotheses on the agentic path too (default on, matching
+        # config) — ask for the per-experiment `hypothesis` so the ledger of tested beliefs fills in.
+        hyp = ""
+        if getattr(self, "track_hypotheses", True):
+            from looplab.agents.roles import _HYPOTHESIS_INSTRUCTION
+            hyp = "\n" + _HYPOTHESIS_INSTRUCTION
         messages = [
             {"role": "system",
              "content": render(self.prompts, "tool_researcher_system", self._SYSTEM)
-                        + self.space_hint},
+                        + self.space_hint + hyp},
             {"role": "user", "content": _state_brief(state, parent) + hint_block + cue +
-                "\nDecide the next experiment. Consult knowledge if useful, then emit."},
+                "\nDecide the next experiment — a parameter change OR a structural one (architecture, "
+                "loss, data, training) if that's the stronger move. Consult knowledge if useful, then emit."},
         ]
         return drive_tool_loop(
             self.client, self.tools, messages, self._emit_spec(),
