@@ -1115,6 +1115,14 @@ class Engine:
             self.store.append("hint", {
                 "text": "deep-research directions: " + "; ".join(memo.recommended_directions[:5]),
                 "source": "deep_research"})
+            # P1: also register each direction as an OPEN hypothesis so a deep-research idea is
+            # tracked to a verdict (was fire-and-forget) — it accrues evidence when a matching node
+            # runs, and shows on the board as an open question the search should resolve.
+            for direction in memo.recommended_directions[:5]:
+                if str(direction).strip():
+                    self.store.append("hypothesis_added", {
+                        "statement": str(direction).strip(), "source": "deep_research",
+                        "at_node": memo.at_node})
 
     def _due_research_trigger(self, state: RunState) -> str | None:
         """Is an AUTO deep-research trigger (cadence/strategist) due at the current node-count? Used by

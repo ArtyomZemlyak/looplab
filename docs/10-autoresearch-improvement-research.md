@@ -151,19 +151,22 @@ The current "plan" is a derived label (`seed|explore|exploit|confirm` computed f
 `strategist.py:101-108`) plus a reactive rule table. Nothing represents *what the run intends to
 find out*. Three additions, all replay-safe events:
 
-### P1 · Hypothesis ledger (first-class hypotheses)
-A `hypothesis` object `{id, statement, source (researcher|deep-research|human), status
-(open|supported|refuted|abandoned), evidence: [node_ids], expected_gain}` written as events.
-Ideas link to a hypothesis; when a node evaluates, the ledger updates. The Researcher prompt then
-carries "open hypotheses ranked by expected gain × cheapness" instead of a flat digest, and
-Deep-Research memos become hypotheses instead of advisory text (today `recommended_directions` is
-fire-and-forget — nothing tracks whether directions were pursued or paid off). This is the single
-biggest *planning* upgrade: it converts the loop from "propose next mutation" to "run experiments
-that resolve open questions", and it gives the UI a real board to show (see U2). External
-precedent: Kosmos (FutureHouse/Edison, arXiv:2511.02824) keeps a queryable "structured world
-model" — entities, relationships, results, *open questions* — updated after every task, credited
-with staying coherent over 200 rollouts; the hypothesis ledger is the LoopLab-native,
-event-sourced version of that idea.
+### P1 · Hypothesis ledger (first-class hypotheses) — ✅ SHIPPED
+A `Hypothesis` `{id, statement, source, status (open|testing|supported|tested|abandoned), evidence:
+[node_ids], best_delta}`. This is the single biggest *planning* upgrade: it converts the loop from
+"propose next mutation" to "run experiments that resolve open questions", and gives the UI a real
+board (U2). External precedent: Kosmos (arXiv:2511.02824) keeps a queryable "structured world model"
+of entities/results/*open questions* — the ledger is the LoopLab-native, event-sourced version.
+- **Implemented DERIVED-in-fold** (lowest-risk, fully replay-safe, audit-only — never touches
+  best-selection): `Idea` gains an optional `hypothesis` statement (the Researcher states what each
+  experiment tests; prompt updated); `replay._derive_hypotheses` builds the ledger from every node
+  carrying one (id = slug of the statement, so the same claim from several ideas links to one entry)
+  plus explicit `hypothesis_added` events. The **verdict is computed from outcomes** — supported when
+  an experiment improved over its parent / became best, tested when evaluated without improvement,
+  testing while evidence runs, open with no evidence; a human `hypothesis_updated status=abandoned`
+  overrides. **Deep-research directions now register as open hypotheses** (were fire-and-forget) and a
+  human can add/abandon from the board via control events. Tested in `tests/test_hypotheses.py` +
+  a server round-trip in `tests/test_server.py`.
 
 ### P2 · Plan-as-artifact with budget allocation + re-planning
 An explicit `plan` event: ranked experiment backlog (from Genesis/Deep-Research/Strategist) with
@@ -242,10 +245,15 @@ panel: what the policy plans next, injected experiments waiting, confirm/ablate 
 reorderable/cancelable (append `priority_hint` control events; the engine already consumes hints).
 This is the direct-manipulation steering surface the Dock's slash commands approximate in text.
 
-### U2 · Hypothesis board (needs P1)
-A kanban: open / testing / supported / refuted, each card linking to its nodes and metric deltas.
-This answers the researcher's actual question ("what have we learned?") which no metric chart
-answers, and makes the Deep-Research memos actionable and auditable.
+### U2 · Hypothesis board (needs P1) — ✅ SHIPPED
+A kanban: open / testing / supported / tested / abandoned, each card linking to its evidence nodes
+and its best Δ-over-parent. This answers the researcher's actual question ("what have we learned?")
+which no metric chart answers, and makes the deep-research directions actionable and auditable.
+- **Implemented** as a primary `Hypotheses` panel (`ui/src/panels.jsx` `HypothesisBoard`, wired in
+  `RunView.jsx`, styled in `styles.css`): five verdict columns, source icons
+  (🔬 researcher / 💡 deep-research / 🧑 human), click-through to evidence nodes, a "+ Add" box and
+  per-card abandon (✕) via the `hypothesis_added` / `hypothesis_updated` control events. Pure
+  projection of `state.hypotheses`; UI bundle builds clean.
 
 ### U3 · Canvas as control surface, not just a view
 Right-click a node → "explore from here" / "ablate this" / "diff vs champion" / "kill branch";

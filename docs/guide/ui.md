@@ -60,8 +60,13 @@ Then open the printed URL. The server serves the **built** React bundle from `ui
   action narrated in a durable feed (`chat.jsonl`).
 - **Reports** — an agent-authored, conclusion-first run report plus deterministic metric-improvement
   charts.
-- **Trust panel** — surfaces the audit-only safety monitors (reward-hack, code-leakage, critic
-  flags).
+- **Trust panel** — surfaces the safety monitors (reward-hack, code-leakage, critic flags); set
+  `trust_gate` to `gate`/`block` (or pick the `thorough` profile) to make a flagged node ineligible
+  to win, not just logged.
+- **Hypotheses board** — a kanban of what the run is trying to learn (open / testing / supported /
+  tested / abandoned). Each experiment states the hypothesis it tests; deep-research directions and
+  your own "+ Add" questions land here too, then get tracked to a verdict with links to the evidence
+  nodes. Audit-only — it never changes which node wins.
 - **Per-node trace** — when `trace_llm_io` is on, see exactly what the model read and wrote per node.
 - **Per-run settings** — edit a run's settings; `PUT /api/runs/{id}/config` rewrites that run's
   snapshot (resume reads it, not the global UI defaults).

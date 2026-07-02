@@ -408,6 +408,21 @@ button { font: inherit; }
 .run-node .muted { font-size: 11px; }
 .run-node .chips { display: flex; flex-wrap: wrap; gap: 3px; margin-top: 5px; }
 .chip.sm { font-size: 11px; padding: 1px 6px; gap: 3px; }
+.chip.xs { font-size: 10px; padding: 0 5px; gap: 2px; }
+.btn.xs { padding: 0 5px; font-size: 10px; min-height: 18px; line-height: 16px; }
+
+/* P1 hypothesis board: a compact kanban of the run's questions → verdicts. */
+.hyp-board { display: grid; grid-template-columns: repeat(5, 1fr); gap: 8px; align-items: start; }
+.hyp-col { background: var(--bg-2); border: 1px solid var(--border); border-radius: 8px; padding: 6px; min-height: 60px; }
+.hyp-col-h { font-weight: 600; font-size: 12px; margin-bottom: 6px; text-transform: uppercase; letter-spacing: .03em; }
+.hyp-col.hyp-supported .hyp-col-h { color: #b6f0cf; }
+.hyp-col.hyp-tested .hyp-col-h { color: var(--working); }
+.hyp-col.hyp-abandoned .hyp-col-h { color: var(--fg-mut); }
+.hyp-card { background: var(--bg-3); border: 1px solid var(--border); border-radius: 6px; padding: 6px 7px; margin-bottom: 6px; }
+.hyp-stmt { font-size: 12px; line-height: 1.35; }
+.hyp-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 3px; margin-top: 5px; }
+.hyp-empty { font-size: 11px; text-align: center; padding: 4px 0; }
+@media (max-width: 900px) { .hyp-board { grid-template-columns: 1fr 1fr; } }
 
 /* ---------- inspector ---------- */
 .tabs { display: flex; gap: 2px; padding: 6px 8px 0; border-bottom: 1px solid var(--line); overflow-x: auto; }

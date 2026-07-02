@@ -44,6 +44,11 @@ _RESEARCHER_SYSTEM = ("You are an ML researcher proposing the next experiment as
                       "folds/seeds, or a big grid — set `eval_timeout` to a realistic per-run budget in "
                       "SECONDS (e.g. 300-1800). Leave it null for ordinary/light experiments so they use "
                       "the run default. "
+                      "Set `hypothesis`: ONE plain-sentence statement of what this experiment TESTS — "
+                      "the belief you expect the result to support or refute (e.g. \"adding interaction "
+                      "features raises CV accuracy\", \"a deeper tree overfits this small dataset\"). "
+                      "Reuse the SAME wording when a later experiment tests the same belief, so the run "
+                      "builds a ledger of what's been learned. "
                       "Respond ONLY with the requested structured fields.")
 _DEVELOPER_SYSTEM = ("You are an expert ML engineer. Output ONLY a single fenced "
                      "```python``` block containing a complete, self-contained script. ")
@@ -194,12 +199,14 @@ class LLMResearcher:
                         + "\n\n" + _attention_points()},
             {"role": "user", "content": _state_brief(state, parent) + "\n" + self.space_hint +
                                         hint_block + cue + sweep_hint +
-                                        "\nPropose the next Idea (operator, params, rationale; "
-                                        "optionally a `space` grid for a sweep). The `rationale` is "
-                                        "your conclusion the operator reads: in 1-3 sentences state "
-                                        "WHY this experiment next and WHAT you expect it to "
-                                        "learn/improve given the results so far — not a restatement "
-                                        "of the params."},
+                                        "\nPropose the next Idea (operator, params, rationale, "
+                                        "hypothesis; optionally a `space` grid for a sweep). The "
+                                        "`rationale` is your conclusion the operator reads: in 1-3 "
+                                        "sentences state WHY this experiment next and WHAT you expect "
+                                        "it to learn/improve given the results so far — not a "
+                                        "restatement of the params. The `hypothesis` is the one-line "
+                                        "belief this experiment tests (reuse wording across "
+                                        "experiments that test the same belief)."},
         ]
         # Small models occasionally emit unparseable output; retry, then fall back to a
         # safe default so one bad response never crashes the run.

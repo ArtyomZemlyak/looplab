@@ -40,6 +40,13 @@ class Idea(BaseModel):
     # and the enumeration deterministic for replay — a future `space_kind` field can add ranges.
     space: dict[str, list[float]] = Field(default_factory=dict)
 
+    # Hypothesis ledger (P1): a one-line statement of WHAT THIS EXPERIMENT TESTS ("residual features
+    # help", "a deeper tree overfits here"). Optional and audit-only — it turns the search from
+    # "propose the next mutation" into "run experiments that resolve open questions". When set, the
+    # fold derives/links a Hypothesis (id = slug of the statement) and tracks it to a verdict from the
+    # node's outcome. Flows through the event log on the Idea automatically; None => today's behavior.
+    hypothesis: Optional[str] = None
+
     @property
     def is_sweep(self) -> bool:
         return bool(self.space)
@@ -105,6 +112,36 @@ class Node(BaseModel):
     # directions were the active steering). {"at_node","trigger"} of the memo. None otherwise. Audit/UI
     # only (a 💡 chip) — shows where research landed in the tree; never affects search/selection.
     research_origin: Optional[dict] = None
+
+
+def hypothesis_id(statement: str) -> str:
+    """Stable id for a hypothesis statement so the same claim (from different ideas / a human /
+    a deep-research direction) links to ONE ledger entry that accumulates evidence. A normalized
+    slug + short hash: readable in the log, collision-resistant across paraphrases-of-the-exact-same
+    wording (paraphrase *variation* is intentionally a new hypothesis — dedup is by exact intent)."""
+    import hashlib
+    import re
+    norm = re.sub(r"\s+", " ", (statement or "").strip().lower())
+    slug = re.sub(r"[^a-z0-9]+", "-", norm).strip("-")[:48] or "hypothesis"
+    return f"{slug}-{hashlib.md5(norm.encode('utf-8')).hexdigest()[:6]}"
+
+
+class Hypothesis(BaseModel):
+    """A first-class research hypothesis (P1). Audit-only — it never affects best-selection; it makes
+    the run legible ("what have we learned?") and gives the UI a board. Mostly DERIVED by the fold
+    from nodes whose `idea.hypothesis` is set (evidence + verdict computed from their outcomes); an
+    `hypothesis_added` event can also register one with no evidence yet (a human ask, or a
+    deep-research direction) that later accrues evidence when a matching node runs."""
+    id: str
+    statement: str
+    source: str = "researcher"          # researcher | deep_research | human | strategist
+    # open (no evaluated evidence) | testing (evidence running) | supported (an experiment improved) |
+    # tested (evaluated, no improvement) | abandoned (explicitly dropped)
+    status: str = "open"
+    rationale: str = ""
+    evidence: list[int] = Field(default_factory=list)   # node ids that tested it
+    created_at_node: int = 0
+    best_delta: Optional[float] = None  # best improvement-over-parent among evidence (audit)
 
 
 class ResearchMemo(BaseModel):
@@ -251,6 +288,15 @@ class RunState(BaseModel):
     research: list[dict] = Field(default_factory=list)
     research_requests: list[dict] = Field(default_factory=list)
     research_served: int = 0
+    # Hypothesis ledger (P1, audit-only — NEVER read by best-selection). Derived each fold: from every
+    # node whose `idea.hypothesis` is set, plus any explicit `hypothesis_added` events (human /
+    # deep-research directions). Keyed by `hypothesis_id`. The UI renders it as a board.
+    hypotheses: dict[str, Hypothesis] = Field(default_factory=dict)
+    # Explicitly-added hypotheses (human `add_hypothesis` control event or a deep-research direction),
+    # kept separately so the derived-from-nodes pass can merge evidence into them. `abandoned` ids are
+    # a human/agent override of the derived status.
+    hypotheses_added: list[dict] = Field(default_factory=list)
+    hypotheses_abandoned: list[str] = Field(default_factory=list)
     # Agent-authored run report (conclusion-first; audit-only sidecar — NEVER read by best-selection).
     # The latest `report_generated` event's content, regenerated on a cadence + on manual refresh. The
     # UI renders the deterministic analysis from the node set and layers this narrative on top.

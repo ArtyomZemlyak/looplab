@@ -113,6 +113,26 @@ def test_runs_list_state_and_node_detail(tmp_path):
     assert node["id"] == nid and "code" in node and "trace" in node
 
 
+def test_add_and_abandon_hypothesis_via_control(tmp_path):
+    """P1: a human posts a hypothesis to the board through /control (it's in CONTROL_EVENTS), it folds
+    into state.hypotheses as `open`, and an abandon control event flips it to `abandoned`."""
+    from looplab.models import hypothesis_id
+    _build_run(tmp_path)
+    client = TestClient(make_app(tmp_path))
+    stmt = "a log transform of the target helps"
+    r = client.post("/api/runs/demo/control",
+                    json={"type": "hypothesis_added", "data": {"statement": stmt, "source": "human"}})
+    assert r.status_code == 200
+    hyps = client.get("/api/runs/demo/state").json()["state"]["hypotheses"]
+    hid = hypothesis_id(stmt)
+    assert hid in hyps and hyps[hid]["status"] == "open" and hyps[hid]["source"] == "human"
+
+    client.post("/api/runs/demo/control",
+                json={"type": "hypothesis_updated", "data": {"id": hid, "status": "abandoned"}})
+    hyps = client.get("/api/runs/demo/state").json()["state"]["hypotheses"]
+    assert hyps[hid]["status"] == "abandoned"
+
+
 def test_engine_liveness_lock_probe(tmp_path):
     """A run with no engine holding its singleton lock is reported engine_running=False (so the UI can
     tell a real "thinking" run from a ZOMBIE whose engine died without run_finished); while a process

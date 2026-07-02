@@ -6,7 +6,8 @@ from __future__ import annotations
 
 from typing import Iterable
 
-from .models import Event, Idea, Node, NodeStatus, RunState, Trial
+from .models import (Event, Hypothesis, Idea, Node, NodeStatus, RunState, Trial,
+                     hypothesis_id)
 
 
 def fold(events: Iterable[Event]) -> RunState:
@@ -173,6 +174,16 @@ def fold(events: Iterable[Event]) -> RunState:
             st.reward_hacks.append({"node_id": d.get("node_id"), "signals": d.get("signals", [])})
         elif t == "novelty_rejected":
             st.novelty_events.append(d)   # E1: a near-duplicate proposal nudged off (audit)
+        elif t == "hypothesis_added":
+            # P1: an explicitly-registered hypothesis (human `add_hypothesis`, or a deep-research
+            # direction) — may have no evidence yet. Evidence + verdict are DERIVED post-loop.
+            if d.get("statement"):
+                st.hypotheses_added.append(d)
+        elif t == "hypothesis_updated":
+            # Currently only carries an `abandoned` override (human/agent drops a line of inquiry).
+            hid = d.get("id")
+            if d.get("status") == "abandoned" and hid and hid not in st.hypotheses_abandoned:
+                st.hypotheses_abandoned.append(hid)
         elif t == "proxy_scored":
             # A6 proxy/predictive scoring (audit-only): early-signal rank + which nodes were skipped.
             nid = d.get("node_id")
@@ -321,4 +332,78 @@ def fold(events: Iterable[Event]) -> RunState:
             and st.nodes[best_confirmed].feasible
             and best_confirmed not in flagged):
         st.best_node_id = best_confirmed
+
+    _derive_hypotheses(st)   # P1: audit-only ledger (after best is known); never touches selection
     return st
+
+
+def _derive_hypotheses(st: RunState) -> None:
+    """Build the hypothesis ledger from the folded state (P1). DERIVED, not stored: every node whose
+    `idea.hypothesis` is set contributes a hypothesis (id = slug of the statement) with itself as
+    evidence, merged with any explicitly-added ones (`hypothesis_added`). The verdict is computed from
+    evidence outcomes — supported if an experiment IMPROVED over its parent (or became the run best),
+    tested if evaluated without improvement, testing while still running, open with no evidence.
+    Audit-only: nothing here is read by best-selection."""
+    better = (lambda a, b: a > b) if st.direction == "max" else (lambda a, b: a < b)
+    hyps: dict[str, Hypothesis] = {}
+
+    # 1) explicitly-added hypotheses (human / deep-research) — may start with no evidence.
+    for d in st.hypotheses_added:
+        stmt = str(d.get("statement", "")).strip()
+        if not stmt:
+            continue
+        hid = d.get("id") or hypothesis_id(stmt)
+        if hid not in hyps:
+            hyps[hid] = Hypothesis(id=hid, statement=stmt, source=d.get("source", "human"),
+                                   rationale=str(d.get("rationale", ""))[:400],
+                                   created_at_node=int(d.get("at_node", 0) or 0))
+
+    # 2) derive/merge from nodes that state a hypothesis (evidence = the node).
+    for nid in sorted(st.nodes):
+        n = st.nodes[nid]
+        stmt = (n.idea.hypothesis or "").strip() if n.idea else ""
+        if not stmt:
+            continue
+        hid = hypothesis_id(stmt)
+        h = hyps.get(hid)
+        if h is None:
+            h = Hypothesis(id=hid, statement=stmt, source="researcher",
+                           rationale=(n.idea.rationale or "")[:400], created_at_node=n.id)
+            hyps[hid] = h
+        if n.id not in h.evidence:
+            h.evidence.append(n.id)
+
+    # 3) compute a verdict per hypothesis from its evidence nodes.
+    for h in hyps.values():
+        ev = [st.nodes[i] for i in h.evidence if i in st.nodes]
+        evaluated = [n for n in ev if n.status is NodeStatus.evaluated and n.feasible
+                     and n.metric is not None]
+        supported = False
+        best_delta: float | None = None
+        for n in evaluated:
+            # parent metric = the best feasible-evaluated parent's metric (direction-aware)
+            pmetrics = [st.nodes[p].metric for p in n.parent_ids
+                        if p in st.nodes and st.nodes[p].metric is not None
+                        and st.nodes[p].feasible]
+            base = (max(pmetrics) if st.direction == "max" else min(pmetrics)) if pmetrics else None
+            if base is not None:
+                delta = (n.metric - base) if st.direction == "max" else (base - n.metric)
+                best_delta = delta if best_delta is None else max(best_delta, delta)
+                if better(n.metric, base):
+                    supported = True
+            if n.id == st.best_node_id:            # a draft with no parent that became the run best
+                supported = True
+        h.best_delta = best_delta
+        pending = [n for n in ev if n.status is NodeStatus.pending]
+        if h.id in st.hypotheses_abandoned:
+            h.status = "abandoned"
+        elif not ev:
+            h.status = "open"
+        elif supported:
+            h.status = "supported"                 # at least one experiment improved — verdict stands
+        elif pending or not evaluated:
+            h.status = "testing"                   # still inconclusive: evidence running
+        else:
+            h.status = "tested"                    # all evidence evaluated, none improved
+
+    st.hypotheses = hyps

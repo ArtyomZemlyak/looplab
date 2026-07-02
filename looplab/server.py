@@ -74,6 +74,8 @@ CONTROL_EVENTS = {
     "approval_granted", "spec_approved", "inject_node", "run_reopened",
     "set_strategy",   # A7: operator pins/overrides the Strategist's choice (HITL parity)
     "deep_research",  # P2: operator asks the engine to run the Deep-Research stage now
+    "hypothesis_added",    # P1: a human registers a hypothesis on the board (open question to test)
+    "hypothesis_updated",  # P1: a human abandons a hypothesis line (status=abandoned)
 }
 
 POLL_SECONDS = 0.4   # SSE tail cadence — fast enough to feel live, light on the disk

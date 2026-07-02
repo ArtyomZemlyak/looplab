@@ -12,7 +12,7 @@ import {
   TrustPanel, SensitivityPanel, FailuresPanel, ParetoPanel, DataQualityPanel,
   ConfigPanel, AuthoringPanel, MemoryPanel, RegistryPanel, EventExplorer,
   ComparePanel, GpuPanel, HyperImportancePanel, CrossRunPanel, CollabPanel, OverviewPanel, ResearchPanel,
-  ArtifactsPanel,
+  ArtifactsPanel, HypothesisBoard,
 } from './panels.jsx'
 
 // The panel bar, grouped by importance then process order (Report is the [Search|Report] toggle, and
@@ -20,8 +20,8 @@ import {
 //   rigor → analysis → data/lab → ops
 // Run-view panel IA (design audit 2026-06-28): keep the few most-used panels inline; fold the long
 // tail into a grouped "More ▾" overflow so the bar never wraps to a second row (was 17 buttons).
-const PRIMARY_PANELS = [['trust', 'Trust'], ['failures', 'Failures'], ['research', 'Research'],
-                        ['compare', 'Compare'], ['config', 'Settings']]
+const PRIMARY_PANELS = [['trust', 'Trust'], ['hypotheses', 'Hypotheses'], ['failures', 'Failures'],
+                        ['research', 'Research'], ['compare', 'Compare'], ['config', 'Settings']]
 const MORE_GROUPS = [
   ['Output', [['artifacts', 'Artifacts']]],
   ['Analysis', [['sensitivity', 'Sensitivity'], ['importance', 'Importance'], ['pareto', 'Pareto/Div'], ['data', 'Data']]],
@@ -248,6 +248,7 @@ export default function RunView({ runId, onBack }) {
       {panel === 'overview' && <OverviewPanel state={state} maxEval={maxEval} onClose={() => setPanel(null)} onOpenPanel={setPanel} />}
       {panel === 'research' && <ResearchPanel state={state} runId={runId} onToast={showToast} onClose={() => setPanel(null)} />}
       {panel === 'trust' && <TrustPanel state={state} runId={runId} onClose={() => setPanel(null)} />}
+      {panel === 'hypotheses' && <HypothesisBoard state={state} runId={runId} onSelect={selectNode} onToast={showToast} onClose={() => setPanel(null)} />}
       {panel === 'sensitivity' && <SensitivityPanel state={state} onSelect={selectNode} onClose={() => setPanel(null)} />}
       {panel === 'importance' && <HyperImportancePanel state={state} onClose={() => setPanel(null)} />}
       {panel === 'failures' && <FailuresPanel state={state} onSelect={setSelectedId} onClose={() => setPanel(null)} />}

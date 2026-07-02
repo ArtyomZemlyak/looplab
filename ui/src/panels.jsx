@@ -615,6 +615,69 @@ export function CollabPanel({ state, runId, onSelect, onClose, onToast }) {
   )
 }
 
+// P1 hypothesis board: the run's ledger of what it's TRYING TO LEARN, as a kanban. Turns the DAG
+// from "mutations tried" into "questions asked → answered". Columns are the derived verdict; each
+// card links to its evidence nodes. Audit-only (never affects selection), so it's a pure projection
+// of state.hypotheses + a thin human add/abandon via control events.
+const _HYP_COLUMNS = [
+  ['open', 'Open', 'question posed, not yet tested'],
+  ['testing', 'Testing', 'experiments running'],
+  ['supported', 'Supported', 'an experiment improved'],
+  ['tested', 'Tested', 'evaluated, no improvement'],
+  ['abandoned', 'Abandoned', 'dropped'],
+]
+const _HYP_SRC = { researcher: '🔬', deep_research: '💡', human: '🧑', strategist: '🧭' }
+
+export function HypothesisBoard({ state, runId, onSelect, onClose, onToast }) {
+  const [draft, setDraft] = useState('')
+  const hyps = Object.values(state.hypotheses || {})
+  const byStatus = (s) => hyps.filter(h => (h.status || 'open') === s)
+  const add = async () => {
+    const s = draft.trim()
+    if (!s) return
+    try { await CONTROL.addHypothesis(runId, s); setDraft(''); onToast && onToast('hypothesis added') }
+    catch { onToast && onToast('could not add (run not live?)') }
+  }
+  const abandon = async (h) => {
+    try { await CONTROL.abandonHypothesis(runId, h.id); onToast && onToast('hypothesis abandoned') }
+    catch { onToast && onToast('could not update') }
+  }
+  return (
+    <Panel title="Hypotheses" sub={`${hyps.length} tracked — what the run is trying to learn`} onClose={onClose} wide>
+      <div className="toolbar" style={{ marginBottom: 10, gap: 6 }}>
+        <input className="text" style={{ flex: 1 }} placeholder="Pose a hypothesis to test (e.g. “target is right-skewed; a log transform helps”)"
+          value={draft} onChange={e => setDraft(e.target.value)}
+          onKeyDown={e => { if (e.key === 'Enter') add() }} />
+        <button className="btn sm primary" onClick={add} disabled={!draft.trim()}>+ Add</button>
+      </div>
+      {hyps.length === 0
+        ? <div className="muted">No hypotheses yet. The Researcher states one per experiment (its
+          <code> hypothesis</code> field); deep-research directions and your “+ Add” questions land here too,
+          then get tracked to a verdict as experiments run.</div>
+        : <div className="hyp-board">
+          {_HYP_COLUMNS.map(([key, label, hint]) => {
+            const col = byStatus(key)
+            return <div key={key} className={'hyp-col hyp-' + key}>
+              <div className="hyp-col-h" title={hint}>{label} <span className="muted">{col.length}</span></div>
+              {col.map(h => <div key={h.id} className="hyp-card">
+                <div className="hyp-stmt">{_HYP_SRC[h.source] || '•'} {h.statement}</div>
+                <div className="hyp-meta">
+                  {(h.evidence || []).slice(0, 8).map(nid => <button key={nid} className="btn xs ghost"
+                    title={`experiment #${nid}`} onClick={() => { onSelect && onSelect(nid); onClose() }}>#{nid}</button>)}
+                  {h.best_delta != null && <span className={'chip xs ' + (h.best_delta > 0 ? 'ok' : '')}
+                    title="best improvement over parent among the evidence">Δ{fmt(h.best_delta)}</span>}
+                  {key !== 'abandoned' && <button className="btn xs ghost" title="abandon this line of inquiry"
+                    onClick={() => abandon(h)}>✕</button>}
+                </div>
+              </div>)}
+              {col.length === 0 && <div className="muted hyp-empty">—</div>}
+            </div>
+          })}
+        </div>}
+    </Panel>
+  )
+}
+
 // Module scope so their identity is stable across SSE frames (ComparePanel re-renders on every live
 // fold); defined inline they remounted the <select> each frame, closing an open dropdown mid-pick.
 function CmpSel({ v, set, ids }) {
