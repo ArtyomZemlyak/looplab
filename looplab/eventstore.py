@@ -76,13 +76,15 @@ def iter_jsonl(path: str | os.PathLike) -> Iterator[dict]:
             yield obj
 
 
-def _parse_jsonl_region(buf: bytes) -> tuple[list[dict], int]:
+def _parse_jsonl_region(buf: bytes) -> tuple[list[tuple[dict, int]], int]:
     """Parse complete records from a byte buffer, applying `iter_jsonl`'s EXACT durability rules
     (stop at the first torn/blank-then-nonterminated/corrupt line), and report how many bytes were
-    consumed (always a newline boundary). This is the incremental core shared by the read cache: the
-    set of records it yields for a full-file buffer is identical to `iter_jsonl`, so caching can never
-    change what `read_all` returns — it only avoids re-reading+re-parsing bytes already seen."""
-    out: list[dict] = []
+    consumed (always a newline boundary). Each record is paired with the byte offset consumed
+    through the end of its line, so a caller that rejects a record can rewind to the exact
+    boundary before it. This is the incremental core shared by the read cache: the set of records
+    it yields for a full-file buffer is identical to `iter_jsonl`, so caching can never change
+    what `read_all` returns — it only avoids re-reading+re-parsing bytes already seen."""
+    out: list[tuple[dict, int]] = []
     consumed = 0
     n = len(buf)
     i = 0
@@ -103,9 +105,9 @@ def _parse_jsonl_region(buf: bytes) -> tuple[list[dict], int]:
             break  # corrupt tail — stop cleanly (matches iter_jsonl), don't advance past it
         if not isinstance(obj, dict):
             break  # valid JSON but non-object => corruption, not a record
-        out.append(obj)
         i = nl + 1
         consumed = i
+        out.append((obj, consumed))
     return out, consumed
 
 
@@ -228,9 +230,22 @@ class EventStore:
                 except OSError:
                     new = b""
                 objs, consumed = _parse_jsonl_region(new)
-                if objs:
-                    self._cache.extend(Event(**o) for o in objs)
-                self._cache_bytes += consumed
+                # Materialize BEFORE mutating the cache, and tolerate a record that is valid JSON
+                # but not a valid Event (foreign writer / version skew): stop at the byte boundary
+                # BEFORE it, like a torn line, instead of half-extending the cache mid-generator
+                # and re-appending the same prefix on every later call.
+                evs: list[Event] = []
+                ok_bytes = 0
+                for o, end in objs:
+                    try:
+                        evs.append(Event(**o))
+                    except Exception:  # noqa: BLE001
+                        break
+                    ok_bytes = end
+                else:
+                    ok_bytes = consumed   # all records valid — trailing blanks count too
+                self._cache.extend(evs)
+                self._cache_bytes += ok_bytes
             # Return a snapshot copy so a caller iterating the result can't be perturbed by a
             # concurrent top-up (and so callers expecting a re-iterable list still work).
             return list(self._cache)

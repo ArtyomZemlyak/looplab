@@ -110,7 +110,9 @@ def _json_line_extras(text: str, primary_key: str = "metric") -> dict:
                 if k in _skip or isinstance(v, bool):
                     continue
                 if isinstance(v, (int, float)):
-                    out[str(k)] = float(v)
+                    f = _to_float(v)     # same finiteness rule as the primary metric: JSON parses
+                    if f is not None:    # NaN/Infinity literals, and a NaN extra breaks serializers
+                        out[str(k)] = f
             return out
     return {}
 

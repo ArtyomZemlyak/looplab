@@ -379,8 +379,10 @@ def run_command_eval(command: list[str], cwd: str, timeout: float, metric: dict,
         if spec.get("kind") == "adapter":
             raise ValueError("metrics/constraints readers must be built-in, not 'adapter' "
                              "(an agent-authored gate reader defeats the trust boundary).")
-    declared = ({name: read_metric(out, str(wd), spec, wrap=wrap)
-                 for name, spec in metrics.items()} if (metrics and not to) else {})
+    declared = ({name: v for name, spec in metrics.items()
+                 if (v := read_metric(out, str(wd), spec, wrap=wrap)) is not None}
+                if (metrics and not to) else {})   # a MISSED reader (None) must not erase a
+    #                                                successfully auto-captured value of the same name
     # Auto-capture: every other numeric key on the metric's own JSON line is also reported (no config
     # needed), so an experiment that prints {"metric": x, "recall@10": y, ...} surfaces them all. A
     # declared spec wins over the auto-captured value of the same name.

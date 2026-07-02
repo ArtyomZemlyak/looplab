@@ -431,7 +431,7 @@ button { font: inherit; }
 .why-ic { color: var(--fg-dim); flex: none; }
 
 /* U3 canvas control surface: right-click node menu + drag-to-merge arm hint. */
-.node-menu { position: fixed; z-index: 60; min-width: 176px; background: var(--bg-1); border: 1px solid var(--border);
+.node-menu { position: fixed; z-index: 95;  /* above .menu-backdrop (90) or every action is dead */ min-width: 176px; background: var(--bg-1); border: 1px solid var(--border);
   border-radius: 8px; box-shadow: 0 8px 28px rgba(0,0,0,.5); padding: 4px; }
 .node-menu .nm-h { font-size: 11px; color: var(--fg-mut); padding: 4px 8px 6px; }
 .nm-item { display: flex; align-items: center; gap: 8px; width: 100%; text-align: left; background: none;

@@ -153,8 +153,10 @@ export function TrustPanel({ state, runId, onClose, onSelect, onToast }) {
         : <div className="chip ok">no metric drift detected</div>}
 
       <div className="section-h">Reward-hacking monitor (B5) {(state.reward_hacks || []).length > 0 && <span className="chip alarm">{state.reward_hacks.length} flagged</span>}</div>
-      {cfg && <div className="muted" style={{ marginBottom: 6 }}>
-        enforcement: <b>{cfg.trust_gate || 'audit'}</b>{(cfg.trust_gate || 'audit') === 'audit'
+      {/* Folded state is the enforcement truth (it applies trust_gate_changed events);
+          the config snapshot alone can claim a gate the fold never engages. */}
+      {(state.trust_gate || cfg) && <div className="muted" style={{ marginBottom: 6 }}>
+        enforcement: <b>{state.trust_gate || cfg?.trust_gate || 'audit'}</b>{(state.trust_gate || cfg?.trust_gate || 'audit') === 'audit'
           ? ' — flags are logged only; set trust_gate=gate/block (or the thorough profile) to keep a flagged node from winning.'
           : ' — a flagged node is excluded from best-selection.'}</div>}
       {(state.reward_hacks || []).length
@@ -658,10 +660,11 @@ export function CrossRunPanel({ state, onClose }) {
   const [overlay, setOverlay] = useState(false)   // U4: convergence-trajectory overlay
   const [traj, setTraj] = useState([])
   useEffect(() => { get('/api/runs').then(setRuns).catch(() => setRuns([])) }, [])
-  if (!runs) return <Panel title="Cross-run sweep" onClose={onClose} wide><div className="muted">Loading runs…</div></Panel>
-  const tasks = [...new Set(runs.map(r => r.task_id).filter(Boolean))].sort()
-  const dir = (runs.find(r => r.task_id === task)?.direction) || state.direction
-  const rows = runs.filter(r => r.task_id === task)
+  // All hooks must run on every render — the loading early-return sits AFTER the effects
+  // (a conditional hook here unmounts the whole app once /api/runs resolves).
+  const tasks = [...new Set((runs || []).map(r => r.task_id).filter(Boolean))].sort()
+  const dir = ((runs || []).find(r => r.task_id === task)?.direction) || state.direction
+  const rows = (runs || []).filter(r => r.task_id === task)
     .map(r => ({ ...r, m: r.best_confirmed ?? r.best_metric }))
     .filter(r => r.m != null)
     .sort((a, b) => dir === 'min' ? a.m - b.m : b.m - a.m)
@@ -680,6 +683,7 @@ export function CrossRunPanel({ state, onClose }) {
     }).catch(() => ({ run_id: r.run_id, label: r.label || r.run_id, series: [] })))).then(res => { if (!cancelled) setTraj(res) })
     return () => { cancelled = true }
   }, [overlay, task, rowKey])
+  if (!runs) return <Panel title="Cross-run sweep" onClose={onClose} wide><div className="muted">Loading runs…</div></Panel>
   return (
     <Panel title="Cross-run sweep" sub={`${runs.length} runs · ${tasks.length} tasks`} onClose={onClose} wide>
       <div className="row" style={{ gap: 8, alignItems: 'center', marginBottom: 8 }}>
@@ -832,10 +836,12 @@ export function ComparePanel({ state, runId, onClose, initialPair = null }) {
     }
   }, [initialPair && initialPair.join(',')])
   // Seed/repair the selectors once nodes exist (the panel may open before any node arrives).
+  // Functional updates: on mount this runs in the same commit as the initialPair seeding above
+  // and would otherwise read a=null from the stale closure and overwrite the explicit pair.
   useEffect(() => {
     if (!ids.length) return
-    if (a == null || !ids.includes(a)) setA(state.best_node_id ?? ids[0])
-    if (b == null || !ids.includes(b)) setB(ids[ids.length - 1])
+    setA(cur => (cur == null || !ids.includes(cur)) ? (state.best_node_id ?? ids[0]) : cur)
+    setB(cur => (cur == null || !ids.includes(cur)) ? ids[ids.length - 1] : cur)
   }, [ids.join(','), state.best_node_id])
   useEffect(() => { if (a != null) get(`/api/runs/${runId}/nodes/${a}`).then(setDa).catch(() => {}) }, [runId, a])
   useEffect(() => { if (b != null) get(`/api/runs/${runId}/nodes/${b}`).then(setDb).catch(() => {}) }, [runId, b])

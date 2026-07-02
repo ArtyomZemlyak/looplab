@@ -375,12 +375,19 @@ export default function Dag({ state, selectedId, onSelect, groupMode = 'none', c
                  const from = rf?.data?.node?.id
                  if (from == null || !onNodeAction) return
                  const p = rf.position || {}
-                 let hit = null, bestD = 9999
+                 // A merge is an irreversible engine action: require a deliberate gesture
+                 // (moved well past the layout pitch's slop) AND a genuine card overlap —
+                 // banded layout packs cards 92px apart, so a plain radius test fires on a
+                 // few-pixel accidental nudge toward a neighbour.
+                 const orig = nodes.find(n => n.id === rf.id)
+                 if (orig && Math.hypot(p.x - orig.position.x, p.y - orig.position.y) < 60) return
+                 let hit = null, bestD = Infinity
                  for (const n of nodes) {
                    if (n.type !== 'exp' || n.id === rf.id) continue
-                   const dx = (n.position.x - p.x), dy = (n.position.y - p.y)
+                   const dx = Math.abs(n.position.x - p.x), dy = Math.abs(n.position.y - p.y)
+                   if (dx >= NODE_W || dy >= NODE_H) continue   // must actually overlap the card
                    const dd = Math.hypot(dx, dy)
-                   if (dd < 90 && dd < bestD) { bestD = dd; hit = n.data?.node?.id }
+                   if (dd < bestD) { bestD = dd; hit = n.data?.node?.id }
                  }
                  if (hit != null) onNodeAction('merge', { from, to: hit })
                }}

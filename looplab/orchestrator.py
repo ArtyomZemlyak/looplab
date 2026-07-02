@@ -297,7 +297,11 @@ class Engine:
         self.proxy_scorer = proxy_scorer
         self.proxy_kill_fraction = proxy_kill_fraction
         self.reward_hack_detect = reward_hack_detect
-        self.trust_gate = trust_gate if trust_gate in ("audit", "gate", "block") else "audit"
+        if trust_gate not in ("audit", "gate", "block"):
+            # A security control must fail LOUDLY: silently coercing a typo ("Gate") to "audit"
+            # would run with no enforcement while the caller believes the gate is on.
+            raise ValueError(f"trust_gate must be 'audit', 'gate' or 'block', got {trust_gate!r}")
+        self.trust_gate = trust_gate
         self._code_leakage_detect = code_leakage_detect
         self._critic_check = critic_check
         self._redact_output = redact_output
@@ -1264,6 +1268,8 @@ class Engine:
                     o = orjson.loads(line)
                 except Exception:  # noqa: BLE001
                     continue
+                if not isinstance(o, dict):       # valid JSON but not an object (corrupt line)
+                    continue
                 if o.get("task_id") == self.task.id and o.get("note"):
                     notes.append(str(o["note"]))
         if notes:
@@ -1272,30 +1278,39 @@ class Engine:
         lpath = base / "lessons.jsonl"
         if lpath.exists():
             from .memory import fingerprint_similarity
-            fp = self._task_fingerprint(self._empty_state_for_fp())
-            scored: list[tuple[float, dict]] = []
-            for line in lpath.read_text(encoding="utf-8").splitlines():
+            # Compare WITHOUT param: tokens: the writer stamps the winner's param names, but at
+            # read time no winner exists yet, so those tokens only dilute the Jaccard overlap.
+            fp = [t for t in self._task_fingerprint(self._empty_state_for_fp())
+                  if not t.startswith("param:")]
+            scored: list[tuple[float, int, dict]] = []
+            for idx, line in enumerate(lpath.read_text(encoding="utf-8").splitlines()):
                 try:
                     o = orjson.loads(line)
                 except Exception:  # noqa: BLE001
                     continue
-                if not o.get("statement"):
+                if not isinstance(o, dict) or not o.get("statement"):
                     continue
+                stored_fp = o.get("fingerprint")
+                stored_fp = ([t for t in stored_fp if not str(t).startswith("param:")]
+                             if isinstance(stored_fp, list) else [])
                 exact = o.get("task_id") == self.task.id
-                sim = 1.0 if exact else fingerprint_similarity(fp, o.get("fingerprint", []))
+                sim = 1.0 if exact else fingerprint_similarity(fp, stored_fp)
                 if sim >= 0.34:                    # a related task (Jaccard) or the same one
-                    scored.append((sim, o))
-            scored.sort(key=lambda t: -t[0])
+                    scored.append((sim, idx, o))
+            # Tie-break by recency (line index): newer lessons win at equal similarity, so a
+            # long-lived store doesn't pin the 5 oldest exact-task lessons forever.
+            scored.sort(key=lambda t: (-t[0], -t[1]))
             seen: set[str] = set()
             picked: list[str] = []
-            for _, o in scored:
+            for _, _, o in scored:
                 key = (o.get("statement", "")[:80], o.get("outcome"))
                 if key in seen:
                     continue
                 seen.add(key)
                 d = o.get("delta")
                 dtxt = f" Δ{d:+.3g}" if isinstance(d, (int, float)) else ""
-                picked.append(f"{o['statement']} [{o.get('outcome', '?')}{dtxt}]")
+                stmt = " ".join(str(o["statement"]).split())[:200]   # cap + collapse newlines:
+                picked.append(f"{stmt} [{o.get('outcome', '?')}{dtxt}]")   # store is shared/free-text
                 if len(picked) >= 5:
                     break
             if picked:
@@ -1326,24 +1341,29 @@ class Engine:
         if not (self._reflection_priors and self.memory_dir):
             return
         best = final.best()
-        if best is None:
-            return
-        note = (f"best metric {best.metric:.4g} via op '{best.operator}' params {best.idea.params}; "
-                f"{len(final.nodes)} nodes, {len(final.evaluated_nodes())} evaluated")
         base = Path(self.memory_dir)
         base.mkdir(parents=True, exist_ok=True)
-        with open(base / "meta_notes.jsonl", "a", encoding="utf-8") as f:
-            f.write(orjson.dumps({"task_id": final.task_id, "note": note}).decode() + "\n")
+        # The winner note needs a winner — but hypothesis/failure lessons below do NOT: a run in
+        # which every node failed is exactly the negative lesson M3 exists to record.
+        if best is not None:
+            note = (f"best metric {best.metric:.4g} via op '{best.operator}' params "
+                    f"{best.idea.params}; "
+                    f"{len(final.nodes)} nodes, {len(final.evaluated_nodes())} evaluated")
+            with open(base / "meta_notes.jsonl", "a", encoding="utf-8") as f:
+                f.write(orjson.dumps({"task_id": final.task_id, "note": note}).decode() + "\n")
 
         # M3 · lessons (incl. failures) with an M2 fingerprint. Memory of what DIDN'T work is as
         # valuable as what did (DS-Agent / MARS / ML-Master): it stops a later run re-treading a dead
         # end. Sources: the winner, each resolved hypothesis (the P1 ledger gives negative results for
         # free), and the dominant failure reason.
         fp = self._task_fingerprint(final, best)
-        lessons: list[dict] = [{
-            "task_id": final.task_id, "fingerprint": fp, "kind": getattr(self.task, "kind", ""),
-            "statement": f"op '{best.operator}' with params {best.idea.params} reached {best.metric:.4g}",
-            "outcome": "supported", "delta": None, "confidence": 0.7}]
+        lessons: list[dict] = []
+        if best is not None:
+            lessons.append({
+                "task_id": final.task_id, "fingerprint": fp, "kind": getattr(self.task, "kind", ""),
+                "statement": (f"op '{best.operator}' with params {best.idea.params} "
+                              f"reached {best.metric:.4g}"),
+                "outcome": "supported", "delta": None, "confidence": 0.7})
         for h in (final.hypotheses or {}).values():
             if h.status in ("supported", "tested", "abandoned"):
                 lessons.append({
@@ -1362,9 +1382,27 @@ class Engine:
                 "task_id": final.task_id, "fingerprint": fp, "kind": getattr(self.task, "kind", ""),
                 "statement": f"{reasons[top]} node(s) failed with reason '{top}'",
                 "outcome": "failed", "delta": None, "confidence": 0.4})
-        with open(base / "lessons.jsonl", "a", encoding="utf-8") as f:
-            for lz in lessons:
-                f.write(orjson.dumps(lz).decode() + "\n")
+        if lessons:
+            # One write call: concurrent engine processes append to the same shared store, and a
+            # single small O_APPEND write doesn't interleave mid-line the way per-line buffered
+            # writes flushed at 8 KB boundaries can.
+            payload = "".join(orjson.dumps(lz).decode() + "\n" for lz in lessons)
+            with open(base / "lessons.jsonl", "a", encoding="utf-8") as f:
+                f.write(payload)
+            self._compact_lessons(base / "lessons.jsonl")
+
+    @staticmethod
+    def _compact_lessons(path: Path, max_lines: int = 4000, keep: int = 2000) -> None:
+        """Bound the shared lessons store: it is re-read and scored at every run start, and grows by
+        a few lines per finished run forever. Past `max_lines`, keep the most recent `keep` (recency
+        also wins ties at retrieval, so the dropped prefix is the least useful part)."""
+        try:
+            lines = path.read_text(encoding="utf-8").splitlines()
+            if len(lines) > max_lines:
+                from .atomicio import atomic_write_text
+                atomic_write_text(path, "\n".join(lines[-keep:]) + "\n")
+        except Exception:  # noqa: BLE001 — compaction is best-effort; never fail the run for it
+            pass
 
     def _apply_novelty_gate(self, state: RunState, idea: Idea) -> Idea:
         """E1: if a fresh proposal's numeric params are within `novelty_epsilon` (normalized L2) of an

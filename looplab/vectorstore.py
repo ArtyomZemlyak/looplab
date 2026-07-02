@@ -8,6 +8,7 @@ tests; production embeddings go through LiteLLM (`ollama/nomic-embed-text`).
 from __future__ import annotations
 
 import hashlib
+import http.client
 import json
 import urllib.error
 import urllib.request
@@ -80,17 +81,23 @@ class LLMEmbedder:
             )
             with urllib.request.urlopen(req, timeout=self.timeout) as resp:
                 body = json.loads(resp.read().decode("utf-8", "replace"))
-        except (urllib.error.URLError, TimeoutError, OSError, ValueError, json.JSONDecodeError):
+        except (urllib.error.URLError, TimeoutError, OSError, ValueError,
+                json.JSONDecodeError, http.client.HTTPException):
+            # HTTPException covers IncompleteRead/BadStatusLine — a server dying mid-response
+            # must degrade to the hash fallback, not crash role construction.
             return None
         data = body.get("data") if isinstance(body, dict) else None
         if not isinstance(data, list) or len(data) != len(texts):
             return None
         vecs: list[Vector] = []
-        for row in data:
-            emb = row.get("embedding") if isinstance(row, dict) else None
-            if not isinstance(emb, list) or not emb:
-                return None
-            vecs.append([float(x) for x in emb])
+        try:
+            for row in data:
+                emb = row.get("embedding") if isinstance(row, dict) else None
+                if not isinstance(emb, list) or not emb:
+                    return None
+                vecs.append([float(x) for x in emb])
+        except (TypeError, ValueError):    # non-numeric entries in a malformed body
+            return None
         return vecs
 
     def _fallback(self, texts: list[str]) -> list[Vector]:

@@ -154,12 +154,30 @@ _NATIVE_PARAM_RE = re.compile(r'parameter\s+name="([^"]+)"[^>]*?>(.*?)</[^>]*?pa
 _NATIVE_OPEN_RE = re.compile(r'<[^>]*?(?:DSML|tool_calls|\binvoke\b)')
 
 
+_CODE_SPAN_RE = re.compile(r"```.*?(?:```|$)|`[^`\n]*`", re.DOTALL)
+
+
+def _code_spans(text: str) -> list[tuple[int, int]]:
+    """Spans of fenced blocks and inline code — markup QUOTED there is the model talking about
+    tool calls (docs, examples, explaining this very file), never a leaked call to recover."""
+    return [m.span() for m in _CODE_SPAN_RE.finditer(text)]
+
+
 def _extract_native_tool_calls(content: str):
-    """(tool_calls | None, cleaned_content). Parse a leaked native tool-call block out of `content`."""
+    """(tool_calls | None, cleaned_content). Parse a leaked native tool-call block out of `content`.
+    Deliberately conservative: only tag-anchored markup OUTSIDE code spans counts — recovering a
+    merely-quoted example would truncate the reply and, worse, execute text as a real tool call."""
     if not content or "invoke name=" not in content:
         return None, content
+    spans = _code_spans(content)
+
+    def _quoted(pos: int) -> bool:
+        return any(a <= pos < b for a, b in spans)
+
     calls = []
-    for i, m in enumerate(_NATIVE_INVOKE_RE.finditer(content)):
+    for m in _NATIVE_INVOKE_RE.finditer(content):
+        if _quoted(m.start()):
+            continue
         name, body = m.group(1), m.group(2)
         params = {p.group(1): p.group(2).strip() for p in _NATIVE_PARAM_RE.finditer(body)}
         args = params.get("arguments")
@@ -170,12 +188,14 @@ def _extract_native_tool_calls(content: str):
                 json.loads(args)                 # already valid JSON string -> keep as-is
             except (ValueError, TypeError):
                 args = json.dumps(params or {})   # fall back to the param map
-        calls.append({"id": f"call_{i}", "type": "function",
+        calls.append({"id": f"call_{len(calls)}", "type": "function",
                       "function": {"name": name, "arguments": args}})
     if not calls:
         return None, content
-    m0 = _NATIVE_OPEN_RE.search(content)
-    clean = (content[:m0.start()] if m0 else content).strip()
+    m0 = next((m for m in _NATIVE_OPEN_RE.finditer(content) if not _quoted(m.start())), None)
+    if m0 is None:                # invoke text without any tag-anchored opener — quoted, not leaked
+        return None, content
+    clean = content[:m0.start()].strip()
     return calls, clean
 
 
@@ -601,7 +621,15 @@ class OpenAICompatibleClient:
                                 model_parameters=self._model_params()) as gen:
             body = self._post(payload)
             msg = body["choices"][0]["message"]
-            _apply_native_tool_calls(msg)   # recover a leaked native tool-call block (glm/DeepSeek)
+            # Recover a leaked native tool-call block (glm/DeepSeek) — but ALWAYS as a tool call
+            # here, never folded into content: this endpoint forces a tool named "emit", which is
+            # in _FINAL_NAMES, so _apply_native_tool_calls would discard the recovered args and
+            # force the expensive text-parse fallback for the exact case recovery was built for.
+            if not msg.get("tool_calls"):
+                _calls, _clean = _extract_native_tool_calls(msg.get("content") or "")
+                if _calls:
+                    msg["tool_calls"] = _calls
+                    msg["content"] = _clean
             calls = msg.get("tool_calls")
             if not calls:  # endpoint ignored tool_choice -> let parse.py fall back to text
                 gen.usage(body.get("usage")).error("no tool_calls in response")

@@ -325,8 +325,21 @@ def run_turn(client, run_root, messages: list, instruction: str, mode: str = DEF
     trace_ok = (not steps) or any(m.get("role") == "tool" for m in convo)
     if reply_sink is not None and trace_ok:
         try:
-            base = convo[:-1] if (convo and convo[-1].get("role") == "assistant"
-                                  and convo[-1].get("tool_calls")) else convo
+            # Strip UNANSWERED tool calls anywhere in the trace, not just a trailing message:
+            # when the model paired a retrieval call with final_answer, the loop executed the
+            # retrieval but returned on final_answer, leaving its tool_call_id dangling — strict
+            # OpenAI-compatible endpoints 400 on that and the turn silently loses streaming.
+            answered = {m.get("tool_call_id") for m in convo if m.get("role") == "tool"}
+            base = []
+            for m in convo:
+                if m.get("role") == "assistant" and m.get("tool_calls"):
+                    kept = [c for c in m["tool_calls"] if c.get("id") in answered]
+                    if not kept and not (m.get("content") or "").strip():
+                        continue
+                    if len(kept) != len(m["tool_calls"]):
+                        m = {**m, "tool_calls": kept} if kept else \
+                            {k: v for k, v in m.items() if k != "tool_calls"}
+                base.append(m)
             stream_msgs = base + [{"role": "user", "content": "Now write your final answer to the "
                                    "user in Markdown, based on everything above. Be concise."}]
             streamed = []

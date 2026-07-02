@@ -1001,7 +1001,24 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
             raise HTTPException(422, f"invalid settings — {fields}")
         except Exception as e:               # noqa: BLE001 - any other coercion error
             raise HTTPException(422, f"invalid settings: {e}")
+        # A profile switch would silently no-op on resume: the snapshot already carries every field
+        # of the OLD profile's expansion as explicit values, so `_apply_profile` in the resumed
+        # engine would skip the new bundle entirely. Refuse rather than pretend.
+        if "profile" in changed:
+            raise HTTPException(422, "profile can't be changed per-run after launch — the snapshot "
+                                     "already contains the expanded profile; set the individual "
+                                     "fields (trust_gate, confirm_top_k, …) instead")
         atomic_write_text(snap, json.dumps(updated, indent=2))
+        # trust_gate is enforced by the FOLD (which reads it from the event log, not the snapshot),
+        # so a snapshot edit alone would leave the Trust panel claiming an enforcement that never
+        # engages. Record the change as an event: every fold — live UI, resume, reset — applies it.
+        if "trust_gate" in changed:
+            try:
+                EventStore(rd / "events.jsonl").append(
+                    "trust_gate_changed", {"trust_gate": updated["trust_gate"],
+                                           "source": "config_edit"})
+            except Exception as e:  # noqa: BLE001
+                raise HTTPException(500, f"snapshot updated but trust_gate event append failed: {e}")
         return {"ok": True, "config": updated, "changed": sorted(changed),
                 "engine_running": _engine_alive(rd)}
 
@@ -1194,6 +1211,16 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
         # Everything reaches the engine as LOOPLAB_* env on the spawned process, so ANY Settings
         # field is configurable from the UI without growing the CLI surface (Settings() reads env).
         settings = {**_load_ui_settings(), **(body.get("settings") or {})}
+        # Drop fields that equal what the chosen profile resolves to anyway: the launch dialog
+        # echoes back EVERY resolved field, and passing them all as explicit LOOPLAB_* env would
+        # defeat `_apply_profile`'s "explicit key wins" check in the child — selecting a profile
+        # in the dialog would be a complete no-op.
+        try:
+            prof_defaults = Settings(profile=settings.get("profile") or "default").model_dump()
+            settings = {k: v for k, v in settings.items()
+                        if k == "profile" or prof_defaults.get(k, object()) != v}
+        except Exception:  # noqa: BLE001 — an invalid profile fails later, in Settings validation
+            pass
         env = _settings_env(settings)
         _spawn_engine(["run", str(task_file), "--out", str(rd)], env=env, run_dir=rd)
         return {"ok": True, "run_id": run_id}
@@ -1366,12 +1393,25 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
         body = await request.json()
         incoming = body.get("settings", body) or {}
         # Keep only known, non-secret fields whose value differs from the engine default — the file
-        # stays a small, readable diff rather than a full mirror of every Settings field.
-        base = Settings().model_dump()
+        # stays a small, readable diff rather than a full mirror of every Settings field. Diff
+        # against the PROFILE-expanded defaults: the form echoes the expanded snapshot back, and
+        # diffing against bare defaults would persist every profile value as an explicit override
+        # (a one-way ratchet the profile selector could never undo) while dropping an explicit
+        # knob that happens to equal the bare default (breaking "explicit knob wins").
+        try:
+            base = Settings(profile=incoming.get("profile") or "default").model_dump()
+        except Exception:  # noqa: BLE001 — unknown profile: fall back to bare defaults
+            base = Settings().model_dump()
+        # Fields the form merely ECHOES from the previous resolved snapshot are not user edits:
+        # when the profile changes, those echoes must fall away with the old profile, not stick.
+        prev = _resolved_settings()
         overrides = {}
         for k, v in incoming.items():
-            if k in _ALLOWED_FIELDS and k not in _SECRET_FIELDS and v is not None and base.get(k) != v:
-                overrides[k] = v
+            if k not in _ALLOWED_FIELDS or k in _SECRET_FIELDS or v is None or base.get(k) == v:
+                continue
+            if k != "profile" and prev.get(k) == v and incoming.get("profile") != prev.get("profile"):
+                continue                       # unchanged echo of the old profile's expansion
+            overrides[k] = v
         atomic_write_text(_ui_settings_path, json.dumps(overrides, indent=2))   # unique temp + safe fsync
         return {"ok": True, "settings": _resolved_settings(), "overrides": overrides}
 

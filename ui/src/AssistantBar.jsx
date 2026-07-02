@@ -51,12 +51,15 @@ function parseDirect(t) {
 const firstLine = (s) => (s || '').replace(/[#*`>_-]/g, '').split('\n').map(l => l.trim()).find(Boolean) || ''
 
 // U5 · cheap pre-router: catch a few natural-language control phrases WITHOUT paying for an LLM
-// round-trip. Only fires on an unambiguous lone phrase; anything with extra prose falls to the model.
+// round-trip. Fires ONLY when the phrase names the run ("stop the run", "pause run") — a bare
+// "stop" or "continue" is everyday chat directed at the assistant, and silently firing an
+// irreversible run_abort (or resuming a paused run) on it is far worse than one LLM round-trip.
 const _NL_CONTROL = { stop: 'abort', abort: 'abort', halt: 'abort', pause: 'pause',
   resume: 'resume', continue: 'resume', unpause: 'resume' }
 function preRoute(t) {
-  const norm = t.toLowerCase().replace(/^(please\s+|can you\s+)/, '').replace(/\b(the\s+)?run\b/g, '')
-    .replace(/[.!]+$/, '').trim()
+  const cleaned = t.toLowerCase().replace(/^(please\s+|can you\s+)/, '').replace(/[.!]+$/, '').trim()
+  if (!/\brun\b/.test(cleaned)) return null
+  const norm = cleaned.replace(/\b(the\s+|this\s+|current\s+)?run\b/g, '').trim()
   const name = _NL_CONTROL[norm]
   return name && DIRECT[name] ? { name, spec: DIRECT[name], arg: null } : null
 }
@@ -152,14 +155,20 @@ export default function AssistantBar({ runId, hidden = false }) {
   const toggleSide = () => (view === 'side' ? collapseToBar() : openSide())
 
   // ── resizable side panel (drag its left edge) ──
+  const resizeCleanupRef = useRef(null)
   const startResize = (e) => {
     e.preventDefault()
     const x0 = e.clientX, w0 = sideW
     const onMove = (ev) => setSideW(Math.min(Math.max(w0 - (ev.clientX - x0), 320), window.innerWidth - 120))
-    const onUp = () => { window.removeEventListener('mousemove', onMove); window.removeEventListener('mouseup', onUp); document.body.style.cursor = '' }
+    const cleanup = () => {
+      window.removeEventListener('mousemove', onMove); window.removeEventListener('mouseup', cleanup)
+      document.body.style.cursor = ''; resizeCleanupRef.current = null
+    }
+    resizeCleanupRef.current = cleanup   // unmount mid-drag must also detach the window listeners
     document.body.style.cursor = 'col-resize'
-    window.addEventListener('mousemove', onMove); window.addEventListener('mouseup', onUp)
+    window.addEventListener('mousemove', onMove); window.addEventListener('mouseup', cleanup)
   }
+  useEffect(() => () => resizeCleanupRef.current?.(), [])
 
   // ── sessions (full view) ──
   const openSession = async (id, { recover = false } = {}) => {
@@ -177,7 +186,9 @@ export default function AssistantBar({ runId, hidden = false }) {
       // (e.g. the tab was reloaded before it finished). Poll until the reply lands so it's never lost.
       if (recover && arr.length && arr[arr.length - 1].role === 'user') {
         setBusy(true)
-        recoverReply(id, arr.length).finally(() => { if (mountedRef.current) setBusy(false) })
+        // Wait for a message BEYOND what we just fetched — with priorLen = arr.length the very
+        // first poll trivially "succeeds" off any earlier assistant reply and drops the recovery.
+        recoverReply(id, arr.length + 1).finally(() => { if (mountedRef.current) setBusy(false) })
       }
     } catch (e) { flash(e.message) }
   }
@@ -351,7 +362,14 @@ export default function AssistantBar({ runId, hidden = false }) {
         .filter((c, i, a) => a.findIndex(x => x.name === c.name) === i).slice(0, 6)
     : []
 
-  const onKey = (e) => { if (e.key === 'Enter' && !e.shiftKey && suggestions.length === 0) { e.preventDefault(); send() } }
+  const onKey = (e) => {
+    if (e.key !== 'Enter' || e.shiftKey) return
+    // Only the bar view renders the suggestion popup, so only it may hold Enter back — and an
+    // exact command ("/stop") must send even there, not be swallowed by its own suggestion.
+    const exact = slashMatch && suggestions.some(c => c.name === slashMatch[1].toLowerCase())
+    if (view === 'bar' && suggestions.length > 0 && !exact) return
+    e.preventDefault(); send()
+  }
 
   if (hidden) return null
 

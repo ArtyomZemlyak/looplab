@@ -29,6 +29,12 @@ def fold(events: Iterable[Event]) -> RunState:
             st.workspace = d.get("workspace")
             _tg = str(d.get("trust_gate", "audit")).strip().lower()
             st.trust_gate = _tg if _tg in ("audit", "gate", "block") else "audit"
+        elif t == "trust_gate_changed":
+            # Operator edited the run's trust gate after launch (server config edit). Last write
+            # wins so the change engages in every fold — live view, resume, reset — immediately.
+            _tg = str(d.get("trust_gate", "")).strip().lower()
+            if _tg in ("audit", "gate", "block"):
+                st.trust_gate = _tg
         elif t == "node_created":
             # Defensive like the per-trial / unknown-node tolerance below: a malformed or incomplete
             # node_created (missing key, non-coercible idea param in a hand-edited / bring-your-own-script
@@ -179,11 +185,23 @@ def fold(events: Iterable[Event]) -> RunState:
             # direction) — may have no evidence yet. Evidence + verdict are DERIVED post-loop.
             if d.get("statement"):
                 st.hypotheses_added.append(d)
+                # Re-adding an abandoned statement reopens it (last write wins).
+                try:
+                    hid = str(d.get("id") or hypothesis_id(str(d["statement"])))
+                    if hid in st.hypotheses_abandoned:
+                        st.hypotheses_abandoned.remove(hid)
+                except Exception:
+                    pass
         elif t == "hypothesis_updated":
-            # Currently only carries an `abandoned` override (human/agent drops a line of inquiry).
+            # Carries a status override (human/agent drops — or reopens — a line of inquiry).
+            # Last write wins: "abandoned" adds the override, any other status clears it.
             hid = d.get("id")
-            if d.get("status") == "abandoned" and hid and hid not in st.hypotheses_abandoned:
-                st.hypotheses_abandoned.append(hid)
+            if hid:
+                if d.get("status") == "abandoned":
+                    if hid not in st.hypotheses_abandoned:
+                        st.hypotheses_abandoned.append(hid)
+                elif hid in st.hypotheses_abandoned:
+                    st.hypotheses_abandoned.remove(hid)
         elif t == "proxy_scored":
             # A6 proxy/predictive scoring (audit-only): early-signal rank + which nodes were skipped.
             nid = d.get("node_id")
@@ -290,7 +308,10 @@ def fold(events: Iterable[Event]) -> RunState:
     # high-precision cheating/leakage signals — the heuristic `critic:` signal stays advisory in
     # every mode. Order-independent: computed from the folded `reward_hacks` after the full pass.
     def _has_hard_signal(rh: dict) -> bool:
-        return any(not str(s.get("signal", "")).startswith("critic:")
+        # `critic:` AND `perfect_metric` stay advisory: perfect_metric flags metric<=0 (min) /
+        # >=1 (max), which legitimately-perfect scores (accuracy 1.0, an achievable 0.0 floor,
+        # negative-valued objectives) hit — gating on it can exclude every honest winner.
+        return any(not str(s.get("signal", "")).startswith(("critic:", "perfect_metric"))
                    for s in (rh.get("signals") or []))
     flagged = ({r.get("node_id") for r in st.reward_hacks if _has_hard_signal(r)}
                if st.trust_gate in ("gate", "block") else set())
@@ -348,15 +369,25 @@ def _derive_hypotheses(st: RunState) -> None:
     hyps: dict[str, Hypothesis] = {}
 
     # 1) explicitly-added hypotheses (human / deep-research) — may start with no evidence.
+    # Coerce defensively: control events arrive from the API verbatim, and one malformed entry
+    # must not brick every subsequent fold of the run (same convention as node_created).
     for d in st.hypotheses_added:
-        stmt = str(d.get("statement", "")).strip()
-        if not stmt:
-            continue
-        hid = d.get("id") or hypothesis_id(stmt)
-        if hid not in hyps:
-            hyps[hid] = Hypothesis(id=hid, statement=stmt, source=d.get("source", "human"),
+        try:
+            stmt = str(d.get("statement", "")).strip()
+            if not stmt:
+                continue
+            hid = str(d.get("id") or hypothesis_id(stmt))
+            if hid in hyps:
+                continue
+            try:
+                at_node = int(d.get("at_node", 0) or 0)
+            except (TypeError, ValueError):
+                at_node = 0
+            hyps[hid] = Hypothesis(id=hid, statement=stmt, source=str(d.get("source") or "human"),
                                    rationale=str(d.get("rationale", ""))[:400],
-                                   created_at_node=int(d.get("at_node", 0) or 0))
+                                   created_at_node=at_node)
+        except Exception:
+            continue
 
     # 2) derive/merge from nodes that state a hypothesis (evidence = the node).
     for nid in sorted(st.nodes):
@@ -401,8 +432,10 @@ def _derive_hypotheses(st: RunState) -> None:
             h.status = "open"
         elif supported:
             h.status = "supported"                 # at least one experiment improved — verdict stands
-        elif pending or not evaluated:
+        elif pending:
             h.status = "testing"                   # still inconclusive: evidence running
+        elif not evaluated:
+            h.status = "open"                      # all evidence failed/infeasible — no verdict
         else:
             h.status = "tested"                    # all evidence evaluated, none improved
 

@@ -165,6 +165,18 @@ def _state_brief(state: RunState, parent: Optional[Node]) -> str:
     # not just `best` + `parent`. Depth (full experiments, code, data) lives behind the run tools.
     from .digest import experiments_digest
     lines.append(experiments_digest(state))
+    # P1: surface OPEN board hypotheses (human "+ Add" / deep-research directions) verbatim.
+    # Without this the Researcher never sees them, and evidence only links when an experiment's
+    # `hypothesis` matches the statement exactly — so board cards would stay "open" forever.
+    open_hyps = [h for h in (state.hypotheses or {}).values()
+                 if h.status == "open" and h.evidence == []]
+    if open_hyps:
+        lines.append("Untested hypotheses on the board (registered by the operator or deep "
+                     "research — none has evidence yet):")
+        lines.extend(f'- "{" ".join(h.statement.split())[:200]}"' for h in open_hyps[:5])
+        lines.append("If your next experiment tests one of these, copy its statement EXACTLY "
+                     "(verbatim, unchanged wording) into `hypothesis` so the evidence links to "
+                     "the board card.")
     return "\n".join(l for l in lines if l)
 
 

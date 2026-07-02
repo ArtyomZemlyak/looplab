@@ -67,11 +67,14 @@ export default function RunView({ runId, onBack }) {
     }
     const onUp = () => {
       window.removeEventListener('mousemove', onMove); window.removeEventListener('mouseup', onUp)
-      document.body.style.userSelect = ''
+      document.body.style.userSelect = ''; dragCleanupRef.current = null
     }
+    dragCleanupRef.current = onUp   // unmount mid-drag must also detach the window listeners
     window.addEventListener('mousemove', onMove); window.addEventListener('mouseup', onUp)
     document.body.style.userSelect = 'none'
   }
+  const dragCleanupRef = useRef(null)
+  useEffect(() => () => dragCleanupRef.current?.(), [])
   const [toast, setToast] = useState(null)
   const [cfg, setCfg] = useState(null)
   useEffect(() => { get(`/api/runs/${runId}/config`).then(setCfg).catch(() => {}) }, [runId])
@@ -299,7 +302,7 @@ export default function RunView({ runId, onBack }) {
       {panel === 'hypotheses' && <HypothesisBoard state={state} runId={runId} onSelect={selectNode} onToast={showToast} onClose={() => setPanel(null)} />}
       {panel === 'sensitivity' && <SensitivityPanel state={state} onSelect={selectNode} onClose={() => setPanel(null)} />}
       {panel === 'importance' && <HyperImportancePanel state={state} onClose={() => setPanel(null)} />}
-      {panel === 'failures' && <FailuresPanel state={state} onSelect={setSelectedId} onClose={() => setPanel(null)} />}
+      {panel === 'failures' && <FailuresPanel state={state} onSelect={selectNode} onClose={() => setPanel(null)} />}
       {panel === 'pareto' && <ParetoPanel state={state} onSelect={selectNode} onClose={() => setPanel(null)} />}
       {panel === 'data' && <DataQualityPanel state={state} onClose={() => setPanel(null)} />}
       {panel === 'compare' && <ComparePanel state={state} runId={runId} initialPair={comparePair}
