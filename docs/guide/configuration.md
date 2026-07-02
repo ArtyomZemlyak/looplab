@@ -51,6 +51,28 @@ file's `settings:` **>** env/`.env` **>** defaults.
 
 ---
 
+## Profile (one-word preset)
+
+| Setting | Env | Default | Description |
+|---|---|---|---|
+| `profile` | `LOOPLAB_PROFILE` | `default` | `default`/`fast` = lean defaults; `thorough` = turn the built quality/trust machinery on |
+
+`profile` is a **named bundle of setting defaults**. The engine ships every intelligence feature
+*off* so a toy `looplab run` stays cheap and deterministic; `profile: thorough` turns the
+built-and-tested machinery on in one word — multi-seed confirmation (`confirm_top_k=3`,
+`confirm_seeds=3`), the novelty gate, the reward-hack / leakage / critic monitors **plus**
+`trust_gate=gate` (a flagged win can no longer be selected as best), ablation-driven refinement
+(`ablate_every=3`), and the proposal cues (`complexity_cue`, `budget_aware`, `failure_reflection`).
+
+A profile is **config-first**: it only fills fields you did *not* set yourself, so any explicit
+knob — in the file, on the CLI (`--set`), or via `LOOPLAB_*` — always wins. It deliberately touches
+only quality/trust knobs, never spend (`max_nodes`/`max_parallel` stay yours).
+
+```bash
+looplab run examples/dataset_task.json --set profile=thorough      # everything trustworthy, on
+looplab run examples/dataset_task.json -s profile=thorough -s confirm_top_k=5   # profile, but k=5
+```
+
 ## Search budget & loop shape
 
 | Setting | Env | Default | Description |
@@ -181,9 +203,10 @@ default grants resource/search-shape knobs to the agents and keeps infra (`llm_*
 | `trust_mode` | `LOOPLAB_TRUST_MODE` | `trusted_local` | Sandbox tier: `trusted_local` (subprocess) or `untrusted` (Docker `--network none`) |
 | `docker_image` | `LOOPLAB_DOCKER_IMAGE` | `python:3.12-slim` | Image for the untrusted command-eval tier |
 | `redact_output` | `LOOPLAB_REDACT_OUTPUT` | `false` | Mask credentials in stdout/stderr before persisting (recommend on for untrusted) |
-| `reward_hack_detect` | `LOOPLAB_REWARD_HACK_DETECT` | `false` | Flag suspicious wins (grader access, frozen-file writes); audit-only |
-| `code_leakage_detect` | `LOOPLAB_CODE_LEAKAGE_DETECT` | `false` | Static code-leakage scan (fit-before-split, fit-on-test); audit-only |
-| `critic_check` | `LOOPLAB_CRITIC_CHECK` | `false` | Execution-free critic of each solution; audit-only |
+| `reward_hack_detect` | `LOOPLAB_REWARD_HACK_DETECT` | `false` | Flag suspicious wins (grader access, frozen-file writes) |
+| `code_leakage_detect` | `LOOPLAB_CODE_LEAKAGE_DETECT` | `false` | Static code-leakage scan (fit-before-split, fit-on-test) |
+| `critic_check` | `LOOPLAB_CRITIC_CHECK` | `false` | Execution-free critic of each solution (always advisory) |
+| `trust_gate` | `LOOPLAB_TRUST_GATE` | `audit` | What a reward-hack / leakage flag does to selection: `audit` (surface only) · `gate` (a flagged node can't be selected best) · `block` (also mark it infeasible so the policy won't breed from it). Critic stays advisory in every mode |
 | `eval_trust_mode` | `LOOPLAB_EVAL_TRUST_MODE` | `ratify_freeze` | Trust policy for an agent-authored eval spec (onboarding): `ratify_freeze` / `autonomous` / `ratify_freeze_drift` |
 | `require_approval` | `LOOPLAB_REQUIRE_APPROVAL` | `false` | HITL: pause for `approve` before finishing |
 

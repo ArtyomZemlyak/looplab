@@ -210,7 +210,8 @@ class Engine:
         ablate_code_blocks: bool = False,  # A0a: ablate pipeline code blocks, not just params
         proxy_scorer=None,          # A6: Optional[ProxyScorer] early-signal candidate gate
         proxy_kill_fraction: float = 0.0,
-        reward_hack_detect: bool = False,   # B5: flag suspicious wins (audit-only)
+        reward_hack_detect: bool = False,   # B5: flag suspicious wins
+        trust_gate: str = "audit",          # T2: audit|gate|block — what a hack/leak flag does to selection
         code_leakage_detect: bool = False,  # I3: static code-leakage scan per node
         critic_check: bool = False,         # C4: execution-free critic per node
         redact_output: bool = False,        # B3: redact secrets from persisted output tails
@@ -288,6 +289,7 @@ class Engine:
         self.proxy_scorer = proxy_scorer
         self.proxy_kill_fraction = proxy_kill_fraction
         self.reward_hack_detect = reward_hack_detect
+        self.trust_gate = trust_gate if trust_gate in ("audit", "gate", "block") else "audit"
         self._code_leakage_detect = code_leakage_detect
         self._critic_check = critic_check
         self._redact_output = redact_output
@@ -466,6 +468,10 @@ class Engine:
                         "direction": self.task.direction,
                         "config_hash": cfg_hash,
                         "workspace": wf,
+                        # T2 trust enforcement: recorded here so the pure fold applies the same
+                        # gate on replay/resume (config isn't available to `replay.fold`). Absent in
+                        # old logs -> "audit" -> byte-identical legacy selection.
+                        "trust_gate": self.trust_gate,
                     },
                 )
                 # AGENTS.md (I18): task/contract context for coding-agent backends. Runtime line is

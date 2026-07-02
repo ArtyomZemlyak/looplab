@@ -1303,12 +1303,20 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
     def _resolved_settings(s: Optional["Settings"] = None) -> dict:
         """Engine defaults (Settings(): defaults+env) overlaid with the saved UI overrides — i.e.
         exactly what a new run gets if the launch dialog changes nothing. Secret masked. Pass an
-        already-built Settings to avoid constructing one (and re-reading .env from disk) a 2nd time."""
-        base = (s or Settings()).masked_snapshot()
-        base.update(_load_ui_settings())
-        # Keep llm_api_key but ONLY as the mask masked_snapshot already applied ("***" when set, else
-        # None) — the UI needs the set/unset state to render the secret field; the value never leaks.
-        return base
+        already-built Settings to avoid constructing one (and re-reading .env from disk) a 2nd time.
+
+        Built by RE-RESOLVING `Settings(**overrides)` (not a shallow overlay) so a `profile` override
+        is EXPANDED into its bundle here too — the UI then shows the real values `thorough` turns on,
+        matching what the spawned run computes. Falls back to the shallow overlay if that ever raises."""
+        overrides = _load_ui_settings()
+        try:
+            return Settings(**overrides).masked_snapshot()
+        except Exception:
+            base = (s or Settings()).masked_snapshot()
+            base.update(overrides)
+            # Keep llm_api_key but ONLY as the mask masked_snapshot already applied ("***" when set,
+            # else None) — the UI needs the set/unset state to render the secret field; value never leaks.
+            return base
 
     def _settings_env(settings: dict) -> dict:
         """Render UI settings into LOOPLAB_* env strings pydantic-settings can parse back."""

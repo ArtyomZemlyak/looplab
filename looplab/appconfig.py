@@ -255,6 +255,7 @@ def render_template(kind: str = "dataset") -> str:
     task_block = _task_block(kind)
     # Curated common knobs shown live with a one-line comment each.
     common = [
+        ("profile", "default", "preset: default/fast (lean) | thorough (confirm+trust-gate+cues on)"),
         ("backend", "toy", "toy = offline optimizer (no LLM); llm = drive a real model"),
         ("max_nodes", "8", "candidate budget — how many ideas the loop tries"),
         ("max_seconds", "null", "wall-clock ceiling in seconds (null = no limit)"),

@@ -10,6 +10,8 @@ export const SETTINGS_GROUPS = [
   {
     title: 'Search & policy', sub: 'how the loop explores the solution tree',
     fields: [
+      { key: 'profile', label: 'Profile', type: 'enum', options: ['default', 'fast', 'thorough'],
+        help: 'Preset bundle. default/fast = lean defaults; thorough = turn on multi-seed confirmation, the novelty gate, the reward-hack/leakage/critic monitors AND gate them (trust_gate=gate), ablation refinement and the prompt cues — in one word. A profile only fills fields you have not set yourself; any explicit knob here still wins.' },
       { key: 'policy', label: 'Policy', type: 'enum', options: ['greedy', 'evolutionary', 'mcts', 'asha', 'bohb'],
         agents: ['strategist'],
         help: 'Search strategy: greedy, evolutionary, MCTS, ASHA (multi-fidelity racing), or BOHB (ASHA racing × surrogate proposal).' },
@@ -196,6 +198,8 @@ export const SETTINGS_GROUPS = [
         help: 'I3: static scan of each solution for train→test leakage (fit-before-split, fit-on-test); surfaced in the Trust panel.' },
       { key: 'critic_check', label: 'Independent critic', type: 'bool',
         help: 'C4: execution-free critic of each solution (stub / hardcoded-metric / params-ignored); surfaced in the Trust panel.' },
+      { key: 'trust_gate', label: 'Trust enforcement', type: 'enum', options: ['audit', 'gate', 'block'],
+        help: 'T2: what a reward-hack / data-leakage flag DOES to selection. audit = surface only (default); gate = a flagged node can no longer be selected as best (still repairable); block = also mark it infeasible so the policy won’t breed from it. The heuristic critic signal always stays advisory.' },
     ],
   },
   {

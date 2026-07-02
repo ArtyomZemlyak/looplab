@@ -4,13 +4,46 @@ reproducibility. (No real secrets in P0, but the masking discipline is in place.
 """
 from __future__ import annotations
 
-from pydantic import Field, SecretStr
+from pydantic import Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # Autonomous roles that may be granted per-setting write access (see Settings.agent_control).
 # strategist = A7 meta-controller (run-wide); boss = run-chat operator-proxy (run-wide);
 # researcher = per-experiment proposer (per-node sizing, e.g. eval timeout for a heavy model).
 AGENT_ROLES = ("strategist", "boss", "researcher")
+
+# --- Run profiles (config-first presets) -------------------------------------------------------
+# A `profile` is a NAMED BUNDLE of setting defaults — nothing more. It only fills fields the user
+# did NOT set explicitly (via file / --set / LOOPLAB_* env / init-kwargs), so any explicit knob
+# always wins (see `_apply_profile`). The whole intelligence of the engine already exists behind
+# individual flags but ships OFF so a toy `looplab run` stays cheap and deterministic; `thorough`
+# turns the built-and-tested machinery ON in one word for real tasks. Every value here is reachable
+# by hand — the profile is a convenience, never a hidden mode.
+#
+# `thorough` deliberately touches only QUALITY/TRUST machinery, not spend: it does NOT raise
+# max_nodes / max_parallel (those are cost knobs the user owns). It enables multi-seed confirmation
+# (demote seed-lucky leaders), the novelty gate (stop re-evaluating duplicates), the reward-hack /
+# leakage / critic monitors AND flips them from advisory to *gating* (`trust_gate="gate"` — a
+# flagged win can no longer be selected as best), ablation-driven refinement, and the prompt cues
+# (complexity / budget / failure-reflection). Effect is large; marginal cost is a few extra evals.
+PROFILES: dict[str, dict] = {
+    "default": {},   # explicit no-op alias for "ship-as-is" (== omitting profile)
+    "fast":    {},   # today's lean defaults, named for symmetry with `thorough`
+    "thorough": {
+        "confirm_top_k": 3,
+        "confirm_seeds": 3,
+        "novelty_gate": True,
+        "reward_hack_detect": True,
+        "code_leakage_detect": True,
+        "critic_check": True,
+        "trust_gate": "gate",          # detectors stop gating a flagged node from WINNING (not just audit)
+        "ablate_every": 3,
+        "complexity_cue": True,
+        "budget_aware": True,
+        "failure_reflection": True,
+        "reflection_priors": True,     # no-op unless memory_dir is set (cross-run priors)
+    },
+}
 
 
 class Settings(BaseSettings):
@@ -26,6 +59,11 @@ class Settings(BaseSettings):
         env_file_encoding="utf-8-sig",
         extra="ignore",
     )
+
+    # Run profile (config-first preset, see PROFILES above). "default"/"fast" = today's lean
+    # defaults; "thorough" turns the built quality/trust machinery ON in one word. A profile only
+    # fills fields the user did NOT set — every knob it touches stays individually overridable.
+    profile: str = "default"
 
     # Lower bounds (review C/⚪): `max_parallel=0` silently stalls the loop; a non-positive
     # node/seed budget or timeout is never valid. Reject at config time, not mid-run.
@@ -167,8 +205,18 @@ class Settings(BaseSettings):
     redact_output: bool = False
     # B5 reward-hacking detector: a host-side monitor that flags suspicious wins (grader/answer-key
     # access, runtime writes to frozen files, suspiciously-perfect metrics) as a `reward_hack_suspected`
-    # audit event in the Trust panel. Never changes selection. Off by default.
+    # audit event in the Trust panel. Off by default. Whether a flag CHANGES selection is governed by
+    # `trust_gate` below (default: audit-only, never changes selection).
     reward_hack_detect: bool = False
+    # Trust enforcement (T2): what a reward-hack / data-leakage flag actually DOES to selection.
+    #   "audit" (default) = surface it in the Trust panel, never change selection (today's behavior);
+    #   "gate"  = a flagged node can no longer be selected as BEST (it stays in the tree; the search
+    #             may still repair/improve it into a clean version) — closes the "a hacked/leaky node
+    #             can win" hole;
+    #   "block" = additionally mark it infeasible so the policy won't breed from it either.
+    # Deliberately gates only high-precision CHEATING/LEAKAGE signals; the heuristic `critic` signal
+    # stays advisory (audit) in every mode — the field is a per-node quality hint, not proof of a hack.
+    trust_gate: str = "audit"
     # I3 data-centric: static code-leakage scan of each evaluated solution (fit-before-split,
     # fit-on-test) surfaced into the Trust panel alongside reward-hack flags. Off by default.
     code_leakage_detect: bool = False
@@ -356,6 +404,37 @@ class Settings(BaseSettings):
     # API key as a reference, never serialized as a value (ADR-11). Local servers
     # ignore it; default to a placeholder.
     llm_api_key: SecretStr | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _apply_profile(cls, data):
+        """Expand `profile` into a bundle of setting defaults BEFORE validation.
+
+        pydantic-settings hands this validator the fully-merged input from ALL explicit sources
+        (init kwargs + LOOPLAB_* env + .env), with fields the user left unset simply ABSENT (they
+        fall to field defaults afterward). So a profile value is applied only when its key is not
+        already present — i.e. any explicit file/CLI/env setting wins over the profile, and the
+        profile wins over the bare field default. This makes `thorough` a true convenience preset,
+        never an override of what the user asked for."""
+        if not isinstance(data, dict):
+            return data
+        prof = data.get("profile", "default")
+        # env may deliver the key as "profile" (env_prefix stripped) — normalize to a str
+        prof = str(prof).strip().lower() if prof is not None else "default"
+        overrides = PROFILES.get(prof)
+        if overrides is None:
+            raise ValueError(f"unknown profile {prof!r}; known: {sorted(PROFILES)}")
+        for key, val in overrides.items():
+            if key not in data:          # explicit source (file/CLI/env) always wins
+                data[key] = val
+        return data
+
+    @model_validator(mode="after")
+    def _check_trust_gate(self):
+        if self.trust_gate not in ("audit", "gate", "block"):
+            raise ValueError(
+                f"trust_gate must be audit|gate|block, got {self.trust_gate!r}")
+        return self
 
     def masked_snapshot(self) -> dict:
         d = self.model_dump()

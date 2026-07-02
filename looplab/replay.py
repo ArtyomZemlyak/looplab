@@ -26,6 +26,8 @@ def fold(events: Iterable[Event]) -> RunState:
             st.direction = _dir if _dir in ("min", "max") else "min"
             st.config_hash = d.get("config_hash", "")
             st.workspace = d.get("workspace")
+            _tg = str(d.get("trust_gate", "audit")).strip().lower()
+            st.trust_gate = _tg if _tg in ("audit", "gate", "block") else "audit"
         elif t == "node_created":
             # Defensive like the per-trial / unknown-node tolerance below: a malformed or incomplete
             # node_created (missing key, non-coercible idea param in a hand-edited / bring-your-own-script
@@ -272,6 +274,23 @@ def fold(events: Iterable[Event]) -> RunState:
                 st.champion = d.get("node_id")
         # unknown event types (e.g. "budget") are ignored for state — forward-compat
 
+    # T2 trust enforcement: under "gate"/"block", a node flagged for a reward-hack or data-leakage
+    # signal must not be selectable as best (closes "a hacked/leaky node can win"). Gate ONLY on the
+    # high-precision cheating/leakage signals — the heuristic `critic:` signal stays advisory in
+    # every mode. Order-independent: computed from the folded `reward_hacks` after the full pass.
+    def _has_hard_signal(rh: dict) -> bool:
+        return any(not str(s.get("signal", "")).startswith("critic:")
+                   for s in (rh.get("signals") or []))
+    flagged = ({r.get("node_id") for r in st.reward_hacks if _has_hard_signal(r)}
+               if st.trust_gate in ("gate", "block") else set())
+    # "block" additionally bars the policy from breeding a flagged node forward (feasible=False also
+    # removes it from `feasible_nodes()` used by the search policies), not just from winning.
+    if st.trust_gate == "block":
+        for nid in flagged:
+            nb = st.nodes.get(nid)
+            if nb is not None:
+                nb.feasible = False
+
     # Multi-objective (#5): a constraint-violating node is excluded from selection — it keeps
     # its metric for the audit trail but can never be chosen best. If NOTHING is feasible,
     # there is no valid best (best_node_id stays None).
@@ -279,7 +298,8 @@ def fold(events: Iterable[Event]) -> RunState:
     # metric=null yet fold to status=evaluated, and comparing None vs a float in the chooser below
     # would raise TypeError and brick every re-fold/resume. Such a node simply can't be "best".
     evaluated = [n for n in st.evaluated_nodes()
-                 if n.feasible and (n.confirmed_mean if n.confirmed_mean is not None else n.metric) is not None]
+                 if n.feasible and n.id not in flagged
+                 and (n.confirmed_mean if n.confirmed_mean is not None else n.metric) is not None]
     if evaluated:
         # If any node has been confirmed (multi-seed), the final answer must be the
         # robust winner: rank confirmed nodes by confirmed_mean. With no confirmations
@@ -298,6 +318,7 @@ def fold(events: Iterable[Event]) -> RunState:
     # past the feasibility gate (#5): a constraint-violating node must not become best even if
     # the confirm phase ran on it (the mean-based pick above already excluded infeasibles).
     if (best_confirmed is not None and best_confirmed in st.nodes
-            and st.nodes[best_confirmed].feasible):
+            and st.nodes[best_confirmed].feasible
+            and best_confirmed not in flagged):
         st.best_node_id = best_confirmed
     return st

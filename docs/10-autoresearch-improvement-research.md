@@ -50,22 +50,31 @@ amplified by this.
 
 ## 2. Technical improvements (engine)
 
-### T1 · A "research-grade" preset — fix the defaults problem *(quick win, highest leverage-per-effort)*
-One config preset (`profile: thorough` vs `fast`) that turns on what already exists:
+### T1 · A "research-grade" preset — fix the defaults problem *(quick win, highest leverage-per-effort)* — ✅ SHIPPED
+One config preset (`profile: thorough` vs `default`/`fast`) that turns on what already exists:
 novelty gate, confirm top-k (k=3, 3 seeds), reward-hack + leakage gates *in enforcing mode*,
-ablation cadence, complexity cue, budget cue, Strategist=rule (zero-dep). Genesis and the UI
-StartRun should default to `thorough` for real tasks and `fast` for toys. Rationale: the marginal
-cost is config only; the machinery is built and tested. This single change moves the median run
-more than any new feature.
+ablation cadence, complexity cue, budget cue, failure reflection, reflection priors. Rationale: the
+marginal cost is config only; the machinery is built and tested. This single change moves the median
+run more than any new feature.
+- **Implemented** (`config.py`): `PROFILES` map + a `profile` field + a `model_validator(mode="before")`
+  that expands the profile *config-first* — it fills only fields the user did not set, so any explicit
+  file/CLI/`LOOPLAB_*` knob wins. Surfaced in the CLI (`-s profile=thorough`), YAML, the UI Settings
+  form (`ui/src/settingsSchema.js`), and the guide. Deliberately touches only quality/trust knobs,
+  not spend (`max_nodes`/`max_parallel` stay the user's). Regression-tested in
+  `tests/test_profile_trust_gate.py`.
 
-### T2 · Advisory → enforcing trust ladder
-Detectors exist (reward-hack, leakage, critic, drift) but a flagged node can still be promoted to
-champion. Add one knob `trust_mode: audit|gate|block`:
-- `gate` = flagged node is excluded from best-selection (`replay.py:281` ranking filter) unless a
-  human `/promote`s it;
-- `block` = flagged node is marked infeasible.
-This reuses the existing feasibility gate (`models.py:263`) — small change, closes the "a hacked
-node can win" hole.
+### T2 · Advisory → enforcing trust ladder — ✅ SHIPPED
+Detectors exist (reward-hack, leakage, critic, drift) but a flagged node could still be promoted to
+champion. New knob `trust_gate: audit|gate|block`:
+- `audit` (default) = surface only, never change selection (legacy behavior);
+- `gate` = a flagged node is excluded from best-selection but stays in the tree (the search may still
+  repair/improve it into a clean version);
+- `block` = additionally mark it infeasible so the policy won't breed from it either.
+- **Implemented** replay-safe: the mode is recorded in the `run_started` event (`orchestrator.py`) so
+  the pure `fold` (`replay.py`) applies the same gate on replay/resume — old logs (no field) fold to
+  `audit`, byte-identical. Gates **only** high-precision cheating/leakage signals; the heuristic
+  `critic:` signal stays advisory in every mode. Order-independent (computed from folded
+  `reward_hacks`). `thorough` sets `trust_gate=gate`. Regression-tested in `tests/test_profile_trust_gate.py`.
 
 ### T3 · Un-park B6: held-out split + generalization-gap guard
 Still the #1 verified unsolved failure mode (val–test gap 15–16.6%, arXiv:2507.02554 §5.3), and

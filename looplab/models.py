@@ -155,6 +155,9 @@ class RunState(BaseModel):
     goal: str = ""
     direction: str = "min"  # "min" | "max"
     config_hash: str = ""
+    # T2 trust enforcement (folded from run_started; "audit" for old logs). "gate"/"block" make
+    # best-selection exclude nodes flagged for a reward-hack / data-leakage signal (not critic).
+    trust_gate: str = "audit"
     nodes: dict[int, Node] = Field(default_factory=dict)
     best_node_id: Optional[int] = None
     finished: bool = False
