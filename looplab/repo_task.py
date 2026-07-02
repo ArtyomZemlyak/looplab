@@ -213,10 +213,19 @@ class RepoWriteTools:
                 self.deleted.remove(p)
             return f"wrote {p} ({len(content)} bytes)"
         if name == "delete_file":
-            if p:
-                self.files.pop(p, None)
-                if p not in self.deleted:
-                    self.deleted.append(p)
+            if not p:
+                return ("(refused: path must be REPO-RELATIVE and inside the repo — no absolute paths, "
+                        "no `..`.)")
+            # SAME gates as write_file: a deletion must not remove a protected file (the operator's
+            # eval/metric/grader) or reach outside the editable surface. Without these, delete_file
+            # was a hole around the write-surface enforcement.
+            if p in self._protected:
+                return f"(refused: {p} is protected — the operator owns the eval; you may not delete it)"
+            if not _in_surface(p, self._surface, self._prefixes):
+                return f"(refused: {p} is outside your editable surface: {', '.join(self._surface)})"
+            self.files.pop(p, None)
+            if p not in self.deleted:
+                self.deleted.append(p)
             return f"deleted {p}"
         return f"(unknown tool: {name})"
 
@@ -418,8 +427,11 @@ class LLMRepoDeveloper:
     def _run(self, idea: Idea, error: Optional[str] = None) -> str:
         from .agent import drive_tool_loop
         write = RepoWriteTools(self._surface, self._protected, self._prefixes)
-        if error and self.last_files:           # repair: carry prior files so the agent amends them
-            write.files = dict(self.last_files)
+        if error and (self.last_files or self.last_deleted):   # repair: carry prior state so the
+            write.files = dict(self.last_files)                # agent amends it — and so the node's
+            write.deleted = list(self.last_deleted)            # recorded deletions aren't lost on
+            #   a re-materialization (multi-seed confirm / replay / cross-run import), which would
+            #   otherwise resurrect a file the search deleted and measure a different workspace.
         params = ", ".join(f"{k}={v}" for k, v in (idea.params or {}).items()) or "(choose sensible values)"
         from .hardware import operational_attention_points
         system = (

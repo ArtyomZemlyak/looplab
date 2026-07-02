@@ -252,6 +252,11 @@ class LLMDeveloper:
         user = ("The script below failed. Return a corrected, complete script that runs "
                 "and prints the required JSON metric line.\n\n--- SCRIPT ---\n" + code +
                 "\n\n--- ERROR (stderr tail) ---\n" + error)
+        # Include the idea rationale — the ValidatingDeveloper folds the validator's rejection feedback
+        # into it on each retry, so without this the retry re-sends a byte-identical prompt and
+        # deterministically re-fails, burning every attempt.
+        if idea is not None and getattr(idea, "rationale", ""):
+            user += "\n\n--- ADDITIONAL GUIDANCE ---\n" + idea.rationale
         return extract_code(self.client.complete_text(
             [{"role": "system", "content": system}, {"role": "user", "content": user}]))
 

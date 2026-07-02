@@ -80,13 +80,19 @@ def read_metric(stdout: str, workdir: str, spec: dict, wrap=None) -> Optional[fl
         preds_path = Path(workdir) / spec.get("predictions", "predictions.json")
         labels_path = Path(spec["labels"]).resolve()   # operator-declared host path (trusted)
         # Enforce the invariant the docstring asserts: the answer key must live OUTSIDE the
-        # candidate's workspace. Under the untrusted/hostile tier the whole workdir root is
-        # bind-mounted into the container, so a labels path inside it would be readable AND
-        # writable by the candidate — defeating held-out grading. Fail loud on misconfig.
-        if _is_within(labels_path, Path(workdir).resolve()):
+        # candidate's workspace. Under the untrusted/hostile tier the whole MOUNT ROOT (the run root)
+        # is bind-mounted into the container — not just the eval cwd — so a labels path anywhere under
+        # the mount root is readable AND writable by the candidate, defeating held-out grading. Guard
+        # against the mounted root when a docker wrap is active (it's a strict superset of the cwd);
+        # fall back to the cwd otherwise. Fail loud on misconfig.
+        guard_root = Path(workdir).resolve()
+        mount_root = getattr(wrap, "_mount_root", None) if wrap is not None else None
+        if mount_root:
+            guard_root = Path(mount_root).resolve()
+        if _is_within(labels_path, guard_root):
             raise ValueError(
                 f"host_score labels path {labels_path} is inside the candidate workspace "
-                f"{Path(workdir).resolve()} — it would be mounted/writable by the candidate. "
+                f"{guard_root} — it would be mounted/writable by the candidate. "
                 "Place the held-out labels outside the eval workspace.")
         if not preds_path.is_file() or not labels_path.is_file():
             return None
@@ -272,6 +278,7 @@ def make_docker_wrap(mount_root: str, image: str, network: str = "none",
         return base + [image] + list(argv)
 
     wrap._docker = True   # marks a real container wrap -> run_command_eval adds in-container timeout
+    wrap._mount_root = str(root)   # host_score guards the held-out labels against the MOUNTED root
     return wrap
 
 

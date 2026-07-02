@@ -264,12 +264,15 @@ class CliAgentDeveloper:
         return self._run(msg, _SEED)
 
     def repair(self, idea: Idea, code: str, error: str) -> str:
+        # Fold in the idea rationale — the ValidatingDeveloper appends the validator's rejection
+        # feedback to it per retry; without it a validation-retry re-sends an identical prompt.
+        extra = ("\n" + idea.rationale) if (idea is not None and getattr(idea, "rationale", "")) else ""
         if self.seed_dirs:                       # RepoTask: fix the repo edits in place
             return self._run(
-                f"The eval failed with:\n{error}\nEdit the repository files to fix it.", "")
+                f"The eval failed with:\n{error}\nEdit the repository files to fix it.{extra}", "")
         return self._run(
             f"Rewrite solution.py completely (overwrite the whole file) to fix this "
-            f"error:\n{error}\nReturn a corrected, complete script.", code)
+            f"error:\n{error}\nReturn a corrected, complete script.{extra}", code)
 
 
 def _read_if(p: Path) -> str:

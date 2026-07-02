@@ -11,6 +11,7 @@ from __future__ import annotations
 import ipaddress
 import re
 import socket
+import urllib.error
 import urllib.parse
 import urllib.request
 
@@ -32,6 +33,18 @@ def _ssrf_blocked(url: str) -> str | None:
     except (socket.gaierror, ValueError):
         return None
     return None
+
+class _SSRFRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Re-run the SSRF check on every redirect target: urlopen follows redirects without re-checking,
+    so a public URL could 302 into 169.254.169.254 / an internal host and exfiltrate it otherwise."""
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        blocked = _ssrf_blocked(newurl)
+        if blocked:
+            raise urllib.error.HTTPError(newurl, code, f"SSRF-blocked redirect: {blocked}", headers, fp)
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+_SSRF_OPENER = urllib.request.build_opener(_SSRFRedirectHandler)
 
 from .knowledge_tools import _fn_spec
 
@@ -99,7 +112,7 @@ class WebTools:
 
     def _get(self, url: str, data: bytes | None = None) -> str:
         req = urllib.request.Request(url, data=data, headers={"User-Agent": _UA})
-        with urllib.request.urlopen(req, timeout=self.timeout) as r:
+        with _SSRF_OPENER.open(req, timeout=self.timeout) as r:   # re-checks SSRF on each redirect hop
             return r.read().decode("utf-8", errors="replace")
 
     def _search(self, query: str) -> str:

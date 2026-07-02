@@ -262,7 +262,13 @@ def make_roles(task: TaskAdapter, settings, run_dir=None):
     # entrypoint) within the surface, via the shared tool loop — so a repo task runs on JUST the
     # in-house LLM. An external coding-agent preset (below) still takes precedence when requested.
     from .cli_agent import PRESETS
+    # A cli_overrides hyperparameter-search RepoTask (`params` set) is a NO-code-edit mode: the
+    # experiment varies via CLI overrides, not edits, so the baseline (NoOp) developer is correct.
+    # Compute the guard BEFORE either developer branch so the in-house editor isn't wired for a
+    # param-search run (which would inject agent-authored code into every eval and perturb the metric).
+    _param_search = bool(getattr(task, "params", None)) and callable(getattr(task, "repo_spec", None))
     if (settings.developer_backend not in PRESETS
+            and not _param_search
             and callable(getattr(task, "repo_spec", None))
             and task.repo_spec().get("editables")):
         from .repo_task import LLMRepoDeveloper
@@ -272,15 +278,8 @@ def make_roles(task: TaskAdapter, settings, run_dir=None):
 
     # External coding-agent Developer (ADR-7): an external CLI agent writes/repairs the
     # solution code, reusing the task's brief. Tool-agnostic via cli_agent presets.
-    # A cli_overrides hyperparameter-search RepoTask (`params` set) is a NO-code-edit mode:
-    # the experiment varies via CLI overrides, not edits, so the baseline (NoOp) developer
-    # from build_roles/llm_roles is correct — do NOT wire the editing agent even if a
-    # developer_backend preset was requested (that would conflate tuning with code edits).
-    # A cli_overrides hyperparameter-search RepoTask (`params` set) is a NO-code-edit mode:
-    # the experiment varies via CLI overrides, not edits, so the baseline (NoOp) developer
-    # from build_roles/llm_roles is correct — do NOT wire the editing agent even if a
-    # developer_backend preset was requested (that would conflate tuning with code edits).
-    _param_search = bool(getattr(task, "params", None)) and callable(getattr(task, "repo_spec", None))
+    # An external coding-agent preset also stays off for a param-search run (see _param_search above):
+    # do NOT wire the editing agent even if a developer_backend preset was requested.
     if settings.developer_backend in PRESETS and not _param_search:
         from .cli_agent import CliAgentDeveloper, opencode_config
         agent_model = _agent_model(settings.developer_backend, settings.llm_model)
