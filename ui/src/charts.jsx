@@ -25,14 +25,26 @@ function ChartLegend({ items }) {
 // soft area fill under it.
 export function Trajectory({ nodes, direction, width = 760, height = 220, steps = null, onPick = null }) {
   const evald = nodes.filter(n => (n.metric ?? null) !== null).sort((a, b) => a.id - b.id)
+  const [logY, setLogY] = React.useState(false)   // interactivity: log-scale toggle (e.g. loss curves)
+  const [hoverId, setHoverId] = React.useState(null)   // interactivity: crosshair + tooltip on hover
   if (!evald.length) return <Empty>no evaluated nodes yet</Empty>
   const xs = evald.map(n => n.id)
   const ys = evald.map(n => n.confirmed_mean ?? n.metric)
   const minY = Math.min(...ys), maxY = Math.max(...ys)
+  const canLog = minY > 0                           // log scale only when every value is positive
+  const useLog = logY && canLog
+  const tf = (v) => useLog ? Math.log10(v) : v      // value transform for the axis
+  const tMin = tf(minY), tMax = tf(maxY)
   const pad = 34, w = width, h = height
   const x0 = Math.min(...xs), x1 = Math.max(...xs)
   const X = (id) => pad + (id - x0) / Math.max(1, x1 - x0) * (w - pad - 10)
-  const Y = (v) => h - pad - (v - minY) / Math.max(1e-9, maxY - minY) * (h - pad - 12)
+  const Y = (v) => h - pad - (tf(v) - tMin) / Math.max(1e-9, tMax - tMin) * (h - pad - 12)
+  const nearest = (px) => {   // map a pixel x to the nearest evaluated node (for the hover crosshair)
+    let best = null, bd = 1e9
+    for (const n of evald) { const d = Math.abs(X(n.id) - px); if (d < bd) { bd = d; best = n } }
+    return best
+  }
+  const hn = hoverId != null ? evald.find(n => n.id === hoverId) : null
   // running best — exclude infeasible (constraint-violating) nodes, mirroring engine selection
   // (replay.fold ranks only feasible nodes), so the line never claims a best the engine rejected.
   let best = null; const bestPts = []
@@ -49,7 +61,14 @@ export function Trajectory({ nodes, direction, width = 760, height = 220, steps 
   const opsPresent = [...new Set(evald.map(n => n.operator).filter(Boolean))]
   return (
     <div className="chart">
-    <svg width="100%" viewBox={`0 0 ${w} ${h}`} className={pick ? 'pickable' : ''}>
+    <div className="chart-tools">
+      {canLog && <button className={'btn xs ghost' + (logY ? ' primary' : '')} onClick={() => setLogY(v => !v)}
+        title="toggle a logarithmic Y axis">log Y</button>}
+    </div>
+    <svg width="100%" viewBox={`0 0 ${w} ${h}`} className={pick ? 'pickable' : ''}
+         onMouseMove={(e) => { const r = e.currentTarget.getBoundingClientRect()
+           const px = (e.clientX - r.left) / r.width * w; const n = nearest(px); setHoverId(n ? n.id : null) }}
+         onMouseLeave={() => setHoverId(null)}>
       <defs><linearGradient id="ll-traj-fill" x1="0" y1="0" x2="0" y2="1">
         <stop offset="0%" stopColor="#2ecc71" stopOpacity=".20" /><stop offset="100%" stopColor="#2ecc71" stopOpacity="0" />
       </linearGradient></defs>
@@ -77,7 +96,18 @@ export function Trajectory({ nodes, direction, width = 760, height = 220, steps 
           <title>#{s.id} {s.operator}{s.theme ? ` (${s.theme})` : ''} → {fmt(v)}{s.delta != null ? ` (Δ ${fmt(s.delta)})` : ' baseline'}</title>
         </g>
       })}
-      <text x={pad} y={12} fill={AX} fontSize="11">best so far: {fmt(best)}</text>
+      {hn && (() => {   // hover crosshair + tooltip tracking the nearest node
+        const v = hn.confirmed_mean ?? hn.metric, hx = X(hn.id), hy = Y(v)
+        const label = `#${hn.id} ${hn.operator} → ${fmt(v)}`
+        const tw = Math.max(64, label.length * 6.0), tx = Math.min(w - 10 - tw, Math.max(pad, hx - tw / 2))
+        return <g pointerEvents="none">
+          <line x1={hx} x2={hx} y1={pad / 2} y2={h - pad} stroke={AX} strokeDasharray="3 3" opacity=".6" />
+          <circle cx={hx} cy={hy} r="5" fill="none" stroke="#eaf2ff" strokeWidth="1.5" />
+          <rect x={tx} y={2} width={tw} height={16} rx="3" fill="#12151c" stroke={GRID} />
+          <text x={tx + tw / 2} y={13} fill="#eaf2ff" fontSize="10.5" textAnchor="middle">{label}</text>
+        </g>
+      })()}
+      <text x={pad} y={12} fill={AX} fontSize="11">best so far: {fmt(best)}{useLog ? ' · log Y' : ''}</text>
       <text x={pad} y={h - 8} fill={AX} fontSize="11">node id →</text>
     </svg>
     <ChartLegend items={opsPresent.map(o => ({ label: operatorMeta(o).label, color: opColor(o) }))} />
@@ -294,6 +324,7 @@ export function MetricLines({ series, cols = 2 }) {
 }
 
 function MiniLine({ label, pts, width = 340, height = 130 }) {
+  const [hi, setHi] = React.useState(null)   // hovered point index (tooltip + dot)
   const xs = pts.map(p => p.step), ys = pts.map(p => p.value)
   const minX = Math.min(...xs), maxX = Math.max(...xs)
   const minY = Math.min(...ys), maxY = Math.max(...ys)
@@ -302,14 +333,24 @@ function MiniLine({ label, pts, width = 340, height = 130 }) {
   const Y = v => h - pad - (v - minY) / Math.max(1e-9, maxY - minY) * (h - pad - 16)
   const d = pts.map((p, i) => (i ? 'L' : 'M') + X(p.step).toFixed(1) + ' ' + Y(p.value).toFixed(1)).join(' ')
   const last = ys[ys.length - 1]
+  const nearestIdx = (px) => {   // pixel x -> nearest point index (hover)
+    let bi = 0, bd = 1e9
+    pts.forEach((p, i) => { const dd = Math.abs(X(p.step) - px); if (dd < bd) { bd = dd; bi = i } })
+    return bi
+  }
+  const hp = hi != null ? pts[hi] : null
   return (
     <div style={{ border: `1px solid ${GRID}`, borderRadius: 6, padding: 6, background: '#0d1017' }}>
       <div className="muted" style={{ fontSize: 11, marginBottom: 2, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-        {label} · <span style={{ color: '#4aa3ff' }}>{fmt(last)}</span> <span style={{ opacity: .6 }}>({pts.length} pts)</span>
+        {label} · <span style={{ color: '#4aa3ff' }}>{hp ? `step ${hp.step}: ${fmt(hp.value)}` : fmt(last)}</span> <span style={{ opacity: .6 }}>({pts.length} pts)</span>
       </div>
-      <svg width="100%" viewBox={`0 0 ${w} ${h}`}>
+      <svg width="100%" viewBox={`0 0 ${w} ${h}`}
+           onMouseMove={(e) => { const r = e.currentTarget.getBoundingClientRect(); setHi(nearestIdx((e.clientX - r.left) / r.width * w)) }}
+           onMouseLeave={() => setHi(null)}>
         {[0, .5, 1].map((t, i) => { const y = pad / 2 + t * (h - pad - 16); return <line key={i} x1={pad} x2={w - 8} y1={y} y2={y} stroke={GRID} /> })}
         <path d={d} fill="none" stroke="#2ecc71" strokeWidth="1.6" />
+        {hp && <><line x1={X(hp.step)} x2={X(hp.step)} y1={pad / 2} y2={h - pad} stroke={AX} strokeDasharray="3 3" opacity=".6" />
+          <circle cx={X(hp.step)} cy={Y(hp.value)} r="3.5" fill="none" stroke="#eaf2ff" strokeWidth="1.4" /></>}
         <text x={2} y={pad / 2 + 4} fill={AX} fontSize="9">{fmt(maxY)}</text>
         <text x={2} y={h - pad + 4} fill={AX} fontSize="9">{fmt(minY)}</text>
         <text x={pad} y={h - 6} fill={AX} fontSize="9">step {minX}–{maxX}</text>

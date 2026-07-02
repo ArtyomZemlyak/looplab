@@ -444,6 +444,10 @@ button { font: inherit; }
 
 /* U5 command-bar #-context chips row (above the input). */
 .cmdbar-ctx { display: flex; align-items: center; gap: 4px; padding: 3px 4px 5px; flex-wrap: wrap; }
+
+/* chart interactivity: a small toolbar (log-scale toggle) above a chart. */
+.chart { position: relative; }
+.chart-tools { display: flex; justify-content: flex-end; gap: 6px; margin-bottom: 2px; min-height: 18px; }
 .hyp-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 3px; margin-top: 5px; }
 .hyp-empty { font-size: 11px; text-align: center; padding: 4px 0; }
 @media (max-width: 900px) { .hyp-board { grid-template-columns: 1fr 1fr; } }
