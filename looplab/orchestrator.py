@@ -1236,28 +1236,83 @@ class Engine:
             pass
 
     def _load_reflection_priors(self) -> str:
-        """E4: load prior-run meta-review notes for THIS task from the cross-run memory and format
-        them as a proposal-prompt prior (gradient-free meta-learning). Empty unless enabled + present."""
+        """E4 + M2/M3: build the cross-run prior injected into the proposal prompt. Two parts:
+        (1) exact-task "what won" notes (meta_notes.jsonl — unchanged E4 warm-start), and
+        (2) LESSONS retrieved by task-FINGERPRINT similarity (M2), so a *similar but new* task also
+        benefits — including NEGATIVE lessons (what was tested/abandoned/failed, M3) so the search
+        doesn't re-tread a known dead end. Empty unless enabled + present."""
         if not (self._reflection_priors and self.memory_dir):
             return ""
-        path = Path(self.memory_dir) / "meta_notes.jsonl"
-        if not path.exists():
-            return ""
+        base = Path(self.memory_dir)
+        out = ""
+        # (1) exact-task meta notes (E4)
         notes: list[str] = []
-        for line in path.read_text(encoding="utf-8").splitlines():
-            try:
-                o = orjson.loads(line)
-            except Exception:  # noqa: BLE001
-                continue
-            if o.get("task_id") == self.task.id and o.get("note"):
-                notes.append(str(o["note"]))
-        if not notes:
-            return ""
-        return "\nPrior-run insights for this task (meta-learned): " + " | ".join(notes[-3:])
+        npath = base / "meta_notes.jsonl"
+        if npath.exists():
+            for line in npath.read_text(encoding="utf-8").splitlines():
+                try:
+                    o = orjson.loads(line)
+                except Exception:  # noqa: BLE001
+                    continue
+                if o.get("task_id") == self.task.id and o.get("note"):
+                    notes.append(str(o["note"]))
+        if notes:
+            out += "\nPrior-run insights for this task (meta-learned): " + " | ".join(notes[-3:])
+        # (2) fingerprint-matched lessons (M2/M3), incl. negatives
+        lpath = base / "lessons.jsonl"
+        if lpath.exists():
+            from .memory import fingerprint_similarity
+            fp = self._task_fingerprint(self._empty_state_for_fp())
+            scored: list[tuple[float, dict]] = []
+            for line in lpath.read_text(encoding="utf-8").splitlines():
+                try:
+                    o = orjson.loads(line)
+                except Exception:  # noqa: BLE001
+                    continue
+                if not o.get("statement"):
+                    continue
+                exact = o.get("task_id") == self.task.id
+                sim = 1.0 if exact else fingerprint_similarity(fp, o.get("fingerprint", []))
+                if sim >= 0.34:                    # a related task (Jaccard) or the same one
+                    scored.append((sim, o))
+            scored.sort(key=lambda t: -t[0])
+            seen: set[str] = set()
+            picked: list[str] = []
+            for _, o in scored:
+                key = (o.get("statement", "")[:80], o.get("outcome"))
+                if key in seen:
+                    continue
+                seen.add(key)
+                d = o.get("delta")
+                dtxt = f" Δ{d:+.3g}" if isinstance(d, (int, float)) else ""
+                picked.append(f"{o['statement']} [{o.get('outcome', '?')}{dtxt}]")
+                if len(picked) >= 5:
+                    break
+            if picked:
+                out += "\nLessons from related runs (what did/didn't work): " + "; ".join(picked)
+        return out
+
+    def _empty_state_for_fp(self) -> RunState:
+        """Minimal RunState carrying just what `_task_fingerprint` reads at run START (before any
+        node), so the prior loader can fingerprint the current task the same way the writer will."""
+        return RunState(task_id=self.task.id, goal=getattr(self.task, "goal", ""),
+                        direction=getattr(self.task, "direction", "min"))
+
+    def _task_fingerprint(self, final: RunState, best=None) -> list[str]:
+        """M2: content fingerprint of this task so cross-run transfer reaches SIMILAR tasks, not only
+        the exact same task_id. Built from kind/direction/metric/goal keywords + the winner's params."""
+        from .memory import task_fingerprint
+        pnames = list((best.idea.params or {}).keys()) if best is not None and best.idea else []
+        return task_fingerprint(getattr(self.task, "kind", ""), final.direction,
+                                final.goal or getattr(self.task, "goal", ""),
+                                metric=str(getattr(self.task, "metric", "") or ""),
+                                param_names=pnames)
 
     def _write_reflection_note(self, final: RunState) -> None:
-        """E4: distill a one-line meta-review of this run (what won) into the cross-run memory, so the
-        NEXT run of this task warm-starts from it. Appends to <memory_dir>/meta_notes.jsonl."""
+        """E4 + M2/M3: distill this run's cross-run memory. Writes (1) the one-line "what won" note to
+        meta_notes.jsonl (E4, exact-task warm-start — unchanged), and (2) structured LESSONS to
+        lessons.jsonl (M3) — including NEGATIVE results (tested/abandoned hypotheses, failure themes),
+        each stamped with a task fingerprint (M2) so a later SIMILAR task can retrieve them."""
         if not (self._reflection_priors and self.memory_dir):
             return
         best = final.best()
@@ -1265,10 +1320,41 @@ class Engine:
             return
         note = (f"best metric {best.metric:.4g} via op '{best.operator}' params {best.idea.params}; "
                 f"{len(final.nodes)} nodes, {len(final.evaluated_nodes())} evaluated")
-        p = Path(self.memory_dir) / "meta_notes.jsonl"
-        p.parent.mkdir(parents=True, exist_ok=True)
-        with open(p, "a", encoding="utf-8") as f:
+        base = Path(self.memory_dir)
+        base.mkdir(parents=True, exist_ok=True)
+        with open(base / "meta_notes.jsonl", "a", encoding="utf-8") as f:
             f.write(orjson.dumps({"task_id": final.task_id, "note": note}).decode() + "\n")
+
+        # M3 · lessons (incl. failures) with an M2 fingerprint. Memory of what DIDN'T work is as
+        # valuable as what did (DS-Agent / MARS / ML-Master): it stops a later run re-treading a dead
+        # end. Sources: the winner, each resolved hypothesis (the P1 ledger gives negative results for
+        # free), and the dominant failure reason.
+        fp = self._task_fingerprint(final, best)
+        lessons: list[dict] = [{
+            "task_id": final.task_id, "fingerprint": fp, "kind": getattr(self.task, "kind", ""),
+            "statement": f"op '{best.operator}' with params {best.idea.params} reached {best.metric:.4g}",
+            "outcome": "supported", "delta": None, "confidence": 0.7}]
+        for h in (final.hypotheses or {}).values():
+            if h.status in ("supported", "tested", "abandoned"):
+                lessons.append({
+                    "task_id": final.task_id, "fingerprint": fp,
+                    "kind": getattr(self.task, "kind", ""), "statement": h.statement,
+                    "outcome": h.status, "delta": h.best_delta,
+                    "confidence": 0.7 if h.status == "supported" else 0.5})
+        # dominant failure theme (so a repeat run is warned off the same crash class)
+        reasons: dict[str, int] = {}
+        for n in final.nodes.values():
+            if n.status is NodeStatus.failed and n.error_reason:
+                reasons[n.error_reason] = reasons.get(n.error_reason, 0) + 1
+        if reasons:
+            top = max(reasons, key=reasons.get)
+            lessons.append({
+                "task_id": final.task_id, "fingerprint": fp, "kind": getattr(self.task, "kind", ""),
+                "statement": f"{reasons[top]} node(s) failed with reason '{top}'",
+                "outcome": "failed", "delta": None, "confidence": 0.4})
+        with open(base / "lessons.jsonl", "a", encoding="utf-8") as f:
+            for lz in lessons:
+                f.write(orjson.dumps(lz).decode() + "\n")
 
     def _apply_novelty_gate(self, state: RunState, idea: Idea) -> Idea:
         """E1: if a fresh proposal's numeric params are within `novelty_epsilon` (normalized L2) of an

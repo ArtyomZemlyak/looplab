@@ -203,20 +203,26 @@ shape: **draft/improve see sibling summaries** (push diversity — "your sibling
 A/B/C"), **debug sees the ancestral repair chain** (avoid undo↔redo oscillation). Verified lever;
 small change to `_state_brief`/digest assembly.
 
-### M2 · Task fingerprinting for cross-run transfer
-`meta_notes.jsonl` priors are keyed by exact `task_id` — a similar-but-new task gets nothing.
-Compute a task fingerprint `{kind, modality, n_rows/cols bucket, metric, direction, data-profile
-sketch}` and retrieve priors by fingerprint similarity (via T4 embeddings). This turns the case
-library from "resume my last run" into actual transfer learning across tasks.
+### M2 · Task fingerprinting for cross-run transfer — ✅ SHIPPED
+`meta_notes.jsonl` priors were keyed by exact `task_id` — a similar-but-new task got nothing.
+- **Implemented** (`memory.py`): `task_fingerprint(kind, direction, goal, metric, param_names)` →
+  a deterministic token set; `fingerprint_similarity` = Jaccard overlap. `_load_reflection_priors`
+  now fingerprints the current task and pulls lessons from runs whose fingerprint overlaps
+  (sim ≥ 0.34) — turning the case library from "resume my last run" into transfer across *similar*
+  tasks. (Deterministic token overlap, not embeddings — zero-dep and enough for the signal; can move
+  to T4 embeddings later.) Tested in `tests/test_lessons_fingerprint.py`.
 
-### M3 · Remember failures, not only winners
-`JsonlCaseLibrary` retains only the best case; `_write_reflection_note` distills only the winner.
-Memory/experience accumulation is the dominant 2026 theme among MLE-bench leaders: ML-Master 2.0's
-Hierarchical Cognitive Caching (execution traces → stable knowledge → cross-task wisdom) took it
-29.3%→56.4%; MARS's reflective lesson learning is ablation-critical. At run end, write 3–5
-structured lessons: `{context, action, outcome, lesson, confidence}` — including "X looked
-promising and failed because Y". Inject top-k by fingerprint similarity (M2) with the
-confidence/promotion gating ADR-10 already specifies (candidate → distilled → trusted).
+### M3 · Remember failures, not only winners — ✅ SHIPPED
+`_write_reflection_note` distilled only the winner. Memory/experience accumulation is the dominant
+2026 theme (ML-Master 2.0's Hierarchical Cognitive Caching 29.3%→56.4%; MARS's reflective lessons
+are ablation-critical) and remembering what DIDN'T work stops a later run re-treading a dead end.
+- **Implemented**: at run end (same `reflection_priors` gate, default off) the engine writes
+  structured lessons to `lessons.jsonl` — the winner **plus** every resolved P1 hypothesis
+  (`supported`/`tested`/`abandoned` — the ledger yields negative results for free) **plus** the
+  dominant failure reason — each `{task_id, fingerprint, statement, outcome, delta, confidence}`.
+  `_load_reflection_priors` injects the top-5 fingerprint-matched lessons (positive *and* negative)
+  into the proposal prompt. Ties Phase 3 → Phase 4: the hypothesis board is the lesson source.
+  Tested in `tests/test_lessons_fingerprint.py`.
 
 ### M4 · Auto-distilled skills (procedural memory that grows)
 `SkillLibrary` reads static hand-written SKILL.md files. After a run where a technique repeatedly

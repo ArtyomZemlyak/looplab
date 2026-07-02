@@ -6,11 +6,41 @@ top-system differentiator — solved tasks make later similar tasks easier.
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Callable, Optional
 
 from .atomicio import atomic_write_text
 from .vectorstore import Hit, Item, VectorStore, hash_embed
+
+_STOP = {"the", "a", "an", "to", "of", "and", "or", "for", "on", "in", "with", "from", "predict",
+         "using", "use", "data", "dataset", "model", "target", "column", "columns", "features",
+         "given", "this", "that", "is", "are", "by", "your", "my", "it", "as", "at", "be"}
+
+
+def task_fingerprint(kind: str, direction: str, goal: str, metric: str = "",
+                     param_names: Optional[list[str]] = None) -> list[str]:
+    """A cheap, deterministic content fingerprint of a task as a token SET (M2). Cross-run transfer
+    should reach a *similar* task, not only the exact same `task_id` — so we key priors/lessons on the
+    overlap of these tokens (Jaccard, `fingerprint_similarity`) instead of an exact id match. Tokens:
+    the kind/direction/metric (weighted by prefixing), plus salient goal keywords and param names."""
+    toks = {f"kind:{(kind or '').lower()}", f"dir:{(direction or '').lower()}"}
+    if metric:
+        toks.add(f"metric:{str(metric).lower()}")
+    for w in re.findall(r"[a-z0-9]+", (goal or "").lower()):
+        if len(w) > 2 and w not in _STOP:
+            toks.add(w)
+    for p in (param_names or []):
+        toks.add(f"param:{str(p).lower()}")
+    return sorted(toks)
+
+
+def fingerprint_similarity(a: list[str], b: list[str]) -> float:
+    """Jaccard overlap of two fingerprints in [0,1]. 1.0 = identical token sets."""
+    sa, sb = set(a or []), set(b or [])
+    if not sa or not sb:
+        return 0.0
+    return len(sa & sb) / len(sa | sb)
 
 
 class JsonlCaseLibrary:
