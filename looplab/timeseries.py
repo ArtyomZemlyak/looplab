@@ -10,8 +10,6 @@ tabular tasks; a real AutoGluon-TS/Darts backend is a drop-in replacement for th
 """
 from __future__ import annotations
 
-import json
-import math
 import random
 from typing import Optional
 

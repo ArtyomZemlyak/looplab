@@ -14,7 +14,6 @@ import anyio
 import orjson
 
 from .config import Settings
-from .replay import fold
 from .tasks import load_task
 
 

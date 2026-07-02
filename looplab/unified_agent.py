@@ -17,7 +17,6 @@ from the log, never re-invoked.
 """
 from __future__ import annotations
 
-import json
 from typing import Optional
 
 from .agent import drive_tool_loop

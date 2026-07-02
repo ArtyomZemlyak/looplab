@@ -20,7 +20,6 @@ to the model (possibly a REMOTE provider):
 """
 from __future__ import annotations
 
-from pathlib import Path
 
 from . import _pathsafe
 from .knowledge_tools import _fn_spec   # shared OpenAI function-schema builder (one schema shape)

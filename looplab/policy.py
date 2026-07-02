@@ -329,7 +329,6 @@ class ASHAPolicy:
         by_rung: dict[int, list[int]] = {}
         for nid in feasible:
             by_rung.setdefault(gen.get(nid, 0), []).append(nid)
-        best_of = max if state.direction == "max" else min
         for r in sorted(by_rung):
             members = by_rung[r]
             # successive-halving survivor count: keep the top ⌈n/η⌉ (round UP so a rung wider than η

@@ -21,7 +21,6 @@ be added to the candidate image, or the brief constrained to numpy+stdlib.
 from __future__ import annotations
 
 import csv as _csv
-import io
 from functools import lru_cache
 from pathlib import Path
 from typing import Optional
@@ -145,7 +144,6 @@ class MLEBenchRealTask(BaseModel):
         schema (column names + a couple rows) instead of guessing it. This is what stops the model
         confusing, e.g., spooky's single categorical `author` column with the submission's per-class
         probability columns. Long text fields are truncated to keep the prompt small."""
-        import csv as _csv
         pub = self._public_dir()
 
         def head(path: Path, rows: int) -> str:

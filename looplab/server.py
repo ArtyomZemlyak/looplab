@@ -1965,8 +1965,10 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
         try:
             client = make_llm_client(s)
         except Exception as e:  # noqa: BLE001 - offline -> stream a single error event
+            err_msg = str(e)
+
             async def _err_gen():
-                yield f"event: error\ndata: {json.dumps(str(e))}\n\n"
+                yield f"event: error\ndata: {json.dumps(err_msg)}\n\n"
             return StreamingResponse(_err_gen(), media_type="text/event-stream")
         approver = _make_approver(sid)
         with _perm_lock:

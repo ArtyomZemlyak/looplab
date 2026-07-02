@@ -17,7 +17,6 @@ import subprocess
 import tempfile
 import threading
 from pathlib import Path
-from typing import Optional
 
 from .sandbox import _SECRET_ENV
 

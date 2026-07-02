@@ -6,8 +6,6 @@ irreversible action) — the user can run it explicitly via run_command in auto 
 """
 from __future__ import annotations
 
-from pathlib import Path
-from typing import Optional
 
 from .knowledge_tools import _fn_spec
 
