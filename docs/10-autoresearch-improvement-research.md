@@ -46,6 +46,13 @@ Trust detectors that *do* run are **audit-only** — they never change selection
 benchmarked — is: greedy, shallow, sequential, unconfirmed, unguarded. Every gap below is
 amplified by this.
 
+> **Update (this session).** The table above describes the *pre-change* defaults. Since then:
+> the `thorough` profile (T1) turns the trust/confirm/ablation machinery on in one word; the P1
+> hypothesis ledger (`track_hypotheses`) and the P4 cross-run memory + lessons (`reflection_priors`)
+> now **default ON** (audit-only, and cross-run memory is a no-op until `memory_dir` is set). Every
+> one of these remains an individually-toggleable setting, surfaced in the CLI/YAML **and** the UI
+> Settings form.
+
 ---
 
 ## 2. Technical improvements (engine)

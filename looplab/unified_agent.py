@@ -68,7 +68,7 @@ class UnifiedAgent:
     def propose(self, state: RunState, parent: Optional[Node]) -> Idea:
         # The engine sets ephemeral hints via `setattr(self.researcher, ...)` where self.researcher
         # is THIS agent; forward them to the internal researcher that actually reads them.
-        for attr in ("_complexity_hint", "_sweep_hint"):
+        for attr in ("_complexity_hint", "_sweep_hint", "track_hypotheses"):
             if hasattr(self, attr):
                 setattr(self.researcher, attr, getattr(self, attr))
         return self.researcher.propose(state, parent)

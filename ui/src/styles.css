@@ -420,6 +420,7 @@ button { font: inherit; }
 .hyp-col.hyp-abandoned .hyp-col-h { color: var(--fg-mut); }
 .hyp-card { background: var(--bg-3); border: 1px solid var(--border); border-radius: 6px; padding: 6px 7px; margin-bottom: 6px; }
 .hyp-stmt { font-size: 12px; line-height: 1.35; }
+.hyp-src { display: inline-flex; vertical-align: -1px; color: var(--fg-dim); }
 .hyp-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 3px; margin-top: 5px; }
 .hyp-empty { font-size: 11px; text-align: center; padding: 4px 0; }
 @media (max-width: 900px) { .hyp-board { grid-template-columns: 1fr 1fr; } }

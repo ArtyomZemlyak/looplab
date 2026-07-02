@@ -217,7 +217,8 @@ class Engine:
         redact_output: bool = False,        # B3: redact secrets from persisted output tails
         novelty_gate: bool = False,         # E1: dedup near-duplicate proposals
         novelty_epsilon: float = 0.05,
-        reflection_priors: bool = False,    # E4: cross-run meta-review priors
+        reflection_priors: bool = False,    # E4/M2/M3: cross-run priors + lessons (needs memory_dir)
+        track_hypotheses: bool = True,      # P1: register deep-research directions as hypotheses
         surrogate_explore: float = 0.1,     # A2/A3: explore weight for a lazily-wired BOHB surrogate
         unified_agent: bool = False,        # one agent plays Researcher+Developer(+Strategist)
         agent_drives_actions: bool = False,  # agent picks the next macro action (within a legal gate)
@@ -233,6 +234,13 @@ class Engine:
         self.run_dir = Path(run_dir)
         self.task = task
         self.researcher = researcher
+        # P1: propagate the hypothesis-tracking knob to the researcher (LLMResearcher reads it;
+        # UnifiedAgent forwards it to its inner researcher). Default-on already via the constructor;
+        # this makes an explicit OFF reach the prompt. Best-effort (toy researchers ignore it).
+        try:
+            setattr(self.researcher, "track_hypotheses", track_hypotheses)
+        except Exception:  # noqa: BLE001
+            pass
         self.developer = developer
         self.sandbox = sandbox
         self.policy = policy
@@ -296,6 +304,7 @@ class Engine:
         self._novelty_gate = novelty_gate
         self._novelty_epsilon = novelty_epsilon
         self._reflection_priors = reflection_priors
+        self._track_hypotheses = track_hypotheses
         self._surrogate_explore = surrogate_explore
         # Unified self-driving agent: in unified mode `researcher is developer` (one object plays
         # both roles); `agent_drives_actions` additionally lets it pick the next macro action.
@@ -1118,11 +1127,12 @@ class Engine:
             # P1: also register each direction as an OPEN hypothesis so a deep-research idea is
             # tracked to a verdict (was fire-and-forget) — it accrues evidence when a matching node
             # runs, and shows on the board as an open question the search should resolve.
-            for direction in memo.recommended_directions[:5]:
-                if str(direction).strip():
-                    self.store.append("hypothesis_added", {
-                        "statement": str(direction).strip(), "source": "deep_research",
-                        "at_node": memo.at_node})
+            if self._track_hypotheses:
+                for direction in memo.recommended_directions[:5]:
+                    if str(direction).strip():
+                        self.store.append("hypothesis_added", {
+                            "statement": str(direction).strip(), "source": "deep_research",
+                            "at_node": memo.at_node})
 
     def _due_research_trigger(self, state: RunState) -> str | None:
         """Is an AUTO deep-research trigger (cadence/strategist) due at the current node-count? Used by

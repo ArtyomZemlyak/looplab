@@ -195,10 +195,16 @@ class Settings(BaseSettings):
     # wasting evals re-trying the same idea. Audit event `novelty_rejected`. Off by default.
     novelty_gate: bool = False
     novelty_epsilon: float = 0.05
-    # E4 reflection-memory -> priors (gradient-free cross-run meta-learning): at run end distill a
-    # one-line meta-review (best params/operator) into `<memory_dir>/meta_notes.jsonl`; at run start,
-    # inject prior notes for this task into the proposal prompt. Needs memory_dir; off without it.
-    reflection_priors: bool = False
+    # P1 hypothesis ledger: ask the Researcher to state the one-line hypothesis each experiment tests,
+    # register deep-research directions as hypotheses, and track them to a verdict on the board. ON by
+    # default (audit-only — never changes selection). Set False to drop the prompt nudge + registration.
+    track_hypotheses: bool = True
+    # E4/M2/M3 reflection-memory -> priors (gradient-free cross-run meta-learning): at run end distill
+    # the winner into `<memory_dir>/meta_notes.jsonl` AND structured lessons (incl. NEGATIVE results:
+    # tested/abandoned hypotheses + failure themes) into `lessons.jsonl` with a task fingerprint; at run
+    # start, inject exact-task notes + fingerprint-matched lessons from SIMILAR tasks into the proposal
+    # prompt. ON by default — but a NO-OP until `memory_dir` is set (that's where cross-run memory lives).
+    reflection_priors: bool = True
     # B3 output redaction: mask credentials (known key shapes + high-entropy tokens) in the
     # stdout/stderr tail before it is persisted to the event log / spans / UI — a leaked secret in a
     # print()/traceback must not land in the durable log. Off by default; recommend on for untrusted.

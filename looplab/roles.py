@@ -44,12 +44,14 @@ _RESEARCHER_SYSTEM = ("You are an ML researcher proposing the next experiment as
                       "folds/seeds, or a big grid — set `eval_timeout` to a realistic per-run budget in "
                       "SECONDS (e.g. 300-1800). Leave it null for ordinary/light experiments so they use "
                       "the run default. "
-                      "Set `hypothesis`: ONE plain-sentence statement of what this experiment TESTS — "
-                      "the belief you expect the result to support or refute (e.g. \"adding interaction "
-                      "features raises CV accuracy\", \"a deeper tree overfits this small dataset\"). "
-                      "Reuse the SAME wording when a later experiment tests the same belief, so the run "
-                      "builds a ledger of what's been learned. "
                       "Respond ONLY with the requested structured fields.")
+# Appended to the Researcher system prompt when hypothesis tracking is on (P1, default on). Split out
+# so the knob can drop it cleanly (the `hypothesis` field then simply stays unset).
+_HYPOTHESIS_INSTRUCTION = (
+    "Set `hypothesis`: ONE plain-sentence statement of what this experiment TESTS — the belief you "
+    "expect the result to support or refute (e.g. \"adding interaction features raises CV accuracy\", "
+    "\"a deeper tree overfits this small dataset\"). Reuse the SAME wording when a later experiment "
+    "tests the same belief, so the run builds a ledger of what's been learned.")
 _DEVELOPER_SYSTEM = ("You are an expert ML engineer. Output ONLY a single fenced "
                      "```python``` block containing a complete, self-contained script. ")
 # Appended to the Developer's system prompt when the Idea carries a `space` (intra-node sweep).
@@ -175,12 +177,13 @@ class LLMResearcher:
 
     def __init__(self, client: LLMClient, space_hint: str = "",
                  bounds: Optional[dict] = None, parser: str = "tool_call",
-                 prompts: Optional[PromptStore] = None):
+                 prompts: Optional[PromptStore] = None, track_hypotheses: bool = True):
         self.client = client
         self.space_hint = space_hint
         self.bounds = bounds
         self.parser = parser
         self.prompts = prompts
+        self.track_hypotheses = track_hypotheses   # P1: ask for the per-experiment hypothesis (default on)
 
     def propose(self, state: RunState, parent: Optional[Node]) -> Idea:
         # Operator steering (Phase 5 `hint` control events): fold them into the prompt so a live
@@ -193,20 +196,23 @@ class LLMResearcher:
         # Strategist `prefer_sweep` bias (engine-set, empty when off): nudges — but never forces —
         # the Researcher toward an intra-node sweep when the cost model favors in-process execution.
         sweep_hint = getattr(self, "_sweep_hint", "")
+        hyp_sys = ("\n" + _HYPOTHESIS_INSTRUCTION) if self.track_hypotheses else ""
         messages = [
             {"role": "system",
-             "content": render(self.prompts, "researcher_system", _RESEARCHER_SYSTEM)
+             "content": render(self.prompts, "researcher_system", _RESEARCHER_SYSTEM) + hyp_sys
                         + "\n\n" + _attention_points()},
             {"role": "user", "content": _state_brief(state, parent) + "\n" + self.space_hint +
                                         hint_block + cue + sweep_hint +
-                                        "\nPropose the next Idea (operator, params, rationale, "
-                                        "hypothesis; optionally a `space` grid for a sweep). The "
+                                        "\nPropose the next Idea (operator, params, rationale"
+                                        + (", hypothesis" if self.track_hypotheses else "") +
+                                        "; optionally a `space` grid for a sweep). The "
                                         "`rationale` is your conclusion the operator reads: in 1-3 "
                                         "sentences state WHY this experiment next and WHAT you expect "
                                         "it to learn/improve given the results so far — not a "
-                                        "restatement of the params. The `hypothesis` is the one-line "
-                                        "belief this experiment tests (reuse wording across "
-                                        "experiments that test the same belief)."},
+                                        "restatement of the params."
+                                        + (" The `hypothesis` is the one-line belief this experiment "
+                                           "tests (reuse wording across experiments that test the same "
+                                           "belief)." if self.track_hypotheses else "")},
         ]
         # Small models occasionally emit unparseable output; retry, then fall back to a
         # safe default so one bad response never crashes the run.

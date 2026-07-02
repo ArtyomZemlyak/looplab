@@ -626,7 +626,8 @@ const _HYP_COLUMNS = [
   ['tested', 'Tested', 'evaluated, no improvement'],
   ['abandoned', 'Abandoned', 'dropped'],
 ]
-const _HYP_SRC = { researcher: '🔬', deep_research: '💡', human: '🧑', strategist: '🧭' }
+// Monochrome source glyphs (no emoji): who posed the hypothesis. Reuses the shared icon set.
+const _HYP_ICON = { researcher: 'search', deep_research: 'bulb', human: 'user', strategist: 'compass' }
 
 export function HypothesisBoard({ state, runId, onSelect, onClose, onToast }) {
   const [draft, setDraft] = useState('')
@@ -660,14 +661,17 @@ export function HypothesisBoard({ state, runId, onSelect, onClose, onToast }) {
             return <div key={key} className={'hyp-col hyp-' + key}>
               <div className="hyp-col-h" title={hint}>{label} <span className="muted">{col.length}</span></div>
               {col.map(h => <div key={h.id} className="hyp-card">
-                <div className="hyp-stmt">{_HYP_SRC[h.source] || '•'} {h.statement}</div>
+                <div className="hyp-stmt">
+                  <span className="hyp-src" title={`source: ${h.source}`}>
+                    <OpIcon name={_HYP_ICON[h.source] || 'dot'} size={12} /></span> {h.statement}
+                </div>
                 <div className="hyp-meta">
                   {(h.evidence || []).slice(0, 8).map(nid => <button key={nid} className="btn xs ghost"
                     title={`experiment #${nid}`} onClick={() => { onSelect && onSelect(nid); onClose() }}>#{nid}</button>)}
                   {h.best_delta != null && <span className={'chip xs ' + (h.best_delta > 0 ? 'ok' : '')}
                     title="best improvement over parent among the evidence">Δ{fmt(h.best_delta)}</span>}
                   {key !== 'abandoned' && <button className="btn xs ghost" title="abandon this line of inquiry"
-                    onClick={() => abandon(h)}>✕</button>}
+                    onClick={() => abandon(h)}><OpIcon name="cross" size={11} /></button>}
                 </div>
               </div>)}
               {col.length === 0 && <div className="muted hyp-empty">—</div>}

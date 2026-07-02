@@ -85,8 +85,16 @@ def test_similar_task_retrieves_lessons_including_negatives(tmp_path):
     assert "unrelated classifier" not in prior                 # dissimilar task filtered out (M2)
 
 
-def test_lessons_off_by_default(tmp_path):
-    # reflection_priors defaults off -> no lessons file, no prior text (byte-identical legacy path)
+def test_settings_defaults_enable_phase3_and_4():
+    # Product default (via Settings): hypotheses + cross-run memory are ON out of the box.
+    from looplab.config import Settings
+    s = Settings()
+    assert s.track_hypotheses is True and s.reflection_priors is True
+
+
+def test_lessons_engine_level_off_when_flag_not_passed(tmp_path):
+    # Engine's low-level param default stays False, so building Engine directly without the flag
+    # writes no lessons file (the product turns it on via Settings -> cli, tested above).
     task = ToyTask.load(TASK)
     r, d = task.build_roles()
     mem = tmp_path / "mem"

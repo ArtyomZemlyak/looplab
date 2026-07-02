@@ -228,7 +228,8 @@ See [Concepts → Trust & sandbox](concepts.md#trust--the-sandbox) for what each
 | `web_search` | `LOOPLAB_WEB_SEARCH` | `false` | Web search/fetch for the DeepResearcher (network-optional) |
 | `deep_research_every` | `LOOPLAB_DEEP_RESEARCH_EVERY` | `0` | Run the Deep-Research stage every N created nodes (0 = off) |
 | `concurrent_research` | `LOOPLAB_CONCURRENT_RESEARCH` | `false` | Overlap a due research "think" with the GPU-bound eval (remote-LLM win) |
-| `reflection_priors` | `LOOPLAB_REFLECTION_PRIORS` | `false` | Distill a meta-review at run end; inject prior notes at run start (needs `memory_dir`) |
+| `track_hypotheses` | `LOOPLAB_TRACK_HYPOTHESES` | `true` | P1: ask the Researcher to state each experiment's hypothesis, register deep-research directions, track them to a verdict on the Hypotheses board (audit-only) |
+| `reflection_priors` | `LOOPLAB_REFLECTION_PRIORS` | `true` | E4/M2/M3: at run end distill the winner + lessons (incl. negatives) with a task fingerprint; at run start inject exact-task notes + fingerprint-matched lessons from similar runs. No-op until `memory_dir` is set |
 
 ## Reporting & observability
 

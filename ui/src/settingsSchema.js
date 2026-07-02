@@ -61,8 +61,10 @@ export const SETTINGS_GROUPS = [
         help: 'E1: nudge near-duplicate proposals off each other so the search stops re-trying the same idea.' },
       { key: 'novelty_epsilon', label: 'Novelty ε', type: 'float',
         help: 'E1: normalized param-space distance below which a proposal counts as a near-duplicate.' },
-      { key: 'reflection_priors', label: 'Reflection priors', type: 'bool',
-        help: 'E4: distill a meta-review at run end and inject prior-run insights into the next run’s prompt (needs a memory dir).' },
+      { key: 'track_hypotheses', label: 'Track hypotheses', type: 'bool',
+        help: 'P1 (on by default): ask the Researcher to state the one-line hypothesis each experiment tests, register deep-research directions as hypotheses, and track them to a verdict on the Hypotheses board. Audit-only — never changes which node wins.' },
+      { key: 'reflection_priors', label: 'Cross-run memory (priors + lessons)', type: 'bool',
+        help: 'E4/M2/M3 (on by default): at run end distill the winner + structured LESSONS (incl. negative results — tested/abandoned hypotheses & failure themes) with a task fingerprint; at run start inject exact-task notes + fingerprint-matched lessons from SIMILAR past runs. No-op until a Memory dir is set (below).' },
     ],
   },
   {
