@@ -21,16 +21,16 @@ import {
 //   rigor → analysis → data/lab → ops
 // Run-view panel IA (design audit 2026-06-28): keep the few most-used panels inline; fold the long
 // tail into a grouped "More ▾" overflow so the bar never wraps to a second row (was 17 buttons).
-const PRIMARY_PANELS = [['queue', 'Queue'], ['trust', 'Trust'], ['hypotheses', 'Hypotheses'],
-                        ['failures', 'Failures'], ['research', 'Research'], ['compare', 'Compare'],
-                        ['config', 'Settings']]
-const MORE_GROUPS = [
-  ['Output', [['artifacts', 'Artifacts']]],
-  ['Analysis', [['sensitivity', 'Sensitivity'], ['importance', 'Importance'], ['pareto', 'Pareto/Div'], ['data', 'Data']]],
-  ['System', [['gpu', 'GPU'], ['memory', 'Memory'], ['events', 'Events'], ['registry', 'Registry'],
-              ['crossrun', 'Cross-run'], ['collab', 'Collab'], ['authoring', 'Authoring']]],
+// Panel IA consolidated into 4 hubs (was 7 inline + a 12-item "More" overflow). Each hub is a
+// dropdown of related panels; the hub button lights when its open panel is active. Report + Overview
+// stay in the view-toggle above; Settings stays a dedicated button — both are one-click essentials.
+const HUBS = [
+  ['Progress', [['queue', 'Queue'], ['hypotheses', 'Hypotheses'], ['research', 'Research'], ['failures', 'Failures']]],
+  ['Trust', [['trust', 'Trust'], ['pareto', 'Pareto / diversity'], ['data', 'Data quality']]],
+  ['Analysis', [['compare', 'Compare'], ['sensitivity', 'Sensitivity'], ['importance', 'Importance'], ['crossrun', 'Cross-run']]],
+  ['Lab', [['artifacts', 'Artifacts'], ['registry', 'Registry'], ['memory', 'Memory'], ['collab', 'Collab'], ['authoring', 'Authoring'], ['events', 'Events'], ['gpu', 'GPU']]],
 ]
-const MORE_KEYS = new Set(MORE_GROUPS.flatMap(([, items]) => items.map(([k]) => k)))
+const HUB_OF = Object.fromEntries(HUBS.flatMap(([label, items]) => items.map(([k]) => [k, label])))
 
 export default function RunView({ runId, onBack }) {
   const { live, seq, connected } = useRunState(runId)
@@ -42,7 +42,7 @@ export default function RunView({ runId, onBack }) {
   const [collapsed, setCollapsed] = useState(() => new Set())
   const [selectedGroup, setSelectedGroup] = useState(null)
   const [panel, setPanel] = useState(null)
-  const [moreOpen, setMoreOpen] = useState(false)            // run-view "More ▾" overflow menu
+  const [openHub, setOpenHub] = useState(null)               // which panel-hub dropdown is open
   const [view, setView] = useState('dag')                    // 'dag' | 'report' — primary destination
   const [themeFilter, setThemeFilter] = useState(null)       // E1: drill the tree to one direction
   const landedRef = useRef(false)                            // auto-land on Report once, on finish
@@ -234,24 +234,22 @@ export default function RunView({ runId, onBack }) {
 
       <div className="topbar panel-bar" style={{ minHeight: 38, paddingTop: 4, paddingBottom: 4 }}>
         <div className="menu">
-          {PRIMARY_PANELS.map(([k, l]) => <button key={k} className={'btn sm ghost' + (panel === k ? ' on' : '')} onClick={() => { setMoreOpen(false); setPanel(k) }}>{l}</button>)}
-          <span className="panel-sep" />
-          <div className="more-wrap">
-            {/* "More ▾" overflow: the long tail of panels, grouped — keeps the bar to one row. The
-                button shows active when the open panel lives inside the overflow. */}
-            <button className={'btn sm ghost' + (MORE_KEYS.has(panel) ? ' on' : '')}
-                    onClick={() => setMoreOpen(o => !o)}>More ▾</button>
-            {moreOpen && <>
-              <div className="menu-backdrop" onClick={() => setMoreOpen(false)} />
+          {/* 4 consolidated hubs — each a dropdown of related panels; the hub lights when its open
+              panel is active. Report/Overview live in the view-toggle above; Settings is dedicated. */}
+          {HUBS.map(([label, items]) => <div className="more-wrap" key={label}>
+            <button className={'btn sm ghost' + (HUB_OF[panel] === label ? ' on' : '')}
+                    onClick={() => setOpenHub(o => o === label ? null : label)}>{label} ▾</button>
+            {openHub === label && <>
+              <div className="menu-backdrop" onClick={() => setOpenHub(null)} />
               <div className="run-menu more-menu" onClick={e => e.stopPropagation()}>
-                {MORE_GROUPS.map(([label, items]) => <React.Fragment key={label}>
-                  <div className="mi-label">{label}</div>
-                  {items.map(([k, l]) => <button key={k} className={'mi' + (panel === k ? ' on' : '')}
-                    onClick={() => { setMoreOpen(false); setPanel(k) }}>{l}</button>)}
-                </React.Fragment>)}
+                {items.map(([k, l]) => <button key={k} className={'mi' + (panel === k ? ' on' : '')}
+                  onClick={() => { setOpenHub(null); setPanel(k) }}>{l}</button>)}
               </div>
             </>}
-          </div>
+          </div>)}
+          <span className="panel-sep" />
+          <button className={'btn sm ghost' + (panel === 'config' ? ' on' : '')}
+                  onClick={() => { setOpenHub(null); setPanel('config') }}>Settings</button>
         </div>
       </div>
 

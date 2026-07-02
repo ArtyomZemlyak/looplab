@@ -298,10 +298,18 @@ assistant.
 decisions live — A7 strategy rationale, unified-agent action, policy why-this-node — folded from
 events already logged; click a referenced node to jump to it.
 
-### U7 · Lower-priority but real
-Mobile/readonly responsive view for monitoring long runs from a phone; chart interactivity
-(zoom/brush/log-scale/export on `charts.jsx`); panel consolidation (17 panels → 4 hubs: Progress /
-Trust / Analysis / Knowledge); per-user attribution of steering actions in shared deployments.
+### U7 · Lower-priority but real — 🟡 PARTIALLY SHIPPED
+- **Chart interactivity ✅** — `Trajectory` gains a mousemove crosshair + floating tooltip and a
+  `log Y` toggle; `MiniLine` training curves gain a hover crosshair + live step/value readout
+  (`charts.jsx`).
+- **Panel consolidation ✅** — the 7-inline + 12-item "More" overflow collapsed into **4 hubs**
+  (Progress / Trust / Analysis / Lab) as dropdowns, with Report/Overview in the view-toggle and a
+  dedicated Settings button (`RunView.jsx`).
+- **Legacy emoji ✅** — swept the colour/decorative emoji (★ ⚠ 🔗 ✎ 💬 💡 🗺 ⚡ 🔄 🖨 ⬇ ♚ ☰ ⚙) to
+  monochrome `OpIcon` glyphs (new: pencil/link/download/printer/crown/list); kept the established
+  monochrome UI vocabulary (arrows/checks/dots).
+- *Still open:* mobile/responsive read-only view; per-user attribution of steering in shared
+  deployments.
 
 ---
 
