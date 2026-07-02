@@ -218,6 +218,8 @@ See [Concepts → Trust & sandbox](concepts.md#trust--the-sandbox) for what each
 |---|---|---|---|
 | `memory_dir` | `LOOPLAB_MEMORY_DIR` | — | Cross-run case library (best result of each run becomes retrievable knowledge) |
 | `knowledge_dir` | `LOOPLAB_KNOWLEDGE_DIR` | — | Notes dir; the Researcher gets grep/kb_search/read tools over it |
+| `embed_model` | `LOOPLAB_EMBED_MODEL` | — | Embedding model for **semantic** `kb_search` / case retrieval (e.g. `nomic-embed-text`). Blank = dependency-free lexical hashing. Offline/misconfigured endpoint degrades back to lexical (never crashes) |
+| `embed_base_url` | `LOOPLAB_EMBED_BASE_URL` | — | Endpoint for embeddings if different from the chat model's (blank = reuse `llm_base_url`) |
 | `skills_dir` | `LOOPLAB_SKILLS_DIR` | — | Dir of `SKILL.md` files the Researcher can list/load |
 | `prompt_dir` | `LOOPLAB_PROMPT_DIR` | — | Dir of editable, hot-reloaded role-prompt `.md` files |
 | `researcher_tools` | `LOOPLAB_RESEARCHER_TOOLS` | `true` | Let the Researcher read its own experiments + task data mid-loop |

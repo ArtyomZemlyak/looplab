@@ -109,10 +109,13 @@ class RepoTools:
 
 class KnowledgeTools:
     def __init__(self, knowledge_dir: str | None = None,
-                 cases_path: str | None = None, k: int = 3):
+                 cases_path: str | None = None, k: int = 3, embed=None):
         self.dir = Path(knowledge_dir).resolve() if knowledge_dir else None
         self.cases_path = Path(cases_path) if cases_path else None
         self.k = k
+        # T4: one embedder builds AND queries the index (consistent dim). Defaults to the lexical
+        # hash_embed; `make_embedder(settings)` supplies a real LLM embedder when configured.
+        self.embed = embed or hash_embed
         self._index = InMemoryVectorStore()
         self._build_index()
 
@@ -121,7 +124,7 @@ class KnowledgeTools:
         if self.dir:
             for p in glob_files("*.md", str(self.dir)):
                 text = read_file(p)
-                items.append(Item(id=p, vector=hash_embed(Path(p).name + " " + text),
+                items.append(Item(id=p, vector=self.embed(Path(p).name + " " + text),
                                   payload={"path": p, "text": text}))
         # Cross-run memory (I19): past best solutions become searchable knowledge.
         if self.cases_path and self.cases_path.exists():
@@ -138,7 +141,7 @@ class KnowledgeTools:
                 text = (f"PAST CASE — task {c.get('task_id')}: {c.get('goal','')}\n"
                         f"best params={c.get('params')} metric={c.get('metric')}\n"
                         f"{c.get('rationale','')}")
-                items.append(Item(id=f"case:{i}", vector=hash_embed(c.get("goal", "") + " " + text),
+                items.append(Item(id=f"case:{i}", vector=self.embed(c.get("goal", "") + " " + text),
                                   payload={"path": f"case:{c.get('task_id')}", "text": text}))
         if items:
             self._index.upsert("kb", items)
@@ -159,7 +162,7 @@ class KnowledgeTools:
     def execute(self, name: str, args: dict) -> str:
         try:
             if name == "kb_search":
-                hits = self._index.search("kb", hash_embed(args.get("query", "")), self.k)
+                hits = self._index.search("kb", self.embed(args.get("query", "")), self.k)
                 return "\n---\n".join(
                     f"{Path(h.payload['path']).name}:\n{h.payload['text'][:600]}" for h in hits
                 ) or "(no notes)"

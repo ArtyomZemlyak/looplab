@@ -83,12 +83,18 @@ contract grows an optional `holdout` reader the search never sees; champion sele
 val-top-k happens on holdout; per-node `generalization_gap` folds into the Trust panel. This gates
 any publishable MLE-bench number.
 
-### T4 · Real embeddings behind the existing `VectorStore` seam
-`hash_embed` (`knowledge_tools.py:124`, `memory.py:70`) is a lexical hashing trick — KB search,
-case retrieval and the novelty gate are all built on it, so all three quietly underperform. Wire an
-optional local embedding model (the box already runs Ollama — `nomic-embed-text` / `bge-m3` via
-the same OpenAI-compatible endpoint; keep hash_embed as the zero-dep fallback). One seam, three
-features improve at once.
+### T4 · Real embeddings behind the existing `VectorStore` seam — ✅ SHIPPED
+`hash_embed` (`knowledge_tools.py`, `memory.py`) is a lexical hashing trick — KB search and case
+retrieval are built on it, so both quietly underperform. Wire an optional local embedding model (the
+box already runs Ollama — `nomic-embed-text` / `bge-m3` via the same OpenAI-compatible endpoint; keep
+hash_embed as the zero-dep fallback).
+- **Implemented** (`vectorstore.py`): `LLMEmbedder` (stdlib urllib → `/embeddings`, same proxy/CA as
+  the chat client) + `make_embedder(settings)`; config `embed_model`/`embed_base_url` (blank =
+  hash_embed, byte-identical). **Robust by construction**: the embedder commits to one vector
+  dimension for its lifetime and degrades to a same-dim `hash_embed` fallback on any endpoint failure,
+  so `_cosine` never sees a dim mismatch and an offline/flaky endpoint never crashes a run — it only
+  loses semantic quality. Threaded through `KnowledgeTools` (one embedder builds *and* queries the
+  index). Surfaced in Settings UI + guide. Tested in `tests/test_embedder.py`.
 
 ### T5 · Semantic novelty/dedup for ideas (not just numeric params)
 The novelty gate is L2 over numeric params and *jitters* duplicates instead of rejecting them —
@@ -96,12 +102,21 @@ useless for repo/code/free-form ideas. With T4 in place, dedup on `embedding(ide
 rationale)` against accepted+failed nodes; a near-duplicate of a *failed* idea should be rejected
 with the failure surfaced to the Researcher ("you already tried X, it scored Y because Z").
 
-### T6 · Fold caching / incremental state
-`fold(store.read_all())` re-parses the whole log many times per iteration and every 0.3 s in the
-abort watcher (`orchestrator.py:529,735,760,1455,2033`). Cache `(seq_watermark → RunState)` and
-fold only the tail; the abort watcher needs only a "new control event?" check (a seq counter),
-not a full re-fold. This is the main scaling ceiling for long runs and directly enables higher
-`max_parallel`.
+### T6 · Fold caching / incremental state — ✅ SHIPPED (read-cache form)
+`fold(store.read_all())` re-parsed the whole log many times per iteration and every 0.3 s in the
+abort watcher — O(events²) IO+orjson+`Event()` per run, the main scaling ceiling.
+- **Implemented** as an **incremental read cache in `EventStore`** (lowest-risk form — `fold` itself
+  is untouched, so its 838-test correctness contract stands): `read_all()` keeps already-parsed
+  Events and reads only the bytes appended since the last call (byte-offset cursor ending on a newline
+  boundary), rebuilding on a shrink/heal-truncate. It returns byte-for-byte what a fresh `iter_jsonl`
+  scan would (same torn/corrupt-tail rules), is thread-safe (a lock guards the top-up, for the
+  concurrent watchers under `max_parallel>1`), and the abort watcher now scans the cache instead of
+  re-reading the file. **Measured ~200× on the loop's read pattern** (3000-event log, 300 reads).
+  Verified with a parallel toy run + an 8-thread read-stress; tested in `tests/test_eventstore_cache.py`.
+- *Left for later:* an incremental *fold* (continue a cached `RunState` over only new events) — the
+  read cache already removes the dominant IO+parse cost, so the remaining O(events) pure-Python
+  reduce is cheap; splitting `fold` into reducer+finalize is a larger, higher-risk change deferred
+  until profiling shows it matters.
 
 ### T7 · LLM response cache + prompt-prefix discipline
 Identical/near-identical calls re-hit the model every time. A content-addressed response cache

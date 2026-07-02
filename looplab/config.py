@@ -376,6 +376,13 @@ class Settings(BaseSettings):
     # Agentic retrieval (ADR-16): if set, the LLM Researcher gets grep/kb_search/read
     # tools over this directory of markdown notes and chooses when to use them.
     knowledge_dir: str | None = None
+    # T4 real embeddings: model id for an OpenAI-compatible `/embeddings` endpoint used for
+    # kb_search / case retrieval. Blank (default) = the dependency-free lexical `hash_embed` (today's
+    # behavior). Set e.g. "nomic-embed-text" (Ollama) or "text-embedding-3-small" for SEMANTIC
+    # retrieval; a misconfigured/offline endpoint degrades back to hash_embed at call time (never
+    # crashes a run). `embed_base_url` blank = reuse `llm_base_url`; the shared `llm_api_key` is used.
+    embed_model: str | None = None
+    embed_base_url: str | None = None
     # E3 literature-grounded ideation (network-OPTIONAL): give the agentic Researcher an arXiv search
     # tool to ground ideas in real techniques. Off by default (egress is unreliable on some boxes);
     # fails gracefully if the network is blocked.

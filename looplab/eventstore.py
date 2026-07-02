@@ -7,6 +7,7 @@ durability contract exercised by the replay-determinism keystone test.
 from __future__ import annotations
 
 import os
+import threading
 import time
 from contextlib import contextmanager
 from pathlib import Path
@@ -75,10 +76,54 @@ def iter_jsonl(path: str | os.PathLike) -> Iterator[dict]:
             yield obj
 
 
+def _parse_jsonl_region(buf: bytes) -> tuple[list[dict], int]:
+    """Parse complete records from a byte buffer, applying `iter_jsonl`'s EXACT durability rules
+    (stop at the first torn/blank-then-nonterminated/corrupt line), and report how many bytes were
+    consumed (always a newline boundary). This is the incremental core shared by the read cache: the
+    set of records it yields for a full-file buffer is identical to `iter_jsonl`, so caching can never
+    change what `read_all` returns — it only avoids re-reading+re-parsing bytes already seen."""
+    out: list[dict] = []
+    consumed = 0
+    n = len(buf)
+    i = 0
+    while i < n:
+        nl = buf.find(b"\n", i)
+        if nl == -1:
+            break  # torn final write (no trailing newline) — leave it for a later top-up
+        raw = buf[i:nl]
+        line = raw.strip()
+        if not line:
+            # blank line: iter_jsonl `continue`s over it (it is newline-terminated here)
+            i = nl + 1
+            consumed = i
+            continue
+        try:
+            obj = orjson.loads(line)
+        except orjson.JSONDecodeError:
+            break  # corrupt tail — stop cleanly (matches iter_jsonl), don't advance past it
+        if not isinstance(obj, dict):
+            break  # valid JSON but non-object => corruption, not a record
+        out.append(obj)
+        i = nl + 1
+        consumed = i
+    return out, consumed
+
+
 class EventStore:
     def __init__(self, path: str | os.PathLike):
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        # Incremental read cache (perf): the folded loop calls read_all() many times per iteration,
+        # and each call used to re-read + re-parse the WHOLE log (O(events) IO+orjson+Event() every
+        # time => O(events^2) per run, plus the mid-eval abort watcher re-scanning every 0.3s). The
+        # cache keeps already-parsed Events and only reads the bytes appended since the last call, so
+        # read_all() is amortized O(new events). `_cache_bytes` always ends on a newline boundary.
+        self._cache: list[Event] = []
+        self._cache_bytes: int = 0
+        # The abort watcher (and, under max_parallel>1, several concurrent watchers) call read_all()
+        # from worker THREADS while the main loop may also read — guard the cache top-up so a
+        # concurrent extend/offset update can't race into a corrupt cache.
+        self._read_lock = threading.Lock()
         self._seq = self._scan_last_seq()
 
     def _scan_last_seq(self) -> int:
@@ -162,5 +207,30 @@ class EventStore:
         return e
 
     def read_all(self) -> Iterator[Event]:
-        for obj in iter_jsonl(self.path):
-            yield Event(**obj)
+        """Yield every Event on disk (up to the first torn/corrupt line), served from an incremental
+        cache. Only bytes appended since the previous call are read+parsed; the returned sequence is
+        byte-for-byte identical to a full `iter_jsonl` scan. Falls back to a full rescan if the file
+        shrank/was replaced (a heal-truncate or a fresh file) so the cache can never go stale."""
+        with self._read_lock:
+            try:
+                size = self.path.stat().st_size if self.path.exists() else 0
+            except OSError:
+                size = 0
+            if size < self._cache_bytes:
+                # File shrank/was replaced (heal-truncate / new run at same path) — rebuild from zero.
+                self._cache = []
+                self._cache_bytes = 0
+            if size > self._cache_bytes:
+                try:
+                    with open(self.path, "rb") as f:
+                        f.seek(self._cache_bytes)
+                        new = f.read(size - self._cache_bytes)
+                except OSError:
+                    new = b""
+                objs, consumed = _parse_jsonl_region(new)
+                if objs:
+                    self._cache.extend(Event(**o) for o in objs)
+                self._cache_bytes += consumed
+            # Return a snapshot copy so a caller iterating the result can't be perturbed by a
+            # concurrent top-up (and so callers expecting a re-iterable list still work).
+            return list(self._cache)

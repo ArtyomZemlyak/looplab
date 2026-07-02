@@ -220,6 +220,10 @@ export const SETTINGS_GROUPS = [
         help: 'Overlap a due deep-research "think" with the GPU-bound eval, so the agent works while the node trains. Best with a REMOTE LLM (no GPU contention with eval); off by default — validate on your setup before enabling.' },
       { key: 'prompt_dir', label: 'Prompt dir', type: 'text', placeholder: 'unset', help: 'Editable, hot-reloaded role prompt .md files.' },
       { key: 'memory_dir', label: 'Memory dir', type: 'text', placeholder: 'unset', help: 'Cross-run case memory.' },
+      { key: 'embed_model', label: 'Embedding model', type: 'text', placeholder: 'hash (lexical)',
+        help: 'T4: model for an OpenAI-compatible /embeddings endpoint (e.g. nomic-embed-text) → SEMANTIC kb_search / case retrieval. Blank = dependency-free lexical hashing. A misconfigured/offline endpoint degrades back to lexical (never crashes).' },
+      { key: 'embed_base_url', label: 'Embedding base URL', type: 'text', placeholder: 'reuse llm_base_url',
+        help: 'Endpoint for embeddings if different from the chat model’s (blank = reuse llm_base_url).' },
     ],
   },
 ]

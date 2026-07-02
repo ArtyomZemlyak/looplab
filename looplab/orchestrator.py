@@ -23,7 +23,7 @@ import orjson
 from .agents_md import generate_agents_md
 from .archive import DiversityArchive
 from .cv import cv_summary
-from .eventstore import EventStore, iter_jsonl
+from .eventstore import EventStore
 from .gate import one_se_better
 from .htmlview import render_html
 from .leakage import target_leakage, temporal_leakage, train_test_contamination
@@ -2036,9 +2036,9 @@ class Engine:
                 cancel = threading.Event()
                 aborted = False
                 async with anyio.create_task_group() as _tg:
-                    def _abort_seen() -> bool:   # lightweight raw scan — no full fold each tick
-                        for o in iter_jsonl(self.store.path):
-                            if o.get("type") == "node_abort" and o.get("data", {}).get("node_id") == node_id:
+                    def _abort_seen() -> bool:   # cached incremental read — no full re-parse each tick
+                        for e in self.store.read_all():
+                            if e.type == "node_abort" and e.data.get("node_id") == node_id:
                                 return True
                         return False
                     async def _watch():
