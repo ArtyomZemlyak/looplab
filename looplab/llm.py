@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import http.client
 import json
+import re
 import ssl
 import time
 import urllib.error
@@ -141,6 +142,79 @@ def _retry_after_seconds(ra) -> Optional[float]:
         return max(0.0, (dt - datetime.now(timezone.utc)).total_seconds())
     except (TypeError, ValueError, OverflowError):
         return None
+
+
+# Native tool-call recovery. Some models (glm-5.1 / DeepSeek served via litellm) emit tool calls in
+# their OWN template as plain CONTENT instead of OpenAI `tool_calls` — e.g.
+# `<｜DSML｜invoke name="emit"><｜DSML｜parameter name="arguments" ...>{...}</…></…>`. When that leaks
+# into content the agent loop sees no tool call and the raw markup reaches the user. These lift the
+# leaked call back into OpenAI-shaped tool_calls (name + JSON arguments) and clean the content.
+_NATIVE_INVOKE_RE = re.compile(r'invoke\s+name="([^"]+)"(.*?)</[^>]*?invoke>', re.DOTALL)
+_NATIVE_PARAM_RE = re.compile(r'parameter\s+name="([^"]+)"[^>]*?>(.*?)</[^>]*?parameter>', re.DOTALL)
+_NATIVE_OPEN_RE = re.compile(r'<[^>]*?(?:DSML|tool_calls|\binvoke\b)')
+
+
+def _extract_native_tool_calls(content: str):
+    """(tool_calls | None, cleaned_content). Parse a leaked native tool-call block out of `content`."""
+    if not content or "invoke name=" not in content:
+        return None, content
+    calls = []
+    for i, m in enumerate(_NATIVE_INVOKE_RE.finditer(content)):
+        name, body = m.group(1), m.group(2)
+        params = {p.group(1): p.group(2).strip() for p in _NATIVE_PARAM_RE.finditer(body)}
+        args = params.get("arguments")
+        if args is None:
+            args = json.dumps(params or {})
+        else:
+            try:
+                json.loads(args)                 # already valid JSON string -> keep as-is
+            except (ValueError, TypeError):
+                args = json.dumps(params or {})   # fall back to the param map
+        calls.append({"id": f"call_{i}", "type": "function",
+                      "function": {"name": name, "arguments": args}})
+    if not calls:
+        return None, content
+    m0 = _NATIVE_OPEN_RE.search(content)
+    clean = (content[:m0.start()] if m0 else content).strip()
+    return calls, clean
+
+
+_FINAL_NAMES = {"emit", "finalanswer", "answer", "reply", "respond", "finish", "submit", "final", "done"}
+_ANSWER_FIELDS = ("answer", "reply", "text", "response", "summary", "content", "message")
+
+
+def _apply_native_tool_calls(msg: dict) -> dict:
+    """If `msg` has no OpenAI tool_calls but its content carries a leaked native tool-call block,
+    recover it. A FINAL-ANSWER-style call (emit / final_answer / answer / …) becomes the clean visible
+    content (its answer text) so the loop finalizes on it; any other call is lifted into real
+    tool_calls. Either way the raw markup never reaches the user. Mutates + returns `msg`."""
+    if not isinstance(msg, dict) or msg.get("tool_calls"):
+        return msg
+    calls, clean = _extract_native_tool_calls(msg.get("content") or "")
+    if not calls:
+        return msg
+    first = calls[0]
+    name = re.sub(r"[_\s-]", "", (first["function"]["name"] or "").lower())
+    try:
+        args = json.loads(first["function"]["arguments"])
+    except (ValueError, TypeError):
+        args = {}
+    if name in _FINAL_NAMES:
+        ans = ""
+        if isinstance(args, dict):
+            for k in _ANSWER_FIELDS:
+                if isinstance(args.get(k), str) and args[k].strip():
+                    ans = args[k]
+                    break
+            if not ans:
+                ans = json.dumps(args)
+        else:
+            ans = str(args)
+        msg["content"] = (clean + "\n" + ans).strip() if clean else ans
+    else:
+        msg["tool_calls"] = calls
+        msg["content"] = clean
+    return msg
 
 
 def _assistant_text(msg: dict) -> str:
@@ -430,6 +504,7 @@ class OpenAICompatibleClient:
             body = self._post({"model": self.model, "messages": messages,
                                "temperature": self.temperature, "stream": False})
             msg = body["choices"][0]["message"]
+            _apply_native_tool_calls(msg)   # strip a leaked native tool-call block from the text
             out = msg.get("content") or ""
             # Record the clean answer as the completion (the conclusion) and the raw reasoning
             # separately; return the original text so downstream parsing is unchanged.
@@ -497,6 +572,7 @@ class OpenAICompatibleClient:
                 "tool_choice": tool_choice, "temperature": self.temperature, "stream": False,
             })
             msg = body["choices"][0]["message"]
+            _apply_native_tool_calls(msg)   # recover a leaked native tool-call block (glm/DeepSeek)
             thinking, answer = _clean_thinking(msg.get("content") or "",
                                                msg.get("reasoning") or msg.get("reasoning_content") or "")
             # The output records BOTH the assistant text AND any tool_calls it decided to make, so the
@@ -525,6 +601,7 @@ class OpenAICompatibleClient:
                                 model_parameters=self._model_params()) as gen:
             body = self._post(payload)
             msg = body["choices"][0]["message"]
+            _apply_native_tool_calls(msg)   # recover a leaked native tool-call block (glm/DeepSeek)
             calls = msg.get("tool_calls")
             if not calls:  # endpoint ignored tool_choice -> let parse.py fall back to text
                 gen.usage(body.get("usage")).error("no tool_calls in response")

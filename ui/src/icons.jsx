@@ -56,6 +56,8 @@ const GLYPHS = {
   // ---- organizational glyphs (replace the color emoji so every theme stays monochrome) ----
   // project = folder with a tab
   folder: <path d="M2.4 4.4h3.3l1.3 1.6h6.6v6.6H2.4Z" />,
+  // paperclip — attach files
+  clip: <path d="M11.7 5.3 6.1 10.9a1.8 1.8 0 0 1-2.6-2.6l5.9-5.9a3 3 0 0 1 4.2 4.2l-5.9 5.9a4.2 4.2 0 0 1-5.9-5.9l5.2-5.2" />,
   // super-task / cross-run = target (reuses the crosshair metaphor) — alias of `target`
   // map = location pin
   map: <><path d="M8 14s4.1-4 4.1-7A4.1 4.1 0 0 0 8 2.9 4.1 4.1 0 0 0 3.9 7c0 3 4.1 7 4.1 7Z" /><circle cx="8" cy="6.9" r="1.5" /></>,

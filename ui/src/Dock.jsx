@@ -370,7 +370,7 @@ function GenericDetail({ e }) {
 // One feed row, chat-message styled: an icon/color by kind, the narration, an expandable "why" card.
 // node_created auto-expands ONLY while its node is the live frontier (the Researcher is "thinking");
 // once the node is evaluated the card collapses to its one-line key info.
-function EventRow({ e, trace, onFocusEvent, autoOpen }) {
+function EventRow({ e, trace, onFocusEvent, autoOpen, runId }) {
   const [open, setOpen] = useState(autoOpen)
   const touched = useRef(false)   // once the user toggles, stop auto-following the live frontier
   // collapse-when-done: follow autoOpen (expand while live, collapse when the node resolves) UNLESS
@@ -381,8 +381,11 @@ function EventRow({ e, trace, onFocusEvent, autoOpen }) {
   // langfuse-style: any event that resolves a node expands to that node's span trace inline (it
   // appears once spans land, so the toggle shows up for evaluated/failed/repaired nodes too).
   // Use the event's OWN node_id (not eventNode's parent_id fallback) so e.g. an `ablate` row — which
-  // carries only parent_id — never renders the PARENT node's trace mislabeled as its own.
-  const traceNid = e.data?.node_id
+  // carries only parent_id — never renders the PARENT node's trace mislabeled as its own. The
+  // `setup_started` row surfaces the SETUP phase's span tree (task/data materialization, profiling,
+  // genesis) — traced under the pseudo-node -1 — so the opaque "setting up task & data" step becomes a
+  // watchable trace like any experiment.
+  const traceNid = e.data?.node_id ?? (e.type === 'setup_started' ? -1 : null)
   const nodeSpans = traceNid != null ? (trace?.nodes || {})[String(traceNid)] : null
   const hasTrace = !!(nodeSpans && nodeSpans.length)
   // no-truncation: a row whose one-line narration clamped text (or used the raw JSON fallback) is
@@ -405,7 +408,7 @@ function EventRow({ e, trace, onFocusEvent, autoOpen }) {
         {open && expandable && <div className="ev-detail-wrap">
           {hasReason && reasoningDetail(e, trace)}
           {hasGeneric && <GenericDetail e={e} />}
-          {hasTrace && <NodeTrace spans={nodeSpans} />}
+          {hasTrace && <NodeTrace spans={nodeSpans} runId={runId} />}
         </div>}
       </div>
     </div>
@@ -571,7 +574,13 @@ export default function Dock({ runId, live, liveSeq, viewSeq, setViewSeq, onFocu
   // which doesn't change nodeCount) — so a node's eval/repair waterfall appears on its feed rows
   // without waiting for the next node. Still not every SSE tick (idle ticks don't change either key).
   const settledCount = live ? Object.values(live.nodes || {}).filter(n => n.status === 'evaluated' || n.status === 'failed').length : 0
-  useEffect(() => { get(`/api/runs/${runId}/trace`).then(setTrace).catch(() => {}) }, [runId, nodeCount, settledCount, live?.finished])
+  // The task/data SETUP phase runs before any node exists (nodeCount 0), so the node-count/settled
+  // triggers never fire and its span tree would sit frozen. While in setup, key the refetch on liveSeq
+  // so the setup trace streams in live (the phase is short; a few small refetches). Once the first node
+  // lands this collapses to 0 and normal node-based refetching resumes.
+  const inSetup = !!live && !live.finished && nodeCount === 0
+  useEffect(() => { get(`/api/runs/${runId}/trace`).then(setTrace).catch(() => {}) },
+    [runId, nodeCount, settledCount, live?.finished, inSetup ? liveSeq : 0])
   const atLive = viewSeq == null || viewSeq >= liveSeq
 
   // The live frontier: the highest-id node still pending while the run runs — its proposal card stays
@@ -902,8 +911,9 @@ export default function Dock({ runId, live, liveSeq, viewSeq, setViewSeq, onFocu
           {feed.length === 0
             ? <div className="muted">{(filter || kinds.size) ? 'nothing matches the filter' : (eventsOnly ? 'no events yet' : 'no events yet — say hello below')}</div>
             : feed.map(it => it.t === 'ev'
-                ? <EventRow key={'e' + it.seq} e={it.e} trace={trace} onFocusEvent={focusEvent}
-                    autoOpen={it.e.type === 'node_created' && eventNode(it.e) === livePendingId} />
+                ? <EventRow key={'e' + it.seq} e={it.e} trace={trace} onFocusEvent={focusEvent} runId={runId}
+                    autoOpen={(it.e.type === 'node_created' && eventNode(it.e) === livePendingId)
+                      || (it.e.type === 'setup_started' && inSetup)} />
                 : it.m.role === 'summary'
                   ? <SummaryRow key={'s' + it.i} m={it.m} folded={it.m.folded ?? foldedCount}
                       showFolded={showFolded} onToggleFolded={() => setShowFolded(v => !v)} />

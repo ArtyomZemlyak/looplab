@@ -436,13 +436,18 @@ class LLMRepoDeveloper:
         from .hardware import operational_attention_points
         system = (
             "You improve an existing experiment repository by WRITING code, using ONLY the write_file "
-            "tool. " + self.brief + "\n\n"
+            "tool. You OWN the implementation: the researcher proposed the experiment CONCEPT and "
+            "hyperparameters; YOU decide how to realise it in code — which existing scripts to "
+            "orchestrate, the stage structure, and how to compute + read the metric. " + self.brief + "\n\n"
             "The repository's current source files are included verbatim below — you have everything "
             "you need; do NOT try to read or inspect files, and do NOT write helper/'cat'/'check' "
             "scripts. Author the eval entrypoint the eval command runs (it does not exist yet) by "
             "calling write_file with a REPO-RELATIVE path and the FULL file content. The entrypoint "
             "must run the whole experiment and print the metric as the LAST stdout line (a JSON object "
-            "with the required key). Bake the chosen hyperparameters into the code. Stay within your "
+            "with the required key). ALSO include any related metrics you compute in that SAME JSON "
+            "object under their own names (e.g. {\"metric\": <objective>, \"recall@10\": .., \"mrr\": ..}) "
+            "— every extra key is recorded and shown alongside the objective; only the required key "
+            "drives selection, so report generously. Bake the chosen hyperparameters into the code. Stay within your "
             "editable surface; never write protected or absolute paths. When all files are written and "
             "the eval would succeed, call done.\n\n"
             "STRONGLY PREFER ORCHESTRATING the repo's EXISTING scripts via subprocess "
@@ -478,8 +483,8 @@ class LLMRepoDeveloper:
                 "metric; use it to pick strong hyperparameters and beat the best) ===\n"
                 + _results + "\n\n") if (_results := self._results_context()) else "")
             + "=== REPOSITORY SOURCE ===\n" + self._repo_context())
-        user = (f"Experiment to implement: {idea.rationale}\nHyperparameters to use: {params}.\n"
-                "Write the eval entrypoint (and any edits) now with write_file, then call done.")
+        user = (f"Experiment concept (the researcher's idea): {idea.rationale}\nHyperparameters to use: {params}.\n"
+                "Design and implement the eval entrypoint (and any edits) now with write_file, then call done.")
         if error:
             already = ", ".join(self.last_files) or "(none)"
             user += ("\n\nThe PREVIOUS attempt FAILED — fix ONLY the stage that failed (see the error) by "

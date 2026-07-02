@@ -209,7 +209,9 @@ class LLMResearcher:
                                         "`rationale` is your conclusion the operator reads: in 1-3 "
                                         "sentences state WHY this experiment next and WHAT you expect "
                                         "it to learn/improve given the results so far — not a "
-                                        "restatement of the params."
+                                        "restatement of the params, and NOT an implementation plan. "
+                                        "Stay at the level of the idea: do not write code or design the "
+                                        "code structure — the Developer owns how to implement it."
                                         + (" The `hypothesis` is the one-line belief this experiment "
                                            "tests (reuse wording across experiments that test the same "
                                            "belief)." if self.track_hypotheses else "")},
@@ -255,7 +257,10 @@ class LLMDeveloper:
             fixed = f" Fixed/shared params: {params}." if idea.params else ""
             user = (f"Run an intra-node sweep over the grid: {grid}.{fixed} {idea.rationale}").strip()
         else:
-            user = (f"Approach to implement with parameters: {params}. {idea.rationale}").strip()
+            user = (f"Experiment concept (the researcher's idea): {idea.rationale}\n"
+                    f"Parameters: {params}.\n"
+                    "You own the implementation: design and write the solution code that realises "
+                    "this concept.").strip()
         return extract_code(self.client.complete_text(
             [{"role": "system", "content": system}, {"role": "user", "content": user}]))
 

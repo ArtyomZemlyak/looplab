@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useRef } from 'react'
-import { get, fmt, fmtInt, isSweep } from './util.js'
+import { get, fmt, fmtInt, isSweep, spanDetail } from './util.js'
 import { Trajectory, ParallelCoords, Scatter, MetricLines } from './charts.jsx'
 import { groupAggregate } from './grouping.js'
 import { mergeSummary, nodeChip } from './report.js'
@@ -12,10 +12,8 @@ import Markdown from './markdown.jsx'
 // LLM I/O, and the coding-agent's validation — instead of three disconnected panes. The Inspector is
 // READ-ONLY (Workstream C): every node action — confirm/ablate/fork/promote/note — is done from the
 // chat (add the node via its ＋#id chip, or use a /command), so there's no per-node button toolbar.
-// Tab order follows a node's story top-to-bottom: what it is (Overview) → the solution (Code) → what
-// it scored (Metrics, Training) → is it trustworthy (Trust) → how it ran (Trace) → what it cost (Cost).
-// The everyday "what/results" tabs lead; the diagnostic lifecycle Trace + LLM Cost trail at the end.
-const TABS = ['Overview', 'Code', 'Metrics', 'Training', 'Trust', 'Trace', 'Cost']
+// Tab order (user preference): Overview → Trace → Training → Code → Metrics → Trust → Cost.
+const TABS = ['Overview', 'Trace', 'Training', 'Code', 'Metrics', 'Trust', 'Cost']
 
 export default function Inspector({ runId, nodeId, state, live, tab, setTab, onToast }) {
   const [detail, setDetail] = useState(null)
@@ -50,9 +48,9 @@ export default function Inspector({ runId, nodeId, state, live, tab, setTab, onT
 
         {activeTab === 'Overview' && <Overview n={n} state={state} />}
         {activeTab === 'Trials' && <Trials n={n} detail={detail} state={state} />}
-        {activeTab === 'Trace' && <Trace n={n} />}
+        {activeTab === 'Trace' && <Trace n={n} runId={runId} />}
         {activeTab === 'Code' && <Code n={n} />}
-        {activeTab === 'Metrics' && <Metrics n={n} detail={detail} />}
+        {activeTab === 'Metrics' && <Metrics n={n} detail={detail} state={state} />}
         {activeTab === 'Training' && <Training runId={runId} nodeId={nodeId} n={n} />}
         {activeTab === 'Trust' && <Trust n={n} drifts={nodeDrifts} />}
         {activeTab === 'Cost' && <Cost state={state} />}
@@ -242,23 +240,27 @@ function genToCall(s) {
 }
 const asText = (v) => v == null ? '' : (typeof v === 'string' ? v : JSON.stringify(v, null, 2))
 
-// The expandable body of a generation: input messages, any tool_calls it decided, the output, and a
-// collapsed reasoning disclosure — the full input→output record (nothing truncated).
+// The expandable body of a generation: the INPUT (prompt messages) and the OUTPUT (the model's text),
+// plus a collapsed reasoning disclosure. Tool CALLS are NOT shown here — they render as their own
+// indented tool observations directly beneath this chat (no duplication); when a turn produced only
+// tool calls, its output is empty and we say so, pointing at the tools below.
 function GenBody({ c }) {
   const [think, setThink] = useState(false)
+  const nTools = (c.tool_calls || []).length
   return <div className="llm-io">
     {(c.model || c.model_parameters || c.cost != null) && <div className="kv">
       {c.model && <KV k="model" v={c.model} />}
       {c.model_parameters && <KV k="params" v={JSON.stringify(c.model_parameters)} />}
       {c.cost ? <KV k="cost" v={'$' + c.cost} /> : null}</div>}
+    <div className="gen-sec-h">input</div>
     {(c.prompt || []).map((m, i) => <div key={i} className="msg">
       <div className={'msg-role role-' + (m.role || 'user')}>{m.role}</div>
       <pre className="code">{m.content}</pre></div>)}
-    {(c.tool_calls || []).map((tc, i) => <div key={i} className="msg">
-      <div className="msg-role role-tool">→ calls {tc.name}</div>
-      <pre className="code">{asText(tc.arguments)}</pre></div>)}
-    <div className="msg"><div className="msg-role role-completion">output</div>
-      <pre className="code">{c.completion || '(empty)'}</pre></div>
+    <div className="gen-sec-h">output</div>
+    {c.completion
+      ? <div className="msg"><pre className="code">{c.completion}</pre></div>
+      : <div className="muted" style={{ fontSize: 12, padding: '2px 2px 4px' }}>
+          {nTools ? `→ called ${nTools} tool${nTools > 1 ? 's' : ''} (shown below)` : '(no text output)'}</div>}
     {c.thinking && <div className="msg think-debug">
       <div className="msg-role role-think" onClick={() => setThink(v => !v)} style={{ cursor: 'pointer' }}>
         {think ? '▾' : '▸'} reasoning (debug)</div>
@@ -266,53 +268,95 @@ function GenBody({ c }) {
   </div>
 }
 
+// Render a list of sibling spans. Two behaviours:
+//  • INDENT each tool observation one level under the generation before it — in the tool-loop the
+//    sequence is (chat → tool → tool → chat → …), so a tool belongs to the last chat, making "which
+//    chat called this tool" obvious without re-parenting the trace.
+//  • CAP how many are rendered at once (a heavily-repaired node can have 800+ spans — rendering them
+//    all freezes the browser / black screen). Show the first SPAN_CAP, then a "show N more" button;
+//    the rest (and every span's full I/O) are always one click away — nothing is lost.
+const SPAN_CAP = 60
+function SpanList({ items, depth, t0, total, runId, parentOp = null }) {
+  const [all, setAll] = useState(false)
+  const rows = []
+  let genDepth = null
+  ;(items || []).forEach((c, i) => {
+    const kind = c.kind || 'operation'
+    if (kind === 'tool' && genDepth != null) { rows.push({ c, d: genDepth + 1, i }) }
+    else { rows.push({ c, d: depth, i }); genDepth = (kind === 'generation') ? depth : null }
+  })
+  const shown = all ? rows : rows.slice(0, SPAN_CAP)
+  return <>
+    {shown.map(({ c, d, i }) => <SpanRow key={i} s={c} depth={d} t0={t0} total={total} runId={runId} parentOp={parentOp} />)}
+    {!all && rows.length > SPAN_CAP && <button className="span-more" style={{ marginLeft: depth * 14 + 4 }}
+      onClick={() => setAll(true)}>… show {rows.length - SPAN_CAP} more observations</button>}
+  </>
+}
+
 // One span and its subtree, drawn as a langfuse-style waterfall row: the bar is positioned by the
 // span's OFFSET from the trace start (t0) and sized by its duration, so sequence reads at a glance.
 // Renders three observation kinds distinctly — GENERATION (an LLM call: op·model·in→out·preview, its
 // prompt/output on expand), TOOL (name·arg, its input/output on expand), and OPERATION (a phase of
 // work) — so the tree shows exactly what called what and what each produced. Nothing is truncated.
-function SpanRow({ s, depth, t0, total }) {
+function SpanRow({ s, depth, t0, total, runId, parentOp = null }) {
   const [open, setOpen] = useState(false)
+  const [io, setIo] = useState(null)   // lazily-fetched FULL i/o for a generation/tool (Langfuse-style)
   const kind = s.kind || 'operation'
   const err = s.status === 'ERROR'
   const off = (typeof s.start === 'number') ? Math.max(0, (s.start - t0) / total * 100) : 0
   const wid = Math.max(1.5, (s.duration_s || 0) / total * 100)
   const barTone = err ? 'var(--fail)' : kind === 'generation' ? 'var(--accent)' : kind === 'tool' ? 'var(--working)' : stageMeta(s.name).tone
   const bar = <span className="span-bar"><span className="span-fill" style={{ marginLeft: Math.min(98, off) + '%', width: wid + '%', background: barTone }} /></span>
-  const kids = (s.children || []).map((c, i) => <SpanRow key={i} s={c} depth={depth + 1} t0={t0} total={total} />)
+  const kids = <SpanList items={s.children} depth={depth + 1} t0={t0} total={total} runId={runId} parentOp={s.name} />
+  // On first expand of a generation/tool, pull the full (uncapped) input/output on demand — the tree
+  // is served light so a long run stays fast, and NO information is lost (full text fetched here).
+  useEffect(() => {
+    if (open && io === null && runId && s.span_id && (kind === 'generation' || kind === 'tool')) {
+      let on = true
+      spanDetail(runId, s.span_id).then(d => on && setIo((d && d.attributes) || {})).catch(() => on && setIo({}))
+      return () => { on = false }
+    }
+  }, [open])
 
   if (kind === 'generation') {
-    const c = genToCall(s), t = callTok(c), preview = callPreview(c), msgs = (c.prompt || []).length
+    // Row header from the LIGHT span (op·model·tokens); the prompt/output come from the fetched `io`.
+    const a = { ...(s.attributes || {}), ...(io || {}) }
+    const c = genToCall({ ...s, attributes: a }), t = callTok(c)
     return <>
-      <div className={'span-row gen' + (err ? ' err' : '')} style={{ paddingLeft: depth * 14 }} onClick={() => setOpen(o => !o)} title={preview || 'expand for prompt & output'}>
+      <div className={'span-row gen' + (err ? ' err' : '')} style={{ paddingLeft: depth * 14 }} onClick={() => setOpen(o => !o)} title="expand for prompt & output">
         <span className="span-tw">{open ? '▾' : '▸'}</span>
-        <span className="span-name gen"><OpIcon name="bulb" className="t-ic" /> <span className="llm-op">{c.op || 'llm'}</span>{c.model && <span className="llm-model" title={c.model}>{shortModel(c.model)}</span>}</span>
+        {(() => {   // name the call by ROLE so "who writes code" is unmistakable: the Developer's LLM
+          // call (under implement/repair) is "writing code"; the Researcher's (under propose) is "reasoning".
+          const dev = parentOp === 'implement' || parentOp === 'repair'
+          const label = dev ? 'writing code' : (parentOp === 'propose' && a.op === 'chat' ? 'reasoning' : (a.op || 'llm'))
+          return <span className="span-name gen"><OpIcon name={dev ? 'pencil' : 'bulb'} className="t-ic" /> <span className={'llm-op' + (dev ? ' dev-code' : '')}>{label}</span>{a.model && <span className="llm-model" title={a.model}>{shortModel(a.model)}</span>}</span>
+        })()}
         {bar}
         <span className="t">{fmt(s.duration_s, 3)}s</span>
         {(t.in != null || t.out != null) && <span className="badge" title={`${t.in || 0} prompt → ${t.out || 0} completion tokens`}>{ktok(t.in)}→{ktok(t.out)}</span>}
-        {msgs > 2 && <span className="llm-msgs" title={`${msgs} messages in the prompt`}>{msgs}m</span>}
-        {c.thinking && <span className="llm-think" title="model reasoning captured"><OpIcon name="bulb" /></span>}
         {err && <span className="badge reason">ERROR</span>}
       </div>
-      {open && <div className="span-detail" style={{ marginLeft: depth * 14 + 16 }}><GenBody c={c} /></div>}
+      {open && <div className="span-detail" style={{ marginLeft: depth * 14 + 16 }}>
+        {io === null ? <div className="muted" style={{ fontSize: 12 }}>loading…</div> : <GenBody c={c} />}</div>}
       {kids}
     </>
   }
   if (kind === 'tool') {
-    const a = s.attributes || {}, inp = asText(a.input), outp = asText(a.output), name = a.tool || 'tool'
-    const arg = inp ? inp.replace(/\s+/g, ' ').slice(0, 64) : ''
-    const detail = inp || outp
+    const a = { ...(s.attributes || {}), ...(io || {}) }
+    const inp = asText(a.input), outp = asText(a.output), name = (s.attributes || {}).tool || a.tool || 'tool'
     return <>
-      <div className={'span-row tool' + (err ? ' err' : '')} style={{ paddingLeft: depth * 14 }} onClick={() => detail && setOpen(o => !o)} title={detail ? 'expand for input & output' : ''}>
-        <span className="span-tw">{detail ? (open ? '▾' : '▸') : '·'}</span>
-        <span className="span-name tool"><OpIcon name="gear" className="t-ic" /> <b className="tool-name">{name}</b>{arg && <span className="muted"> {arg}</span>}</span>
+      <div className={'span-row tool' + (err ? ' err' : '')} style={{ paddingLeft: depth * 14 }} onClick={() => setOpen(o => !o)} title="expand for input & output">
+        <span className="span-tw">{open ? '▾' : '▸'}</span>
+        <span className="span-name tool"><OpIcon name="gear" className="t-ic" /> <b className="tool-name">{name}</b></span>
         {bar}
         <span className="t">{fmt(s.duration_s, 3)}s</span>
         {err && <span className="badge reason">ERROR</span>}
       </div>
-      {open && detail && <div className="span-detail" style={{ marginLeft: depth * 14 + 16 }}>
-        {inp && <div className="msg"><div className="msg-role role-user">input</div><pre className="code">{inp}</pre></div>}
-        {outp && <div className="msg"><div className="msg-role role-completion">output</div><pre className="code">{outp}</pre></div>}
+      {open && <div className="span-detail" style={{ marginLeft: depth * 14 + 16 }}>
+        {io === null ? <div className="muted" style={{ fontSize: 12 }}>loading…</div> : <>
+          {inp && <div className="msg"><div className="msg-role role-user">input</div><pre className="code">{inp}</pre></div>}
+          {outp && <div className="msg"><div className="msg-role role-completion">output</div><pre className="code">{outp}</pre></div>}
+          {!inp && !outp && <div className="muted" style={{ fontSize: 12 }}>(no input/output recorded)</div>}</>}
       </div>}
       {kids}
     </>
@@ -390,7 +434,7 @@ export function LlmCall({ call, idx }) {
 
 // A top-level lifecycle stage (one root span = one phase of work on this node), with its sub-steps.
 // The header rolls up the stage's model-call count + token cost so the expensive phases stand out.
-function StageBlock({ s, t0, total }) {
+function StageBlock({ s, t0, total, runId }) {
   const m = stageMeta(s.name)
   const roll = spanRollup(s)
   return <div className={'stage' + (s.status === 'ERROR' ? ' err' : '')}>
@@ -403,19 +447,19 @@ function StageBlock({ s, t0, total }) {
     </div>
     <div className="spans">
       {(s.children || []).length
-        ? (s.children || []).map((c, i) => <SpanRow key={i} s={c} depth={0} t0={t0} total={total} />)
-        : <SpanRow s={s} depth={0} t0={t0} total={total} />}
+        ? <SpanList items={s.children} depth={0} t0={t0} total={total} runId={runId} />
+        : <SpanRow s={s} depth={0} t0={t0} total={total} runId={runId} />}
     </div>
   </div>
 }
 
 // Reusable langfuse-style trace for ONE node's span forest — the lifecycle stages on a shared
 // timeline. Exported so the chat feed can show the same waterfall inline (Dock.jsx) as the Inspector.
-export function NodeTrace({ spans }) {
+export function NodeTrace({ spans, runId }) {
   const roots = spans || []
   if (!roots.length) return <div className="muted" style={{ fontSize: 12 }}>No LLM/execution spans captured for this node yet.</div>
   const { t0, total } = traceBounds(roots)
-  return <div className="trace">{roots.map((s, i) => <StageBlock key={i} s={s} t0={t0} total={total} />)}</div>
+  return <div className="trace">{roots.map((s, i) => <StageBlock key={i} s={s} t0={t0} total={total} runId={runId} />)}</div>
 }
 
 // The coding-agent's own validation report (was its own tab) — folded into the lifecycle as the
@@ -437,7 +481,7 @@ function AgentReport({ r }) {
   </div>
 }
 
-function Trace({ n }) {
+function Trace({ n, runId }) {
   const spans = n.trace?.nodes || []
   const agent = n.agent_report
   if (!spans.length && !agent)
@@ -460,7 +504,7 @@ function Trace({ n }) {
       </span> : null}
     </div>
     {spans.map((s, i) => <React.Fragment key={i}>
-      <StageBlock s={s} t0={t0} total={total} />
+      <StageBlock s={s} t0={t0} total={total} runId={runId} />
       {agent && i === authorIdx && <AgentReport r={agent} />}
     </React.Fragment>)}
     {agent && authorIdx < 0 && <AgentReport r={agent} />}
@@ -491,21 +535,33 @@ function Code({ n }) {
   </>
 }
 
-function Metrics({ n, detail }) {
+function Metrics({ n, detail, state }) {
   const seeds = detail?.confirm_seeds_detail || {}
   const vals = Object.entries(seeds).map(([s, v]) => ({ s: Number(s), v })).filter(x => x.v != null).sort((a, b) => a.s - b.s)
+  // Every metric reported anywhere in the run (the objective ★ + all auto-captured extras), shown for
+  // THIS node and for the champion (the run's best node), so "the metrics you wanted to see overall"
+  // are all visible + comparable. Only the objective drives selection; extras are audit-only.
+  const nodes = Object.values(state?.nodes || {})
+  const extraKeys = [...new Set(nodes.flatMap(x => Object.keys(x.extra_metrics || {})))]
+  const champ = state?.best_node_id != null ? nodes.find(x => x.id === state.best_node_id) : null
+  const showChamp = champ && champ.id !== n.id
+  const rows = [
+    { k: 'objective', mine: n.confirmed_mean ?? n.metric, best: champ ? (champ.confirmed_mean ?? champ.metric) : null, star: true },
+    ...extraKeys.map(k => ({ k, mine: n.extra_metrics?.[k], best: champ?.extra_metrics?.[k] })),
+  ]
   return <>
-    <div className="kv">
-      <KV k="single metric" v={fmt(n.metric)} />
-      {n.confirmed_mean != null && <KV k="robust mean ± std" v={`${fmt(n.confirmed_mean)} ± ${fmt(n.confirmed_std)}`} />}
-      {Object.entries(n.extra_metrics || {}).map(([k, v]) => <KV key={k} k={'aux: ' + k} v={fmt(v)} />)}
-    </div>
+    <div className="section-h">Reported metrics{champ ? ` · best = #${champ.id}` : ''}</div>
+    <table className="tbl"><thead><tr><th>metric</th><th>this node</th>{showChamp && <th>best #{champ.id}</th>}</tr></thead>
+      <tbody>{rows.map(r => <tr key={r.k} className={r.star ? 'chosen-row' : ''}>
+        <td>{r.star ? '★ ' : ''}{r.k}</td><td>{fmt(r.mine)}</td>
+        {showChamp && <td>{fmt(r.best)}</td>}</tr>)}</tbody></table>
+    {n.confirmed_mean != null && <div className="kv" style={{ marginTop: 8 }}>
+      <KV k="robust mean ± std" v={`${fmt(n.confirmed_mean)} ± ${fmt(n.confirmed_std)} over ${n.confirmed_seeds || vals.length} seeds`} /></div>}
     {vals.length > 0 && <>
       <div className="section-h">Per-seed confirmation</div>
       <table className="tbl"><thead><tr><th>seed</th><th>metric</th></tr></thead>
         <tbody>{vals.map(x => <tr key={x.s}><td>{x.s}</td><td>{fmt(x.v)}</td></tr>)}</tbody></table>
     </>}
-    {!vals.length && <div className="muted" style={{ marginTop: 10 }}>No per-step series for this task kind; run multi-seed confirmation to populate robustness.</div>}
   </>
 }
 

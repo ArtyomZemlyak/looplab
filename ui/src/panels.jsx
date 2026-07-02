@@ -267,7 +267,14 @@ export function WhyStrip({ state, onSelect }) {
   }
   const dec = (state.agent_decisions || [])[(state.agent_decisions || []).length - 1]
   if (dec && (dec.rationale || dec.chosen)) {
-    items.push({ icon: 'bolt', label: dec.chosen || 'action', text: dec.rationale || '', at: dec.at_node })
+    // `chosen` used to be a bare node id but the agentic policy makes it an ACTION object
+    // {kind, parent_id, parent_ids, node_id} — render a readable label, never the raw object
+    // (a raw object as a JSX child is React error #31, which black-screened the whole run view).
+    const ch = dec.chosen
+    const label = (ch && typeof ch === 'object')
+      ? `${ch.kind || 'action'}${ch.node_id != null ? ' #' + ch.node_id : (ch.parent_id != null ? ' from #' + ch.parent_id : '')}`
+      : (ch || 'action')
+    items.push({ icon: 'bolt', label, text: dec.rationale || '', at: dec.at_node })
   }
   if (state.policy_reason) {
     items.push({ icon: 'target', label: 'policy', node: state.policy_chosen,

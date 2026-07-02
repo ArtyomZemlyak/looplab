@@ -23,7 +23,7 @@ from contextlib import nullcontext
 from pathlib import Path
 from typing import Optional
 
-from .sandbox import RunResult, _json_line_metric, _json_line_trials, _run_argv, _to_float
+from .sandbox import RunResult, _json_line_extras, _json_line_metric, _json_line_trials, _run_argv, _to_float
 
 
 def _dig(obj, key: str):
@@ -379,8 +379,14 @@ def run_command_eval(command: list[str], cwd: str, timeout: float, metric: dict,
         if spec.get("kind") == "adapter":
             raise ValueError("metrics/constraints readers must be built-in, not 'adapter' "
                              "(an agent-authored gate reader defeats the trust boundary).")
-    extra = ({name: read_metric(out, str(wd), spec, wrap=wrap)
-              for name, spec in metrics.items()} if (metrics and not to) else None)
+    declared = ({name: read_metric(out, str(wd), spec, wrap=wrap)
+                 for name, spec in metrics.items()} if (metrics and not to) else {})
+    # Auto-capture: every other numeric key on the metric's own JSON line is also reported (no config
+    # needed), so an experiment that prints {"metric": x, "recall@10": y, ...} surfaces them all. A
+    # declared spec wins over the auto-captured value of the same name.
+    auto = (_json_line_extras(out, metric.get("key", "metric"))
+            if (not to and metric.get("kind", "stdout_json") == "stdout_json") else {})
+    extra = ({**auto, **declared} or None)
     viol = _violations(out, str(wd), constraints, wrap) if (constraints and not to and m is not None) else None
     # Intra-node sweep: a RepoTask command may emit the same `{"trials": [...]}` stdout line; carry
     # it so the engine can collapse it to the node's best metric (no eval_spec change required).

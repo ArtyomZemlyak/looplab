@@ -992,11 +992,15 @@ textarea.text { min-height: 220px; font-family: ui-monospace, Consolas, monospac
 .insp-hint code { background: var(--bg-3); padding: 0 4px; border-radius: 4px; }
 
 /* ── Graph redesign (Workstream E): diff-labeled nodes + directions overview ──── */
-.node-card .change-chip { font-size: 11px; color: var(--fg-dim); margin-top: 3px; background: var(--bg-3);
-  border: 1px solid var(--line); border-radius: 5px; padding: 0 5px; display: inline-block;
-  max-width: 168px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
-.node-card .merge-line { font-size: 11px; color: #c9b3e0; margin-top: 3px; max-width: 168px;
-  overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+/* "what it does" label — font size is computed per-node (chipFontSize) to fit the text: big for a
+   short change, shrinking + wrapping to a 2nd line for a long one, so the description stays readable. */
+.node-card .change-chip { font-size: var(--ll-label-zfs, 11px); color: var(--fg-dim); margin-top: 3px; background: var(--bg-3);
+  border: 1px solid var(--line); border-radius: 5px; padding: 1px 5px; max-width: 168px;
+  display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden;
+  line-height: 1.18; word-break: break-word; }
+.node-card .merge-line { font-size: var(--ll-label-zfs, 11px); color: #c9b3e0; margin-top: 3px; max-width: 168px;
+  display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden;
+  line-height: 1.18; word-break: break-word; }
 /* cross-run provenance: a "seeded from a sibling run" chip — accent-tinted to stand apart from the
    neutral change-chip, and a real link (deep-links to the source run). */
 .node-card .origin-chip { font-size: 11px; color: var(--accent); margin-top: 3px; background: var(--bg-3);
@@ -1320,7 +1324,7 @@ textarea.text { min-height: 220px; font-family: ui-monospace, Consolas, monospac
   line-height: 1.45; white-space: pre; tab-size: 4; }
 
 /* ---- Assistant (general chat agent — the evolution of Genesis) ---- */
-.asst-view { display: flex; height: 100vh; min-height: 0; background: var(--bg-0); }
+.asst-view { display: flex; height: 100vh; min-height: 0; background: var(--bg); }
 .asst-side { width: 250px; flex: none; display: flex; flex-direction: column;
   border-right: 1px solid var(--line); background: var(--bg-1); }
 .asst-side-h { display: flex; align-items: center; gap: 8px; padding: 10px; border-bottom: 1px solid var(--line); }
@@ -1352,7 +1356,7 @@ textarea.text { min-height: 220px; font-family: ui-monospace, Consolas, monospac
 .asst-perm-h { display: flex; align-items: center; gap: 8px; font-size: 13px; }
 .asst-perm-badge { font-size: 10px; text-transform: uppercase; letter-spacing: .6px; color: #07101c;
   background: var(--accent); border-radius: 5px; padding: 1px 6px; font-weight: 700; }
-.asst-perm-pre { margin: 8px 0 0; max-height: 220px; overflow: auto; background: var(--bg-0);
+.asst-perm-pre { margin: 8px 0 0; max-height: 220px; overflow: auto; background: var(--bg);
   border: 1px solid var(--line); border-radius: 7px; padding: 8px; font-family: ui-monospace, Consolas, monospace;
   font-size: 11.5px; line-height: 1.4; white-space: pre; tab-size: 4; }
 .asst-perm-pre.diff { white-space: pre-wrap; }
@@ -1389,3 +1393,90 @@ textarea.text { min-height: 220px; font-family: ui-monospace, Consolas, monospac
 .asst-todo.in_progress .asst-todo-box { color: var(--accent); }
 .asst-cursor { display: inline-block; margin-left: 1px; color: var(--accent); animation: asstBlink 1s step-end infinite; }
 @keyframes asstBlink { 50% { opacity: 0; } }
+
+/* ── assistant bar rework (centered+capped bar · resizable side panel · opaque full · files · hints) ── */
+.cmdbar-wrap { flex: none; display: flex; justify-content: center; padding: 6px 12px 8px;
+  background: var(--bg); border-top: 1px solid var(--line-2); }
+.cmdbar-wrap .cmdbar-dock { border-top: none; width: 100%; max-width: 1000px; margin: 0 auto; }
+.cmdbar-attach, .asst-attach { background: transparent; border: 1px solid var(--line-2); color: var(--fg-dim);
+  cursor: pointer; border-radius: 7px; padding: 6px 8px; display: inline-flex; align-items: center; flex: none; }
+.cmdbar-attach:hover, .asst-attach:hover { color: var(--fg); border-color: var(--accent-dim); background: var(--bg-3); }
+.chip.file { display: inline-flex; align-items: center; gap: 3px; }
+.chip .chip-x { background: transparent; border: none; color: var(--fg-mut); cursor: pointer; padding: 0 0 0 4px; font-size: 11px; }
+.chip .chip-x:hover { color: var(--fail); }
+
+/* Right side panel: full-height, RESIZABLE (drag left edge), composer lives inside it. */
+.asst-side-panel { position: fixed; top: 0; right: 0; bottom: 0; z-index: 58; display: flex; flex-direction: column;
+  background: var(--bg-1); border-left: 1px solid var(--line); box-shadow: -8px 0 24px rgba(0,0,0,.35); }
+.asst-resize { position: absolute; left: -3px; top: 0; bottom: 0; width: 8px; cursor: col-resize; z-index: 3; }
+.asst-resize:hover { background: var(--accent-dim); }
+.asst-side-panel .asst-drawer-feed { flex: 1; min-height: 0; overflow: auto; padding: 10px 12px; }
+
+/* Composer shared by side + full: attach + textarea + send/stop, mode selector BELOW it. */
+.asst-in { border-top: 1px solid var(--line); padding: 8px 10px; flex: none; position: relative; }
+.asst-inrow { display: flex; align-items: flex-end; gap: 6px; }
+.asst-inrow .text { flex: 1; min-height: 40px; max-height: 200px; resize: vertical; width: auto; }
+.asst-moderow { display: flex; align-items: center; gap: 8px; margin-top: 7px; }
+.asst-modehint { font-size: 11px; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.asst-files { display: flex; flex-wrap: wrap; gap: 4px; margin-bottom: 6px; }
+
+/* Empty-state one-tap command hints. */
+.asst-empty { padding: 16px; }
+.asst-hints { display: flex; flex-wrap: wrap; gap: 6px; }
+.asst-hint { background: var(--bg-2); border: 1px solid var(--line-2); color: var(--fg); cursor: pointer;
+  border-radius: 14px; padding: 5px 12px; font-size: 12px; }
+.asst-hint:hover { border-color: var(--accent-dim); background: var(--bg-3); }
+
+/* Full = a dedicated OPAQUE page above everything. */
+.asst-view.asst-full { position: fixed; inset: 0; z-index: 200; background: var(--bg); }
+.asst-main-h { display: flex; align-items: center; gap: 8px; padding: 10px; border-bottom: 1px solid var(--line); }
+.asst-main-h .ttl { font-size: 13px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.asst-full .asst-feed { flex: 1; min-height: 0; overflow: auto; padding: 12px 14px; }
+
+/* Delete-chat: clearly clickable trash on each session row. */
+.asst-sess { display: flex; align-items: center; gap: 6px; }
+.asst-sess .asst-sess-t { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.asst-sess-x { background: transparent; border: none; color: var(--fg-mut); cursor: pointer; font-size: 13px;
+  opacity: .3; flex: none; padding: 2px 5px; border-radius: 5px; }
+.asst-sess:hover .asst-sess-x { opacity: 1; }
+.asst-sess-x:hover { color: var(--fail); background: var(--bg-3); }
+
+.cmdbar-toast.side { position: absolute; bottom: 70px; left: 12px; right: 12px; text-align: center; }
+
+/* Generation body: labeled input / output sections (tool calls render as indented tool rows below). */
+.llm-io .gen-sec-h { font-size: 10px; text-transform: uppercase; letter-spacing: .05em; color: var(--fg-mut); margin: 8px 2px 3px; font-weight: 600; }
+.llm-io .gen-sec-h:first-child { margin-top: 0; }
+/* An indented tool observation reads as a child of the chat above it. */
+.span-row.tool { border-left: 2px solid var(--line-2); }
+
+/* Bar send-slot doubling as stop mid-turn — distinct from the side button so stopping never navigates. */
+.cmdbar-go.stop { background: var(--bg-3); color: var(--fg); }
+.cmdbar-go.stop:hover { background: var(--fail); color: #fff; }
+
+/* Side panel docks like VS Code: push the main view aside (reserve the panel's width) instead of
+   overlaying it. The panel stays position:fixed and fills this reserved space on the right. */
+body.asst-side-open .app-shell-main { margin-right: var(--asst-side-w, 440px); }
+
+/* "show N more" when a level has too many observations to render at once (keeps the DOM bounded). */
+.span-more { background: transparent; border: 1px dashed var(--line-2); color: var(--fg-dim); cursor: pointer;
+  font-size: 11px; padding: 3px 10px; border-radius: 6px; margin: 4px 0; }
+.span-more:hover { color: var(--fg); border-color: var(--accent-dim); background: var(--bg-3); }
+
+/* Faint caption above a user message: the context silently attached to it (run · #experiments · files). */
+.asst-ctx-cap { display: flex; flex-wrap: wrap; gap: 5px; margin: 6px 0 1px; padding-left: 2px; }
+.asst-ctx-i { display: inline-flex; align-items: center; gap: 3px; font-size: 10px; color: var(--fg-mut);
+  background: var(--bg-2); border: 1px solid var(--line-2); border-radius: 4px; padding: 1px 6px; }
+
+/* Assistant context-usage chip (how full the conversation's context window is). */
+.asst-ctxtok { display: inline-flex; align-items: center; gap: 3px; font-size: 10px; color: var(--fg-mut);
+  background: var(--bg-2); border: 1px solid var(--line-2); border-radius: 4px; padding: 1px 6px; margin-left: 8px; }
+/* Clickable chart legend — click a swatch to isolate that operator group. */
+.chart-leg.pick { cursor: pointer; user-select: none; }
+.chart-leg.pick:hover { color: var(--fg); }
+.chart-leg.dim { opacity: .32; }
+/* Developer "writing code" call — tinted to stand apart from the researcher's reasoning calls. */
+.llm-op.dev-code { color: #6fae97; font-weight: 600; }
+
+/* Chart group-by control (colour points by operator or theme). */
+.chart-grp { display: inline-flex; align-items: center; gap: 3px; font-size: 10px; color: var(--fg-mut); margin-right: 8px; }
+.chart-grp .btn.xs { padding: 0 6px; }

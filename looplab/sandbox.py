@@ -90,6 +90,31 @@ def _parse_metric(stdout: str) -> Optional[float]:
     return _json_line_metric(stdout, "metric")
 
 
+def _json_line_extras(text: str, primary_key: str = "metric") -> dict:
+    """Every OTHER numeric key on the SAME final JSON line that carries the metric — auto-captured as
+    secondary metrics, so an experiment that prints {"metric": x, "recall@10": y, "mrr": z} surfaces
+    ALL of them with no per-task config. Structural/bookkeeping keys and non-numeric values are skipped;
+    only the primary key drives selection (extras are audit-only)."""
+    _skip = {primary_key, "metric", "trials", "params", "seconds", "second", "time", "epoch", "step"}
+    for line in reversed(text.splitlines()):
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            obj = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(obj, dict) and primary_key in obj:
+            out = {}
+            for k, v in obj.items():
+                if k in _skip or isinstance(v, bool):
+                    continue
+                if isinstance(v, (int, float)):
+                    out[str(k)] = float(v)
+            return out
+    return {}
+
+
 def _json_line_trials(text: str) -> Optional[list]:
     """Last stdout line that is a JSON object with a "trials" key holding a list (intra-node
     sweep). Scans bottom-up like `_json_line_metric`, so trailing chatter after the sweep's
@@ -313,6 +338,7 @@ class SubprocessSandbox:
             str(wd), timeout, env, self.max_output_bytes, cancel)
         return RunResult(exit_code=rc, stdout=out, stderr=err,
                          metric=_parse_metric(out), timed_out=to,
+                         extra_metrics=(_json_line_extras(out) or None) if not to else None,
                          trials=_json_line_trials(out))
 
 
@@ -366,6 +392,7 @@ class DockerSandbox:
         timed_out = to or rc in (124, 137)
         return RunResult(exit_code=rc, stdout=out, stderr=err,
                          metric=(None if timed_out else _parse_metric(out)), timed_out=timed_out,
+                         extra_metrics=(None if timed_out else (_json_line_extras(out) or None)),
                          trials=(None if timed_out else _json_line_trials(out)))
 
 

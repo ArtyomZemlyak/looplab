@@ -63,11 +63,64 @@ def _rollup(spans: list[dict]) -> dict:
             "cost": round(cost, 6)}
 
 
-def build_trace_view(state: RunState, spans: list[dict]) -> dict:
+# Trace-view I/O caps. A real repo-developer generation carries a 100KB+ prompt, and a long run
+# accumulates hundreds of them — the raw trace of one such run was ~52 MB, which crashes the browser
+# (observed: a black screen). The full text stays in spans.jsonl; the VIEW truncates each generation's
+# input/output/reasoning and keeps only the tail of a long message list, so the payload stays bounded
+# and the UI renders. Tune via these constants.
+_IO_CAP = 2000          # max chars per single message/output/reasoning string
+_MSGS_CAP = 10          # max messages kept in a generation's `input` (head + tail)
+
+
+def _cap_str(v, n: int = _IO_CAP):
+    if isinstance(v, str) and len(v) > n:
+        return v[:n] + f"\n…[+{len(v) - n} chars truncated — full text in spans.jsonl]"
+    return v
+
+
+def _cap_msgs(msgs: list) -> list:
+    if not isinstance(msgs, list):
+        return msgs
+    capped = [({**m, "content": _cap_str(m.get("content", ""))} if isinstance(m, dict) else m) for m in msgs]
+    if len(capped) <= _MSGS_CAP:
+        return capped
+    head, tail = _MSGS_CAP // 2, _MSGS_CAP - _MSGS_CAP // 2
+    return capped[:head] + [{"role": "system", "content": f"…[{len(capped) - _MSGS_CAP} earlier messages omitted]"}] + capped[-tail:]
+
+
+def _cap_span_io(s: dict) -> dict:
+    """Return the span with its heavy I/O attributes truncated (generation/tool only)."""
+    a = s.get("attributes")
+    if not isinstance(a, dict) or not any(k in a for k in ("input", "output", "thinking")):
+        return s
+    a = dict(a)
+    if isinstance(a.get("output"), str):
+        a["output"] = _cap_str(a["output"])
+    if isinstance(a.get("thinking"), str):
+        a["thinking"] = _cap_str(a["thinking"])
+    if "input" in a:
+        a["input"] = _cap_msgs(a["input"])
+    return {**s, "attributes": a}
+
+
+def _strip_span_io(s: dict) -> dict:
+    """Drop the heavy I/O entirely — the run-level trace (Dock timeline) needs only structure, timing,
+    model + token usage, not the prompts/outputs. Keeps the whole-run payload tiny; the per-node
+    endpoint serves the (capped) full I/O for the Inspector."""
+    a = s.get("attributes")
+    if not isinstance(a, dict) or not any(k in a for k in ("input", "output", "thinking")):
+        return s
+    return {**s, "attributes": {k: v for k, v in a.items() if k not in ("input", "output", "thinking")}}
+
+
+def build_trace_view(state: RunState, spans: list[dict], *, light: bool = False) -> dict:
     """Group spans into per-node trees + a run summary, correlated by node_id (carried on each
     trace's root span). Spans with no node_id land under `unscoped` (e.g. onboarding). Each span
     carries `kind` (operation/generation/tool) so the UI renders the Langfuse-style observation
-    tree; `rollups` gives per-node token/cost/observation totals aggregated from generations."""
+    tree; `rollups` gives per-node token/cost/observation totals aggregated from generations.
+    Heavy generation I/O is truncated (see `_cap_span_io`) so the payload stays browser-safe; with
+    `light=True` it's dropped entirely (run-level timeline doesn't need prompts/outputs)."""
+    spans = [(_strip_span_io if light else _cap_span_io)(s) for s in spans]
     by_trace: dict[str, list[dict]] = defaultdict(list)
     for s in spans:
         by_trace[s.get("trace_id")].append(s)

@@ -9,12 +9,22 @@ const OP_COLORS = {
   fork: '#22c5c5', random: '#e06fae', tune: '#7f8cff', sweep: '#f59e42',
 }
 const opColor = (op) => OP_COLORS[op] || '#6b8cc0'
+// Stable hue per theme slug (for grouping BY theme) — hashed so a theme always gets the same colour.
+function themeColor(t) {
+  let h = 0; const s = String(t || 'untagged')
+  for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) % 360
+  return `hsl(${h}, 60%, 58%)`
+}
 
-// A compact colour legend rendered under a chart (operators present in the data).
-function ChartLegend({ items }) {
+// A compact colour legend rendered under a chart (operators present in the data). When `onPick` is
+// given the swatches are clickable to FOCUS one operator group (dim the rest) — interactive grouping.
+function ChartLegend({ items, active = null, onPick = null }) {
   if (!items || items.length < 2) return null
   return <div className="chart-legend">{items.map((it, i) =>
-    <span key={i} className="chart-leg"><span className="chart-leg-dot" style={{ background: it.color }} />{it.label}</span>)}</div>
+    <span key={i} className={'chart-leg' + (onPick ? ' pick' : '') + (active && active !== it.key ? ' dim' : '')}
+      onClick={onPick ? () => onPick(active === it.key ? null : it.key) : undefined}
+      title={onPick ? (active === it.key ? 'show all' : `show only ${it.label}`) : undefined}>
+      <span className="chart-leg-dot" style={{ background: it.color }} />{it.label}</span>)}</div>
 }
 
 // Best-metric-over-time + all-node scatter. Pass `steps` (from report.improvements) to annotate
@@ -23,10 +33,17 @@ function ChartLegend({ items }) {
 // `onPick(id)` (optional) makes every point + frontier marker clickable to drill into that node.
 // Points are coloured BY OPERATOR (grouping), with a legend; the frontier keeps its green line + a
 // soft area fill under it.
-export function Trajectory({ nodes, direction, width = 760, height = 220, steps = null, onPick = null }) {
+export function Trajectory({ nodes, direction, width = 760, height = 220, steps = null, onPick = null, selected = null }) {
   const evald = nodes.filter(n => (n.metric ?? null) !== null).sort((a, b) => a.id - b.id)
   const [logY, setLogY] = React.useState(false)   // interactivity: log-scale toggle (e.g. loss curves)
   const [hoverId, setHoverId] = React.useState(null)   // interactivity: crosshair + tooltip on hover
+  const [focusGrp, setFocusGrp] = React.useState(null)   // interactivity: click the legend to isolate one group
+  const [groupBy, setGroupBy] = React.useState('operator')   // grouping dimension: operator | theme
+  const grpKey = (n) => groupBy === 'theme' ? (n.idea?.theme || 'untagged') : (n.operator || '—')
+  const grpColor = (n) => n.feasible === false ? '#7a6b9a'
+    : (groupBy === 'theme' ? themeColor(grpKey(n)) : opColor(n.operator))
+  const grpLabel = (g) => groupBy === 'theme' ? g : operatorMeta(g).label
+  const grpSwatch = (g) => groupBy === 'theme' ? themeColor(g) : opColor(g)
   if (!evald.length) return <Empty>no evaluated nodes yet</Empty>
   const xs = evald.map(n => n.id)
   const ys = evald.map(n => n.confirmed_mean ?? n.metric)
@@ -58,10 +75,15 @@ export function Trajectory({ nodes, direction, width = 760, height = 220, steps 
     ? `${line} L ${bestPts[bestPts.length - 1][0]} ${h - pad} L ${bestPts[0][0]} ${h - pad} Z` : ''
   const marks = steps || []
   const pick = onPick || null
-  const opsPresent = [...new Set(evald.map(n => n.operator).filter(Boolean))]
+  const groupsPresent = [...new Set(evald.map(grpKey).filter(Boolean))]
+  const hasThemes = evald.some(n => n.idea?.theme)
   return (
     <div className="chart">
     <div className="chart-tools">
+      {hasThemes && <span className="chart-grp">group:
+        {['operator', 'theme'].map(g => <button key={g} className={'btn xs ghost' + (groupBy === g ? ' primary' : '')}
+          onClick={() => { setGroupBy(g); setFocusGrp(null) }} title={`colour points by ${g}`}>{g}</button>)}
+      </span>}
       {canLog && <button className={'btn xs ghost' + (logY ? ' primary' : '')} onClick={() => setLogY(v => !v)}
         title="toggle a logarithmic Y axis">log Y</button>}
     </div>
@@ -77,11 +99,17 @@ export function Trajectory({ nodes, direction, width = 760, height = 220, steps 
         return <line key={i} x1={pad} x2={w - 10} y1={y} y2={y} stroke={GRID} />
       })}
       {area && <path d={area} fill="url(#ll-traj-fill)" />}
+      {selected != null && (() => {   // ring the currently-selected node so the chart tracks the Inspector
+        const sn = evald.find(n => n.id === selected); if (!sn) return null
+        const v = sn.confirmed_mean ?? sn.metric
+        return <circle cx={X(sn.id)} cy={Y(v)} r="7.5" fill="none" stroke="#eaf2ff" strokeWidth="2" opacity=".9" pointerEvents="none" />
+      })()}
       {evald.map(n => {
         const v = n.confirmed_mean ?? n.metric
-        const c = n.feasible === false ? '#7a6b9a' : opColor(n.operator)
+        const c = grpColor(n)
+        const dim = focusGrp && grpKey(n) !== focusGrp   // legend focus: fade the other groups
         return <circle key={n.id} className={'chart-pt' + (pick ? ' pick' : '')} cx={X(n.id)} cy={Y(v)}
-          r={n.feasible === false ? 2.8 : 4} fill={c} opacity={.85}
+          r={n.id === selected ? 5 : (n.feasible === false ? 2.8 : 4)} fill={c} opacity={dim ? .12 : .85}
           onClick={pick ? () => pick(n.id) : undefined}>
           <title>#{n.id} {n.operator}{n.idea?.theme ? ` (${n.idea.theme})` : ''} → {fmt(v)}{n.feasible === false ? ' · infeasible' : ''}</title>
         </circle>
@@ -110,7 +138,8 @@ export function Trajectory({ nodes, direction, width = 760, height = 220, steps 
       <text x={pad} y={12} fill={AX} fontSize="11">best so far: {fmt(best)}{useLog ? ' · log Y' : ''}</text>
       <text x={pad} y={h - 8} fill={AX} fontSize="11">node id →</text>
     </svg>
-    <ChartLegend items={opsPresent.map(o => ({ label: operatorMeta(o).label, color: opColor(o) }))} />
+    <ChartLegend items={groupsPresent.map(g => ({ key: g, label: grpLabel(g), color: grpSwatch(g) }))}
+                 active={focusGrp} onPick={setFocusGrp} />
     </div>
   )
 }

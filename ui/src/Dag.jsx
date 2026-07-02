@@ -29,6 +29,21 @@ function LodWatcher({ lod, onChange }) {
   return null
 }
 
+// Label font vs zoom: the whole pane scales uniformly, so at higher zoom the "what it does" text would
+// just grow without fitting more. Instead we SHRINK the label's CSS font as you zoom IN (font ≈
+// target/zoom) — the on-screen size stays ~constant while more characters fit. Written to one CSS var
+// (--ll-label-zfs) so labels restyle via CSS with NO node re-render; quantized to 0.05 zoom steps so it
+// doesn't thrash the style on every frame.
+function ZoomFontWatcher() {
+  const { zoom } = useViewport()
+  const q = Math.round(zoom * 20) / 20
+  useEffect(() => {
+    const fs = Math.max(5.5, Math.min(14, 12 / Math.max(0.4, q)))
+    document.documentElement.style.setProperty('--ll-label-zfs', fs.toFixed(2) + 'px')
+  }, [q])
+  return null
+}
+
 // Exception-only + monochrome: the common success case gets NO badge (the card's colour budget is
 // reserved for experiment STATUS, so a green ✓agent can't sit next to a red failure meaning two
 // different things). Only a fallback or a failed validation shows one faint glyph.
@@ -117,8 +132,8 @@ function ExpNode({ data }) {
       </div>
       {isMerge
         ? (() => { const ml = '⊕ ' + mergeThemes.join(' + ')
-            return <div className="merge-line" style={{ fontSize: chipFontSize(ml) + 'px' }} title={'combines: ' + mergeThemes.join(' + ')}>{ml}</div> })()
-        : chg ? <div className="change-chip" style={{ fontSize: chipFontSize(chg) + 'px' }} title={chg}>{chg}</div> : null}
+            return <div className="merge-line" title={'combines: ' + mergeThemes.join(' + ')}>{ml}</div> })()
+        : chg ? <div className="change-chip" title={chg}>{chg}</div> : null}
       {/* cross-run provenance: this experiment was seeded from a sibling run — deep-link to it */}
       {node.origin?.run_id && <a className="origin-chip" href={`#/run/${node.origin.run_id}`}
         onClick={(e) => e.stopPropagation()}
@@ -371,6 +386,7 @@ export default function Dag({ state, selectedId, onSelect, groupMode = 'none', c
                }}
                onPaneClick={() => { setMenu(null); onSelect(null); onSelectGroup && onSelectGroup(null) }}>
       <LodWatcher lod={lod} onChange={setLod} />
+      <ZoomFontWatcher />
       <Background color="#20252f" gap={22} />
       <Controls showInteractive={false} />
       <Panel position="top-right" className="grp-control">

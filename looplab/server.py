@@ -837,14 +837,31 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
         try:
             from .traceview import build_trace_view, load_spans
             st = fold(_events(rd))
-            tv = build_trace_view(st, load_spans(rd / "spans.jsonl"))
-            # `rollup` = this node's Langfuse-style totals (generations, tool calls, tokens, cost)
-            # so the UI shows the trace header without re-summing the tree.
+            # light=True: the tree carries structure + tokens + timing but NOT the prompts/outputs —
+            # the UI fetches a single observation's full I/O lazily via /spans/{sid} when expanded
+            # (Langfuse-style), so a heavily-repaired node's trace stays small and nothing is lost.
+            tv = build_trace_view(st, load_spans(rd / "spans.jsonl"), light=True)
             return {"nodes": tv.get("nodes", {}).get(str(nid), []),
                     "rollup": tv.get("rollups", {}).get(str(nid), {}),
                     "summary": tv.get("summary", {})}
         except Exception:  # noqa: BLE001
             return {"nodes": [], "rollup": {}, "summary": {}}
+
+    @app.get("/api/runs/{run_id}/spans/{sid}")
+    def span_io(run_id: str, sid: str):
+        """Full (uncapped) input/output/reasoning for ONE observation — fetched on demand when the
+        user expands a generation/tool in the trace tree. The tree endpoints stay light (no I/O) so a
+        long run's trace is browser-safe; the complete text lives here and in spans.jsonl. No info lost."""
+        rd = _run_dir(run_id)
+        try:
+            for s in iter_jsonl(rd / "spans.jsonl"):
+                if s.get("span_id") == sid:
+                    return {"span_id": sid, "name": s.get("name"), "kind": s.get("kind"),
+                            "attributes": s.get("attributes") or {}, "events": s.get("events") or [],
+                            "duration_s": s.get("duration_s"), "status": s.get("status")}
+        except Exception:  # noqa: BLE001
+            pass
+        return {"span_id": sid, "attributes": {}, "events": []}
 
     @app.get("/api/runs/{run_id}/log")
     def event_log(run_id: str, since: int = -1):
@@ -900,7 +917,9 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
         rd = _run_dir(run_id)
         from .traceview import build_trace_view, load_spans
         try:
-            return build_trace_view(fold(_events(rd)), load_spans(rd / "spans.jsonl"))
+            # light=True: strip prompt/output text — the run-level timeline needs only structure +
+            # timing + token usage; a heavy run's full I/O is ~50 MB and crashes the browser.
+            return build_trace_view(fold(_events(rd)), load_spans(rd / "spans.jsonl"), light=True)
         except Exception:  # noqa: BLE001 — a malformed/foreign spans.jsonl must degrade, not 500
             return {"run_id": run_id, "task_id": "", "nodes": {}, "unscoped": [],
                     "summary": {"spans": 0, "errors": 0, "total_eval_seconds": 0}}

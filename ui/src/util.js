@@ -526,7 +526,13 @@ export async function putText(path, text) {
   return r.json()
 }
 async function send(path, method, body) {
-  const r = await fetch(apiUrl(path), { method, headers: _authHeaders({ 'Content-Type': 'application/json' }), body: JSON.stringify(body || {}) })
+  // Only attach a JSON body for methods that carry one (PATCH/PUT/POST). A DELETE with a request
+  // body + Content-Type is unusual and some reverse proxies (e.g. jupyter-server-proxy) mishandle it
+  // — which surfaced as a 500 on "delete chat"/"delete run". DELETE goes bodyless.
+  const hasBody = method !== 'DELETE' && method !== 'GET'
+  const opts = { method, headers: _authHeaders(hasBody ? { 'Content-Type': 'application/json' } : {}) }
+  if (hasBody) opts.body = JSON.stringify(body || {})
+  const r = await fetch(apiUrl(path), opts)
   if (!r.ok) await _throw(r, path)
   return r.json()
 }
@@ -653,6 +659,11 @@ export async function assistantMessageStream(sid, instruction, mode, cbs = {}, s
   }
   return result
 }
+// Full (uncapped) I/O for one trace observation — fetched lazily when the user expands a
+// generation/tool in the trace tree (the tree itself is served light, without prompts/outputs).
+export const spanDetail = (runId, spanId) =>
+  get(`/api/runs/${encodeURIComponent(runId)}/spans/${encodeURIComponent(spanId)}`)
+
 export const assistantCommands = () => get('/api/assistant/commands')
 export const assistantRevert = (path) => post('/api/assistant/revert', { path })
 export const assistantShare = (sid) => post(`/api/assistant/sessions/${encodeURIComponent(sid)}/share`, {})
