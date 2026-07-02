@@ -220,7 +220,7 @@ See [Concepts → Trust & sandbox](concepts.md#trust--the-sandbox) for what each
 | `knowledge_dir` | `LOOPLAB_KNOWLEDGE_DIR` | — | Notes dir; the Researcher gets grep/kb_search/read tools over it |
 | `embed_model` | `LOOPLAB_EMBED_MODEL` | — | Embedding model for **semantic** `kb_search` / case retrieval (e.g. `nomic-embed-text`). Blank = dependency-free lexical hashing. Offline/misconfigured endpoint degrades back to lexical (never crashes) |
 | `embed_base_url` | `LOOPLAB_EMBED_BASE_URL` | — | Endpoint for embeddings if different from the chat model's (blank = reuse `llm_base_url`) |
-| `memora` | `LOOPLAB_MEMORA` | `false` | **Harmonic memory** (idea import from Memora): index cases/notes by abstraction + cue anchors, consolidate near-duplicates on write, expand retrieval through anchors. Off = byte-identical to today |
+| `memora` | `LOOPLAB_MEMORA` | `true` | **Harmonic memory** (idea import from Memora): index cases/notes by abstraction + cue anchors, consolidate near-duplicates on write, expand retrieval through anchors. On by default (lexical abstractor, zero LLM calls); set `false` to restore the raw-text index |
 | `memora_llm` | `LOOPLAB_MEMORA_LLM` | `false` | Write abstractions with a live LLM (needs a wired chat client). Off = deterministic lexical abstractor (zero LLM calls). No-op unless `memora` is on |
 | `memora_anchors` | `LOOPLAB_MEMORA_ANCHORS` | `6` | Max cue anchors kept per memory |
 | `memora_consolidate_threshold` | `LOOPLAB_MEMORA_CONSOLIDATE_THRESHOLD` | `0.86` | Cosine at/above which a new memory is consolidated into an existing entry |

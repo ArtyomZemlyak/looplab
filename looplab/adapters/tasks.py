@@ -94,6 +94,23 @@ def make_llm_client(settings, *, model: str | None = None,
     )
 
 
+def _make_abstractor(settings):
+    """Memora abstractor for the tool-building sites. Returns None unless `memora` is on. When
+    `memora_llm` is also on, wire a live chat client (via `chat_completer`) so abstractions are
+    model-written — degrading to the deterministic lexical abstractor if the client can't be built or
+    the endpoint fails at call time. `memora_llm` off (default) = lexical, zero LLM calls."""
+    if not getattr(settings, "memora", False):
+        return None
+    from looplab.tools.memora import chat_completer, make_abstractor
+    complete = None
+    if getattr(settings, "memora_llm", False):
+        try:
+            complete = chat_completer(make_llm_client(settings))
+        except Exception:  # noqa: BLE001 — a client we can't build just means lexical abstractions
+            complete = None
+    return make_abstractor(settings, complete=complete)
+
+
 def _set_role_client(obj, client) -> None:
     """H3: point a role (and any wrapped inner/fallback role) at a per-role LLM client. Best-effort —
     objects without a `client` (e.g. an external CLI-agent Developer) are left untouched."""
@@ -141,12 +158,11 @@ def build_strategist_tools(task: TaskAdapter, settings, run_dir=None):
                   if getattr(settings, "memory_dir", None) else None)
     if getattr(settings, "knowledge_dir", None) or cases_path:
         from looplab.tools.knowledge_tools import KnowledgeTools
-        from looplab.tools.memora import make_abstractor
         from looplab.tools.vectorstore import make_embedder
         providers.append(KnowledgeTools(
             settings.knowledge_dir, cases_path=cases_path,
             embed=make_embedder(settings),                 # KB + memory (T4 embeddings)
-            abstract=make_abstractor(settings),            # harmonic index + anchor-expansion (Memora)
+            abstract=_make_abstractor(settings),           # harmonic index + anchor-expansion (Memora)
             consolidate_threshold=getattr(settings, "memora_consolidate_threshold", 0.86)))
     if getattr(settings, "skills_dir", None):
         from looplab.tools.skills import SkillTools
@@ -346,12 +362,11 @@ def make_roles(task: TaskAdapter, settings, run_dir=None):
         providers.append(SiblingRunTools(Path(run_dir).parent, Path(run_dir).name))
     if settings.knowledge_dir or cases_path:
         from looplab.tools.knowledge_tools import KnowledgeTools
-        from looplab.tools.memora import make_abstractor
         from looplab.tools.vectorstore import make_embedder
         providers.append(KnowledgeTools(
             settings.knowledge_dir, cases_path=cases_path,
             embed=make_embedder(settings),
-            abstract=make_abstractor(settings),            # harmonic index + anchor-expansion (Memora)
+            abstract=_make_abstractor(settings),           # harmonic index + anchor-expansion (Memora)
             consolidate_threshold=getattr(settings, "memora_consolidate_threshold", 0.86)))
     if settings.skills_dir:
         from looplab.tools.skills import SkillTools

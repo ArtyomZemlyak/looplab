@@ -30,10 +30,10 @@ def test_abstraction_merge_unions_anchors_and_keeps_richer_primary():
     assert m.anchors == ["x", "y", "z"]                  # order-preserving union, deduped
 
 
-def test_make_abstractor_off_by_default_and_lexical_when_on():
-    assert make_abstractor(Settings()) is None           # memora off -> callers stay legacy
-    ab = make_abstractor(Settings(memora=True))
+def test_make_abstractor_on_by_default_and_disablable():
+    ab = make_abstractor(Settings())                     # memora ON by default -> lexical abstractor
     assert ab is not None and isinstance(ab("hello ridge ridge world"), Abstraction)
+    assert make_abstractor(Settings(memora=False)) is None  # opt-out -> callers stay legacy
 
 
 # ------------------------------ LLM abstractor ----------------------------- #

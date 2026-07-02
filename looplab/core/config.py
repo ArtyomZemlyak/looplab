@@ -392,12 +392,12 @@ class Settings(BaseSettings):
     # Harmonic memory (Memora, ICML'26 — idea import). When ON, cross-run cases and knowledge notes are
     # indexed by a short ABSTRACTION + cue ANCHORS instead of their raw text, near-duplicate memories are
     # CONSOLIDATED into one entry under a matching abstraction, and `kb_search`/case retrieval EXPAND
-    # through the top hits' anchors to surface related-but-not-similar memories. OFF by default →
-    # byte-identical to today. LLM-optional: without `memora_llm` (or without a wired chat client) the
-    # abstractions are written by a deterministic offline lexical abstractor, so the structure works with
-    # zero LLM calls; it only loses quality vs. a model-written abstraction. Never a source of truth —
-    # abstractions live only in the derived, rebuildable retrieval index.
-    memora: bool = False
+    # through the top hits' anchors to surface related-but-not-similar memories. ON by default, using the
+    # deterministic offline LEXICAL abstractor (zero LLM calls) — so the structure/consolidation/expansion
+    # work everywhere; set `memora_llm` to have a wired chat model write richer abstractions instead. Set
+    # `memora=false` to restore the pre-Memora raw-text index. Never a source of truth — abstractions live
+    # only in the derived, rebuildable retrieval index (never the event log or canonical cases.jsonl).
+    memora: bool = True
     memora_llm: bool = False          # use an LLM to write abstractions (needs a wired chat client); else lexical
     memora_anchors: int = 6           # max cue anchors kept per memory
     # Cosine similarity at/above which a new case is CONSOLIDATED into an existing one (same evolving

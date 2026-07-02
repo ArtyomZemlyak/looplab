@@ -137,9 +137,9 @@ cross-run meta-learning.
 ### Harmonic memory (`memora`, optional)
 
 An idea import from [Memora](https://github.com/microsoft/Memora) (Microsoft Research, ICML'26).
-Turn it on with `memora=true` and the case library + knowledge index switch from keying each memory
-by its **raw text** to keying it by a short **abstraction** (a 6–8 word essence) plus a few **cue
-anchors** (tags giving alternative retrieval paths). Three things follow:
+**On by default** (`memora=true`): the case library + knowledge index key each memory not by its
+**raw text** but by a short **abstraction** (a 6–8 word essence) plus a few **cue anchors** (tags
+giving alternative retrieval paths). Three things follow:
 
 1. **Abstraction + anchors as the index** — only the abstraction/anchors are embedded; the rich memory
    value is stored alongside, unindexed.
@@ -150,10 +150,10 @@ anchors** (tags giving alternative retrieval paths). Three things follow:
    surface *related-but-not-similar* memories the plain query missed.
 
 **LLM-optional by design.** Abstractions are written by a live model when `memora_llm=true` and a chat
-client is wired, else by a deterministic **lexical** abstractor — so the structure works with zero LLM
-calls (only the abstraction quality differs). With `memora=false` (the default) every path is
-byte-identical to the behavior above. Like the rest of cross-run memory, abstractions live only in the
-derived, rebuildable retrieval index — never in the event log or the canonical `cases.jsonl`.
+client is wired, else by a deterministic **lexical** abstractor (the default) — so the structure works
+with zero LLM calls (only the abstraction quality differs). Set `memora=false` to restore the pre-Memora
+raw-text index. Like the rest of cross-run memory, abstractions live only in the derived, rebuildable
+retrieval index — never in the event log or the canonical `cases.jsonl`.
 
 ## Observability
 
