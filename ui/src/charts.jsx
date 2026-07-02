@@ -1,19 +1,37 @@
 import React from 'react'
-import { fmt } from './util.js'
+import { fmt, operatorMeta } from './util.js'
 
 const AX = '#6b7480', GRID = '#20252f'
+
+// Grouping palette: one stable hue per operator so scatter points read as families ("группировка").
+const OP_COLORS = {
+  draft: '#4aa3ff', improve: '#2ecc71', debug: '#ef4444', merge: '#9a6bff', refine_block: '#f0b429',
+  fork: '#22c5c5', random: '#e06fae', tune: '#7f8cff', sweep: '#f59e42',
+}
+const opColor = (op) => OP_COLORS[op] || '#6b8cc0'
+
+// A compact colour legend rendered under a chart (operators present in the data).
+function ChartLegend({ items }) {
+  if (!items || items.length < 2) return null
+  return <div className="chart-legend">{items.map((it, i) =>
+    <span key={i} className="chart-leg"><span className="chart-leg-dot" style={{ background: it.color }} />{it.label}</span>)}</div>
+}
 
 // Best-metric-over-time + all-node scatter. Pass `steps` (from report.improvements) to annotate
 // the nodes that moved the frontier with a marker + a "what changed" label — so the chart shows
 // not just the metric curve but WHICH improvement caused each drop/rise.
-export function Trajectory({ nodes, direction, width = 760, height = 220, steps = null }) {
+// `onPick(id)` (optional) makes every point + frontier marker clickable to drill into that node.
+// Points are coloured BY OPERATOR (grouping), with a legend; the frontier keeps its green line + a
+// soft area fill under it.
+export function Trajectory({ nodes, direction, width = 760, height = 220, steps = null, onPick = null }) {
   const evald = nodes.filter(n => (n.metric ?? null) !== null).sort((a, b) => a.id - b.id)
   if (!evald.length) return <Empty>no evaluated nodes yet</Empty>
   const xs = evald.map(n => n.id)
   const ys = evald.map(n => n.confirmed_mean ?? n.metric)
   const minY = Math.min(...ys), maxY = Math.max(...ys)
   const pad = 34, w = width, h = height
-  const X = (id) => pad + (id - Math.min(...xs)) / Math.max(1, (Math.max(...xs) - Math.min(...xs))) * (w - pad - 10)
+  const x0 = Math.min(...xs), x1 = Math.max(...xs)
+  const X = (id) => pad + (id - x0) / Math.max(1, x1 - x0) * (w - pad - 10)
   const Y = (v) => h - pad - (v - minY) / Math.max(1e-9, maxY - minY) * (h - pad - 12)
   // running best — exclude infeasible (constraint-violating) nodes, mirroring engine selection
   // (replay.fold ranks only feasible nodes), so the line never claims a best the engine rejected.
@@ -24,22 +42,35 @@ export function Trajectory({ nodes, direction, width = 760, height = 220, steps 
     if (best !== null) bestPts.push([X(n.id), Y(best)])
   })
   const line = bestPts.map((p, i) => (i ? 'L' : 'M') + p[0] + ' ' + p[1]).join(' ')
+  const area = bestPts.length > 1
+    ? `${line} L ${bestPts[bestPts.length - 1][0]} ${h - pad} L ${bestPts[0][0]} ${h - pad} Z` : ''
   const marks = steps || []
+  const pick = onPick || null
+  const opsPresent = [...new Set(evald.map(n => n.operator).filter(Boolean))]
   return (
-    <svg width="100%" viewBox={`0 0 ${w} ${h}`}>
+    <div className="chart">
+    <svg width="100%" viewBox={`0 0 ${w} ${h}`} className={pick ? 'pickable' : ''}>
+      <defs><linearGradient id="ll-traj-fill" x1="0" y1="0" x2="0" y2="1">
+        <stop offset="0%" stopColor="#2ecc71" stopOpacity=".20" /><stop offset="100%" stopColor="#2ecc71" stopOpacity="0" />
+      </linearGradient></defs>
       {[0, .25, .5, .75, 1].map((t, i) => {
         const y = pad / 2 + t * (h - pad - 12)
         return <line key={i} x1={pad} x2={w - 10} y1={y} y2={y} stroke={GRID} />
       })}
+      {area && <path d={area} fill="url(#ll-traj-fill)" />}
       {evald.map(n => {
         const v = n.confirmed_mean ?? n.metric
-        return <circle key={n.id} cx={X(n.id)} cy={Y(v)} r={n.feasible === false ? 2.5 : 3.5}
-          fill={n.feasible === false ? '#7a6b9a' : '#4aa3ff'} opacity={.8} />
+        const c = n.feasible === false ? '#7a6b9a' : opColor(n.operator)
+        return <circle key={n.id} className={'chart-pt' + (pick ? ' pick' : '')} cx={X(n.id)} cy={Y(v)}
+          r={n.feasible === false ? 2.8 : 4} fill={c} opacity={.85}
+          onClick={pick ? () => pick(n.id) : undefined}>
+          <title>#{n.id} {n.operator}{n.idea?.theme ? ` (${n.idea.theme})` : ''} → {fmt(v)}{n.feasible === false ? ' · infeasible' : ''}</title>
+        </circle>
       })}
       <path d={line} fill="none" stroke="#2ecc71" strokeWidth="2" />
       {marks.map((s, i) => {
         const v = s.to, x = X(s.id), y = Y(v)
-        return <g key={i}>
+        return <g key={i} className={pick ? 'chart-mark pick' : 'chart-mark'} onClick={pick ? () => pick(s.id) : undefined}>
           <circle cx={x} cy={y} r="5" fill="none" stroke="#2ecc71" strokeWidth="1.6" />
           <line x1={x} x2={x} y1={y - 6} y2={Math.max(14, y - 20)} stroke="#2ecc71" strokeWidth="1" opacity=".5" />
           <text x={x} y={Math.max(11, y - 22)} fill="#7fe0a3" fontSize="9.5" textAnchor="middle">#{s.id}</text>
@@ -49,6 +80,8 @@ export function Trajectory({ nodes, direction, width = 760, height = 220, steps 
       <text x={pad} y={12} fill={AX} fontSize="11">best so far: {fmt(best)}</text>
       <text x={pad} y={h - 8} fill={AX} fontSize="11">node id →</text>
     </svg>
+    <ChartLegend items={opsPresent.map(o => ({ label: operatorMeta(o).label, color: opColor(o) }))} />
+    </div>
   )
 }
 
@@ -135,9 +168,10 @@ export function Gantt({ spans, width = 760, onPick }) {
 }
 
 // Parallel coordinates of params -> metric.
-export function ParallelCoords({ nodes, direction, width = 760, height = 260 }) {
+export function ParallelCoords({ nodes, direction, width = 760, height = 260, onPick = null }) {
   const ev = nodes.filter(n => (n.metric ?? null) !== null)
   if (!ev.length) return <Empty>no evaluated nodes</Empty>
+  const pick = onPick || null
   const params = Array.from(new Set(ev.flatMap(n => Object.keys(n.idea?.params || {}))))
   const axes = [...params, 'metric']
   if (axes.length < 2) return <Empty>not enough dimensions</Empty>
@@ -162,22 +196,32 @@ export function ParallelCoords({ nodes, direction, width = 760, height = 260 }) 
       {ev.map(n => {
         const pts = axes.map((a, i) => { const v = vals(n, a); return v == null ? null : [AXX(i), AXY(a, v)] }).filter(Boolean)
         const d = pts.map((p, i) => (i ? 'L' : 'M') + p[0] + ' ' + p[1]).join(' ')
-        return <path key={n.id} d={d} fill="none" stroke={colorOf(n.confirmed_mean ?? n.metric)} strokeWidth="1.5" opacity=".7" />
+        return <path key={n.id} className={'pc-line' + (pick ? ' pick' : '')} d={d} fill="none"
+          stroke={colorOf(n.confirmed_mean ?? n.metric)} strokeWidth="1.5" opacity=".7"
+          onClick={pick ? () => pick(n.id) : undefined}>
+          <title>#{n.id} {n.operator || ''} → {fmt(n.confirmed_mean ?? n.metric)}</title></path>
       })}
     </svg>
   )
 }
 
 // metric vs a constraint value (Pareto-ish). data: [{x,y,feasible,id}]
-export function Scatter({ data, xlab, ylab, width = 720, height = 260 }) {
+// `onPick(id)` (optional) drills into a point's node (points carrying an `id`).
+export function Scatter({ data, xlab, ylab, width = 720, height = 260, onPick = null }) {
   if (!data || !data.length) return <Empty>no constraint data</Empty>
   const xs = data.map(d => d.x), ys = data.map(d => d.y)
   const pad = 40, w = width, h = height
   const X = v => pad + (v - Math.min(...xs)) / Math.max(1e-9, Math.max(...xs) - Math.min(...xs)) * (w - 2 * pad)
   const Y = v => h - pad - (v - Math.min(...ys)) / Math.max(1e-9, Math.max(...ys) - Math.min(...ys)) * (h - 2 * pad)
+  const pick = onPick || null
   return (
-    <svg width="100%" viewBox={`0 0 ${w} ${h}`}>
-      {data.map((d, i) => <circle key={i} cx={X(d.x)} cy={Y(d.y)} r="4" fill={d.feasible ? '#2ecc71' : '#7a6b9a'} opacity=".85" />)}
+    <svg width="100%" viewBox={`0 0 ${w} ${h}`} className={pick ? 'pickable' : ''}>
+      {[0, .5, 1].map((t, i) => { const y = pad + t * (h - 2 * pad); return <line key={i} x1={pad} x2={w - pad} y1={y} y2={y} stroke={GRID} /> })}
+      {data.map((d, i) => <circle key={i} className={'chart-pt' + (pick && d.id != null ? ' pick' : '')}
+        cx={X(d.x)} cy={Y(d.y)} r="4.5" fill={d.feasible ? '#2ecc71' : '#7a6b9a'} opacity=".85"
+        onClick={pick && d.id != null ? () => pick(d.id) : undefined}>
+        <title>{d.id != null ? `#${d.id} · ` : ''}{xlab} {fmt(d.x)} · {ylab} {fmt(d.y)}{d.feasible ? '' : ' · infeasible'}</title>
+      </circle>)}
       <text x={w / 2} y={h - 6} fill={AX} fontSize="11" textAnchor="middle">{xlab}</text>
       <text x={12} y={14} fill={AX} fontSize="11">{ylab}</text>
     </svg>

@@ -13,6 +13,31 @@ export function fmtInt(v) {
   return Number(v).toLocaleString()
 }
 
+// Assistant permission modes — shared by the docked assistant (AssistantBar) and the full-page view
+// (AssistantChat) so the list stays defined once.
+export const ASSISTANT_MODES = [
+  { id: 'plan', label: 'Plan', hint: 'read-only — inspect & propose (safe)' },
+  { id: 'default', label: 'Ask', hint: 'confirm every change' },
+  { id: 'acceptEdits', label: 'Auto-edit', hint: 'edits apply; commands ask' },
+  { id: 'auto', label: 'Auto', hint: 'runs everything without asking' },
+]
+// One streamed token's text: the SSE stream sends {text} objects, but some paths hand back a bare
+// string — one reader so both assistant surfaces decode identically.
+export const tokText = (tok) => (tok && tok.text != null) ? tok.text : (typeof tok === 'string' ? tok : '')
+
+// Dynamic font size for a node card's one-line caption ("what this node did"). The chip is a fixed
+// width (~168px) and single line, so a long param-diff / change-summary used to hit the hard ellipsis
+// almost immediately. Instead of clipping, shrink the font as the text grows so MORE of the caption
+// stays legible in the same footprint — a short "baseline" stays a comfortable 11px, a long
+// "lr: 0.01 → 0.003, depth: 4 → 8, subsample: …" scales down toward an 8px floor before ellipsizing.
+// Pure + deterministic (length-based, ~0.56em/char) so it never reflows or measures the DOM.
+export function chipFontSize(text, { max = 11, min = 8, width = 168 } = {}) {
+  const len = String(text || '').length
+  if (!len) return max
+  const fit = width / (len * 0.56)   // approx glyph advance ≈ 0.56em at this weight
+  return Math.max(min, Math.min(max, Math.round(fit * 2) / 2))   // clamp to [min,max] in 0.5px steps
+}
+
 // Human-readable byte size (file listings, etc.).
 export function fmtBytes(n) {
   if (n == null) return ''

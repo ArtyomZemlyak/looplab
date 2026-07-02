@@ -204,7 +204,8 @@ export default function RunView({ runId, onBack }) {
       {view === 'report'
         ? <div className="main"><div className="report-scroll">
             <ReportView state={state} runId={runId} onToast={showToast}
-              onOpenPanel={(p) => setPanel(p)} /></div></div>
+              onOpenPanel={(p) => setPanel(p)}
+              onPickNode={(id) => { setView('dag'); selectNode(id) }} /></div></div>
         : <>
       <DirectionsOverview state={state} active={themeFilter} onPick={setThemeFilter} />
       <div className="main">
@@ -234,17 +235,17 @@ export default function RunView({ runId, onBack }) {
 
       {!dockC && <div className="splitter h" onMouseDown={startDrag('dock')} title="drag to resize" />}
       <Dock runId={runId} live={live} liveSeq={seq} viewSeq={viewSeq} setViewSeq={setViewSeq} onFocus={focusNode}
-            selectedId={selectedId} onToast={showToast}
+            selectedId={selectedId} onToast={showToast} eventsOnly
             collapsed={dockC} onToggleCollapse={() => setDockC(c => !c)} height={dockH} />
         </>}
 
       {panel === 'overview' && <OverviewPanel state={state} maxEval={maxEval} onClose={() => setPanel(null)} onOpenPanel={setPanel} />}
       {panel === 'research' && <ResearchPanel state={state} runId={runId} onToast={showToast} onClose={() => setPanel(null)} />}
       {panel === 'trust' && <TrustPanel state={state} runId={runId} onClose={() => setPanel(null)} />}
-      {panel === 'sensitivity' && <SensitivityPanel state={state} onClose={() => setPanel(null)} />}
+      {panel === 'sensitivity' && <SensitivityPanel state={state} onSelect={selectNode} onClose={() => setPanel(null)} />}
       {panel === 'importance' && <HyperImportancePanel state={state} onClose={() => setPanel(null)} />}
       {panel === 'failures' && <FailuresPanel state={state} onSelect={setSelectedId} onClose={() => setPanel(null)} />}
-      {panel === 'pareto' && <ParetoPanel state={state} onClose={() => setPanel(null)} />}
+      {panel === 'pareto' && <ParetoPanel state={state} onSelect={selectNode} onClose={() => setPanel(null)} />}
       {panel === 'data' && <DataQualityPanel state={state} onClose={() => setPanel(null)} />}
       {panel === 'compare' && <ComparePanel state={state} runId={runId} onClose={() => setPanel(null)} />}
       {panel === 'crossrun' && <CrossRunPanel state={state} onClose={() => setPanel(null)} />}

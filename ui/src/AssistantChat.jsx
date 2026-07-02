@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react'
 import Markdown from './markdown.jsx'
-import { fmtAgo, fmt, get, startRun } from './util.js'
+import { fmtAgo, fmt, get, startRun, ASSISTANT_MODES, tokText } from './util.js'
 import {
   assistantSessions, assistantCreate, assistantGet, assistantDelete, assistantFork,
   assistantMessageStream, assistantPermissions, assistantResolve,
@@ -26,12 +26,7 @@ function RunChip({ id, run }) {
 // The general-purpose assistant — the evolution of Genesis into a persistent chat agent (like Claude
 // Desktop). P0 is read-only (inspect files + runs); write/shell/git + the permission modes below
 // become live in P1, so the mode selector is shown but only `plan` is enforced for now.
-const MODES = [
-  { id: 'plan', label: 'Plan', hint: 'read-only — inspect & propose (safe)' },
-  { id: 'default', label: 'Ask', hint: 'confirm every change' },
-  { id: 'acceptEdits', label: 'Auto-edit', hint: 'edits apply; commands ask' },
-  { id: 'auto', label: 'Auto', hint: 'runs everything without asking' },
-]
+const MODES = ASSISTANT_MODES
 
 // One assistant/user turn in the feed. Tool steps (what the agent read) render as a compact sub-line;
 // any @run:<id> mention gets a live inline run card.
@@ -75,7 +70,7 @@ function Todos({ items }) {
 
 // A human-in-the-loop confirm card: the turn paused to ask before a mutating action. Approve/Reject
 // resolves it server-side and the turn resumes.
-function PermCard({ req, onResolve }) {
+export function PermCard({ req, onResolve }) {
   const a = req.action || {}
   const isDiff = a.tool === 'write_file' || a.tool === 'edit_file' || a.tool === 'apply_patch'
   return <div className="asst-perm">
@@ -241,7 +236,7 @@ export default function AssistantChat({ onBack }) {
     let acc = ''; let errored = null
     try {
       const res = await assistantMessageStream(id, t, mode, {
-        onToken: safe((tok) => { acc += (tok && tok.text != null ? tok.text : (typeof tok === 'string' ? tok : '')); patchLast({ content: acc }) }),
+        onToken: safe((tok) => { acc += tokText(tok); patchLast({ content: acc }) }),
         onStep: safe((s) => setLiveSteps(x => [...x, s])),
         onTodos: safe((items) => { setLiveTodos(items); patchLast({ todos: items }) }),
         onError: safe((e) => { errored = e; setErr(e) }),

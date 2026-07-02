@@ -155,7 +155,7 @@ export function TrustPanel({ state, runId, onClose }) {
   )
 }
 
-export function SensitivityPanel({ state, onClose }) {
+export function SensitivityPanel({ state, onClose, onSelect }) {
   // Aggregate ablation impacts across all ablate events (latest wins per param).
   const impacts = {}
   ;(state.ablations || []).forEach(a => Object.entries(a.impacts || {}).forEach(([k, v]) => { impacts[k] = Math.abs(v) }))
@@ -165,7 +165,8 @@ export function SensitivityPanel({ state, onClose }) {
       <div className="section-h">Ablation impact (|Δmetric| when param zeroed)</div>
       {bars.length ? <Bars data={bars} color="#9a6bff" /> : <div className="muted">No ablation events yet (enable ablate_every or use Force-ablate on a node).</div>}
       <div className="section-h">Parallel coordinates — params → metric</div>
-      <ParallelCoords nodes={Object.values(state.nodes)} direction={state.direction} />
+      <ParallelCoords nodes={Object.values(state.nodes)} direction={state.direction}
+        onPick={onSelect ? (id) => { onSelect(id); onClose && onClose() } : undefined} />
     </Panel>
   )
 }
@@ -199,7 +200,7 @@ function paretoFront(nodes, direction) {
   const pts = nodes.map(n => ({ n, v: vec(n) }))
   return { keys, front: pts.filter(p => !pts.some(q => q !== p && dominates(q.v, p.v))).map(p => p.n) }
 }
-export function ParetoPanel({ state, onClose }) {
+export function ParetoPanel({ state, onClose, onSelect }) {
   const nodes = Object.values(state.nodes).filter(n => n.metric != null && n.feasible !== false)
   // first constraint dimension, if any
   const withV = nodes.filter(n => (n.violations || []).length || Object.keys(n.extra_metrics || {}).length)
@@ -210,7 +211,8 @@ export function ParetoPanel({ state, onClose }) {
       const cv = (n.violations || []).find(v => v.name === cName)?.value ?? n.extra_metrics?.[cName]
       return cv == null ? null : { x: cv, y: n.confirmed_mean ?? n.metric, feasible: n.feasible !== false, id: n.id }
     }).filter(Boolean)
-    scatter = <Scatter data={data} xlab={cName} ylab="metric" />
+    scatter = <Scatter data={data} xlab={cName} ylab="metric"
+      onPick={onSelect ? (id) => { onSelect(id); onClose && onClose() } : undefined} />
   }
   const archive = state.archive
   const ops = {}
