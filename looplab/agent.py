@@ -213,6 +213,10 @@ def drive_tool_loop(client, tools, messages: list, emit_spec: dict, *,
                 args = json.loads(raw) if isinstance(raw, str) else (raw or {})
             except (json.JSONDecodeError, TypeError):
                 args = {}
+            if not isinstance(args, dict):
+                # Valid-but-non-object JSON ("[0]", "\"x\"", "3") would otherwise reach finalize()/
+                # tools.execute() and blow up on .get(); a junk model must never crash the run.
+                args = {}
             if name == emit_name:
                 return finalize(args)
             if self_plan and name == _PLAN_TOOL_NAME:

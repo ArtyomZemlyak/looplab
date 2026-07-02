@@ -263,8 +263,11 @@ class RunState(BaseModel):
     def feasible_nodes(self) -> list[Node]:
         """Evaluated nodes that satisfied all hard constraints (#5). These are the only nodes
         eligible to be selected as best or bred from — a constraint-violating node keeps its
-        metric for the audit trail but never drives the search forward."""
-        return [n for n in self.evaluated_nodes() if n.feasible]
+        metric for the audit trail but never drives the search forward. A node with no metric
+        (tolerated from a hand-edited/BYO-script log by replay) is excluded too: it can neither be
+        sorted against real metrics nor selected as best, and would raise TypeError in the policies'
+        metric-keyed sorts."""
+        return [n for n in self.evaluated_nodes() if n.feasible and n.metric is not None]
 
     def pending_nodes(self) -> list[Node]:
         return sorted(

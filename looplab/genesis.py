@@ -165,12 +165,14 @@ def author_task(goal: str, *, client, kinds: tuple[str, ...], data: Optional[str
         task["direction"] = direction
     if task and "goal" not in task:
         task["goal"] = goal
+    # Normalize BEFORE the --data fill so a repo path the model gave under an alias (repo_path ->
+    # editable_path) is already in place and the fill doesn't install the data CSV as the editable.
+    if task and task.get("kind") == "repo":
+        _normalize_repo_task(task)
     # A user-given --data path the model dropped: put it where this kind expects it, so an explicit
     # path is never silently lost.
     if task and data and not (task.get("data_path") or task.get("editable_path") or task.get("data")):
         task["editable_path" if task.get("kind") == "repo" else "data_path"] = data
-    if task and task.get("kind") == "repo":
-        _normalize_repo_task(task)
     return GenesisResult(task=task, rationale=plan.rationale, reply=plan.reply)
 
 
@@ -182,7 +184,12 @@ def _normalize_repo_task(task: dict) -> None:
     fills/renames — never overwrites a field already in canonical form."""
     import shlex
     def _as_list(v):
-        return shlex.split(v) if isinstance(v, str) else (list(v) if isinstance(v, (list, tuple)) else v)
+        if isinstance(v, str):
+            try:
+                return shlex.split(v)
+            except ValueError:
+                return v.split()   # unbalanced quotes: fall back to a naive split, never crash Genesis
+        return list(v) if isinstance(v, (list, tuple)) else v
     # editable repo path under any of the common aliases
     if not task.get("editable_path"):
         for alias in ("repo_path", "repo", "path", "editable"):
@@ -208,8 +215,11 @@ def _normalize_repo_task(task: dict) -> None:
             ev["metric"] = {"kind": "stdout_json", "key": m}
         elif m is None and isinstance(task.get("metric"), str):
             ev["metric"] = {"kind": "stdout_json", "key": task["metric"]}
-    # a top-level metric string with no eval yet -> stash it on a minimal eval so it isn't lost
-    if isinstance(task.get("metric"), str) and isinstance(task.get("eval"), dict) \
-            and "metric" not in task["eval"]:
-        task["eval"]["metric"] = {"kind": "stdout_json", "key": task["metric"]}
+    # a top-level metric string -> stash it on the eval so it isn't lost, creating a minimal eval
+    # dict when the model authored none.
+    if isinstance(task.get("metric"), str):
+        if isinstance(task.get("eval"), dict):
+            task["eval"].setdefault("metric", {"kind": "stdout_json", "key": task["metric"]})
+        elif task.get("eval") is None:
+            task["eval"] = {"metric": {"kind": "stdout_json", "key": task["metric"]}}
     task.pop("metric", None)

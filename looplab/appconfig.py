@@ -46,7 +46,12 @@ def _read_doc(path: Path) -> dict:
             raise ValueError(
                 "reading a YAML config needs PyYAML: pip install pyyaml "
                 "(or use a .json file)") from e
-        data = yaml.safe_load(text)
+        try:
+            data = yaml.safe_load(text)
+        except yaml.YAMLError as e:
+            # YAMLError is not a ValueError, so callers' `except ValueError` would otherwise miss it
+            # and dump a raw traceback instead of the intended one-line error.
+            raise ValueError(f"{path}: invalid YAML: {e}") from e
     else:
         data = json.loads(text)
     if data is None:

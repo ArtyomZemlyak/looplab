@@ -234,6 +234,12 @@ class WriteTools:
             if g["rejected"]:
                 return f"(refused: out-of-surface/protected paths: {', '.join(g['rejected'])})"
             return "(empty/unparseable patch)"
+        # The surface gate doesn't know about credential files (DEFAULT_PROTECT has no secret patterns),
+        # so apply the SAME secret guard the write/edit/delete paths enforce — a diff must not be able
+        # to create/overwrite an .env / id_rsa / *.pem that write_file would refuse.
+        secret = [rp for rp in g["paths"] if _pathsafe.looks_secret(Path(rp))]
+        if secret:
+            return f"(refused: patch touches secret/credential paths: {', '.join(secret)})"
         action = {"tool": "apply_patch", "tool_kind": "write",
                   "label": f"apply patch ({len(g['paths'])} file(s))", "verb": "apply this patch",
                   "preview": diff[:_MAX_PREVIEW], "paths": g["paths"]}

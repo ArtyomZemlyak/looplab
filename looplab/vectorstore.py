@@ -44,6 +44,10 @@ def hash_embed(text: str, dim: int = 64) -> Vector:
 
 
 def _cosine(a: Vector, b: Vector) -> float:
+    if len(a) != len(b):
+        # Mismatched dims (e.g. a store populated with hash_embed=64 then queried with a 768-dim
+        # LLM embedder) would silently rank on the truncated overlap; refuse instead.
+        return 0.0
     dot = sum(x * y for x, y in zip(a, b))
     na = sum(x * x for x in a) ** 0.5
     nb = sum(y * y for y in b) ** 0.5

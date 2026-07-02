@@ -125,7 +125,9 @@ class ShellTools:
         wd = self._cwd(cwd)
         if wd is None:
             return f"(refused: cwd {cwd} is outside the allowed roots)"
-        to = min(float(timeout or self.timeout), _MAX_TIMEOUT)
+        # Clamp to a positive window: a negative/zero `timeout` is truthy and would otherwise reach
+        # communicate(timeout<=0) and kill the child instantly.
+        to = max(1.0, min(float(timeout or self.timeout), _MAX_TIMEOUT))
         pretty = " ".join(argv)
         action = {"tool": argv[0] if argv else "", "tool_kind": tool_kind, "label": label,
                   "verb": f"run `{pretty[:80]}`", "preview": pretty, "cwd": str(wd)}

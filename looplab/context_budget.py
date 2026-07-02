@@ -36,6 +36,12 @@ def truncate_history(messages: list[dict], max_chars: int, *, keep_last: int = 2
         head = per_msg_cap // 2
         trimmed = (content[:head] + f"\n…[truncated {len(content) - 2 * head} chars]…\n"
                    + content[-head:])
+        # For a message only marginally over the cap the marker overhead can make `trimmed` LONGER
+        # than the original; replacing it would grow the history the budget exists to shrink. Skip
+        # unless truncation actually saves bytes.
+        if len(trimmed) >= len(content):
+            out.append(m)
+            continue
         total -= len(content) - len(trimmed)
         out.append({**m, "content": trimmed})
     return out

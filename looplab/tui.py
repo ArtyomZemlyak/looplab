@@ -23,6 +23,7 @@ Three surfaces, reached from one dashboard:
 """
 from __future__ import annotations
 
+import http.client
 import json
 import os
 import re
@@ -80,9 +81,14 @@ class Api:
             except Exception:  # noqa: BLE001 - no/garbled JSON body -> fall back to the status line
                 pass
             raise ApiError(detail or f"{path}: HTTP {e.code}", status=e.code) from e
-        except (urllib.error.URLError, OSError, socket.timeout) as e:
+        except (urllib.error.URLError, OSError, socket.timeout, http.client.HTTPException) as e:
             raise ApiError(f"could not reach {self.base}{path}: {e}") from e
-        return json.loads(raw) if raw else None
+        try:
+            return json.loads(raw) if raw else None
+        except ValueError as e:
+            # A 200 with a non-JSON body (some other service bound to our port) must surface as an
+            # ApiError callers already handle, not an uncaught JSONDecodeError that kills the TUI.
+            raise ApiError(f"{path}: invalid JSON from server") from e
 
     def get(self, path: str, timeout: Optional[float] = None) -> Any:
         return self._request("GET", path, timeout=timeout)
@@ -376,6 +382,10 @@ def ensure_server(base_url: Optional[str], run_root: str, *, log=lambda m: None)
     child). Otherwise launch our own `looplab ui --no-build` (API only — the TUI never needs the React
     bundle) on a free local port, wait until it answers, and return its handle so the caller can stop it
     on exit. Raises ApiError if a server we launched never comes up."""
+    # Absolutize before spawning: the child server runs with cwd=<package parent> (repo root in dev,
+    # site-packages for a pip install) and resolves a relative run_root against THAT cwd, so a relative
+    # "runs" would otherwise point into the install tree instead of the user's project.
+    run_root = os.path.abspath(run_root)
     if base_url:
         if Api(base_url).ping():
             return base_url, None

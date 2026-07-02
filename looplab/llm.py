@@ -353,7 +353,7 @@ class OpenAICompatibleClient:
                     # Streaming: reassemble SSE lines (a stall raises socket.timeout HERE, inside the
                     # `with`, and lands in the transient-retry handler below). Non-streaming: one read.
                     parsed = self._read_stream(resp) if self.stream \
-                        else _parse_chat_body(resp.read().decode("utf-8"))
+                        else _parse_chat_body(resp.read().decode("utf-8", "replace"))
             except urllib.error.HTTPError as e:
                 # A 400 that rejects our REASONING toggle — e.g. a litellm-proxied model like glm-5.1
                 # returns UnsupportedParamsError for `reasoning_effort` — isn't a real bad request:

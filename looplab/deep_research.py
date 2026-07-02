@@ -150,6 +150,8 @@ class DeepResearcher:
                         args = json.loads(raw) if isinstance(raw, str) else (raw or {})
                     except (json.JSONDecodeError, TypeError):
                         args = {}
+                    if not isinstance(args, dict):
+                        args = {}   # non-object JSON ("[...]") must not abort the whole memo on .get()
                     if name == "emit":
                         return self._finalize(args, memo, sources)
                     result = self.tools.execute(name, args) if self.tools else "(no tools)"

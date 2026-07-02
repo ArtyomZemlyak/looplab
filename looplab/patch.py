@@ -14,6 +14,7 @@ import fnmatch
 import os
 import re
 import subprocess
+import tempfile
 from pathlib import Path
 
 _DRIVE = re.compile(r"^[A-Za-z]:")
@@ -136,17 +137,21 @@ def apply_patch(diff_text: str, repo_dir: str, allow: list[str],
         return {"applied": False, "paths": g["paths"], "rejected": g["rejected"],
                 "error": "out-of-surface" if g["rejected"] else "empty patch"}
     repo = Path(repo_dir)
-    patch_file = repo / ".LoopLab.patch"
-    patch_file.write_text(diff_text, encoding="utf-8")
+    # Unique temp name so two concurrent apply_patch calls on the same repo can't clobber each other's
+    # patch between --check and apply (or unlink a sibling's file mid-apply).
+    fd, patch_path = tempfile.mkstemp(dir=str(repo), prefix=".LoopLab.", suffix=".patch")
+    patch_name = Path(patch_path).name
     try:
-        chk = subprocess.run(["git", "apply", "--check", patch_file.name],
+        with os.fdopen(fd, "w", encoding="utf-8") as pf:
+            pf.write(diff_text)
+        chk = subprocess.run(["git", "apply", "--check", patch_name],
                              cwd=str(repo), capture_output=True, text=True)
         if chk.returncode != 0:
             return {"applied": False, "paths": g["paths"], "rejected": [],
                     "error": chk.stderr.strip()}
-        ap = subprocess.run(["git", "apply", patch_file.name],
+        ap = subprocess.run(["git", "apply", patch_name],
                             cwd=str(repo), capture_output=True, text=True)
         return {"applied": ap.returncode == 0, "paths": g["paths"], "rejected": [],
                 "error": "" if ap.returncode == 0 else ap.stderr.strip()}
     finally:
-        patch_file.unlink(missing_ok=True)
+        Path(patch_path).unlink(missing_ok=True)

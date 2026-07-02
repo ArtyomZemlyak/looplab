@@ -128,9 +128,13 @@ class RepoScoutTools:
         hits = []
         try:
             for m in sorted(p.glob(pattern or "*")):
-                if _looks_secret(m):                  # don't reveal secret paths via glob either
+                # pathlib glob accepts `..` segments and follows symlinks, so a pattern like
+                # "../../etc/*" escapes the allowed roots — re-validate every hit against the roots
+                # (and run the secret filter on the RESOLVED path so a symlinked secret is caught).
+                rm = _pathsafe.resolve_within(self._roots, str(m))
+                if rm is None or _looks_secret(rm):
                     continue
-                hits.append(str(m))
+                hits.append(str(rm))
                 if len(hits) >= _MAX_ENTRIES:
                     break
         except (OSError, ValueError) as e:

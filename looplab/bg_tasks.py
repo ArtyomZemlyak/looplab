@@ -45,8 +45,17 @@ class BackgroundManager:
         kwargs = {}
         if os.name != "nt":
             kwargs["start_new_session"] = True
-        proc = subprocess.Popen(run_argv, cwd=cwd, stdout=f, stderr=subprocess.STDOUT,
-                                env=_child_env(argv), **kwargs)
+        try:
+            proc = subprocess.Popen(run_argv, cwd=cwd, stdout=f, stderr=subprocess.STDOUT,
+                                    env=_child_env(argv), **kwargs)
+        except OSError:
+            # e.g. binary not found: don't leak the open fd + stray log file on the failed start.
+            f.close()
+            try:
+                log.unlink()
+            except OSError:
+                pass
+            raise
         with self._lock:
             self._tasks[tid] = {"proc": proc, "log": log, "fh": f, "cursor": 0,
                                 "cmd": " ".join(argv), "cwd": cwd}

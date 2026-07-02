@@ -9,6 +9,7 @@ import json
 import os
 from pathlib import Path
 
+from . import _pathsafe
 from .retrieval import glob_files, grep, read_file
 from .vectorstore import InMemoryVectorStore, Item, hash_embed
 
@@ -73,7 +74,10 @@ class RepoTools:
                         hp = Path(h.path).resolve()
                         if root != hp and root not in hp.parents:
                             continue            # a hit outside the root (symlink) -> skip, not crash
-                        out.append(f"{pre}{hp.relative_to(root).as_posix()}:{h.lineno}: {h.line}")
+                        rp = hp.relative_to(root)
+                        if _pathsafe.looks_secret(rp):
+                            continue            # don't stream secret-file contents into the LLM prompt
+                        out.append(f"{pre}{rp.as_posix()}:{h.lineno}: {h.line}")
                 return "\n".join(out[:40]) or "(no matches)"
             if name == "repo_list":
                 repo = args.get("repo") or ("." if "." in self.roots else next(iter(self.roots)))
@@ -82,12 +86,21 @@ class RepoTools:
                     return f"(no such repo: {repo}; have: {', '.join(self.roots)})"
                 glob = args.get("glob") or "*"
                 files = [Path(p).resolve().relative_to(root).as_posix()
-                         for p in glob_files(glob, str(root)) if ".git" not in Path(p).parts]
+                         for p in glob_files(glob, str(root))
+                         if ".git" not in Path(p).parts
+                         and not _pathsafe.looks_secret(Path(p).resolve().relative_to(root))]
                 return "\n".join(sorted(files)[:100]) or "(empty)"
             if name == "repo_read":
                 target = self._resolve(args.get("path", ""))
                 if target is None or not target.is_file():
                     return f"(no such file: {args.get('path')})"
+                # Refuse to read credential files back into the (possibly remote) model context.
+                for r in self.roots.values():
+                    try:
+                        if _pathsafe.looks_secret(target.relative_to(r)):
+                            return f"(refused: {target.name} looks like a secret/credential)"
+                    except ValueError:
+                        continue
                 return read_file(str(target))[:self.max_bytes]
         except Exception as e:  # noqa: BLE001 — tool errors are fed back to the model
             return f"(tool error: {e})"

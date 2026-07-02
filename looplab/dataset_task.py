@@ -216,7 +216,18 @@ class DatasetTask(BaseModel):
                             break
                 if len(rows) < 2:
                     return {}
-                header = [h or f"col{i}" for i, h in enumerate(rows[0])]
+                # De-duplicate header names (suffix _2, _3, …) so two physical columns sharing a name
+                # don't collapse into one key with interleaved doubled samples that misprofile both.
+                header: list[str] = []
+                seen: dict[str, int] = {}
+                for i, h in enumerate(rows[0]):
+                    name = h or f"col{i}"
+                    if name in seen:
+                        seen[name] += 1
+                        name = f"{name}_{seen[name]}"
+                    else:
+                        seen[name] = 1
+                    header.append(name)
                 cols: dict[str, list] = {h: [] for h in header}
                 for row in rows[1:]:
                     for h, val in zip(header, row):

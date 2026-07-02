@@ -113,9 +113,40 @@ class EventStore:
         # fall back to a full scan so a concurrent writer can't mint a duplicate seq. Non-recursive.
         return self._scan_last_seq()
 
+    def _heal_torn_tail(self) -> None:
+        """A final line without a trailing newline is always a torn write (append writes `line +
+        b"\\n"` atomically-per-record). `iter_jsonl` already ignores that partial record on read, but
+        the NEXT append would glue its bytes onto the partial line, producing one unparseable merged
+        line at which every reader stops — silently dropping this event and all events after it.
+        Truncate the torn partial line before appending so new records stay readable. No-op when the
+        file is absent, empty, or already newline-terminated. Called under the append lock."""
+        try:
+            with open(self.path, "r+b") as f:
+                f.seek(0, os.SEEK_END)
+                end = f.tell()
+                if end == 0:
+                    return
+                f.seek(end - 1)
+                if f.read(1) == b"\n":
+                    return
+                pos, newline_at = end, -1
+                while pos > 0:
+                    start = max(0, pos - 65536)
+                    f.seek(start)
+                    buf = f.read(pos - start)
+                    idx = buf.rfind(b"\n")
+                    if idx != -1:
+                        newline_at = start + idx
+                        break
+                    pos = start
+                f.truncate(newline_at + 1 if newline_at != -1 else 0)
+        except OSError:
+            pass  # best-effort healing; a read still tolerates the torn tail
+
     def append(self, type: str, data: dict[str, Any]) -> Event:
         trace_id, span_id = current_ids()
         with _interprocess_lock(Path(str(self.path) + ".lock")):
+            self._heal_torn_tail()
             # Derive seq from max(in-memory, on-disk tail) so a concurrent writer can't collide.
             # Single-process: _disk_last_seq == self._seq, so seq == self._seq + 1 (unchanged).
             seq = max(self._seq, self._disk_last_seq()) + 1

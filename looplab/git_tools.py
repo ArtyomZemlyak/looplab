@@ -55,7 +55,9 @@ class GitTools:
                 paths = [str(p) for p in (args.get("paths") or []) if p]
                 if not paths:
                     return "(git_add needs a non-empty list of paths)"
-                return self._mut(["git", "add", *paths], f"git add {' '.join(paths)[:60]}")
+                # `--` stops git from parsing a path that starts with '-' as an option (git option
+                # injection from a model-supplied path).
+                return self._mut(["git", "add", "--", *paths], f"git add {' '.join(paths)[:60]}")
             if name == "git_commit":
                 msg = str(args.get("message") or "").strip()
                 if not msg:
@@ -71,7 +73,8 @@ class GitTools:
                 ref = str(args.get("ref") or "").strip()
                 if not ref:
                     return "(git_checkout needs a ref)"
-                return self._mut(["git", "checkout", ref], f"git checkout {ref}")
+                # `--` after the ref so a ref like '-f' can't be parsed as a git option.
+                return self._mut(["git", "checkout", ref, "--"], f"git checkout {ref}")
             return f"(unknown tool: {name})"
         except Exception as e:  # noqa: BLE001 - never crash the loop
             return f"(error: {e})"

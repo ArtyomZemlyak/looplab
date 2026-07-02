@@ -296,6 +296,7 @@ _ART_BIN_EXT = {".png", ".jpg", ".jpeg", ".gif", ".bmp", ".ico", ".webp", ".svgz
                 ".jar", ".class", ".wasm"}
 _ART_MAX_FILES = 1500          # per root — keep listings bounded even for a big repo / data dir
 _ART_MAX_BYTES = 2_000_000     # 2 MB cap for an inline text view (the tail is dropped, `truncated` set)
+_LOG_TAIL_MAX = 5_000_000      # hard cap on the client-controlled `tail` byte count for node_logs
 
 
 def _art_expand(p: str) -> str:
@@ -800,13 +801,20 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
         subprocesses (eval.log / setup.log in the node workdir). `tail` caps bytes returned (from the
         end) so the UI can poll cheaply. Empty strings when a log doesn't exist yet."""
         nd = _node_dir(_run_dir(run_id), nid)
+        # Clamp the client-controlled tail so a hostile/large value can't force an unbounded read; and
+        # seek to the tail instead of read_bytes() so we never pull a multi-GB training log into RAM.
+        n = min(max(0, tail), _LOG_TAIL_MAX)
         def _tail(name: str) -> str:
             p = nd / name
             try:
-                b = p.read_bytes()
+                size = p.stat().st_size
+                with open(p, "rb") as f:
+                    if size > n:
+                        f.seek(size - n)
+                    b = f.read()
             except OSError:
                 return ""
-            return b[-max(0, tail):].decode("utf-8", "replace")
+            return b.decode("utf-8", "replace")
         return {"eval": _tail("eval.log"), "setup": _tail("setup.log"),
                 "run_setup": (_run_dir(run_id) / "run_setup.log").read_text("utf-8", "replace")
                              if (_run_dir(run_id) / "run_setup.log").exists() else ""}
@@ -1001,7 +1009,10 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
         # faithfully and the lineage is recorded. (_run_dir guards path traversal on the sibling id.)
         if etype == "inject_node" and data.get("source_run") and data.get("source_node") is not None:
             sr = str(data.pop("source_run"))
-            sn = int(data.pop("source_node"))
+            try:
+                sn = int(data.pop("source_node"))
+            except (TypeError, ValueError):
+                raise HTTPException(400, "source_node must be an integer")
             sst = fold(_events(_run_dir(sr)))            # 404 if the sibling run doesn't exist
             snode = sst.nodes.get(sn)
             if snode is None:

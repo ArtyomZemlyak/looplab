@@ -10,7 +10,7 @@ import string
 from pathlib import Path
 from typing import Optional
 
-_FRONTMATTER = re.compile(r"^---\n.*?\n---\n", re.DOTALL)
+_FRONTMATTER = re.compile(r"^---\n.*?^---\n", re.DOTALL | re.MULTILINE)
 
 
 def _strip_frontmatter(text: str) -> str:
@@ -26,7 +26,8 @@ class PromptStore:
         if self.dir is not None:
             f = self.dir / f"{name}.md"
             if f.exists():  # re-read each call -> hot reload
-                text = _strip_frontmatter(f.read_text(encoding="utf-8", errors="replace")).strip()
+                # utf-8-sig strips a BOM so a Windows-edited prompt's frontmatter still matches ^---.
+                text = _strip_frontmatter(f.read_text(encoding="utf-8-sig", errors="replace")).strip()
         return string.Template(text).safe_substitute(vars)
 
 

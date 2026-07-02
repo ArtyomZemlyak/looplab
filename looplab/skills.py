@@ -9,7 +9,7 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
-_FM = re.compile(r"^---\n(.*?)\n---\n(.*)$", re.DOTALL)
+_FM = re.compile(r"^---\r?\n(.*?)\r?\n---\r?\n?(.*)$", re.DOTALL)
 
 
 @dataclass
@@ -20,7 +20,7 @@ class Skill:
 
 
 def _parse_skill(path: Path) -> Skill:
-    text = path.read_text(encoding="utf-8", errors="replace")  # a cp1252/UTF-16 file must not crash load
+    text = path.read_text(encoding="utf-8-sig", errors="replace")  # utf-8-sig drops a BOM; won't crash load
     name, desc, body = (path.parent.name if path.name == "SKILL.md" else path.stem), "", text.strip()
     m = _FM.match(text)
     if m:
