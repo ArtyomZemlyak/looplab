@@ -141,9 +141,13 @@ def build_strategist_tools(task: TaskAdapter, settings, run_dir=None):
                   if getattr(settings, "memory_dir", None) else None)
     if getattr(settings, "knowledge_dir", None) or cases_path:
         from looplab.tools.knowledge_tools import KnowledgeTools
+        from looplab.tools.memora import make_abstractor
         from looplab.tools.vectorstore import make_embedder
-        providers.append(KnowledgeTools(settings.knowledge_dir, cases_path=cases_path,
-                                        embed=make_embedder(settings)))  # KB + memory (T4 embeddings)
+        providers.append(KnowledgeTools(
+            settings.knowledge_dir, cases_path=cases_path,
+            embed=make_embedder(settings),                 # KB + memory (T4 embeddings)
+            abstract=make_abstractor(settings),            # harmonic index + anchor-expansion (Memora)
+            consolidate_threshold=getattr(settings, "memora_consolidate_threshold", 0.86)))
     if getattr(settings, "skills_dir", None):
         from looplab.tools.skills import SkillTools
         providers.append(SkillTools(settings.skills_dir))
@@ -342,9 +346,13 @@ def make_roles(task: TaskAdapter, settings, run_dir=None):
         providers.append(SiblingRunTools(Path(run_dir).parent, Path(run_dir).name))
     if settings.knowledge_dir or cases_path:
         from looplab.tools.knowledge_tools import KnowledgeTools
+        from looplab.tools.memora import make_abstractor
         from looplab.tools.vectorstore import make_embedder
-        providers.append(KnowledgeTools(settings.knowledge_dir, cases_path=cases_path,
-                                        embed=make_embedder(settings)))
+        providers.append(KnowledgeTools(
+            settings.knowledge_dir, cases_path=cases_path,
+            embed=make_embedder(settings),
+            abstract=make_abstractor(settings),            # harmonic index + anchor-expansion (Memora)
+            consolidate_threshold=getattr(settings, "memora_consolidate_threshold", 0.86)))
     if settings.skills_dir:
         from looplab.tools.skills import SkillTools
         providers.append(SkillTools(settings.skills_dir))

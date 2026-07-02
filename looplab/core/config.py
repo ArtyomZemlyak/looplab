@@ -389,6 +389,20 @@ class Settings(BaseSettings):
     # crashes a run). `embed_base_url` blank = reuse `llm_base_url`; the shared `llm_api_key` is used.
     embed_model: str | None = None
     embed_base_url: str | None = None
+    # Harmonic memory (Memora, ICML'26 — idea import). When ON, cross-run cases and knowledge notes are
+    # indexed by a short ABSTRACTION + cue ANCHORS instead of their raw text, near-duplicate memories are
+    # CONSOLIDATED into one entry under a matching abstraction, and `kb_search`/case retrieval EXPAND
+    # through the top hits' anchors to surface related-but-not-similar memories. OFF by default →
+    # byte-identical to today. LLM-optional: without `memora_llm` (or without a wired chat client) the
+    # abstractions are written by a deterministic offline lexical abstractor, so the structure works with
+    # zero LLM calls; it only loses quality vs. a model-written abstraction. Never a source of truth —
+    # abstractions live only in the derived, rebuildable retrieval index.
+    memora: bool = False
+    memora_llm: bool = False          # use an LLM to write abstractions (needs a wired chat client); else lexical
+    memora_anchors: int = 6           # max cue anchors kept per memory
+    # Cosine similarity at/above which a new case is CONSOLIDATED into an existing one (same evolving
+    # topic) rather than stored as a separate entry. Only used when `memora` is on.
+    memora_consolidate_threshold: float = 0.86
     # E3 literature-grounded ideation (network-OPTIONAL): give the agentic Researcher an arXiv search
     # tool to ground ideas in real techniques. Off by default (egress is unreliable on some boxes);
     # fails gracefully if the network is blocked.
