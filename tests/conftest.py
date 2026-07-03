@@ -16,3 +16,15 @@ from looplab.config import Settings
 @pytest.fixture(autouse=True)
 def _no_dotenv_in_tests(monkeypatch):
     monkeypatch.setitem(Settings.model_config, "env_file", None)
+
+
+@pytest.fixture(autouse=True)
+def _isolate_looplab_home(monkeypatch, tmp_path):
+    """Cross-run memory and the knowledge base are ON BY DEFAULT — they point at the developer's real
+    `~/.looplab`. Left alone, every engine test would read and write there (polluting real memory, and
+    on a slow/locking FUSE mount even hanging on the append). Point both at a per-test tmp dir. Set via
+    the environment, not just field defaults, so it also reaches subprocess-based tests (which spawn a
+    fresh `looplab` process that reads the real `.env`) through their inherited environment."""
+    home = tmp_path / "_ll_home"
+    monkeypatch.setenv("LOOPLAB_MEMORY_DIR", str(home / "memory"))
+    monkeypatch.setenv("LOOPLAB_KNOWLEDGE_DIR", str(home / "knowledge"))

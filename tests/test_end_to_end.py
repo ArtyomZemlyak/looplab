@@ -73,21 +73,26 @@ def test_crash_then_resume_subprocess(tmp_path):
     env = {**_clean_env()}
 
     # 1) Run with a crash hook -> process hard-exits after 2 evaluations.
+    # `-s backend=toy` forces the OFFLINE optimizer: the subprocess reads the repo's real `.env` (unlike
+    # in-process tests, which disable dotenv), so without this it would pick up a live `backend=llm` and
+    # hang on an LLM call. A per-call `timeout` bounds any stall so a hang fails the test in seconds
+    # instead of blocking the whole suite indefinitely.
     proc = subprocess.run(
         [sys.executable, "-m", "looplab.cli", "run", str(TASK_FILE),
-         "--out", str(rd), "--max-nodes", "10", "--crash-after", "2"],
-        cwd=str(ROOT), env=env, capture_output=True, text=True,
+         "--out", str(rd), "--max-nodes", "10", "--crash-after", "2", "-s", "backend=toy"],
+        cwd=str(ROOT), env=env, capture_output=True, text=True, timeout=120,
     )
     assert proc.returncode != 0  # crashed, did not finish cleanly
     crashed = fold(EventStore(rd / "events.jsonl").read_all())
     assert not crashed.finished
     assert len(crashed.evaluated_nodes()) >= 2
 
-    # 2) Resume -> completes, no duplicates, all 10 nodes present.
+    # 2) Resume -> completes, no duplicates, all 10 nodes present. (Backend is read back from the run's
+    # config snapshot, which recorded backend=toy, so resume stays offline too.)
     proc2 = subprocess.run(
         [sys.executable, "-m", "looplab.cli", "resume", str(rd),
          "--task-file", str(TASK_FILE), "--max-nodes", "10"],
-        cwd=str(ROOT), env=env, capture_output=True, text=True,
+        cwd=str(ROOT), env=env, capture_output=True, text=True, timeout=120,
     )
     assert proc2.returncode == 0, proc2.stderr
     final = fold(EventStore(rd / "events.jsonl").read_all())

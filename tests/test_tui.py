@@ -163,7 +163,6 @@ def test_live_prompt_refreshes_then_reads(monkeypatch):
     typed line. Drive it with a real OS pipe as stdin so select() behaves like a terminal."""
     import os
     import sys
-    import threading
 
     if not hasattr(__import__("select"), "select"):
         pytest.skip("no select()")
@@ -189,10 +188,13 @@ def test_live_prompt_refreshes_then_reads(monkeypatch):
 
     def render(_data):
         renders["n"] += 1
+        # Deterministic (no wall-clock race): the initial draw is render #1; the first live refresh in
+        # the wait loop is #2 — feed the input right then, so "at least one live refresh" is guaranteed
+        # regardless of scheduling/load, and the very next select() returns the typed line.
+        if renders["n"] == 2:
+            os.write(w_fd, b"hello\n")
 
     try:
-        # After a couple of refresh ticks, "type" a line into the pipe so the prompt returns it.
-        threading.Timer(0.12, lambda: (os.write(w_fd, b"hello\n"), os.close(w_fd))).start()
         line, data = app._live_prompt("» ", fetch=fetch, render=render, sig=lambda d: d, interval=0.02)
         assert line == "hello"
         assert renders["n"] >= 2                            # initial draw + at least one live refresh
