@@ -63,7 +63,9 @@ function preRoute(t) {
   const name = _NL_CONTROL[norm]
   return name && DIRECT[name] ? { name, spec: DIRECT[name], arg: null } : null
 }
-const refNodes = (t) => [...new Set([...(t || '').matchAll(/#(?:node-)?(\d+)/gi)].map(m => Number(m[1])))]
+// `#N` must start a token (not follow a word/# char) and end at a boundary — so `#3498db` (hex color),
+// URL fragments (`page#12`), and `x#5` don't fabricate an experiment reference.
+const refNodes = (t) => [...new Set([...(t || '').matchAll(/(?<![\w#])#(?:node-)?(\d+)\b/gi)].map(m => Number(m[1])))]
 
 // Popular one-tap prompts surfaced in the full view (and side view when empty). Keep short + generic.
 const HINTS = [
@@ -77,6 +79,8 @@ const HINTS = [
 // paste doesn't blow the context; the backend receives the content inline in the instruction.
 const TEXT_EXT = /\.(txt|md|markdown|csv|tsv|json|jsonl|ya?ml|toml|ini|cfg|conf|log|py|js|jsx|ts|tsx|sh|c|cpp|h|hpp|java|go|rs|rb|sql|html|css|xml|env)$/i
 const FILE_CHAR_CAP = 20000
+const MAX_FILE_BYTES = 2 * 1024 * 1024   // never readAsText a giant log/csv into the tab (OOM)
+const SECRET_RE = /(^|\/)\.env(\.|$)|\.pem$|\.key$|(^|\/)(id_rsa|id_ed25519)$|secret|credential/i
 const readFileText = (file) => new Promise((resolve) => {
   const r = new FileReader()
   r.onload = () => resolve({ name: file.name, size: file.size, content: String(r.result || '').slice(0, FILE_CHAR_CAP), truncated: (r.result || '').length > FILE_CHAR_CAP })
@@ -216,9 +220,19 @@ export default function AssistantBar({ runId, hidden = false }) {
           if (!ok && mountedRef.current && sidRef.current === id)
             patchLast(prev => prev && prev.role === 'assistant' && prev.streaming
               ? { streaming: false, content: prev.content || '(the previous turn ended without a reply — ask again)' } : prev)
-        }).finally(() => { polling = false; runningRef.current = false; if (mountedRef.current) setBusy(false) })
+        }).finally(() => {   // only reset the SHARED busy/runningRef if we're still on this session —
+          // else a departing session's late finally would clobber the one the user switched TO.
+          polling = false
+          if (mountedRef.current && sidRef.current === id) { runningRef.current = false; setBusy(false) }
+        })
       }
-    } catch (e) { flash(e.message) }
+    } catch (e) {
+      // The stored/opened session no longer exists (deleted here or in another tab, run-root reset).
+      // Don't leave the dead id in `sid`/localStorage — that wedges the chat (every send targets the
+      // 404'd session). Drop it back to a fresh composer.
+      if (/404/.test(e.message) && sidRef.current === id) { newChat() }
+      else flash(e.message)
+    }
   }
   // Restore the last session on mount so a full page reload never loses the conversation — and if its
   // last turn has no reply yet, recover the in-flight answer (the fix for "typed in the bar, reloaded,
@@ -269,8 +283,16 @@ export default function AssistantBar({ runId, hidden = false }) {
     const picked = [...(list || [])]
     const bad = picked.filter(f => !TEXT_EXT.test(f.name))
     if (bad.length) flash(`skipped non-text: ${bad.map(f => f.name).join(', ')}`)
-    const read = (await Promise.all(picked.filter(f => TEXT_EXT.test(f.name)).map(readFileText))).filter(Boolean)
-    if (read.length) setFiles(f => [...f, ...read])
+    const txt = picked.filter(f => TEXT_EXT.test(f.name))
+    const secret = txt.filter(f => SECRET_RE.test(f.name))          // don't slurp .env/keys into the prompt
+    if (secret.length) flash(`skipped secret-looking: ${secret.map(f => f.name).join(', ')}`)
+    const big = txt.filter(f => !SECRET_RE.test(f.name) && f.size > MAX_FILE_BYTES)   // OOM guard BEFORE read
+    if (big.length) flash(`too large (>2MB): ${big.map(f => f.name).join(', ')}`)
+    const ok = txt.filter(f => !SECRET_RE.test(f.name) && f.size <= MAX_FILE_BYTES)
+    const read = (await Promise.all(ok.map(readFileText))).filter(Boolean)
+    if (read.length) setFiles(f => {   // dedup by name (React key + removeFile both key on name)
+      const seen = new Set(f.map(x => x.name)); return [...f, ...read.filter(r => !seen.has(r.name))]
+    })
   }
   const removeFile = (name) => setFiles(f => f.filter(x => x.name !== name))
   const filePreamble = (fs) => fs.length
@@ -306,12 +328,15 @@ export default function AssistantBar({ runId, hidden = false }) {
     if (ensureVisible && view === 'bar' && hasChat) setView('side')
     const wasBar = view === 'bar' && !ensureVisible
     setPreview(''); setHasNew(false)
-    const atts = files; setFiles([])
+    const atts = files
     let id = sid
     if (!id) {
+      // Create the session FIRST; only then clear the attached-file chips — else a create failure
+      // strands the user with their files already gone.
       try { const m = await assistantCreate((userText || instruction).slice(0, 60), mode); id = m.id; sidRef.current = id; try { localStorage.setItem('ll.asstSid', id) } catch { /* ignore */ } if (mountedRef.current) setSid(id) }
       catch { flash('assistant offline'); return }
     }
+    setFiles([])   // committed to sending this turn -> clear the composer's attachments
     // What was silently attached to this turn (run, #experiments, files) — shown as a faint caption
     // ABOVE the user's bubble so the injected context is visible, not hidden inside the instruction.
     const ctxInfo = { run: context?.run || null, refs: context?.refs || [], files: atts.map(a => a.name) }
@@ -360,9 +385,13 @@ export default function AssistantBar({ runId, hidden = false }) {
         patchLast({ content: '', streaming: true, recovering: true })
         flash('reconnecting…')
         const ok = await recoverReply(id, priorLen)
-        if (mountedRef.current && sidRef.current === id && !ok) patchLast({ content: 'Could not reach the assistant.', streaming: false, recovering: false })
+        // `runningRef` guard: if the user hit Stop during recovery, keep the "(stopped)" bubble.
+        if (mountedRef.current && sidRef.current === id && runningRef.current && !ok) patchLast({ content: 'Could not reach the assistant.', streaming: false, recovering: false })
       }
-    } finally { polling = false; runningRef.current = false; abortRef.current = null; if (mountedRef.current) { setBusy(false); setPending([]) } }
+    } finally {   // guard shared-ref/state cleanup on still-current session (see reattach finally)
+      polling = false
+      if (mountedRef.current && sidRef.current === id) { runningRef.current = false; abortRef.current = null; setBusy(false); setPending([]) }
+    }
   }
 
   const send = () => {
@@ -384,8 +413,9 @@ export default function AssistantBar({ runId, hidden = false }) {
     if (pr) { setInput(''); runDirect(pr); return }
     setInput('')
     const refs = runId ? refNodes(t) : []
+    const safeRun = String(runId).replace(/[\]"\r\n]/g, ' ').slice(0, 200)   // can't break the preamble/stripCtx or inject
     const ctx = runId
-      ? `\n\n[UI context: run "${runId}" is open.${refs.length ? ` The user is referring to experiment(s) ${refs.map(i => '#' + i).join(', ')} — read them with the run tools.` : ''} Use the run tools if this is about it.]`
+      ? `\n\n[UI context: run "${safeRun}" is open.${refs.length ? ` The user is referring to experiment(s) ${refs.map(i => '#' + i).join(', ')} — read them with the run tools.` : ''} Use the run tools if this is about it.]`
       : ''
     runLLM((t || 'See the attached file(s).') + ctx, { userText: t || '(attached files)', context: { run: runId || null, refs } })
   }

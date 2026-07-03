@@ -1852,6 +1852,19 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
             return dec
         return approver
 
+    def _deny_session_perms(sid: str) -> None:
+        """Auto-deny + UNBLOCK every pending permission request for a session. Called on cancel/delete
+        so a worker parked in `approver.ev.wait` un-parks immediately (returns "deny" → the mutating
+        tool is NOT executed → the loop's next cancel_check ends the turn), instead of blocking for
+        _PERM_TIMEOUT. Also flips the request to resolved so a stopped turn's confirm can't be
+        re-surfaced and approved later to fire a mutation the user already cancelled."""
+        with _perm_lock:
+            for r in _perm_reqs.values():
+                if r.get("session") == sid and r.get("status") == "pending":
+                    r["decision"] = "deny"
+                    r["status"] = "resolved"
+                    r["event"].set()
+
     @app.get("/api/assistant/permissions")
     def assistant_permissions(session: Optional[str] = None):
         with _perm_lock:
@@ -1904,6 +1917,7 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
         since the turn + flag live server-side, keyed by session id)."""
         with _perm_lock:
             ev = _asst_cancel.get(sid)
+        _deny_session_perms(sid)   # un-park a worker waiting on a confirm; kill the stale request
         if ev is not None:
             ev.set()
             return {"ok": True, "cancelling": True}
@@ -1937,6 +1951,13 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
             d = _asst._sdir(sid)
         except ValueError:
             raise HTTPException(404, "no such session")
+        # Stop an in-flight turn on this session before removing its files: cancel the loop AND unblock
+        # a worker parked on a confirm — else it runs against a now-deleted session for up to 900s.
+        with _perm_lock:
+            cev = _asst_cancel.get(sid)
+        if cev is not None:
+            cev.set()
+        _deny_session_perms(sid)
         if d.exists():
             shutil.rmtree(d, ignore_errors=True)
         with _perm_lock:      # drop the deleted session's in-memory grants/progress (no slow leak)
@@ -1994,6 +2015,7 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
         history = list(sess["messages"])          # BEFORE appending the new user turn
         eff_mode = mode or sess["meta"].get("mode") or "plan"
         _asst.append(sid, {"role": "user", "content": display or instruction, "mode": eff_mode})
+        _asst.update_meta(sid, mode=eff_mode)   # remember the chosen mode so a reload/switch keeps it
         s = _llm_settings()
         try:
             client = make_llm_client(s)
@@ -2072,6 +2094,7 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
         history = list(sess["messages"])
         eff_mode = mode or sess["meta"].get("mode") or "plan"
         _asst.append(sid, {"role": "user", "content": display or instruction, "mode": eff_mode})
+        _asst.update_meta(sid, mode=eff_mode)   # remember the chosen mode so a reload/switch keeps it
         s = _llm_settings()
         q: "_queue.Queue" = _queue.Queue()
         try:

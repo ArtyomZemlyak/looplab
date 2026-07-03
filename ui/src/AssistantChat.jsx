@@ -36,7 +36,7 @@ const MODES = ASSISTANT_MODES
 const stripCtx = (s) => typeof s === 'string'
   ? s.replace(/\n*\[UI context:[^\]]*\]\s*$/, '').trimEnd() : s
 
-export function Turn({ m, runsById, onRevert }) {
+export function Turn({ m, runsById, onRevert, readOnly = false }) {
   const who = m.role === 'user' ? 'you' : 'assistant'
   const content = m.role === 'user' ? stripCtx(m.content) : m.content
   const mentions = runMentions(content)
@@ -72,7 +72,7 @@ export function Turn({ m, runsById, onRevert }) {
       {mentions.length > 0 && <div className="asst-runchips">
         {mentions.map(id => <RunChip key={id} id={id} run={runsById && runsById[id]} />)}
       </div>}
-      {Array.isArray(m.proposals) && m.proposals.map((sp, i) => <LaunchCard key={i} spec={sp} />)}
+      {!readOnly && Array.isArray(m.proposals) && m.proposals.map((sp, i) => <LaunchCard key={i} spec={sp} />)}
     </div>
   </div>
 }

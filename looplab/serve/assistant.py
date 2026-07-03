@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import re
 import secrets
+import threading
 import time
 from pathlib import Path
 from typing import Callable, Optional
@@ -50,6 +51,7 @@ class SessionStore:
 
     def __init__(self, run_root):
         self.dir = Path(run_root) / "assistant"
+        self._append_lock = threading.Lock()   # serialize appends so a large turn can't interleave
 
     def _sdir(self, sid: str) -> Path:
         d = (self.dir / sid).resolve()
@@ -118,12 +120,16 @@ class SessionStore:
         if not d.exists():
             raise ValueError("no such session")
         line = {**turn, "ts": turn.get("ts", time.time())}
-        with open(self._msgs_path(sid), "ab") as f:
-            f.write((json.dumps(line, ensure_ascii=False) + "\n").encode("utf-8"))
-            try:
-                best_effort_fsync(f.fileno())
-            except OSError:
-                pass
+        # A large turn (attached-file contents) exceeds the buffer and becomes multiple write() syscalls
+        # that can interleave with a concurrent append → a corrupt mid-file line, which iter_jsonl stops
+        # at, silently dropping every later turn on the next read. Serialize appends to prevent that.
+        with self._append_lock:
+            with open(self._msgs_path(sid), "ab") as f:
+                f.write((json.dumps(line, ensure_ascii=False) + "\n").encode("utf-8"))
+                try:
+                    best_effort_fsync(f.fileno())
+                except OSError:
+                    pass
         self.update_meta(sid, updated=line["ts"])
 
     def fork(self, sid: str, *, now: Optional[float] = None) -> Optional[dict]:
@@ -198,8 +204,14 @@ def expand_mentions(text: str, run_root, *, alive_fn: Optional[Callable] = None,
         elif kind == "file":
             from looplab.tools.reposcout import RepoScoutTools
             body = RepoScoutTools(list(roots) or [Path.home(), REPO_ROOT, Path(run_root)])._read_file(raw)
-            blocks.append(f"[@file:{raw}]\n```\n{body}\n```")
-            refs.append({"type": "file", "path": raw})
+            # Skip refused/unreadable files (outside roots, secret, missing) instead of embedding the
+            # refusal string in the prompt — mirrors the @run branch and the docstring's promise. The
+            # scout returns a single-line "(…reason…)" on refusal; a real file is multi-line or not so
+            # wrapped, so this only drops genuine refusals.
+            _b = body.strip()
+            if not (_b.startswith("(") and _b.endswith(")") and "\n" not in _b):
+                blocks.append(f"[@file:{raw}]\n```\n{body}\n```")
+                refs.append({"type": "file", "path": raw})
     expanded = text if not blocks else (text + "\n\n--- Referenced context ---\n" + "\n\n".join(blocks))
     return expanded, refs
 
