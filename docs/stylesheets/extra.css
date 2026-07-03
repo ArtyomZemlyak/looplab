@@ -1,0 +1,68 @@
+/* LoopLab docs — brand polish on top of Material. Teal to match the infographic. */
+:root {
+  --md-primary-fg-color:        #0f9c8c;
+  --md-primary-fg-color--light: #33d6c2;
+  --md-primary-fg-color--dark:  #0a6a5f;
+  --md-accent-fg-color:         #0a6a5f;
+}
+[data-md-color-scheme="slate"] {
+  --md-primary-fg-color:        #33d6c2;
+  --md-accent-fg-color:         #8ff0e4;
+  --md-hue: 210;
+}
+
+/* ---- Home hero -------------------------------------------------------- */
+.ll-hero {
+  border: 1px solid var(--md-default-fg-color--lightest);
+  border-radius: 16px;
+  padding: 2.4rem 2rem;
+  margin: .4rem 0 2rem;
+  background:
+    radial-gradient(120% 90% at 90% -10%,
+      color-mix(in srgb, var(--md-primary-fg-color) 14%, transparent), transparent 60%),
+    var(--md-code-bg-color);
+}
+.ll-hero h1 { margin: 0 0 .4rem; font-weight: 800; letter-spacing: -.02em; }
+.ll-hero .ll-verbs {
+  display: flex; flex-wrap: wrap; gap: .5rem; margin-top: 1.1rem;
+  font-family: var(--md-code-font-family); font-size: .78rem;
+}
+.ll-hero .ll-verbs span {
+  padding: .35rem .7rem; border-radius: 999px;
+  border: 1px solid var(--md-default-fg-color--lightest);
+  background: var(--md-default-bg-color);
+}
+
+/* ---- Embedded infographic frame -------------------------------------- */
+.ll-frame {
+  position: relative;
+  width: 100%;
+  height: min(82vh, 1180px);
+  border: 1px solid var(--md-default-fg-color--lightest);
+  border-radius: 14px;
+  overflow: hidden;
+  background: var(--md-code-bg-color);
+  box-shadow: 0 1px 3px rgba(0,0,0,.06);
+}
+.ll-frame iframe { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; }
+.ll-open {
+  display: inline-flex; align-items: center; gap: .4rem;
+}
+
+/* ---- Mermaid: give diagrams room and center them --------------------- */
+.mermaid { text-align: center; }
+
+/* ---- Grid cards: subtle lift ----------------------------------------- */
+.md-typeset .grid.cards > ul > li {
+  border-radius: 12px;
+  transition: border-color .15s, box-shadow .15s, transform .15s;
+}
+.md-typeset .grid.cards > ul > li:hover {
+  border-color: var(--md-primary-fg-color);
+  box-shadow: 0 4px 18px color-mix(in srgb, var(--md-primary-fg-color) 18%, transparent);
+  transform: translateY(-2px);
+}
+@media (prefers-reduced-motion: reduce) {
+  .md-typeset .grid.cards > ul > li { transition: none; }
+  .md-typeset .grid.cards > ul > li:hover { transform: none; }
+}

@@ -1,0 +1,151 @@
+site_name: LoopLab
+site_description: >-
+  LoopLab — an autonomous ML/DS research engine. Give it a goal; it invents,
+  implements, tests and improves candidate solutions in a loop and returns the
+  best verified result.
+site_url: https://artyomzemlyak.github.io/looplab/
+repo_url: https://github.com/ArtyomZemlyak/looplab
+repo_name: ArtyomZemlyak/looplab
+edit_uri: edit/master/docs/
+copyright: MIT-licensed · files are the source of truth · the engine is the sole writer
+
+docs_dir: docs
+
+theme:
+  name: material
+  language: en
+  icon:
+    repo: fontawesome/brands/github
+    logo: material/rotate-3d-variant
+  favicon: infographic/favicon.svg
+  font:
+    text: Inter
+    code: JetBrains Mono
+  palette:
+    # Palette toggle — light
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: teal
+      accent: teal
+      toggle:
+        icon: material/weather-night
+        name: Switch to dark mode
+    # Palette toggle — dark
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: teal
+      accent: teal
+      toggle:
+        icon: material/weather-sunny
+        name: Switch to light mode
+  features:
+    - navigation.tabs
+    - navigation.tabs.sticky
+    - navigation.sections
+    - navigation.indexes
+    - navigation.top
+    - navigation.footer
+    - navigation.tracking
+    - toc.follow
+    - search.suggest
+    - search.highlight
+    - content.code.copy
+    - content.code.annotate
+    - content.tabs.link
+
+markdown_extensions:
+  - abbr
+  - admonition
+  - attr_list
+  - def_list
+  - footnotes
+  - md_in_html
+  - tables
+  - toc:
+      permalink: true
+      title: On this page
+  - pymdownx.betterem
+  - pymdownx.caret
+  - pymdownx.keys
+  - pymdownx.mark
+  - pymdownx.tilde
+  - pymdownx.details
+  - pymdownx.highlight:
+      anchor_linenums: true
+      line_spans: __span
+      pygments_lang_class: true
+  - pymdownx.inlinehilite
+  - pymdownx.snippets
+  - pymdownx.tabbed:
+      alternate_style: true
+  - pymdownx.emoji:
+      emoji_index: !!python/name:material.extensions.emoji.twemoji
+      emoji_generator: !!python/name:material.extensions.emoji.to_svg
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+
+extra_css:
+  - stylesheets/extra.css
+
+extra:
+  social:
+    - icon: fontawesome/brands/github
+      link: https://github.com/ArtyomZemlyak/looplab
+
+# Design/research notes that stay reachable by URL but out of the nav tree.
+not_in_nav: |
+  /10-autoresearch-improvement-research.md
+  /11-agent-systems-research.md
+  /autoresearch-systems-exploration.md
+  /chat-first-command-bar-research.md
+  /BACKLOG.md
+  /CODE_REVIEW.md
+  /GRAPH_GROUPING_REDESIGN.md
+  /RESEARCH_NOTES.md
+
+validation:
+  nav:
+    omitted_files: info
+    not_found: warn
+    absolute_links: info
+  links:
+    not_found: info
+    anchors: info
+    absolute_links: info
+    unrecognized_links: info
+
+nav:
+  - Home: index.md
+  - Architecture:
+      - Overview (infographic): guide/architecture.md
+      - Concepts: guide/concepts.md
+      - Architecture spec: 02-architecture.md
+      - Tracing: 08-tracing-architecture.md
+  - Guide:
+      - Overview: guide/index.md
+      - Installation: guide/installation.md
+      - Quickstart: guide/quickstart.md
+      - CLI reference: guide/cli-reference.md
+      - Configuration: guide/configuration.md
+      - Tasks: guide/tasks.md
+      - Generating code: guide/generating-code.md
+      - LLM & coding agents: guide/llm-and-agents.md
+      - Memory & knowledge: guide/memory.md
+      - Web UI: guide/ui.md
+      - Deployment: guide/deployment.md
+      - Live scenarios: guide/live-scenarios.md
+      - MLE-bench runbook: MLEBENCH.md
+  - Design records:
+      - Index: 00-INDEX.md
+      - Product design: 01-product-design.md
+      - Decisions (ADRs): 03-decisions.md
+      - File layout: 04-file-layout.md
+      - Build decisions: 05-build-decisions.md
+      - Implementation plan: 06-implementation-plan.md
+      - Architecture review: 07-architecture-review.md
+      - Phased plan (2026-07): 12-phased-plan-2026-07.md
+      - Strategist design: A7-strategist-design.md
+      - Roadmap: ROADMAP.md

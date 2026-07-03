@@ -5,6 +5,9 @@
 [![Python](https://img.shields.io/badge/python-%3E%3D3.11-blue.svg)](https://www.python.org/)
 [![Tests](https://img.shields.io/badge/tests-1076-brightgreen.svg)](#testing)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](#license)
+[![Docs](https://img.shields.io/badge/docs-mkdocs--material-0f9c8c.svg)](https://artyomzemlyak.github.io/looplab/)
+
+📖 **[Documentation site](https://artyomzemlyak.github.io/looplab/)** · 🗺️ **[Architecture infographic](https://artyomzemlyak.github.io/looplab/guide/architecture/)** — the whole agent, every component and stage, in one picture.
 
 LoopLab runs a closed research loop: a **Researcher** proposes ideas, a **Developer** writes the
 code, a sandbox runs it, an evaluator scores it, and the loop refines and **merges** the best

@@ -1,0 +1,45 @@
+---
+hide:
+  - toc
+---
+
+# Architecture at a glance
+
+A single picture of the **whole agent** — every component and every stage — grounded in the
+configuration that ships **enabled by default**. It walks a run end to end: the six-stage lifecycle,
+one turn of the loop (Researcher → Developer → Sandbox → Evaluator, with the repair and merge edges),
+the subsystems around the loop, the four cross-run memory types, and an honest board of what is
+**on**, **off**, or **dormant until `backend=llm`**.
+
+[:material-open-in-new: Open the infographic full-screen](../infographic/agent-architecture.html){ .md-button .md-button--primary .ll-open target="_blank" }
+
+<div class="ll-frame">
+  <iframe src="../../infographic/agent-architecture.html"
+          title="LoopLab agent architecture and workflow infographic"
+          loading="lazy"></iframe>
+</div>
+
+!!! note "How to read it"
+
+    The color advances with a candidate as it moves through the four roles. Two edges break the
+    circle: a **repair ↺** loop (a crash or timeout is fed back with its stderr) and a **merge**
+    branch (two strong lineages fused into one multi-parent child). The central **Policy** hub selects
+    which node to expand next; the optional **Strategist** re-tunes policy, operators and fidelity
+    every few nodes.
+
+## Where each piece lives in the code
+
+| Concept | Module |
+|---|---|
+| Control loop + crash-resume | `engine/orchestrator.py` |
+| Append-only log · pure fold · SQLite read-model | `events/eventstore.py`, `events/replay.py`, `events/readmodel.py` |
+| Researcher / Developer / unified agent | `agents/roles.py`, `agents/unified_agent.py` |
+| Search policies · operators | `search/policy.py`, `search/operators.py` |
+| Sandbox seam (subprocess / Docker) | `runtime/sandbox.py` |
+| Variance gate · multi-seed confirmation · CV · leakage | `trust/gate.py`, `trust/confirm.py`, `trust/cv.py`, `trust/leakage.py` |
+| Cross-run memory · retrieval · harmonic index | `engine/memory.py`, `tools/retrieval.py`, `tools/memora.py` |
+| Trace span exporter | `core/tracing.py` |
+
+For the narrative behind each box, read **[Concepts](concepts.md)**; for the full design rationale and
+decision records, see the **[Architecture spec](../02-architecture.md)** and the
+**[Design records index](../00-INDEX.md)**.

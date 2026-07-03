@@ -17,6 +17,8 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0", "httpx>=0.27"]   # httpx powers fastapi's TestClient (server tests)
+# Documentation site (MkDocs + Material). `mkdocs serve` for a live preview; CI builds & deploys it.
+docs = ["mkdocs-material>=9.5,<10", "pymdown-extensions>=10"]
 proc = ["psutil>=5.9"]
 # Live React UI server (ADR-18: a separate read/control process, never imported by the engine).
 ui = ["fastapi>=0.110", "uvicorn>=0.27"]

@@ -53,3 +53,6 @@ secrets.*
 # Live scenario collection — generated datasets + task files (deterministic; rebuilt on demand)
 examples/live_scenarios/
 examples/live-*.json
+
+# MkDocs build output (site is published by CI to GitHub Pages)
+site/
