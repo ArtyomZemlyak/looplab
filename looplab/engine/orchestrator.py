@@ -280,6 +280,7 @@ class Engine:
         digest_char_cap: int = 0,            # M5: digest prompt budget; 0 = auto-scale with run size
         research_verify: bool = True,        # D8: verify memo claims against cited evidence
         workdir_audit: bool = True,          # 4.4: flag unexpected writes in the eval workdir
+        lesson_abstractor=None,              # Memora synergy: harmonic recall over cross-run lessons
     ):
         self.run_dir = Path(run_dir)
         self.task = task
@@ -384,6 +385,10 @@ class Engine:
             pass
         self._research_verify = bool(research_verify)
         self._workdir_audit = bool(workdir_audit)
+        # Memora synergy: the SAME abstractor Memora uses for the case/KB index, applied to the
+        # cross-run LESSONS tier so lesson retrieval gains anchor-expansion (harmonic recall)
+        # instead of fingerprint-Jaccard alone. None (memora off) => the legacy Jaccard-only path.
+        self._lesson_abstractor = lesson_abstractor
         self._exploit_suite = None   # 4.3 hardened ruleset; loaded once memory_dir is set (below)
         self._reflection_priors = reflection_priors
         self._track_hypotheses = track_hypotheses
@@ -1429,6 +1434,7 @@ class Engine:
             # read time no winner exists yet, so those tokens only dilute the Jaccard overlap.
             fp = [t for t in self._task_fingerprint(self._empty_state_for_fp())
                   if not t.startswith("param:")]
+            all_lessons: list[tuple[int, dict]] = []
             scored: list[tuple[float, int, dict]] = []
             for idx, line in enumerate(lpath.read_text(encoding="utf-8").splitlines()):
                 try:
@@ -1437,6 +1443,7 @@ class Engine:
                     continue
                 if not isinstance(o, dict) or not o.get("statement"):
                     continue
+                all_lessons.append((idx, o))
                 stored_fp = o.get("fingerprint")
                 stored_fp = ([t for t in stored_fp if not str(t).startswith("param:")]
                              if isinstance(stored_fp, list) else [])
@@ -1444,6 +1451,20 @@ class Engine:
                 sim = 1.0 if exact else fingerprint_similarity(fp, stored_fp)
                 if sim >= 0.34:                    # a related task (Jaccard) or the same one
                     scored.append((sim, idx, o))
+            # Full synergy with Memora: harmonic recall reaches lessons a differently-worded but
+            # anchor-linked task shares — the ones token-overlap (Jaccard ≥ 0.34) misses. Splice
+            # them into the SAME candidate pool so the D2 hygiene + ranking below apply uniformly.
+            # No-op unless a Memora abstractor is wired (memora on); then it uses the T5 embedder.
+            if self._lesson_abstractor is not None and all_lessons:
+                from looplab.engine.memory import retrieve_lessons_harmonic
+                by_idx = {i: o for i, o in all_lessons}
+                already = {i for _, i, _ in scored}
+                query = " ".join(fp) + " " + (getattr(self.task, "goal", "") or "")
+                for hsim, hidx in retrieve_lessons_harmonic(
+                        all_lessons, query, self._lesson_abstractor, self._embedder):
+                    if hidx not in already and hidx in by_idx:
+                        scored.append((hsim, hidx, by_idx[hidx]))
+                        already.add(hidx)
             # D2 hygiene at read time: quarantine any lesson whose claim a NEWER run reversed
             # (an old "supported" vs a later "tested/abandoned" of the same statement) — the
             # misevolution guard: memory must not keep pushing a refuted correlation.

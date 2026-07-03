@@ -27,6 +27,7 @@ from looplab.events.replay import fold
 from looplab.runtime.sandbox import make_sandbox
 from looplab.adapters.tasks import TaskAdapter, kinds, load_task, make_llm_client, make_roles, validate_task
 from looplab.tools.vectorstore import make_embedder as _make_embedder
+from looplab.adapters.tasks import _make_abstractor as _make_lesson_abstractor
 from looplab.core import appconfig
 _TASK_KINDS = tuple(kinds())
 
@@ -296,6 +297,10 @@ def _engine(run_dir: Path, task: TaskAdapter, settings: Settings,
         digest_char_cap=settings.digest_char_cap,
         research_verify=settings.research_verify,
         workdir_audit=settings.workdir_audit,
+        # Memora synergy: harmonic recall over the cross-run lessons tier (same abstractor Memora
+        # uses for the case/KB index; shares its content-hash cache). None when memora is off; a
+        # dead LLM endpoint degrades to the deterministic lexical abstractor inside make_abstractor.
+        lesson_abstractor=_make_lesson_abstractor(settings),
         reflection_priors=settings.reflection_priors,
         track_hypotheses=settings.track_hypotheses,
         surrogate_explore=settings.surrogate_explore,

@@ -117,6 +117,68 @@ def filter_contradicted(scored: list[tuple[float, int, dict]]) -> list[tuple[flo
     return keep
 
 
+def _lesson_index_text(o: dict) -> str:
+    """The memory VALUE a lesson is abstracted from for the harmonic index: its ORIGIN-TASK cues
+    (the stored fingerprint tokens — kind/direction/goal-keywords) plus the lesson statement. This
+    keeps the query (current task descriptor) and the indexed lessons in the same 'task-cue' space,
+    so anchors actually align."""
+    fp = o.get("fingerprint")
+    fp_txt = " ".join(str(t) for t in fp if not str(t).startswith("param:")) if isinstance(fp, list) else ""
+    return f"{fp_txt} {o.get('statement', '')}".strip()
+
+
+def retrieve_lessons_harmonic(candidates, query_text, abstract, embed, *, k: int = 8,
+                              min_score: float = 0.15):
+    """Memora-powered lesson recall that reaches BEYOND the fingerprint-Jaccard gate: index every
+    lesson by a short abstraction + cue anchors (`tools.memora`), then retrieve for the current task
+    and EXPAND through the top hits' anchors — surfacing a lesson from a differently-worded but
+    anchor-linked task that token-overlap (Jaccard) would miss. Returns [(similarity, idx)] for the
+    matched lessons, capped just under 1.0 so an exact-task Jaccard match always outranks a
+    harmonic-only hit. No-op ([]) when `abstract` is None (memora off) — the caller stays legacy.
+
+    `candidates` = list[(idx, lesson_dict)] (all parsed lessons). Pure w.r.t. the store (a fresh
+    in-memory index per call); the LLM abstractor, when used, is content-cached by memora."""
+    if abstract is None or not candidates:
+        return []
+    from looplab.tools.memora import Abstraction, expand_by_anchors
+    from looplab.tools.vectorstore import Hit, InMemoryVectorStore, Item
+
+    store = InMemoryVectorStore()
+    items: list[Item] = []
+    idx_by_id: dict[str, int] = {}
+    for idx, o in candidates:
+        try:
+            ab = abstract(_lesson_index_text(o))
+            if not isinstance(ab, Abstraction):
+                continue
+            sid = str(idx)
+            idx_by_id[sid] = idx
+            items.append(Item(sid, embed(ab.index_text()),
+                              {"anchors": list(ab.anchors)}))
+        except Exception:  # noqa: BLE001 — one bad lesson must not sink the whole retrieval
+            continue
+    if not items:
+        return []
+    store.upsert("lessons", items)
+    try:
+        qab = abstract(query_text)
+        qvec = embed(qab.index_text() if isinstance(qab, Abstraction) else str(query_text))
+        hits: list[Hit] = store.search("lessons", qvec, k)
+        hits = hits + expand_by_anchors(store, "lessons", hits, embed, k=k,
+                                        exclude={h.id for h in hits})
+    except Exception:  # noqa: BLE001
+        return []
+    out: list[tuple[float, int]] = []
+    seen: set[int] = set()
+    for h in hits:
+        i = idx_by_id.get(h.id)
+        if i is None or i in seen or h.score < min_score:
+            continue
+        seen.add(i)
+        out.append((min(0.9, float(h.score)), i))   # cap < exact-task 1.0
+    return out
+
+
 def lesson_rank_key(sim: float, idx: int, o: dict):
     """Retrieval ranking: similarity first, then confidence × corroboration, then recency —
     so a twice-confirmed lesson from a related task beats a one-off with equal similarity."""

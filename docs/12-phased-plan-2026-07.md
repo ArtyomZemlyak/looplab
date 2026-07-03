@@ -12,6 +12,15 @@
 > per the existing local-first ADR — a real training run owns its resources); real MLE-bench (5.6)
 > stays external-infra-gated. Each phase was committed separately with its own tests; the full
 > suite is green after every phase.
+>
+> **Memora synergy (2026-07-03).** After merging the concurrent Memora harmonic-memory work into
+> master, the cross-run **lessons** tier (D2/M3) was wired through Memora's abstractor+anchor index
+> (`engine.memory.retrieve_lessons_harmonic`): lesson retrieval now gains anchor-expansion recall —
+> surfacing a lesson from a differently-worded but anchor-linked task that the fingerprint-Jaccard
+> gate misses — while every hit still passes the D2 contradiction/forgetting/corroboration hygiene.
+> Off (byte-identical Jaccard-only) when `memora=false`; shares Memora's content-hash abstraction
+> cache so no extra LLM cost. The three memory tiers now compose: canonical case write (JsonlCaseLibrary)
+> → harmonic case/KB retrieval (Memora) → harmonic + hygienic lessons (both) → scoped in-run digest.
 
 **Basis.** Synthesis of [11-agent-systems-research.md](11-agent-systems-research.md) (directions
 D1–D14, fresh 3-stream evidence), the still-open items from
