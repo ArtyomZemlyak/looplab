@@ -5,8 +5,10 @@ directory (no arbitrary reads).
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
+import re
 from pathlib import Path
 
 from looplab.core import _pathsafe
@@ -111,6 +113,55 @@ class RepoTools:
         except Exception as e:  # noqa: BLE001 — tool errors are fed back to the model
             return f"(tool error: {e})"
         return f"(unknown tool: {name})"
+
+
+class KnowledgeWriteTools:
+    """Lets an agent SAVE a distilled note into the shared knowledge base (`knowledge_dir`) so FUTURE
+    runs' Researchers find it via `kb_search`. Deliberately narrow + benign — it only appends a single
+    markdown file under the KB dir (no arbitrary path, no shell, no git) — so it's safe to expose even
+    in the assistant's read-only 'plan' mode, unlike the general write tools. This is the write half of
+    the knowledge base whose read half is `KnowledgeTools`."""
+
+    def __init__(self, knowledge_dir: str | None = None):
+        self.dir = Path(knowledge_dir).resolve() if knowledge_dir else None
+
+    def specs(self) -> list[dict]:
+        if not self.dir:
+            return []
+        return [_fn_spec(
+            "remember",
+            "Save a distilled note to the shared KNOWLEDGE BASE so FUTURE runs' Researchers can find it "
+            "(via kb_search). Use it whenever the user shares experiment results, lessons, recipes, or "
+            "domain facts worth keeping across runs. Distill to the essentials: what was tried, the "
+            "result/metric, and the takeaway or lesson — write it so a future run benefits.",
+            {"title": {"type": "string", "description": "Short descriptive title for the note."},
+             "note": {"type": "string", "description": "The knowledge in markdown: what was tried, the "
+                      "result/metric, and the takeaway. Be specific and self-contained."},
+             "tags": {"type": "array", "items": {"type": "string"},
+                      "description": "Optional keywords to aid retrieval (e.g. task/domain/method)."}},
+            ["title", "note"])]
+
+    def execute(self, name: str, args: dict) -> str:
+        if name != "remember":
+            return f"(unknown tool: {name})"
+        if not self.dir:
+            return "error: no knowledge base configured (set knowledge_dir) — cannot save the note."
+        title = str((args or {}).get("title") or "note").strip()
+        note = str((args or {}).get("note") or "").strip()
+        if not note:
+            return "error: `note` is empty — nothing to remember."
+        tags = [str(t) for t in ((args or {}).get("tags") or []) if str(t).strip()]
+        self.dir.mkdir(parents=True, exist_ok=True)
+        slug = re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")[:48] or "note"
+        # content-hash id: re-saving the same note overwrites (idempotent) instead of piling duplicates.
+        sid = hashlib.sha1((title + "\n" + note).encode("utf-8")).hexdigest()[:8]
+        path = self.dir / f"{slug}-{sid}.md"
+        body = f"# {title}\n\n{note}\n"
+        if tags:
+            body += "\n_tags: " + ", ".join(tags) + "_\n"
+        path.write_text(body, encoding="utf-8")
+        return (f"saved to the knowledge base as {path.name} — future runs will find it via kb_search "
+                f"(KB: {self.dir}).")
 
 
 class KnowledgeTools:

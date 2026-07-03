@@ -12,6 +12,7 @@ from __future__ import annotations
 import functools
 import hashlib
 import os
+import re
 import sys
 import time
 from pathlib import Path
@@ -1519,9 +1520,13 @@ class Engine:
         # The winner note needs a winner — but hypothesis/failure lessons below do NOT: a run in
         # which every node failed is exactly the negative lesson M3 exists to record.
         if best is not None:
-            note = (f"best metric {best.metric:.4g} via op '{best.operator}' params "
-                    f"{best.idea.params}; "
-                    f"{len(final.nodes)} nodes, {len(final.evaluated_nodes())} evaluated")
+            stats = (f"best metric {best.metric:.4g} via op '{best.operator}' params "
+                     f"{best.idea.params}; {len(final.nodes)} nodes, "
+                     f"{len(final.evaluated_nodes())} evaluated")
+            # A meta-note's purpose is the CAUSE — WHY the winner won — not the raw config (that's the
+            # case). Distil a causal summary with the LLM; fall back to the stats line if there's no
+            # client / on any error (reflection is best-effort, never fails the run).
+            note = self._causal_meta_note(final, best) or stats
             with open(base / "meta_notes.jsonl", "a", encoding="utf-8") as f:
                 f.write(orjson.dumps({"task_id": final.task_id, "note": note}).decode() + "\n")
 
@@ -1531,14 +1536,11 @@ class Engine:
         # free), and the dominant failure reason.
         fp = self._task_fingerprint(final, best)
         lessons: list[dict] = []
-        if best is not None:
-            lessons.append({
-                "task_id": final.task_id, "fingerprint": fp, "kind": getattr(self.task, "kind", ""),
-                "statement": (f"op '{best.operator}' with params {best.idea.params} "
-                              f"reached {best.metric:.4g}"),
-                "outcome": "supported", "delta": None, "confidence": 0.7,
-                # D2 provenance: which run/nodes back this claim (audit + future contradiction checks)
-                "run_id": final.run_id, "evidence": [best.id]})
+        # A lesson should be a GENERALIZABLE finding (DS-Agent / MARS reflective memory), not the raw
+        # winning config (that's the case) — so instead of a templated "op X params Y reached Z" line we
+        # LLM-reflect over the whole run for transferable good/bad takeaways. Fingerprint-keyed, so a
+        # later SIMILAR task retrieves them; consolidation then merges repeats into "verified on N runs".
+        lessons.extend(self._reflect_lessons(final, best, fp))
         for h in (final.hypotheses or {}).values():
             if h.status in ("supported", "tested", "abandoned"):
                 lessons.append({
@@ -1578,15 +1580,121 @@ class Engine:
         for h in (final.hypotheses or {}).values():
             if h.status == "supported" and (h.best_delta or 0) > 0:
                 ev = [final.nodes[i] for i in h.evidence if i in final.nodes]
-                ev_txt = "\n".join(
-                    f"- #{n.id} {n.operator} metric={n.metric} params={n.idea.params}: "
-                    f"{' '.join((n.idea.rationale or '').split())[:120]}" for n in ev[:4])
-                write_auto_skill(
-                    sk_dir, h.statement,
-                    f"Verified on task `{final.task_id}` (best Δ={h.best_delta:+.4g}).\n\n"
-                    f"Evidence:\n{ev_txt}\n\nApply when the task matches this technique's "
-                    "preconditions; re-validate with the eval before trusting it.",
-                    fp, final.task_id)
+                write_auto_skill(sk_dir, h.statement,
+                                 self._distill_skill_body(final, h, ev), fp, final.task_id)
+
+    def _reflect_lessons(self, final: RunState, best, fp: list) -> list:
+        """LLM reflection over the whole run → 1-3 GENERALIZABLE lessons (transferable good/bad
+        takeaways), the DS-Agent/MARS reflective-memory idea — not per-run specifics. [] on no-client
+        / error, so the hypothesis-derived + failure lessons still stand."""
+        def _winner_lesson():
+            # Offline/toy fallback (no LLM to generalize): keep a minimal winner record so the
+            # fingerprint-keyed store still captures this run for retrieval + consolidation.
+            if best is None:
+                return []
+            return [{"task_id": final.task_id, "fingerprint": fp, "kind": getattr(self.task, "kind", ""),
+                     "statement": (f"op '{best.operator}' with params {best.idea.params} "
+                                   f"reached {best.metric:.4g}"),
+                     "outcome": "supported", "delta": None, "confidence": 0.7,
+                     "run_id": final.run_id, "evidence": [best.id]}]
+        client = self._reflect_client()
+        if client is None or best is None:
+            return _winner_lesson()
+        rev = (final.direction != "min")
+        ok = sorted((n for n in final.evaluated_nodes() if n.metric is not None),
+                    key=lambda n: n.metric, reverse=rev)[:5]
+        bad = [n for n in final.nodes.values() if n.status is NodeStatus.failed][:3]
+        rows = [f"#{n.id} {n.operator} metric={n.metric:.4g} params={n.idea.params}" for n in ok]
+        fails = [f"#{n.id} {n.operator} failed: {n.error_reason}" for n in bad]
+        prompt = ("Distil reusable LESSONS from a finished ML experiment run, to guide FUTURE runs on "
+                  f"SIMILAR tasks.\nTask: {final.goal}\nWhat worked (best first):\n" + "\n".join(rows) +
+                  ("\nWhat failed:\n" + "\n".join(fails) if fails else "") +
+                  "\n\nWrite 1-3 GENERALIZABLE lessons — transferable findings, NOT these exact numbers "
+                  "(e.g. 'a larger batch size aided convergence', 'polynomial features overfit on small "
+                  "data'). Tag each [GOOD] (reuse this) or [BAD] (avoid this). One per line, no preamble.")
+        try:
+            out = client.complete_text([{"role": "user", "content": prompt}]) or ""
+        except Exception:   # noqa: BLE001 - best-effort
+            return _winner_lesson()
+        res = []
+        for line in out.splitlines():
+            s = line.strip().lstrip("-*•0123456789.) ").strip()
+            low = s.lower()
+            good, bad_ = "[good]" in low, "[bad]" in low
+            s = re.sub(r"\[(good|bad)\]", "", s, flags=re.I).strip()
+            if len(s) < 8:
+                continue
+            res.append({"task_id": final.task_id, "fingerprint": fp,
+                        "kind": getattr(self.task, "kind", ""), "statement": s,
+                        "outcome": "failed" if bad_ else ("supported" if good else "tested"),
+                        "delta": None, "confidence": 0.6, "run_id": final.run_id, "evidence": []})
+            if len(res) >= 3:
+                break
+        return res or _winner_lesson()      # LLM gave nothing usable → keep the winner record
+
+    def _distill_skill_body(self, final: RunState, h, ev: list) -> str:
+        """A skill is a reusable BEST PRACTICE — the technique + a MINIMAL snippet/script the agent can
+        reuse, NOT a dump of the whole solution. LLM-distil the essential lines from the winning code;
+        fall back to a code-free evidence summary when there's no client / no code."""
+        ev_txt = "\n".join(f"- #{n.id} {n.operator} metric={n.metric} params={n.idea.params}: "
+                           f"{' '.join((n.idea.rationale or '').split())[:120]}" for n in ev[:4])
+        base = (f"Verified on task `{final.task_id}` (best Δ={h.best_delta:+.4g}).\n\n"
+                f"Evidence:\n{ev_txt}\n\nApply when the task matches this technique's preconditions; "
+                "re-validate with the eval before trusting it.")
+        client = self._reflect_client()
+        code_node = max((n for n in ev if getattr(n, "code", None)),
+                        key=lambda n: (n.metric if n.metric is not None else -1e18), default=None)
+        if client is None or code_node is None or not code_node.code:
+            return base
+        prompt = (f"A technique that worked: {h.statement}\n\nThe winning solution's code:\n"
+                  f"```\n{code_node.code[:4000]}\n```\n\n"
+                  "Write a SHORT, REUSABLE skill card for THIS technique — not the whole script. Include:\n"
+                  "1. The technique in 1-2 sentences (what it is + why it helps).\n"
+                  "2. A MINIMAL code snippet — ONLY the essential, generalized lines that implement the "
+                  "technique (a few lines), not the full solution.\n"
+                  "3. When to use it (preconditions) and when NOT to.\n"
+                  "Keep it concise — a card someone reuses, never a code dump.")
+        try:
+            out = (client.complete_text([{"role": "user", "content": prompt}]) or "").strip()
+            return (f"{out[:1800]}\n\n_Verified on `{final.task_id}` (Δ={h.best_delta:+.4g})._"
+                    if out else base)
+        except Exception:   # noqa: BLE001 - best-effort
+            return base
+
+    def _reflect_client(self):
+        """The LLM client to use for run-end distillation — the Researcher's (unwrapping any
+        surrogate/fallback), else the Developer's. None when no LLM client is wired (toy backends)."""
+        r = getattr(self, "researcher", None)
+        for obj in (r, getattr(r, "inner", None), getattr(r, "fallback", None),
+                    getattr(self, "developer", None)):
+            c = getattr(obj, "client", None)
+            if c is not None and hasattr(c, "complete_text"):
+                return c
+        return None
+
+    def _causal_meta_note(self, final: RunState, best) -> Optional[str]:
+        """LLM-distilled 'WHY the winner won' — a reusable causal note (the meta-note's real purpose,
+        distinct from the case's raw config). Returns None on no-client / any error → caller falls back
+        to the stats line, so this never fails the run."""
+        client = self._reflect_client()
+        if client is None:
+            return None
+        rev = (final.direction != "min")
+        ev = sorted((n for n in final.evaluated_nodes() if n.metric is not None),
+                    key=lambda n: n.metric, reverse=rev)[:6]
+        rows = [f"#{n.id} {n.operator} metric={n.metric:.4g} params={n.idea.params}"
+                + (f" — {' '.join((n.idea.rationale or '').split())[:90]}" if n.idea.rationale else "")
+                for n in ev]
+        prompt = (f"Task goal: {final.goal}\nObjective: {'maximize' if rev else 'minimize'} the metric.\n"
+                  f"Experiments (best first):\n" + "\n".join(rows) +
+                  f"\n\nThe winner is #{best.id}. In 2-3 sentences, state WHY it won: the KEY factors "
+                  "that mattered and what did NOT help — a reusable CAUSAL note a future run on this "
+                  "task can learn from. Be specific and concise; no preamble, don't just restate params.")
+        try:
+            out = (client.complete_text([{"role": "user", "content": prompt}]) or "").strip()
+            return out[:700] or None
+        except Exception:   # noqa: BLE001 - reflection is best-effort
+            return None
 
     @staticmethod
     def _consolidate_lessons_file(path: Path) -> None:

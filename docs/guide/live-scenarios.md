@@ -23,6 +23,8 @@ the real CLI, engine, sandbox and trust machinery, not a mock.
 | 4 | `nosignal` | **endgame / futility recognition** | `target` independent of features → ceiling ~0.50 | **no false breakthrough** (< 0.60) *and* a hypothesis naming the absent signal |
 | 5 | `trust_gate` | **trust gate / reward-hack exclusion** | a leaky `leak == target` column; an honest node (0.85) + a flagged "cheater" (1.00, `reward_hack` leakage signal), `trust_gate=gate` | the 1.00 cheater is **excluded** from best-selection (best ≠ the cheater) |
 | 6 | `repair` | **implement → repair loop** | a dataset with ~8 % missing `x2` (clean head preview) that trips a naive `.fit()` | a `node_repaired` event fires (first attempt failed → fixed) *or* every node still evaluated |
+| 7 | `memory_reflect` | **reflection distillation** (causal meta-notes + generalizable lessons) | a learnable run finishes → run-end reflection writes cross-run memory (isolated per-run) | a **causal** meta-note (not the `best metric …` stats line) + ≥1 lesson are written |
+| 8 | `memory_recall` | **cross-run recall** (agentic pull of memory) | a distinctive lesson (`ZEPHYRSIGNAL`) is pre-seeded in the run's memory; the goal invites `search_lessons` | the seeded lesson **reaches the agent** — its token appears in the run's trace (pulled via `search_lessons` / injected) |
 
 Checks assert the **outcome, not the exact path**, so they tolerate normal LLM variation.
 

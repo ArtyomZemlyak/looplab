@@ -4,8 +4,16 @@ reproducibility. (No real secrets in P0, but the masking discipline is in place.
 """
 from __future__ import annotations
 
+from pathlib import Path
+
 from pydantic import Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+# Default home for cross-run memory + the knowledge base (shared across every run). Both are ON by
+# default now (a user asked for it) so a fresh install accumulates + consults knowledge with no setup;
+# set the env var to "" to disable, or to a path to relocate. `~/.looplab/` keeps them out of any one
+# project + shared across projects.
+_LL_HOME = Path.home() / ".looplab"
 
 # Autonomous roles that may be granted per-setting write access (see Settings.agent_control).
 # strategist = A7 meta-controller (run-wide); boss = run-chat operator-proxy (run-wide);
@@ -299,7 +307,7 @@ class Settings(BaseSettings):
     max_eval_seconds: float | None = None
     # Cross-run memory (I19, ADR-10): if set, the best result of each run is stored as
     # a case here, and the cases become retrievable knowledge for future runs.
-    memory_dir: str | None = None
+    memory_dir: str | None = Field(default_factory=lambda: str(_LL_HOME / "memory"))
     # HITL (I21, ADR-11): pause for human approval of the final best before finishing.
     require_approval: bool = False
     # Diversity archive (I22): niche bucket width in parameter space.
@@ -450,7 +458,7 @@ class Settings(BaseSettings):
     cross_run_tools: bool = True
     # Agentic retrieval (ADR-16): if set, the LLM Researcher gets grep/kb_search/read
     # tools over this directory of markdown notes and chooses when to use them.
-    knowledge_dir: str | None = None
+    knowledge_dir: str | None = Field(default_factory=lambda: str(_LL_HOME / "knowledge"))
     # T4 real embeddings: model id for an OpenAI-compatible `/embeddings` endpoint used for
     # kb_search / case retrieval. Blank (default) = the dependency-free lexical `hash_embed` (today's
     # behavior). Set e.g. "nomic-embed-text" (Ollama) or "text-embedding-3-small" for SEMANTIC

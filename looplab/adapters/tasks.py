@@ -181,6 +181,9 @@ def build_strategist_tools(task: TaskAdapter, settings, run_dir=None):
             embed=make_embedder(settings),                 # KB + memory (T4 embeddings)
             abstract=_make_abstractor(settings),           # harmonic index + anchor-expansion (Memora)
             consolidate_threshold=getattr(settings, "memora_consolidate_threshold", 0.86)))
+    if getattr(settings, "memory_dir", None):              # agentic pull of lessons + meta-notes (else injection-only)
+        from looplab.tools.memory_tools import MemoryTools
+        providers.append(MemoryTools(settings.memory_dir))
     if getattr(settings, "skills_dir", None):
         from looplab.tools.skills import SkillTools
         providers.append(SkillTools(settings.skills_dir))
@@ -393,6 +396,9 @@ def make_roles(task: TaskAdapter, settings, run_dir=None):
             embed=make_embedder(settings),
             abstract=_make_abstractor(settings),           # harmonic index + anchor-expansion (Memora)
             consolidate_threshold=getattr(settings, "memora_consolidate_threshold", 0.86)))
+    if getattr(settings, "memory_dir", None):              # agentic pull of lessons + meta-notes (else injection-only)
+        from looplab.tools.memory_tools import MemoryTools
+        providers.append(MemoryTools(settings.memory_dir))
     if settings.skills_dir:
         from looplab.tools.skills import SkillTools
         providers.append(SkillTools(settings.skills_dir))
@@ -415,7 +421,10 @@ def make_roles(task: TaskAdapter, settings, run_dir=None):
     if rs and rs.get("editables") and not _param_search:
         from looplab.tools.knowledge_tools import RepoTools
         providers.append(RepoTools(rs["editables"]))
-    if providers:
+    # `researcher_tools` is the master switch for the tool-using Researcher: an explicit opt-out yields
+    # a PLAIN LLMResearcher even when other tool sources (knowledge_dir — now on by default — cross-run,
+    # skills) are configured, so the flag's meaning stays "no tool loop", not just "no run-introspection".
+    if providers and getattr(settings, "researcher_tools", True):
         from looplab.agents.agent import CompositeTools, ToolUsingResearcher, loop_opts_from_settings
         tools = providers[0] if len(providers) == 1 else CompositeTools(providers)
         researcher = ToolUsingResearcher(

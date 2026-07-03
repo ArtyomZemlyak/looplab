@@ -139,7 +139,7 @@ class SessionStore:
 
 
 # --------------------------------------------------------------------------- system prompt + toolset
-def system_prompt(mode: str, *, repo_root: Path = REPO_ROOT) -> str:
+def system_prompt(mode: str, *, repo_root: Path = REPO_ROOT, knowledge_dir: str | None = None) -> str:
     mode = normalize_mode(mode)
     mode_line = {
         "plan": "MODE=plan: you are READ-ONLY. You may inspect files and runs and PROPOSE changes in "
@@ -162,7 +162,14 @@ def system_prompt(mode: str, *, repo_root: Path = REPO_ROOT) -> str:
         "When the user wants to START a new autonomous-ML run, call `propose_run` with a run name + an "
         "inline `task` (pick the kind: dataset/repo/mlebench_real/…) or a catalogue `task_file`, plus "
         "any settings (model, max_nodes) implied by their words — they get an editable launch card.\n"
-        "Be concise and concrete; use Markdown. When you have the answer, call `final_answer` exactly "
+        + (f"There is a shared KNOWLEDGE BASE at {knowledge_dir} — markdown notes that EVERY autonomous "
+           "run's Researcher searches (via kb_search) to reuse past findings. When the user shares "
+           "experiment results, lessons, recipes, or domain facts worth keeping across runs (e.g. an "
+           "attached file describing past experiments and their metrics), DISTILL the essentials and "
+           "save them with the `remember` tool so future runs benefit. `remember` works in EVERY mode "
+           "(it's a safe, scoped append to the KB) — you don't need write mode for it.\n"
+           if knowledge_dir else "")
+        + "Be concise and concrete; use Markdown. When you have the answer, call `final_answer` exactly "
         "once with your reply.")
 
 
@@ -219,6 +226,10 @@ def build_tools(run_root, alive_fn: Optional[Callable] = None, mode: str = DEFAU
     mode = normalize_mode(mode)
     roots = [Path.home(), REPO_ROOT, Path(run_root)] + list(extra_roots)
     providers = [RepoScoutTools(roots), RunsTools(run_root, alive_fn=alive_fn), RunLauncherTools()]
+    kdir = getattr(settings, "knowledge_dir", None) if settings else None
+    if kdir:                                            # write half of the KB — safe (scoped .md append) in EVERY mode
+        from looplab.tools.knowledge_tools import KnowledgeWriteTools
+        providers.append(KnowledgeWriteTools(kdir))
     if mode != "plan":
         from looplab.tools.write_tools import WriteTools
         from looplab.tools.shell_tools import ShellTools
@@ -266,7 +277,8 @@ def run_turn(client, run_root, messages: list, instruction: str, mode: str = DEF
     roots = [Path.home(), REPO_ROOT, Path(run_root)] + list(extra_roots)
     from looplab.serve.assistant_commands import expand_command
     grounded, refs = expand_mentions(expand_command(instruction), run_root, alive_fn=alive_fn, roots=roots)
-    convo = [{"role": "system", "content": system_prompt(mode)}]
+    convo = [{"role": "system", "content": system_prompt(
+        mode, knowledge_dir=(getattr(settings, "knowledge_dir", None) if settings else None))}]
     for m in messages:
         role = m.get("role")
         if role in ("user", "assistant") and m.get("content"):

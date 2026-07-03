@@ -94,6 +94,8 @@ class Scenario:
     label_noise: float = 0.03                           # flip fraction (0 => a pure/unlearnable target)
     max_nodes: int = 7                                   # total node budget (seed + agent)
     rows: int = 400
+    memory: bool = False                                # isolate cross-run memory/KB into the run dir
+    seed_memory: dict = field(default_factory=dict)     # {'lessons': [dict...], 'notes': {name: md}}
 
     @property
     def run_dir(self) -> Path:
@@ -102,6 +104,14 @@ class Scenario:
     @property
     def data_path(self) -> str:
         return f"examples/live_scenarios/{self.name}.csv"
+
+    @property
+    def mem_dir(self) -> Path:                          # cross-run memory (cases/lessons/meta-notes/skills)
+        return self.run_dir / "mem"
+
+    @property
+    def kb_dir(self) -> Path:                            # knowledge base (*.md notes)
+        return self.run_dir / "kb"
 
 
 # ── dataset + fabricated-history builder ─────────────────────────────────────────────────────────
@@ -135,6 +145,14 @@ def build(sc: Scenario) -> None:
 
     if sc.run_dir.exists():
         shutil.rmtree(sc.run_dir)
+    if sc.memory:                                       # isolate + pre-seed cross-run memory/KB
+        sc.mem_dir.mkdir(parents=True, exist_ok=True)
+        sc.kb_dir.mkdir(parents=True, exist_ok=True)
+        if sc.seed_memory.get("lessons"):
+            (sc.mem_dir / "lessons.jsonl").write_text(
+                "".join(json.dumps(lz) + "\n" for lz in sc.seed_memory["lessons"]))
+        for nm, md in (sc.seed_memory.get("notes") or {}).items():
+            (sc.kb_dir / f"{nm}.md").write_text(md)
     if not sc.seed_nodes:                               # fresh-run scenario: only the dataset + a task file
         (ROOT / "examples" / f"live-{sc.name}.json").write_text(json.dumps(
             {"kind": "dataset", "id": sc.name, "goal": sc.goal, "direction": "max",
@@ -199,7 +217,10 @@ def run(sc: Scenario) -> None:
     (tool-using) Researcher so the whole new pipeline is exercised."""
     for f in ("engine.lock", "readmodel.sqlite"):
         (sc.run_dir / f).unlink(missing_ok=True)
-    common = ["-s", "llm_model=glm-5.1", "-s", "strategist_backend=llm"]
+    model = os.environ.get("LOOPLAB_LIVE_MODEL", "glm-5.1")   # overridable (glm-5.1 exercises the DSML path)
+    common = ["-s", f"llm_model={model}", "-s", "strategist_backend=llm"]
+    if sc.memory:                                       # isolate cross-run memory so the check is clean
+        common += ["-s", f"memory_dir={sc.mem_dir}", "-s", f"knowledge_dir={sc.kb_dir}"]
     if sc.seed_nodes:
         argv = [sys.executable, "-m", "looplab.cli", "resume", str(sc.run_dir),
                 "--max-nodes", str(sc.max_nodes)]
@@ -228,7 +249,29 @@ def load(sc: Scenario) -> tuple[dict, list]:
 
 def verify(sc: Scenario) -> tuple[bool, str]:
     state, events = load(sc)
-    return sc.check(state, events)
+    return sc.check(sc, state, events)
+
+
+def _mem_lines(sc: Scenario, fname: str) -> list:
+    """Parsed JSONL from the run's isolated memory dir (e.g. lessons.jsonl / meta_notes.jsonl)."""
+    p = sc.mem_dir / fname
+    if not p.exists():
+        return []
+    out = []
+    for line in p.read_text().splitlines():
+        line = line.strip()
+        if line:
+            try:
+                out.append(json.loads(line))
+            except json.JSONDecodeError:
+                pass
+    return out
+
+
+def _spans_text(sc: Scenario) -> str:
+    """All prompt/output text the run traced — so a check can confirm memory reached a prompt."""
+    p = sc.run_dir / "spans.jsonl"
+    return p.read_text().lower() if p.exists() else ""
 
 
 # ── the registry ─────────────────────────────────────────────────────────────────────────────────
@@ -272,7 +315,7 @@ REGISTRY: list[Scenario] = [
                     _lin(1, "logistic-C", "Raise C to reduce regularization.", 0.601, C=10),
                     _lin(2, "logistic-C", "Push C=100; continue the sweep.", 0.598, C=100),
                     _lin(3, "logistic-penalty", "L1 penalty for feature selection.", 0.612)],
-        check=lambda st, ev: (_agent_best(st) > 0.72,
+        check=lambda sc, st, ev: (_agent_best(st) > 0.72,
             f"agent best = {_agent_best(st):.3f} (plateau ~0.61; want a structural break-out > 0.72)"),
     ),
     Scenario(
@@ -283,7 +326,7 @@ REGISTRY: list[Scenario] = [
                     _lin(1, "logistic-C", "Raise C.", 0.571, C=10),
                     _lin(2, "logistic-C", "Push C=100.", 0.564, C=100),
                     _lin(3, "logistic-solver", "Swap solver; still linear.", 0.569)],
-        check=lambda st, ev: (_agent_best(st) > 0.70,
+        check=lambda sc, st, ev: (_agent_best(st) > 0.70,
             f"agent best = {_agent_best(st):.3f} (plateau ~0.57; want > 0.70 via periodic/flexible model)"),
     ),
     Scenario(
@@ -294,7 +337,7 @@ REGISTRY: list[Scenario] = [
                     _rf(1, "rf-ntrees", "200 trees.", 0.699, n=200),
                     _rf(2, "rf-ntrees", "300 trees.", 0.701, n=300),
                     _rf(3, "rf-ntrees", "500 trees; gains shrinking.", 0.703, n=500)],
-        check=lambda st, ev: (
+        check=lambda sc, st, ev: (
             # success = the agent stops tuning n_estimators (a NEW theme) AND breaks the ~0.70 plateau
             (any((n["theme"] or "") != "rf-ntrees" for i, n in st["nodes"].items() if int(i) >= 4)
              and _agent_best(st) > 0.80),
@@ -309,7 +352,7 @@ REGISTRY: list[Scenario] = [
                     _rf(1, "rf", "RandomForest — maybe nonlinear.", 0.507, n=200),
                     _rf(2, "gbm", "More trees to catch structure.", 0.492, n=300),
                     _lin(3, "svc", "Flexible fit.", 0.503)],
-        check=lambda st, ev: (
+        check=lambda sc, st, ev: (
             # success = no false breakthrough (stays ~chance) AND a hypothesis names the absent signal
             (_agent_best(st) < 0.60
              and any("signal" in t or "no signal" in t or "random" in t or "chance" in t
@@ -329,7 +372,7 @@ REGISTRY: list[Scenario] = [
              "cols": ["x1", "x2", "x3", "leak"], "args": "",
              "reward_hack": [{"signal": "leakage:feature_equals_target",
                               "detail": "`leak` is identical to the target label"}]}],
-        check=lambda st, ev: (
+        check=lambda sc, st, ev: (
             (st["best_node_id"] != 1
              and (st["nodes"].get(1, {}).get("metric") == 1.0)),
             f"cheater #1 has metric 1.0 but best={st['best_node_id']} — must NOT be #1 (gate exclusion)"),
@@ -340,10 +383,44 @@ REGISTRY: list[Scenario] = [
         # a fresh run (no seed): the dataset carries ~8% missing x2 (clean preview) that trips a naive fit.
         target=lambda a, b, c: 1 if (0.9 * a - b) > 0 else 0,
         seed_nodes=[], max_nodes=2,
-        check=lambda st, ev: (
+        check=lambda sc, st, ev: (
             ("node_repaired" in [e["type"] for e in ev]
              or all(n["metric"] is not None for n in st["nodes"].values())),
             "want a node_repaired event (first attempt failed -> fixed) OR every node still evaluated"),
+    ),
+    Scenario(
+        name="memory_reflect", feature="reflection — causal meta-notes + generalizable lessons",
+        goal="predict `target`; maximize AUC-ROC.",
+        target=lambda a, b, c: 1 if (a + b) > 0 else 0,   # learnable -> the run finishes with a winner
+        seed_nodes=[], max_nodes=3, memory=True,
+        check=lambda sc, st, ev: (
+            # run-end reflection wrote (a) a CAUSAL meta-note (not the fallback "best metric … via" stats
+            # line) and (b) at least one lesson — i.e. the distillation pipeline produced real memory.
+            (any(not m.get("note", "").startswith("best metric ")
+                 for m in _mem_lines(sc, "meta_notes.jsonl"))
+             and len(_mem_lines(sc, "lessons.jsonl")) >= 1),
+            f"meta_notes={len(_mem_lines(sc, 'meta_notes.jsonl'))} "
+            f"lessons={len(_mem_lines(sc, 'lessons.jsonl'))}; want a CAUSAL meta-note "
+            "(not the 'best metric …' stats line) + >=1 lesson"),
+    ),
+    Scenario(
+        name="memory_recall", feature="cross-run recall — the agent pulls a seeded lesson from memory",
+        goal="predict `target`; maximize AUC-ROC. Earlier runs on related tasks left LESSONS in memory — "
+             "consult them with `search_lessons` before deciding, and reuse what generalizes.",
+        target=lambda a, b, c: 1 if (a * b) > 0 else 0,
+        seed_nodes=[], max_nodes=2, memory=True,
+        seed_memory={"lessons": [{
+            "task_id": "prior-run", "fingerprint": ["kind:dataset", "dir:max", "target", "auc", "roc"],
+            "statement": ("ZEPHYRSIGNAL: for this data family an x1*x2 interaction feature with gradient "
+                          "boosting is the key lever; plain linear models plateau near chance."),
+            "outcome": "supported", "delta": 0.3, "confidence": 0.9, "run_id": "prior-run",
+            "evidence": [], "evidence_count": 7}]},
+        check=lambda sc, st, ev: (
+            # the seeded lesson (unique token ZEPHYRSIGNAL) reached the agent — it appears in the run's
+            # traced prompts/tool-results, i.e. it was pulled via search_lessons (or fingerprint-injected).
+            ("zephyrsignal" in _spans_text(sc)),
+            "want the seeded lesson (ZEPHYRSIGNAL) to surface in the run's trace — pulled via "
+            "search_lessons / injected — proving cross-run recall reaches the agent"),
     ),
 ]
 
