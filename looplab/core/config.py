@@ -249,6 +249,15 @@ class Settings(BaseSettings):
     # I3 data-centric: static code-leakage scan of each evaluated solution (fit-before-split,
     # fit-on-test) surfaced into the Trust panel alongside reward-hack flags. Off by default.
     code_leakage_detect: bool = False
+    # 4.4 sandbox instrumentation (needs reward_hack_detect): after each eval, flag a RUNTIME write
+    # to a protected/frozen file (an answer key or grader tampered mid-run) — behavioral evidence a
+    # static code scan misses. ON by default; only fires when the reward-hack detector is on.
+    workdir_audit: bool = True
+    # D8 decoupled research Verifier: check every Deep-Research memo's CLAIMS against their cited
+    # evidence (node ids / urls) before recording — synthesis is the documented weak link (Kosmos
+    # 57.9% accurate). Deterministic layer always; an LLM rubric pass when the DeepResearcher has a
+    # client. Audit-only (verdicts ride inside the memo). ON by default (no-op with no memo/claims).
+    research_verify: bool = True
     # C4 independent critic: an execution-free critic of each solution (stub / hardcoded-metric /
     # params-ignored; on host-graded tasks the metric checks become a submission-output check)
     # surfaced in the Trust panel. Audit-only. Off by default.

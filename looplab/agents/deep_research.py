@@ -21,22 +21,36 @@ from pydantic import BaseModel, Field
 from looplab.core.models import NodeStatus, ResearchMemo, RunState
 
 
+class _ClaimOut(BaseModel):
+    """D8: one claim with its provenance — which experiments (node ids) and/or sources back it."""
+    statement: str = ""
+    node_ids: list[int] = Field(default_factory=list)
+    urls: list[str] = Field(default_factory=list)
+
+
 class _MemoOut(BaseModel):
     """Structured shape the LLM fills via `emit` (assembled into a ResearchMemo, validated again)."""
     summary: str = ""
     reasoning: str = ""
     findings: list[str] = Field(default_factory=list)
+    claims: list[_ClaimOut] = Field(default_factory=list)
     recommended_directions: list[str] = Field(default_factory=list)
 
 
 _SYSTEM = (
     "You are a senior ML researcher doing a DEEP-RESEARCH review of an ongoing automated experiment "
-    "run. You see every experiment tried so far with its metric/outcome. Think broadly: what is "
-    "working, what keeps failing, what's untried. You MAY call the search/fetch tools to ground your "
-    "thinking in real techniques, datasets and write-ups. Then call `emit` exactly once with: a "
-    "`summary` (your conclusion in a short paragraph), `findings` (concrete observations), and "
-    "`recommended_directions` (specific next experiments to try). Put your detailed deliberation in "
-    "`reasoning`. Be concrete and grounded in the actual results, not generic advice."
+    "run. You see every experiment tried so far with its metric/outcome. "
+    # 4.5: explicit sub-question planning — one-shot review misses dependent questions (the
+    # deep-research surveys' tree-decomposition finding, prompt-level form).
+    "FIRST break the review into 2-4 concrete sub-questions (e.g. 'why do X nodes fail', 'is the "
+    "leader overfit', 'what technique is untried'), then work through them one by one — you MAY "
+    "call the search/fetch tools per sub-question to ground your thinking in real techniques, "
+    "datasets and write-ups. Then call `emit` exactly once with: a `summary` (your conclusion in "
+    "a short paragraph), `findings` (concrete observations), `claims` — EVERY substantive claim "
+    "as {statement, node_ids, urls} citing the experiment ids and/or source urls it rests on "
+    "(a claim with no evidence will be flagged by the verifier) — and `recommended_directions` "
+    "(specific next experiments to try). Put your detailed deliberation in `reasoning`. Be "
+    "concrete and grounded in the actual results, not generic advice."
 )
 
 
@@ -180,6 +194,7 @@ class DeepResearcher:
         memo.summary = out.summary
         memo.reasoning = out.reasoning
         memo.findings = out.findings
+        memo.claims = [c.model_dump() for c in out.claims]   # D8 evidence ledger
         memo.recommended_directions = out.recommended_directions
         memo.sources = sources
         return memo

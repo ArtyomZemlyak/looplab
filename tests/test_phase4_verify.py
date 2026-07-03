@@ -1,0 +1,189 @@
+"""Phase 4 (docs/12): evidence-ledger claim verification, decoupled Verifier, hacker-fixer-solver
+evaluator hardening, sandbox workdir-write audit."""
+from __future__ import annotations
+
+import json
+
+import pytest
+
+from looplab.core.models import Idea, Node, NodeStatus, RunState
+from looplab.trust.harden import ExploitSuite, harden
+from looplab.trust.verify import check_claims, verify_memo
+
+
+def _node(nid, metric=None, op="draft", status=NodeStatus.evaluated, rationale=""):
+    return Node(id=nid, operator=op, idea=Idea(operator=op, params={"x": float(nid)},
+                                               rationale=rationale),
+                metric=metric, status=status)
+
+
+def _state(nodes, direction="max"):
+    st = RunState(direction=direction)
+    st.nodes = {n.id: n for n in nodes}
+    return st
+
+
+# --------------------------------------------------------------------------- #
+# D8 deterministic claim checking
+# --------------------------------------------------------------------------- #
+
+def test_uncited_claim_flagged_unsupported():
+    st = _state([_node(0, metric=0.9)])
+    out = check_claims([{"statement": "deeper nets generalize better", "node_ids": [], "urls": []}], st)
+    assert out[0]["verdict"] == "unsupported"
+
+
+def test_claim_citing_unknown_node_unsupported():
+    st = _state([_node(0, metric=0.9)])
+    out = check_claims([{"statement": "node 5 won", "node_ids": [5]}], st)
+    assert out[0]["verdict"] == "unsupported"
+
+
+def test_quoted_metric_mismatch_flagged():
+    st = _state([_node(0, metric=0.90), _node(1, metric=0.88)])
+    out = check_claims([{"statement": "the leader reached 0.99 accuracy", "node_ids": [0, 1]}], st)
+    assert out[0]["verdict"] == "mismatch"
+
+
+def test_well_cited_claim_passes_deterministic():
+    st = _state([_node(0, metric=0.90)])
+    out = check_claims([{"statement": "node 0 reached 0.90", "node_ids": [0]}], st)
+    assert out[0]["verdict"] == "cited"
+
+
+def test_url_only_claim_is_cited():
+    st = _state([_node(0, metric=0.9)])
+    out = check_claims([{"statement": "SOTA uses focal loss", "urls": ["http://arxiv.org/x"]}], st)
+    assert out[0]["verdict"] == "cited"
+
+
+# --------------------------------------------------------------------------- #
+# verify_memo (deterministic path, no client)
+# --------------------------------------------------------------------------- #
+
+def test_verify_memo_counts_unsupported():
+    st = _state([_node(0, metric=0.9)])
+    memo = {"claims": [
+        {"statement": "node 0 reached 0.90", "node_ids": [0]},
+        {"statement": "quantum helps", "node_ids": []},
+        {"statement": "score was 0.5", "node_ids": [0]},   # mismatch
+    ]}
+    out = verify_memo(memo, st, client=None)
+    assert out["method"] == "deterministic"
+    assert out["unsupported"] == 2
+    assert len(out["verdicts"]) == 3
+
+
+def test_verify_memo_none_without_claims():
+    assert verify_memo({"claims": []}, _state([_node(0, metric=1.0)])) is None
+
+
+def test_verify_memo_llm_upgrades_cited(monkeypatch):
+    st = _state([_node(0, metric=0.9)])
+    memo = {"claims": [{"statement": "node 0 reached 0.90", "node_ids": [0]}]}
+
+    class _FakeVerdict:
+        verdicts = ["unsupported"]
+        notes = ["evidence does not establish causation"]
+
+    import looplab.core.parse as parse_mod
+    monkeypatch.setattr(parse_mod, "parse_structured", lambda *a, **k: _FakeVerdict())
+    out = verify_memo(memo, st, client=object())
+    assert out["method"] == "llm"
+    assert out["verdicts"][0]["verdict"] == "unsupported"
+    assert out["unsupported"] == 1
+
+
+# --------------------------------------------------------------------------- #
+# 4.3 hacker-fixer-solver hardening
+# --------------------------------------------------------------------------- #
+
+def test_harden_adds_rules_for_escaped_exploits():
+    suite = ExploitSuite()
+    # detector that catches NOTHING -> every seed exploit escapes and gets a rule
+    res = harden(suite, detector=lambda code: [], legit_solutions=[])
+    assert res["escaped"] > 0 and res["added"]
+    assert len(suite.patterns) == len(res["added"])
+    # the import-grader exploit is now guarded
+    assert suite.scan("import grader\nx=1")
+
+
+def test_harden_solver_guardrail_blocks_overhardening():
+    suite = ExploitSuite()
+    # an honest solution that legitimately imports numpy; a naive fixer pattern that would flag
+    # "import" must be rejected by the solver guardrail
+    legit = ["import numpy as np\nnp.mean([1,2,3])"]
+
+    def hacker():
+        return ["import numpy\nprint('cheat')"]   # escapes; derived pattern would be 'import numpy'
+
+    res = harden(suite, detector=lambda code: [], hacker=hacker, legit_solutions=legit)
+    assert res["blocked_legit"]                    # guardrail fired
+    assert not suite.scan("import numpy as np\nnp.mean([1,2,3])")   # honest code stays clean
+
+
+def test_harden_idempotent_when_detector_covers():
+    suite = ExploitSuite()
+    # a detector that catches everything -> nothing escapes, no rules added
+    res = harden(suite, detector=lambda code: [{"signal": "x", "detail": "y"}])
+    assert res["escaped"] == 0 and not res["added"]
+
+
+def test_exploit_suite_roundtrip(tmp_path):
+    suite = ExploitSuite()
+    suite.add("r1", r"import\s+grader", "grader_access")
+    p = tmp_path / "exploits.jsonl"
+    suite.save(p)
+    loaded = ExploitSuite.load(p)
+    assert len(loaded.patterns) == 1 and loaded.scan("import grader")
+
+
+def test_exploit_suite_rejects_bad_regex():
+    suite = ExploitSuite()
+    assert suite.add("bad", "(unclosed", "x") is False
+    assert not suite.patterns
+
+
+# --------------------------------------------------------------------------- #
+# 4.4 workdir-write audit (engine)
+# --------------------------------------------------------------------------- #
+
+def test_audit_workdir_writes_flags_tampered_asset(tmp_path):
+    from looplab.engine.orchestrator import Engine
+    from looplab.runtime.sandbox import SubprocessSandbox
+    from looplab.search.policy import GreedyTree
+
+    class _T:
+        id = "t"; goal = "g"; direction = "max"
+        def model_dump(self, mode="json"):
+            return {"id": "t"}
+        def assets(self):
+            return {"answer_key.json": '{"y": [1,2,3]}'}
+
+    class _R:
+        def propose(self, s, p):
+            return Idea(operator="draft", params={})
+
+    class _D:
+        def implement(self, idea):
+            return "print(1)"
+
+    eng = Engine(tmp_path / "run", task=_T(), researcher=_R(), developer=_D(),
+                 sandbox=SubprocessSandbox(), policy=GreedyTree(n_seeds=1, max_nodes=1),
+                 reward_hack_detect=True, workdir_audit=True)
+    wd = tmp_path / "wd"
+    wd.mkdir()
+    # untampered copy -> clean
+    (wd / "answer_key.json").write_text('{"y": [1,2,3]}')
+    assert eng._audit_workdir_writes(wd, {"answer_key.json"}) == []
+    # tampered -> flagged
+    (wd / "answer_key.json").write_text('{"y": [9,9,9]}')
+    sigs = eng._audit_workdir_writes(wd, {"answer_key.json"})
+    assert sigs and sigs[0]["signal"] == "protected_write"
+
+
+def test_settings_phase4_defaults():
+    from looplab.core.config import Settings
+    s = Settings()
+    assert s.research_verify is True
+    assert s.workdir_audit is True

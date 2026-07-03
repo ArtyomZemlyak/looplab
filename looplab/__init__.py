@@ -51,6 +51,7 @@ _LAYOUT = {
     "context_budget": "core",
     "critic": "trust",
     "cv": "trust",
+    "harden": "trust",
     "dataset_task": "adapters",
     "deep_research": "agents",
     "deps": "runtime",
@@ -120,6 +121,7 @@ _LAYOUT = {
     "uibuild": "serve",
     "validate": "core",
     "vectorstore": "tools",
+    "verify": "trust",
     "web": "tools",
     "write_tools": "tools",
 }

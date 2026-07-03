@@ -163,6 +163,12 @@ class ResearchMemo(BaseModel):
     summary: str = ""                                   # one-paragraph conclusion (the takeaway)
     reasoning: str = ""                                 # the "think hard" narrative (debug-only)
     findings: list[str] = Field(default_factory=list)   # concrete observations across results/web
+    # D8 evidence ledger: findings as CLAIMS with per-claim provenance — {statement,
+    # node_ids: [int], urls: [str]}. Kosmos's failure data says cross-evidence SYNTHESIS is the
+    # weakest link (57.9% accurate vs ~85% for analysis), so every synthesis claim must be
+    # traceable to the experiments/sources it rests on; the Verifier (trust/verify.py) then
+    # checks each claim against its cited evidence and flags the unsupported ones.
+    claims: list[dict] = Field(default_factory=list)
     sources: list[dict] = Field(default_factory=list)   # {title, url} consulted (web/arXiv)
     recommended_directions: list[str] = Field(default_factory=list)  # what to try next (steer hints)
     # Optional concrete proposals the engine may materialize as injected nodes (empty for v1; the

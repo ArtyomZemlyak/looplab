@@ -278,6 +278,8 @@ class Engine:
         novelty_semantic_threshold: float = 0.92,
         embedder=None,                       # text→vector callable (default: zero-dep hash_embed)
         digest_char_cap: int = 0,            # M5: digest prompt budget; 0 = auto-scale with run size
+        research_verify: bool = True,        # D8: verify memo claims against cited evidence
+        workdir_audit: bool = True,          # 4.4: flag unexpected writes in the eval workdir
     ):
         self.run_dir = Path(run_dir)
         self.task = task
@@ -380,6 +382,9 @@ class Engine:
             setattr(researcher, "_digest_cap", int(digest_char_cap))
         except Exception:  # noqa: BLE001 — toy researchers without attrs are fine
             pass
+        self._research_verify = bool(research_verify)
+        self._workdir_audit = bool(workdir_audit)
+        self._exploit_suite = None   # 4.3 hardened ruleset; loaded once memory_dir is set (below)
         self._reflection_priors = reflection_priors
         self._track_hypotheses = track_hypotheses
         self._surrogate_explore = surrogate_explore
@@ -398,6 +403,17 @@ class Engine:
         self.max_seconds = max_seconds
         self.max_eval_seconds = max_eval_seconds
         self.memory_dir = memory_dir
+        # 4.3: load the hardened exploit ruleset grown by `looplab harden` (hacker-fixer-solver)
+        # from <memory_dir>/exploits.jsonl — merged into the reward-hack scan so every
+        # previously-discovered exploit stays guarded on later runs. None => built-in detector only.
+        if self.memory_dir and self.reward_hack_detect:
+            _ep = Path(self.memory_dir) / "exploits.jsonl"
+            if _ep.exists():
+                try:
+                    from looplab.trust.harden import ExploitSuite
+                    self._exploit_suite = ExploitSuite.load(_ep)
+                except Exception:  # noqa: BLE001
+                    self._exploit_suite = None
         self.require_approval = require_approval
         self.archive_resolution = archive_resolution
         # RepoTask onboarding (Phase 3): `onboarder()` -> a proposed {eval_spec,
@@ -1223,8 +1239,24 @@ class Engine:
 
     def _record_deep_research(self, memo, *, trigger: str, manual: bool) -> None:
         """Append the memo to the event log (engine = sole writer; called only from the main task)."""
+        memo_d = memo.model_dump(mode="json")
+        # D8 · decoupled Verifier: check the memo's claims against their CITED evidence before the
+        # memo is recorded — synthesis is the documented weak link (Kosmos: 57.9% accurate).
+        # Deterministic layer always (refs exist? quoted numbers match?); LLM rubric pass when a
+        # client is wired. Verdicts ride INSIDE the memo dict (audit-only; fold untouched).
+        if self._research_verify and memo_d.get("claims"):
+            try:
+                from looplab.trust.verify import verify_memo
+                state = fold(self.store.read_all())
+                ver = verify_memo(memo_d, state,
+                                  client=getattr(self.deep_researcher, "client", None),
+                                  parser=getattr(self.deep_researcher, "parser", "tool_call"))
+                if ver is not None:
+                    memo_d["verification"] = ver
+            except Exception:  # noqa: BLE001 — verification must never block the memo
+                pass
         self.store.append("research_completed", {
-            "memo": memo.model_dump(mode="json"),
+            "memo": memo_d,
             "at_node": memo.at_node, "trigger": trigger, "served_manual": manual})
         # Steer the next proposals: surface the memo's directions as a standing operator hint (the
         # same channel the Researcher already reads), so deep research actually informs planning.
@@ -2631,6 +2663,16 @@ class Engine:
                         protected = set(self._repo_spec.get("protected_names", [])) | set(self._assets)
                         sigs += detect_reward_hacks(scan_src, res.metric, state.direction,
                                                     protected_names=protected, stdout=res.stdout)
+                        # 4.3: also apply the hardened exploit ruleset grown by `looplab harden`
+                        # (hacker-fixer-solver) — each previously-discovered exploit stays guarded.
+                        if self._exploit_suite is not None:
+                            sigs += self._exploit_suite.scan(scan_src)
+                        # 4.4 sandbox instrumentation (RewardHackingAgents recipe): flag RUNTIME
+                        # writes to protected/frozen files — behavioral evidence a static scan of the
+                        # code can miss (a write via a helper, os.system, a template). Compares the
+                        # workdir against the assets/protected set the engine placed there.
+                        if self._workdir_audit:
+                            sigs += self._audit_workdir_writes(workdir, protected)
                     if self._code_leakage_detect and scan_src:
                         from looplab.trust.leakage import code_leakage_scan
                         for f in code_leakage_scan(scan_src)["flags"]:
@@ -2658,6 +2700,32 @@ class Engine:
                             triage_outcome[0], str(triage_outcome[1])[:300])
                     self.store.append("node_failed", data)
                 self._maybe_crash()
+
+    def _audit_workdir_writes(self, workdir, protected: set) -> list[dict]:
+        """4.4: after an eval, flag any PROTECTED/frozen file whose on-disk content differs from
+        what the engine wrote there (assets/answer keys) — a runtime tamper the static code scan
+        can't see. Pure host-side check; audit-only (feeds reward_hack_suspected). Best-effort."""
+        sigs: list[dict] = []
+        try:
+            import hashlib
+            wd = Path(workdir)
+            for name in protected:
+                p = wd / name
+                if not p.is_file():
+                    continue
+                original = self._assets.get(name)
+                if original is None:
+                    continue
+                want = hashlib.sha256(
+                    original.encode("utf-8") if isinstance(original, str) else bytes(original)
+                ).hexdigest()
+                got = hashlib.sha256(p.read_bytes()).hexdigest()
+                if got != want:
+                    sigs.append({"signal": "protected_write",
+                                 "detail": f"protected file '{name}' was modified at runtime"})
+        except Exception:  # noqa: BLE001 — an audit failure must never fail the eval
+            pass
+        return sigs
 
     @staticmethod
     def _already_confirmed(state: RunState) -> bool:
