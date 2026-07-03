@@ -261,7 +261,8 @@ def build_read_tools(run_root, alive_fn: Optional[Callable] = None, *, extra_roo
 def run_turn(client, run_root, messages: list, instruction: str, mode: str = DEFAULT_MODE, *,
              alive_fn: Optional[Callable] = None, settings=None, on_step: Optional[Callable] = None,
              approver: Optional[Callable] = None, extra_roots=(), _subagent: bool = False,
-             on_todos: Optional[Callable] = None, reply_sink: Optional[Callable] = None) -> dict:
+             on_todos: Optional[Callable] = None, reply_sink: Optional[Callable] = None,
+             on_text: Optional[Callable] = None, cancel_check: Optional[Callable] = None) -> dict:
     """Run ONE assistant turn: drive the shared tool loop over the mode's toolset and return a
     response dict {ok, reply, steps, applied, mode}. `messages` is the prior conversation
     (role/content); `instruction` is the new user message. Pure orchestration — the caller injects the
@@ -314,14 +315,17 @@ def run_turn(client, run_root, messages: list, instruction: str, mode: str = DEF
     opts = loop_opts_from_settings(settings) if settings is not None else {}
     opts["self_plan"] = False        # the assistant uses the visible write_todos tool instead
     max_turns = int(getattr(settings, "agent_max_turns", 0) or 0)
-    time_budget = float(getattr(settings, "agent_time_budget_s", 0.0) or 0.0)
+    # Interactive assistant: bound the turn's wall-clock so a stalled shared-LLM call can't leave the
+    # chat "thinking" forever. Falls back to 5 min when the setting is unset (0 = unlimited).
+    time_budget = float(getattr(settings, "agent_time_budget_s", 0.0) or 0.0) or 300.0
     def _collect(attr):
         return [a for p in getattr(tools, "providers", []) if hasattr(p, attr) for a in getattr(p, attr)]
 
     try:
         reply = drive_tool_loop(client, tools, convo, _emit_spec(),
                                 max_turns=max_turns, time_budget_s=time_budget,
-                                finalize=_fin, fallback=_fb, on_step=_on_step, **opts)
+                                finalize=_fin, fallback=_fb, on_step=_on_step, on_text=on_text,
+                                cancel_check=cancel_check, **opts)
     except Exception as e:  # noqa: BLE001 - surface a usable error, never crash the request
         return {"ok": False, "error": str(e), "reply": f"(assistant error: {e})", "steps": steps,
                 "applied": _collect("applied"), "proposals": _collect("proposals"),

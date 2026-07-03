@@ -4,7 +4,7 @@ import { OpIcon } from './icons.jsx'
 import {
   CONTROL, get, fmtAgo, ASSISTANT_MODES as MODES, tokText, assistantCreate, assistantMessageStream,
   assistantCommands, assistantRevert, assistantSessions, assistantGet, assistantDelete,
-  assistantPermissions, assistantResolve,
+  assistantPermissions, assistantResolve, assistantCancel, assistantProgress,
 } from './util.js'
 
 // ── ONE assistant, three flowing views: bar ⇄ side(right) ⇄ full ───────────────────────────────
@@ -182,13 +182,33 @@ export default function AssistantBar({ runId, hidden = false }) {
       setMsgs(arr); if (s.meta?.mode) setMode(s.meta.mode)
       const la = [...arr].reverse().find(m => m.role === 'assistant' && m.content)
       if (la) setPreview(firstLine(la.content).slice(0, 120))
-      // In-flight reply: the final turn is the user's with no answer yet — the worker is still running
-      // (e.g. the tab was reloaded before it finished). Poll until the reply lands so it's never lost.
-      if (recover && arr.length && arr[arr.length - 1].role === 'user') {
+      // Reattach to a turn still running server-side — after a page RELOAD or after switching AWAY and
+      // BACK to this session. The worker keeps going and only persists its reply when done, so the turn
+      // state would otherwise vanish from the UI. `progress.active` is authoritative (falls back to the
+      // "last turn is the user's, unanswered" heuristic on mount). Show the thinking indicator (a
+      // streaming placeholder), stream the live tool steps from the progress channel, and poll until the
+      // reply lands. The reply's setMsgs() then replaces the placeholder.
+      let prog = { active: false, steps: [] }
+      try { prog = await assistantProgress(id) } catch { /* offline */ }
+      const inFlight = prog.active || (recover && arr.length && arr[arr.length - 1].role === 'user')
+      if (inFlight && mountedRef.current && sidRef.current === id) {
         setBusy(true)
-        // Wait for a message BEYOND what we just fetched — with priorLen = arr.length the very
-        // first poll trivially "succeeds" off any earlier assistant reply and drops the recovery.
-        recoverReply(id, arr.length + 1).finally(() => { if (mountedRef.current) setBusy(false) })
+        const act = (prog.steps || []).length ? [{ type: 'tools', labels: prog.steps }] : []
+        setMsgs(m => (m[m.length - 1] && m[m.length - 1].role === 'assistant' && m[m.length - 1].streaming)
+          ? m : [...m, { role: 'assistant', content: '', streaming: true, activity: act }])
+        let polling = true
+        ;(async () => {
+          while (polling && mountedRef.current && sidRef.current === id) {
+            await sleep(1200)
+            try {
+              const pp = await assistantProgress(id)
+              if (!pp.active) break
+              if (mountedRef.current && sidRef.current === id && (pp.steps || []).length)
+                patchLast({ activity: [{ type: 'tools', labels: pp.steps }] })
+            } catch { /* transient */ }
+          }
+        })()
+        recoverReply(id, arr.length + 1).finally(() => { polling = false; if (mountedRef.current) setBusy(false) })
       }
     } catch (e) { flash(e.message) }
   }
@@ -287,9 +307,16 @@ export default function AssistantBar({ runId, hidden = false }) {
     try {
       const res = await assistantMessageStream(id, fullInstruction, mode, {
         onToken: safeSid((tok) => { acc += tokText(tok); patchLast({ content: acc }) }),
+        onText: safeSid((txt) => patchLast(prev => ({ activity: [...(prev.activity || []), { type: 'text', content: txt }] }))),
+        onStep: safeSid((s) => patchLast(prev => {
+          const a = prev.activity || []; const last = a[a.length - 1]
+          return last && last.type === 'tools'
+            ? { activity: [...a.slice(0, -1), { ...last, labels: [...last.labels, s] }] }
+            : { activity: [...a, { type: 'tools', labels: [s] }] }
+        })),
         onTodos: safeSid((items) => patchLast({ todos: items })),
         onError: safeSid((e) => flash(e)),
-      }, ctrl.signal)
+      }, ctrl.signal, userText || instruction)   // persist the CLEAN bubble, not the ctx-augmented instruction
       if (!mountedRef.current || sidRef.current !== id) return
       const reply = (res && res.reply) || acc || '(no reply)'
       patchLast({ content: reply, streaming: false, steps: res && res.steps, applied: res && res.applied,
@@ -337,7 +364,11 @@ export default function AssistantBar({ runId, hidden = false }) {
     runLLM((t || 'See the attached file(s).') + ctx, { userText: t || '(attached files)', context: { run: runId || null, refs } })
   }
 
-  const stop = () => { if (abortRef.current) abortRef.current.abort() }
+  const stop = () => {
+    if (abortRef.current) abortRef.current.abort()          // drop the local stream
+    const id = sidRef.current || sid                        // AND cancel server-side (works post-reload)
+    if (id) assistantCancel(id).catch(() => {})
+  }
 
   const activeMode = MODES.find(x => x.id === mode) || MODES[0]
   // Context usage: the last turn's PROMPT tokens ≈ how much context the assistant is carrying right now
@@ -393,10 +424,8 @@ export default function AssistantBar({ runId, hidden = false }) {
       <Turn m={m} runsById={runsById} onRevert={onRevert} />
     </React.Fragment>)}
     {pending.map(req => <PermCard key={req.id} req={req} onResolve={resolvePerm} />)}
-    {busy && pending.length === 0 && (!msgs.length || !msgs[msgs.length - 1].content) &&
-      <div className="feed-msg chat assistant"><div className="fm-body">
-        <div className="chat-who">assistant</div>
-        <div className="chat-bubble"><div className="chat-text muted">… thinking</div></div></div></div>}
+    {/* The streaming placeholder is itself in `msgs`; its Turn renders the activity timeline +
+        the "thinking" indicator — no separate block here (which would double the label). */}
   </>
 
   const fileChips = files.length > 0 && <div className="asst-files">

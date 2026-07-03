@@ -30,15 +30,34 @@ const MODES = ASSISTANT_MODES
 
 // One assistant/user turn in the feed. Tool steps (what the agent read) render as a compact sub-line;
 // any @run:<id> mention gets a live inline run card.
+// Strip the invisible "[UI context: …]" preamble the bar appends to a user turn for the model, so it
+// never shows in the bubble — including messages persisted before the server started storing the clean
+// display text. The injected context is still surfaced separately as the faint caption plaque.
+const stripCtx = (s) => typeof s === 'string'
+  ? s.replace(/\n*\[UI context:[^\]]*\]\s*$/, '').trimEnd() : s
+
 export function Turn({ m, runsById, onRevert }) {
   const who = m.role === 'user' ? 'you' : 'assistant'
-  const mentions = runMentions(m.content)
+  const content = m.role === 'user' ? stripCtx(m.content) : m.content
+  const mentions = runMentions(content)
   return <div className={'feed-msg chat ' + m.role}>
     <div className="fm-body">
       <div className="chat-who">{who}</div>
-      {m.role === 'assistant' && Array.isArray(m.steps) && m.steps.length > 0 &&
+      {/* Live, interleaved activity (Claude-Desktop style): prose the agent writes BETWEEN tool rounds
+          renders as its own line; a run of consecutive tool calls collapses into one status line. */}
+      {m.role === 'assistant' && Array.isArray(m.activity) && m.activity.length > 0 &&
+        <div className="asst-activity">{m.activity.map((seg, i) => seg.type === 'text'
+          ? <Markdown key={i} text={seg.content} className="asst-inter" />
+          : <div key={i} className="asst-status"><span className="asst-status-ic">⚙</span>
+              {seg.labels.length > 3
+                ? <span> {seg.labels.length} steps · {seg.labels[seg.labels.length - 1]}</span>
+                : <span> {seg.labels.join(' · ')}</span>}</div>)}</div>}
+      {/* Legacy compact step line — only when there's no richer activity timeline to show. */}
+      {m.role === 'assistant' && !(m.activity && m.activity.length) && Array.isArray(m.steps) && m.steps.length > 0 &&
         <div className="asst-steps">{m.steps.map((s, i) =>
           <span key={i} className="asst-step">{s.label || s.tool}</span>)}</div>}
+      {m.role === 'assistant' && m.streaming && !m.content && !(m.activity && m.activity.length) &&
+        <div className="asst-status thinking"><span className="asst-status-ic">…</span><span> thinking</span></div>}
       {m.role === 'assistant' && Array.isArray(m.applied) && m.applied.length > 0 &&
         <div className="asst-steps">{m.applied.map((a, i) =>
           <span key={i} className="asst-step done">✓ {a.label || a.tool}
@@ -48,7 +67,7 @@ export function Turn({ m, runsById, onRevert }) {
       {(m.content || !m.streaming) && <div className="chat-bubble">
         {m.role === 'assistant'
           ? <><Markdown text={m.content || ''} className="chat-text" />{m.streaming && <span className="asst-cursor">▍</span>}</>
-          : <div className="chat-text">{m.content}</div>}
+          : <div className="chat-text">{content}</div>}
       </div>}
       {mentions.length > 0 && <div className="asst-runchips">
         {mentions.map(id => <RunChip key={id} id={id} run={runsById && runsById[id]} />)}
@@ -242,7 +261,13 @@ export default function AssistantChat({ onBack }) {
     try {
       const res = await assistantMessageStream(id, t, mode, {
         onToken: safe((tok) => { acc += tokText(tok); patchLast({ content: acc }) }),
-        onStep: safe((s) => setLiveSteps(x => [...x, s])),
+        onText: safe((txt) => patchLast(prev => ({ activity: [...(prev.activity || []), { type: 'text', content: txt }] }))),
+        onStep: safe((s) => { setLiveSteps(x => [...x, s]); patchLast(prev => {
+          const a = prev.activity || []; const last = a[a.length - 1]
+          return last && last.type === 'tools'
+            ? { activity: [...a.slice(0, -1), { ...last, labels: [...last.labels, s] }] }
+            : { activity: [...a, { type: 'tools', labels: [s] }] }
+        }) }),
         onTodos: safe((items) => { setLiveTodos(items); patchLast({ todos: items }) }),
         onError: safe((e) => { errored = e; setErr(e) }),
       }, ctrl.signal)
@@ -307,16 +332,10 @@ export default function AssistantChat({ onBack }) {
             'Read the README and summarize LoopLab'].map(s =>
             <button key={s} className="gen-seed" onClick={() => send(s)}>{s}</button>)}
         </div>}
+        {/* The streaming assistant placeholder is itself in `msgs`, so its Turn renders the live
+            activity timeline (interstitial text + collapsed tool status) and the thinking indicator. */}
         {msgs.map((m, i) => <Turn key={i} m={m} runsById={runsById} onRevert={onRevert} />)}
         {pending.map(req => <PermCard key={req.id} req={req} onResolve={resolvePerm} />)}
-        {busy && pending.length === 0 && !streamingStarted && <div className="feed-msg chat assistant"><div className="fm-body">
-          <div className="chat-who">assistant</div>
-          <Todos items={liveTodos} />
-          {liveSteps.length > 0 && <div className="asst-steps">{liveSteps.slice(-6).map((s, i) =>
-            <span key={i} className="asst-step">{s}</span>)}</div>}
-          <div className="chat-bubble"><div className="chat-text muted">
-            … {liveSteps.length ? liveSteps[liveSteps.length - 1] : 'thinking'}</div></div>
-        </div></div>}
       </div>
 
       {err && <div className="notice" style={{ borderColor: 'var(--fail)', color: '#ffd3d3', margin: '0 12px' }}>{err}</div>}

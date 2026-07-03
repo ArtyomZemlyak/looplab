@@ -629,9 +629,10 @@ export const assistantDelete = (sid) => send(`/api/assistant/sessions/${encodeUR
 export const assistantFork = (sid) => post(`/api/assistant/sessions/${encodeURIComponent(sid)}/fork`, {})
 // Streaming turn: POST and read the SSE stream, invoking callbacks for token/step/todos/done/error.
 // Real token streaming of the final answer (Claude-Desktop feel). Returns the final result dict.
-export async function assistantMessageStream(sid, instruction, mode, cbs = {}, signal) {
+export async function assistantMessageStream(sid, instruction, mode, cbs = {}, signal, display = null) {
   const r = await fetch(apiUrl(`/api/assistant/sessions/${encodeURIComponent(sid)}/message_stream`),
-    { method: 'POST', headers: _authHeaders({ 'Content-Type': 'application/json' }), body: JSON.stringify({ instruction, mode }), signal })
+    { method: 'POST', headers: _authHeaders({ 'Content-Type': 'application/json' }),
+      body: JSON.stringify(display && display !== instruction ? { instruction, mode, display } : { instruction, mode }), signal })
   if (!r.ok || !r.body) { await _throw(r, 'message_stream'); return null }
   const reader = r.body.getReader(); const dec = new TextDecoder()
   let buf = ''; let result = null
@@ -651,6 +652,7 @@ export async function assistantMessageStream(sid, instruction, mode, cbs = {}, s
       }
       let parsed; try { parsed = JSON.parse(data) } catch { parsed = data }
       if (ev === 'token') cbs.onToken && cbs.onToken(parsed)
+      else if (ev === 'text') cbs.onText && cbs.onText(parsed)
       else if (ev === 'step') cbs.onStep && cbs.onStep(parsed)
       else if (ev === 'todos') cbs.onTodos && cbs.onTodos(parsed)
       else if (ev === 'error') { cbs.onError && cbs.onError(parsed); result = { ok: false, error: parsed } }
@@ -668,6 +670,11 @@ export const spanDetail = (runId, spanId) =>
 // generation's delta interleaved with tool calls) — the readable alternative to the raw span tree.
 export const nodeConversation = (runId, nid) =>
   get(`/api/runs/${encodeURIComponent(runId)}/nodes/${encodeURIComponent(nid)}/conversation`)
+
+// Stop an in-flight assistant turn server-side (survives a page reload, unlike aborting the local
+// stream). Also used to poll whether a turn is still running (reattach after switch/reload).
+export const assistantCancel = (sid) => post(`/api/assistant/sessions/${encodeURIComponent(sid)}/cancel`, {})
+export const assistantProgress = (sid) => get(`/api/assistant/progress?session=${encodeURIComponent(sid)}`)
 
 export const assistantCommands = () => get('/api/assistant/commands')
 export const assistantRevert = (path) => post('/api/assistant/revert', { path })

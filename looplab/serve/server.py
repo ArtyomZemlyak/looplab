@@ -1818,6 +1818,7 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
     _perm_reqs: dict = {}
     _perm_always: dict = {}
     _asst_progress: dict = {}      # sid -> {steps:[label,…], updated} — live tool steps during a turn
+    _asst_cancel: dict = {}        # sid -> threading.Event — set by /cancel to stop an in-flight turn
     _PERM_TIMEOUT = float(os.environ.get("LOOPLAB_ASSISTANT_PERM_TIMEOUT", "900"))
 
     def _make_approver(sid: str):
@@ -1895,6 +1896,18 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
             p = _asst_progress.get(session)
             return {"steps": list(p["steps"]) if p else [],
                     "todos": list(p.get("todos", [])) if p else [], "active": bool(p)}
+
+    @app.post("/api/assistant/sessions/{sid}/cancel")
+    def assistant_cancel(sid: str):
+        """Stop an in-flight turn. Sets the session's cancel flag; the tool loop checks it at the next
+        turn boundary and finalizes from what it has. Works from any client (survives a page reload,
+        since the turn + flag live server-side, keyed by session id)."""
+        with _perm_lock:
+            ev = _asst_cancel.get(sid)
+        if ev is not None:
+            ev.set()
+            return {"ok": True, "cancelling": True}
+        return {"ok": True, "cancelling": False}   # nothing running for this session
 
     @app.get("/api/assistant/sessions")
     def assistant_sessions():
@@ -2042,6 +2055,10 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
         import queue as _queue
         body = await request.json()
         instruction = (body.get("instruction") or body.get("content") or "").strip()
+        # `display` (optional) is the CLEAN text the user typed; `instruction` may carry an invisible
+        # UI-context preamble (open run, #experiments, files) for the model. Persist the clean bubble so
+        # a page reload doesn't reveal the preamble; the model still receives the full instruction.
+        display = (body.get("display") or "").strip()
         mode = body.get("mode")
         try:
             sess = _asst.get(sid)
@@ -2053,7 +2070,7 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
             raise HTTPException(400, "empty message")
         history = list(sess["messages"])
         eff_mode = mode or sess["meta"].get("mode") or "plan"
-        _asst.append(sid, {"role": "user", "content": instruction, "mode": eff_mode})
+        _asst.append(sid, {"role": "user", "content": display or instruction, "mode": eff_mode})
         s = _llm_settings()
         q: "_queue.Queue" = _queue.Queue()
         try:
@@ -2065,8 +2082,10 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
                 yield f"event: error\ndata: {json.dumps(err_msg)}\n\n"
             return StreamingResponse(_err_gen(), media_type="text/event-stream")
         approver = _make_approver(sid)
+        cancel_ev = threading.Event()
         with _perm_lock:
             _asst_progress[sid] = {"steps": [], "todos": [], "updated": time.time()}
+            _asst_cancel[sid] = cancel_ev
 
         def _on_step(ev):
             with _perm_lock:
@@ -2077,12 +2096,16 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
         def _on_todos(items):
             q.put(("todos", items))
 
+        def _on_text(content):
+            q.put(("text", content))          # interstitial assistant prose (between tool rounds)
+
         def _worker():
             try:
                 res = _assistant_run_turn(client, root, history, instruction, eff_mode,
                                           alive_fn=_engine_alive, settings=s, approver=approver,
-                                          on_step=_on_step, on_todos=_on_todos,
-                                          reply_sink=lambda piece: q.put(("token", piece)))
+                                          on_step=_on_step, on_todos=_on_todos, on_text=_on_text,
+                                          reply_sink=lambda piece: q.put(("token", piece)),
+                                          cancel_check=cancel_ev.is_set)
                 res["tokens"] = _client_tokens(client)
                 _asst.append(sid, {"role": "assistant", "content": res.get("reply", ""),
                                    "steps": res.get("steps") or [], "applied": res.get("applied") or [],
@@ -2105,12 +2128,23 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
             finally:
                 with _perm_lock:
                     _asst_progress.pop(sid, None)
+                    _asst_cancel.pop(sid, None)
                 q.put(("__end__", None))
         threading.Thread(target=_worker, daemon=True).start()
 
         async def gen():
+            # Defeat proxy buffering: jupyter-server-proxy/tornado (and any nginx hop) can hold a small
+            # initial buffer, so step/text/token events arrive BATCHED at the end instead of live. A
+            # >2KB first write forces the buffer to flush immediately; then poll the queue with a timeout
+            # so a long or stalled LLM call still emits a keepalive comment (the proxy's idle read-timer
+            # never fires, and a dead client surfaces promptly on the failed write).
+            yield ": " + " " * 2048 + "\n\n"
             while True:
-                kind, data = await anyio.to_thread.run_sync(q.get)
+                try:
+                    kind, data = await anyio.to_thread.run_sync(lambda: q.get(timeout=10))
+                except _queue.Empty:
+                    yield ": keepalive\n\n"
+                    continue
                 if kind == "__end__":
                     break
                 yield f"event: {kind}\ndata: {json.dumps(data)}\n\n"
@@ -2852,7 +2886,10 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
         # file unchanged, behaviour identical to before.
         html_path = dist / "index.html"
         if not ui_token:
-            return FileResponse(str(html_path))
+            # `no-cache` = the browser MUST revalidate index.html every load (it's tiny). Without it a
+            # shared cache / the jupyter-server-proxy can pin a stale index that references an OLD hashed
+            # bundle, so rebuilt UI never loads. The hashed /assets are immutable and stay cacheable.
+            return FileResponse(str(html_path), headers={"Cache-Control": "no-cache"})
         # Token is set. The <meta> is readable by ANY code that can read this document, INCLUDING a
         # same-origin page on a different path (the shared-JupyterHub-origin case). We can't make a
         # shared origin per-user — that needs a private origin (see deployment guide) — but we DO

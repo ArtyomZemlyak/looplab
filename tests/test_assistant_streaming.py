@@ -60,6 +60,48 @@ def test_run_turn_streams_final_answer(tmp_path):
     assert res["reply"] == "Streamed answer."      # the streamed answer wins over the loop's emit reply
 
 
+class _InterFake:
+    """Turn 1: prose + a real tool call (interstitial message). Turn 2: the final emit."""
+    def __init__(self):
+        self.scripted = [
+            {"content": "Let me look at the runs first.",
+             "tool_calls": [{"id": "c1", "function": {"name": "list_runs", "arguments": "{}"}}]},
+            _call("final_answer", {"reply": "Here is what I found."}),
+        ]
+
+    def chat(self, messages, tools, tool_choice="auto"):
+        return self.scripted.pop(0)
+
+    def complete_text_stream(self, messages):
+        yield "Here is what I found."
+
+    def complete_text(self, messages):
+        return "Here is what I found."
+
+
+def test_run_turn_surfaces_interstitial_text(tmp_path):
+    # The prose the model writes ALONGSIDE a tool round is delivered via on_text (Claude-Desktop feel),
+    # distinct from the final streamed answer (reply_sink).
+    texts = []
+    run_turn(_InterFake(), tmp_path, [], "why did it fail?", "plan", on_text=texts.append)
+    assert texts == ["Let me look at the runs first."]
+
+
+def test_message_stream_emits_text_event(tmp_path, monkeypatch):
+    monkeypatch.setattr("looplab.server.make_llm_client", lambda s: _InterFake())
+    client = TestClient(make_app(tmp_path))
+    sid = client.post("/api/assistant/sessions", json={"mode": "plan"}).json()["id"]
+    texts, event = [], None
+    with client.stream("POST", f"/api/assistant/sessions/{sid}/message_stream",
+                       json={"instruction": "why did it fail?", "mode": "plan"}) as r:
+        for line in r.iter_lines():
+            if line.startswith("event:"):
+                event = line.split(":", 1)[1].strip()
+            elif line.startswith("data:") and event == "text":
+                texts.append(json.loads(line.split(":", 1)[1].strip()))
+    assert "Let me look at the runs first." in texts   # interstitial prose reached the client as a `text` SSE event
+
+
 def test_message_stream_endpoint(tmp_path, monkeypatch):
     monkeypatch.setattr("looplab.server.make_llm_client", lambda s: _StreamFake())
     client = TestClient(make_app(tmp_path))

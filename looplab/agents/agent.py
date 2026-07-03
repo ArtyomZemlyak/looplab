@@ -108,7 +108,8 @@ def drive_tool_loop(client, tools, messages: list, emit_spec: dict, *,
                     stuck_detection: bool = True,
                     stuck_repeat: int = 4, stuck_alternate: int = 4,
                     self_plan: bool = False, plan_reinject_every: int = 5,
-                    auto_summary: bool = False, summary_client=None, on_step=None):
+                    auto_summary: bool = False, summary_client=None, on_step=None, on_text=None,
+                    cancel_check=None):
     """Multi-turn tool loop shared by every tool-using agent (Researcher, unified-agent pilot/triage,
     Boss, genesis scout, cross-run report). The model MAY call the provided retrieval tools across
     turns; when it calls the emit function (named in `emit_spec`), `finalize(args)` is returned. If
@@ -156,6 +157,15 @@ def drive_tool_loop(client, tools, messages: list, emit_spec: dict, *,
             on_step(ev)
         except Exception:               # noqa: BLE001 - transparency must not change behaviour
             pass
+    def _text(content):                 # interstitial assistant prose (a message written BEFORE a tool
+        if on_text is None:             # round) — surfaced live so the chat reads like Claude Desktop
+            return                      # (what the agent is thinking out loud between tool calls).
+        try:
+            s = (content or "").strip()
+            if s:
+                on_text(s)
+        except Exception:               # noqa: BLE001 - transparency must not change behaviour
+            pass
     stuck = None
     if stuck_detection:                 # a FRESH detector per call — never share state across loops
         from looplab.agents.stuck import StuckDetector
@@ -171,6 +181,12 @@ def drive_tool_loop(client, tools, messages: list, emit_spec: dict, *,
     stalls = 0                          # consecutive prose turns we couldn't turn into a forced emit
     turns = itertools.count() if max_turns is None or max_turns <= 0 else range(max_turns)
     for turn_idx in turns:
+        if cancel_check is not None:
+            try:
+                if cancel_check():      # user hit stop -> finalize from what we have, promptly
+                    break
+            except Exception:           # noqa: BLE001 - a broken cancel probe must not wedge the loop
+                pass
         if time_budget_s and (time.monotonic() - started) > time_budget_s:
             break                       # out of wall-clock budget -> finalize from what we have
         if auto_summary:                # C2: summarize the stale middle once the history grows long
@@ -201,6 +217,7 @@ def drive_tool_loop(client, tools, messages: list, emit_spec: dict, *,
             messages.append({"role": "user", "content": f"Now call `{emit_name}` with your final answer."})
             continue
         stalls = 0
+        _text(msg.get("content"))       # the model's prose alongside this tool round → live to the UI
         messages.append({"role": "assistant", "content": msg.get("content") or "",
                          "tool_calls": calls})
         stuck_reason = None
