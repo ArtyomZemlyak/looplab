@@ -138,7 +138,8 @@ export default function RunView({ runId, onBack }) {
       const id = arg
       if (action === 'explore') { await CONTROL.fork(runId, id); await kickEngine(`exploring from #${id}`); showToast(`exploring from #${id}`) }
       else if (action === 'ablate') { await CONTROL.forceAblate(runId, id); await kickEngine(`ablating #${id}`); showToast(`ablating #${id}`) }
-      else if (action === 'inspect') { selectNode(id) }
+      else if (action === 'inspect') { selectNode(id); setSideC(false) }   // un-collapse: with the side
+      // panel folded (sideC persists in localStorage!) selecting alone changes nothing visible
       else if (action === 'diff') { setComparePair([live2?.best_node_id ?? id, id]); setPanel('compare') }
       else if (action === 'merge') { setMergeFrom(id); showToast(`click a node to merge with #${id}`) }
       else if (action === 'kill') {
@@ -169,6 +170,7 @@ export default function RunView({ runId, onBack }) {
   // Drill-down from the dock/timeline: select a node, optionally open a tab + jump the scrubber.
   const focusNode = (id, tab, seq) => {
     selectNode(id)
+    setSideC(false)          // drill-down means "show me the inspector" — un-fold a collapsed panel
     if (tab) setInspectTab(tab)
     if (seq != null) setViewSeq(seq)
   }
