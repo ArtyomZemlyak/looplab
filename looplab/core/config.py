@@ -33,6 +33,7 @@ PROFILES: dict[str, dict] = {
         "confirm_top_k": 3,
         "confirm_seeds": 3,
         "novelty_gate": True,
+        "operator_bandit": True,   # P4: adaptive operator mix over folded yields (GreedyTree)
         "reward_hack_detect": True,
         "code_leakage_detect": True,
         "critic_check": True,
@@ -115,8 +116,10 @@ class Settings(BaseSettings):
     # No-op unless a max_eval_seconds budget is set.
     budget_aware: bool = False
     # A4 (LATS-style): feed a summary of the most recent FAILED branches (operator + error reason)
-    # back into the proposal prompt so the proposer reflects on and avoids repeating them. Off default.
-    failure_reflection: bool = False
+    # back into the proposal prompt so the proposer reflects on and avoids repeating them. ON by
+    # default: it is SELECTIVE by construction (injects only when recent failures exist — the
+    # evidenced form of reflection; reflecting at every step shows no gains, arXiv:2506.12928).
+    failure_reflection: bool = True
     # C3 deep test-driven repair: hand the Developer the failure taxonomy + a structured "reproduce
     # then fix" directive on debug, not just the raw stderr tail. Off by default.
     deep_repair: bool = True
@@ -199,6 +202,22 @@ class Settings(BaseSettings):
     # wasting evals re-trying the same idea. Audit event `novelty_rejected`. Off by default.
     novelty_gate: bool = False
     novelty_epsilon: float = 0.05
+    # T5 semantic novelty (Phase 2, needs novelty_gate): ALSO reject a proposal whose idea TEXT
+    # (rationale+hypothesis) embeds within `novelty_semantic_threshold` cosine of an existing
+    # node's — with one informed re-propose surfacing the duplicate's outcome ("you tried X, it
+    # failed because Y"). ShinkaEvolve's ablation ranks duplicate-rejection-before-eval above
+    # model routing. Uses the T4 embedder (hash_embed fallback, zero-dep).
+    novelty_semantic: bool = True
+    novelty_semantic_threshold: float = Field(default=0.92, ge=0.5, le=1.0)
+    # T10: debug-lineage depth bound for every policy — how many error-feedback repairs a failing
+    # lineage gets before it is abandoned. The old default (1) abandoned lineages after ONE repair;
+    # multi-turn/deeper debugging is a verified lever (AIRA2 ReAct debug +5.5 percentile points).
+    debug_depth: int = Field(default=2, ge=1)
+    # P4 operator bandit (GreedyTree): replace the fixed merge/ablate cadences with a
+    # deterministic UCB over per-operator yield (Δmetric per eval-second, folded from the run).
+    # Off by default (the cadences are well-tested and the bandit has no direct published
+    # ablation); `thorough` turns it on.
+    operator_bandit: bool = False
     # P1 hypothesis ledger: ask the Researcher to state the one-line hypothesis each experiment tests,
     # register deep-research directions as hypotheses, and track them to a verdict on the board. ON by
     # default (audit-only — never changes selection). Set False to drop the prompt nudge + registration.

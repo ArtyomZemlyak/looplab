@@ -215,13 +215,16 @@ class LLMResearcher:
         # Strategist `prefer_sweep` bias (engine-set, empty when off): nudges — but never forces —
         # the Researcher toward an intra-node sweep when the cost model favors in-process execution.
         sweep_hint = getattr(self, "_sweep_hint", "")
+        # T5 novelty-gate feedback (engine-set, one re-propose): "you already tried X, it failed
+        # because Y — propose something meaningfully different". Empty in the normal path.
+        novelty_fb = getattr(self, "_novelty_feedback", "")
         hyp_sys = ("\n" + _HYPOTHESIS_INSTRUCTION) if self.track_hypotheses else ""
         messages = [
             {"role": "system",
              "content": render(self.prompts, "researcher_system", _RESEARCHER_SYSTEM) + hyp_sys
                         + "\n\n" + _attention_points()},
             {"role": "user", "content": _state_brief(state, parent) + "\n" + self.space_hint +
-                                        hint_block + cue + sweep_hint +
+                                        hint_block + cue + sweep_hint + novelty_fb +
                                         "\nPropose the next Idea (operator, params, rationale"
                                         + (", hypothesis" if self.track_hypotheses else "") +
                                         "; optionally a `space` grid for a sweep). The "

@@ -369,6 +369,7 @@ class ToolUsingResearcher:
         from looplab.agents.hints import render_hint_directives
         hint_block = render_hint_directives(state.pending_hints)
         cue = getattr(self, "_complexity_hint", "")   # A0d breadth-keyed complexity cue (empty=off)
+        cue += getattr(self, "_novelty_feedback", "")  # T5 novelty-gate re-propose feedback (empty=off)
         # Hypotheses ledger (P1): honor track_hypotheses on the agentic path too (default on, matching
         # config) — ask for the per-experiment `hypothesis` so the ledger of tested beliefs fills in.
         hyp = ""

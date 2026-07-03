@@ -129,6 +129,20 @@ def _failure_reason(res) -> str:
     return "no_metric"          # exit 0 but no parseable metric emitted
 
 
+def _normalize_error_sig(err: str) -> str:
+    """T10: normalize an error before the anti-stuck compare — strip memory addresses, line
+    numbers, absolute paths and numeric literals so two SEMANTICALLY-identical errors (same
+    exception, same message shape) match even when incidental details differ. The exact-match
+    compare missed e.g. the same shape-mismatch recurring with different tensor sizes."""
+    import re
+    s = " ".join((err or "").strip().split())
+    s = re.sub(r"0x[0-9a-fA-F]+", "0xADDR", s)
+    s = re.sub(r"line \d+", "line N", s)
+    s = re.sub(r"(?:[A-Za-z]:)?[/\\][^\s'\":,)]+", "/PATH", s)
+    s = re.sub(r"\d+(?:\.\d+)?(?:e[+-]?\d+)?", "N", s)
+    return s[-160:]
+
+
 def _holdout_indices(n: int, fraction: float) -> frozenset:
     """D1: the deterministic holdout partition over n host-held labels. A pure function of
     (n, fraction) — identical on every resume/replay with no state to persist. Knuth
@@ -256,6 +270,13 @@ class Engine:
         holdout_fraction: float = 0.25,
         holdout_select: bool = True,
         holdout_top_k: int = 3,
+        # Phase 2 (D3/D4/T10/P4) knobs — kept on the engine so strategist-driven policy swaps
+        # rebuild policies with the same run-wide settings.
+        debug_depth: int = 1,            # T10: debug-lineage bound for every policy
+        operator_bandit: bool = False,   # P4: deterministic UCB over operator yields (GreedyTree)
+        novelty_semantic: bool = True,       # T5: embedding-similarity idea dedup (needs novelty_gate)
+        novelty_semantic_threshold: float = 0.92,
+        embedder=None,                       # text→vector callable (default: zero-dep hash_embed)
     ):
         self.run_dir = Path(run_dir)
         self.task = task
@@ -340,6 +361,19 @@ class Engine:
         self._redact_output = redact_output
         self._novelty_gate = novelty_gate
         self._novelty_epsilon = novelty_epsilon
+        # T5 semantic novelty (Phase 2): reject a proposal whose idea TEXT is a near-duplicate of
+        # an existing node's — with one informed re-propose when the duplicate FAILED (the
+        # ShinkaEvolve lever: novelty rejection before evaluation, ablation-ranked above model
+        # routing). hash_embed is the zero-dep default; T4 wires a real embedder from config.
+        self._novelty_semantic = bool(novelty_semantic)
+        self._novelty_semantic_threshold = float(novelty_semantic_threshold)
+        if embedder is None:
+            from looplab.tools.vectorstore import hash_embed as _he
+            embedder = _he
+        self._embedder = embedder
+        self._idea_vecs: dict[int, list] = {}   # node_id -> embedding of its idea text (lazy cache)
+        self._debug_depth = max(1, int(debug_depth))
+        self._operator_bandit = bool(operator_bandit)
         self._reflection_priors = reflection_priors
         self._track_hypotheses = track_hypotheses
         self._surrogate_explore = surrogate_explore
@@ -966,6 +1000,7 @@ class Engine:
             improves_since_best=improves_since_best(state),
             is_numeric_space=is_numeric_space(state),
             avg_eval_seconds=avg_es,
+            current_policy=self._policy_name,   # D3: lets the rule switch BACK to greedy post-stall
             available_policies=available_policies(),
             available_developers=self._available_developers(),
             defaults=defaults,
@@ -1045,9 +1080,12 @@ class Engine:
                 # {"n_seeds": 4} would otherwise raise "multiple values for keyword argument",
                 # silently dropping the whole switch (recorded decision diverging from live policy).
                 pp = {k: v for k, v in (strat.get("policy_params") or {}).items()
-                      if k not in ("n_seeds", "max_nodes", "ablate_every")}
+                      if k not in ("n_seeds", "max_nodes", "ablate_every",
+                                   "debug_depth", "operator_bandit")}
                 self.policy = make_policy(pol, n_seeds=self.n_seeds, max_nodes=self.max_nodes,
-                                          ablate_every=self._ablate_every, **pp)
+                                          ablate_every=self._ablate_every,
+                                          debug_depth=self._debug_depth,
+                                          operator_bandit=self._operator_bandit, **pp)
                 self._base_max_nodes = getattr(self.policy, "max_nodes", self.max_nodes)  # new base for the live override
                 # A3 BOHB = ASHA racing + the surrogate proposer. make_policy only builds the racing
                 # half; wire the surrogate now so a mid-run switch to bohb isn't bare ASHA.
@@ -1464,16 +1502,85 @@ class Engine:
         except Exception:  # noqa: BLE001 — compaction is best-effort; never fail the run for it
             pass
 
-    def _apply_novelty_gate(self, state: RunState, idea: Idea) -> Idea:
-        """E1: if a fresh proposal's numeric params are within `novelty_epsilon` (normalized L2) of an
-        existing node, nudge it off the duplicate deterministically and record a `novelty_rejected`
-        audit event. Loop-safe (always returns a usable idea) and replay-safe (the nudged params land
-        in node_created; the gate is not re-run on replay). No-op unless `novelty_gate` is on."""
+    @staticmethod
+    def _idea_text(idea) -> str:
+        """The semantic identity of a proposal: what it claims to try + why."""
+        return " ".join(filter(None, [getattr(idea, "rationale", "") or "",
+                                      getattr(idea, "hypothesis", "") or ""])).strip()
+
+    def _idea_vec(self, node_id: int, text: str):
+        v = self._idea_vecs.get(node_id)
+        if v is None:
+            v = self._embedder(text)
+            self._idea_vecs[node_id] = v
+        return v
+
+    def _semantic_duplicate(self, state: RunState, idea: Idea):
+        """T5: nearest existing node by idea-TEXT embedding similarity, or None. Only meaningful
+        for proposals with real text (LLM ideas); short/empty rationales (toy backends) skip."""
+        text = self._idea_text(idea)
+        if len(text) < 20:
+            return None, 0.0
+        from looplab.tools.vectorstore import _cosine
+        v = self._embedder(text)
+        best_n, best_s = None, 0.0
+        for n in state.nodes.values():
+            nt = self._idea_text(n.idea)
+            if len(nt) < 20:
+                continue
+            try:
+                s = _cosine(v, self._idea_vec(n.id, nt))
+            except Exception:  # noqa: BLE001 — an embedder hiccup must never block proposing
+                continue
+            if s > best_s:
+                best_n, best_s = n, s
+        if best_n is not None and best_s >= self._novelty_semantic_threshold:
+            return best_n, best_s
+        return None, best_s
+
+    def _apply_novelty_gate(self, state: RunState, idea: Idea, repropose=None) -> Idea:
+        """E1+T5: novelty/dedup gate over fresh proposals, BEFORE any compute is spent.
+        Two layers:
+        (1) SEMANTIC (T5, ShinkaEvolve `novelty rejection before evaluation`): if the idea TEXT is a
+            near-duplicate of an existing node's, reject it — and when a `repropose` callable is
+            given, ask the Researcher ONCE more with the duplicate (and its outcome, especially a
+            FAILURE) surfaced, so the search learns "you already tried X, it scored Y because Z"
+            instead of paying another eval for the same idea.
+        (2) NUMERIC (E1 legacy): params within `novelty_epsilon` (normalized L2) of an existing
+            node are deterministically nudged off the duplicate.
+        Loop-safe (always returns a usable idea) and replay-safe (the final idea lands in
+        node_created; the gate is not re-run on replay). No-op unless `novelty_gate` is on."""
         if not self._novelty_gate:
             return idea
         import random as _random
 
         from looplab.events.digest import param_distance
+
+        if self._novelty_semantic:
+            dup, sim = self._semantic_duplicate(state, idea)
+            if dup is not None:
+                outcome = (f"it FAILED ({dup.error_reason}: {(dup.error or '')[:80]})"
+                           if dup.status is NodeStatus.failed
+                           else f"it scored {dup.metric}")
+                self.store.append("novelty_rejected", {
+                    "node_id": len(state.nodes), "near_node": dup.id, "kind": "semantic",
+                    "similarity": round(sim, 4),
+                    "action": "reproposed" if callable(repropose) else "kept"})
+                if callable(repropose):
+                    hint = (f"\nNOVELTY GATE: your proposal is a near-duplicate of experiment "
+                            f"#{dup.id} ('{self._idea_text(dup.idea)[:160]}') — {outcome}. "
+                            "Propose something MEANINGFULLY DIFFERENT (another approach, "
+                            "component or direction), not a rewording.")
+                    try:
+                        prev = getattr(self.researcher, "_novelty_feedback", "")
+                        setattr(self.researcher, "_novelty_feedback", hint)
+                        idea2 = repropose()
+                        setattr(self.researcher, "_novelty_feedback", prev)
+                        if idea2 is not None:
+                            idea = idea2
+                    except Exception:  # noqa: BLE001 — a repropose failure keeps the original idea
+                        pass
+
         params = {k: float(v) for k, v in idea.params.items() if isinstance(v, (int, float))}
         if not params:
             return idea
@@ -1668,7 +1775,9 @@ class Engine:
                 self._set_complexity_hint(state, None)   # A0d breadth-keyed complexity cue
                 with self.tracer.span("propose"):
                     idea = self.researcher.propose(state, None)
-                idea = self._apply_novelty_gate(state, idea)   # E1 dedup near-duplicate proposals
+                # E1+T5 dedup near-duplicate proposals (one informed re-propose on a semantic hit)
+                idea = self._apply_novelty_gate(
+                    state, idea, repropose=lambda: self.researcher.propose(state, None))
                 idea.operator = "draft"        # operator is authoritative from the policy,
                 parents: list[int] = []        # not whatever label the LLM returns
                 with self.tracer.span("implement"):
@@ -1712,7 +1821,9 @@ class Engine:
                 self._set_complexity_hint(state, parent)   # A0d breadth-keyed complexity cue
                 with self.tracer.span("propose"):
                     idea = self.researcher.propose(state, parent)
-                idea = self._apply_novelty_gate(state, idea)   # E1 dedup near-duplicate proposals
+                # E1+T5 dedup near-duplicate proposals (one informed re-propose on a semantic hit)
+                idea = self._apply_novelty_gate(
+                    state, idea, repropose=lambda p=parent: self.researcher.propose(state, p))
                 idea.operator = "improve"
                 parents = [parent.id]
                 with self.tracer.span("implement"):
@@ -2371,7 +2482,9 @@ class Engine:
                         continue   # re-run now that the library is present (no repair attempt spent)
                 # Anti-stuck: when the SAME error recurs with no progress, stop (even under unlimited
                 # repair) so the agent doesn't loop forever on an unfixable failure.
-                _sig = " ".join((err or "").strip().split())[-160:]
+                # T10: NORMALIZED signature — the same semantic error with different line numbers /
+                # sizes / paths counts as "stuck" too (exact-match compare missed those loops).
+                _sig = _normalize_error_sig(err)
                 stuck_n = (stuck_n + 1) if _sig and _sig == stuck_sig else 1
                 stuck_sig = _sig
                 # Inline-repair gate: feature on, repairable reason, a Developer that can repair, and

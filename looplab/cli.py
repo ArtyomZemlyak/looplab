@@ -26,6 +26,7 @@ from looplab.search.policy import make_policy
 from looplab.events.replay import fold
 from looplab.runtime.sandbox import make_sandbox
 from looplab.adapters.tasks import TaskAdapter, kinds, load_task, make_llm_client, make_roles, validate_task
+from looplab.tools.vectorstore import make_embedder as _make_embedder
 from looplab.core import appconfig
 _TASK_KINDS = tuple(kinds())
 
@@ -228,7 +229,9 @@ def _engine(run_dir: Path, task: TaskAdapter, settings: Settings,
         policy=make_policy(settings.policy, n_seeds=settings.n_seeds,
                            max_nodes=settings.max_nodes, ablate_every=settings.ablate_every,
                            eta=settings.asha_eta,     # forwarded to ASHA (greedy/mcts/evo ignore it)
-                           rung_nodes=settings.asha_rung_nodes),
+                           rung_nodes=settings.asha_rung_nodes,
+                           debug_depth=settings.debug_depth,
+                           operator_bandit=settings.operator_bandit),
         max_parallel=settings.max_parallel,
         timeout=settings.timeout,
         sweep_timeout_mult=settings.sweep_timeout_mult,
@@ -285,6 +288,11 @@ def _engine(run_dir: Path, task: TaskAdapter, settings: Settings,
         redact_output=settings.redact_output,
         novelty_gate=settings.novelty_gate,
         novelty_epsilon=settings.novelty_epsilon,
+        novelty_semantic=settings.novelty_semantic,
+        novelty_semantic_threshold=settings.novelty_semantic_threshold,
+        embedder=_make_embedder(settings),
+        debug_depth=settings.debug_depth,
+        operator_bandit=settings.operator_bandit,
         reflection_priors=settings.reflection_priors,
         track_hypotheses=settings.track_hypotheses,
         surrogate_explore=settings.surrogate_explore,
