@@ -129,6 +129,24 @@ def _failure_reason(res) -> str:
     return "no_metric"          # exit 0 but no parseable metric emitted
 
 
+def _holdout_indices(n: int, fraction: float) -> frozenset:
+    """D1: the deterministic holdout partition over n host-held labels. A pure function of
+    (n, fraction) — identical on every resume/replay with no state to persist. Knuth
+    multiplicative hashing spreads the reserved rows evenly through the label order (no
+    head/tail bias if the data is sorted). Guaranteed non-degenerate for n >= 2: at least one
+    holdout row and at least one search row, so neither signal ever collapses to nothing."""
+    cut = max(0, min(999, int(round(float(fraction) * 1000))))
+    if cut <= 0:
+        return frozenset()          # fraction 0 = holdout off, never force a reserved row
+    idx = frozenset(i for i in range(n)
+                    if ((i * 2654435761) & 0xFFFFFFFF) % 1000 < cut)
+    if not idx and n >= 2:
+        idx = frozenset({n - 1})
+    elif len(idx) >= n and n >= 2:
+        idx = frozenset(sorted(idx)[:-1])
+    return idx
+
+
 # Env-prep: max auto-install + re-run rounds per node before giving up (a re-run can reveal a
 # *second* missing lib; bound it so an odd install state can't loop). The `_dep_failed` cache
 # already prevents re-attempting the same uninstallable module.
@@ -177,6 +195,7 @@ class Engine:
         crash_after: Optional[int] = None,
         confirm_top_k: int = 0,
         confirm_seeds: int = 0,
+        confirm_seed_base: int = 1,   # D1: first confirm seed; 1 keeps confirm splits disjoint from search's seed 0
         max_seconds: Optional[float] = None,
         max_eval_seconds: Optional[float] = None,
         memory_dir: Optional[str] = None,
@@ -230,6 +249,13 @@ class Engine:
         dep_install_timeout: float = 900.0,  # per-package install wall-clock budget (seconds)
         dep_installer=None,                  # Optional[Callable] install hook (test seam; default = deps.install)
         agent_control: Optional[dict] = None,  # per-setting allow-list of roles that may change it (governance)
+        # D1 holdout-gated promotion (B6): reserve a fraction of host-held labels as a FINAL
+        # holdout partition the search never sees; at finish, re-score the val-top-k on it and
+        # (when holdout_select) let the unseen signal pick the champion. Host-graded tasks only
+        # (label-partition holdout is free — the predictions already exist); 0.0 = off.
+        holdout_fraction: float = 0.25,
+        holdout_select: bool = True,
+        holdout_top_k: int = 3,
     ):
         self.run_dir = Path(run_dir)
         self.task = task
@@ -264,6 +290,13 @@ class Engine:
         self.report_every = max(0, report_every)
         self.developer_factory = developer_factory
         self._developer_name = "default"
+        # A0b/T8: "auto" resolves by Developer capability — code recombination is the verified
+        # strongest merge (removing it costs ~9 pp), so it is the default wherever the Developer
+        # actually GENERATES code (LLM/agent backends declare `is_code_generating`); templated/toy
+        # developers keep the legacy mean-param merge (a code ensemble is meaningless there).
+        if merge_mode == "auto":
+            merge_mode = ("ensemble" if getattr(developer, "is_code_generating", False)
+                          else "mean")
         self._merge_mode = merge_mode
         self._complexity_cue = complexity_cue
         self._prefer_sweep = False   # A7: Strategist-set bias toward intra-node sweeps (audit-driven)
@@ -369,6 +402,23 @@ class Engine:
         # FS or the event log. Works for ANY solution.py-path task, not just MLEBench.
         hg = getattr(task, "host_grader", None)
         self._host_grader: Optional[dict] = hg() if callable(hg) else None
+        # D1 holdout partition: a deterministic subset of the host-held labels reserved as the
+        # final unseen signal. Every search/confirm eval is scored on the COMPLEMENT only; the
+        # holdout rows are touched exactly once, at finish, to re-score the val-top-k. The
+        # partition is a pure function of (n_labels, fraction) — identical across resume/replay,
+        # no state to persist. Real MLE-bench (kind="mlebench") is graded by the official
+        # out-of-process grader, which the engine cannot partition — skipped.
+        self.confirm_seed_base = max(0, int(confirm_seed_base))
+        self._holdout_select = bool(holdout_select)
+        self._holdout_top_k = max(1, int(holdout_top_k))
+        self._holdout_idx: frozenset = frozenset()
+        if (self._host_grader is not None and self._host_grader.get("kind") != "mlebench"
+                and float(holdout_fraction) > 0):
+            from looplab.runtime.command_eval import _LABEL_KEYS, _as_list
+            _yt = _as_list(self._host_grader.get("labels"), self._host_grader.get("key"),
+                           _LABEL_KEYS)
+            if isinstance(_yt, list) and len(_yt) >= 2:
+                self._holdout_idx = _holdout_indices(len(_yt), float(holdout_fraction))
         # RepoTask (ADR-7): an existing repo the agent edits + a command-based eval.
         rs = getattr(task, "repo_spec", None)
         self._repo_spec: dict = rs() if callable(rs) else {}
@@ -485,6 +535,9 @@ class Engine:
                         # gate on replay/resume (config isn't available to `replay.fold`). Absent in
                         # old logs -> "audit" -> byte-identical legacy selection.
                         "trust_gate": self.trust_gate,
+                        # D1 holdout-gated promotion: same recorded-at-start discipline. Absent in
+                        # old logs -> False -> byte-identical legacy selection.
+                        "holdout_select": self._holdout_select,
                     },
                 )
                 # AGENTS.md (I18): task/contract context for coding-agent backends. Runtime line is
@@ -690,6 +743,13 @@ class Engine:
                 if (self.confirm_top_k > 0 and self.confirm_seeds > 0
                         and not self._already_confirmed(state)):
                     await self._confirm_phase(state)
+                    continue
+                # D1 holdout-gated promotion: AFTER the confirm pass (so confirmed means pick the
+                # top-k), re-score the val-leaders' predictions on the reserved holdout partition.
+                # Free (no re-training) and replay-safe (gated per node). The fold then lets the
+                # unseen signal pick the champion (holdout_select) + surfaces the gap.
+                if self._holdout_pending(state):
+                    await self._holdout_phase(state)
                     continue
                 # HITL gate (I21, ADR-11): pause for human approval of the final best.
                 # Approval flows through the event log (a UI/human appends
@@ -2102,15 +2162,81 @@ class Engine:
             from looplab.runtime.sandbox import _to_float
             try:
                 preds = _json.loads(preds_path.read_text(encoding="utf-8-sig", errors="replace"))
-                # .get (not g["labels"]): a host_grader() dict missing labels yields metric None
-                # (node fails) rather than an uncaught KeyError that would crash the eval worker.
-                # _to_float: a non-finite (NaN/Inf) host score reads as None so an untrusted candidate
-                # can't self-elect champion via a crafted prediction (mirrors command_eval/sweep paths).
-                m = _to_float(host_score(g.get("scorer", "rmse"), preds, g.get("labels"), key=g.get("key")))
+                # D1 holdout: when a holdout partition is reserved, the SEARCH signal is the score
+                # on the complement rows only — the holdout rows are scored exactly once, at
+                # finish, for the val-top-k (see _holdout_phase). No partition => legacy full score.
+                if self._holdout_idx:
+                    m = self._host_score_split(preds, g, holdout=False)
+                else:
+                    # .get (not g["labels"]): a host_grader() dict missing labels yields metric None
+                    # (node fails) rather than an uncaught KeyError that would crash the eval worker.
+                    # _to_float: a non-finite (NaN/Inf) host score reads as None so an untrusted candidate
+                    # can't self-elect champion via a crafted prediction (mirrors command_eval/sweep paths).
+                    m = _to_float(host_score(g.get("scorer", "rmse"), preds, g.get("labels"), key=g.get("key")))
             except (ValueError, OSError):
                 m = None
         res.metric = m
         return res
+
+    def _host_score_split(self, preds, g: dict, *, holdout: bool) -> Optional[float]:
+        """D1: score predictions on ONE side of the holdout partition — the search side
+        (complement) for every regular/confirm eval, the holdout side once at finish. Length
+        mismatch or an empty side yields None (the node fails / gets no holdout metric), the
+        same contract as host_score itself."""
+        from looplab.runtime.command_eval import _LABEL_KEYS, _PRED_KEYS, _as_list, host_score
+        from looplab.runtime.sandbox import _to_float
+        yp = _as_list(preds, g.get("key"), _PRED_KEYS)
+        yt = _as_list(g.get("labels"), g.get("key"), _LABEL_KEYS)
+        if not isinstance(yp, list) or not isinstance(yt, list) or len(yp) != len(yt):
+            return None
+        keep = (lambda i: i in self._holdout_idx) if holdout else \
+               (lambda i: i not in self._holdout_idx)
+        yp2 = [v for i, v in enumerate(yp) if keep(i)]
+        yt2 = [v for i, v in enumerate(yt) if keep(i)]
+        if not yt2:
+            return None
+        return _to_float(host_score(g.get("scorer", "rmse"), yp2, yt2))
+
+    def _holdout_topk(self, state: RunState) -> list[int]:
+        """The val-leaders that get a holdout evaluation: top-k feasible by the robust search
+        metric (confirmed mean when the confirm phase ran, else the single metric)."""
+        def _key(n):
+            return ((n.confirmed_mean if n.confirmed_mean is not None else n.metric), n.id)
+        pool = sorted(state.feasible_nodes(), key=_key, reverse=(state.direction == "max"))
+        return [n.id for n in pool[: self._holdout_top_k]]
+
+    def _holdout_pending(self, state: RunState) -> bool:
+        if not (self._holdout_idx and self._host_grader is not None):
+            return False
+        return any(nid not in state.holdout_evaluated_ids for nid in self._holdout_topk(state))
+
+    async def _holdout_phase(self, state: RunState) -> None:
+        """D1 holdout-gated promotion: re-score the val-top-k's EXISTING predictions on the
+        reserved holdout partition (no re-training — free), emit `holdout_evaluated` per node.
+        The fold then (a) surfaces the val-holdout generalization gap in the Trust panel and
+        (b) under holdout_select picks the champion by the unseen signal among these leaders.
+        Replay/resume-safe: gated per node on holdout_evaluated_ids; an event is emitted even
+        when the predictions file is gone (metric None) so the gate always closes."""
+        import json as _json
+        g = self._host_grader
+        for nid in self._holdout_topk(state):
+            if nid in state.holdout_evaluated_ids:
+                continue
+            n = state.nodes[nid]
+            preds = None
+            p = self.run_dir / "nodes" / f"node_{nid}" / g.get("predictions", "predictions.json")
+            try:
+                preds = _json.loads(p.read_text(encoding="utf-8-sig", errors="replace"))
+            except (OSError, ValueError):
+                preds = None
+            m = self._host_score_split(preds, g, holdout=True) if preds is not None else None
+            gap = None
+            if m is not None and n.metric is not None:
+                gap = (n.metric - m) if state.direction == "max" else (m - n.metric)
+            async with self._write_lock:
+                self.store.append("holdout_evaluated", {
+                    "node_id": nid, "metric": m, "gap": gap,
+                    "n_holdout": len(self._holdout_idx)})
 
     def _emit_agent_report(self, node_id: int) -> None:
         """External-agent audit (ADR-7): if the Developer validated its output (a
@@ -2385,7 +2511,10 @@ class Engine:
             # of re-executing every expensive full-profile seed. `done` maps seed -> metric|None.
             done = state.confirm_seed_results.get(nd.id, {})
             scores: list[float] = [m for m in done.values() if m is not None]
-            for s in range(self.confirm_seeds):
+            # D1 seed-holdout: confirm seeds start at confirm_seed_base (default 1) so every
+            # confirm split is DISJOINT from the search's implicit seed 0 — the confirm metric
+            # is a generalization signal, not a re-measurement of what the search optimized.
+            for s in range(self.confirm_seed_base, self.confirm_seed_base + self.confirm_seeds):
                 if s in done:                         # already evaluated this seed earlier
                     continue
                 workdir = self.run_dir / "confirm" / f"node_{nd.id}_seed_{s}"
@@ -2442,7 +2571,7 @@ class Engine:
         state = fold(self.store.read_all())
         seeds = max(self.confirm_seeds, 3)
         done = state.confirm_seed_results.get(nd.id, {})
-        for s in range(seeds):
+        for s in range(self.confirm_seed_base, self.confirm_seed_base + seeds):
             if s in done:
                 continue
             workdir = self.run_dir / "confirm" / f"node_{nd.id}_seed_{s}"

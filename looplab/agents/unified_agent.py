@@ -77,6 +77,11 @@ class UnifiedAgent:
     def brief(self) -> str:
         return getattr(self.developer, "brief", "")
 
+    # T8/A0b: capability follows the internal developer (merge_mode="auto" resolution)
+    @property
+    def is_code_generating(self) -> bool:
+        return bool(getattr(self.developer, "is_code_generating", False))
+
     # ----------------------------------------------------------- Developer
     def implement(self, idea: Idea) -> str:
         code = self.developer.implement(idea)

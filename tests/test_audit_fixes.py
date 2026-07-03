@@ -214,9 +214,11 @@ def test_confirm_phase_skips_already_run_seeds(tmp_path):
     st = RunState(direction="max")
     st.nodes = {0: Node(id=0, operator="draft", idea=Idea(operator="draft"), metric=1.0,
                         status=NodeStatus.evaluated, feasible=True)}
-    st.confirm_seed_results = {0: {0: 1.0, 1: 1.0}}    # seeds 0,1 already done in a prior attempt
+    # Seeds 1,2 already done in a prior attempt. (Confirm seeds are 1..3 by default now —
+    # confirm_seed_base=1 keeps them disjoint from the search's implicit seed 0, D1.)
+    st.confirm_seed_results = {0: {1: 1.0, 2: 1.0}}
     anyio.run(eng._confirm_phase, st)
-    assert ran == [2]                                  # only the missing seed re-runs
+    assert ran == [3]                                  # only the missing seed re-runs
 
 
 # #55 — a metric file with a UTF-8 BOM still parses

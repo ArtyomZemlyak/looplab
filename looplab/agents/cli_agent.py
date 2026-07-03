@@ -123,6 +123,9 @@ PRESETS: dict[str, CliAgentSpec] = {
 
 
 class CliAgentDeveloper:
+    # T8/A0b: an external coding agent writes real code -> merge_mode="auto" = ensemble merge.
+    is_code_generating = True
+
     def __init__(self, model: str, base_url: str = "http://localhost:11434/v1",
                  brief: str = "", spec: Optional[CliAgentSpec] = None,
                  cmd_override: Optional[list] = None, timeout: float = 600.0,

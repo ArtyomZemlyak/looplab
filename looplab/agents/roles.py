@@ -53,7 +53,14 @@ _HYPOTHESIS_INSTRUCTION = (
     "\"a deeper tree overfits this small dataset\"). Reuse the SAME wording when a later experiment "
     "tests the same belief, so the run builds a ledger of what's been learned.")
 _DEVELOPER_SYSTEM = ("You are an expert ML engineer. Output ONLY a single fenced "
-                     "```python``` block containing a complete, self-contained script. ")
+                     "```python``` block containing a complete, self-contained script. "
+                     # 1.3 consistent evaluation: every candidate must be measured on the SAME
+                     # splits/seeds or their scores are incomparable noise (AIRA2: much apparent
+                     # 'validation overfitting' was evaluation inconsistency). The engine varies
+                     # the env var only in the confirm/holdout phases.
+                     "Seed ALL randomness (train/validation splits, CV folds, model init, "
+                     "subsampling) from int(os.environ.get('LOOPLAB_EVAL_SEED', '0')) so every "
+                     "evaluation is reproducible and comparable across candidates. ")
 # Appended to the Developer's system prompt when the Idea carries a `space` (intra-node sweep).
 _SWEEP_CONTRACT = (
     "\nThis is an INTRA-NODE SWEEP: evaluate EVERY point of the given grid in ONE process — load "
@@ -251,6 +258,10 @@ class LLMDeveloper:
     task's I/O contract (where to read data, what metric to print). `repair` powers the
     error-feedback debug operator: it gets the failing code + stderr and fixes it."""
 
+    # T8/A0b: this Developer generates real code, so merge_mode="auto" resolves to the
+    # code-recombination ensemble merge (the verified strongest operator) instead of mean-params.
+    is_code_generating = True
+
     def __init__(self, client: LLMClient, brief: str = "",
                  prompts: Optional[PromptStore] = None):
         self.client = client
@@ -336,6 +347,12 @@ class ValidatingDeveloper:
         self.last_shipped_ok: bool = False
         self.last_files: dict[str, str] = {}   # multi-file output of the shipped attempt
         self.last_deleted: list[str] = []      # accepted in-surface deletions of the shipped attempt
+
+    # T8/A0b: code-generation capability follows the INNER developer (the fallback is LLM anyway)
+    @property
+    def is_code_generating(self) -> bool:
+        return bool(getattr(self.inner, "is_code_generating", False)
+                    or getattr(self.fallback, "is_code_generating", False))
 
     # forward the brief/prompt hooks make_roles pokes at, to the wrapped developer
     @property

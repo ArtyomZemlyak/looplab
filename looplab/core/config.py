@@ -95,8 +95,12 @@ class Settings(BaseSettings):
     ablate_code_blocks: bool = False
     # A0b: real merge/ensembling. "mean" = legacy mean-param merge; "ensemble" = the Developer
     # writes a code-recombination ensemble over the two parents' solutions (verified: agent-proposed
-    # ensembling 37.9%->43.9%). Falls back to mean when the Developer can't ensemble.
-    merge_mode: str = "mean"
+    # ensembling 37.9%->43.9%). "auto" (default) = ensemble whenever the Developer actually
+    # generates code (LLM/agent backends; declared via `is_code_generating`), mean for the
+    # templated/toy developers where a code ensemble is meaningless — the evidence says code
+    # recombination is the strongest single merge (removing it costs ~9 pp), so it is the default
+    # wherever it can work. Falls back to mean when the Developer can't ensemble.
+    merge_mode: str = "auto"
     # A0d (AIRA): inject a dynamic complexity hint into the draft/improve prompt keyed on the
     # node's child count (few children -> keep minimal; many -> escalate to ensembling/HPO).
     complexity_cue: bool = False
@@ -242,6 +246,23 @@ class Settings(BaseSettings):
     # finishing. 0 disables (default). Only meaningful when eval has variance.
     confirm_top_k: int = 0
     confirm_seeds: int = 0
+    # D1 seed-holdout discipline: the FIRST seed the confirm phase uses. Search evals run with the
+    # implicit seed 0 (LOOPLAB_EVAL_SEED unset -> "0"), so a base of 1 keeps every confirm split
+    # DISJOINT from anything the search optimized against — the confirm metric is then a
+    # generalization signal, not a re-measurement (AIRA: selecting on a signal the search saw
+    # overfits by 9-13 pp). Set 0 to restore the legacy overlapping seeds 0..N-1.
+    confirm_seed_base: int = Field(default=1, ge=0)
+    # D1 holdout-gated promotion (B6, Arbor-style): for host-graded tasks, reserve this fraction of
+    # the held-out labels as a FINAL holdout partition the search never sees — every search/confirm
+    # eval is scored on the remaining rows only, and at finish the val-top-k are re-scored on the
+    # holdout partition (free: the predictions already exist). 0.0 = off (legacy full-label scoring).
+    holdout_fraction: float = Field(default=0.25, ge=0.0, le=0.9)
+    # Champion selection prefers the HOLDOUT metric among the nodes that have one (the val-top-k).
+    # Recorded in run_started so replay applies the same rule; old logs fold to False (legacy pick).
+    # The per-node val-holdout `generalization_gap` folds into the Trust panel either way.
+    holdout_select: bool = True
+    # How many val-leaders get a holdout evaluation at finish (host-graded tasks).
+    holdout_top_k: int = Field(default=3, ge=1)
     # Budget (I13): hard wall-clock ceiling; the run aborts cleanly when exceeded.
     max_seconds: float | None = None
     # Eval-compute budget (#2): hard ceiling on cumulative time spent INSIDE evals (training
@@ -447,6 +468,9 @@ class Settings(BaseSettings):
         if self.trust_gate not in ("audit", "gate", "block"):
             raise ValueError(
                 f"trust_gate must be audit|gate|block, got {self.trust_gate!r}")
+        if self.merge_mode not in ("auto", "mean", "ensemble"):
+            raise ValueError(
+                f"merge_mode must be auto|mean|ensemble, got {self.merge_mode!r}")
         return self
 
     def masked_snapshot(self) -> dict:

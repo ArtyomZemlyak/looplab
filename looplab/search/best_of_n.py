@@ -42,6 +42,11 @@ class BestOfNDeveloper:
         self.last_deleted: list = []
         self.last_n_scores: list[float] = []
 
+    # T8/A0b: capability follows the inner developer (merge_mode="auto" resolution)
+    @property
+    def is_code_generating(self) -> bool:
+        return bool(getattr(self.inner, "is_code_generating", False))
+
     # forward the hooks make_roles / the engine poke at, to the wrapped developer
     @property
     def brief(self) -> str:
