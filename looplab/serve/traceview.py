@@ -7,6 +7,7 @@ with node_id (see tracing.py), so we group traces by node_id and build a child t
 """
 from __future__ import annotations
 
+import json
 import os
 from collections import defaultdict
 from typing import Optional
@@ -111,6 +112,98 @@ def _strip_span_io(s: dict) -> dict:
     if not isinstance(a, dict) or not any(k in a for k in ("input", "output", "thinking")):
         return s
     return {**s, "attributes": {k: v for k, v in a.items() if k not in ("input", "output", "thinking")}}
+
+
+# ── linear conversation projection ───────────────────────────────────────────────────────────────
+# The raw span tree shows every generation with the FULL message list it was sent — but the agent
+# tool-loop re-sends the whole conversation on every turn, so successive generations duplicate the
+# system+user prompt and every prior turn (a 206-generation node re-sends the history 206×). The
+# conversation projection reconstructs the loop as a linear, de-duplicated thread: the system+user
+# REQUEST once per sub-loop, then each generation's DELTA (reasoning + text + which tools it called)
+# interleaved with the tool executions. It reads like the agent's actual train of thought.
+
+def _as_text(v) -> str:
+    if v is None:
+        return ""
+    if isinstance(v, str):
+        return v
+    try:
+        return json.dumps(v, ensure_ascii=False)
+    except (TypeError, ValueError):
+        return str(v)
+
+
+def _seg_label(gen_span: dict, by_id: dict) -> Optional[str]:
+    """The nearest ancestor OPERATION span's name — the sub-loop a generation belongs to
+    (propose / implement / repair / grade), so a request boundary can be labelled with its phase."""
+    cur = by_id.get(gen_span.get("parent_id"))
+    while cur is not None:
+        if cur.get("kind") in (None, "operation"):
+            return cur.get("name")
+        cur = by_id.get(cur.get("parent_id"))
+    return None
+
+
+def _thread_turns(spans_sorted: list[dict], by_id: dict) -> list[dict]:
+    """Walk one trace's spans in time order → linear turns. A `request` is emitted at the first
+    generation and again whenever the sent message count DROPS (the context reset that marks a new
+    sub-loop — a fresh system+user), so the request is shown once per sub-loop, never re-duplicated.
+    Every generation contributes only its delta (thinking + output + tool_calls); tools interleave."""
+    turns: list[dict] = []
+    prev_in: Optional[int] = None
+    for s in spans_sorted:
+        kind = s.get("kind")
+        a = s.get("attributes") or {}
+        if kind == "generation":
+            inp = a.get("input") if isinstance(a.get("input"), list) else []
+            n = len(inp)
+            if prev_in is None or n <= prev_in:      # first call, or a context reset → new sub-loop
+                turns.append({"type": "request", "label": _seg_label(s, by_id),
+                              "messages": [{"role": m.get("role", "user"),
+                                            "content": _cap_str(_as_text(m.get("content")))}
+                                           for m in inp if isinstance(m, dict)]})
+            prev_in = n
+            out = a.get("output")
+            think = a.get("thinking")
+            turns.append({"type": "generation",
+                          "think": _cap_str(think) if isinstance(think, str) and think else None,
+                          "output": _cap_str(out if isinstance(out, str) else _as_text(out)),
+                          "model": a.get("model"),
+                          "tool_calls": [(tc.get("name") if isinstance(tc, dict) else tc)
+                                         for tc in (a.get("tool_calls") or [])],
+                          "usage": a.get("usage") or {},
+                          "status": s.get("status"), "seconds": s.get("duration_s")})
+        elif kind == "tool":
+            turns.append({"type": "tool", "name": a.get("tool") or s.get("name") or "tool",
+                          "input": _cap_str(_as_text(a.get("input"))),
+                          "output": _cap_str(_as_text(a.get("output"))),
+                          "status": s.get("status"), "seconds": s.get("duration_s")})
+        # operation spans carry structure only — skipped in the linear reading view.
+    return turns
+
+
+def build_conversation(state: RunState, spans: list[dict], node_id) -> dict:
+    """Per-node linear conversation (companion to `build_trace_view`). One `stage` per trace tagged
+    with this node (create_node / evaluate / …), each a de-duplicated thread of turns. Reader of
+    files-as-truth; caps every string for the browser, but never re-sends the growing history."""
+    by_id = {s["span_id"]: s for s in spans if s.get("span_id")}
+    by_trace: dict[str, list[dict]] = defaultdict(list)
+    for s in spans:
+        by_trace[s.get("trace_id")].append(s)
+    stages: list[dict] = []
+    for tid, ss in by_trace.items():
+        ss_sorted = sorted(ss, key=lambda x: x.get("start", 0.0))
+        root = next((s for s in ss_sorted if s.get("parent_id") is None), ss_sorted[0] if ss_sorted else None)
+        nid = _node_id_of(root) if root else None
+        if nid is None or str(nid) != str(node_id):
+            continue
+        turns = _thread_turns(ss_sorted, by_id)
+        if turns:
+            stages.append({"trace_id": tid, "label": (root or {}).get("name"),
+                           "start": (root or {}).get("start", 0.0),
+                           "rollup": _rollup(ss), "turns": turns})
+    stages.sort(key=lambda x: x.get("start", 0.0))
+    return {"run_id": state.run_id, "task_id": state.task_id, "node_id": str(node_id), "stages": stages}
 
 
 def build_trace_view(state: RunState, spans: list[dict], *, light: bool = False) -> dict:

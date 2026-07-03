@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useRef } from 'react'
-import { get, fmt, fmtInt, isSweep, spanDetail } from './util.js'
+import { get, fmt, fmtInt, isSweep, spanDetail, nodeConversation } from './util.js'
 import { Trajectory, ParallelCoords, Scatter, MetricLines } from './charts.jsx'
 import { groupAggregate } from './grouping.js'
 import { mergeSummary, nodeChip } from './report.js'
@@ -481,11 +481,122 @@ function AgentReport({ r }) {
   </div>
 }
 
+// ── linear conversation view ─────────────────────────────────────────────────────────────────────
+// The raw span tree re-shows the WHOLE re-sent message list on every generation (a tool-loop re-sends
+// the growing history each turn → the system+user prompt and every prior turn duplicate N times). The
+// conversation view reconstructs the loop as a readable thread: the request once per sub-loop, then
+// each generation's DELTA (reasoning + text + tool calls) interleaved with the tool executions.
+function ConvRequest({ t }) {
+  const [open, setOpen] = useState(false)   // system prompt is big — collapsed by default
+  const roles = (t.messages || []).map(m => m.role).join(' + ')
+  return <div className="conv-req">
+    <div className="conv-req-h" onClick={() => setOpen(o => !o)} title="the system + user prompt for this sub-loop (shown once)">
+      <span className="span-tw">{open ? '▾' : '▸'}</span>
+      <OpIcon name="chat" className="t-ic" /> <b>request</b>
+      {t.label && <span className="llm-op">{t.label}</span>}
+      <span className="muted conv-req-roles"> {roles}</span>
+    </div>
+    {open && <div className="conv-req-body">
+      {(t.messages || []).map((m, i) => <div key={i} className="msg">
+        <div className={'msg-role role-' + (m.role || 'user')}>{m.role}</div>
+        <pre className="code">{m.content}</pre></div>)}
+    </div>}
+  </div>
+}
+
+function ConvGen({ t }) {
+  const [think, setThink] = useState(false)
+  const calls = t.tool_calls || []
+  const u = t.usage || {}
+  const tok = u.total || (u.prompt || 0) + (u.completion || 0)
+  // strip the trailing "[tool_calls: …]" marker — the calls are their own chip + the tool rows below
+  const text = (t.output || '').replace(/\n*\[tool_calls:[^\]]*\]\s*$/, '').trim()
+  return <div className={'conv-gen' + (t.status === 'ERROR' ? ' err' : '')}>
+    <div className="conv-gen-h">
+      <OpIcon name="bulb" className="t-ic" />
+      {t.model && <span className="llm-model" title={t.model}>{shortModel(t.model)}</span>}
+      {tok ? <span className="badge" title={`${u.prompt || 0} prompt → ${u.completion || 0} completion tokens`}>{ktok(tok)} tok</span> : null}
+      {t.seconds != null && <span className="t">{fmt(t.seconds, 2)}s</span>}
+      {t.status === 'ERROR' && <span className="badge reason">ERROR</span>}
+    </div>
+    {t.think && <div className="msg think-debug">
+      <div className="msg-role role-think" onClick={() => setThink(v => !v)} style={{ cursor: 'pointer' }}>
+        {think ? '▾' : '▸'} thinking</div>
+      {think && <Markdown className="think-body" text={t.think} />}</div>}
+    {text && <div className="conv-out"><Markdown text={text} /></div>}
+    {calls.length > 0 && <div className="conv-calls muted">→ called {calls.join(', ')}</div>}
+    {!text && !t.think && calls.length === 0 && <div className="muted" style={{ fontSize: 12 }}>(no output)</div>}
+  </div>
+}
+
+function ConvTool({ t }) {
+  const [open, setOpen] = useState(false)
+  const err = t.status === 'ERROR'
+  return <div className={'conv-tool' + (err ? ' err' : '')}>
+    <div className="conv-tool-h" onClick={() => setOpen(o => !o)} title="tool call — expand for input & output">
+      <span className="span-tw">{open ? '▾' : '▸'}</span>
+      <OpIcon name="gear" className="t-ic" /> <b className="tool-name">{t.name}</b>
+      {!open && t.input && <span className="muted conv-tool-prev"> {t.input.slice(0, 60)}</span>}
+      {err && <span className="badge reason">ERROR</span>}
+      {t.seconds != null && <span className="t">{fmt(t.seconds, 2)}s</span>}
+    </div>
+    {open && <div className="conv-tool-body">
+      {t.input && <div className="msg"><div className="msg-role role-user">input</div><pre className="code">{t.input}</pre></div>}
+      {t.output && <div className="msg"><div className="msg-role role-completion">output</div><pre className="code">{t.output}</pre></div>}
+      {!t.input && !t.output && <div className="muted" style={{ fontSize: 12 }}>(no input/output recorded)</div>}
+    </div>}
+  </div>
+}
+
+function ConvStage({ st }) {
+  const m = stageMeta(st.label)
+  const roll = st.rollup || {}
+  const rtok = (roll.tokens || {}).total
+  return <div className={'stage' + (st.status === 'ERROR' ? ' err' : '')}>
+    <div className="stage-h" title={m.desc}>
+      <span className="stage-ic"><OpIcon name={m.icon} /></span>
+      <b>{m.role}</b>
+      {(roll.generations || roll.tools) ? <span className="stage-roll">
+        {roll.generations || 0} turn{roll.generations === 1 ? '' : 's'}
+        {roll.tools ? ` · ${roll.tools} tool call${roll.tools === 1 ? '' : 's'}` : ''}
+        {rtok ? ` · ${ktok(rtok)} tok` : ''}</span> : null}
+    </div>
+    <div className="conv-turns">
+      {(st.turns || []).map((t, j) => t.type === 'request' ? <ConvRequest key={j} t={t} />
+        : t.type === 'tool' ? <ConvTool key={j} t={t} /> : <ConvGen key={j} t={t} />)}
+    </div>
+  </div>
+}
+
+function Conversation({ n, runId }) {
+  const [conv, setConv] = useState(null)
+  useEffect(() => {
+    let on = true
+    setConv(null)
+    nodeConversation(runId, n.id).then(d => on && setConv(d || { stages: [] })).catch(() => on && setConv({ stages: [] }))
+    return () => { on = false }
+  }, [runId, n.id])
+  if (conv === null) return <div className="muted" style={{ fontSize: 12 }}>loading…</div>
+  const stages = conv.stages || []
+  if (!stages.length) return <div className="muted">No conversation captured for this node yet.</div>
+  return <div className="conv">{stages.map((st, i) => <ConvStage key={i} st={st} />)}</div>
+}
+
 function Trace({ n, runId }) {
+  const [view, setView] = useState('conversation')   // linear reading by default; raw tree on demand
   const spans = n.trace?.nodes || []
   const agent = n.agent_report
   if (!spans.length && !agent)
     return <div className="muted">No execution spans for this node yet — toy/offline nodes have minimal spans, and a node still in progress fills its trace as it runs.</div>
+  const toggle = <div className="conv-toggle">
+    <button className={'seg' + (view === 'conversation' ? ' on' : '')} onClick={() => setView('conversation')}
+      title="Linear, de-duplicated reading: request once, then each turn's reasoning + tools">conversation</button>
+    <button className={'seg' + (view === 'raw' ? ' on' : '')} onClick={() => setView('raw')}
+      title="The raw span tree with each generation's full re-sent message list">raw spans</button>
+  </div>
+  if (view === 'conversation')
+    return <div className="trace">{toggle}<Conversation n={n} runId={runId} />
+      {agent && <AgentReport r={agent} />}</div>
   const { t0, total } = traceBounds(spans)
   // create_node already nests propose→implement; if an agent wrote the node, the report belongs
   // right after that authoring stage (placed by index), otherwise it trails the whole lifecycle.
@@ -493,6 +604,7 @@ function Trace({ n, runId }) {
   const roll = n.trace?.rollup || {}
   const rtok = roll.tokens || {}
   return <div className="trace">
+    {toggle}
     <div className="muted" style={{ marginBottom: 10 }}>
       Lifecycle of node #{n.id} — each part on a shared timeline (offset = when it ran, bar = how long).
       Expand any observation to read its input &amp; output.

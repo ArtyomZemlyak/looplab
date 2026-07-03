@@ -144,6 +144,47 @@ def test_trace_json_written_and_grouped_by_node(tmp_path):
     assert tv2["summary"]["spans"] == tv["summary"]["spans"]
 
 
+def test_conversation_dedups_resent_history():
+    """The linear conversation projection shows the system+user request ONCE per sub-loop, and each
+    generation contributes only its delta (thinking + output + tool_calls) — never the raw tree's
+    per-turn re-send of the whole growing message history. A context RESET (shorter input, e.g. a
+    compaction or a sub-agent handoff) starts a fresh request."""
+    from types import SimpleNamespace
+    from looplab.traceview import build_conversation
+
+    def span(sid, kind, start, parent, **attrs):
+        return {"span_id": sid, "parent_id": parent, "trace_id": "t1", "kind": kind,
+                "name": attrs.pop("name", kind), "start": start, "duration_s": 0.1,
+                "status": "OK", "attributes": attrs}
+
+    sysm, usrm = {"role": "system", "content": "SYS"}, {"role": "user", "content": "USR"}
+    spans = [
+        {"span_id": "root", "parent_id": None, "trace_id": "t1", "kind": "operation",
+         "name": "create_node", "start": 0.0, "duration_s": 5, "status": "OK", "attributes": {"node_id": 3}},
+        {"span_id": "op1", "parent_id": "root", "trace_id": "t1", "kind": "operation",
+         "name": "propose", "start": 0.1, "duration_s": 4, "status": "OK", "attributes": {}},
+        span("g1", "generation", 0.2, "op1", input=[sysm, usrm], thinking="think-1",
+             output="out-1", model="m", tool_calls=[{"name": "grep"}], usage={"total": 10}),
+        span("x1", "tool", 0.3, "op1", tool="grep", input={"q": "a"}, output="hit"),
+        span("g2", "generation", 0.4, "op1", thinking="think-2", output="out-2", model="m", usage={"total": 12},
+             input=[sysm, usrm, {"role": "assistant", "content": "out-1"}, {"role": "tool", "content": "hit"}]),
+        span("g3", "generation", 0.5, "op1", input=[sysm, usrm], thinking="think-3", output="done", model="m"),
+    ]
+    conv = build_conversation(SimpleNamespace(run_id="r", task_id="tk"), spans, 3)
+    assert len(conv["stages"]) == 1
+    turns = conv["stages"][0]["turns"]
+    # first + the reset => exactly TWO requests, not one per generation (no duplication)
+    assert [t["type"] for t in turns] == ["request", "generation", "tool", "generation", "request", "generation"]
+    reqs = [t for t in turns if t["type"] == "request"]
+    assert all([m["role"] for m in r["messages"]] == ["system", "user"] for r in reqs)
+    assert reqs[0]["label"] == "propose"                    # labelled by the nearest ancestor operation
+    gens = [t for t in turns if t["type"] == "generation"]
+    assert [g["think"] for g in gens] == ["think-1", "think-2", "think-3"]   # each turn's own delta
+    assert gens[0]["tool_calls"] == ["grep"]
+    # node filter: a different node id yields no stages
+    assert build_conversation(SimpleNamespace(run_id="r", task_id="tk"), spans, 99)["stages"] == []
+
+
 def test_fold_ignores_spans(tmp_path):
     # Determinism: the read model / fold depends only on events, never on spans.
     from looplab.replay import fold

@@ -863,6 +863,20 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
             pass
         return {"span_id": sid, "attributes": {}, "events": []}
 
+    @app.get("/api/runs/{run_id}/nodes/{nid}/conversation")
+    def node_conversation(run_id: str, nid: int):
+        """The node's trace as a LINEAR, de-duplicated conversation: the system+user request shown
+        once per sub-loop, then each generation's delta (reasoning + text + tool calls) interleaved
+        with the tool executions — so the agent's train of thought reads without the raw tree's
+        per-turn re-send of the whole message history. Caps I/O for the browser (full text in the
+        raw span tree / spans.jsonl)."""
+        rd = _run_dir(run_id)
+        try:
+            from looplab.serve.traceview import build_conversation, load_spans
+            return build_conversation(fold(_events(rd)), load_spans(rd / "spans.jsonl"), nid)
+        except Exception:  # noqa: BLE001
+            return {"run_id": run_id, "node_id": str(nid), "stages": []}
+
     @app.get("/api/runs/{run_id}/log")
     def event_log(run_id: str, since: int = -1):
         """Raw event envelopes (for the activity feed + event/span explorer). `since` = exclusive

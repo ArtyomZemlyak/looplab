@@ -792,6 +792,31 @@ textarea.text { min-height: 220px; font-family: ui-monospace, Consolas, monospac
 .stage-roll { font-size: 11px; color: var(--fg-dim); background: var(--bg-3); border-radius: 999px;
   padding: 0 8px; font-variant-numeric: tabular-nums; white-space: nowrap; }
 
+/* ── Linear conversation view (de-duplicated trace reading) ───────────────────── */
+.conv-toggle { display: inline-flex; gap: 0; border: 1px solid var(--line-2); border-radius: 8px;
+  overflow: hidden; margin-bottom: 10px; }
+.conv-toggle .seg { padding: 4px 11px; font-size: 12px; background: var(--bg-2); color: var(--fg-mut);
+  border: none; cursor: pointer; }
+.conv-toggle .seg + .seg { border-left: 1px solid var(--line-2); }
+.conv-toggle .seg.on { background: var(--accent); color: #fff; }
+.conv .stage .conv-turns { padding: 4px 8px; }
+.conv-turns > div { padding: 3px 0; }
+.conv-turns > div + div { border-top: 1px dashed var(--line); }
+.conv-req-h, .conv-tool-h { display: flex; align-items: center; gap: 6px; cursor: pointer; font-size: 13px; }
+.conv-req-h .llm-op, .conv-tool-h .tool-name { font-size: 12px; }
+.conv-req-roles { font-size: 11px; }
+.conv-req { background: var(--bg-2); border-radius: 6px; padding: 3px 6px !important; }
+.conv-req-body, .conv-tool-body { margin: 4px 0 2px 18px; }
+.conv-gen { padding-left: 4px; }
+.conv-gen-h { display: flex; align-items: center; gap: 8px; }
+.conv-gen-h .t { color: var(--fg-mut); font-variant-numeric: tabular-nums; font-size: 12px; }
+.conv-out { margin: 3px 0 2px 18px; font-size: 13px; }
+.conv-calls { margin: 2px 0 2px 18px; font-size: 12px; font-variant-numeric: tabular-nums; }
+.conv-tool { padding-left: 18px; }
+.conv-tool.err .tool-name { color: var(--fail); }
+.conv-tool-prev { font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 42ch; }
+.conv-gen .think-debug { border-top: 1px dashed var(--line); margin-top: 3px; padding-top: 2px; }
+
 /* ── Report (Workstream A): first-class, conclusion-first destination ─────────── */
 .view-toggle { display: inline-flex; gap: 0; border: 1px solid var(--line-2); border-radius: 8px; overflow: hidden; }
 .view-toggle .vt { padding: 4px 11px; font-size: 12px; background: var(--bg-2); color: var(--fg-mut);

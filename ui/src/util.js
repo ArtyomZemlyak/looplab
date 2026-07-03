@@ -664,6 +664,11 @@ export async function assistantMessageStream(sid, instruction, mode, cbs = {}, s
 export const spanDetail = (runId, spanId) =>
   get(`/api/runs/${encodeURIComponent(runId)}/spans/${encodeURIComponent(spanId)}`)
 
+// Linear, de-duplicated conversation view of a node's trace (request once per sub-loop, then each
+// generation's delta interleaved with tool calls) — the readable alternative to the raw span tree.
+export const nodeConversation = (runId, nid) =>
+  get(`/api/runs/${encodeURIComponent(runId)}/nodes/${encodeURIComponent(nid)}/conversation`)
+
 export const assistantCommands = () => get('/api/assistant/commands')
 export const assistantRevert = (path) => post('/api/assistant/revert', { path })
 export const assistantShare = (sid) => post(`/api/assistant/sessions/${encodeURIComponent(sid)}/share`, {})
