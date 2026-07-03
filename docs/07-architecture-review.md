@@ -1,6 +1,6 @@
 ﻿# LoopLab — Architecture Review (2026-06-22)
 
-**Scope:** full audit of the `LoopLab/` implementation (~22 modules, 76 tests) against the design (ADR-1…18 in [03](03-decisions.md)/[05](05-build-decisions.md)). Method: two parallel adversarial code-review passes (concurrency/replay/policy cluster; trust/LLM cluster) + manual design-consistency check. Companion: [README.md](README.md), status board [06](06-implementation-plan.md).
+**Scope:** full audit of the `LoopLab/` implementation (~22 modules, 76 tests) against the design (ADR-1…18 in [03](03-decisions.md)/[05](05-build-decisions.md)). Method: two parallel adversarial code-review passes (concurrency/replay/policy cluster; trust/LLM cluster) + manual design-consistency check. Companion: [README.md](../README.md), status board [06](06-implementation-plan.md).
 
 **Verdict:** the implementation is **consistent with the architecture**; the moat (files-as-truth event loop, pluggable roles/policies/sandbox, trust layer) is intact. Seven real bugs were found and **fixed**; documented deviations are deliberate. No design change required — only the I10 gate *semantics* were clarified (below).
 

@@ -3,7 +3,7 @@
 > An autonomous ML/DS research engine. Give it a goal; it **invents → implements → tests → improves** candidate solutions in a loop and returns the best *verified* result.
 
 [![Python](https://img.shields.io/badge/python-%3E%3D3.11-blue.svg)](https://www.python.org/)
-[![Tests](https://img.shields.io/badge/tests-641-brightgreen.svg)](#testing)
+[![Tests](https://img.shields.io/badge/tests-1076-brightgreen.svg)](#testing)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](#license)
 
 LoopLab runs a closed research loop: a **Researcher** proposes ideas, a **Developer** writes the
@@ -13,6 +13,20 @@ the single source of truth**, so a run is fully **reproducible and crash-resumab
 
 It runs **fully offline with zero external services** (no API keys, no Docker) on a local task, and
 scales up to driving a live LLM, working inside a real repo, or grading actual Kaggle competitions.
+
+## Key features
+
+- **Closed research loop** — a Researcher proposes, a Developer writes the code, a sandbox runs it, an evaluator scores it, and the loop refines and merges the best candidates. See [Concepts](docs/guide/concepts.md).
+- **Event log as the single source of truth** — every step is appended to an append-only log, so runs are fully reproducible and **crash-resumable by replay**. See [Concepts](docs/guide/concepts.md).
+- **Offline, or any OpenAI-compatible LLM** — no keys or Docker for local runs; change `base_url` to drive it with Ollama, vLLM, SGLang, or OpenAI. See [LLM & coding agents](docs/guide/llm-and-agents.md).
+- **Describe the task in words** — Genesis (the LLM planner) authors the whole task from a `--goal`, including where your data lives. See [Generating code](docs/guide/generating-code.md).
+- **Nine task adapters** — from a toy objective to your own dataset, an existing repo, or real Kaggle competitions. See [Tasks](docs/guide/tasks.md).
+- **The agent writes and repairs the code** — the Developer emits a full solution; a self-repair operator feeds failing code plus stderr back to fix it. See [Generating code](docs/guide/generating-code.md).
+- **Cross-run memory and knowledge** — cases, lessons, causal meta-notes, skills, and a knowledge base accumulate across runs, both injected into prompts and **agentically retrievable**. See [Memory & knowledge](docs/guide/memory.md).
+- **Adaptive search** — MCTS/ASHA policies, a novelty gate, and stagnation-driven broadening of the idea space. See [Concepts](docs/guide/concepts.md).
+- **Trust tiers and sandbox** — a subprocess sandbox by default (no Docker), a `--network none` Docker tier for untrusted code, and reward-hack / leakage gates on scoring. See [Deployment](docs/guide/deployment.md).
+- **Live web UI and terminal control plane** — a React control plane with a full execution trace, or steer runs by chat from the terminal. See [Web UI](docs/guide/ui.md).
+- **Verified, returnable results** — held-out grading, MLE-bench scoring, and a returnable [live-scenario suite](docs/guide/live-scenarios.md); export the champion to MLflow or a notebook.
 
 ---
 
@@ -171,12 +185,14 @@ The full guide lives in **[`docs/guide/`](docs/guide/index.md)**:
 | [Quickstart](docs/guide/quickstart.md) | Your first run, offline → LLM-driven |
 | [CLI reference](docs/guide/cli-reference.md) | Every command and option |
 | [Configuration](docs/guide/configuration.md) | Every `LOOPLAB_*` setting, grouped |
-| [Tasks](docs/guide/tasks.md) | All eight task kinds and their fields |
+| [Tasks](docs/guide/tasks.md) | All nine task kinds and their fields |
 | [Generating train & test code](docs/guide/generating-code.md) | Let the agent write the code (Genesis-first); bring your own repo + data |
 | [LLM & coding agents](docs/guide/llm-and-agents.md) | Backends, external agents, per-role models, reasoning |
 | [Concepts](docs/guide/concepts.md) | Event log, replay, sandbox/trust, operators, gates, memory |
+| [Memory & knowledge](docs/guide/memory.md) | Every memory type (cases, lessons, meta-notes, skills, KB), the methodologies, and agentic retrieval |
 | [Web UI](docs/guide/ui.md) | The live React control plane |
 | [Deployment](docs/guide/deployment.md) | Docker Compose, the untrusted tier |
+| [Live scenarios](docs/guide/live-scenarios.md) | Situational end-to-end tests of the main features — a returnable collection |
 | [MLE-bench runbook](docs/MLEBENCH.md) | Running real Kaggle competitions |
 
 Design records (the *why* behind the architecture) are in [`docs/00-INDEX.md`](docs/00-INDEX.md).
@@ -184,7 +200,7 @@ Design records (the *why* behind the architecture) are in [`docs/00-INDEX.md`](d
 ## Testing
 
 ```bash
-python -m pytest -q          # 641 tests across 84 files
+python -m pytest -q          # 1076 tests across 118 files
 ```
 
 Live-LLM and external-agent tests auto-skip when no endpoint/agent is configured, so the suite runs
