@@ -38,6 +38,7 @@ decision records, roadmap), see [`../00-INDEX.md`](../00-INDEX.md).
 | **[Web UI](ui.md)** | The live React control plane |
 | **[Deployment](deployment.md)** | Docker Compose stack, the untrusted sandbox tier |
 | **[MLE-bench runbook](../MLEBENCH.md)** | Running real Kaggle competitions end-to-end |
+| **[Live scenarios](live-scenarios.md)** | Situational end-to-end tests of the main features (stagnation, novelty, trust gate, repair, …) — a returnable collection |
 
 ## The loop in one picture
 

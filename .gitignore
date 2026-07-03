@@ -49,3 +49,7 @@ Thumbs.db
 .env.*
 !.env.example
 secrets.*
+
+# Live scenario collection — generated datasets + task files (deterministic; rebuilt on demand)
+examples/live_scenarios/
+examples/live-*.json
