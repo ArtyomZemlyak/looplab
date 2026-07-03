@@ -67,6 +67,23 @@ def test_read_logs_clips_to_the_tail():
     assert "earlier chars truncated" in out
 
 
+def test_read_logs_error_tail_survives_the_agent_result_cap():
+    """The shared tool loop HEAD-truncates every tool result to 4000 chars. A Python traceback puts
+    the exception line at the BOTTOM, so read_logs must stay under that cap (and keep the error's
+    tail) — else the one line that says WHY the node failed gets silently cut off upstream."""
+    st = RunState(goal="g", direction="min")
+    st.nodes = {0: Node(id=0, operator="draft", idea=Idea(operator="draft", params={}),
+                        status=NodeStatus.failed, error_reason="crash",
+                        stdout_tail="epoch 1 loss=0.5\n",
+                        error="Traceback (most recent call last):\n" + "  frame\n" * 5000
+                              + "ValueError: the real reason it died")}
+    rt = RunTools()
+    rt.bind_state(st)
+    out = rt.execute("read_logs", {"node_id": 0})
+    assert len(out) <= 4000                             # fits the agent-layer result cap, no silent cut
+    assert "ValueError: the real reason it died" in out  # the exception line (error tail) is preserved
+
+
 # ------------------------------------------------------ RunsTools.read_run_logs / read_run_trace
 def _make_run(tmp_path: Path) -> Path:
     """A minimal on-disk run: events.jsonl (fold → one evaluated node with a stdout tail) + a real
@@ -125,6 +142,18 @@ def test_read_run_trace_without_spans_is_graceful(tmp_path):
     (root / "demo" / "spans.jsonl").unlink()
     rts = RunsTools(root)
     assert "no spans.jsonl" in rts.execute("read_run_trace", {"run_id": "demo", "node_id": 0})
+
+
+def test_read_run_trace_soft_fails_on_malformed_spans(tmp_path):
+    """A JSON-valid but malformed spans.jsonl (a null `attributes` → AttributeError inside
+    build_conversation) must soft-fail to a string, never crash the tool loop."""
+    root = _make_run(tmp_path)
+    (root / "demo" / "spans.jsonl").write_text(
+        json.dumps({"span_id": "s1", "trace_id": "tr", "parent_id": None, "attributes": None}) + "\n",
+        encoding="utf-8")
+    rts = RunsTools(root)
+    out = rts.execute("read_run_trace", {"run_id": "demo", "node_id": 0})
+    assert isinstance(out, str) and "could not read trace" in out
 
 
 # --------------------------------------------------- read-file allowlist covers logs + jsonl data

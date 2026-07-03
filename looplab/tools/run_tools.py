@@ -46,7 +46,12 @@ def _fn(name: str, description: str, props: dict, required: Optional[list] = Non
 class RunTools:
     """Read-only view over the live search DAG (the bound `RunState`)."""
 
-    _LOG_CHARS = 12000        # execution logs get a larger budget than a normal read — they ARE the point
+    # Logs get a bigger error budget than read_experiment's 300-char slice — but the shared tool loop
+    # HEAD-truncates every tool result to 4000 chars (agent.drive_tool_loop), so a larger budget here
+    # is not just wasted, it's harmful: content past ~4000 (the error tail — a traceback's exception
+    # line lives at the BOTTOM) would be silently cut. Stay under that cap with headroom for the header
+    # + section markers, so our own tail-preserving clip is what actually decides what's dropped.
+    _LOG_CHARS = 3600
 
     def __init__(self, max_chars: int = 3500):
         self.max_chars = max_chars

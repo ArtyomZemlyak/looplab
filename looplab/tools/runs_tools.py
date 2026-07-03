@@ -19,7 +19,10 @@ from looplab.events import digest
 from looplab.core.models import RunState
 from looplab.tools.run_tools import RunTools, _fn
 
-_TRACE_CHARS = 12000      # a trace is a whole conversation — give it the same larger budget as logs
+# A trace is a whole conversation, but the shared tool loop HEAD-truncates every tool result to 4000
+# chars (agent.drive_tool_loop), so a larger budget would be silently cut there (losing the tail with
+# no marker). Stay under that cap so our own truncation + the "narrow with `stage`" hint engage first.
+_TRACE_CHARS = 3600
 
 
 def _render_conversation(convo: dict, run_id, nid, stage: Optional[str], max_chars: int) -> str:
@@ -277,8 +280,8 @@ class RunsTools:
                     "predate tracing, or ran with tracing off.)")
         try:
             convo = build_conversation(st, load_spans(spans_path), nid)
-        except (OSError, ValueError, TypeError) as e:
-            return f"(could not read trace: {e})"
+        except Exception as e:  # noqa: BLE001 — a torn/hand-edited spans.jsonl (e.g. a null `attributes`
+            return f"(could not read trace: {e})"  # → AttributeError) must soft-fail, never crash the loop
         return _render_conversation(convo, run_id, nid, stage, self.max_chars)
 
 
