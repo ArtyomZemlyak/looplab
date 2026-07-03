@@ -51,6 +51,73 @@ def _debug_lineage(state: RunState, node_id: int) -> int:
     return seen
 
 
+def operator_yields(state: RunState) -> dict[str, dict]:
+    """P4: per-operator empirical yield, folded purely from the DAG — {op: {"n": tried,
+    "gain": mean positive Δmetric-over-best-parent per eval-second}}. The data for a
+    deterministic UCB over operators (the cheap, principled 'adaptive operator mix' — the
+    Strategist's rule table becomes priors, not hard-coded cadences). Draft nodes have no
+    parent, so 'draft' yield is not defined here (drafts are the exploration baseline)."""
+    out: dict[str, dict] = {}
+    for n in state.nodes.values():
+        if not n.parent_ids or n.status is not NodeStatus.evaluated or n.metric is None:
+            continue
+        pm = [state.nodes[p].metric for p in n.parent_ids
+              if p in state.nodes and state.nodes[p].metric is not None]
+        if not pm:
+            continue
+        # direction-aware improvement over the best parent (clamped at 0 — a regression yields
+        # no positive credit), amortized per eval-second so cheap wins rank above slow ones.
+        base = max(pm) if state.direction == "max" else min(pm)
+        delta = (n.metric - base) if state.direction == "max" else (base - n.metric)
+        gain = max(0.0, delta) / max(0.1, (n.eval_seconds or 0.1))
+        d = out.setdefault(n.operator, {"n": 0, "gain": 0.0})
+        d["gain"] = (d["gain"] * d["n"] + gain) / (d["n"] + 1)
+        d["n"] += 1
+    return out
+
+
+def _bandit_pick(yields: dict[str, dict], candidates: list[str], c: float = 0.8) -> str:
+    """Deterministic UCB1 over operator kinds: an UNTRIED operator is optimistically tried first
+    (classic UCB1 infinite priority, in candidate order); otherwise mean normalized gain + an
+    exploration bonus for rarely-tried operators. Ties break by candidate order (caller lists
+    its default first)."""
+    for k in candidates:
+        if yields.get(k, {"n": 0})["n"] == 0:
+            return k                      # optimism under uncertainty: try every operator once
+    total = sum(d["n"] for d in yields.values()) or 1
+    gmax = max((d["gain"] for d in yields.values()), default=0.0) or 1.0
+    best_k, best_s = candidates[0], None
+    for k in candidates:
+        d = yields[k]
+        score = (d["gain"] / gmax) + c * math.sqrt(math.log(total + 1) / (d["n"] + 1))
+        if best_s is None or score > best_s + 1e-12:
+            best_k, best_s = k, score
+    return best_k
+
+
+def weighted_parent(state: RunState, feasible=None) -> Optional[int]:
+    """ShinkaEvolve-shaped parent selection, derandomized for replay safety: prefer parents
+    with a high fitness RANK that are still UNDER-EXPANDED — weight = 1/rank / (1 + children).
+    Expanding a node lowers its weight, so selection rotates through good stepping stones
+    instead of hammering the single global best (weighted parent sampling beat both
+    hill-climbing and random selection in ShinkaEvolve's ablation). Deterministic: pure
+    argmax with id tie-break."""
+    pool = feasible if feasible is not None else state.feasible_nodes()
+    if not pool:
+        return None
+    ranked = sorted(pool, key=lambda n: (n.metric, n.id), reverse=(state.direction == "max"))
+    kids: dict[int, int] = {}
+    for n in state.nodes.values():
+        for p in n.parent_ids:
+            kids[p] = kids.get(p, 0) + 1
+    best_id, best_w = None, -1.0
+    for rank, n in enumerate(ranked, start=1):
+        w = (1.0 / rank) / (1.0 + kids.get(n.id, 0))
+        if w > best_w + 1e-12:
+            best_id, best_w = n.id, w
+    return best_id
+
+
 def debug_action(state: RunState, debug_depth: int) -> Optional[dict]:
     """A debug action for the first failed leaf whose debug-lineage depth is below the
     bound, else None. Caller is responsible for the node budget."""
@@ -77,6 +144,7 @@ class GreedyTree:
         merge_every: int = 3,
         max_merges: int = 2,
         ablate_every: int = 0,
+        operator_bandit: bool = False,
     ):
         self.n_seeds = n_seeds
         self.max_nodes = max_nodes
@@ -85,6 +153,11 @@ class GreedyTree:
         self.merge_every = merge_every
         self.max_merges = max_merges
         self.ablate_every = ablate_every  # 0 = off (I7 ablation-driven refinement)
+        # P4: replace the FIXED merge/ablate cadences with a deterministic UCB over operator
+        # yields folded from the run itself (Δmetric per eval-second). Off by default: the
+        # cadence defaults are well-tested and the bandit has no direct published ablation —
+        # `thorough` turns it on.
+        self.operator_bandit = operator_bandit
 
     def next_actions(self, state: RunState) -> list[dict]:
         # 1. Evaluate anything created-but-not-evaluated (crash-resume re-entry point).
@@ -112,10 +185,37 @@ class GreedyTree:
         if best is None:
             return [{"kind": "draft"}]
 
-        # 4. Periodic merge of the top-2 evaluated nodes (multi-parent DAG step).
         evaluated = state.feasible_nodes()   # never breed from constraint-violating nodes (#5)
         n_improve = sum(1 for n in state.nodes.values() if n.operator == "improve")
         n_merge = sum(1 for n in state.nodes.values() if n.operator == "merge")
+        n_refine = sum(1 for n in state.nodes.values() if n.operator == "refine_block")
+
+        # P4 operator bandit: pick the next operator by observed yield (deterministic UCB over
+        # Δmetric per eval-second folded from the run), instead of the fixed cadences below.
+        # Only chooses among currently-LEGAL operators; falls through to the cadence logic when
+        # off or when it picks the default (improve).
+        if self.operator_bandit:
+            cands = ["improve"]
+            if self.enable_merge and len(evaluated) >= 2 and n_merge < self.max_merges:
+                cands.append("merge")
+            if self.ablate_every > 0 and len(best.idea.params) >= 2:
+                cands.append("refine_block")
+            pick = _bandit_pick(operator_yields(state), cands)
+            if pick == "merge":
+                top2 = sorted(evaluated, key=lambda n: (n.metric, n.id),
+                              reverse=(state.direction == "max"))[:2]
+                return [{"kind": "merge", "parent_ids": [top2[0].id, top2[1].id],
+                         "_scores": _metric_scores(top2), "_chosen": top2[0].id,
+                         "_reason": "bandit: merge top-2"}]
+            if pick == "refine_block":
+                return [{"kind": "ablate", "parent_id": best.id,
+                         "_scores": _metric_scores(evaluated), "_chosen": best.id,
+                         "_reason": "bandit: ablate highest-impact param"}]
+            return [{"kind": "improve", "parent_id": best.id,
+                     "_scores": _metric_scores(evaluated), "_chosen": best.id,
+                     "_reason": "bandit: exploit best"}]
+
+        # 4. Periodic merge of the top-2 evaluated nodes (multi-parent DAG step).
         # One merge per `merge_every` improves (not back-to-back): gate on the merge DEFICIT
         # vs the milestone count, since n_improve is unchanged between consecutive merges.
         if (self.enable_merge and len(evaluated) >= 2 and n_merge < self.max_merges
@@ -128,7 +228,6 @@ class GreedyTree:
 
         # 5. Ablation-driven refinement (I7): periodically ablate the best to find the
         #    highest-impact parameter, then refine just that one.
-        n_refine = sum(1 for n in state.nodes.values() if n.operator == "refine_block")
         if (self.ablate_every > 0 and len(best.idea.params) >= 2
                 and n_improve >= (n_refine + 1) * self.ablate_every):
             return [{"kind": "ablate", "parent_id": best.id,
@@ -185,12 +284,21 @@ class EvolutionaryPolicy:
         # crossover/mutate parity or the elite rotation (deterministic w.r.t. eval failures).
         gen = sum(1 for n in state.nodes.values() if n.operator in ("improve", "merge"))
 
-        # Even generations crossover two elites; odd generations mutate a rotating elite.
+        # Even generations crossover two elites; odd generations mutate a WEIGHTED parent:
+        # fitness-rank × under-expansion over the WHOLE feasible archive (not just elites) —
+        # ShinkaEvolve's #1-ranked lever (weighted parent sampling beat both hill-climbing and
+        # random), derandomized for replay safety. Good stepping stones outside the elite set
+        # stay reachable; expanding a node lowers its weight, so selection rotates naturally.
         if gen % 2 == 0 and len(elites) >= 2:
             i = (gen // 2) % len(elites)
             j = (i + 1) % len(elites)
             return [{"kind": "merge", "parent_ids": [elites[i].id, elites[j].id]}]
-        return [{"kind": "improve", "parent_id": elites[gen % len(elites)].id}]
+        pid = weighted_parent(state, evaluated)
+        if pid is None:
+            pid = elites[gen % len(elites)].id
+        return [{"kind": "improve", "parent_id": pid,
+                 "_scores": _metric_scores(evaluated), "_chosen": pid,
+                 "_reason": "weighted parent (fitness-rank × under-expansion)"}]
 
 
 class MCTSPolicy:
@@ -408,19 +516,23 @@ def available_policies() -> list[str]:
 def make_policy(name: str = "greedy", *, n_seeds: int, max_nodes: int,
                 ablate_every: int = 0, **params) -> SearchPolicy:
     """Select a search policy by name (ADR-2 pluggable algorithm). `params` carries
-    policy-specific overrides the Strategist may pass (e.g. mcts `c`, asha `eta`)."""
+    policy-specific overrides the Strategist may pass (e.g. mcts `c`, asha `eta`) plus the
+    run-wide `debug_depth` / `operator_bandit` knobs (Settings)."""
+    depth = int(params.get("debug_depth", 1) or 1)
     if name == "greedy":
-        return GreedyTree(n_seeds=n_seeds, max_nodes=max_nodes, ablate_every=ablate_every)
+        return GreedyTree(n_seeds=n_seeds, max_nodes=max_nodes, ablate_every=ablate_every,
+                          debug_depth=depth,
+                          operator_bandit=bool(params.get("operator_bandit", False)))
     if name == "evolutionary":
-        return EvolutionaryPolicy(pop=n_seeds, max_nodes=max_nodes)
+        return EvolutionaryPolicy(pop=n_seeds, max_nodes=max_nodes, debug_depth=depth)
     if name == "mcts":
         c = float(params.get("c", 1.4))
-        return MCTSPolicy(n_seeds=n_seeds, max_nodes=max_nodes, c=c)
+        return MCTSPolicy(n_seeds=n_seeds, max_nodes=max_nodes, c=c, debug_depth=depth)
     if name in ("asha", "bohb"):
         # A3 BOHB = Hyperband racing (ASHA) × surrogate-guided proposal (A2). The racing schedule is
         # the ASHA policy; the surrogate is wired as the Researcher (cli enables it for `bohb`), so
         # the policy object is the same — the fusion is the racing schedule + a surrogate proposer.
         eta = int(params.get("eta", 3))
-        return ASHAPolicy(n_seeds=n_seeds, max_nodes=max_nodes, eta=eta,
+        return ASHAPolicy(n_seeds=n_seeds, max_nodes=max_nodes, eta=eta, debug_depth=depth,
                           rung_nodes=int(params.get("rung_nodes", 0) or 0))
     raise ValueError(f"unknown policy: {name!r}")

@@ -53,7 +53,14 @@ _HYPOTHESIS_INSTRUCTION = (
     "\"a deeper tree overfits this small dataset\"). Reuse the SAME wording when a later experiment "
     "tests the same belief, so the run builds a ledger of what's been learned.")
 _DEVELOPER_SYSTEM = ("You are an expert ML engineer. Output ONLY a single fenced "
-                     "```python``` block containing a complete, self-contained script. ")
+                     "```python``` block containing a complete, self-contained script. "
+                     # 1.3 consistent evaluation: every candidate must be measured on the SAME
+                     # splits/seeds or their scores are incomparable noise (AIRA2: much apparent
+                     # 'validation overfitting' was evaluation inconsistency). The engine varies
+                     # the env var only in the confirm/holdout phases.
+                     "Seed ALL randomness (train/validation splits, CV folds, model init, "
+                     "subsampling) from int(os.environ.get('LOOPLAB_EVAL_SEED', '0')) so every "
+                     "evaluation is reproducible and comparable across candidates. ")
 # Appended to the Developer's system prompt when the Idea carries a `space` (intra-node sweep).
 _SWEEP_CONTRACT = (
     "\nThis is an INTRA-NODE SWEEP: evaluate EVERY point of the given grid in ONE process — load "
@@ -153,7 +160,7 @@ def _clamp_fill(idea: Idea, bounds: Optional[dict]) -> Idea:
     return idea
 
 
-def _state_brief(state: RunState, parent: Optional[Node]) -> str:
+def _state_brief(state: RunState, parent: Optional[Node], digest_cap: int = 0) -> str:
     best = state.best()
     lines = [f"Goal: {state.goal}", f"Optimize direction: {state.direction}."]
     if best is not None:
@@ -163,8 +170,13 @@ def _state_brief(state: RunState, parent: Optional[Node]) -> str:
     # Append the always-on "working set": a compact view of the whole search (top winners, weakest /
     # failures, theme map) so the Researcher proposes with awareness of what's already been tried,
     # not just `best` + `parent`. Depth (full experiments, code, data) lives behind the run tools.
-    from looplab.events.digest import experiments_digest
-    lines.append(experiments_digest(state))
+    from looplab.events.digest import experiments_digest, lineage_lessons, sibling_digest
+    lines.append(experiments_digest(state, char_cap=digest_cap))
+    # M1/A0c operator-scoped memory: draft/improve additionally see their SIBLINGS (diversity
+    # pressure — aira-dojo MEM_OPS `sibling`) and, when refining, the LESSONS distilled from the
+    # lineage under the refined node (D6 insight backpropagation, Arbor's Backpropagate step).
+    lines.append(sibling_digest(state, parent))
+    lines.append(lineage_lessons(state, parent))
     # P1: surface OPEN board hypotheses (human "+ Add" / deep-research directions) verbatim.
     # Without this the Researcher never sees them, and evidence only links when an experiment's
     # `hypothesis` matches the statement exactly — so board cards would stay "open" forever.
@@ -208,13 +220,18 @@ class LLMResearcher:
         # Strategist `prefer_sweep` bias (engine-set, empty when off): nudges — but never forces —
         # the Researcher toward an intra-node sweep when the cost model favors in-process execution.
         sweep_hint = getattr(self, "_sweep_hint", "")
+        # T5 novelty-gate feedback (engine-set, one re-propose): "you already tried X, it failed
+        # because Y — propose something meaningfully different". Empty in the normal path.
+        novelty_fb = getattr(self, "_novelty_feedback", "")
         hyp_sys = ("\n" + _HYPOTHESIS_INSTRUCTION) if self.track_hypotheses else ""
         messages = [
             {"role": "system",
              "content": render(self.prompts, "researcher_system", _RESEARCHER_SYSTEM) + hyp_sys
                         + "\n\n" + _attention_points()},
-            {"role": "user", "content": _state_brief(state, parent) + "\n" + self.space_hint +
-                                        hint_block + cue + sweep_hint +
+            {"role": "user", "content": _state_brief(state, parent,
+                                                     digest_cap=getattr(self, "_digest_cap", 0))
+                                        + "\n" + self.space_hint +
+                                        hint_block + cue + sweep_hint + novelty_fb +
                                         "\nPropose the next Idea (operator, params, rationale"
                                         + (", hypothesis" if self.track_hypotheses else "") +
                                         "; optionally a `space` grid for a sweep). The "
@@ -250,6 +267,10 @@ class LLMDeveloper:
     """Writes (and repairs) a complete runnable solution script. `brief` carries the
     task's I/O contract (where to read data, what metric to print). `repair` powers the
     error-feedback debug operator: it gets the failing code + stderr and fixes it."""
+
+    # T8/A0b: this Developer generates real code, so merge_mode="auto" resolves to the
+    # code-recombination ensemble merge (the verified strongest operator) instead of mean-params.
+    is_code_generating = True
 
     def __init__(self, client: LLMClient, brief: str = "",
                  prompts: Optional[PromptStore] = None):
@@ -336,6 +357,12 @@ class ValidatingDeveloper:
         self.last_shipped_ok: bool = False
         self.last_files: dict[str, str] = {}   # multi-file output of the shipped attempt
         self.last_deleted: list[str] = []      # accepted in-surface deletions of the shipped attempt
+
+    # T8/A0b: code-generation capability follows the INNER developer (the fallback is LLM anyway)
+    @property
+    def is_code_generating(self) -> bool:
+        return bool(getattr(self.inner, "is_code_generating", False)
+                    or getattr(self.fallback, "is_code_generating", False))
 
     # forward the brief/prompt hooks make_roles pokes at, to the wrapped developer
     @property

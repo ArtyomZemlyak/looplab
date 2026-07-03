@@ -108,7 +108,7 @@ def drive_tool_loop(client, tools, messages: list, emit_spec: dict, *,
                     stuck_detection: bool = True,
                     stuck_repeat: int = 4, stuck_alternate: int = 4,
                     self_plan: bool = False, plan_reinject_every: int = 5,
-                    auto_summary: bool = False, on_step=None):
+                    auto_summary: bool = False, summary_client=None, on_step=None):
     """Multi-turn tool loop shared by every tool-using agent (Researcher, unified-agent pilot/triage,
     Boss, genesis scout, cross-run report). The model MAY call the provided retrieval tools across
     turns; when it calls the emit function (named in `emit_spec`), `finalize(args)` is returned. If
@@ -165,7 +165,9 @@ def drive_tool_loop(client, tools, messages: list, emit_spec: dict, *,
         tool_specs = tool_specs + [_plan_spec()]
     current_plan = ""
     started = time.monotonic()
-    summarize = _summarizer(client) if auto_summary else None   # loop-invariant: build once, not per turn
+    # D11: history compression runs on the dedicated cheap compressor when configured, else the
+    # loop's own client. Loop-invariant: build once, not per turn.
+    summarize = _summarizer(summary_client or client) if auto_summary else None
     stalls = 0                          # consecutive prose turns we couldn't turn into a forced emit
     turns = itertools.count() if max_turns is None or max_turns <= 0 else range(max_turns)
     for turn_idx in turns:
@@ -274,9 +276,10 @@ def _summarizer(client):
 def loop_opts_from_settings(settings) -> dict:
     """Collect the config-driven tool-loop options (B1 stuck detection + C1 self-plan + C2
     auto-summary) into a dict to spread into `drive_tool_loop`. Plain scalars only — safe to reuse
-    across calls (the loop builds a FRESH StuckDetector per invocation from these thresholds)."""
+    across calls (the loop builds a FRESH StuckDetector per invocation from these thresholds) —
+    plus the optional D11 compression client (stateless, reusable)."""
     g = getattr
-    return {
+    opts = {
         "stuck_detection": bool(g(settings, "agent_stuck_detection", True)),
         "stuck_repeat": int(g(settings, "agent_stuck_repeat", 4)),
         "stuck_alternate": int(g(settings, "agent_stuck_alternate", 4)),
@@ -284,6 +287,18 @@ def loop_opts_from_settings(settings) -> dict:
         "plan_reinject_every": int(g(settings, "agent_plan_reinject_every", 5)),
         "auto_summary": bool(g(settings, "agent_auto_summary", True)),
     }
+    # D11 compression model slot (open_deep_research's four-slot pattern): a dedicated CHEAP
+    # summarizer for history compression, instead of paying the main model for it. Blank = the
+    # loop's own client (byte-identical legacy behavior).
+    if g(settings, "compressor_model", None):
+        from looplab.adapters.tasks import make_llm_client
+        try:
+            opts["summary_client"] = make_llm_client(
+                settings, model=settings.compressor_model,
+                base_url=g(settings, "compressor_base_url", None) or None)
+        except Exception:  # noqa: BLE001 — a bad compressor config degrades to the main client
+            pass
+    return opts
 
 
 class ToolUsingResearcher:
@@ -369,6 +384,7 @@ class ToolUsingResearcher:
         from looplab.agents.hints import render_hint_directives
         hint_block = render_hint_directives(state.pending_hints)
         cue = getattr(self, "_complexity_hint", "")   # A0d breadth-keyed complexity cue (empty=off)
+        cue += getattr(self, "_novelty_feedback", "")  # T5 novelty-gate re-propose feedback (empty=off)
         # Hypotheses ledger (P1): honor track_hypotheses on the agentic path too (default on, matching
         # config) — ask for the per-experiment `hypothesis` so the ledger of tested beliefs fills in.
         hyp = ""
@@ -379,7 +395,9 @@ class ToolUsingResearcher:
             {"role": "system",
              "content": render(self.prompts, "tool_researcher_system", self._SYSTEM)
                         + self.space_hint + hyp},
-            {"role": "user", "content": _state_brief(state, parent) + hint_block + cue +
+            {"role": "user", "content": _state_brief(state, parent,
+                                                     digest_cap=getattr(self, "_digest_cap", 0))
+                + hint_block + cue +
                 "\nDecide the next experiment — a parameter change OR a structural one (architecture, "
                 "loss, data, training) if that's the stronger move. Consult knowledge if useful, then emit."},
         ]

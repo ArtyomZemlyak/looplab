@@ -26,6 +26,7 @@ from looplab.search.policy import make_policy
 from looplab.events.replay import fold
 from looplab.runtime.sandbox import make_sandbox
 from looplab.adapters.tasks import TaskAdapter, kinds, load_task, make_llm_client, make_roles, validate_task
+from looplab.tools.vectorstore import make_embedder as _make_embedder
 from looplab.core import appconfig
 _TASK_KINDS = tuple(kinds())
 
@@ -228,13 +229,19 @@ def _engine(run_dir: Path, task: TaskAdapter, settings: Settings,
         policy=make_policy(settings.policy, n_seeds=settings.n_seeds,
                            max_nodes=settings.max_nodes, ablate_every=settings.ablate_every,
                            eta=settings.asha_eta,     # forwarded to ASHA (greedy/mcts/evo ignore it)
-                           rung_nodes=settings.asha_rung_nodes),
+                           rung_nodes=settings.asha_rung_nodes,
+                           debug_depth=settings.debug_depth,
+                           operator_bandit=settings.operator_bandit),
         max_parallel=settings.max_parallel,
         timeout=settings.timeout,
         sweep_timeout_mult=settings.sweep_timeout_mult,
         crash_after=crash_after,
         confirm_top_k=settings.confirm_top_k,
         confirm_seeds=settings.confirm_seeds,
+        confirm_seed_base=settings.confirm_seed_base,
+        holdout_fraction=settings.holdout_fraction,
+        holdout_select=settings.holdout_select,
+        holdout_top_k=settings.holdout_top_k,
         max_seconds=settings.max_seconds,
         max_eval_seconds=settings.max_eval_seconds,
         memory_dir=settings.memory_dir,
@@ -281,6 +288,14 @@ def _engine(run_dir: Path, task: TaskAdapter, settings: Settings,
         redact_output=settings.redact_output,
         novelty_gate=settings.novelty_gate,
         novelty_epsilon=settings.novelty_epsilon,
+        novelty_semantic=settings.novelty_semantic,
+        novelty_semantic_threshold=settings.novelty_semantic_threshold,
+        embedder=_make_embedder(settings),
+        debug_depth=settings.debug_depth,
+        operator_bandit=settings.operator_bandit,
+        digest_char_cap=settings.digest_char_cap,
+        research_verify=settings.research_verify,
+        workdir_audit=settings.workdir_audit,
         reflection_priors=settings.reflection_priors,
         track_hypotheses=settings.track_hypotheses,
         surrogate_explore=settings.surrogate_explore,
@@ -708,6 +723,37 @@ def init(
         raise typer.BadParameter(f"unknown task kind {kind!r}; choose one of: {', '.join(_TASK_KINDS)}")
     atomic_write_text(out, appconfig.render_template(kind))
     typer.echo(f"wrote {out} — edit it, then: looplab run {out}")
+
+
+@app.command()
+def harden(
+    memory_dir: Path = typer.Argument(..., help="Memory dir; the exploit suite lives at "
+                                                "<memory_dir>/exploits.jsonl."),
+    rounds: int = typer.Option(1, help="Hacker/fixer iterations."),
+):
+    """4.3 · Harden the reward-hack evaluator via a hacker-fixer-solver loop (arXiv:2606.08960).
+
+    Grows a persisted exploit ruleset: a hacker proposes eval exploits, a fixer turns each one the
+    current detector MISSES into a durable regex, and a solver guardrail rejects any rule that would
+    flag an honest solution. Every future run with this memory_dir + reward_hack_detect loads the
+    suite, so each discovered exploit stays guarded. Deterministic seed corpus (offline); no model."""
+    from looplab.trust.harden import ExploitSuite, harden as _harden
+    path = memory_dir / "exploits.jsonl"
+    memory_dir.mkdir(parents=True, exist_ok=True)
+    suite = ExploitSuite.load(path)
+    # Honest baselines the solver guardrail protects (a fix must never flag these).
+    legit = [
+        "import json\nimport numpy as np\nX=json.load(open('train.json'))['X']\n"
+        "pred=[0]*len(X)\njson.dump(pred, open('predictions.json','w'))",
+        "from sklearn.ensemble import RandomForestClassifier\nm=RandomForestClassifier().fit(Xtr,ytr)\n"
+        "json.dump(m.predict(Xte).tolist(), open('predictions.json','w'))",
+    ]
+    res = _harden(suite, legit_solutions=legit, rounds=rounds)
+    suite.save(path)
+    typer.echo(f"hardened: +{len(res['added'])} rules ({', '.join(res['added']) or 'none new'}); "
+               f"caught={res['caught']} escaped={res['escaped']} "
+               f"blocked_legit={len(res['blocked_legit'])}; suite now {len(suite.patterns)} rules "
+               f"at {path}")
 
 
 @app.command()

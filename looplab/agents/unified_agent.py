@@ -68,7 +68,8 @@ class UnifiedAgent:
     def propose(self, state: RunState, parent: Optional[Node]) -> Idea:
         # The engine sets ephemeral hints via `setattr(self.researcher, ...)` where self.researcher
         # is THIS agent; forward them to the internal researcher that actually reads them.
-        for attr in ("_complexity_hint", "_sweep_hint", "track_hypotheses"):
+        for attr in ("_complexity_hint", "_sweep_hint", "_novelty_feedback", "_digest_cap",
+                     "track_hypotheses"):
             if hasattr(self, attr):
                 setattr(self.researcher, attr, getattr(self, attr))
         return self.researcher.propose(state, parent)
@@ -76,6 +77,11 @@ class UnifiedAgent:
     @property
     def brief(self) -> str:
         return getattr(self.developer, "brief", "")
+
+    # T8/A0b: capability follows the internal developer (merge_mode="auto" resolution)
+    @property
+    def is_code_generating(self) -> bool:
+        return bool(getattr(self.developer, "is_code_generating", False))
 
     # ----------------------------------------------------------- Developer
     def implement(self, idea: Idea) -> str:

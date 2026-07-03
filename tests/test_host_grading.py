@@ -38,8 +38,12 @@ def _dev(code_body):
 
 
 def _run(tmp_path, code):
+    # holdout_fraction=0 pins the LEGACY full-label scoring this file tests; the D1
+    # label-partition path (search scored on the complement of a reserved holdout) has its
+    # own coverage in tests/test_holdout.py.
     eng = Engine(tmp_path, task=_PredTask(), researcher=_Stub(), developer=_dev(code),
-                 sandbox=SubprocessSandbox(), policy=GreedyTree(n_seeds=1, max_nodes=1))
+                 sandbox=SubprocessSandbox(), policy=GreedyTree(n_seeds=1, max_nodes=1),
+                 holdout_fraction=0.0)
     return anyio.run(eng.run)
 
 

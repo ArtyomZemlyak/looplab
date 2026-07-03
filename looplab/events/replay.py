@@ -10,6 +10,21 @@ from looplab.core.models import (Event, Hypothesis, Idea, Node, NodeStatus, RunS
                      hypothesis_id)
 
 
+def flagged_node_ids(st: RunState) -> set:
+    """T2: node ids excluded from best/holdout selection under trust_gate gate/block — those with a
+    HIGH-PRECISION cheating/leakage signal. The heuristic `critic:` and `perfect_metric` signals
+    stay advisory in every mode (perfect_metric flags metric<=0 (min) / >=1 (max), which
+    legitimately-perfect scores hit, so gating on it could exclude honest winners). Empty under
+    `audit`. Shared by the fold and the engine's holdout-topk so both apply the SAME exclusion."""
+    if st.trust_gate not in ("gate", "block"):
+        return set()
+
+    def _has_hard_signal(rh: dict) -> bool:
+        return any(not str(s.get("signal", "")).startswith(("critic:", "perfect_metric"))
+                   for s in (rh.get("signals") or []))
+    return {r.get("node_id") for r in st.reward_hacks if _has_hard_signal(r)}
+
+
 def fold(events: Iterable[Event]) -> RunState:
     st = RunState()
     best_confirmed: int | None = None
@@ -29,6 +44,14 @@ def fold(events: Iterable[Event]) -> RunState:
             st.workspace = d.get("workspace")
             _tg = str(d.get("trust_gate", "audit")).strip().lower()
             st.trust_gate = _tg if _tg in ("audit", "gate", "block") else "audit"
+            # D1: recorded at start so replay applies the same selection rule. Absent in old
+            # logs -> False -> byte-identical legacy selection.
+            st.holdout_select = bool(d.get("holdout_select", False))
+            # The reserved-holdout fraction the run committed to (the split every search metric was
+            # scored against). None in old logs; the engine re-uses it on resume so a changed live
+            # setting can't make pre/post-resume metrics incomparable.
+            _hf = d.get("holdout_fraction")
+            st.holdout_fraction = float(_hf) if isinstance(_hf, (int, float)) else None
         elif t == "trust_gate_changed":
             # Operator edited the run's trust gate after launch (server config edit). Last write
             # wins so the change engages in every fold — live view, resume, reset — immediately.
@@ -116,6 +139,20 @@ def fold(events: Iterable[Event]) -> RunState:
                 n.confirmed_mean = d.get("mean")
                 n.confirmed_std = d.get("std")
                 n.confirmed_seeds = d.get("seeds")
+        elif t == "holdout_evaluated":
+            # D1 holdout-gated promotion: the engine re-scored this val-leader's predictions on
+            # the FINAL holdout partition the search never saw. Tolerant like node_evaluated:
+            # an event for an unknown node (corrupt log) is skipped, and a null metric (missing
+            # predictions) records nothing — such a node simply can't win the holdout pick.
+            nid = d.get("node_id")
+            if nid is not None and nid not in st.holdout_evaluated_ids:
+                st.holdout_evaluated_ids.append(nid)   # gate: attempted, even if metric is null
+            n = st.nodes.get(nid)
+            if n is not None and d.get("metric") is not None:
+                try:
+                    n.holdout_metric = float(d["metric"])
+                except (TypeError, ValueError):
+                    pass
         elif t == "agent_validated":
             n = st.nodes.get(d.get("node_id"))
             if n is not None:                       # audit only; never affects selection
@@ -304,17 +341,9 @@ def fold(events: Iterable[Event]) -> RunState:
         # unknown event types (e.g. "budget") are ignored for state — forward-compat
 
     # T2 trust enforcement: under "gate"/"block", a node flagged for a reward-hack or data-leakage
-    # signal must not be selectable as best (closes "a hacked/leaky node can win"). Gate ONLY on the
-    # high-precision cheating/leakage signals — the heuristic `critic:` signal stays advisory in
-    # every mode. Order-independent: computed from the folded `reward_hacks` after the full pass.
-    def _has_hard_signal(rh: dict) -> bool:
-        # `critic:` AND `perfect_metric` stay advisory: perfect_metric flags metric<=0 (min) /
-        # >=1 (max), which legitimately-perfect scores (accuracy 1.0, an achievable 0.0 floor,
-        # negative-valued objectives) hit — gating on it can exclude every honest winner.
-        return any(not str(s.get("signal", "")).startswith(("critic:", "perfect_metric"))
-                   for s in (rh.get("signals") or []))
-    flagged = ({r.get("node_id") for r in st.reward_hacks if _has_hard_signal(r)}
-               if st.trust_gate in ("gate", "block") else set())
+    # signal must not be selectable as best (closes "a hacked/leaky node can win"). Order-independent:
+    # computed from the folded `reward_hacks` after the full pass (see `flagged_node_ids`).
+    flagged = flagged_node_ids(st)
     # "block" additionally bars the policy from breeding a flagged node forward (feasible=False also
     # removes it from `feasible_nodes()` used by the search policies), not just from winning.
     if st.trust_gate == "block":
@@ -353,6 +382,27 @@ def fold(events: Iterable[Event]) -> RunState:
             and st.nodes[best_confirmed].feasible
             and best_confirmed not in flagged):
         st.best_node_id = best_confirmed
+
+    # D1 holdout-gated promotion: when the run recorded holdout_select, the champion is the best
+    # node ON THE HOLDOUT PARTITION among those that were holdout-scored (the val-top-k — so the
+    # search metric still decides WHO gets a holdout eval, but the unseen signal decides who WINS).
+    # Applied LAST: the holdout is a stronger discipline than the confirm mean (it is data/splits
+    # the search never optimized against — AIRA: picking on the search signal overfits 9-13 pp).
+    # Same guards as every other pick: feasibility + trust flags.
+    if st.holdout_select and evaluated:
+        hpool = [n for n in evaluated if n.holdout_metric is not None]
+        if hpool:
+            chooser = min if st.direction == "min" else max
+            st.best_node_id = chooser(hpool, key=lambda n: (n.holdout_metric, n.id)).id
+
+    # Derived generalization gap (audit-only, Trust panel): how much better the search metric
+    # looked than the unseen-signal metric — holdout when present, else the confirmed mean.
+    # Direction-aware so positive always means "overperformed on the signal the search saw".
+    for n in st.nodes.values():
+        robust = n.holdout_metric if n.holdout_metric is not None else n.confirmed_mean
+        if robust is None or n.metric is None:
+            continue
+        n.generalization_gap = (n.metric - robust) if st.direction == "max" else (robust - n.metric)
 
     _derive_hypotheses(st)   # P1: audit-only ledger (after best is known); never touches selection
     return st

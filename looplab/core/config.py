@@ -33,6 +33,7 @@ PROFILES: dict[str, dict] = {
         "confirm_top_k": 3,
         "confirm_seeds": 3,
         "novelty_gate": True,
+        "operator_bandit": True,   # P4: adaptive operator mix over folded yields (GreedyTree)
         "reward_hack_detect": True,
         "code_leakage_detect": True,
         "critic_check": True,
@@ -95,8 +96,12 @@ class Settings(BaseSettings):
     ablate_code_blocks: bool = False
     # A0b: real merge/ensembling. "mean" = legacy mean-param merge; "ensemble" = the Developer
     # writes a code-recombination ensemble over the two parents' solutions (verified: agent-proposed
-    # ensembling 37.9%->43.9%). Falls back to mean when the Developer can't ensemble.
-    merge_mode: str = "mean"
+    # ensembling 37.9%->43.9%). "auto" (default) = ensemble whenever the Developer actually
+    # generates code (LLM/agent backends; declared via `is_code_generating`), mean for the
+    # templated/toy developers where a code ensemble is meaningless — the evidence says code
+    # recombination is the strongest single merge (removing it costs ~9 pp), so it is the default
+    # wherever it can work. Falls back to mean when the Developer can't ensemble.
+    merge_mode: str = "auto"
     # A0d (AIRA): inject a dynamic complexity hint into the draft/improve prompt keyed on the
     # node's child count (few children -> keep minimal; many -> escalate to ensembling/HPO).
     complexity_cue: bool = False
@@ -111,8 +116,10 @@ class Settings(BaseSettings):
     # No-op unless a max_eval_seconds budget is set.
     budget_aware: bool = False
     # A4 (LATS-style): feed a summary of the most recent FAILED branches (operator + error reason)
-    # back into the proposal prompt so the proposer reflects on and avoids repeating them. Off default.
-    failure_reflection: bool = False
+    # back into the proposal prompt so the proposer reflects on and avoids repeating them. ON by
+    # default: it is SELECTIVE by construction (injects only when recent failures exist — the
+    # evidenced form of reflection; reflecting at every step shows no gains, arXiv:2506.12928).
+    failure_reflection: bool = True
     # C3 deep test-driven repair: hand the Developer the failure taxonomy + a structured "reproduce
     # then fix" directive on debug, not just the raw stderr tail. Off by default.
     deep_repair: bool = True
@@ -195,6 +202,22 @@ class Settings(BaseSettings):
     # wasting evals re-trying the same idea. Audit event `novelty_rejected`. Off by default.
     novelty_gate: bool = False
     novelty_epsilon: float = 0.05
+    # T5 semantic novelty (Phase 2, needs novelty_gate): ALSO reject a proposal whose idea TEXT
+    # (rationale+hypothesis) embeds within `novelty_semantic_threshold` cosine of an existing
+    # node's — with one informed re-propose surfacing the duplicate's outcome ("you tried X, it
+    # failed because Y"). ShinkaEvolve's ablation ranks duplicate-rejection-before-eval above
+    # model routing. Uses the T4 embedder (hash_embed fallback, zero-dep).
+    novelty_semantic: bool = True
+    novelty_semantic_threshold: float = Field(default=0.92, ge=0.5, le=1.0)
+    # T10: debug-lineage depth bound for every policy — how many error-feedback repairs a failing
+    # lineage gets before it is abandoned. The old default (1) abandoned lineages after ONE repair;
+    # multi-turn/deeper debugging is a verified lever (AIRA2 ReAct debug +5.5 percentile points).
+    debug_depth: int = Field(default=2, ge=1)
+    # P4 operator bandit (GreedyTree): replace the fixed merge/ablate cadences with a
+    # deterministic UCB over per-operator yield (Δmetric per eval-second, folded from the run).
+    # Off by default (the cadences are well-tested and the bandit has no direct published
+    # ablation); `thorough` turns it on.
+    operator_bandit: bool = False
     # P1 hypothesis ledger: ask the Researcher to state the one-line hypothesis each experiment tests,
     # register deep-research directions as hypotheses, and track them to a verdict on the board. ON by
     # default (audit-only — never changes selection). Set False to drop the prompt nudge + registration.
@@ -226,6 +249,15 @@ class Settings(BaseSettings):
     # I3 data-centric: static code-leakage scan of each evaluated solution (fit-before-split,
     # fit-on-test) surfaced into the Trust panel alongside reward-hack flags. Off by default.
     code_leakage_detect: bool = False
+    # 4.4 sandbox instrumentation (needs reward_hack_detect): after each eval, flag a RUNTIME write
+    # to a protected/frozen file (an answer key or grader tampered mid-run) — behavioral evidence a
+    # static code scan misses. ON by default; only fires when the reward-hack detector is on.
+    workdir_audit: bool = True
+    # D8 decoupled research Verifier: check every Deep-Research memo's CLAIMS against their cited
+    # evidence (node ids / urls) before recording — synthesis is the documented weak link (Kosmos
+    # 57.9% accurate). Deterministic layer always; an LLM rubric pass when the DeepResearcher has a
+    # client. Audit-only (verdicts ride inside the memo). ON by default (no-op with no memo/claims).
+    research_verify: bool = True
     # C4 independent critic: an execution-free critic of each solution (stub / hardcoded-metric /
     # params-ignored; on host-graded tasks the metric checks become a submission-output check)
     # surfaced in the Trust panel. Audit-only. Off by default.
@@ -242,6 +274,23 @@ class Settings(BaseSettings):
     # finishing. 0 disables (default). Only meaningful when eval has variance.
     confirm_top_k: int = 0
     confirm_seeds: int = 0
+    # D1 seed-holdout discipline: the FIRST seed the confirm phase uses. Search evals run with the
+    # implicit seed 0 (LOOPLAB_EVAL_SEED unset -> "0"), so a base of 1 keeps every confirm split
+    # DISJOINT from anything the search optimized against — the confirm metric is then a
+    # generalization signal, not a re-measurement (AIRA: selecting on a signal the search saw
+    # overfits by 9-13 pp). Set 0 to restore the legacy overlapping seeds 0..N-1.
+    confirm_seed_base: int = Field(default=1, ge=0)
+    # D1 holdout-gated promotion (B6, Arbor-style): for host-graded tasks, reserve this fraction of
+    # the held-out labels as a FINAL holdout partition the search never sees — every search/confirm
+    # eval is scored on the remaining rows only, and at finish the val-top-k are re-scored on the
+    # holdout partition (free: the predictions already exist). 0.0 = off (legacy full-label scoring).
+    holdout_fraction: float = Field(default=0.25, ge=0.0, le=0.9)
+    # Champion selection prefers the HOLDOUT metric among the nodes that have one (the val-top-k).
+    # Recorded in run_started so replay applies the same rule; old logs fold to False (legacy pick).
+    # The per-node val-holdout `generalization_gap` folds into the Trust panel either way.
+    holdout_select: bool = True
+    # How many val-leaders get a holdout evaluation at finish (host-graded tasks).
+    holdout_top_k: int = Field(default=3, ge=1)
     # Budget (I13): hard wall-clock ceiling; the run aborts cleanly when exceeded.
     max_seconds: float | None = None
     # Eval-compute budget (#2): hard ceiling on cumulative time spent INSIDE evals (training
@@ -264,6 +313,16 @@ class Settings(BaseSettings):
     # execution-free reward (static validity + metric-print). 1 = off. In-house LLM developer only
     # (not external agents — ADR-7 cost rule). The top SWE-bench reliability lever for weak models.
     best_of_n: int = 1
+    # D10 list-wise best-of-N selection: when the top static-scorers TIE, break the tie with a
+    # comparative LLM selection over the candidates presented together (+~3 pts vs pointwise on
+    # GAIA, arXiv:2506.12928). The static score stays the primary filter — the LLM is a weak
+    # comparative prior, never the sole oracle. ON by default (no-op when best_of_n==1).
+    best_of_n_listwise: bool = True
+    # T7 LLM response cache: serve an identical DETERMINISTIC (temperature 0) request from an
+    # in-process content-addressed cache instead of re-hitting the model — cuts cost on
+    # retry/panel/verify flows. NEVER caches sampling calls (temp>0: best-of-N / panel / novelty
+    # re-propose must vary). Off by default (most role calls run at temperature>0 anyway).
+    llm_cache: bool = False
     agent_cmd: str | None = None  # override the agent's launcher (path / wrapper)
     # External-agent validation (ADR-7): wrap a CLI-agent Developer with a validator that
     # audits each output (no-op/syntax/crash/timeout), retries with feedback, and falls
@@ -335,6 +394,16 @@ class Settings(BaseSettings):
     # H4: cap the growing agentic-researcher tool-call history (chars) by middle-truncating stale
     # tool output, so a long trace doesn't blow the context window. 0 = off (unbounded).
     context_budget_chars: int = 0
+    # M5: the Researcher's always-on experiments digest budget (chars). 0 = AUTO — scales with the
+    # run size (60 chars/node, bounded [1200, 6000]) instead of one flat cap for an 8-node toy run
+    # and a 200-node benchmark run alike. Set a positive value to pin it.
+    digest_char_cap: int = Field(default=0, ge=0)
+    # D11 compression model slot (open_deep_research's four-slot pattern): a dedicated CHEAP model
+    # for agent-history summarization (C2 auto-summary), so compression doesn't pay the main
+    # model's price. Blank = use each loop's own model (legacy). `compressor_base_url` blank =
+    # the shared llm_base_url.
+    compressor_model: str | None = None
+    compressor_base_url: str | None = None
     # Agentic tool-loop limits — apply to EVERY tool-using agent (the LLM Researcher, the unified
     # agent's pilot + crash-triage, Deep-Research, the run-chat Boss, the genesis repo-scout, and the
     # cross-run report synthesizer). The loop lets the model call read-only tools across turns before
@@ -467,6 +536,9 @@ class Settings(BaseSettings):
         if self.trust_gate not in ("audit", "gate", "block"):
             raise ValueError(
                 f"trust_gate must be audit|gate|block, got {self.trust_gate!r}")
+        if self.merge_mode not in ("auto", "mean", "ensemble"):
+            raise ValueError(
+                f"merge_mode must be auto|mean|ensemble, got {self.merge_mode!r}")
         return self
 
     def masked_snapshot(self) -> dict:

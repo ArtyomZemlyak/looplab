@@ -55,6 +55,8 @@ class StrategyContext(BaseModel):
     improves_since_best: int = 0
     is_numeric_space: bool = False
     avg_eval_seconds: Optional[float] = None   # mean per-node eval cost so far (sweep cost signal)
+    node_budget_frac: float = 0.0              # fraction of the node budget spent (P2 endgame reserve)
+    current_policy: str = "greedy"             # the ACTIVE policy (for switch-back rules, D3)
     available_policies: list[str] = Field(default_factory=list)
     available_developers: list[str] = Field(default_factory=list)
     defaults: dict = Field(default_factory=dict)   # the static config Strategy (fallback/start)
@@ -195,6 +197,17 @@ class RuleStrategist:
                     "rationale": "eval budget <20% left: exploit the current leader, no new breadth",
                     "source": "rule"}
 
+        # P2/D13 endgame reserve: in the FINAL fraction of the node budget, stop opening new breadth
+        # and spend the reserve on a final ENSEMBLE of the strongest solutions at full fidelity —
+        # top MLE-bench systems reserve an explicit final-ensemble/confirm window rather than
+        # exploring until the budget dies. (The confirm phase then runs at finish as usual.)
+        if ctx.node_budget_frac >= 0.8 and ctx.phase in ("explore", "exploit"):
+            return {"policy": "greedy", "fidelity": "full",
+                    "operators": {"merge_mode": "ensemble", "ablate_every": 0},
+                    "rationale": f"endgame ({ctx.node_budget_frac:.0%} of node budget spent): "
+                                 "reserve for a final ensemble of the top solutions, no new breadth",
+                    "source": "rule"}
+
         # High failure rate -> stop spending breadth on broken code; deepen repair, narrow search.
         if ctx.failure_rate > 0.4:
             strat: Strategy = {"policy": "greedy", "fidelity": "adaptive",
@@ -204,6 +217,20 @@ class RuleStrategist:
             if "agentless" in ctx.available_developers:
                 strat["developer"] = "agentless"   # only when C5 has landed
             return strat
+
+        # D3 (FML-bench): the adaptive greedy⇄broad cycle beats every FIXED strategy. The stall
+        # rule below broadens the search when the leader stops moving; THIS rule closes the loop —
+        # once a broadened search produced a fresh leader (no current stall), return to greedy
+        # exploitation instead of paying breadth forever. Greedy wins when improvement
+        # opportunities are dense; breadth wins when they're sparse — the signal is stagnation.
+        if (ctx.current_policy not in ("", "greedy")
+                and ctx.improves_since_best < self.stall_window
+                and ctx.phase == "exploit"):
+            return {"policy": "greedy", "fidelity": "adaptive",
+                    "rationale": f"fresh leader under {ctx.current_policy} "
+                                 "(no stall): switch back to greedy exploitation "
+                                 "(adaptive greedy⇄broad beats fixed strategies)",
+                    "source": "rule"}
 
         # Stall: the leader hasn't been dethroned for a while. Per the verified "operators > search"
         # finding, first probe operators (bump ablation); if MCTS is available, switch to explore.

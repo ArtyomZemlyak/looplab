@@ -89,6 +89,16 @@ class Node(BaseModel):
     confirmed_mean: Optional[float] = None
     confirmed_std: Optional[float] = None
     confirmed_seeds: Optional[int] = None   # how many seeds actually succeeded (I12)
+    # D1 holdout-gated promotion (B6): metric of this node on the FINAL holdout partition the
+    # search never saw (set by a `holdout_evaluated` event at finish, val-top-k only). When
+    # `holdout_select` was recorded on the run, best-selection ranks holdout-carrying nodes by
+    # THIS metric — the anti-validation-overfitting gate (AIRA val-test gap 15-16.6%).
+    holdout_metric: Optional[float] = None
+    # Direction-aware val-vs-robust gap, DERIVED by the fold: how much better the search metric
+    # looked than the unseen-signal metric (holdout, else confirmed mean). Positive = the node
+    # overperformed on the signal the search optimized — the overfitting indicator the Trust
+    # panel surfaces. Audit-only.
+    generalization_gap: Optional[float] = None
     eval_seconds: Optional[float] = None     # wall-clock of this node's eval (cost accounting #2)
     # Multi-objective (#5): extra reported metrics + unmet hard constraints. `feasible` is
     # False when any constraint was violated — such a node keeps its metric (for the audit
@@ -153,6 +163,12 @@ class ResearchMemo(BaseModel):
     summary: str = ""                                   # one-paragraph conclusion (the takeaway)
     reasoning: str = ""                                 # the "think hard" narrative (debug-only)
     findings: list[str] = Field(default_factory=list)   # concrete observations across results/web
+    # D8 evidence ledger: findings as CLAIMS with per-claim provenance — {statement,
+    # node_ids: [int], urls: [str]}. Kosmos's failure data says cross-evidence SYNTHESIS is the
+    # weakest link (57.9% accurate vs ~85% for analysis), so every synthesis claim must be
+    # traceable to the experiments/sources it rests on; the Verifier (trust/verify.py) then
+    # checks each claim against its cited evidence and flags the unsupported ones.
+    claims: list[dict] = Field(default_factory=list)
     sources: list[dict] = Field(default_factory=list)   # {title, url} consulted (web/arXiv)
     recommended_directions: list[str] = Field(default_factory=list)  # what to try next (steer hints)
     # Optional concrete proposals the engine may materialize as injected nodes (empty for v1; the
@@ -195,6 +211,13 @@ class RunState(BaseModel):
     # T2 trust enforcement (folded from run_started; "audit" for old logs). "gate"/"block" make
     # best-selection exclude nodes flagged for a reward-hack / data-leakage signal (not critic).
     trust_gate: str = "audit"
+    # D1 holdout-gated promotion (folded from run_started; False for old logs -> byte-identical
+    # legacy selection). When True, best-selection prefers the holdout metric among the nodes
+    # that carry one (the val-top-k re-scored on the unseen partition at finish).
+    holdout_select: bool = False
+    # The reserved-holdout fraction the run committed to at start (None in old logs / when off).
+    # The engine re-uses this on resume so the split every metric was scored against never changes.
+    holdout_fraction: Optional[float] = None
     nodes: dict[int, Node] = Field(default_factory=dict)
     best_node_id: Optional[int] = None
     finished: bool = False
@@ -231,6 +254,10 @@ class RunState(BaseModel):
     # lets a crash-interrupted confirm pass RESUME mid-node (skip seeds already run) instead of
     # re-executing every expensive full-profile seed from scratch.
     confirm_seed_results: dict[int, dict] = Field(default_factory=dict)
+    # D1: every node that received a `holdout_evaluated` event (even with a null metric — e.g.
+    # its predictions file was gone). The replay-safe gate that stops the holdout phase from
+    # re-attempting a node forever on resume.
+    holdout_evaluated_ids: list[int] = Field(default_factory=list)
 
     # --- live operator control (UI intervention via the event log) ---
     # These are folded from appended CONTROL events (intent). The engine remains the sole writer

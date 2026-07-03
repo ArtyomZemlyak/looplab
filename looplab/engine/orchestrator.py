@@ -129,6 +129,38 @@ def _failure_reason(res) -> str:
     return "no_metric"          # exit 0 but no parseable metric emitted
 
 
+def _normalize_error_sig(err: str) -> str:
+    """T10: normalize an error before the anti-stuck compare — strip memory addresses, line
+    numbers, absolute paths and numeric literals so two SEMANTICALLY-identical errors (same
+    exception, same message shape) match even when incidental details differ. The exact-match
+    compare missed e.g. the same shape-mismatch recurring with different tensor sizes."""
+    import re
+    s = " ".join((err or "").strip().split())
+    s = re.sub(r"0x[0-9a-fA-F]+", "0xADDR", s)
+    s = re.sub(r"line \d+", "line N", s)
+    s = re.sub(r"(?:[A-Za-z]:)?[/\\][^\s'\":,)]+", "/PATH", s)
+    s = re.sub(r"\d+(?:\.\d+)?(?:e[+-]?\d+)?", "N", s)
+    return s[-160:]
+
+
+def _holdout_indices(n: int, fraction: float) -> frozenset:
+    """D1: the deterministic holdout partition over n host-held labels. A pure function of
+    (n, fraction) — identical on every resume/replay with no state to persist.
+
+    Reserves an EXACT count = round(fraction·n) rows (clamped to [1, n-1] whenever fraction>0), so
+    the holdout size is controlled even for small n — a per-index Bernoulli threshold would leave
+    the count uncontrolled (e.g. n=4, frac=0.25 could reserve 0/2/3 rows), making the champion-
+    selecting 'unseen signal' noisy on exactly the small-data tasks where it matters most. Which
+    rows are chosen is spread deterministically through the label order by Knuth multiplicative
+    hashing (no head/tail bias if the data is sorted)."""
+    if float(fraction) <= 0 or n < 2:
+        return frozenset()          # fraction 0 = holdout off; n<2 can't split without collapsing
+    k = max(1, min(n - 1, int(round(float(fraction) * n))))   # exact reserved count, non-degenerate
+    # Pick the k rows with the smallest hash — a stable, uniform, deterministic selection.
+    ranked = sorted(range(n), key=lambda i: (((i * 2654435761) & 0xFFFFFFFF), i))
+    return frozenset(ranked[:k])
+
+
 # Env-prep: max auto-install + re-run rounds per node before giving up (a re-run can reveal a
 # *second* missing lib; bound it so an odd install state can't loop). The `_dep_failed` cache
 # already prevents re-attempting the same uninstallable module.
@@ -177,6 +209,7 @@ class Engine:
         crash_after: Optional[int] = None,
         confirm_top_k: int = 0,
         confirm_seeds: int = 0,
+        confirm_seed_base: int = 1,   # D1: first confirm seed; 1 keeps confirm splits disjoint from search's seed 0
         max_seconds: Optional[float] = None,
         max_eval_seconds: Optional[float] = None,
         memory_dir: Optional[str] = None,
@@ -230,6 +263,23 @@ class Engine:
         dep_install_timeout: float = 900.0,  # per-package install wall-clock budget (seconds)
         dep_installer=None,                  # Optional[Callable] install hook (test seam; default = deps.install)
         agent_control: Optional[dict] = None,  # per-setting allow-list of roles that may change it (governance)
+        # D1 holdout-gated promotion (B6): reserve a fraction of host-held labels as a FINAL
+        # holdout partition the search never sees; at finish, re-score the val-top-k on it and
+        # (when holdout_select) let the unseen signal pick the champion. Host-graded tasks only
+        # (label-partition holdout is free — the predictions already exist); 0.0 = off.
+        holdout_fraction: float = 0.25,
+        holdout_select: bool = True,
+        holdout_top_k: int = 3,
+        # Phase 2 (D3/D4/T10/P4) knobs — kept on the engine so strategist-driven policy swaps
+        # rebuild policies with the same run-wide settings.
+        debug_depth: int = 1,            # T10: debug-lineage bound for every policy
+        operator_bandit: bool = False,   # P4: deterministic UCB over operator yields (GreedyTree)
+        novelty_semantic: bool = True,       # T5: embedding-similarity idea dedup (needs novelty_gate)
+        novelty_semantic_threshold: float = 0.92,
+        embedder=None,                       # text→vector callable (default: zero-dep hash_embed)
+        digest_char_cap: int = 0,            # M5: digest prompt budget; 0 = auto-scale with run size
+        research_verify: bool = True,        # D8: verify memo claims against cited evidence
+        workdir_audit: bool = True,          # 4.4: flag unexpected writes in the eval workdir
     ):
         self.run_dir = Path(run_dir)
         self.task = task
@@ -264,6 +314,13 @@ class Engine:
         self.report_every = max(0, report_every)
         self.developer_factory = developer_factory
         self._developer_name = "default"
+        # A0b/T8: "auto" resolves by Developer capability — code recombination is the verified
+        # strongest merge (removing it costs ~9 pp), so it is the default wherever the Developer
+        # actually GENERATES code (LLM/agent backends declare `is_code_generating`); templated/toy
+        # developers keep the legacy mean-param merge (a code ensemble is meaningless there).
+        if merge_mode == "auto":
+            merge_mode = ("ensemble" if getattr(developer, "is_code_generating", False)
+                          else "mean")
         self._merge_mode = merge_mode
         self._complexity_cue = complexity_cue
         self._prefer_sweep = False   # A7: Strategist-set bias toward intra-node sweeps (audit-driven)
@@ -307,6 +364,27 @@ class Engine:
         self._redact_output = redact_output
         self._novelty_gate = novelty_gate
         self._novelty_epsilon = novelty_epsilon
+        # T5 semantic novelty (Phase 2): reject a proposal whose idea TEXT is a near-duplicate of
+        # an existing node's — with one informed re-propose when the duplicate FAILED (the
+        # ShinkaEvolve lever: novelty rejection before evaluation, ablation-ranked above model
+        # routing). hash_embed is the zero-dep default; T4 wires a real embedder from config.
+        self._novelty_semantic = bool(novelty_semantic)
+        self._novelty_semantic_threshold = float(novelty_semantic_threshold)
+        if embedder is None:
+            from looplab.tools.vectorstore import hash_embed as _he
+            embedder = _he
+        self._embedder = embedder
+        self._idea_vecs: dict[int, list] = {}   # node_id -> embedding of its idea text (lazy cache)
+        self._debug_depth = max(1, int(debug_depth))
+        self._operator_bandit = bool(operator_bandit)
+        # M5: the Researcher's always-on digest budget (0 = auto-scale with run size).
+        try:
+            setattr(researcher, "_digest_cap", int(digest_char_cap))
+        except Exception:  # noqa: BLE001 — toy researchers without attrs are fine
+            pass
+        self._research_verify = bool(research_verify)
+        self._workdir_audit = bool(workdir_audit)
+        self._exploit_suite = None   # 4.3 hardened ruleset; loaded once memory_dir is set (below)
         self._reflection_priors = reflection_priors
         self._track_hypotheses = track_hypotheses
         self._surrogate_explore = surrogate_explore
@@ -325,6 +403,17 @@ class Engine:
         self.max_seconds = max_seconds
         self.max_eval_seconds = max_eval_seconds
         self.memory_dir = memory_dir
+        # 4.3: load the hardened exploit ruleset grown by `looplab harden` (hacker-fixer-solver)
+        # from <memory_dir>/exploits.jsonl — merged into the reward-hack scan so every
+        # previously-discovered exploit stays guarded on later runs. None => built-in detector only.
+        if self.memory_dir and self.reward_hack_detect:
+            _ep = Path(self.memory_dir) / "exploits.jsonl"
+            if _ep.exists():
+                try:
+                    from looplab.trust.harden import ExploitSuite
+                    self._exploit_suite = ExploitSuite.load(_ep)
+                except Exception:  # noqa: BLE001
+                    self._exploit_suite = None
         self.require_approval = require_approval
         self.archive_resolution = archive_resolution
         # RepoTask onboarding (Phase 3): `onboarder()` -> a proposed {eval_spec,
@@ -369,6 +458,21 @@ class Engine:
         # FS or the event log. Works for ANY solution.py-path task, not just MLEBench.
         hg = getattr(task, "host_grader", None)
         self._host_grader: Optional[dict] = hg() if callable(hg) else None
+        # D1 holdout partition: a deterministic subset of the host-held labels reserved as the
+        # final unseen signal. Every search/confirm eval is scored on the COMPLEMENT only; the
+        # holdout rows are touched exactly once, at finish, to re-score the val-top-k. The
+        # partition is a pure function of (n_labels, fraction) — identical across resume/replay,
+        # no state to persist. Real MLE-bench (kind="mlebench") is graded by the official
+        # out-of-process grader, which the engine cannot partition — skipped.
+        self.confirm_seed_base = max(0, int(confirm_seed_base))
+        self._holdout_select = bool(holdout_select)
+        self._holdout_top_k = max(1, int(holdout_top_k))
+        # The FRACTION defines the split every search metric is scored against, so it must be pinned
+        # in the event log (like trust_gate / holdout_select) — on resume the recorded value is
+        # re-used (see run()), so a changed live setting can't silently make pre/post-resume metrics
+        # incomparable. `_build_holdout_idx` rebuilds the partition from a fraction.
+        self._holdout_fraction = float(holdout_fraction)
+        self._holdout_idx: frozenset = self._build_holdout_idx(self._holdout_fraction)
         # RepoTask (ADR-7): an existing repo the agent edits + a command-based eval.
         rs = getattr(task, "repo_spec", None)
         self._repo_spec: dict = rs() if callable(rs) else {}
@@ -485,6 +589,11 @@ class Engine:
                         # gate on replay/resume (config isn't available to `replay.fold`). Absent in
                         # old logs -> "audit" -> byte-identical legacy selection.
                         "trust_gate": self.trust_gate,
+                        # D1 holdout-gated promotion: same recorded-at-start discipline. Absent in
+                        # old logs -> False -> byte-identical legacy selection. The FRACTION is
+                        # pinned too so a resume re-uses the exact split every metric was scored on.
+                        "holdout_select": self._holdout_select,
+                        "holdout_fraction": self._holdout_fraction,
                     },
                 )
                 # AGENTS.md (I18): task/contract context for coding-agent backends. Runtime line is
@@ -542,6 +651,15 @@ class Engine:
         _entry = fold(self.store.read_all())
         if _entry.active_strategy:
             self._apply_strategy(_entry.active_strategy)
+        # D1 resume-safety: honor the holdout split the run ORIGINALLY committed to (recorded in
+        # run_started), not a possibly-changed live `holdout_fraction` — otherwise nodes evaluated
+        # before vs. after a config change would be scored on different splits and the champion pick
+        # would mix incomparable metrics. Recorded holdout_select likewise wins on resume.
+        if _entry.holdout_fraction is not None:
+            if _entry.holdout_fraction != self._holdout_fraction:
+                self._holdout_fraction = _entry.holdout_fraction
+                self._holdout_idx = self._build_holdout_idx(self._holdout_fraction)
+            self._holdout_select = _entry.holdout_select
         self._prior_note_text = self._load_reflection_priors()   # E4: cross-run meta-learned priors
         start = time.time()
         while True:
@@ -690,6 +808,13 @@ class Engine:
                 if (self.confirm_top_k > 0 and self.confirm_seeds > 0
                         and not self._already_confirmed(state)):
                     await self._confirm_phase(state)
+                    continue
+                # D1 holdout-gated promotion: AFTER the confirm pass (so confirmed means pick the
+                # top-k), re-score the val-leaders' predictions on the reserved holdout partition.
+                # Free (no re-training) and replay-safe (gated per node). The fold then lets the
+                # unseen signal pick the champion (holdout_select) + surfaces the gap.
+                if self._holdout_pending(state):
+                    await self._holdout_phase(state)
                     continue
                 # HITL gate (I21, ADR-11): pause for human approval of the final best.
                 # Approval flows through the event log (a UI/human appends
@@ -906,6 +1031,9 @@ class Engine:
             improves_since_best=improves_since_best(state),
             is_numeric_space=is_numeric_space(state),
             avg_eval_seconds=avg_es,
+            node_budget_frac=(len(state.nodes) / self.policy.max_nodes
+                              if getattr(self.policy, "max_nodes", 0) else 0.0),  # P2 endgame reserve
+            current_policy=self._policy_name,   # D3: lets the rule switch BACK to greedy post-stall
             available_policies=available_policies(),
             available_developers=self._available_developers(),
             defaults=defaults,
@@ -985,9 +1113,12 @@ class Engine:
                 # {"n_seeds": 4} would otherwise raise "multiple values for keyword argument",
                 # silently dropping the whole switch (recorded decision diverging from live policy).
                 pp = {k: v for k, v in (strat.get("policy_params") or {}).items()
-                      if k not in ("n_seeds", "max_nodes", "ablate_every")}
+                      if k not in ("n_seeds", "max_nodes", "ablate_every",
+                                   "debug_depth", "operator_bandit")}
                 self.policy = make_policy(pol, n_seeds=self.n_seeds, max_nodes=self.max_nodes,
-                                          ablate_every=self._ablate_every, **pp)
+                                          ablate_every=self._ablate_every,
+                                          debug_depth=self._debug_depth,
+                                          operator_bandit=self._operator_bandit, **pp)
                 self._base_max_nodes = getattr(self.policy, "max_nodes", self.max_nodes)  # new base for the live override
                 # A3 BOHB = ASHA racing + the surrogate proposer. make_policy only builds the racing
                 # half; wire the surrogate now so a mid-run switch to bohb isn't bare ASHA.
@@ -1119,8 +1250,24 @@ class Engine:
 
     def _record_deep_research(self, memo, *, trigger: str, manual: bool) -> None:
         """Append the memo to the event log (engine = sole writer; called only from the main task)."""
+        memo_d = memo.model_dump(mode="json")
+        # D8 · decoupled Verifier: check the memo's claims against their CITED evidence before the
+        # memo is recorded — synthesis is the documented weak link (Kosmos: 57.9% accurate).
+        # Deterministic layer always (refs exist? quoted numbers match?); LLM rubric pass when a
+        # client is wired. Verdicts ride INSIDE the memo dict (audit-only; fold untouched).
+        if self._research_verify and memo_d.get("claims"):
+            try:
+                from looplab.trust.verify import verify_memo
+                state = fold(self.store.read_all())
+                ver = verify_memo(memo_d, state,
+                                  client=getattr(self.deep_researcher, "client", None),
+                                  parser=getattr(self.deep_researcher, "parser", "tool_call"))
+                if ver is not None:
+                    memo_d["verification"] = ver
+            except Exception:  # noqa: BLE001 — verification must never block the memo
+                pass
         self.store.append("research_completed", {
-            "memo": memo.model_dump(mode="json"),
+            "memo": memo_d,
             "at_node": memo.at_node, "trigger": trigger, "served_manual": manual})
         # Steer the next proposals: surface the memo's directions as a standing operator hint (the
         # same channel the Researcher already reads), so deep research actually informs planning.
@@ -1297,9 +1444,14 @@ class Engine:
                 sim = 1.0 if exact else fingerprint_similarity(fp, stored_fp)
                 if sim >= 0.34:                    # a related task (Jaccard) or the same one
                     scored.append((sim, idx, o))
-            # Tie-break by recency (line index): newer lessons win at equal similarity, so a
-            # long-lived store doesn't pin the 5 oldest exact-task lessons forever.
-            scored.sort(key=lambda t: (-t[0], -t[1]))
+            # D2 hygiene at read time: quarantine any lesson whose claim a NEWER run reversed
+            # (an old "supported" vs a later "tested/abandoned" of the same statement) — the
+            # misevolution guard: memory must not keep pushing a refuted correlation.
+            from looplab.engine.memory import filter_contradicted, lesson_rank_key
+            scored = filter_contradicted(scored)
+            # Rank: similarity, then confidence × corroboration (evidence_count), then recency —
+            # so a twice-confirmed lesson from a related task beats a one-off at equal similarity.
+            scored.sort(key=lambda t: lesson_rank_key(*t))
             seen: set[str] = set()
             picked: list[str] = []
             for _, _, o in scored:
@@ -1363,14 +1515,17 @@ class Engine:
                 "task_id": final.task_id, "fingerprint": fp, "kind": getattr(self.task, "kind", ""),
                 "statement": (f"op '{best.operator}' with params {best.idea.params} "
                               f"reached {best.metric:.4g}"),
-                "outcome": "supported", "delta": None, "confidence": 0.7})
+                "outcome": "supported", "delta": None, "confidence": 0.7,
+                # D2 provenance: which run/nodes back this claim (audit + future contradiction checks)
+                "run_id": final.run_id, "evidence": [best.id]})
         for h in (final.hypotheses or {}).values():
             if h.status in ("supported", "tested", "abandoned"):
                 lessons.append({
                     "task_id": final.task_id, "fingerprint": fp,
                     "kind": getattr(self.task, "kind", ""), "statement": h.statement,
                     "outcome": h.status, "delta": h.best_delta,
-                    "confidence": 0.7 if h.status == "supported" else 0.5})
+                    "confidence": 0.7 if h.status == "supported" else 0.5,
+                    "run_id": final.run_id, "evidence": list(h.evidence)[:8]})
         # dominant failure theme (so a repeat run is warned off the same crash class)
         reasons: dict[str, int] = {}
         for n in final.nodes.values():
@@ -1389,7 +1544,50 @@ class Engine:
             payload = "".join(orjson.dumps(lz).decode() + "\n" for lz in lessons)
             with open(base / "lessons.jsonl", "a", encoding="utf-8") as f:
                 f.write(payload)
+            # D2 hygiene: consolidate the store after appending — merge duplicate claims into an
+            # evidence_count, retire contradicted verdicts (newest wins), THEN bound the size.
+            self._consolidate_lessons_file(base / "lessons.jsonl")
             self._compact_lessons(base / "lessons.jsonl")
+
+        # M4 · auto-distilled skills (episodic → procedural memory): a supported hypothesis that
+        # actually moved the metric becomes a candidate SKILL.md; a later run on a DIFFERENT task
+        # fingerprint that re-confirms it promotes it. Best-effort; never fails the run.
+        from looplab.engine.memory import write_auto_skill
+        sk_dir = base / "skills"
+        for h in (final.hypotheses or {}).values():
+            if h.status == "supported" and (h.best_delta or 0) > 0:
+                ev = [final.nodes[i] for i in h.evidence if i in final.nodes]
+                ev_txt = "\n".join(
+                    f"- #{n.id} {n.operator} metric={n.metric} params={n.idea.params}: "
+                    f"{' '.join((n.idea.rationale or '').split())[:120]}" for n in ev[:4])
+                write_auto_skill(
+                    sk_dir, h.statement,
+                    f"Verified on task `{final.task_id}` (best Δ={h.best_delta:+.4g}).\n\n"
+                    f"Evidence:\n{ev_txt}\n\nApply when the task matches this technique's "
+                    "preconditions; re-validate with the eval before trusting it.",
+                    fp, final.task_id)
+
+    @staticmethod
+    def _consolidate_lessons_file(path: Path) -> None:
+        """D2: rewrite lessons.jsonl through `consolidate_lessons` — duplicate claims merge into
+        an evidence_count and a contradicted verdict is retired (the newest observation wins).
+        Atomic rewrite; best-effort (a hygiene failure must never fail the run)."""
+        try:
+            from looplab.engine.memory import consolidate_lessons
+            rows = []
+            for line in path.read_text(encoding="utf-8").splitlines():
+                try:
+                    o = orjson.loads(line)
+                except Exception:  # noqa: BLE001
+                    continue
+                if isinstance(o, dict):
+                    rows.append(o)
+            merged = consolidate_lessons(rows)
+            if len(merged) < len(rows):
+                from looplab.core.atomicio import atomic_write_text
+                atomic_write_text(path, "".join(orjson.dumps(o).decode() + "\n" for o in merged))
+        except Exception:  # noqa: BLE001
+            pass
 
     @staticmethod
     def _compact_lessons(path: Path, max_lines: int = 4000, keep: int = 2000) -> None:
@@ -1404,16 +1602,85 @@ class Engine:
         except Exception:  # noqa: BLE001 — compaction is best-effort; never fail the run for it
             pass
 
-    def _apply_novelty_gate(self, state: RunState, idea: Idea) -> Idea:
-        """E1: if a fresh proposal's numeric params are within `novelty_epsilon` (normalized L2) of an
-        existing node, nudge it off the duplicate deterministically and record a `novelty_rejected`
-        audit event. Loop-safe (always returns a usable idea) and replay-safe (the nudged params land
-        in node_created; the gate is not re-run on replay). No-op unless `novelty_gate` is on."""
+    @staticmethod
+    def _idea_text(idea) -> str:
+        """The semantic identity of a proposal: what it claims to try + why."""
+        return " ".join(filter(None, [getattr(idea, "rationale", "") or "",
+                                      getattr(idea, "hypothesis", "") or ""])).strip()
+
+    def _idea_vec(self, node_id: int, text: str):
+        v = self._idea_vecs.get(node_id)
+        if v is None:
+            v = self._embedder(text)
+            self._idea_vecs[node_id] = v
+        return v
+
+    def _semantic_duplicate(self, state: RunState, idea: Idea):
+        """T5: nearest existing node by idea-TEXT embedding similarity, or None. Only meaningful
+        for proposals with real text (LLM ideas); short/empty rationales (toy backends) skip."""
+        text = self._idea_text(idea)
+        if len(text) < 20:
+            return None, 0.0
+        from looplab.tools.vectorstore import _cosine
+        v = self._embedder(text)
+        best_n, best_s = None, 0.0
+        for n in state.nodes.values():
+            nt = self._idea_text(n.idea)
+            if len(nt) < 20:
+                continue
+            try:
+                s = _cosine(v, self._idea_vec(n.id, nt))
+            except Exception:  # noqa: BLE001 — an embedder hiccup must never block proposing
+                continue
+            if s > best_s:
+                best_n, best_s = n, s
+        if best_n is not None and best_s >= self._novelty_semantic_threshold:
+            return best_n, best_s
+        return None, best_s
+
+    def _apply_novelty_gate(self, state: RunState, idea: Idea, repropose=None) -> Idea:
+        """E1+T5: novelty/dedup gate over fresh proposals, BEFORE any compute is spent.
+        Two layers:
+        (1) SEMANTIC (T5, ShinkaEvolve `novelty rejection before evaluation`): if the idea TEXT is a
+            near-duplicate of an existing node's, reject it — and when a `repropose` callable is
+            given, ask the Researcher ONCE more with the duplicate (and its outcome, especially a
+            FAILURE) surfaced, so the search learns "you already tried X, it scored Y because Z"
+            instead of paying another eval for the same idea.
+        (2) NUMERIC (E1 legacy): params within `novelty_epsilon` (normalized L2) of an existing
+            node are deterministically nudged off the duplicate.
+        Loop-safe (always returns a usable idea) and replay-safe (the final idea lands in
+        node_created; the gate is not re-run on replay). No-op unless `novelty_gate` is on."""
         if not self._novelty_gate:
             return idea
         import random as _random
 
         from looplab.events.digest import param_distance
+
+        if self._novelty_semantic:
+            dup, sim = self._semantic_duplicate(state, idea)
+            if dup is not None:
+                outcome = (f"it FAILED ({dup.error_reason}: {(dup.error or '')[:80]})"
+                           if dup.status is NodeStatus.failed
+                           else f"it scored {dup.metric}")
+                self.store.append("novelty_rejected", {
+                    "node_id": len(state.nodes), "near_node": dup.id, "kind": "semantic",
+                    "similarity": round(sim, 4),
+                    "action": "reproposed" if callable(repropose) else "kept"})
+                if callable(repropose):
+                    hint = (f"\nNOVELTY GATE: your proposal is a near-duplicate of experiment "
+                            f"#{dup.id} ('{self._idea_text(dup.idea)[:160]}') — {outcome}. "
+                            "Propose something MEANINGFULLY DIFFERENT (another approach, "
+                            "component or direction), not a rewording.")
+                    try:
+                        prev = getattr(self.researcher, "_novelty_feedback", "")
+                        setattr(self.researcher, "_novelty_feedback", hint)
+                        idea2 = repropose()
+                        setattr(self.researcher, "_novelty_feedback", prev)
+                        if idea2 is not None:
+                            idea = idea2
+                    except Exception:  # noqa: BLE001 — a repropose failure keeps the original idea
+                        pass
+
         params = {k: float(v) for k, v in idea.params.items() if isinstance(v, (int, float))}
         if not params:
             return idea
@@ -1529,11 +1796,23 @@ class Engine:
         cap = self._inline_repair_attempts or 10**9
         return _rule_triage(reason, error, attempt, cap)
 
-    def _repair_error_context(self, reason: str, error: str) -> str:
+    def _repair_error_context(self, reason: str, error: str,
+                              state: Optional[RunState] = None, node=None) -> str:
         """Error context handed to Developer.repair(). A timeout gets an explicit cost-reduction
         directive (the code was too slow, not wrong — shrink it to fit the budget). With deep_repair
         (C3) a crash is enriched with the failure taxonomy + a 'reproduce then fix' directive; else
-        the raw tail. Shared by the inter-node debug operator and the inline (in-node) repair loop."""
+        the raw tail. Shared by the inter-node debug operator and the inline (in-node) repair loop.
+
+        M1/A0c: when `state`+`node` are given, the ANCESTRAL REPAIR CHAIN of the lineage is
+        prepended (aira-dojo MEM_OPS `ancestral`) — prior fixes and what they hit — so a repair
+        doesn't oscillate undo↔redo with an earlier one."""
+        chain = ""
+        if state is not None and node is not None:
+            from looplab.events.digest import ancestral_repair_chain
+            chain = ancestral_repair_chain(state, node)
+            if chain:
+                chain += "\n\n"
+        error = chain + (error or "")
         if reason == "timeout":
             # Don't quote a specific budget here: the wall-clock varies by node kind (a sweep node gets
             # timeout×sweep_timeout_mult; a RepoTask uses its own per-profile timeout), so a hardcoded
@@ -1608,7 +1887,9 @@ class Engine:
                 self._set_complexity_hint(state, None)   # A0d breadth-keyed complexity cue
                 with self.tracer.span("propose"):
                     idea = self.researcher.propose(state, None)
-                idea = self._apply_novelty_gate(state, idea)   # E1 dedup near-duplicate proposals
+                # E1+T5 dedup near-duplicate proposals (one informed re-propose on a semantic hit)
+                idea = self._apply_novelty_gate(
+                    state, idea, repropose=lambda: self.researcher.propose(state, None))
                 idea.operator = "draft"        # operator is authoritative from the policy,
                 parents: list[int] = []        # not whatever label the LLM returns
                 with self.tracer.span("implement"):
@@ -1638,7 +1919,8 @@ class Engine:
                     # C3 deep test-driven repair (when enabled): failure taxonomy + a structured
                     # "reproduce then fix" directive, not just the raw stderr tail. Depth is already
                     # bounded by debug_depth.
-                    err = self._repair_error_context(parent.error_reason, parent.error)
+                    err = self._repair_error_context(parent.error_reason, parent.error,
+                                                     state=state, node=parent)
                     with self.tracer.span("repair", parent_id=parent.id):
                         code = repair(parent.idea, parent.code, err)
                 else:
@@ -1652,7 +1934,9 @@ class Engine:
                 self._set_complexity_hint(state, parent)   # A0d breadth-keyed complexity cue
                 with self.tracer.span("propose"):
                     idea = self.researcher.propose(state, parent)
-                idea = self._apply_novelty_gate(state, idea)   # E1 dedup near-duplicate proposals
+                # E1+T5 dedup near-duplicate proposals (one informed re-propose on a semantic hit)
+                idea = self._apply_novelty_gate(
+                    state, idea, repropose=lambda p=parent: self.researcher.propose(state, p))
                 idea.operator = "improve"
                 parents = [parent.id]
                 with self.tracer.span("implement"):
@@ -2102,15 +2386,101 @@ class Engine:
             from looplab.runtime.sandbox import _to_float
             try:
                 preds = _json.loads(preds_path.read_text(encoding="utf-8-sig", errors="replace"))
-                # .get (not g["labels"]): a host_grader() dict missing labels yields metric None
-                # (node fails) rather than an uncaught KeyError that would crash the eval worker.
-                # _to_float: a non-finite (NaN/Inf) host score reads as None so an untrusted candidate
-                # can't self-elect champion via a crafted prediction (mirrors command_eval/sweep paths).
-                m = _to_float(host_score(g.get("scorer", "rmse"), preds, g.get("labels"), key=g.get("key")))
+                # D1 holdout: when a holdout partition is reserved, the SEARCH signal is the score
+                # on the complement rows only — the holdout rows are scored exactly once, at
+                # finish, for the val-top-k (see _holdout_phase). No partition => legacy full score.
+                if self._holdout_idx:
+                    m = self._host_score_split(preds, g, holdout=False)
+                else:
+                    # .get (not g["labels"]): a host_grader() dict missing labels yields metric None
+                    # (node fails) rather than an uncaught KeyError that would crash the eval worker.
+                    # _to_float: a non-finite (NaN/Inf) host score reads as None so an untrusted candidate
+                    # can't self-elect champion via a crafted prediction (mirrors command_eval/sweep paths).
+                    m = _to_float(host_score(g.get("scorer", "rmse"), preds, g.get("labels"), key=g.get("key")))
             except (ValueError, OSError):
                 m = None
         res.metric = m
         return res
+
+    def _host_score_split(self, preds, g: dict, *, holdout: bool) -> Optional[float]:
+        """D1: score predictions on ONE side of the holdout partition — the search side
+        (complement) for every regular/confirm eval, the holdout side once at finish. Length
+        mismatch or an empty side yields None (the node fails / gets no holdout metric), the
+        same contract as host_score itself."""
+        from looplab.runtime.command_eval import _LABEL_KEYS, _PRED_KEYS, _as_list, host_score
+        from looplab.runtime.sandbox import _to_float
+        yp = _as_list(preds, g.get("key"), _PRED_KEYS)
+        yt = _as_list(g.get("labels"), g.get("key"), _LABEL_KEYS)
+        if not isinstance(yp, list) or not isinstance(yt, list) or len(yp) != len(yt):
+            return None
+        keep = (lambda i: i in self._holdout_idx) if holdout else \
+               (lambda i: i not in self._holdout_idx)
+        yp2 = [v for i, v in enumerate(yp) if keep(i)]
+        yt2 = [v for i, v in enumerate(yt) if keep(i)]
+        if not yt2:
+            return None
+        return _to_float(host_score(g.get("scorer", "rmse"), yp2, yt2))
+
+    def _build_holdout_idx(self, fraction: float) -> frozenset:
+        """D1: the reserved holdout partition for a given fraction, or empty when holdout doesn't
+        apply (no host grader, real MLE-bench, non-list labels, or fraction<=0)."""
+        if (self._host_grader is None or self._host_grader.get("kind") == "mlebench"
+                or float(fraction) <= 0):
+            return frozenset()
+        from looplab.runtime.command_eval import _LABEL_KEYS, _as_list
+        yt = _as_list(self._host_grader.get("labels"), self._host_grader.get("key"), _LABEL_KEYS)
+        if isinstance(yt, list) and len(yt) >= 2:
+            return _holdout_indices(len(yt), float(fraction))
+        return frozenset()
+
+    def _holdout_topk(self, state: RunState) -> list[int]:
+        """The val-leaders that get a holdout evaluation: top-k feasible by the robust search
+        metric (confirmed mean when the confirm phase ran, else the single metric). EXCLUDES
+        trust-gate-flagged nodes under gate/block — exactly as fold's holdout pick does — so a
+        flagged node can't consume a holdout slot the legitimate runner-up needs (else, under
+        `gate`, the winner is flagged, fold drops it from the holdout pool, and no clean node ever
+        received a holdout eval → the discipline silently no-ops)."""
+        from looplab.events.replay import flagged_node_ids
+        flagged = flagged_node_ids(state)
+
+        def _key(n):
+            return ((n.confirmed_mean if n.confirmed_mean is not None else n.metric), n.id)
+        pool = sorted((n for n in state.feasible_nodes() if n.id not in flagged),
+                      key=_key, reverse=(state.direction == "max"))
+        return [n.id for n in pool[: self._holdout_top_k]]
+
+    def _holdout_pending(self, state: RunState) -> bool:
+        if not (self._holdout_idx and self._host_grader is not None):
+            return False
+        return any(nid not in state.holdout_evaluated_ids for nid in self._holdout_topk(state))
+
+    async def _holdout_phase(self, state: RunState) -> None:
+        """D1 holdout-gated promotion: re-score the val-top-k's EXISTING predictions on the
+        reserved holdout partition (no re-training — free), emit `holdout_evaluated` per node.
+        The fold then (a) surfaces the val-holdout generalization gap in the Trust panel and
+        (b) under holdout_select picks the champion by the unseen signal among these leaders.
+        Replay/resume-safe: gated per node on holdout_evaluated_ids; an event is emitted even
+        when the predictions file is gone (metric None) so the gate always closes."""
+        import json as _json
+        g = self._host_grader
+        for nid in self._holdout_topk(state):
+            if nid in state.holdout_evaluated_ids:
+                continue
+            n = state.nodes[nid]
+            preds = None
+            p = self.run_dir / "nodes" / f"node_{nid}" / g.get("predictions", "predictions.json")
+            try:
+                preds = _json.loads(p.read_text(encoding="utf-8-sig", errors="replace"))
+            except (OSError, ValueError):
+                preds = None
+            m = self._host_score_split(preds, g, holdout=True) if preds is not None else None
+            gap = None
+            if m is not None and n.metric is not None:
+                gap = (n.metric - m) if state.direction == "max" else (m - n.metric)
+            async with self._write_lock:
+                self.store.append("holdout_evaluated", {
+                    "node_id": nid, "metric": m, "gap": gap,
+                    "n_holdout": len(self._holdout_idx)})
 
     def _emit_agent_report(self, node_id: int) -> None:
         """External-agent audit (ADR-7): if the Developer validated its output (a
@@ -2245,7 +2615,9 @@ class Engine:
                         continue   # re-run now that the library is present (no repair attempt spent)
                 # Anti-stuck: when the SAME error recurs with no progress, stop (even under unlimited
                 # repair) so the agent doesn't loop forever on an unfixable failure.
-                _sig = " ".join((err or "").strip().split())[-160:]
+                # T10: NORMALIZED signature — the same semantic error with different line numbers /
+                # sizes / paths counts as "stuck" too (exact-match compare missed those loops).
+                _sig = _normalize_error_sig(err)
                 stuck_n = (stuck_n + 1) if _sig and _sig == stuck_sig else 1
                 stuck_sig = _sig
                 # Inline-repair gate: feature on, repairable reason, a Developer that can repair, and
@@ -2272,7 +2644,8 @@ class Engine:
                 # action == "repair": fix the code in place and re-eval (no new node, no budget spent).
                 with self.tracer.span("inline_repair", node_id=node_id, attempt=attempt + 1):
                     new_code = self.developer.repair(
-                        node.idea, node.code, self._repair_error_context(reason, err))
+                        node.idea, node.code,
+                        self._repair_error_context(reason, err, state=state, node=node))
                 attempt += 1
                 async with self._write_lock:
                     self.store.append("node_repaired", {
@@ -2321,6 +2694,16 @@ class Engine:
                         protected = set(self._repo_spec.get("protected_names", [])) | set(self._assets)
                         sigs += detect_reward_hacks(scan_src, res.metric, state.direction,
                                                     protected_names=protected, stdout=res.stdout)
+                        # 4.3: also apply the hardened exploit ruleset grown by `looplab harden`
+                        # (hacker-fixer-solver) — each previously-discovered exploit stays guarded.
+                        if self._exploit_suite is not None:
+                            sigs += self._exploit_suite.scan(scan_src)
+                        # 4.4 sandbox instrumentation (RewardHackingAgents recipe): flag RUNTIME
+                        # writes to protected/frozen files — behavioral evidence a static scan of the
+                        # code can miss (a write via a helper, os.system, a template). Compares the
+                        # workdir against the assets/protected set the engine placed there.
+                        if self._workdir_audit:
+                            sigs += self._audit_workdir_writes(workdir, protected)
                     if self._code_leakage_detect and scan_src:
                         from looplab.trust.leakage import code_leakage_scan
                         for f in code_leakage_scan(scan_src)["flags"]:
@@ -2348,6 +2731,39 @@ class Engine:
                             triage_outcome[0], str(triage_outcome[1])[:300])
                     self.store.append("node_failed", data)
                 self._maybe_crash()
+
+    def _audit_workdir_writes(self, workdir, protected: set) -> list[dict]:
+        """4.4: after an eval, flag any PROTECTED/frozen file whose on-disk content differs from
+        what the engine wrote there (assets/answer keys) — a runtime tamper the static code scan
+        can't see. Pure host-side check; audit-only (feeds reward_hack_suspected). Best-effort."""
+        sigs: list[dict] = []
+        try:
+            wd = Path(workdir)
+            for name in protected:
+                p = wd / name
+                if not p.is_file():
+                    continue
+                original = self._assets.get(name)
+                if original is None:
+                    continue
+                # Compare as TEXT for str assets: `_write_assets` writes them via
+                # `Path.write_text` (text mode translates '\n' -> os.linesep), so a raw-BYTES
+                # compare would flag EVERY honest eval on a platform where os.linesep != '\n'
+                # (e.g. Windows CRLF) as a tamper. Bytes assets compare byte-exact.
+                if isinstance(original, str):
+                    try:
+                        got = p.read_text(encoding="utf-8")
+                    except (OSError, UnicodeDecodeError):
+                        got = None
+                    tampered = got is not None and got != original
+                else:
+                    tampered = p.read_bytes() != bytes(original)
+                if tampered:
+                    sigs.append({"signal": "protected_write",
+                                 "detail": f"protected file '{name}' was modified at runtime"})
+        except Exception:  # noqa: BLE001 — an audit failure must never fail the eval
+            pass
+        return sigs
 
     @staticmethod
     def _already_confirmed(state: RunState) -> bool:
@@ -2385,7 +2801,10 @@ class Engine:
             # of re-executing every expensive full-profile seed. `done` maps seed -> metric|None.
             done = state.confirm_seed_results.get(nd.id, {})
             scores: list[float] = [m for m in done.values() if m is not None]
-            for s in range(self.confirm_seeds):
+            # D1 seed-holdout: confirm seeds start at confirm_seed_base (default 1) so every
+            # confirm split is DISJOINT from the search's implicit seed 0 — the confirm metric
+            # is a generalization signal, not a re-measurement of what the search optimized.
+            for s in range(self.confirm_seed_base, self.confirm_seed_base + self.confirm_seeds):
                 if s in done:                         # already evaluated this seed earlier
                     continue
                 workdir = self.run_dir / "confirm" / f"node_{nd.id}_seed_{s}"
@@ -2442,7 +2861,7 @@ class Engine:
         state = fold(self.store.read_all())
         seeds = max(self.confirm_seeds, 3)
         done = state.confirm_seed_results.get(nd.id, {})
-        for s in range(seeds):
+        for s in range(self.confirm_seed_base, self.confirm_seed_base + seeds):
             if s in done:
                 continue
             workdir = self.run_dir / "confirm" / f"node_{nd.id}_seed_{s}"

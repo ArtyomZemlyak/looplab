@@ -7,6 +7,7 @@ client takes a model name and reads the key from the environment via LiteLLM.
 """
 from __future__ import annotations
 
+import copy
 import http.client
 import json
 import re
@@ -260,7 +261,7 @@ class OpenAICompatibleClient:
                  api_key: str = "ollama", temperature: float = 0.7,
                  timeout: float = 180.0, accountant: Optional["CostAccountant"] = None,
                  guided_json: bool = False, reasoning: Optional[dict] = None,
-                 stream: bool = True):
+                 stream: bool = True, cache: bool = False):
         self.model = model
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key or "x"
@@ -288,6 +289,9 @@ class OpenAICompatibleClient:
         # + `guided_json` (vLLM extra) — so a weak model can't emit invalid JSON. Off by default
         # (Ollama needs no constraint and some builds reject unknown fields).
         self.guided_json = guided_json
+        # T7: in-process content-addressed response cache for DETERMINISTIC (temperature 0) calls
+        # only. None = disabled (default). Never caches sampling calls (temp>0) — those must vary.
+        self._cache: Optional[dict] = {} if cache else None
 
     def _read_stream(self, resp) -> dict:
         """Reassemble an OpenAI SSE stream into the non-streaming response body shape
@@ -418,7 +422,33 @@ class OpenAICompatibleClient:
                 for i, s in sorted(tcs.items())]
         return {"choices": [{"message": msg, "finish_reason": finish}], "usage": usage}
 
+    def _cache_key(self, payload: dict) -> Optional[str]:
+        """T7: content-addressed key for a DETERMINISTIC request. Only temperature==0 calls are
+        cacheable — a temperature>0 call is a SAMPLE and MUST vary (best-of-N, the researcher panel,
+        and the novelty re-propose all depend on independent draws), so caching those would silently
+        collapse the search's diversity. Returns None (uncacheable) unless the request is deterministic."""
+        if self._cache is None or payload.get("temperature", self.temperature) not in (0, 0.0):
+            return None
+        import hashlib
+        blob = json.dumps({"model": self.model, "messages": payload.get("messages"),
+                           "tools": payload.get("tools"), "tool_choice": payload.get("tool_choice"),
+                           "response_format": payload.get("response_format")},
+                          sort_keys=True, default=str)
+        return hashlib.sha256(blob.encode("utf-8")).hexdigest()
+
     def _post(self, payload: dict) -> dict:
+        # T7 LLM response cache: serve an identical DETERMINISTIC (temp 0) request from cache instead
+        # of re-hitting the model — cuts cost on retry/panel/verify flows. Sampling calls (temp>0)
+        # are never cached (see _cache_key). Replay itself never calls the model (Ideas are recorded
+        # in events), so this is a within-run/live cost saver, not a correctness dependency.
+        ck = self._cache_key(payload)
+        if ck is not None and ck in self._cache:
+            cached = self._cache[ck]
+            # Restore the per-call telemetry a live call would have set, and hand back a DEEP COPY:
+            # downstream (e.g. complete_text -> _apply_native_tool_calls) mutates the message in
+            # place, which would otherwise corrupt the shared cached entry for every later hit.
+            self._last_usage = cached.get("usage") or {}
+            return copy.deepcopy(cached)
         # A network blip / HTTP error / non-JSON body must surface as a clean LLMError, not an
         # unhandled URLError/HTTPError/JSONDecodeError that aborts the whole run — the role layer
         # already retries + falls back on LLMError. (urllib.error was imported but unused before.)
@@ -509,6 +539,8 @@ class OpenAICompatibleClient:
         # No price table for local models -> account tokens as 0 cost, but track them.
         self.accountant.add(0.0, usage=usage)
         self._last_usage = usage
+        if ck is not None:                       # T7: cache a COPY (the returned body is mutated
+            self._cache[ck] = copy.deepcopy(body)  # in place by callers — keep the cached entry clean)
         return body
 
     def _model_params(self) -> dict:

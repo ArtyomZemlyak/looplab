@@ -85,6 +85,18 @@ export function ResearchPanel({ state, runId, onToast, onClose }) {
           </div>
           {(m.findings || []).length > 0 && <><div className="section-h">Findings</div>
             <ul className="bul">{m.findings.map((f, j) => <li key={j}>{f}</li>)}</ul></>}
+          {/* D8: decoupled Verifier verdicts over the memo's claims (synthesis is the weak link) */}
+          {m.verification && (m.verification.verdicts || []).length > 0 && <>
+            <div className="section-h">Verified claims
+              {m.verification.unsupported > 0 &&
+                <span className="pill warn" title="claims whose cited evidence does not support them">
+                  {m.verification.unsupported} unsupported</span>}
+              <span className="muted"> ({m.verification.method})</span></div>
+            <ul className="bul">{m.verification.verdicts.map((v, j) => (
+              <li key={j} className={v.verdict === 'supported' ? 'ok'
+                : (v.verdict === 'unclear' || v.verdict === 'cited') ? '' : 'bad'}>
+                <span className="pill">{v.verdict}</span> {v.statement}
+                {v.note && <span className="muted"> — {v.note}</span>}</li>))}</ul></>}
           {(m.recommended_directions || []).length > 0 && <><div className="section-h">Recommended directions</div>
             <ul className="rsch-dirs">{m.recommended_directions.map((d, j) => (
               <li key={j}><span>{d}</span>
