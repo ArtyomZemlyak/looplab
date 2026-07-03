@@ -1022,6 +1022,8 @@ class Engine:
             improves_since_best=improves_since_best(state),
             is_numeric_space=is_numeric_space(state),
             avg_eval_seconds=avg_es,
+            node_budget_frac=(len(state.nodes) / self.policy.max_nodes
+                              if getattr(self.policy, "max_nodes", 0) else 0.0),  # P2 endgame reserve
             current_policy=self._policy_name,   # D3: lets the rule switch BACK to greedy post-stall
             available_policies=available_policies(),
             available_developers=self._available_developers(),

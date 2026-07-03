@@ -1,5 +1,18 @@
 # LoopLab — Phased Implementation Plan (2026-07-02)
 
+> **Implementation status (2026-07-03).** Phases 1–5 are **implemented, config-first, and
+> test-covered** on branch `claude/agent-systems-research-uhnl6d`. Every "best new" mechanism ships
+> **ON by default** (holdout-gated promotion, ensemble-by-default merge, disjoint confirm seeds,
+> stagnation-adaptive strategy, semantic novelty, weighted parents, deeper debug, failure
+> reflection, operator-scoped memory, insight backprop, memory hygiene, auto-skills, scaling
+> digest, research verification, workdir audit, list-wise BoN, endgame reserve); the higher-cost or
+> less-evidenced knobs (operator bandit, LLM cache) default OFF and turn on via `profile: thorough`
+> or explicitly. **Deliberately not flipped:** `max_parallel` and `max_nodes` stay the user's cost
+> knobs (D9/G3 read-dominant parallelism is available at `max_parallel>1` but the default stays 1,
+> per the existing local-first ADR — a real training run owns its resources); real MLE-bench (5.6)
+> stays external-infra-gated. Each phase was committed separately with its own tests; the full
+> suite is green after every phase.
+
 **Basis.** Synthesis of [11-agent-systems-research.md](11-agent-systems-research.md) (directions
 D1–D14, fresh 3-stream evidence), the still-open items from
 [10-autoresearch-improvement-research.md](10-autoresearch-improvement-research.md) /

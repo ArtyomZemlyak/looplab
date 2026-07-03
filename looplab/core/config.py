@@ -313,6 +313,16 @@ class Settings(BaseSettings):
     # execution-free reward (static validity + metric-print). 1 = off. In-house LLM developer only
     # (not external agents — ADR-7 cost rule). The top SWE-bench reliability lever for weak models.
     best_of_n: int = 1
+    # D10 list-wise best-of-N selection: when the top static-scorers TIE, break the tie with a
+    # comparative LLM selection over the candidates presented together (+~3 pts vs pointwise on
+    # GAIA, arXiv:2506.12928). The static score stays the primary filter — the LLM is a weak
+    # comparative prior, never the sole oracle. ON by default (no-op when best_of_n==1).
+    best_of_n_listwise: bool = True
+    # T7 LLM response cache: serve an identical DETERMINISTIC (temperature 0) request from an
+    # in-process content-addressed cache instead of re-hitting the model — cuts cost on
+    # retry/panel/verify flows. NEVER caches sampling calls (temp>0: best-of-N / panel / novelty
+    # re-propose must vary). Off by default (most role calls run at temperature>0 anyway).
+    llm_cache: bool = False
     agent_cmd: str | None = None  # override the agent's launcher (path / wrapper)
     # External-agent validation (ADR-7): wrap a CLI-agent Developer with a validator that
     # audits each output (no-op/syntax/crash/timeout), retries with feedback, and falls

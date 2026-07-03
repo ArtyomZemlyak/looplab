@@ -55,6 +55,7 @@ class StrategyContext(BaseModel):
     improves_since_best: int = 0
     is_numeric_space: bool = False
     avg_eval_seconds: Optional[float] = None   # mean per-node eval cost so far (sweep cost signal)
+    node_budget_frac: float = 0.0              # fraction of the node budget spent (P2 endgame reserve)
     current_policy: str = "greedy"             # the ACTIVE policy (for switch-back rules, D3)
     available_policies: list[str] = Field(default_factory=list)
     available_developers: list[str] = Field(default_factory=list)
@@ -194,6 +195,17 @@ class RuleStrategist:
             return {"policy": "greedy", "fidelity": "full",
                     "operators": {"ablate_every": 0},
                     "rationale": "eval budget <20% left: exploit the current leader, no new breadth",
+                    "source": "rule"}
+
+        # P2/D13 endgame reserve: in the FINAL fraction of the node budget, stop opening new breadth
+        # and spend the reserve on a final ENSEMBLE of the strongest solutions at full fidelity —
+        # top MLE-bench systems reserve an explicit final-ensemble/confirm window rather than
+        # exploring until the budget dies. (The confirm phase then runs at finish as usual.)
+        if ctx.node_budget_frac >= 0.8 and ctx.phase in ("explore", "exploit"):
+            return {"policy": "greedy", "fidelity": "full",
+                    "operators": {"merge_mode": "ensemble", "ablate_every": 0},
+                    "rationale": f"endgame ({ctx.node_budget_frac:.0%} of node budget spent): "
+                                 "reserve for a final ensemble of the top solutions, no new breadth",
                     "source": "rule"}
 
         # High failure rate -> stop spending breadth on broken code; deepen repair, narrow search.

@@ -90,6 +90,7 @@ def make_llm_client(settings, *, model: str | None = None,
         guided_json=getattr(settings, "llm_guided_json", False),   # H1 constrained decoding
         reasoning=reasoning,                                        # provider-aware thinking toggle
         stream=getattr(settings, "llm_stream", True),              # inter-token idle-timeout via SSE
+        cache=getattr(settings, "llm_cache", False),               # T7 deterministic-response cache
         **extra,
     )
 
@@ -393,7 +394,8 @@ def make_roles(task: TaskAdapter, settings, run_dir=None):
     if (settings.best_of_n > 1 and settings.developer_backend not in PRESETS
             and not _param_search):
         from looplab.search.best_of_n import BestOfNDeveloper
-        developer = BestOfNDeveloper(developer, n=settings.best_of_n)
+        developer = BestOfNDeveloper(developer, n=settings.best_of_n,
+                                     listwise=getattr(settings, "best_of_n_listwise", True))
     # H3 per-role model presets: point the Researcher / Developer at their own model/endpoint when
     # configured (e.g. Developer on a strong coding model, Researcher on a fast breadth model).
     if settings.researcher_model or settings.researcher_base_url:
