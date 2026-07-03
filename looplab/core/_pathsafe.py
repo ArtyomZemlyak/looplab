@@ -22,7 +22,10 @@ from pathlib import Path
 TEXT_EXT = {".py", ".md", ".txt", ".json", ".yaml", ".yml", ".toml", ".cfg", ".ini", ".sh",
             ".csv", ".tsv", ".rst", ".lock", ".bat", ".ps1", ".r", ".jl", ".sql", ".html", ".css",
             ".js", ".ts", ".tsx", ".jsx", ".java", ".go", ".rs", ".cpp", ".cc", ".c", ".h", ".hpp",
-            ".xml", ".properties", ".gradle", ".tf"}
+            ".xml", ".properties", ".gradle", ".tf",
+            # Logs + line-delimited data: reading a run's own trace/event logs and a node's
+            # training/eval output is a first-class need (the assistant reads what it produced).
+            ".log", ".jsonl", ".ndjson", ".out", ".err"}
 # ... plus a few KNOWN-safe files that have no usable suffix (Path.suffix wouldn't match them).
 SAFE_NAMES = {"makefile", "dockerfile", "readme", "license", "licence", "changelog", "notice",
               "authors", "requirements", "pipfile", "procfile", "manifest.in", "containerfile",

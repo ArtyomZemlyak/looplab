@@ -19,6 +19,59 @@ from looplab.events import digest
 from looplab.core.models import RunState
 from looplab.tools.run_tools import RunTools, _fn
 
+_TRACE_CHARS = 12000      # a trace is a whole conversation — give it the same larger budget as logs
+
+
+def _render_conversation(convo: dict, run_id, nid, stage: Optional[str], max_chars: int) -> str:
+    """Render `traceview.build_conversation` output as a readable linear thread. One block per stage
+    (create_node / evaluate / …); within a stage, requests show the prompt, generations show
+    thinking + output + which tools were called, tool turns show input→output. Filtered to one stage
+    when `stage` is given (substring match on its label). Bounded to a generous trace budget."""
+    stages = convo.get("stages") or []
+    if stage:
+        s = str(stage).lower()
+        stages = [st for st in stages if s in str(st.get("label") or "").lower()]
+    if not stages:
+        which = f" matching {stage!r}" if stage else ""
+        return f"(run {run_id} node #{nid}: no trace stages{which} recorded)"
+    lines = [f"run {run_id} · node #{nid} · trace ({len(stages)} stage(s)):"]
+    for st in stages:
+        roll = st.get("rollup") or {}
+        tok = (roll.get("tokens") or {}).get("total")
+        meta = f"{roll.get('generations', 0)} gen · {roll.get('tools', 0)} tool"
+        meta += f" · {tok} tok" if tok else ""
+        lines.append(f"\n══ stage: {st.get('label') or '(unnamed)'} · {meta} ══")
+        for t in st.get("turns") or []:
+            kind = t.get("type")
+            if kind == "request":
+                lines.append("▶ REQUEST" + (f" [{t['label']}]" if t.get("label") else ""))
+                for m in t.get("messages") or []:
+                    body = str(m.get("content") or "").strip()
+                    if body:
+                        lines.append(f"  [{m.get('role')}] {body}")
+            elif kind == "generation":
+                if t.get("think"):
+                    lines.append(f"🧠 {str(t['think']).strip()}")
+                if str(t.get("output") or "").strip():
+                    lines.append(f"💬 {str(t['output']).strip()}")
+                calls = [c for c in (t.get("tool_calls") or []) if c]
+                if calls:
+                    lines.append(f"  → called {', '.join(str(c) for c in calls)}")
+            elif kind == "tool":
+                head = f"⚙ {t.get('name') or 'tool'}"
+                if t.get("status") and t["status"] != "OK":
+                    head += f" ({t['status']})"
+                lines.append(head)
+                if str(t.get("input") or "").strip():
+                    lines.append(f"    in:  {str(t['input']).strip()}")
+                if str(t.get("output") or "").strip():
+                    lines.append(f"    out: {str(t['output']).strip()}")
+    text = "\n".join(lines)
+    budget = max(max_chars, _TRACE_CHARS)
+    if len(text) <= budget:
+        return text
+    return text[:budget].rstrip() + f"\n…[+{len(text) - budget} chars truncated — narrow with `stage`]"
+
 
 class RunsTools:
     """Read-only view over ALL runs under the run-root (for the assistant)."""
@@ -56,6 +109,21 @@ class RunsTools:
                 {"run_id": {"type": "string"}, "node_id": {"type": "integer"},
                  "trials": {"type": "string", "description": "how many sweep trials: a number, or 'all'"}},
                 ["run_id", "node_id"]),
+            _fn("read_run_logs",
+                "Read one experiment's EXECUTION LOGS: the captured stdout tail from training/eval and "
+                "the FULL error/stderr (not the short failure summary). Use to see what a node printed "
+                "while training, or why it failed, in full. Use run_id + node_id from read_run.",
+                {"run_id": {"type": "string"}, "node_id": {"type": "integer"}},
+                ["run_id", "node_id"]),
+            _fn("read_run_trace",
+                "Read one experiment's AGENT TRACE as a linear, de-duplicated conversation: the "
+                "system+user request once per sub-loop, then each LLM generation's reasoning + output "
+                "and the tools it called, interleaved with tool results. This is the full train of "
+                "thought that produced the node. Use run_id + node_id from read_run.",
+                {"run_id": {"type": "string"}, "node_id": {"type": "integer"},
+                 "stage": {"type": "string", "description": "optional: only the stage whose label "
+                                                            "contains this text (e.g. 'repair')"}},
+                ["run_id", "node_id"]),
         ]
 
     def execute(self, name: str, args: dict) -> str:
@@ -68,6 +136,11 @@ class RunsTools:
             if name == "read_run_experiment":
                 return self._read_experiment(args.get("run_id"), int(args.get("node_id")),
                                              args.get("trials"))
+            if name == "read_run_logs":
+                return self._read_logs(args.get("run_id"), int(args.get("node_id")))
+            if name == "read_run_trace":
+                return self._read_trace(args.get("run_id"), int(args.get("node_id")),
+                                        args.get("stage"))
             return f"(unknown tool: {name})"
         except (KeyError, TypeError, ValueError, ArithmeticError) as e:
             return f"(tool error: {e})"
@@ -181,6 +254,32 @@ class RunsTools:
         self._reader.bind_state(st, None)
         return f"run {run_id} · " + self._reader.execute(
             "read_experiment", {"node_id": nid, "trials": trials_arg})
+
+    def _read_logs(self, run_id, nid: int) -> str:
+        st = self._state(run_id)
+        if st is None:
+            return f"(no such run: {run_id!r})"
+        self._reader.bind_state(st, None)
+        return f"run {run_id} · " + self._reader.execute("read_logs", {"node_id": nid})
+
+    def _read_trace(self, run_id, nid: int, stage: Optional[str] = None) -> str:
+        """The node's agent trace as a linear, de-duplicated conversation. Reuses the SAME
+        `build_conversation` projection the Web UI's Trace tab shows (so the assistant reads exactly
+        what the human sees), rendered to text and bounded to `max_chars`."""
+        rd = self._safe_dir(run_id)
+        st = self._state(run_id)
+        if rd is None or st is None:
+            return f"(no such run: {run_id!r})"
+        from looplab.serve.traceview import build_conversation, load_spans
+        spans_path = rd / "spans.jsonl"
+        if not spans_path.exists():
+            return (f"(run {run_id} has no spans.jsonl — no agent trace was recorded. This run may "
+                    "predate tracing, or ran with tracing off.)")
+        try:
+            convo = build_conversation(st, load_spans(spans_path), nid)
+        except (OSError, ValueError, TypeError) as e:
+            return f"(could not read trace: {e})"
+        return _render_conversation(convo, run_id, nid, stage, self.max_chars)
 
 
 class RunLauncherTools:

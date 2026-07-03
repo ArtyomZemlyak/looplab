@@ -29,6 +29,14 @@ def _is_number(v: str) -> bool:
         return False
 
 
+def _clip(text: str, n: int) -> str:
+    """Return the LAST `n` chars of `text` (logs are read tail-first — the end is where the error and
+    the final metric line live), flagging how much was dropped off the front."""
+    if len(text) <= n:
+        return text
+    return f"…[+{len(text) - n} earlier chars truncated]\n" + text[-n:]
+
+
 def _fn(name: str, description: str, props: dict, required: Optional[list] = None) -> dict:
     return {"type": "function", "function": {
         "name": name, "description": description,
@@ -37,6 +45,8 @@ def _fn(name: str, description: str, props: dict, required: Optional[list] = Non
 
 class RunTools:
     """Read-only view over the live search DAG (the bound `RunState`)."""
+
+    _LOG_CHARS = 12000        # execution logs get a larger budget than a normal read — they ARE the point
 
     def __init__(self, max_chars: int = 3500):
         self.max_chars = max_chars
@@ -69,6 +79,11 @@ class RunTools:
             _fn("read_code",
                 "Read the solution code of one experiment (so you can build on or avoid it).",
                 {"node_id": {"type": "integer"}}, ["node_id"]),
+            _fn("read_logs",
+                "Read one experiment's EXECUTION LOGS — the captured stdout tail from training/eval "
+                "and the FULL error/stderr (not the 300-char summary). Use to see why a node failed, "
+                "or what it printed while training, in full.",
+                {"node_id": {"type": "integer"}}, ["node_id"]),
             _fn("find_analogous",
                 "Find experiments most similar to a given one (or to a set of params) by parameter "
                 "distance — to see how nearby configs performed before committing.",
@@ -91,6 +106,8 @@ class RunTools:
                 return self._read(st, int(args.get("node_id")), args.get("trials"))
             if name == "read_code":
                 return self._code(st, int(args.get("node_id")))
+            if name == "read_logs":
+                return self._logs(st, int(args.get("node_id")))
             if name == "find_analogous":
                 return self._analogous(st, args)
             if name == "list_themes":
@@ -196,6 +213,36 @@ class RunTools:
             return f"(experiment #{nid} has no code recorded)"
         files = (f"\nother files: {list(n.files)}" if n.files else "")
         return f"# solution.py of experiment #{nid}\n{n.code[:self.max_chars]}{files}"
+
+    def _logs(self, st: RunState, nid: int) -> str:
+        """The node's execution logs: the captured stdout tail (what it printed while training/eval)
+        and the FULL error/stderr — not the 300-char failure summary `read_experiment` shows. Logs are
+        the whole point of this tool, so they get a larger budget (`_LOG_CHARS`) than a normal read."""
+        n = st.nodes.get(nid)
+        if n is None:
+            return f"(no experiment #{nid})"
+        head = f"experiment #{n.id} — operator={n.operator} status={n.status.value}"
+        if n.error_reason:
+            head += f" · failure={n.error_reason}"
+        if n.eval_seconds is not None:
+            head += f" · eval={digest._fmt_num(n.eval_seconds)}s"
+        out = [head]
+        stdout = (n.stdout_tail or "").rstrip()
+        error = (n.error or "").rstrip()
+        budget = max(self.max_chars, self._LOG_CHARS)
+        # Split the budget so a huge stdout can't crowd out the error (and vice-versa): give each the
+        # larger half only when the other is short, so a lone log still gets the whole budget.
+        if stdout and error:
+            half = budget // 2
+            out.append("--- stdout (tail) ---\n" + _clip(stdout, max(half, budget - len(error) - 200)))
+            out.append("--- error / stderr ---\n" + _clip(error, max(half, budget - len(stdout) - 200)))
+        elif stdout:
+            out.append("--- stdout (tail) ---\n" + _clip(stdout, budget))
+        elif error:
+            out.append("--- error / stderr ---\n" + _clip(error, budget))
+        else:
+            out.append("(no stdout or error captured for this experiment)")
+        return "\n".join(out)
 
     def _analogous(self, st: RunState, args: dict) -> str:
         nid = args.get("node_id")
