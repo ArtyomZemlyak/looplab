@@ -44,7 +44,7 @@ export default function Inspector({ runId, nodeId, state, live, tab, setTab, onT
                             onClick={() => setTab(t)}>{t}</div>)}
       </div>
       <div className="insp-body">
-        <div className="insp-hint muted">Actions (confirm · ablate · fork · promote · note) live in the chat — add <span className="ctx-chip" style={{ padding: '0 6px' }}>＋ #{n.id}</span> as context there, or type a <code>/command</code>.</div>
+        <div className="insp-hint muted">Actions (confirm · ablate · fork · promote · note) live in the chat — <button className="ctx-chip" style={{ padding: '0 6px', cursor: 'pointer' }} title="attach this experiment to the assistant context" onClick={() => window.dispatchEvent(new CustomEvent('ll:attach-node', { detail: { id: n.id } }))}>＋ #{n.id}</button> as context there, or type a <code>/command</code>.</div>
 
         {activeTab === 'Overview' && <Overview n={n} state={state} />}
         {activeTab === 'Trials' && <Trials n={n} detail={detail} state={state} />}

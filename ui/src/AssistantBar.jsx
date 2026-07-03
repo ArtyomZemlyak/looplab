@@ -220,6 +220,20 @@ export default function AssistantBar({ runId, hidden = false }) {
     try { last = localStorage.getItem('ll.asstSid') } catch { last = null }
     if (last) openSession(last, { recover: true })
   }, [])   // eslint-disable-line react-hooks/exhaustive-deps
+  // Attach a node to the chat context from anywhere (a node card / the Inspector dispatches
+  // `ll:attach-node`): append `#<id>` to the composer (deduped), reveal the assistant, and focus.
+  useEffect(() => {
+    const onAttach = (e) => {
+      const id = e?.detail?.id
+      if (id == null) return
+      setInput(prev => new RegExp(`#(?:node-)?${id}\\b`, 'i').test(prev) ? prev
+        : (prev.trim() ? prev.replace(/\s*$/, ' ') : '') + `#${id} `)
+      setView(v => (v === 'bar' && hasChat) ? 'side' : v)
+      requestAnimationFrame(() => inputRef.current?.focus())
+    }
+    window.addEventListener('ll:attach-node', onAttach)
+    return () => window.removeEventListener('ll:attach-node', onAttach)
+  }, [hasChat])
   const newChat = () => { if (abortRef.current) abortRef.current.abort(); sidRef.current = null; setSid(null); setMsgs([]); setPreview(''); setHasNew(false); setInput(''); setFiles([]); try { localStorage.removeItem('ll.asstSid') } catch { /* ignore */ } }
   const delSession = async (id, e) => {
     e?.stopPropagation()
@@ -448,6 +462,10 @@ export default function AssistantBar({ runId, hidden = false }) {
 
   // A full composer (textarea + attach + send/stop + mode row below) — reused by side + full views.
   const composer = (placeholder) => <div className="chat-in asst-in">
+    {runId && refNodes(input).length > 0 && <div className="cmdbar-ctx">
+      {refNodes(input).map(id => <span key={id} className="chip xs">#{id}
+        <button className="chip-x" title="detach" onClick={() => setInput(input.replace(new RegExp(`#(?:node-)?${id}\\b`, 'gi'), '').replace(/\s{2,}/g, ' ').trim())}>✕</button></span>)}
+    </div>}
     {fileChips}
     <div className="asst-inrow">
       {attachBtn('asst-attach')}
