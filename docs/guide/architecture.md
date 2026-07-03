@@ -5,11 +5,23 @@ hide:
 
 # Architecture at a glance
 
-A single picture of the **whole agent** — every component and every stage — grounded in the
-configuration that ships **enabled by default**. It walks a run end to end: the six-stage lifecycle,
-one turn of the loop (Researcher → Developer → Sandbox → Evaluator, with the repair and merge edges),
-the subsystems around the loop, the four cross-run memory types, and an honest board of what is
-**on**, **off**, or **dormant until `backend=llm`**.
+Two views of the **whole agent**: a **single-schema one-pager** for the mental model, and a
+**full interactive infographic** for the deep dive — both grounded in the configuration that ships
+**enabled by default**.
+
+## The one-pager
+
+Three planes and their connections. **Magenta = where the LLM / agent is invoked** (Genesis,
+Strategist, Researcher, Developer, Critic, Reflector); the **engine** plane is deterministic
+(select · execute · gate · log); and the **stores** — Search, Memory, Knowledge — feed the loop,
+all over the append-only `events.jsonl` spine.
+
+[![LoopLab architecture — one-pager schema](../infographic/architecture-one-pager.svg)](../infographic/architecture-one-pager.svg)
+
+## The interactive infographic
+
+The lifecycle, one loop iteration keyed to the real event kinds, every subsystem, the four cross-run
+memory types, and an honest board of what is **on**, **off**, or **dormant until `backend=llm`**.
 
 [:material-open-in-new: Open the infographic full-screen](../infographic/agent-architecture.html){ .md-button .md-button--primary .ll-open target="_blank" }
 

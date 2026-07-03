@@ -17,6 +17,14 @@ the single source of truth**, so a run is fully **reproducible and crash-resumab
 It runs **fully offline with zero external services** (no API keys, no Docker) on a local task, and
 scales up to driving a live LLM, working inside a real repo, or grading actual Kaggle competitions.
 
+## Architecture
+
+Three planes and their connections — **magenta marks where the LLM / agent is invoked**, the engine
+plane is deterministic, and the Search / Memory / Knowledge stores feed the loop over the append-only
+`events.jsonl` spine. Full walkthrough on the [documentation site](https://artyomzemlyak.github.io/looplab/guide/architecture/).
+
+![LoopLab architecture — one-pager schema](docs/infographic/architecture-one-pager.svg)
+
 ## Key features
 
 - **Closed research loop** — a Researcher proposes, a Developer writes the code, a sandbox runs it, an evaluator scores it, and the loop refines and merges the best candidates. See [Concepts](docs/guide/concepts.md).
