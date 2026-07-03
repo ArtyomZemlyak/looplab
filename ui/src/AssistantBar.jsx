@@ -5,6 +5,7 @@ import {
   CONTROL, get, fmtAgo, ASSISTANT_MODES as MODES, tokText, assistantCreate, assistantMessageStream,
   assistantCommands, assistantRevert, assistantSessions, assistantGet, assistantDelete,
   assistantPermissions, assistantResolve, assistantCancel, assistantProgress,
+  assistantFork, assistantShare,
 } from './util.js'
 
 // ── ONE assistant, three flowing views: bar ⇄ side(right) ⇄ full ───────────────────────────────
@@ -452,7 +453,11 @@ export default function AssistantBar({ runId, hidden = false }) {
     runningRef.current = false                              // halt reattach/recover polling immediately
     if (abortRef.current) { try { abortRef.current.abort() } catch { /* already gone */ } abortRef.current = null }
     const id = sidRef.current || sid                        // cancel server-side (works even post-reload)
-    if (id) cancelReqRef.current = assistantCancel(id).catch(() => {}).finally(() => { cancelReqRef.current = null })
+    if (id) {
+      const pr = assistantCancel(id).catch(() => {})
+      cancelReqRef.current = pr
+      pr.finally(() => { if (cancelReqRef.current === pr) cancelReqRef.current = null })   // identity-guarded
+    }
     // Reset the UI NOW — never wait on a hung LLM call or the server: end the streaming placeholder,
     // drop busy + pending, so the composer is usable again instantly.
     setBusy(false); setPending([])
@@ -634,6 +639,17 @@ export default function AssistantBar({ runId, hidden = false }) {
         <div className="asst-main-h">
           <span className="ttl" style={{ flex: 1 }}>{sessions.find(s => s.id === sid)?.title || 'New chat'}</span>
           {ctxChip}
+          {sid && <button className="btn sm ghost" title="fork this chat into a new session" onClick={async () => {
+            try { const c = await assistantFork(sid); await refreshSessions(); openSession(c.id) } catch (e) { flash(e.message) }
+          }}>⑂ fork</button>}
+          {sid && <button className="btn sm ghost" title="share a read-only link to this chat" onClick={async () => {
+            try {
+              const r = await assistantShare(sid)
+              const url = location.origin + location.pathname + r.url
+              try { await navigator.clipboard.writeText(url) } catch { /* clipboard blocked */ }
+              location.hash = r.url.replace(/^#/, '')   // navigate AFTER copying (the bar hides on the shared page)
+            } catch (e) { flash(e.message) }
+          }}>⤴ share</button>}
           <button className="btn sm ghost" title="dock to the right" onClick={openSide}>▧ side</button>
           <button className="btn sm ghost" title="fold to the bar" onClick={collapseToBar}>▾ bar</button>
         </div>

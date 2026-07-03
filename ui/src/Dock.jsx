@@ -1,82 +1,13 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react'
-import { get, fmt, chat, command, appendAction, actionNeedsEngine, workingId, CONTROL, resumeRun, resetRun, getChatLog, appendChatTurn, chatCompact } from './util.js'
+import { get, fmt, workingId, CONTROL, resumeRun, resetRun } from './util.js'
 import Markdown from './markdown.jsx'
-import { NodeTrace, LlmCall } from './Inspector.jsx'
+import { NodeTrace } from './Inspector.jsx'
 import { OpIcon } from './icons.jsx'
 
-const HELP = 'Commands: /confirm #n · /ablate #n · /fork #n · /promote #n · /note #n text · /hint text · /strategy policy=ucb fidelity=low · /deep-research · /experiment <idea> · /approve #n · /ratify · /pause · /resume · /stop · /refresh. Or just say what you want and I’ll do it right away (boss mode — actions apply immediately; reversible ones offer Undo).'
 
-// Slash-command catalogue powering the type-ahead hints above the input. `desc` is the one-line label
-// in the list; `why` is the "what this does / when to reach for it" shown on hover (and in the detail
-// strip). Order = roughly most-reached-for first. Kept in sync with parseSlash() below.
-const COMMANDS = [
-  { cmd: 'confirm', args: '#n', desc: 'multi-seed re-eval of a node',
-    why: 'Re-runs a node across several seeds and ranks by the robust mean — confirms a score is real, not luck from one good seed.' },
-  { cmd: 'ablate', args: '#n', desc: 'sensitivity / ablation probe',
-    why: 'Turns parts of a node’s idea off one at a time to see which actually move the metric — separates what matters from dead weight.' },
-  { cmd: 'fork', args: '#n', desc: 'branch a fresh improve from a node',
-    why: 'Starts a new improve-branch off this (known-good) node so the search explores a different direction from a solid base.' },
-  { cmd: 'promote', args: '#n', desc: 'pin a node as champion',
-    why: 'Marks this node as the current best/champion the report and final answer build on.' },
-  { cmd: 'note', args: '#n text', desc: 'annotate a node',
-    why: 'Attaches a human note to a node — kept in the audit trail and visible to the agent as context.' },
-  { cmd: 'hint', args: 'text', desc: 'steer the agent (soft)',
-    why: 'Drops a free-text directive into the agent’s context to bias what it tries next, without forcing a specific action.' },
-  { cmd: 'strategy', args: 'policy=ucb fidelity=low', desc: 'switch search strategy',
-    why: 'Changes the search policy/fidelity live — e.g. explore harder (ucb) or run cheaper low-fidelity evals to cover more ground.' },
-  { cmd: 'deep-research', args: '', desc: 'run a deep-research step now',
-    why: 'Fires the arXiv + web research stage immediately to pull outside ideas in before the next round of proposals.' },
-  { cmd: 'experiment', args: '<idea>', desc: 'propose & add a node',
-    why: 'Hands your idea to the agent to turn into the next experiment node (LLM-authored), instead of you specifying an exact action.' },
-  { cmd: 'approve', args: '#n', desc: 'approve a gated node (HITL)',
-    why: 'Grants human approval at an approval checkpoint so the run can proceed past it.' },
-  { cmd: 'ratify', args: '', desc: 'ratify the eval spec',
-    why: 'Approves the evaluation spec so the run can start/continue scoring under it.' },
-  { cmd: 'pause', args: '', desc: 'pause the run (resumable)',
-    why: 'Cleanly stops taking new work between nodes while keeping all state — resume picks up exactly where it left off.' },
-  { cmd: 'resume', args: '', desc: 'resume a paused run',
-    why: 'Continues a paused run from where it stopped.' },
-  { cmd: 'stop', args: '', desc: 'stop / abort the run',
-    why: 'Aborts and finalizes the run. Not resumable in place — use Replay to start over from scratch.' },
-  { cmd: 'refresh', args: '', desc: 'rebuild the run report',
-    why: 'Regenerates the agent-authored report from the latest events.' },
-  { cmd: 'help', args: '', desc: 'list all commands',
-    why: 'Prints the full command reference into the chat.' },
-]
-
-// Parse a leading-slash command into a control action (no LLM — deterministic + offline-safe). Returns
-// {action} | {error} | {help} | {llm:instruction} (route to the action-router) | null (not a command).
-function parseSlash(text, ctxId, state) {
-  const m = text.trim().match(/^\/(\S+)\s*([\s\S]*)$/)
-  if (!m) return null
-  const cmd = m[1].toLowerCase(), rest = (m[2] || '').trim()
-  const idArg = () => { const mm = rest.match(/#?(\d+)/); return mm ? Number(mm[1]) : (ctxId ?? null) }
-  const afterId = () => rest.replace(/#?\d+\s*/, '').trim()
-  const need = (id, label) => id == null ? { error: `which node? add #id or drag one in — e.g. /${cmd} #5` } : label
-  switch (cmd) {
-    case 'help': return { help: true }
-    case 'pause': return { action: { type: 'pause', data: {}, label: 'Pause the run' } }
-    case 'resume': return { action: { type: 'resume', data: {}, label: 'Resume the run' } }
-    case 'stop': case 'abort': return { action: { type: 'run_abort', data: { reason: 'ui' }, label: 'Stop the run' } }
-    case 'confirm': { const id = idArg(); return need(id, { action: { type: 'force_confirm', data: { node_id: id }, label: `Confirm #${id} (multi-seed robustness)` } }) }
-    case 'ablate': { const id = idArg(); return need(id, { action: { type: 'force_ablate', data: { node_id: id }, label: `Ablate #${id} (sensitivity probe)` } }) }
-    case 'fork': { const id = idArg(); return need(id, { action: { type: 'fork', data: { from_node_id: id }, label: `Fork an improve-branch from #${id}` } }) }
-    case 'promote': { const id = idArg(); return need(id, { action: { type: 'promote', data: { node_id: id, alias: 'champion' }, label: `Promote #${id} to champion` } }) }
-    case 'note': { const id = idArg(), txt = afterId(); return (id == null || !txt) ? { error: 'usage: /note #id your note' } : { action: { type: 'annotation', data: { node_id: id, text: txt }, label: `Note on #${id}` } } }
-    case 'hint': return rest ? { action: { type: 'hint', data: { text: rest }, label: `Hint: ${rest.slice(0, 60)}` } } : { error: 'usage: /hint your directive' }
-    case 'strategy': { const s = {}; rest.split(/\s+/).forEach(kv => { const [k, v] = kv.split('='); if (k && v) s[k] = v }); const pretty = Object.entries(s).map(([k, v]) => `${k}=${v}`).join(' '); return Object.keys(s).length ? { action: { type: 'set_strategy', data: { strategy: s }, label: `Switch strategy → ${pretty}` } } : { error: 'usage: /strategy policy=ucb fidelity=low' } }
-    case 'deep-research': case 'research': return { action: { type: 'deep_research', data: {}, label: 'Run a deep-research step now' } }
-    case 'approve': { const id = idArg() ?? state.best_node_id; return { action: { type: 'approval_granted', data: { node_id: id }, label: `Approve #${id}` } } }
-    case 'ratify': return { action: { type: 'spec_approved', data: {}, label: 'Ratify the eval spec' } }
-    case 'refresh': return { action: { type: '__refresh_report__', data: {}, label: 'Refresh the run report' } }
-    case 'experiment': case 'new': return { llm: rest || 'propose and add the next experiment' }
-    default: return { error: `unknown command /${cmd} — try /help` }
-  }
-}
-
-// The unified chat surface (Workstream B): one scrubbable, filterable feed that renders every run
-// event as a differentiated chat message AND hosts the command/conversation input. There are no tab
-// names and no Gantt — this is simply "the chat".
+// The run's EVENTS window (round-9): one scrubbable, filterable feed that renders every run event
+// as a differentiated message. The per-run "boss" chat moved to the single persistent assistant, so
+// there is no composer here — just the timeline, scrubber, filters, and transport.
 
 const NARR = {
   run_started: (d) => `run started — ${d.goal || d.task_id} (${d.direction})`,
@@ -415,153 +346,17 @@ function EventRow({ e, trace, onFocusEvent, autoOpen, runId }) {
   )
 }
 
-// An action the boss-handler APPLIED (round-7: no confirm — it acts immediately). The row is the audit
-// record of what it did; reversible verbs (pause⇄resume) offer one-click Undo. Critical verbs
-// (abort) are highlighted so they stay visible in the feed.
-function AppliedRow({ m, onUndo }) {
-  const a = m.action
-  return (
-    <div className={'feed-msg action' + (m.highlight ? ' hl' : '')}>
-      <div className="fm-ic"><OpIcon name="bolt" size={14} className="fm-ic-svg" /></div>
-      <div className="fm-body">
-        <div className="fm-line">
-          <b className="pa-label">{a.label}</b>
-          {m.highlight && <OpIcon name="star" size={12} className="fm-star" />}
-          <span className="spacer" style={{ flex: 1 }} />
-          {m.tokens?.total ? <span className="chat-tok"
-            title={`${m.tokens.prompt || 0} prompt → ${m.tokens.completion || 0} completion tokens`}>{ktok(m.tokens.total)} tok</span> : null}
-          <span className={'pa-status ' + m.status}>{
-            m.status === 'running' ? '… applying' : m.status === 'done' ? '✓ applied'
-              : m.status === 'failed' ? '✗ ' + (m.err || 'failed') : ''}</span>
-        </div>
-        {a.rationale && <div className="muted pa-why">{a.rationale}</div>}
-        {m.status === 'done' && m.undo &&
-          <button className="btn sm ghost pa-undo" onClick={() => onUndo(m)}>Undo ({m.undo.label})</button>}
-      </div>
-    </div>
-  )
-}
-
-// A chat turn. The human's own messages sit RIGHT, in a filled accent bubble (so they never visually
-// merge with the left-aligned event/agent stream); the agent's replies sit LEFT in a neutral bubble,
-// and a long reply (the "wall of text") collapses to a clamp with a show-more toggle.
-function ChatRow({ m }) {
-  const [open, setOpen] = useState(false)
-  const isUser = m.role === 'user'
-  const tr = !isUser ? m.trace : null                  // the LLM I/O behind this reply, if captured
-  const long = !isUser && (m.content || '').length > 600
-  const [expanded, setExpanded] = useState(false)
-  const icon = <div className="fm-ic"><OpIcon name={isUser ? 'user' : 'bot'} size={14} className="fm-ic-svg" /></div>
-  return (
-    <div className={'feed-msg chat ' + m.role}>
-      {icon}
-      <div className="fm-body">
-        {(m.ctx || []).length > 0 && <div className="ctx-row">{m.ctx.map(id => <span key={id} className="ctx-chip">#{id}</span>)}</div>}
-        <div className="chat-who">{isUser ? 'you' : 'agent'}
-          {!isUser && m.tokens?.total ? <span className="chat-tok"
-            title={`${m.tokens.prompt || 0} prompt → ${m.tokens.completion || 0} completion tokens`}>{ktok(m.tokens.total)} tok</span> : null}</div>
-        <div className={'chat-bubble' + (long && !expanded ? ' clamp' : '')}>
-          {isUser ? <div className="chat-text">{m.content}</div> : <Markdown className="chat-text" text={m.content} />}
-        </div>
-        {long && <div className="chat-more" onClick={() => setExpanded(e => !e)}>
-          {expanded ? '▾ show less' : '▸ show full reply'}</div>}
-        {tr && <div className="chat-trace-tog" onClick={() => setOpen(o => !o)}>{open ? '▾' : '▸'} trace</div>}
-        {tr && open && <div className="chat-trace">
-          <LlmCall idx={0} call={{ op: 'chat', model: tr.model, tokens: tr.tokens, completion: tr.completion,
-            prompt: [...(tr.system ? [{ role: 'system', content: tr.system }] : []),
-                     ...(tr.user ? [{ role: 'user', content: tr.user }] : []),
-                     ...(tr.messages || [])] }} />
-        </div>}
-      </div>
-    </div>
-  )
-}
-
-// Compact token formatter (langfuse-style): 1280 → "1.3k", 12000 → "12k".
-const ktok = (n) => (n == null ? '' : n >= 1000 ? +(n / 1000).toFixed(n >= 9950 ? 0 : 1) + 'k' : String(n))
-// Turns kept verbatim at the tail when compacting; the rest fold into the recap. Compact only offers
-// itself once there's a real backlog to fold (KEEP_RECENT + at least 2 older turns).
-const KEEP_RECENT = 6
-// Tokens spent on ONE turn — assistant replies carry it in their trace; an agentic plan carries it
-// directly (no trace); a summary carries the compaction cost. One reader so the header total agrees.
-const turnTokens = (m) => (m?.trace?.tokens?.total || m?.tokens?.total || 0)
-
-// A compaction marker: N older chat turns folded into ONE recap, so the boss re-reads the recap
-// instead of every turn. Expands to show the recap; a sub-toggle reveals the original folded turns
-// (still in chat.jsonl — just hidden from the live feed and the boss's context).
-function SummaryRow({ m, folded, showFolded, onToggleFolded }) {
-  const [open, setOpen] = useState(false)
-  return (
-    <div className="feed-msg summary">
-      <div className="fm-ic"><OpIcon name="doc" size={14} className="fm-ic-svg" /></div>
-      <div className="fm-body">
-        <div className="fm-line clickable" onClick={() => setOpen(o => !o)}>
-          <span className="fm-tw">{open ? '▾' : '▸'}</span>
-          <span className="fm-narr">compacted {folded} earlier message{folded === 1 ? '' : 's'} into a recap</span>
-          {m.tokens?.total ? <span className="chat-tok" title="tokens spent compacting">{ktok(m.tokens.total)} tok</span> : null}
-        </div>
-        {open && <div className="ev-detail-wrap"><div className="ev-detail">
-          <div className="v">{m.content}</div>
-          <div className="sum-foot" onClick={(e) => { e.stopPropagation(); onToggleFolded() }}>
-            {showFolded ? '▾ hide the folded turns' : `▸ show the ${folded} folded turn${folded === 1 ? '' : 's'}`}</div>
-        </div></div>}
-      </div>
-    </div>
-  )
-}
-
-// `eventsOnly` (round-9): the per-run "boss" chat has moved to the single persistent assistant, so the
-// Dock is now purely the run's EVENTS window — the timeline feed + scrubber + filters + transport. The
-// chat composer / conversation turns / compaction are not rendered in that mode.
-export default function Dock({ runId, live, liveSeq, viewSeq, setViewSeq, onFocus, collapsed, onToggleCollapse, height = 230, selectedId, onToast, eventsOnly = false }) {
+// Round-9: the per-run "boss" chat moved to the single persistent assistant, so the Dock is purely
+// the run's EVENTS window — the timeline feed + scrubber + filters + transport.
+export default function Dock({ runId, live, liveSeq, viewSeq, setViewSeq, onFocus, collapsed, onToggleCollapse, height = 230, onToast }) {
   const [log, setLog] = useState([])
   const [trace, setTrace] = useState(null)
   const [filter, setFilter] = useState('')
   const [kinds, setKinds] = useState(() => new Set())     // selected kind chips (empty = all)
-  const [msgs, setMsgs] = useState([])                    // chat turns {role, content, ts, ctx?}
-  const [input, setInput] = useState('')
-  const [busy, setBusy] = useState(false)
-  const [ctx, setCtx] = useState([])                      // node-id context chips for the next message
-  const [dropActive, setDropActive] = useState(false)
-  const [sugIdx, setSugIdx] = useState(0)                 // highlighted command suggestion
-  const [sugOpen, setSugOpen] = useState(true)            // false only after an explicit Esc (reopens on edit)
-  const [showFolded, setShowFolded] = useState(false)     // reveal turns hidden behind the latest recap
-  const [compacting, setCompacting] = useState(false)     // a /chat-compact request is in flight
-  // Transparency: the single in-flight CHAT-SIDE operation, shown live in the status strip with an
-  // elapsed counter so a slow model call (compaction / a boss reply can take 20-30s on a hosted model)
-  // reads as "working, 14s" instead of a frozen "…". { label, icon, since (epoch s) } | null.
-  const [op, setOp] = useState(null)
-  const [, tick] = useState(0)                            // 1Hz repaint so the elapsed counter advances
-  const taRef = useRef(null)
   const feedRef = useRef(null)
-  const msgCtr = useRef(0)
   // round-7: scrubber + filter chips collapse into one block to save space; default hidden, remembered.
   const [showControls, setShowControls] = useState(() => localStorage.getItem('ll.dock.controls') === '1')
   const toggleControls = () => setShowControls(v => { const n = !v; localStorage.setItem('ll.dock.controls', n ? '1' : '0'); return n })
-  // Restore the saved conversation on mount (and whenever the run changes) so chat turns survive a
-  // Dock remount — a Search↔Report toggle, the finish-auto-land, reopening the run, or a full reload.
-  // The in-memory feed stays the live truth; this just rehydrates it from the run's chat.jsonl.
-  useEffect(() => {
-    if (eventsOnly) return                      // events window: no per-run chat to restore
-    let alive = true
-    getChatLog(runId).then(turns => {
-      if (!alive || !Array.isArray(turns)) return
-      // Merge, don't clobber: a turn the user sent WHILE this load was in flight (it carries its own
-      // seq) must survive — the GET was issued before that POST, so its snapshot predates it. Dedup by
-      // seq (a persisted turn reuses the same seq) and keep chronological order.
-      setMsgs(prev => {
-        if (!prev.length) return turns
-        const have = new Set(turns.map(t => t.seq))
-        return [...turns, ...prev.filter(p => !have.has(p.seq))]
-          .sort((a, b) => ((a.ts || 0) - (b.ts || 0)) || ((a.seq ?? 0) - (b.seq ?? 0)))
-      })
-      msgCtr.current = Math.max(msgCtr.current, turns.length)   // keep new seqs past the restored turns
-    }).catch(() => {})
-    return () => { alive = false }
-  }, [runId, eventsOnly])
-  // Durably append one feed turn to the run's transcript. Fire-and-forget + soft-fail: the in-memory
-  // feed already shows it, so a disk hiccup must never break the chat — it just won't survive a reload.
-  const persistTurn = (turn) => { appendChatTurn(runId, turn).catch(() => {}) }
   useEffect(() => {
     let alive = true
     get(`/api/runs/${runId}/log`).then(d => { if (alive) setLog(d) }).catch(() => {})
@@ -619,205 +414,18 @@ export default function Dock({ runId, live, liveSeq, viewSeq, setViewSeq, onFocu
   }
   const kindMatch = (e) => kinds.size === 0 || kinds.has(TYPE2GROUP[e.type] || 'lifecycle')
 
-  // round-7: anchor each chat turn to the live tail so a just-sent message can't sort into the past
-  // (the old "overlaps previous messages" bug). ts ≥ newest known event; seq grows with liveSeq + order.
-  const tailTs = () => Math.max(Date.now() / 1000, log.length ? (log[log.length - 1].ts || 0) : 0) + 1e-3
-  const chatSeq = () => 1e15 + liveSeq * 1e6 + (msgCtr.current++)
+  // The chronological feed: events, filtered + time-scrubbed.
+  const feed = useMemo(() =>
+    log.filter(e => (atLive || e.seq <= viewSeq) && kindMatch(e) && textMatch(e)),
+    [log, atLive, viewSeq, filter, kinds])
 
-  // --- context compaction (manual "Compact"): fold older chat turns into ONE recap so the boss stops
-  // re-reading the whole conversation each message. The recap is a durable `summary` turn; everything
-  // it covers (seq ≤ covers_upto_seq) is hidden from the feed + the boss's context unless expanded. ---
-  const latestSummary = useMemo(() => {
-    const s = msgs.filter(m => m.role === 'summary')
-    return s.length ? s.reduce((a, b) => ((b.seq ?? 0) > (a.seq ?? 0) ? b : a)) : null
-  }, [msgs])
-  const coveredSeq = latestSummary?.covers_upto_seq ?? -1
-  const foldedCount = useMemo(() =>
-    msgs.filter(m => m.role !== 'summary' && (m.seq ?? 0) <= coveredSeq).length, [msgs, coveredSeq])
-  // Turns eligible to fold next time = real conversation turns AFTER the current recap boundary.
-  const compactableTurns = useMemo(() =>
-    msgs.filter(m => (m.role === 'user' || m.role === 'assistant' || m.role === 'action') && (m.seq ?? 0) > coveredSeq),
-    [msgs, coveredSeq])
-  // Running token total for this chat (boss plans + advisory replies + compactions) — the header badge.
-  const chatTokens = useMemo(() => msgs.reduce((sum, m) => sum + turnTokens(m), 0), [msgs])
-  // The conversation the boss actually receives: the recap (if any) standing in for the folded turns,
-  // then every turn after it. This is what caps the O(n) context growth a long chat would otherwise hit.
-  const buildHistory = () => {
-    const after = coveredSeq >= 0 ? msgs.filter(m => (m.seq ?? 0) > coveredSeq) : msgs
-    // Keep applied actions in the boss's memory as one-liners — else a recent tail dominated by a big
-    // plan's action rows would be stripped, leaving the boss only the recap with no recent context.
-    const conv = after.filter(m => m.role === 'user' || m.role === 'assistant' || m.role === 'action')
-      .map(m => m.role === 'action' ? { role: 'assistant', content: 'applied: ' + (m.action?.label || '') } : { role: m.role, content: m.content })
-    return latestSummary
-      ? [{ role: 'assistant', content: 'Recap of our earlier discussion (compacted):\n' + latestSummary.content }, ...conv]
-      : conv
-  }
-
-  // The unified, chronological feed: events (filtered + time-scrubbed) interleaved with chat turns.
-  const feed = useMemo(() => {
-    const evItems = log
-      .filter(e => (atLive || e.seq <= viewSeq) && kindMatch(e) && textMatch(e))
-      .map(e => ({ t: 'ev', ts: e.ts || 0, seq: e.seq, e }))
-    const msgItems = msgs
-      .map((m, i) => ({ t: 'msg', ts: m.ts || 0, seq: m.seq ?? (1e15 + i), m, i }))
-      .filter(it => it.m.role === 'summary'
-        ? it.m.seq === latestSummary?.seq                                  // only the newest recap card
-        : (showFolded || coveredSeq < 0 || (it.m.seq ?? 0) > coveredSeq))  // hide turns behind the recap
-    return [...evItems, ...msgItems].sort((a, b) => (a.ts - b.ts) || (a.seq - b.seq))
-  }, [log, msgs, atLive, viewSeq, filter, kinds, coveredSeq, showFolded, latestSummary])
-
-  // Scroll the CONTAINER after paint — tall Markdown replies lay out late, so scrollIntoView fired
-  // mid-layout would land short and leave a new turn visually colliding with the row above it.
+  // Scroll the CONTAINER after paint — tall detail cards lay out late, so scrollIntoView fired
+  // mid-layout would land short and leave a new row visually colliding with the row above it.
   useEffect(() => {
     if (!atLive) return
     const el = feedRef.current
     if (el) requestAnimationFrame(() => { el.scrollTop = el.scrollHeight })
-  }, [feed.length, busy, atLive])
-  // Advance the elapsed counter while an operation is running (and only then — no idle timer).
-  useEffect(() => {
-    if (!op) return
-    const id = setInterval(() => tick(t => t + 1), 1000)
-    return () => clearInterval(id)
-  }, [op])
-  const opElapsed = op ? Math.max(0, Math.floor(Date.now() / 1000 - op.since)) : 0
-
-  const pushAssistant = (content, trace = null, tokens = null) => {
-    const turn = { role: 'assistant', content, trace, tokens: tokens || trace?.tokens || null, ts: tailTs(), seq: chatSeq() }
-    setMsgs(m => [...m, turn]); persistTurn(turn)
-  }
-  // round-7 boss mode: the action is APPLIED immediately (no confirm card). Reversible verbs
-  // (pause⇄resume) carry an Undo; critical verbs (abort) are highlighted so they stay visible.
-  const isCritical = (a) => a.type === 'run_abort' || a.type === 'node_abort'
-  const undoFor = (a) =>
-    a.type === 'pause' ? { label: 'resume', type: 'resume', data: {} }
-      : a.type === 'resume' ? { label: 'pause', type: 'pause', data: {} } : null
-  // Agentic apply: a PLAN is a list of actions. Each becomes its own applied-row (running→done/failed,
-  // persisted), appended IN ORDER as append-only intents; then we reopen+resume the run ONCE if any
-  // step needs the engine AND no engine is alive to drain it. "Engine dead" is finished OR a ZOMBIE
-  // (reopened but the engine died without run_finished, so finished=false yet engine_running=false) —
-  // resuming only on `finished` was the bug that left injected nodes sitting unrun forever. A genuinely
-  // live run (engine_running===true) needs no resume — it drains the intents between nodes. (undefined
-  // engine_running, e.g. an older server, falls back to the old finished-only behaviour.) Reversible
-  // steps keep their Undo.
-  const autoApplyPlan = async (actions, planTokens = null) => {
-    if (!actions || !actions.length) return
-    const engineDead = !!live?.finished || live?.engine_running === false
-    let needsResume = false, anyFailed = false
-    for (let i = 0; i < actions.length; i++) {
-      const action = actions[i]
-      const seq = chatSeq(), id = 'a' + seq, ts = tailTs()
-      // Stamp the plan's token cost on the FIRST applied row when there was no narration turn to carry
-      // it (an actions-only plan), so the header total still counts it.
-      const base = { role: 'action', action, id, ts, seq, highlight: isCritical(action), undo: undoFor(action),
-                     tokens: i === 0 ? planTokens : null }
-      setMsgs(m => [...m, { ...base, status: 'running' }])
-      try {
-        await appendAction(runId, action)                // append-only intent — no resume yet
-        setMsgs(m => m.map(x => x.id === id ? { ...x, status: 'done' } : x))
-        persistTurn({ ...base, status: 'done' })         // persist only the SETTLED row (never 'running')
-        if (engineDead && actionNeedsEngine(action)) needsResume = true
-      } catch (e) {
-        anyFailed = true
-        setMsgs(m => m.map(x => x.id === id ? { ...x, status: 'failed', err: e.message } : x))
-        persistTurn({ ...base, status: 'failed', err: e.message })
-      }
-    }
-    if (needsResume) {
-      // Still resume even if a step failed — the steps are independent append-only intents, so the
-      // ones that DID apply should run; the failed step stays visible as a ✗ row in the feed.
-      setOp({ label: 'Reopening & resuming the run', icon: 'play', since: Date.now() / 1000 })
-      try {
-        await CONTROL.reopen(runId); await resumeRun(runId)
-        onToast?.(anyFailed ? 'resumed — but a step failed (see the feed)' : 'applied & resumed — running the plan')
-      } catch (e) { onToast?.('resume failed: ' + e.message) }
-    } else if (anyFailed) {
-      onToast?.('plan partially applied — a step failed (see the feed)')
-    } else {
-      // No engine resume needed. A live run drains these intents between nodes; with no live engine
-      // (finished or zombie) a hint/note step is only BUFFERED (it runs on the next reopen) — say so.
-      const note = engineDead ? ' — saved for the next reopen' : ''
-      onToast?.((actions.length > 1 ? `applied ${actions.length} steps` : 'applied: ' + actions[0].label) + note)
-    }
-  }
-  // Single-action apply (slash commands) routes through the same plan path.
-  const autoApply = (action) => autoApplyPlan([action])
-  const onUndo = async (m) => {
-    if (!m.undo) return
-    try { await CONTROL.raw(runId, m.undo.type, m.undo.data); onToast?.('undid: ' + m.action.label) }
-    catch (e) { onToast?.('undo failed: ' + e.message) }
-  }
-  // Manual "Compact": fold all but the last KEEP_RECENT live turns into one recap (the boss then
-  // re-reads the recap, not every turn). The recap is a durable `summary` turn placed at the fold
-  // boundary; everything it covers is hidden from the feed + the boss's context until expanded.
-  const onCompact = async () => {
-    if (compacting || busy) return   // one chat-side op at a time (send + compact share the op strip)
-    const fold = compactableTurns.slice(0, Math.max(0, compactableTurns.length - KEEP_RECENT))
-    if (fold.length < 2) { onToast?.('nothing to compact yet — keep chatting'); return }
-    setCompacting(true)
-    setOp({ label: `Compacting ${fold.length} earlier messages`, icon: 'doc', since: Date.now() / 1000 })
-    try {
-      // Send the folded turns (action rows become a one-line "applied: …"); carry the PRIOR recap so a
-      // second compaction stays cumulative rather than dropping the first recap's memory.
-      const prior = latestSummary ? [{ role: 'assistant', content: 'Earlier recap: ' + latestSummary.content }] : []
-      const payload = [...prior, ...fold.map(m => ({
-        role: m.role === 'action' ? 'assistant' : m.role,
-        content: m.role === 'action' ? ('applied: ' + (m.action?.label || '')) : (m.content || '') }))]
-      const r = await chatCompact(runId, payload)
-      if (!r || !r.ok || !r.summary) { onToast?.(r?.error ? 'compact failed: ' + r.error : 'compact unavailable (offline?)'); return }
-      const foldLast = fold[fold.length - 1]
-      const upto = Math.max(...fold.map(m => m.seq ?? 0))
-      // Sit the recap at the fold boundary (just after the last folded turn, before the kept tail).
-      // Stamp `folded` on the record so the card's count is exact PER-recap (not a live re-count that
-      // overstates after a 2nd compaction, or reads 0 if the folded turns failed to persist).
-      const turn = { role: 'summary', content: r.summary, covers_upto_seq: upto, tokens: r.tokens || null,
-                     folded: fold.length, ts: (foldLast?.ts || tailTs()) + 1e-4, seq: upto + 0.5 }
-      setMsgs(m => [...m, turn]); persistTurn(turn); setShowFolded(false)
-      onToast?.(`compacted ${fold.length} messages into a recap`)
-    } catch (e) { onToast?.('compact failed: ' + e.message) }
-    finally { setCompacting(false); setOp(null) }
-  }
-  // Free text -> the boss applies an action immediately, or replies; soft-fails to advisory chat.
-  // A reply carries its `trace` (the LLM I/O) so the chat row can expand into a langfuse-style card.
-  const runCommand = async (instruction, nid, history) => {
-    const r = await command(runId, { messages: history, node_id: nid, instruction })
-    if (r.ok && r.actions?.length) {
-      // Agentic plan: show the boss's narration first, then apply the ordered steps (single resume).
-      // Token cost rides the narration turn, or the first applied row when the plan has no narration.
-      if (r.reply) pushAssistant(r.reply, null, r.tokens)
-      await autoApplyPlan(r.actions, r.reply ? null : r.tokens)
-    } else if (r.ok && r.reply) pushAssistant(r.reply, r.trace, r.tokens)
-    else {
-      // Soft-fail to advisory chat. `history` is the PRIOR turns; the current instruction must be
-      // appended or the model answers the previous message (it's not in `history` yet).
-      const c = await chat(runId, [...history, { role: 'user', content: instruction }], nid)
-      pushAssistant(c.ok ? c.text : `${c.error || 'no model reachable'}`, c.ok ? c.trace : null)
-    }
-  }
-  const send = async () => {
-    const text = input.trim()
-    if (!text || busy || compacting) return   // one chat-side op at a time (send + compact share the op strip)
-    const nid = ctx.length ? ctx[ctx.length - 1] : (selectedId ?? null)
-    const history = buildHistory()   // recap + post-recap turns, so the boss's context doesn't grow unbounded
-    const userTurn = { role: 'user', content: text, ts: tailTs(), seq: chatSeq(), ctx: [...ctx] }
-    setMsgs(m => [...m, userTurn]); persistTurn(userTurn)
-    setInput(''); setCtx([]); setBusy(true)   // the feed.length effect scrolls the new turn into view
-    // Honest op label: a boss/LLM path says "reading & deciding"; a purely-local slash action does no
-    // model call, so it says "Applying" instead (autoApplyPlan relabels to "resuming" if it reopens).
-    const reading = () => setOp({ label: 'Boss is reading & deciding', icon: 'chat', since: Date.now() / 1000 })
-    try {
-      if (text.startsWith('/')) {
-        const p = parseSlash(text, nid, live || {})
-        if (p?.help) pushAssistant(HELP)
-        else if (p?.error) pushAssistant('' + p.error)
-        else if (p?.action) { setOp({ label: 'Applying', icon: 'gear', since: Date.now() / 1000 }); await autoApply(p.action) }
-        else if (p?.llm) { reading(); await runCommand(p.llm, nid, history) }
-        else pushAssistant('unrecognized — try /help')
-      } else {
-        reading(); await runCommand(text, nid, history)
-      }
-    } catch (e) { pushAssistant('' + e.message) }
-    finally { setBusy(false); setOp(null) }
-  }
+  }, [feed.length, atLive])
   // round-7 transport: mode derived from live state; wired to existing control endpoints + reset.
   const paused = !!live?.paused, finished = !!live?.finished
   // Zombie: not finished, not paused, but no engine holds the lock (engine_running===false) — the run
@@ -833,44 +441,10 @@ export default function Dock({ runId, live, liveSeq, viewSeq, setViewSeq, onFocu
     if (!window.confirm('Reset this run? Wipes all events & nodes and restarts from scratch.')) return
     try { await resetRun(runId); onToast?.('replaying from scratch') } catch (e) { onToast?.('reset failed: ' + e.message) }
   }
-  // Command type-ahead: a `/word` with no space yet → matching commands (prefix first, then substring).
-  // Once a space is typed (entering args) or the text isn't a bare slash-word, the list disappears.
-  const sugTok = input.match(/^\/(\S*)$/)
-  const suggestions = useMemo(() => {
-    if (!sugTok) return []
-    const q = sugTok[1].toLowerCase()
-    const pre = COMMANDS.filter(c => c.cmd.startsWith(q))
-    return q ? [...pre, ...COMMANDS.filter(c => !c.cmd.startsWith(q) && c.cmd.includes(q))] : COMMANDS
-  }, [sugTok ? sugTok[1] : null])
-  const showSuggest = sugOpen && suggestions.length > 0
-  const sugSel = Math.min(sugIdx, Math.max(0, suggestions.length - 1))
-  const acceptSuggestion = (c) => {
-    if (!c) return
-    setInput('/' + c.cmd + ' ')          // trailing space → list closes, caret ready for args
-    setSugIdx(0); setSugOpen(true)
-    requestAnimationFrame(() => taRef.current?.focus())
-  }
-  const onInputKey = (e) => {
-    if (showSuggest) {
-      if (e.key === 'ArrowDown') { e.preventDefault(); setSugIdx(i => Math.min(i + 1, suggestions.length - 1)); return }
-      if (e.key === 'ArrowUp') { e.preventDefault(); setSugIdx(i => Math.max(i - 1, 0)); return }
-      if (e.key === 'Tab' || (e.key === 'Enter' && !e.shiftKey)) { e.preventDefault(); acceptSuggestion(suggestions[sugSel]); return }
-      if (e.key === 'Escape') { e.preventDefault(); setSugOpen(false); return }
-    }
-    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send() }
-  }
-  const addCtx = (id) => { if (id != null) setCtx(c => (c.includes(id) ? c : [...c, id])) }
-  const onDrop = (ev) => {
-    ev.preventDefault(); setDropActive(false)
-    const raw = ev.dataTransfer.getData('application/looplab-node') || ev.dataTransfer.getData('text/plain')
-    const id = Number(String(raw).replace('#', ''))
-    if (!Number.isNaN(id)) addCtx(id)
-  }
-
   return (
     <div className="dock chat-dock">
       <div className="dock-tabs">
-        <span className="chat-label"><OpIcon name={eventsOnly ? 'flag' : 'chat'} size={14} /> {eventsOnly ? 'events' : 'chat'} &amp; timeline</span>
+        <span className="chat-label"><OpIcon name="flag" size={14} /> events &amp; timeline</span>
         {/* clickable so the user can return to live even when the controls (with the Live button) are hidden */}
         <span className={'hist-tag-mini ' + (atLive ? 'live' : 'hist')}
               onClick={() => { if (!atLive) { setViewSeq(null); setDrag(null) } }}
@@ -882,9 +456,6 @@ export default function Dock({ runId, live, liveSeq, viewSeq, setViewSeq, onFocu
           <span className="hist-tag-mini hist" style={{ cursor: 'pointer' }}
                 title="a filter is active — open controls to change it" onClick={toggleControls}>⌕ filtered</span>}
         <span className="spacer" style={{ flex: 1 }} />
-        {!eventsOnly && chatTokens > 0 && <span className="chat-tok hdr"
-              title="approx tokens this chat has cost so far (boss replies + compaction) — a lifetime total, not the current context size">
-          {ktok(chatTokens)} tok</span>}
         <button className={'btn sm ghost' + (showControls ? ' on' : '')} title="time-travel & filters"
                 onClick={toggleControls}><OpIcon name="sliders" size={13} /> controls</button>
         <button className="btn sm ghost dock-collapse" title={collapsed ? 'expand' : 'collapse'}
@@ -909,33 +480,22 @@ export default function Dock({ runId, live, liveSeq, viewSeq, setViewSeq, onFocu
         </div>}
         <div className="feed chat-feed" ref={feedRef}>
           {feed.length === 0
-            ? <div className="muted">{(filter || kinds.size) ? 'nothing matches the filter' : (eventsOnly ? 'no events yet' : 'no events yet — say hello below')}</div>
-            : feed.map(it => it.t === 'ev'
-                ? <EventRow key={'e' + it.seq} e={it.e} trace={trace} onFocusEvent={focusEvent} runId={runId}
-                    autoOpen={(it.e.type === 'node_created' && eventNode(it.e) === livePendingId)
-                      || (it.e.type === 'setup_started' && inSetup)} />
-                : it.m.role === 'summary'
-                  ? <SummaryRow key={'s' + it.i} m={it.m} folded={it.m.folded ?? foldedCount}
-                      showFolded={showFolded} onToggleFolded={() => setShowFolded(v => !v)} />
-                  : it.m.role === 'action'
-                    ? <AppliedRow key={it.m.id || ('a' + it.i)} m={it.m} onUndo={onUndo} />
-                    : <ChatRow key={'m' + it.i} m={it.m} />)}
+            ? <div className="muted">{(filter || kinds.size) ? 'nothing matches the filter' : 'no events yet'}</div>
+            : feed.map(e =>
+                <EventRow key={'e' + e.seq} e={e} trace={trace} onFocusEvent={focusEvent} runId={runId}
+                    autoOpen={(e.type === 'node_created' && eventNode(e) === livePendingId)
+                      || (e.type === 'setup_started' && inSetup)} />)}
           {(() => {
-            // Concurrent transparency: the engine pipeline (research/eval) keeps working WHILE a
-            // chat-side op (boss reply / compaction / resume) runs — show BOTH, never one masking the
-            // other, and put a live elapsed counter on the chat op so a slow model call never looks hung.
+            // A short, honest "what's the agent doing now" strip at the foot of the feed.
             const pipeline = atLive ? agentStatus(live, log) : null
-            if (!pipeline && !op) return null
+            if (!pipeline) return null
             return <div className="agent-status">
               <span className="as-dot" />
-              {pipeline && <span className="as-seg">{pipeline}</span>}
-              {pipeline && op && <span className="as-bullet">·</span>}
-              {op && <span className="as-seg as-reply">
-                <OpIcon name={op.icon || 'chat'} size={11} /> {op.label}…{opElapsed >= 2 ? ` ${opElapsed}s` : ''}</span>}
+              <span className="as-seg">{pipeline}</span>
             </div>
           })()}
         </div>
-        {eventsOnly ? <div className="dock-foot">
+        <div className="dock-foot">
           <span className="muted" style={{ fontSize: 11, flex: 1 }}>
             Steer this run from the assistant bar below — say what to do, or use <code className="cmd-hint">/pause</code> · <code className="cmd-hint">/stop</code> · <code className="cmd-hint">/approve #id</code>.
           </span>
@@ -954,53 +514,6 @@ export default function Dock({ runId, live, liveSeq, viewSeq, setViewSeq, onFocu
               <button className="btn sm" title="reset & restart from scratch" onClick={onReplay}><OpIcon name="replay" size={13} /></button></>}
           </div>
         </div>
-        : <div className={'chat-in' + (dropActive ? ' drop' : '')}
-             onDragOver={e => { e.preventDefault(); setDropActive(true) }}
-             onDragLeave={() => setDropActive(false)} onDrop={onDrop}>
-          {showSuggest && <div className="cmd-suggest" role="listbox" aria-label="commands">
-            <div className="cmd-list">
-              {suggestions.map((c, i) => <div key={c.cmd} role="option" aria-selected={i === sugSel}
-                  className={'cmd-item' + (i === sugSel ? ' on' : '')} title={c.why}
-                  onMouseEnter={() => setSugIdx(i)}
-                  onMouseDown={e => { e.preventDefault(); acceptSuggestion(c) }}>
-                <span className="cmd-name">/{c.cmd}{c.args && <span className="cmd-args"> {c.args}</span>}</span>
-                <span className="cmd-desc">{c.desc}</span>
-              </div>)}
-            </div>
-            <div className="cmd-why">{suggestions[sugSel]?.why}
-              <span className="cmd-keys">↑↓ choose · Tab insert · Esc close</span></div>
-          </div>}
-          {(ctx.length > 0 || selectedId != null) && <div className="ctx-row">
-            {ctx.map(id => <span key={id} className="ctx-chip">#{id}<button onClick={() => setCtx(c => c.filter(x => x !== id))}>✕</button></span>)}
-            {selectedId != null && !ctx.includes(selectedId) && <button className="ctx-chip add" onClick={() => addCtx(selectedId)}>＋ #{selectedId}</button>}
-          </div>}
-          <textarea ref={taRef} className="text" rows={2} placeholder="Ask, run a /command (type “/” for hints), or just say what to do… select a node to add it as ＋context · Enter to send"
-            value={input} onChange={e => { setInput(e.target.value); setSugIdx(0); setSugOpen(true) }}
-            onKeyDown={onInputKey} />
-          <div className="toolbar" style={{ marginTop: 4 }}>
-            <button className="btn sm primary" disabled={busy || compacting || !input.trim()} onClick={send}>Send</button>
-            <button className="btn sm ghost" title="list commands" onClick={() => pushAssistant(HELP)}>/help</button>
-            <button className="btn sm ghost" disabled={busy || compacting || compactableTurns.length < KEEP_RECENT + 2}
-                    title="Compact older chat turns into a recap — shrinks what the boss re-reads each message"
-                    onClick={onCompact}>{compacting ? '…' : 'Compact'}</button>
-            <span className="muted" style={{ fontSize: 11 }}>{busy ? 'thinking…' : 'boss mode — actions apply immediately'}</span>
-            <span className="spacer" style={{ flex: 1 }} />
-            <div className="transport">
-              {mode === 'running' && <>
-                <button className="btn sm" title="pause the run" onClick={onPause}><OpIcon name="pause" size={13} /></button>
-                <button className="btn sm danger" title="stop the run" onClick={onStop}><OpIcon name="stop" size={13} /></button></>}
-              {mode === 'paused' && <>
-                <button className="btn sm primary" title="resume the run" onClick={onResume}><OpIcon name="play" size={13} /></button>
-                <button className="btn sm danger" title="stop the run" onClick={onStop}><OpIcon name="stop" size={13} /></button></>}
-              {mode === 'stalled' && <>
-                <button className="btn sm primary" title="engine stopped — resume to keep going" onClick={onReopen}><OpIcon name="play" size={13} /></button>
-                <button className="btn sm danger" title="give up — mark the run finished" onClick={onStop}><OpIcon name="stop" size={13} /></button></>}
-              {mode === 'finished' && <>
-                <button className="btn sm primary" title="reopen & resume" onClick={onReopen}><OpIcon name="play" size={13} /></button>
-                <button className="btn sm" title="reset & restart from scratch" onClick={onReplay}><OpIcon name="replay" size={13} /></button></>}
-            </div>
-          </div>
-        </div>}
       </div>}
     </div>
   )

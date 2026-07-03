@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { useRunState } from './hooks.js'
-import { get, fmt, fmtInt, phaseLabel, workingId, CONTROL } from './util.js'
+import { get, fmt, fmtInt, phaseLabel, workingId, CONTROL, resumeRun } from './util.js'
 import Dag from './Dag.jsx'
 import Inspector, { GroupSummary } from './Inspector.jsx'
 import Dock from './Dock.jsx'
@@ -119,14 +119,25 @@ export default function RunView({ runId, onBack }) {
       ;(kids[x] || []).forEach(k => stack.push(k)) }
     return out
   }
+  // fork/ablate/merge only append an INTENT to the event log — a dead engine (finished/idle run)
+  // never reads it, so the button silently "does nothing". Mirror the chat's apply path: reopen the
+  // run + re-enter the loop so the engine actually processes the action (same NEEDS_RESUME logic).
+  const kickEngine = async (label) => {
+    const engineDead = !!live2?.finished || live?.engine_running === false
+    if (!engineDead) return
+    await CONTROL.reopen(runId)
+    await resumeRun(runId)
+    showToast(`${label} — run reopened, engine resuming`)
+  }
   const onNodeAction = async (action, arg) => {
     try {
       if (action === 'merge' && arg && typeof arg === 'object') {   // drag drop A->B
-        await CONTROL.merge(runId, [arg.from, arg.to]); showToast(`merging #${arg.from} + #${arg.to}`); return
+        await CONTROL.merge(runId, [arg.from, arg.to]); await kickEngine(`merging #${arg.from} + #${arg.to}`)
+        showToast(`merging #${arg.from} + #${arg.to}`); return
       }
       const id = arg
-      if (action === 'explore') { await CONTROL.fork(runId, id); showToast(`exploring from #${id}`) }
-      else if (action === 'ablate') { await CONTROL.forceAblate(runId, id); showToast(`ablating #${id}`) }
+      if (action === 'explore') { await CONTROL.fork(runId, id); await kickEngine(`exploring from #${id}`); showToast(`exploring from #${id}`) }
+      else if (action === 'ablate') { await CONTROL.forceAblate(runId, id); await kickEngine(`ablating #${id}`); showToast(`ablating #${id}`) }
       else if (action === 'inspect') { selectNode(id) }
       else if (action === 'diff') { setComparePair([live2?.best_node_id ?? id, id]); setPanel('compare') }
       else if (action === 'merge') { setMergeFrom(id); showToast(`click a node to merge with #${id}`) }
@@ -136,12 +147,15 @@ export default function RunView({ runId, onBack }) {
         for (const k of ids) await CONTROL.nodeAbort(runId, k)
         showToast(`killed ${ids.length} pending experiment(s) under #${id}`)
       }
-    } catch { showToast('action failed (run not live?)') }
+    } catch (e) { showToast(`action failed: ${e.message || 'run not live?'}`) }
   }
   // When armed for merge, a node click completes the merge instead of selecting.
   const onCanvasSelect = (id) => {
     if (mergeFrom != null && id != null && id !== mergeFrom) {
-      CONTROL.merge(runId, [mergeFrom, id]).then(() => showToast(`merging #${mergeFrom} + #${id}`)).catch(() => showToast('merge failed'))
+      CONTROL.merge(runId, [mergeFrom, id])
+        .then(() => kickEngine(`merging #${mergeFrom} + #${id}`))
+        .then(() => showToast(`merging #${mergeFrom} + #${id}`))
+        .catch(() => showToast('merge failed'))
       setMergeFrom(null); return
     }
     if (mergeFrom != null) setMergeFrom(null)
@@ -291,7 +305,7 @@ export default function RunView({ runId, onBack }) {
 
       {!dockC && <div className="splitter h" onMouseDown={startDrag('dock')} title="drag to resize" />}
       <Dock runId={runId} live={live} liveSeq={seq} viewSeq={viewSeq} setViewSeq={setViewSeq} onFocus={focusNode}
-            selectedId={selectedId} onToast={showToast} eventsOnly
+            onToast={showToast}
             collapsed={dockC} onToggleCollapse={() => setDockC(c => !c)} height={dockH} />
         </>}
 
