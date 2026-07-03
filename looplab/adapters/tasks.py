@@ -147,6 +147,14 @@ def build_strategist_tools(task: TaskAdapter, settings, run_dir=None):
     if getattr(settings, "skills_dir", None):
         from looplab.tools.skills import SkillTools
         providers.append(SkillTools(settings.skills_dir))
+    # M4 auto-distilled skills: techniques distilled from prior winning runs live under
+    # <memory_dir>/skills (provenance: auto). Loaded alongside any hand-written skills_dir.
+    if getattr(settings, "memory_dir", None):
+        from pathlib import Path as _P
+        _auto = _P(settings.memory_dir) / "skills"
+        if _auto.is_dir():
+            from looplab.tools.skills import SkillTools
+            providers.append(SkillTools(str(_auto)))
     if getattr(settings, "literature_search", False):       # arXiv (network-optional)
         from looplab.tools.literature import LiteratureTools
         providers.append(LiteratureTools(enabled=True))
@@ -348,6 +356,14 @@ def make_roles(task: TaskAdapter, settings, run_dir=None):
     if settings.skills_dir:
         from looplab.tools.skills import SkillTools
         providers.append(SkillTools(settings.skills_dir))
+    # M4 auto-distilled skills: techniques distilled from prior winning runs live under
+    # <memory_dir>/skills (provenance: auto). Loaded alongside any hand-written skills_dir.
+    if getattr(settings, "memory_dir", None):
+        from pathlib import Path as _P
+        _auto = _P(settings.memory_dir) / "skills"
+        if _auto.is_dir():
+            from looplab.tools.skills import SkillTools
+            providers.append(SkillTools(str(_auto)))
     if getattr(settings, "literature_search", False):   # E3 arXiv grounding (network-optional)
         from looplab.tools.literature import LiteratureTools
         providers.append(LiteratureTools(enabled=True))

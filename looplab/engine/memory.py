@@ -43,6 +43,131 @@ def fingerprint_similarity(a: list[str], b: list[str]) -> float:
     return len(sa & sb) / len(sa | sb)
 
 
+# --------------------------------------------------------------------------- #
+# D2 · Memory hygiene (Phase 3 dep): consolidation, contradiction-quarantine, forgetting.
+# Misevolution (ICLR 2026, arXiv:2509.26354) shows append-only cross-run memory causes
+# deployment-time reward hacking — agents repeat actions that merely correlated with past
+# positive feedback. The memory surveys (arXiv:2512.13564) make consolidation & forgetting
+# first-class lifecycle operations. These pure helpers implement both for lessons.jsonl.
+# --------------------------------------------------------------------------- #
+
+# Outcomes that CONFLICT with a positive lesson: if the SAME statement was later tested and
+# didn't hold (or was abandoned), the earlier "supported" must not be injected any more.
+_NEGATIVE = {"tested", "abandoned", "failed", "refuted"}
+
+
+def normalize_statement(s: str) -> str:
+    """Identity of a lesson claim: collapsed whitespace, lowercased, capped."""
+    return " ".join(str(s or "").split()).lower()[:160]
+
+
+def consolidate_lessons(lessons: list[dict]) -> list[dict]:
+    """Merge near-duplicate lessons and resolve contradictions — the write-path hygiene pass.
+    Input: lessons in FILE ORDER (oldest first). For each (normalized statement, task_id) group:
+    the NEWEST entry wins (its outcome is the current verdict — forgetting the stale one), and it
+    absorbs the group's support as `evidence_count`. A newer NEGATIVE verdict silently retires an
+    older positive duplicate (contradiction resolution), and vice versa — last observation is the
+    truth, prior observations only add confidence when they AGREE."""
+    groups: dict[tuple, list[dict]] = {}
+    order: list[tuple] = []
+    for o in lessons:
+        key = (normalize_statement(o.get("statement", "")), o.get("task_id"))
+        if key not in groups:
+            groups[key] = []
+            order.append(key)
+        groups[key].append(o)
+    out: list[dict] = []
+    for key in order:
+        grp = groups[key]
+        newest = grp[-1]
+        agree = sum(1 for o in grp if o.get("outcome") == newest.get("outcome"))
+        merged = dict(newest)
+        merged["evidence_count"] = int(newest.get("evidence_count", 1) or 1) + (agree - 1)
+        out.append(merged)
+    return out
+
+
+def filter_contradicted(scored: list[tuple[float, int, dict]]) -> list[tuple[float, int, dict]]:
+    """Read-path quarantine: drop any lesson whose normalized statement carries a NEWER
+    conflicting verdict elsewhere in the candidate set (e.g. an old 'supported' vs a later
+    'tested'/'abandoned' of the same claim). `scored` = (similarity, file_index, lesson); a
+    higher file_index is newer. The newer verdict itself stays — negative knowledge is exactly
+    what M3 keeps."""
+    latest: dict[str, tuple[int, str]] = {}
+    for _, idx, o in scored:
+        stmt = normalize_statement(o.get("statement", ""))
+        cur = latest.get(stmt)
+        if cur is None or idx > cur[0]:
+            latest[stmt] = (idx, str(o.get("outcome", "")))
+    keep: list[tuple[float, int, dict]] = []
+    for sim, idx, o in scored:
+        stmt = normalize_statement(o.get("statement", ""))
+        newest_idx, newest_out = latest[stmt]
+        mine = str(o.get("outcome", ""))
+        if idx < newest_idx and ((mine == "supported" and newest_out in _NEGATIVE)
+                                 or (mine in _NEGATIVE and newest_out == "supported")):
+            continue                       # quarantined: a newer run reversed this verdict
+        keep.append((sim, idx, o))
+    return keep
+
+
+def lesson_rank_key(sim: float, idx: int, o: dict):
+    """Retrieval ranking: similarity first, then confidence × corroboration, then recency —
+    so a twice-confirmed lesson from a related task beats a one-off with equal similarity."""
+    conf = float(o.get("confidence", 0.5) or 0.5)
+    ev = min(3, int(o.get("evidence_count", 1) or 1))
+    return (-sim, -(conf * ev), -idx)
+
+
+# --------------------------------------------------------------------------- #
+# M4 · Auto-distilled skills: episodic → procedural memory. A technique that repeatedly won
+# in a run is drafted as a candidate SKILL.md under <memory_dir>/skills/; it is PROMOTED when
+# a later run with a DIFFERENT task fingerprint confirms it (won on two distinct tasks).
+# --------------------------------------------------------------------------- #
+
+def skill_slug(statement: str) -> str:
+    norm = re.sub(r"[^a-z0-9]+", "-", normalize_statement(statement)).strip("-")[:48]
+    return norm or "skill"
+
+
+def write_auto_skill(skills_dir: str | Path, statement: str, body: str,
+                     fingerprint: list[str], task_id: str) -> Optional[Path]:
+    """Draft/refresh an auto-distilled skill. New claim -> status: candidate. If a candidate
+    with the same slug already exists from a DIFFERENT task fingerprint (Jaccard < 0.6), the
+    technique generalized -> status: promoted. Never raises (best-effort memory)."""
+    try:
+        d = Path(skills_dir)
+        d.mkdir(parents=True, exist_ok=True)
+        p = d / f"auto-{skill_slug(statement)}.md"
+        status, fps = "candidate", [fingerprint]
+        if p.exists():
+            head = p.read_text(encoding="utf-8")
+            m = re.search(r"fingerprints:\s*(\[.*?\])\s*$", head, re.M | re.S)
+            if m:
+                try:
+                    fps = json.loads(m.group(1))
+                except json.JSONDecodeError:
+                    fps = []
+            prior_status = "promoted" if "status: promoted" in head else "candidate"
+            different = any(fingerprint_similarity(fingerprint, old) < 0.6 for old in fps if old)
+            status = "promoted" if (different or prior_status == "promoted") else "candidate"
+            if fingerprint not in fps:
+                fps = (fps + [fingerprint])[-6:]
+        text = ("---\n"
+                f"name: auto-{skill_slug(statement)}\n"
+                f"description: {normalize_statement(statement)[:120]}\n"
+                "provenance: auto\n"
+                f"status: {status}\n"
+                f"source_task: {task_id}\n"
+                f"fingerprints: {json.dumps(fps)}\n"
+                "---\n\n"
+                f"# {statement.strip()}\n\n{body.strip()}\n")
+        atomic_write_text(p, text)
+        return p
+    except Exception:  # noqa: BLE001 — skill distillation is best-effort, never fails a run
+        return None
+
+
 class JsonlCaseLibrary:
     """Persistent case store (I19, ADR-10): cases on disk as JSONL, keyed by task_id
     with retain-on-improvement. Loads existing cases on init so it accumulates across

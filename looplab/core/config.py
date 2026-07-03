@@ -375,6 +375,16 @@ class Settings(BaseSettings):
     # H4: cap the growing agentic-researcher tool-call history (chars) by middle-truncating stale
     # tool output, so a long trace doesn't blow the context window. 0 = off (unbounded).
     context_budget_chars: int = 0
+    # M5: the Researcher's always-on experiments digest budget (chars). 0 = AUTO — scales with the
+    # run size (60 chars/node, bounded [1200, 6000]) instead of one flat cap for an 8-node toy run
+    # and a 200-node benchmark run alike. Set a positive value to pin it.
+    digest_char_cap: int = Field(default=0, ge=0)
+    # D11 compression model slot (open_deep_research's four-slot pattern): a dedicated CHEAP model
+    # for agent-history summarization (C2 auto-summary), so compression doesn't pay the main
+    # model's price. Blank = use each loop's own model (legacy). `compressor_base_url` blank =
+    # the shared llm_base_url.
+    compressor_model: str | None = None
+    compressor_base_url: str | None = None
     # Agentic tool-loop limits — apply to EVERY tool-using agent (the LLM Researcher, the unified
     # agent's pilot + crash-triage, Deep-Research, the run-chat Boss, the genesis repo-scout, and the
     # cross-run report synthesizer). The loop lets the model call read-only tools across turns before

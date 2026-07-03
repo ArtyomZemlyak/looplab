@@ -160,7 +160,7 @@ def _clamp_fill(idea: Idea, bounds: Optional[dict]) -> Idea:
     return idea
 
 
-def _state_brief(state: RunState, parent: Optional[Node]) -> str:
+def _state_brief(state: RunState, parent: Optional[Node], digest_cap: int = 0) -> str:
     best = state.best()
     lines = [f"Goal: {state.goal}", f"Optimize direction: {state.direction}."]
     if best is not None:
@@ -170,8 +170,13 @@ def _state_brief(state: RunState, parent: Optional[Node]) -> str:
     # Append the always-on "working set": a compact view of the whole search (top winners, weakest /
     # failures, theme map) so the Researcher proposes with awareness of what's already been tried,
     # not just `best` + `parent`. Depth (full experiments, code, data) lives behind the run tools.
-    from looplab.events.digest import experiments_digest
-    lines.append(experiments_digest(state))
+    from looplab.events.digest import experiments_digest, lineage_lessons, sibling_digest
+    lines.append(experiments_digest(state, char_cap=digest_cap))
+    # M1/A0c operator-scoped memory: draft/improve additionally see their SIBLINGS (diversity
+    # pressure — aira-dojo MEM_OPS `sibling`) and, when refining, the LESSONS distilled from the
+    # lineage under the refined node (D6 insight backpropagation, Arbor's Backpropagate step).
+    lines.append(sibling_digest(state, parent))
+    lines.append(lineage_lessons(state, parent))
     # P1: surface OPEN board hypotheses (human "+ Add" / deep-research directions) verbatim.
     # Without this the Researcher never sees them, and evidence only links when an experiment's
     # `hypothesis` matches the statement exactly — so board cards would stay "open" forever.
@@ -223,7 +228,9 @@ class LLMResearcher:
             {"role": "system",
              "content": render(self.prompts, "researcher_system", _RESEARCHER_SYSTEM) + hyp_sys
                         + "\n\n" + _attention_points()},
-            {"role": "user", "content": _state_brief(state, parent) + "\n" + self.space_hint +
+            {"role": "user", "content": _state_brief(state, parent,
+                                                     digest_cap=getattr(self, "_digest_cap", 0))
+                                        + "\n" + self.space_hint +
                                         hint_block + cue + sweep_hint + novelty_fb +
                                         "\nPropose the next Idea (operator, params, rationale"
                                         + (", hypothesis" if self.track_hypotheses else "") +

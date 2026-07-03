@@ -118,15 +118,140 @@ def _node_line(n) -> str:
     return f"  #{n.id} {n.operator} {outcome} {_fmt_params(n.idea.params)}{swept}{theme}"
 
 
+def auto_char_cap(state: RunState) -> int:
+    """M5: scale the digest budget with the run instead of one flat cap — a 100-node MLE-bench
+    run carries far more decision-relevant state than an 8-node toy run. Bounded so a huge run
+    still can't flood the prompt (depth stays behind the run tools)."""
+    return min(6000, max(1200, 60 * len(state.nodes)))
+
+
+def sibling_digest(state: RunState, parent) -> str:
+    """M1/A0c operator-scoped memory (aira-dojo MEM_OPS `sibling`): what the OTHER children of
+    the node being operated on (or the other root drafts, when drafting) already tried — the
+    diversity-pressure context for draft/improve ("your siblings already tried A/B/C; do
+    something different"). Empty when there are no resolved siblings."""
+    pid = parent.id if parent is not None else None
+    sibs = [n for n in state.nodes.values()
+            if n.status is not NodeStatus.pending
+            and (pid in n.parent_ids if pid is not None else not n.parent_ids)
+            and (parent is None or n.id != parent.id)]
+    if not sibs:
+        return ""
+    sibs.sort(key=lambda n: n.id, reverse=True)
+    lines = ["\nSiblings of this expansion (already tried — push diversity, don't repeat):"]
+    for n in sibs[:5]:
+        why = " ".join((n.idea.rationale or "").split())[:90]
+        lines.append(_node_line(n) + (f" — {why}" if why else ""))
+    return "\n".join(lines)
+
+
+def lineage_lessons(state: RunState, parent, k: int = 5) -> str:
+    """D6/3.2 insight backpropagation (Arbor's `Backpropagate` step, MARS cross-branch lessons):
+    one-line outcomes distilled from the subtree UNDER the node being refined, so an expansion
+    inherits what its lineage already learned instead of re-deriving it. Pure projection of the
+    folded DAG — no new events. Ranked by |Δ over parent| so the most informative experiments
+    (biggest win, biggest regression) surface first."""
+    if parent is None:
+        return ""
+    # descendants of `parent`
+    kids: dict[int, list[int]] = {}
+    for n in state.nodes.values():
+        for p in n.parent_ids:
+            kids.setdefault(p, []).append(n.id)
+    desc: list[int] = []
+    stack = list(kids.get(parent.id, []))
+    seen: set[int] = set()
+    while stack:
+        nid = stack.pop()
+        if nid in seen:
+            continue
+        seen.add(nid)
+        desc.append(nid)
+        stack.extend(kids.get(nid, []))
+    lessons: list[tuple[float, str]] = []
+    for nid in desc:
+        n = state.nodes[nid]
+        if n.status is NodeStatus.failed:
+            lessons.append((0.5, f"  #{n.id} {n.operator} FAILED ({n.error_reason or 'error'}): "
+                                 f"{' '.join((n.idea.rationale or '').split())[:70]}"))
+            continue
+        if n.metric is None:
+            continue
+        pm = [state.nodes[p].metric for p in n.parent_ids
+              if p in state.nodes and state.nodes[p].metric is not None]
+        if not pm:
+            continue
+        base = max(pm) if state.direction == "max" else min(pm)
+        delta = (n.metric - base) if state.direction == "max" else (base - n.metric)
+        sign = "improved" if delta > 0 else "regressed"
+        lessons.append((abs(delta),
+                        f"  #{n.id} {n.operator} {sign} {_fmt_num(abs(delta))} vs parent: "
+                        f"{' '.join((n.idea.rationale or '').split())[:70]}"))
+    if not lessons:
+        return ""
+    lessons.sort(key=lambda t: -t[0])
+    return "\nLessons from this lineage (inherited — build on wins, don't undo/redo):\n" + \
+        "\n".join(line for _, line in lessons[:k])
+
+
+def ancestral_repair_chain(state: RunState, node, k: int = 4) -> str:
+    """M1/A0c operator-scoped memory (aira-dojo MEM_OPS `ancestral`): the chain of PRIOR repairs
+    in this lineage, for the debug operator — so a fix doesn't oscillate undo↔redo with an
+    earlier one. Walks ancestors collecting debug/repair nodes and what they hit."""
+    if node is None:
+        return ""
+    chain: list = []
+    seen: set[int] = set()
+    stack = list(node.parent_ids)
+    while stack:
+        nid = stack.pop()
+        if nid in seen or nid not in state.nodes:
+            continue
+        seen.add(nid)
+        n = state.nodes[nid]
+        if n.operator == "debug" or n.error:
+            chain.append(n)
+        stack.extend(n.parent_ids)
+    if not chain:
+        return ""
+    chain.sort(key=lambda n: n.id)
+    lines = ["Prior repairs in this lineage (do NOT undo these fixes or re-introduce their bugs):"]
+    for n in chain[-k:]:
+        err = " ".join((n.error or "").split())[:80]
+        outcome = ("still failing" if n.status is NodeStatus.failed
+                   else f"fixed, metric={_fmt_num(node_metric(n))}")
+        lines.append(f"  #{n.id} {n.operator}: {err or n.error_reason or 'repair'} — {outcome}")
+    return "\n".join(lines)
+
+
+def ablation_attribution(state: RunState) -> dict:
+    """P3 run-level ablation attribution: aggregate per-component impact across EVERY ablate
+    event in the run — "which pipeline component moved the metric overall" (MLE-STAR's outer
+    loop). {component: {"impact": summed |Δ|, "n": probes}} sorted by impact desc."""
+    out: dict[str, dict] = {}
+    for ab in state.ablations or []:
+        for comp, imp in (ab.get("impacts") or {}).items():
+            try:
+                v = abs(float(imp))
+            except (TypeError, ValueError):
+                continue
+            d = out.setdefault(str(comp), {"impact": 0.0, "n": 0})
+            d["impact"] += v
+            d["n"] += 1
+    return dict(sorted(out.items(), key=lambda kv: -kv[1]["impact"]))
+
+
 def experiments_digest(state: RunState, top_k: int = 5, worst_n: int = 3,
-                       char_cap: int = 1200) -> str:
+                       char_cap: int = 0) -> str:
     """A compact, budgeted snapshot of the whole search appended to the Researcher's prompt — its
     always-on "working set". Lists the strongest experiments, the weakest + recent failures (so the
     model doesn't repeat dead ends), and the theme map. Depth lives behind the run-introspection
-    tools; this stays small (hard `char_cap`)."""
+    tools; this stays small (hard `char_cap`; <=0 = auto-scale with the run size, M5)."""
     nodes = state.nodes
     if not nodes:
         return ""
+    if char_cap <= 0:
+        char_cap = auto_char_cap(state)
     n_fail = sum(1 for n in nodes.values() if n.status is NodeStatus.failed)
     lines = [f"\nSearch so far — {len(nodes)} experiment(s), {n_fail} failed:"]
 
@@ -164,6 +289,14 @@ def experiments_digest(state: RunState, top_k: int = 5, worst_n: int = 3,
             f"{t} ×{d['count']}" + (f" (best {_fmt_num(d['best_metric'])})" if d['best_metric'] is not None else "")
             for t, d in sorted(themes.items(), key=lambda kv: -kv[1]["count"]))
         lines.append(f"Themes: {chips}")
+
+    # P3: run-level component attribution — which parts of the pipeline actually moved the
+    # metric, aggregated over every ablation probe (steers refinement toward high-yield parts).
+    attr = ablation_attribution(state)
+    if attr:
+        top = list(attr.items())[:5]
+        lines.append("Component attribution (summed ablation impact): " +
+                     "; ".join(f"{c} {_fmt_num(d['impact'])} (×{d['n']})" for c, d in top))
 
     out = "\n".join(lines)
     if len(out) > char_cap:

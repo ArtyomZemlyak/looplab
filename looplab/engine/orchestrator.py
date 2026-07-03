@@ -277,6 +277,7 @@ class Engine:
         novelty_semantic: bool = True,       # T5: embedding-similarity idea dedup (needs novelty_gate)
         novelty_semantic_threshold: float = 0.92,
         embedder=None,                       # text→vector callable (default: zero-dep hash_embed)
+        digest_char_cap: int = 0,            # M5: digest prompt budget; 0 = auto-scale with run size
     ):
         self.run_dir = Path(run_dir)
         self.task = task
@@ -374,6 +375,11 @@ class Engine:
         self._idea_vecs: dict[int, list] = {}   # node_id -> embedding of its idea text (lazy cache)
         self._debug_depth = max(1, int(debug_depth))
         self._operator_bandit = bool(operator_bandit)
+        # M5: the Researcher's always-on digest budget (0 = auto-scale with run size).
+        try:
+            setattr(researcher, "_digest_cap", int(digest_char_cap))
+        except Exception:  # noqa: BLE001 — toy researchers without attrs are fine
+            pass
         self._reflection_priors = reflection_priors
         self._track_hypotheses = track_hypotheses
         self._surrogate_explore = surrogate_explore
@@ -1395,9 +1401,14 @@ class Engine:
                 sim = 1.0 if exact else fingerprint_similarity(fp, stored_fp)
                 if sim >= 0.34:                    # a related task (Jaccard) or the same one
                     scored.append((sim, idx, o))
-            # Tie-break by recency (line index): newer lessons win at equal similarity, so a
-            # long-lived store doesn't pin the 5 oldest exact-task lessons forever.
-            scored.sort(key=lambda t: (-t[0], -t[1]))
+            # D2 hygiene at read time: quarantine any lesson whose claim a NEWER run reversed
+            # (an old "supported" vs a later "tested/abandoned" of the same statement) — the
+            # misevolution guard: memory must not keep pushing a refuted correlation.
+            from looplab.engine.memory import filter_contradicted, lesson_rank_key
+            scored = filter_contradicted(scored)
+            # Rank: similarity, then confidence × corroboration (evidence_count), then recency —
+            # so a twice-confirmed lesson from a related task beats a one-off at equal similarity.
+            scored.sort(key=lambda t: lesson_rank_key(*t))
             seen: set[str] = set()
             picked: list[str] = []
             for _, _, o in scored:
@@ -1461,14 +1472,17 @@ class Engine:
                 "task_id": final.task_id, "fingerprint": fp, "kind": getattr(self.task, "kind", ""),
                 "statement": (f"op '{best.operator}' with params {best.idea.params} "
                               f"reached {best.metric:.4g}"),
-                "outcome": "supported", "delta": None, "confidence": 0.7})
+                "outcome": "supported", "delta": None, "confidence": 0.7,
+                # D2 provenance: which run/nodes back this claim (audit + future contradiction checks)
+                "run_id": final.run_id, "evidence": [best.id]})
         for h in (final.hypotheses or {}).values():
             if h.status in ("supported", "tested", "abandoned"):
                 lessons.append({
                     "task_id": final.task_id, "fingerprint": fp,
                     "kind": getattr(self.task, "kind", ""), "statement": h.statement,
                     "outcome": h.status, "delta": h.best_delta,
-                    "confidence": 0.7 if h.status == "supported" else 0.5})
+                    "confidence": 0.7 if h.status == "supported" else 0.5,
+                    "run_id": final.run_id, "evidence": list(h.evidence)[:8]})
         # dominant failure theme (so a repeat run is warned off the same crash class)
         reasons: dict[str, int] = {}
         for n in final.nodes.values():
@@ -1487,7 +1501,50 @@ class Engine:
             payload = "".join(orjson.dumps(lz).decode() + "\n" for lz in lessons)
             with open(base / "lessons.jsonl", "a", encoding="utf-8") as f:
                 f.write(payload)
+            # D2 hygiene: consolidate the store after appending — merge duplicate claims into an
+            # evidence_count, retire contradicted verdicts (newest wins), THEN bound the size.
+            self._consolidate_lessons_file(base / "lessons.jsonl")
             self._compact_lessons(base / "lessons.jsonl")
+
+        # M4 · auto-distilled skills (episodic → procedural memory): a supported hypothesis that
+        # actually moved the metric becomes a candidate SKILL.md; a later run on a DIFFERENT task
+        # fingerprint that re-confirms it promotes it. Best-effort; never fails the run.
+        from looplab.engine.memory import write_auto_skill
+        sk_dir = base / "skills"
+        for h in (final.hypotheses or {}).values():
+            if h.status == "supported" and (h.best_delta or 0) > 0:
+                ev = [final.nodes[i] for i in h.evidence if i in final.nodes]
+                ev_txt = "\n".join(
+                    f"- #{n.id} {n.operator} metric={n.metric} params={n.idea.params}: "
+                    f"{' '.join((n.idea.rationale or '').split())[:120]}" for n in ev[:4])
+                write_auto_skill(
+                    sk_dir, h.statement,
+                    f"Verified on task `{final.task_id}` (best Δ={h.best_delta:+.4g}).\n\n"
+                    f"Evidence:\n{ev_txt}\n\nApply when the task matches this technique's "
+                    "preconditions; re-validate with the eval before trusting it.",
+                    fp, final.task_id)
+
+    @staticmethod
+    def _consolidate_lessons_file(path: Path) -> None:
+        """D2: rewrite lessons.jsonl through `consolidate_lessons` — duplicate claims merge into
+        an evidence_count and a contradicted verdict is retired (the newest observation wins).
+        Atomic rewrite; best-effort (a hygiene failure must never fail the run)."""
+        try:
+            from looplab.engine.memory import consolidate_lessons
+            rows = []
+            for line in path.read_text(encoding="utf-8").splitlines():
+                try:
+                    o = orjson.loads(line)
+                except Exception:  # noqa: BLE001
+                    continue
+                if isinstance(o, dict):
+                    rows.append(o)
+            merged = consolidate_lessons(rows)
+            if len(merged) < len(rows):
+                from looplab.core.atomicio import atomic_write_text
+                atomic_write_text(path, "".join(orjson.dumps(o).decode() + "\n" for o in merged))
+        except Exception:  # noqa: BLE001
+            pass
 
     @staticmethod
     def _compact_lessons(path: Path, max_lines: int = 4000, keep: int = 2000) -> None:
@@ -1696,11 +1753,23 @@ class Engine:
         cap = self._inline_repair_attempts or 10**9
         return _rule_triage(reason, error, attempt, cap)
 
-    def _repair_error_context(self, reason: str, error: str) -> str:
+    def _repair_error_context(self, reason: str, error: str,
+                              state: Optional[RunState] = None, node=None) -> str:
         """Error context handed to Developer.repair(). A timeout gets an explicit cost-reduction
         directive (the code was too slow, not wrong — shrink it to fit the budget). With deep_repair
         (C3) a crash is enriched with the failure taxonomy + a 'reproduce then fix' directive; else
-        the raw tail. Shared by the inter-node debug operator and the inline (in-node) repair loop."""
+        the raw tail. Shared by the inter-node debug operator and the inline (in-node) repair loop.
+
+        M1/A0c: when `state`+`node` are given, the ANCESTRAL REPAIR CHAIN of the lineage is
+        prepended (aira-dojo MEM_OPS `ancestral`) — prior fixes and what they hit — so a repair
+        doesn't oscillate undo↔redo with an earlier one."""
+        chain = ""
+        if state is not None and node is not None:
+            from looplab.events.digest import ancestral_repair_chain
+            chain = ancestral_repair_chain(state, node)
+            if chain:
+                chain += "\n\n"
+        error = chain + (error or "")
         if reason == "timeout":
             # Don't quote a specific budget here: the wall-clock varies by node kind (a sweep node gets
             # timeout×sweep_timeout_mult; a RepoTask uses its own per-profile timeout), so a hardcoded
@@ -1807,7 +1876,8 @@ class Engine:
                     # C3 deep test-driven repair (when enabled): failure taxonomy + a structured
                     # "reproduce then fix" directive, not just the raw stderr tail. Depth is already
                     # bounded by debug_depth.
-                    err = self._repair_error_context(parent.error_reason, parent.error)
+                    err = self._repair_error_context(parent.error_reason, parent.error,
+                                                     state=state, node=parent)
                     with self.tracer.span("repair", parent_id=parent.id):
                         code = repair(parent.idea, parent.code, err)
                 else:
@@ -2511,7 +2581,8 @@ class Engine:
                 # action == "repair": fix the code in place and re-eval (no new node, no budget spent).
                 with self.tracer.span("inline_repair", node_id=node_id, attempt=attempt + 1):
                     new_code = self.developer.repair(
-                        node.idea, node.code, self._repair_error_context(reason, err))
+                        node.idea, node.code,
+                        self._repair_error_context(reason, err, state=state, node=node))
                 attempt += 1
                 async with self._write_lock:
                     self.store.append("node_repaired", {
