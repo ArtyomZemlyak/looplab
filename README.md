@@ -5,6 +5,9 @@
 [![Python](https://img.shields.io/badge/python-%3E%3D3.11-blue.svg)](https://www.python.org/)
 [![Tests](https://img.shields.io/badge/tests-1076-brightgreen.svg)](#testing)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](#license)
+[![Docs](https://img.shields.io/badge/docs-mkdocs--material-0f9c8c.svg)](https://artyomzemlyak.github.io/looplab/)
+
+📖 **[Documentation site](https://artyomzemlyak.github.io/looplab/)** · 🗺️ **[Architecture infographic](https://artyomzemlyak.github.io/looplab/guide/architecture/)** — the whole agent, every component and stage, in one picture.
 
 LoopLab runs a closed research loop: a **Researcher** proposes ideas, a **Developer** writes the
 code, a sandbox runs it, an evaluator scores it, and the loop refines and **merges** the best
@@ -13,6 +16,14 @@ the single source of truth**, so a run is fully **reproducible and crash-resumab
 
 It runs **fully offline with zero external services** (no API keys, no Docker) on a local task, and
 scales up to driving a live LLM, working inside a real repo, or grading actual Kaggle competitions.
+
+## Architecture
+
+Three planes and their connections — **magenta marks where the LLM / agent is invoked**, the engine
+plane is deterministic, and the Search / Memory / Knowledge stores feed the loop over the append-only
+`events.jsonl` spine. Full walkthrough on the [documentation site](https://artyomzemlyak.github.io/looplab/guide/architecture/).
+
+![LoopLab architecture — one-pager schema](docs/infographic/architecture-one-pager.svg)
 
 ## Key features
 

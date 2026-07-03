@@ -1,0 +1,198 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1760" height="1060" viewBox="0 0 1760 1060" font-family="'DejaVu Sans','Inter',system-ui,sans-serif">
+  <defs>
+    <radialGradient id="glow" cx="50%" cy="0%" r="75%">
+      <stop offset="0%" stop-color="#12403b" stop-opacity="0.55"/>
+      <stop offset="100%" stop-color="#0c1219" stop-opacity="0"/>
+    </radialGradient>
+    <filter id="sh" x="-20%" y="-20%" width="140%" height="150%">
+      <feDropShadow dx="0" dy="3" stdDeviation="7" flood-color="#000000" flood-opacity="0.38"/>
+    </filter>
+    <marker id="g"    markerWidth="8" markerHeight="8" refX="6" refY="4" orient="auto"><path d="M0 0 L7 4 L0 8 z" fill="#8496a2"/></marker>
+    <marker id="t"    markerWidth="8" markerHeight="8" refX="6" refY="4" orient="auto"><path d="M0 0 L7 4 L0 8 z" fill="#33d6c2"/></marker>
+    <marker id="p"    markerWidth="8" markerHeight="8" refX="6" refY="4" orient="auto"><path d="M0 0 L7 4 L0 8 z" fill="#cf8ff2"/></marker>
+    <marker id="gold" markerWidth="8" markerHeight="8" refX="6" refY="4" orient="auto"><path d="M0 0 L7 4 L0 8 z" fill="#e7b24a"/></marker>
+    <marker id="kn"   markerWidth="8" markerHeight="8" refX="6" refY="4" orient="auto"><path d="M0 0 L7 4 L0 8 z" fill="#5aa6f5"/></marker>
+  </defs>
+
+  <rect width="1760" height="1060" fill="#0c1219"/>
+  <rect width="1760" height="520" fill="url(#glow)"/>
+  <rect width="1760" height="5" fill="#33d6c2"/>
+
+  <!-- ===================== HEADER ===================== -->
+  <text x="48" y="55" font-size="31" font-weight="700" fill="#eaf1f4" letter-spacing="-0.5">LoopLab<tspan fill="#6e828d" font-weight="400"> — architecture</tspan></text>
+  <text x="49" y="82" font-size="13.5" fill="#93a4ab" font-family="ui-monospace,'DejaVu Sans Mono',monospace">elements &amp; connections  ·  <tspan fill="#cf8ff2" font-weight="700">magenta = the LLM / agent is invoked here</tspan>  ·  the engine plane is deterministic</text>
+
+  <!-- legend -->
+  <g font-family="ui-monospace,'DejaVu Sans Mono',monospace" font-size="12.5">
+    <rect x="1306" y="33" width="182" height="36" rx="18" fill="#1c1231" stroke="#7d4fb0"/>
+    <circle cx="1330" cy="51" r="4.5" fill="#cf8ff2"/><text x="1345" y="51" dominant-baseline="central" fill="#e6d6f5">LLM / agent step</text>
+    <rect x="1500" y="33" width="220" height="36" rx="18" fill="#111b22" stroke="#2c3e49"/>
+    <circle cx="1524" cy="51" r="4.5" fill="#8496a2"/><text x="1539" y="51" dominant-baseline="central" fill="#c3ccd1">deterministic engine</text>
+  </g>
+
+  <!-- ===================== PLANE A · AGENT / LLM ===================== -->
+  <rect x="40" y="96" width="1680" height="220" rx="18" fill="#150e24" stroke="#4a3572"/>
+  <rect x="40" y="96" width="6" height="220" rx="3" fill="#cf8ff2"/>
+  <text x="66" y="128" font-size="13.5" letter-spacing="2.5" fill="#cf8ff2" font-family="ui-monospace,'DejaVu Sans Mono',monospace" font-weight="700">AGENT · LLM</text>
+  <text x="212" y="128" font-size="13" fill="#8f80ab" font-family="ui-monospace,'DejaVu Sans Mono',monospace">— every step the model performs</text>
+  <text x="66" y="150" font-size="12.5" fill="#8f80ab" font-family="ui-monospace,'DejaVu Sans Mono',monospace">one unified identity plays these across stages (default)  ·  any OpenAI-compatible model  ·  per-role &amp; per-stage routing</text>
+
+  <!-- persona cards -->
+  <g filter="url(#sh)">
+    <rect x="62"   y="168" width="176" height="126" rx="13" fill="#1d1433" stroke="#7d4fb0"/>
+    <rect x="272"  y="168" width="176" height="126" rx="13" fill="#1d1433" stroke="#7d4fb0"/>
+    <rect x="516"  y="168" width="176" height="126" rx="13" fill="#1d1433" stroke="#9285f2"/>
+    <rect x="704"  y="168" width="176" height="126" rx="13" fill="#1d1433" stroke="#5aa6f5"/>
+    <rect x="1432" y="168" width="176" height="126" rx="13" fill="#1d1433" stroke="#7d4fb0"/>
+  </g>
+  <rect x="1032" y="168" width="176" height="126" rx="13" fill="#170f21" stroke="#6e4f9e" stroke-dasharray="6 4"/>
+  <!-- persona text -->
+  <g font-family="'DejaVu Sans',sans-serif">
+    <g><text x="82" y="205" font-size="16" font-weight="700" fill="#f2ecfa">Genesis</text><circle cx="220" cy="190" r="4" fill="#cf8ff2"/><text x="82" y="228" font-size="11.5" fill="#bcabd8">authors the run spec</text><text x="82" y="246" font-size="11.5" fill="#bcabd8">(goal → task + config,</text><text x="82" y="264" font-size="11.5" fill="#bcabd8">reads your repo)</text></g>
+    <g><text x="292" y="205" font-size="16" font-weight="700" fill="#f2ecfa">Strategist</text><circle cx="430" cy="190" r="4" fill="#cf8ff2"/><text x="292" y="228" font-size="11.5" fill="#bcabd8">meta-controller:</text><text x="292" y="246" font-size="11.5" fill="#bcabd8">adapts policy /</text><text x="292" y="264" font-size="11.5" fill="#bcabd8">operators · every 3</text></g>
+    <g><text x="536" y="205" font-size="16" font-weight="700" fill="#f2ecfa">Researcher</text><circle cx="674" cy="190" r="4" fill="#cf8ff2"/><text x="536" y="228" font-size="11.5" fill="#c6b9e2">propose idea +</text><text x="536" y="246" font-size="11.5" fill="#c6b9e2">hypothesis, pick</text><text x="536" y="264" font-size="11.5" fill="#c6b9e2">operator</text></g>
+    <g><text x="724" y="205" font-size="16" font-weight="700" fill="#f2ecfa">Developer</text><circle cx="862" cy="190" r="4" fill="#cf8ff2"/><text x="724" y="228" font-size="11.5" fill="#b8cce6">write the code</text><text x="724" y="246" font-size="11.5" fill="#b8cce6">&amp; repair crashes</text><text x="724" y="264" font-size="11.5" fill="#b8cce6">(inline · debug)</text></g>
+    <g><text x="1052" y="205" font-size="16" font-weight="700" fill="#e9e0f2">Critic</text><text x="1120" y="205" font-size="10.5" fill="#8f80ab" font-family="ui-monospace,'DejaVu Sans Mono',monospace">optional</text><circle cx="1190" cy="190" r="4" fill="#cf8ff2"/><text x="1052" y="232" font-size="11.5" fill="#bcabd8">audit a solution</text><text x="1052" y="250" font-size="11.5" fill="#bcabd8">· advisory only</text></g>
+    <g><text x="1452" y="205" font-size="16" font-weight="700" fill="#f2ecfa">Reflector</text><circle cx="1590" cy="190" r="4" fill="#cf8ff2"/><text x="1452" y="228" font-size="11.5" fill="#bcabd8">at run end: distil</text><text x="1452" y="246" font-size="11.5" fill="#bcabd8">the winner + lessons</text><text x="1452" y="264" font-size="11.5" fill="#bcabd8">(incl. negatives)</text></g>
+  </g>
+
+  <!-- ===================== PLANE B · ENGINE ===================== -->
+  <rect x="40" y="360" width="1440" height="306" rx="18" fill="#0e1721" stroke="#263742"/>
+  <rect x="40" y="360" width="6" height="306" rx="3" fill="#33d6c2"/>
+  <text x="66" y="392" font-size="13.5" letter-spacing="2.5" fill="#33d6c2" font-family="ui-monospace,'DejaVu Sans Mono',monospace" font-weight="700">ENGINE · CONTROL LOOP</text>
+  <text x="322" y="392" font-size="13" fill="#5f7078" font-family="ui-monospace,'DejaVu Sans Mono',monospace">⚙ select · execute · gate · log — no model here</text>
+
+  <!-- engine step cards (unified slate · teal kicker) -->
+  <g filter="url(#sh)">
+    <rect x="262"  y="438" width="196" height="112" rx="13" fill="#152430" stroke="#2d4653"/>
+    <rect x="602"  y="438" width="196" height="112" rx="13" fill="#152430" stroke="#2d4653"/>
+    <rect x="912"  y="438" width="196" height="112" rx="13" fill="#152430" stroke="#2d4653"/>
+    <rect x="1222" y="438" width="196" height="112" rx="13" fill="#152430" stroke="#2d4653"/>
+  </g>
+  <g font-family="ui-monospace,'DejaVu Sans Mono',monospace" font-size="10" letter-spacing="1.5">
+    <text x="360"  y="466" text-anchor="middle" fill="#4fb8ac">⚙ SELECT</text>
+    <text x="700"  y="466" text-anchor="middle" fill="#4fb8ac">⚙ MATERIALIZE</text>
+    <text x="1010" y="466" text-anchor="middle" fill="#4fb8ac">⚙ EXECUTE</text>
+    <text x="1320" y="466" text-anchor="middle" fill="#4fb8ac">⚙ SCORE</text>
+  </g>
+  <g font-family="'DejaVu Sans',sans-serif" text-anchor="middle">
+    <text x="360"  y="490" font-size="16.5" font-weight="700" fill="#eaf1f4">Policy</text><text x="360"  y="511" font-size="11.5" fill="#9dabb3">pick node to expand</text><text x="360"  y="529" font-size="10.5" fill="#6f828c" font-family="ui-monospace,'DejaVu Sans Mono',monospace">greedy tree · pure fn</text>
+    <text x="700"  y="490" font-size="16.5" font-weight="700" fill="#eaf1f4">Create node</text><text x="700"  y="511" font-size="11.5" fill="#9dabb3">apply patch · git commit</text><text x="700"  y="529" font-size="10.5" fill="#6f828c" font-family="ui-monospace,'DejaVu Sans Mono',monospace">edit-surface gate</text>
+    <text x="1010" y="490" font-size="16.5" font-weight="700" fill="#eaf1f4">Sandbox</text><text x="1010" y="511" font-size="11.5" fill="#9dabb3">run · isolated · timed</text><text x="1010" y="529" font-size="10.5" fill="#6f828c" font-family="ui-monospace,'DejaVu Sans Mono',monospace">n_seeds · tree-kill</text>
+    <text x="1320" y="490" font-size="16.5" font-weight="700" fill="#eaf1f4">Evaluate</text><text x="1320" y="511" font-size="11.5" fill="#9dabb3">CV · variance gate</text><text x="1320" y="529" font-size="10.5" fill="#6f828c" font-family="ui-monospace,'DejaVu Sans Mono',monospace">verdict, not a number</text>
+  </g>
+
+  <!-- engine forward flow -->
+  <g stroke="#8496a2" stroke-width="2.4" fill="none" stroke-linecap="round">
+    <path d="M458 494 L596 494" marker-end="url(#g)"/>
+    <path d="M798 494 L906 494" marker-end="url(#g)"/>
+    <path d="M1108 494 L1216 494" marker-end="url(#g)"/>
+  </g>
+  <!-- repair (LLM) -->
+  <path d="M960 438 C 930 406 770 406 742 436" fill="none" stroke="#cf8ff2" stroke-width="1.8" stroke-dasharray="6 5" stroke-linecap="round" marker-end="url(#p)"/>
+  <!-- return -->
+  <path d="M1320 550 L1320 630 L360 630 L360 552" fill="none" stroke="#8496a2" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#g)"/>
+
+  <!-- ===================== A → B application arrows (magenta) ===================== -->
+  <g stroke="#cf8ff2" fill="none" stroke-linecap="round">
+    <path d="M150 294 C 150 360 300 376 322 434" stroke-width="2.1" marker-end="url(#p)"/>
+    <path d="M360 294 L360 434" stroke-width="2.1" marker-end="url(#p)"/>
+    <path d="M604 294 C 604 360 682 376 692 434" stroke-width="2.1" marker-end="url(#p)"/>
+    <path d="M792 294 C 792 360 720 376 712 434" stroke-width="2.1" marker-end="url(#p)"/>
+    <path d="M1120 294 C 1120 372 1300 372 1320 434" stroke-width="1.7" stroke-dasharray="6 4" marker-end="url(#p)"/>
+  </g>
+
+  <!-- ===================== OUTPUT ===================== -->
+  <path d="M1418 476 L1506 428" fill="none" stroke="#8496a2" stroke-width="2.2" stroke-linecap="round" marker-end="url(#g)"/>
+  <g filter="url(#sh)">
+    <rect x="1506" y="374" width="226" height="104" rx="13" fill="#152430" stroke="#2d4653"/>
+    <rect x="1506" y="504" width="226" height="122" rx="13" fill="#241d10" stroke="#e7b24a" stroke-width="1.6"/>
+  </g>
+  <text x="1528" y="401" font-size="10.5" letter-spacing="1.5" fill="#4fb8ac" font-family="ui-monospace,'DejaVu Sans Mono',monospace">⚙ CONFIRM</text>
+  <text x="1528" y="425" font-size="15.5" font-weight="700" fill="#eaf1f4">multi-seed · top-k</text>
+  <text x="1528" y="447" font-size="11.5" fill="#9dabb3">re-run best candidates ·</text>
+  <text x="1528" y="465" font-size="11.5" fill="#9dabb3">promote only if &gt; 1 SE</text>
+  <path d="M1620 478 L1620 502" fill="none" stroke="#e7b24a" stroke-width="2.2" stroke-linecap="round" marker-end="url(#gold)"/>
+  <text x="1528" y="532" font-size="10.5" letter-spacing="1.5" fill="#e7b24a" font-family="ui-monospace,'DejaVu Sans Mono',monospace">CHAMPION</text>
+  <text x="1528" y="560" font-size="17" font-weight="700" fill="#f3ecdb">🏆 best verified</text>
+  <text x="1528" y="583" font-size="11.5" fill="#cbb98c">reported with variance ·</text>
+  <text x="1528" y="601" font-size="11.5" fill="#cbb98c">metric ± CI · reproducible</text>
+  <text x="1528" y="619" font-size="11.5" fill="#cbb98c">tree.html · MLflow · nb</text>
+
+  <!-- ===================== PLANE C · STORES ===================== -->
+  <!-- SEARCH -->
+  <g filter="url(#sh)"><rect x="40" y="700" width="520" height="198" rx="16" fill="#101b23" stroke="#26404b"/></g>
+  <rect x="40" y="700" width="6" height="198" rx="3" fill="#5f9aa6"/>
+  <text x="66" y="730" font-size="13" letter-spacing="2.5" fill="#8fb3bf" font-family="ui-monospace,'DejaVu Sans Mono',monospace" font-weight="700">SEARCH</text>
+  <text x="146" y="730" font-size="11" fill="#5f7078" font-family="ui-monospace,'DejaVu Sans Mono',monospace">⚙</text>
+  <g font-family="'DejaVu Sans',sans-serif">
+    <rect x="62" y="742" width="476" height="44" rx="9" fill="#0b141b" stroke="#22343d"/><text x="80" y="762" font-size="12.5" font-weight="700" fill="#dfe7ea">Archive / DAG</text><text x="80" y="778" font-size="11" fill="#93a4ab">nodes · scores · parent_ids lineage (tree-with-merge)</text>
+    <rect x="62" y="794" width="476" height="44" rx="9" fill="#0b141b" stroke="#22343d"/><text x="80" y="814" font-size="12.5" font-weight="700" fill="#dfe7ea">Operators</text><text x="80" y="830" font-size="11" fill="#93a4ab">draft · improve · debug · ablate→refine · merge / ensemble</text>
+    <rect x="62" y="846" width="476" height="44" rx="9" fill="#0b141b" stroke="#22343d"/><text x="80" y="866" font-size="12.5" font-weight="700" fill="#dfe7ea">Policies</text><text x="80" y="882" font-size="11" fill="#93a4ab">greedy (default) · asha · mcts · evolutionary</text>
+  </g>
+  <!-- MEMORY -->
+  <g filter="url(#sh)"><rect x="590" y="700" width="560" height="198" rx="16" fill="#1a160d" stroke="#463a1f"/></g>
+  <rect x="590" y="700" width="6" height="198" rx="3" fill="#e7b24a"/>
+  <text x="616" y="730" font-size="13" letter-spacing="2.5" fill="#e7b24a" font-family="ui-monospace,'DejaVu Sans Mono',monospace" font-weight="700">MEMORY · CROSS-RUN</text>
+  <text x="1128" y="730" text-anchor="end" font-size="10.5" fill="#8a7c58" font-family="ui-monospace,'DejaVu Sans Mono',monospace">memora index</text>
+  <g font-family="'DejaVu Sans',sans-serif">
+    <rect x="612" y="742" width="255" height="68" rx="9" fill="#120f08" stroke="#40361d"/><text x="630" y="764" font-size="12.5" font-weight="700" fill="#f0e6cf">Cases</text><text x="630" y="782" font-size="11" fill="#c9b78a">best config per task</text><text x="630" y="798" font-size="11" fill="#c9b78a">(retain-on-improve)</text>
+    <rect x="875" y="742" width="255" height="68" rx="9" fill="#120f08" stroke="#40361d"/><text x="893" y="764" font-size="12.5" font-weight="700" fill="#f0e6cf">Meta-notes</text><text x="893" y="782" font-size="11" fill="#c9b78a">causal "why it won"</text>
+    <rect x="612" y="818" width="255" height="64" rx="9" fill="#120f08" stroke="#40361d"/><text x="630" y="840" font-size="12.5" font-weight="700" fill="#f0e6cf">Lessons</text><text x="630" y="858" font-size="11" fill="#c9b78a">generalizable ± · fingerprint-keyed</text>
+    <rect x="875" y="818" width="255" height="64" rx="9" fill="#120f08" stroke="#40361d"/><text x="893" y="840" font-size="12.5" font-weight="700" fill="#f0e6cf">Skills</text><text x="893" y="858" font-size="11" fill="#c9b78a">technique + code (SKILL.md)</text>
+  </g>
+  <!-- KNOWLEDGE -->
+  <g filter="url(#sh)"><rect x="1180" y="700" width="540" height="198" rx="16" fill="#0e1826" stroke="#23394f"/></g>
+  <rect x="1180" y="700" width="6" height="198" rx="3" fill="#5aa6f5"/>
+  <text x="1206" y="730" font-size="13" letter-spacing="2.5" fill="#5aa6f5" font-family="ui-monospace,'DejaVu Sans Mono',monospace" font-weight="700">KNOWLEDGE</text>
+  <text x="1696" y="730" text-anchor="end" font-size="10.5" fill="#5a7ea6" font-family="ui-monospace,'DejaVu Sans Mono',monospace">agentic retrieval</text>
+  <g font-family="'DejaVu Sans',sans-serif">
+    <rect x="1202" y="742" width="496" height="44" rx="9" fill="#0a121c" stroke="#20344a"/><text x="1220" y="762" font-size="12.5" font-weight="700" fill="#dfe7ea">KB notes</text><text x="1220" y="778" font-size="11" fill="#93a4ab">markdown + frontmatter · grep · kb_search (lexical / semantic)</text>
+    <rect x="1202" y="794" width="496" height="44" rx="9" fill="#0a121c" stroke="#20344a"/><text x="1220" y="814" font-size="12.5" font-weight="700" fill="#dfe7ea">Skills library</text><text x="1220" y="830" font-size="11" fill="#93a4ab">SKILL.md recipes the Researcher can list &amp; load</text>
+    <rect x="1202" y="846" width="496" height="44" rx="9" fill="#0a121c" stroke="#20344a"/><text x="1220" y="866" font-size="12.5" font-weight="700" fill="#dfe7ea">Literature / web</text><text x="1220" y="882" font-size="11" fill="#93a4ab">arXiv · web search · deep-research (optional · off by default)</text>
+  </g>
+
+  <!-- ===================== STORE CONNECTIONS ===================== -->
+  <path d="M300 700 L340 666" fill="none" stroke="#8496a2" stroke-width="2.1" stroke-linecap="round" marker-end="url(#g)"/>
+  <path d="M372 666 L392 700" fill="none" stroke="#8496a2" stroke-width="1.6" stroke-linecap="round" marker-end="url(#g)"/>
+  <path d="M770 700 C 770 636 700 616 700 554" fill="none" stroke="#e7b24a" stroke-width="1.9" stroke-linecap="round" marker-end="url(#gold)"/>
+  <path d="M1300 700 C 1180 632 820 588 712 554" fill="none" stroke="#5aa6f5" stroke-width="1.8" stroke-linecap="round" marker-end="url(#kn)"/>
+  <path d="M1506 568 C 1320 614 1150 690 1008 700" fill="none" stroke="#cf8ff2" stroke-width="1.8" stroke-dasharray="6 5" stroke-linecap="round" marker-end="url(#p)"/>
+
+  <!-- ===================== EDGE LABELS (pill-backed) ===================== -->
+  <g font-family="ui-monospace,'DejaVu Sans Mono',monospace" font-size="11">
+    <!-- agent → engine -->
+    <g><rect x="98" y="343" width="106" height="21" rx="10" fill="#0c1219" stroke="#3a2b55"/><text x="151" y="354" text-anchor="middle" dominant-baseline="central" fill="#cf8ff2">task + config</text></g>
+    <g><rect x="330" y="343" width="60" height="21" rx="10" fill="#0c1219" stroke="#3a2b55"/><text x="360" y="354" text-anchor="middle" dominant-baseline="central" fill="#cf8ff2">adapt</text></g>
+    <g><rect x="574" y="343" width="76" height="21" rx="10" fill="#0c1219" stroke="#3a2b55"/><text x="612" y="354" text-anchor="middle" dominant-baseline="central" fill="#cf8ff2">propose</text></g>
+    <g><rect x="716" y="343" width="92" height="21" rx="10" fill="#0c1219" stroke="#3a2b55"/><text x="762" y="354" text-anchor="middle" dominant-baseline="central" fill="#cf8ff2">implement</text></g>
+    <g><rect x="1186" y="343" width="84" height="21" rx="10" fill="#0c1219" stroke="#3a2b55"/><text x="1228" y="354" text-anchor="middle" dominant-baseline="central" fill="#cf8ff2">advisory</text></g>
+    <!-- repair -->
+    <g><rect x="778" y="398" width="150" height="21" rx="10" fill="#0e1721" stroke="#3a2b55"/><text x="853" y="409" text-anchor="middle" dominant-baseline="central" fill="#cf8ff2">✦ repair (Developer)</text></g>
+    <!-- budget spent -->
+    <g><rect x="1412" y="441" width="100" height="21" rx="10" fill="#0c1219" stroke="#2d4653"/><text x="1462" y="452" text-anchor="middle" dominant-baseline="central" fill="#93a4ab">budget spent</text></g>
+    <!-- return -->
+    <g><rect x="452" y="609" width="616" height="22" rx="11" fill="#0e1721" stroke="#2d4653"/><text x="760" y="621" text-anchor="middle" dominant-baseline="central" fill="#9dabb3">policy picks the next node ↺   ·   every value = a pure fold of the log</text></g>
+    <!-- retrieve -->
+    <g><rect x="1152" y="590" width="112" height="21" rx="10" fill="#0e1721" stroke="#23394f"/><text x="1208" y="601" text-anchor="middle" dominant-baseline="central" fill="#5aa6f5">retrieve · tools</text></g>
+    <!-- store -->
+    <g><rect x="176" y="672" width="312" height="21" rx="10" fill="#0c1219" stroke="#26404b"/><text x="332" y="683" text-anchor="middle" dominant-baseline="central" fill="#8fa0aa">candidates + operators ↑ · store node ↓</text></g>
+    <!-- inject -->
+    <g><rect x="790" y="677" width="230" height="21" rx="10" fill="#0c1219" stroke="#463a1f"/><text x="905" y="688" text-anchor="middle" dominant-baseline="central" fill="#e7b24a">inject priors + retrieve cases</text></g>
+    <!-- reflector write -->
+    <g><rect x="1306" y="662" width="220" height="21" rx="10" fill="#0c1219" stroke="#3a2b55"/><text x="1416" y="673" text-anchor="middle" dominant-baseline="central" fill="#cf8ff2">✦ Reflector distils → write</text></g>
+  </g>
+
+  <!-- ===================== EVENT LOG SPINE ===================== -->
+  <path d="M575 666 L575 936" fill="none" stroke="#33d6c2" stroke-width="2.3" stroke-linecap="round" marker-end="url(#t)"/>
+  <g><rect x="588" y="908" width="132" height="21" rx="10" fill="#0c1219" stroke="#1f5b54"/><text x="654" y="919" text-anchor="middle" dominant-baseline="central" font-size="11" fill="#33d6c2" font-family="ui-monospace,'DejaVu Sans Mono',monospace">append every step</text></g>
+  <g filter="url(#sh)"><rect x="40" y="940" width="1680" height="86" rx="16" fill="#0b2422" stroke="#1f5b54"/></g>
+  <rect x="40" y="940" width="6" height="86" rx="3" fill="#33d6c2"/>
+  <text x="70" y="974" font-size="19" font-weight="700" fill="#33d6c2" font-family="ui-monospace,'DejaVu Sans Mono',monospace">events.jsonl</text>
+  <text x="70" y="1000" font-size="13.5" fill="#88b3ae">append-only · the single source of truth — every projection above is a pure fold of this log</text>
+  <g font-family="ui-monospace,'DejaVu Sans Mono',monospace" font-size="12" fill="#cfe6e2">
+    <rect x="1116" y="958" width="180" height="50" rx="10" fill="#0d2a27" stroke="#1f5b54"/><text x="1206" y="978" text-anchor="middle" font-weight="700">replay</text><text x="1206" y="995" text-anchor="middle" font-size="10" fill="#7fb0aa">⇒ crash-resume</text>
+    <rect x="1308" y="958" width="180" height="50" rx="10" fill="#0d2a27" stroke="#1f5b54"/><text x="1398" y="978" text-anchor="middle" font-weight="700">read-model</text><text x="1398" y="995" text-anchor="middle" font-size="10" fill="#7fb0aa">UI · DAG</text>
+    <rect x="1500" y="958" width="196" height="50" rx="10" fill="#0d2a27" stroke="#1f5b54"/><text x="1598" y="978" text-anchor="middle" font-weight="700">spans.jsonl</text><text x="1598" y="995" text-anchor="middle" font-size="10" fill="#7fb0aa">traces · OTel</text>
+  </g>
+</svg>
