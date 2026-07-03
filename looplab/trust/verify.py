@@ -16,14 +16,11 @@ verdicts rather than blocking the memo.
 """
 from __future__ import annotations
 
-import re
 from typing import Optional
 
 from pydantic import BaseModel, Field
 
 from looplab.core.models import NodeStatus, RunState
-
-_NUM_RE = re.compile(r"-?\d+\.\d+")
 
 
 def _evidence_text(claim: dict, state: RunState) -> str:
@@ -48,11 +45,16 @@ def _evidence_text(claim: dict, state: RunState) -> str:
 def check_claims(claims: list[dict], state: RunState) -> list[dict]:
     """Deterministic verification layer (pure, offline). Verdicts:
       - `unsupported` — no evidence cited at all, or every cited node id is unknown;
-      - `mismatch`    — a metric number quoted in the statement doesn't match any cited node's
-                        metric (±1% relative tolerance) — the classic confabulated-number tell;
-      - `cited`       — evidence exists and nothing contradicts; semantic support is the LLM
-                        layer's (or a human's) call.
-    Returns [{statement, verdict, note}] aligned with `claims`."""
+      - `cited`       — evidence exists (node ids resolve and/or a url is given); whether it
+                        SEMANTICALLY supports the claim is the LLM rubric layer's (or a human's)
+                        call, not this deterministic pass's.
+    Returns [{statement, verdict, note}] aligned with `claims`.
+
+    NOTE: this layer deliberately does NOT try to match numbers quoted in the statement against
+    node metrics — a research claim legitimately quotes non-metric decimals (arXiv ids like
+    2506.12928, percentages like 37.9, dataset sizes, p-values), and a regex can't tell those from
+    a metric, so a numeric "confabulation" heuristic here produces false 'fabricated' labels on
+    well-supported claims. Numeric correctness is left to the semantic (LLM) verifier."""
     out: list[dict] = []
     for c in claims or []:
         stmt = str(c.get("statement", "") or "")
@@ -66,19 +68,6 @@ def check_claims(claims: list[dict], state: RunState) -> list[dict]:
         if nids and not known and not urls:
             out.append({"statement": stmt, "verdict": "unsupported",
                         "note": f"cited experiments do not exist: {nids}"})
-            continue
-        # Metric numbers quoted in the claim must match SOME cited node's metric.
-        quoted = [float(x) for x in _NUM_RE.findall(stmt)[:4]]
-        metrics = [state.nodes[i].metric for i in known if state.nodes[i].metric is not None]
-        mism = None
-        for q in quoted:
-            if metrics and not any(abs(q - m) <= max(1e-9, 0.01 * abs(m)) for m in metrics):
-                mism = q
-                break
-        if mism is not None:
-            out.append({"statement": stmt, "verdict": "mismatch",
-                        "note": f"quoted number {mism} matches no cited experiment's metric "
-                                f"(cited metrics: {[round(m, 6) for m in metrics[:4]]})"})
             continue
         out.append({"statement": stmt, "verdict": "cited", "note": ""})
     return out
@@ -134,5 +123,5 @@ def verify_memo(memo: dict, state: RunState, client=None,
             method = "llm"
         except Exception:  # noqa: BLE001 — verification degrades, never blocks the memo
             pass
-    bad = sum(1 for v in verdicts if v["verdict"] in ("unsupported", "mismatch"))
+    bad = sum(1 for v in verdicts if v["verdict"] == "unsupported")
     return {"verdicts": verdicts, "method": method, "unsupported": bad}

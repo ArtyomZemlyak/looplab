@@ -80,29 +80,35 @@ def consolidate_lessons(lessons: list[dict]) -> list[dict]:
     for key in order:
         grp = groups[key]
         newest = grp[-1]
-        agree = sum(1 for o in grp if o.get("outcome") == newest.get("outcome"))
         merged = dict(newest)
-        merged["evidence_count"] = int(newest.get("evidence_count", 1) or 1) + (agree - 1)
+        # Accumulate ACROSS runs: sum the stored evidence_count of every group member that AGREES
+        # with the current (newest) verdict, so a lesson re-confirmed by N runs ends at ~N — not
+        # capped at 2. A prior consolidated row already carries its accumulated count; a fresh
+        # append carries 1. (Members with a conflicting verdict don't add support.)
+        merged["evidence_count"] = sum(int(o.get("evidence_count", 1) or 1) for o in grp
+                                       if o.get("outcome") == newest.get("outcome"))
         out.append(merged)
     return out
 
 
 def filter_contradicted(scored: list[tuple[float, int, dict]]) -> list[tuple[float, int, dict]]:
-    """Read-path quarantine: drop any lesson whose normalized statement carries a NEWER
-    conflicting verdict elsewhere in the candidate set (e.g. an old 'supported' vs a later
-    'tested'/'abandoned' of the same claim). `scored` = (similarity, file_index, lesson); a
-    higher file_index is newer. The newer verdict itself stays — negative knowledge is exactly
-    what M3 keeps."""
-    latest: dict[str, tuple[int, str]] = {}
+    """Read-path quarantine: drop any lesson whose SAME-TASK statement carries a NEWER conflicting
+    verdict elsewhere in the candidate set (e.g. an old 'supported' vs a later 'tested'/'abandoned'
+    of the same claim ON THE SAME TASK). `scored` = (similarity, file_index, lesson); a higher
+    file_index is newer. Keyed by (statement, task_id) — a technique that worked on task A but was
+    abandoned on a DIFFERENT task B is NOT a reversal (both verdicts are legitimately kept, matching
+    how `consolidate_lessons` groups). The newer verdict itself always stays — negative knowledge is
+    exactly what M3 keeps."""
+    latest: dict[tuple, tuple[int, str]] = {}
     for _, idx, o in scored:
-        stmt = normalize_statement(o.get("statement", ""))
-        cur = latest.get(stmt)
+        key = (normalize_statement(o.get("statement", "")), o.get("task_id"))
+        cur = latest.get(key)
         if cur is None or idx > cur[0]:
-            latest[stmt] = (idx, str(o.get("outcome", "")))
+            latest[key] = (idx, str(o.get("outcome", "")))
     keep: list[tuple[float, int, dict]] = []
     for sim, idx, o in scored:
-        stmt = normalize_statement(o.get("statement", ""))
-        newest_idx, newest_out = latest[stmt]
+        key = (normalize_statement(o.get("statement", "")), o.get("task_id"))
+        newest_idx, newest_out = latest[key]
         mine = str(o.get("outcome", ""))
         if idx < newest_idx and ((mine == "supported" and newest_out in _NEGATIVE)
                                  or (mine in _NEGATIVE and newest_out == "supported")):

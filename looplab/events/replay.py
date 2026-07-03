@@ -10,6 +10,21 @@ from looplab.core.models import (Event, Hypothesis, Idea, Node, NodeStatus, RunS
                      hypothesis_id)
 
 
+def flagged_node_ids(st: RunState) -> set:
+    """T2: node ids excluded from best/holdout selection under trust_gate gate/block — those with a
+    HIGH-PRECISION cheating/leakage signal. The heuristic `critic:` and `perfect_metric` signals
+    stay advisory in every mode (perfect_metric flags metric<=0 (min) / >=1 (max), which
+    legitimately-perfect scores hit, so gating on it could exclude honest winners). Empty under
+    `audit`. Shared by the fold and the engine's holdout-topk so both apply the SAME exclusion."""
+    if st.trust_gate not in ("gate", "block"):
+        return set()
+
+    def _has_hard_signal(rh: dict) -> bool:
+        return any(not str(s.get("signal", "")).startswith(("critic:", "perfect_metric"))
+                   for s in (rh.get("signals") or []))
+    return {r.get("node_id") for r in st.reward_hacks if _has_hard_signal(r)}
+
+
 def fold(events: Iterable[Event]) -> RunState:
     st = RunState()
     best_confirmed: int | None = None
@@ -32,6 +47,11 @@ def fold(events: Iterable[Event]) -> RunState:
             # D1: recorded at start so replay applies the same selection rule. Absent in old
             # logs -> False -> byte-identical legacy selection.
             st.holdout_select = bool(d.get("holdout_select", False))
+            # The reserved-holdout fraction the run committed to (the split every search metric was
+            # scored against). None in old logs; the engine re-uses it on resume so a changed live
+            # setting can't make pre/post-resume metrics incomparable.
+            _hf = d.get("holdout_fraction")
+            st.holdout_fraction = float(_hf) if isinstance(_hf, (int, float)) else None
         elif t == "trust_gate_changed":
             # Operator edited the run's trust gate after launch (server config edit). Last write
             # wins so the change engages in every fold — live view, resume, reset — immediately.
@@ -321,17 +341,9 @@ def fold(events: Iterable[Event]) -> RunState:
         # unknown event types (e.g. "budget") are ignored for state — forward-compat
 
     # T2 trust enforcement: under "gate"/"block", a node flagged for a reward-hack or data-leakage
-    # signal must not be selectable as best (closes "a hacked/leaky node can win"). Gate ONLY on the
-    # high-precision cheating/leakage signals — the heuristic `critic:` signal stays advisory in
-    # every mode. Order-independent: computed from the folded `reward_hacks` after the full pass.
-    def _has_hard_signal(rh: dict) -> bool:
-        # `critic:` AND `perfect_metric` stay advisory: perfect_metric flags metric<=0 (min) /
-        # >=1 (max), which legitimately-perfect scores (accuracy 1.0, an achievable 0.0 floor,
-        # negative-valued objectives) hit — gating on it can exclude every honest winner.
-        return any(not str(s.get("signal", "")).startswith(("critic:", "perfect_metric"))
-                   for s in (rh.get("signals") or []))
-    flagged = ({r.get("node_id") for r in st.reward_hacks if _has_hard_signal(r)}
-               if st.trust_gate in ("gate", "block") else set())
+    # signal must not be selectable as best (closes "a hacked/leaky node can win"). Order-independent:
+    # computed from the folded `reward_hacks` after the full pass (see `flagged_node_ids`).
+    flagged = flagged_node_ids(st)
     # "block" additionally bars the policy from breeding a flagged node forward (feasible=False also
     # removes it from `feasible_nodes()` used by the search policies), not just from winning.
     if st.trust_gate == "block":

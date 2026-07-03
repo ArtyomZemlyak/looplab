@@ -58,7 +58,6 @@ def operator_yields(state: RunState) -> dict[str, dict]:
     Strategist's rule table becomes priors, not hard-coded cadences). Draft nodes have no
     parent, so 'draft' yield is not defined here (drafts are the exploration baseline)."""
     out: dict[str, dict] = {}
-    better = (lambda a, b: a > b) if state.direction == "max" else (lambda a, b: a < b)
     for n in state.nodes.values():
         if not n.parent_ids or n.status is not NodeStatus.evaluated or n.metric is None:
             continue
@@ -66,14 +65,14 @@ def operator_yields(state: RunState) -> dict[str, dict]:
               if p in state.nodes and state.nodes[p].metric is not None]
         if not pm:
             continue
+        # direction-aware improvement over the best parent (clamped at 0 — a regression yields
+        # no positive credit), amortized per eval-second so cheap wins rank above slow ones.
         base = max(pm) if state.direction == "max" else min(pm)
         delta = (n.metric - base) if state.direction == "max" else (base - n.metric)
         gain = max(0.0, delta) / max(0.1, (n.eval_seconds or 0.1))
         d = out.setdefault(n.operator, {"n": 0, "gain": 0.0})
         d["gain"] = (d["gain"] * d["n"] + gain) / (d["n"] + 1)
         d["n"] += 1
-    # `better` documents direction-awareness for readers; delta above already applies it.
-    _ = better
     return out
 
 

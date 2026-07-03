@@ -215,6 +215,9 @@ class RunState(BaseModel):
     # legacy selection). When True, best-selection prefers the holdout metric among the nodes
     # that carry one (the val-top-k re-scored on the unseen partition at finish).
     holdout_select: bool = False
+    # The reserved-holdout fraction the run committed to at start (None in old logs / when off).
+    # The engine re-uses this on resume so the split every metric was scored against never changes.
+    holdout_fraction: Optional[float] = None
     nodes: dict[int, Node] = Field(default_factory=dict)
     best_node_id: Optional[int] = None
     finished: bool = False

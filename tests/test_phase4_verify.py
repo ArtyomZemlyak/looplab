@@ -39,10 +39,13 @@ def test_claim_citing_unknown_node_unsupported():
     assert out[0]["verdict"] == "unsupported"
 
 
-def test_quoted_metric_mismatch_flagged():
+def test_quoted_numbers_do_not_false_flag():
+    # A claim citing a real node but quoting non-metric decimals (arXiv id, percentages) must NOT
+    # be labelled fabricated by the deterministic layer — numeric judgment is the LLM layer's job.
     st = _state([_node(0, metric=0.90), _node(1, metric=0.88)])
-    out = check_claims([{"statement": "the leader reached 0.99 accuracy", "node_ids": [0, 1]}], st)
-    assert out[0]["verdict"] == "mismatch"
+    out = check_claims([{"statement": "ensembling lifted 37.9% -> 43.9% (arXiv:2506.12928)",
+                         "node_ids": [0, 1]}], st)
+    assert out[0]["verdict"] == "cited"
 
 
 def test_well_cited_claim_passes_deterministic():
@@ -65,8 +68,8 @@ def test_verify_memo_counts_unsupported():
     st = _state([_node(0, metric=0.9)])
     memo = {"claims": [
         {"statement": "node 0 reached 0.90", "node_ids": [0]},
-        {"statement": "quantum helps", "node_ids": []},
-        {"statement": "score was 0.5", "node_ids": [0]},   # mismatch
+        {"statement": "quantum helps", "node_ids": []},           # no evidence -> unsupported
+        {"statement": "node 9 was best", "node_ids": [9]},         # unknown node -> unsupported
     ]}
     out = verify_memo(memo, st, client=None)
     assert out["method"] == "deterministic"

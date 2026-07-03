@@ -37,16 +37,28 @@ _VALID_B = "import json\nprint(json.dumps({'metric': 0.2}))\n"
 def test_listwise_breaks_tie_with_selector(monkeypatch):
     dev = BestOfNDeveloper(_VaryingDev([_VALID_A, _VALID_B]), n=2, listwise=True)
     # force the selector to pick index 1 (the second tied candidate)
-    monkeypatch.setattr("looplab.search.best_of_n._listwise_pick", lambda c, i, cands: 1)
+    monkeypatch.setattr("looplab.search.best_of_n._listwise_pick", lambda *a, **k: 1)
     out = dev.implement(Idea(operator="draft", params={}))
     assert out == _VALID_B
+
+
+def test_listwise_threads_configured_parser(monkeypatch):
+    dev = BestOfNDeveloper(_VaryingDev([_VALID_A, _VALID_B]), n=2, listwise=True, parser="baml")
+    seen = {}
+
+    def _spy(c, i, cands, parser="tool_call"):
+        seen["p"] = parser
+        return 0
+    monkeypatch.setattr("looplab.search.best_of_n._listwise_pick", _spy)
+    dev.implement(Idea(operator="draft", params={}))
+    assert seen["p"] == "baml"          # the run's parser reaches the selector, not a hardcode
 
 
 def test_listwise_off_takes_first_top_scorer(monkeypatch):
     dev = BestOfNDeveloper(_VaryingDev([_VALID_A, _VALID_B]), n=2, listwise=False)
     called = {"n": 0}
     monkeypatch.setattr("looplab.search.best_of_n._listwise_pick",
-                        lambda *a: called.__setitem__("n", called["n"] + 1) or 1)
+                        lambda *a, **k: called.__setitem__("n", called["n"] + 1) or 1)
     out = dev.implement(Idea(operator="draft", params={}))
     assert out == _VALID_A and called["n"] == 0    # selector never consulted
 
@@ -56,7 +68,7 @@ def test_listwise_not_consulted_when_no_tie(monkeypatch):
     dev = BestOfNDeveloper(_VaryingDev([_VALID_A, "def ("]), n=2, listwise=True)
     called = {"n": 0}
     monkeypatch.setattr("looplab.search.best_of_n._listwise_pick",
-                        lambda *a: called.__setitem__("n", called["n"] + 1) or 0)
+                        lambda *a, **k: called.__setitem__("n", called["n"] + 1) or 0)
     out = dev.implement(Idea(operator="draft", params={}))
     assert out == _VALID_A and called["n"] == 0
 
@@ -107,7 +119,11 @@ def test_llm_cache_serves_stored_body(monkeypatch):
     c._cache[ck] = body                       # pre-seed the cache
     monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
     out = c._post(payload)
-    assert out is body and calls["n"] == 0    # served from cache, no network
+    # served from cache, no network — and returned as a COPY (mutating it must not corrupt the
+    # cached entry, since complete_text mutates the message in place)
+    assert out == body and out is not body and calls["n"] == 0
+    out["choices"][0]["message"]["content"] = "MUTATED"
+    assert c._cache[ck]["choices"][0]["message"]["content"] == "cached"
 
 
 # --------------------------------------------------------------------------- #

@@ -7,6 +7,7 @@ client takes a model name and reads the key from the environment via LiteLLM.
 """
 from __future__ import annotations
 
+import copy
 import http.client
 import json
 import re
@@ -442,7 +443,12 @@ class OpenAICompatibleClient:
         # in events), so this is a within-run/live cost saver, not a correctness dependency.
         ck = self._cache_key(payload)
         if ck is not None and ck in self._cache:
-            return self._cache[ck]
+            cached = self._cache[ck]
+            # Restore the per-call telemetry a live call would have set, and hand back a DEEP COPY:
+            # downstream (e.g. complete_text -> _apply_native_tool_calls) mutates the message in
+            # place, which would otherwise corrupt the shared cached entry for every later hit.
+            self._last_usage = cached.get("usage") or {}
+            return copy.deepcopy(cached)
         # A network blip / HTTP error / non-JSON body must surface as a clean LLMError, not an
         # unhandled URLError/HTTPError/JSONDecodeError that aborts the whole run — the role layer
         # already retries + falls back on LLMError. (urllib.error was imported but unused before.)
@@ -533,8 +539,8 @@ class OpenAICompatibleClient:
         # No price table for local models -> account tokens as 0 cost, but track them.
         self.accountant.add(0.0, usage=usage)
         self._last_usage = usage
-        if ck is not None:                       # T7: cache the deterministic response for reuse
-            self._cache[ck] = body
+        if ck is not None:                       # T7: cache a COPY (the returned body is mutated
+            self._cache[ck] = copy.deepcopy(body)  # in place by callers — keep the cached entry clean)
         return body
 
     def _model_params(self) -> dict:

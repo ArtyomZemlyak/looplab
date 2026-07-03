@@ -145,20 +145,20 @@ def _normalize_error_sig(err: str) -> str:
 
 def _holdout_indices(n: int, fraction: float) -> frozenset:
     """D1: the deterministic holdout partition over n host-held labels. A pure function of
-    (n, fraction) — identical on every resume/replay with no state to persist. Knuth
-    multiplicative hashing spreads the reserved rows evenly through the label order (no
-    head/tail bias if the data is sorted). Guaranteed non-degenerate for n >= 2: at least one
-    holdout row and at least one search row, so neither signal ever collapses to nothing."""
-    cut = max(0, min(999, int(round(float(fraction) * 1000))))
-    if cut <= 0:
-        return frozenset()          # fraction 0 = holdout off, never force a reserved row
-    idx = frozenset(i for i in range(n)
-                    if ((i * 2654435761) & 0xFFFFFFFF) % 1000 < cut)
-    if not idx and n >= 2:
-        idx = frozenset({n - 1})
-    elif len(idx) >= n and n >= 2:
-        idx = frozenset(sorted(idx)[:-1])
-    return idx
+    (n, fraction) — identical on every resume/replay with no state to persist.
+
+    Reserves an EXACT count = round(fraction·n) rows (clamped to [1, n-1] whenever fraction>0), so
+    the holdout size is controlled even for small n — a per-index Bernoulli threshold would leave
+    the count uncontrolled (e.g. n=4, frac=0.25 could reserve 0/2/3 rows), making the champion-
+    selecting 'unseen signal' noisy on exactly the small-data tasks where it matters most. Which
+    rows are chosen is spread deterministically through the label order by Knuth multiplicative
+    hashing (no head/tail bias if the data is sorted)."""
+    if float(fraction) <= 0 or n < 2:
+        return frozenset()          # fraction 0 = holdout off; n<2 can't split without collapsing
+    k = max(1, min(n - 1, int(round(float(fraction) * n))))   # exact reserved count, non-degenerate
+    # Pick the k rows with the smallest hash — a stable, uniform, deterministic selection.
+    ranked = sorted(range(n), key=lambda i: (((i * 2654435761) & 0xFFFFFFFF), i))
+    return frozenset(ranked[:k])
 
 
 # Env-prep: max auto-install + re-run rounds per node before giving up (a re-run can reveal a
@@ -467,14 +467,12 @@ class Engine:
         self.confirm_seed_base = max(0, int(confirm_seed_base))
         self._holdout_select = bool(holdout_select)
         self._holdout_top_k = max(1, int(holdout_top_k))
-        self._holdout_idx: frozenset = frozenset()
-        if (self._host_grader is not None and self._host_grader.get("kind") != "mlebench"
-                and float(holdout_fraction) > 0):
-            from looplab.runtime.command_eval import _LABEL_KEYS, _as_list
-            _yt = _as_list(self._host_grader.get("labels"), self._host_grader.get("key"),
-                           _LABEL_KEYS)
-            if isinstance(_yt, list) and len(_yt) >= 2:
-                self._holdout_idx = _holdout_indices(len(_yt), float(holdout_fraction))
+        # The FRACTION defines the split every search metric is scored against, so it must be pinned
+        # in the event log (like trust_gate / holdout_select) — on resume the recorded value is
+        # re-used (see run()), so a changed live setting can't silently make pre/post-resume metrics
+        # incomparable. `_build_holdout_idx` rebuilds the partition from a fraction.
+        self._holdout_fraction = float(holdout_fraction)
+        self._holdout_idx: frozenset = self._build_holdout_idx(self._holdout_fraction)
         # RepoTask (ADR-7): an existing repo the agent edits + a command-based eval.
         rs = getattr(task, "repo_spec", None)
         self._repo_spec: dict = rs() if callable(rs) else {}
@@ -592,8 +590,10 @@ class Engine:
                         # old logs -> "audit" -> byte-identical legacy selection.
                         "trust_gate": self.trust_gate,
                         # D1 holdout-gated promotion: same recorded-at-start discipline. Absent in
-                        # old logs -> False -> byte-identical legacy selection.
+                        # old logs -> False -> byte-identical legacy selection. The FRACTION is
+                        # pinned too so a resume re-uses the exact split every metric was scored on.
                         "holdout_select": self._holdout_select,
+                        "holdout_fraction": self._holdout_fraction,
                     },
                 )
                 # AGENTS.md (I18): task/contract context for coding-agent backends. Runtime line is
@@ -651,6 +651,15 @@ class Engine:
         _entry = fold(self.store.read_all())
         if _entry.active_strategy:
             self._apply_strategy(_entry.active_strategy)
+        # D1 resume-safety: honor the holdout split the run ORIGINALLY committed to (recorded in
+        # run_started), not a possibly-changed live `holdout_fraction` — otherwise nodes evaluated
+        # before vs. after a config change would be scored on different splits and the champion pick
+        # would mix incomparable metrics. Recorded holdout_select likewise wins on resume.
+        if _entry.holdout_fraction is not None:
+            if _entry.holdout_fraction != self._holdout_fraction:
+                self._holdout_fraction = _entry.holdout_fraction
+                self._holdout_idx = self._build_holdout_idx(self._holdout_fraction)
+            self._holdout_select = _entry.holdout_select
         self._prior_note_text = self._load_reflection_priors()   # E4: cross-run meta-learned priors
         start = time.time()
         while True:
@@ -2412,12 +2421,32 @@ class Engine:
             return None
         return _to_float(host_score(g.get("scorer", "rmse"), yp2, yt2))
 
+    def _build_holdout_idx(self, fraction: float) -> frozenset:
+        """D1: the reserved holdout partition for a given fraction, or empty when holdout doesn't
+        apply (no host grader, real MLE-bench, non-list labels, or fraction<=0)."""
+        if (self._host_grader is None or self._host_grader.get("kind") == "mlebench"
+                or float(fraction) <= 0):
+            return frozenset()
+        from looplab.runtime.command_eval import _LABEL_KEYS, _as_list
+        yt = _as_list(self._host_grader.get("labels"), self._host_grader.get("key"), _LABEL_KEYS)
+        if isinstance(yt, list) and len(yt) >= 2:
+            return _holdout_indices(len(yt), float(fraction))
+        return frozenset()
+
     def _holdout_topk(self, state: RunState) -> list[int]:
         """The val-leaders that get a holdout evaluation: top-k feasible by the robust search
-        metric (confirmed mean when the confirm phase ran, else the single metric)."""
+        metric (confirmed mean when the confirm phase ran, else the single metric). EXCLUDES
+        trust-gate-flagged nodes under gate/block — exactly as fold's holdout pick does — so a
+        flagged node can't consume a holdout slot the legitimate runner-up needs (else, under
+        `gate`, the winner is flagged, fold drops it from the holdout pool, and no clean node ever
+        received a holdout eval → the discipline silently no-ops)."""
+        from looplab.events.replay import flagged_node_ids
+        flagged = flagged_node_ids(state)
+
         def _key(n):
             return ((n.confirmed_mean if n.confirmed_mean is not None else n.metric), n.id)
-        pool = sorted(state.feasible_nodes(), key=_key, reverse=(state.direction == "max"))
+        pool = sorted((n for n in state.feasible_nodes() if n.id not in flagged),
+                      key=_key, reverse=(state.direction == "max"))
         return [n.id for n in pool[: self._holdout_top_k]]
 
     def _holdout_pending(self, state: RunState) -> bool:
@@ -2709,7 +2738,6 @@ class Engine:
         can't see. Pure host-side check; audit-only (feeds reward_hack_suspected). Best-effort."""
         sigs: list[dict] = []
         try:
-            import hashlib
             wd = Path(workdir)
             for name in protected:
                 p = wd / name
@@ -2718,11 +2746,19 @@ class Engine:
                 original = self._assets.get(name)
                 if original is None:
                     continue
-                want = hashlib.sha256(
-                    original.encode("utf-8") if isinstance(original, str) else bytes(original)
-                ).hexdigest()
-                got = hashlib.sha256(p.read_bytes()).hexdigest()
-                if got != want:
+                # Compare as TEXT for str assets: `_write_assets` writes them via
+                # `Path.write_text` (text mode translates '\n' -> os.linesep), so a raw-BYTES
+                # compare would flag EVERY honest eval on a platform where os.linesep != '\n'
+                # (e.g. Windows CRLF) as a tamper. Bytes assets compare byte-exact.
+                if isinstance(original, str):
+                    try:
+                        got = p.read_text(encoding="utf-8")
+                    except (OSError, UnicodeDecodeError):
+                        got = None
+                    tampered = got is not None and got != original
+                else:
+                    tampered = p.read_bytes() != bytes(original)
+                if tampered:
                     sigs.append({"signal": "protected_write",
                                  "detail": f"protected file '{name}' was modified at runtime"})
         except Exception:  # noqa: BLE001 — an audit failure must never fail the eval
