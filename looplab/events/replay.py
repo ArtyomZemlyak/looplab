@@ -256,8 +256,12 @@ def fold(events: Iterable[Event]) -> RunState:
             # An operator added an experiment to a FINISHED run and wants to continue it: clear the
             # terminal flags so re-entering the loop (resume) processes the new node(s) and then
             # re-finishes. Deterministic under replay — a later run_finished simply sets it again.
+            # Also clear a lingering ABORT: a run stopped from the UI carries stop_requested, and the
+            # loop re-aborts on the next resume before doing any work — so reopening must lift it too,
+            # else a UI-stopped run can never be continued with injected experiments.
             st.finished = False
             st.stop_reason = None
+            st.stop_requested = None
         # --- live operator control events (UI intervention). Intent only; the engine reads
         # these and writes the matching domain effect. Deterministic under replay. ---
         elif t == "run_abort":
