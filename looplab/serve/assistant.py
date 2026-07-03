@@ -339,7 +339,11 @@ def run_turn(client, run_root, messages: list, instruction: str, mode: str = DEF
     # `convo` holds no tool-result messages, it was compacted away; stream over a stale trace would
     # make the model re-answer BLIND, so we skip streaming and keep the loop's (correct) reply.
     trace_ok = (not steps) or any(m.get("role") == "tool" for m in convo)
-    if reply_sink is not None and trace_ok:
+    # If the user cancelled, DON'T fire a fresh (un-cancellable) streaming completion for the final
+    # answer — that call could hang on the shared LLM and keep the worker (and its SSE stream) alive
+    # long after Stop. Keep the loop's already-computed reply instead.
+    _cancelled = bool(cancel_check and cancel_check())
+    if reply_sink is not None and trace_ok and not _cancelled:
         try:
             # Strip UNANSWERED tool calls anywhere in the trace, not just a trailing message:
             # when the model paired a retrieval call with final_answer, the loop executed the
@@ -360,6 +364,8 @@ def run_turn(client, run_root, messages: list, instruction: str, mode: str = DEF
                                    "user in Markdown, based on everything above. Be concise."}]
             streamed = []
             for piece in client.complete_text_stream(stream_msgs):
+                if cancel_check and cancel_check():   # stop honored mid-stream too
+                    break
                 streamed.append(piece)
                 try:
                     reply_sink(piece)

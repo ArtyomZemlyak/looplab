@@ -217,7 +217,11 @@ def drive_tool_loop(client, tools, messages: list, emit_spec: dict, *,
             messages.append({"role": "user", "content": f"Now call `{emit_name}` with your final answer."})
             continue
         stalls = 0
-        _text(msg.get("content"))       # the model's prose alongside this tool round → live to the UI
+        # Surface interstitial prose live — but NOT on the final turn where the model pairs prose with
+        # the emit/final-answer call, since that same prose is regenerated as the streamed answer (it
+        # would show twice). Only genuine between-tool-rounds prose reaches the UI here.
+        if not any((c.get("function") or {}).get("name") == emit_name for c in calls):
+            _text(msg.get("content"))
         messages.append({"role": "assistant", "content": msg.get("content") or "",
                          "tool_calls": calls})
         stuck_reason = None

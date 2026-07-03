@@ -205,11 +205,18 @@ export default function AssistantBar({ runId, hidden = false }) {
               const pp = await assistantProgress(id)
               if (!pp.active) break
               if (mountedRef.current && sidRef.current === id && (pp.steps || []).length)
-                patchLast({ activity: [{ type: 'tools', labels: pp.steps }] })
+                patchLast(prev => prev && prev.role === 'assistant' && prev.streaming   // only the live placeholder
+                  ? { activity: [{ type: 'tools', labels: pp.steps }] } : prev)
             } catch { /* transient */ }
           }
         })()
-        recoverReply(id, arr.length + 1).finally(() => { polling = false; if (mountedRef.current) setBusy(false) })
+        recoverReply(id, arr.length + 1).then(ok => {
+          // If recovery gives up (the worker died / no reply ever lands), end the placeholder — else it
+          // renders a forever "thinking" spinner (the send path has the same fallback on failure).
+          if (!ok && mountedRef.current && sidRef.current === id)
+            patchLast(prev => prev && prev.role === 'assistant' && prev.streaming
+              ? { streaming: false, content: prev.content || '(the previous turn ended without a reply — ask again)' } : prev)
+        }).finally(() => { polling = false; runningRef.current = false; if (mountedRef.current) setBusy(false) })
       }
     } catch (e) { flash(e.message) }
   }
@@ -333,6 +340,10 @@ export default function AssistantBar({ runId, hidden = false }) {
         onError: safeSid((e) => flash(e)),
       }, ctrl.signal, userText || instruction)   // persist the CLEAN bubble, not the ctx-augmented instruction
       if (!mountedRef.current || sidRef.current !== id) return
+      // Stop was pressed: aborting a fetch mid-stream does NOT throw (the reader catch swallows it and
+      // returns), so we land here on the success path — but the turn is cancelled. Don't overwrite the
+      // "(stopped)" bubble stop() already wrote with a "(no reply)".
+      if (!runningRef.current) return
       const reply = (res && res.reply) || acc || '(no reply)'
       patchLast({ content: reply, streaming: false, steps: res && res.steps, applied: res && res.applied,
                   proposals: res && res.proposals, todos: res && res.todos, tokens: res && res.tokens })

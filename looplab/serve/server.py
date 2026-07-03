@@ -1981,6 +1981,7 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
         504ing), then persists the assistant reply. Soft-fails offline."""
         body = await request.json()
         instruction = (body.get("instruction") or body.get("content") or "").strip()
+        display = (body.get("display") or "").strip()   # clean bubble; instruction may carry UI-context
         mode = body.get("mode")
         try:
             sess = _asst.get(sid)
@@ -1992,7 +1993,7 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
             raise HTTPException(400, "empty message")
         history = list(sess["messages"])          # BEFORE appending the new user turn
         eff_mode = mode or sess["meta"].get("mode") or "plan"
-        _asst.append(sid, {"role": "user", "content": instruction, "mode": eff_mode})
+        _asst.append(sid, {"role": "user", "content": display or instruction, "mode": eff_mode})
         s = _llm_settings()
         try:
             client = make_llm_client(s)
@@ -2126,9 +2127,13 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
             except Exception as e:  # noqa: BLE001
                 q.put(("error", str(e)))
             finally:
+                # Only tear down OUR turn's registry entries: if a second turn for this session
+                # started meanwhile it will have replaced `_asst_cancel[sid]` with its own Event, and
+                # popping unconditionally would orphan it (its Stop + progress polling would break).
                 with _perm_lock:
-                    _asst_progress.pop(sid, None)
-                    _asst_cancel.pop(sid, None)
+                    if _asst_cancel.get(sid) is cancel_ev:
+                        _asst_cancel.pop(sid, None)
+                        _asst_progress.pop(sid, None)
                 q.put(("__end__", None))
         threading.Thread(target=_worker, daemon=True).start()
 
