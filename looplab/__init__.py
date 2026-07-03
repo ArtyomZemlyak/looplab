@@ -72,6 +72,7 @@ _LAYOUT = {
     "localize": "engine",
     "mcp_tools": "tools",
     "memora": "tools",
+    "memory_tools": "tools",
     "memory": "engine",
     "metrics_adapters": "serve",
     "mlebench": "adapters",

@@ -4,7 +4,7 @@ from __future__ import annotations
 from enum import Enum
 from typing import Any, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 class NodeStatus(str, Enum):
@@ -50,6 +50,17 @@ class Idea(BaseModel):
     @property
     def is_sweep(self) -> bool:
         return bool(self.space)
+
+    @model_validator(mode="after")
+    def _backfill_rationale(self) -> "Idea":
+        # An idea's `rationale` is the human-readable "why" the UI panel shows. Researchers sometimes
+        # emit a structural idea (a code change, not a param sweep) with a filled `hypothesis` but an
+        # empty `rationale` — leaving the node with no visible description. When that happens, derive
+        # the rationale from the hypothesis so every node always carries a "why". Runs replay-safe:
+        # fold rebuilds ideas through this validator, so it also heals such nodes in existing runs.
+        if not (self.rationale or "").strip() and (self.hypothesis or "").strip():
+            self.rationale = self.hypothesis.strip()[:500]
+        return self
 
 
 class Trial(BaseModel):
