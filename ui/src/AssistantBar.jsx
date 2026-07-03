@@ -103,6 +103,7 @@ export default function AssistantBar({ runId, hidden = false }) {
 
   const mountedRef = useRef(true)
   const abortRef = useRef(null)
+  const runningRef = useRef(false)   // a turn is live (stream OR reattach poll); stop clears it to halt both
   const sidRef = useRef(null)   // session the stream callbacks belong to (guards cross-session bleed)
   const inputRef = useRef(null)
   const feedRef = useRef(null)
@@ -192,13 +193,13 @@ export default function AssistantBar({ runId, hidden = false }) {
       try { prog = await assistantProgress(id) } catch { /* offline */ }
       const inFlight = prog.active || (recover && arr.length && arr[arr.length - 1].role === 'user')
       if (inFlight && mountedRef.current && sidRef.current === id) {
-        setBusy(true)
+        setBusy(true); runningRef.current = true
         const act = (prog.steps || []).length ? [{ type: 'tools', labels: prog.steps }] : []
         setMsgs(m => (m[m.length - 1] && m[m.length - 1].role === 'assistant' && m[m.length - 1].streaming)
           ? m : [...m, { role: 'assistant', content: '', streaming: true, activity: act }])
         let polling = true
         ;(async () => {
-          while (polling && mountedRef.current && sidRef.current === id) {
+          while (polling && runningRef.current && mountedRef.current && sidRef.current === id) {
             await sleep(1200)
             try {
               const pp = await assistantProgress(id)
@@ -274,7 +275,7 @@ export default function AssistantBar({ runId, hidden = false }) {
   // background worker keeps running and persists the reply, so poll the session until the assistant
   // message lands, then surface it — instead of stranding the user on "could not reach".
   const recoverReply = async (id, priorLen) => {
-    for (let i = 0; i < 90 && mountedRef.current && sidRef.current === id; i++) {
+    for (let i = 0; i < 90 && runningRef.current && mountedRef.current && sidRef.current === id; i++) {
       await sleep(2000)
       try {
         const s = await assistantGet(id)
@@ -311,7 +312,7 @@ export default function AssistantBar({ runId, hidden = false }) {
     setMsgs(m => [...m, { role: 'user', content: userText || instruction, context: hasCtx ? ctxInfo : null },
                         { role: 'assistant', content: '', streaming: true }])
     const priorLen = msgs.length + 2
-    setBusy(true)
+    setBusy(true); runningRef.current = true
     const ctrl = new AbortController(); abortRef.current = ctrl
     let polling = true
     ;(async () => { while (polling && mountedRef.current) { try { const p = await assistantPermissions(id); if (mountedRef.current) setPending(p.pending || []) } catch { /* transient */ } await sleep(800) } })()
@@ -350,7 +351,7 @@ export default function AssistantBar({ runId, hidden = false }) {
         const ok = await recoverReply(id, priorLen)
         if (mountedRef.current && sidRef.current === id && !ok) patchLast({ content: 'Could not reach the assistant.', streaming: false, recovering: false })
       }
-    } finally { polling = false; abortRef.current = null; if (mountedRef.current) { setBusy(false); setPending([]) } }
+    } finally { polling = false; runningRef.current = false; abortRef.current = null; if (mountedRef.current) { setBusy(false); setPending([]) } }
   }
 
   const send = () => {
@@ -379,9 +380,16 @@ export default function AssistantBar({ runId, hidden = false }) {
   }
 
   const stop = () => {
-    if (abortRef.current) abortRef.current.abort()          // drop the local stream
-    const id = sidRef.current || sid                        // AND cancel server-side (works post-reload)
+    runningRef.current = false                              // halt reattach/recover polling immediately
+    if (abortRef.current) { try { abortRef.current.abort() } catch { /* already gone */ } abortRef.current = null }
+    const id = sidRef.current || sid                        // cancel server-side (works even post-reload)
     if (id) assistantCancel(id).catch(() => {})
+    // Reset the UI NOW — never wait on a hung LLM call or the server: end the streaming placeholder,
+    // drop busy + pending, so the composer is usable again instantly.
+    setBusy(false); setPending([])
+    patchLast(prev => prev && prev.role === 'assistant' && prev.streaming
+      ? { streaming: false, recovering: false, content: prev.content || '(stopped)' } : prev || {})
+    flash('stopped')
   }
 
   const activeMode = MODES.find(x => x.id === mode) || MODES[0]

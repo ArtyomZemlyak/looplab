@@ -444,6 +444,8 @@ button { font: inherit; }
 
 /* U5 command-bar #-context chips row (above the input). */
 .cmdbar-ctx { display: flex; align-items: center; gap: 4px; padding: 3px 4px 5px; flex-wrap: wrap; }
+/* In the right side/full composer, center the attached-context chips (#node / run / files). */
+.asst-in .cmdbar-ctx { justify-content: center; }
 
 /* chart interactivity: a small toolbar (log-scale toggle) above a chart. */
 .chart { position: relative; }
