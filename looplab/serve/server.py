@@ -1168,11 +1168,15 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
         run_id = body.get("run_id")
         if not run_id:
             raise HTTPException(400, "run_id is required")
-        if run_id in _RESERVED_RUN_IDS:        # don't let a run clobber the cross-run report store dir
-            raise HTTPException(400, f"run_id {run_id!r} is reserved")
         rd = (root / run_id).resolve()
-        if root not in rd.parents and rd != root:
-            raise HTTPException(400, "bad run_id")
+        # A run id must resolve to a DIRECT child of the runs root: this rejects "." (which would make
+        # the runs root itself a run — an invisible ghost engine writing events.jsonl at the root),
+        # nested "a/b" (invisible to the run list), and traversal. Check the RESERVED names against the
+        # resolved directory name, so "./reports" can't sneak into the cross-run report store.
+        if rd.parent != root or rd == root:
+            raise HTTPException(400, "bad run_id (must be a plain name, not a path)")
+        if rd.name in _RESERVED_RUN_IDS:       # don't let a run clobber the report/assistant stores
+            raise HTTPException(400, f"run_id {rd.name!r} is reserved")
         if (rd / "events.jsonl").exists():
             raise HTTPException(409, f"run {run_id!r} already exists — pick another id")
         task_file = body.get("task_file")
@@ -1518,24 +1522,31 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
     def _normalize_genesis(spec: "_GenesisSpec", draft: dict) -> dict:
         """Turn the boss's raw proposal into a launch-ready, editable card: slugify + de-dup the run_id
         against existing run dirs, keep only known non-secret setting overrides, and invent a name when
-        the model didn't give one."""
+        the model didn't give one. A REFINE turn (an existing draft) merges: fields the model omitted
+        are kept from the prior card — a partial emit like {settings:{max_nodes:50}} must tweak the
+        user's tuned spec, not wipe its task/name."""
+        draft = draft if isinstance(draft, dict) else {}
+
         def _slug(s):
             return re.sub(r"(^-|-$)", "", re.sub(r"[^a-z0-9]+", "-", str(s or "").lower()))[:40]
 
-        task = spec.task if isinstance(spec.task, dict) else {}
-        task_file = spec.task_file or ""
-        base = (_slug(spec.run_id) or _slug(task.get("competition")) or _slug(task.get("kind"))
-                or _slug(Path(task_file).stem if task_file else "") or "run")
+        task = spec.task if isinstance(spec.task, dict) and spec.task else (draft.get("task") or {})
+        task_file = spec.task_file or draft.get("task_file") or ""
+        base = (_slug(spec.run_id) or _slug(draft.get("run_id")) or _slug(task.get("competition"))
+                or _slug(task.get("kind")) or _slug(Path(task_file).stem if task_file else "") or "run")
         run_id, n = base, 2
         # A name is "taken" only when it holds a REAL run (events.jsonl) — matches /api/start's 409 — so
         # a leftover empty dir (e.g. a validation-failed materialization) doesn't force a -2 suffix.
         while (root / run_id / "events.jsonl").exists():
             run_id, n = f"{base}-{n}", n + 1
-        settings = {k: v for k, v in (spec.settings or {}).items()
+        merged_settings = {**(draft.get("settings") or {}), **(spec.settings or {})}
+        settings = {k: v for k, v in merged_settings.items()
                     if k in _ALLOWED_FIELDS and k not in _SECRET_FIELDS and v is not None}
-        steps = [str(s).strip() for s in (spec.setup_steps or []) if str(s).strip()][:12]
+        steps = [str(s).strip() for s in (spec.setup_steps or []) if str(s).strip()][:12] \
+            or list(draft.get("setup_steps") or [])
         return {"run_id": run_id, "task": task, "task_file": task_file,
-                "settings": settings, "rationale": spec.rationale or "", "setup_steps": steps}
+                "settings": settings, "rationale": spec.rationale or draft.get("rationale") or "",
+                "setup_steps": steps}
 
     # Genesis runs an AGENTIC, multi-turn tool loop (the boss reads the repo before planning). Done
     # synchronously that can outlast a UI proxy's gateway timeout (it 504'd behind JupyterHub). So the
@@ -1773,7 +1784,13 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
             _genesis_put(job_id, progress={"label": label, "step": int((ev or {}).get("turn", 0)) + 1})
 
         def _worker():
-            res = _compute_plan(_on_step)
+            # Guard the WHOLE worker: an exception outside _compute_plan's own try (e.g. a parse
+            # returning None → AttributeError in normalize) must still flip the job to done, or the
+            # poll endpoint reports "running" forever and the UI waits out its full timeout blind.
+            try:
+                res = _compute_plan(_on_step)
+            except Exception as e:  # noqa: BLE001 - surface as a job error, never a wedged job
+                res = {"ok": False, "error": f"planning failed: {e}"}
             _genesis_put(job_id, status="done", result=res, ts=time.time())
         threading.Thread(target=_worker, daemon=True).start()
 
@@ -1821,8 +1838,13 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
     _asst_cancel: dict = {}        # sid -> threading.Event — set by /cancel to stop an in-flight turn
     _PERM_TIMEOUT = float(os.environ.get("LOOPLAB_ASSISTANT_PERM_TIMEOUT", "900"))
 
-    def _make_approver(sid: str):
+    def _make_approver(sid: str, cancel_ev: "Optional[threading.Event]" = None):
         def approver(action: dict) -> str:
+            # A confirm raised AFTER the user hit Stop (the in-flight model response's tools still
+            # execute once) must not park the worker for _PERM_TIMEOUT on a card nobody will see —
+            # deny immediately, so the loop's next cancel_check ends the turn.
+            if cancel_ev is not None and cancel_ev.is_set():
+                return "deny"
             kind = (action or {}).get("tool_kind", "")
             with _perm_lock:
                 if kind and kind in _perm_always.get(sid, set()):
@@ -1842,7 +1864,14 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
                              if _perm_reqs[k]["status"] != "pending"]
                     for k in stale[:max(0, len(_perm_reqs) - 128)]:
                         _perm_reqs.pop(k, None)
-            got = ev.wait(timeout=_PERM_TIMEOUT)
+            # Wait in short slices so a Stop DURING the wait un-parks promptly (cancel_ev wake) even
+            # though the resolve Event is what a normal Approve/Reject sets.
+            deadline = time.monotonic() + _PERM_TIMEOUT
+            got = False
+            while time.monotonic() < deadline:
+                got = ev.wait(timeout=1.0)
+                if got or (cancel_ev is not None and cancel_ev.is_set()):
+                    break
             with _perm_lock:
                 req = _perm_reqs.get(req_id) or {}
                 dec = (req.get("decision") if got else "deny") or "deny"
@@ -2092,7 +2121,8 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
         if not instruction:
             raise HTTPException(400, "empty message")
         history = list(sess["messages"])
-        eff_mode = mode or sess["meta"].get("mode") or "plan"
+        from looplab.serve.assistant import normalize_mode as _norm_mode
+        eff_mode = _norm_mode(mode or sess["meta"].get("mode") or "plan")   # never persist a junk mode
         _asst.append(sid, {"role": "user", "content": display or instruction, "mode": eff_mode})
         _asst.update_meta(sid, mode=eff_mode)   # remember the chosen mode so a reload/switch keeps it
         s = _llm_settings()
@@ -2105,19 +2135,28 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
             async def _err_gen():
                 yield f"event: error\ndata: {json.dumps(err_msg)}\n\n"
             return StreamingResponse(_err_gen(), media_type="text/event-stream")
-        approver = _make_approver(sid)
         cancel_ev = threading.Event()
+        approver = _make_approver(sid, cancel_ev)   # a confirm raised AFTER Stop denies instantly
         with _perm_lock:
             _asst_progress[sid] = {"steps": [], "todos": [], "updated": time.time()}
             _asst_cancel[sid] = cancel_ev
 
         def _on_step(ev):
             with _perm_lock:
-                p = _asst_progress.setdefault(sid, {"steps": [], "todos": [], "updated": 0})
-                p["steps"] = (p["steps"] + [ev.get("label") or ev.get("tool") or "…"])[-40:]
+                # Record progress ONLY while this turn still owns the session's registry entry — a
+                # cancelled worker's late tool steps must not re-create _asst_progress after a newer
+                # turn (or the finally) popped it, else `progress.active` stays true forever and every
+                # future open of the session reattaches to a phantom "thinking" turn.
+                if _asst_cancel.get(sid) is cancel_ev:
+                    p = _asst_progress.setdefault(sid, {"steps": [], "todos": [], "updated": 0})
+                    p["steps"] = (p["steps"] + [ev.get("label") or ev.get("tool") or "…"])[-40:]
             q.put(("step", ev.get("label") or ev.get("tool") or "…"))
 
         def _on_todos(items):
+            with _perm_lock:   # mirror todos into the progress channel so a reattach restores them
+                if _asst_cancel.get(sid) is cancel_ev:
+                    p = _asst_progress.setdefault(sid, {"steps": [], "todos": [], "updated": 0})
+                    p["todos"] = items
             q.put(("todos", items))
 
         def _on_text(content):
@@ -2131,10 +2170,23 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
                                           reply_sink=lambda piece: q.put(("token", piece)),
                                           cancel_check=cancel_ev.is_set)
                 res["tokens"] = _client_tokens(client)
-                _asst.append(sid, {"role": "assistant", "content": res.get("reply", ""),
-                                   "steps": res.get("steps") or [], "applied": res.get("applied") or [],
-                                   "proposals": res.get("proposals") or [], "todos": res.get("todos") or [],
-                                   "tokens": res.get("tokens")})
+                # A CANCELLED turn's late reply is persisted only while the transcript still ends at
+                # our own user message. If the user already sent a newer message, appending would
+                # interleave the transcripts (u1,u2,a1,a2) and recoverReply could finalize turn 2's
+                # placeholder with turn 1's stale reply — drop the late reply instead.
+                stale = False
+                if cancel_ev.is_set():
+                    try:
+                        stale = len(_asst.messages(sid)) > len(history) + 1
+                    except Exception:  # noqa: BLE001
+                        stale = False
+                if stale:
+                    res["reply"] = ""   # dropped; the done event still ends the (already reset) stream
+                else:
+                    _asst.append(sid, {"role": "assistant", "content": res.get("reply", ""),
+                                       "steps": res.get("steps") or [], "applied": res.get("applied") or [],
+                                       "proposals": res.get("proposals") or [], "todos": res.get("todos") or [],
+                                       "tokens": res.get("tokens")})
                 if not history:
                     try:
                         t = client.complete_text([

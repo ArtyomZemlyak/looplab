@@ -2,7 +2,9 @@ import React, { useEffect, useRef, useState } from 'react'
 import { genesis, genesisAwait, startRun } from './util.js'
 import StartRun from './StartRun.jsx'
 
-const slug = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '').slice(0, 40)
+// 48 > the server's 40-char normalize cap, so a server-deduped name ("…-2", 42 chars) survives the
+// launch-time re-slug instead of being chopped back to the colliding 40-char base (guaranteed 409).
+const slug = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '').slice(0, 48)
 // Lenient form for the live name input: keeps a TRAILING hyphen so a kebab name can be typed
 // left-to-right ("my-" → "my-run"); the strict slug() is applied once at launch.
 const slugLoose = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+/, '').slice(0, 40)
@@ -63,7 +65,10 @@ export default function GenesisChat({ onClose, onStarted, seed }) {
       // onProgress surfaces each scout step ("reading README.md…") so a long plan isn't an opaque wait.
       const r = await genesisAwait(await genesis({ messages: next, instruction: goal, draft: spec }),
         { onProgress: p => setProgress(p) })
-      setMsgs(m => [...m, { role: 'assistant', content: r.reply || '(planned — see the card)' }])
+      // On failure/timeout (ok:false, no reply) don't claim a plan exists — the transcript would lie
+      // (and later be carried into the launched run's chat.jsonl).
+      setMsgs(m => [...m, { role: 'assistant', content: r.reply
+        || (r.ok === false ? `(planning failed: ${r.error || 'timed out'})` : '(planned — see the card)') }])
       // Only adopt a REAL spec — the offline soft-fail returns ok:false with an all-blank spec, which
       // must NOT wipe a good draft the user already tuned.
       if (r.ok !== false && r.spec && (r.spec.run_id || r.spec.task_file || r.spec.task?.kind)) setSpec(r.spec)
@@ -118,7 +123,7 @@ export default function GenesisChat({ onClose, onStarted, seed }) {
       clearDraft()                 // the conversation now lives in the run's chat.jsonl
       onStarted?.(rid)
     } catch (e) {
-      setErr(/409/.test(e.message) ? `run "${spec.run_id}" already exists — rename it` : 'launch failed: ' + e.message)
+      setErr(e.status === 409 ? `run "${spec.run_id}" already exists — rename it` : 'launch failed: ' + e.message)
       setBusy(false)
     }
   }

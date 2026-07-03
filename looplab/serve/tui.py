@@ -276,7 +276,7 @@ def slug(s: str) -> str:
 # Actions whose effect on a FINISHED/zombie run only takes hold once the engine is reopened+resumed —
 # the Python twin of util.js NEEDS_RESUME, so the TUI's apply path matches the web Dock's exactly.
 _NEEDS_RESUME = {"fork", "inject_node", "force_confirm", "force_ablate", "deep_research",
-                 "set_strategy", "budget_extend"}
+                 "set_strategy", "budget_extend", "resume"}
 
 
 def action_needs_engine(action: dict) -> bool:

@@ -429,7 +429,7 @@ export const CONTROL = {
 // processes them (mirrors InjectModal's reopen→inject→resume). These verbs need the loop running.
 // `budget_extend` is here too: raising the node budget on a finished run is pointless unless the run
 // reopens and keeps going (the agentic boss pairs it with inject/hint steps).
-const NEEDS_RESUME = new Set(['fork', 'inject_node', 'force_confirm', 'force_ablate', 'deep_research', 'set_strategy', 'budget_extend'])
+const NEEDS_RESUME = new Set(['fork', 'inject_node', 'force_confirm', 'force_ablate', 'deep_research', 'set_strategy', 'budget_extend', 'resume'])
 
 // Does applying this action on a FINISHED run require reopening + resuming the engine? (Used to batch a
 // multi-action plan: append every step's intent, then reopen+resume ONCE if any step needs the loop.)

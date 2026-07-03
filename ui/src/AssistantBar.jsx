@@ -108,6 +108,8 @@ export default function AssistantBar({ runId, hidden = false }) {
   const mountedRef = useRef(true)
   const abortRef = useRef(null)
   const runningRef = useRef(false)   // a turn is live (stream OR reattach poll); stop clears it to halt both
+  const cancelReqRef = useRef(null)  // in-flight server-cancel POST; the next send awaits it so a late
+                                     // cancel can't land on (and instantly kill) the NEW turn's event
   const sidRef = useRef(null)   // session the stream callbacks belong to (guards cross-session bleed)
   const inputRef = useRef(null)
   const feedRef = useRef(null)
@@ -182,7 +184,14 @@ export default function AssistantBar({ runId, hidden = false }) {
 
   // ── sessions (full view) ──
   const openSession = async (id, { recover = false } = {}) => {
-    if (abortRef.current) abortRef.current.abort()   // stop an in-flight turn before switching away
+    // Re-opening the session that is ALREADY live-streaming would abort its own stream (and downgrade
+    // to polling) — the thread is already on screen, so just no-op.
+    if (id === sidRef.current && runningRef.current) return
+    // Leaving a live turn: the departing turn's finally is sid-guarded (it must not clobber the session
+    // we switch TO), so IT won't reset the shared flags once sidRef changes — reset them here, or busy
+    // stays true forever and the composer wedges on ■.
+    if (abortRef.current) { try { abortRef.current.abort() } catch { /* gone */ } abortRef.current = null }
+    if (runningRef.current) { runningRef.current = false; setBusy(false); setPending([]) }
     sidRef.current = id; setSid(id)
     try { localStorage.setItem('ll.asstSid', id) } catch { /* private mode */ }
     try {
@@ -216,6 +225,10 @@ export default function AssistantBar({ runId, hidden = false }) {
               if (mountedRef.current && sidRef.current === id && (pp.steps || []).length)
                 patchLast(prev => prev && prev.role === 'assistant' && prev.streaming   // only the live placeholder
                   ? { activity: [{ type: 'tools', labels: pp.steps }] } : prev)
+              // A reattached turn may be PARKED on a HITL confirm — surface its card too (the send
+              // path polls permissions; without this a reload hides the card until the 900s deny).
+              const perms = await assistantPermissions(id)
+              if (mountedRef.current && sidRef.current === id) setPending(perms.pending || [])
             } catch { /* transient */ }
           }
         })()
@@ -261,7 +274,13 @@ export default function AssistantBar({ runId, hidden = false }) {
     window.addEventListener('ll:attach-node', onAttach)
     return () => window.removeEventListener('ll:attach-node', onAttach)
   }, [hasChat])
-  const newChat = () => { if (abortRef.current) abortRef.current.abort(); sidRef.current = null; setSid(null); setMsgs([]); setPreview(''); setHasNew(false); setInput(''); setFiles([]); try { localStorage.removeItem('ll.asstSid') } catch { /* ignore */ } }
+  const newChat = () => {
+    if (abortRef.current) { try { abortRef.current.abort() } catch { /* gone */ } abortRef.current = null }
+    // the departing turn's finally is sid-guarded — reset the shared flags here (see openSession)
+    runningRef.current = false; setBusy(false); setPending([])
+    sidRef.current = null; setSid(null); setMsgs([]); setPreview(''); setHasNew(false); setInput(''); setFiles([])
+    try { localStorage.removeItem('ll.asstSid') } catch { /* ignore */ }
+  }
   const delSession = async (id, e) => {
     e?.stopPropagation()
     setSessions(ss => ss.filter(s => s.id !== id))   // optimistic: drop it now (geesefs list can lag)
@@ -309,7 +328,7 @@ export default function AssistantBar({ runId, hidden = false }) {
   // background worker keeps running and persists the reply, so poll the session until the assistant
   // message lands, then surface it — instead of stranding the user on "could not reach".
   const recoverReply = async (id, priorLen) => {
-    for (let i = 0; i < 90 && runningRef.current && mountedRef.current && sidRef.current === id; i++) {
+    for (let i = 0; i < 180 && runningRef.current && mountedRef.current && sidRef.current === id; i++) {   // ~6min > the 300s turn budget
       await sleep(2000)
       try {
         const s = await assistantGet(id)
@@ -358,6 +377,9 @@ export default function AssistantBar({ runId, hidden = false }) {
     let acc = ''
     const fullInstruction = instruction + filePreamble(atts)
     try {
+      // A just-fired Stop's cancel POST may still be in flight — wait it out so it can't register
+      // against (and instantly kill) THIS new turn's cancel event server-side.
+      if (cancelReqRef.current) { try { await cancelReqRef.current } catch { /* done */ } }
       const res = await assistantMessageStream(id, fullInstruction, mode, {
         onToken: safeSid((tok) => { acc += tokText(tok); patchLast({ content: acc }) }),
         onText: safeSid((txt) => patchLast(prev => ({ activity: [...(prev.activity || []), { type: 'text', content: txt }] }))),
@@ -375,7 +397,7 @@ export default function AssistantBar({ runId, hidden = false }) {
       // returns), so we land here on the success path — but the turn is cancelled. Don't overwrite the
       // "(stopped)" bubble stop() already wrote with a "(no reply)".
       if (!runningRef.current) return
-      const reply = (res && res.reply) || acc || '(no reply)'
+      const reply = (res && res.reply) || acc || (res && res.ok === false && res.error ? `(error: ${res.error})` : '(no reply)')
       patchLast({ content: reply, streaming: false, steps: res && res.steps, applied: res && res.applied,
                   proposals: res && res.proposals, todos: res && res.todos, tokens: res && res.tokens })
       setPreview(firstLine(reply).slice(0, 120)); setHasNew(wasBar)
@@ -430,7 +452,7 @@ export default function AssistantBar({ runId, hidden = false }) {
     runningRef.current = false                              // halt reattach/recover polling immediately
     if (abortRef.current) { try { abortRef.current.abort() } catch { /* already gone */ } abortRef.current = null }
     const id = sidRef.current || sid                        // cancel server-side (works even post-reload)
-    if (id) assistantCancel(id).catch(() => {})
+    if (id) cancelReqRef.current = assistantCancel(id).catch(() => {}).finally(() => { cancelReqRef.current = null })
     // Reset the UI NOW — never wait on a hung LLM call or the server: end the streaming placeholder,
     // drop busy + pending, so the composer is usable again instantly.
     setBusy(false); setPending([])

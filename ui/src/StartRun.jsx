@@ -66,7 +66,7 @@ export default function StartRun({ onClose, onStarted }) {
       await startRun({ task_file: effectivePath, run_id: runId.trim(), settings: fromForm(form) })
       onStarted?.(runId.trim())
     } catch (e) {
-      setErr(/409/.test(e.message) ? `run "${runId}" already exists — pick another id` : 'launch failed: ' + e.message)
+      setErr(e.status === 409 ? `run "${runId}" already exists — pick another id` : 'launch failed: ' + e.message)
       setBusy(false)
     }
   }

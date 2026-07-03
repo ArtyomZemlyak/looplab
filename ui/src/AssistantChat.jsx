@@ -119,7 +119,7 @@ function LaunchCard({ spec }) {
       if (spec.task_file) body.task_file = spec.task_file; else body.task = task
       await startRun(body)
       setDone(true); location.hash = `#/run/${encodeURIComponent(spec.run_id)}`
-    } catch (e) { setErr(/409/.test(e.message) ? `"${spec.run_id}" already exists — rename it` : e.message); setBusy(false) }
+    } catch (e) { setErr(e.status === 409 ? `"${spec.run_id}" already exists — rename it` : e.message); setBusy(false) }
   }
   return <div className="asst-launch">
     <div className="asst-launch-h"><span className="asst-perm-badge">new run</span><b>{spec.run_id}</b>

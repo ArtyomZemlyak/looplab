@@ -49,7 +49,10 @@ def decide(mode, tool_kind) -> str:
 # LoopLab is an explicit goal — only run-data + integrity files. Matched case-insensitively against the
 # root-relative POSIX path (see patch._match semantics: a leading `**/` also matches root files).
 DEFAULT_PROTECT = [
-    ".git/**",
+    # BOTH forms: the writable-target check resolves a path relative to its FIRST containing root
+    # (usually $HOME, which the repo lives under), so the bare ".git/**" never matched the repo's
+    # .git seen as "data/…/.git/…" — leaving .git internals (config, hooks/pre-commit) writable.
+    ".git/**", "**/.git/**",
     "**/events.jsonl", "**/spans.jsonl", "**/readmodel.sqlite", "**/engine.lock",
     "**/task.snapshot.json", "**/config.snapshot.json",
     "**/answers/**", "**/answers.csv", "**/held_out/**", "**/private/**",
