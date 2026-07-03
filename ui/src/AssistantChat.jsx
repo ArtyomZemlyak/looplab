@@ -184,9 +184,11 @@ export default function AssistantChat({ onBack }) {
     try { const r = await assistantSessions(); setSessions(r.sessions || []) } catch { /* offline */ }
   }
   useEffect(() => { refreshSessions() }, [])
-  useEffect(() => {
+  const atBottomRef = useRef(true)
+  const onFeedScroll = (e) => { const f = e.currentTarget; atBottomRef.current = f.scrollHeight - f.scrollTop - f.clientHeight < 80 }
+  useEffect(() => {   // don't yank the reader down when they've scrolled up during a streaming reply
     const f = feedRef.current
-    if (f) requestAnimationFrame(() => { f.scrollTop = f.scrollHeight })
+    if (f && atBottomRef.current) requestAnimationFrame(() => { f.scrollTop = f.scrollHeight })
   }, [msgs, busy])
 
   const openSession = async (id) => {
@@ -247,6 +249,7 @@ export default function AssistantChat({ onBack }) {
       try { const m = await assistantCreate(t.slice(0, 60), mode); id = m.id; sidRef.current = id; setSid(id); refreshSessions() }
       catch (e) { setErr(e.message); return }
     }
+    atBottomRef.current = true
     setMsgs(m => [...m, { role: 'user', content: t }, { role: 'assistant', content: '', streaming: true }])
     setBusy(true)
     const ctrl = new AbortController(); abortRef.current = ctrl
@@ -322,7 +325,7 @@ export default function AssistantChat({ onBack }) {
         {sid && <button className="btn sm ghost" onClick={share} title="copy a read-only link">share</button>}
       </div>
 
-      <div className="asst-feed" ref={feedRef}>
+      <div className="asst-feed" ref={feedRef} onScroll={onFeedScroll}>
         {msgs.length === 0 && <div className="gen-empty">
           <div className="muted" style={{ marginBottom: 8 }}>
             Ask me anything — I can inspect the code, read your runs, and (once you switch modes) edit

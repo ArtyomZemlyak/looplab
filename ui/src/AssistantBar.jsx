@@ -111,6 +111,8 @@ export default function AssistantBar({ runId, hidden = false }) {
   const sidRef = useRef(null)   // session the stream callbacks belong to (guards cross-session bleed)
   const inputRef = useRef(null)
   const feedRef = useRef(null)
+  const atBottomRef = useRef(true)     // is the feed scrolled to (near) the bottom? gates autoscroll
+  const flashTimerRef = useRef(null)   // single toast-clear timer so rapid flashes don't clip each other
   const fileRef = useRef(null)
   useEffect(() => () => { mountedRef.current = false; if (abortRef.current) abortRef.current.abort() }, [])
   useEffect(() => { localStorage.setItem('ll.asstW', sideW) }, [sideW])
@@ -136,9 +138,12 @@ export default function AssistantBar({ runId, hidden = false }) {
   useEffect(() => { if (view === 'full') refreshSessions() }, [view])
 
   const feedOpen = view === 'side' || view === 'full'
-  useEffect(() => { if (feedOpen && feedRef.current) requestAnimationFrame(() => { feedRef.current.scrollTop = feedRef.current.scrollHeight }) }, [msgs, view, busy])
+  // Autoscroll ONLY when the user is already near the bottom — don't yank them back down while they've
+  // scrolled up to read earlier turns during a streaming reply.
+  const onFeedScroll = (e) => { const f = e.currentTarget; atBottomRef.current = f.scrollHeight - f.scrollTop - f.clientHeight < 80 }
+  useEffect(() => { if (feedOpen && feedRef.current && atBottomRef.current) requestAnimationFrame(() => { feedRef.current.scrollTop = feedRef.current.scrollHeight }) }, [msgs, view, busy])
 
-  const flash = (m) => { setToast(m); setTimeout(() => mountedRef.current && setToast(null), 2600) }
+  const flash = (m) => { setToast(m); if (flashTimerRef.current) clearTimeout(flashTimerRef.current); flashTimerRef.current = setTimeout(() => mountedRef.current && setToast(null), 2600) }
   const patchLast = (patch) => setMsgs(m => {
     const c = [...m]; const i = c.length - 1
     if (i >= 0) c[i] = { ...c[i], ...(typeof patch === 'function' ? patch(c[i]) : patch) }
@@ -341,6 +346,7 @@ export default function AssistantBar({ runId, hidden = false }) {
     // ABOVE the user's bubble so the injected context is visible, not hidden inside the instruction.
     const ctxInfo = { run: context?.run || null, refs: context?.refs || [], files: atts.map(a => a.name) }
     const hasCtx = ctxInfo.run || ctxInfo.refs.length || ctxInfo.files.length
+    atBottomRef.current = true          // sending my own message: always scroll it into view
     setMsgs(m => [...m, { role: 'user', content: userText || instruction, context: hasCtx ? ctxInfo : null },
                         { role: 'assistant', content: '', streaming: true }])
     const priorLen = msgs.length + 2
@@ -518,7 +524,7 @@ export default function AssistantBar({ runId, hidden = false }) {
     {fileChips}
     <div className="asst-inrow">
       {attachBtn('asst-attach')}
-      <textarea className="text" ref={inputRef} value={input} disabled={busy && false}
+      <textarea className="text" ref={inputRef} value={input}
         onChange={e => setInput(e.target.value)} onKeyDown={onKey} placeholder={placeholder} />
       {busy
         ? <button className="btn sm" title="stop" onClick={stop}>■</button>
@@ -580,7 +586,7 @@ export default function AssistantBar({ runId, hidden = false }) {
         <button className="btn sm ghost" title="expand to the full view" onClick={openFull}>⤢ full</button>
         <button className="btn sm ghost" title="collapse to the bar" onClick={collapseToBar}>▾ bar</button>
       </div>
-      <div className="asst-drawer-feed" ref={feedRef}>{renderThread()}</div>
+      <div className="asst-drawer-feed" ref={feedRef} onScroll={onFeedScroll}>{renderThread()}</div>
       {composer('Message the assistant…  (/ for commands · Enter to send)')}
       {toast && <div className="cmdbar-toast side">{toast}</div>}
     </div>}
@@ -609,7 +615,7 @@ export default function AssistantBar({ runId, hidden = false }) {
           <button className="btn sm ghost" title="dock to the right" onClick={openSide}>▧ side</button>
           <button className="btn sm ghost" title="fold to the bar" onClick={collapseToBar}>▾ bar</button>
         </div>
-        <div className="asst-feed" ref={feedRef}>{renderThread()}</div>
+        <div className="asst-feed" ref={feedRef} onScroll={onFeedScroll}>{renderThread()}</div>
         {composer('Message the assistant…  (/ for commands · Enter to send)')}
         {toast && <div className="cmdbar-toast side">{toast}</div>}
       </div>

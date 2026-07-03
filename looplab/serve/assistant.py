@@ -141,7 +141,9 @@ class SessionStore:
                             parent=sid, mode=src["meta"].get("mode", DEFAULT_MODE), now=now)
         for turn in src["messages"]:
             self.append(child["id"], turn)
-        return child
+        # `append` stamped `updated` with each copied turn's OLD ts; restore it to the fork's creation
+        # time so a fresh fork sorts to the TOP of the list (not buried by its ancestors' timestamps).
+        return self.update_meta(child["id"], updated=child["updated"]) or child
 
 
 # --------------------------------------------------------------------------- system prompt + toolset
