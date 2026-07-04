@@ -2012,7 +2012,10 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
             raise HTTPException(404, "no such session")
         if sess is None or not sess["meta"].get("shared"):
             raise HTTPException(404, "not shared")
-        return sess
+        # Strip `raw` (the full model-facing instruction: attached-file contents, UI-context preamble)
+        # from the read-only share — a shared link shows the clean bubbles, not the injected context.
+        return {"meta": sess["meta"],
+                "messages": [{k: v for k, v in m.items() if k != "raw"} for m in sess["messages"]]}
 
     @app.post("/api/assistant/sessions/{sid}/fork")
     def assistant_fork(sid: str):
@@ -2043,7 +2046,14 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
             raise HTTPException(400, "empty message")
         history = list(sess["messages"])          # BEFORE appending the new user turn
         eff_mode = mode or sess["meta"].get("mode") or "plan"
-        _asst.append(sid, {"role": "user", "content": display or instruction, "mode": eff_mode})
+        turn = {"role": "user", "content": display or instruction, "mode": eff_mode}
+        if display and display != instruction:
+            # Keep the FULL model-facing instruction (attached-file contents, UI-context preamble)
+            # alongside the clean bubble: later turns rebuild the model's history from this transcript,
+            # and an attachment exists nowhere else (it was read in the browser). The UI renders
+            # `content` only, so the bubble stays clean.
+            turn["raw"] = instruction
+        _asst.append(sid, turn)
         _asst.update_meta(sid, mode=eff_mode)   # remember the chosen mode so a reload/switch keeps it
         s = _llm_settings()
         try:
@@ -2054,20 +2064,24 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
             return {"ok": False, "error": str(e), "reply": reply, "mode": eff_mode}
 
         approver = _make_approver(sid)
+        # Identity-guarded registry entry: touch/pop it ONLY while this turn still owns it, so a
+        # concurrent turn for the same session (another tab / the stream endpoint) can't have its
+        # live-progress entry clobbered or popped by this one.
+        prog = {"steps": [], "todos": [], "updated": time.time()}
         with _perm_lock:
-            _asst_progress[sid] = {"steps": [], "updated": time.time()}
+            _asst_progress[sid] = prog
 
         def _on_step(ev: dict) -> None:
             with _perm_lock:
-                p = _asst_progress.setdefault(sid, {"steps": [], "todos": [], "updated": 0})
-                p["steps"] = (p["steps"] + [ev.get("label") or ev.get("tool") or "…"])[-40:]
-                p["updated"] = time.time()
+                if _asst_progress.get(sid) is prog:
+                    prog["steps"] = (prog["steps"] + [ev.get("label") or ev.get("tool") or "…"])[-40:]
+                    prog["updated"] = time.time()
 
         def _on_todos(items: list) -> None:
             with _perm_lock:
-                p = _asst_progress.setdefault(sid, {"steps": [], "todos": [], "updated": 0})
-                p["todos"] = items
-                p["updated"] = time.time()
+                if _asst_progress.get(sid) is prog:
+                    prog["todos"] = items
+                    prog["updated"] = time.time()
 
         def _compute() -> dict:
             try:
@@ -2094,8 +2108,9 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
                         pass
                 return res
             finally:
-                with _perm_lock:            # always drop the live-progress entry (no leak on error)
-                    _asst_progress.pop(sid, None)
+                with _perm_lock:            # drop OUR live-progress entry (no leak on error) — but
+                    if _asst_progress.get(sid) is prog:   # never a newer turn's entry
+                        _asst_progress.pop(sid, None)
 
         return await _run_as_job(_compute)
 
@@ -2123,7 +2138,10 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
         history = list(sess["messages"])
         from looplab.serve.assistant import normalize_mode as _norm_mode
         eff_mode = _norm_mode(mode or sess["meta"].get("mode") or "plan")   # never persist a junk mode
-        _asst.append(sid, {"role": "user", "content": display or instruction, "mode": eff_mode})
+        turn = {"role": "user", "content": display or instruction, "mode": eff_mode}
+        if display and display != instruction:
+            turn["raw"] = instruction   # full model-facing text — see the non-stream endpoint's note
+        _asst.append(sid, turn)
         _asst.update_meta(sid, mode=eff_mode)   # remember the chosen mode so a reload/switch keeps it
         s = _llm_settings()
         q: "_queue.Queue" = _queue.Queue()
@@ -2147,14 +2165,14 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
                 # cancelled worker's late tool steps must not re-create _asst_progress after a newer
                 # turn (or the finally) popped it, else `progress.active` stays true forever and every
                 # future open of the session reattaches to a phantom "thinking" turn.
-                if _asst_cancel.get(sid) is cancel_ev:
+                if _asst_cancel.get(sid) is cancel_ev and not cancel_ev.is_set():
                     p = _asst_progress.setdefault(sid, {"steps": [], "todos": [], "updated": 0})
                     p["steps"] = (p["steps"] + [ev.get("label") or ev.get("tool") or "…"])[-40:]
             q.put(("step", ev.get("label") or ev.get("tool") or "…"))
 
         def _on_todos(items):
             with _perm_lock:   # mirror todos into the progress channel so a reattach restores them
-                if _asst_cancel.get(sid) is cancel_ev:
+                if _asst_cancel.get(sid) is cancel_ev and not cancel_ev.is_set():
                     p = _asst_progress.setdefault(sid, {"steps": [], "todos": [], "updated": 0})
                     p["todos"] = items
             q.put(("todos", items))

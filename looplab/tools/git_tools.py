@@ -42,14 +42,18 @@ class GitTools:
                 return self._ro(["git", "status", "--short"], "git status")
             if name == "git_diff":
                 path = args.get("path")
-                return self._ro(["git", "diff"] + ([path] if path else []), "git diff")
+                # `--` so a model-supplied path starting with '-' can't become a git option (e.g.
+                # `--output=<file>` would make this "read-only" verb write a file).
+                return self._ro(["git", "diff"] + (["--", str(path)] if path else []), "git diff")
             if name == "git_log":
                 n = int(args.get("n") or 10)
                 return self._ro(["git", "log", "--oneline", "-n", str(n)], "git log")
             if name == "git_branch":
-                nm = args.get("name")
+                nm = str(args.get("name") or "").strip()
                 if nm:
-                    return self._mut(["git", "branch", str(nm)], f"git branch {nm}")
+                    if nm.startswith("-"):   # a leading dash would be parsed as a git OPTION, not a name
+                        return f"(refused: {nm!r} is not a valid branch name)"
+                    return self._mut(["git", "branch", nm], f"git branch {nm}")
                 return self._ro(["git", "branch", "--list"], "git branch")
             if name == "git_add":
                 paths = [str(p) for p in (args.get("paths") or []) if p]
@@ -73,7 +77,11 @@ class GitTools:
                 ref = str(args.get("ref") or "").strip()
                 if not ref:
                     return "(git_checkout needs a ref)"
-                # `--` after the ref so a ref like '-f' can't be parsed as a git option.
+                # A leading dash WOULD be parsed as a git option even with the trailing `--` (which
+                # only disambiguates ref-vs-path): `git checkout -f --` silently discards all
+                # uncommitted changes. Refuse dash-refs outright; no real ref starts with '-'.
+                if ref.startswith("-"):
+                    return f"(refused: {ref!r} is not a valid ref)"
                 return self._mut(["git", "checkout", ref, "--"], f"git checkout {ref}")
             return f"(unknown tool: {name})"
         except Exception as e:  # noqa: BLE001 - never crash the loop

@@ -251,7 +251,8 @@ def build_tools(run_root, alive_fn: Optional[Callable] = None, mode: str = DEFAU
         from looplab.tools.write_tools import WriteTools
         from looplab.tools.shell_tools import ShellTools
         from looplab.tools.git_tools import GitTools
-        sh = ShellTools(roots, mode=mode, trust_mode=trust_mode, approver=approver)
+        sh = ShellTools(roots, mode=mode, trust_mode=trust_mode, approver=approver,
+                        default_cwd=REPO_ROOT)   # the spec promises "default: repo root", not $HOME
         backup_dir = Path(run_root) / "assistant" / "backups"
         providers += [WriteTools(roots, mode=mode, approver=approver, repo_root=REPO_ROOT,
                                  backup_dir=backup_dir),
@@ -299,8 +300,13 @@ def run_turn(client, run_root, messages: list, instruction: str, mode: str = DEF
         mode, knowledge_dir=(getattr(settings, "knowledge_dir", None) if settings else None))}]
     for m in messages:
         role = m.get("role")
-        if role in ("user", "assistant") and m.get("content"):
-            convo.append({"role": role, "content": m["content"]})
+        # A user turn may carry `raw` — the full model-facing instruction (attached-file contents,
+        # UI-context preamble) persisted alongside the clean display `content`. Prefer it, or the
+        # model loses the attachments on every turn after the one they were sent with (the browser
+        # is the only other place that content exists).
+        body = (m.get("raw") or m.get("content")) if role == "user" else m.get("content")
+        if role in ("user", "assistant") and body:
+            convo.append({"role": role, "content": body})
     convo.append({"role": "user", "content": grounded})
 
     steps: list[dict] = []
@@ -351,15 +357,18 @@ def run_turn(client, run_root, messages: list, instruction: str, mode: str = DEF
     # Real token streaming of the FINAL answer: after the tool loop has acted, generate the
     # user-facing answer with a streaming call over the accumulated trace, pushing tokens to the sink.
     # (One extra call; reuses the context the loop built. The loop's emit reply is the fallback.)
-    # GUARD: drive_tool_loop REBINDS its `messages` to a NEW list when auto_summary compacts a long
-    # trace (context_budget), so `convo` can be orphaned — missing the tool results. If tools ran but
-    # `convo` holds no tool-result messages, it was compacted away; stream over a stale trace would
-    # make the model re-answer BLIND, so we skip streaming and keep the loop's (correct) reply.
+    # GUARD (belt): drive_tool_loop compacts a long trace IN PLACE (slice-assign), so `convo` stays
+    # current through auto_summary. If tools nonetheless ran and `convo` holds no tool-result
+    # messages (compaction summarized every one away), streaming over it would make the model
+    # re-answer BLIND — skip streaming and keep the loop's (correct) reply.
     trace_ok = (not steps) or any(m.get("role") == "tool" for m in convo)
     # If the user cancelled, DON'T fire a fresh (un-cancellable) streaming completion for the final
     # answer — that call could hang on the shared LLM and keep the worker (and its SSE stream) alive
     # long after Stop. Keep the loop's already-computed reply instead.
-    _cancelled = bool(cancel_check and cancel_check())
+    try:
+        _cancelled = bool(cancel_check and cancel_check())
+    except Exception:  # noqa: BLE001 - a broken cancel probe must not discard a computed reply
+        _cancelled = False
     if reply_sink is not None and trace_ok and not _cancelled:
         try:
             # Strip UNANSWERED tool calls anywhere in the trace, not just a trailing message:

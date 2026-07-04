@@ -146,22 +146,28 @@ class KnowledgeWriteTools:
             return f"(unknown tool: {name})"
         if not self.dir:
             return "error: no knowledge base configured (set knowledge_dir) — cannot save the note."
-        title = str((args or {}).get("title") or "note").strip()
-        note = str((args or {}).get("note") or "").strip()
-        if not note:
-            return "error: `note` is empty — nothing to remember."
-        tags = [str(t) for t in ((args or {}).get("tags") or []) if str(t).strip()]
-        self.dir.mkdir(parents=True, exist_ok=True)
-        slug = re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")[:48] or "note"
-        # content-hash id: re-saving the same note overwrites (idempotent) instead of piling duplicates.
-        sid = hashlib.sha1((title + "\n" + note).encode("utf-8")).hexdigest()[:8]
-        path = self.dir / f"{slug}-{sid}.md"
-        body = f"# {title}\n\n{note}\n"
-        if tags:
-            body += "\n_tags: " + ", ".join(tags) + "_\n"
-        path.write_text(body, encoding="utf-8")
-        return (f"saved to the knowledge base as {path.name} — future runs will find it via kb_search "
-                f"(KB: {self.dir}).")
+        try:
+            title = str((args or {}).get("title") or "note").strip()
+            note = str((args or {}).get("note") or "").strip()
+            if not note:
+                return "error: `note` is empty — nothing to remember."
+            raw_tags = (args or {}).get("tags") or []
+            if not isinstance(raw_tags, (list, tuple)):   # a junk model may pass a scalar
+                raw_tags = [raw_tags]
+            tags = [str(t) for t in raw_tags if str(t).strip()]
+            self.dir.mkdir(parents=True, exist_ok=True)
+            slug = re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")[:48] or "note"
+            # content-hash id: re-saving the same note overwrites (idempotent) instead of piling duplicates.
+            sid = hashlib.sha1((title + "\n" + note).encode("utf-8")).hexdigest()[:8]
+            path = self.dir / f"{slug}-{sid}.md"
+            body = f"# {title}\n\n{note}\n"
+            if tags:
+                body += "\n_tags: " + ", ".join(tags) + "_\n"
+            path.write_text(body, encoding="utf-8")
+            return (f"saved to the knowledge base as {path.name} — future runs will find it via "
+                    f"kb_search (KB: {self.dir}).")
+        except Exception as e:  # noqa: BLE001 - a full/read-only KB disk must not kill the whole turn
+            return f"(error saving to the knowledge base: {e})"
 
 
 class KnowledgeTools:

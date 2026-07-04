@@ -373,7 +373,9 @@ export default function AssistantBar({ runId, hidden = false }) {
     setBusy(true); runningRef.current = true
     const ctrl = new AbortController(); abortRef.current = ctrl
     let polling = true
-    ;(async () => { while (polling && mountedRef.current) { try { const p = await assistantPermissions(id); if (mountedRef.current) setPending(p.pending || []) } catch { /* transient */ } await sleep(800) } })()
+    // sid-guarded like every other callback: after a mid-turn session switch, a late poll result
+    // must not surface the DEPARTED session's confirm-cards over the one the user switched to.
+    ;(async () => { while (polling && mountedRef.current && sidRef.current === id) { try { const p = await assistantPermissions(id); if (mountedRef.current && sidRef.current === id) setPending(p.pending || []) } catch { /* transient */ } await sleep(800) } })()
     const safeSid = (fn) => (...a) => { if (mountedRef.current && sidRef.current === id) fn(...a) }
     let acc = ''
     const fullInstruction = instruction + filePreamble(atts)

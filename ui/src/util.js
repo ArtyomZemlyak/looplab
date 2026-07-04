@@ -450,27 +450,6 @@ export const resumeRun = (rid) => post(`/api/runs/${encodeURIComponent(rid)}/res
 // fresh run on the same run-id. Only offered on a FINISHED run (no live engine), so it's race-free.
 export const resetRun = (rid) => post(`/api/runs/${encodeURIComponent(rid)}/reset`, {})
 
-// ---- persisted chat transcript (saved WITH the run, so it survives remount/reload) ----
-// getChatLog → the stored feed turns in order; appendChatTurn → durably append ONE turn. Fire-and-
-// forget on the client (the in-memory feed stays the live truth; persistence is a soft-fail backup).
-export const getChatLog = (rid) => get(`/api/runs/${encodeURIComponent(rid)}/chat-log`)
-export const appendChatTurn = (rid, turn) => post(`/api/runs/${encodeURIComponent(rid)}/chat-log`, turn)
-// Compact a stretch of older chat turns into ONE recap (the boss's history is re-sent in full each
-// turn, so this caps the context growth). Returns {ok, summary, tokens}; the UI appends the recap as
-// a durable `summary` turn and sends it to the boss in place of the folded turns. Soft-fails offline.
-export const chatCompact = (rid, messages) => post(`/api/runs/${encodeURIComponent(rid)}/chat-compact`, { messages })
-
-// ---- experiment chat / suggest / LLM health ----
-export const chat = (rid, messages, node_id = null) => post(`/api/runs/${rid}/chat`, { messages, node_id })
-export const suggestIdea = (rid, { node_id = null, messages = [], instruction = '' }) =>
-  post(`/api/runs/${rid}/suggest`, { node_id, messages, instruction })
-// Workstream C: the action-router — turn a free-text instruction into EITHER an advisory reply or a
-// concrete control action {type, data, label, rationale} the chat proposes for confirmation. Runs as
-// a background job, so we jobAwait the response (a slow boss tool-loop can't 504 behind a proxy; a
-// fast plan returns inline). Resolves to the same {ok, actions?, reply?, trace?, tokens?} the
-// downstream confirm-card flow already handles — never a job_id.
-export const command = async (rid, { messages = [], node_id = null, instruction = '' }) =>
-  jobAwait(await post(`/api/runs/${rid}/command`, { messages, node_id, instruction }))
 export const llmHealth = () => get('/api/llm/health')
 
 // G1 server auth: when the server runs with LOOPLAB_UI_TOKEN it injects the token into the served

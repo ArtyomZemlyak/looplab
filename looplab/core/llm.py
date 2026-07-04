@@ -581,8 +581,18 @@ class OpenAICompatibleClient:
         with tracing.generation(op="complete_text_stream", model=self.model, messages=messages,
                                 model_parameters=self._model_params()) as gen:
             try:
+                # Idle timeout by PROGRESS (same stall class `_read_stream` guards against): SSE
+                # keepalive/heartbeat lines reset the socket read timeout on every line, so a STALLED
+                # generation that keeps heartbeating would spin here forever — and the caller's
+                # cancel check only runs per YIELDED piece, so Stop would never be observed. Track
+                # wall-clock since the last real token and bail once it exceeds the client timeout;
+                # the except below then falls back / returns what we have.
+                _last_progress = time.monotonic()
                 with urllib.request.urlopen(req, timeout=self.timeout) as resp:
                     for raw in resp:
+                        if time.monotonic() - _last_progress > self.timeout:
+                            raise TimeoutError(
+                                f"LLM stream stalled — no new tokens for {self.timeout:.0f}s")
                         line = raw.decode("utf-8", "replace").strip()
                         if not line or not line.startswith("data:"):
                             continue
@@ -595,10 +605,12 @@ class OpenAICompatibleClient:
                             continue
                         if obj.get("usage"):                       # final usage chunk (include_usage)
                             usage = obj["usage"]
+                            _last_progress = time.monotonic()
                         delta = ((obj.get("choices") or [{}])[0] or {}).get("delta") or {}
                         piece = delta.get("content") or ""
                         if piece:
                             pieces.append(piece)
+                            _last_progress = time.monotonic()
                             yield piece
             except (urllib.error.URLError, TimeoutError, OSError, http.client.IncompleteRead):
                 if not pieces:                 # never streamed -> fall back to a single blocking call

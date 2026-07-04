@@ -42,8 +42,13 @@ def _tail(s: str, n: int = 4000) -> str:
 class ShellTools:
     def __init__(self, roots, mode: str = "plan", trust_mode: str = "trusted_local",
                  approver: Optional[Callable[[dict], str]] = None, timeout: float = 120.0,
-                 max_output: int = _MAX_OUTPUT, image: str = "python:3.12-slim"):
+                 max_output: int = _MAX_OUTPUT, image: str = "python:3.12-slim",
+                 default_cwd=None):
         self._roots = _pathsafe.resolve_roots(roots)
+        # Where a command runs when the model gives no cwd. The spec promises "default: repo root" —
+        # without an explicit value we can only fall back to the first root (which in the assistant's
+        # toolset is $HOME: run_tests there would collect every project under the home dir).
+        self._default_cwd = Path(default_cwd).resolve() if default_cwd else None
         self.mode = mode
         self.trust_mode = trust_mode
         self.approver = approver or default_approver
@@ -107,7 +112,7 @@ class ShellTools:
 
     def _cwd(self, cwd: Optional[str]) -> Optional[Path]:
         if not cwd:
-            return self._roots[0] if self._roots else Path.cwd()
+            return self._default_cwd or (self._roots[0] if self._roots else Path.cwd())
         return _pathsafe.resolve_within(self._roots, cwd)
 
     def _run(self, command, cwd, timeout, background=False) -> str:
