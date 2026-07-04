@@ -51,6 +51,8 @@ PROFILES: dict[str, dict] = {
         "budget_aware": True,
         "failure_reflection": True,
         "reflection_priors": True,     # no-op unless memory_dir is set (cross-run priors)
+        "lessons_every": 4,            # M6: mid-run comparative distillation into the shared store
+        "lessons_refresh_every": 4,    # M6: mid-run re-read (live pickup of concurrent runs' lessons)
     },
 }
 
@@ -236,6 +238,20 @@ class Settings(BaseSettings):
     # start, inject exact-task notes + fingerprint-matched lessons from SIMILAR tasks into the proposal
     # prompt. ON by default — but a NO-OP until `memory_dir` is set (that's where cross-run memory lives).
     reflection_priors: bool = True
+    # M6 comparative lessons (MARS "comparative reflective memory", doc 13 §7 item 2): distill
+    # credit-assigned lessons from PAIRS of solutions — which SPECIFIC change made a child beat
+    # (or regress from) its parent, and what fixed a failure — on top of the one-shot run-end
+    # reflection. At most one extra LLM call per distillation (all pairs batched); offline a
+    # deterministic param-diff credit stands in. ON by default; a NO-OP unless reflection_priors
+    # is on AND memory_dir is set (same gate as the rest of cross-run memory).
+    comparative_lessons: bool = True
+    # M6 mid-run cadences (doc 13 §7 item 5 — the AgentRxiv live-share pattern): every N created
+    # nodes, WRITE comparative lessons to the shared cross-run store during the run (lessons_every)
+    # and RE-READ the store so lessons distilled by CONCURRENT runs reach this run's proposals
+    # (lessons_refresh_every; pure file re-read, no LLM call). 0 = off — run-end write / run-start
+    # read only, the pre-M6 behavior.
+    lessons_every: int = Field(default=0, ge=0)
+    lessons_refresh_every: int = Field(default=0, ge=0)
     # B3 output redaction: mask credentials (known key shapes + high-entropy tokens) in the
     # stdout/stderr tail before it is persisted to the event log / spans / UI — a leaked secret in a
     # print()/traceback must not land in the durable log. Off by default; recommend on for untrusted.

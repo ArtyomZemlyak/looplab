@@ -235,3 +235,39 @@ on held-out grading (`mlebench_real` pattern), not `dataset`. Item 6 requires re
 product-design non-goal first. All seven map onto pre-existing roadmap/backlog IDs (A5, I5, E4,
 F2, G7, D8) — nothing here contradicts the shipped roadmap; MARS/AgentRxiv mainly add external
 validation and concrete mechanisms for items already parked.
+
+---
+
+## 8. Implemented: items 2 + 5 as one mechanism (M6, 2026-07-04)
+
+Items 2 and 5 shipped together as **M6 · comparative lessons, live-shared** — the synergy is that
+the credit-assigned lessons (item 2) are exactly the content worth exchanging between concurrent
+runs (item 5), so one cadence loop serves both:
+
+- **Item 2 (MARS comparative reflective memory).** `engine/memory.py` gains pure helpers:
+  `select_comparison_pairs` (debug-first, then biggest |Δ| parent→child pairs — regressions are as
+  informative as wins; stable order for replay), `param_credit_statement` (deterministic
+  param-diff credit, the offline fallback), `code_diff`, `parse_credit_lessons`.
+  `Engine._comparative_lessons` distills one lesson per pair — a single batched LLM call with the
+  code diff as evidence, `P<n> [GOOD|BAD]` verdict lines — and run-end reflection
+  (`_write_reflection_note`) now appends these `source: "comparative"` rows (with `pair` +
+  `evidence` node ids and signed `delta`) alongside the legacy one-shot lessons.
+- **Item 5 (AgentRxiv live share).** Two new cadences close the "end-of-run write / start-of-run
+  read" gap: `lessons_every` distills + appends comparative lessons to the shared
+  `~/.looplab/memory/lessons.jsonl` **mid-run** (write side), and `lessons_refresh_every` re-reads
+  the store mid-run and rebuilds the proposal prior (read side, no LLM call) — so lessons a
+  concurrent run distilled after this run started reach this run's next proposals. This run's own
+  `run_id` is excluded on read (no echo). Both are replay-safe audit sidecars: `lessons_distilled`
+  events carry the at_node gate + the spent pair ids (a pair is never re-distilled, not even by
+  run-end reflection), `lessons_refreshed` carries the refresh gate; recorded LLM output is never
+  re-invoked on replay.
+- **Wiring.** Engine knobs `comparative_lessons` / `lessons_every` / `lessons_refresh_every`
+  (defaults off at engine level); Settings defaults: `comparative_lessons=True` (no-op without
+  `memory_dir`, like the rest of reflection memory), mid-run cadences 0 (opt-in), and the
+  `thorough` profile sets both cadences to 4. `RunState.lessons_distilled/_refreshed` + fold cases
+  added. Full offline test coverage in `tests/test_comparative_lessons.py` (pair selection,
+  deterministic credit, LLM parsing/fallback, run-end rows, mid-run events + pair ledger + replay
+  safety, live pickup of a concurrent run's lessons, own-run echo exclusion, config wiring).
+
+Remaining from item 5 (not in scope here): a fleet launcher and cross-task/cross-run-root sharing
+(the `SiblingRunTools` scope limits), parked as ROADMAP F2.

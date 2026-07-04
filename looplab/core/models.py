@@ -339,6 +339,13 @@ class RunState(BaseModel):
     # The latest `report_generated` event's content, regenerated on a cadence + on manual refresh. The
     # UI renders the deterministic analysis from the node set and layers this narrative on top.
     report: Optional[dict] = None
+    # M6 comparative-lesson sidecars (audit-only — NEVER read by best-selection).
+    # `lessons_distilled` records each mid-run distillation (at_node + the (child, parent) node-id
+    # pairs spent + the statements) — it is BOTH the replay-safe cadence gate and the ledger that
+    # stops a later firing (or run-end reflection) from re-distilling the same pair.
+    # `lessons_refreshed` records each mid-run re-read of the shared cross-run store (cadence gate).
+    lessons_distilled: list[dict] = Field(default_factory=list)
+    lessons_refreshed: list[dict] = Field(default_factory=list)
 
     # --- read helpers (no mutation) ---
     def best(self) -> Optional[Node]:
