@@ -58,18 +58,18 @@ def test_verified_report_empty_when_nothing():
 # --------------------------------------------------------------------------- #
 
 def test_rank_returns_sanitized_order():
-    order, conf = rank(_RankClient([1, 0], 0.9), "report", [_A, _B])
-    assert order == [1, 0] and conf == 0.9
+    order, conf, reason = rank(_RankClient([1, 0], 0.9), "report", [_A, _B])
+    assert order == [1, 0] and conf == 0.9 and reason == "test"
 
 
 def test_rank_completes_partial_order():
     # model ranks only candidate 2; the missing indices are appended in input order.
-    order, _ = rank(_RankClient([2]), "r", ["a", "b", "c"])
+    order, _, _ = rank(_RankClient([2]), "r", ["a", "b", "c"])
     assert order == [2, 0, 1]
 
 
 def test_rank_drops_out_of_range_and_dupes():
-    order, _ = rank(_RankClient([5, 1, 1, 0]), "r", [_A, _B])
+    order, _, _ = rank(_RankClient([5, 1, 1, 0]), "r", [_A, _B])
     assert order == [1, 0]
 
 
@@ -218,7 +218,9 @@ def test_prioritize_board_orders_open_hypotheses():
     panel._prioritize_board(st, None)
     ids = list(st.hypotheses)                       # insertion order
     assert base._hyp_order == [ids[2], ids[0], ids[1]]
-    assert panel.last_hyp_priority["n"] == 3
+    lp = panel.last_hyp_priority
+    assert lp["n"] == 3 and lp["reason"] == "test" and lp["order"] == base._hyp_order
+    assert [c["id"] for c in lp["ranked"]] == base._hyp_order   # id->statement pairs for the UI
 
 
 def test_prioritize_board_noop_below_two():

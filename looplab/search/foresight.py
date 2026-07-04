@@ -84,11 +84,12 @@ def verified_report(*, brief: str = "", data_profile: Optional[dict] = None, mem
 
 
 def rank(client, report: str, items: list[str], *, goal: str = "", direction: str = "min",
-         parser: str = "tool_call", prompts=None) -> Optional[tuple[list[int], float]]:
+         parser: str = "tool_call", prompts=None) -> Optional[tuple[list[int], float, str]]:
     """Predict a best->worst ordering over `items` (already-rendered candidate strings) with ONE LLM
-    call. Returns `(order, confidence)` where `order` is DISTINCT valid indices best-first (a partial
-    order is tolerated — any index the model omitted is appended in input order), or None on any
-    failure / abstention. Never raises — the predictor is advisory and fails open."""
+    call. Returns `(order, confidence, reason)` where `order` is DISTINCT valid indices best-first (a
+    partial order is tolerated — any index the model omitted is appended in input order) and `reason`
+    is the model's one-line justification (the analysis trace, "" if none), or None on any failure /
+    abstention. Never raises — the predictor is advisory and fails open."""
     if client is None or len(items) < 2:
         return None
     items = items[:_MAX_ITEMS]
@@ -114,7 +115,7 @@ def rank(client, report: str, items: list[str], *, goal: str = "", direction: st
         return None
     order.extend(i for i in range(len(items)) if i not in seen)   # append any indices the model dropped
     conf = out.confidence if isinstance(out.confidence, (int, float)) else 0.0
-    return order, max(0.0, min(1.0, float(conf)))
+    return order, max(0.0, min(1.0, float(conf))), (out.reason or "").strip()[:600]
 
 
 def rank_solutions(client, brief: str, codes: list[str], *, goal: str = "", direction: str = "min",
@@ -216,10 +217,15 @@ class ForesightPanelResearcher:
         if r is None:
             setattr(self.base, "_hyp_order", None)
             return
-        order, conf = r
+        order, conf, reason = r
         ids = [hyps[i].id for i in order]
         setattr(self.base, "_hyp_order", ids)
-        self.last_hyp_priority = {"order": ids, "confidence": conf, "n": len(hyps)}
+        # Telemetry the ENGINE reads after propose() to emit the `hypothesis_ranked` audit event
+        # (engine = sole event writer): the predicted board order + confidence + the model's analysis
+        # trace (`reason`). `ranked` pairs id->statement so the event/UI needn't re-resolve ids.
+        self.last_hyp_priority = {
+            "order": ids, "confidence": conf, "reason": reason, "n": len(hyps),
+            "ranked": [{"id": hyps[i].id, "statement": hyps[i].statement} for i in order]}
 
     def propose(self, state, parent):
         if self.client is None:
@@ -237,9 +243,9 @@ class ForesightPanelResearcher:
         if r is None:
             self.last_foresight = None
             return ideas[0]
-        order, conf = r
+        order, conf, reason = r
         best = ideas[order[0]]
-        self.last_foresight = {"order": order, "confidence": conf, "k": self.k}
+        self.last_foresight = {"order": order, "confidence": conf, "reason": reason, "k": self.k}
         best.rationale = (best.rationale
                           + f" [foresight: predicted best of {self.k} pre-execution]").strip()
         return best
