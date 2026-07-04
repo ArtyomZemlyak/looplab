@@ -235,52 +235,48 @@ adapters+runtime+trust+tools / repo-DX) landed the low-risk subset on branch
 `core/errors.py` cycle break, `tools/_base.py` ToolProvider contract, `_shared_providers`,
 hint-attr registry, policy constants/registry, orchestrator extractions (triage/lessons/finalize),
 serve protocol/prompt hoists, DeepResearcher→`drive_tool_loop` merge, root `CLAUDE.md`, tests CI.
-The remaining (deliberately deferred, higher-churn) items:
 
-- ⬜ **P1/M — `Engine.__init__` 79-param collapse.** Group pure-config knobs into a frozen
-  `EngineOptions` built from `Settings`; keep old kwargs during transition. Kills the 4-edit
-  ritual (Settings → cli passthrough → `__init__` param → `self._x`) and the ~90-line mirror in
-  `cli.py::_engine`. ~105 test call sites construct `Engine(...)` — keep kwargs accepted.
-- ⬜ **P1/L — `serve/server.py` router split.** `make_app` is still a ~2.5k-line closure; the
-  audit's plan (AppState + `routers/` with `build_router(st)`, SPA fallback registered last,
-  assistant perm-registry moved as one unit) is in the review session notes. Also: unify the
-  genesis job registry onto the generic `_jobs` one; de-duplicate the two assistant turn
-  endpoints (`_begin_turn`/`_finish_turn`).
-- ⬜ **P2/M — orchestrator step 2: holdout + workspace + confirm/ablate mixins.**
-  `HoldoutGrader`, `WorkspaceSeeder`, `ConfirmMixin`/`AblationMixin` per the audit plan; also
-  `_emit_node_created` (payload currently built 4 ways, two omit `deleted`) and decomposing
-  `run()` (~420 lines) into guarded phase methods.
-- ⬜ **P2/M — llm.py shared SSE generator.** `_read_stream` and `complete_text_stream` duplicate
-  ~107 lines of SSE consumption; extract `_sse_lines(resp, idle_limit)` (lean on
-  test_openai_client.py + test_assistant_streaming.py).
-- ⬜ **P2/S — trust dedup.** `confirm_top_k` (tests-only) re-implements `_confirm_phase`'s
-  selection — extract the pure selection step and call it from the engine; mark `cv.py`'s
-  unwired splitters as library code.
-- ⬜ **P2/M — SurfacePolicy.** The surface/protected write-gate is re-implemented in
-  `tools/patch.py`, `RepoWriteTools`, `WriteTools`, `RepoTask._eval_protected`; one value object
-  with reason codes (each site keeps its wording).
-- ⬜ **P2/M — `repo_task.py` split** (specs+task vs developer/tools halves, re-exports kept) +
-  hoist its inline mega-prompts to constants; extract the tolerant search/replace matcher to
-  `tools/edit_match.py` for reuse by `WriteTools`.
-- ⬜ **P2/S — RunStateCache.** `run_tools.SiblingRunTools` / `runs_tools.RunsTools` duplicate the
-  fold-cache + traversal guard verbatim.
-- ⬜ **P3/M — test-suite reorganization.** 21 accretion-named files (`test_review_fixes*`,
-  `test_*_fixes`, phase/round names) → per-subject homes; codemod the 91 legacy flat-import test
-  files to canonical paths (keep the `_LAYOUT` shim for external users); register `live` /
-  `docker` pytest markers.
-- ⬜ **P3/S — CLI polish.** Extract the duplicated 10-line error funnel in `run`/`resume`; freeze
-  the 24-flag `run()` surface (new knobs go through `--set`). Move `ui_preview.py` /
-  `ui_with_env.py` dev shims out of the repo root.
-- ⬜ **P3/S — wrapper-forwarding mixin** for Developer/Researcher wrappers
-  (`ValidatingDeveloper`, `BestOfNDeveloper`, `UnifiedAgent`, `SurrogateResearcher`) + document
-  the developer-attribute contract the engine reads (`last_files`, `inner`, `audit_extra`, …).
-- ⬜ **P3/S — prompt-store routing.** Wrap the ~7 hardcoded system prompts (strategist ×2,
-  unified pilot/triage, deep-research, best-of-N judge, repair prefix) in
-  `render(prompts, key, default)` so every prompt is greppable/overridable; move the two
-  researcher instruction-prose duplicates (agent.py vs roles.py) onto shared fragments with a
-  rendered-prompt snapshot test.
-- ⬜ **P3/S — known one-off flags from the audit:** `ToolUsingResearcher` doesn't read
-  `_sweep_hint` (flagged in roles.py — decide: bug or intent); `command_eval` handles Docker
-  timeout rc 124 but not 137 while `sandbox` handles both; `parse._ORDER`'s `"outlines"` alias;
-  `_PRELOAD_PRIORITY`/`_recipes` hardcode one repo's filenames; `Strategy` knobs are
-  quadruple-encoded (TypedDict/_StrategyOut/_assemble/validate).
+**Waves 3–5 (commits `d024f94`, `79cd990`, `2bd16b5`) then landed almost the entire remainder**,
+each behavior-preserving (differential tests / route-list diffs / behavior matrices, full suite
+green — 1165 passed / 22 skipped):
+
+- ✅ **`Engine.__init__` 79-param collapse.** `engine/options.py::EngineOptions` (64 config knobs,
+  `from_settings`); `__init__` keeps every kwarg (now `_UNSET`-defaulted, explicit > options >
+  default); `cli.py::_engine` passthrough collapsed (net −59 lines). Differential test locks
+  old-kwarg vs options equivalence.
+- ✅ **`serve/server.py` router split.** 2,968 → 245 lines: `AppState` + `serve/routers/`
+  (runs/org/control/genesis/assistant/boss/reports/misc) + engine_proc/jobs/settings_store/
+  llm_context/artifacts modules. Route list byte-identical (75 routes). Genesis jobs unified onto
+  the shared `JobRegistry`; assistant turn endpoints share `_begin_turn`/`_finish_turn`. Zero test
+  lines changed (seams preserved via late binding + re-exports).
+- ✅ **orchestrator step 2.** `HoldoutGrader`, `WorkspaceSeeder` (with `materialize()`),
+  `ConfirmPhaseMixin`, `AblationMixin`; `_emit_node_created` unifies the 4 payload sites
+  (historical key sets kept, incl. the ablate `deleted`-omission quirk, now flagged). Orchestrator
+  2863 → 2358 lines. *(Not done: decomposing `run()` (~420 lines) into guarded phase methods —
+  still open.)*
+- ✅ **llm.py shared SSE generator.** `_sse_chunks` (+`_SSETail`); both callers keep their divergent
+  merge semantics; +1 regression test.
+- ✅ **trust dedup.** `trust/confirm.py::robust_selection` shared by `confirm_top_k` and the engine
+  confirm tail. *(Not done: marking `cv.py`'s unwired splitters as library code — trivial, open.)*
+- ✅ **SurfacePolicy** in `tools/patch.py` (reason codes; each site keeps its wording; provable
+  semantic differences parameterized). RepoTask read-side normalizer left separate by design.
+- ✅ **`repo_task.py` split** (946 → 395; `adapters/repo_developer.py`, re-exports kept, mega-prompt
+  hoisted) + **`tools/edit_match.py`** (tolerant matcher extracted).
+- ✅ **RunStateCache** (`tools/_runcache.py`) dedupes the fold-cache + traversal guard.
+- ✅ **CLI polish.** `_run_engine_guarded` dedupes the run/resume error funnel; `ui_preview.py`/
+  `ui_with_env.py` → `tools/`; `task_mlebench_100.json` was a byte-identical duplicate → removed.
+  Pytest `live`/`docker` markers registered. *(Not done: freezing the 24-flag `run()` surface.)*
+- ✅ **wrapper-forwarding mixin** (`WrapsDeveloper` in roles.py) + **prompt-store routing** (7 more
+  prompts through `render(prompts, key, default)`; byte-identical defaults). *(Not done: moving the
+  two researcher instruction-prose duplicates onto shared fragments — open.)*
+- 🟡 **test-suite reorganization.** Codemod of all legacy flat-import test files to canonical paths
+  ✅; `live`/`docker` markers ✅. *(Not done: moving the 21 accretion-named `test_review_fixes*`/
+  `test_*_fixes` files into per-subject homes — higher-churn/lower-value, deferred.)*
+- 🟡 **known one-off flags from the audit.** `Strategy`'s four-site cross-reference comment added
+  ✅. *(Open decisions, unchanged behavior: `ToolUsingResearcher` `_sweep_hint` omission — bug or
+  intent?; `command_eval` docker rc 137 vs 124; `parse._ORDER` `"outlines"` alias;
+  `_PRELOAD_PRIORITY`/`_recipes` hardcoded filenames.)*
+
+**Still open (carried forward):** `run()` phase-method decomposition; `cv.py` splitter docstrings;
+`run()` flag-surface freeze; researcher-prose shared fragments; the review-round test-file reorg;
+the four one-off behavior decisions above.
