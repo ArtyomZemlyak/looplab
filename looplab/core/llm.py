@@ -8,14 +8,21 @@ client takes a model name and reads the key from the environment via LiteLLM.
 from __future__ import annotations
 
 import copy
-import http.client
 import json
 import re
-import ssl
 import time
-import urllib.error
-import urllib.request
 from typing import Optional
+
+import httpx
+import openai
+
+# Legacy urllib-transport helpers (still imported by a few direct unit tests) — the LIVE path now
+# goes through the openai SDK (see OpenAICompatibleClient._sdk_chat). Kept import-safe until the
+# dead helpers are removed.
+import http.client  # noqa: F401
+import ssl  # noqa: F401
+import urllib.error  # noqa: F401
+import urllib.request  # noqa: F401
 
 from looplab.core import tracing
 # Re-exported for backward compatibility: dozens of importers (and tests) do
@@ -56,6 +63,33 @@ def _is_reasoning_reject(err_body: str) -> bool:
     """True when a 400 error body (already lowercased) says the endpoint rejected the reasoning
     param — the caller then drops the toggle for this client and retries."""
     return any(k in err_body for k in _REASONING_REJECT_KEYS)
+
+
+def _err_body(exc: Exception) -> str:
+    """Lowercased text of an openai SDK error (its parsed `body` + message), for reasoning-reject
+    detection — the SDK surfaces the endpoint's error payload on `.body` and `.message`."""
+    return (str(getattr(exc, "body", "") or "") + " " + str(getattr(exc, "message", "") or exc)).lower()
+
+
+def _retry_after_of(exc: Exception) -> Optional[str]:
+    """The Retry-After header from an openai SDK error's HTTP response, if any (429/503 backoff hint)."""
+    resp = getattr(exc, "response", None)
+    headers = getattr(resp, "headers", None)
+    return headers.get("retry-after") if headers is not None else None
+
+
+def _sdk_transient(exc: Exception) -> bool:
+    """Whether an openai.APIConnectionError is worth RETRYING. Preserves the urllib-era distinction
+    now that httpx collapses several causes into APIConnectionError: a refused connection / DNS
+    failure / TLS-cert error is steady-state ('endpoint down or misconfigured') → fail FAST (so
+    /api/llm/health is instant); a reset / TLS-EOF / mid-read protocol error is a transient hiccup on
+    a busy gateway → retry. The real cause is on `__cause__` (httpx wraps it)."""
+    for x in (exc, getattr(exc, "__cause__", None)):
+        if isinstance(x, ssl.SSLCertVerificationError):
+            return False
+        if isinstance(x, httpx.ConnectError):     # connection refused / DNS resolution failure
+            return False
+    return True                                   # reset / EOF / protocol error mid-read → transient
 
 
 def _reasoning_of(msg: dict) -> str:
@@ -481,6 +515,94 @@ class OpenAICompatibleClient:
         # T7: in-process content-addressed response cache for DETERMINISTIC (temperature 0) calls
         # only. None = disabled (default). Never caches sampling calls (temp>0) — those must vary.
         self._cache: Optional[dict] = {} if cache else None
+        # Transport: the openai SDK over an httpx client. httpx enforces a per-read timeout that
+        # RELIABLY interrupts a stalled mid-stream read (the urllib+ssl path couldn't — a glm SSE
+        # stall hung for minutes). `connect` = the first-byte/header window (a black-holed request
+        # fails over fast); `read` = the inter-token idle limit (a steady generation keeps resetting
+        # it, so a long-but-alive stream is never cut off). `trust_env=False` ignores proxy env vars
+        # (the internal endpoint needs a DIRECT connection). max_retries=0: we own the retry loop in
+        # `_post` (reasoning-drop + stream→non-stream degrade + Retry-After), which the SDK can't do.
+        self._sdk = openai.OpenAI(
+            base_url=self.base_url, api_key=self.api_key, max_retries=0,
+            timeout=httpx.Timeout(read=self.timeout, connect=self.header_timeout, write=30.0, pool=10.0),
+            http_client=httpx.Client(trust_env=False,
+                                     timeout=httpx.Timeout(read=self.timeout, connect=self.header_timeout,
+                                                           write=30.0, pool=10.0)))
+
+    def _sdk_chat(self, payload: dict, use_stream: bool) -> dict:
+        """The single transport seam: one openai-SDK chat call, returned in the legacy body shape
+        ({"choices":[{"message":{content,reasoning?,tool_calls?},"finish_reason"}],"usage"}) the rest
+        of the client expects. Non-provider params (a reasoning toggle, vLLM `guided_json`) ride in
+        `extra_body`. Streaming accumulates deltas exactly like the old `_read_stream`; a stalled
+        stream raises openai.APITimeoutError from httpx's read timeout — no watchdog needed. Tests
+        monkeypatch THIS method (not urllib) to script transport behaviour."""
+        kwargs: dict = {"model": payload["model"], "messages": payload["messages"],
+                        "temperature": payload.get("temperature", self.temperature)}
+        if payload.get("tools"):
+            kwargs["tools"] = payload["tools"]
+            kwargs["tool_choice"] = payload.get("tool_choice", "auto")
+        if payload.get("response_format"):
+            kwargs["response_format"] = payload["response_format"]
+        extra: dict = {}
+        if self.reasoning and self._reasoning_ok:     # provider reasoning toggle (non-standard params)
+            extra.update(self.reasoning)
+        if payload.get("guided_json"):                # vLLM constrained-decoding extra
+            extra["guided_json"] = payload["guided_json"]
+        if extra:
+            kwargs["extra_body"] = extra
+        if use_stream:
+            kwargs["stream"] = True
+            kwargs["stream_options"] = {"include_usage": True}
+            return self._accumulate_stream(self._sdk.chat.completions.create(**kwargs))
+        resp = self._sdk.chat.completions.create(**kwargs)
+        return resp.model_dump()
+
+    @staticmethod
+    def _accumulate_stream(stream) -> dict:
+        """Reassemble an SDK streaming response into the non-streaming body shape. Merges tool_call
+        deltas by index (partial name/arguments concatenated), captures reasoning deltas, and keeps
+        the final include_usage chunk. httpx's read timeout bounds each iteration — a stall surfaces
+        as openai.APITimeoutError out of this loop, caught by `_post`."""
+        content: list[str] = []
+        reasoning: list[str] = []
+        tcs: dict[int, dict] = {}
+        finish = None
+        usage: dict = {}
+        for ev in stream:
+            if getattr(ev, "usage", None):
+                usage = ev.usage.model_dump()
+            if not ev.choices:
+                continue
+            ch = ev.choices[0]
+            d = ch.delta
+            if getattr(d, "content", None):
+                content.append(d.content)
+            r = getattr(d, "reasoning", None) or getattr(d, "reasoning_content", None)
+            if r:
+                reasoning.append(r)
+            for tc in (getattr(d, "tool_calls", None) or []):
+                tcd = tc.model_dump()               # reuse the tested index-merge logic (_tool_call_slot)
+                idx = _tool_call_slot(tcs, tcd)     # provider-omitted `index` must not collapse calls
+                slot = tcs.setdefault(idx, {"id": None, "type": "function",
+                                            "function": {"name": "", "arguments": []}})
+                if tcd.get("id"):
+                    slot["id"] = tcd["id"]
+                fn = tcd.get("function") or {}
+                if fn.get("name"):
+                    slot["function"]["name"] = fn["name"]
+                if fn.get("arguments"):
+                    slot["function"]["arguments"].append(fn["arguments"])
+            if ch.finish_reason:
+                finish = ch.finish_reason
+        msg: dict = {"role": "assistant", "content": "".join(content)}
+        if reasoning:
+            msg["reasoning"] = "".join(reasoning)
+        if tcs:
+            msg["tool_calls"] = [
+                {"id": s["id"] or f"call_{i}", "type": "function",
+                 "function": {"name": s["function"]["name"], "arguments": "".join(s["function"]["arguments"])}}
+                for i, s in sorted(tcs.items())]
+        return {"choices": [{"message": msg, "finish_reason": finish}], "usage": usage}
 
     def _read_stream(self, resp) -> dict:
         """Reassemble an OpenAI SSE stream into the non-streaming response body shape
@@ -602,81 +724,48 @@ class OpenAICompatibleClient:
             # Build the request per attempt so a param-compat retry (below) can drop the reasoning
             # toggle. `_reasoning_ok` starts True and flips off permanently for THIS client the first
             # time the endpoint rejects our reasoning param.
-            p = dict(payload)
-            if self.reasoning and self._reasoning_ok:   # inject the reasoning toggle
-                p = {**p, **self.reasoning}
-            # Stall-degrade: stream by default (timeout = inter-token idle guard), but drop to a
-            # plain blocking read for the attempt right after a stream stall, and permanently once
-            # this client has stalled twice — a flaky proxied endpoint often answers the SAME request
-            # fine without SSE while its stream wedges mid-generation.
+            # Stall-degrade: stream by default (httpx read-timeout = inter-token idle guard), but drop
+            # to a single blocking read for the attempt right after a stream stall, and permanently
+            # once this client has stalled STREAM_STALL_DEGRADE_AFTER times — a flaky proxied endpoint
+            # often answers the SAME request fine without SSE while its stream wedges mid-generation.
             use_stream = (self.stream and self._stream_stalls < STREAM_STALL_DEGRADE_AFTER
                           and not _stalled_prev)
-            if use_stream:                      # force streaming so `timeout` is an inter-token idle guard
-                p = {**p, "stream": True, "stream_options": {"include_usage": True}}
-            req = urllib.request.Request(
-                f"{self.base_url}/chat/completions", data=json.dumps(p).encode("utf-8"), method="POST",
-                headers={"Content-Type": "application/json",
-                         "Authorization": f"Bearer {self.api_key}"},
-            )
-            # The short header window applies ONLY to stream attempts: an SSE response sends its
-            # headers as soon as the request is admitted (before generation finishes), so no-headers-
-            # in-45s ≈ black-holed. A NON-stream response sends nothing — headers included — until the
-            # whole generation completes, so its header wait must be the full idle timeout or every
-            # legitimate >45s generation would die at the header phase (self-triggering with the
-            # stall-degrade below, which is exactly what switches a call to non-stream).
-            _first_byte_to = self.header_timeout if use_stream else self.timeout
             try:
-                with urllib.request.urlopen(req, timeout=_first_byte_to) as resp:
-                    # Headers arrived — restore the full idle timeout for the BODY phase (the short
-                    # window above only bounds connect + first byte; slow token gaps are legitimate).
-                    _sk = _raw_socket(resp)
-                    if _sk is not None:
-                        try:
-                            _sk.settimeout(self.timeout)
-                        except OSError:
-                            pass
-                    # Streaming: reassemble SSE lines (a stall raises socket.timeout HERE, inside the
-                    # `with`, and lands in the transient-retry handler below). Non-streaming: one read.
-                    parsed = self._read_stream(resp) if use_stream \
-                        else _parse_chat_body(resp.read().decode("utf-8", "replace"))
-            except urllib.error.HTTPError as e:
-                # A 400 that rejects our REASONING toggle — e.g. a litellm-proxied model like glm-5.1
+                parsed = self._sdk_chat(payload, use_stream)
+            except openai.BadRequestError as e:
+                # A 400 that rejects our REASONING toggle — a litellm-proxied model like glm-5.1
                 # returns UnsupportedParamsError for `reasoning_effort` — isn't a real bad request:
-                # drop reasoning for this client and retry immediately, so the model still works
-                # (deepseek accepts reasoning_effort, glm-5.1 doesn't; the client adapts per model).
-                if e.code == 400 and self.reasoning and self._reasoning_ok:
-                    try:
-                        eb = e.read().decode("utf-8", "replace").lower()
-                    except Exception:  # noqa: BLE001
-                        eb = ""
-                    if _is_reasoning_reject(eb):
-                        self._reasoning_ok = False
-                        continue
-                if e.code in (429, 500, 502, 503, 504) and attempt < self._max_retries:
-                    ra = _retry_after_seconds(e.headers.get("Retry-After") if e.headers else None)
-                    delay = ra if ra is not None else _backoff(attempt)
-                    time.sleep(min(delay, BACKOFF_CAP_S))
+                # drop reasoning for this client and retry (deepseek keeps it; glm-5.1 adapts).
+                if self.reasoning and self._reasoning_ok and _is_reasoning_reject(_err_body(e)):
+                    self._reasoning_ok = False
                     continue
-                hint = (" — check the API key (LOOPLAB_LLM_API_KEY)" if e.code == 401 else "")
-                raise LLMError(f"LLM request to {self.base_url} failed: {e}{hint}") from e
-            except (urllib.error.URLError, TimeoutError, OSError, http.client.IncompleteRead) as e:
-                # Retry TRANSIENT network failures (timeout, reset, TLS EOF / IncompleteRead mid-read)
-                # — the modes that
-                # otherwise abort a long run, since the tool-using proposer / pilot call client.chat
-                # directly and don't wrap LLMError. A refused connection / DNS / TLS CERT error is a
-                # steady-state "endpoint down or misconfigured" signal: fail FAST so /api/llm/health
-                # stays instant and a wrong base_url surfaces on the first call, not after backoff.
-                # Count a stall ONLY for a transient failure of a STREAM attempt (idle timeout /
-                # reset / TLS EOF mid-stream). A fail-fast error (refused, DNS, cert) means the
-                # endpoint is down/misconfigured — it says nothing about SSE health, and counting it
-                # would ratchet `_stream_stalls` to the permanent-degrade threshold while the
-                # endpoint restarts. Degrade applies to the REMAINING attempts of this call.
-                if use_stream and _is_transient(e):
+                raise LLMError(f"LLM request to {self.base_url} failed: {e}") from e
+            except openai.AuthenticationError as e:
+                raise LLMError(f"LLM request to {self.base_url} failed: {e} — check the API key "
+                               "(LOOPLAB_LLM_API_KEY)") from e
+            except (openai.RateLimitError, openai.InternalServerError) as e:   # 429 / 5xx
+                if attempt < self._max_retries:
+                    ra = _retry_after_seconds(_retry_after_of(e))
+                    time.sleep(min(ra if ra is not None else _backoff(attempt), BACKOFF_CAP_S))
+                    continue
+                raise LLMError(f"LLM request to {self.base_url} failed: {e}") from e
+            except openai.APIConnectionError as e:
+                # httpx transport failure. APITimeoutError (a subclass) = a read/connect timeout: a
+                # stalled mid-stream read or a black-holed request — always transient, and the
+                # reliable interrupt the urllib+ssl path lacked (a glm SSE stall hung for minutes).
+                # A plain APIConnectionError is retried only when `_sdk_transient` says so (reset/EOF),
+                # else it fails fast (refused/DNS/cert). A STREAM stall degrades the next attempt to
+                # non-stream and ratchets the permanent-degrade counter.
+                is_timeout = isinstance(e, openai.APITimeoutError)
+                transient = is_timeout or _sdk_transient(e)
+                if use_stream and transient:
                     _stalled_prev = True
                     self._stream_stalls += 1
-                if _is_transient(e) and attempt < self._max_retries:
+                if transient and attempt < self._max_retries:
                     time.sleep(_backoff(attempt))
                     continue
+                raise LLMError(f"LLM request to {self.base_url} failed: {e}") from e
+            except openai.APIError as e:   # any other SDK-level protocol error -> clean LLMError
                 raise LLMError(f"LLM request to {self.base_url} failed: {e}") from e
             else:
                 # HTTP 200 read cleanly, but the body can still be unusable: a hosted gateway
@@ -759,64 +848,38 @@ class OpenAICompatibleClient:
             # this client and retry the stream ONCE without it, instead of paying a wasted 400
             # round-trip per turn and always falling back to the blocking path.
             for _attempt in range(2):
-                payload = {"model": self.model, "messages": messages,
-                           "temperature": self.temperature,
-                           "stream": True, "stream_options": {"include_usage": True}}
+                kwargs: dict = {"model": self.model, "messages": messages,
+                                "temperature": self.temperature, "stream": True,
+                                "stream_options": {"include_usage": True}}
                 if self.reasoning and self._reasoning_ok:
-                    payload = {**payload, **self.reasoning}
-                req = urllib.request.Request(
-                    f"{self.base_url}/chat/completions", data=json.dumps(payload).encode("utf-8"),
-                    method="POST", headers={"Content-Type": "application/json",
-                                            "Authorization": f"Bearer {self.api_key}"})
+                    kwargs["extra_body"] = dict(self.reasoning)
                 try:
-                    # Idle timeout by PROGRESS, enforced by the SAME socket-shutdown watchdog as
-                    # `_read_stream`: the in-loop wall-clock check alone can't catch a server that
-                    # trickles bytes without completing a line (recv() blocks in the kernel — the
-                    # documented ~15-min hang), and the caller's cancel check only runs per yielded
-                    # piece, so Stop would never be observed. The watchdog shuts the socket down.
-                    with urllib.request.urlopen(req, timeout=self.header_timeout) as resp:
-                        _sk2 = _raw_socket(resp)   # restore the idle timeout for the body phase
-                        if _sk2 is not None:
-                            try:
-                                _sk2.settimeout(self.timeout)
-                            except OSError:
-                                pass
-                        last_progress, _killed, _stop_wd = _socket_watchdog(resp, self.timeout)
-                        stall_msg = f"LLM stream stalled — no new tokens for {self.timeout:.0f}s"
-                        try:
-                            for obj in _sse_chunks(iter(resp), last_progress, _killed,
-                                                   self.timeout, stall_msg):
-                                if obj.get("usage"):           # final usage chunk (include_usage)
-                                    usage = obj["usage"]
-                                    last_progress[0] = time.monotonic()
-                                delta = ((obj.get("choices") or [{}])[0] or {}).get("delta") or {}
-                                piece = delta.get("content") or ""
-                                if piece:
-                                    pieces.append(piece)
-                                    last_progress[0] = time.monotonic()
-                                    yield piece
-                        finally:
-                            _stop_wd()
-                        if _killed[0] and not pieces:   # watchdog killed a stalled, silent stream
-                            raise TimeoutError(stall_msg)
+                    # httpx's per-read timeout bounds each stream iteration, so a stalled/silent
+                    # stream raises openai.APITimeoutError here instead of hanging — the reliable
+                    # interrupt the urllib+watchdog path approximated. Reasoning-param retry mirrors
+                    # `_post`: a model that 400s on the toggle (glm-5.1) drops it and retries once.
+                    for ev in self._sdk.chat.completions.create(**kwargs):
+                        if getattr(ev, "usage", None):
+                            usage = ev.usage.model_dump()
+                        if not ev.choices:
+                            continue
+                        piece = getattr(ev.choices[0].delta, "content", None) or ""
+                        if piece:
+                            pieces.append(piece)
+                            yield piece
                     break                        # streamed (or cleanly ended) -> done
-                except urllib.error.HTTPError as e:
-                    if (e.code == 400 and self.reasoning and self._reasoning_ok
-                            and not pieces and _attempt == 0):
-                        try:
-                            eb = e.read().decode("utf-8", "replace").lower()
-                        except Exception:  # noqa: BLE001
-                            eb = ""
-                        if _is_reasoning_reject(eb):
-                            self._reasoning_ok = False
-                            continue             # retry the stream once without the reasoning toggle
-                    if not pieces:               # any other HTTP error -> blocking fallback
+                except openai.BadRequestError as e:
+                    if (self.reasoning and self._reasoning_ok and not pieces and _attempt == 0
+                            and _is_reasoning_reject(_err_body(e))):
+                        self._reasoning_ok = False
+                        continue                 # retry the stream once without the reasoning toggle
+                    if not pieces:               # any other bad request -> blocking fallback
                         text = self.complete_text(messages)
                         if text:
                             yield text
                         return
                     break
-                except (urllib.error.URLError, TimeoutError, OSError, http.client.IncompleteRead):
+                except openai.APIError:
                     if not pieces:               # never streamed -> fall back to a single blocking call
                         text = self.complete_text(messages)   # its own nested generation span
                         if text:

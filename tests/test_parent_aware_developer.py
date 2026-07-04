@@ -22,37 +22,31 @@ from looplab.core.llm import OpenAICompatibleClient  # noqa: E402
 
 
 # ---------------------------------------------------------------- stall-degrade
-class _Ctx:
-    def __init__(self, body):
-        self.body = body
+import httpx as _httpx
+import openai as _openai
 
-    def __enter__(self):
-        return self.body
+_REQ = _httpx.Request("POST", "http://x/v1/chat/completions")
 
-    def __exit__(self, *a):
-        return False
-
-
-def _nonstream_body(text="ok"):
-    return io.BytesIO(json.dumps(
-        {"choices": [{"message": {"role": "assistant", "content": text}}],
-         "usage": {"prompt_tokens": 1, "completion_tokens": 1}}).encode())
+def _body(text="ok"):
+    return {"choices": [{"message": {"role": "assistant", "content": text}, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1}}
 
 
 def test_stream_stall_degrades_to_nonstream(monkeypatch):
-    """Attempt 1 (stream) stalls -> attempt 2 goes NON-stream and succeeds; the stall is counted."""
+    """Attempt 1 (stream) stalls -> attempt 2 goes NON-stream and succeeds; the stall is counted.
+    The transport seam `_sdk_chat` raises openai.APITimeoutError on a stalled stream (httpx read
+    timeout)."""
     calls = []
 
-    def fake_urlopen(req, timeout=None):
-        payload = json.loads(req.data.decode())
-        calls.append(bool(payload.get("stream")))
-        if payload.get("stream"):
-            raise TimeoutError("stream stalled")     # what the watchdog/idle check raises
-        return _Ctx(_nonstream_body("degraded"))
+    def fake(payload, use_stream):
+        calls.append(use_stream)
+        if use_stream:
+            raise _openai.APITimeoutError(request=_REQ)   # stalled stream -> read timeout
+        return _body("degraded")
 
-    monkeypatch.setattr(llm.urllib.request, "urlopen", fake_urlopen)
     monkeypatch.setattr(llm.time, "sleep", lambda s: None)   # skip the backoff wait
     c = OpenAICompatibleClient("m", base_url="http://x/v1", stream=True)
+    monkeypatch.setattr(c, "_sdk_chat", fake)
     out = c.complete_text([{"role": "user", "content": "hi"}])
     assert out == "degraded"
     assert calls == [True, False]                    # stream first, then degraded
@@ -60,24 +54,17 @@ def test_stream_stall_degrades_to_nonstream(monkeypatch):
 
 
 def test_two_stalls_disable_streaming_for_the_client(monkeypatch):
-    def fake_urlopen(req, timeout=None):
-        payload = json.loads(req.data.decode())
-        if payload.get("stream"):
-            raise TimeoutError("stream stalled")
-        return _Ctx(_nonstream_body("ok"))
+    def fake(payload, use_stream):
+        seen.append(use_stream)
+        if use_stream:
+            raise _openai.APITimeoutError(request=_REQ)
+        return _body("ok")
 
-    monkeypatch.setattr(llm.urllib.request, "urlopen", fake_urlopen)
     monkeypatch.setattr(llm.time, "sleep", lambda s: None)
     c = OpenAICompatibleClient("m", base_url="http://x/v1", stream=True)
     c._stream_stalls = 2                             # already stalled twice
     seen = []
-    real = fake_urlopen
-
-    def spy(req, timeout=None):
-        seen.append(json.loads(req.data.decode()).get("stream"))
-        return real(req, timeout=timeout)
-
-    monkeypatch.setattr(llm.urllib.request, "urlopen", spy)
+    monkeypatch.setattr(c, "_sdk_chat", fake)
     assert c.complete_text([{"role": "user", "content": "hi"}]) == "ok"
     assert seen and not seen[0]                      # streaming never attempted again
 
@@ -171,36 +158,27 @@ def test_edit_file_patch_gate(tmp_path):
     assert "return 2" in w.files["b.py"]
 
 
-def test_header_timeout_applies_only_to_stream_attempts(monkeypatch):
-    """The short first-byte window is a STREAM-only bound (SSE headers arrive on admission). A
-    non-stream attempt's headers arrive only after the WHOLE generation — bounding them at 45s would
-    kill every legitimate >45s generation, self-triggering with the stall-degrade that switches a
-    call to non-stream. Regression for exactly that: the degraded attempt must get the full timeout."""
-    seen = []   # (stream?, urlopen timeout)
-
-    def fake_urlopen(req, timeout=None):
-        payload = json.loads(req.data.decode())
-        seen.append((bool(payload.get("stream")), timeout))
-        if payload.get("stream"):
-            raise TimeoutError("stream stalled")
-        return _Ctx(_nonstream_body("ok"))
-
-    monkeypatch.setattr(llm.urllib.request, "urlopen", fake_urlopen)
-    monkeypatch.setattr(llm.time, "sleep", lambda s: None)
-    c = OpenAICompatibleClient("m", base_url="http://x/v1", stream=True, timeout=180.0)
-    assert c.complete_text([{"role": "user", "content": "hi"}]) == "ok"
-    assert seen[0] == (True, 45.0)      # stream attempt: short header window
-    assert seen[1] == (False, 180.0)    # degraded non-stream attempt: FULL timeout for the whole read
+def test_sdk_client_timeout_split_connect_vs_read(monkeypatch):
+    """The httpx transport separates the first-byte window (connect = header_timeout) from the
+    inter-token idle limit (read = timeout), so a legitimate >45s generation is bounded by the READ
+    timeout, not killed at the 45s connect window. This is the SDK-native replacement for the old
+    per-attempt header/body timeout juggling."""
+    c = OpenAICompatibleClient("m", base_url="http://x/v1", stream=True, timeout=180.0,
+                               header_timeout=45.0)
+    to = c._sdk.timeout
+    assert to.connect == 45.0 and to.read == 180.0
 
 
 def test_fail_fast_errors_do_not_count_as_stream_stalls(monkeypatch):
     """A refused connection (endpoint down) says nothing about SSE health — it must not ratchet the
     permanent stream-off counter."""
-    def fake_urlopen(req, timeout=None):
-        raise ConnectionRefusedError("down")
+    def fake(payload, use_stream):
+        e = _openai.APIConnectionError(message="refused", request=_REQ)
+        e.__cause__ = _httpx.ConnectError("down")      # httpx.ConnectError -> fail fast, not a stall
+        raise e
 
-    monkeypatch.setattr(llm.urllib.request, "urlopen", fake_urlopen)
     c = OpenAICompatibleClient("m", base_url="http://x/v1", stream=True)
+    monkeypatch.setattr(c, "_sdk_chat", fake)
     try:
         c.complete_text([{"role": "user", "content": "hi"}])
     except Exception:

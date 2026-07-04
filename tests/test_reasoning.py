@@ -63,16 +63,23 @@ class _Resp:
 def test_client_injects_reasoning_into_request(monkeypatch):
     captured = {}
 
-    def fake_urlopen(req, timeout=0):
-        captured["body"] = json.loads(req.data.decode("utf-8"))
-        return _Resp({"choices": [{"message": {"content": "hi"}}], "usage": {}})
+    class _FakeResp:
+        def model_dump(self):
+            return {"choices": [{"message": {"content": "hi"}}], "usage": {}}
 
-    monkeypatch.setattr(llm.urllib.request, "urlopen", fake_urlopen)
-    c = OpenAICompatibleClient("qwen3-30b-a3b",
+    def fake_create(**kwargs):
+        captured["kwargs"] = kwargs
+        return _FakeResp()
+
+    # The reasoning toggle rides in the SDK's `extra_body` (non-standard provider params). stream=False
+    # so _sdk_chat takes the single-call path and returns model_dump().
+    c = OpenAICompatibleClient("qwen3-30b-a3b", stream=False,
                                reasoning={"chat_template_kwargs": {"enable_thinking": True}})
+    monkeypatch.setattr(c._sdk.chat.completions, "create", fake_create)
     c.complete_text([{"role": "user", "content": "x"}])
-    assert captured["body"]["chat_template_kwargs"] == {"enable_thinking": True}
+    assert captured["kwargs"]["extra_body"]["chat_template_kwargs"] == {"enable_thinking": True}
     # and a client with no reasoning sends no toggle (unchanged behavior)
-    c2 = OpenAICompatibleClient("qwen3-30b-a3b")
+    c2 = OpenAICompatibleClient("qwen3-30b-a3b", stream=False)
+    monkeypatch.setattr(c2._sdk.chat.completions, "create", fake_create)
     c2.complete_text([{"role": "user", "content": "x"}])
-    assert "chat_template_kwargs" not in captured["body"]
+    assert "extra_body" not in captured["kwargs"]

@@ -25,12 +25,19 @@ def _sse(chunks):
 
 
 def test_complete_text_stream_parses_sse(monkeypatch):
-    class _Ctx:
-        def __init__(self, body): self.body = body
-        def __enter__(self): return self.body
-        def __exit__(self, *a): return False
-    monkeypatch.setattr(llm.urllib.request, "urlopen", lambda req, timeout=None: _Ctx(_sse(["Hel", "lo", "!"])))
+    import types
+
+    def _chunk(text):
+        delta = types.SimpleNamespace(content=text)
+        return types.SimpleNamespace(choices=[types.SimpleNamespace(delta=delta, finish_reason=None)],
+                                     usage=None)
+
+    def fake_create(**kwargs):
+        for t in ["Hel", "lo", "!"]:
+            yield _chunk(t)
+
     c = OpenAICompatibleClient("m", base_url="http://x/v1")
+    monkeypatch.setattr(c._sdk.chat.completions, "create", fake_create)
     assert list(c.complete_text_stream([{"role": "user", "content": "hi"}])) == ["Hel", "lo", "!"]
 
 

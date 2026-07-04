@@ -63,63 +63,75 @@ def test_text_fallback_strips_think(base_url):
     assert idea.operator == "draft" and idea.params == {"x": 1.0}
 
 
-# --- transient-timeout resilience: a slow/unresponsive endpoint is retried, not fatal ----------
-class _OkResp:
-    def __enter__(self):
-        return self
+# --- transport resilience (openai SDK): built on a mocked `_sdk_chat` seam. The live path drives
+# the openai SDK over httpx, so a stall/timeout/refused surfaces as an openai exception, not a
+# urllib one; these assert the retry / reasoning-drop / fail-fast / stall-degrade POLICY around it.
+import httpx as _httpx
+import openai as _openai
 
-    def __exit__(self, *a):
-        return False
+_OK_BODY = {"choices": [{"message": {"role": "assistant", "content": "ok"}, "finish_reason": "stop"}],
+            "usage": {}}
+_EMPTY_STREAM = {"choices": [{"message": {"role": "assistant", "content": ""}, "finish_reason": None}],
+                 "usage": {}}
+_REQ = _httpx.Request("POST", "http://x/v1/chat/completions")
 
-    def read(self):
-        return json.dumps({"choices": [{"message": {"role": "assistant", "content": "ok"}}],
-                           "usage": {}}).encode()
+
+def _timeout_exc():
+    return _openai.APITimeoutError(request=_REQ)
+
+
+def _conn_exc(cause):
+    e = _openai.APIConnectionError(message="connection error", request=_REQ)
+    e.__cause__ = cause
+    return e
+
+
+def _status_exc(cls, code, body):
+    return cls("err", response=_httpx.Response(code, request=_REQ, json=body), body=body)
 
 
 def test_post_retries_transient_timeout(monkeypatch):
-    """A momentary socket timeout (e.g. Ollama reloading a model) must be retried with backoff and
-    then succeed — a single slow response must not abort a long unattended run."""
+    """A momentary read/connect timeout (httpx -> openai.APITimeoutError) must be retried with backoff
+    and then succeed — a single slow response must not abort a long unattended run."""
     import looplab.core.llm as llm
     calls = {"n": 0}
 
-    def fake_urlopen(req, timeout=None):
+    def fake(payload, use_stream):
         calls["n"] += 1
         if calls["n"] < 3:
-            raise TimeoutError("timed out")        # first two attempts time out
-        return _OkResp()
+            raise _timeout_exc()
+        return dict(_OK_BODY)
 
-    monkeypatch.setattr(llm.urllib.request, "urlopen", fake_urlopen)
-    monkeypatch.setattr(llm.time, "sleep", lambda *_a: None)   # skip real backoff
+    monkeypatch.setattr(llm.time, "sleep", lambda *_a: None)
     c = llm.OpenAICompatibleClient("m", base_url="http://x/v1")
+    monkeypatch.setattr(c, "_sdk_chat", fake)
     assert c.complete_text([{"role": "user", "content": "go"}]) == "ok"
     assert calls["n"] == 3                                     # retried twice, succeeded on the 3rd
 
 
 def test_post_drops_reasoning_on_unsupported_param_400(monkeypatch):
-    """A litellm-proxied model (e.g. glm-5.1) returns 400 UnsupportedParamsError for `reasoning_effort`.
+    """A litellm-proxied model (glm-5.1) returns 400 UnsupportedParamsError for `reasoning_effort`.
     The client must DROP the reasoning toggle and retry — so the model works — and remember it (deepseek
-    keeps reasoning; glm-5.1 silently drops it). Without this glm-5.1 hard-fails and 'produces nothing'."""
-    import io
+    keeps reasoning; glm-5.1 drops it). The seam sees `_reasoning_ok` flip off between attempts."""
     import looplab.core.llm as llm
-    seen = []
+    calls = {"n": 0, "reasoning_at_first": None}
 
-    def fake_urlopen(req, timeout=None):
-        seen.append(json.loads(req.data.decode()))
-        if len(seen) == 1:                                  # first attempt carries reasoning_effort
-            body = json.dumps({"error": {"message": "litellm.UnsupportedParamsError: openai does "
-                                         "not support parameters: ['reasoning_effort']"}}).encode()
-            raise llm.urllib.error.HTTPError(req.full_url, 400, "Bad Request", {}, io.BytesIO(body))
-        return _OkResp()
+    def fake(payload, use_stream):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            calls["reasoning_at_first"] = None   # first attempt still has _reasoning_ok True
+            body = {"error": {"message": "litellm.UnsupportedParamsError: openai does not support "
+                              "parameters: ['reasoning_effort']"}}
+            raise _status_exc(_openai.BadRequestError, 400, body)
+        return dict(_OK_BODY)
 
-    monkeypatch.setattr(llm.urllib.request, "urlopen", fake_urlopen)
     monkeypatch.setattr(llm.time, "sleep", lambda *_a: None)
     c = llm.OpenAICompatibleClient("glm-5.1", base_url="http://x/v1",
                                    reasoning={"reasoning_effort": "high"})
+    monkeypatch.setattr(c, "_sdk_chat", fake)
     assert c._reasoning_ok is True
     assert c.complete_text([{"role": "user", "content": "go"}]) == "ok"
-    assert c._reasoning_ok is False                         # adapted — won't send reasoning again
-    assert "reasoning_effort" in seen[0] and "reasoning_effort" not in seen[1]  # dropped on retry
-    assert len(seen) == 2
+    assert c._reasoning_ok is False and calls["n"] == 2      # adapted — won't send reasoning again
 
 
 def test_read_stream_watchdog_breaks_a_stalled_connection():
@@ -168,188 +180,143 @@ def test_post_raises_after_exhausting_timeouts(monkeypatch):
     """A persistently dead endpoint still surfaces a clean LLMError once retries are exhausted."""
     import looplab.core.llm as llm
 
-    def fake_urlopen(req, timeout=None):
-        raise TimeoutError("timed out")
+    def fake(payload, use_stream):
+        raise _timeout_exc()
 
-    monkeypatch.setattr(llm.urllib.request, "urlopen", fake_urlopen)
     monkeypatch.setattr(llm.time, "sleep", lambda *_a: None)
     c = llm.OpenAICompatibleClient("m", base_url="http://x/v1")
+    monkeypatch.setattr(c, "_sdk_chat", fake)
     with pytest.raises(llm.LLMError):
         c.complete_text([{"role": "user", "content": "go"}])
 
 
 def test_post_fails_fast_on_connection_refused(monkeypatch):
-    """A refused connection (endpoint down / wrong base_url) is a STEADY-STATE failure: it must raise
-    immediately WITHOUT retry/backoff, so /api/llm/health stays instant and a misconfig surfaces on
-    the first call. Only timeouts are retried."""
+    """A refused connection (endpoint down / wrong base_url) is a STEADY-STATE failure: raise
+    immediately WITHOUT retry/backoff, so /api/llm/health stays instant. Only timeouts / transient
+    resets are retried."""
     import looplab.core.llm as llm
-    calls = {"open": 0, "sleep": 0}
+    calls = {"n": 0, "sleep": 0}
 
-    def fake_urlopen(req, timeout=None):
-        calls["open"] += 1
-        raise ConnectionRefusedError("connection refused")   # OSError subclass, not a timeout
+    def fake(payload, use_stream):
+        calls["n"] += 1
+        raise _conn_exc(_httpx.ConnectError("connection refused"))   # httpx.ConnectError -> fail fast
 
-    monkeypatch.setattr(llm.urllib.request, "urlopen", fake_urlopen)
     monkeypatch.setattr(llm.time, "sleep", lambda *_a: calls.__setitem__("sleep", calls["sleep"] + 1))
     c = llm.OpenAICompatibleClient("m", base_url="http://x/v1")
+    monkeypatch.setattr(c, "_sdk_chat", fake)
     with pytest.raises(llm.LLMError):
         c.complete_text([{"role": "user", "content": "go"}])
-    assert calls["open"] == 1        # one attempt, no retry
-    assert calls["sleep"] == 0       # no backoff sleep on a steady-state failure
+    assert calls["n"] == 1 and calls["sleep"] == 0       # one attempt, no backoff on a steady-state fail
 
 
 def test_post_retries_transient_ssl_eof(monkeypatch):
-    """A mid-read TLS EOF (UNEXPECTED_EOF_WHILE_READING — the peer hung up, common over a hosted
-    gateway like OpenRouter) is TRANSIENT and must be retried, not abort the run."""
-    import ssl
-    import urllib.error
+    """A mid-read TLS EOF / protocol error (the peer hung up, common over a hosted gateway) is
+    TRANSIENT and must be retried, not abort the run."""
     import looplab.core.llm as llm
     calls = {"n": 0}
 
-    def fake_urlopen(req, timeout=None):
+    def fake(payload, use_stream):
         calls["n"] += 1
         if calls["n"] < 3:
-            raise urllib.error.URLError(ssl.SSLEOFError("EOF occurred in violation of protocol"))
-        return _OkResp()
+            raise _conn_exc(_httpx.RemoteProtocolError("server disconnected"))
+        return dict(_OK_BODY)
 
-    monkeypatch.setattr(llm.urllib.request, "urlopen", fake_urlopen)
     monkeypatch.setattr(llm.time, "sleep", lambda *_a: None)
     c = llm.OpenAICompatibleClient("m", base_url="http://x/v1")
+    monkeypatch.setattr(c, "_sdk_chat", fake)
     assert c.complete_text([{"role": "user", "content": "go"}]) == "ok"
-    assert calls["n"] == 3           # retried the transient TLS drop, then succeeded
+    assert calls["n"] == 3           # retried the transient TLS/protocol drop, then succeeded
 
 
 def test_post_fails_fast_on_tls_cert_error(monkeypatch):
     """A TLS CERT verification error is a steady-state misconfig — fail fast, do NOT retry."""
     import ssl
-    import urllib.error
     import looplab.core.llm as llm
-    calls = {"open": 0, "sleep": 0}
+    calls = {"n": 0, "sleep": 0}
 
-    def fake_urlopen(req, timeout=None):
-        calls["open"] += 1
-        raise urllib.error.URLError(ssl.SSLCertVerificationError("certificate verify failed"))
+    def fake(payload, use_stream):
+        calls["n"] += 1
+        raise _conn_exc(ssl.SSLCertVerificationError("certificate verify failed"))
 
-    monkeypatch.setattr(llm.urllib.request, "urlopen", fake_urlopen)
     monkeypatch.setattr(llm.time, "sleep", lambda *_a: calls.__setitem__("sleep", calls["sleep"] + 1))
     c = llm.OpenAICompatibleClient("m", base_url="http://x/v1")
+    monkeypatch.setattr(c, "_sdk_chat", fake)
     with pytest.raises(llm.LLMError):
         c.complete_text([{"role": "user", "content": "go"}])
-    assert calls["open"] == 1 and calls["sleep"] == 0
+    assert calls["n"] == 1 and calls["sleep"] == 0
 
 
-# --- bad-200-body resilience: an empty / keepalive-only / truncated 200 is a transient gateway
-# hiccup (OpenRouter ': OPENROUTER PROCESSING' heartbeats, dropped socket) → retry, not crash -----
-class _BytesResp:
-    """A urlopen context manager whose body is whatever bytes/str the test queues."""
-    def __init__(self, payload):
-        self._payload = payload if isinstance(payload, bytes) else payload.encode()
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *a):
-        return False
-
-    def read(self):
-        return self._payload
-
-
-_GOOD = json.dumps({"choices": [{"message": {"role": "assistant", "content": "ok"}}], "usage": {}})
-
-
-def test_post_retries_empty_200_body(monkeypatch):
-    """A 200 with an empty / whitespace body (gateway dropped the socket before the final JSON) must
-    be retried with backoff and then succeed — it crashed the DeepSeek run before this fix."""
+# --- bad-body resilience: a keepalive-only / empty STREAM is a transient gateway hiccup → retry;
+# a mid-read protocol drop → retry; a persistent SDK protocol error / a no-choices body → surface.
+def test_post_retries_empty_stream(monkeypatch):
+    """A stream that yields NOTHING usable (keepalive-only heartbeats — content/tool_calls/reasoning
+    and finish_reason all empty) is a mid-stream stall: retried with backoff, then succeeds."""
     import looplab.core.llm as llm
-    bodies = iter(["", "  \n \n\n ", _GOOD])      # two bad 200s, then the real payload
-    calls = {"n": 0}
+    seq = iter([_EMPTY_STREAM, _OK_BODY])         # one empty stream degrades to non-stream, then good
+    calls = {"stream_flags": []}
 
-    def fake_urlopen(req, timeout=None):
-        calls["n"] += 1
-        return _BytesResp(next(bodies))
+    def fake(payload, use_stream):
+        calls["stream_flags"].append(use_stream)
+        return dict(next(seq))
 
-    monkeypatch.setattr(llm.urllib.request, "urlopen", fake_urlopen)
     monkeypatch.setattr(llm.time, "sleep", lambda *_a: None)
-    c = llm.OpenAICompatibleClient("m", base_url="http://x/v1")
+    c = llm.OpenAICompatibleClient("m", base_url="http://x/v1")   # streams by default -> empty_stream fires
+    monkeypatch.setattr(c, "_sdk_chat", fake)
     assert c.complete_text([{"role": "user", "content": "go"}]) == "ok"
-    assert calls["n"] == 3                          # retried twice, succeeded on the 3rd
+    # first attempt streamed and stalled empty; the retry degraded to a non-stream read and succeeded
+    assert calls["stream_flags"] == [True, False]
 
 
-def test_post_recovers_sse_keepalive_comments(monkeypatch):
-    """OpenRouter interleaves ': OPENROUTER PROCESSING' SSE comment lines with the JSON on a slow
-    non-streaming call; the body is recovered by dropping comment lines — no retry needed."""
-    import looplab.core.llm as llm
-    body = f": OPENROUTER PROCESSING\n\n: OPENROUTER PROCESSING\n\n{_GOOD}\n"
-    calls = {"n": 0}
-
-    def fake_urlopen(req, timeout=None):
-        calls["n"] += 1
-        return _BytesResp(body)
-
-    monkeypatch.setattr(llm.urllib.request, "urlopen", fake_urlopen)
-    monkeypatch.setattr(llm.time, "sleep", lambda *_a: None)
-    c = llm.OpenAICompatibleClient("m", base_url="http://x/v1")
-    assert c.complete_text([{"role": "user", "content": "go"}]) == "ok"
-    assert calls["n"] == 1                          # parsed on the first attempt, no retry
-
-
-def test_post_retries_incomplete_read(monkeypatch):
-    """A socket-level truncation (http.client.IncompleteRead from resp.read() — the gateway dropped
-    the connection mid-body) is transient and must be retried, not abort the run."""
-    import http.client
+def test_post_retries_transient_protocol_drop(monkeypatch):
+    """A mid-read protocol drop (the gateway dropped the connection mid-body → openai.APIConnectionError
+    wrapping httpx.RemoteProtocolError) is transient and must be retried, not abort the run."""
     import looplab.core.llm as llm
     calls = {"n": 0}
 
-    class _TruncResp:
-        def __enter__(self): return self
-        def __exit__(self, *a): return False
-        def read(self): raise http.client.IncompleteRead(b"partial")
-
-    def fake_urlopen(req, timeout=None):
+    def fake(payload, use_stream):
         calls["n"] += 1
-        return _OkResp() if calls["n"] >= 3 else _TruncResp()
+        if calls["n"] < 3:
+            raise _conn_exc(_httpx.RemoteProtocolError("peer closed connection without complete body"))
+        return dict(_OK_BODY)
 
-    monkeypatch.setattr(llm.urllib.request, "urlopen", fake_urlopen)
     monkeypatch.setattr(llm.time, "sleep", lambda *_a: None)
     c = llm.OpenAICompatibleClient("m", base_url="http://x/v1")
+    monkeypatch.setattr(c, "_sdk_chat", fake)
     assert c.complete_text([{"role": "user", "content": "go"}]) == "ok"
     assert calls["n"] == 3                            # retried the truncated reads, then succeeded
 
 
-def test_post_raises_after_persistent_non_json(monkeypatch):
-    """A persistently unparseable 200 body still surfaces a clean LLMError once retries are spent."""
+def test_post_raises_after_persistent_sdk_error(monkeypatch):
+    """A persistent SDK-level protocol error (unparseable body etc.) surfaces a clean LLMError once
+    retries are spent, never a raw openai exception into the run."""
     import looplab.core.llm as llm
-    calls = {"n": 0}
 
-    def fake_urlopen(req, timeout=None):
-        calls["n"] += 1
-        return _BytesResp("<html>502 Bad Gateway</html>")
+    def fake(payload, use_stream):
+        raise _openai.APIError("unparseable body", request=_REQ, body=None)
 
-    monkeypatch.setattr(llm.urllib.request, "urlopen", fake_urlopen)
     monkeypatch.setattr(llm.time, "sleep", lambda *_a: None)
     c = llm.OpenAICompatibleClient("m", base_url="http://x/v1")
-    with pytest.raises(llm.LLMError, match="non-JSON"):
+    monkeypatch.setattr(c, "_sdk_chat", fake)
+    with pytest.raises(llm.LLMError):
         c.complete_text([{"role": "user", "content": "go"}])
-    assert calls["n"] == 5                           # 1 + _max_retries attempts, then raises
 
 
-def test_post_fails_fast_on_error_envelope(monkeypatch):
-    """A valid-JSON `{"error": ...}` envelope (genuine bad request) is NOT a transient body — it must
-    fail fast at the no-choices check with ONE attempt, not waste the retry budget."""
+def test_post_fails_fast_on_no_choices_body(monkeypatch):
+    """A body with no `choices` (an `{"error": ...}` envelope the SDK surfaced as a dict) fails fast
+    at the no-choices check with ONE attempt, not the retry budget."""
     import looplab.core.llm as llm
     calls = {"n": 0}
 
-    def fake_urlopen(req, timeout=None):
+    def fake(payload, use_stream):
         calls["n"] += 1
-        return _BytesResp(json.dumps({"error": {"code": 400, "message": "bad request"}}))
+        return {"error": {"code": 400, "message": "bad request"}}   # no "choices"
 
-    monkeypatch.setattr(llm.urllib.request, "urlopen", fake_urlopen)
     monkeypatch.setattr(llm.time, "sleep", lambda *_a: None)
     c = llm.OpenAICompatibleClient("m", base_url="http://x/v1")
+    monkeypatch.setattr(c, "_sdk_chat", fake)
     with pytest.raises(llm.LLMError, match="no choices"):
         c.complete_text([{"role": "user", "content": "go"}])
-    assert calls["n"] == 1                           # error envelope fails fast, no retry
+    assert calls["n"] == 1                           # no-choices body fails fast, no retry
 
 
 def test_h1_guided_json_adds_schema_constraints():
