@@ -22,7 +22,7 @@ import orjson
 from looplab.core.models import NodeStatus, RunState
 from looplab.engine.memory import JsonlCaseLibrary
 from looplab.events.replay import fold
-from looplab.events.types import EV_LESSONS_DISTILLED, EV_LESSONS_REFRESHED
+from looplab.events.types import EV_LESSONS_DISTILLED, EV_LESSONS_REFRESHED, EV_REFLECTION_NOTE
 
 if TYPE_CHECKING:  # engine type hint only — no runtime import of the orchestrator
     from looplab.engine.orchestrator import Engine
@@ -156,6 +156,7 @@ class LessonMemory:
         best = final.best()
         base = Path(self._e.memory_dir)
         base.mkdir(parents=True, exist_ok=True)
+        note = ""            # the causal "why the winner won" summary (set below when there's a winner)
         # The winner note needs a winner — but hypothesis/failure lessons below do NOT: a run in
         # which every node failed is exactly the negative lesson M3 exists to record.
         if best is not None:
@@ -222,11 +223,25 @@ class LessonMemory:
         # fingerprint that re-confirms it promotes it. Best-effort; never fails the run.
         from looplab.engine.memory import write_auto_skill
         sk_dir = base / "skills"
+        skills: list[str] = []
         for h in (final.hypotheses or {}).values():
             if h.status == "supported" and (h.best_delta or 0) > 0:
                 ev = [final.nodes[i] for i in h.evidence if i in final.nodes]
                 write_auto_skill(sk_dir, h.statement,
                                  self._e._distill_skill_body(final, h, ev), fp, final.task_id)
+                skills.append(h.statement)
+
+        # Audit the run-end distillation in the event log (diagnostic sidecar — fold ignores it). These
+        # LLM artifacts (the causal note, the generalizable lessons, the auto-promoted skills) shape
+        # FUTURE runs' priors/skills yet otherwise leave no trace in THIS run's events.jsonl — only in
+        # cross-run files. One summary event makes "what this run concluded & wrote to memory" visible.
+        self._e.store.append(EV_REFLECTION_NOTE, {
+            "task_id": final.task_id, "fingerprint": fp, "note": note,
+            "n_lessons": len(lessons), "n_skills": len(skills),
+            "lessons": [{"statement": lz.get("statement", ""), "outcome": lz.get("outcome", "")}
+                        if isinstance(lz, dict) else {"statement": str(lz), "outcome": ""}
+                        for lz in lessons[:12]],
+            "skills": skills[:8]})
 
     def reflect_lessons(self, final: RunState, best, fp: list) -> list:
         """LLM reflection over the whole run → 1-3 GENERALIZABLE lessons (transferable good/bad

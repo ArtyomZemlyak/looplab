@@ -262,6 +262,24 @@ def test_run_end_writes_comparative_rows_and_records_spent_pairs(tmp_path):
     assert end_events and end_events[0]["pairs"]
 
 
+def test_run_end_emits_reflection_note(tmp_path):
+    # run-end LLM distillation (causal note + lessons + auto-skills) writes to cross-run files but
+    # otherwise never touches events.jsonl — now a single `reflection_note` event audits it.
+    eng = _engine(tmp_path, reflection_priors=True, memory_dir=str(tmp_path / "mem"))
+    anyio.run(eng.run)
+    notes = [e for e in eng.store.read_all() if e.type == "reflection_note"]
+    assert len(notes) == 1
+    d = notes[0].data
+    assert d["task_id"] == "toy_quadratic"
+    assert "n_lessons" in d and "n_skills" in d and isinstance(d["lessons"], list)
+
+
+def test_no_reflection_note_when_reflection_off(tmp_path):
+    eng = _engine(tmp_path)                          # reflection_priors/memory_dir not set
+    anyio.run(eng.run)
+    assert not [e for e in eng.store.read_all() if e.type == "reflection_note"]
+
+
 def test_comparative_off_writes_no_comparative_rows(tmp_path):
     mem = tmp_path / "mem"
     eng = _engine(tmp_path, reflection_priors=True, memory_dir=str(mem))  # flag not passed
