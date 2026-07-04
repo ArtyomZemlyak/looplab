@@ -375,13 +375,11 @@ def test_cross_run_transfer_of_comparative_lessons(tmp_path):
 # Config wiring
 # --------------------------------------------------------------------------- #
 
-def test_settings_defaults_and_thorough_profile():
-    from looplab.core.config import PROFILES, Settings
+def test_settings_defaults_on():
+    from looplab.core.config import Settings
     s = Settings()
     assert s.comparative_lessons is True                          # product default: ON
-    assert s.lessons_every == 0 and s.lessons_refresh_every == 0  # mid-run cadences opt-in
-    assert PROFILES["thorough"]["lessons_every"] == 4
-    assert PROFILES["thorough"]["lessons_refresh_every"] == 4
+    assert s.lessons_every == 4 and s.lessons_refresh_every == 4  # mid-run live share: ON
 
 
 def test_engine_defaults_off_without_flags(tmp_path):

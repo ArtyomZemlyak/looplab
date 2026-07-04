@@ -51,8 +51,6 @@ PROFILES: dict[str, dict] = {
         "budget_aware": True,
         "failure_reflection": True,
         "reflection_priors": True,     # no-op unless memory_dir is set (cross-run priors)
-        "lessons_every": 4,            # M6: mid-run comparative distillation into the shared store
-        "lessons_refresh_every": 4,    # M6: mid-run re-read (live pickup of concurrent runs' lessons)
     },
 }
 
@@ -248,10 +246,12 @@ class Settings(BaseSettings):
     # M6 mid-run cadences (doc 13 §7 item 5 — the AgentRxiv live-share pattern): every N created
     # nodes, WRITE comparative lessons to the shared cross-run store during the run (lessons_every)
     # and RE-READ the store so lessons distilled by CONCURRENT runs reach this run's proposals
-    # (lessons_refresh_every; pure file re-read, no LLM call). 0 = off — run-end write / run-start
-    # read only, the pre-M6 behavior.
-    lessons_every: int = Field(default=0, ge=0)
-    lessons_refresh_every: int = Field(default=0, ge=0)
+    # (lessons_refresh_every; pure file re-read, no LLM call). ON by default (every 4 nodes; the
+    # write side batches all pairs into one LLM call, so the added cost is bounded); 0 = off —
+    # run-end write / run-start read only, the pre-M6 behavior. Like the rest of reflection
+    # memory, both are a NO-OP until memory_dir is set.
+    lessons_every: int = Field(default=4, ge=0)
+    lessons_refresh_every: int = Field(default=4, ge=0)
     # B3 output redaction: mask credentials (known key shapes + high-entropy tokens) in the
     # stdout/stderr tail before it is persisted to the event log / spans / UI — a leaked secret in a
     # print()/traceback must not land in the durable log. Off by default; recommend on for untrusted.
