@@ -123,6 +123,7 @@ def make_llm_client(settings, *, model: str | None = None,
         reasoning=reasoning,                                        # provider-aware thinking toggle
         stream=getattr(settings, "llm_stream", True),              # inter-token idle-timeout via SSE
         header_timeout=float(getattr(settings, "llm_header_timeout", 45.0) or 45.0),
+        trust_env=bool(getattr(settings, "llm_trust_env", False)),  # direct-connect by default (bypass proxy)
         cache=getattr(settings, "llm_cache", False),               # T7 deterministic-response cache
         **extra,
     )

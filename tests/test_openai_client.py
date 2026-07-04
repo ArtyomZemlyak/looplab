@@ -563,30 +563,38 @@ def test_llm_transport_error_is_clean_and_falls_back():
 
 def test_stream_idle_guard_kills_keepalive_trickle():
     """A stream that yields NO events (an SSE keepalive-comment trickle the SDK filters out) must not
-    hang: the idle-guard watchdog closes the response after idle_limit and surfaces APITimeoutError —
-    httpx's per-read timeout alone can't catch this (keepalive bytes reset it)."""
+    hang: the idle-guard watchdog SHUTS DOWN the underlying socket after idle_limit and surfaces
+    APITimeoutError — httpx's per-read timeout alone can't catch this (keepalive bytes reset it), and
+    resp.close() alone can't unblock a kernel recv (verified live) — only socket.shutdown() does."""
     import threading
     from looplab.core.llm import _stream_with_idle_guard
-    closed = threading.Event()
+    shot = threading.Event()
+
+    class _Sock:                       # exposed via the httpx network_stream extension
+        def shutdown(self, _how):
+            shot.set()                 # shutdown() is what unblocks the blocked read
+
+    class _NS:
+        def get_extra_info(self, _k):
+            return _Sock()
 
     class _Resp:
         request = None
+        extensions = {"network_stream": _NS()}
         def close(self):
-            closed.set()
+            pass
 
     class _Stream:
         response = _Resp()
-        def close(self):
-            closed.set()
         def __iter__(self):
             return self
         def __next__(self):
-            closed.wait(timeout=5)     # block like a keepalive-trickle read until the watchdog closes us
+            shot.wait(timeout=5)       # block like a stalled read until the watchdog shuts the socket
             raise StopIteration
 
     with pytest.raises(_openai.APITimeoutError):
         list(_stream_with_idle_guard(_Stream(), idle_limit=0.3))
-    assert closed.is_set()
+    assert shot.is_set()               # the watchdog reached the socket and shut it down
 
 
 def test_stream_idle_guard_disabled_passes_through():

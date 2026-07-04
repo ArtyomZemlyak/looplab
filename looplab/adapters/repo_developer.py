@@ -520,19 +520,19 @@ class LLMRepoDeveloper:
              base_deleted: Optional[list] = None) -> str:
         from looplab.agents.agent import drive_tool_loop
         write = RepoWriteTools(self._surface, self._protected, self._prefixes, editables=self._editables)
-        if error and (self.last_files or self.last_deleted):   # repair: carry prior state so the
-            write.files = dict(self.last_files)                # agent amends it — and so the node's
-            write.deleted = list(self.last_deleted)            # recorded deletions aren't lost on
-            #   a re-materialization (multi-seed confirm / replay / cross-run import), which would
-            #   otherwise resurrect a file the search deleted and measure a different workspace.
-        elif base or base_deleted:
-            # IMPROVE/REFINE from a parent solution: pre-load the parent's files so untouched ones
-            # carry over verbatim (cumulative parent→child diff) — the agent PATCHES, it does not
-            # regenerate the whole solution from the pristine repo. Deletions carry too: without
-            # them the child's workdir re-seeds the pristine repo with the parent's deleted files
-            # RESTORED — a different workspace than "parent + patch".
+        if base is not None or base_deleted is not None:
+            # An EXPLICIT base is the node's OWN solution — the parent's (improve/refine via
+            # implement_from) or the failing node's (repair via repair_from). Pre-load it so untouched
+            # files carry over verbatim (cumulative diff — the agent PATCHES, doesn't regenerate from
+            # the pristine repo) and deletions carry too (else the workdir re-seeds the pristine repo
+            # with a deleted file RESTORED). This WINS over `last_files` even for a repair, because the
+            # shared developer instance's `last_files` holds whatever node it BUILT LAST — almost never
+            # the node being repaired (the create-batch builds every node before any eval).
             write.files = dict(base or {})
             write.deleted = list(base_deleted or [])
+        elif error and (self.last_files or self.last_deleted):   # legacy repair (no explicit base):
+            write.files = dict(self.last_files)                  # best-effort carry of the last build
+            write.deleted = list(self.last_deleted)
         params = ", ".join(f"{k}={v}" for k, v in (idea.params or {}).items()) or "(choose sensible values)"
         from looplab.core.hardware import operational_attention_points
         system = (
@@ -589,6 +589,16 @@ class LLMRepoDeveloper:
 
     def repair(self, idea: Idea, code: str, error: str) -> str:
         return self._run(idea, error=error)
+
+    def repair_from(self, idea: Idea, node, error: str) -> str:
+        """Repair seeded from the FAILING NODE's OWN files (not the shared developer's `last_files`,
+        which holds whatever node it built last — almost never this one). Falls back to the legacy
+        last_files carry only when the node has no files (single-file / non-repo)."""
+        files = dict(getattr(node, "files", {}) or {})
+        deleted = list(getattr(node, "deleted", []) or [])
+        if not files and not deleted:
+            return self._run(idea, error=error)
+        return self._run(idea, error=error, base=files, base_deleted=deleted)
 
 
 class LLMOnboarder:

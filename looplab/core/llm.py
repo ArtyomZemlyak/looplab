@@ -92,41 +92,63 @@ def _sdk_transient(exc: Exception) -> bool:
     return True                                   # reset / EOF / protocol error mid-read → transient
 
 
-def _stream_with_idle_guard(stream, idle_limit: float):
-    """Yield the SDK stream's events, but a background watchdog CLOSES the underlying httpx response
-    if no event arrives for `idle_limit`s. httpx's per-read timeout only catches TRUE silence — an SSE
-    KEEPALIVE-COMMENT trickle (`: keepalive`) resets it on every byte, and the SDK's decoder skips
-    those comment lines, so its iterator blocks on the next `data:` event FOREVER while bytes keep
-    arriving (the exact multi-minute hang the old socket-watchdog prevented; httpx alone does not).
-    The watchdog keys on real EVENTS (the SDK already filters keepalives), closes the response to
-    unblock the read, and the stall surfaces as openai.APITimeoutError → `_post` degrades+retries.
-    idle_limit<=0 disables the guard (test iterators / non-httpx streams)."""
+def _stream_raw_socket(resp):
+    """The raw socket behind an httpx STREAMING response, via the `network_stream` transport
+    extension. Needed because `response.close()` does NOT interrupt a read already blocked in the
+    kernel — only `socket.shutdown()` does (the same lesson the old urllib watchdog learned)."""
+    try:
+        ns = resp.extensions.get("network_stream")
+        return ns.get_extra_info("socket") if ns is not None else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _stream_with_idle_guard(stream, idle_limit: float, first_byte_limit: float = 0.0):
+    """Yield the SDK stream's events, but a background watchdog SHUTS DOWN the underlying socket if no
+    event arrives in time. Two deadlines: `first_byte_limit` until the FIRST event (bounds a black-
+    holed request that accepts the socket then answers nothing — httpx `connect` only bounds TCP/TLS
+    establishment, NOT the wait for headers/first byte, so this is what actually caps first-byte),
+    then `idle_limit` between events. httpx's per-read timeout can't catch either: an SSE KEEPALIVE-
+    COMMENT trickle (`: keepalive`) resets it on every byte while the SDK's decoder skips those
+    comment lines, so its iterator blocks on the next `data:` event FOREVER. The watchdog keys on
+    real EVENTS (keepalives are already filtered) and calls socket.shutdown() — `resp.close()` alone
+    can't unblock a kernel recv (verified live) — so the stall surfaces as openai.APITimeoutError →
+    `_post` degrades+retries. idle_limit<=0 or a non-httpx stream (test iterators) disables it."""
     if not idle_limit:
         yield from stream
         return
+    import socket as _socket
     import threading
     resp = getattr(stream, "response", None)
-    if resp is None:                              # a plain iterator (tests) — nothing to close
+    sock = _stream_raw_socket(resp) if resp is not None else None
+    if sock is None:                              # a plain iterator / no socket handle — nothing to kill
         yield from stream
         return
     last = [time.monotonic()]
+    seen = [False]                                # has the FIRST real event arrived yet
     killed = [False]
     stop = threading.Event()
+    fb = first_byte_limit if first_byte_limit and first_byte_limit > 0 else idle_limit
 
     def _wd():
-        while not stop.wait(min(5.0, idle_limit / 4)):
-            if time.monotonic() - last[0] > idle_limit:
+        while not stop.wait(min(5.0, min(fb, idle_limit) / 4)):
+            limit = idle_limit if seen[0] else fb   # first-byte window before any event, idle after
+            if time.monotonic() - last[0] > limit:
                 killed[0] = True
-                for closer in (resp, stream):
-                    try:
-                        closer.close()
-                    except Exception:  # noqa: BLE001
-                        pass
+                try:
+                    sock.shutdown(_socket.SHUT_RDWR)   # unblocks a recv() stuck in the kernel
+                except Exception:  # noqa: BLE001
+                    pass
+                try:
+                    resp.close()                       # fallback (mock-friendly / frees the response)
+                except Exception:  # noqa: BLE001
+                    pass
                 return
 
     threading.Thread(target=_wd, daemon=True).start()
     try:
         for ev in stream:                         # each yielded event = real progress (keepalives filtered)
+            seen[0] = True
             last[0] = time.monotonic()
             yield ev
     except Exception:
@@ -516,7 +538,7 @@ class OpenAICompatibleClient:
                  timeout: float = 180.0, accountant: Optional["CostAccountant"] = None,
                  guided_json: bool = False, reasoning: Optional[dict] = None,
                  stream: bool = True, cache: bool = False,
-                 header_timeout: Optional[float] = None):
+                 header_timeout: Optional[float] = None, trust_env: bool = True):
         self.model = model
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key or "x"
@@ -562,19 +584,19 @@ class OpenAICompatibleClient:
         # T7: in-process content-addressed response cache for DETERMINISTIC (temperature 0) calls
         # only. None = disabled (default). Never caches sampling calls (temp>0) — those must vary.
         self._cache: Optional[dict] = {} if cache else None
-        # Transport: the openai SDK over an httpx client. httpx enforces a per-read timeout that
-        # RELIABLY interrupts a stalled mid-stream read (the urllib+ssl path couldn't — a glm SSE
-        # stall hung for minutes). `connect` = the first-byte/header window (a black-holed request
-        # fails over fast); `read` = the inter-token idle limit (a steady generation keeps resetting
-        # it, so a long-but-alive stream is never cut off). `trust_env=False` ignores proxy env vars
-        # (the internal endpoint needs a DIRECT connection). max_retries=0: we own the retry loop in
-        # `_post` (reasoning-drop + stream→non-stream degrade + Retry-After), which the SDK can't do.
+        # Transport: the openai SDK over an httpx client. `connect` bounds TCP/TLS establishment;
+        # `read` = the inter-read idle limit (a long-but-alive generation keeps resetting it, so it's
+        # never cut off). IMPORTANT: httpx's `read` timeout can't catch an SSE keepalive-trickle
+        # (bytes reset it while no data EVENT arrives) NOR bound the wait-for-FIRST-byte — those are
+        # enforced by `_stream_with_idle_guard` on the STREAM path (idle_limit=timeout,
+        # first_byte_limit=header_timeout). The per-request timeout lives on the OpenAI client
+        # (`timeout=`), which wins over the http_client's; the http_client exists only to set
+        # `trust_env=False` (the internal endpoint needs a DIRECT connection — no proxy env). See
+        # `llm_trust_env` if a proxy/custom-CA is required. max_retries=0: we own the retry loop.
         self._sdk = openai.OpenAI(
             base_url=self.base_url, api_key=self.api_key, max_retries=0,
             timeout=httpx.Timeout(read=self.timeout, connect=self.header_timeout, write=30.0, pool=10.0),
-            http_client=httpx.Client(trust_env=False,
-                                     timeout=httpx.Timeout(read=self.timeout, connect=self.header_timeout,
-                                                           write=30.0, pool=10.0)))
+            http_client=httpx.Client(trust_env=trust_env))
 
     def _sdk_chat(self, payload: dict, use_stream: bool) -> dict:
         """The single transport seam: one openai-SDK chat call, returned in the legacy body shape
@@ -600,12 +622,13 @@ class OpenAICompatibleClient:
         if use_stream:
             kwargs["stream"] = True
             kwargs["stream_options"] = {"include_usage": True}
-            return self._accumulate_stream(self._sdk.chat.completions.create(**kwargs), self.timeout)
+            return self._accumulate_stream(self._sdk.chat.completions.create(**kwargs),
+                                           self.timeout, self.header_timeout)
         resp = self._sdk.chat.completions.create(**kwargs)
         return resp.model_dump()
 
     @staticmethod
-    def _accumulate_stream(stream, idle_limit: float = 0.0) -> dict:
+    def _accumulate_stream(stream, idle_limit: float = 0.0, first_byte_limit: float = 0.0) -> dict:
         """Reassemble an SDK streaming response into the non-streaming body shape. Merges tool_call
         deltas by index (partial name/arguments concatenated), captures reasoning deltas, and keeps
         the final include_usage chunk. httpx's read timeout bounds each iteration — a stall surfaces
@@ -615,7 +638,7 @@ class OpenAICompatibleClient:
         tcs: dict[int, dict] = {}
         finish = None
         usage: dict = {}
-        for ev in _stream_with_idle_guard(stream, idle_limit):
+        for ev in _stream_with_idle_guard(stream, idle_limit, first_byte_limit):
             if getattr(ev, "usage", None):
                 usage = ev.usage.model_dump()
             if not ev.choices:
@@ -814,13 +837,14 @@ class OpenAICompatibleClient:
                 raise LLMError(f"LLM request to {self.base_url} failed: {e}") from e
             except openai.APIError as e:   # any other SDK-level protocol error -> clean LLMError
                 raise LLMError(f"LLM request to {self.base_url} failed: {e}") from e
-            except (json.JSONDecodeError, ValueError, AttributeError) as e:
+            except json.JSONDecodeError as e:
                 # A gateway 200 with an empty / whitespace / keepalive-only body makes the SDK's
-                # decoder raise a RAW json.JSONDecodeError (application/json) or AttributeError
-                # (text/event-stream), which are NOT openai.APIError — so without this they'd escape
-                # `_post` uncaught and abort the run (the role layer only retries+falls back on
-                # LLMError). Mirror the old `_parse_chat_body`-None path: treat as a transient gateway
-                # hiccup — retry with backoff, then a clean LLMError. (JSONDecodeError ⊂ ValueError.)
+                # decoder raise a RAW json.JSONDecodeError — NOT an openai.APIError — so without this
+                # it'd escape `_post` uncaught and abort the run (the role layer only retries+falls
+                # back on LLMError). Mirror the old `_parse_chat_body`-None path: a transient gateway
+                # hiccup — retry with backoff, then a clean LLMError. NARROW on purpose: a ValueError/
+                # AttributeError from our own _accumulate_stream/_tool_call_slot code must NOT be
+                # masked here as a "gateway hiccup" — let a real accumulation bug propagate loudly.
                 if attempt < self._max_retries:
                     time.sleep(_backoff(attempt))
                     continue
@@ -917,7 +941,7 @@ class OpenAICompatibleClient:
                     # interrupt the urllib+watchdog path approximated. Reasoning-param retry mirrors
                     # `_post`: a model that 400s on the toggle (glm-5.1) drops it and retries once.
                     for ev in _stream_with_idle_guard(
-                            self._sdk.chat.completions.create(**kwargs), self.timeout):
+                            self._sdk.chat.completions.create(**kwargs), self.timeout, self.header_timeout):
                         if getattr(ev, "usage", None):
                             usage = ev.usage.model_dump()
                         if not ev.choices:

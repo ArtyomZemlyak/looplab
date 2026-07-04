@@ -111,6 +111,15 @@ class UnifiedAgent(WrapsDeveloper):
         self._sync_audit()
         return out
 
+    def repair_from(self, idea: Idea, node, error: str) -> str:
+        """Node-aware repair: delegate to the inner developer's repair_from (seeds the failing node's
+        OWN files) when available, else the plain repair(idea, node.code, error)."""
+        rf = getattr(self.developer, "repair_from", None)
+        out = (rf(idea, node, error) if callable(rf)
+               else self.repair(idea, getattr(node, "code", ""), error))
+        self._sync_audit()
+        return out
+
     # ----------------------------------------------------------- Strategist
     def decide(self, state: RunState, ctx):
         """Strategist Protocol: delegate to the strategy-stage backend (None => keep current)."""

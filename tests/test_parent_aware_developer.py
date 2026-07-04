@@ -290,3 +290,47 @@ def test_edit_file_syntax_gate_rejects_broken_python():
     # editing an ALREADY-broken .py is allowed (fixing it)
     w.files["broke.py"] = "def g(:\n pass\n"
     assert "1 hunk applied" in w.execute("edit_file", {"path": "broke.py", "search": "def g(:", "replace": "def g():"})
+
+
+def test_repair_from_seeds_the_failing_nodes_own_files():
+    """repair_from must seed the working set from the FAILING NODE's own files, NOT the shared
+    developer's `last_files` (which holds whatever node it built last — almost never this one)."""
+    from looplab.adapters.repo_developer import LLMRepoDeveloper
+
+    class _DoneClient:
+        def chat(self, messages, tools, tool_choice="auto"):
+            return {"content": "", "tool_calls": [
+                {"id": "c1", "function": {"name": "done", "arguments": '{"summary":"ok"}'}}]}
+
+    dev = LLMRepoDeveloper.__new__(LLMRepoDeveloper)
+    dev.client = _DoneClient(); dev.brief = "b"; dev.loop_opts = {}
+    dev._surface = ["**/*.py"]; dev._protected = set(); dev._prefixes = (); dev._editables = []
+    dev._recipes = lambda: "(none)"; dev._results_context = lambda: ""; dev._repo_context = lambda: "(repo)"
+    dev._emit_spec = lambda: {"type": "function", "function": {
+        "name": "done", "parameters": {"type": "object", "properties": {"summary": {"type": "string"}}}}}
+    dev.last_files = {"other.py": "WRONG"}; dev.last_deleted = []      # the last-built (wrong) node
+    node = Node(id=5, operator="improve", idea=Idea(operator="improve", params={}),
+                files={"solution.py": "RIGHT = 1"}, deleted=["dead.py"])
+    dev.repair_from(Idea(operator="improve", params={}, rationale="fix"), node, "some error")
+    assert dev.last_files.get("solution.py") == "RIGHT = 1"          # seeded from the NODE's files
+    assert "other.py" not in dev.last_files                          # NOT the wrong node's files
+    assert dev.last_deleted == ["dead.py"]                           # the node's deletions carried
+
+
+def test_orchestrator_repair_routes_to_repair_from():
+    from looplab.engine.orchestrator import Engine
+
+    class _RepairAwareDev:
+        def __init__(self): self.got = None
+        def repair_from(self, idea, node, error): self.got = node; return "from"
+        def repair(self, idea, code, error): return "plain"
+
+    class _PlainDev:
+        def repair(self, idea, code, error): return "plain"
+
+    node = Node(id=3, operator="improve", idea=Idea(operator="improve", params={}), code="C")
+    eng = Engine.__new__(Engine)
+    eng.developer = _RepairAwareDev()
+    assert eng._repair(node, "err") == "from" and eng.developer.got is node
+    eng.developer = _PlainDev()
+    assert eng._repair(node, "err") == "plain"

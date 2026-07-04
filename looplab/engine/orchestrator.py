@@ -1684,6 +1684,16 @@ class Engine(ConfirmPhaseMixin, AblationMixin):
             return impl_from(idea, parent)
         return self.developer.implement(idea)
 
+    def _repair(self, node, err: str) -> str:
+        """Route a repair through `repair_from(idea, node, error)` when the Developer supports it, so
+        the fix is seeded from the FAILING NODE's OWN files — not the shared developer's `last_files`,
+        which holds whatever node it built last (a batch builds every node before any eval, so
+        `last_files` is almost never the node being repaired). Falls back to `repair(idea, code, err)`."""
+        rf = getattr(self.developer, "repair_from", None)
+        if callable(rf):
+            return rf(node.idea, node, err)
+        return self.developer.repair(node.idea, node.code, err)
+
     def _emit_node_created(self, *, node_id: int, parent_ids: list, operator: str, idea: dict,
                            code: str, files: dict, deleted=_OMIT, research_origin=_OMIT,
                            source=_OMIT, origin=_OMIT) -> None:
@@ -1747,7 +1757,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin):
                     err = self._repair_error_context(parent.error_reason, parent.error,
                                                      state=state, node=parent)
                     with self.tracer.span("repair", parent_id=parent.id):
-                        code = repair(parent.idea, parent.code, err)
+                        code = self._repair(parent, err)   # seed from parent's OWN files (repair_from)
                 else:
                     with self.tracer.span("propose"):
                         idea = self.researcher.propose(state, parent)
@@ -2247,9 +2257,8 @@ class Engine(ConfirmPhaseMixin, AblationMixin):
                     break
                 # action == "repair": fix the code in place and re-eval (no new node, no budget spent).
                 with self.tracer.span("inline_repair", node_id=node_id, attempt=attempt + 1):
-                    new_code = self.developer.repair(
-                        node.idea, node.code,
-                        self._repair_error_context(reason, err, state=state, node=node))
+                    new_code = self._repair(
+                        node, self._repair_error_context(reason, err, state=state, node=node))
                 # Snapshot the developer's per-call audit state IMMEDIATELY, before any `await`: under
                 # max_parallel>1 the developer instance is SHARED across concurrent _evaluate tasks,
                 # and `async with self._write_lock` below is a checkpoint — a sibling task's repair()

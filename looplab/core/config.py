@@ -455,6 +455,11 @@ class Settings(BaseSettings):
     # NOT bounded by this (their headers arrive only after the whole generation). The default mirrors
     # `DEFAULT_HEADER_TIMEOUT_S` in looplab/core/llm.py is the single source (imported above).
     llm_header_timeout: float = Field(default=DEFAULT_HEADER_TIMEOUT_S, gt=0)
+    # Honour HTTP(S)_PROXY / NO_PROXY / SSL_CERT_FILE env vars for LLM calls. Default False: the
+    # transport connects DIRECTLY (many internal/OLAP endpoints are reachable only by bypassing an
+    # ambient proxy — a picked-up proxy yields "connection refused"). Set true when the endpoint is
+    # reachable ONLY via a corporate proxy or needs a custom CA bundle from the environment.
+    llm_trust_env: bool = False
     # H4: cap the growing agentic-researcher tool-call history (chars) by middle-truncating stale
     # tool output, so a long trace doesn't blow the context window. 0 = off (unbounded).
     context_budget_chars: int = 0
