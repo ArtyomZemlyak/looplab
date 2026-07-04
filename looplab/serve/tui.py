@@ -108,6 +108,8 @@ class Api:
     # ---- background-job polling: the server hands back {status:'running', job_id} for slow agent work
     # (genesis boss / action-router) so it can't 504 behind a proxy. We poll to completion. Mirrors
     # util.js genesisAwait / jobAwait. Transient poll errors are tolerated (keep polling).
+    # The 'running'/'done'/'unknown' status strings matched below are the job wire protocol named in
+    # looplab/serve/protocol.py (JOB_RUNNING / JOB_DONE / JOB_UNKNOWN + the inline-wait convention).
     def _await_job(self, resp: Any, poll_path, *, interval: float, deadline_s: float) -> Any:
         if not isinstance(resp, dict) or resp.get("status") != "running" or not resp.get("job_id"):
             return resp                                     # fast path: already the final result
@@ -181,6 +183,8 @@ def fmt_ago(sec: Optional[float], now: Optional[float] = None) -> str:
 # Phase → (glyph, rich-colour, label). One source of truth for how a run's state reads at a glance,
 # shared by the dashboard table and the run-view status panel. `running` is inferred (not finished and
 # a live engine), so it isn't a server phase value — handled in phase_meta().
+# The keys are the server's phase names (`server._phase`) — named constants in
+# looplab/serve/protocol.py (PHASE_*); keep this map in sync with that vocabulary.
 _PHASE_META = {
     "finished":      ("✓", "green",        "finished"),
     "paused":        ("⏸", "yellow",       "paused"),

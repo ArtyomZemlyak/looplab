@@ -12,7 +12,6 @@ from __future__ import annotations
 import functools
 import hashlib
 import os
-import re
 import sys
 import time
 from pathlib import Path
@@ -22,27 +21,32 @@ import anyio
 import orjson
 
 from looplab.tools.agents_md import generate_agents_md
-from looplab.search.archive import DiversityArchive
 from looplab.trust.cv import cv_summary
 from looplab.events.eventstore import EventStore
 from looplab.events.types import (
     EV_ABLATE, EV_AGENT_DECISION, EV_AGENT_VALIDATED, EV_APPROVAL_REQUESTED,
-    EV_BEST_CONFIRMED, EV_BUDGET, EV_CONFIRM_DONE, EV_CONFIRM_EVAL, EV_DATA_LEAKAGE,
-    EV_DATA_PROFILED, EV_DATA_PROVENANCE, EV_DEPS_INSTALLED, EV_DIVERSITY_ARCHIVE,
+    EV_BEST_CONFIRMED, EV_CONFIRM_DONE, EV_CONFIRM_EVAL, EV_DATA_LEAKAGE,
+    EV_DATA_PROFILED, EV_DATA_PROVENANCE, EV_DEPS_INSTALLED,
     EV_DRIFT_UNAVAILABLE, EV_FORK_DONE, EV_HINT, EV_HOLDOUT_EVALUATED, EV_HOST_GRADING,
-    EV_HYPOTHESIS_ADDED, EV_INJECT_DONE, EV_INJECT_FAILED, EV_LESSONS_DISTILLED,
-    EV_LESSONS_REFRESHED, EV_LLM_COST, EV_NODE_ABORT, EV_NODE_CONFIRMED, EV_NODE_CREATED,
+    EV_HYPOTHESIS_ADDED, EV_INJECT_DONE, EV_INJECT_FAILED,
+    EV_NODE_ABORT, EV_NODE_CONFIRMED, EV_NODE_CREATED,
     EV_NODE_EVALUATED, EV_NODE_FAILED, EV_NODE_REPAIRED, EV_NOVELTY_REJECTED,
-    EV_POLICY_DECISION, EV_PROXY_SCORED, EV_READMODEL_SKIPPED, EV_REPORT_GENERATED,
+    EV_POLICY_DECISION, EV_PROXY_SCORED, EV_REPORT_GENERATED,
     EV_RESEARCH_COMPLETED, EV_REWARD_HACK_SUSPECTED, EV_RUN_FINISHED,
     EV_RUN_SETUP_FINISHED, EV_RUN_SETUP_STARTED, EV_RUN_STARTED, EV_RUNG_PROMOTED,
     EV_SETUP_FINISHED, EV_SETUP_STARTED, EV_SETUP_STEP, EV_SPEC_APPROVAL_REQUESTED,
     EV_SPEC_APPROVED, EV_SPEC_DRIFT, EV_SPEC_PROPOSED, EV_STRATEGY_DECISION,
     EV_WORKSPACE_CHANGED, EV_WORKSPACE_SEEDED)
 from looplab.trust.gate import one_se_better
-from looplab.serve.htmlview import render_html
 from looplab.trust.leakage import target_leakage, temporal_leakage, train_test_contamination
-from looplab.engine.memory import JsonlCaseLibrary
+from looplab.engine.finalize import finalize_run
+from looplab.engine.lessons import LessonMemory
+# Pure triage/fingerprint helpers extracted to looplab/engine/triage.py, imported back under
+# their original names so `looplab.engine.orchestrator._normalize_error_sig`, `._holdout_indices`
+# (& friends) stay importable — tests import them from this module path.
+from looplab.engine.triage import (_MAX_DEP_ROUNDS, _MECHANICAL_MARKERS,  # noqa: F401
+                                   _dir_fingerprint, _failure_reason, _holdout_indices,
+                                   _normalize_error_sig, _rule_triage, _shallow_fingerprint)
 from looplab.core.llm import BudgetExceeded
 from looplab.core.models import Idea, NodeStatus, RunState
 from looplab.search.operators import merge_idea
@@ -56,157 +60,10 @@ from looplab.agents.strategist import (
     validate_strategy,
 )
 from looplab.core.profile import profile_dataset
-from looplab.events.readmodel import build_readmodel
 from looplab.events.replay import fold
 from looplab.agents.roles import Developer, Researcher
 from looplab.runtime.sandbox import Sandbox
 from looplab.core.tracing import JsonlSpanExporter, Tracer
-
-
-def _dir_fingerprint(path) -> str:
-    """git HEAD SHA if `path` is (inside) a git repo, else a sha256 over sorted
-    (relpath, size, mtime_ns) — cheap and deterministic, catches edits/adds/removes without
-    reading file contents. A missing path fingerprints as 'absent'."""
-    import subprocess
-    p = Path(path)
-    if not p.exists():
-        return "absent"
-    try:
-        r = subprocess.run(["git", "-C", str(p), "rev-parse", "HEAD"],
-                           capture_output=True, text=True, encoding="utf-8", errors="replace")
-        if r.returncode == 0 and r.stdout.strip():
-            return "git:" + r.stdout.strip()
-    except OSError:
-        pass
-    if p.is_file():
-        st = p.stat()
-        return f"file:{st.st_size}:{st.st_mtime_ns}"
-    h = hashlib.sha256()
-    for f in sorted(p.rglob("*")):
-        if f.is_file() and ".git" not in f.parts:
-            st = f.stat()
-            h.update(f.relative_to(p).as_posix().encode())
-            h.update(f"{st.st_size}:{st.st_mtime_ns}".encode())
-    return "hash:" + h.hexdigest()[:16]
-
-
-def _shallow_fingerprint(path) -> str:
-    """Cheap signature for large/immutable mounts (data, references): git HEAD if it's a git
-    repo, else a single os.scandir of the TOP level (entry count + max mtime) — O(top-level),
-    never a recursive walk. Catches add/remove/replace at the root; deep edits to immutable
-    inputs aren't the resume-drift concern (the editable repos are, and those are deep-hashed)."""
-    import subprocess
-    p = Path(path)
-    if not p.exists():
-        return "absent"
-    try:
-        r = subprocess.run(["git", "-C", str(p), "rev-parse", "HEAD"],
-                           capture_output=True, text=True, encoding="utf-8", errors="replace")
-        if r.returncode == 0 and r.stdout.strip():
-            return "git:" + r.stdout.strip()
-    except OSError:
-        pass
-    if p.is_file():
-        st = p.stat()
-        return f"file:{st.st_size}:{st.st_mtime_ns}"
-    n, newest = 0, 0
-    with os.scandir(p) as it:
-        for e in it:
-            n += 1
-            try:
-                newest = max(newest, e.stat(follow_symlinks=False).st_mtime_ns)
-            except OSError:
-                pass
-    return f"dir:{n}:{newest}"
-
-
-def _failure_reason(res) -> str:
-    """Classify why an eval produced no usable metric, so the audit trail distinguishes a
-    crash from a timeout from a missing-deps setup failure from a drift rejection from a clean
-    run that simply printed no metric. Ordered most-specific first. (The "idea_rejected" reason
-    is NOT classified here — it is set by `_evaluate` when the crash-triage agent judges the idea
-    fundamentally wrong, which then steers `debug_action` away from that lineage.)"""
-    if getattr(res, "drift", None) is not None:
-        return "drift"
-    if res.timed_out:
-        return "timeout"
-    if (res.stderr or "").startswith("setup failed:"):
-        return "setup"
-    if res.exit_code != 0:
-        # OOM-kill: on a memory-capped pod (a JupyterHub cgroup limit) the kernel SIGKILLs a too-big
-        # eval — exit -9 (POSIX, Python returns -signal) or 137 (128+9) — with little/no Python
-        # traceback. Distinguish it from an ordinary crash so it's triaged as REPAIRABLE (reduce
-        # memory: batch/model size, subsample) instead of a silent abandon that recurs on every heavy
-        # eval. Heuristic: the SIGKILL signature with no real traceback in stderr (a timeout-kill is
-        # also SIGKILL but `res.timed_out` already returned "timeout" above, so it never reaches here).
-        if res.exit_code in (-9, 137) and "Traceback" not in (res.stderr or ""):
-            return "oom"
-        return "crash"
-    return "no_metric"          # exit 0 but no parseable metric emitted
-
-
-def _normalize_error_sig(err: str) -> str:
-    """T10: normalize an error before the anti-stuck compare — strip memory addresses, line
-    numbers, absolute paths and numeric literals so two SEMANTICALLY-identical errors (same
-    exception, same message shape) match even when incidental details differ. The exact-match
-    compare missed e.g. the same shape-mismatch recurring with different tensor sizes."""
-    import re
-    s = " ".join((err or "").strip().split())
-    s = re.sub(r"0x[0-9a-fA-F]+", "0xADDR", s)
-    s = re.sub(r"line \d+", "line N", s)
-    s = re.sub(r"(?:[A-Za-z]:)?[/\\][^\s'\":,)]+", "/PATH", s)
-    s = re.sub(r"\d+(?:\.\d+)?(?:e[+-]?\d+)?", "N", s)
-    return s[-160:]
-
-
-def _holdout_indices(n: int, fraction: float) -> frozenset:
-    """D1: the deterministic holdout partition over n host-held labels. A pure function of
-    (n, fraction) — identical on every resume/replay with no state to persist.
-
-    Reserves an EXACT count = round(fraction·n) rows (clamped to [1, n-1] whenever fraction>0), so
-    the holdout size is controlled even for small n — a per-index Bernoulli threshold would leave
-    the count uncontrolled (e.g. n=4, frac=0.25 could reserve 0/2/3 rows), making the champion-
-    selecting 'unseen signal' noisy on exactly the small-data tasks where it matters most. Which
-    rows are chosen is spread deterministically through the label order by Knuth multiplicative
-    hashing (no head/tail bias if the data is sorted)."""
-    if float(fraction) <= 0 or n < 2:
-        return frozenset()          # fraction 0 = holdout off; n<2 can't split without collapsing
-    k = max(1, min(n - 1, int(round(float(fraction) * n))))   # exact reserved count, non-degenerate
-    # Pick the k rows with the smallest hash — a stable, uniform, deterministic selection.
-    ranked = sorted(range(n), key=lambda i: (((i * 2654435761) & 0xFFFFFFFF), i))
-    return frozenset(ranked[:k])
-
-
-# Env-prep: max auto-install + re-run rounds per node before giving up (a re-run can reveal a
-# *second* missing lib; bound it so an odd install state can't loop). The `_dep_failed` cache
-# already prevents re-attempting the same uninstallable module.
-_MAX_DEP_ROUNDS = 6
-
-# Mechanical-failure signatures: a crash whose stderr matches one of these is almost always a
-# code/runtime defect (bad import, removed/renamed API, typo) — repairable in place from the
-# traceback alone. Used by the deterministic crash-triage fallback when no LLM agent is wired.
-_MECHANICAL_MARKERS = (
-    "ImportError", "ModuleNotFoundError", "NameError", "AttributeError", "SyntaxError",
-    "IndentationError", "TypeError", "unexpected keyword argument", "has no attribute",
-    "is not defined", "no attribute",
-)
-
-
-def _rule_triage(reason: str, error: str, attempt: int, max_attempts: int) -> dict:
-    """Deterministic crash-triage fallback (no LLM): repair a clear MECHANICAL crash — or a TIMEOUT
-    (too slow, not a wrong idea -> reduce compute) — while attempts remain, otherwise abandon.
-    Conservatively NEVER returns "reject_idea" — killing a whole idea lineage is a strong call
-    reserved for the LLM agent, so the rule path stays safe with the unified agent off (it only ever
-    repairs obvious mechanical crashes / timeouts or abandons)."""
-    err = error or ""
-    if reason in ("timeout", "oom") and attempt <= max_attempts:
-        why = ("timeout — reduce compute to fit the budget (rule-based)" if reason == "timeout"
-               else "OOM-killed — reduce memory: batch/model size or subsample to fit the pod limit (rule-based)")
-        return {"action": "repair", "rationale": why}
-    mechanical = any(s in err for s in _MECHANICAL_MARKERS)
-    if reason == "crash" and mechanical and attempt <= max_attempts:
-        return {"action": "repair", "rationale": "mechanical crash (rule-based)"}
-    return {"action": "abandon", "rationale": "non-mechanical failure or attempts exhausted (rule-based)"}
 
 
 class Engine:
@@ -415,14 +272,16 @@ class Engine:
         self._comparative_lessons_on = comparative_lessons
         self.lessons_every = max(0, lessons_every)
         self.lessons_refresh_every = max(0, lessons_refresh_every)
-        self._lessons_seen_stamp = None   # (size, mtime_ns) of the store at the last read
+        # Cross-run memory / lessons / reflection cluster (looplab/engine/lessons.py). The Engine
+        # keeps thin delegators under the original `_`-names below (tests call/monkeypatch them);
+        # the lessons-owned mutable state (seen stamp, prior note) lives on LessonMemory.
+        self.lessons = LessonMemory(self)
         self._track_hypotheses = track_hypotheses
         self._surrogate_explore = surrogate_explore
         # Unified self-driving agent: in unified mode `researcher is developer` (one object plays
         # both roles); `agent_drives_actions` additionally lets it pick the next macro action.
         self.unified_agent = unified_agent
         self.agent_drives_actions = unified_agent and agent_drives_actions
-        self._prior_note_text = ""   # E4: cross-run meta-review prior, loaded at run start
         self._strategy_fidelity: Optional[str] = None   # None => use the Idea's own profile
         self.max_parallel = max_parallel
         self.timeout = timeout
@@ -457,8 +316,7 @@ class Engine:
         self.docker_image = docker_image
         self._seed_mode = seed_mode or "auto"   # run-wide fallback for per-editable seeding
         self._run_setup_done = False             # run-level (once) dependency setup guard
-        import threading as _threading2
-        self._run_setup_lock = _threading2.Lock()   # _run_eval runs on parallel worker threads; the
+        self._run_setup_lock = _threading.Lock()   # _run_eval runs on parallel worker threads; the
         #   check-then-set on _run_setup_done races without this, launching run_setup (pip) N times
         self._drift_warned = False   # one-shot guard for the #8 drift-coverage warning
         # Fail loud at START, not mid-sweep: the untrusted tier needs docker, so verify it once
@@ -518,8 +376,7 @@ class Engine:
     def _write_assets(self, workdir) -> None:
         if not self._assets:
             return
-        from pathlib import Path as _P
-        wd = _P(workdir)
+        wd = Path(workdir)
         wd.mkdir(parents=True, exist_ok=True)
         for name, content in self._assets.items():
             (wd / name).write_text(content, encoding="utf-8")
@@ -531,7 +388,6 @@ class Engine:
         overwrite a task-owned file (e.g. the private `grader.py` answer key) via an
         in-surface `*.py` edit. Paths are surface-gated (no escapes) by the developer; we
         re-check defensively. Call BEFORE `_write_assets` so task assets always win."""
-        from pathlib import Path as _P
         files = getattr(node, "files", None) or {}
         deleted = getattr(node, "deleted", None) or []
         if not files and not deleted:
@@ -542,7 +398,7 @@ class Engine:
         import os as _os
         protected = {_os.path.normcase(n) for n in
                      ("solution.py", *self._assets, *self._repo_spec.get("protected_names", []))}
-        wd = _P(workdir).resolve()
+        wd = Path(workdir).resolve()
         wd.mkdir(parents=True, exist_ok=True)
         def _protected_after_resolve(target) -> bool:
             # Check the RESOLVED relative path against the protected set, not the raw name: a name like
@@ -578,7 +434,7 @@ class Engine:
             except OSError:
                 pass
 
-    # ----------------------------------------------------------------- public
+    # ------------------------------------------------------------ loop control
     async def run(self) -> RunState:
         state = fold(self.store.read_all())
         if not state.run_id:
@@ -966,83 +822,12 @@ class Engine:
                         tg.start_soon(self._evaluate, a["node_id"], limiter)
                         started += 1
 
-        # Finalize only on real completion (not when paused for approval / idempotent
-        # resume of a done run).
-        if not entry_finished and fold(self.store.read_all()).finished:
-            cur = fold(self.store.read_all())
-            self.store.append(EV_BUDGET, {                       # budget summary (I13 + #2)
-                "elapsed_s": round(time.time() - start, 3),
-                "eval_s": round(cur.total_eval_seconds, 3),
-                "nodes": len(cur.nodes),
-            })
-            self.store.append(EV_DIVERSITY_ARCHIVE,              # diversity archive (I22)
-                              DiversityArchive(self.archive_resolution).summary(cur))
-            self._emit_llm_cost()                               # LLM cost/tokens roll-up (UI)
-            self._store_case(fold(self.store.read_all()))       # cross-run memory (I19)
-            self._write_reflection_note(fold(self.store.read_all()))   # E4 cross-run meta-review prior
+        # Finalize (extracted to looplab/engine/finalize.py, a pure move): budget summary,
+        # diversity archive, LLM cost roll-up, case store + reflection note, read-model,
+        # trace.json + tree.html. Event emission order is preserved exactly.
+        return finalize_run(self, entry_finished=entry_finished, start_time=start)
 
-        # The SQLite read-model is a DERIVED, rebuildable cache that nothing in-process reads (the UI
-        # folds events.jsonl / reads trace.json). On a FUSE/S3 run dir (JupyterHub geesefs) sqlite's
-        # byte-range locks are unsupported and the write can raise `database is locked` / `disk I/O
-        # error` — which must NOT abort an otherwise-finished run. Build best-effort; the run state we
-        # actually need comes from the event fold regardless.
-        try:
-            final = build_readmodel(self.store.read_all(), self.run_dir / "readmodel.sqlite")
-        except Exception as e:  # noqa: BLE001 - derived cache; a FUSE sqlite failure must not kill finalize
-            final = fold(self.store.read_all())
-            try:
-                self.store.append(EV_READMODEL_SKIPPED, {"error": str(e)[:300]})
-            except Exception:  # noqa: BLE001 - even the audit note is best-effort
-                pass
-        # UI projection (ADR-17): join the research tree (events) to its execution detail
-        # (spans) -> trace.json for the React UI + an inline span tree in the static HTML.
-        from looplab.serve.traceview import build_trace_view, load_spans
-        tv = build_trace_view(final, load_spans(self.run_dir / "spans.jsonl"))
-        (self.run_dir / "trace.json").write_bytes(orjson.dumps(tv))
-        (self.run_dir / "tree.html").write_text(render_html(final, tv), encoding="utf-8")
-        return final
-
-    def _emit_llm_cost(self) -> None:
-        """Best-effort LLM cost/token roll-up for the UI cost panel. Duck-types the role graph
-        (researcher/developer may be wrapped by ToolUsingResearcher/ValidatingDeveloper) to find
-        every CostAccountant, dedupes by identity, and emits one `llm_cost` event. Local models
-        have no $ price (spent=0.0) but tokens are the real cost signal. Skips silently for the
-        offline/toy backend (no client, no accountant) — never breaks a run."""
-        try:
-            seen: dict[int, object] = {}
-            stack = [self.researcher, self.developer]
-            while stack:
-                obj = stack.pop()
-                if obj is None:
-                    continue
-                acc = getattr(obj, "accountant", None)
-                if acc is not None and id(acc) not in seen:
-                    seen[id(acc)] = acc
-                for attr in ("client", "inner", "fallback", "researcher", "developer",
-                             "strategist", "tools"):
-                    child = getattr(obj, attr, None)
-                    if child is not None and child is not obj:
-                        stack.append(child)
-                # Unified agent: per-stage clients (strategy/pilot) not on the attr graph above.
-                for c in (getattr(obj, "stage_clients", None) or []):
-                    if c is not None and c is not obj:
-                        stack.append(c)
-            if not seen:
-                return
-            accs = list(seen.values())
-            if not any(getattr(a, "calls", 0) for a in accs):
-                return  # no LLM calls actually happened (e.g. toy run) — nothing to report
-            self.store.append(EV_LLM_COST, {
-                "cost": round(sum(getattr(a, "spent", 0.0) for a in accs), 6),
-                "calls": sum(getattr(a, "calls", 0) for a in accs),
-                "prompt_tokens": sum(getattr(a, "prompt_tokens", 0) for a in accs),
-                "completion_tokens": sum(getattr(a, "completion_tokens", 0) for a in accs),
-                "total_tokens": sum(getattr(a, "total_tokens", 0) for a in accs),
-            })
-        except Exception:  # noqa: BLE001 - cost telemetry must NEVER abort run finalization
-            return
-
-    # ----------------------------------------------------------- A7 Strategist
+    # -------------------------------------------------- strategist cadence (A7)
     @staticmethod
     def _strategy_core(s: Optional[dict]) -> dict:
         """The decision-relevant subset of a Strategy (ignores rationale/source) — used to detect a
@@ -1238,7 +1023,7 @@ class Engine:
                     return fold(self.store.read_all())
         return state
 
-    # ----------------------------------------------------------------- Deep-Research stage (P2)
+    # ---------------------------------------------------- research cadence (P2)
     def _maybe_deep_research(self, state: RunState) -> RunState:
         """Run the Deep-Research stage when there's demand, then re-fold. Three triggers, each gated
         for replay safety: a MANUAL `deep_research` control event (counter gate), a CADENCE
@@ -1434,336 +1219,75 @@ class Engine:
         except Exception:  # noqa: BLE001
             pass
 
+    # ---------------------------- cross-run memory / lessons / reflection (extracted)
+    # The lessons/reflection cluster lives in looplab/engine/lessons.py (`LessonMemory`,
+    # constructed as `self.lessons` in __init__). These thin delegators keep the ORIGINAL
+    # method/attribute names on the Engine — tests call and monkeypatch e.g.
+    # `engine._write_reflection_note` / `engine._reflect_client` / `engine._prior_note_text` —
+    # and LessonMemory routes its internal cross-calls back through them, so an instance-level
+    # monkeypatch intercepts every path.
+    @property
+    def _lessons_seen_stamp(self):
+        return self.lessons.seen_stamp
+
+    @_lessons_seen_stamp.setter
+    def _lessons_seen_stamp(self, value) -> None:
+        self.lessons.seen_stamp = value
+
+    @property
+    def _prior_note_text(self) -> str:
+        return self.lessons.prior_note_text
+
+    @_prior_note_text.setter
+    def _prior_note_text(self, value: str) -> None:
+        self.lessons.prior_note_text = value
+
     def _load_reflection_priors(self, exclude_run_id: Optional[str] = None) -> str:
-        """E4 + M2/M3: build the cross-run prior injected into the proposal prompt. Two parts:
-        (1) exact-task "what won" notes (meta_notes.jsonl — unchanged E4 warm-start), and
-        (2) LESSONS retrieved by task-FINGERPRINT similarity (M2), so a *similar but new* task also
-        benefits — including NEGATIVE lessons (what was tested/abandoned/failed, M3) so the search
-        doesn't re-tread a known dead end. Empty unless enabled + present. `exclude_run_id` drops
-        lessons THIS run wrote (M6 mid-run distillation / resume): a run must not read its own
-        output back as another run's experience — those results are already in its digest."""
-        if not (self._reflection_priors and self.memory_dir):
-            return ""
-        base = Path(self.memory_dir)
-        out = ""
-        # (1) exact-task meta notes (E4)
-        notes: list[str] = []
-        npath = base / "meta_notes.jsonl"
-        if npath.exists():
-            for line in npath.read_text(encoding="utf-8").splitlines():
-                try:
-                    o = orjson.loads(line)
-                except Exception:  # noqa: BLE001
-                    continue
-                if not isinstance(o, dict):       # valid JSON but not an object (corrupt line)
-                    continue
-                if o.get("task_id") == self.task.id and o.get("note"):
-                    notes.append(str(o["note"]))
-        if notes:
-            out += "\nPrior-run insights for this task (meta-learned): " + " | ".join(notes[-3:])
-        # (2) fingerprint-matched lessons (M2/M3), incl. negatives
-        lpath = base / "lessons.jsonl"
-        if lpath.exists():
-            from looplab.engine.memory import fingerprint_similarity
-            # Compare WITHOUT param: tokens: the writer stamps the winner's param names, but at
-            # read time no winner exists yet, so those tokens only dilute the Jaccard overlap.
-            fp = [t for t in self._task_fingerprint(self._empty_state_for_fp())
-                  if not t.startswith("param:")]
-            all_lessons: list[tuple[int, dict]] = []
-            scored: list[tuple[float, int, dict]] = []
-            for idx, line in enumerate(lpath.read_text(encoding="utf-8").splitlines()):
-                try:
-                    o = orjson.loads(line)
-                except Exception:  # noqa: BLE001
-                    continue
-                if not isinstance(o, dict) or not o.get("statement"):
-                    continue
-                if exclude_run_id and o.get("run_id") == exclude_run_id:
-                    continue                     # M6: never echo this run's own lessons back
-                all_lessons.append((idx, o))
-                stored_fp = o.get("fingerprint")
-                stored_fp = ([t for t in stored_fp if not str(t).startswith("param:")]
-                             if isinstance(stored_fp, list) else [])
-                exact = o.get("task_id") == self.task.id
-                sim = 1.0 if exact else fingerprint_similarity(fp, stored_fp)
-                if sim >= 0.34:                    # a related task (Jaccard) or the same one
-                    scored.append((sim, idx, o))
-            # Full synergy with Memora: harmonic recall reaches lessons a differently-worded but
-            # anchor-linked task shares — the ones token-overlap (Jaccard ≥ 0.34) misses. Splice
-            # them into the SAME candidate pool so the D2 hygiene + ranking below apply uniformly.
-            # No-op unless a Memora abstractor is wired (memora on); then it uses the T5 embedder.
-            if self._lesson_abstractor is not None and all_lessons:
-                from looplab.engine.memory import retrieve_lessons_harmonic
-                by_idx = {i: o for i, o in all_lessons}
-                already = {i for _, i, _ in scored}
-                query = " ".join(fp) + " " + (getattr(self.task, "goal", "") or "")
-                for hsim, hidx in retrieve_lessons_harmonic(
-                        all_lessons, query, self._lesson_abstractor, self._embedder):
-                    if hidx not in already and hidx in by_idx:
-                        scored.append((hsim, hidx, by_idx[hidx]))
-                        already.add(hidx)
-            # D2 hygiene at read time: quarantine any lesson whose claim a NEWER run reversed
-            # (an old "supported" vs a later "tested/abandoned" of the same statement) — the
-            # misevolution guard: memory must not keep pushing a refuted correlation.
-            from looplab.engine.memory import filter_contradicted, lesson_rank_key
-            scored = filter_contradicted(scored)
-            # Rank: similarity, then confidence × corroboration (evidence_count), then recency —
-            # so a twice-confirmed lesson from a related task beats a one-off at equal similarity.
-            scored.sort(key=lambda t: lesson_rank_key(*t))
-            seen: set[str] = set()
-            picked: list[str] = []
-            for _, _, o in scored:
-                key = (o.get("statement", "")[:80], o.get("outcome"))
-                if key in seen:
-                    continue
-                seen.add(key)
-                d = o.get("delta")
-                dtxt = f" Δ{d:+.3g}" if isinstance(d, (int, float)) else ""
-                stmt = " ".join(str(o["statement"]).split())[:200]   # cap + collapse newlines:
-                picked.append(f"{stmt} [{o.get('outcome', '?')}{dtxt}]")   # store is shared/free-text
-                if len(picked) >= 5:
-                    break
-            if picked:
-                out += "\nLessons from related runs (what did/didn't work): " + "; ".join(picked)
-        return out
+        return self.lessons.load_reflection_priors(exclude_run_id=exclude_run_id)
 
     def _empty_state_for_fp(self) -> RunState:
-        """Minimal RunState carrying just what `_task_fingerprint` reads at run START (before any
-        node), so the prior loader can fingerprint the current task the same way the writer will."""
-        return RunState(task_id=self.task.id, goal=getattr(self.task, "goal", ""),
-                        direction=getattr(self.task, "direction", "min"))
+        return self.lessons.empty_state_for_fp()
 
     def _task_fingerprint(self, final: RunState, best=None) -> list[str]:
-        """M2: content fingerprint of this task so cross-run transfer reaches SIMILAR tasks, not only
-        the exact same task_id. Built from kind/direction/metric/goal keywords + the winner's params."""
-        from looplab.engine.memory import task_fingerprint
-        pnames = list((best.idea.params or {}).keys()) if best is not None and best.idea else []
-        return task_fingerprint(getattr(self.task, "kind", ""), final.direction,
-                                final.goal or getattr(self.task, "goal", ""),
-                                metric=str(getattr(self.task, "metric", "") or ""),
-                                param_names=pnames)
+        return self.lessons.task_fingerprint(final, best)
 
     def _write_reflection_note(self, final: RunState) -> None:
-        """E4 + M2/M3: distill this run's cross-run memory. Writes (1) the one-line "what won" note to
-        meta_notes.jsonl (E4, exact-task warm-start — unchanged), and (2) structured LESSONS to
-        lessons.jsonl (M3) — including NEGATIVE results (tested/abandoned hypotheses, failure themes),
-        each stamped with a task fingerprint (M2) so a later SIMILAR task can retrieve them."""
-        if not (self._reflection_priors and self.memory_dir):
-            return
-        best = final.best()
-        base = Path(self.memory_dir)
-        base.mkdir(parents=True, exist_ok=True)
-        # The winner note needs a winner — but hypothesis/failure lessons below do NOT: a run in
-        # which every node failed is exactly the negative lesson M3 exists to record.
-        if best is not None:
-            stats = (f"best metric {best.metric:.4g} via op '{best.operator}' params "
-                     f"{best.idea.params}; {len(final.nodes)} nodes, "
-                     f"{len(final.evaluated_nodes())} evaluated")
-            # A meta-note's purpose is the CAUSE — WHY the winner won — not the raw config (that's the
-            # case). Distil a causal summary with the LLM; fall back to the stats line if there's no
-            # client / on any error (reflection is best-effort, never fails the run).
-            note = self._causal_meta_note(final, best) or stats
-            with open(base / "meta_notes.jsonl", "a", encoding="utf-8") as f:
-                f.write(orjson.dumps({"task_id": final.task_id, "note": note}).decode() + "\n")
-
-        # M3 · lessons (incl. failures) with an M2 fingerprint. Memory of what DIDN'T work is as
-        # valuable as what did (DS-Agent / MARS / ML-Master): it stops a later run re-treading a dead
-        # end. Sources: the winner, each resolved hypothesis (the P1 ledger gives negative results for
-        # free), and the dominant failure reason.
-        fp = self._task_fingerprint(final, best)
-        lessons: list[dict] = []
-        # A lesson should be a GENERALIZABLE finding (DS-Agent / MARS reflective memory), not the raw
-        # winning config (that's the case) — so instead of a templated "op X params Y reached Z" line we
-        # LLM-reflect over the whole run for transferable good/bad takeaways. Fingerprint-keyed, so a
-        # later SIMILAR task retrieves them; consolidation then merges repeats into "verified on N runs".
-        lessons.extend(self._reflect_lessons(final, best, fp))
-        # M6 comparative lessons at run end: credit-assigned pair distillation over whatever pairs
-        # the mid-run cadence did NOT already spend. Run-end spends are recorded as a
-        # `lessons_distilled` event too — a run reopened later (budget_extend/add_nodes) must not
-        # re-distill these pairs any more than a resumed one may re-distill the mid-run ones.
-        if self._comparative_lessons_on:
-            comp, pairs = self._comparative_lessons(final, fp,
-                                                    exclude=self._spent_pairs(final))
-            if pairs:
-                self.store.append(EV_LESSONS_DISTILLED, {
-                    "at_node": len(final.nodes), "trigger": "run_end", "count": len(comp),
-                    "pairs": [[pr["a"], pr["b"]] for pr in pairs],
-                    "lessons": [{"statement": lz["statement"], "outcome": lz["outcome"],
-                                 "evidence": lz.get("evidence")} for lz in comp]})
-            lessons.extend(comp)
-        for h in (final.hypotheses or {}).values():
-            if h.status in ("supported", "tested", "abandoned"):
-                lessons.append({
-                    "task_id": final.task_id, "fingerprint": fp,
-                    "kind": getattr(self.task, "kind", ""), "statement": h.statement,
-                    "outcome": h.status, "delta": h.best_delta,
-                    "confidence": 0.7 if h.status == "supported" else 0.5,
-                    "run_id": final.run_id, "evidence": list(h.evidence)[:8]})
-        # dominant failure theme (so a repeat run is warned off the same crash class)
-        reasons: dict[str, int] = {}
-        for n in final.nodes.values():
-            if n.status is NodeStatus.failed and n.error_reason:
-                reasons[n.error_reason] = reasons.get(n.error_reason, 0) + 1
-        if reasons:
-            top = max(reasons, key=reasons.get)
-            # run_id stamped like every other lesson shape: the M6 own-run exclusion filters on it,
-            # and a row without the key would be read back as another run's experience on resume.
-            lessons.append({
-                "task_id": final.task_id, "fingerprint": fp, "kind": getattr(self.task, "kind", ""),
-                "statement": f"{reasons[top]} node(s) failed with reason '{top}'",
-                "outcome": "failed", "delta": None, "confidence": 0.4, "run_id": final.run_id})
-        self._append_lessons(lessons)
-
-        # M4 · auto-distilled skills (episodic → procedural memory): a supported hypothesis that
-        # actually moved the metric becomes a candidate SKILL.md; a later run on a DIFFERENT task
-        # fingerprint that re-confirms it promotes it. Best-effort; never fails the run.
-        from looplab.engine.memory import write_auto_skill
-        sk_dir = base / "skills"
-        for h in (final.hypotheses or {}).values():
-            if h.status == "supported" and (h.best_delta or 0) > 0:
-                ev = [final.nodes[i] for i in h.evidence if i in final.nodes]
-                write_auto_skill(sk_dir, h.statement,
-                                 self._distill_skill_body(final, h, ev), fp, final.task_id)
+        return self.lessons.write_reflection_note(final)
 
     def _reflect_lessons(self, final: RunState, best, fp: list) -> list:
-        """LLM reflection over the whole run → 1-3 GENERALIZABLE lessons (transferable good/bad
-        takeaways), the DS-Agent/MARS reflective-memory idea — not per-run specifics. [] on no-client
-        / error, so the hypothesis-derived + failure lessons still stand."""
-        def _winner_lesson():
-            # Offline/toy fallback (no LLM to generalize): keep a minimal winner record so the
-            # fingerprint-keyed store still captures this run for retrieval + consolidation.
-            if best is None:
-                return []
-            return [{"task_id": final.task_id, "fingerprint": fp, "kind": getattr(self.task, "kind", ""),
-                     "statement": (f"op '{best.operator}' with params {best.idea.params} "
-                                   f"reached {best.metric:.4g}"),
-                     "outcome": "supported", "delta": None, "confidence": 0.7,
-                     "run_id": final.run_id, "evidence": [best.id]}]
-        client = self._reflect_client()
-        if client is None or best is None:
-            return _winner_lesson()
-        rev = (final.direction != "min")
-        ok = sorted((n for n in final.evaluated_nodes() if n.metric is not None),
-                    key=lambda n: n.metric, reverse=rev)[:5]
-        bad = [n for n in final.nodes.values() if n.status is NodeStatus.failed][:3]
-        rows = [f"#{n.id} {n.operator} metric={n.metric:.4g} params={n.idea.params}" for n in ok]
-        fails = [f"#{n.id} {n.operator} failed: {n.error_reason}" for n in bad]
-        prompt = ("Distil reusable LESSONS from a finished ML experiment run, to guide FUTURE runs on "
-                  f"SIMILAR tasks.\nTask: {final.goal}\nWhat worked (best first):\n" + "\n".join(rows) +
-                  ("\nWhat failed:\n" + "\n".join(fails) if fails else "") +
-                  "\n\nWrite 1-3 GENERALIZABLE lessons — transferable findings, NOT these exact numbers "
-                  "(e.g. 'a larger batch size aided convergence', 'polynomial features overfit on small "
-                  "data'). Tag each [GOOD] (reuse this) or [BAD] (avoid this). One per line, no preamble.")
-        try:
-            out = client.complete_text([{"role": "user", "content": prompt}]) or ""
-        except Exception:   # noqa: BLE001 - best-effort
-            return _winner_lesson()
-        from looplab.engine.memory import parse_credit_lessons
-        res = [{"task_id": final.task_id, "fingerprint": fp,
-                "kind": getattr(self.task, "kind", ""), "statement": stmt,
-                "outcome": outcome, "delta": None, "confidence": 0.6,
-                "run_id": final.run_id, "evidence": []}
-               for _, stmt, outcome in parse_credit_lessons(out, 0)[:3]]
-        return res or _winner_lesson()      # LLM gave nothing usable → keep the winner record
+        return self.lessons.reflect_lessons(final, best, fp)
 
     def _append_lessons(self, lessons: list, *, hygiene: bool = True) -> None:
-        """Append lessons to the SHARED cross-run store. Used by run-end reflection AND the M6
-        mid-run distillation, so a lesson distilled mid-flight is visible to a concurrent run's
-        refresh immediately. Concurrency: the whole append (and the optional hygiene rewrite) runs
-        under the same best-effort interprocess lock the event store uses — the D2 consolidate/
-        compact pass is a full-file read-modify-write, and without the lock a concurrent run's
-        O_APPEND between our read and our rewrite would be silently clobbered (losing exactly the
-        cross-run lesson the live share exists to propagate). `hygiene=False` (the mid-run path)
-        skips consolidate/compact entirely: the read path already dedups and quarantines, so
-        hygiene can wait for run end instead of rewriting a shared file every few nodes."""
-        if not (lessons and self.memory_dir):
-            return
-        from looplab.events.eventstore import _interprocess_lock
-        base = Path(self.memory_dir)
-        base.mkdir(parents=True, exist_ok=True)
-        path = base / "lessons.jsonl"
-        payload = "".join(orjson.dumps(lz).decode() + "\n" for lz in lessons)
-        with _interprocess_lock(Path(str(path) + ".lock")):
-            with open(path, "a", encoding="utf-8") as f:
-                f.write(payload)
-            if hygiene:
-                # D2 hygiene: consolidate the store after appending — merge duplicate claims into
-                # an evidence_count, retire contradicted verdicts (newest wins), THEN bound size.
-                self._consolidate_lessons_file(path)
-                self._compact_lessons(path)
+        return self.lessons.append_lessons(lessons, hygiene=hygiene)
 
     def _comparative_lessons(self, state: RunState, fp: list, exclude=()) -> tuple[list, list]:
-        """M6 (MARS comparative reflective memory): credit-assigned lessons from solution PAIRS —
-        which SPECIFIC difference made the child beat (or regress from) its parent, and what fixed
-        a failure. One LLM call for ALL pairs (budget: same order as `_reflect_lessons`); offline,
-        the deterministic param-diff credit stands in. Returns (lessons, pairs_used); ([], []) when
-        there is nothing informative to compare. Best-effort — never raises."""
-        from looplab.engine.memory import (code_diff, param_credit_statement,
-                                           parse_credit_lessons, select_comparison_pairs)
-        pairs = select_comparison_pairs(state, k=3, exclude=exclude)
-        if not pairs:
-            return [], []
+        return self.lessons.comparative_lessons(state, fp, exclude=exclude)
 
-        def _lesson(pr: Optional[dict], statement: str, outcome: str, conf: float) -> dict:
-            # `evidence` [child, parent] IS the credited pair (no separate `pair` field to drift).
-            # pr=None = the LLM line carried no usable P<n> marker: record the lesson UNATTRIBUTED
-            # rather than stamping it with an arbitrary pair's nodes/delta (wrong provenance).
-            return {"task_id": state.task_id, "fingerprint": fp,
-                    "kind": getattr(self.task, "kind", ""), "statement": statement,
-                    "outcome": outcome, "delta": pr.get("delta") if pr else None,
-                    "confidence": conf, "run_id": state.run_id,
-                    "evidence": [pr["a"], pr["b"]] if pr else [], "source": "comparative"}
+    _spent_pairs = staticmethod(LessonMemory.spent_pairs)
 
-        def _fallback() -> list:
-            out = []
-            for pr in pairs:
-                a, b = state.nodes[pr["a"]], state.nodes[pr["b"]]
-                if pr["kind"] == "debug":
-                    why = " ".join((a.idea.rationale or "").split())[:90]
-                    out.append(_lesson(pr, f"a node failing with '{b.error_reason or 'error'}' "
-                                           f"was fixed" + (f": {why}" if why else ""),
-                                       "supported", 0.5))
-                    continue
-                stmt = param_credit_statement(a, b, pr["delta"] or 0.0)
-                if stmt:   # no clean single-factor credit -> no lesson (beats a mushy lesson)
-                    out.append(_lesson(pr, stmt,
-                                       "supported" if (pr["delta"] or 0) > 0 else "failed", 0.55))
-            return out
+    def _maybe_distill_lessons(self, state: RunState) -> RunState:
+        return self.lessons.maybe_distill_lessons(state)
 
-        client = self._reflect_client()
-        if client is None:
-            return _fallback(), pairs
-        blocks = []
-        for i, pr in enumerate(pairs, 1):
-            a, b = state.nodes[pr["a"]], state.nodes[pr["b"]]
-            if pr["kind"] == "debug":
-                head = (f"P{i} (debug): #{b.id} FAILED with '{b.error_reason or 'error'}'; its "
-                        f"repair #{a.id} reached metric={a.metric:.4g}.")
-            else:
-                verb = "IMPROVED on" if (pr["delta"] or 0) > 0 else "REGRESSED from"
-                head = (f"P{i}: #{a.id} (metric={a.metric:.4g}, params={a.idea.params}) {verb} "
-                        f"#{b.id} (metric={b.metric:.4g}, params={b.idea.params}) "
-                        f"by {abs(pr['delta'] or 0):.4g}.")
-            diff = code_diff(b.code or "", a.code or "")
-            blocks.append(head + (f"\nCode diff (#{b.id} -> #{a.id}):\n{diff[:2000]}"
-                                  if diff else ""))
-        prompt = ("Assign CREDIT for each experiment-pair outcome below: identify WHICH specific "
-                  "difference (code or params) caused the change, then state it as ONE "
-                  "generalizable lesson for future runs on SIMILAR tasks.\n"
-                  f"Task: {state.goal}\n\n" + "\n\n".join(blocks) +
-                  "\n\nFor EACH pair output exactly one line: `P<n> [GOOD] <lesson>` if the "
-                  "credited change should be reused, or `P<n> [BAD] <lesson>` if it should be "
-                  "avoided. Credit the SPECIFIC difference, stated generally (no exact numbers). "
-                  "No preamble.")
-        try:
-            out = client.complete_text([{"role": "user", "content": prompt}]) or ""
-        except Exception:  # noqa: BLE001 — reflection is best-effort, never fails the run
-            return _fallback(), pairs
-        lessons = []
-        for idx, stmt, outcome in parse_credit_lessons(out, len(pairs)):
-            pr = pairs[idx] if idx >= 0 else None
-            lessons.append(_lesson(pr, stmt, outcome, 0.65 if idx >= 0 else 0.5))
-        return (lessons or _fallback()), pairs
+    def _lessons_store_stamp(self):
+        return self.lessons.lessons_store_stamp()
+
+    def _maybe_refresh_lessons(self, state: RunState) -> RunState:
+        return self.lessons.maybe_refresh_lessons(state)
+
+    def _distill_skill_body(self, final: RunState, h, ev: list) -> str:
+        return self.lessons.distill_skill_body(final, h, ev)
+
+    def _reflect_client(self):
+        return self.lessons.reflect_client()
+
+    def _causal_meta_note(self, final: RunState, best) -> Optional[str]:
+        return self.lessons.causal_meta_note(final, best)
+
+    _consolidate_lessons_file = staticmethod(LessonMemory.consolidate_lessons_file)
+    _compact_lessons = staticmethod(LessonMemory.compact_lessons)
+
+    def _store_case(self, final: RunState) -> None:
+        return self.lessons.store_case(final)
 
     @staticmethod
     def _cadence_due(n: int, last: int, every: int) -> bool:
@@ -1772,184 +1296,7 @@ class Engine:
         multiple and silently skip the whole window."""
         return every > 0 and n > 0 and n - last >= every
 
-    @staticmethod
-    def _spent_pairs(state: RunState) -> list:
-        """Every (child, parent) pair a prior distillation already spent — the ledger both the
-        mid-run cadence and run-end reflection exclude against, folded from `lessons_distilled`
-        events (incl. the run-end one, so a reopened run never re-distills)."""
-        return [tuple(p) for d in (state.lessons_distilled or [])
-                for p in (d.get("pairs") or [])]
-
-    def _maybe_distill_lessons(self, state: RunState) -> RunState:
-        """M6 write side (doc 13 §7 items 2+5): every `lessons_every` NEW nodes, distill
-        comparative lessons and append them to the SHARED cross-run store IMMEDIATELY — a
-        concurrent run's refresh (read side below) can pick them up mid-flight, the AgentRxiv
-        live-share pattern. The `lessons_distilled` event is the replay-safe gate (at_node +
-        the pair ids already spent); fires only at a creation decision point (no pending evals),
-        mirroring deep-research. No-op when the cadence is 0 or reflection memory is off."""
-        if (self.lessons_every <= 0 or not self._comparative_lessons_on
-                or not (self._reflection_priors and self.memory_dir)):
-            return state
-        if state.pending_nodes():
-            return state
-        n = len(state.nodes)
-        last = max((int(d.get("at_node") or 0) for d in state.lessons_distilled), default=0)
-        if not self._cadence_due(n, last, self.lessons_every):
-            return state
-        fp = self._task_fingerprint(state, state.best())
-        lessons, pairs = self._comparative_lessons(state, fp, exclude=self._spent_pairs(state))
-        # Event BEFORE the store write, and always — even with 0 lessons — so the at_node gate
-        # advances and the loop doesn't retry this node-count. Event-first ordering: if the
-        # process dies between the two writes, a resume sees the gate advanced and skips — the
-        # store misses one batch (best-effort memory) instead of re-invoking the LLM and
-        # appending the same lessons twice. The statements ride in the event for audit.
-        self.store.append(EV_LESSONS_DISTILLED, {
-            "at_node": n, "trigger": "cadence", "count": len(lessons),
-            "pairs": [[pr["a"], pr["b"]] for pr in pairs],
-            "lessons": [{"statement": lz["statement"], "outcome": lz["outcome"],
-                         "evidence": lz.get("evidence")} for lz in lessons]})
-        # Hygiene deferred to run end: the read path dedups/quarantines already, and a full-file
-        # rewrite of the shared store every few nodes would race other runs' appends for nothing.
-        self._append_lessons(lessons, hygiene=False)
-        return fold(self.store.read_all())
-
-    def _lessons_store_stamp(self):
-        """(size, mtime_ns) of the shared lessons store, or None — the cheap change detector the
-        refresh gate uses to skip a full re-read/re-score when no run has written since."""
-        if not self.memory_dir:
-            return None
-        try:
-            st = (Path(self.memory_dir) / "lessons.jsonl").stat()
-            return (st.st_size, st.st_mtime_ns)
-        except OSError:
-            return None
-
-    def _maybe_refresh_lessons(self, state: RunState) -> RunState:
-        """M6 read side (doc 13 §7 item 5): every `lessons_refresh_every` NEW nodes, re-read the
-        SHARED cross-run store and rebuild the proposal prior — so lessons a CONCURRENT run
-        distilled after this run started reach this run's next proposals (pre-M6, the store was
-        read at run start only). No LLM call; this run's own lessons are excluded (they're already
-        in the digest). The `lessons_refreshed` event is the replay-safe cadence gate. When the
-        store file is UNCHANGED since the last look (stat stamp), the rebuild — a full re-read +
-        re-score (+ harmonic re-embed) of every lesson — is skipped; the gate still advances.
-        No-op when the cadence is 0 or reflection memory is off."""
-        if self.lessons_refresh_every <= 0 or not (self._reflection_priors and self.memory_dir):
-            return state
-        n = len(state.nodes)
-        last = max((int(d.get("at_node") or 0) for d in state.lessons_refreshed), default=0)
-        if not self._cadence_due(n, last, self.lessons_refresh_every):
-            return state
-        stamp = self._lessons_store_stamp()
-        if stamp == self._lessons_seen_stamp:
-            self.store.append(EV_LESSONS_REFRESHED, {"at_node": n, "skipped": "unchanged"})
-            return fold(self.store.read_all())
-        self._lessons_seen_stamp = stamp
-        before = self._prior_note_text
-        self._prior_note_text = self._load_reflection_priors(exclude_run_id=state.run_id or None)
-        self.store.append(EV_LESSONS_REFRESHED, {
-            "at_node": n, "chars": len(self._prior_note_text),
-            "changed": self._prior_note_text != before})
-        return fold(self.store.read_all())
-
-    def _distill_skill_body(self, final: RunState, h, ev: list) -> str:
-        """A skill is a reusable BEST PRACTICE — the technique + a MINIMAL snippet/script the agent can
-        reuse, NOT a dump of the whole solution. LLM-distil the essential lines from the winning code;
-        fall back to a code-free evidence summary when there's no client / no code."""
-        ev_txt = "\n".join(f"- #{n.id} {n.operator} metric={n.metric} params={n.idea.params}: "
-                           f"{' '.join((n.idea.rationale or '').split())[:120]}" for n in ev[:4])
-        base = (f"Verified on task `{final.task_id}` (best Δ={h.best_delta:+.4g}).\n\n"
-                f"Evidence:\n{ev_txt}\n\nApply when the task matches this technique's preconditions; "
-                "re-validate with the eval before trusting it.")
-        client = self._reflect_client()
-        code_node = max((n for n in ev if getattr(n, "code", None)),
-                        key=lambda n: (n.metric if n.metric is not None else -1e18), default=None)
-        if client is None or code_node is None or not code_node.code:
-            return base
-        prompt = (f"A technique that worked: {h.statement}\n\nThe winning solution's code:\n"
-                  f"```\n{code_node.code[:4000]}\n```\n\n"
-                  "Write a SHORT, REUSABLE skill card for THIS technique — not the whole script. Include:\n"
-                  "1. The technique in 1-2 sentences (what it is + why it helps).\n"
-                  "2. A MINIMAL code snippet — ONLY the essential, generalized lines that implement the "
-                  "technique (a few lines), not the full solution.\n"
-                  "3. When to use it (preconditions) and when NOT to.\n"
-                  "Keep it concise — a card someone reuses, never a code dump.")
-        try:
-            out = (client.complete_text([{"role": "user", "content": prompt}]) or "").strip()
-            return (f"{out[:1800]}\n\n_Verified on `{final.task_id}` (Δ={h.best_delta:+.4g})._"
-                    if out else base)
-        except Exception:   # noqa: BLE001 - best-effort
-            return base
-
-    def _reflect_client(self):
-        """The LLM client to use for run-end distillation — the Researcher's (unwrapping any
-        surrogate/fallback), else the Developer's. None when no LLM client is wired (toy backends)."""
-        r = getattr(self, "researcher", None)
-        for obj in (r, getattr(r, "inner", None), getattr(r, "fallback", None),
-                    getattr(self, "developer", None)):
-            c = getattr(obj, "client", None)
-            if c is not None and hasattr(c, "complete_text"):
-                return c
-        return None
-
-    def _causal_meta_note(self, final: RunState, best) -> Optional[str]:
-        """LLM-distilled 'WHY the winner won' — a reusable causal note (the meta-note's real purpose,
-        distinct from the case's raw config). Returns None on no-client / any error → caller falls back
-        to the stats line, so this never fails the run."""
-        client = self._reflect_client()
-        if client is None:
-            return None
-        rev = (final.direction != "min")
-        ev = sorted((n for n in final.evaluated_nodes() if n.metric is not None),
-                    key=lambda n: n.metric, reverse=rev)[:6]
-        rows = [f"#{n.id} {n.operator} metric={n.metric:.4g} params={n.idea.params}"
-                + (f" — {' '.join((n.idea.rationale or '').split())[:90]}" if n.idea.rationale else "")
-                for n in ev]
-        prompt = (f"Task goal: {final.goal}\nObjective: {'maximize' if rev else 'minimize'} the metric.\n"
-                  f"Experiments (best first):\n" + "\n".join(rows) +
-                  f"\n\nThe winner is #{best.id}. In 2-3 sentences, state WHY it won: the KEY factors "
-                  "that mattered and what did NOT help — a reusable CAUSAL note a future run on this "
-                  "task can learn from. Be specific and concise; no preamble, don't just restate params.")
-        try:
-            out = (client.complete_text([{"role": "user", "content": prompt}]) or "").strip()
-            return out[:700] or None
-        except Exception:   # noqa: BLE001 - reflection is best-effort
-            return None
-
-    @staticmethod
-    def _consolidate_lessons_file(path: Path) -> None:
-        """D2: rewrite lessons.jsonl through `consolidate_lessons` — duplicate claims merge into
-        an evidence_count and a contradicted verdict is retired (the newest observation wins).
-        Atomic rewrite; best-effort (a hygiene failure must never fail the run)."""
-        try:
-            from looplab.engine.memory import consolidate_lessons
-            rows = []
-            for line in path.read_text(encoding="utf-8").splitlines():
-                try:
-                    o = orjson.loads(line)
-                except Exception:  # noqa: BLE001
-                    continue
-                if isinstance(o, dict):
-                    rows.append(o)
-            merged = consolidate_lessons(rows)
-            if len(merged) < len(rows):
-                from looplab.core.atomicio import atomic_write_text
-                atomic_write_text(path, "".join(orjson.dumps(o).decode() + "\n" for o in merged))
-        except Exception:  # noqa: BLE001
-            pass
-
-    @staticmethod
-    def _compact_lessons(path: Path, max_lines: int = 4000, keep: int = 2000) -> None:
-        """Bound the shared lessons store: it is re-read and scored at every run start, and grows by
-        a few lines per finished run forever. Past `max_lines`, keep the most recent `keep` (recency
-        also wins ties at retrieval, so the dropped prefix is the least useful part)."""
-        try:
-            lines = path.read_text(encoding="utf-8").splitlines()
-            if len(lines) > max_lines:
-                from looplab.core.atomicio import atomic_write_text
-                atomic_write_text(path, "\n".join(lines[-keep:]) + "\n")
-        except Exception:  # noqa: BLE001 — compaction is best-effort; never fail the run for it
-            pass
-
+    # -------------------------------------------------------- novelty gate (E1/T5)
     @staticmethod
     def _idea_text(idea) -> str:
         """The semantic identity of a proposal: what it claims to try + why."""
@@ -2061,6 +1408,7 @@ class Engine:
         out.rationale = (idea.rationale + " [novelty-gate: nudged off a near-duplicate]").strip()
         return out
 
+    # ------------------------------------------------------------- node creation
     def _ensemble_idea(self, parents) -> Idea:
         """A0b: an ensembling/recombination merge — instruct the Developer to combine the parents'
         solutions (stack/average predictions) rather than mean-averaging params. Carries the mean
@@ -2234,7 +1582,6 @@ class Engine:
                     installed.append(pkg)
             return installed
 
-    # ---------------------------------------------------------------- private
     def _implement(self, idea, parent=None) -> str:
         """Route an implement through `implement_from(idea, parent)` when the Developer supports it
         and a parent exists — so an IMPROVE/REFINE starts from the parent's actual solution (its
@@ -2425,6 +1772,7 @@ class Engine:
         self._repo_spec = {**self._repo_spec, "protected_names": protected}
         self._spec_activated = True
 
+    # --------------------------------------------------------- workspace seeding
     def _workspace_fingerprint(self) -> dict:
         """A per-source fingerprint of the editable repos + mounted data (item #4): the git
         HEAD SHA when the source is a git repo, else a cheap content signature over
@@ -2455,8 +1803,7 @@ class Engine:
         if not self._repo_spec:
             return
         import shutil
-        from pathlib import Path as _P
-        wd = _P(workdir)
+        wd = Path(workdir)
         wd.mkdir(parents=True, exist_ok=True)
         ignore = shutil.ignore_patterns(".git", "__pycache__", "*.pyc", ".venv", "node_modules")
         sp = (self.tracer.span("seed_workspace") if self.tracer is not None
@@ -2498,8 +1845,7 @@ class Engine:
         Returns the number of tracked files copied, or -1 when a full copytree was used."""
         import shutil
         import subprocess
-        from pathlib import Path as _P
-        src = _P(src); dst = _P(dst)
+        src = Path(src); dst = Path(dst)
         tracked = None
         if mode != "all":
             # Ask git directly (no `.git`-at-root check): the editable repo is often a SUBDIR of a
@@ -2537,8 +1883,7 @@ class Engine:
         mount). Idempotent (resume / re-seed); falls back to a copy if the symlink can't be made."""
         import os as _os
         import shutil
-        from pathlib import Path as _P
-        src = _P(src); dst = _P(dst)
+        src = Path(src); dst = Path(dst)
         if dst.is_symlink() or dst.exists():
             return
         dst.parent.mkdir(parents=True, exist_ok=True)
@@ -2552,6 +1897,7 @@ class Engine:
         elif src.is_file():
             shutil.copy2(src, dst)
 
+    # ------------------------------------------------------------- eval dispatch
     def _agent_may(self, role: str, setting: str) -> bool:
         """Governance gate (Settings.agent_control): may `role` (strategist|boss|researcher) change
         `setting` at runtime? A setting absent from the map is LOCKED for everyone. Pure + cheap —
@@ -2601,14 +1947,13 @@ class Engine:
         the agent's edits + the seeded tree) instead of the shared original repo — `Path(wd)/'/abs'`
         would otherwise collapse to '/abs', silently bypassing the sandbox. An absolute cwd that is
         not under any editable source is trusted as given (e.g. an external tool dir)."""
-        from pathlib import Path as _P
-        wd = _P(workdir).resolve()
-        p = _P(cwd_spec)
+        wd = Path(workdir).resolve()
+        p = Path(cwd_spec)
         if not p.is_absolute():
             return str((wd / cwd_spec).resolve())
         ap = p.resolve()
         for ed in (self._repo_spec or {}).get("editables", []):
-            src = _P(ed["path"]).resolve()
+            src = Path(ed["path"]).resolve()
             base = wd if ed["name"] in (".", "") else wd / ed["name"]
             try:
                 rel = ap.relative_to(src)
@@ -3146,6 +2491,7 @@ class Engine:
             pass
         return sigs
 
+    # ------------------------------------------------------------------- confirm
     @staticmethod
     def _already_confirmed(state: RunState) -> bool:
         return state.confirmed_done  # gated on completion, not on partial progress
@@ -3263,6 +2609,7 @@ class Engine:
         async with self._write_lock:
             self.store.append(EV_CONFIRM_DONE, {"node_id": nd.id})   # fulfill the request (gate)
 
+    # ------------------------------------------------------------------ ablation
     async def _ablate(self, parent_id: int) -> None:
         """Ablation-driven refinement (I7, MLE-STAR): probe each parameter's impact by
         setting it to a neutral baseline (0.0) and re-running, then create a
@@ -3393,6 +2740,7 @@ class Engine:
             "files": getattr(self.developer, "last_files", {}) or {}})
         self._emit_agent_report(node_id)
 
+    # ------------------------------------------------------------- trust & audit
     def _redact(self, text: str) -> str:
         """B3: mask secrets in an output tail before it is persisted, when redaction is enabled."""
         if not self._redact_output or not text:
@@ -3425,20 +2773,3 @@ class Engine:
         leak = any(v.get("leak") for v in verdicts)
         self.store.append(EV_DATA_LEAKAGE, {"leak": leak, "verdicts": verdicts})
         return leak
-
-    def _store_case(self, final: RunState) -> None:
-        """Cross-run memory (I19): persist the best result as a retrievable case."""
-        if not self.memory_dir:
-            return
-        best = final.best()
-        if best is None:
-            return
-        lib = JsonlCaseLibrary(Path(self.memory_dir) / "cases.jsonl")
-        lib.add({
-            "task_id": final.task_id,
-            "goal": final.goal,
-            "direction": final.direction,
-            "params": best.idea.params,
-            "metric": best.confirmed_mean if best.confirmed_mean is not None else best.metric,
-            "rationale": best.idea.rationale,
-        })

@@ -36,13 +36,23 @@ from looplab.core.config import Settings
 from looplab.events.eventstore import EventStore, iter_jsonl
 from looplab.events.types import (
     EV_ANNOTATION, EV_APPROVAL_GRANTED, EV_BUDGET_EXTEND, EV_DEEP_RESEARCH,
-    EV_FORCE_ABLATE, EV_FORCE_CONFIRM, EV_FORK, EV_HINT, EV_HYPOTHESIS_ADDED,
-    EV_HYPOTHESIS_UPDATED, EV_INJECT_NODE, EV_NODE_ABORT, EV_PAUSE, EV_PROMOTE,
-    EV_REPORT_GENERATED, EV_RESUME, EV_RUN_ABORT, EV_RUN_REOPENED, EV_SET_STRATEGY,
+    EV_FORCE_ABLATE, EV_FORCE_CONFIRM, EV_FORK, EV_HINT,
+    EV_INJECT_NODE, EV_PAUSE, EV_PROMOTE,
+    EV_REPORT_GENERATED, EV_RESUME, EV_RUN_ABORT, EV_SET_STRATEGY,
     EV_SPEC_APPROVED, EV_TRUST_GATE_CHANGED)
 from looplab.core.models import Event
 from looplab.serve.projects import ProjectError, ProjectStore
 from looplab.serve.assistant import REPO_ROOT as _ASSISTANT_REPO_ROOT, SessionStore, run_turn as _assistant_run_turn
+# The wire-protocol names this server shares with the TUI + React UI live in `serve/protocol.py`.
+# CONTROL_EVENTS and POLL_SECONDS are re-exported here (imported, not aliased) so the historical
+# `looplab.serve.server.CONTROL_EVENTS` import path keeps working for tests and callers.
+from looplab.serve.protocol import (
+    ASSISTANT_STREAM_END_SENTINEL, CONTROL_EVENTS, GENESIS_CHAT_SEQ_BASE, JOB_DONE, JOB_RUNNING,
+    JOB_UNKNOWN, PERM_ALLOW_ALWAYS, PERM_ALLOW_ONCE, PERM_DENY, PHASE_APPROVAL, PHASE_FINISHED,
+    PHASE_GROUNDING, PHASE_ONBOARDING, PHASE_PAUSED, PHASE_SEARCH, PHASE_SPEC_APPROVAL,
+    POLL_SECONDS, SSE_DONE, SSE_ERROR, SSE_STATE, SSE_STEP, SSE_TEXT, SSE_TODOS, SSE_TOKEN)
+from looplab.serve.serve_prompts import (
+    CHAT_SYSTEM, COMMAND_SYSTEM, COMPACT_SYSTEM, RESEARCH_BRIEF_SYSTEM, genesis_system)
 from looplab.events.replay import fold
 from looplab.adapters.tasks import make_llm_client
 
@@ -71,20 +81,6 @@ except ModuleNotFoundError as e:  # pragma: no cover - exercised only without th
         "The LoopLab UI server needs the [ui] extra: pip install 'looplab[ui]' "
         "(fastapi + uvicorn)."
     ) from e
-
-
-# Control events the UI is allowed to append (intent). The engine writes the domain effect.
-CONTROL_EVENTS = {
-    EV_RUN_ABORT, EV_PAUSE, EV_RESUME, EV_NODE_ABORT, EV_BUDGET_EXTEND, EV_HINT,
-    EV_FORCE_CONFIRM, EV_FORCE_ABLATE, EV_FORK, EV_ANNOTATION, EV_PROMOTE,
-    EV_APPROVAL_GRANTED, EV_SPEC_APPROVED, EV_INJECT_NODE, EV_RUN_REOPENED,
-    EV_SET_STRATEGY,   # A7: operator pins/overrides the Strategist's choice (HITL parity)
-    EV_DEEP_RESEARCH,  # P2: operator asks the engine to run the Deep-Research stage now
-    EV_HYPOTHESIS_ADDED,    # P1: a human registers a hypothesis on the board (open question to test)
-    EV_HYPOTHESIS_UPDATED,  # P1: a human abandons a hypothesis line (status=abandoned)
-}
-
-POLL_SECONDS = 0.4   # SSE tail cadence — fast enough to feel live, light on the disk
 
 
 # Workstream C → agentic boss: the chat action-router LLM emits a _Plan — a short conversational reply
@@ -538,18 +534,18 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
 
     def _phase(st) -> str:
         if st.finished:
-            return "finished"
+            return PHASE_FINISHED
         if st.paused:
-            return "paused"
+            return PHASE_PAUSED
         if st.awaiting_approval:
-            return "approval"
+            return PHASE_APPROVAL
         if st.spec_approval_requested and not st.spec_confirmed:
-            return "spec_approval"
+            return PHASE_SPEC_APPROVAL
         if st.proposed_spec is not None and not st.spec_confirmed:
-            return "onboarding"
+            return PHASE_ONBOARDING
         if not st.nodes and st.data_profile is None and st.run_id:
-            return "grounding"
-        return "search"
+            return PHASE_GROUNDING
+        return PHASE_SEARCH
 
     # ------------------------------------------------------------------ runs list
     _summary_cache: dict[str, tuple] = {}   # run_id -> (size, mtime, summary); skips re-folding
@@ -601,6 +597,15 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
                  "engine_running": _engine_alive(root / s["run_id"])} for s in out]
 
     # ------------------------------------------------------------------ projects (ClearML-style)
+    def _project_call(fn):
+        """Run one ProjectStore mutation, translating its ProjectError into the same 400 every
+        projects/supertasks route raised inline (HTTPException(400, str(e)) — identical status and
+        {"detail": ...} body, just written once)."""
+        try:
+            return fn()
+        except ProjectError as e:
+            raise HTTPException(400, str(e))
+
     @app.get("/api/projects")
     def list_projects():
         return projects.load()
@@ -608,40 +613,31 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
     @app.post("/api/projects")
     async def create_project(request: Request):
         body = await request.json()
-        try:
-            p = projects.create(body.get("name", ""), body.get("parent_id"))
-        except ProjectError as e:
-            raise HTTPException(400, str(e))
+        p = _project_call(lambda: projects.create(body.get("name", ""), body.get("parent_id")))
         return p.model_dump()
 
     @app.patch("/api/projects/{pid}")
     async def patch_project(pid: str, request: Request):
         body = await request.json()
-        try:
+
+        def _apply():
             if "name" in body and body["name"] is not None:
                 projects.rename(pid, body["name"])
             if "parent_id" in body:
                 projects.reparent(pid, body["parent_id"])
-        except ProjectError as e:
-            raise HTTPException(400, str(e))
+        _project_call(_apply)
         return {"ok": True}
 
     @app.delete("/api/projects/{pid}")
     def delete_project(pid: str):
-        try:
-            projects.delete(pid)
-        except ProjectError as e:
-            raise HTTPException(400, str(e))
+        _project_call(lambda: projects.delete(pid))
         return {"ok": True}
 
     @app.post("/api/runs/{run_id}/project")
     async def assign_run(run_id: str, request: Request):
         _run_dir(run_id)   # 404 guard: only real runs can be filed
         body = await request.json()
-        try:
-            projects.assign(run_id, body.get("project_id"))
-        except ProjectError as e:
-            raise HTTPException(400, str(e))
+        _project_call(lambda: projects.assign(run_id, body.get("project_id")))
         return {"ok": True}
 
     # ------------------------------------------------------------------ super-tasks (flat axis)
@@ -653,37 +649,25 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
     @app.post("/api/supertasks")
     async def create_supertask(request: Request):
         body = await request.json()
-        try:
-            st = projects.create_supertask(body.get("name", ""), body.get("task_id"))
-        except ProjectError as e:
-            raise HTTPException(400, str(e))
+        st = _project_call(lambda: projects.create_supertask(body.get("name", ""), body.get("task_id")))
         return st
 
     @app.patch("/api/supertasks/{sid}")
     async def patch_supertask(sid: str, request: Request):
         body = await request.json()
-        try:
-            projects.rename_supertask(sid, body.get("name", ""))
-        except ProjectError as e:
-            raise HTTPException(400, str(e))
+        _project_call(lambda: projects.rename_supertask(sid, body.get("name", "")))
         return {"ok": True}
 
     @app.delete("/api/supertasks/{sid}")
     def delete_supertask(sid: str):
-        try:
-            projects.delete_supertask(sid)
-        except ProjectError as e:
-            raise HTTPException(400, str(e))
+        _project_call(lambda: projects.delete_supertask(sid))
         return {"ok": True}
 
     @app.post("/api/runs/{run_id}/supertask")
     async def assign_supertask(run_id: str, request: Request):
         _run_dir(run_id)   # 404 guard: only real runs can be filed
         body = await request.json()
-        try:
-            projects.assign_supertask(run_id, body.get("supertask_id"))
-        except ProjectError as e:
-            raise HTTPException(400, str(e))
+        _project_call(lambda: projects.assign_supertask(run_id, body.get("supertask_id")))
         return {"ok": True}
 
     @app.patch("/api/runs/{run_id}")
@@ -761,14 +745,14 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
                     last_alive = alive
                     last_beat = time.monotonic()
                     yield (f"id: {payload['seq']}\n"
-                           f"event: state\n"
+                           f"event: {SSE_STATE}\n"
                            f"data: {json.dumps(payload)}\n\n")
                     if payload["state"].get("finished"):   # reuse the threaded fold; don't re-fold
                         # End this stream — but the client deliberately does NOT close on `done`; it
                         # lets the closed connection trigger its reconnect, so a reopen (fork / branch
                         # / add-experiment) is picked up within a couple seconds. (Holding the stream
                         # open instead would never terminate, which hangs the TestClient SSE test.)
-                        yield "event: done\ndata: {}\n\n"
+                        yield f"event: {SSE_DONE}\ndata: {{}}\n\n"
                         break
                 elif time.monotonic() - last_beat >= KEEPALIVE:
                     last_beat = time.monotonic()
@@ -808,7 +792,8 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
         """Live training/eval logs for a node — the streamed stdout/stderr of its eval + setup
         subprocesses (eval.log / setup.log in the node workdir). `tail` caps bytes returned (from the
         end) so the UI can poll cheaply. Empty strings when a log doesn't exist yet."""
-        nd = _node_dir(_run_dir(run_id), nid)
+        rd = _run_dir(run_id)
+        nd = _node_dir(rd, nid)
         # Clamp the client-controlled tail so a hostile/large value can't force an unbounded read; and
         # seek to the tail instead of read_bytes() so we never pull a multi-GB training log into RAM.
         n = min(max(0, tail), _LOG_TAIL_MAX)
@@ -824,8 +809,8 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
                 return ""
             return b.decode("utf-8", "replace")
         return {"eval": _tail("eval.log"), "setup": _tail("setup.log"),
-                "run_setup": (_run_dir(run_id) / "run_setup.log").read_text("utf-8", "replace")
-                             if (_run_dir(run_id) / "run_setup.log").exists() else ""}
+                "run_setup": (rd / "run_setup.log").read_text("utf-8", "replace")
+                             if (rd / "run_setup.log").exists() else ""}
 
     @app.get("/api/runs/{run_id}/nodes/{nid}/metrics")
     def node_metrics(run_id: str, nid: int):
@@ -1094,14 +1079,7 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
         return {"ok": True, "seq": ev.seq, "type": etype}
 
     # ------------------------------------------------------------------ spawn / resume
-    @app.post("/api/runs/{run_id}/resume")
-    def resume_run(run_id: str):
-        rd = _run_dir(run_id)
-        # Don't spawn a second engine when one is already alive: the engine-singleton lock would make it
-        # no-op anyway, but skipping the detached Popen keeps the signal honest (and avoids a phantom
-        # process flash). The UI's auto-resume already gates on engine_running; this is the backstop.
-        if _engine_alive(rd):
-            return {"ok": True, "already_running": True}
+    def _task_file_for(rd: Path) -> Optional[str]:
         # Prefer the UI's recorded task_file; fall back to the verbatim task.snapshot.json that
         # `run` now writes into every run dir, so even a CLI-started run can be resumed/continued.
         task_file: Optional[str] = None
@@ -1110,6 +1088,17 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
             task_file = json.loads(meta.read_text(encoding="utf-8")).get("task_file")
         if not task_file and (rd / "task.snapshot.json").exists():
             task_file = str(rd / "task.snapshot.json")
+        return task_file
+
+    @app.post("/api/runs/{run_id}/resume")
+    def resume_run(run_id: str):
+        rd = _run_dir(run_id)
+        # Don't spawn a second engine when one is already alive: the engine-singleton lock would make it
+        # no-op anyway, but skipping the detached Popen keeps the signal honest (and avoids a phantom
+        # process flash). The UI's auto-resume already gates on engine_running; this is the backstop.
+        if _engine_alive(rd):
+            return {"ok": True, "already_running": True}
+        task_file = _task_file_for(rd)
         if not task_file:
             raise HTTPException(400, "run is not resumable — no task.snapshot.json or ui_meta.json "
                                      "(it predates self-describing runs; start it via the UI to enable resume)")
@@ -1133,12 +1122,7 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
         # it, matching resume_run. Archiving events.jsonl out from under a live engine corrupts the log.
         if _engine_alive(rd) or not fold(_events(rd)).finished:
             raise HTTPException(409, "run is still active — stop it first (Replay resets a finished run)")
-        task_file: Optional[str] = None
-        meta = rd / "ui_meta.json"
-        if meta.exists():
-            task_file = json.loads(meta.read_text(encoding="utf-8")).get("task_file")
-        if not task_file and (rd / "task.snapshot.json").exists():
-            task_file = str(rd / "task.snapshot.json")
+        task_file = _task_file_for(rd)
         if not task_file:
             raise HTTPException(400, "run is not resettable — no task.snapshot.json or ui_meta.json")
         stamp = int(time.time() * 1000)   # ms granularity so two resets in the same second don't collide
@@ -1228,7 +1212,7 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
                         continue
                     f.write(orjson.dumps({
                         "role": m["role"], "content": str(m.get("content", "")),
-                        "ts": t0 + i * 1e-3, "seq": int(1e15) + i, "genesis": True}) + b"\n")
+                        "ts": t0 + i * 1e-3, "seq": GENESIS_CHAT_SEQ_BASE + i, "genesis": True}) + b"\n")
                 f.flush()
                 best_effort_fsync(f.fileno())   # FUSE/S3 fsync may raise — don't fail the launch
         # Per-run settings = the saved UI defaults overlaid with whatever the launch dialog set.
@@ -1501,10 +1485,7 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
             from looplab.adapters.tasks import make_llm_client
             client = make_llm_client(s)
             msgs = [
-                {"role": "system", "content": "You are a senior ML research advisor. Given a problem "
-                 "topic, write a concise markdown brief: key approaches to try, likely hyperparameters "
-                 "and sensible ranges, common pitfalls, and 2-3 concrete first experiments. Be specific "
-                 "and terse."},
+                {"role": "system", "content": RESEARCH_BRIEF_SYSTEM},
                 {"role": "user", "content": f"Research topic for an autonomous ML run:\n\n{topic}"},
             ]
             # Offload the blocking completion to a worker thread: this is an `async def` handler, so a
@@ -1595,83 +1576,7 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
         defaults = _resolved_settings()
         key_defaults = {k: defaults.get(k) for k in
                         ("llm_model", "llm_base_url", "llm_temperature", "max_nodes", "n_seeds", "policy")}
-        sys_prompt = (
-            "You are the BOSS that bootstraps a NEW autonomous-ML run from the user's goal. Decide the "
-            "whole plan and return it as ONE structured spec:\n"
-            "- run_id: a short, memorable kebab-case name you invent (e.g. 'nomad-minimax', "
-            "'titanic-baseline'). NEVER ask the user for it.\n"
-            "- the TASK: if an existing catalogue entry clearly matches, set task_file to its path. "
-            "Otherwise AUTHOR an inline `task` object. For a Kaggle / MLE-bench competition use "
-            '{"kind":"mlebench_real","competition":"<id>"} with the FULL slug exactly as on Kaggle — '
-            "e.g. 'nomad2018-predict-transparent-conductors' (NOT the short 'nomad2018'), "
-            "'spooky-author-identification'.\n"
-            "- REPO task (the agent optimizes an EXISTING code repo on this machine): author "
-            '{"kind":"repo","goal":"<what to optimize>","direction":"max"|"min",'
-            '"editable_path":"<absolute path to the repo the agent may edit>",'
-            '"edit_surface":["**/*.py"],'
-            '"eval":{"command":["python","train.py"],"cwd":".",'
-            '"metric":{"kind":"stdout_json","key":"<the key the command prints>"},'
-            '"setup":["pip","install","-r","requirements.txt"],"timeout":1800}}. '
-            "The `eval.command` is the OPERATOR's trusted way to RUN and score the repo (argv, no "
-            "shell); it must print the metric the loop reads (e.g. a final JSON line "
-            '{"metric": 0.93}). If the user states HOW the repo is run but NOT how it is scored, set '
-            '"onboard": true with "onboard_command" = that run command and ask in `reply` how the '
-            "metric is emitted. Copy any path / command / metric-key the user gives VERBATIM; never "
-            "invent a path you weren't given (leave editable_path empty and ask instead). When the user "
-            "points you at their OWN repo (gives a path), ALWAYS author this inline repo task with that "
-            "editable_path — do NOT substitute a similarly-named catalogue file; the catalogue is only "
-            "for the bundled example tasks. An absolute path is best, but ~ and $HOME are expanded.\n"
-            "- REPO data: WHENEVER the user says where the data is, mount it — add "
-            '"data":{"<name>":"<abs path>"} (each is copied to ./<name> in the eval workdir; ~/$HOME '
-            'expand) and reference it by that relative path. Read-only runtime deps go in '
-            '"references":[{"name":..,"path":..,"mount":true}]. Never drop a data path the user gave.\n'
-            "- REPO with no entry script yet, OR a scorer but no trainer: the AGENT writes the missing "
-            'code. Point the command at a conventional file it will CREATE (e.g. ["python","run.py"]) '
-            "and INCLUDE that file in edit_surface so it may be created; when training must run before "
-            'scoring, put the trainer in eval.setup (e.g. ["python","train.py"] — it runs before the '
-            "eval each node). Keep the scorer in protect.\n"
-            "- REPO, let the AGENT choose the arguments (the user does NOT want to enumerate flags): keep "
-            'the command argument-free (e.g. ["python","run.py"]) and put a CONFIG the agent edits (e.g. '
-            "config.yaml) in edit_surface — the agent reads the code and rewrites the config to switch "
-            "implementations. The agent emits FILES, never the command line, so route variability through "
-            "an editable config/launcher, not by appending flags to the command.\n"
-            "- REPO pure hyperparameter tuning with NO code edits: set eval.params_style:\"cli_overrides\" "
-            'plus task "params":{"<name>":[lo,hi]} (NUMERIC bounds) so proposals become key=value CLI '
-            'overrides, and add eval.profiles {"smoke":{"overrides":[..],"timeout":..},"full":{..}} for a '
-            "cheap search + a full confirm. (Categorical impl-switches are NOT numeric — use the config "
-            "approach above for those.)\n"
-            "- metric.kind options: stdout_json (default) | stdout_regex | file_json / file_regex (read a "
-            "file the run writes; dotted key ok) | adapter (the onboarding-written reader). Choose file_* "
-            "when the metric lands in a FILE rather than stdout.\n"
-            "- NO repo/code, just DATA + a goal (\"here is my data, get the best metric you see fit\"): "
-            'author the fully-generative kind {"kind":"dataset","goal":"<what to do>","direction":"max",'
-            '"data_path":"<abs path to the data file/dir>"} — the Developer writes the WHOLE solution and '
-            "self-reports the metric, CHOOSING an appropriate one when the user didn't name it (set "
-            '"metric":"<name>" only if they did). Use mlebench_real instead for a known Kaggle '
-            "competition. (dataset self-reports its metric, so for a hard no-self-grading guarantee "
-            "prefer a repo task with the operator's own eval.)\n"
-            "- setup_steps: WHENEVER the task is a repo, return a concrete checklist of what the user "
-            "must do to make the repo LoopLab-ready, e.g.: 'Expose a metric — print one JSON line "
-            '{"metric": <score>} at the end of the eval command\'; \'Pin dependencies in '
-            "requirements.txt so setup can install them'; 'Set edit_surface to only the files the "
-            "agent should change (e.g. src/model/**.py)'; 'Protect the eval/grader/answer files so "
-            "the agent can't overwrite them'; 'Add a cheap smoke profile (few steps) so the search is "
-            "fast'. One actionable line each; [] for a ready-to-run catalogue task.\n"
-            "- settings: ONLY the overrides the goal implies. CRITICAL: if the user mentions ANY model "
-            "name — even mid-sentence ('on minimax/minimax-m3', 'with deepseek') — copy it VERBATIM into "
-            "settings.llm_model; when it is an OpenRouter-style 'vendor/model' id (contains '/') also set "
-            "settings.llm_base_url='https://openrouter.ai/api/v1'. Map phrasing like '100 nodes' → "
-            "max_nodes, 'N seeds' → n_seeds. Leave everything else to the defaults.\n"
-            "- reply: a friendly message (two or three sentences) that states the plan in plain words — "
-            "the task you chose, where its data/repo is, and the key settings — so the user can confirm "
-            "or correct it. Don't be one-word terse; if anything is ambiguous, end with ONE specific "
-            "question. Never reply with just '-' or 'ok'.\n"
-            "- rationale: one terse line on why.\n"
-            "When the goal is too vague to choose a task, still invent a sensible run_id, leave task / "
-            "task_file empty, and ask ONE clarifying question in `reply`.\n\n"
-            f"Registered task kinds: {kinds()}\n"
-            f"Default settings (override only what matters): {json.dumps(key_defaults)}\n"
-            f"Task catalogue:\n{cat_lines}\n")
+        sys_prompt = genesis_system(kinds(), key_defaults, cat_lines)
         prior = _prior_learnings_index()
         if prior:
             sys_prompt += ("\nPrior cross-run learnings (portfolio reports from earlier runs — use them "
@@ -1775,7 +1680,7 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
                     "reply": spec.reply or "Here's a plan — tweak the card and launch."}
 
         job_id = secrets.token_hex(8)
-        _genesis_put(job_id, status="running", result=None, ts=time.time())
+        _genesis_put(job_id, status=JOB_RUNNING, result=None, ts=time.time())
 
         def _on_step(ev: dict) -> None:
             # Turn a raw tool event into a short human line so the UI can show what the boss is doing
@@ -1797,7 +1702,7 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
                 res = _compute_plan(_on_step)
             except Exception as e:  # noqa: BLE001 - surface as a job error, never a wedged job
                 res = {"ok": False, "error": f"planning failed: {e}"}
-            _genesis_put(job_id, status="done", result=res, ts=time.time())
+            _genesis_put(job_id, status=JOB_DONE, result=res, ts=time.time())
         threading.Thread(target=_worker, daemon=True).start()
 
         # Adaptive fast-path: poll the job for a few seconds WITHOUT blocking the event loop. A quick
@@ -1806,10 +1711,10 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
         deadline = time.monotonic() + _GENESIS_INLINE_WAIT
         while time.monotonic() < deadline:
             j = _genesis_get(job_id)
-            if j and j.get("status") == "done":
+            if j and j.get("status") == JOB_DONE:
                 return j["result"]
             await anyio.sleep(0.2)
-        return {"status": "running", "job_id": job_id}
+        return {"status": JOB_RUNNING, "job_id": job_id}
 
     @app.get("/api/genesis/{job_id}")
     def genesis_job(job_id: str):
@@ -1818,12 +1723,12 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
         job expired/was evicted (the UI should re-POST)."""
         j = _genesis_get(job_id)
         if not j:
-            return {"status": "unknown"}
-        if j.get("status") != "done":
+            return {"status": JOB_UNKNOWN}
+        if j.get("status") != JOB_DONE:
             # Carry the latest scout step so the UI can show "reading README.md…" instead of an
             # opaque spinner while a slow boss inspects the repo (transparency, not a time cap).
-            return {"status": "running", "progress": j.get("progress")}
-        return {**j["result"], "status": "done"}
+            return {"status": JOB_RUNNING, "progress": j.get("progress")}
+        return {**j["result"], "status": JOB_DONE}
 
     # ------------------------------------------------------------------ assistant (general chat agent)
     # The evolution of Genesis: a persistent, general-purpose chat agent with its OWN sessions (not
@@ -1850,11 +1755,11 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
             # execute once) must not park the worker for _PERM_TIMEOUT on a card nobody will see —
             # deny immediately, so the loop's next cancel_check ends the turn.
             if cancel_ev is not None and cancel_ev.is_set():
-                return "deny"
+                return PERM_DENY
             kind = (action or {}).get("tool_kind", "")
             with _perm_lock:
                 if kind and kind in _perm_always.get(sid, set()):
-                    return "allow_always"
+                    return PERM_ALLOW_ALWAYS
             req_id = secrets.token_hex(8)
             ev = threading.Event()
             safe_action = {k: v for k, v in (action or {}).items()
@@ -1880,9 +1785,9 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
                     break
             with _perm_lock:
                 req = _perm_reqs.get(req_id) or {}
-                dec = (req.get("decision") if got else "deny") or "deny"
+                dec = (req.get("decision") if got else PERM_DENY) or PERM_DENY
                 req["status"] = "resolved"
-                if dec == "allow_always" and kind:
+                if dec == PERM_ALLOW_ALWAYS and kind:
                     _perm_always.setdefault(sid, set()).add(kind)
             return dec
         return approver
@@ -1921,7 +1826,7 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
         with _perm_lock:
             for r in _perm_reqs.values():
                 if r.get("session") == sid and r.get("status") == "pending":
-                    r["decision"] = "deny"
+                    r["decision"] = PERM_DENY
                     r["status"] = "resolved"
                     r["event"].set()
 
@@ -1937,12 +1842,12 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
     @app.post("/api/assistant/permissions/{req_id}")
     async def assistant_resolve(req_id: str, request: Request):
         body = await request.json()
-        dec = body.get("decision", "deny")
+        dec = body.get("decision", PERM_DENY)
         with _perm_lock:
             r = _perm_reqs.get(req_id)
             if not r:
                 raise HTTPException(404, "no such permission request")
-            r["decision"] = dec if dec in ("allow_once", "allow_always", "deny") else "deny"
+            r["decision"] = dec if dec in (PERM_ALLOW_ONCE, PERM_ALLOW_ALWAYS, PERM_DENY) else PERM_DENY
             r["event"].set()
         return {"ok": True}
 
@@ -2209,7 +2114,7 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
             err_msg = str(e)
 
             async def _err_gen():
-                yield f"event: error\ndata: {json.dumps(err_msg)}\n\n"
+                yield f"event: {SSE_ERROR}\ndata: {json.dumps(err_msg)}\n\n"
             return StreamingResponse(_err_gen(), media_type="text/event-stream")
         approver = _make_approver(sid, cancel_ev)   # a confirm raised AFTER Stop denies instantly
 
@@ -2222,24 +2127,24 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
                 p = _asst_progress.get(sid)
                 if p is not None and p.get("owner") is cancel_ev and not cancel_ev.is_set():
                     p["steps"] = (p["steps"] + [ev.get("label") or ev.get("tool") or "…"])[-40:]
-            q.put(("step", ev.get("label") or ev.get("tool") or "…"))
+            q.put((SSE_STEP, ev.get("label") or ev.get("tool") or "…"))
 
         def _on_todos(items):
             with _perm_lock:   # mirror todos into the progress channel so a reattach restores them
                 p = _asst_progress.get(sid)
                 if p is not None and p.get("owner") is cancel_ev and not cancel_ev.is_set():
                     p["todos"] = items
-            q.put(("todos", items))
+            q.put((SSE_TODOS, items))
 
         def _on_text(content):
-            q.put(("text", content))          # interstitial assistant prose (between tool rounds)
+            q.put((SSE_TEXT, content))        # interstitial assistant prose (between tool rounds)
 
         def _worker():
             try:
                 res = _assistant_run_turn(client, root, history, instruction, eff_mode,
                                           alive_fn=_engine_alive, settings=s, approver=approver,
                                           on_step=_on_step, on_todos=_on_todos, on_text=_on_text,
-                                          reply_sink=lambda piece: q.put(("token", piece)),
+                                          reply_sink=lambda piece: q.put((SSE_TOKEN, piece)),
                                           cancel_check=cancel_ev.is_set)
                 res["tokens"] = _client_tokens(client)
                 # Persist the reply ONLY while the transcript still ends at OUR user message
@@ -2264,15 +2169,15 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
                             _asst.update_meta(sid, title=t)
                     except Exception:  # noqa: BLE001
                         pass
-                q.put(("done", {k: res.get(k) for k in
-                                ("reply", "steps", "applied", "proposals", "todos", "refs", "tokens", "mode")}))
+                q.put((SSE_DONE, {k: res.get(k) for k in
+                                  ("reply", "steps", "applied", "proposals", "todos", "refs", "tokens", "mode")}))
             except Exception as e:  # noqa: BLE001
-                q.put(("error", str(e)))
+                q.put((SSE_ERROR, str(e)))
             finally:
                 # Tear down ONLY OUR turn's registry entries (owner-guarded): a newer turn may have
                 # replaced them, and popping unconditionally would orphan it.
                 _release_turn(sid, cancel_ev)
-                q.put(("__end__", None))
+                q.put((ASSISTANT_STREAM_END_SENTINEL, None))
         threading.Thread(target=_worker, daemon=True).start()
 
         async def gen():
@@ -2288,7 +2193,7 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
                 except _queue.Empty:
                     yield ": keepalive\n\n"
                     continue
-                if kind == "__end__":
+                if kind == ASSISTANT_STREAM_END_SENTINEL:
                     break
                 yield f"event: {kind}\ndata: {json.dumps(data)}\n\n"
 
@@ -2440,13 +2345,7 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
             return {"ok": True, "summary": "", "tokens": None}
         try:
             client = make_llm_client(_llm_settings(rd))
-            sys_prompt = (
-                "You are compacting a conversation between a human and the BOSS of an autonomous ML "
-                "experiment run. Rewrite it as a TIGHT recap that becomes the boss's memory of these "
-                "turns, so they can be dropped from the live context. PRESERVE, in order of priority: "
-                "decisions made, actions already applied (and their outcome), open questions, and any "
-                "agreed next steps or constraints the human set. Drop pleasantries and resolved "
-                "tangents. One compact paragraph, no preamble, written as notes-to-self.")
+            sys_prompt = COMPACT_SYSTEM
             summary = await anyio.to_thread.run_sync(lambda: client.complete_text(
                 [{"role": "system", "content": sys_prompt}, {"role": "user", "content": convo}]))
         except Exception as e:  # noqa: BLE001 - offline / no model -> soft fail (chat stays uncompacted)
@@ -2463,19 +2362,7 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
         msgs = body.get("messages") or []
         nid = body.get("node_id")
         st = fold(_events(rd))
-        sys_prompt = (
-            "You are an ML research collaborator embedded in an autonomous experiment loop, chatting "
-            "with the human running it. Talk like a sharp, friendly colleague at a whiteboard — warm "
-            "and conversational, not a formal report. Use the human's language. Open with a direct "
-            "answer to what they asked, then your reasoning; ask a clarifying question back when it "
-            "would help. Keep it concise but human: contractions are fine, and it's okay to say what "
-            "you'd be curious to try and why.\n"
-            "Format with Markdown so it's easy to read: short paragraphs, **bold** for the key point, "
-            "bullet lists for options, and ```python fenced blocks for any code or params. When you "
-            "actually recommend an experiment, name the operator (improve/draft/debug), give the exact "
-            "params, and a one-line why — but don't force every reply into that shape; sometimes the "
-            "right answer is just an explanation or a question.\n\n"
-            "Here is the run you're discussing:\n" + _boss_context(st, nid, rd))
+        sys_prompt = CHAT_SYSTEM + _boss_context(st, nid, rd)
         try:
             client = make_llm_client(_llm_settings(rd))
             # Offload to a thread — an `async def` handler must not run the blocking completion on the
@@ -2558,37 +2445,7 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
             client = make_llm_client(s)
         except Exception as e:  # noqa: BLE001 - offline / no model
             return JSONResponse({"ok": False, "error": str(e)}, status_code=200)
-        sys_prompt = (
-            "You are the BOSS of an autonomous ML experiment run. Turn the human's chat message into a "
-            "PLAN: a short conversational `reply` plus an ORDERED list of `actions` to apply right now. "
-            "You are a real agent — take AS MANY actions as the request needs (zero, one, or several), "
-            "and the run will apply them in order, then reopen+resume itself if any step needs the "
-            "engine. Bias toward ACTING on what they want, not just talking back.\n"
-            "- Empty `actions` (advice only) ONLY for a pure question or chit-chat that asks for nothing "
-            "to change. Otherwise put real steps in `actions`.\n"
-            "- Compose steps freely. E.g. 'you have 10 more nodes, try some neural nets' →\n"
-            "    [budget(nodes=10), hint(text='try small neural nets: an MLP and a 1-D CNN baseline, "
-            "tune width/depth/lr'), inject(operator='draft', params={...}, rationale='MLP baseline'), "
-            "inject(operator='draft', params={...}, rationale='CNN baseline')].\n"
-            "- Verbs: budget(nodes=N) raises the run's node budget by N (REQUIRED before asking for more "
-            "experiments on a finished/near-budget run, else there's no room to run them); "
-            "hint(text=the COMPLETE current standing directive distilled into specific techniques/"
-            "features/params to try or avoid — it REPLACES the previous directive the researcher "
-            "follows, so restate anything earlier that still applies; the researcher and strategist "
-            "both read it, so phrase exploration asks plainly, e.g. 'try several distinct neural "
-            "architectures'); inject(operator one of draft/improve/debug/merge, params, rationale) for ONE "
-            "concrete experiment — emit several inject steps for several experiments; deep_research to "
-            "read the literature first; note(node_id, text) to annotate a node; confirm(node_id), "
-            "ablate(node_id), fork(node_id), promote(node_id); strategy(policy,fidelity) pins the "
-            "search policy/fidelity and OVERRIDES the autonomous strategist for the rest of the run "
-            "— pre-set it to match the request: an exploratory policy (evolutionary/asha) when the "
-            "user wants to TRY MANY distinct approaches (so the search doesn't just greedily refine "
-            "the current best), or greedy to exploit a clear leader; "
-            "import(source_run, source_node) to SEED a winning experiment from a SIBLING run of this "
-            "task into this run (use list_sibling_runs / read_sibling_experiment first to find one — the "
-            "imported node records where it came from); "
-            "approve(node_id), ratify, pause, resume, stop. Use the node in context when no id is given. "
-            "Give each step a one-line `rationale`.\n\n" + _boss_context(st, nid, rd))
+        sys_prompt = COMMAND_SYSTEM + _boss_context(st, nid, rd)
         convo = "\n".join(f"{m.get('role')}: {m.get('content')}" for m in msgs)
         user = (f"Instruction: {instruction}" if instruction else "") + (f"\n\nDiscussion:\n{convo}" if convo else "")
         from looplab.core.parse import parse_structured
@@ -2844,23 +2701,23 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
         thread keeps a blocking LLM/agent call off the event loop AND off the request's critical path,
         so it can't stall other clients or 504 behind a proxy."""
         job_id = secrets.token_hex(8)
-        _job_put(job_id, status="running", result=None, ts=time.time())
+        _job_put(job_id, status=JOB_RUNNING, result=None, ts=time.time())
 
         def _worker():
             try:
                 res = compute()
             except Exception as e:  # noqa: BLE001 - surface a usable error, never crash the worker
                 res = {"ok": False, "error": str(e)}
-            _job_put(job_id, status="done", result=res, ts=time.time())
+            _job_put(job_id, status=JOB_DONE, result=res, ts=time.time())
         threading.Thread(target=_worker, daemon=True).start()
 
         deadline = time.monotonic() + _JOB_INLINE_WAIT
         while time.monotonic() < deadline:
             j = _job_get(job_id)
-            if j and j.get("status") == "done":
+            if j and j.get("status") == JOB_DONE:
                 return j["result"]
             await anyio.sleep(0.2)
-        return {"status": "running", "job_id": job_id}
+        return {"status": JOB_RUNNING, "job_id": job_id}
 
     @app.get("/api/jobs/{job_id}")
     def get_job(job_id: str):
@@ -2868,10 +2725,10 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
         with status='done'; `unknown` if it expired/was evicted (the UI should re-issue the action)."""
         j = _job_get(job_id)
         if not j:
-            return {"status": "unknown"}
-        if j.get("status") != "done":
-            return {"status": "running"}
-        return {**j["result"], "status": "done"}
+            return {"status": JOB_UNKNOWN}
+        if j.get("status") != JOB_DONE:
+            return {"status": JOB_RUNNING}
+        return {**j["result"], "status": JOB_DONE}
 
     @app.get("/api/scope-report/{scope_type}/{scope_id}")
     def get_scope_report(scope_type: str, scope_id: str):
@@ -2957,6 +2814,12 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
             return {"ok": False, "error": str(e), **info}
 
     # ------------------------------------------------------------------ GPU monitor
+    def _f(s: str) -> Optional[float]:
+        try:
+            return float(s)
+        except (TypeError, ValueError):
+            return None
+
     @app.get("/api/gpu")
     def gpu():
         try:
@@ -3094,13 +2957,6 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
             })
 
     return app
-
-
-def _f(s: str) -> Optional[float]:
-    try:
-        return float(s)
-    except (TypeError, ValueError):
-        return None
 
 
 def serve(run_root: str | os.PathLike, host: str = "127.0.0.1", port: int = 8765,

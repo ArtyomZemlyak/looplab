@@ -117,7 +117,8 @@ def drive_tool_loop(client, tools, messages: list, emit_spec: dict, *,
                     stuck_repeat: int = 4, stuck_alternate: int = 4,
                     self_plan: bool = False, plan_reinject_every: int = 5,
                     auto_summary: bool = False, summary_client=None, on_step=None, on_text=None,
-                    cancel_check=None):
+                    cancel_check=None, on_tool_result=None,
+                    nudge_prompt: str = "", stuck_prompt: str = ""):
     """Multi-turn tool loop shared by every tool-using agent (Researcher, unified-agent pilot/triage,
     Boss, genesis scout, cross-run report). The model MAY call the provided retrieval tools across
     turns; when it calls the emit function (named in `emit_spec`), `finalize(args)` is returned. If
@@ -147,6 +148,18 @@ def drive_tool_loop(client, tools, messages: list, emit_spec: dict, *,
         invokes a retrieval tool — so a caller (e.g. the genesis endpoint) can surface "reading
         README.md" / "listing /repo" live to the UI. Never affects control flow; any exception it
         raises is swallowed (transparency must not change behaviour).
+      - `on_tool_result(name, args, result)` (optional): a per-tool-call DATA hook invoked after a
+        retrieval tool actually EXECUTES, with the parsed args and the 4000-char-capped result
+        string (exactly what the tool message will carry) — so a caller can record provenance
+        (the DeepResearcher's consulted-sources ledger) without re-implementing the loop. Not
+        called for the emit, the `update_plan` tool, or a cancel-stubbed call. Unlike
+        `on_step`/`on_text` this is data collection, not transparency, so exceptions PROPAGATE
+        (the caller's error handling owns them, same as a raising `tools.execute`).
+      - `nudge_prompt` / `stuck_prompt` (optional): caller-supplied wording for the two mid-loop
+        user nudges (the prose-stall retry, and the stuck-detector stop). Prompt strings are
+        contracts, so a caller folded onto this loop keeps its historical wording byte-identical
+        via these instead of inheriting the generic default. `stuck_prompt` is a `str.format`
+        template with a `{reason}` placeholder; empty ("") = the loop's default wording.
 
     Termination under "unlimited": when the model answers WITHOUT calling a tool (it considers
     itself done), we FORCE the structured emit immediately (`_force_emit`) and finish — so a prose
@@ -237,7 +250,8 @@ def drive_tool_loop(client, tools, messages: list, emit_spec: dict, *,
             stalls += 1
             if stalls >= 2:
                 break
-            messages.append({"role": "user", "content": f"Now call `{emit_name}` with your final answer."})
+            messages.append({"role": "user",
+                             "content": nudge_prompt or f"Now call `{emit_name}` with your final answer."})
             continue
         stalls = 0
         # Surface interstitial prose live — but NOT on the final turn where the model pairs prose with
@@ -283,6 +297,8 @@ def drive_tool_loop(client, tools, messages: list, emit_spec: dict, *,
                 with tracing.tool(name, args) as _tool_obs:
                     result = tools.execute(name, args) if tools is not None else f"(unknown tool: {name})"
                     _tool_obs.output(result)
+                if on_tool_result is not None:      # provenance hook: capped result, exceptions propagate
+                    on_tool_result(name, args, str(result)[:4000])
             result = str(result)[:4000]
             messages.append({"role": "tool", "tool_call_id": tc.get("id", ""),
                              "name": name, "content": result})
@@ -292,8 +308,9 @@ def drive_tool_loop(client, tools, messages: list, emit_spec: dict, *,
             # No progress — stop gracefully WITH a result instead of spinning forever. Nudge once,
             # then force the structured emit; if the client can't force it, fall through to fallback.
             messages.append({"role": "user",
-                             "content": f"Stop: you appear to be stuck ({stuck_reason}). "
-                                        f"Call `{emit_name}` now with your best answer."})
+                             "content": (stuck_prompt.format(reason=stuck_reason) if stuck_prompt
+                                         else f"Stop: you appear to be stuck ({stuck_reason}). "
+                                              f"Call `{emit_name}` now with your best answer.")})
             forced = _force_emit(client, messages, emit_spec)
             if forced is not None:
                 return finalize(forced)

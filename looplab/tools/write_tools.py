@@ -172,6 +172,9 @@ class WriteTools:
             return (f"(plan mode is read-only — I can't {action.get('verb', 'do that')}. "
                     "Switch the assistant to default/acceptEdits/auto to apply changes.)")
         if d == "ask":
+            # The approver's verdict vocabulary ("allow_once"/"allow_always"/"deny") is the permission-
+            # decision wire protocol named in looplab/serve/protocol.py (PERM_*). It is string-matched
+            # here rather than imported because tools must never import serve (layering).
             verdict = str(self.approver(action) or "deny")
             if not verdict.startswith("allow"):
                 return f"(declined by the user: {action.get('label', 'change')})"

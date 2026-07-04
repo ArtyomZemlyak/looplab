@@ -13,11 +13,11 @@ failure (or no model) yields a minimal memo rather than crashing the run.
 """
 from __future__ import annotations
 
-import json
 from typing import Optional
 
 from pydantic import BaseModel, Field
 
+from looplab.agents.agent import drive_tool_loop
 from looplab.core.llm import BudgetExceeded
 from looplab.core.models import NodeStatus, ResearchMemo, RunState
 
@@ -80,6 +80,18 @@ def state_brief(state: RunState, max_nodes: int = 40) -> str:
     return "\n".join(lines)
 
 
+class _NoTools:
+    """Tool-less stand-in handed to `drive_tool_loop` when no grounding tools are wired: the model
+    only sees `emit` (specs() is empty), and a hallucinated tool call gets the same "(no tools)"
+    observation this stage has always returned (drive_tool_loop's own no-tools reply differs)."""
+
+    def specs(self) -> list[dict]:
+        return []
+
+    def execute(self, name: str, args: dict) -> str:
+        return "(no tools)"
+
+
 class DeepResearcher:
     """Run-wide agentic research step. `tools` is any object with .specs()/.execute(); None = no
     external grounding (the memo is then formed from the results summary alone)."""
@@ -109,83 +121,40 @@ class DeepResearcher:
         memo = ResearchMemo(at_node=len(state.nodes), trigger=trigger)
         if self.tools is not None and hasattr(self.tools, "bind_state"):
             self.tools.bind_state(state)     # let run-aware tools read the current search
-        tool_specs = ((self.tools.specs() if self.tools else []) + [self._emit_spec()])
         messages = [
             {"role": "system", "content": _SYSTEM},
             {"role": "user", "content": state_brief(state) +
                 "\nReview the run. Consult sources if useful, then emit your memo."},
         ]
         sources: list[dict] = []
+
+        def _record(name: str, args: dict, result: str) -> None:
+            # Record which sources were consulted (the query/url + a snippet) for the memo.
+            sources.append({"title": f"{name}({_arg_label(args)})",
+                            "url": _arg_url(args), "snippet": str(result)[:200]})
+
         try:
-            import itertools
-            import time as _time
-            from looplab.agents.agent import _force_emit, _summarizer
-            from looplab.agents.stuck import StuckDetector
-            detector = (StuckDetector(repeat_threshold=self.stuck_repeat,
-                                      alternate_threshold=self.stuck_alternate)
-                        if self.stuck_detection else None)
-            summarize = _summarizer(self.client) if self.auto_summary else None  # build once, not per turn
-            started = _time.monotonic()
-            stalls = 0                  # consecutive prose turns we couldn't force into an emit
-            turns = (itertools.count() if self.max_turns is None or self.max_turns <= 0
-                     else range(self.max_turns))   # 0 = unlimited (config-driven)
-            for _ in turns:
-                if self.time_budget_s and (_time.monotonic() - started) > self.time_budget_s:
-                    break               # out of wall-clock budget -> force a memo from what we have
-                if self.auto_summary:
-                    from looplab.core.context_budget import DEFAULT_SUMMARY_CHARS, compact_history
-                    messages = compact_history(
-                        messages, self.context_budget_chars or DEFAULT_SUMMARY_CHARS, summarize)
-                elif self.context_budget_chars:
-                    from looplab.core.context_budget import truncate_history
-                    messages = truncate_history(messages, self.context_budget_chars)
-                msg = self.client.chat(messages, tool_specs, tool_choice="auto")
-                calls = msg.get("tool_calls") or []
-                if not calls:
-                    # Replied in prose instead of a tool call — force the memo emit now (deterministic)
-                    # rather than nudge-and-hope; bounded nudge fallback if the client can't force one.
-                    messages.append({"role": "assistant", "content": msg.get("content") or ""})
-                    forced = _force_emit(self.client, messages, self._emit_spec())
-                    if forced is not None:
-                        return self._finalize(forced, memo, sources)
-                    stalls += 1
-                    if stalls >= 2:
-                        break
-                    messages.append({"role": "user", "content": "Now call `emit` with your memo."})
-                    continue
-                stalls = 0
-                messages.append({"role": "assistant", "content": msg.get("content") or "",
-                                 "tool_calls": calls})
-                stuck_reason = None
-                for tc in calls:
-                    fn = tc.get("function", {})
-                    name = fn.get("name", "")
-                    raw = fn.get("arguments") or "{}"
-                    try:
-                        args = json.loads(raw) if isinstance(raw, str) else (raw or {})
-                    except (json.JSONDecodeError, TypeError):
-                        args = {}
-                    if not isinstance(args, dict):
-                        args = {}   # non-object JSON ("[...]") must not abort the whole memo on .get()
-                    if name == "emit":
-                        return self._finalize(args, memo, sources)
-                    result = self.tools.execute(name, args) if self.tools else "(no tools)"
-                    # Record which sources were consulted (the query/url + a snippet) for the memo.
-                    sources.append({"title": f"{name}({_arg_label(args)})",
-                                    "url": _arg_url(args), "snippet": str(result)[:200]})
-                    messages.append({"role": "tool", "tool_call_id": tc.get("id", ""),
-                                     "name": name, "content": str(result)[:4000]})
-                    if detector is not None:    # B1: stop searching in circles -> force the memo
-                        stuck_reason = detector.push(name, args, str(result)[:4000]) or stuck_reason
-                if stuck_reason:
-                    messages.append({"role": "user", "content": (
-                        f"Stop: you appear to be stuck ({stuck_reason}). Call `emit` with your memo now.")})
-                    forced = _force_emit(self.client, messages, self._emit_spec())
-                    if forced is not None:
-                        return self._finalize(forced, memo, sources)
-                    break
-            # Ran out of turns without an emit — force a structured memo from the accumulated context.
-            return self._forced(messages, memo, sources)
+            # The shared loop owns the mechanics this stage used to reimplement (prose-stall
+            # force-emit + bounded nudge, malformed-args guard, B1 stuck detection, C2 history
+            # compaction, turn/time budgets); this stage keeps only what is genuinely its own:
+            # the memo prompts, the consulted-sources ledger (`on_tool_result`), its historical
+            # nudge wording (prompt strings are contracts), and the no-tools observation text
+            # (truthiness on purpose, matching the pre-fold `if self.tools else` guards).
+            # `self_plan` stays OFF: the memo review never had an update_plan tool.
+            return drive_tool_loop(
+                self.client, self.tools if self.tools else _NoTools(), messages, self._emit_spec(),
+                max_turns=self.max_turns,               # 0 = unlimited (config-driven)
+                context_budget_chars=self.context_budget_chars,
+                time_budget_s=self.time_budget_s,       # out of wall-clock budget -> memo from what we have
+                finalize=lambda args: self._finalize(args, memo, sources),
+                # Ran out of turns without an emit — force a structured memo from the accumulated context.
+                fallback=lambda msgs: self._forced(msgs, memo, sources),
+                stuck_detection=self.stuck_detection,   # B1: stop searching in circles -> force the memo
+                stuck_repeat=self.stuck_repeat, stuck_alternate=self.stuck_alternate,
+                auto_summary=self.auto_summary, self_plan=False,
+                on_tool_result=_record,
+                nudge_prompt="Now call `emit` with your memo.",
+                stuck_prompt="Stop: you appear to be stuck ({reason}). Call `emit` with your memo now.")
         except BudgetExceeded:      # a hard budget stop must end the run, not be swallowed as a memo
             raise
         except Exception as e:  # noqa: BLE001 — research is best-effort; never crash the run
@@ -257,6 +226,10 @@ def make_deep_researcher(settings, *, client=None, task=None) -> Optional[DeepRe
     if providers:
         from looplab.agents.agent import CompositeTools
         tools = providers[0] if len(providers) == 1 else CompositeTools(providers)
+    # Deliberately NOT `loop_opts_from_settings(settings)`: that bundle also carries `self_plan`
+    # (default ON — this stage never exposes an update_plan tool) and the D11 `summary_client`
+    # (compressor_model — this stage has always compacted with its own client), so spreading it
+    # would change the memo loop's behavior. Keep the explicit per-setting kwargs instead.
     return DeepResearcher(client, tools, parser=getattr(settings, "llm_parser", "tool_call"),
                           context_budget_chars=getattr(settings, "context_budget_chars", 0),
                           max_turns=getattr(settings, "agent_max_turns", 0),

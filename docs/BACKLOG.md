@@ -224,3 +224,63 @@ config-overridable). *(B6 parked in backlog — high value, not top-3 now.)*
 
 *Companion docs: [ROADMAP.md](ROADMAP.md) (strategy/why), [RESEARCH_NOTES.md](RESEARCH_NOTES.md)
 (sourced evidence), [CODE_REVIEW.md](CODE_REVIEW.md) (foundation findings).*
+
+---
+
+## 4. Maintainability backlog (architecture review, 2026-07-04)
+
+A six-subsystem architecture audit (engine / core+events / agents+search / serve /
+adapters+runtime+trust+tools / repo-DX) landed the low-risk subset on branch
+`claude/agent-architecture-review-t6iqkn`: the `events/types.py` registry + typo-guard test,
+`core/errors.py` cycle break, `tools/_base.py` ToolProvider contract, `_shared_providers`,
+hint-attr registry, policy constants/registry, orchestrator extractions (triage/lessons/finalize),
+serve protocol/prompt hoists, DeepResearcher→`drive_tool_loop` merge, root `CLAUDE.md`, tests CI.
+The remaining (deliberately deferred, higher-churn) items:
+
+- ⬜ **P1/M — `Engine.__init__` 79-param collapse.** Group pure-config knobs into a frozen
+  `EngineOptions` built from `Settings`; keep old kwargs during transition. Kills the 4-edit
+  ritual (Settings → cli passthrough → `__init__` param → `self._x`) and the ~90-line mirror in
+  `cli.py::_engine`. ~105 test call sites construct `Engine(...)` — keep kwargs accepted.
+- ⬜ **P1/L — `serve/server.py` router split.** `make_app` is still a ~2.5k-line closure; the
+  audit's plan (AppState + `routers/` with `build_router(st)`, SPA fallback registered last,
+  assistant perm-registry moved as one unit) is in the review session notes. Also: unify the
+  genesis job registry onto the generic `_jobs` one; de-duplicate the two assistant turn
+  endpoints (`_begin_turn`/`_finish_turn`).
+- ⬜ **P2/M — orchestrator step 2: holdout + workspace + confirm/ablate mixins.**
+  `HoldoutGrader`, `WorkspaceSeeder`, `ConfirmMixin`/`AblationMixin` per the audit plan; also
+  `_emit_node_created` (payload currently built 4 ways, two omit `deleted`) and decomposing
+  `run()` (~420 lines) into guarded phase methods.
+- ⬜ **P2/M — llm.py shared SSE generator.** `_read_stream` and `complete_text_stream` duplicate
+  ~107 lines of SSE consumption; extract `_sse_lines(resp, idle_limit)` (lean on
+  test_openai_client.py + test_assistant_streaming.py).
+- ⬜ **P2/S — trust dedup.** `confirm_top_k` (tests-only) re-implements `_confirm_phase`'s
+  selection — extract the pure selection step and call it from the engine; mark `cv.py`'s
+  unwired splitters as library code.
+- ⬜ **P2/M — SurfacePolicy.** The surface/protected write-gate is re-implemented in
+  `tools/patch.py`, `RepoWriteTools`, `WriteTools`, `RepoTask._eval_protected`; one value object
+  with reason codes (each site keeps its wording).
+- ⬜ **P2/M — `repo_task.py` split** (specs+task vs developer/tools halves, re-exports kept) +
+  hoist its inline mega-prompts to constants; extract the tolerant search/replace matcher to
+  `tools/edit_match.py` for reuse by `WriteTools`.
+- ⬜ **P2/S — RunStateCache.** `run_tools.SiblingRunTools` / `runs_tools.RunsTools` duplicate the
+  fold-cache + traversal guard verbatim.
+- ⬜ **P3/M — test-suite reorganization.** 21 accretion-named files (`test_review_fixes*`,
+  `test_*_fixes`, phase/round names) → per-subject homes; codemod the 91 legacy flat-import test
+  files to canonical paths (keep the `_LAYOUT` shim for external users); register `live` /
+  `docker` pytest markers.
+- ⬜ **P3/S — CLI polish.** Extract the duplicated 10-line error funnel in `run`/`resume`; freeze
+  the 24-flag `run()` surface (new knobs go through `--set`). Move `ui_preview.py` /
+  `ui_with_env.py` dev shims out of the repo root.
+- ⬜ **P3/S — wrapper-forwarding mixin** for Developer/Researcher wrappers
+  (`ValidatingDeveloper`, `BestOfNDeveloper`, `UnifiedAgent`, `SurrogateResearcher`) + document
+  the developer-attribute contract the engine reads (`last_files`, `inner`, `audit_extra`, …).
+- ⬜ **P3/S — prompt-store routing.** Wrap the ~7 hardcoded system prompts (strategist ×2,
+  unified pilot/triage, deep-research, best-of-N judge, repair prefix) in
+  `render(prompts, key, default)` so every prompt is greppable/overridable; move the two
+  researcher instruction-prose duplicates (agent.py vs roles.py) onto shared fragments with a
+  rendered-prompt snapshot test.
+- ⬜ **P3/S — known one-off flags from the audit:** `ToolUsingResearcher` doesn't read
+  `_sweep_hint` (flagged in roles.py — decide: bug or intent); `command_eval` handles Docker
+  timeout rc 124 but not 137 while `sandbox` handles both; `parse._ORDER`'s `"outlines"` alias;
+  `_PRELOAD_PRIORITY`/`_recipes` hardcode one repo's filenames; `Strategy` knobs are
+  quadruple-encoded (TypedDict/_StrategyOut/_assemble/validate).
