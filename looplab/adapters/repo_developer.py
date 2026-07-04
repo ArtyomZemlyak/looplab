@@ -125,6 +125,36 @@ class RepoWriteTools:
             return f"(refused: {p} is outside your editable surface: {', '.join(self._surface)})"
         return None
 
+    @staticmethod
+    def _py_syntax_check(path: str, content: str) -> tuple[bool, Optional[str]]:
+        """Compile a *.py result: returns (hard, msg).
+          - (True, "line N: msg")  → an IndentationError/TabError (or an unparseable-content
+            ValueError, e.g. a NUL byte). These are VERSION-INVARIANT — the indentation grammar is
+            fixed across Python versions — and are the dominant real-run failure (a replace-block
+            inserted at the wrong indent, so train.py only broke minutes later as a crash). HARD-
+            reject: never stage.
+          - (False, "line N: msg") → any OTHER SyntaxError. Could be syntax NEWER than the
+            interpreter running this check (the sandbox that executes train.py may be a newer
+            Python: PEP 695 generics, `type X = …`), which would false-reject valid code. So surface
+            it as a non-blocking WARNING and still stage — the model sees it and can fix a genuine
+            break, but valid-for-target code is never wedged.
+          - (False, None)          → compiles cleanly here.
+
+        Uses compile() (not ast.parse) so it ALSO catches the AST-validation errors ast.parse lets
+        through — a repeated keyword arg, `return` outside a function, a duplicate parameter — which
+        were part of the real-run failures."""
+        if not path.endswith(".py"):
+            return (False, None)
+        try:
+            compile(content, path, "exec")
+            return (False, None)
+        except IndentationError as e:      # subclass of SyntaxError; TabError subclasses this too
+            return (True, f"line {e.lineno}: {e.msg}")
+        except SyntaxError as e:
+            return (False, f"line {e.lineno}: {e.msg}")
+        except ValueError as e:            # source with NUL bytes etc. — genuinely unrunnable
+            return (True, str(e)[:80])
+
     def _write(self, p, args: dict) -> str:
         if not p:
             return ("(refused: path must be REPO-RELATIVE and inside the repo — no absolute paths, "
@@ -133,10 +163,15 @@ class RepoWriteTools:
         if refusal:
             return refusal
         content = args.get("content", "")
+        hard, err = self._py_syntax_check(p, content)
+        if hard:
+            return (f"(refused: the content you wrote for {p} is not valid Python — {err}. "
+                    "Fix the indentation/syntax and write_file again; nothing was staged.)")
         self.files[p] = content
         if p in self.deleted:
             self.deleted.remove(p)
-        return f"wrote {p} ({len(content)} bytes)"
+        warn = (f"  ⚠ this may not be valid Python ({err}) — verify before calling done" if err else "")
+        return f"wrote {p} ({len(content)} bytes){warn}"
 
     def _edit(self, p, args: dict) -> str:
         if not p:
@@ -156,10 +191,22 @@ class RepoWriteTools:
         new, msg = apply_search_replace(cur, search, replace, path=p)
         if new is None:
             return msg
+        # Syntax gate: reject an edit that INTRODUCES an indentation break (the model's replace-block
+        # at the wrong indent — the #1 real-run failure) — but only when the ORIGINAL parsed cleanly,
+        # so we never punish the model for editing an already-broken file, and only HARD on the
+        # version-invariant class (see _py_syntax_check); a newer-syntax SyntaxError is a warning.
+        _, cur_err = self._py_syntax_check(p, cur)       # cur_err None => original parsed cleanly
+        new_hard, new_err = self._py_syntax_check(p, new)
+        if cur_err is None and new_hard:                 # the edit INTRODUCED an indentation break
+            return (f"(refused: this edit makes {p} invalid Python — {new_err}. Your `replace` "
+                    "block's indentation doesn't fit the surrounding code; match the exact "
+                    "indentation of the lines around the hunk and try again. Nothing was staged.)")
         self.files[p] = new
         if p in self.deleted:
             self.deleted.remove(p)          # an edit resurrects a previously-deleted file
-        return msg
+        warn = (f"  ⚠ this edit may make {p} invalid Python ({new_err}) — verify before done"
+                if (new_err and not new_hard) else "")
+        return msg + warn
 
     def _delete(self, p) -> str:
         if not p:
@@ -235,8 +282,9 @@ def _xlsx_to_markdown(path: str, *, max_rows: int = 120, cap: int = 9000) -> Opt
 # `{note}`/`{already}` placeholders are `.format`-filled at the exact spots the old f-strings
 # interpolated; neither template contains any other brace.
 _REPO_DEV_SYSTEM_INTRO = (
-    "You improve an existing experiment repository by WRITING code, using ONLY the write_file "
-    "tool. You OWN the implementation: the researcher proposed the experiment CONCEPT and "
+    "You improve an existing experiment repository by WRITING code with the write_file and edit_file "
+    "tools (edit_file for changes to existing files, write_file for new ones). You OWN the "
+    "implementation: the researcher proposed the experiment CONCEPT and "
     "hyperparameters; YOU decide how to realise it in code — which existing scripts to "
     "orchestrate, the stage structure, and how to compute + read the metric. ")
 _REPO_DEV_SYSTEM_BODY = (
