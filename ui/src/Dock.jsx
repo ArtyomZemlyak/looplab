@@ -41,6 +41,7 @@ const NARR = {
   proxy_scored: (d) => `proxy scored #${d.node_id}: ${fmt(d.score)}${d.skipped ? ' (skipped full eval)' : ''}`,
   reward_hack_suspected: (d) => `reward-hack suspected on #${d.node_id}: ${(d.signals || []).map(s => s.signal).join(', ')}`,
   novelty_rejected: (d) => `dedup: proposal near #${d.near_node} (dist ${fmt(d.distance, 3)}) nudged to diversify`,
+  hypothesis_ranked: (d) => `foresight ranked ${d.n || (d.order || []).length} open hypotheses by predicted payoff${d.confidence != null ? ` (${Math.round(d.confidence * 100)}% conf)` : ''}${d.reason ? ' — ' + String(d.reason).slice(0, 70) : ''}`,
   run_finished: (d) => `run finished${d.reason ? ' (' + d.reason + ')' : ''}`,
   llm_cost: (d) => `LLM: ${d.total_tokens} tokens, $${fmt(d.cost)}`,
   // --- operator/boss control INTENTS + their engine confirmations. Every event the agentic boss can
@@ -99,7 +100,7 @@ const GROUPS = [
 const TYPE2GROUP = {
   node_created: 'proposal',
   node_evaluated: 'eval', node_failed: 'eval', node_repaired: 'eval', node_confirmed: 'eval', best_confirmed: 'eval', proxy_scored: 'eval', ablate: 'eval',
-  policy_decision: 'decision', strategy_decision: 'decision', rung_promoted: 'decision', agent_decision: 'decision', set_strategy: 'decision',
+  policy_decision: 'decision', strategy_decision: 'decision', rung_promoted: 'decision', agent_decision: 'decision', set_strategy: 'decision', hypothesis_ranked: 'decision',
   research_completed: 'research', deep_research: 'research',
   report_generated: 'report',
   reward_hack_suspected: 'trust', data_leakage: 'trust', spec_drift: 'trust', novelty_rejected: 'trust',
@@ -125,7 +126,7 @@ const TYPE_GLYPH = {
   node_failed: 'bug', node_repaired: 'gear', node_confirmed: 'target', best_confirmed: 'star',
   run_started: 'play', run_finished: 'stop', report_generated: 'doc', research_completed: 'search',
   deep_research: 'search', agent_decision: 'bot', run_reopened: 'play', inject_node: 'gitbranch',
-  fork: 'gitbranch', agent_validated: 'target',
+  fork: 'gitbranch', agent_validated: 'target', hypothesis_ranked: 'bulb',
 }
 function kindOf(type) {
   const g = TYPE2GROUP[type] || 'lifecycle'

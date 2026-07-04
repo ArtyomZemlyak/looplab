@@ -65,6 +65,7 @@ EV_LLM_COST = "llm_cost"
 EV_ABLATE = "ablate"
 EV_POLICY_DECISION = "policy_decision"
 EV_STRATEGY_DECISION = "strategy_decision"
+EV_HYPOTHESIS_RANKED = "hypothesis_ranked"   # FOREAGENT board prioritization: order + confidence + trace
 EV_RUNG_PROMOTED = "rung_promoted"
 EV_AGENT_DECISION = "agent_decision"
 EV_REWARD_HACK_SUSPECTED = "reward_hack_suspected"

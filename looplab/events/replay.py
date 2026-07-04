@@ -14,7 +14,7 @@ from looplab.events.types import (
     EV_CONFIRM_EVAL, EV_DATA_LEAKAGE, EV_DATA_PROFILED, EV_DATA_PROVENANCE,
     EV_DEEP_RESEARCH, EV_DIVERSITY_ARCHIVE, EV_FORCE_ABLATE, EV_FORCE_CONFIRM, EV_FORK,
     EV_FORK_DONE, EV_HINT, EV_HOLDOUT_EVALUATED, EV_HOST_GRADING, EV_HYPOTHESIS_ADDED,
-    EV_HYPOTHESIS_UPDATED, EV_INJECT_DONE, EV_INJECT_NODE, EV_LESSONS_DISTILLED,
+    EV_HYPOTHESIS_RANKED, EV_HYPOTHESIS_UPDATED, EV_INJECT_DONE, EV_INJECT_NODE, EV_LESSONS_DISTILLED,
     EV_LESSONS_REFRESHED, EV_LLM_COST, EV_NODE_ABORT, EV_NODE_CONFIRMED, EV_NODE_CREATED,
     EV_NODE_EVALUATED, EV_NODE_FAILED, EV_NODE_REPAIRED, EV_NOVELTY_REJECTED, EV_PAUSE,
     EV_POLICY_DECISION, EV_PROMOTE, EV_PROXY_SCORED, EV_REPORT_GENERATED,
@@ -220,6 +220,11 @@ def fold(events: Iterable[Event]) -> RunState:
             st.active_strategy = d.get("strategy")
             st.strategy_history.append({"strategy": d.get("strategy"), "at_node": d.get("at_node"),
                                         "ctx": d.get("ctx")})
+        elif t == EV_HYPOTHESIS_RANKED:
+            # FOREAGENT board prioritization (audit-only): the engine recorded how the world model
+            # ordered the OPEN hypotheses (order of ids + confidence + analysis trace). Latest-wins
+            # (like policy_scores); `_derive_hypotheses` stamps each card's `priority` from `order`.
+            st.hypothesis_ranking = d
         elif t == EV_RUNG_PROMOTED:
             st.rungs.append({"rung": d.get("rung"), "survivors": d.get("survivors", [])})
         elif t == EV_AGENT_DECISION:
@@ -524,5 +529,14 @@ def _derive_hypotheses(st: RunState) -> None:
             h.status = "open"                      # all evidence failed/infeasible — no verdict
         else:
             h.status = "tested"                    # all evidence evaluated, none improved
+
+    # FOREAGENT board prioritization: stamp each ranked card's `priority` (0-based position in the
+    # latest `hypothesis_ranked` order) so the UI kanban sorts open cards by predicted payoff. Derived,
+    # not stored on the event's cards — the ranking is by hypothesis id, robust to a card changing lane.
+    order = ((st.hypothesis_ranking or {}).get("order") or []) if isinstance(st.hypothesis_ranking, dict) else []
+    for rank_i, hid in enumerate(order):
+        h = hyps.get(str(hid))
+        if h is not None:
+            h.priority = rank_i
 
     st.hypotheses = hyps

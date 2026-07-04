@@ -163,6 +163,11 @@ class Hypothesis(BaseModel):
     evidence: list[int] = Field(default_factory=list)   # node ids that tested it
     created_at_node: int = 0
     best_delta: Optional[float] = None  # best improvement-over-parent among evidence (audit)
+    # FOREAGENT board prioritization (search/foresight.py): 0-based rank among the OPEN hypotheses in
+    # the latest `hypothesis_ranked` event — 0 = predicted highest payoff. DERIVED each fold from that
+    # event; None when unranked (no predictor run, or the card isn't open). Audit/UI only — the kanban
+    # sorts open cards by it; never read by best-selection.
+    priority: Optional[int] = None
 
 
 class ResearchMemo(BaseModel):
@@ -335,6 +340,11 @@ class RunState(BaseModel):
     # a human/agent override of the derived status.
     hypotheses_added: list[dict] = Field(default_factory=list)
     hypotheses_abandoned: list[str] = Field(default_factory=list)
+    # FOREAGENT board prioritization (audit-only — NEVER read by best-selection). The latest
+    # `hypothesis_ranked` event: {at_node, order:[ids], confidence, reason, ranked:[{id,statement}]}.
+    # `_derive_hypotheses` stamps each open card's `priority` from `order`; the UI kanban sorts by it
+    # and shows `reason` as the "why this order" analysis trace. None until the predictor first runs.
+    hypothesis_ranking: Optional[dict] = None
     # Agent-authored run report (conclusion-first; audit-only sidecar — NEVER read by best-selection).
     # The latest `report_generated` event's content, regenerated on a cadence + on manual refresh. The
     # UI renders the deterministic analysis from the node set and layers this narrative on top.

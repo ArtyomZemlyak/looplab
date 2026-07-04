@@ -4,7 +4,9 @@ over structural/text ideas (the hypothesis panel the numeric surrogate is blind 
 from __future__ import annotations
 
 from looplab.agents.roles import _state_brief
-from looplab.core.models import Hypothesis, Idea, Node, NodeStatus, RunState, hypothesis_id
+from looplab.core.models import (Event, Hypothesis, Idea, Node, NodeStatus, RunState,
+                                 hypothesis_id)
+from looplab.events.replay import fold
 from looplab.search.best_of_n import BestOfNDeveloper
 from looplab.search.foresight import (ForesightPanelResearcher, rank, rank_solutions,
                                       verified_report)
@@ -261,6 +263,62 @@ def test_propose_prioritizes_board_and_ranks_ideas():
     assert panel.base._hyp_order is not None          # the board was prioritized for the base
     assert panel.last_hyp_priority is not None
     assert out.hypothesis == "h a"                    # idea ranking still picks the predicted best
+
+
+# --------------------------------------------------------------------------- #
+# fold: hypothesis_ranked -> RunState.hypothesis_ranking + Hypothesis.priority
+# --------------------------------------------------------------------------- #
+
+def test_fold_stamps_priority_and_keeps_trace():
+    s0, s1 = "interaction features help", "a deeper tree overfits"
+    id0, id1 = hypothesis_id(s0), hypothesis_id(s1)
+    evs = [
+        Event(type="run_started", data={"run_id": "r", "task_id": "t", "direction": "max"}),
+        Event(type="hypothesis_added", data={"statement": s0, "source": "deep_research"}),
+        Event(type="hypothesis_added", data={"statement": s1, "source": "human"}),
+        # predictor ranked the deeper-tree card first
+        Event(type="hypothesis_ranked", data={"node_id": 3, "order": [id1, id0],
+                                              "confidence": 0.8, "reason": "small data favors it",
+                                              "ranked": [{"id": id1, "statement": s1},
+                                                         {"id": id0, "statement": s0}]}),
+    ]
+    st = fold(evs)
+    assert st.hypotheses[id1].priority == 0 and st.hypotheses[id0].priority == 1
+    assert st.hypothesis_ranking["reason"] == "small data favors it"
+    assert st.hypothesis_ranking["confidence"] == 0.8
+
+
+def test_fold_priority_none_without_ranking():
+    st = fold([Event(type="run_started", data={"run_id": "r", "task_id": "t", "direction": "max"}),
+               Event(type="hypothesis_added", data={"statement": "x helps"})])
+    assert next(iter(st.hypotheses.values())).priority is None
+    assert st.hypothesis_ranking is None
+
+
+# --------------------------------------------------------------------------- #
+# engine emit: _emit_hypothesis_ranked reads role telemetry, consumes it
+# --------------------------------------------------------------------------- #
+
+def test_engine_emits_and_consumes_hypothesis_ranked():
+    from looplab.engine.orchestrator import Engine
+
+    class _Store:
+        def __init__(self):
+            self.events = []
+
+        def append(self, t, d):
+            self.events.append((t, d))
+
+    class _Researcher:
+        last_hyp_priority = {"order": ["a", "b"], "confidence": 0.7, "reason": "r", "n": 2}
+
+    eng = Engine.__new__(Engine)                 # bypass heavy __init__: method only uses store+researcher
+    eng.store, eng.researcher = _Store(), _Researcher()
+    eng._emit_hypothesis_ranked(5)
+    ranked = [e for e in eng.store.events if e[0] == "hypothesis_ranked"]
+    assert len(ranked) == 1 and ranked[0][1]["node_id"] == 5 and ranked[0][1]["reason"] == "r"
+    eng._emit_hypothesis_ranked(6)               # consumed -> a non-propose node re-emits nothing
+    assert len([e for e in eng.store.events if e[0] == "hypothesis_ranked"]) == 1
 
 
 # --------------------------------------------------------------------------- #

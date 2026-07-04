@@ -27,7 +27,7 @@ from looplab.events.types import (
     EV_DATA_LEAKAGE,
     EV_DATA_PROFILED, EV_DATA_PROVENANCE, EV_DEPS_INSTALLED,
     EV_DRIFT_UNAVAILABLE, EV_FORK_DONE, EV_HINT, EV_HOST_GRADING,
-    EV_HYPOTHESIS_ADDED, EV_INJECT_DONE, EV_INJECT_FAILED,
+    EV_HYPOTHESIS_ADDED, EV_HYPOTHESIS_RANKED, EV_INJECT_DONE, EV_INJECT_FAILED,
     EV_NODE_ABORT, EV_NODE_CREATED,
     EV_NODE_EVALUATED, EV_NODE_FAILED, EV_NODE_REPAIRED, EV_NOVELTY_REJECTED,
     EV_POLICY_DECISION, EV_PROXY_SCORED, EV_REPORT_GENERATED,
@@ -1785,6 +1785,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin):
                 research_origin=research_origin,
             )
         self._emit_agent_report(node_id)
+        self._emit_hypothesis_ranked(node_id)
 
     def _create_injected_node(self, req: dict) -> None:
         """Materialize an operator-authored experiment (`inject_node` control event) into a real
@@ -2073,6 +2074,22 @@ class Engine(ConfirmPhaseMixin, AblationMixin):
             if callable(extra):
                 data.update(extra())
             self.store.append(EV_AGENT_VALIDATED, data)
+
+    def _emit_hypothesis_ranked(self, node_id: int) -> None:
+        """FOREAGENT board prioritization audit: if the active Researcher (a
+        `ForesightPanelResearcher`) predicted an order over the OPEN-hypothesis board while proposing
+        THIS node, record it as a `hypothesis_ranked` event — the analysis + selection trace the UI
+        surfaces (kanban order + the model's `reason`). The engine stays the sole event writer: it
+        reads the role's `last_hyp_priority` telemetry (set during propose) and appends here.
+
+        Consumed on read (reset to None) so a subsequent non-propose action (merge / debug-repair,
+        which never re-prioritizes) can't re-emit a stale ranking for the wrong node — same
+        sequential-creation safety as `_emit_agent_report`."""
+        prio = getattr(self.researcher, "last_hyp_priority", None)
+        if prio:
+            self.store.append(EV_HYPOTHESIS_RANKED, {"node_id": node_id, **prio})
+        if hasattr(self.researcher, "last_hyp_priority"):
+            self.researcher.last_hyp_priority = None
 
     @property
     def _probe_developer(self):

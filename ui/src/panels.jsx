@@ -767,7 +767,13 @@ const _HYP_ICON = { researcher: 'search', deep_research: 'bulb', human: 'user', 
 export function HypothesisBoard({ state, runId, onSelect, onClose, onToast }) {
   const [draft, setDraft] = useState('')
   const hyps = Object.values(state.hypotheses || {})
+  // FOREAGENT board prioritization: order cards by predicted payoff (`priority`, 0 = best;
+  // unranked cards last), so the kanban shows the sort the world model chose. `ranking` carries the
+  // analysis trace (reason + confidence) surfaced as a header note and per-card tooltip.
+  const ranking = state.hypothesis_ranking || null
+  const rankConf = ranking && typeof ranking.confidence === 'number' ? Math.round(ranking.confidence * 100) : null
   const byStatus = (s) => hyps.filter(h => (h.status || 'open') === s)
+    .sort((a, b) => (a.priority ?? Infinity) - (b.priority ?? Infinity))
   const add = async () => {
     const s = draft.trim()
     if (!s) return
@@ -786,6 +792,12 @@ export function HypothesisBoard({ state, runId, onSelect, onClose, onToast }) {
           onKeyDown={e => { if (e.key === 'Enter') add() }} />
         <button className="btn sm primary" onClick={add} disabled={!draft.trim()}>+ Add</button>
       </div>
+      {ranking && <div className="muted" style={{ marginBottom: 8, fontSize: 12, display: 'flex', gap: 6, alignItems: 'baseline' }}
+        title={ranking.reason || 'predicted before execution'}>
+        <OpIcon name="bulb" size={11} />
+        <span>Predicted priority order (FOREAGENT{rankConf != null ? `, ${rankConf}% confidence` : ''})
+          {ranking.reason ? `: ${ranking.reason}` : ''}</span>
+      </div>}
       {hyps.length === 0
         ? <div className="muted">No hypotheses yet. The Researcher states one per experiment (its
           <code> hypothesis</code> field); deep-research directions and your “+ Add” questions land here too,
@@ -801,6 +813,9 @@ export function HypothesisBoard({ state, runId, onSelect, onClose, onToast }) {
                     <OpIcon name={_HYP_ICON[h.source] || 'dot'} size={12} /></span> {h.statement}
                 </div>
                 <div className="hyp-meta">
+                  {h.priority != null && <span className="chip xs" title={'predicted priority '
+                    + (h.priority + 1) + (rankConf != null ? ` · ${rankConf}% confidence` : '')
+                    + (ranking && ranking.reason ? ` · ${ranking.reason}` : '')}>#{h.priority + 1}</span>}
                   {(h.evidence || []).slice(0, 8).map(nid => <button key={nid} className="btn xs ghost"
                     title={`experiment #${nid}`} onClick={() => { onSelect && onSelect(nid); onClose() }}>#{nid}</button>)}
                   {h.best_delta != null && <span className={'chip xs ' + (h.best_delta > 0 ? 'ok' : '')}
