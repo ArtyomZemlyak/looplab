@@ -22,8 +22,6 @@ def _toks(s: str) -> set:
     return {w for w in _WORD.findall((s or "").lower()) if len(w) > 2}
 
 
-# Back-compat alias: the implementation now lives in `looplab.tools._base.fn_spec`.
-_fn = fn_spec
 
 
 class MemoryTools:
@@ -36,7 +34,7 @@ class MemoryTools:
         if not self.dir:
             return []
         return [
-            _fn("search_lessons",
+            fn_spec("search_lessons",
                 "Search the cross-run LESSONS ledger — generalizable findings (what worked AND what "
                 "did NOT) distilled from past runs, each with a verdict (supported/tested/abandoned/"
                 "failed) and how many observations back it. Use it to reuse what reliably helps and to "
@@ -45,7 +43,7 @@ class MemoryTools:
                            "size', 'overfitting', 'learning-rate schedule')."},
                  "limit": {"type": "integer", "description": "Max lessons (default 6)."}},
                 ["query"]),
-            _fn("recall_notes",
+            fn_spec("recall_notes",
                 "Recall META-NOTES — short CAUSAL summaries of WHY past runs' winners won, per task. "
                 "Use it to warm-start: what actually mattered last time on this or a similar task.",
                 {"query": {"type": "string", "description": "Task id or keywords to filter "

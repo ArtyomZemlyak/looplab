@@ -22,7 +22,7 @@ from pathlib import Path
 from typing import Callable, Optional
 
 from looplab.core import _pathsafe
-from looplab.tools.knowledge_tools import _fn_spec
+from looplab.tools._base import fn_spec
 from looplab.tools.perm_modes import decide, default_approver
 
 _MAX_OUTPUT = 64_000
@@ -115,7 +115,7 @@ class ShellTools:
 
     def specs(self) -> list[dict]:
         return [
-            _fn_spec("run_command",
+            fn_spec("run_command",
                      "Run a command as an ARGV LIST (no shell) inside the allowed roots — e.g. "
                      '["python","-m","pytest","-q","tests/test_patch.py"]. Returns exit code + '
                      "stdout/stderr. Pass argv, NOT a shell string. Set background=true for a LONG "
@@ -125,15 +125,15 @@ class ShellTools:
                       "cwd": {"type": "string", "description": "working dir (default: repo root)"},
                       "timeout": {"type": "number"},
                       "background": {"type": "boolean"}}, ["command"]),
-            _fn_spec("run_tests",
+            fn_spec("run_tests",
                      "Run the test suite (or a subset) with pytest -q. Convenience wrapper over "
                      "run_command.",
                      {"path": {"type": "string", "description": "a test file/dir (default: all)"}}, []),
-            _fn_spec("read_output",
+            fn_spec("read_output",
                      "Read NEW output from a background command since your last read, plus its "
                      "running/exited status. Use the task_id from a background run_command.",
                      {"task_id": {"type": "string"}}, ["task_id"]),
-            _fn_spec("list_background",
+            fn_spec("list_background",
                      "List background commands started this session with their status.", {}, []),
         ]
 

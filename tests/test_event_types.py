@@ -34,8 +34,11 @@ def _is_event_store_receiver(node: ast.expr) -> bool:
 
 
 def _emitted_string_literals(tree: ast.AST) -> list[tuple[int, str]]:
-    """(lineno, literal) for every event-store `.append` call whose first positional
-    argument is a string literal."""
+    """(lineno, literal) for every `.append` call that can only be an event emission:
+    the receiver looks like an event store (see above), OR the call passes more than one
+    argument (list.append takes exactly one, so `anything.append("type", {...})` must be
+    `EventStore.append(type, data)` — this catches emissions through aliased receivers
+    like `es = EventStore(p); es.append(...)` that the name heuristic would miss)."""
     out = []
     for node in ast.walk(tree):
         if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
@@ -44,7 +47,8 @@ def _emitted_string_literals(tree: ast.AST) -> list[tuple[int, str]]:
         first = node.args[0]
         if not (isinstance(first, ast.Constant) and isinstance(first.value, str)):
             continue
-        if _is_event_store_receiver(node.func.value):
+        if (_is_event_store_receiver(node.func.value)
+                or len(node.args) >= 2 or node.keywords):
             out.append((node.lineno, first.value))
     return out
 
@@ -86,8 +90,11 @@ def test_every_emitted_event_type_is_registered():
         "self.store.append('node_created', {})\n"
         "store.append('typo_event', {})\n"
         "EventStore(p).append('pause', {})\n"
-        "lines.append('node_created')\n")
-    assert [(1, "node_created"), (2, "typo_event"), (3, "pause")] == _emitted_string_literals(demo)
+        "lines.append('node_created')\n"        # 1-arg list append: never matched
+        "es.append('aliased_emit', {})\n"       # aliased receiver: caught by the 2-arg rule
+        "es.append('kw_emit', data={})\n")      # keyword data: caught by the keywords rule
+    assert [(1, "node_created"), (2, "typo_event"), (3, "pause"),
+            (5, "aliased_emit"), (6, "kw_emit")] == _emitted_string_literals(demo)
 
 
 def test_every_type_string_in_replay_fold_is_registered():

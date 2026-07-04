@@ -46,7 +46,7 @@ class _SSRFRedirectHandler(urllib.request.HTTPRedirectHandler):
 
 _SSRF_OPENER = urllib.request.build_opener(_SSRFRedirectHandler)
 
-from looplab.tools.knowledge_tools import _fn_spec
+from looplab.tools._base import fn_spec
 
 _DDG = "https://html.duckduckgo.com/html/"
 _UA = "Mozilla/5.0 (compatible; LoopLab/1.0; +https://example.invalid/looplab)"
@@ -86,14 +86,14 @@ class WebTools:
 
     def specs(self) -> list[dict]:
         return [
-            _fn_spec(
+            fn_spec(
                 "web_search",
                 "Search the web (DuckDuckGo) for techniques, datasets, baselines or write-ups to "
                 "ground the next idea. Returns the top result titles, URLs and snippets.",
                 {"query": {"type": "string",
                            "description": "search terms, e.g. 'gradient boosting tabular leakage'"}},
                 ["query"]),
-            _fn_spec(
+            fn_spec(
                 "web_fetch",
                 "Fetch a single web page (from a web_search result URL) and return its main text, "
                 "truncated. Use to read a promising result in more detail.",

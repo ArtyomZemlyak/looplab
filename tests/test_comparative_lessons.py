@@ -422,3 +422,31 @@ def test_engine_defaults_off_without_flags(tmp_path):
     eng = _engine(tmp_path)
     assert eng._comparative_lessons_on is False
     assert eng.lessons_every == 0 and eng.lessons_refresh_every == 0
+
+
+# ---- extraction seam guard (architecture review 2026-07) --------------------------------------
+# LessonMemory (looplab/engine/lessons.py) deliberately routes its INTERNAL cross-calls through
+# the Engine's thin delegators (`self._e._reflect_lessons(...)`, not `self.reflect_lessons(...)`)
+# so instance-level monkeypatches on the engine keep intercepting every path — the seam this
+# suite's fakes (and users' hooks) rely on. A "simplification" that calls sibling methods
+# directly would type-check and read better while silently disconnecting those seams; this test
+# turns that mistake into a hard failure.
+def test_lesson_memory_internal_calls_route_through_engine_delegators(tmp_path, monkeypatch):
+    eng = _engine(tmp_path, reflection_priors=True, memory_dir=str(tmp_path / "mem"))
+    st = _state([_node(1, metric=1.0), _node(2, metric=0.5, parent_ids=[1])])
+
+    seen = {"reflect": 0, "append": []}
+
+    def fake_reflect(final, best, fp):
+        seen["reflect"] += 1
+        return ["[lesson] seam guard sentinel"]
+
+    monkeypatch.setattr(eng, "_reflect_lessons", fake_reflect)
+    monkeypatch.setattr(eng, "_append_lessons", lambda lessons, **kw: seen["append"].extend(lessons))
+
+    # Call the MOVED implementation directly (not the delegator) — its internal calls must still
+    # hit the patched engine attributes.
+    eng.lessons.write_reflection_note(st)
+    assert seen["reflect"] == 1, "lessons.write_reflection_note must call engine._reflect_lessons"
+    assert any("seam guard sentinel" in l for l in seen["append"]), \
+        "lessons.write_reflection_note must persist via engine._append_lessons"

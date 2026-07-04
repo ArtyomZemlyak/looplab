@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Callable, Optional
 
 from looplab.core import _pathsafe
-from looplab.tools.knowledge_tools import _fn_spec
+from looplab.tools._base import fn_spec
 from looplab.tools.patch import _ci, _match, apply_patch as _apply_patch, gate as _gate
 from looplab.tools.perm_modes import DEFAULT_PROTECT, decide, default_approver
 
@@ -96,25 +96,25 @@ class WriteTools:
 
     def specs(self) -> list[dict]:
         return [
-            _fn_spec("write_file",
+            fn_spec("write_file",
                      "Create or OVERWRITE a text file with the given content (within the allowed "
                      "roots; refused for protected/secret paths). Prefer edit_file for small changes.",
                      {"path": {"type": "string"}, "content": {"type": "string"}},
                      ["path", "content"]),
-            _fn_spec("edit_file",
+            fn_spec("edit_file",
                      "Replace the SINGLE occurrence of old_str with new_str in a file (exact match; "
                      "errors if old_str is missing or appears more than once — add surrounding context "
                      "to disambiguate). Read the file first.",
                      {"path": {"type": "string"}, "old_str": {"type": "string"},
                       "new_str": {"type": "string"}}, ["path", "old_str", "new_str"]),
-            _fn_spec("apply_patch",
+            fn_spec("apply_patch",
                      "Apply a unified git diff (a/… b/… headers) to the repo — for multi-file or "
                      "surgical changes. Gated + `git apply --check`ed before it touches disk.",
                      {"diff": {"type": "string"}}, ["diff"]),
-            _fn_spec("delete_file",
+            fn_spec("delete_file",
                      "Delete a file (within the allowed roots; refused for protected/secret paths).",
                      {"path": {"type": "string"}}, ["path"]),
-            _fn_spec("revert_file",
+            fn_spec("revert_file",
                      "Undo your most recent change to a file (restore the pre-edit snapshot).",
                      {"path": {"type": "string"}}, ["path"]),
         ]

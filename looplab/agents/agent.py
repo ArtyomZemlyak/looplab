@@ -158,8 +158,9 @@ def drive_tool_loop(client, tools, messages: list, emit_spec: dict, *,
       - `nudge_prompt` / `stuck_prompt` (optional): caller-supplied wording for the two mid-loop
         user nudges (the prose-stall retry, and the stuck-detector stop). Prompt strings are
         contracts, so a caller folded onto this loop keeps its historical wording byte-identical
-        via these instead of inheriting the generic default. `stuck_prompt` is a `str.format`
-        template with a `{reason}` placeholder; empty ("") = the loop's default wording.
+        via these instead of inheriting the generic default. `stuck_prompt` may contain a literal
+        `{reason}` placeholder (substituted via `str.replace`, NOT `str.format`, so prompt wording
+        with other literal braces — JSON examples etc. — is safe); empty ("") = the default wording.
 
     Termination under "unlimited": when the model answers WITHOUT calling a tool (it considers
     itself done), we FORCE the structured emit immediately (`_force_emit`) and finish — so a prose
@@ -297,8 +298,11 @@ def drive_tool_loop(client, tools, messages: list, emit_spec: dict, *,
                 with tracing.tool(name, args) as _tool_obs:
                     result = tools.execute(name, args) if tools is not None else f"(unknown tool: {name})"
                     _tool_obs.output(result)
-                if on_tool_result is not None:      # provenance hook: capped result, exceptions propagate
-                    on_tool_result(name, args, str(result)[:4000])
+                # Cap once, up front, so the provenance hook receives EXACTLY what the tool message
+                # below will carry (a single expression, not two kept-in-sync copies).
+                result = str(result)[:4000]
+                if on_tool_result is not None:      # provenance hook: exceptions propagate
+                    on_tool_result(name, args, result)
             result = str(result)[:4000]
             messages.append({"role": "tool", "tool_call_id": tc.get("id", ""),
                              "name": name, "content": result})
@@ -308,7 +312,7 @@ def drive_tool_loop(client, tools, messages: list, emit_spec: dict, *,
             # No progress — stop gracefully WITH a result instead of spinning forever. Nudge once,
             # then force the structured emit; if the client can't force it, fall through to fallback.
             messages.append({"role": "user",
-                             "content": (stuck_prompt.format(reason=stuck_reason) if stuck_prompt
+                             "content": (stuck_prompt.replace("{reason}", str(stuck_reason)) if stuck_prompt
                                          else f"Stop: you appear to be stuck ({stuck_reason}). "
                                               f"Call `{emit_name}` now with your best answer.")})
             forced = _force_emit(client, messages, emit_spec)

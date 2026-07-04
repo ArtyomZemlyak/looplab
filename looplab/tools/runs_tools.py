@@ -17,7 +17,8 @@ from typing import Callable, Optional
 
 from looplab.events import digest
 from looplab.core.models import RunState
-from looplab.tools.run_tools import RunTools, _fn
+from looplab.tools.run_tools import RunTools
+from looplab.tools._base import fn_spec
 
 # A trace is a whole conversation, but the shared tool loop HEAD-truncates every tool result to 4000
 # chars (agent.drive_tool_loop), so a larger budget would be silently cut there (losing the tail with
@@ -93,32 +94,32 @@ class RunsTools:
 
     def specs(self) -> list[dict]:
         return [
-            _fn("list_runs",
+            fn_spec("list_runs",
                 "List EVERY LoopLab run on this machine with its goal, phase, best metric, node count "
                 "and whether its engine is LIVE right now. Use to reference an existing run, see what "
                 "is running, or pick one to inspect/steer.",
                 {"only_live": {"type": "boolean",
                                "description": "if true, list only runs whose engine is currently live"}}),
-            _fn("read_run",
+            fn_spec("read_run",
                 "Read ONE run in detail: goal, direction, phase, best experiment and its top "
                 "experiments. Use a run_id from list_runs before steering or fixing it.",
                 {"run_id": {"type": "string"},
                  "sort": {"type": "string", "enum": ["best", "worst", "recent"]},
                  "limit": {"type": "integer"}},
                 ["run_id"]),
-            _fn("read_run_experiment",
+            fn_spec("read_run_experiment",
                 "Read one experiment of a run in full detail (params, metric, robustness, rationale, "
                 "failure, sweep trials). Use run_id + node_id from read_run.",
                 {"run_id": {"type": "string"}, "node_id": {"type": "integer"},
                  "trials": {"type": "string", "description": "how many sweep trials: a number, or 'all'"}},
                 ["run_id", "node_id"]),
-            _fn("read_run_logs",
+            fn_spec("read_run_logs",
                 "Read one experiment's EXECUTION LOGS: the captured stdout tail from training/eval and "
                 "the FULL error/stderr (not the short failure summary). Use to see what a node printed "
                 "while training, or why it failed, in full. Use run_id + node_id from read_run.",
                 {"run_id": {"type": "string"}, "node_id": {"type": "integer"}},
                 ["run_id", "node_id"]),
-            _fn("read_run_trace",
+            fn_spec("read_run_trace",
                 "Read one experiment's AGENT TRACE as a linear, de-duplicated conversation: the "
                 "system+user request once per sub-loop, then each LLM generation's reasoning + output "
                 "and the tools it called, interleaved with tool results. This is the full train of "
@@ -299,7 +300,7 @@ class RunLauncherTools:
 
     def specs(self) -> list[dict]:
         return [
-            _fn("propose_run",
+            fn_spec("propose_run",
                 "Propose a NEW LoopLab run for the user to launch (a run name + a task + optional "
                 "settings). The user reviews an editable card and starts it — you do not launch it. "
                 "Give EITHER an inline `task` object (with a `kind`: dataset/repo/mlebench_real/…) OR a "

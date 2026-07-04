@@ -13,7 +13,8 @@ pip install -e ".[dev,ui]"        # dev deps; [ui] needed for server/assistant/T
 python -m pytest                  # full suite (~1150 tests, a few minutes; addopts already has -q)
 python -m pytest tests/test_events_replay.py           # targeted run — always do this first
 python -m pytest -o addopts="" -q ...                  # if you need to override the default -q
-looplab run --kind quadratic --goal "min (x-3)^2" --direction min --out runs/demo   # offline smoke
+looplab run --no-genesis --kind quadratic --goal "min (x-3)^2" --direction min --out runs/demo  # offline smoke
+# (--no-genesis matters: any --goal otherwise invokes Genesis, which needs a reachable LLM)
 looplab replay runs/demo          # rebuild state from the event log (reproducibility check)
 looplab ui                        # FastAPI server + React UI (see looplab/serve/)
 ```
@@ -38,7 +39,7 @@ auto-builds when the dist is missing.
 | `looplab/trust/` | gates that keep results honest: leakage, reward-hack, CV, redaction, confirmation |
 | `looplab/engine/` | **the orchestrator loop** (`orchestrator.py`, the largest file) + cross-run memory; see invariants below |
 | `looplab/adapters/` | task types (toy → dataset → repo → MLE-bench); the TaskAdapter contract is documented in `adapters/tasks.py` |
-| `looplab/serve/` | FastAPI server (`server.py` — routes live inside `make_app`), TUI, assistant; never imported by the engine loop |
+| `looplab/serve/` | FastAPI server (`server.py` — routes live inside `make_app`), TUI, assistant; not imported at engine import time (`engine/finalize.py` lazily imports the htmlview/traceview projections at run end) |
 | `ui/` | React control plane (built artifacts served by `serve/server.py`) |
 
 ## Engine invariants (violating these breaks replay/resume)

@@ -57,7 +57,7 @@ Requires **Python ≥ 3.11**. Core dependencies are small and pure-Python (`pyda
 
 ```bash
 # 1. Run a toy optimization task offline (no LLM, no network) — no file needed:
-looplab run --kind quadratic --goal "minimize (x-3)^2+(y+1)^2" --direction min --out runs/demo
+looplab run --no-genesis --kind quadratic --goal "minimize (x-3)^2+(y+1)^2" --direction min --out runs/demo
 
 # 2. Inspect the result and verify reproducibility.
 looplab inspect runs/demo          # resolved config + best result

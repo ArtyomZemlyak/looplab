@@ -28,8 +28,8 @@ from looplab.core.parse import split_think  # noqa: F401  (also a re-export)
 # Named retry/backoff constants (previously inline magic numbers).
 BACKOFF_CAP_S = 30.0                 # ceiling on any single exponential-backoff sleep
 STREAM_STALL_DEGRADE_AFTER = 2       # stream stalls before this client goes non-streaming for good
-# Default first-byte (response-headers) window, seconds. Mirrors the default of
-# `Settings.llm_header_timeout` in looplab/core/config.py — keep the two in sync.
+# Default first-byte (response-headers) window, seconds. The single source: config.py's
+# `Settings.llm_header_timeout` imports this constant as its field default.
 DEFAULT_HEADER_TIMEOUT_S = 45.0
 
 
@@ -387,7 +387,6 @@ class OpenAICompatibleClient:
         # request is actually admitted (streaming starts before generation finishes), so a short
         # header window fails futile attempts over to a fresh connection quickly. The idle `timeout`
         # still governs the BODY (inter-token) phase, restored right after headers arrive.
-        # Default mirrors `Settings.llm_header_timeout` (looplab/core/config.py) — keep in sync.
         _ht = DEFAULT_HEADER_TIMEOUT_S if header_timeout is None else float(header_timeout)
         self.header_timeout = min(_ht, timeout) if timeout else _ht   # never exceeds the idle timeout
         # Stream EVERY request (SSE) and reassemble it, so `timeout` acts as an INTER-TOKEN idle

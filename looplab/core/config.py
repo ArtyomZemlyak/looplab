@@ -12,6 +12,9 @@ from pathlib import Path
 from pydantic import Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+# Single source of the LLM first-byte (response-headers) default — see core/llm.py.
+from looplab.core.llm import DEFAULT_HEADER_TIMEOUT_S
+
 # Default home for cross-run memory + the knowledge base (shared across every run). Both are ON by
 # default now (a user asked for it) so a fresh install accumulates + consults knowledge with no setup;
 # set the env var to "" to disable, or to a path to relocate. `~/.looplab/` keeps them out of any one
@@ -439,8 +442,8 @@ class Settings(BaseSettings):
     # headers on admission, so no-headers ≈ a black-holed request — fail over to a fresh connection
     # fast instead of waiting the full idle timeout. Clamped to llm_timeout. Non-stream attempts are
     # NOT bounded by this (their headers arrive only after the whole generation). The default mirrors
-    # `DEFAULT_HEADER_TIMEOUT_S` in looplab/core/llm.py — keep the two in sync.
-    llm_header_timeout: float = Field(default=45.0, gt=0)
+    # `DEFAULT_HEADER_TIMEOUT_S` in looplab/core/llm.py is the single source (imported above).
+    llm_header_timeout: float = Field(default=DEFAULT_HEADER_TIMEOUT_S, gt=0)
     # H4: cap the growing agentic-researcher tool-call history (chars) by middle-truncating stale
     # tool output, so a long trace doesn't blow the context window. 0 = off (unbounded).
     context_budget_chars: int = 0

@@ -22,7 +22,7 @@ from __future__ import annotations
 
 
 from looplab.core import _pathsafe
-from looplab.tools.knowledge_tools import _fn_spec   # shared OpenAI function-schema builder (one schema shape)
+from looplab.tools._base import fn_spec   # shared OpenAI function-schema builder (one schema shape)
 
 # Path/secret guards now live in _pathsafe (shared with the write/shell/git providers so every tool
 # enforces the same rules). Re-exported under the historical private names for back-compat.
@@ -43,17 +43,17 @@ class RepoScoutTools:
 
     def specs(self) -> list[dict]:
         return [
-            _fn_spec("list_dir",
+            fn_spec("list_dir",
                      "List files and subdirectories under a directory on this machine (read-only). "
                      "Use to explore a repo's structure.",
                      {"path": {"type": "string", "description": "Directory path (absolute or ~-relative)."}},
                      ["path"]),
-            _fn_spec("read_file",
+            fn_spec("read_file",
                      "Read a text file on this machine (first ~16KB, read-only). Use for README, the "
                      "train/eval entry script (e.g. test.py), configs, requirements.",
                      {"path": {"type": "string", "description": "File path (absolute or ~-relative)."}},
                      ["path"]),
-            _fn_spec("find_files",
+            fn_spec("find_files",
                      "Recursively find files matching a glob under a directory (read-only).",
                      {"root": {"type": "string"},
                       "pattern": {"type": "string", "description": "glob, e.g. **/*.py or **/README*"}},

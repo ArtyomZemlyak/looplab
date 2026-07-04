@@ -99,7 +99,7 @@ from `--kind`/`--set` alone (offline), or run a complete file with no `--goal`.
 
 ```bash
 looplab init && looplab run looplab.yaml                  # scaffold a config, edit, run
-looplab run --kind quadratic --goal "minimize x^2+y^2" --direction min   # no file
+looplab run --no-genesis --kind quadratic --goal "minimize x^2+y^2" --direction min   # no file, no LLM
 looplab run examples/toy_task.json --out runs/demo --max-nodes 14
 looplab run examples/toy_task.json -s policy=asha -s n_seeds=5            # --set any setting
 looplab run examples/code_regression_task.json --backend llm --max-nodes 6

@@ -204,9 +204,9 @@ class RepoWriteTools:
         return p
 
     def specs(self) -> list[dict]:
-        from looplab.tools.knowledge_tools import _fn_spec
+        from looplab.tools._base import fn_spec
         return [
-            _fn_spec("edit_file",
+            fn_spec("edit_file",
                      "Edit an EXISTING file with a minimal SEARCH/REPLACE patch — STRONGLY PREFERRED "
                      "over write_file for changing existing code: it is far faster and safer than "
                      "re-generating a whole file. `search` must be copied EXACTLY (including "
@@ -217,7 +217,7 @@ class RepoWriteTools:
                       "search": {"type": "string", "description": "exact existing snippet (unique in the file)"},
                       "replace": {"type": "string", "description": "the replacement snippet"}},
                      ["path", "search", "replace"]),
-            _fn_spec("write_file",
+            fn_spec("write_file",
                      "Create or OVERWRITE a file in the experiment repo you are editing. Provide the "
                      "FULL file content (not a diff, not a shell command). Use this ONLY to author the "
                      "eval entrypoint and code edits — NOT to inspect files. Path is REPO-RELATIVE "
@@ -225,7 +225,7 @@ class RepoWriteTools:
                      {"path": {"type": "string", "description": "repo-relative path, e.g. test_looplab.py"},
                       "content": {"type": "string", "description": "the complete file content"}},
                      ["path", "content"]),
-            _fn_spec("delete_file",
+            fn_spec("delete_file",
                      "Delete a file you previously wrote in this experiment (within your surface).",
                      {"path": {"type": "string"}}, ["path"]),
         ]
@@ -511,8 +511,8 @@ class LLMRepoDeveloper:
         return "\n\n".join(out)
 
     def _emit_spec(self) -> dict:
-        from looplab.tools.knowledge_tools import _fn_spec
-        return _fn_spec("done",
+        from looplab.tools._base import fn_spec
+        return fn_spec("done",
                         "Call once the file(s) are written and the eval command would run and print "
                         "its metric. Briefly summarize what you wrote.",
                         {"summary": {"type": "string"}}, [])

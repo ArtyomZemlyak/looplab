@@ -11,7 +11,7 @@ import re
 import urllib.parse
 import urllib.request
 
-from looplab.tools.knowledge_tools import _fn_spec
+from looplab.tools._base import fn_spec
 
 _ARXIV = "http://export.arxiv.org/api/query"
 _ENTRY = re.compile(r"<entry>(.*?)</entry>", re.DOTALL)
@@ -28,7 +28,7 @@ class LiteratureTools:
         self.timeout = timeout
 
     def specs(self) -> list[dict]:
-        return [_fn_spec(
+        return [fn_spec(
             "arxiv_search",
             "Search arXiv for relevant ML techniques/papers to ground the next idea. "
             "Returns the top paper titles + abstracts.",

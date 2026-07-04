@@ -468,8 +468,8 @@ class TodoTools:
         return None
 
     def specs(self) -> list[dict]:
-        from looplab.tools.knowledge_tools import _fn_spec
-        return [_fn_spec(
+        from looplab.tools._base import fn_spec
+        return [fn_spec(
             "write_todos",
             "Record/update your TODO list for a multi-step task (replaces the previous list). Mark each "
             "item pending / in_progress / completed as you go. Use it for any task with 3+ steps.",
@@ -513,8 +513,8 @@ class SubagentTools:
         return None
 
     def specs(self) -> list[dict]:
-        from looplab.tools.knowledge_tools import _fn_spec
-        return [_fn_spec(
+        from looplab.tools._base import fn_spec
+        return [fn_spec(
             "task",
             "Delegate a focused, self-contained subtask to a fresh sub-agent that has its OWN context "
             "and read-only tools (inspect files, read runs). It returns only its final answer — use it "

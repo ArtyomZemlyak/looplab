@@ -23,9 +23,6 @@ def _abstraction_of(payload: dict):
     return Abstraction(str(payload.get("abstraction", "")), list(payload.get("anchors", [])))
 
 
-# Back-compat alias: several tool modules (web, literature, git_tools, …) import `_fn_spec`
-# from here; the implementation now lives in `looplab.tools._base.fn_spec`.
-_fn_spec = fn_spec
 
 
 class RepoTools:
@@ -44,12 +41,12 @@ class RepoTools:
     def specs(self) -> list[dict]:
         names = ", ".join(self.roots)
         return [
-            _fn_spec("repo_grep", f"Regex search across the editable repo source ({names}). "
+            fn_spec("repo_grep", f"Regex search across the editable repo source ({names}). "
                      "Returns matching <repo>/<path>:<line> hits.",
                      {"pattern": {"type": "string"}, "glob": {"type": "string"}}, ["pattern"]),
-            _fn_spec("repo_list", f"List source files in an editable repo ({names}).",
+            fn_spec("repo_list", f"List source files in an editable repo ({names}).",
                      {"repo": {"type": "string"}, "glob": {"type": "string"}}, []),
-            _fn_spec("repo_read", "Read a file from an editable repo, given a <repo>/<path> "
+            fn_spec("repo_read", "Read a file from an editable repo, given a <repo>/<path> "
                      "(or just <path> for the root repo).", {"path": {"type": "string"}}, ["path"]),
         ]
 
@@ -126,7 +123,7 @@ class KnowledgeWriteTools:
     def specs(self) -> list[dict]:
         if not self.dir:
             return []
-        return [_fn_spec(
+        return [fn_spec(
             "remember",
             "Save a distilled note to the shared KNOWLEDGE BASE so FUTURE runs' Researchers can find it "
             "(via kb_search). Use it whenever the user shares experiment results, lessons, recipes, or "
@@ -251,12 +248,12 @@ class KnowledgeTools:
     # ---- tool schemas (OpenAI function format) ----
     def specs(self) -> list[dict]:
         return [
-            _fn_spec("kb_search", "Semantic search over the knowledge base; returns relevant note snippets.",
+            fn_spec("kb_search", "Semantic search over the knowledge base; returns relevant note snippets.",
                      {"query": {"type": "string"}}, ["query"]),
-            _fn_spec("grep", "Regex search across knowledge notes (*.md). Returns matching lines.",
+            fn_spec("grep", "Regex search across knowledge notes (*.md). Returns matching lines.",
                      {"pattern": {"type": "string"}}, ["pattern"]),
-            _fn_spec("list_notes", "List available knowledge note filenames.", {}, []),
-            _fn_spec("read_note", "Read a knowledge note by filename.",
+            fn_spec("list_notes", "List available knowledge note filenames.", {}, []),
+            fn_spec("read_note", "Read a knowledge note by filename.",
                      {"name": {"type": "string"}}, ["name"]),
         ]
 

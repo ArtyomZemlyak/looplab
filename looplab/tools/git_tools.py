@@ -7,7 +7,7 @@ irreversible action) — the user can run it explicitly via run_command in auto 
 from __future__ import annotations
 
 
-from looplab.tools.knowledge_tools import _fn_spec
+from looplab.tools._base import fn_spec
 
 
 class GitTools:
@@ -20,18 +20,18 @@ class GitTools:
 
     def specs(self) -> list[dict]:
         return [
-            _fn_spec("git_status", "Show `git status --short` for the repo.", {}, []),
-            _fn_spec("git_diff", "Show `git diff` (optionally for one path).",
+            fn_spec("git_status", "Show `git status --short` for the repo.", {}, []),
+            fn_spec("git_diff", "Show `git diff` (optionally for one path).",
                      {"path": {"type": "string"}}, []),
-            _fn_spec("git_log", "Show recent commits (`git log --oneline -n N`).",
+            fn_spec("git_log", "Show recent commits (`git log --oneline -n N`).",
                      {"n": {"type": "integer"}}, []),
-            _fn_spec("git_add", "Stage files (`git add`).",
+            fn_spec("git_add", "Stage files (`git add`).",
                      {"paths": {"type": "array", "items": {"type": "string"}}}, ["paths"]),
-            _fn_spec("git_commit", "Commit staged changes with a message (`git commit -m`).",
+            fn_spec("git_commit", "Commit staged changes with a message (`git commit -m`).",
                      {"message": {"type": "string"}}, ["message"]),
-            _fn_spec("git_branch", "List branches, or create one when `name` is given.",
+            fn_spec("git_branch", "List branches, or create one when `name` is given.",
                      {"name": {"type": "string"}}, []),
-            _fn_spec("git_checkout", "Switch to a branch/ref (`git checkout`).",
+            fn_spec("git_checkout", "Switch to a branch/ref (`git checkout`).",
                      {"ref": {"type": "string"}}, ["ref"]),
         ]
 

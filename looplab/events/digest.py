@@ -75,8 +75,6 @@ def fmt_params(params: dict, max_k: int = 4) -> str:
 
 
 # Back-compat aliases for pre-rename importers.
-_fmt_num = fmt_num
-_fmt_params = fmt_params
 
 
 # Default number of intra-node sweep trials surfaced in the always-on context (digest). A small,
@@ -91,7 +89,6 @@ def finite_trials(trials) -> list:
     return [t for t in trials if t.metric is not None and math.isfinite(t.metric)]
 
 
-_finite_trials = finite_trials   # back-compat alias
 
 
 def select_trials(trials, k: int, direction: str) -> list:
@@ -116,7 +113,6 @@ def trial_line(t) -> str:
     return f"{fmt_params(t.params)} → {fmt_num(t.metric)}{extra}"
 
 
-_trial_line = trial_line   # back-compat alias
 
 
 def _node_line(n) -> str:

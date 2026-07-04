@@ -38,8 +38,6 @@ def _clip(text: str, n: int) -> str:
     return f"…[+{len(text) - n} earlier chars truncated]\n" + text[-n:]
 
 
-# Back-compat alias: the implementation now lives in `looplab.tools._base.fn_spec`.
-_fn = fn_spec
 
 
 class RunTools:
@@ -64,13 +62,13 @@ class RunTools:
 
     def specs(self) -> list[dict]:
         return [
-            _fn("list_experiments",
+            fn_spec("list_experiments",
                 "List experiments tried so far (the search DAG). Use to see what's been done before "
                 "proposing. `sort`: best|worst|recent.",
                 {"sort": {"type": "string", "enum": ["best", "worst", "recent"]},
                  "limit": {"type": "integer"},
                  "theme": {"type": "string", "description": "filter to one theme slug (optional)"}}),
-            _fn("read_experiment",
+            fn_spec("read_experiment",
                 "Read one experiment's full detail: params, metric, robustness, rationale, failure "
                 "reason, extra metrics, and — for a hyperparameter sweep — its trials. `trials` "
                 "chooses how many sweep points to return: a number like '20' (a representative sample "
@@ -80,21 +78,21 @@ class RunTools:
                             "description": "how many sweep trials to include: a number, or 'all'. "
                                            "Default: 10 representative trials (best→worst)."}},
                 ["node_id"]),
-            _fn("read_code",
+            fn_spec("read_code",
                 "Read the solution code of one experiment (so you can build on or avoid it).",
                 {"node_id": {"type": "integer"}}, ["node_id"]),
-            _fn("read_logs",
+            fn_spec("read_logs",
                 "Read one experiment's EXECUTION LOGS — the captured stdout tail from training/eval "
                 "and the FULL error/stderr (not the 300-char summary). Use to see why a node failed, "
                 "or what it printed while training, in full.",
                 {"node_id": {"type": "integer"}}, ["node_id"]),
-            _fn("find_analogous",
+            fn_spec("find_analogous",
                 "Find experiments most similar to a given one (or to a set of params) by parameter "
                 "distance — to see how nearby configs performed before committing.",
                 {"node_id": {"type": "integer"},
                  "params": {"type": "object", "description": "param dict to compare instead of a node"},
                  "k": {"type": "integer"}}),
-            _fn("list_themes",
+            fn_spec("list_themes",
                 "List the experiment themes explored so far with counts and best metric per theme.",
                 {}),
         ]
@@ -310,21 +308,21 @@ class SiblingRunTools:
 
     def specs(self) -> list[dict]:
         return [
-            _fn("list_sibling_runs",
+            fn_spec("list_sibling_runs",
                 "List OTHER runs of the same task (siblings) with their best metric, node count and "
                 "phase — so you can see what neighbouring runs achieved before proposing.", {}),
-            _fn("read_sibling_experiment",
+            fn_spec("read_sibling_experiment",
                 "Read one experiment of a SIBLING run in full detail (params, metric, rationale, "
                 "failure, sweep trials). Use a run_id from list_sibling_runs.",
                 {"run_id": {"type": "string"}, "node_id": {"type": "integer"},
                  "trials": {"type": "string", "description": "how many sweep trials: a number, or 'all'"}},
                 ["run_id", "node_id"]),
-            _fn("read_sibling_code",
+            fn_spec("read_sibling_code",
                 "Read the solution code of one experiment of a SIBLING run (to reproduce or build on "
                 "it — pair with an `import` action to seed it into this run).",
                 {"run_id": {"type": "string"}, "node_id": {"type": "integer"}},
                 ["run_id", "node_id"]),
-            _fn("find_analogous_across_runs",
+            fn_spec("find_analogous_across_runs",
                 "Find experiments ACROSS sibling runs most similar to a set of params, by parameter "
                 "distance — to see how a nearby config performed elsewhere.",
                 {"params": {"type": "object", "description": "param dict to compare against"},
@@ -473,11 +471,11 @@ class DataTools:
 
     def specs(self) -> list[dict]:
         return [
-            _fn("data_schema", "Show the task's data schema — column names, types, and a couple of "
+            fn_spec("data_schema", "Show the task's data schema — column names, types, and a couple of "
                 "sample values — so you propose from the real fields.", {}),
-            _fn("data_profile", "Per-column statistics of the task data — missing fraction, numeric "
+            fn_spec("data_profile", "Per-column statistics of the task data — missing fraction, numeric "
                 "min/max/mean, and categorical cardinality (derived from the training table).", {}),
-            _fn("read_asset", "Read a sample of a task data asset (e.g. train/test). Omit `name` to "
+            fn_spec("read_asset", "Read a sample of a task data asset (e.g. train/test). Omit `name` to "
                 "list available assets.", {"name": {"type": "string"}}),
         ]
 
