@@ -2045,7 +2045,8 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
         if not instruction:
             raise HTTPException(400, "empty message")
         history = list(sess["messages"])          # BEFORE appending the new user turn
-        eff_mode = mode or sess["meta"].get("mode") or "plan"
+        from looplab.serve.assistant import normalize_mode as _norm_mode2
+        eff_mode = _norm_mode2(mode or sess["meta"].get("mode") or "plan")   # never persist a junk mode
         turn = {"role": "user", "content": display or instruction, "mode": eff_mode}
         if display and display != instruction:
             # Keep the FULL model-facing instruction (attached-file contents, UI-context preamble)

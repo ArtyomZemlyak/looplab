@@ -249,7 +249,7 @@ export default function AssistantBar({ runId, hidden = false }) {
       // The stored/opened session no longer exists (deleted here or in another tab, run-root reset).
       // Don't leave the dead id in `sid`/localStorage — that wedges the chat (every send targets the
       // 404'd session). Drop it back to a fresh composer.
-      if (/404/.test(e.message) && sidRef.current === id) { newChat() }
+      if ((e.status === 404 || /404/.test(e.message)) && sidRef.current === id) { newChat() }
       else flash(e.message)
     }
   }
