@@ -1,4 +1,4 @@
-﻿"""I12 integration: the orchestrator-wired multi-seed confirmation phase."""
+"""I12 integration: the orchestrator-wired multi-seed confirmation phase."""
 from __future__ import annotations
 
 import anyio

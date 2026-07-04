@@ -1,4 +1,4 @@
-﻿# LoopLab — Product & Design Specification
+# LoopLab — Product & Design Specification
 
 **Version:** 0.1 (design) · **Date:** 2026-06-20
 **Companion docs:** [02-architecture.md](02-architecture.md) · [03-decisions.md](03-decisions.md) · [04-file-layout.md](04-file-layout.md) · [05-build-decisions.md](05-build-decisions.md) · **Research basis:** [autoresearch-systems-exploration.md](autoresearch-systems-exploration.md)

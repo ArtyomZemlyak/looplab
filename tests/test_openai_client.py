@@ -1,4 +1,4 @@
-﻿"""I2: OpenAI-compatible client against a mock HTTP server (offline, deterministic).
+"""I2: OpenAI-compatible client against a mock HTTP server (offline, deterministic).
 Verifies tool-call parsing, the text/JSON fallback path, and <think> stripping."""
 from __future__ import annotations
 

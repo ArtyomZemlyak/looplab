@@ -1,4 +1,4 @@
-﻿"""I9 leakage, I16 profiler, I17 vector store + retrieval, I19 cross-run memory."""
+"""I9 leakage, I16 profiler, I17 vector store + retrieval, I19 cross-run memory."""
 from __future__ import annotations
 
 from looplab.leakage import target_leakage, temporal_leakage, train_test_contamination

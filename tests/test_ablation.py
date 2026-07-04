@@ -1,4 +1,4 @@
-﻿"""I7: ablation-driven refinement — probe each param's impact, refine the top one."""
+"""I7: ablation-driven refinement — probe each param's impact, refine the top one."""
 from __future__ import annotations
 
 from pathlib import Path

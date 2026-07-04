@@ -1,4 +1,4 @@
-﻿"""External-agent validator (ADR-7): static + process checks (validate.py) and the
+"""External-agent validator (ADR-7): static + process checks (validate.py) and the
 ValidatingDeveloper wrapper (retry-with-feedback + fallback)."""
 from __future__ import annotations
 

@@ -1,4 +1,4 @@
-﻿"""RepoTask e2e Developer loop: a `setup` step (dependency install) runs before each eval,
+"""RepoTask e2e Developer loop: a `setup` step (dependency install) runs before each eval,
 and an eval FAILURE is fed back to the Developer's `repair` (the error-feedback loop fires
 for repo tasks, where node.code is empty — the fix that lets an e2e agent fix runtime
 errors / missing deps)."""

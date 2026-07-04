@@ -1,4 +1,4 @@
-﻿"""I3 sandbox behavior + I10 variance-gate unit tests."""
+"""I3 sandbox behavior + I10 variance-gate unit tests."""
 from __future__ import annotations
 
 import pytest

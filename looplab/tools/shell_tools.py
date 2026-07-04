@@ -205,15 +205,15 @@ class ShellTools:
             self.applied.append(action)
             tid = MANAGER.start(argv, str(wd), wrap=self._wrap)
             return f"(started background task {tid} — poll read_output(\"{tid}\") for progress)"
-        run_argv = self._wrap(argv, str(wd)) if self._wrap else argv
-        # `_run_argv` scrubs env vars whose NAME looks secret (…KEY…), which would drop only PART of a
+        full_argv = self._wrap(argv, str(wd)) if self._wrap else argv
+        # `run_argv` scrubs env vars whose NAME looks secret (…KEY…), which would drop only PART of a
         # multi-var git config (GIT_CONFIG_KEY_0 gone, GIT_CONFIG_COUNT kept) and break `git` with
         # "missing config key". For a git command, pass back ONLY the host's git config + identity vars
         # (NOT credential-bearing GIT_ASKPASS/SSH_COMMAND/HTTP_EXTRAHEADER) so git works without leaking
         # a token into output the model sees.
         env = git_config_env() if (argv and argv[0] == "git") else None
-        from looplab.runtime.sandbox import _run_argv
-        rc, out, err, timed_out = _run_argv(run_argv, str(wd), to, env=env, max_output_bytes=self.max_output)
+        from looplab.runtime.sandbox import run_argv
+        rc, out, err, timed_out = run_argv(full_argv, str(wd), to, env=env, max_output_bytes=self.max_output)
         if d != "inline" or tool_kind != "git_ro":     # record real mutations/commands (not ro peeks)
             self.applied.append(action)
         head = f"exit={rc}" + (" (TIMEOUT)" if timed_out else "")

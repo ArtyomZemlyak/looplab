@@ -1,4 +1,4 @@
-﻿"""I4: unified-diff path extraction, the out-of-surface gate (reject not strip), and
+"""I4: unified-diff path extraction, the out-of-surface gate (reject not strip), and
 git apply."""
 from __future__ import annotations
 

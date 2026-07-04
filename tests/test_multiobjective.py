@@ -1,4 +1,4 @@
-﻿"""Item #5: multi-objective via extra reported metrics + hard constraints. A node that
+"""Item #5: multi-objective via extra reported metrics + hard constraints. A node that
 violates a constraint stays measured but is excluded from best-selection — "optimize the
 metric subject to latency <= bound"."""
 from __future__ import annotations

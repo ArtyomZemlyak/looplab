@@ -16,6 +16,7 @@ from typing import Optional
 
 from looplab.events import digest
 from looplab.core.models import NodeStatus, RunState
+from looplab.tools._base import fn_spec
 
 
 def _is_number(v: str) -> bool:
@@ -37,10 +38,8 @@ def _clip(text: str, n: int) -> str:
     return f"…[+{len(text) - n} earlier chars truncated]\n" + text[-n:]
 
 
-def _fn(name: str, description: str, props: dict, required: Optional[list] = None) -> dict:
-    return {"type": "function", "function": {
-        "name": name, "description": description,
-        "parameters": {"type": "object", "properties": props, "required": required or []}}}
+# Back-compat alias: the implementation now lives in `looplab.tools._base.fn_spec`.
+_fn = fn_spec
 
 
 class RunTools:
@@ -126,9 +125,9 @@ class RunTools:
         if n.status is NodeStatus.failed:
             outcome = f"FAILED({n.error_reason or 'error'})"
         else:
-            outcome = f"metric={digest._fmt_num(digest.node_metric(n))}"
+            outcome = f"metric={digest.fmt_num(digest.node_metric(n))}"
         theme = f" {{{n.idea.theme}}}" if getattr(n.idea, "theme", None) else ""
-        return f"#{n.id} {n.operator} {outcome} {digest._fmt_params(n.idea.params)}{theme}"
+        return f"#{n.id} {n.operator} {outcome} {digest.fmt_params(n.idea.params)}{theme}"
 
     def _list(self, st: RunState, args: dict) -> str:
         sort = (args.get("sort") or "best").lower()
@@ -155,10 +154,10 @@ class RunTools:
                f"params={n.idea.params}"]
         if n.idea.space:
             out.append(f"sweep_space={n.idea.space}")
-        out.append(f"metric={digest._fmt_num(n.metric)}")
+        out.append(f"metric={digest.fmt_num(n.metric)}")
         if n.confirmed_mean is not None:
-            out.append(f"confirmed={digest._fmt_num(n.confirmed_mean)} "
-                       f"±{digest._fmt_num(n.confirmed_std)} ({n.confirmed_seeds} seeds)")
+            out.append(f"confirmed={digest.fmt_num(n.confirmed_mean)} "
+                       f"±{digest.fmt_num(n.confirmed_std)} ({n.confirmed_seeds} seeds)")
         if n.extra_metrics:
             out.append(f"extra_metrics={n.extra_metrics}")
         if n.violations:
@@ -191,21 +190,21 @@ class RunTools:
         count (representative sample by default, or all). When the full finite set is shown, any
         no-metric trials are appended so 'all' is genuinely complete."""
         trials = n.trials
-        finite = digest._finite_trials(trials)
+        finite = digest.finite_trials(trials)
         k = self._resolve_trial_k(trials_arg, len(trials))
         sel = digest.select_trials(trials, k, direction)
         best = sel[0] if sel else None
         head = f"sweep: {len(trials)} trials" + (f" over {dict(n.idea.space)}" if n.idea.space else "")
         if best:
-            head += f"; best {digest._fmt_params(best.params)} metric={digest._fmt_num(best.metric)}"
+            head += f"; best {digest.fmt_params(best.params)} metric={digest.fmt_num(best.metric)}"
         n_nometric = len(trials) - len(finite)
         if n_nometric:
             head += f" (+{n_nometric} no-metric)"
         head += (f"\nshowing {len(sel)} of {len(finite)} (best→worst):" if len(sel) < len(finite)
                  else "\ntrials (best→worst):")
-        lines = [head] + [f"  {digest._trial_line(t)}" for t in sel]
+        lines = [head] + [f"  {digest.trial_line(t)}" for t in sel]
         if len(sel) >= len(finite):   # complete finite set shown → list the no-metric trials too
-            lines += [f"  {digest._fmt_params(t.params)} → (no metric"
+            lines += [f"  {digest.fmt_params(t.params)} → (no metric"
                       + (f": {t.error[:60]}" if t.error else "") + ")"
                       for t in trials if t.metric is None or not math.isfinite(t.metric)]
         return "\n".join(lines)
@@ -230,7 +229,7 @@ class RunTools:
         if n.error_reason:
             head += f" · failure={n.error_reason}"
         if n.eval_seconds is not None:
-            head += f" · eval={digest._fmt_num(n.eval_seconds)}s"
+            head += f" · eval={digest.fmt_num(n.eval_seconds)}s"
         out = [head]
         stdout = (n.stdout_tail or "").rstrip()
         error = (n.error or "").rstrip()
@@ -278,7 +277,7 @@ class RunTools:
             return "(no themes assigned yet)"
         return "\n".join(
             f"{t}: {d['count']} experiment(s)" +
-            (f", best={digest._fmt_num(d['best_metric'])}" if d['best_metric'] is not None else "")
+            (f", best={digest.fmt_num(d['best_metric'])}" if d['best_metric'] is not None else "")
             for t, d in sorted(roll.items(), key=lambda kv: -kv[1]["count"]))
 
 
@@ -415,7 +414,7 @@ class SiblingRunTools:
                 continue
             best = st.best()
             phase = "finished" if st.finished else "running"
-            lines.append(f"{rid}: best={digest._fmt_num(best.metric) if best else '—'} "
+            lines.append(f"{rid}: best={digest.fmt_num(best.metric) if best else '—'} "
                          f"({st.direction}) · {len(st.nodes)} nodes · {phase}"
                          + (f" · best=#{best.id}" if best else ""))
         head = f"{len(lines)} sibling run(s) of task {self.task_id or '?'}:"
@@ -600,8 +599,8 @@ class DataTools:
             if present and len(nums) == len(present):             # every present value is finite-numeric
                 mean = sum(nums) / len(nums)
                 lines.append(f"  {col}: numeric missing={missing:.2f} "
-                             f"min={digest._fmt_num(min(nums))} max={digest._fmt_num(max(nums))} "
-                             f"mean={digest._fmt_num(mean)}")
+                             f"min={digest.fmt_num(min(nums))} max={digest.fmt_num(max(nums))} "
+                             f"mean={digest.fmt_num(mean)}")
             else:
                 lines.append(f"  {col}: categorical missing={missing:.2f} unique={len(set(present))}")
         return "\n".join(lines)[:self.max_chars]

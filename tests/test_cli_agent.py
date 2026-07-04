@@ -1,4 +1,4 @@
-﻿"""ADR-7: tool-agnostic external CLI coding agent as a Developer backend. Offline
+"""ADR-7: tool-agnostic external CLI coding agent as a Developer backend. Offline
 plumbing uses a stub agent (a script that edits solution.py); a guarded live test uses
 real OpenCode + Ollama."""
 from __future__ import annotations

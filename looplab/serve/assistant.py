@@ -304,11 +304,6 @@ def build_tools(run_root, alive_fn: Optional[Callable] = None, mode: str = DEFAU
     return CompositeTools(providers)
 
 
-# Back-compat: the read-only toolset (P0 callers / tests).
-def build_read_tools(run_root, alive_fn: Optional[Callable] = None, *, extra_roots=()):
-    return build_tools(run_root, alive_fn, "plan", extra_roots=extra_roots)
-
-
 def run_turn(client, run_root, messages: list, instruction: str, mode: str = DEFAULT_MODE, *,
              alive_fn: Optional[Callable] = None, settings=None, on_step: Optional[Callable] = None,
              approver: Optional[Callable] = None, extra_roots=(), _subagent: bool = False,

@@ -18,14 +18,50 @@ import urllib.request
 from typing import Optional
 
 from looplab.core import tracing
-class BudgetExceeded(Exception):
-    pass
+# Re-exported for backward compatibility: dozens of importers (and tests) do
+# `from looplab.core.llm import LLMError / BudgetExceeded`. The definitions live in
+# `looplab.core.errors` so `parse` can import them without importing this module.
+from looplab.core.errors import BudgetExceeded, LLMError  # noqa: F401
+# Safe top-level import (no cycle): parse imports only from looplab.core.errors now.
+from looplab.core.parse import split_think  # noqa: F401  (also a re-export)
+
+# Named retry/backoff constants (previously inline magic numbers).
+BACKOFF_CAP_S = 30.0                 # ceiling on any single exponential-backoff sleep
+STREAM_STALL_DEGRADE_AFTER = 2       # stream stalls before this client goes non-streaming for good
+# Default first-byte (response-headers) window, seconds. Mirrors the default of
+# `Settings.llm_header_timeout` in looplab/core/config.py — keep the two in sync.
+DEFAULT_HEADER_TIMEOUT_S = 45.0
 
 
-class LLMError(RuntimeError):
-    """A reachable LLM transport/protocol failure (network down, HTTP error, non-JSON, no choices).
-    Raised instead of leaking a raw urllib/JSON exception so the role layer's retry+fallback treats
-    it like any other bad response and the run degrades to a safe default rather than crashing."""
+def _backoff(attempt: int) -> float:
+    """Exponential-backoff delay for retry `attempt` (0-based), capped at BACKOFF_CAP_S."""
+    return min(2.0 * (2 ** attempt), BACKOFF_CAP_S)
+
+
+def _raw_socket(resp):
+    """Best-effort grab of the raw socket behind a urllib response (http.client wraps it in a
+    BufferedReader over a SocketIO). None for a non-socket body (e.g. a test mock)."""
+    fp = getattr(resp, "fp", None)
+    return getattr(getattr(fp, "raw", None), "_sock", None) or getattr(fp, "_sock", None)
+
+
+# Substrings that mark an HTTP 400 as "this endpoint rejects our REASONING toggle" (e.g. a
+# litellm-proxied model returning UnsupportedParamsError for `reasoning_effort`) rather than a
+# genuine bad request — shared by `_post` and `complete_text_stream`.
+_REASONING_REJECT_KEYS = ("reasoning", "unsupportedparams", "does not support parameters",
+                          "extra_forbidden", "unexpected keyword", "unrecognized")
+
+
+def _is_reasoning_reject(err_body: str) -> bool:
+    """True when a 400 error body (already lowercased) says the endpoint rejected the reasoning
+    param — the caller then drops the toggle for this client and retries."""
+    return any(k in err_body for k in _REASONING_REJECT_KEYS)
+
+
+def _reasoning_of(msg: dict) -> str:
+    """The dedicated reasoning field of an OpenAI-shaped assistant message: `reasoning` (OpenRouter/
+    Ollama) or `reasoning_content` (newer OpenAI/SGLang), whichever is present. '' when absent."""
+    return msg.get("reasoning") or msg.get("reasoning_content") or ""
 
 
 def _is_transient(e: BaseException) -> bool:
@@ -69,13 +105,6 @@ def _parse_chat_body(raw: Optional[str]) -> Optional[dict]:
         except (json.JSONDecodeError, ValueError):
             return None
     return obj if isinstance(obj, dict) else None
-
-
-def split_think(text: str) -> tuple[str, str]:
-    """(thinking, answer) split — thin wrapper over `parse.split_think`, imported lazily to avoid
-    the parse↔llm import cycle (parse imports LLMError from here)."""
-    from looplab.core.parse import split_think as _split
-    return _split(text)
 
 
 def _clean_thinking(content: str, reasoning: str = "") -> tuple[str, str]:
@@ -310,10 +339,8 @@ def _socket_watchdog(resp, idle_limit: float):
     last_progress = [time.monotonic()]
     killed = [False]
     _stop = threading.Event()
-    # Best-effort grab of the raw socket behind the urllib response (http.client wraps it in a
-    # BufferedReader over a SocketIO). None for a non-socket body (e.g. a test mock) -> close() path.
-    _fp = getattr(resp, "fp", None)
-    _sock = getattr(getattr(_fp, "raw", None), "_sock", None) or getattr(_fp, "_sock", None)
+    # None for a non-socket body (e.g. a test mock) -> close() path.
+    _sock = _raw_socket(resp)
 
     def _watchdog():
         while not _stop.wait(min(5.0, idle_limit / 4)):
@@ -360,7 +387,8 @@ class OpenAICompatibleClient:
         # request is actually admitted (streaming starts before generation finishes), so a short
         # header window fails futile attempts over to a fresh connection quickly. The idle `timeout`
         # still governs the BODY (inter-token) phase, restored right after headers arrive.
-        _ht = 45.0 if header_timeout is None else float(header_timeout)
+        # Default mirrors `Settings.llm_header_timeout` (looplab/core/config.py) — keep in sync.
+        _ht = DEFAULT_HEADER_TIMEOUT_S if header_timeout is None else float(header_timeout)
         self.header_timeout = min(_ht, timeout) if timeout else _ht   # never exceeds the idle timeout
         # Stream EVERY request (SSE) and reassemble it, so `timeout` acts as an INTER-TOKEN idle
         # timeout, NOT a whole-request deadline: a long-but-alive generation keeps streaming tokens
@@ -382,8 +410,9 @@ class OpenAICompatibleClient:
         # Stall-degrade: a shared/proxied endpoint can stall MID-STREAM on big (code-gen) requests
         # while answering the same request fine without SSE (observed on glm-5.1: non-stream 2s vs a
         # stream that hangs until the watchdog kills it). After a stream stall the NEXT attempt of
-        # that call goes non-streaming; after 2 stalls streaming is disabled for this client's
-        # lifetime. Bounded worst case: one idle-timeout, not retries × idle-timeout of silence.
+        # that call goes non-streaming; after STREAM_STALL_DEGRADE_AFTER stalls streaming is disabled
+        # for this client's lifetime. Bounded worst case: one idle-timeout, not retries ×
+        # idle-timeout of silence.
         self._stream_stalls = 0
         # H1: when the endpoint supports constrained decoding (vLLM/SGLang), drive structured calls
         # from the Pydantic JSON schema — `response_format` json_schema (OpenAI-standard, vLLM+SGLang)
@@ -549,7 +578,8 @@ class OpenAICompatibleClient:
             # plain blocking read for the attempt right after a stream stall, and permanently once
             # this client has stalled twice — a flaky proxied endpoint often answers the SAME request
             # fine without SSE while its stream wedges mid-generation.
-            use_stream = self.stream and self._stream_stalls < 2 and not _stalled_prev
+            use_stream = (self.stream and self._stream_stalls < STREAM_STALL_DEGRADE_AFTER
+                          and not _stalled_prev)
             if use_stream:                      # force streaming so `timeout` is an inter-token idle guard
                 p = {**p, "stream": True, "stream_options": {"include_usage": True}}
             req = urllib.request.Request(
@@ -568,8 +598,7 @@ class OpenAICompatibleClient:
                 with urllib.request.urlopen(req, timeout=_first_byte_to) as resp:
                     # Headers arrived — restore the full idle timeout for the BODY phase (the short
                     # window above only bounds connect + first byte; slow token gaps are legitimate).
-                    _fp = getattr(resp, "fp", None)
-                    _sk = getattr(getattr(_fp, "raw", None), "_sock", None) or getattr(_fp, "_sock", None)
+                    _sk = _raw_socket(resp)
                     if _sk is not None:
                         try:
                             _sk.settimeout(self.timeout)
@@ -589,15 +618,13 @@ class OpenAICompatibleClient:
                         eb = e.read().decode("utf-8", "replace").lower()
                     except Exception:  # noqa: BLE001
                         eb = ""
-                    if any(k in eb for k in ("reasoning", "unsupportedparams",
-                                             "does not support parameters", "extra_forbidden",
-                                             "unexpected keyword", "unrecognized")):
+                    if _is_reasoning_reject(eb):
                         self._reasoning_ok = False
                         continue
                 if e.code in (429, 500, 502, 503, 504) and attempt < self._max_retries:
                     ra = _retry_after_seconds(e.headers.get("Retry-After") if e.headers else None)
-                    delay = ra if ra is not None else 2.0 * (2 ** attempt)
-                    time.sleep(min(delay, 30.0))
+                    delay = ra if ra is not None else _backoff(attempt)
+                    time.sleep(min(delay, BACKOFF_CAP_S))
                     continue
                 hint = (" — check the API key (LOOPLAB_LLM_API_KEY)" if e.code == 401 else "")
                 raise LLMError(f"LLM request to {self.base_url} failed: {e}{hint}") from e
@@ -617,7 +644,7 @@ class OpenAICompatibleClient:
                     _stalled_prev = True
                     self._stream_stalls += 1
                 if _is_transient(e) and attempt < self._max_retries:
-                    time.sleep(min(2.0 * (2 ** attempt), 30.0))
+                    time.sleep(_backoff(attempt))
                     continue
                 raise LLMError(f"LLM request to {self.base_url} failed: {e}") from e
             else:
@@ -651,7 +678,7 @@ class OpenAICompatibleClient:
                     _stalled_prev = True
                     self._stream_stalls += 1
                 if attempt < self._max_retries:
-                    time.sleep(min(2.0 * (2 ** attempt), 30.0))
+                    time.sleep(_backoff(attempt))
                     continue
                 raise LLMError(f"LLM returned non-JSON/empty after {self._max_retries + 1} attempts")
         if body is None:  # loop exhausted retries on a transient code without ever succeeding
@@ -682,7 +709,7 @@ class OpenAICompatibleClient:
             out = msg.get("content") or ""
             # Record the clean answer as the completion (the conclusion) and the raw reasoning
             # separately; return the original text so downstream parsing is unchanged.
-            thinking, answer = _clean_thinking(out, msg.get("reasoning") or msg.get("reasoning_content") or "")
+            thinking, answer = _clean_thinking(out, _reasoning_of(msg))
             gen.output(answer or out).thinking(thinking).usage(body.get("usage"))
             return out
 
@@ -717,9 +744,7 @@ class OpenAICompatibleClient:
                     # documented ~15-min hang), and the caller's cancel check only runs per yielded
                     # piece, so Stop would never be observed. The watchdog shuts the socket down.
                     with urllib.request.urlopen(req, timeout=self.header_timeout) as resp:
-                        _fp2 = getattr(resp, "fp", None)   # restore the idle timeout for the body phase
-                        _sk2 = (getattr(getattr(_fp2, "raw", None), "_sock", None)
-                                or getattr(_fp2, "_sock", None))
+                        _sk2 = _raw_socket(resp)   # restore the idle timeout for the body phase
                         if _sk2 is not None:
                             try:
                                 _sk2.settimeout(self.timeout)
@@ -772,9 +797,7 @@ class OpenAICompatibleClient:
                             eb = e.read().decode("utf-8", "replace").lower()
                         except Exception:  # noqa: BLE001
                             eb = ""
-                        if any(k in eb for k in ("reasoning", "unsupportedparams",
-                                                 "does not support parameters", "extra_forbidden",
-                                                 "unexpected keyword", "unrecognized")):
+                        if _is_reasoning_reject(eb):
                             self._reasoning_ok = False
                             continue             # retry the stream once without the reasoning toggle
                     if not pieces:               # any other HTTP error -> blocking fallback
@@ -807,8 +830,7 @@ class OpenAICompatibleClient:
             })
             msg = body["choices"][0]["message"]
             _apply_native_tool_calls(msg)   # recover a leaked native tool-call block (glm/DeepSeek)
-            thinking, answer = _clean_thinking(msg.get("content") or "",
-                                               msg.get("reasoning") or msg.get("reasoning_content") or "")
+            thinking, answer = _clean_thinking(msg.get("content") or "", _reasoning_of(msg))
             # The output records BOTH the assistant text AND any tool_calls it decided to make, so the
             # trace shows what this generation produced (its content + the tool calls the loop will run).
             gen.output(_assistant_text({**msg, "content": answer})).thinking(thinking).usage(body.get("usage"))
@@ -852,8 +874,7 @@ class OpenAICompatibleClient:
             # Reasoning models emit their chain-of-thought (a `reasoning` field, or inline <think> in
             # `content`) alongside the tool call; capture it (debug channel) instead of discarding it.
             # The completion stays the structured tool args — the clean conclusion the UI renders.
-            thinking, _ = _clean_thinking(msg.get("content") or "",
-                                          msg.get("reasoning") or msg.get("reasoning_content") or "")
+            thinking, _ = _clean_thinking(msg.get("content") or "", _reasoning_of(msg))
             gen.output(args if isinstance(args, str) else json.dumps(args)).thinking(thinking).usage(body.get("usage"))
             return json.loads(args) if isinstance(args, str) else args
 
@@ -922,7 +943,7 @@ class LiteLLMClient:
                     "ratelimit", "timeout", "apiconnection", "serviceunavailable",
                     "internalserver", "overloaded", "apierror"))
                 if transient and attempt < 3:
-                    time.sleep(min(2.0 * (2 ** attempt), 30.0))
+                    time.sleep(_backoff(attempt))
                     continue
                 raise LLMError(f"litellm completion for {self.model} failed: {e}") from e
         raise LLMError(f"litellm completion for {self.model} failed: {last}")
@@ -952,6 +973,8 @@ class LiteLLMClient:
                 raise LLMError(f"litellm response had no choices for {self.model}")
             m = resp.choices[0].message
             out = m.content or ""
+            # Not `_reasoning_of`: litellm messages are objects (getattr, not dict.get) and probe
+            # `reasoning_content` FIRST — deliberately divergent, don't unify blindly.
             thinking, answer = _clean_thinking(
                 out, getattr(m, "reasoning_content", None) or getattr(m, "reasoning", None) or "")
             u = self._usage(resp)
@@ -984,6 +1007,7 @@ class LiteLLMClient:
                 raise KeyError("no tool_calls in response")
             args = calls[0].function.arguments
             m = resp.choices[0].message
+            # Not `_reasoning_of`: object attributes + reasoning_content-first (see complete_text).
             thinking, _ = _clean_thinking(
                 getattr(m, "content", None) or "",
                 getattr(m, "reasoning_content", None) or getattr(m, "reasoning", None) or "")

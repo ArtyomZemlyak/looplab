@@ -32,6 +32,7 @@ __version__ = "0.1.0"
 
 # old flat module name -> its subpackage today (kept in sync by tests/test_package_layout.py)
 _LAYOUT = {
+    "_base": "tools",
     "_mcp_transport": "tools",
     "_pathsafe": "core",
     "agent": "agents",
@@ -56,6 +57,7 @@ _LAYOUT = {
     "deep_research": "agents",
     "deps": "runtime",
     "digest": "events",
+    "errors": "core",
     "eventstore": "events",
     "gate": "trust",
     "genesis": "engine",
@@ -119,6 +121,7 @@ _LAYOUT = {
     "traceview": "serve",
     "tracing": "core",
     "tui": "serve",
+    "types": "events",
     "unified_agent": "agents",
     "uibuild": "serve",
     "validate": "core",

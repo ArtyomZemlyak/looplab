@@ -6,6 +6,7 @@ end as provenance and queryable for seeding exploration.
 from __future__ import annotations
 
 from looplab.core.models import Node, RunState
+from looplab.search.policy import rank_by_metric
 
 
 class DiversityArchive:
@@ -31,9 +32,7 @@ class DiversityArchive:
 
     def summary(self, state: RunState) -> dict:
         elites = self.build(state)
-        ranked = sorted(elites.values(),
-                        key=lambda n: (n.metric, n.id),
-                        reverse=(state.direction == "max"))
+        ranked = rank_by_metric(state, elites.values())
         return {
             "resolution": self.resolution,
             "niches": len(elites),

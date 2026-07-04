@@ -1,4 +1,4 @@
-﻿"""I14 JSONL span exporter + I22 EvolutionaryPolicy (pluggable algorithm seam)."""
+"""I14 JSONL span exporter + I22 EvolutionaryPolicy (pluggable algorithm seam)."""
 from __future__ import annotations
 
 from pathlib import Path

@@ -1,4 +1,4 @@
-﻿"""I21/ADR-11 + ADR-13: secret-leak gate and trust-mode sandbox selection."""
+"""I21/ADR-11 + ADR-13: secret-leak gate and trust-mode sandbox selection."""
 from __future__ import annotations
 
 import json

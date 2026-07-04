@@ -1,4 +1,4 @@
-﻿"""I6 keystone: a real (tiny) autonomous run, plus crash + resume.
+"""I6 keystone: a real (tiny) autonomous run, plus crash + resume.
 
 These tests drive the full loop on the toy task: draft -> sandbox-run -> evaluate ->
 improve -> greedy-select, and verify crash-resume continues from the exact frontier

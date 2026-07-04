@@ -1,4 +1,4 @@
-﻿# LoopLab — Architecture Review (2026-06-22)
+# LoopLab — Architecture Review (2026-06-22)
 
 **Scope:** full audit of the `LoopLab/` implementation (~22 modules, 76 tests) against the design (ADR-1…18 in [03](03-decisions.md)/[05](05-build-decisions.md)). Method: two parallel adversarial code-review passes (concurrency/replay/policy cluster; trust/LLM cluster) + manual design-consistency check. Companion: [README.md](../README.md), status board [06](06-implementation-plan.md).
 

@@ -1,5 +1,6 @@
-"""Human-friendly run configuration: one YAML (or JSON) file describes BOTH *what* to solve (the
-task) and *how* to run it (engine settings), plus CLI escape hatches so a run needs no file at all.
+"""Run-config loader: how a run file / CLI / env becomes a ``Settings`` (the schema lives in
+``looplab.core.config``). One YAML (or JSON) file describes BOTH *what* to solve (the task) and
+*how* to run it (engine settings), plus CLI escape hatches so a run needs no file at all.
 
     # looplab.yaml
     out: runs/demo
@@ -18,9 +19,10 @@ Design (why this is a thin *converter*, not a new source of truth):
   legacy JSON task format — so every existing ``examples/*.json`` keeps working unchanged.
 - **YAML is input-only.** The task and settings become the same dicts the engine already consumes,
   and the run dir still records canonical JSON snapshots, so ``replay``/``resume`` are untouched.
-- **One precedence order**, highest first: explicit CLI flags / ``--set`` > the file's ``settings:``
-  block > ``LOOPLAB_*`` env (+ ``.env``) > field defaults. (pydantic-settings makes ``__init__``
-  kwargs win over env, so building ``Settings(**merged)`` realizes exactly this.)
+- **One precedence order** (canonical — stated in full only here), highest first: explicit CLI
+  flags / ``--set`` > the file's ``settings:`` block > ``LOOPLAB_*`` env (+ ``.env``) > field
+  defaults. (pydantic-settings makes ``__init__`` kwargs win over env, so building
+  ``Settings(**merged)`` realizes exactly this.)
 """
 from __future__ import annotations
 

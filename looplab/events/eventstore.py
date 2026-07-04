@@ -191,6 +191,15 @@ class EventStore:
             pass  # best-effort healing; a read still tolerates the torn tail
 
     def append(self, type: str, data: dict[str, Any]) -> Event:
+        """Durably append one event and return it (the envelope with its assigned seq).
+
+        Under a best-effort cross-process lock (the UI server and the engine write the SAME
+        events.jsonl): first heal a torn tail (truncate a final line without a trailing
+        newline so this record can't glue onto a partial write), then derive the next seq
+        from max(in-memory, on-disk tail) so a concurrent writer can't mint a duplicate.
+        The record is written as one line + flush + best-effort fsync — fsync failures
+        (FUSE/S3) never abort the engine, because reads tolerate a torn final line.
+        `_seq` advances only AFTER the durable write succeeds."""
         trace_id, span_id = current_ids()
         with _interprocess_lock(Path(str(self.path) + ".lock")):
             self._heal_torn_tail()
@@ -208,8 +217,8 @@ class EventStore:
             self._seq = seq
         return e
 
-    def read_all(self) -> Iterator[Event]:
-        """Yield every Event on disk (up to the first torn/corrupt line), served from an incremental
+    def read_all(self) -> list[Event]:
+        """Return every Event on disk (up to the first torn/corrupt line), served from an incremental
         cache. Only bytes appended since the previous call are read+parsed; the returned sequence is
         byte-for-byte identical to a full `iter_jsonl` scan. Falls back to a full rescan if the file
         shrank/was replaced (a heal-truncate or a fresh file) so the cache can never go stale."""

@@ -1,4 +1,4 @@
-﻿"""Regression tests for the deep-audit findings (security/trust, resilience, resume, deletions)."""
+"""Regression tests for the deep-audit findings (security/trust, resilience, resume, deletions)."""
 from __future__ import annotations
 
 import sys

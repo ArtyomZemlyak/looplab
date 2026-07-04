@@ -25,6 +25,20 @@ from looplab.tools.agents_md import generate_agents_md
 from looplab.search.archive import DiversityArchive
 from looplab.trust.cv import cv_summary
 from looplab.events.eventstore import EventStore
+from looplab.events.types import (
+    EV_ABLATE, EV_AGENT_DECISION, EV_AGENT_VALIDATED, EV_APPROVAL_REQUESTED,
+    EV_BEST_CONFIRMED, EV_BUDGET, EV_CONFIRM_DONE, EV_CONFIRM_EVAL, EV_DATA_LEAKAGE,
+    EV_DATA_PROFILED, EV_DATA_PROVENANCE, EV_DEPS_INSTALLED, EV_DIVERSITY_ARCHIVE,
+    EV_DRIFT_UNAVAILABLE, EV_FORK_DONE, EV_HINT, EV_HOLDOUT_EVALUATED, EV_HOST_GRADING,
+    EV_HYPOTHESIS_ADDED, EV_INJECT_DONE, EV_INJECT_FAILED, EV_LESSONS_DISTILLED,
+    EV_LESSONS_REFRESHED, EV_LLM_COST, EV_NODE_ABORT, EV_NODE_CONFIRMED, EV_NODE_CREATED,
+    EV_NODE_EVALUATED, EV_NODE_FAILED, EV_NODE_REPAIRED, EV_NOVELTY_REJECTED,
+    EV_POLICY_DECISION, EV_PROXY_SCORED, EV_READMODEL_SKIPPED, EV_REPORT_GENERATED,
+    EV_RESEARCH_COMPLETED, EV_REWARD_HACK_SUSPECTED, EV_RUN_FINISHED,
+    EV_RUN_SETUP_FINISHED, EV_RUN_SETUP_STARTED, EV_RUN_STARTED, EV_RUNG_PROMOTED,
+    EV_SETUP_FINISHED, EV_SETUP_STARTED, EV_SETUP_STEP, EV_SPEC_APPROVAL_REQUESTED,
+    EV_SPEC_APPROVED, EV_SPEC_DRIFT, EV_SPEC_PROPOSED, EV_STRATEGY_DECISION,
+    EV_WORKSPACE_CHANGED, EV_WORKSPACE_SEEDED)
 from looplab.trust.gate import one_se_better
 from looplab.serve.htmlview import render_html
 from looplab.trust.leakage import target_leakage, temporal_leakage, train_test_contamination
@@ -575,11 +589,11 @@ class Engine:
             # captures the trace so the UI's Setup pseudo-node shows what happened. fold ignores these
             # (forward-compat), so they're pure observability.
             _su_t0 = time.time()
-            self.store.append("setup_started",
+            self.store.append(EV_SETUP_STARTED,
                               {"phase": "task+data", "repo": bool(self._repo_spec),
                                "goal": (self.task.goal or "")[:200]})
             def _su_step(step: str, **detail):
-                self.store.append("setup_step", {"step": step, **detail})
+                self.store.append(EV_SETUP_STEP, {"step": step, **detail})
             with self.tracer.span("setup", new_trace=True, node_id=-1) as _su:
                 def _ev(name, **kv):
                     if _su is not None:
@@ -593,7 +607,7 @@ class Engine:
                 wf = self._workspace_fingerprint()
                 _su_step("workspace fingerprint", sources=list(wf.keys()))
                 self.store.append(
-                    "run_started",
+                    EV_RUN_STARTED,
                     {
                         "run_id": self.run_dir.name,
                         "task_id": self.task.id,
@@ -627,7 +641,7 @@ class Engine:
                             c.encode("utf-8") if isinstance(c, str) else bytes(c)).hexdigest()[:16]
                         for name, c in (self._assets or {}).items()}
                 if prov:
-                    self.store.append("data_provenance", {"assets": prov})
+                    self.store.append(EV_DATA_PROVENANCE, {"assets": prov})
                     _ev("data_provenance", n=len(prov)); _su_step("data provenance", assets=list(prov))
                 # Out-of-process host-side grading active: record WHICH scorer + how many held-out labels
                 # (NEVER the labels themselves — the log is readable). Surfaced in the Trust panel.
@@ -642,24 +656,24 @@ class Engine:
                         # panel into "nothing held out". Omit it; `competition` signals host-held answers.
                     else:
                         evt["n_labels"] = len(hg.get("labels") or [])
-                    self.store.append("host_grading", evt)
+                    self.store.append(EV_HOST_GRADING, evt)
                 # Grounding pre-phase (I16): profile the dataset if the task exposes one.
                 cols = getattr(self.task, "columns", None)
                 if callable(cols):
-                    self.store.append("data_profiled", {"columns": profile_dataset(cols())})
+                    self.store.append(EV_DATA_PROFILED, {"columns": profile_dataset(cols())})
                     _ev("data_profiled"); _su_step("data profiled")
                 # Leakage-first grounding (I9): if the task exposes split/feature/target/time
                 # data and a leak is detected, refuse to run — don't produce results on leaky data.
                 if self._leakage_blocks():
-                    self.store.append("run_finished", {"reason": "leakage"})
-            self.store.append("setup_finished", {"seconds": round(time.time() - _su_t0, 3)})
+                    self.store.append(EV_RUN_FINISHED, {"reason": "leakage"})
+            self.store.append(EV_SETUP_FINISHED, {"seconds": round(time.time() - _su_t0, 3)})
         elif self._repo_spec and state.workspace and not state.workspace_changed:
             # Resume (item #4): the editable workspace is copied fresh each node, so if the
             # operator's repo changed since the run started, later nodes silently evaluate a
             # DIFFERENT codebase. Record it instead of pretending the run is reproducible.
             now = self._workspace_fingerprint()
             if now != state.workspace:
-                self.store.append("workspace_changed", {"was": state.workspace, "now": now})
+                self.store.append(EV_WORKSPACE_CHANGED, {"was": state.workspace, "now": now})
 
         entry_finished = fold(self.store.read_all()).finished  # resuming a done run?
         # A7 Strategist: re-apply the last-decided strategy on (re)entry so a resumed run continues
@@ -693,7 +707,7 @@ class Engine:
             # WITHOUT finishing (a later `resume` event + re-entering run() continues), the same
             # files-as-truth shape as the HITL approval gate below.
             if state.stop_requested:
-                self.store.append("run_finished", {"reason": "aborted"})
+                self.store.append(EV_RUN_FINISHED, {"reason": "aborted"})
                 break
             if state.paused:
                 break
@@ -704,13 +718,13 @@ class Engine:
                 if state.proposed_spec is None:
                     with self.tracer.span("onboard", new_trace=True):
                         proposal = self.onboarder()
-                    self.store.append("spec_proposed", proposal)
+                    self.store.append(EV_SPEC_PROPOSED, proposal)
                     continue
                 if self.eval_trust_mode == "autonomous":
-                    self.store.append("spec_approved", {})   # no human gate
+                    self.store.append(EV_SPEC_APPROVED, {})   # no human gate
                     continue
                 if not state.spec_approval_requested:
-                    self.store.append("spec_approval_requested",
+                    self.store.append(EV_SPEC_APPROVAL_REQUESTED,
                                       {"eval": state.proposed_spec.get("eval_spec")})
                 break  # pause for `LoopLab approve` (ratify_freeze)
             if self.onboarder is not None and not self._spec_activated:
@@ -724,7 +738,7 @@ class Engine:
                 self._drift_warned = True
                 _m = self._eval_spec.get("metric", {})
                 if _m.get("kind") == "adapter" and not self._eval_spec.get("cross_check"):
-                    self.store.append("drift_unavailable", {
+                    self.store.append(EV_DRIFT_UNAVAILABLE, {
                         "reason": "ratify_freeze_drift selected but the adapter metric has no "
                                   "cross_check; the agent-authored reader is trusted WITHOUT "
                                   "independent corroboration. Add eval.cross_check (a built-in "
@@ -745,14 +759,14 @@ class Engine:
                 except (TypeError, ValueError): pass
             # Budget (I13): per-invocation wall-clock ceiling (resets on each resume).
             if max_s is not None and (time.time() - start) >= max_s:
-                self.store.append("run_finished", {"reason": "time_budget"})
+                self.store.append(EV_RUN_FINISHED, {"reason": "time_budget"})
                 break
             # Eval-compute budget (#2): cumulative time spent inside evals across the whole run
             # (persisted via the event log, so it survives resume — unlike wall-clock). Stops
             # the silent multi-hour sweep that real training runs can produce.
             if (max_es is not None
                     and state.total_eval_seconds >= max_es):
-                self.store.append("run_finished", {"reason": "eval_budget"})
+                self.store.append(EV_RUN_FINISHED, {"reason": "eval_budget"})
                 break
 
             # Operator-forced steering (Phase 5), one per iteration then re-fold. Each is gated on
@@ -763,7 +777,7 @@ class Engine:
                 pid = req.get("from_node_id")
                 if pid in state.nodes:
                     self._create_node({"kind": "improve", "parent_id": pid})  # operator-seeded branch
-                self.store.append("fork_done", {"from_node_id": pid})         # always advance the gate
+                self.store.append(EV_FORK_DONE, {"from_node_id": pid})         # always advance the gate
                 continue
             # Operator-authored experiment (manual tree edit): the human hand-adds a node (an idea
             # + optional parent + optional ready-made code). Materialize it into a real pending node;
@@ -776,9 +790,9 @@ class Engine:
                 except Exception as e:  # noqa: BLE001 - a malformed operator/API inject must not
                     # crash-loop the engine: without advancing the gate, every resume replays the same
                     # bad request and dies again, leaving the run unrecoverable. Record + skip it.
-                    self.store.append("inject_failed",
+                    self.store.append(EV_INJECT_FAILED,
                                       {"idx": state.injects_done, "error": str(e)[:500]})
-                self.store.append("inject_done", {"idx": state.injects_done})
+                self.store.append(EV_INJECT_DONE, {"idx": state.injects_done})
                 continue
             forced_ablate = next((p for p in state.ablate_requests
                                   if p in state.nodes
@@ -851,7 +865,7 @@ class Engine:
                 if self.require_approval and not state.approved:
                     if not state.awaiting_approval:
                         best = state.best()
-                        self.store.append("approval_requested", {
+                        self.store.append(EV_APPROVAL_REQUESTED, {
                             "node_id": best.id if best else None,
                             "metric": best.metric if best else None})
                     break  # awaiting approval -> stop without finishing
@@ -861,7 +875,7 @@ class Engine:
                 # (report_every=0 = manual-only), so "manual only" stays truly call-free.
                 if self.report_writer is not None and self.report_every > 0:
                     state = self._write_report(state, trigger="finish")
-                self.store.append("run_finished", {})
+                self.store.append(EV_RUN_FINISHED, {})
                 break
 
             ablates = [a for a in actions if a["kind"] == "ablate"]
@@ -877,11 +891,11 @@ class Engine:
             if creates:
                 for a in creates:
                     if "_scores" in a:   # policy exposed candidate scores -> surface "why this node"
-                        self.store.append("policy_decision",
+                        self.store.append(EV_POLICY_DECISION,
                                           {"scores": a["_scores"], "chosen": a.get("_chosen"),
                                            "reason": a.get("_reason")})
                     if a.get("_rung") is not None:   # A1 ASHA: surface the successive-halving promotion
-                        self.store.append("rung_promoted",
+                        self.store.append(EV_RUNG_PROMOTED,
                                           {"rung": a["_rung"], "survivors": a.get("_promoted", [])})
                     self._create_node(a)  # sequential -> deterministic ids/proposals
                 continue
@@ -913,7 +927,7 @@ class Engine:
                         if a["node_id"] in cur.aborted_nodes:
                             n = cur.nodes.get(a["node_id"])
                             if n is not None and n.status is NodeStatus.pending:
-                                self.store.append("node_failed", {
+                                self.store.append(EV_NODE_FAILED, {
                                     "node_id": a["node_id"], "error": "aborted by operator",
                                     "reason": "aborted", "eval_seconds": 0.0})
                             continue
@@ -937,7 +951,7 @@ class Engine:
                         if a["node_id"] in cur.aborted_nodes:
                             n = cur.nodes.get(a["node_id"])
                             if n is not None and n.status is NodeStatus.pending:
-                                self.store.append("node_failed", {
+                                self.store.append(EV_NODE_FAILED, {
                                     "node_id": a["node_id"], "error": "aborted by operator",
                                     "reason": "aborted", "eval_seconds": 0.0})
                             continue
@@ -956,12 +970,12 @@ class Engine:
         # resume of a done run).
         if not entry_finished and fold(self.store.read_all()).finished:
             cur = fold(self.store.read_all())
-            self.store.append("budget", {                       # budget summary (I13 + #2)
+            self.store.append(EV_BUDGET, {                       # budget summary (I13 + #2)
                 "elapsed_s": round(time.time() - start, 3),
                 "eval_s": round(cur.total_eval_seconds, 3),
                 "nodes": len(cur.nodes),
             })
-            self.store.append("diversity_archive",              # diversity archive (I22)
+            self.store.append(EV_DIVERSITY_ARCHIVE,              # diversity archive (I22)
                               DiversityArchive(self.archive_resolution).summary(cur))
             self._emit_llm_cost()                               # LLM cost/tokens roll-up (UI)
             self._store_case(fold(self.store.read_all()))       # cross-run memory (I19)
@@ -977,7 +991,7 @@ class Engine:
         except Exception as e:  # noqa: BLE001 - derived cache; a FUSE sqlite failure must not kill finalize
             final = fold(self.store.read_all())
             try:
-                self.store.append("readmodel_skipped", {"error": str(e)[:300]})
+                self.store.append(EV_READMODEL_SKIPPED, {"error": str(e)[:300]})
             except Exception:  # noqa: BLE001 - even the audit note is best-effort
                 pass
         # UI projection (ADR-17): join the research tree (events) to its execution detail
@@ -1018,7 +1032,7 @@ class Engine:
             accs = list(seen.values())
             if not any(getattr(a, "calls", 0) for a in accs):
                 return  # no LLM calls actually happened (e.g. toy run) — nothing to report
-            self.store.append("llm_cost", {
+            self.store.append(EV_LLM_COST, {
                 "cost": round(sum(getattr(a, "spent", 0.0) for a in accs), 6),
                 "calls": sum(getattr(a, "calls", 0) for a in accs),
                 "prompt_tokens": sum(getattr(a, "prompt_tokens", 0) for a in accs),
@@ -1080,7 +1094,7 @@ class Engine:
 
     def _record_strategy(self, strat: dict, state: RunState,
                          ctx: Optional[StrategyContext] = None) -> None:
-        self.store.append("strategy_decision", {
+        self.store.append(EV_STRATEGY_DECISION, {
             "strategy": strat,
             "at_node": len(state.nodes),
             "ctx": (ctx.model_dump(include={"phase", "eval_budget_remaining", "failure_rate"})
@@ -1295,13 +1309,13 @@ class Engine:
                     memo_d["verification"] = ver
             except Exception:  # noqa: BLE001 — verification must never block the memo
                 pass
-        self.store.append("research_completed", {
+        self.store.append(EV_RESEARCH_COMPLETED, {
             "memo": memo_d,
             "at_node": memo.at_node, "trigger": trigger, "served_manual": manual})
         # Steer the next proposals: surface the memo's directions as a standing operator hint (the
         # same channel the Researcher already reads), so deep research actually informs planning.
         if memo.recommended_directions:
-            self.store.append("hint", {
+            self.store.append(EV_HINT, {
                 "text": "deep-research directions: " + "; ".join(memo.recommended_directions[:5]),
                 "source": "deep_research"})
             # P1: also register each direction as an OPEN hypothesis so a deep-research idea is
@@ -1310,7 +1324,7 @@ class Engine:
             if self._track_hypotheses:
                 for direction in memo.recommended_directions[:5]:
                     if str(direction).strip():
-                        self.store.append("hypothesis_added", {
+                        self.store.append(EV_HYPOTHESIS_ADDED, {
                             "statement": str(direction).strip(), "source": "deep_research",
                             "at_node": memo.at_node})
 
@@ -1354,7 +1368,7 @@ class Engine:
             return state
         with self.tracer.span("report", new_trace=True, trigger=trigger):
             content = self.report_writer.generate(state, trigger=trigger)
-        self.store.append("report_generated", {
+        self.store.append(EV_REPORT_GENERATED, {
             "content": content, "at_node": content.get("at_node"), "trigger": trigger})
         return fold(self.store.read_all())
 
@@ -1571,7 +1585,7 @@ class Engine:
             comp, pairs = self._comparative_lessons(final, fp,
                                                     exclude=self._spent_pairs(final))
             if pairs:
-                self.store.append("lessons_distilled", {
+                self.store.append(EV_LESSONS_DISTILLED, {
                     "at_node": len(final.nodes), "trigger": "run_end", "count": len(comp),
                     "pairs": [[pr["a"], pr["b"]] for pr in pairs],
                     "lessons": [{"statement": lz["statement"], "outcome": lz["outcome"],
@@ -1789,7 +1803,7 @@ class Engine:
         # process dies between the two writes, a resume sees the gate advanced and skips — the
         # store misses one batch (best-effort memory) instead of re-invoking the LLM and
         # appending the same lessons twice. The statements ride in the event for audit.
-        self.store.append("lessons_distilled", {
+        self.store.append(EV_LESSONS_DISTILLED, {
             "at_node": n, "trigger": "cadence", "count": len(lessons),
             "pairs": [[pr["a"], pr["b"]] for pr in pairs],
             "lessons": [{"statement": lz["statement"], "outcome": lz["outcome"],
@@ -1827,12 +1841,12 @@ class Engine:
             return state
         stamp = self._lessons_store_stamp()
         if stamp == self._lessons_seen_stamp:
-            self.store.append("lessons_refreshed", {"at_node": n, "skipped": "unchanged"})
+            self.store.append(EV_LESSONS_REFRESHED, {"at_node": n, "skipped": "unchanged"})
             return fold(self.store.read_all())
         self._lessons_seen_stamp = stamp
         before = self._prior_note_text
         self._prior_note_text = self._load_reflection_priors(exclude_run_id=state.run_id or None)
-        self.store.append("lessons_refreshed", {
+        self.store.append(EV_LESSONS_REFRESHED, {
             "at_node": n, "chars": len(self._prior_note_text),
             "changed": self._prior_note_text != before})
         return fold(self.store.read_all())
@@ -1996,7 +2010,7 @@ class Engine:
                 outcome = (f"it FAILED ({dup.error_reason}: {(dup.error or '')[:80]})"
                            if dup.status is NodeStatus.failed
                            else f"it scored {dup.metric}")
-                self.store.append("novelty_rejected", {
+                self.store.append(EV_NOVELTY_REJECTED, {
                     "node_id": len(state.nodes), "near_node": dup.id, "kind": "semantic",
                     "similarity": round(sim, 4),
                     "action": "reproposed" if callable(repropose) else "kept"})
@@ -2039,7 +2053,7 @@ class Engine:
         for k in params:
             scale = max(abs(params[k]), 1.0) * 0.1
             nudged[k] = round(params[k] + rng.uniform(-1.0, 1.0) * scale, 4)
-        self.store.append("novelty_rejected", {
+        self.store.append(EV_NOVELTY_REJECTED, {
             "node_id": nid, "near_node": nearest, "distance": round(mind, 4),
             "original": idea.params, "nudged": nudged})
         out = idea.model_copy()
@@ -2096,7 +2110,7 @@ class Engine:
             return {"kind": a.get("kind"), "parent_id": a.get("parent_id"),
                     "parent_ids": a.get("parent_ids"), "node_id": a.get("node_id")}
 
-        self.store.append("agent_decision", {
+        self.store.append(EV_AGENT_DECISION, {
             "at_node": len(state.nodes),
             "chosen": _summ(chosen),
             "legal": [_summ(a) for a in legal],
@@ -2305,7 +2319,7 @@ class Engine:
                 if _ra is not None and _ra <= node_id < _ra + 2:
                     research_origin = {"at_node": _ra, "trigger": _m.get("trigger")}
             self.store.append(
-                "node_created",
+                EV_NODE_CREATED,
                 {
                     "node_id": node_id,
                     "parent_ids": parents,
@@ -2371,7 +2385,7 @@ class Engine:
                     _pnode = state.nodes.get(parents[0]) if parents else None
                     code = self._implement(idea, _pnode)
             self.store.append(
-                "node_created",
+                EV_NODE_CREATED,
                 {
                     "node_id": node_id,
                     "parent_ids": parents,
@@ -2470,7 +2484,7 @@ class Engine:
                 nid = int(str(wd.name).split("_")[-1])
             except (ValueError, IndexError):
                 nid = None
-            self.store.append("workspace_seeded", {"node_id": nid, "materialized": seeded})
+            self.store.append(EV_WORKSPACE_SEEDED, {"node_id": nid, "materialized": seeded})
 
     def _seed_repo_tree(self, src, dst, ignore, mode: str = "auto") -> int:
         """Materialize an editable repo's *source* into the node workdir under a seeding `mode`:
@@ -2571,10 +2585,10 @@ class Engine:
         eds = (self._repo_spec or {}).get("editables", [])
         cwd = eds[0]["path"] if eds else str(self.run_dir)
         to = float((self._eval_spec or {}).get("run_setup_timeout", 1800.0))
-        self.store.append("run_setup_started", {"command": cmd, "cwd": cwd})
+        self.store.append(EV_RUN_SETUP_STARTED, {"command": cmd, "cwd": cwd})
         log = str(Path(self.run_dir) / "run_setup.log")
         rc, out, err, timed = _run_argv(cmd, cwd, to, log_path=log)
-        self.store.append("run_setup_finished",
+        self.store.append(EV_RUN_SETUP_FINISHED,
                           {"exit_code": rc, "timed_out": timed, "stderr_tail": (err or "")[-2000:]})
         if rc != 0 or timed:
             raise RuntimeError(f"run_setup failed (exit={rc}, timed_out={timed}); see {log}\n"
@@ -2838,7 +2852,7 @@ class Engine:
             if m is not None and n.metric is not None:
                 gap = (n.metric - m) if state.direction == "max" else (m - n.metric)
             async with self._write_lock:
-                self.store.append("holdout_evaluated", {
+                self.store.append(EV_HOLDOUT_EVALUATED, {
                     "node_id": nid, "metric": m, "gap": gap,
                     "n_holdout": len(self._holdout_idx)})
 
@@ -2857,7 +2871,7 @@ class Engine:
             extra = getattr(self.developer, "audit_extra", None)
             if callable(extra):
                 data.update(extra())
-            self.store.append("agent_validated", data)
+            self.store.append(EV_AGENT_VALIDATED, data)
 
     @property
     def _probe_developer(self):
@@ -2884,10 +2898,10 @@ class Engine:
                     skip = self.proxy_scorer.should_skip(state, node, pred)
                     sp.set_many(proxy_score=round(pred, 6), proxy_skipped=skip)
                     async with self._write_lock:
-                        self.store.append("proxy_scored",
+                        self.store.append(EV_PROXY_SCORED,
                                           {"node_id": node_id, "score": round(pred, 6), "skipped": skip})
                         if skip:
-                            self.store.append("node_failed", {
+                            self.store.append(EV_NODE_FAILED, {
                                 "node_id": node_id,
                                 "error": "skipped by proxy scorer (predicted in the doomed bottom fraction)",
                                 "reason": "proxy_skipped", "eval_seconds": 0.0})
@@ -2924,7 +2938,7 @@ class Engine:
                 async with anyio.create_task_group() as _tg:
                     def _abort_seen() -> bool:   # cached incremental read — no full re-parse each tick
                         for e in self.store.read_all():
-                            if e.type == "node_abort" and e.data.get("node_id") == node_id:
+                            if e.type == EV_NODE_ABORT and e.data.get("node_id") == node_id:
                                 return True
                         return False
                     async def _watch():
@@ -2947,7 +2961,7 @@ class Engine:
                 ok = res.metric is not None and res.exit_code == 0 and not res.timed_out
                 if aborted and not ok:                       # killed mid-eval by the operator (and the
                     async with self._write_lock:             # eval didn't already finish cleanly first)
-                        self.store.append("node_failed", {
+                        self.store.append(EV_NODE_FAILED, {
                             "node_id": node_id, "error": "aborted by operator (killed mid-eval)",
                             "reason": "aborted", "eval_seconds": total_eval})
                         self._maybe_crash()
@@ -2970,7 +2984,7 @@ class Engine:
                     if installed:
                         dep_rounds += 1
                         async with self._write_lock:
-                            self.store.append("deps_installed", {
+                            self.store.append(EV_DEPS_INSTALLED, {
                                 "node_id": node_id, "packages": installed, "round": dep_rounds})
                         continue   # re-run now that the library is present (no repair attempt spent)
                 # Anti-stuck: when the SAME error recurs with no progress, stop (even under unlimited
@@ -3015,7 +3029,7 @@ class Engine:
                 repaired_deleted = list(getattr(self.developer, "last_deleted", []) or [])
                 attempt += 1
                 async with self._write_lock:
-                    self.store.append("node_repaired", {
+                    self.store.append(EV_NODE_REPAIRED, {
                         "node_id": node_id, "attempt": attempt, "code": new_code,
                         "files": repaired_files,
                         "deleted": repaired_deleted,
@@ -3032,10 +3046,10 @@ class Engine:
                 sp.set("drift", True)
             async with self._write_lock:
                 if res.drift is not None:               # Phase 4: uncorroborated metric (audit)
-                    self.store.append("spec_drift", {"node_id": node_id, **res.drift})
+                    self.store.append(EV_SPEC_DRIFT, {"node_id": node_id, **res.drift})
                 if ok:
                     self.store.append(
-                        "node_evaluated",
+                        EV_NODE_EVALUATED,
                         {"node_id": node_id, "metric": res.metric,
                          "stdout_tail": self._redact(res.stdout[-500:]), "eval_seconds": total_eval,
                          "extra_metrics": res.extra_metrics or {},   # #5 multi-objective
@@ -3085,7 +3099,7 @@ class Engine:
                         for c in critique(node.idea, scan_src, submission_file=sub_file):
                             sigs.append({"signal": "critic:" + c["issue"], "detail": c["detail"]})
                     if sigs:
-                        self.store.append("reward_hack_suspected",
+                        self.store.append(EV_REWARD_HACK_SUSPECTED,
                                           {"node_id": node_id, "signals": sigs})
                 else:
                     # `err`/`reason` were computed in the attempt loop (reason may be "idea_rejected"
@@ -3096,7 +3110,7 @@ class Engine:
                     if triage_outcome is not None:
                         data["triage_action"], data["triage_rationale"] = (
                             triage_outcome[0], str(triage_outcome[1])[:300])
-                    self.store.append("node_failed", data)
+                    self.store.append(EV_NODE_FAILED, data)
                 self._maybe_crash()
 
     def _audit_workdir_writes(self, workdir, protected: set) -> list[dict]:
@@ -3151,7 +3165,7 @@ class Engine:
         topk = evaluated[: self.confirm_top_k]
         if not topk:
             async with self._write_lock:
-                self.store.append("best_confirmed", {"node_id": None, "significant": False})
+                self.store.append(EV_BEST_CONFIRMED, {"node_id": None, "significant": False})
             return
 
         summaries: list[dict] = []
@@ -3189,19 +3203,19 @@ class Engine:
                     )
                     valid = res.metric is not None and res.exit_code == 0 and not res.timed_out
                     async with self._write_lock:            # confirm-seed eval cost (#2) + memo (#0)
-                        self.store.append("confirm_eval", {
+                        self.store.append(EV_CONFIRM_EVAL, {
                             "node_id": nd.id, "seed": s,
                             "eval_seconds": round(time.time() - _t0, 3),
                             "metric": res.metric if valid else None})
                         if res.drift is not None:           # Phase 4: drop + audit drifted seeds
-                            self.store.append("spec_drift", {"node_id": nd.id, "seed": s, **res.drift})
+                            self.store.append(EV_SPEC_DRIFT, {"node_id": nd.id, "seed": s, **res.drift})
                 if valid:
                     scores.append(res.metric)
             if scores:
                 summ = cv_summary(scores)
                 summaries.append({"node_id": nd.id, **summ})
                 async with self._write_lock:
-                    self.store.append("node_confirmed", {
+                    self.store.append(EV_NODE_CONFIRMED, {
                         "node_id": nd.id, "mean": summ["mean"],
                         "std": summ["std"], "seeds": len(scores),
                     })
@@ -3217,7 +3231,7 @@ class Engine:
         else:
             chosen, significant = topk[0].id, False  # all seeds failed -> keep leader
         async with self._write_lock:
-            self.store.append("best_confirmed", {"node_id": chosen, "significant": significant})
+            self.store.append(EV_BEST_CONFIRMED, {"node_id": chosen, "significant": significant})
 
     async def _confirm_node(self, nd) -> None:
         """Operator-forced multi-seed confirmation of ONE node (force_confirm). Records the per-seed
@@ -3241,13 +3255,13 @@ class Engine:
                     self._run_eval, nd, str(workdir), {"LOOPLAB_EVAL_SEED": str(s)}, "full")
                 valid = res.metric is not None and res.exit_code == 0 and not res.timed_out
                 async with self._write_lock:
-                    self.store.append("confirm_eval", {
+                    self.store.append(EV_CONFIRM_EVAL, {
                         "node_id": nd.id, "seed": s, "eval_seconds": round(time.time() - _t0, 3),
                         "metric": res.metric if valid else None})
                     if res.drift is not None:
-                        self.store.append("spec_drift", {"node_id": nd.id, "seed": s, **res.drift})
+                        self.store.append(EV_SPEC_DRIFT, {"node_id": nd.id, "seed": s, **res.drift})
         async with self._write_lock:
-            self.store.append("confirm_done", {"node_id": nd.id})   # fulfill the request (gate)
+            self.store.append(EV_CONFIRM_DONE, {"node_id": nd.id})   # fulfill the request (gate)
 
     async def _ablate(self, parent_id: int) -> None:
         """Ablation-driven refinement (I7, MLE-STAR): probe each parameter's impact by
@@ -3263,7 +3277,7 @@ class Engine:
             # Still emit an (empty) ablate event so an operator `force_ablate` request is marked
             # done — otherwise the forced-ablate gate, which waits for an ablate event for this
             # parent, never closes and the loop spins forever on repo/eval-spec runs.
-            self.store.append("ablate", {"parent_id": parent_id, "impacts": {},
+            self.store.append(EV_ABLATE, {"parent_id": parent_id, "impacts": {},
                                          "skipped": "repo_or_eval_spec"})
             return
         # A0a (MLE-STAR): ablate generated *pipeline code blocks*, not just numeric params — the
@@ -3285,7 +3299,7 @@ class Engine:
                 if res.metric is not None and res.exit_code == 0 and not res.timed_out:
                     impacts[p] = abs(res.metric - base)
         async with self._write_lock:
-            self.store.append("ablate", {"parent_id": parent_id, "impacts": impacts})
+            self.store.append(EV_ABLATE, {"parent_id": parent_id, "impacts": impacts})
 
         top = max(impacts, key=impacts.get) if impacts else (
             sorted(parent.idea.params)[0] if parent.idea.params else None)
@@ -3297,7 +3311,7 @@ class Engine:
                     rationale=f"ablation: refine highest-impact '{top}' (impacts={impacts})")
         code = self._implement(idea, parent)
         node_id = max(fold(self.store.read_all()).nodes, default=-1) + 1
-        self.store.append("node_created", {
+        self.store.append(EV_NODE_CREATED, {
             "node_id": node_id, "parent_ids": [parent_id], "operator": "refine_block",
             "idea": idea.model_dump(mode="json"), "code": code,
             "files": getattr(self.developer, "last_files", {}) or {}})
@@ -3361,7 +3375,7 @@ class Engine:
             return (1, float("inf")) if v is None else (0, v)
         top = max(impacts.items(), key=_rank)[0] if impacts else None
         async with self._write_lock:
-            self.store.append("ablate", {"parent_id": parent_id, "impacts": impacts,
+            self.store.append(EV_ABLATE, {"parent_id": parent_id, "impacts": impacts,
                                          "mode": "code_blocks", "blocks": len(blocks),
                                          "top_block": top})
         top_src = ""
@@ -3373,7 +3387,7 @@ class Engine:
                                f"#{top} and keep the rest. Block:\n{top_src}"))
         new_code = self._implement(idea, parent)
         node_id = max(fold(self.store.read_all()).nodes, default=-1) + 1
-        self.store.append("node_created", {
+        self.store.append(EV_NODE_CREATED, {
             "node_id": node_id, "parent_ids": [parent_id], "operator": "refine_block",
             "idea": idea.model_dump(mode="json"), "code": new_code,
             "files": getattr(self.developer, "last_files", {}) or {}})
@@ -3389,7 +3403,7 @@ class Engine:
     def _maybe_crash(self) -> None:
         if self.crash_after is None:
             return
-        n_eval = sum(1 for e in self.store.read_all() if e.type == "node_evaluated")
+        n_eval = sum(1 for e in self.store.read_all() if e.type == EV_NODE_EVALUATED)
         if n_eval >= self.crash_after:
             os._exit(137)  # simulate kill -9 (no cleanup, no run_finished)
 
@@ -3409,7 +3423,7 @@ class Engine:
         if "train_timestamps" in inp and "test_timestamps" in inp:
             verdicts.append(temporal_leakage(inp["train_timestamps"], inp["test_timestamps"]))
         leak = any(v.get("leak") for v in verdicts)
-        self.store.append("data_leakage", {"leak": leak, "verdicts": verdicts})
+        self.store.append(EV_DATA_LEAKAGE, {"leak": leak, "verdicts": verdicts})
         return leak
 
     def _store_case(self, final: RunState) -> None:

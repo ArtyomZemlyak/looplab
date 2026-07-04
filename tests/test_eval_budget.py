@@ -1,4 +1,4 @@
-﻿"""Item #2: per-eval time accounting + a hard eval-compute budget that stops the silent
+"""Item #2: per-eval time accounting + a hard eval-compute budget that stops the silent
 long sweep (distinct from the wall-clock max_seconds — this counts only time inside evals)."""
 from __future__ import annotations
 

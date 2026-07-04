@@ -1,4 +1,4 @@
-﻿"""A real ML task through the engine: polynomial model selection via CV (ADR-2)."""
+"""A real ML task through the engine: polynomial model selection via CV (ADR-2)."""
 from __future__ import annotations
 
 from pathlib import Path

@@ -23,7 +23,7 @@ from contextlib import nullcontext
 from pathlib import Path
 from typing import Optional
 
-from looplab.runtime.sandbox import RunResult, _json_line_extras, _json_line_metric, _json_line_trials, _run_argv, _to_float
+from looplab.runtime.sandbox import RunResult, _to_float, json_line_extras, json_line_metric, json_line_trials, run_argv
 
 
 def _dig(obj, key: str):
@@ -55,7 +55,7 @@ def read_metric(stdout: str, workdir: str, spec: dict, wrap=None) -> Optional[fl
     eval — pass `wrap` (from make_docker_wrap) to run it inside the container."""
     kind = spec.get("kind", "stdout_json")
     if kind == "stdout_json":
-        return _json_line_metric(stdout, spec.get("key", "metric"))
+        return json_line_metric(stdout, spec.get("key", "metric"))
     if kind == "stdout_regex":
         return _regex_metric(stdout, spec["pattern"], int(spec.get("group", 1)))
     if kind in ("file_json", "file_regex"):
@@ -118,9 +118,9 @@ def read_metric(stdout: str, workdir: str, spec: dict, wrap=None) -> Optional[fl
         argv = (["python", "-c", runner] if wrap else [sys.executable, "-c", runner])
         if wrap:
             argv = wrap(argv, str(workdir))
-        rc, out, _, to = _run_argv(argv, str(workdir),
+        rc, out, _, to = run_argv(argv, str(workdir),
                                    float(spec.get("timeout", 120)), None, 64_000)
-        return _json_line_metric(out, "metric") if (rc == 0 and not to) else None
+        return json_line_metric(out, "metric") if (rc == 0 and not to) else None
     return None
 
 
@@ -349,7 +349,7 @@ def run_command_eval(command: list[str], cwd: str, timeout: float, metric: dict,
         swd = Path(setup_cwd).resolve() if setup_cwd else wd
         swd.mkdir(parents=True, exist_ok=True)
         with _sp("setup", sandboxed=bool(wrap)):
-            rc, out, err, to = _run_argv(_w(_bound(setup, setup_timeout), str(swd)), swd,
+            rc, out, err, to = run_argv(_w(_bound(setup, setup_timeout), str(swd)), swd,
                                          setup_timeout + grace, env, max_output_bytes, cancel,
                                          log_path=_log("setup.log"))
         to = to or (is_docker and rc == 124)            # coreutils timeout -> exit 124
@@ -357,7 +357,7 @@ def run_command_eval(command: list[str], cwd: str, timeout: float, metric: dict,
             return RunResult(exit_code=rc, stdout=out, stderr="setup failed:\n" + err,
                              metric=None, timed_out=to)
     with _sp("command", sandboxed=bool(wrap)) as _h:
-        rc, out, err, to = _run_argv(_w(_bound(command, timeout), str(wd)), wd,
+        rc, out, err, to = run_argv(_w(_bound(command, timeout), str(wd)), wd,
                                      timeout + grace, env, max_output_bytes, cancel,
                                      log_path=_log("eval.log"))
         to = to or (is_docker and rc == 124)
@@ -386,13 +386,13 @@ def run_command_eval(command: list[str], cwd: str, timeout: float, metric: dict,
     # Auto-capture: every other numeric key on the metric's own JSON line is also reported (no config
     # needed), so an experiment that prints {"metric": x, "recall@10": y, ...} surfaces them all. A
     # declared spec wins over the auto-captured value of the same name.
-    auto = (_json_line_extras(out, metric.get("key", "metric"))
+    auto = (json_line_extras(out, metric.get("key", "metric"))
             if (not to and metric.get("kind", "stdout_json") == "stdout_json") else {})
     extra = ({**auto, **declared} or None)
     viol = _violations(out, str(wd), constraints, wrap) if (constraints and not to and m is not None) else None
     # Intra-node sweep: a RepoTask command may emit the same `{"trials": [...]}` stdout line; carry
     # it so the engine can collapse it to the node's best metric (no eval_spec change required).
-    trials = _json_line_trials(out) if not to else None
+    trials = json_line_trials(out) if not to else None
     return RunResult(exit_code=rc, stdout=out, stderr=err, metric=m, timed_out=to, drift=drift,
                      extra_metrics=extra, violations=(viol or None), trials=trials)
 

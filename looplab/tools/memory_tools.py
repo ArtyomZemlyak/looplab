@@ -13,6 +13,8 @@ import json
 import re
 from pathlib import Path
 
+from looplab.tools._base import fn_spec
+
 _WORD = re.compile(r"[a-z0-9@._]+")
 
 
@@ -20,10 +22,8 @@ def _toks(s: str) -> set:
     return {w for w in _WORD.findall((s or "").lower()) if len(w) > 2}
 
 
-def _fn(name: str, desc: str, props: dict, required: list) -> dict:
-    return {"type": "function", "function": {
-        "name": name, "description": desc,
-        "parameters": {"type": "object", "properties": props, "required": required}}}
+# Back-compat alias: the implementation now lives in `looplab.tools._base.fn_spec`.
+_fn = fn_spec
 
 
 class MemoryTools:

@@ -18,7 +18,7 @@ from looplab.core.llm import BudgetExceeded
 from looplab.core.models import Idea, Node, RunState
 from looplab.core.parse import ParseError, parse_structured
 from looplab.core.prompts import PromptStore, render
-from looplab.agents.roles import _clamp_fill, _state_brief
+from looplab.agents.roles import _clamp_fill, _state_brief, collect_hint_cues
 
 
 class CompositeTools:
@@ -351,6 +351,13 @@ def loop_opts_from_settings(settings) -> dict:
 
 
 class ToolUsingResearcher:
+    """Agentic Researcher (same `propose` Protocol as roles.LLMResearcher — see this module's
+    docstring): drives a bounded multi-turn tool loop (`drive_tool_loop`, whose docs cover the
+    turn/time/context budgets and history compression) in which the model may consult the run
+    via retrieval tools before calling `emit` exactly once with its final Idea. Resilient by
+    contract: malformed emits are sanitized, and parse/transport failures degrade to a safe
+    bounds-filled Idea instead of crashing the run."""
+
     _SYSTEM = ("You are an ML researcher driving experiments to improve the objective. You MAY call the "
                "retrieval tools to consult prior knowledge/results, then call `emit` exactly once with "
                "your final Idea (operator, params, rationale, and a short reusable `theme` slug that "
@@ -432,8 +439,9 @@ class ToolUsingResearcher:
             self.tools.bind_state(state, parent)
         from looplab.agents.hints import render_hint_directives
         hint_block = render_hint_directives(state.pending_hints)
-        cue = getattr(self, "_complexity_hint", "")   # A0d breadth-keyed complexity cue (empty=off)
-        cue += getattr(self, "_novelty_feedback", "")  # T5 novelty-gate re-propose feedback (empty=off)
+        # A0d breadth-keyed complexity cue + T5 novelty-gate re-propose feedback (each empty=off).
+        # Deliberately NOT `_sweep_hint` — see the note on roles.RESEARCHER_HINT_ATTRS.
+        cue = collect_hint_cues(self, ("_complexity_hint", "_novelty_feedback"))
         # Hypotheses ledger (P1): honor track_hypotheses on the agentic path too (default on, matching
         # config) — ask for the per-experiment `hypothesis` so the ledger of tested beliefs fills in.
         hyp = ""

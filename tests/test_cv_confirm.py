@@ -1,4 +1,4 @@
-﻿"""I8 consistent-CV harness + I12 multi-seed top-k confirmation."""
+"""I8 consistent-CV harness + I12 multi-seed top-k confirmation."""
 from __future__ import annotations
 
 from looplab.confirm import confirm_top_k

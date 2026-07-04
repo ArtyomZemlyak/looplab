@@ -1,4 +1,4 @@
-﻿"""ADR-16: agentic retrieval — KnowledgeTools + the tool-using Researcher agent loop.
+"""ADR-16: agentic retrieval — KnowledgeTools + the tool-using Researcher agent loop.
 Offline (fake chat client), no model needed."""
 from __future__ import annotations
 

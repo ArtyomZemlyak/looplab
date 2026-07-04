@@ -61,17 +61,22 @@ def top_nodes(state: RunState, k: int, *, worst: bool = False) -> list:
     return feasible[:k]
 
 
-def _fmt_num(v: Optional[float]) -> str:
+def fmt_num(v: Optional[float]) -> str:
     if v is None:
         return "?"
     return f"{v:.4g}"
 
 
-def _fmt_params(params: dict, max_k: int = 4) -> str:
+def fmt_params(params: dict, max_k: int = 4) -> str:
     items = list(params.items())[:max_k]
-    body = ", ".join(f"{k}={_fmt_num(float(v)) if isinstance(v, (int, float)) else v}" for k, v in items)
+    body = ", ".join(f"{k}={fmt_num(float(v)) if isinstance(v, (int, float)) else v}" for k, v in items)
     extra = "" if len(params) <= max_k else f", +{len(params) - max_k} more"
     return f"[{body}{extra}]" if body else "[]"
+
+
+# Back-compat aliases for pre-rename importers.
+_fmt_num = fmt_num
+_fmt_params = fmt_params
 
 
 # Default number of intra-node sweep trials surfaced in the always-on context (digest). A small,
@@ -81,9 +86,12 @@ def _fmt_params(params: dict, max_k: int = 4) -> str:
 DEFAULT_TRIAL_K = 10
 
 
-def _finite_trials(trials) -> list:
+def finite_trials(trials) -> list:
     """Trials that produced a usable (finite) metric — the only ones carrying tuning signal."""
     return [t for t in trials if t.metric is not None and math.isfinite(t.metric)]
+
+
+_finite_trials = finite_trials   # back-compat alias
 
 
 def select_trials(trials, k: int, direction: str) -> list:
@@ -92,7 +100,7 @@ def select_trials(trials, k: int, direction: str) -> list:
     between them (so a flat region and a cliff both show up). Deterministic — rank-based, with a
     stable param tie-break — so replay/audit is reproducible. Trials with no finite metric are
     dropped; `k<=0` or `k>=count` returns the full sorted finite set."""
-    scored = _finite_trials(trials)
+    scored = finite_trials(trials)
     scored.sort(key=lambda t: sorted(t.params.items()))            # stable, direction-independent tie-break
     scored.sort(key=lambda t: t.metric, reverse=(direction != "min"))
     if k <= 0 or len(scored) <= k:
@@ -103,19 +111,22 @@ def select_trials(trials, k: int, direction: str) -> list:
     return [scored[i] for i in idx]
 
 
-def _trial_line(t) -> str:
-    extra = f"  ({_fmt_num(t.seconds)}s)" if getattr(t, "seconds", None) else ""
-    return f"{_fmt_params(t.params)} → {_fmt_num(t.metric)}{extra}"
+def trial_line(t) -> str:
+    extra = f"  ({fmt_num(t.seconds)}s)" if getattr(t, "seconds", None) else ""
+    return f"{fmt_params(t.params)} → {fmt_num(t.metric)}{extra}"
+
+
+_trial_line = trial_line   # back-compat alias
 
 
 def _node_line(n) -> str:
     if n.status is NodeStatus.failed:
         outcome = f"FAILED ({n.error_reason or 'error'})"
     else:
-        outcome = f"metric={_fmt_num(node_metric(n))}"
+        outcome = f"metric={fmt_num(node_metric(n))}"
     theme = f" {{{n.idea.theme}}}" if getattr(n.idea, "theme", None) else ""
     swept = f" swept ×{len(n.trials)}" if getattr(n, "trials", None) else ""
-    return f"  #{n.id} {n.operator} {outcome} {_fmt_params(n.idea.params)}{swept}{theme}"
+    return f"  #{n.id} {n.operator} {outcome} {fmt_params(n.idea.params)}{swept}{theme}"
 
 
 def auto_char_cap(state: RunState) -> int:
@@ -185,7 +196,7 @@ def lineage_lessons(state: RunState, parent, k: int = 5) -> str:
         delta = (n.metric - base) if state.direction == "max" else (base - n.metric)
         sign = "improved" if delta > 0 else "regressed"
         lessons.append((abs(delta),
-                        f"  #{n.id} {n.operator} {sign} {_fmt_num(abs(delta))} vs parent: "
+                        f"  #{n.id} {n.operator} {sign} {fmt_num(abs(delta))} vs parent: "
                         f"{' '.join((n.idea.rationale or '').split())[:70]}"))
     if not lessons:
         return ""
@@ -219,7 +230,7 @@ def ancestral_repair_chain(state: RunState, node, k: int = 4) -> str:
     for n in chain[-k:]:
         err = " ".join((n.error or "").split())[:80]
         outcome = ("still failing" if n.status is NodeStatus.failed
-                   else f"fixed, metric={_fmt_num(node_metric(n))}")
+                   else f"fixed, metric={fmt_num(node_metric(n))}")
         lines.append(f"  #{n.id} {n.operator}: {err or n.error_reason or 'repair'} — {outcome}")
     return "\n".join(lines)
 
@@ -269,10 +280,10 @@ def experiments_digest(state: RunState, top_k: int = 5, worst_n: int = 3,
     if swept:
         champ = swept[0]
         sel = select_trials(champ.trials, DEFAULT_TRIAL_K, state.direction)
-        finite_n = len(_finite_trials(champ.trials))
+        finite_n = len(finite_trials(champ.trials))
         cap = f", showing {len(sel)} of {finite_n} best→worst" if len(sel) < finite_n else ""
         lines.append(f"Tuning of #{champ.id} ({len(champ.trials)} trials{cap}):")
-        lines += [f"  {_trial_line(t)}" for t in sel]
+        lines += [f"  {trial_line(t)}" for t in sel]
 
     # Weakest feasible + the most recent failures — the "avoid repeating this" set.
     weak = [n for n in top_nodes(state, worst_n, worst=True) if n not in winners]
@@ -286,7 +297,7 @@ def experiments_digest(state: RunState, top_k: int = 5, worst_n: int = 3,
     themes = theme_rollup(state)
     if themes:
         chips = "; ".join(
-            f"{t} ×{d['count']}" + (f" (best {_fmt_num(d['best_metric'])})" if d['best_metric'] is not None else "")
+            f"{t} ×{d['count']}" + (f" (best {fmt_num(d['best_metric'])})" if d['best_metric'] is not None else "")
             for t, d in sorted(themes.items(), key=lambda kv: -kv[1]["count"]))
         lines.append(f"Themes: {chips}")
 
@@ -296,7 +307,7 @@ def experiments_digest(state: RunState, top_k: int = 5, worst_n: int = 3,
     if attr:
         top = list(attr.items())[:5]
         lines.append("Component attribution (summed ablation impact): " +
-                     "; ".join(f"{c} {_fmt_num(d['impact'])} (×{d['n']})" for c, d in top))
+                     "; ".join(f"{c} {fmt_num(d['impact'])} (×{d['n']})" for c, d in top))
 
     out = "\n".join(lines)
     if len(out) > char_cap:

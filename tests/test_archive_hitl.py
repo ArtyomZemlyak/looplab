@@ -1,4 +1,4 @@
-﻿"""I22 diversity archive + I21 HITL approval (offline)."""
+"""I22 diversity archive + I21 HITL approval (offline)."""
 from __future__ import annotations
 
 from pathlib import Path

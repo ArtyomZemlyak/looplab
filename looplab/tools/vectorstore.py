@@ -145,7 +145,7 @@ def make_embedder(settings) -> Callable[[str], Vector]:
     return LLMEmbedder(model, base_url=base, api_key=key)
 
 
-def _cosine(a: Vector, b: Vector) -> float:
+def cosine(a: Vector, b: Vector) -> float:
     if len(a) != len(b):
         # Mismatched dims (e.g. a store populated with hash_embed=64 then queried with a 768-dim
         # LLM embedder) would silently rank on the truncated overlap; refuse instead.
@@ -154,6 +154,10 @@ def _cosine(a: Vector, b: Vector) -> float:
     na = sum(x * x for x in a) ** 0.5
     nb = sum(y * y for y in b) ** 0.5
     return dot / (na * nb) if na and nb else 0.0
+
+
+# Back-compat alias for pre-rename importers (orchestrator, tests).
+_cosine = cosine
 
 
 class InMemoryVectorStore:
@@ -170,7 +174,7 @@ class InMemoryVectorStore:
 
     def search(self, index: str, query: Vector, k: int) -> list[Hit]:
         store = self._idx.get(index, {})
-        hits = [Hit(it.id, _cosine(query, it.vector), it.payload) for it in store.values()]
+        hits = [Hit(it.id, cosine(query, it.vector), it.payload) for it in store.values()]
         hits.sort(key=lambda h: (-h.score, h.id))
         return hits[:k]
 

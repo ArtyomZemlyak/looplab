@@ -20,6 +20,7 @@ from __future__ import annotations
 from typing import Optional
 
 from looplab.agents.agent import drive_tool_loop
+from looplab.agents.roles import RESEARCHER_HINT_ATTRS
 from looplab.core.llm import BudgetExceeded
 from looplab.core.models import Idea, Node, RunState
 
@@ -69,8 +70,8 @@ class UnifiedAgent:
     def propose(self, state: RunState, parent: Optional[Node]) -> Idea:
         # The engine sets ephemeral hints via `setattr(self.researcher, ...)` where self.researcher
         # is THIS agent; forward them to the internal researcher that actually reads them.
-        for attr in ("_complexity_hint", "_sweep_hint", "_novelty_feedback", "_digest_cap",
-                     "track_hypotheses"):
+        # `track_hypotheses` rides along: not an engine hint, but likewise poked onto the facade.
+        for attr in (*RESEARCHER_HINT_ATTRS, "track_hypotheses"):
             if hasattr(self, attr):
                 setattr(self.researcher, attr, getattr(self, attr))
         return self.researcher.propose(state, parent)

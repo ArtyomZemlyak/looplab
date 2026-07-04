@@ -1,4 +1,4 @@
-﻿"""I18: prompt store (hot-reload), skills (progressive disclosure), AGENTS.md."""
+"""I18: prompt store (hot-reload), skills (progressive disclosure), AGENTS.md."""
 from __future__ import annotations
 
 import json

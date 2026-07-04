@@ -1,4 +1,4 @@
-﻿"""I7/I11: debug operator, merge operator, multi-parent DAG, policy transitions."""
+"""I7/I11: debug operator, merge operator, multi-parent DAG, policy transitions."""
 from __future__ import annotations
 
 from pathlib import Path

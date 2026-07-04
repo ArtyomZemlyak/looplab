@@ -1,4 +1,4 @@
-﻿"""RepoTask Phase 3 — onboarding: the agent proposes a trusted eval + metric adapter, a
+"""RepoTask Phase 3 — onboarding: the agent proposes a trusted eval + metric adapter, a
 human ratifies it (ratify_freeze) or it auto-confirms (autonomous), then the loop runs the
 command-eval through the frozen, protected adapter."""
 from __future__ import annotations

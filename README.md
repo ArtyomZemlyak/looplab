@@ -3,7 +3,7 @@
 > An autonomous ML/DS research engine. Give it a goal; it **invents → implements → tests → improves** candidate solutions in a loop and returns the best *verified* result.
 
 [![Python](https://img.shields.io/badge/python-%3E%3D3.11-blue.svg)](https://www.python.org/)
-[![Tests](https://img.shields.io/badge/tests-1076-brightgreen.svg)](#testing)
+[![Tests](https://img.shields.io/badge/tests-1147-brightgreen.svg)](#testing)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](#license)
 [![Docs](https://img.shields.io/badge/docs-mkdocs--material-0f9c8c.svg)](https://artyomzemlyak.github.io/looplab/)
 
@@ -211,7 +211,7 @@ Design records (the *why* behind the architecture) are in [`docs/00-INDEX.md`](d
 ## Testing
 
 ```bash
-python -m pytest -q          # 1076 tests across 118 files
+python -m pytest -q          # ~1150 tests, fully offline, a few minutes
 ```
 
 Live-LLM and external-agent tests auto-skip when no endpoint/agent is configured, so the suite runs

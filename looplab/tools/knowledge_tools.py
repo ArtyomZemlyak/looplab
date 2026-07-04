@@ -12,8 +12,9 @@ import re
 from pathlib import Path
 
 from looplab.core import _pathsafe
+from looplab.tools._base import fn_spec
 from looplab.tools.retrieval import glob_files, grep, read_file
-from looplab.tools.vectorstore import InMemoryVectorStore, Item, _cosine, hash_embed
+from looplab.tools.vectorstore import InMemoryVectorStore, Item, cosine, hash_embed
 
 
 def _abstraction_of(payload: dict):
@@ -22,12 +23,9 @@ def _abstraction_of(payload: dict):
     return Abstraction(str(payload.get("abstraction", "")), list(payload.get("anchors", [])))
 
 
-def _fn_spec(name: str, desc: str, props: dict, required: list) -> dict:
-    """Build one OpenAI-format function/tool schema. Shared by every tool provider so the
-    schema shape lives in one place."""
-    return {"type": "function", "function": {
-        "name": name, "description": desc,
-        "parameters": {"type": "object", "properties": props, "required": required}}}
+# Back-compat alias: several tool modules (web, literature, git_tools, …) import `_fn_spec`
+# from here; the implementation now lives in `looplab.tools._base.fn_spec`.
+_fn_spec = fn_spec
 
 
 class RepoTools:
@@ -233,7 +231,7 @@ class KnowledgeTools:
             vec = self.embed(ab.index_text())
             merged = False
             for it in kept:
-                if _cosine(vec, it.vector) >= self.consolidate_threshold:
+                if cosine(vec, it.vector) >= self.consolidate_threshold:
                     prev = _abstraction_of(it.payload)
                     m = prev.merge(ab)
                     if len(pl["text"]) > len(it.payload["text"]):

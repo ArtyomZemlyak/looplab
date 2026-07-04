@@ -1,4 +1,4 @@
-﻿"""Patch-gated multi-file external agent (ADR-7 Rule 3). A stub agent edits files in the
+"""Patch-gated multi-file external agent (ADR-7 Rule 3). A stub agent edits files in the
 developer's git worktree; the surface gate accepts in-surface multi-file changes and
 rejects (reverts) any out-of-surface touch. Plus an end-to-end check that a multi-file
 solution's helper modules are materialized into the eval workdir."""

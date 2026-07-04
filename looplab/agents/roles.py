@@ -82,6 +82,28 @@ class Developer(Protocol):
     def implement(self, idea: Idea) -> str: ...
 
 
+RESEARCHER_HINT_ATTRS: tuple[str, ...] = (
+    "_digest_cap", "_complexity_hint", "_sweep_hint", "_novelty_feedback")
+"""Ephemeral hint attributes the engine communicates to the ACTIVE Researcher via
+`setattr` (orchestrator.py: `_digest_cap` ~388, `_complexity_hint` ~1409,
+`_sweep_hint` ~1419, `_novelty_feedback` ~2008-2023). Readers consume them with
+`getattr(self, name, default)`: `LLMResearcher.propose` (below) reads all four;
+`UnifiedAgent.propose` forwards them to its internal researcher. Keep this tuple in
+sync with the orchestrator's setattr sites.
+
+NOTE: agent.py's `ToolUsingResearcher.propose` currently omits `_sweep_hint` (it folds
+only `_complexity_hint` + `_novelty_feedback` into its prompt) — a potential bug, kept
+as-is deliberately so its rendered prompts stay byte-identical."""
+
+
+def collect_hint_cues(obj, attrs) -> str:
+    """Concatenate the given engine-set hint attributes (a subset of
+    `RESEARCHER_HINT_ATTRS`) off `obj` in order, each defaulting to "" when unset — the
+    shared rendering pattern the Researcher prompts use. Purely mechanical: byte-identical
+    to the per-attribute `getattr(obj, name, "")` concatenation it replaces."""
+    return "".join(getattr(obj, name, "") for name in attrs)
+
+
 # --------------------------------------------------------------------------- #
 # Toy backends (offline, deterministic given a seed)
 # --------------------------------------------------------------------------- #
@@ -215,14 +237,13 @@ class LLMResearcher:
         # the model still proposes; bounds still clamp.
         from looplab.agents.hints import render_hint_directives
         hint_block = render_hint_directives(state.pending_hints)
-        # A0d: an engine-set complexity cue keyed on the operated node's breadth (empty when off).
-        cue = getattr(self, "_complexity_hint", "")
-        # Strategist `prefer_sweep` bias (engine-set, empty when off): nudges — but never forces —
-        # the Researcher toward an intra-node sweep when the cost model favors in-process execution.
-        sweep_hint = getattr(self, "_sweep_hint", "")
-        # T5 novelty-gate feedback (engine-set, one re-propose): "you already tried X, it failed
-        # because Y — propose something meaningfully different". Empty in the normal path.
-        novelty_fb = getattr(self, "_novelty_feedback", "")
+        # Engine-set hint cues (see RESEARCHER_HINT_ATTRS; each empty when off), in order:
+        # - _complexity_hint — A0d: an engine-set complexity cue keyed on the operated node's breadth.
+        # - _sweep_hint — Strategist `prefer_sweep` bias: nudges — but never forces — the Researcher
+        #   toward an intra-node sweep when the cost model favors in-process execution.
+        # - _novelty_feedback — T5 novelty-gate feedback (one re-propose): "you already tried X, it
+        #   failed because Y — propose something meaningfully different". Empty in the normal path.
+        cues = collect_hint_cues(self, ("_complexity_hint", "_sweep_hint", "_novelty_feedback"))
         hyp_sys = ("\n" + _HYPOTHESIS_INSTRUCTION) if self.track_hypotheses else ""
         messages = [
             {"role": "system",
@@ -231,7 +252,7 @@ class LLMResearcher:
             {"role": "user", "content": _state_brief(state, parent,
                                                      digest_cap=getattr(self, "_digest_cap", 0))
                                         + "\n" + self.space_hint +
-                                        hint_block + cue + sweep_hint + novelty_fb +
+                                        hint_block + cues +
                                         "\nPropose the next Idea (operator, params, rationale"
                                         + (", hypothesis" if self.track_hypotheses else "") +
                                         "; optionally a `space` grid for a sweep). The "

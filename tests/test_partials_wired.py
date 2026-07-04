@@ -1,4 +1,4 @@
-﻿"""Completed-partials: I14 spans, I13 budget, I10 gated promotion, I9 leakage gate,
+"""Completed-partials: I14 spans, I13 budget, I10 gated promotion, I9 leakage gate,
 I19 cross-run memory. All offline."""
 from __future__ import annotations
 

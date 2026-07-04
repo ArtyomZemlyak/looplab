@@ -1,4 +1,4 @@
-﻿"""Phase 4 untrusted tier: command-eval sandboxed via `docker run`. Docker isn't required
+"""Phase 4 untrusted tier: command-eval sandboxed via `docker run`. Docker isn't required
 to run these — we test the argv construction (monkeypatching the docker-CLI probe) and that
 run_command_eval routes the wrap to setup (root) and eval (cwd subdir) correctly."""
 from __future__ import annotations

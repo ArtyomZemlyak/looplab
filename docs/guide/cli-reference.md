@@ -280,3 +280,49 @@ looplab export-notebook RUN_DIR [--out champion.ipynb]
 |---|---|---|
 | `RUN_DIR` | *(required)* | Run directory to export the champion from |
 | `--out PATH` | `<run>/champion.ipynb` | Output `.ipynb` path |
+
+## `harden`
+
+Harden the reward-hack evaluator via a hacker–fixer–solver loop. Grows a persisted exploit ruleset
+at `<memory_dir>/exploits.jsonl`: a hacker proposes eval exploits, a fixer turns each one the
+current detector misses into a durable regex, and a solver guardrail rejects any rule that would
+flag an honest solution. Every future run with this `memory_dir` + `reward_hack_detect` loads the
+suite. Deterministic seed corpus — fully offline, no model needed.
+
+```bash
+looplab harden MEMORY_DIR [--rounds 1]
+```
+
+| Option | Default | Description |
+|---|---|---|
+| `MEMORY_DIR` | *(required)* | Memory dir; the exploit suite lives at `<memory_dir>/exploits.jsonl` |
+| `--rounds N` | `1` | Hacker/fixer iterations |
+
+## `tensorboard`
+
+Serve TensorBoard over a run's per-node training logs — online curves for all metrics the training
+framework logged, one comparable run per experiment. Needs `tensorboard` installed.
+
+```bash
+looplab tensorboard RUN_DIR [--port 6006] [--host 0.0.0.0]
+```
+
+| Option | Default | Description |
+|---|---|---|
+| `RUN_DIR` | *(required)* | Run dir; its `nodes/` hold each experiment's training logs |
+| `--port N` | `6006` | Port to serve on |
+| `--host ADDR` | `0.0.0.0` | Bind address |
+
+## `build-ui`
+
+Build the React UI bundle (`ui/dist`) so `looplab ui` can serve it. Runs `npm ci` (first build) +
+`npm run build` in the UI source tree. Normally not needed — `looplab ui` builds on demand — but
+handy for CI or a warm-up step.
+
+```bash
+looplab build-ui [--force]
+```
+
+| Option | Default | Description |
+|---|---|---|
+| `--force` | off | Rebuild even if a bundle already exists |

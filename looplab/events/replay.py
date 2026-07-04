@@ -8,6 +8,20 @@ from typing import Iterable
 
 from looplab.core.models import (Event, Hypothesis, Idea, Node, NodeStatus, RunState, Trial,
                      hypothesis_id)
+from looplab.events.types import (
+    EV_ABLATE, EV_AGENT_DECISION, EV_AGENT_VALIDATED, EV_ANNOTATION, EV_APPROVAL_GRANTED,
+    EV_APPROVAL_REQUESTED, EV_BEST_CONFIRMED, EV_BUDGET_EXTEND, EV_CONFIRM_DONE,
+    EV_CONFIRM_EVAL, EV_DATA_LEAKAGE, EV_DATA_PROFILED, EV_DATA_PROVENANCE,
+    EV_DEEP_RESEARCH, EV_DIVERSITY_ARCHIVE, EV_FORCE_ABLATE, EV_FORCE_CONFIRM, EV_FORK,
+    EV_FORK_DONE, EV_HINT, EV_HOLDOUT_EVALUATED, EV_HOST_GRADING, EV_HYPOTHESIS_ADDED,
+    EV_HYPOTHESIS_UPDATED, EV_INJECT_DONE, EV_INJECT_NODE, EV_LESSONS_DISTILLED,
+    EV_LESSONS_REFRESHED, EV_LLM_COST, EV_NODE_ABORT, EV_NODE_CONFIRMED, EV_NODE_CREATED,
+    EV_NODE_EVALUATED, EV_NODE_FAILED, EV_NODE_REPAIRED, EV_NOVELTY_REJECTED, EV_PAUSE,
+    EV_POLICY_DECISION, EV_PROMOTE, EV_PROXY_SCORED, EV_REPORT_GENERATED,
+    EV_RESEARCH_COMPLETED, EV_RESUME, EV_REWARD_HACK_SUSPECTED, EV_RUN_ABORT,
+    EV_RUN_FINISHED, EV_RUN_REOPENED, EV_RUN_STARTED, EV_RUNG_PROMOTED, EV_SET_STRATEGY,
+    EV_SPEC_APPROVAL_REQUESTED, EV_SPEC_APPROVED, EV_SPEC_DRIFT, EV_SPEC_PROPOSED,
+    EV_STRATEGY_DECISION, EV_TRUST_GATE_CHANGED, EV_WORKSPACE_CHANGED)
 
 
 def flagged_node_ids(st: RunState) -> set:
@@ -31,7 +45,7 @@ def fold(events: Iterable[Event]) -> RunState:
     for e in events:
         d = e.data
         t = e.type
-        if t == "run_started":
+        if t == EV_RUN_STARTED:
             st.run_id = d["run_id"]
             st.task_id = d["task_id"]
             st.goal = d.get("goal", "")
@@ -52,13 +66,13 @@ def fold(events: Iterable[Event]) -> RunState:
             # setting can't make pre/post-resume metrics incomparable.
             _hf = d.get("holdout_fraction")
             st.holdout_fraction = float(_hf) if isinstance(_hf, (int, float)) else None
-        elif t == "trust_gate_changed":
+        elif t == EV_TRUST_GATE_CHANGED:
             # Operator edited the run's trust gate after launch (server config edit). Last write
             # wins so the change engages in every fold — live view, resume, reset — immediately.
             _tg = str(d.get("trust_gate", "")).strip().lower()
             if _tg in ("audit", "gate", "block"):
                 st.trust_gate = _tg
-        elif t == "node_created":
+        elif t == EV_NODE_CREATED:
             # Defensive like the per-trial / unknown-node tolerance below: a malformed or incomplete
             # node_created (missing key, non-coercible idea param in a hand-edited / bring-your-own-script
             # log) must not crash the WHOLE fold — skip the bad event instead (the engine, sole writer,
@@ -78,7 +92,7 @@ def fold(events: Iterable[Event]) -> RunState:
             except Exception:
                 continue
             st.nodes[n.id] = n
-        elif t == "node_evaluated":
+        elif t == EV_NODE_EVALUATED:
             n = st.nodes.get(d.get("node_id"))          # tolerate an event for an unknown/missing node
             if n is not None:                           # (corrupt/hand-edited log) — skip, don't crash
                 # Idempotent (C4): only a node's FIRST terminal event contributes its eval time, so
@@ -104,7 +118,7 @@ def fold(events: Iterable[Event]) -> RunState:
                 n.trials = trials
                 if first_terminal:
                     st.total_eval_seconds += d.get("eval_seconds") or 0.0
-        elif t == "node_failed":
+        elif t == EV_NODE_FAILED:
             n = st.nodes.get(d.get("node_id"))
             if n is not None:
                 first_terminal = n.status is NodeStatus.pending
@@ -114,7 +128,7 @@ def fold(events: Iterable[Event]) -> RunState:
                 n.eval_seconds = d.get("eval_seconds")
                 if first_terminal:
                     st.total_eval_seconds += d.get("eval_seconds") or 0.0
-        elif t == "node_repaired":
+        elif t == EV_NODE_REPAIRED:
             # In-node inline repair (hybrid crash repair): a NON-terminal event that replaces the
             # node's code with the LLM-repaired version BEFORE the eval that follows it. Idempotent
             # and replay-safe: only mutates while the node is still pending (the single terminal
@@ -129,17 +143,17 @@ def fold(events: Iterable[Event]) -> RunState:
                     n.files = d["files"]
                 if d.get("deleted"):
                     n.deleted = d["deleted"]
-        elif t == "confirm_eval":
+        elif t == EV_CONFIRM_EVAL:
             st.total_eval_seconds += d.get("eval_seconds") or 0.0   # confirm-seed eval cost
             if "node_id" in d and "seed" in d:                       # per-seed resume memo (#0)
                 st.confirm_seed_results.setdefault(d["node_id"], {})[d["seed"]] = d.get("metric")
-        elif t == "node_confirmed":
+        elif t == EV_NODE_CONFIRMED:
             n = st.nodes.get(d.get("node_id"))
             if n is not None:
                 n.confirmed_mean = d.get("mean")
                 n.confirmed_std = d.get("std")
                 n.confirmed_seeds = d.get("seeds")
-        elif t == "holdout_evaluated":
+        elif t == EV_HOLDOUT_EVALUATED:
             # D1 holdout-gated promotion: the engine re-scored this val-leader's predictions on
             # the FINAL holdout partition the search never saw. Tolerant like node_evaluated:
             # an event for an unknown node (corrupt log) is skipped, and a null metric (missing
@@ -153,7 +167,7 @@ def fold(events: Iterable[Event]) -> RunState:
                     n.holdout_metric = float(d["metric"])
                 except (TypeError, ValueError):
                     pass
-        elif t == "agent_validated":
+        elif t == EV_AGENT_VALIDATED:
             n = st.nodes.get(d.get("node_id"))
             if n is not None:                       # audit only; never affects selection
                 n.agent_report = {
@@ -161,36 +175,36 @@ def fold(events: Iterable[Event]) -> RunState:
                     "fell_back": d.get("fell_back"), "attempts": d.get("attempts"),
                     "shipped_ok": d.get("shipped_ok"),
                 }
-        elif t == "data_profiled":
+        elif t == EV_DATA_PROFILED:
             st.data_profile = d.get("columns")
-        elif t == "data_provenance":
+        elif t == EV_DATA_PROVENANCE:
             st.data_provenance = d   # D4: pinned dataset/asset content hashes
-        elif t == "host_grading":
+        elif t == EV_HOST_GRADING:
             st.host_grading = d      # out-of-process host-side grading active (audit; no labels)
-        elif t == "data_leakage":
+        elif t == EV_DATA_LEAKAGE:
             st.leakage = d
-        elif t == "approval_requested":
+        elif t == EV_APPROVAL_REQUESTED:
             st.awaiting_approval = True
-        elif t == "approval_granted":
+        elif t == EV_APPROVAL_GRANTED:
             st.awaiting_approval = False
             st.approved = True
-        elif t == "spec_proposed":
+        elif t == EV_SPEC_PROPOSED:
             st.proposed_spec = d
-        elif t == "spec_approval_requested":
+        elif t == EV_SPEC_APPROVAL_REQUESTED:
             st.spec_approval_requested = True
-        elif t == "spec_approved":
+        elif t == EV_SPEC_APPROVED:
             st.spec_confirmed = True
-        elif t == "spec_drift":
+        elif t == EV_SPEC_DRIFT:
             st.drifts.append(d)                         # audit only; metric already discarded
-        elif t == "workspace_changed":
+        elif t == EV_WORKSPACE_CHANGED:
             st.workspace_changed = True                 # resume saw the source repo/data change
-        elif t == "diversity_archive":
+        elif t == EV_DIVERSITY_ARCHIVE:
             st.archive = d
-        elif t == "llm_cost":
+        elif t == EV_LLM_COST:
             st.llm_cost = d
-        elif t == "ablate":
+        elif t == EV_ABLATE:
             st.ablations.append(d)   # {parent_id, impacts} — parameter-sensitivity audit
-        elif t == "policy_decision":
+        elif t == EV_POLICY_DECISION:
             _scores = {}
             for k, v in (d.get("scores") or {}).items():
                 try:
@@ -200,24 +214,24 @@ def fold(events: Iterable[Event]) -> RunState:
             st.policy_scores = _scores
             st.policy_chosen = d.get("chosen")
             st.policy_reason = d.get("reason") or ""
-        elif t == "strategy_decision":
+        elif t == EV_STRATEGY_DECISION:
             # A7 Strategist (audit-only): the engine recorded the chosen Strategy. Replay rebuilds
             # active_strategy WITHOUT re-calling the LLM (the decision is config, not selection).
             st.active_strategy = d.get("strategy")
             st.strategy_history.append({"strategy": d.get("strategy"), "at_node": d.get("at_node"),
                                         "ctx": d.get("ctx")})
-        elif t == "rung_promoted":
+        elif t == EV_RUNG_PROMOTED:
             st.rungs.append({"rung": d.get("rung"), "survivors": d.get("survivors", [])})
-        elif t == "agent_decision":
+        elif t == EV_AGENT_DECISION:
             # Self-driving unified agent (audit-only): records WHICH legal macro action the agent
             # chose and why. NEVER drives selection — the effect is the subsequent node_created,
             # folded as usual. Additive & non-load-bearing: an old log without it folds identically.
             st.agent_decisions.append(d)
-        elif t == "reward_hack_suspected":
+        elif t == EV_REWARD_HACK_SUSPECTED:
             st.reward_hacks.append({"node_id": d.get("node_id"), "signals": d.get("signals", [])})
-        elif t == "novelty_rejected":
+        elif t == EV_NOVELTY_REJECTED:
             st.novelty_events.append(d)   # E1: a near-duplicate proposal nudged off (audit)
-        elif t == "hypothesis_added":
+        elif t == EV_HYPOTHESIS_ADDED:
             # P1: an explicitly-registered hypothesis (human `add_hypothesis`, or a deep-research
             # direction) — may have no evidence yet. Evidence + verdict are DERIVED post-loop.
             if d.get("statement"):
@@ -229,7 +243,7 @@ def fold(events: Iterable[Event]) -> RunState:
                         st.hypotheses_abandoned.remove(hid)
                 except Exception:
                     pass
-        elif t == "hypothesis_updated":
+        elif t == EV_HYPOTHESIS_UPDATED:
             # Carries a status override (human/agent drops — or reopens — a line of inquiry).
             # Last write wins: "abandoned" adds the override, any other status clears it.
             hid = d.get("id")
@@ -239,20 +253,20 @@ def fold(events: Iterable[Event]) -> RunState:
                         st.hypotheses_abandoned.append(hid)
                 elif hid in st.hypotheses_abandoned:
                     st.hypotheses_abandoned.remove(hid)
-        elif t == "proxy_scored":
+        elif t == EV_PROXY_SCORED:
             # A6 proxy/predictive scoring (audit-only): early-signal rank + which nodes were skipped.
             nid = d.get("node_id")
             if nid is not None and d.get("score") is not None:
                 st.proxy_scores[nid] = d["score"]
             if d.get("skipped") and nid is not None and nid not in st.proxy_skipped:
                 st.proxy_skipped.append(nid)
-        elif t == "best_confirmed":
+        elif t == EV_BEST_CONFIRMED:
             best_confirmed = d.get("node_id", best_confirmed)
             st.confirmed_done = True   # the confirmation phase ran to completion
-        elif t == "run_finished":
+        elif t == EV_RUN_FINISHED:
             st.finished = True
             st.stop_reason = d.get("reason")
-        elif t == "run_reopened":
+        elif t == EV_RUN_REOPENED:
             # An operator added an experiment to a FINISHED run and wants to continue it: clear the
             # terminal flags so re-entering the loop (resume) processes the new node(s) and then
             # re-finishes. Deterministic under replay — a later run_finished simply sets it again.
@@ -264,17 +278,17 @@ def fold(events: Iterable[Event]) -> RunState:
             st.stop_requested = None
         # --- live operator control events (UI intervention). Intent only; the engine reads
         # these and writes the matching domain effect. Deterministic under replay. ---
-        elif t == "run_abort":
+        elif t == EV_RUN_ABORT:
             st.stop_requested = d.get("reason", "operator")
-        elif t == "pause":
+        elif t == EV_PAUSE:
             st.paused = True
-        elif t == "resume":
+        elif t == EV_RESUME:
             st.paused = False
-        elif t == "node_abort":
+        elif t == EV_NODE_ABORT:
             nid = d.get("node_id")
             if nid is not None and nid not in st.aborted_nodes:
                 st.aborted_nodes.append(nid)
-        elif t == "budget_extend":
+        elif t == EV_BUDGET_EXTEND:
             # max_seconds / max_eval_seconds are ABSOLUTE new ceilings (last write wins). add_nodes is
             # an ADDITIVE delta — "give the run N more nodes" — so several extensions accumulate; the
             # orchestrator folds it into the policy's effective max_nodes so a finished run, once
@@ -289,7 +303,7 @@ def fold(events: Iterable[Event]) -> RunState:
                     st.budget_overrides["add_nodes"] = int(st.budget_overrides.get("add_nodes", 0)) + int(d["add_nodes"])
                 except (TypeError, ValueError):
                     pass
-        elif t == "hint":
+        elif t == EV_HINT:
             # Append-only by default; a `replace` hint supersedes all prior standing directives
             # (mirrors set_strategy/pending_strategy) so the boss can rewrite the single directive
             # instead of accumulating contradictory ones. Replay-safe: deterministic over the log.
@@ -297,62 +311,71 @@ def fold(events: Iterable[Event]) -> RunState:
                 st.pending_hints = [d]
             else:
                 st.pending_hints.append(d)
-        elif t == "set_strategy":
+        elif t == EV_SET_STRATEGY:
             # A7 operator override (HITL parity with pause/hint): the human pins a Strategy. The
             # engine applies it before consulting the Strategist, so a human always wins. The pin owns
             # only the fields it names (policy/policy_params/fidelity) and STAYS in force for the rest
             # of the run (it is not cleared on apply) — a later set_strategy overwrites it; the
             # Strategist keeps tuning everything else (see Engine._maybe_consult_strategist).
             st.pending_strategy = d.get("strategy")
-        elif t == "force_confirm":
+        elif t == EV_FORCE_CONFIRM:
             if d.get("node_id") is not None:
                 st.confirm_requests.append(d["node_id"])
-        elif t == "force_ablate":
+        elif t == EV_FORCE_ABLATE:
             if d.get("node_id") is not None:
                 st.ablate_requests.append(d["node_id"])
-        elif t == "fork":
+        elif t == EV_FORK:
             st.fork_requests.append(d)
-        elif t == "fork_done":
+        elif t == EV_FORK_DONE:
             st.forks_done += 1   # one per processed fork request (gate for replay-safe fulfillment)
-        elif t == "inject_node":
+        elif t == EV_INJECT_NODE:
             st.inject_requests.append(d)        # operator-authored experiment (manual tree edit)
-        elif t == "inject_done":
+        elif t == EV_INJECT_DONE:
             st.injects_done += 1                 # one per processed inject (replay-safe gate)
-        elif t == "deep_research":
+        elif t == EV_DEEP_RESEARCH:
             st.research_requests.append(d)       # manual "go think hard" request (control event)
-        elif t == "research_completed":
+        elif t == EV_RESEARCH_COMPLETED:
             # Deep-Research memo (audit-only sidecar; NEVER touches nodes/best). `served_manual`
             # advances the manual-request gate so a resume never re-runs a served request.
             st.research.append(d.get("memo") or d)
             if d.get("served_manual"):
                 st.research_served += 1
-        elif t == "lessons_distilled":
+        elif t == EV_LESSONS_DISTILLED:
             # M6 mid-run comparative-lesson distillation (audit-only sidecar; NEVER touches
             # nodes/best). at_node + pair ids are the replay-safe gates (cadence + no re-distill).
             st.lessons_distilled.append(d)
-        elif t == "lessons_refreshed":
+        elif t == EV_LESSONS_REFRESHED:
             st.lessons_refreshed.append(d)   # M6 shared-store re-read (audit-only cadence gate)
-        elif t == "report_generated":
+        elif t == EV_REPORT_GENERATED:
             # Agent-authored run report (audit-only sidecar; NEVER touches nodes/best). Latest wins —
             # the cadence and manual-refresh paths both append this; the freshest narrative stands.
             st.report = d.get("content") or d
-        elif t == "confirm_done":
+        elif t == EV_CONFIRM_DONE:
             nid = d.get("node_id")   # forced-confirm finished for this node (gate; selection untouched)
             if nid is not None and nid not in st.confirmed_forced:
                 st.confirmed_forced.append(nid)
-        elif t == "annotation":
+        elif t == EV_ANNOTATION:
             nid = d.get("node_id")
             if nid is not None:
                 st.annotations.setdefault(nid, []).append(d.get("text", ""))
-        elif t == "promote":
+        elif t == EV_PROMOTE:
             st.promotions.append(d)
             if d.get("alias", "champion") == "champion":
                 st.champion = d.get("node_id")
         # unknown event types (e.g. "budget") are ignored for state — forward-compat
 
-    # T2 trust enforcement: under "gate"/"block", a node flagged for a reward-hack or data-leakage
-    # signal must not be selectable as best (closes "a hacked/leaky node can win"). Order-independent:
-    # computed from the folded `reward_hacks` after the full pass (see `flagged_node_ids`).
+    flagged = _apply_trust_gate(st)
+    _select_best(st, flagged, best_confirmed)
+
+    _derive_hypotheses(st)   # P1: audit-only ledger (after best is known); never touches selection
+    return st
+
+
+def _apply_trust_gate(st: RunState) -> set:
+    """T2 trust enforcement post-pass: under "gate"/"block", a node flagged for a reward-hack or
+    data-leakage signal must not be selectable as best (closes "a hacked/leaky node can win").
+    Order-independent: computed from the folded `reward_hacks` after the full pass (see
+    `flagged_node_ids`). Returns the flagged node-id set for `_select_best`."""
     flagged = flagged_node_ids(st)
     # "block" additionally bars the policy from breeding a flagged node forward (feasible=False also
     # removes it from `feasible_nodes()` used by the search policies), not just from winning.
@@ -361,7 +384,13 @@ def fold(events: Iterable[Event]) -> RunState:
             nb = st.nodes.get(nid)
             if nb is not None:
                 nb.feasible = False
+    return flagged
 
+
+def _select_best(st: RunState, flagged: set, best_confirmed: int | None) -> None:
+    """Best-selection post-pass: derive `best_node_id` (mean-based pick -> variance-gated confirm
+    override -> holdout-gated promotion) plus the audit-only generalization gap. Pure and
+    deterministic over the folded state — the tail of `fold`, extracted verbatim."""
     # Multi-objective (#5): a constraint-violating node is excluded from selection — it keeps
     # its metric for the audit trail but can never be chosen best. If NOTHING is feasible,
     # there is no valid best (best_node_id stays None).
@@ -413,9 +442,6 @@ def fold(events: Iterable[Event]) -> RunState:
         if robust is None or n.metric is None:
             continue
         n.generalization_gap = (n.metric - robust) if st.direction == "max" else (robust - n.metric)
-
-    _derive_hypotheses(st)   # P1: audit-only ledger (after best is known); never touches selection
-    return st
 
 
 def _derive_hypotheses(st: RunState) -> None:

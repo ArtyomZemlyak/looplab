@@ -15,7 +15,7 @@ from typing import Protocol, Type, TypeVar, get_args, get_origin
 
 from pydantic import BaseModel, ValidationError
 
-from looplab.core.llm import LLMError
+from looplab.core.errors import LLMError
 
 T = TypeVar("T", bound=BaseModel)
 
@@ -152,6 +152,9 @@ def _coerce_to_model(obj: dict, model: Type[T]) -> dict:
 _ORDER = {
     "tool_call": ["tool_call", "baml"],
     "baml": ["baml"],
+    # "outlines" is an alias for the text (baml) path until constrained decoding lands here —
+    # `parse_structured` treats any non-"tool_call" entry as the text+JSON-extraction path. For
+    # endpoint-side constrained decoding today, see the `llm_guided_json` setting instead.
     "outlines": ["outlines", "baml"],
 }
 

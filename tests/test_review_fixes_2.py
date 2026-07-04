@@ -1,4 +1,4 @@
-﻿"""Regression tests for the second code-review round (feasibility gate, NaN metrics, tracing)."""
+"""Regression tests for the second code-review round (feasibility gate, NaN metrics, tracing)."""
 from __future__ import annotations
 
 import sys

@@ -1,4 +1,4 @@
-﻿"""Phase 4 drift cross-check (eval_trust_mode='ratify_freeze_drift').
+"""Phase 4 drift cross-check (eval_trust_mode='ratify_freeze_drift').
 
 The threat closed here: under plain ratify_freeze the metric adapter is frozen (the agent
 can't edit it), but the agent's experiment code still RUNS as part of the eval, so it can

@@ -141,7 +141,9 @@ class NoOpRepoDeveloper:
     """Baseline developer: makes no edits (empty file set). Used offline and as the agent's
     fallback, so a failed/absent agent leaves the repo unmodified and the eval measures the
     baseline rather than poisoning the search."""
-    last_files: dict[str, str] = {}
+
+    def __init__(self) -> None:
+        self.last_files: dict[str, str] = {}
 
     def implement(self, idea: Idea) -> str:
         self.last_files = {}

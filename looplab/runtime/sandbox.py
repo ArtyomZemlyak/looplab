@@ -29,7 +29,8 @@ from typing import Optional, Protocol
 # Env-var NAMES that look like a secret — redacted from the child process environment so generated
 # code can't read (and persist into the event log) the operator's keys/tokens. Name-based, so it
 # never touches PATH/SYSTEMROOT/TEMP etc. that a process legitimately needs.
-_SECRET_ENV = re.compile(r"(KEY|SECRET|TOKEN|PASSWORD|PASSWD|CREDENTIAL|API_KEY)", re.IGNORECASE)
+SECRET_ENV = re.compile(r"(KEY|SECRET|TOKEN|PASSWORD|PASSWD|CREDENTIAL|API_KEY)", re.IGNORECASE)
+_SECRET_ENV = SECRET_ENV   # back-compat alias (pre-rename importers)
 
 
 def _clamp_tail_bytes(s: str, max_bytes: int) -> str:
@@ -83,7 +84,7 @@ def _to_float(v) -> Optional[float]:
     return f if math.isfinite(f) else None
 
 
-def _json_line_metric(text: str, key: str = "metric") -> Optional[float]:
+def json_line_metric(text: str, key: str = "metric") -> Optional[float]:
     """Last stdout line that is a JSON object containing `key`. The one tolerant metric-line
     scanner — both the solution.py path (_parse_metric) and the command-eval readers use it."""
     for line in reversed(text.splitlines()):
@@ -99,11 +100,17 @@ def _json_line_metric(text: str, key: str = "metric") -> Optional[float]:
     return None
 
 
+# Back-compat alias (pre-rename importers/tests use `_json_line_metric`).
+_json_line_metric = json_line_metric
+
+
 def _parse_metric(stdout: str) -> Optional[float]:
-    return _json_line_metric(stdout, "metric")
+    # Kept (not folded into its callers): the sandboxes' readable name for "read the solution's
+    # self-reported metric", and imported directly by tests (test_review_fixes_2).
+    return json_line_metric(stdout, "metric")
 
 
-def _json_line_extras(text: str, primary_key: str = "metric") -> dict:
+def json_line_extras(text: str, primary_key: str = "metric") -> dict:
     """Every OTHER numeric key on the SAME final JSON line that carries the metric — auto-captured as
     secondary metrics, so an experiment that prints {"metric": x, "recall@10": y, "mrr": z} surfaces
     ALL of them with no per-task config. Structural/bookkeeping keys and non-numeric values are skipped;
@@ -130,7 +137,11 @@ def _json_line_extras(text: str, primary_key: str = "metric") -> dict:
     return {}
 
 
-def _json_line_trials(text: str) -> Optional[list]:
+# Back-compat alias (pre-rename importers/tests use `_json_line_extras`).
+_json_line_extras = json_line_extras
+
+
+def json_line_trials(text: str) -> Optional[list]:
     """Last stdout line that is a JSON object with a "trials" key holding a list (intra-node
     sweep). Scans bottom-up like `_json_line_metric`, so trailing chatter after the sweep's
     summary line is tolerated. Returns the raw list of trial dicts, or None if absent."""
@@ -147,9 +158,13 @@ def _json_line_trials(text: str) -> Optional[list]:
     return None
 
 
-def _run_argv(argv: list[str], workdir: str, timeout: float,
-              env: Optional[dict] = None, max_output_bytes: int = 64_000, cancel=None,
-              log_path: Optional[str] = None):
+# Back-compat alias (pre-rename importers/tests use `_json_line_trials`).
+_json_line_trials = json_line_trials
+
+
+def run_argv(argv: list[str], workdir: str, timeout: float,
+             env: Optional[dict] = None, max_output_bytes: int = 64_000, cancel=None,
+             log_path: Optional[str] = None):
     """Run one subprocess (argv, no shell) in `workdir` with timeout + process-tree kill +
     capped UTF-8/replace capture. Returns (returncode, stdout, stderr, timed_out). The single
     place process management lives — SubprocessSandbox, DockerSandbox, and command_eval all
@@ -176,7 +191,7 @@ def _run_argv(argv: list[str], workdir: str, timeout: float,
     # trace would otherwise exfiltrate LLM_API_KEY / cloud creds into the durable stdout tail. Drop
     # env vars whose NAME looks secret, but keep everything a process needs (PATH, SYSTEMROOT, …)
     # and always keep what the engine explicitly passes in `env` (e.g. LOOPLAB_EVAL_SEED).
-    base = {k: v for k, v in os.environ.items() if not _SECRET_ENV.search(k)}
+    base = {k: v for k, v in os.environ.items() if not SECRET_ENV.search(k)}
     full_env = {**base, **{k: str(v) for k, v in (env or {}).items()}}
     # Run the child in UTF-8 mode so its `open()`/stdio default to UTF-8 even on Windows (whose
     # default is cp1252). LLM-written solutions and real benchmark data (mle-bench CSVs) are UTF-8 and
@@ -243,6 +258,12 @@ def _run_argv(argv: list[str], workdir: str, timeout: float,
                     break
     rc = proc.returncode if proc.returncode is not None else -1
     return rc, _clamp_tail_bytes(out or "", max_output_bytes), _clamp_tail_bytes(err or "", max_output_bytes), timed_out
+
+
+# Back-compat alias: pre-rename importers use `_run_argv`, and tests monkeypatch THIS module
+# attribute to stub process execution — so the sandboxes below call `_run_argv` (resolved at
+# call time), keeping that seam intact.
+_run_argv = run_argv
 
 
 def _tee_drain(proc, log_path, timeout, max_output_bytes, cancel):
@@ -353,8 +374,8 @@ class SubprocessSandbox:
             str(wd), timeout, env, self.max_output_bytes, cancel)
         return RunResult(exit_code=rc, stdout=out, stderr=err,
                          metric=_parse_metric(out), timed_out=to,
-                         extra_metrics=(_json_line_extras(out) or None) if not to else None,
-                         trials=_json_line_trials(out))
+                         extra_metrics=(json_line_extras(out) or None) if not to else None,
+                         trials=json_line_trials(out))
 
 
 class DockerSandbox:
@@ -407,8 +428,8 @@ class DockerSandbox:
         timed_out = to or rc in (124, 137)
         return RunResult(exit_code=rc, stdout=out, stderr=err,
                          metric=(None if timed_out else _parse_metric(out)), timed_out=timed_out,
-                         extra_metrics=(None if timed_out else (_json_line_extras(out) or None)),
-                         trials=(None if timed_out else _json_line_trials(out)))
+                         extra_metrics=(None if timed_out else (json_line_extras(out) or None)),
+                         trials=(None if timed_out else json_line_trials(out)))
 
 
 def make_sandbox(trust_mode: str = "trusted_local", *, image: Optional[str] = None,

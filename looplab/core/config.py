@@ -1,5 +1,8 @@
-﻿"""Engine config (I0, ADR-11). pydantic-settings: env override (LOOPLAB_*) over
-defaults. A resolved, secret-masked snapshot is written next to each run for
+﻿"""Engine config: the schema (what settings exist). (I0, ADR-11)
+
+One pydantic-settings class declaring every engine knob, its default, and its docs. The loader —
+how a run file / CLI / env becomes a `Settings` — is `looplab.core.appconfig`, which also owns
+the config-precedence order. A resolved, secret-masked snapshot is written next to each run for
 reproducibility. (No real secrets in P0, but the masking discipline is in place.)
 """
 from __future__ import annotations
@@ -56,8 +59,20 @@ PROFILES: dict[str, dict] = {
 
 
 class Settings(BaseSettings):
-    # Config sources, highest priority first: explicit init kwargs (e.g. Settings(**snapshot)) >
-    # real OS env vars (LOOPLAB_*) > a `.env` file in the CWD > field defaults. The `.env` is read
+    """The engine settings schema (every knob a run accepts).
+
+    Timeout family — five distinct knobs, each owned by a different subsystem:
+      - `timeout`:             per-eval wall-clock budget for ONE experiment's evaluation (engine/eval).
+      - `llm_timeout`:         LLM request idle timeout — inter-token stall limit in stream mode
+                               (core.llm OpenAICompatibleClient).
+      - `llm_header_timeout`:  LLM first-byte (response-headers) window for stream attempts (core.llm).
+      - `agent_time_budget_s`: wall-clock ceiling across a tool-using agent loop's turns (agents).
+      - `dep_install_timeout`: per-package budget for auto-installing a missing dep (env self-prep).
+
+    Config-source precedence is owned by `looplab.core.appconfig` (the loader) — see its module
+    docstring for the one canonical order.
+    """
+    # Config precedence: see appconfig.py — the loader owns the full order. The `.env` is read
     # so `looplab run`/`looplab ui` pick up LOOPLAB_LLM_BASE_URL etc. without exporting them by hand
     # (keys MUST carry the LOOPLAB_ prefix, same as the env vars). utf-8-sig tolerates a BOM from
     # Windows editors. The test suite disables this (tests/conftest.py) so a dev's real .env in the
@@ -423,7 +438,8 @@ class Settings(BaseSettings):
     # First-byte (response-headers) window for STREAM attempts, seconds: an SSE response sends its
     # headers on admission, so no-headers ≈ a black-holed request — fail over to a fresh connection
     # fast instead of waiting the full idle timeout. Clamped to llm_timeout. Non-stream attempts are
-    # NOT bounded by this (their headers arrive only after the whole generation).
+    # NOT bounded by this (their headers arrive only after the whole generation). The default mirrors
+    # `DEFAULT_HEADER_TIMEOUT_S` in looplab/core/llm.py — keep the two in sync.
     llm_header_timeout: float = Field(default=45.0, gt=0)
     # H4: cap the growing agentic-researcher tool-call history (chars) by middle-truncating stale
     # tool output, so a long trace doesn't blow the context window. 0 = off (unbounded).

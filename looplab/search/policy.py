@@ -11,13 +11,35 @@ Action kinds:
     {"kind": "debug",   "parent_id": int}
     {"kind": "merge",   "parent_ids": [int, int]}
     {"kind": "evaluate","node_id": int}
+    {"kind": "ablate",  "parent_id": int}
+
+Actions may additionally carry underscore-prefixed meta keys (annotations for the
+engine's event log, not part of the action proper): `_scores` (per-candidate
+comparison surfaced as a `policy_decision` event), `_chosen` (the candidate the
+policy picked), `_reason` (one-line why), and — ASHA only — `_rung` / `_promoted`
+(promotion bookkeeping logged as a `rung_promoted` event).
 """
 from __future__ import annotations
 
 import math
-from typing import Optional, Protocol
+from typing import Callable, Optional, Protocol
 
 from looplab.core.models import NodeStatus, RunState
+
+# Action kinds (the vocabulary of the action schema above; values are load-bearing in
+# the event log, so they never change).
+KIND_DRAFT = "draft"
+KIND_IMPROVE = "improve"
+KIND_DEBUG = "debug"
+KIND_MERGE = "merge"
+KIND_EVALUATE = "evaluate"
+KIND_ABLATE = "ablate"
+# Engine-facing action meta keys (see the module docstring).
+META_SCORES = "_scores"
+META_CHOSEN = "_chosen"
+META_REASON = "_reason"
+META_RUNG = "_rung"
+META_PROMOTED = "_promoted"
 
 
 class SearchPolicy(Protocol):
@@ -29,6 +51,14 @@ def _metric_scores(nodes) -> dict[int, float]:
     node's id to its observed metric. Lets the UI show the alternatives the policy weighed
     against the one it chose — even for policies (GreedyTree) that pick by raw metric."""
     return {n.id: round(n.metric, 4) for n in nodes if n.metric is not None}
+
+
+def rank_by_metric(state: RunState, nodes) -> list:
+    """Rank `nodes` best-first by observed metric with an id tie-break — descending when
+    the run maximizes, ascending when it minimizes. The one ranking idiom every policy
+    (and the diversity archive) shares; nodes must carry a non-None `metric` (the
+    feasible/evaluated pools policies rank always do)."""
+    return sorted(nodes, key=lambda n: (n.metric, n.id), reverse=(state.direction == "max"))
 
 
 # --------------------------------------------------------------------------- #
@@ -105,7 +135,7 @@ def weighted_parent(state: RunState, feasible=None) -> Optional[int]:
     pool = feasible if feasible is not None else state.feasible_nodes()
     if not pool:
         return None
-    ranked = sorted(pool, key=lambda n: (n.metric, n.id), reverse=(state.direction == "max"))
+    ranked = rank_by_metric(state, pool)
     kids: dict[int, int] = {}
     for n in state.nodes.values():
         for p in n.parent_ids:
@@ -130,11 +160,21 @@ def debug_action(state: RunState, debug_depth: int) -> Optional[dict]:
         if (n.status is NodeStatus.failed and n.id not in has_child
                 and n.error_reason != "idea_rejected"   # crash-triage judged the idea wrong: don't debug it
                 and _debug_lineage(state, n.id) < debug_depth):
-            return {"kind": "debug", "parent_id": n.id}
+            return {"kind": KIND_DEBUG, "parent_id": n.id}
     return None
 
 
 class GreedyTree:
+    """The default SearchPolicy (see the module docstring for the action schema and meta
+    keys): seed `n_seeds` drafts, then repeatedly `improve` the best feasible node,
+    periodically `merge` the top-2 (every `merge_every` improves, at most `max_merges`)
+    and — when `ablate_every` > 0 — `ablate` the best to refine its highest-impact
+    parameter, while `debug`-repairing failed leaves within `debug_depth`, until
+    `max_nodes` is spent. Pure over the folded RunState (reads state, returns actions;
+    the orchestrator executes them), so it is deterministic and replay-safe;
+    `operator_bandit` (P4) swaps the fixed merge/ablate cadences for a deterministic UCB
+    over observed per-operator yields."""
+
     def __init__(
         self,
         n_seeds: int = 3,
@@ -163,7 +203,7 @@ class GreedyTree:
         # 1. Evaluate anything created-but-not-evaluated (crash-resume re-entry point).
         pending = state.pending_nodes()
         if pending:
-            return [{"kind": "evaluate", "node_id": n.id} for n in pending]
+            return [{"kind": KIND_EVALUATE, "node_id": n.id} for n in pending]
 
         total = len(state.nodes)
 
@@ -179,11 +219,11 @@ class GreedyTree:
         # 3. Seed phase.
         if total < self.n_seeds:
             k = min(self.n_seeds - total, self.max_nodes - total)
-            return [{"kind": "draft"} for _ in range(k)]
+            return [{"kind": KIND_DRAFT} for _ in range(k)]
 
         best = state.best()
         if best is None:
-            return [{"kind": "draft"}]
+            return [{"kind": KIND_DRAFT}]
 
         evaluated = state.feasible_nodes()   # never breed from constraint-violating nodes (#5)
         n_improve = sum(1 for n in state.nodes.values() if n.operator == "improve")
@@ -202,42 +242,40 @@ class GreedyTree:
                 cands.append("refine_block")
             pick = _bandit_pick(operator_yields(state), cands)
             if pick == "merge":
-                top2 = sorted(evaluated, key=lambda n: (n.metric, n.id),
-                              reverse=(state.direction == "max"))[:2]
-                return [{"kind": "merge", "parent_ids": [top2[0].id, top2[1].id],
-                         "_scores": _metric_scores(top2), "_chosen": top2[0].id,
-                         "_reason": "bandit: merge top-2"}]
+                top2 = rank_by_metric(state, evaluated)[:2]
+                return [{"kind": KIND_MERGE, "parent_ids": [top2[0].id, top2[1].id],
+                         META_SCORES: _metric_scores(top2), META_CHOSEN: top2[0].id,
+                         META_REASON: "bandit: merge top-2"}]
             if pick == "refine_block":
-                return [{"kind": "ablate", "parent_id": best.id,
-                         "_scores": _metric_scores(evaluated), "_chosen": best.id,
-                         "_reason": "bandit: ablate highest-impact param"}]
-            return [{"kind": "improve", "parent_id": best.id,
-                     "_scores": _metric_scores(evaluated), "_chosen": best.id,
-                     "_reason": "bandit: exploit best"}]
+                return [{"kind": KIND_ABLATE, "parent_id": best.id,
+                         META_SCORES: _metric_scores(evaluated), META_CHOSEN: best.id,
+                         META_REASON: "bandit: ablate highest-impact param"}]
+            return [{"kind": KIND_IMPROVE, "parent_id": best.id,
+                     META_SCORES: _metric_scores(evaluated), META_CHOSEN: best.id,
+                     META_REASON: "bandit: exploit best"}]
 
         # 4. Periodic merge of the top-2 evaluated nodes (multi-parent DAG step).
         # One merge per `merge_every` improves (not back-to-back): gate on the merge DEFICIT
         # vs the milestone count, since n_improve is unchanged between consecutive merges.
         if (self.enable_merge and len(evaluated) >= 2 and n_merge < self.max_merges
                 and n_improve >= self.merge_every and n_merge < n_improve // self.merge_every):
-            top2 = sorted(evaluated, key=lambda n: (n.metric, n.id),
-                          reverse=(state.direction == "max"))[:2]
-            return [{"kind": "merge", "parent_ids": [top2[0].id, top2[1].id],
-                     "_scores": _metric_scores(top2), "_chosen": top2[0].id,
-                     "_reason": "merge top-2"}]
+            top2 = rank_by_metric(state, evaluated)[:2]
+            return [{"kind": KIND_MERGE, "parent_ids": [top2[0].id, top2[1].id],
+                     META_SCORES: _metric_scores(top2), META_CHOSEN: top2[0].id,
+                     META_REASON: "merge top-2"}]
 
         # 5. Ablation-driven refinement (I7): periodically ablate the best to find the
         #    highest-impact parameter, then refine just that one.
         if (self.ablate_every > 0 and len(best.idea.params) >= 2
                 and n_improve >= (n_refine + 1) * self.ablate_every):
-            return [{"kind": "ablate", "parent_id": best.id,
-                     "_scores": _metric_scores(evaluated), "_chosen": best.id,
-                     "_reason": "ablate highest-impact param"}]
+            return [{"kind": KIND_ABLATE, "parent_id": best.id,
+                     META_SCORES: _metric_scores(evaluated), META_CHOSEN: best.id,
+                     META_REASON: "ablate highest-impact param"}]
 
         # 6. Exploit: improve the current best (over all feasible candidates).
-        return [{"kind": "improve", "parent_id": best.id,
-                 "_scores": _metric_scores(evaluated), "_chosen": best.id,
-                 "_reason": "exploit best"}]
+        return [{"kind": KIND_IMPROVE, "parent_id": best.id,
+                 META_SCORES: _metric_scores(evaluated), META_CHOSEN: best.id,
+                 META_REASON: "exploit best"}]
 
 
 class EvolutionaryPolicy:
@@ -258,7 +296,7 @@ class EvolutionaryPolicy:
     def next_actions(self, state: RunState) -> list[dict]:
         pending = state.pending_nodes()
         if pending:
-            return [{"kind": "evaluate", "node_id": n.id} for n in pending]
+            return [{"kind": KIND_EVALUATE, "node_id": n.id} for n in pending]
 
         total = len(state.nodes)
         if total < self.max_nodes:
@@ -271,13 +309,11 @@ class EvolutionaryPolicy:
         # Fill the initial population with drafts.
         if total < self.pop:
             k = min(self.pop - total, self.max_nodes - total)
-            return [{"kind": "draft"} for _ in range(k)]
+            return [{"kind": KIND_DRAFT} for _ in range(k)]
 
-        evaluated = sorted(state.feasible_nodes(),   # elites must be feasible (#5)
-                           key=lambda n: (n.metric, n.id),
-                           reverse=(state.direction == "max"))
+        evaluated = rank_by_metric(state, state.feasible_nodes())   # elites must be feasible (#5)
         if not evaluated:
-            return [{"kind": "draft"}]
+            return [{"kind": KIND_DRAFT}]
         elites = evaluated[: self.elite]
         # Offspring index = how many generation-producing operators (improve/merge) already
         # exist — NOT total node count, so inserted debug/failed nodes can't perturb the
@@ -292,13 +328,13 @@ class EvolutionaryPolicy:
         if gen % 2 == 0 and len(elites) >= 2:
             i = (gen // 2) % len(elites)
             j = (i + 1) % len(elites)
-            return [{"kind": "merge", "parent_ids": [elites[i].id, elites[j].id]}]
+            return [{"kind": KIND_MERGE, "parent_ids": [elites[i].id, elites[j].id]}]
         pid = weighted_parent(state, evaluated)
         if pid is None:
             pid = elites[gen % len(elites)].id
-        return [{"kind": "improve", "parent_id": pid,
-                 "_scores": _metric_scores(evaluated), "_chosen": pid,
-                 "_reason": "weighted parent (fitness-rank × under-expansion)"}]
+        return [{"kind": KIND_IMPROVE, "parent_id": pid,
+                 META_SCORES: _metric_scores(evaluated), META_CHOSEN: pid,
+                 META_REASON: "weighted parent (fitness-rank × under-expansion)"}]
 
 
 class MCTSPolicy:
@@ -318,7 +354,7 @@ class MCTSPolicy:
     def next_actions(self, state: RunState) -> list[dict]:
         pending = state.pending_nodes()
         if pending:
-            return [{"kind": "evaluate", "node_id": n.id} for n in pending]
+            return [{"kind": KIND_EVALUATE, "node_id": n.id} for n in pending]
         total = len(state.nodes)
         if total < self.max_nodes:
             dbg = debug_action(state, self.debug_depth)
@@ -328,10 +364,10 @@ class MCTSPolicy:
             return []
         if total < self.n_seeds:
             k = min(self.n_seeds - total, self.max_nodes - total)
-            return [{"kind": "draft"} for _ in range(k)]
+            return [{"kind": KIND_DRAFT} for _ in range(k)]
         evaluated = state.feasible_nodes()   # improve only feasible candidates (#5)
         if not evaluated:
-            return [{"kind": "draft"}]
+            return [{"kind": KIND_DRAFT}]
 
         children: dict[int, list[int]] = {}
         for n in state.nodes.values():
@@ -372,7 +408,7 @@ class MCTSPolicy:
         if chosen is None:
             b = state.best()
             chosen = b.id if b is not None else sorted(evaluated, key=lambda n: n.id)[0].id
-        return [{"kind": "improve", "parent_id": chosen, "_scores": scores, "_chosen": chosen}]
+        return [{"kind": KIND_IMPROVE, "parent_id": chosen, META_SCORES: scores, META_CHOSEN: chosen}]
 
 
 class ASHAPolicy:
@@ -409,7 +445,7 @@ class ASHAPolicy:
     def next_actions(self, state: RunState) -> list[dict]:
         pending = state.pending_nodes()
         if pending:
-            return [{"kind": "evaluate", "node_id": n.id} for n in pending]
+            return [{"kind": KIND_EVALUATE, "node_id": n.id} for n in pending]
         total = len(state.nodes)
         if total < self.max_nodes:
             dbg = debug_action(state, self.debug_depth)
@@ -422,12 +458,12 @@ class ASHAPolicy:
         drafts = [n for n in state.nodes.values() if not n.parent_ids]
         if len(drafts) < self.rung0:
             k = min(self.rung0 - len(drafts), self.max_nodes - total)
-            return [{"kind": "draft"} for _ in range(k)]
+            return [{"kind": KIND_DRAFT} for _ in range(k)]
 
         gen = self._generation(state)
         feasible = {n.id for n in state.feasible_nodes()}
         if not feasible:
-            return [{"kind": "draft"}]
+            return [{"kind": KIND_DRAFT}]
         has_child: set[int] = set()
         for n in state.nodes.values():
             has_child.update(n.parent_ids)
@@ -452,18 +488,18 @@ class ASHAPolicy:
                 chosen = sorted(unexpanded)[0]
                 scores = {i: round(state.nodes[i].metric, 4) for i in members
                           if state.nodes[i].metric is not None}
-                return [{"kind": "improve", "parent_id": chosen,
-                         "_scores": scores, "_chosen": chosen,
-                         "_reason": f"promote rung {r + 1}",
-                         "_rung": r + 1, "_promoted": survivors}]
+                return [{"kind": KIND_IMPROVE, "parent_id": chosen,
+                         META_SCORES: scores, META_CHOSEN: chosen,
+                         META_REASON: f"promote rung {r + 1}",
+                         META_RUNG: r + 1, META_PROMOTED: survivors}]
 
         # All rungs collapsed/expanded -> exploit the global best with remaining budget.
         b = state.best()
         if b is None:
-            return [{"kind": "draft"}]
-        return [{"kind": "improve", "parent_id": b.id,
-                 "_scores": _metric_scores(state.feasible_nodes()), "_chosen": b.id,
-                 "_reason": "exploit best (rungs collapsed)"}]
+            return [{"kind": KIND_DRAFT}]
+        return [{"kind": KIND_IMPROVE, "parent_id": b.id,
+                 META_SCORES: _metric_scores(state.feasible_nodes()), META_CHOSEN: b.id,
+                 META_REASON: "exploit best (rungs collapsed)"}]
 
 
 def legal_actions(state: RunState, policy: SearchPolicy, *, max_nodes: int) -> list[dict]:
@@ -482,35 +518,72 @@ def legal_actions(state: RunState, policy: SearchPolicy, *, max_nodes: int) -> l
     never be illegal. Deterministic and side-effect-free — safe to call on every loop turn."""
     pending = state.pending_nodes()
     if pending:
-        return [{"kind": "evaluate", "node_id": n.id} for n in pending]
+        return [{"kind": KIND_EVALUATE, "node_id": n.id} for n in pending]
     total = len(state.nodes)
     if total >= max_nodes:
         return []
     n_seeds = getattr(policy, "rung0", None) or getattr(policy, "n_seeds", getattr(policy, "pop", 3))
     if total < n_seeds:
-        return [{"kind": "draft"}]
-    actions: list[dict] = [{"kind": "draft"}]
-    feasible = sorted(state.feasible_nodes(), key=lambda n: (n.metric, n.id),
-                      reverse=(state.direction == "max"))
-    actions.extend({"kind": "improve", "parent_id": n.id} for n in feasible)
+        return [{"kind": KIND_DRAFT}]
+    actions: list[dict] = [{"kind": KIND_DRAFT}]
+    feasible = rank_by_metric(state, state.feasible_nodes())
+    actions.extend({"kind": KIND_IMPROVE, "parent_id": n.id} for n in feasible)
     dbg = debug_action(state, getattr(policy, "debug_depth", 1))
     if dbg:
         actions.append(dbg)
     if len(feasible) >= 2:
-        actions.append({"kind": "merge", "parent_ids": [feasible[0].id, feasible[1].id]})
+        actions.append({"kind": KIND_MERGE, "parent_ids": [feasible[0].id, feasible[1].id]})
     best = state.best()
     if best is not None and len(best.idea.params) >= 2:
-        actions.append({"kind": "ablate", "parent_id": best.id})
+        actions.append({"kind": KIND_ABLATE, "parent_id": best.id})
     return actions
 
 
+# Per-policy factories for the registry below. Uniform signature: the explicit make_policy
+# kwargs plus the resolved `depth` and the raw `params` overrides.
+def _make_greedy(*, n_seeds: int, max_nodes: int, ablate_every: int, depth: int,
+                 params: dict) -> SearchPolicy:
+    return GreedyTree(n_seeds=n_seeds, max_nodes=max_nodes, ablate_every=ablate_every,
+                      debug_depth=depth,
+                      operator_bandit=bool(params.get("operator_bandit", False)))
+
+
+def _make_evolutionary(*, n_seeds: int, max_nodes: int, ablate_every: int, depth: int,
+                       params: dict) -> SearchPolicy:
+    return EvolutionaryPolicy(pop=n_seeds, max_nodes=max_nodes, debug_depth=depth)
+
+
+def _make_mcts(*, n_seeds: int, max_nodes: int, ablate_every: int, depth: int,
+               params: dict) -> SearchPolicy:
+    c = float(params.get("c", 1.4))
+    return MCTSPolicy(n_seeds=n_seeds, max_nodes=max_nodes, c=c, debug_depth=depth)
+
+
+def _make_asha(*, n_seeds: int, max_nodes: int, ablate_every: int, depth: int,
+               params: dict) -> SearchPolicy:
+    eta = int(params.get("eta", 3))
+    return ASHAPolicy(n_seeds=n_seeds, max_nodes=max_nodes, eta=eta, debug_depth=depth,
+                      rung_nodes=int(params.get("rung_nodes", 0) or 0))
+
+
 # Policy registry (ADR-2). The Strategist (A7) may only pick from these names; new policies
-# auto-register here and become selectable without engine changes.
-_POLICIES = ("greedy", "evolutionary", "mcts", "asha", "bohb")
+# auto-register here and become selectable without engine changes. Insertion order is the
+# order `available_policies()` reports.
+_REGISTRY: dict[str, Callable[..., SearchPolicy]] = {
+    "greedy": _make_greedy,
+    "evolutionary": _make_evolutionary,
+    "mcts": _make_mcts,
+    "asha": _make_asha,
+    # A3 BOHB = Hyperband racing (ASHA) × surrogate-guided proposal (A2). The racing schedule is
+    # the ASHA policy; the surrogate is wired as the Researcher (cli enables it for `bohb`), so
+    # the policy object is the same — the fusion is the racing schedule + a surrogate proposer.
+    # Hence "bohb" is an alias for the ASHA factory (kept exactly for compatibility).
+    "bohb": _make_asha,
+}
 
 
 def available_policies() -> list[str]:
-    return list(_POLICIES)
+    return list(_REGISTRY)
 
 
 def make_policy(name: str = "greedy", *, n_seeds: int, max_nodes: int,
@@ -519,20 +592,8 @@ def make_policy(name: str = "greedy", *, n_seeds: int, max_nodes: int,
     policy-specific overrides the Strategist may pass (e.g. mcts `c`, asha `eta`) plus the
     run-wide `debug_depth` / `operator_bandit` knobs (Settings)."""
     depth = int(params.get("debug_depth", 1) or 1)
-    if name == "greedy":
-        return GreedyTree(n_seeds=n_seeds, max_nodes=max_nodes, ablate_every=ablate_every,
-                          debug_depth=depth,
-                          operator_bandit=bool(params.get("operator_bandit", False)))
-    if name == "evolutionary":
-        return EvolutionaryPolicy(pop=n_seeds, max_nodes=max_nodes, debug_depth=depth)
-    if name == "mcts":
-        c = float(params.get("c", 1.4))
-        return MCTSPolicy(n_seeds=n_seeds, max_nodes=max_nodes, c=c, debug_depth=depth)
-    if name in ("asha", "bohb"):
-        # A3 BOHB = Hyperband racing (ASHA) × surrogate-guided proposal (A2). The racing schedule is
-        # the ASHA policy; the surrogate is wired as the Researcher (cli enables it for `bohb`), so
-        # the policy object is the same — the fusion is the racing schedule + a surrogate proposer.
-        eta = int(params.get("eta", 3))
-        return ASHAPolicy(n_seeds=n_seeds, max_nodes=max_nodes, eta=eta, debug_depth=depth,
-                          rung_nodes=int(params.get("rung_nodes", 0) or 0))
-    raise ValueError(f"unknown policy: {name!r}")
+    factory = _REGISTRY.get(name)
+    if factory is None:
+        raise ValueError(f"unknown policy: {name!r}")
+    return factory(n_seeds=n_seeds, max_nodes=max_nodes, ablate_every=ablate_every,
+                   depth=depth, params=params)

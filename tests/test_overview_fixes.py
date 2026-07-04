@@ -1,4 +1,4 @@
-﻿"""Items #4 (workspace fingerprint + resume drift) and #6 (event-envelope version + failure
+"""Items #4 (workspace fingerprint + resume drift) and #6 (event-envelope version + failure
 taxonomy)."""
 from __future__ import annotations
 

@@ -1,4 +1,4 @@
-﻿# LoopLab — Concrete Build Decisions (frameworks & libraries)
+# LoopLab — Concrete Build Decisions (frameworks & libraries)
 
 **Version:** 0.1 · **Date:** 2026-06-21
 **Companion docs:** [00-INDEX.md](00-INDEX.md) · [01-product-design.md](01-product-design.md) · [02-architecture.md](02-architecture.md) · [03-decisions.md](03-decisions.md) · [04-file-layout.md](04-file-layout.md) · research basis: [autoresearch-systems-exploration.md](autoresearch-systems-exploration.md)

@@ -141,7 +141,6 @@ class CliAgentDeveloper:
         if seed_dirs is None and seed_dir is not None:
             seed_dirs = [{"name": ".", "path": seed_dir}]
         self.seed_dirs = seed_dirs
-        self.seed_dir = seed_dir
         self.model = model                       # provider/model, e.g. "ollama/qwen3:8b"
         self.host = _host(base_url)
         self.brief = brief

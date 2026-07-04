@@ -1,4 +1,4 @@
-﻿"""Regression tests for the /code-review findings fixed in the RepoTask feature."""
+"""Regression tests for the /code-review findings fixed in the RepoTask feature."""
 from __future__ import annotations
 
 import json

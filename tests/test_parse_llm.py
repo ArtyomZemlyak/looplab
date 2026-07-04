@@ -1,4 +1,4 @@
-﻿"""I2: structured-output parsing + auto-fallback, cost accounting, LLM role seam."""
+"""I2: structured-output parsing + auto-fallback, cost accounting, LLM role seam."""
 from __future__ import annotations
 
 import pytest

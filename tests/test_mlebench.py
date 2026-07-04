@@ -1,4 +1,4 @@
-﻿"""MLEBench-style competition adapter (I20): held-out grading, leakage-clean split, and
+"""MLEBench-style competition adapter (I20): held-out grading, leakage-clean split, and
 an offline end-to-end run scored by the private grader."""
 from __future__ import annotations
 

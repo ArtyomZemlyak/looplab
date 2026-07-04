@@ -1,4 +1,4 @@
-﻿"""Phase 4 multi-editable workspace: several editable repos mounted at named subdirs, each
+"""Phase 4 multi-editable workspace: several editable repos mounted at named subdirs, each
 with its own surface/protect, edited in one experiment and scored by one eval that may span
 them."""
 from __future__ import annotations

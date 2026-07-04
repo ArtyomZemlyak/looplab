@@ -1,4 +1,4 @@
-﻿"""CLI surface (Typer) smoke tests — catch broken option wiring that unit tests miss
+"""CLI surface (Typer) smoke tests — catch broken option wiring that unit tests miss
 (e.g. an option assigned to a non-existent Settings field)."""
 from __future__ import annotations
 

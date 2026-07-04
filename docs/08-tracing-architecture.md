@@ -1,4 +1,4 @@
-﻿# ADR-08 — Tracing / observability architecture
+# ADR-08 — Tracing / observability architecture
 
 ## Status
 Accepted (2026-06-22). Supersedes the I14 "stub span exporter" note.

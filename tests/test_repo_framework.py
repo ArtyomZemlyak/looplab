@@ -1,4 +1,4 @@
-﻿"""RepoTask Phase 2 — framework mode: cli_overrides (Researcher params -> CLI overrides,
+"""RepoTask Phase 2 — framework mode: cli_overrides (Researcher params -> CLI overrides,
 no code edits) and eval profiles (smoke/full; confirm forces full)."""
 from __future__ import annotations
 

@@ -1,4 +1,4 @@
-﻿"""RepoTask (kind="repo", ADR-7): command-based eval with pluggable metric readers,
+"""RepoTask (kind="repo", ADR-7): command-based eval with pluggable metric readers,
 workspace mount of an existing repo, eval-file protection, and an end-to-end engine run
 where an agent edits the repo and the OPERATOR's command/metric scores it."""
 from __future__ import annotations

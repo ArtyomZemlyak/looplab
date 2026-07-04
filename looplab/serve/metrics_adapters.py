@@ -71,8 +71,3 @@ def read_node_metrics(node_dir: str) -> dict[str, list[dict]]:
     for tag in merged:
         merged[tag].sort(key=lambda p: p["step"])
     return merged
-
-
-def metric_tags(node_dir: str) -> list[str]:
-    """Just the available metric tag names for a node (cheap listing for the UI)."""
-    return sorted(read_node_metrics(node_dir).keys())

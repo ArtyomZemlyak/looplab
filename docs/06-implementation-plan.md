@@ -1,4 +1,4 @@
-﻿# LoopLab — Implementation ToDo & Status
+# LoopLab — Implementation ToDo & Status
 
 **Version:** 0.2 (status tracker) · **Updated:** 2026-06-22
 **Companion docs:** [00-INDEX.md](00-INDEX.md) · [01-product-design.md](01-product-design.md) · [02-architecture.md](02-architecture.md) · [03-decisions.md](03-decisions.md) · [04-file-layout.md](04-file-layout.md) · [05-build-decisions.md](05-build-decisions.md) · code: [README.md](../README.md)

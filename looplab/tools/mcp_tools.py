@@ -20,7 +20,10 @@ import threading
 from pathlib import Path
 from typing import Optional
 
-from looplab.serve.assistant import REPO_ROOT
+# The LoopLab repo root (…/looplab, two levels above this file) — where the default `.mcp.json`
+# lives. Computed locally instead of importing `looplab.serve.assistant.REPO_ROOT` (same value):
+# the tools layer must not depend on the serve layer.
+REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
 def _prefixed(server: str, tool: str) -> str:

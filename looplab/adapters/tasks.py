@@ -22,6 +22,37 @@ from looplab.adapters.toytask import ToyTask
 
 @runtime_checkable
 class TaskAdapter(Protocol):
+    """The task seam (ADR-2). REQUIRED surface: `id`, `goal`, `direction` ("min"/"max") and
+    `build_roles()` — the members declared below.
+
+    Beyond that, consumers duck-type a set of OPTIONAL hooks (probed with `getattr`/`callable`,
+    so an adapter implements only what applies). They are documented here — NOT declared as
+    Protocol members, so the `isinstance`/structural check stays exactly "the required four":
+
+    - `llm_roles(client, *, parser=..., runtime_caps=...) -> (Researcher, Developer)` — LLM-backed
+      roles; called by `make_roles` (this module) when backend="llm". `core/hardware.py`
+      (`task_runtime_caps`) inspects its signature: accepting `runtime_caps` opts the task into
+      the torch/GPU capability brief.
+    - `assets() -> list[str]` — task data filenames staged into each eval workdir; consumed by
+      `engine/orchestrator.py` (staging + protected from edits).
+    - `columns() -> dict` — tabular schema/profile; consumed by `engine/orchestrator.py` (I1
+      grounding pre-phase) and `tools/run_tools.py` (`DataTools`).
+    - `leakage_inputs() -> dict` — split/timestamp info for the leakage audit; consumed by
+      `engine/orchestrator.py`.
+    - `host_grader() -> dict` — out-of-process grading spec (labels/grader run host-side, outside
+      the sandbox); consumed by `engine/orchestrator.py`.
+    - `data_samples() -> dict[str, str]` — raw data samples for tasks that read data by absolute
+      path; consumed by `tools/run_tools.py` (`DataTools` fallback).
+    - `repo_spec() -> dict` — RepoTask workspace spec (editables/references/protected_names);
+      consumed by `engine/orchestrator.py` and `make_roles` (this module).
+    - `agent_brief() -> str` — the coding-agent task brief; consumed by `make_roles` (this
+      module) and `adapters/repo_task.py` (`LLMRepoDeveloper`).
+    - `eval_spec() -> dict` — the operator's trusted eval command/metric; consumed by
+      `engine/orchestrator.py` (via `runtime/command_eval.py`).
+    - `make_onboarder(settings)` — RepoTask Phase 3 onboarding proposer; consumed by `cli.py`.
+    - `params` (attribute) — CLI-override param space; read by `make_roles` (this module,
+      the param-search guard) and `runtime/command_eval.py` (params_style="cli_overrides").
+    """
     id: str
     goal: str
     direction: str
@@ -159,12 +190,17 @@ def make_developer_factory(task: TaskAdapter, settings):
     return factory
 
 
-def build_strategist_tools(task: TaskAdapter, settings, run_dir=None):
-    """Read-only toolset for the agentic Strategist (`strategist_backend="agent"`): its OWN run
-    (experiments/code/themes) + the task data + SIBLING runs + the knowledge base & memory of past
-    cases (+ skills / literature / web when enabled). Mirrors the Researcher's providers so the
-    Strategist can ground its meta-decision in what actually happened. Returns a CompositeTools (or a
-    lone provider), or None when nothing is available."""
+def _shared_providers(task: TaskAdapter, settings, run_dir=None, *, core_only: bool = False):
+    """The provider list shared by the Researcher, the agentic Strategist, and the unified agent's
+    pilot stage (one assembly instead of three near-identical copies). Ordered exactly as the
+    call sites historically built it; each site appends its own extras (RepoTools / WebTools) after.
+
+    - Run-introspection (default on): read the run's OWN experiments + the task data mid-loop.
+    - Cross-run: read-only access to SIBLING runs of the same task. Needs the run's own dir;
+      off without it (parity).
+    - `core_only=True` (the pilot stage) stops there; otherwise the memory/knowledge stack follows:
+      knowledge base + past cases, lessons/meta-notes, skills (hand-written + M4 auto-distilled
+      under <memory_dir>/skills), and arXiv literature (network-optional)."""
     providers = []
     if getattr(settings, "researcher_tools", True):
         from looplab.tools.run_tools import DataTools, RunTools
@@ -173,6 +209,8 @@ def build_strategist_tools(task: TaskAdapter, settings, run_dir=None):
     if run_dir is not None and getattr(settings, "cross_run_tools", True):
         from looplab.tools.run_tools import SiblingRunTools
         providers.append(SiblingRunTools(Path(run_dir).parent, Path(run_dir).name))   # other runs
+    if core_only:
+        return providers
     cases_path = (str(Path(settings.memory_dir) / "cases.jsonl")
                   if getattr(settings, "memory_dir", None) else None)
     if getattr(settings, "knowledge_dir", None) or cases_path:
@@ -192,14 +230,23 @@ def build_strategist_tools(task: TaskAdapter, settings, run_dir=None):
     # M4 auto-distilled skills: techniques distilled from prior winning runs live under
     # <memory_dir>/skills (provenance: auto). Loaded alongside any hand-written skills_dir.
     if getattr(settings, "memory_dir", None):
-        from pathlib import Path as _P
-        _auto = _P(settings.memory_dir) / "skills"
+        _auto = Path(settings.memory_dir) / "skills"
         if _auto.is_dir():
             from looplab.tools.skills import SkillTools
             providers.append(SkillTools(str(_auto)))
-    if getattr(settings, "literature_search", False):       # arXiv (network-optional)
+    if getattr(settings, "literature_search", False):       # E3 arXiv grounding (network-optional)
         from looplab.tools.literature import LiteratureTools
         providers.append(LiteratureTools(enabled=True))
+    return providers
+
+
+def build_strategist_tools(task: TaskAdapter, settings, run_dir=None):
+    """Read-only toolset for the agentic Strategist (`strategist_backend="agent"`): its OWN run
+    (experiments/code/themes) + the task data + SIBLING runs + the knowledge base & memory of past
+    cases (+ skills / literature / web when enabled). Mirrors the Researcher's providers so the
+    Strategist can ground its meta-decision in what actually happened. Returns a CompositeTools (or a
+    lone provider), or None when nothing is available."""
+    providers = _shared_providers(task, settings, run_dir)
     if getattr(settings, "web_search", False):              # web search/fetch (network-optional)
         from looplab.tools.web import WebTools
         providers.append(WebTools(enabled=True))
@@ -258,15 +305,10 @@ def build_unified_agent(task: TaskAdapter, settings, run_dir=None):
         # The pilot self-drives the next action AND triages crashes; give it BOTH run-introspection
         # and the task data, so triage can judge whether a crash is a code bug or a wrong idea by
         # consulting the real schema/columns (e.g. a reference to a column that doesn't exist).
-        from looplab.tools.run_tools import RunTools, DataTools
-        from looplab.agents.agent import CompositeTools
-        _pilot_providers = [RunTools(), DataTools(task)]
         # Cross-run: let the pilot look at sibling runs of the same task (read-only) so it can choose
         # to import a winning experiment from a neighbour. Needs the run's own dir; no-op without it.
-        if run_dir is not None and getattr(settings, "cross_run_tools", True):
-            from looplab.tools.run_tools import SiblingRunTools
-            _pilot_providers.append(SiblingRunTools(Path(run_dir).parent, Path(run_dir).name))
-        pilot_tools = CompositeTools(_pilot_providers)
+        from looplab.agents.agent import CompositeTools
+        pilot_tools = CompositeTools(_shared_providers(task, settings, run_dir, core_only=True))
 
     extra_clients = [c for c in (strat_client, pilot_client) if c is not None]
     from looplab.agents.agent import loop_opts_from_settings
@@ -377,44 +419,11 @@ def make_roles(task: TaskAdapter, settings, run_dir=None):
             developer.prompts = prompts
 
     # Tool providers for the agentic Researcher: run-introspection + knowledge + memory + skills.
-    cases_path = str(Path(settings.memory_dir) / "cases.jsonl") if settings.memory_dir else None
-    providers = []
     # Run-introspection (default on): let the Researcher read its OWN experiments + the task data
     # mid-loop instead of optimizing blind. This alone makes the Researcher a tool-using agent.
-    if getattr(settings, "researcher_tools", True):
-        from looplab.tools.run_tools import DataTools, RunTools
-        providers.append(RunTools())
-        providers.append(DataTools(task))
     # Cross-run introspection: read-only access to SIBLING runs of the same task so the Researcher can
     # build on a neighbouring run's experiments. Needs the run's own dir; off without it (parity).
-    if run_dir is not None and getattr(settings, "cross_run_tools", True):
-        from looplab.tools.run_tools import SiblingRunTools
-        providers.append(SiblingRunTools(Path(run_dir).parent, Path(run_dir).name))
-    if settings.knowledge_dir or cases_path:
-        from looplab.tools.knowledge_tools import KnowledgeTools
-        from looplab.tools.vectorstore import make_embedder
-        providers.append(KnowledgeTools(
-            settings.knowledge_dir, cases_path=cases_path,
-            embed=make_embedder(settings),
-            abstract=_make_abstractor(settings),           # harmonic index + anchor-expansion (Memora)
-            consolidate_threshold=getattr(settings, "memora_consolidate_threshold", 0.86)))
-    if getattr(settings, "memory_dir", None):              # agentic pull of lessons + meta-notes (else injection-only)
-        from looplab.tools.memory_tools import MemoryTools
-        providers.append(MemoryTools(settings.memory_dir))
-    if settings.skills_dir:
-        from looplab.tools.skills import SkillTools
-        providers.append(SkillTools(settings.skills_dir))
-    # M4 auto-distilled skills: techniques distilled from prior winning runs live under
-    # <memory_dir>/skills (provenance: auto). Loaded alongside any hand-written skills_dir.
-    if getattr(settings, "memory_dir", None):
-        from pathlib import Path as _P
-        _auto = _P(settings.memory_dir) / "skills"
-        if _auto.is_dir():
-            from looplab.tools.skills import SkillTools
-            providers.append(SkillTools(str(_auto)))
-    if getattr(settings, "literature_search", False):   # E3 arXiv grounding (network-optional)
-        from looplab.tools.literature import LiteratureTools
-        providers.append(LiteratureTools(enabled=True))
+    providers = _shared_providers(task, settings, run_dir)
     # RepoTask code-edit mode (item #3): give the Researcher read-only grep/list/read over the
     # editable repo(s) so it proposes changes from the actual code, not blind. Skipped for the
     # cli_overrides param-search mode (no code to read) and non-repo tasks.

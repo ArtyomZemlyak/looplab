@@ -40,7 +40,7 @@ def grade_in_subprocess(competition_id: str, submission_path, data_dir: Optional
                         *, timeout: float = 300.0) -> tuple[Optional[float], Optional[dict]]:
     """Run :func:`grade` in a child process. Returns ``(metric, report)``; ``(None, None)`` on
     non-zero exit, timeout, or unparseable output (the node then has no metric → it fails)."""
-    from looplab.runtime.sandbox import _run_argv
+    from looplab.runtime.sandbox import run_argv
     argv = [sys.executable, "-m", "looplab.adapters.mlebench_grade",
             "-c", competition_id, "-s", str(submission_path)]
     if data_dir:
@@ -49,7 +49,7 @@ def grade_in_subprocess(competition_id: str, submission_path, data_dir: Optional
         argv += ["--data-dir", str(Path(data_dir).resolve())]
     # cwd = repo root so `-m looplab.adapters.mlebench_grade` resolves; capped output, tree-kill on timeout.
     root = str(Path(__file__).resolve().parents[2])
-    rc, out, _err, to = _run_argv(argv, root, timeout, None, 256_000)
+    rc, out, _err, to = run_argv(argv, root, timeout, None, 256_000)
     if rc != 0 or to:
         return None, None
     # Single pass: main() prints exactly one JSON object line carrying BOTH "metric" and "report".

@@ -1,0 +1,88 @@
+# LoopLab — guide for coding agents
+
+LoopLab is an autonomous ML/DS research engine: a Researcher proposes ideas, a Developer writes
+code, a sandbox runs it, an evaluator scores it, and the loop refines/merges the best candidates.
+**The append-only event log (`events.jsonl`) is the single source of truth**; all state is rebuilt
+by replaying it. Design docs live in `docs/` (see `docs/02-architecture.md`, ADRs in
+`docs/03-decisions.md`).
+
+## Commands
+
+```bash
+pip install -e ".[dev,ui]"        # dev deps; [ui] needed for server/assistant/TUI tests (fastapi)
+python -m pytest                  # full suite (~1150 tests, a few minutes; addopts already has -q)
+python -m pytest tests/test_events_replay.py           # targeted run — always do this first
+python -m pytest -o addopts="" -q ...                  # if you need to override the default -q
+looplab run --kind quadratic --goal "min (x-3)^2" --direction min --out runs/demo   # offline smoke
+looplab replay runs/demo          # rebuild state from the event log (reproducibility check)
+looplab ui                        # FastAPI server + React UI (see looplab/serve/)
+```
+
+The suite runs fully offline in ~1-2 minutes; live-LLM tests auto-skip (opt in with
+`LOOPLAB_LIVE_SCENARIOS=1`). There is no lint/format config (no ruff/black); match the style of
+surrounding code (~100-col lines, heavy why-comments) and do not reformat.
+Docs are built with `mkdocs build --strict` in CI — broken doc links fail the deploy.
+`looplab build-ui` builds the React UI (`npm ci && npm run build` in `ui/`); `looplab ui`
+auto-builds when the dist is missing.
+
+## Package map (what lives where)
+
+| Path | Contents |
+|---|---|
+| `looplab/core/` | foundation: domain models, `Settings` (config.py = schema, appconfig.py = loader), LLM client (`llm.py`), parsing, tracing, shared errors |
+| `looplab/events/` | event store, `types.py` (event-type registry), `replay.py::fold` (event log → `RunState`), digest, readmodel, exporters |
+| `looplab/runtime/` | sandboxes (subprocess/Docker tiers), command evaluation, dep install, background tasks |
+| `looplab/tools/` | agent-facing tools; `_base.py` documents the ToolProvider contract |
+| `looplab/agents/` | LLM personas: plain roles (`roles.py`), tool-loop roles (`agent.py::drive_tool_loop`), external CLI backend (`cli_agent.py`), facade (`unified_agent.py`) |
+| `looplab/search/` | search policies (`policy.py` — action kinds/meta-key constants live here), best-of-N, surrogate, archive |
+| `looplab/trust/` | gates that keep results honest: leakage, reward-hack, CV, redaction, confirmation |
+| `looplab/engine/` | **the orchestrator loop** (`orchestrator.py`, the largest file) + cross-run memory; see invariants below |
+| `looplab/adapters/` | task types (toy → dataset → repo → MLE-bench); the TaskAdapter contract is documented in `adapters/tasks.py` |
+| `looplab/serve/` | FastAPI server (`server.py` — routes live inside `make_app`), TUI, assistant; never imported by the engine loop |
+| `ui/` | React control plane (built artifacts served by `serve/server.py`) |
+
+## Engine invariants (violating these breaks replay/resume)
+
+1. **The engine is the sole writer of domain events.** Background tasks return values; only the
+   main task appends. UI/CLI append only *control intents* (allow-listed in `serve/server.py`).
+2. **Exactly one terminal event per node** (`node_evaluated` | `node_failed`). The fold is
+   idempotent on duplicate terminals (first terminal wins).
+3. **Every side effect must be gated on a domain event** so resume-by-replay is idempotent
+   (`fork_done`, `inject_done`, `confirm_done`, `<x>_requests`/`<x>s_done` counter pairs).
+4. **State is only observed via `fold(store.read_all())`** — never cache derived state across
+   loop iterations without re-folding.
+5. **`fold` must stay deterministic and order-tolerant**: no I/O, no LLM calls, unknown event
+   types are ignored (forward compat), new event data fields are additive-only with reader-side
+   defaults for old logs.
+6. Settings recorded in the `run_started` event win over live config on resume.
+7. Event type names are constants in `looplab/events/types.py`; a typo'd literal silently
+   no-ops (unknown types are skipped), and `tests/test_event_types.py` guards against that —
+   always add new event types to the registry.
+
+## Conventions and traps
+
+- **Back-compat import shim**: `looplab/__init__.py` aliases every pre-split flat module path
+  (`looplab.orchestrator` → `looplab.engine.orchestrator`, …) via a meta-path finder; both names
+  resolve to the SAME module object, so monkeypatching either path works. Many tests use old flat
+  paths — keep the `_LAYOUT` map in sync when moving modules.
+- **Layering**: `core` imports nothing above itself; `events` only `core`; `serve` may import
+  anything; the engine must not grow new dependencies on `serve`.
+- **Comments are load-bearing.** The codebase documents *why* (ADR references, review provenance,
+  replay-safety notes) inline. Preserve comments verbatim when moving code; write the same style.
+- **Prompt strings are contracts.** Changes to prompt text alter agent behavior — never "clean up"
+  prompt wording as part of a refactor. Several prompts are routed through the PromptStore
+  (`render(prompts, key, default)`); grep for `render(` to find overridable prompts.
+- **Duck-typed seams**: the engine reads optional attributes off tasks/roles (`assets()`,
+  `last_files`, `choose_action`, hint attrs listed in `agents/roles.py::RESEARCHER_HINT_ATTRS`).
+  The TaskAdapter hooks are documented in `adapters/tasks.py`. Renames here break the engine
+  silently — grep both sides before renaming any such attribute.
+- **Tests isolate the environment** (`tests/conftest.py`): dotenv loading is disabled and
+  `LOOPLAB_MEMORY_DIR`/`LOOPLAB_KNOWLEDGE_DIR` point at tmp dirs. Engine tests construct
+  `Engine(...)` directly (~100 call sites) — keep its keyword API stable.
+- Settings are flat on purpose (`LOOPLAB_<FIELD>` env vars map 1:1); never nest or rename fields —
+  snapshots and env compat depend on the names.
+- `looplab/sweep.py` is NOT a CLI subcommand — it is a runtime helper imported by *generated*
+  solution code inside the sandbox (see its docstring).
+- A run directory contains `events.jsonl`, `config.snapshot.json`, `task.snapshot.json`,
+  `engine.lock`, and per-node workdirs (`docs/guide/concepts.md` is accurate;
+  `docs/04-file-layout.md` is the original *design* and differs from what shipped).

@@ -1,4 +1,4 @@
-﻿"""Live RepoTask integration over Ollama (auto-skips without it). Covers the live paths the
+"""Live RepoTask integration over Ollama (auto-skips without it). Covers the live paths the
 offline suite can't: the LLM hyperparameter Researcher over a real framework (P2), live
 onboarding where the Developer WRITES the metric adapter (P3), and the agentic Researcher
 reading the editable repo via RepoTools (#3)."""

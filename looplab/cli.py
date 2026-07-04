@@ -21,6 +21,8 @@ from looplab import __version__
 from looplab.core.atomicio import atomic_write_text
 from looplab.core.config import Settings
 from looplab.events.eventstore import EventStore
+from looplab.events.types import (EV_APPROVAL_GRANTED, EV_RUN_FINISHED, EV_RUN_REOPENED,
+                                  EV_SPEC_APPROVED)
 from looplab.engine.orchestrator import Engine
 from looplab.search.policy import make_policy
 from looplab.events.replay import fold
@@ -539,7 +541,7 @@ def run(
                 + (f" (reason={prior.stop_reason})" if prior.stop_reason else "")
                 + " — reopening to continue with the current task/settings "
                   "(use a new --out for a fresh run).")
-            eng.store.append("run_reopened", {})
+            eng.store.append(EV_RUN_REOPENED, {})
         try:
             state = anyio.run(eng.run)
         except Exception as e:  # noqa: BLE001 - any fatal abort (e.g. an unreachable LLM endpoint
@@ -548,7 +550,7 @@ def run(
             # the traceback still lands in engine.stderr.log. (A user Ctrl-C / cancel is BaseException,
             # not Exception, so an intentional stop stays resumable.)
             try:
-                eng.store.append("run_finished", {"reason": "error", "error": str(e)[:500]})
+                eng.store.append(EV_RUN_FINISHED, {"reason": "error", "error": str(e)[:500]})
             except Exception:  # noqa: BLE001 - best-effort; never mask the original failure
                 pass
             raise
@@ -600,7 +602,7 @@ def resume(
             # the traceback still lands in engine.stderr.log. (A user Ctrl-C / cancel is BaseException,
             # not Exception, so an intentional stop stays resumable.)
             try:
-                eng.store.append("run_finished", {"reason": "error", "error": str(e)[:500]})
+                eng.store.append(EV_RUN_FINISHED, {"reason": "error", "error": str(e)[:500]})
             except Exception:  # noqa: BLE001 - best-effort; never mask the original failure
                 pass
             raise
@@ -642,12 +644,12 @@ def approve(run_dir: Path = typer.Argument(..., help="Run dir awaiting approval.
     store = _require_run_dir(run_dir)
     state = fold(store.read_all())
     if state.proposed_spec is not None and not state.spec_confirmed:
-        store.append("spec_approved", {})       # ratify the agent-proposed eval/adapter
+        store.append(EV_SPEC_APPROVED, {})       # ratify the agent-proposed eval/adapter
         typer.echo(f"approved eval spec for run {run_dir.name}")
         return
     best = state.best()
     nid = node_id if node_id is not None else (best.id if best else None)
-    store.append("approval_granted", {"node_id": nid})
+    store.append(EV_APPROVAL_GRANTED, {"node_id": nid})
     typer.echo(f"approved node {nid} for run {run_dir.name}")
 
 

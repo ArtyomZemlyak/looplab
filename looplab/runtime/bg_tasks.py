@@ -18,13 +18,13 @@ import tempfile
 import threading
 from pathlib import Path
 
-from looplab.runtime.sandbox import _SECRET_ENV
+from looplab.runtime.sandbox import SECRET_ENV
 
 _MAX_READ = 8000
 
 
 def _child_env(argv) -> dict:
-    base = {k: v for k, v in os.environ.items() if not _SECRET_ENV.search(k)}
+    base = {k: v for k, v in os.environ.items() if not SECRET_ENV.search(k)}
     if argv and argv[0] == "git":     # restore ONLY git config + identity (not credential-bearing vars)
         from looplab.tools.shell_tools import git_config_env
         base.update(git_config_env())

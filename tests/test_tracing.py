@@ -1,4 +1,4 @@
-﻿"""Full tracing (ADR-08): nested correlated spans into spans.jsonl (files-as-truth), bridged
+"""Full tracing (ADR-08): nested correlated spans into spans.jsonl (files-as-truth), bridged
 to OpenTelemetry when present, joined to events for the UI. fold never reads spans."""
 from __future__ import annotations
 

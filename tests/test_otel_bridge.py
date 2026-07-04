@@ -1,4 +1,4 @@
-﻿"""Live OpenTelemetry bridge (ADR-08): with the [otel] extra installed and a real provider,
+"""Live OpenTelemetry bridge (ADR-08): with the [otel] extra installed and a real provider,
 our spans become genuine recording OTel spans (valid ids, correct nesting) that an exporter
 receives. Runs in a SUBPROCESS so installing a global OTel provider can't leak into the rest of
 the suite. Skipped when opentelemetry isn't installed (the default offline path)."""

@@ -1,4 +1,4 @@
-﻿"""Item #3: the Researcher gets read-only grep/list/read over the editable repo(s) so it
+"""Item #3: the Researcher gets read-only grep/list/read over the editable repo(s) so it
 proposes changes from the actual code. RepoTools is read-only and path-restricted (editing
 stays the Developer's job — the role/trust boundary)."""
 from __future__ import annotations

@@ -230,7 +230,7 @@ class RunsTools:
         lines = []
         for r in rows:
             live = " · LIVE" if r["engine_running"] else ""
-            best = digest._fmt_num(r["best_metric"]) if r["best_metric"] is not None else "—"
+            best = digest.fmt_num(r["best_metric"]) if r["best_metric"] is not None else "—"
             lines.append(f"{r['run_id']}: {str(r['goal'])[:70]} · best={best} ({r['direction']}) · "
                          f"{r['nodes']} nodes · {r['phase']}{live}")
         return f"{len(lines)} run(s):\n" + "\n".join(lines)
@@ -243,7 +243,7 @@ class RunsTools:
         live = self._alive(str(run_id))
         head = (f"run {run_id} · goal: {st.goal or st.task_id} · direction={st.direction} · "
                 f"phase={'finished' if st.finished else ('live' if live else 'idle')} · "
-                f"{len(st.nodes)} nodes · best={digest._fmt_num(digest.node_metric(best)) if best else '—'}"
+                f"{len(st.nodes)} nodes · best={digest.fmt_num(digest.node_metric(best)) if best else '—'}"
                 + (f" (#{best.id})" if best else ""))
         self._reader.bind_state(st, None)
         listing = self._reader.execute("list_experiments",

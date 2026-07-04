@@ -1,4 +1,4 @@
-﻿"""Live LLM integration (I2 go-live). Auto-skips unless a local Ollama with the
+"""Live LLM integration (I2 go-live). Auto-skips unless a local Ollama with the
 target model is reachable, so the default suite stays offline. When the model is
 present, this drives the *real* loop with the LLM as the Researcher."""
 from __future__ import annotations

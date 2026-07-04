@@ -1,4 +1,4 @@
-﻿"""I2/I7: LLM-as-Developer coding loop — asset materialization + error-feedback debug.
+"""I2/I7: LLM-as-Developer coding loop — asset materialization + error-feedback debug.
 Offline, using a fake LLM client (no model needed)."""
 from __future__ import annotations
 

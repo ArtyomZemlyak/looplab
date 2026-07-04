@@ -1,4 +1,4 @@
-﻿# LoopLab — Decision Records (added requirements)
+# LoopLab — Decision Records (added requirements)
 
 **Version:** 0.1 · **Date:** 2026-06-20
 **Companion docs:** [01-product-design.md](01-product-design.md) · [02-architecture.md](02-architecture.md) · [04-file-layout.md](04-file-layout.md) · [05-build-decisions.md](05-build-decisions.md) · research basis: [autoresearch-systems-exploration.md](autoresearch-systems-exploration.md)

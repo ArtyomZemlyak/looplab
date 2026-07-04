@@ -34,6 +34,12 @@ import orjson
 from looplab.core.atomicio import atomic_write_text, best_effort_fsync
 from looplab.core.config import Settings
 from looplab.events.eventstore import EventStore, iter_jsonl
+from looplab.events.types import (
+    EV_ANNOTATION, EV_APPROVAL_GRANTED, EV_BUDGET_EXTEND, EV_DEEP_RESEARCH,
+    EV_FORCE_ABLATE, EV_FORCE_CONFIRM, EV_FORK, EV_HINT, EV_HYPOTHESIS_ADDED,
+    EV_HYPOTHESIS_UPDATED, EV_INJECT_NODE, EV_NODE_ABORT, EV_PAUSE, EV_PROMOTE,
+    EV_REPORT_GENERATED, EV_RESUME, EV_RUN_ABORT, EV_RUN_REOPENED, EV_SET_STRATEGY,
+    EV_SPEC_APPROVED, EV_TRUST_GATE_CHANGED)
 from looplab.core.models import Event
 from looplab.serve.projects import ProjectError, ProjectStore
 from looplab.serve.assistant import REPO_ROOT as _ASSISTANT_REPO_ROOT, SessionStore, run_turn as _assistant_run_turn
@@ -69,13 +75,13 @@ except ModuleNotFoundError as e:  # pragma: no cover - exercised only without th
 
 # Control events the UI is allowed to append (intent). The engine writes the domain effect.
 CONTROL_EVENTS = {
-    "run_abort", "pause", "resume", "node_abort", "budget_extend", "hint",
-    "force_confirm", "force_ablate", "fork", "annotation", "promote",
-    "approval_granted", "spec_approved", "inject_node", "run_reopened",
-    "set_strategy",   # A7: operator pins/overrides the Strategist's choice (HITL parity)
-    "deep_research",  # P2: operator asks the engine to run the Deep-Research stage now
-    "hypothesis_added",    # P1: a human registers a hypothesis on the board (open question to test)
-    "hypothesis_updated",  # P1: a human abandons a hypothesis line (status=abandoned)
+    EV_RUN_ABORT, EV_PAUSE, EV_RESUME, EV_NODE_ABORT, EV_BUDGET_EXTEND, EV_HINT,
+    EV_FORCE_CONFIRM, EV_FORCE_ABLATE, EV_FORK, EV_ANNOTATION, EV_PROMOTE,
+    EV_APPROVAL_GRANTED, EV_SPEC_APPROVED, EV_INJECT_NODE, EV_RUN_REOPENED,
+    EV_SET_STRATEGY,   # A7: operator pins/overrides the Strategist's choice (HITL parity)
+    EV_DEEP_RESEARCH,  # P2: operator asks the engine to run the Deep-Research stage now
+    EV_HYPOTHESIS_ADDED,    # P1: a human registers a hypothesis on the board (open question to test)
+    EV_HYPOTHESIS_UPDATED,  # P1: a human abandons a hypothesis line (status=abandoned)
 }
 
 POLL_SECONDS = 0.4   # SSE tail cadence — fast enough to feel live, light on the disk
@@ -131,44 +137,44 @@ def _action_to_control(c: "_Action", st) -> Optional[dict]:
     (a pure-advice step, skipped). `label` is the human-readable line the UI's applied-row shows."""
     a, nid = c.action, c.node_id
     if a == "confirm" and nid is not None:
-        return {"type": "force_confirm", "data": {"node_id": nid}, "label": f"Confirm #{nid} (multi-seed robustness)"}
+        return {"type": EV_FORCE_CONFIRM, "data": {"node_id": nid}, "label": f"Confirm #{nid} (multi-seed robustness)"}
     if a == "ablate" and nid is not None:
-        return {"type": "force_ablate", "data": {"node_id": nid}, "label": f"Ablate #{nid} (sensitivity probe)"}
+        return {"type": EV_FORCE_ABLATE, "data": {"node_id": nid}, "label": f"Ablate #{nid} (sensitivity probe)"}
     if a == "fork" and nid is not None:
-        return {"type": "fork", "data": {"from_node_id": nid}, "label": f"Fork an improve-branch from #{nid}"}
+        return {"type": EV_FORK, "data": {"from_node_id": nid}, "label": f"Fork an improve-branch from #{nid}"}
     if a == "promote" and nid is not None:
-        return {"type": "promote", "data": {"node_id": nid, "alias": "champion"}, "label": f"Promote #{nid} to champion"}
+        return {"type": EV_PROMOTE, "data": {"node_id": nid, "alias": "champion"}, "label": f"Promote #{nid} to champion"}
     if a == "hint" and c.text:
         # The boss authors the COMPLETE current directive each turn (it has the full chat + run
         # context), so a boss hint REPLACES the standing one rather than piling up — the researcher/
         # agent/strategist then read a single, current directive instead of a contradictory stack.
-        return {"type": "hint", "data": {"text": c.text, "replace": True},
+        return {"type": EV_HINT, "data": {"text": c.text, "replace": True},
                 "label": f"Set directive: {c.text[:60]}"}
     if a in ("note", "annotate") and nid is not None and c.text:
-        return {"type": "annotation", "data": {"node_id": nid, "text": c.text}, "label": f"Note on #{nid}: {c.text[:50]}"}
+        return {"type": EV_ANNOTATION, "data": {"node_id": nid, "text": c.text}, "label": f"Note on #{nid}: {c.text[:50]}"}
     if a in ("budget", "extend_budget"):
         n = int(c.nodes)
         if n <= 0:                       # a budget verb only ADDS room — ignore zero/negative (no-op)
             return None
         n = min(n, 1000)                 # cap a hallucinated huge delta so the LLM can't trigger a runaway
-        return {"type": "budget_extend", "data": {"add_nodes": n},
+        return {"type": EV_BUDGET_EXTEND, "data": {"add_nodes": n},
                 "label": f"Extend the run budget by {n} node(s)"}
     if a == "strategy" and (c.policy or c.fidelity):
         strat = {k: v for k, v in (("policy", c.policy), ("fidelity", c.fidelity)) if v}
         pretty = " ".join(f"{k}={v}" for k, v in strat.items())   # "policy=ucb fidelity=low", not a dict repr
-        return {"type": "set_strategy", "data": {"strategy": strat}, "label": f"Switch strategy → {pretty}"}
+        return {"type": EV_SET_STRATEGY, "data": {"strategy": strat}, "label": f"Switch strategy → {pretty}"}
     if a == "deep_research":
-        return {"type": "deep_research", "data": {}, "label": "Run a deep-research step now"}
+        return {"type": EV_DEEP_RESEARCH, "data": {}, "label": "Run a deep-research step now"}
     if a == "inject":
         idea = {"operator": c.operator or "improve", "params": c.params or {}, "rationale": c.rationale or c.text or ""}
         pp = " ".join(f"{k}={v}" for k, v in (idea["params"] or {}).items())   # "lr=0.1 depth=3", not a dict repr
-        return {"type": "inject_node", "data": {"idea": idea, "parent_id": nid, "code": None},
+        return {"type": EV_INJECT_NODE, "data": {"idea": idea, "parent_id": nid, "code": None},
                 "label": f"Add experiment: {idea['operator']}" + (f" ({pp})" if pp else "")}
     if a == "import" and c.source_run and c.source_node is not None:
         # Seed an experiment FROM a sibling run. The source idea/code/metric are resolved from disk at
         # apply time (in /control), which then bakes `origin` provenance into the inject_node event —
         # so this rides the existing manual-injection pipeline, no new event type.
-        return {"type": "inject_node",
+        return {"type": EV_INJECT_NODE,
                 "data": {"idea": {"operator": c.operator or "improve", "params": c.params or {},
                                   "rationale": c.rationale or c.text or ""},
                          "parent_id": nid, "code": None,
@@ -178,11 +184,11 @@ def _action_to_control(c: "_Action", st) -> Optional[dict]:
         node = nid if nid is not None else st.best_node_id
         if node is None:                      # no champion yet -> not an actionable approve
             return None
-        return {"type": "approval_granted", "data": {"node_id": node}, "label": f"Approve #{node}"}
+        return {"type": EV_APPROVAL_GRANTED, "data": {"node_id": node}, "label": f"Approve #{node}"}
     if a == "ratify":
-        return {"type": "spec_approved", "data": {}, "label": "Ratify the eval spec"}
+        return {"type": EV_SPEC_APPROVED, "data": {}, "label": "Ratify the eval spec"}
     if a in ("pause", "resume", "stop"):
-        t = {"pause": "pause", "resume": "resume", "stop": "run_abort"}[a]
+        t = {"pause": EV_PAUSE, "resume": EV_RESUME, "stop": EV_RUN_ABORT}[a]
         return {"type": t, "data": ({"reason": "ui"} if a == "stop" else {}), "label": a.capitalize() + " the run"}
     return None
 
@@ -1029,7 +1035,7 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
         if "trust_gate" in changed:
             try:
                 EventStore(rd / "events.jsonl").append(
-                    "trust_gate_changed", {"trust_gate": updated["trust_gate"],
+                    EV_TRUST_GATE_CHANGED, {"trust_gate": updated["trust_gate"],
                                            "source": "config_edit"})
             except Exception as e:  # noqa: BLE001
                 raise HTTPException(500, f"snapshot updated but trust_gate event append failed: {e}")
@@ -1059,7 +1065,7 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
         # Cross-run import: an inject seeded from a sibling run. Resolve the source experiment from disk
         # NOW and bake its code + `origin` provenance into the inject_node, so the engine reproduces it
         # faithfully and the lineage is recorded. (_run_dir guards path traversal on the sibling id.)
-        if etype == "inject_node" and data.get("source_run") and data.get("source_node") is not None:
+        if etype == EV_INJECT_NODE and data.get("source_run") and data.get("source_node") is not None:
             sr = str(data.pop("source_run"))
             try:
                 sn = int(data.pop("source_node"))
@@ -2709,7 +2715,7 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
             except Exception as e:  # noqa: BLE001 — offline / no model -> soft fail, no event
                 return {"ok": False, "error": str(e)}
             ev = EventStore(rd / "events.jsonl").append(
-                "report_generated", {"content": content, "at_node": content.get("at_node"),
+                EV_REPORT_GENERATED, {"content": content, "at_node": content.get("at_node"),
                                      "trigger": "manual"})
             return {"ok": True, "seq": ev.seq, "content": content}
 
