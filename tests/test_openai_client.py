@@ -52,13 +52,15 @@ def base_url():
 
 
 def test_tool_call_path(base_url):
-    c = OpenAICompatibleClient("m", base_url=base_url)
+    # stream=False: the mock server returns a plain JSON body (not SSE), so exercise the non-stream
+    # path directly instead of the SDK's stream-then-degrade dance on a non-SSE body.
+    c = OpenAICompatibleClient("m", base_url=base_url, stream=False)
     idea = parse_structured(c, [{"role": "user", "content": "go"}], Idea, "tool_call")
     assert idea.operator == "improve" and idea.params == {"x": 3.0, "y": -1.0}
 
 
 def test_text_fallback_strips_think(base_url):
-    c = OpenAICompatibleClient("m", base_url=base_url)
+    c = OpenAICompatibleClient("m", base_url=base_url, stream=False)
     idea = parse_structured(c, [{"role": "user", "content": "go"}], Idea, "baml")
     assert idea.operator == "draft" and idea.params == {"x": 1.0}
 
@@ -319,6 +321,48 @@ def test_post_fails_fast_on_no_choices_body(monkeypatch):
     assert calls["n"] == 1                           # no-choices body fails fast, no retry
 
 
+def test_post_wraps_raw_decode_error_as_llmerror(monkeypatch):
+    """A gateway 200 with an empty/keepalive-only body makes the SDK raise a RAW json.JSONDecodeError
+    (not an openai.APIError). It must be retried like a transient hiccup and surface as a clean
+    LLMError — NOT escape _post and abort the run (the role layer only retries/falls back on LLMError)."""
+    import json as _json
+    import looplab.core.llm as llm
+    calls = {"n": 0}
+
+    def fake(payload, use_stream):
+        calls["n"] += 1
+        raise _json.JSONDecodeError("Expecting value", "", 0)   # raw decode error, not openai.*
+
+    monkeypatch.setattr(llm.time, "sleep", lambda *_a: None)
+    c = llm.OpenAICompatibleClient("m", base_url="http://x/v1")
+    monkeypatch.setattr(c, "_sdk_chat", fake)
+    with pytest.raises(llm.LLMError, match="unparseable"):
+        c.complete_text([{"role": "user", "content": "go"}])
+    assert calls["n"] == 5                            # 1 + _max_retries, then clean LLMError
+
+
+def test_sdk_chat_forwards_guided_json_and_response_format(monkeypatch):
+    """complete_tool with guided_json must forward BOTH response_format (kwarg) and guided_json
+    (extra_body) to the SDK — the vLLM/SGLang constrained-decoding path."""
+    import looplab.core.llm as llm
+    captured = {}
+
+    class _Resp:
+        def model_dump(self):
+            return {"choices": [{"message": {"role": "assistant", "tool_calls": [
+                {"id": "c1", "function": {"name": "emit", "arguments": "{}"}}]}}], "usage": {}}
+
+    def fake_create(**kwargs):
+        captured.update(kwargs)
+        return _Resp()
+
+    c = llm.OpenAICompatibleClient("m", base_url="http://x/v1", stream=False, guided_json=True)
+    monkeypatch.setattr(c._sdk.chat.completions, "create", fake_create)
+    c.complete_tool([{"role": "user", "content": "go"}], {"type": "object", "properties": {}})
+    assert captured["response_format"]["type"] == "json_schema"
+    assert captured["extra_body"]["guided_json"] == {"type": "object", "properties": {}}
+
+
 def test_h1_guided_json_adds_schema_constraints():
     """H1: with guided_json on, complete_tool sends response_format + guided_json built from the schema."""
     from looplab.core.llm import OpenAICompatibleClient
@@ -413,33 +457,55 @@ def test_native_tool_call_real_leak_is_recovered():
     assert json.loads(calls[0]["function"]["arguments"]) == {"x": 1}
 
 
+# --- streaming reassembly: these exercise the LIVE `_accumulate_stream` path (the SDK client streams
+# by default), feeding it real SDK-shaped chunk objects (model_construct = lenient, like the SDK's own
+# streaming decoder, so a provider-omitted `index` is None rather than a validation error). ----------
+from openai.types.chat import ChatCompletionChunk  # noqa: E402
+from openai.types.chat.chat_completion_chunk import (  # noqa: E402
+    Choice as _ChunkChoice, ChoiceDelta as _Delta,
+    ChoiceDeltaToolCall as _DToolCall, ChoiceDeltaToolCallFunction as _DFunc)
+
+
+def _tc(index=None, id=None, name=None, args=None):
+    return _DToolCall.model_construct(index=index, id=id, type="function",
+                                      function=_DFunc.model_construct(name=name, arguments=args))
+
+
+def _chunk(*, content=None, reasoning=None, tool_calls=None, finish=None, usage=None):
+    delta = _Delta.model_construct(content=content, reasoning=reasoning, tool_calls=tool_calls)
+    return ChatCompletionChunk.model_construct(
+        id="x", object="chat.completion.chunk", created=0, model="m", usage=usage,
+        choices=[_ChunkChoice.model_construct(index=0, delta=delta, finish_reason=finish)])
+
+
+def _accum(chunks):
+    return OpenAICompatibleClient._accumulate_stream(iter(chunks))["choices"][0]["message"]
+
+
+def test_accumulate_stream_content_and_reasoning():
+    """The live streaming reassembly joins content + reasoning deltas (non-standard fields survive the
+    SDK's extra='allow' delta)."""
+    msg = _accum([_chunk(content="Hel", reasoning="th"), _chunk(content="lo", reasoning="ink"),
+                  _chunk(finish="stop")])
+    assert msg["content"] == "Hello" and msg["reasoning"] == "think"
+
+
 def test_streamed_tool_calls_without_index_stay_separate():
     """Providers that omit `index` (one whole call per delta) must not collapse both calls into slot 0."""
-    c = OpenAICompatibleClient("m", stream=True)
-    resp = _sse(
-        {"choices": [{"delta": {"tool_calls": [
-            {"id": "a", "type": "function", "function": {"name": "f1", "arguments": '{"x":1}'}}]}}]},
-        {"choices": [{"delta": {"tool_calls": [
-            {"id": "b", "type": "function", "function": {"name": "f2", "arguments": '{"y":2}'}}]}}]},
-        {"choices": [{"delta": {}, "finish_reason": "tool_calls"}]},
-    )
-    out = c._read_stream(resp)
-    calls = out["choices"][0]["message"]["tool_calls"]
+    msg = _accum([_chunk(tool_calls=[_tc(id="a", name="f1", args='{"x":1}')]),
+                  _chunk(tool_calls=[_tc(id="b", name="f2", args='{"y":2}')]),
+                  _chunk(finish="tool_calls")])
+    calls = msg["tool_calls"]
     assert [(t["function"]["name"], t["function"]["arguments"]) for t in calls] == [
         ("f1", '{"x":1}'), ("f2", '{"y":2}')]
 
 
 def test_streamed_single_call_fragments_stay_merged():
     """Fragments of ONE call (id/name only on the first delta) must not split into two calls."""
-    c = OpenAICompatibleClient("m", stream=True)
-    resp = _sse(
-        {"choices": [{"delta": {"tool_calls": [
-            {"id": "a", "function": {"name": "f1", "arguments": '{"x":'}}]}}]},
-        {"choices": [{"delta": {"tool_calls": [{"function": {"arguments": '1}'}}]}}]},
-        {"choices": [{"delta": {}, "finish_reason": "tool_calls"}]},
-    )
-    out = c._read_stream(resp)
-    calls = out["choices"][0]["message"]["tool_calls"]
+    msg = _accum([_chunk(tool_calls=[_tc(id="a", name="f1", args='{"x":')]),
+                  _chunk(tool_calls=[_tc(args='1}')]),
+                  _chunk(finish="tool_calls")])
+    calls = msg["tool_calls"]
     assert len(calls) == 1 and calls[0]["function"]["arguments"] == '{"x":1}'
 
 
@@ -452,26 +518,19 @@ def test_tool_call_slot_prefers_explicit_index():
 def test_streamed_single_call_with_echoed_name_stays_merged():
     """A provider that ECHOES function.name on every continuation delta (no index/id) must not split
     one call into invalid-JSON fragments."""
-    c = OpenAICompatibleClient("m", stream=True)
-    resp = _sse(
-        {"choices": [{"delta": {"tool_calls": [{"function": {"name": "emit", "arguments": '{"x":'}}]}}]},
-        {"choices": [{"delta": {"tool_calls": [{"function": {"name": "emit", "arguments": '1}'}}]}}]},
-        {"choices": [{"delta": {}, "finish_reason": "tool_calls"}]},
-    )
-    calls = c._read_stream(resp)["choices"][0]["message"]["tool_calls"]
+    msg = _accum([_chunk(tool_calls=[_tc(name="emit", args='{"x":')]),
+                  _chunk(tool_calls=[_tc(name="emit", args='1}')]),
+                  _chunk(finish="tool_calls")])
+    calls = msg["tool_calls"]
     assert len(calls) == 1 and calls[0]["function"]["arguments"] == '{"x":1}'
 
 
 def test_streamed_two_indexless_noid_calls_split_on_complete_args():
     """Two distinct index-less, id-less calls (each with complete JSON args) must NOT merge into one."""
-    c = OpenAICompatibleClient("m", stream=True)
-    resp = _sse(
-        {"choices": [{"delta": {"tool_calls": [{"function": {"name": "f1", "arguments": '{"a":1}'}}]}}]},
-        {"choices": [{"delta": {"tool_calls": [{"function": {"name": "f2", "arguments": '{"b":2}'}}]}}]},
-        {"choices": [{"delta": {}, "finish_reason": "tool_calls"}]},
-    )
-    calls = c._read_stream(resp)["choices"][0]["message"]["tool_calls"]
-    assert len(calls) == 2
+    msg = _accum([_chunk(tool_calls=[_tc(name="f1", args='{"a":1}')]),
+                  _chunk(tool_calls=[_tc(name="f2", args='{"b":2}')]),
+                  _chunk(finish="tool_calls")])
+    assert len(msg["tool_calls"]) == 2
 
 
 def test_native_recovery_ignores_markup_quoted_in_code_blocks():

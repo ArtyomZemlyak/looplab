@@ -767,6 +767,17 @@ class OpenAICompatibleClient:
                 raise LLMError(f"LLM request to {self.base_url} failed: {e}") from e
             except openai.APIError as e:   # any other SDK-level protocol error -> clean LLMError
                 raise LLMError(f"LLM request to {self.base_url} failed: {e}") from e
+            except (json.JSONDecodeError, ValueError, AttributeError) as e:
+                # A gateway 200 with an empty / whitespace / keepalive-only body makes the SDK's
+                # decoder raise a RAW json.JSONDecodeError (application/json) or AttributeError
+                # (text/event-stream), which are NOT openai.APIError — so without this they'd escape
+                # `_post` uncaught and abort the run (the role layer only retries+falls back on
+                # LLMError). Mirror the old `_parse_chat_body`-None path: treat as a transient gateway
+                # hiccup — retry with backoff, then a clean LLMError. (JSONDecodeError ⊂ ValueError.)
+                if attempt < self._max_retries:
+                    time.sleep(_backoff(attempt))
+                    continue
+                raise LLMError(f"LLM request to {self.base_url} returned an unparseable body") from e
             else:
                 # HTTP 200 read cleanly, but the body can still be unusable: a hosted gateway
                 # sometimes returns an empty / whitespace / SSE-keepalive-only body (OpenRouter sends
