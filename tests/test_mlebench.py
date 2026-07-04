@@ -7,13 +7,13 @@ from pathlib import Path
 
 import anyio
 
-from looplab.leakage import train_test_contamination
-from looplab.mlebench import MLEBenchTask
-from looplab.models import Idea
-from looplab.orchestrator import Engine
-from looplab.policy import GreedyTree
-from looplab.sandbox import SubprocessSandbox
-from looplab.tasks import TaskAdapter, load_task
+from looplab.trust.leakage import train_test_contamination
+from looplab.adapters.mlebench import MLEBenchTask
+from looplab.core.models import Idea
+from looplab.engine.orchestrator import Engine
+from looplab.search.policy import GreedyTree
+from looplab.runtime.sandbox import SubprocessSandbox
+from looplab.adapters.tasks import TaskAdapter, load_task
 
 ROOT = Path(__file__).resolve().parents[1]
 TASK_FILE = ROOT / "examples" / "mlebench_task.json"
@@ -75,7 +75,7 @@ def test_test_key_independent_of_train_size():
 def test_llm_roles_pass_hyperparameter_and_grader_brief():
     # The LLM Developer must receive the proposed 'k' (regression of the hardcoded
     # degree/lam bug) and a brief that wires the held-out grader.
-    from looplab.roles import LLMDeveloper, LLMResearcher
+    from looplab.agents.roles import LLMDeveloper, LLMResearcher
 
     captured: dict = {}
 
@@ -121,7 +121,7 @@ def test_host_graded_withholds_answer_key():
 
 
 def test_host_graded_brief_writes_predictions():
-    from looplab.roles import LLMDeveloper
+    from looplab.agents.roles import LLMDeveloper
 
     class _Fake:
         def complete_text(self, m):

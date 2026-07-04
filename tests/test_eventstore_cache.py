@@ -10,7 +10,7 @@ from __future__ import annotations
 import threading
 from pathlib import Path
 
-from looplab.eventstore import EventStore, iter_jsonl
+from looplab.events.eventstore import EventStore, iter_jsonl
 
 
 def _fresh_seqs(p):

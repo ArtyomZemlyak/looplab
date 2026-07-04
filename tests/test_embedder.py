@@ -6,9 +6,9 @@ endpoint failure, so `_cosine` never sees a dim mismatch and a flaky/offline end
 a run — it only loses semantic quality. All offline (no real network)."""
 from __future__ import annotations
 
-from looplab.config import Settings
-from looplab.knowledge_tools import KnowledgeTools
-from looplab.vectorstore import LLMEmbedder, _cosine, hash_embed, make_embedder
+from looplab.core.config import Settings
+from looplab.tools.knowledge_tools import KnowledgeTools
+from looplab.tools.vectorstore import LLMEmbedder, _cosine, hash_embed, make_embedder
 
 
 def test_default_is_hash_embed():

@@ -4,8 +4,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from looplab.config import Settings
-from looplab.tasks import load_task, make_roles
+from looplab.core.config import Settings
+from looplab.adapters.tasks import load_task, make_roles
 
 ROOT = Path(__file__).resolve().parents[1]
 

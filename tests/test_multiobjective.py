@@ -7,11 +7,11 @@ import sys
 
 import anyio
 
-from looplab.command_eval import run_command_eval
-from looplab.orchestrator import Engine
-from looplab.policy import GreedyTree
-from looplab.repo_task import EvalSpec, RepoTask
-from looplab.sandbox import SubprocessSandbox
+from looplab.runtime.command_eval import run_command_eval
+from looplab.engine.orchestrator import Engine
+from looplab.search.policy import GreedyTree
+from looplab.adapters.repo_task import EvalSpec, RepoTask
+from looplab.runtime.sandbox import SubprocessSandbox
 
 _M = {"kind": "stdout_json", "key": "metric"}
 _LAT = {"kind": "stdout_json", "key": "latency"}

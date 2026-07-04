@@ -10,9 +10,9 @@ from pathlib import Path
 
 import pytest
 
-from looplab.config import Settings
-from looplab.eventstore import EventStore
-from looplab.replay import fold
+from looplab.core.config import Settings
+from looplab.events.eventstore import EventStore
+from looplab.events.replay import fold
 
 
 def test_config_lower_bounds():
@@ -33,8 +33,8 @@ def test_direction_normalized_in_fold(tmp_path):
 
 
 def test_merge_idea_skips_non_numeric_params():
-    from looplab.models import Idea, Node
-    from looplab.operators import merge_idea
+    from looplab.core.models import Idea, Node
+    from looplab.search.operators import merge_idea
     a = Node(id=0, operator="draft", idea=Idea(operator="draft", params={"x": 2.0}))
     # A free-form repo param that isn't numeric must be skipped, not crash sum().
     b = Node(id=1, operator="draft", idea=Idea.model_construct(operator="draft",
@@ -44,7 +44,7 @@ def test_merge_idea_skips_non_numeric_params():
 
 
 def test_sandbox_redacts_secret_env(tmp_path, monkeypatch):
-    from looplab.sandbox import SubprocessSandbox
+    from looplab.runtime.sandbox import SubprocessSandbox
     monkeypatch.setenv("MY_SECRET_TOKEN", "leak-me")
     monkeypatch.setenv("LLM_API_KEY", "sk-leak")
     code = ("import os, json\n"
@@ -72,7 +72,7 @@ def test_fold_idempotent_to_duplicate_terminal_events(tmp_path):
 
 def test_repo_eval_protects_every_reader_path(tmp_path):
     import sys
-    from looplab.repo_task import EvalSpec, RepoTask
+    from looplab.adapters.repo_task import EvalSpec, RepoTask
     repo = tmp_path / "repo"; repo.mkdir()
     (repo / "run.py").write_text("print('{\"metric\": 1.0}')\n", encoding="utf-8")
     t = RepoTask(
@@ -91,9 +91,9 @@ def test_repo_eval_protects_every_reader_path(tmp_path):
 
 
 def test_llm_transport_error_is_clean_and_falls_back():
-    from looplab.llm import OpenAICompatibleClient, LLMError
-    from looplab.models import Idea
-    from looplab.parse import ParseError, parse_structured
+    from looplab.core.llm import OpenAICompatibleClient, LLMError
+    from looplab.core.models import Idea
+    from looplab.core.parse import ParseError, parse_structured
     client = OpenAICompatibleClient(model="x", base_url="http://127.0.0.1:9/v1", timeout=2.0)
     with pytest.raises(LLMError):                 # raw URLError no longer escapes
         client.complete_text([{"role": "user", "content": "hi"}])

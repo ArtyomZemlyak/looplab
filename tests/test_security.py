@@ -7,11 +7,11 @@ from pathlib import Path
 import anyio
 import pytest
 
-from looplab.config import Settings
-from looplab.orchestrator import Engine
-from looplab.policy import GreedyTree
-from looplab.sandbox import DockerSandbox, SubprocessSandbox, make_sandbox
-from looplab.toytask import ToyTask
+from looplab.core.config import Settings
+from looplab.engine.orchestrator import Engine
+from looplab.search.policy import GreedyTree
+from looplab.runtime.sandbox import DockerSandbox, SubprocessSandbox, make_sandbox
+from looplab.adapters.toytask import ToyTask
 
 ROOT = Path(__file__).resolve().parents[1]
 TASK_FILE = ROOT / "examples" / "toy_task.json"
@@ -37,7 +37,7 @@ def test_untrusted_builds_docker_argv(monkeypatch, tmp_path):
     # scratch workdir bind-mounted; capture the argv via a stubbed runner (no real docker).
     import shutil
 
-    import looplab.sandbox as sb
+    import looplab.runtime.sandbox as sb
     monkeypatch.setattr(shutil, "which", lambda _x: "/usr/bin/docker")
     seen = {}
 

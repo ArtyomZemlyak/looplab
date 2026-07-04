@@ -3,10 +3,10 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from looplab.context_budget import truncate_history
-from looplab.eventstore import EventStore, iter_jsonl
-from looplab.profile import profile_column
-from looplab.redact import redact_secrets
+from looplab.core.context_budget import truncate_history
+from looplab.events.eventstore import EventStore, iter_jsonl
+from looplab.core.profile import profile_column
+from looplab.trust.redact import redact_secrets
 
 
 def test_eventstore_heals_torn_final_line(tmp_path: Path):
@@ -49,7 +49,7 @@ def test_redact_modern_key_prefixes():
 
 
 def test_fold_tolerates_metric_less_evaluated_event(tmp_path: Path):
-    from looplab.replay import fold
+    from looplab.events.replay import fold
 
     p = tmp_path / "events.jsonl"
     st_store = EventStore(p)

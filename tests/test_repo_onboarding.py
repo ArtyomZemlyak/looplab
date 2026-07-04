@@ -9,14 +9,14 @@ from pathlib import Path
 
 import anyio
 
-from looplab.command_eval import read_metric
-from looplab.eventstore import EventStore
-from looplab.models import Idea
-from looplab.orchestrator import Engine
-from looplab.policy import GreedyTree
-from looplab.replay import fold
-from looplab.repo_task import RepoTask
-from looplab.sandbox import SubprocessSandbox
+from looplab.runtime.command_eval import read_metric
+from looplab.events.eventstore import EventStore
+from looplab.core.models import Idea
+from looplab.engine.orchestrator import Engine
+from looplab.search.policy import GreedyTree
+from looplab.events.replay import fold
+from looplab.adapters.repo_task import RepoTask
+from looplab.runtime.sandbox import SubprocessSandbox
 
 FIXTURE = Path(__file__).resolve().parent / "fixtures" / "repo_fixture"
 

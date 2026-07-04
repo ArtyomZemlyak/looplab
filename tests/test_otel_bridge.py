@@ -23,7 +23,7 @@ prov.add_span_processor(SimpleSpanProcessor(exp))
 trace.set_tracer_provider(prov)                      # real provider BEFORE importing LoopLab
 
 import tempfile
-from looplab.tracing import Tracer, JsonlSpanExporter
+from looplab.core.tracing import Tracer, JsonlSpanExporter
 
 with tempfile.TemporaryDirectory() as d:
     t = Tracer(JsonlSpanExporter(d + "/s.jsonl"), run_id="r")
@@ -64,10 +64,10 @@ def test_real_engine_run_exports_instrumented_spans(tmp_path):
         "exp = InMemorySpanExporter(); prov = TracerProvider()\n"
         "prov.add_span_processor(SimpleSpanProcessor(exp)); trace.set_tracer_provider(prov)\n"
         "import tempfile, anyio\n"
-        "from looplab.tasks import load_task\n"
-        "from looplab.orchestrator import Engine\n"
-        "from looplab.policy import GreedyTree\n"
-        "from looplab.sandbox import SubprocessSandbox\n"
+        "from looplab.adapters.tasks import load_task\n"
+        "from looplab.engine.orchestrator import Engine\n"
+        "from looplab.search.policy import GreedyTree\n"
+        "from looplab.runtime.sandbox import SubprocessSandbox\n"
         f"task = load_task({toy!r})\n"
         "r, d = task.build_roles()\n"
         "with tempfile.TemporaryDirectory() as td:\n"
@@ -99,7 +99,7 @@ def test_exception_sets_otel_span_status_error():
         "exp = InMemorySpanExporter(); prov = TracerProvider()\n"
         "prov.add_span_processor(SimpleSpanProcessor(exp)); trace.set_tracer_provider(prov)\n"
         "import tempfile\n"
-        "from looplab.tracing import Tracer, JsonlSpanExporter\n"
+        "from looplab.core.tracing import Tracer, JsonlSpanExporter\n"
         "from opentelemetry.trace import StatusCode\n"
         "import tempfile as _t\n"
         "with _t.TemporaryDirectory() as d:\n"
@@ -125,7 +125,7 @@ def test_env_auto_wires_a_real_provider():
         "import os; os.environ['OTEL_EXPORTER_OTLP_ENDPOINT']='http://127.0.0.1:4318'\n"
         "from opentelemetry import trace\n"
         "from opentelemetry.sdk.trace import TracerProvider\n"
-        "import looplab.tracing as tr\n"
+        "import looplab.core.tracing as tr\n"
         "assert tr._OTEL is not None\n"
         "assert isinstance(trace.get_tracer_provider(), TracerProvider)\n"
         "print('ENV_OK')\n")

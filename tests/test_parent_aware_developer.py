@@ -16,9 +16,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-import looplab.llm as llm  # noqa: E402
+import looplab.core.llm as llm  # noqa: E402
 from looplab.core.models import Idea, Node  # noqa: E402
-from looplab.llm import OpenAICompatibleClient  # noqa: E402
+from looplab.core.llm import OpenAICompatibleClient  # noqa: E402
 
 
 # ---------------------------------------------------------------- stall-degrade

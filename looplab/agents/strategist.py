@@ -29,6 +29,14 @@ from looplab.core.prompts import PromptStore, render
 
 # A fully-serializable description of the active search machinery. Every field maps to an existing
 # config knob, so a Strategy is just "a settings delta the engine applies live".
+#
+# ADDING A FIELD touches four more sites in this file/module chain — keep them in sync:
+#   1. `_StrategyOut` (the LLM output schema, below)      — so the model can propose it,
+#   2. `_assemble_strategy` (below)                        — so the proposal is copied over,
+#   3. `validate_strategy` (below)                         — the paranoid whitelist that lets it through,
+#   4. `Engine._apply_strategy` (engine/orchestrator.py)   — so the engine actually applies it,
+# plus the brief text in `_STRATEGIST_SYSTEM` if the model should know the knob exists.
+# (`prefer_sweep`'s history shows the full chain.)
 Strategy = TypedDict(
     "Strategy",
     {

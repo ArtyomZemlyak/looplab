@@ -11,7 +11,7 @@ import pytest
 pytest.importorskip("fastapi")
 from fastapi.testclient import TestClient  # noqa: E402
 
-from looplab.server import make_app  # noqa: E402
+from looplab.serve.server import make_app  # noqa: E402
 
 
 @pytest.fixture

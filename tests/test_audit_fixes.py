@@ -6,15 +6,15 @@ import sys
 import anyio
 import pytest
 
-from looplab.command_eval import read_metric
-from looplab.config import Settings
-from looplab.models import Idea, Node, NodeStatus, RunState
-from looplab.orchestrator import Engine
-from looplab.patch import gate
-from looplab.policy import GreedyTree
-from looplab.replay import fold
-from looplab.repo_task import EditableSpec, EvalSpec, ReferenceSpec, RepoTask
-from looplab.sandbox import SubprocessSandbox
+from looplab.runtime.command_eval import read_metric
+from looplab.core.config import Settings
+from looplab.core.models import Idea, Node, NodeStatus, RunState
+from looplab.engine.orchestrator import Engine
+from looplab.tools.patch import gate
+from looplab.search.policy import GreedyTree
+from looplab.events.replay import fold
+from looplab.adapters.repo_task import EditableSpec, EvalSpec, ReferenceSpec, RepoTask
+from looplab.runtime.sandbox import SubprocessSandbox
 
 _M = {"kind": "stdout_json", "key": "metric"}
 
@@ -89,7 +89,7 @@ def test_settings_roundtrip_through_snapshot():
 
 # C2 — confirm_eval events populate the per-seed resume memo
 def test_fold_confirm_seed_results():
-    from looplab.models import Event
+    from looplab.core.models import Event
     evs = [Event(type="run_started", data={"run_id": "r", "task_id": "t"}),
            Event(type="confirm_eval", data={"node_id": 3, "seed": 0, "eval_seconds": 1.0, "metric": 0.5}),
            Event(type="confirm_eval", data={"node_id": 3, "seed": 1, "eval_seconds": 1.0, "metric": None})]
@@ -113,7 +113,7 @@ def test_deletion_applied_in_write_node_files(tmp_path):
 
 # B1 — the agentic Researcher survives a malformed-JSON tool call (does not crash the run)
 def test_tool_loop_survives_malformed_json_args():
-    from looplab.agent import ToolUsingResearcher
+    from looplab.agents.agent import ToolUsingResearcher
 
     class _Tools:
         def specs(self): return []
@@ -151,7 +151,7 @@ def test_protected_names_normalized():
 
 # #17/#18 — event seq advances only after a durable write; a non-dict line stops the reader
 def test_eventstore_seq_and_nondict_guard(tmp_path):
-    from looplab.eventstore import EventStore, iter_jsonl
+    from looplab.events.eventstore import EventStore, iter_jsonl
     s = EventStore(tmp_path / "e.jsonl")
     s.append("a", {}); s.append("b", {})
     assert [e.seq for e in s.read_all()] == [0, 1]
@@ -162,7 +162,7 @@ def test_eventstore_seq_and_nondict_guard(tmp_path):
 
 # #21/#22 — grep rejects a bad/over-long (ReDoS) pattern and caps file size
 def test_grep_guards_bad_and_long_pattern(tmp_path):
-    from looplab.retrieval import grep
+    from looplab.tools.retrieval import grep
     (tmp_path / "a.txt").write_text("hello", encoding="utf-8")
     assert grep("(", str(tmp_path)) == []                          # invalid regex -> []
     assert grep("a" * 2000, str(tmp_path)) == []                   # over-long pattern -> []
@@ -171,7 +171,7 @@ def test_grep_guards_bad_and_long_pattern(tmp_path):
 
 # #38 — confirm_top_k does not crown a node that produced zero usable seed scores
 def test_confirm_top_k_skips_scoreless_node():
-    from looplab.confirm import confirm_top_k
+    from looplab.trust.confirm import confirm_top_k
     nodes = [Node(id=0, operator="draft", idea=Idea(operator="draft"), metric=1.0,
                   status=NodeStatus.evaluated)]
     res = confirm_top_k(nodes, lambda n, s: 0.0, k=1, seeds=[], direction="min")
@@ -180,7 +180,7 @@ def test_confirm_top_k_skips_scoreless_node():
 
 # #27/#31 — MCTS values a candidate by its FEASIBLE descendants only
 def test_mcts_ignores_infeasible_descendant_metric():
-    from looplab.policy import MCTSPolicy
+    from looplab.search.policy import MCTSPolicy
     st = RunState(direction="max")
     p = Node(id=0, operator="draft", idea=Idea(operator="draft"), metric=1.0,
              status=NodeStatus.evaluated, feasible=True)
@@ -197,8 +197,8 @@ def test_mcts_ignores_infeasible_descendant_metric():
 
 # #0/#36 — confirm resumes mid-node: seeds already recorded are NOT re-run
 def test_confirm_phase_skips_already_run_seeds(tmp_path):
-    from looplab.toytask import ToyTask
-    from looplab.sandbox import RunResult
+    from looplab.adapters.toytask import ToyTask
+    from looplab.runtime.sandbox import RunResult
     task = ToyTask.load(__import__("pathlib").Path("examples/toy_task.json"))
     r, d = task.build_roles()
     eng = Engine(tmp_path / "run", task=task, researcher=r, developer=d,
@@ -237,7 +237,7 @@ def test_repo_task_direction_validated():
 
 # #54 — a constraint/metric reader may not be an agent-authored adapter
 def test_constraints_adapter_reader_rejected(tmp_path):
-    from looplab.command_eval import run_command_eval
+    from looplab.runtime.command_eval import run_command_eval
     (tmp_path / "p.py").write_text('print("{\\"metric\\": 1.0}")', encoding="utf-8")
     with pytest.raises(ValueError, match="built-in, not 'adapter'"):
         run_command_eval([sys.executable, "p.py"], str(tmp_path), 60, _M,
@@ -247,7 +247,7 @@ def test_constraints_adapter_reader_rejected(tmp_path):
 # #53 — opencode_config tolerates a trailing-slash model id
 def test_opencode_config_trailing_slash():
     import json as _j
-    from looplab.cli_agent import opencode_config
+    from looplab.agents.cli_agent import opencode_config
     cfg = _j.loads(opencode_config("http://h:1", "ollama/"))
     assert "ollama" in cfg["provider"]
     models = cfg["provider"]["ollama"]["models"]

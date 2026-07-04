@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import json
 
-from looplab.agent import ToolUsingResearcher
-from looplab.knowledge_tools import KnowledgeTools
-from looplab.models import RunState
+from looplab.agents.agent import ToolUsingResearcher
+from looplab.tools.knowledge_tools import KnowledgeTools
+from looplab.core.models import RunState
 
 
 def _seed_kb(d):

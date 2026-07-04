@@ -1,8 +1,8 @@
 """E2 researcher panel + empirical (surrogate) ranking."""
 from __future__ import annotations
 
-from looplab.models import Idea, Node, NodeStatus, RunState
-from looplab.panel import PanelResearcher, _predict
+from looplab.core.models import Idea, Node, NodeStatus, RunState
+from looplab.serve.panel import PanelResearcher, _predict
 
 BOUNDS = {"x": (-5.0, 5.0), "y": (-5.0, 5.0)}
 

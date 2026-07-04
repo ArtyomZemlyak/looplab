@@ -5,14 +5,14 @@ from pathlib import Path
 
 import anyio
 
-from looplab.eventstore import EventStore
-from looplab.models import Idea
-from looplab.orchestrator import Engine
-from looplab.policy import GreedyTree
-from looplab.regression import RegressionTask
-from looplab.replay import fold
-from looplab.sandbox import SubprocessSandbox
-from looplab.tasks import load_task
+from looplab.events.eventstore import EventStore
+from looplab.core.models import Idea
+from looplab.engine.orchestrator import Engine
+from looplab.search.policy import GreedyTree
+from looplab.adapters.regression import RegressionTask
+from looplab.events.replay import fold
+from looplab.runtime.sandbox import SubprocessSandbox
+from looplab.adapters.tasks import load_task
 
 ROOT = Path(__file__).resolve().parents[1]
 REG_FILE = ROOT / "examples" / "regression_task.json"
@@ -30,7 +30,7 @@ def test_generated_solution_runs_and_cv_prefers_true_degree(tmp_path):
     generalize better (lower CV MSE) than a degree-0 underfit."""
     task = RegressionTask(seed=1, n=40, true_degree=2, noise=1.0)
     X, Y = task._data()
-    from looplab.regression import RegressionDeveloper
+    from looplab.adapters.regression import RegressionDeveloper
     dev = RegressionDeveloper(X, Y, k=5)
     sb = SubprocessSandbox()
 

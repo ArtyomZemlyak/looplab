@@ -5,14 +5,14 @@ from __future__ import annotations
 import json
 import math
 
-from looplab import digest
-from looplab.agent import ToolUsingResearcher
-from looplab.config import Settings
-from looplab.models import Idea, Node, NodeStatus, RunState, Trial
-from looplab.roles import LLMResearcher
-from looplab.run_tools import DataTools, RunTools
-from looplab.tasks import make_roles
-from looplab.toytask import ToyTask
+from looplab.events import digest
+from looplab.agents.agent import ToolUsingResearcher
+from looplab.core.config import Settings
+from looplab.core.models import Idea, Node, NodeStatus, RunState, Trial
+from looplab.agents.roles import LLMResearcher
+from looplab.tools.run_tools import DataTools, RunTools
+from looplab.adapters.tasks import make_roles
+from looplab.adapters.toytask import ToyTask
 
 
 def _st() -> RunState:

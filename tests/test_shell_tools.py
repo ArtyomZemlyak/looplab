@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import sys
 
-from looplab.shell_tools import ShellTools
+from looplab.tools.shell_tools import ShellTools
 
 ALLOW = lambda a: "allow_once"      # noqa: E731
 DENY = lambda a: "deny"             # noqa: E731

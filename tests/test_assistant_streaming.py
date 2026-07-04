@@ -10,10 +10,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from fastapi.testclient import TestClient  # noqa: E402
 
-import looplab.llm as llm  # noqa: E402
-from looplab.assistant import run_turn  # noqa: E402
-from looplab.llm import OpenAICompatibleClient  # noqa: E402
-from looplab.server import make_app  # noqa: E402
+import looplab.core.llm as llm  # noqa: E402
+from looplab.serve.assistant import run_turn  # noqa: E402
+from looplab.core.llm import OpenAICompatibleClient  # noqa: E402
+from looplab.serve.server import make_app  # noqa: E402
 
 
 def _sse(chunks):
@@ -88,7 +88,7 @@ def test_run_turn_surfaces_interstitial_text(tmp_path):
 
 
 def test_message_stream_emits_text_event(tmp_path, monkeypatch):
-    monkeypatch.setattr("looplab.server.make_llm_client", lambda s: _InterFake())
+    monkeypatch.setattr("looplab.serve.server.make_llm_client", lambda s: _InterFake())
     client = TestClient(make_app(tmp_path))
     sid = client.post("/api/assistant/sessions", json={"mode": "plan"}).json()["id"]
     texts, event = [], None
@@ -103,7 +103,7 @@ def test_message_stream_emits_text_event(tmp_path, monkeypatch):
 
 
 def test_message_stream_endpoint(tmp_path, monkeypatch):
-    monkeypatch.setattr("looplab.server.make_llm_client", lambda s: _StreamFake())
+    monkeypatch.setattr("looplab.serve.server.make_llm_client", lambda s: _StreamFake())
     client = TestClient(make_app(tmp_path))
     sid = client.post("/api/assistant/sessions", json={"mode": "plan"}).json()["id"]
     tokens, done = [], None

@@ -5,12 +5,12 @@ from pathlib import Path
 
 import anyio
 
-from looplab.models import Idea
-from looplab.orchestrator import Engine
-from looplab.policy import GreedyTree
-from looplab.sandbox import SubprocessSandbox
-from looplab.tasks import load_task
-from looplab.timeseries import TimeSeriesDeveloper, TimeSeriesTask, make_series
+from looplab.core.models import Idea
+from looplab.engine.orchestrator import Engine
+from looplab.search.policy import GreedyTree
+from looplab.runtime.sandbox import SubprocessSandbox
+from looplab.adapters.tasks import load_task
+from looplab.adapters.timeseries import TimeSeriesDeveloper, TimeSeriesTask, make_series
 
 ROOT = Path(__file__).resolve().parents[1]
 TASK = ROOT / "examples" / "timeseries_task.json"

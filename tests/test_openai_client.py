@@ -8,9 +8,9 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import pytest
 
-from looplab.llm import OpenAICompatibleClient
-from looplab.models import Idea
-from looplab.parse import parse_structured
+from looplab.core.llm import OpenAICompatibleClient
+from looplab.core.models import Idea
+from looplab.core.parse import parse_structured
 
 
 class _Handler(BaseHTTPRequestHandler):
@@ -74,7 +74,7 @@ class _OkResp:
 def test_post_retries_transient_timeout(monkeypatch):
     """A momentary socket timeout (e.g. Ollama reloading a model) must be retried with backoff and
     then succeed — a single slow response must not abort a long unattended run."""
-    import looplab.llm as llm
+    import looplab.core.llm as llm
     calls = {"n": 0}
 
     def fake_urlopen(req, timeout=None):
@@ -95,7 +95,7 @@ def test_post_drops_reasoning_on_unsupported_param_400(monkeypatch):
     The client must DROP the reasoning toggle and retry — so the model works — and remember it (deepseek
     keeps reasoning; glm-5.1 silently drops it). Without this glm-5.1 hard-fails and 'produces nothing'."""
     import io
-    import looplab.llm as llm
+    import looplab.core.llm as llm
     seen = []
 
     def fake_urlopen(req, timeout=None):
@@ -125,7 +125,7 @@ def test_read_stream_watchdog_breaks_a_stalled_connection():
     Uses a real socketpair so the socket.shutdown() path (not just the close() fallback) is exercised."""
     import socket
     import time as _t
-    import looplab.llm as llm
+    import looplab.core.llm as llm
 
     a, _b = socket.socketpair()                   # _b never sends -> a.recv blocks like a stalled server
 
@@ -161,7 +161,7 @@ def test_read_stream_watchdog_breaks_a_stalled_connection():
 
 def test_post_raises_after_exhausting_timeouts(monkeypatch):
     """A persistently dead endpoint still surfaces a clean LLMError once retries are exhausted."""
-    import looplab.llm as llm
+    import looplab.core.llm as llm
 
     def fake_urlopen(req, timeout=None):
         raise TimeoutError("timed out")
@@ -177,7 +177,7 @@ def test_post_fails_fast_on_connection_refused(monkeypatch):
     """A refused connection (endpoint down / wrong base_url) is a STEADY-STATE failure: it must raise
     immediately WITHOUT retry/backoff, so /api/llm/health stays instant and a misconfig surfaces on
     the first call. Only timeouts are retried."""
-    import looplab.llm as llm
+    import looplab.core.llm as llm
     calls = {"open": 0, "sleep": 0}
 
     def fake_urlopen(req, timeout=None):
@@ -198,7 +198,7 @@ def test_post_retries_transient_ssl_eof(monkeypatch):
     gateway like OpenRouter) is TRANSIENT and must be retried, not abort the run."""
     import ssl
     import urllib.error
-    import looplab.llm as llm
+    import looplab.core.llm as llm
     calls = {"n": 0}
 
     def fake_urlopen(req, timeout=None):
@@ -218,7 +218,7 @@ def test_post_fails_fast_on_tls_cert_error(monkeypatch):
     """A TLS CERT verification error is a steady-state misconfig — fail fast, do NOT retry."""
     import ssl
     import urllib.error
-    import looplab.llm as llm
+    import looplab.core.llm as llm
     calls = {"open": 0, "sleep": 0}
 
     def fake_urlopen(req, timeout=None):
@@ -256,7 +256,7 @@ _GOOD = json.dumps({"choices": [{"message": {"role": "assistant", "content": "ok
 def test_post_retries_empty_200_body(monkeypatch):
     """A 200 with an empty / whitespace body (gateway dropped the socket before the final JSON) must
     be retried with backoff and then succeed — it crashed the DeepSeek run before this fix."""
-    import looplab.llm as llm
+    import looplab.core.llm as llm
     bodies = iter(["", "  \n \n\n ", _GOOD])      # two bad 200s, then the real payload
     calls = {"n": 0}
 
@@ -274,7 +274,7 @@ def test_post_retries_empty_200_body(monkeypatch):
 def test_post_recovers_sse_keepalive_comments(monkeypatch):
     """OpenRouter interleaves ': OPENROUTER PROCESSING' SSE comment lines with the JSON on a slow
     non-streaming call; the body is recovered by dropping comment lines — no retry needed."""
-    import looplab.llm as llm
+    import looplab.core.llm as llm
     body = f": OPENROUTER PROCESSING\n\n: OPENROUTER PROCESSING\n\n{_GOOD}\n"
     calls = {"n": 0}
 
@@ -293,7 +293,7 @@ def test_post_retries_incomplete_read(monkeypatch):
     """A socket-level truncation (http.client.IncompleteRead from resp.read() — the gateway dropped
     the connection mid-body) is transient and must be retried, not abort the run."""
     import http.client
-    import looplab.llm as llm
+    import looplab.core.llm as llm
     calls = {"n": 0}
 
     class _TruncResp:
@@ -314,7 +314,7 @@ def test_post_retries_incomplete_read(monkeypatch):
 
 def test_post_raises_after_persistent_non_json(monkeypatch):
     """A persistently unparseable 200 body still surfaces a clean LLMError once retries are spent."""
-    import looplab.llm as llm
+    import looplab.core.llm as llm
     calls = {"n": 0}
 
     def fake_urlopen(req, timeout=None):
@@ -332,7 +332,7 @@ def test_post_raises_after_persistent_non_json(monkeypatch):
 def test_post_fails_fast_on_error_envelope(monkeypatch):
     """A valid-JSON `{"error": ...}` envelope (genuine bad request) is NOT a transient body — it must
     fail fast at the no-choices check with ONE attempt, not waste the retry budget."""
-    import looplab.llm as llm
+    import looplab.core.llm as llm
     calls = {"n": 0}
 
     def fake_urlopen(req, timeout=None):
@@ -349,7 +349,7 @@ def test_post_fails_fast_on_error_envelope(monkeypatch):
 
 def test_h1_guided_json_adds_schema_constraints():
     """H1: with guided_json on, complete_tool sends response_format + guided_json built from the schema."""
-    from looplab.llm import OpenAICompatibleClient
+    from looplab.core.llm import OpenAICompatibleClient
     c = OpenAICompatibleClient("m", guided_json=True)
     captured = {}
 
@@ -365,7 +365,7 @@ def test_h1_guided_json_adds_schema_constraints():
 
 
 def test_h1_off_by_default_no_constraints():
-    from looplab.llm import OpenAICompatibleClient
+    from looplab.core.llm import OpenAICompatibleClient
     c = OpenAICompatibleClient("m")
     captured = {}
     c._post = lambda p: (captured.update(p) or {"choices": [{"message": {"tool_calls": [
@@ -378,7 +378,7 @@ def test_read_stream_falls_back_on_iterable_non_sse_body():
     """A response that ITERATES line-by-line but never sends a `data:` line (a non-streaming endpoint
     behind a streaming request) must be reassembled from its raw lines and parsed as one plain JSON
     chat body — the `_sse_chunks` tail (raw_lines + got_sse) feeding `_read_stream`'s fallback."""
-    import looplab.llm as llm
+    import looplab.core.llm as llm
 
     class _IterResp:
         """Iterable urllib-response stand-in with NO usable read() (forces the raw-lines path)."""

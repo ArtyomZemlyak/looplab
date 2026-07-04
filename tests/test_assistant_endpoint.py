@@ -12,8 +12,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from fastapi.testclient import TestClient  # noqa: E402
 
-from looplab.assistant import SessionStore, run_turn, normalize_mode, expand_mentions  # noqa: E402
-from looplab.server import make_app  # noqa: E402
+from looplab.serve.assistant import SessionStore, run_turn, normalize_mode, expand_mentions  # noqa: E402
+from looplab.serve.server import make_app  # noqa: E402
 
 
 # --------------------------------------------------------------------------- scripted fake client
@@ -149,7 +149,7 @@ def test_plan_mode_has_no_write_tool(tmp_path):
 
 # --------------------------------------------------------------------------- HTTP routes
 def test_assistant_endpoints_roundtrip(tmp_path, monkeypatch):
-    monkeypatch.setattr("looplab.server.make_llm_client",
+    monkeypatch.setattr("looplab.serve.server.make_llm_client",
                         lambda s: _FakeChatClient([_call("list_runs", {}), _final("done — no runs.")]))
     client = TestClient(make_app(tmp_path))
 
@@ -180,7 +180,7 @@ def test_assistant_permission_pause_resume(tmp_path, monkeypatch):
     import time
     monkeypatch.setenv("LOOPLAB_JOB_INLINE_WAIT", "0.3")     # return {running} fast; the turn blocks on approval
     target = tmp_path / "made.txt"
-    monkeypatch.setattr("looplab.server.make_llm_client",
+    monkeypatch.setattr("looplab.serve.server.make_llm_client",
                         lambda s: _FakeChatClient([_call("write_file", {"path": str(target), "content": "yo"}),
                                                    _final("wrote it")]))
     client = TestClient(make_app(tmp_path))
@@ -213,7 +213,7 @@ def test_assistant_permission_pause_resume(tmp_path, monkeypatch):
 def test_assistant_message_soft_fails_offline(tmp_path, monkeypatch):
     def _boom(s):
         raise RuntimeError("connection refused")
-    monkeypatch.setattr("looplab.server.make_llm_client", _boom)
+    monkeypatch.setattr("looplab.serve.server.make_llm_client", _boom)
     client = TestClient(make_app(tmp_path))
     sid = client.post("/api/assistant/sessions", json={}).json()["id"]
     r = client.post(f"/api/assistant/sessions/{sid}/message", json={"instruction": "hi"}).json()

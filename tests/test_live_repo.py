@@ -12,13 +12,13 @@ from pathlib import Path
 import anyio
 import pytest
 
-from looplab.config import Settings
-from looplab.models import RunState
-from looplab.orchestrator import Engine
-from looplab.policy import GreedyTree
-from looplab.repo_task import EvalSpec, RepoTask
-from looplab.sandbox import SubprocessSandbox
-from looplab.tasks import make_roles
+from looplab.core.config import Settings
+from looplab.core.models import RunState
+from looplab.engine.orchestrator import Engine
+from looplab.search.policy import GreedyTree
+from looplab.adapters.repo_task import EvalSpec, RepoTask
+from looplab.runtime.sandbox import SubprocessSandbox
+from looplab.adapters.tasks import make_roles
 
 MODEL = "qwen3:8b"
 FIXTURE = Path(__file__).resolve().parent / "fixtures" / "repo_fixture"
@@ -90,8 +90,8 @@ def test_live_repotools_researcher_reads_repo(tmp_path):
                  eval=EvalSpec(command=[sys.executable, "ttrain.py"], metric=_M))
     s = _llm(); s.unified_agent = False     # this test asserts the split ToolUsingResearcher wiring
     researcher, _ = make_roles(t, s)
-    from looplab.agent import ToolUsingResearcher
-    from looplab.knowledge_tools import RepoTools
+    from looplab.agents.agent import ToolUsingResearcher
+    from looplab.tools.knowledge_tools import RepoTools
     assert isinstance(researcher, ToolUsingResearcher)
     provs = getattr(researcher.tools, "providers", [researcher.tools])
     assert any(isinstance(p, RepoTools) for p in provs)     # repo is readable by the proposer

@@ -1,8 +1,8 @@
 """C2 best-of-N candidate selection (execution-free reward)."""
 from __future__ import annotations
 
-from looplab.best_of_n import BestOfNDeveloper, _score
-from looplab.models import Idea
+from looplab.search.best_of_n import BestOfNDeveloper, _score
+from looplab.core.models import Idea
 
 _GOOD = "import json\nprint(json.dumps({'metric': 0.1}))\n"
 _BROKEN = "def f(:\n  pass\n"        # syntax error
@@ -52,8 +52,8 @@ def test_best_of_n_forwards_repair_and_audit():
 
 def test_make_roles_wraps_best_of_n():
     from pathlib import Path
-    from looplab.config import Settings
-    from looplab.tasks import load_task, make_roles
+    from looplab.core.config import Settings
+    from looplab.adapters.tasks import load_task, make_roles
     root = Path(__file__).resolve().parents[1]
     task = load_task(root / "examples" / "code_regression_task.json")
     _r, dev = make_roles(task, Settings(backend="llm", best_of_n=3, unified_agent=False))

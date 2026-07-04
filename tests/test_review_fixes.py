@@ -7,14 +7,14 @@ from pathlib import Path
 
 import pytest
 
-from looplab.command_eval import host_score, read_metric
-from looplab.context_budget import truncate_history
-from looplab.critic import critique
-from looplab.models import Idea
-from looplab.parse import _coerce_value
-from looplab.policy import ASHAPolicy, make_policy
-from looplab.redact import redact_secrets
-from looplab.reward_hack import detect_reward_hacks
+from looplab.runtime.command_eval import host_score, read_metric
+from looplab.core.context_budget import truncate_history
+from looplab.trust.critic import critique
+from looplab.core.models import Idea
+from looplab.core.parse import _coerce_value
+from looplab.search.policy import ASHAPolicy, make_policy
+from looplab.trust.redact import redact_secrets
+from looplab.trust.reward_hack import detect_reward_hacks
 
 
 # --- command_eval.host_score: label equality + no candidate array-shopping ------------------------
@@ -124,10 +124,10 @@ def test_asha_rung_nodes_overrides_rung0_width():
 # --- a mid-run strategy switch to BOHB wires the surrogate (not bare ASHA) -------------------------
 
 def test_strategy_switch_to_bohb_wires_surrogate(tmp_path):
-    from looplab.orchestrator import Engine
-    from looplab.policy import GreedyTree
-    from looplab.sandbox import SubprocessSandbox
-    from looplab.surrogate import SurrogateResearcher
+    from looplab.engine.orchestrator import Engine
+    from looplab.search.policy import GreedyTree
+    from looplab.runtime.sandbox import SubprocessSandbox
+    from looplab.search.surrogate import SurrogateResearcher
     from pydantic import BaseModel
 
     class _T(BaseModel):

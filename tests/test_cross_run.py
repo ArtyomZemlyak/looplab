@@ -7,15 +7,15 @@ from pathlib import Path
 
 import anyio
 
-from looplab.eventstore import EventStore
-from looplab.models import NodeStatus, RunState
-from looplab.orchestrator import Engine
-from looplab.policy import GreedyTree
-from looplab.replay import fold
-from looplab.run_tools import SiblingRunTools
-from looplab.sandbox import SubprocessSandbox
-from looplab.server import _Action, _action_to_control
-from looplab.toytask import ToyTask
+from looplab.events.eventstore import EventStore
+from looplab.core.models import NodeStatus, RunState
+from looplab.engine.orchestrator import Engine
+from looplab.search.policy import GreedyTree
+from looplab.events.replay import fold
+from looplab.tools.run_tools import SiblingRunTools
+from looplab.runtime.sandbox import SubprocessSandbox
+from looplab.serve.server import _Action, _action_to_control
+from looplab.adapters.toytask import ToyTask
 
 ROOT = Path(__file__).resolve().parents[1]
 TASK = ROOT / "examples" / "toy_task.json"

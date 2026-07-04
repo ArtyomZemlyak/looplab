@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import pytest
 
-from looplab.models import Event, Idea, NodeStatus, RunState
-from looplab.replay import fold
+from looplab.core.models import Event, Idea, NodeStatus, RunState
+from looplab.events.replay import fold
 
 
 def _run(direction="min"):
@@ -48,7 +48,7 @@ def test_old_events_without_theme_still_fold():
 
 def test_theme_rollup():
     fastapi = pytest.importorskip("fastapi")  # noqa: F841 - server import needs the [ui] extra
-    from looplab.server import _theme_rollup
+    from looplab.serve.server import _theme_rollup
     st = fold([_run("min"),
                _node(0, "loss-fn"), _eval(0, 1.0),
                _node(1, "loss-fn"), _eval(1, 0.3),

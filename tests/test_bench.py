@@ -5,7 +5,7 @@ import json
 from pathlib import Path
 
 from looplab.bench import run_benchmark
-from looplab.config import Settings
+from looplab.core.config import Settings
 
 ROOT = Path(__file__).resolve().parents[1]
 

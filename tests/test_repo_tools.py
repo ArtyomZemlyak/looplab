@@ -3,7 +3,7 @@ proposes changes from the actual code. RepoTools is read-only and path-restricte
 stays the Developer's job — the role/trust boundary)."""
 from __future__ import annotations
 
-from looplab.knowledge_tools import RepoTools
+from looplab.tools.knowledge_tools import RepoTools
 
 
 def _repo(tmp_path):
@@ -45,11 +45,11 @@ def test_read_is_path_restricted(tmp_path):
 def test_make_roles_wires_repo_tools_for_edit_mode(tmp_path):
     from pathlib import Path
 
-    from looplab.agent import ToolUsingResearcher
-    from looplab.config import Settings
-    from looplab.knowledge_tools import RepoTools as RT
-    from looplab.repo_task import EvalSpec, RepoTask
-    from looplab.tasks import make_roles
+    from looplab.agents.agent import ToolUsingResearcher
+    from looplab.core.config import Settings
+    from looplab.tools.knowledge_tools import RepoTools as RT
+    from looplab.adapters.repo_task import EvalSpec, RepoTask
+    from looplab.adapters.tasks import make_roles
     repo = tmp_path / "repo"; repo.mkdir()
     (repo / "m.py").write_text("x=1\n", encoding="utf-8")
     t = RepoTask(id="e", editable_path=str(repo), edit_surface=["*.py"],
@@ -62,10 +62,10 @@ def test_make_roles_wires_repo_tools_for_edit_mode(tmp_path):
 
 
 def test_make_roles_no_repo_tools_for_param_search(tmp_path):
-    from looplab.config import Settings
-    from looplab.knowledge_tools import RepoTools as RT
-    from looplab.repo_task import EvalSpec, RepoTask
-    from looplab.tasks import make_roles
+    from looplab.core.config import Settings
+    from looplab.tools.knowledge_tools import RepoTools as RT
+    from looplab.adapters.repo_task import EvalSpec, RepoTask
+    from looplab.adapters.tasks import make_roles
     repo = tmp_path / "repo"; repo.mkdir()
     (repo / "m.py").write_text("x=1\n", encoding="utf-8")
     t = RepoTask(id="p", editable_path=str(repo), params={"lr": (0.0, 1.0)},

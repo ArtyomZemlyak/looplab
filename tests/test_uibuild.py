@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import pytest
 
-from looplab import uibuild
+from looplab.serve import uibuild
 
 
 @pytest.fixture(autouse=True)

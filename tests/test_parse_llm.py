@@ -3,10 +3,10 @@ from __future__ import annotations
 
 import pytest
 
-from looplab.llm import BudgetExceeded, CostAccountant
-from looplab.models import Idea
-from looplab.parse import ParseError, parse_structured
-from looplab.roles import LLMResearcher
+from looplab.core.llm import BudgetExceeded, CostAccountant
+from looplab.core.models import Idea
+from looplab.core.parse import ParseError, parse_structured
+from looplab.agents.roles import LLMResearcher
 
 
 class FakeClient:
@@ -53,13 +53,13 @@ def test_all_parsers_fail_raises():
 def test_llm_researcher_returns_idea():
     c = FakeClient(tool=[{"operator": "improve", "params": {"x": 3.0, "y": -1.0}, "rationale": "r"}])
     r = LLMResearcher(c)
-    from looplab.models import RunState
+    from looplab.core.models import RunState
     idea = r.propose(RunState(goal="g"), None)
     assert isinstance(idea, Idea) and idea.params["x"] == 3.0
 
 
 def test_extract_json_ignores_trailing_braces():
-    from looplab.parse import _extract_json
+    from looplab.core.parse import _extract_json
     obj = _extract_json('Sure: {"operator": "draft", "params": {"x": 1.0}} note: see {y}')
     assert obj["operator"] == "draft" and obj["params"] == {"x": 1.0}
 
@@ -72,19 +72,19 @@ def test_h2_coerces_string_numbers_in_tool_call():
 
 
 def test_h2_lenient_json_single_quotes_and_trailing_comma():
-    from looplab.parse import _extract_json
+    from looplab.core.parse import _extract_json
     obj = _extract_json("Here: {'operator': 'improve', 'params': {'x': 2.0,}}")
     assert obj["operator"] == "improve" and obj["params"]["x"] == 2.0
 
 
 def test_h2_coerce_case_insensitive_keys():
-    from looplab.parse import _coerce_to_model
+    from looplab.core.parse import _coerce_to_model
     out = _coerce_to_model({"Operator": "draft", "Rationale": "hi"}, Idea)
     assert out["operator"] == "draft" and out["rationale"] == "hi"
 
 
 def test_extract_code_prefers_python_fence():
-    from looplab.parse import extract_code
+    from looplab.core.parse import extract_code
     text = "Example output:\n```\nnot code\n```\nSolution:\n```python\nprint(1)\n```"
     assert extract_code(text) == "print(1)"
 

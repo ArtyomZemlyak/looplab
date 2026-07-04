@@ -3,8 +3,8 @@ from __future__ import annotations
 
 import pytest
 
-from looplab.gate import one_se_better
-from looplab.sandbox import SubprocessSandbox
+from looplab.trust.gate import one_se_better
+from looplab.runtime.sandbox import SubprocessSandbox
 
 
 def test_sandbox_captures_metric(tmp_path):

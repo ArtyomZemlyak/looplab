@@ -7,8 +7,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from looplab.assistant import run_turn  # noqa: E402
-from looplab.write_tools import FileBackups, WriteTools  # noqa: E402
+from looplab.serve.assistant import run_turn  # noqa: E402
+from looplab.tools.write_tools import FileBackups, WriteTools  # noqa: E402
 
 
 def _call(name, args):

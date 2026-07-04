@@ -2,9 +2,9 @@
 ValidatingDeveloper wrapper (retry-with-feedback + fallback)."""
 from __future__ import annotations
 
-from looplab.models import Idea
-from looplab.roles import ValidatingDeveloper
-from looplab.validate import AgentRun, validate_agent_code
+from looplab.core.models import Idea
+from looplab.agents.roles import ValidatingDeveloper
+from looplab.core.validate import AgentRun, validate_agent_code
 
 _SEED = 'import json\nprint(json.dumps({"metric": 0.0}))\n'
 _GOOD = 'import json\nprint(json.dumps({"metric": 42.0}))\n'
@@ -189,12 +189,12 @@ def test_engine_emits_agent_validated_audit_trail(tmp_path):
 
     import anyio
 
-    from looplab.eventstore import EventStore
-    from looplab.orchestrator import Engine
-    from looplab.policy import GreedyTree
-    from looplab.replay import fold
-    from looplab.sandbox import SubprocessSandbox
-    from looplab.toytask import ToyTask
+    from looplab.events.eventstore import EventStore
+    from looplab.engine.orchestrator import Engine
+    from looplab.search.policy import GreedyTree
+    from looplab.events.replay import fold
+    from looplab.runtime.sandbox import SubprocessSandbox
+    from looplab.adapters.toytask import ToyTask
 
     task = ToyTask.load(Path(__file__).resolve().parents[1] / "examples" / "toy_task.json")
     researcher, developer = task.build_roles()
@@ -223,10 +223,10 @@ def test_ablation_probes_bypass_the_validator(tmp_path):
     and multiplying expensive agent calls (review finding B1)."""
     from pathlib import Path
 
-    from looplab.orchestrator import Engine
-    from looplab.policy import GreedyTree
-    from looplab.sandbox import SubprocessSandbox
-    from looplab.toytask import ToyTask
+    from looplab.engine.orchestrator import Engine
+    from looplab.search.policy import GreedyTree
+    from looplab.runtime.sandbox import SubprocessSandbox
+    from looplab.adapters.toytask import ToyTask
 
     task = ToyTask.load(Path(__file__).resolve().parents[1] / "examples" / "toy_task.json")
     researcher, inner = task.build_roles()

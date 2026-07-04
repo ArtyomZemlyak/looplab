@@ -9,8 +9,8 @@ from pathlib import Path
 
 import pytest
 
-from looplab import command_eval
-from looplab.command_eval import make_docker_wrap, run_command_eval
+from looplab.runtime import command_eval
+from looplab.runtime.command_eval import make_docker_wrap, run_command_eval
 
 _M = {"kind": "stdout_json", "key": "metric"}
 
@@ -63,7 +63,7 @@ def test_run_command_eval_applies_wrap_to_setup_and_eval(tmp_path):
 def test_adapter_metric_is_wrapped_under_untrusted(tmp_path):
     """#1a: the agent-authored `adapter` reader EXECS code, so under the untrusted tier it
     must run through the sandbox wrap (in-container), not directly on the host."""
-    from looplab.command_eval import read_metric
+    from looplab.runtime.command_eval import read_metric
     (tmp_path / "LOOPLAB_adapter.py").write_text(
         "def read_metric(workdir):\n    return 2.5\n", encoding="utf-8")
     seen = {}
@@ -82,7 +82,7 @@ def test_adapter_metric_is_wrapped_under_untrusted(tmp_path):
 
 def test_adapter_metric_runs_on_host_without_wrap(tmp_path):
     # Sanity: trusted_local path (no wrap) execs with the host interpreter, in-process harness.
-    from looplab.command_eval import read_metric
+    from looplab.runtime.command_eval import read_metric
     (tmp_path / "LOOPLAB_adapter.py").write_text(
         "def read_metric(workdir):\n    return -1.0\n", encoding="utf-8")
     assert read_metric("", str(tmp_path),
@@ -101,10 +101,10 @@ def test_engine_untrusted_builds_docker_wrap(monkeypatch, tmp_path):
     monkeypatch.setattr(command_eval, "make_docker_wrap", fake_wrap_factory)
 
     import sys as _s
-    from looplab.orchestrator import Engine
-    from looplab.policy import GreedyTree
-    from looplab.repo_task import EvalSpec, RepoTask
-    from looplab.sandbox import SubprocessSandbox
+    from looplab.engine.orchestrator import Engine
+    from looplab.search.policy import GreedyTree
+    from looplab.adapters.repo_task import EvalSpec, RepoTask
+    from looplab.runtime.sandbox import SubprocessSandbox
 
     repo = tmp_path / "repo"
     repo.mkdir()

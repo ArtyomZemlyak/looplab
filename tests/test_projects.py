@@ -6,7 +6,7 @@ import json
 
 import pytest
 
-from looplab.projects import ProjectError, ProjectStore
+from looplab.serve.projects import ProjectError, ProjectStore
 
 
 def store(tmp_path):

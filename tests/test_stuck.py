@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import json
 
-from looplab.agent import drive_tool_loop, loop_opts_from_settings
-from looplab.context_budget import compact_history
-from looplab.stuck import StuckDetector
+from looplab.agents.agent import drive_tool_loop, loop_opts_from_settings
+from looplab.core.context_budget import compact_history
+from looplab.agents.stuck import StuckDetector
 
 
 # --------------------------------------------------------------------------- detector unit
@@ -212,7 +212,7 @@ def test_loop_opts_from_settings_defaults():
 
 
 def test_config_enables_plan_and_summary_by_default():
-    from looplab.config import Settings
+    from looplab.core.config import Settings
     s = Settings()
     assert s.agent_self_plan is True
     assert s.agent_auto_summary is True

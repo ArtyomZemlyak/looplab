@@ -2,7 +2,7 @@
 authoring a task. Must read text, refuse secrets/binaries, and never escape its allowed roots."""
 from __future__ import annotations
 
-from looplab.reposcout import RepoScoutTools
+from looplab.tools.reposcout import RepoScoutTools
 
 
 def _repo(tmp_path):

@@ -5,12 +5,12 @@ from pathlib import Path
 
 import anyio
 
-from looplab.models import Idea, Node, NodeStatus, RunState
-from looplab.orchestrator import Engine
-from looplab.policy import GreedyTree
-from looplab.sandbox import SubprocessSandbox
-from looplab.surrogate import SurrogateResearcher
-from looplab.toytask import ToyTask
+from looplab.core.models import Idea, Node, NodeStatus, RunState
+from looplab.engine.orchestrator import Engine
+from looplab.search.policy import GreedyTree
+from looplab.runtime.sandbox import SubprocessSandbox
+from looplab.search.surrogate import SurrogateResearcher
+from looplab.adapters.toytask import ToyTask
 
 ROOT = Path(__file__).resolve().parents[1]
 TASK_FILE = ROOT / "examples" / "toy_task.json"

@@ -1,7 +1,7 @@
 """WriteTools: path/secret/protect gating and the permission-mode behavior (deny / ask / inline)."""
 from __future__ import annotations
 
-from looplab.write_tools import WriteTools
+from looplab.tools.write_tools import WriteTools
 
 ALLOW = lambda a: "allow_once"      # noqa: E731
 DENY = lambda a: "deny"             # noqa: E731

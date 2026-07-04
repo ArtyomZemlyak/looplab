@@ -3,7 +3,7 @@ gate accounts for them correctly. Regression: a unicode-named in-surface edit ga
 out-of-surface (mangled path) -> the whole agent patch was reverted as a spurious no-op."""
 from __future__ import annotations
 
-from looplab.patch import changed_paths, gate
+from looplab.tools.patch import changed_paths, gate
 
 
 def _diff(*lines):

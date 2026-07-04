@@ -1,7 +1,7 @@
 """I3 static code-leakage scan."""
 from __future__ import annotations
 
-from looplab.leakage import code_leakage_scan
+from looplab.trust.leakage import code_leakage_scan
 
 
 def test_flags_fit_on_test():

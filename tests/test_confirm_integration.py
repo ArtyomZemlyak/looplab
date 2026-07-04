@@ -3,13 +3,13 @@ from __future__ import annotations
 
 import anyio
 
-from looplab.eventstore import EventStore
-from looplab.orchestrator import Engine
-from looplab.policy import GreedyTree
-from looplab.replay import fold
-from looplab.roles import ToyObjectiveDeveloper, ToyResearcher
-from looplab.sandbox import SubprocessSandbox
-from looplab.toytask import ToyTask
+from looplab.events.eventstore import EventStore
+from looplab.engine.orchestrator import Engine
+from looplab.search.policy import GreedyTree
+from looplab.events.replay import fold
+from looplab.agents.roles import ToyObjectiveDeveloper, ToyResearcher
+from looplab.runtime.sandbox import SubprocessSandbox
+from looplab.adapters.toytask import ToyTask
 
 
 def _noisy_engine(run_dir, *, confirm_top_k, confirm_seeds, max_nodes=10):

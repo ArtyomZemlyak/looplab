@@ -1,8 +1,8 @@
 """C4 independent critic (execution-free)."""
 from __future__ import annotations
 
-from looplab.critic import critique
-from looplab.models import Idea
+from looplab.trust.critic import critique
+from looplab.core.models import Idea
 
 
 def test_flags_stub():

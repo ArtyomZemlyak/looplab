@@ -5,10 +5,10 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from looplab.eventstore import EventStore  # noqa: F401  (kept for symmetry with replay tests)
-from looplab.projects import ProjectStore
-from looplab.redact import redact_secrets
-from looplab.replay import fold
+from looplab.events.eventstore import EventStore  # noqa: F401  (kept for symmetry with replay tests)
+from looplab.serve.projects import ProjectStore
+from looplab.trust.redact import redact_secrets
+from looplab.events.replay import fold
 
 ROOT = Path(__file__).resolve().parents[1]
 TASK = ROOT / "examples" / "toy_task.json"
@@ -56,10 +56,10 @@ def test_create_node_id_is_gap_safe(tmp_path):
     # A dropped/malformed node_created leaves a GAP in node ids (fold skips the bad event). The next
     # created node must take max(id)+1, NOT len(nodes) — len would collide with an existing higher id
     # and silently overwrite it (corrupting lineage/best-selection). Regression for that bug.
-    from looplab.orchestrator import Engine
-    from looplab.policy import GreedyTree
-    from looplab.sandbox import SubprocessSandbox
-    from looplab.toytask import ToyTask
+    from looplab.engine.orchestrator import Engine
+    from looplab.search.policy import GreedyTree
+    from looplab.runtime.sandbox import SubprocessSandbox
+    from looplab.adapters.toytask import ToyTask
 
     task = ToyTask.load(TASK)
     r, d = task.build_roles()

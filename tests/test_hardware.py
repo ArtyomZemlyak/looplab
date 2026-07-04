@@ -1,7 +1,7 @@
 """Honest runtime-capability brief + task-aware gating (no torch claim for offline tasks)."""
 from __future__ import annotations
 
-from looplab.hardware import runtime_capabilities_brief, task_runtime_caps
+from looplab.core.hardware import runtime_capabilities_brief, task_runtime_caps
 
 
 def test_caps_off_is_conservative():

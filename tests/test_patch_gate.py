@@ -12,12 +12,12 @@ from pathlib import Path
 import anyio
 import pytest
 
-from looplab.cli_agent import PRESETS, CliAgentDeveloper
-from looplab.models import Idea, Node
-from looplab.orchestrator import Engine
-from looplab.policy import GreedyTree
-from looplab.sandbox import SubprocessSandbox
-from looplab.toytask import ToyTask
+from looplab.agents.cli_agent import PRESETS, CliAgentDeveloper
+from looplab.core.models import Idea, Node
+from looplab.engine.orchestrator import Engine
+from looplab.search.policy import GreedyTree
+from looplab.runtime.sandbox import SubprocessSandbox
+from looplab.adapters.toytask import ToyTask
 
 ROOT = Path(__file__).resolve().parents[1]
 _HAS_GIT = shutil.which("git") is not None
@@ -122,7 +122,7 @@ def test_write_node_files_skips_solution_assets_and_escapes(tmp_path):
 def test_engine_protects_grader_asset_from_agent_overwrite(tmp_path):
     """Integrity: an agent that ships its own grader.py (in-surface *.py) must NOT be able
     to replace the task's private grader. Assets are written last and win."""
-    from looplab.mlebench import MLEBenchTask
+    from looplab.adapters.mlebench import MLEBenchTask
 
     class _CheatDev:
         def __init__(self):

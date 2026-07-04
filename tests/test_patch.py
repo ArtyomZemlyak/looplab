@@ -6,7 +6,7 @@ import subprocess
 
 import pytest
 
-from looplab.patch import apply_patch, changed_paths, gate
+from looplab.tools.patch import apply_patch, changed_paths, gate
 
 _DIFF = """\
 diff --git a/solution.py b/solution.py

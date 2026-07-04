@@ -143,7 +143,7 @@ def test_run_no_task_errors():
 def _patch_genesis(monkeypatch, task):
     """Stub the LLM client construction and the authoring call so the genesis path runs offline."""
     import looplab.cli as cli
-    import looplab.genesis as genesis
+    import looplab.engine.genesis as genesis
     monkeypatch.setattr(cli, "make_llm_client", lambda settings, **k: object())
     monkeypatch.setattr(genesis, "author_task",
                         lambda goal, **k: genesis.GenesisResult(task=task, rationale="inferred"))
@@ -172,7 +172,7 @@ def test_run_no_genesis_no_kind_requires_kind(tmp_path):
 
 def _stub_author(monkeypatch, **task):
     import looplab.cli as cli
-    import looplab.genesis as genesis
+    import looplab.engine.genesis as genesis
     monkeypatch.setattr(cli, "make_llm_client", lambda settings, **k: object())
     monkeypatch.setattr(genesis, "author_task",
                         lambda goal, **k: genesis.GenesisResult(task=dict(task), rationale="r"))
@@ -210,7 +210,7 @@ def test_run_generative_kind_respects_explicit_backend(tmp_path, monkeypatch):
 
 def test_run_genesis_endpoint_error_is_attributed_to_the_model(tmp_path, monkeypatch):
     import looplab.cli as cli
-    import looplab.genesis as genesis
+    import looplab.engine.genesis as genesis
     monkeypatch.setattr(cli, "make_llm_client", lambda settings, **k: object())
     monkeypatch.setattr(genesis, "author_task",
                         lambda goal, **k: genesis.GenesisResult(error="connection refused"))
@@ -221,7 +221,7 @@ def test_run_genesis_endpoint_error_is_attributed_to_the_model(tmp_path, monkeyp
 
 def test_run_genesis_vague_goal_asks_for_detail(tmp_path, monkeypatch):
     import looplab.cli as cli
-    import looplab.genesis as genesis
+    import looplab.engine.genesis as genesis
     monkeypatch.setattr(cli, "make_llm_client", lambda settings, **k: object())
     monkeypatch.setattr(genesis, "author_task",
                         lambda goal, **k: genesis.GenesisResult(task={}, reply="What data do you have?"))
@@ -269,7 +269,7 @@ def test_init_scaffolds_the_requested_kind(tmp_path):
 
 
 def test_set_value_stripped_and_nonfinite_kept_as_string():
-    from looplab.appconfig import coerce_scalar, parse_sets
+    from looplab.core.appconfig import coerce_scalar, parse_sets
     assert parse_sets(["llm_model =  qwen3:8b "]) == {"llm_model": "qwen3:8b"}   # key + value stripped
     assert coerce_scalar("NaN") == "NaN" and coerce_scalar("Infinity") == "Infinity"
     assert coerce_scalar("null") is None and coerce_scalar("3") == 3
@@ -278,7 +278,7 @@ def test_set_value_stripped_and_nonfinite_kept_as_string():
 def test_run_kind_pins_genesis(tmp_path, monkeypatch):
     # --kind does NOT skip genesis: it pins the kind, and genesis fills the rest within it.
     import looplab.cli as cli
-    import looplab.genesis as genesis
+    import looplab.engine.genesis as genesis
     seen = {}
     monkeypatch.setattr(cli, "make_llm_client", lambda settings, **k: object())
 

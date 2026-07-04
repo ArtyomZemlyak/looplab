@@ -1,6 +1,6 @@
 """Shared pytest fixtures.
 
-The engine reads a `.env` file from the CWD (see looplab.config.Settings), and the suite runs from
+The engine reads a `.env` file from the CWD (see looplab.core.config.Settings), and the suite runs from
 the repo root — which is exactly where a developer's real `.env` lives. Without insulation, those
 values would leak into every `Settings()` built in a test and break default-asserting tests
 (e.g. `Settings().max_parallel == 1`). Disable dotenv loading for the whole suite so tests see only
@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import pytest
 
-from looplab.config import Settings
+from looplab.core.config import Settings
 
 
 @pytest.fixture(autouse=True)

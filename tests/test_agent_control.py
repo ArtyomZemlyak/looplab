@@ -8,15 +8,15 @@ from pathlib import Path
 
 import anyio
 
-from looplab.config import Settings
-from looplab.eventstore import EventStore
-from looplab.models import Idea, RunState
-from looplab.orchestrator import Engine
-from looplab.policy import GreedyTree
-from looplab.replay import fold
-from looplab.sandbox import RunResult
-from looplab.strategist import StrategyContext, validate_strategy
-from looplab.toytask import ToyTask
+from looplab.core.config import Settings
+from looplab.events.eventstore import EventStore
+from looplab.core.models import Idea, RunState
+from looplab.engine.orchestrator import Engine
+from looplab.search.policy import GreedyTree
+from looplab.events.replay import fold
+from looplab.runtime.sandbox import RunResult
+from looplab.agents.strategist import StrategyContext, validate_strategy
+from looplab.adapters.toytask import ToyTask
 
 ROOT = Path(__file__).resolve().parents[1]
 TASK = ROOT / "examples" / "toy_task.json"

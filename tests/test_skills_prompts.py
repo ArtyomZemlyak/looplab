@@ -6,15 +6,15 @@ from pathlib import Path
 
 import anyio
 
-from looplab.agent import CompositeTools
-from looplab.agents_md import generate_agents_md
-from looplab.eventstore import EventStore
-from looplab.orchestrator import Engine
-from looplab.policy import GreedyTree
-from looplab.prompts import PromptStore, render
-from looplab.sandbox import SubprocessSandbox
-from looplab.skills import SkillLibrary, SkillTools
-from looplab.toytask import ToyTask
+from looplab.agents.agent import CompositeTools
+from looplab.tools.agents_md import generate_agents_md
+from looplab.events.eventstore import EventStore
+from looplab.engine.orchestrator import Engine
+from looplab.search.policy import GreedyTree
+from looplab.core.prompts import PromptStore, render
+from looplab.runtime.sandbox import SubprocessSandbox
+from looplab.tools.skills import SkillLibrary, SkillTools
+from looplab.adapters.toytask import ToyTask
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -62,7 +62,7 @@ def test_example_skill_loads():
 # ---- composite tools ----
 def test_composite_tools_routing(tmp_path):
     (tmp_path / "s.md").write_text("---\nname: s\ndescription: d\n---\nbody", encoding="utf-8")
-    from looplab.knowledge_tools import KnowledgeTools
+    from looplab.tools.knowledge_tools import KnowledgeTools
     (tmp_path / "note.md").write_text("a knowledge note about trees", encoding="utf-8")
     comp = CompositeTools([KnowledgeTools(str(tmp_path)), SkillTools(str(tmp_path))])
     names = {f["function"]["name"] for f in comp.specs()}

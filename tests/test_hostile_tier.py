@@ -5,7 +5,7 @@ import shutil
 
 import pytest
 
-from looplab.sandbox import DockerSandbox, make_sandbox
+from looplab.runtime.sandbox import DockerSandbox, make_sandbox
 
 
 def test_hostile_tier_uses_gvisor_runtime():
@@ -27,7 +27,7 @@ def test_explicit_runtime_override():
 @pytest.mark.docker
 @pytest.mark.skipif(not shutil.which("docker"), reason="docker not on PATH")
 def test_docker_wrap_includes_runtime_flag(tmp_path):
-    from looplab.command_eval import make_docker_wrap
+    from looplab.runtime.command_eval import make_docker_wrap
     w = make_docker_wrap(str(tmp_path), "python:3.12-slim", runtime="runsc")
     argv = w(["python", "x.py"], str(tmp_path))
     assert "--runtime" in argv and "runsc" in argv

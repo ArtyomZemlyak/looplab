@@ -10,8 +10,8 @@ from __future__ import annotations
 
 import json
 
-from looplab.deep_research import _SYSTEM, DeepResearcher, state_brief
-from looplab.models import RunState
+from looplab.agents.deep_research import _SYSTEM, DeepResearcher, state_brief
+from looplab.core.models import RunState
 
 
 class _FakeTools:

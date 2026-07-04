@@ -7,14 +7,14 @@ from pathlib import Path
 import anyio
 import pytest
 
-from looplab.dataset_task import DatasetBaselineDeveloper, DatasetTask, _SAMPLE_CHARS
-from looplab.eventstore import EventStore
-from looplab.models import Idea, RunState
-from looplab.orchestrator import Engine
-from looplab.policy import GreedyTree
-from looplab.run_tools import DataTools
-from looplab.sandbox import SubprocessSandbox
-from looplab.tasks import kinds, load_task, validate_task
+from looplab.adapters.dataset_task import DatasetBaselineDeveloper, DatasetTask, _SAMPLE_CHARS
+from looplab.events.eventstore import EventStore
+from looplab.core.models import Idea, RunState
+from looplab.engine.orchestrator import Engine
+from looplab.search.policy import GreedyTree
+from looplab.tools.run_tools import DataTools
+from looplab.runtime.sandbox import SubprocessSandbox
+from looplab.adapters.tasks import kinds, load_task, validate_task
 
 ROOT = Path(__file__).resolve().parents[1]
 TASK_FILE = ROOT / "examples" / "dataset_task.json"
@@ -73,7 +73,7 @@ def test_brief_includes_path_and_open_ended_metric():
 
 
 def test_dataset_run_end_to_end_and_replays(tmp_path):
-    from looplab.replay import fold
+    from looplab.events.replay import fold
     task = load_task(TASK_FILE)
     researcher, developer = task.build_roles()
     eng = Engine(tmp_path / "run", task=task, researcher=researcher, developer=developer,

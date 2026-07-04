@@ -4,12 +4,12 @@ to the exact pre-Memora behavior with no abstractor and to a deterministic lexic
 LLM. All offline (no real network/model)."""
 from __future__ import annotations
 
-from looplab.config import Settings
-from looplab.memora import (Abstraction, CachedAbstractor, LLMAbstractor, chat_completer,
+from looplab.core.config import Settings
+from looplab.tools.memora import (Abstraction, CachedAbstractor, LLMAbstractor, chat_completer,
                             expand_by_anchors, lexical_abstraction, make_abstractor)
-from looplab.memory import CaseLibrary
-from looplab.knowledge_tools import KnowledgeTools
-from looplab.vectorstore import InMemoryVectorStore, hash_embed
+from looplab.engine.memory import CaseLibrary
+from looplab.tools.knowledge_tools import KnowledgeTools
+from looplab.tools.vectorstore import InMemoryVectorStore, hash_embed
 
 
 # --------------------------- abstraction primitives ------------------------ #

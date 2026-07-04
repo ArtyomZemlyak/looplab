@@ -3,8 +3,8 @@ from __future__ import annotations
 
 import subprocess
 
-from looplab.git_tools import GitTools
-from looplab.shell_tools import ShellTools
+from looplab.tools.git_tools import GitTools
+from looplab.tools.shell_tools import ShellTools
 
 ALLOW = lambda a: "allow_once"      # noqa: E731
 DENY = lambda a: "deny"             # noqa: E731

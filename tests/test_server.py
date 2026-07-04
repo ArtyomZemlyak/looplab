@@ -13,13 +13,13 @@ import pytest
 pytest.importorskip("fastapi")
 from fastapi.testclient import TestClient  # noqa: E402
 
-from looplab.orchestrator import Engine  # noqa: E402
-from looplab.policy import GreedyTree  # noqa: E402
-from looplab.replay import fold  # noqa: E402
-from looplab.eventstore import EventStore, iter_jsonl  # noqa: E402
-from looplab.sandbox import SubprocessSandbox  # noqa: E402
-from looplab.server import make_app  # noqa: E402
-from looplab.toytask import ToyTask  # noqa: E402
+from looplab.engine.orchestrator import Engine  # noqa: E402
+from looplab.search.policy import GreedyTree  # noqa: E402
+from looplab.events.replay import fold  # noqa: E402
+from looplab.events.eventstore import EventStore, iter_jsonl  # noqa: E402
+from looplab.runtime.sandbox import SubprocessSandbox  # noqa: E402
+from looplab.serve.server import make_app  # noqa: E402
+from looplab.adapters.toytask import ToyTask  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
 TASK = ROOT / "examples" / "toy_task.json"
@@ -116,7 +116,7 @@ def test_runs_list_state_and_node_detail(tmp_path):
 def test_add_and_abandon_hypothesis_via_control(tmp_path):
     """P1: a human posts a hypothesis to the board through /control (it's in CONTROL_EVENTS), it folds
     into state.hypotheses as `open`, and an abandon control event flips it to `abandoned`."""
-    from looplab.models import hypothesis_id
+    from looplab.core.models import hypothesis_id
     _build_run(tmp_path)
     client = TestClient(make_app(tmp_path))
     stmt = "a log transform of the target helps"
@@ -139,7 +139,7 @@ def test_engine_liveness_lock_probe(tmp_path):
     holds the lock the probe flips to True. Uses the real cli._engine_singleton so the lock semantics
     match production and the test stays cross-platform (msvcrt on Windows, fcntl elsewhere)."""
     from looplab.cli import _engine_singleton
-    from looplab.server import _engine_alive
+    from looplab.serve.server import _engine_alive
 
     _build_run(tmp_path)                       # finished run; nothing holds the lock
     client = TestClient(make_app(tmp_path))
@@ -209,7 +209,7 @@ def test_engine_alive_unsupported_flock_reads_not_alive(tmp_path, monkeypatch):
     NOT alive (can't tell), not 'engine held'. The old code returned True for ANY OSError, which made
     every run look live forever and blocked deleting a stalled run. Only BlockingIOError = held."""
     fcntl = pytest.importorskip("fcntl")        # POSIX-only; Windows uses the msvcrt branch
-    from looplab.server import _engine_alive
+    from looplab.serve.server import _engine_alive
     rd = tmp_path / "r"; rd.mkdir()
     (rd / "engine.lock").write_text("", encoding="utf-8")
 
@@ -273,14 +273,14 @@ def test_settings_get_put_roundtrip(tmp_path):
 def _write_snapshot(rd: Path, **overrides):
     """Mimic what `cli run` writes: a masked Settings snapshot the resume path re-reads."""
     import json
-    from looplab.config import Settings
+    from looplab.core.config import Settings
     (rd / "config.snapshot.json").write_text(
         json.dumps(Settings(**overrides).masked_snapshot(), indent=2), encoding="utf-8")
 
 
 def test_put_run_config_edits_snapshot_for_resume(tmp_path):
     import json
-    from looplab.config import Settings
+    from looplab.core.config import Settings
     _build_run(tmp_path)
     rd = tmp_path / "demo"
     # the problematic run's real shape: short timeout, timeout-repair NOT yet enabled
@@ -334,7 +334,7 @@ def test_put_run_config_allowed_while_engine_live(tmp_path):
 
 def test_put_run_config_preserves_secret_and_unknown_keys(tmp_path):
     import json
-    from looplab.config import Settings
+    from looplab.core.config import Settings
     _build_run(tmp_path)
     rd = tmp_path / "demo"
     snap = Settings(timeout=30.0).masked_snapshot()
@@ -369,7 +369,7 @@ def test_boss_command_flags_stalled_run(tmp_path, monkeypatch):
             return {"tool_calls": [{"id": "e", "function": {
                 "name": "emit", "arguments": {"reply": "ok", "actions": []}}}]}
     cap = _Capture()
-    monkeypatch.setattr("looplab.server.make_llm_client", lambda s: cap)
+    monkeypatch.setattr("looplab.serve.server.make_llm_client", lambda s: cap)
     client = TestClient(make_app(tmp_path))
     r = client.post("/api/runs/z/command", json={"instruction": "what now?"}).json()
     assert r["ok"] is True
@@ -390,7 +390,7 @@ def test_tasks_catalogue(tmp_path):
 
 
 def test_start_validation_and_env(tmp_path, monkeypatch):
-    import looplab.server as server
+    import looplab.serve.server as server
     spawned = {}
 
     def fake_popen(cmd, **kw):
@@ -446,7 +446,7 @@ def test_chat_returns_trace_with_user_and_completion(tmp_path, monkeypatch):
     ACTUAL message (not just the system prompt) plus the completion — the Dock chat-trace card depends
     on this contract, so a dropped/renamed key must fail CI."""
     _build_run(tmp_path)
-    import looplab.server as server
+    import looplab.serve.server as server
 
     class _FakeClient:
         model = "fake-model"
@@ -669,7 +669,7 @@ def test_start_seeds_genesis_chat(tmp_path, monkeypatch):
     """The chat-first creation flow carries its planning conversation into the new run: /api/start with
     a `chat` array writes those turns to the run's chat.jsonl, so the run opens with its creation story
     (and only user/assistant turns, in order, flagged as genesis)."""
-    import looplab.server as server
+    import looplab.serve.server as server
     monkeypatch.setattr(server.subprocess, "Popen", lambda *a, **k: type("P", (), {})())
     client = TestClient(make_app(tmp_path))
     r = client.post("/api/start", json={
@@ -693,7 +693,7 @@ def test_start_seeds_genesis_chat(tmp_path, monkeypatch):
 def test_reset_archives_chat_log(tmp_path, monkeypatch):
     """Replay (reset) starts a clean conversation: the prior chat.jsonl is archived (renamed), not
     carried into the fresh run."""
-    import looplab.server as server
+    import looplab.serve.server as server
     _build_run(tmp_path)                                          # a finished run (reset only runs on those)
     # patch AFTER the build — Popen is the shared module symbol the sandbox uses to run solution.py too
     monkeypatch.setattr(server.subprocess, "Popen", lambda *a, **k: type("P", (), {})())
@@ -713,7 +713,7 @@ def test_action_router_maps_plan_to_multiple_controls():
     """The agentic boss emits a _Plan (reply + ordered actions); _plan_to_actions maps each step to a
     control, drops pure-advice steps, and carries per-step rationale. Covers the new note + budget verbs
     and the multi-action shape that makes 'you have 10 more nodes, try some nets' a real batch."""
-    from looplab.server import _Action, _Plan, _action_to_control, _plan_to_actions
+    from looplab.serve.server import _Action, _Plan, _action_to_control, _plan_to_actions
 
     class _St:  # _action_to_control only reads st.best_node_id (for the approve verb)
         best_node_id = 7
@@ -740,7 +740,7 @@ def test_action_router_maps_plan_to_multiple_controls():
 def test_boss_hint_replaces_standing_directive():
     """The boss authors the complete current directive each turn, so its hint REPLACES the standing
     one (data.replace=True) rather than stacking contradictory directives."""
-    from looplab.server import _Action, _action_to_control
+    from looplab.serve.server import _Action, _action_to_control
 
     class _St:
         best_node_id = 1
@@ -753,7 +753,7 @@ def test_boss_hint_replaces_standing_directive():
 def test_budget_action_clamps_nodes():
     """A budget verb only ADDS room and is bounded: non-positive is a no-op, and a hallucinated huge
     delta is capped so the boss LLM can't push max_nodes to a runaway value."""
-    from looplab.server import _Action, _action_to_control
+    from looplab.serve.server import _Action, _action_to_control
 
     class _St:
         best_node_id = 1

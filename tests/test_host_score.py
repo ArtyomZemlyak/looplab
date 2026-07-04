@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import json
 
-from looplab.command_eval import host_score, read_metric
+from looplab.runtime.command_eval import host_score, read_metric
 
 
 def test_host_score_rmse_mae_mse():

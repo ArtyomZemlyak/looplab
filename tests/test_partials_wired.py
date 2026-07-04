@@ -8,15 +8,15 @@ from pathlib import Path
 import anyio
 import orjson
 
-from looplab.confirm import confirm_top_k
-from looplab.eventstore import EventStore
-from looplab.memory import JsonlCaseLibrary
-from looplab.models import Idea, Node, NodeStatus
-from looplab.orchestrator import Engine
-from looplab.policy import GreedyTree
-from looplab.replay import fold
-from looplab.sandbox import SubprocessSandbox
-from looplab.toytask import ToyTask
+from looplab.trust.confirm import confirm_top_k
+from looplab.events.eventstore import EventStore
+from looplab.engine.memory import JsonlCaseLibrary
+from looplab.core.models import Idea, Node, NodeStatus
+from looplab.engine.orchestrator import Engine
+from looplab.search.policy import GreedyTree
+from looplab.events.replay import fold
+from looplab.runtime.sandbox import SubprocessSandbox
+from looplab.adapters.toytask import ToyTask
 
 ROOT = Path(__file__).resolve().parents[1]
 TASK = ROOT / "examples" / "toy_task.json"
@@ -147,7 +147,7 @@ def test_memory_persists_and_retains_best(tmp_path):
 def test_past_cases_become_searchable_knowledge(tmp_path):
     """I19 retrieval: a stored case is indexed by KnowledgeTools so the Researcher can
     recall it via kb_search."""
-    from looplab.knowledge_tools import KnowledgeTools
+    from looplab.tools.knowledge_tools import KnowledgeTools
     cases = tmp_path / "cases.jsonl"
     JsonlCaseLibrary(cases).add({"task_id": "poly_regression", "direction": "min",
                                  "goal": "polynomial degree selection",

@@ -7,9 +7,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from looplab.bg_tasks import BackgroundManager  # noqa: E402
-from looplab.shell_tools import git_config_env  # noqa: E402
-from looplab.write_tools import FileBackups, WriteTools  # noqa: E402
+from looplab.runtime.bg_tasks import BackgroundManager  # noqa: E402
+from looplab.tools.shell_tools import git_config_env  # noqa: E402
+from looplab.tools.write_tools import FileBackups, WriteTools  # noqa: E402
 
 
 def test_secret_check_is_root_relative_not_absolute(tmp_path):

@@ -1,8 +1,8 @@
 """I1 keystone: event store durability + replay determinism (the #1 P0 risk)."""
 from __future__ import annotations
 
-from looplab.eventstore import EventStore
-from looplab.replay import fold
+from looplab.events.eventstore import EventStore
+from looplab.events.replay import fold
 
 
 def _seed_events(store: EventStore) -> None:

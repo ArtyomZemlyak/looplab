@@ -1,7 +1,7 @@
 """E3 literature-grounded ideation (network-optional arXiv tool)."""
 from __future__ import annotations
 
-from looplab.literature import LiteratureTools
+from looplab.tools.literature import LiteratureTools
 
 
 def test_spec_shape():
@@ -25,7 +25,7 @@ def test_empty_query():
 
 def test_network_failure_is_graceful(monkeypatch):
     # Point urlopen at a failure so the network path is exercised offline without crashing.
-    import looplab.literature as lit
+    import looplab.tools.literature as lit
 
     def _boom(*a, **k):
         raise OSError("blocked")

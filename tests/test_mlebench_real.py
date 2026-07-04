@@ -16,12 +16,12 @@ import pytest
 
 mlebench = pytest.importorskip("mlebench")
 
-from looplab.kaggle_dl import KaggleAuthError, KaggleRulesError, resolve_token  # noqa: E402
-from looplab.mlebench_grade import grade, grade_in_subprocess  # noqa: E402
-from looplab.mlebench_real import MLEBenchRealTask, competition_meta  # noqa: E402
-from looplab.orchestrator import Engine  # noqa: E402
-from looplab.policy import GreedyTree  # noqa: E402
-from looplab.sandbox import SubprocessSandbox  # noqa: E402
+from looplab.adapters.kaggle_dl import KaggleAuthError, KaggleRulesError, resolve_token  # noqa: E402
+from looplab.adapters.mlebench_grade import grade, grade_in_subprocess  # noqa: E402
+from looplab.adapters.mlebench_real import MLEBenchRealTask, competition_meta  # noqa: E402
+from looplab.engine.orchestrator import Engine  # noqa: E402
+from looplab.search.policy import GreedyTree  # noqa: E402
+from looplab.runtime.sandbox import SubprocessSandbox  # noqa: E402
 
 SPOOKY = "spooky-author-identification"
 

@@ -9,13 +9,13 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from looplab import tracing
+from looplab.core import tracing
 from looplab.core._pathsafe import readable
-from looplab.models import Idea, Node, NodeStatus, RunState
-from looplab.run_tools import RunTools
-from looplab.runs_tools import RunsTools
+from looplab.core.models import Idea, Node, NodeStatus, RunState
+from looplab.tools.run_tools import RunTools
+from looplab.tools.runs_tools import RunsTools
 from looplab.tools.reposcout import RepoScoutTools
-from looplab.tracing import JsonlSpanExporter, Tracer
+from looplab.core.tracing import JsonlSpanExporter, Tracer
 
 
 # --------------------------------------------------------------------------- RunTools.read_logs

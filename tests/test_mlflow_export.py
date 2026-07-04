@@ -6,13 +6,13 @@ from pathlib import Path
 import anyio
 import pytest
 
-from looplab.eventstore import EventStore
-from looplab.mlflow_export import available, export_run
-from looplab.orchestrator import Engine
-from looplab.policy import GreedyTree
-from looplab.replay import fold
-from looplab.sandbox import SubprocessSandbox
-from looplab.toytask import ToyTask
+from looplab.events.eventstore import EventStore
+from looplab.events.mlflow_export import available, export_run
+from looplab.engine.orchestrator import Engine
+from looplab.search.policy import GreedyTree
+from looplab.events.replay import fold
+from looplab.runtime.sandbox import SubprocessSandbox
+from looplab.adapters.toytask import ToyTask
 
 ROOT = Path(__file__).resolve().parents[1]
 TASK = ROOT / "examples" / "toy_task.json"
@@ -25,7 +25,7 @@ def test_available_is_bool():
 def test_export_raises_clear_error_without_mlflow():
     if available():
         pytest.skip("mlflow installed — error path not exercised")
-    from looplab.models import RunState
+    from looplab.core.models import RunState
     with pytest.raises(RuntimeError, match="mlflow"):
         export_run(RunState(run_id="r", task_id="t"))
 
@@ -49,7 +49,7 @@ def test_export_run_dir_logs_champion_not_best(tmp_path, monkeypatch):
     import sys
     import types
 
-    import looplab.mlflow_export as mod
+    import looplab.events.mlflow_export as mod
 
     rd = tmp_path / "run"
     s = EventStore(rd / "events.jsonl")

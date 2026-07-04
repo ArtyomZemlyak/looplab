@@ -2,7 +2,7 @@
 tool providers consult."""
 from __future__ import annotations
 
-from looplab.perm_modes import DEFAULT_PROTECT, decide, normalize_mode
+from looplab.tools.perm_modes import DEFAULT_PROTECT, decide, normalize_mode
 
 
 def test_reads_always_inline():

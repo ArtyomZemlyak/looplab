@@ -9,10 +9,10 @@ from __future__ import annotations
 import anyio
 from pydantic import BaseModel
 
-from looplab.models import Idea
-from looplab.orchestrator import Engine
-from looplab.policy import GreedyTree
-from looplab.sandbox import SubprocessSandbox
+from looplab.core.models import Idea
+from looplab.engine.orchestrator import Engine
+from looplab.search.policy import GreedyTree
+from looplab.runtime.sandbox import SubprocessSandbox
 
 
 class _PredTask(BaseModel):

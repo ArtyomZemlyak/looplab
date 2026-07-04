@@ -9,13 +9,13 @@ from pathlib import Path
 
 import anyio
 
-from looplab.command_eval import read_metric, run_command_eval
-from looplab.models import Idea
-from looplab.orchestrator import Engine
-from looplab.policy import GreedyTree
-from looplab.repo_task import EvalSpec, RepoTask
-from looplab.sandbox import SubprocessSandbox
-from looplab.tasks import TaskAdapter, load_task
+from looplab.runtime.command_eval import read_metric, run_command_eval
+from looplab.core.models import Idea
+from looplab.engine.orchestrator import Engine
+from looplab.search.policy import GreedyTree
+from looplab.adapters.repo_task import EvalSpec, RepoTask
+from looplab.runtime.sandbox import SubprocessSandbox
+from looplab.adapters.tasks import TaskAdapter, load_task
 
 FIXTURE = Path(__file__).resolve().parent / "fixtures" / "repo_fixture"
 
@@ -125,11 +125,11 @@ def test_engine_runs_repo_command_eval_and_protects_eval(tmp_path):
 
 
 def test_make_roles_wires_repo_agent():
-    from looplab.cli_agent import CliAgentDeveloper
-    from looplab.config import Settings
-    from looplab.repo_task import NoOpRepoDeveloper
-    from looplab.roles import ValidatingDeveloper
-    from looplab.tasks import make_roles
+    from looplab.agents.cli_agent import CliAgentDeveloper
+    from looplab.core.config import Settings
+    from looplab.adapters.repo_task import NoOpRepoDeveloper
+    from looplab.agents.roles import ValidatingDeveloper
+    from looplab.adapters.tasks import make_roles
     s = Settings()
     s.backend, s.developer_backend, s.unified_agent = "llm", "opencode", False
     # monkeypatch the kind dispatch by passing the task directly
@@ -179,8 +179,8 @@ import pytest  # noqa: E402
 def test_live_opencode_edits_repo_end_to_end(tmp_path):
     # Full live path: opencode edits config.json (in-surface) of the seeded repo; the
     # operator's command/metric scores it; ttrain.py stays protected.
-    from looplab.config import Settings
-    from looplab.tasks import make_roles
+    from looplab.core.config import Settings
+    from looplab.adapters.tasks import make_roles
     s = Settings()
     s.backend, s.developer_backend, s.llm_model = "llm", "opencode", "qwen3:8b"
     t = _task()

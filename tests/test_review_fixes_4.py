@@ -4,11 +4,11 @@ from __future__ import annotations
 
 import json
 
-from looplab.eventstore import EventStore
-from looplab.llm import _apply_native_tool_calls, _extract_native_tool_calls
-from looplab.models import Event, hypothesis_id
-from looplab.replay import fold
-from looplab.sandbox import _json_line_extras
+from looplab.events.eventstore import EventStore
+from looplab.core.llm import _apply_native_tool_calls, _extract_native_tool_calls
+from looplab.core.models import Event, hypothesis_id
+from looplab.events.replay import fold
+from looplab.runtime.sandbox import _json_line_extras
 
 
 def _mk(evs):
@@ -97,7 +97,7 @@ def test_perfect_metric_signal_stays_advisory_under_gate():
 
 def test_engine_rejects_invalid_trust_gate(tmp_path):
     import pytest
-    from looplab.orchestrator import Engine
+    from looplab.engine.orchestrator import Engine
     with pytest.raises(ValueError, match="trust_gate"):
         Engine(tmp_path / "run", task=None, researcher=None, developer=None,
                sandbox=None, policy=None, trust_gate="Gate")   # typo must fail loudly, not fail open

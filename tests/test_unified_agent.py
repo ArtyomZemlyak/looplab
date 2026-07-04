@@ -14,16 +14,16 @@ import json
 
 import anyio
 
-from looplab.config import Settings
-from looplab.eventstore import EventStore
-from looplab.models import Event, Idea, Node, NodeStatus, RunState
-from looplab.orchestrator import Engine
-from looplab.policy import GreedyTree, legal_actions
-from looplab.replay import fold
-from looplab.sandbox import SubprocessSandbox
-from looplab.tasks import make_roles
-from looplab.toytask import ToyTask
-from looplab.unified_agent import UnifiedAgent
+from looplab.core.config import Settings
+from looplab.events.eventstore import EventStore
+from looplab.core.models import Event, Idea, Node, NodeStatus, RunState
+from looplab.engine.orchestrator import Engine
+from looplab.search.policy import GreedyTree, legal_actions
+from looplab.events.replay import fold
+from looplab.runtime.sandbox import SubprocessSandbox
+from looplab.adapters.tasks import make_roles
+from looplab.adapters.toytask import ToyTask
+from looplab.agents.unified_agent import UnifiedAgent
 
 
 def _st(pending: bool = False) -> RunState:
@@ -143,7 +143,7 @@ def test_make_roles_split_is_unchanged_when_flag_off():
 def test_unified_absorbs_strategist():
     # strategist_backend="rule" => the agent IS the strategist; decide() delegates to the rule
     # baseline (no model needed). "off" (default) => decide() returns None (split-mode parity).
-    from looplab.strategist import StrategyContext
+    from looplab.agents.strategist import StrategyContext
     r, _ = make_roles(ToyTask(), Settings(backend="llm", unified_agent=True,
                                           strategist_backend="rule"))
     ctx = StrategyContext(node_count=0, phase="seed", available_policies=["greedy"])

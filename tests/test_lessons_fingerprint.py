@@ -12,11 +12,11 @@ from pathlib import Path
 import anyio
 import orjson
 
-from looplab.memory import fingerprint_similarity, task_fingerprint
-from looplab.orchestrator import Engine
-from looplab.policy import GreedyTree
-from looplab.sandbox import SubprocessSandbox
-from looplab.toytask import ToyTask
+from looplab.engine.memory import fingerprint_similarity, task_fingerprint
+from looplab.engine.orchestrator import Engine
+from looplab.search.policy import GreedyTree
+from looplab.runtime.sandbox import SubprocessSandbox
+from looplab.adapters.toytask import ToyTask
 
 ROOT = Path(__file__).resolve().parents[1]
 TASK = ROOT / "examples" / "toy_task.json"
@@ -87,7 +87,7 @@ def test_similar_task_retrieves_lessons_including_negatives(tmp_path):
 
 def test_settings_defaults_enable_phase3_and_4():
     # Product default (via Settings): hypotheses + cross-run memory are ON out of the box.
-    from looplab.config import Settings
+    from looplab.core.config import Settings
     s = Settings()
     assert s.track_hypotheses is True and s.reflection_priors is True
 

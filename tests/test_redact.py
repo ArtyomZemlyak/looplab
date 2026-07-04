@@ -1,7 +1,7 @@
 """B3 secret-leak redaction over persisted output tails."""
 from __future__ import annotations
 
-from looplab.redact import redact_secrets
+from looplab.trust.redact import redact_secrets
 
 
 def test_redacts_openai_style_key():
@@ -35,11 +35,11 @@ def test_empty_is_noop():
 def test_engine_redacts_persisted_tail(tmp_path):
     # End-to-end: a solution that prints a secret has it masked in the persisted stdout_tail.
     import anyio
-    from looplab.models import Idea
-    from looplab.orchestrator import Engine
-    from looplab.policy import GreedyTree
-    from looplab.sandbox import SubprocessSandbox
-    from looplab.toytask import ToyTask
+    from looplab.core.models import Idea
+    from looplab.engine.orchestrator import Engine
+    from looplab.search.policy import GreedyTree
+    from looplab.runtime.sandbox import SubprocessSandbox
+    from looplab.adapters.toytask import ToyTask
     from pathlib import Path
 
     task = ToyTask.load(Path(__file__).resolve().parents[1] / "examples" / "toy_task.json")

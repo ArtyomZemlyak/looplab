@@ -6,11 +6,11 @@ from pathlib import Path
 import anyio
 import orjson
 
-from looplab.orchestrator import Engine
-from looplab.policy import EvolutionaryPolicy, MCTSPolicy, make_policy
-from looplab.sandbox import SubprocessSandbox
-from looplab.toytask import ToyTask
-from looplab.tracing import JsonlSpanExporter, Tracer
+from looplab.engine.orchestrator import Engine
+from looplab.search.policy import EvolutionaryPolicy, MCTSPolicy, make_policy
+from looplab.runtime.sandbox import SubprocessSandbox
+from looplab.adapters.toytask import ToyTask
+from looplab.core.tracing import JsonlSpanExporter, Tracer
 
 ROOT = Path(__file__).resolve().parents[1]
 TASK_FILE = ROOT / "examples" / "toy_task.json"

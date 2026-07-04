@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from looplab import tui
+from looplab.serve import tui
 
 
 # ----------------------------------------------------------------------------- pure helpers
@@ -312,11 +312,11 @@ from fastapi.testclient import TestClient  # noqa: E402
 
 import anyio  # noqa: E402
 
-from looplab.orchestrator import Engine  # noqa: E402
-from looplab.policy import GreedyTree  # noqa: E402
-from looplab.sandbox import SubprocessSandbox  # noqa: E402
-from looplab.server import make_app  # noqa: E402
-from looplab.toytask import ToyTask  # noqa: E402
+from looplab.engine.orchestrator import Engine  # noqa: E402
+from looplab.search.policy import GreedyTree  # noqa: E402
+from looplab.runtime.sandbox import SubprocessSandbox  # noqa: E402
+from looplab.serve.server import make_app  # noqa: E402
+from looplab.adapters.toytask import ToyTask  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
 TASK = ROOT / "examples" / "toy_task.json"

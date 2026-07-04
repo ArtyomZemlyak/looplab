@@ -9,10 +9,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from fastapi.testclient import TestClient  # noqa: E402
 
-from looplab.assistant_commands import expand_command, list_commands  # noqa: E402
-from looplab.bg_tasks import BackgroundManager  # noqa: E402
-from looplab.server import make_app  # noqa: E402
-from looplab.shell_tools import ShellTools  # noqa: E402
+from looplab.serve.assistant_commands import expand_command, list_commands  # noqa: E402
+from looplab.runtime.bg_tasks import BackgroundManager  # noqa: E402
+from looplab.serve.server import make_app  # noqa: E402
+from looplab.tools.shell_tools import ShellTools  # noqa: E402
 
 
 def test_slash_command_expansion():

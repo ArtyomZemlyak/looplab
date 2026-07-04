@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from looplab.localize import _symbols, localize
+from looplab.engine.localize import _symbols, localize
 
 FIXTURE = Path(__file__).resolve().parent / "fixtures" / "repo_fixture"
 
@@ -38,11 +38,11 @@ def test_localize_empty_on_nonexistent_root(tmp_path):
 def test_engine_hint_includes_localized_files(tmp_path):
     # Wire-level: a repo task with a failure surfaces localized files into the proposal cue.
     import anyio
-    from looplab.models import Idea, Node, NodeStatus, RunState
-    from looplab.orchestrator import Engine
-    from looplab.policy import GreedyTree
-    from looplab.sandbox import SubprocessSandbox
-    from looplab.toytask import ToyTask
+    from looplab.core.models import Idea, Node, NodeStatus, RunState
+    from looplab.engine.orchestrator import Engine
+    from looplab.search.policy import GreedyTree
+    from looplab.runtime.sandbox import SubprocessSandbox
+    from looplab.adapters.toytask import ToyTask
 
     task = ToyTask.load(Path(__file__).resolve().parents[1] / "examples" / "toy_task.json")
     eng = Engine(tmp_path / "r", task=task, researcher=type("S", (), {})(), developer=type("D", (), {})(),

@@ -5,19 +5,19 @@ from pathlib import Path
 
 import anyio
 
-from looplab.models import Event, Idea, Node, NodeStatus, RunState
-from looplab.orchestrator import Engine
-from looplab.policy import ASHAPolicy, GreedyTree, available_policies, make_policy
-from looplab.replay import fold
-from looplab.sandbox import SubprocessSandbox
-from looplab.strategist import (
+from looplab.core.models import Event, Idea, Node, NodeStatus, RunState
+from looplab.engine.orchestrator import Engine
+from looplab.search.policy import ASHAPolicy, GreedyTree, available_policies, make_policy
+from looplab.events.replay import fold
+from looplab.runtime.sandbox import SubprocessSandbox
+from looplab.agents.strategist import (
     LLMStrategist,
     RuleStrategist,
     StrategyContext,
     make_strategist,
     validate_strategy,
 )
-from looplab.toytask import ToyTask
+from looplab.adapters.toytask import ToyTask
 
 ROOT = Path(__file__).resolve().parents[1]
 TASK_FILE = ROOT / "examples" / "toy_task.json"
@@ -109,17 +109,17 @@ def test_validate_rejects_unknown_developer():
 # --------------------------------------------------------------------------- #
 
 def test_make_strategist_off_is_none():
-    from looplab.config import Settings
+    from looplab.core.config import Settings
     assert make_strategist(Settings(strategist_backend="off")) is None
 
 
 def test_make_strategist_rule():
-    from looplab.config import Settings
+    from looplab.core.config import Settings
     assert isinstance(make_strategist(Settings(strategist_backend="rule")), RuleStrategist)
 
 
 def test_make_strategist_llm_without_client_falls_back_to_rule():
-    from looplab.config import Settings
+    from looplab.core.config import Settings
     s = make_strategist(Settings(strategist_backend="llm"), client=None)
     assert isinstance(s, RuleStrategist)
 
@@ -364,7 +364,7 @@ def _eval_node(i, x, m):
 
 
 def test_proxy_predicts_from_neighbours():
-    from looplab.proxy import ProxyScorer
+    from looplab.runtime.proxy import ProxyScorer
     st = RunState(direction="min")
     st.nodes[0] = _eval_node(0, 0.0, 10.0)
     st.nodes[1] = _eval_node(1, 10.0, 1.0)
@@ -375,7 +375,7 @@ def test_proxy_predicts_from_neighbours():
 
 
 def test_proxy_off_never_skips():
-    from looplab.proxy import ProxyScorer
+    from looplab.runtime.proxy import ProxyScorer
     st = RunState(direction="min")
     for i in range(6):
         st.nodes[i] = _eval_node(i, i, i)
@@ -386,7 +386,7 @@ def test_proxy_off_never_skips():
 
 
 def test_proxy_skips_doomed_after_warmup():
-    from looplab.proxy import ProxyScorer
+    from looplab.runtime.proxy import ProxyScorer
     st = RunState(direction="min")           # lower is better
     for i in range(6):
         st.nodes[i] = _eval_node(i, i, i)    # metrics 0..5
@@ -397,7 +397,7 @@ def test_proxy_skips_doomed_after_warmup():
 
 
 def test_proxy_end_to_end_records_and_can_skip(tmp_path):
-    from looplab.proxy import ProxyScorer
+    from looplab.runtime.proxy import ProxyScorer
     state = anyio.run(_engine(tmp_path / "px", proxy_scorer=ProxyScorer(kill_fraction=0.5, warmup=3),
                               proxy_kill_fraction=0.5).run)
     assert state.finished
@@ -410,20 +410,20 @@ def test_proxy_end_to_end_records_and_can_skip(tmp_path):
 # --------------------------------------------------------------------------- #
 
 def test_reward_hack_flags_grader_access():
-    from looplab.reward_hack import detect_reward_hacks
+    from looplab.trust.reward_hack import detect_reward_hacks
     sigs = detect_reward_hacks("import grader\nprint(grader._Y)", 0.5, "min")
     assert any(s["signal"] == "grader_access" for s in sigs)
 
 
 def test_reward_hack_flags_protected_write():
-    from looplab.reward_hack import detect_reward_hacks
+    from looplab.trust.reward_hack import detect_reward_hacks
     code = "f = open('metrics.json', 'w')\nf.write('1')"
     sigs = detect_reward_hacks(code, 0.5, "min", protected_names={"metrics.json"})
     assert any(s["signal"] == "protected_write" for s in sigs)
 
 
 def test_reward_hack_flags_perfect_metric():
-    from looplab.reward_hack import detect_reward_hacks
+    from looplab.trust.reward_hack import detect_reward_hacks
     assert any(s["signal"] == "perfect_metric" for s in detect_reward_hacks("x=1", 0.0, "min"))
     assert any(s["signal"] == "perfect_metric" for s in detect_reward_hacks("x=1", 1.0, "max"))
     assert detect_reward_hacks("import numpy", 0.4, "min") == []   # clean code -> no signals
@@ -574,7 +574,7 @@ def _policy_decisions(run_dir):
 
 def test_operator_pin_policy_wins_over_strategist(tmp_path):
     # Boss pins policy=asha; the (greedy-loving) strategist must never flip it back -> no thrash.
-    from looplab.eventstore import EventStore
+    from looplab.events.eventstore import EventStore
     rd = tmp_path / "pin"; rd.mkdir()
     EventStore(rd / "events.jsonl").append("set_strategy", {"strategy": {"policy": "asha"}})
     state = anyio.run(_engine(rd, strategist=_AlwaysGreedy(), strategist_every=1).run)
@@ -588,7 +588,7 @@ def test_operator_pin_policy_wins_over_strategist(tmp_path):
 
 def test_operator_pin_lets_strategist_tune_unpinned_fields(tmp_path):
     # Pinned policy is locked, but the strategist may still set the (unpinned) fidelity.
-    from looplab.eventstore import EventStore
+    from looplab.events.eventstore import EventStore
     rd = tmp_path / "pin2"; rd.mkdir()
     EventStore(rd / "events.jsonl").append("set_strategy", {"strategy": {"policy": "asha"}})
     state = anyio.run(_engine(rd, strategist=_AlwaysGreedy(), strategist_every=1).run)
@@ -601,7 +601,7 @@ def test_invalid_operator_pin_is_dropped_not_recorded(tmp_path):
     # pin must be DROPPED: never recorded (else it diverges from the live policy make_policy rejects)
     # and never re-asserted every consult (which would starve the strategist + spam the log). The
     # greedy strategist still drives.
-    from looplab.eventstore import EventStore
+    from looplab.events.eventstore import EventStore
     rd = tmp_path / "badpin"; rd.mkdir()
     EventStore(rd / "events.jsonl").append("set_strategy", {"strategy": {"policy": "explore_lots"}})
     state = anyio.run(_engine(rd, strategist=_AlwaysGreedy(), strategist_every=1).run)
@@ -616,7 +616,7 @@ def test_invalid_operator_pin_is_dropped_not_recorded(tmp_path):
 # --------------------------------------------------------------------------- #
 
 def _read(run_dir: Path):
-    from looplab.eventstore import EventStore
+    from looplab.events.eventstore import EventStore
     return EventStore(run_dir / "events.jsonl").read_all()
 
 
@@ -625,9 +625,9 @@ def _read(run_dir: Path):
 # --------------------------------------------------------------------------- #
 import json as _json
 
-from looplab.config import Settings
-from looplab.strategist import ToolUsingStrategist
-from looplab.tasks import build_strategist_tools
+from looplab.core.config import Settings
+from looplab.agents.strategist import ToolUsingStrategist
+from looplab.adapters.tasks import build_strategist_tools
 
 
 def _tc(name, args):

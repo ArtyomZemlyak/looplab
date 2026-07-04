@@ -2,13 +2,13 @@
 security (SSRF, value coercion), and the ragged-column leakage scan. Each would fail before its fix."""
 from __future__ import annotations
 
-from looplab.archive import DiversityArchive
-from looplab.eventstore import EventStore
-from looplab.leakage import _pearson
-from looplab.parse import _coerce_value
-from looplab.projects import ProjectStore
-from looplab.replay import fold
-from looplab.web import _ssrf_blocked
+from looplab.search.archive import DiversityArchive
+from looplab.events.eventstore import EventStore
+from looplab.trust.leakage import _pearson
+from looplab.core.parse import _coerce_value
+from looplab.serve.projects import ProjectStore
+from looplab.events.replay import fold
+from looplab.tools.web import _ssrf_blocked
 
 
 def _seed(store: EventStore) -> None:

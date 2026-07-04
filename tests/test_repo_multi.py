@@ -9,11 +9,11 @@ from pathlib import Path
 import anyio
 import pytest
 
-from looplab.cli_agent import CliAgentDeveloper
-from looplab.orchestrator import Engine
-from looplab.policy import GreedyTree
-from looplab.repo_task import EditableSpec, EvalSpec, RepoTask
-from looplab.sandbox import SubprocessSandbox
+from looplab.agents.cli_agent import CliAgentDeveloper
+from looplab.engine.orchestrator import Engine
+from looplab.search.policy import GreedyTree
+from looplab.adapters.repo_task import EditableSpec, EvalSpec, RepoTask
+from looplab.runtime.sandbox import SubprocessSandbox
 
 _M = {"kind": "stdout_json", "key": "metric"}
 

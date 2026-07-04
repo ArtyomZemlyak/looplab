@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import json
 
-import looplab.llm as llm
-from looplab.llm import OpenAICompatibleClient, reasoning_body, _retry_after_seconds
+import looplab.core.llm as llm
+from looplab.core.llm import OpenAICompatibleClient, reasoning_body, _retry_after_seconds
 
 
 def test_retry_after_parsing():

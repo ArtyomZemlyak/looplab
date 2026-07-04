@@ -2,7 +2,7 @@
 names a `kind`. These exercise the authoring logic with a scripted client (no network)."""
 from __future__ import annotations
 
-from looplab.genesis import GENERATIVE_KINDS, author_task
+from looplab.engine.genesis import GENERATIVE_KINDS, author_task
 
 KINDS = ("quadratic", "dataset", "repo", "mlebench_real", "classification")
 

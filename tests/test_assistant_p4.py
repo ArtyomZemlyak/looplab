@@ -7,8 +7,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from looplab.assistant import run_turn  # noqa: E402
-from looplab.mcp_tools import McpTools, load_config, _prefixed  # noqa: E402
+from looplab.serve.assistant import run_turn  # noqa: E402
+from looplab.tools.mcp_tools import McpTools, load_config, _prefixed  # noqa: E402
 
 
 def _call(name, args):

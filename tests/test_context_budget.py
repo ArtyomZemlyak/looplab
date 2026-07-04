@@ -1,7 +1,7 @@
 """H4 context budgeting for long agent traces."""
 from __future__ import annotations
 
-from looplab.context_budget import truncate_history
+from looplab.core.context_budget import truncate_history
 
 
 def _msgs():

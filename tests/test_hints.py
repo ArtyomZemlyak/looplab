@@ -1,9 +1,9 @@
 """Hint directives: recency-aware rendering + replace (supersede) semantics in the fold."""
 from __future__ import annotations
 
-from looplab.eventstore import EventStore
-from looplab.hints import render_hint_directives
-from looplab.replay import fold
+from looplab.events.eventstore import EventStore
+from looplab.agents.hints import render_hint_directives
+from looplab.events.replay import fold
 
 
 def test_render_empty_is_blank():

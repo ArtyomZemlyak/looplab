@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import json
 
-from looplab.notebook import champion_notebook
+from looplab.runtime.notebook import champion_notebook
 
 
 def test_notebook_is_valid_nbformat_v4():

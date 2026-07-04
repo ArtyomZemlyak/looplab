@@ -8,13 +8,13 @@ import anyio
 import orjson
 import pytest
 
-from looplab.eventstore import EventStore
-from looplab.orchestrator import Engine
-from looplab.policy import GreedyTree
-from looplab.repo_task import EvalSpec, RepoTask
-from looplab.sandbox import SubprocessSandbox
-from looplab.tracing import JsonlSpanExporter, Tracer, current_ids
-from looplab.traceview import build_trace_view, load_spans
+from looplab.events.eventstore import EventStore
+from looplab.engine.orchestrator import Engine
+from looplab.search.policy import GreedyTree
+from looplab.adapters.repo_task import EvalSpec, RepoTask
+from looplab.runtime.sandbox import SubprocessSandbox
+from looplab.core.tracing import JsonlSpanExporter, Tracer, current_ids
+from looplab.serve.traceview import build_trace_view, load_spans
 
 _M = {"kind": "stdout_json", "key": "metric"}
 
@@ -42,7 +42,7 @@ def test_nesting_and_trace_ids(tmp_path):
 def test_generation_and_tool_are_first_class_observations(tmp_path):
     """Langfuse-style: an LLM call is a `generation` child span (input/output/model/usage), a tool
     invocation is a `tool` child span (input/output) — both nested under the operation span."""
-    from looplab import tracing
+    from looplab.core import tracing
     tracing.set_llm_capture(True)
     t = Tracer(JsonlSpanExporter(tmp_path / "s.jsonl"), run_id="r")
     with t.span("propose", new_trace=True, node_id=1):
@@ -65,7 +65,7 @@ def test_generation_and_tool_are_first_class_observations(tmp_path):
 
 def test_generation_noop_without_active_tracer():
     """A generation/tool opened with no traced operation active is a harmless no-op (no crash)."""
-    from looplab import tracing
+    from looplab.core import tracing
     with tracing.generation(op="x", model="m", messages=[{"role": "user", "content": "z"}]) as g:
         g.output("y").usage({"prompt_tokens": 1}).cost(0.0)          # must not raise
     with tracing.tool("t", {"a": 1}) as to:
@@ -150,7 +150,7 @@ def test_conversation_dedups_resent_history():
     per-turn re-send of the whole growing message history. A context RESET (shorter input, e.g. a
     compaction or a sub-agent handoff) starts a fresh request."""
     from types import SimpleNamespace
-    from looplab.traceview import build_conversation
+    from looplab.serve.traceview import build_conversation
 
     def span(sid, kind, start, parent, **attrs):
         return {"span_id": sid, "parent_id": parent, "trace_id": "t1", "kind": kind,
@@ -187,7 +187,7 @@ def test_conversation_dedups_resent_history():
 
 def test_fold_ignores_spans(tmp_path):
     # Determinism: the read model / fold depends only on events, never on spans.
-    from looplab.replay import fold
+    from looplab.events.replay import fold
     anyio.run(_engine(tmp_path).run)
     run_dir = tmp_path / "run"
     s1 = fold(list(EventStore(run_dir / "events.jsonl").read_all()))

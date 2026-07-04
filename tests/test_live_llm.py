@@ -9,11 +9,11 @@ import urllib.request
 import anyio
 import pytest
 
-from looplab.config import Settings
-from looplab.orchestrator import Engine
-from looplab.policy import GreedyTree
-from looplab.sandbox import SubprocessSandbox
-from looplab.tasks import load_task, make_roles
+from looplab.core.config import Settings
+from looplab.engine.orchestrator import Engine
+from looplab.search.policy import GreedyTree
+from looplab.runtime.sandbox import SubprocessSandbox
+from looplab.adapters.tasks import load_task, make_roles
 
 MODEL = "qwen3:8b"
 
@@ -62,8 +62,8 @@ def test_live_agentic_researcher(tmp_path):
     s.knowledge_dir = str(ROOT / "examples" / "knowledge")
     task = load_task(ROOT / "examples" / "regression_task.json")
     researcher, _ = make_roles(task, s)
-    from looplab.agent import ToolUsingResearcher
-    from looplab.models import RunState
+    from looplab.agents.agent import ToolUsingResearcher
+    from looplab.core.models import RunState
     assert isinstance(researcher, ToolUsingResearcher)
     idea = researcher.propose(RunState(goal=task.goal, direction="min"), None)
     assert 0.0 <= idea.params.get("degree", 0.0) <= 6.0  # valid, in-bounds Idea
@@ -78,8 +78,8 @@ def test_live_researcher_with_skills(tmp_path):
     s.skills_dir = str(ROOT / "examples" / "skills")
     task = load_task(ROOT / "examples" / "regression_task.json")
     researcher, _ = make_roles(task, s)
-    from looplab.agent import CompositeTools, ToolUsingResearcher
-    from looplab.models import RunState
+    from looplab.agents.agent import CompositeTools, ToolUsingResearcher
+    from looplab.core.models import RunState
     assert isinstance(researcher, ToolUsingResearcher)
     assert isinstance(researcher.tools, CompositeTools)
     idea = researcher.propose(RunState(goal=task.goal, direction="min"), None)

@@ -15,12 +15,12 @@ from pathlib import Path
 import anyio
 import pytest
 
-from looplab.command_eval import run_command_eval
-from looplab.models import Idea
-from looplab.orchestrator import Engine
-from looplab.policy import GreedyTree
-from looplab.repo_task import EvalSpec, RepoTask
-from looplab.sandbox import SubprocessSandbox
+from looplab.runtime.command_eval import run_command_eval
+from looplab.core.models import Idea
+from looplab.engine.orchestrator import Engine
+from looplab.search.policy import GreedyTree
+from looplab.adapters.repo_task import EvalSpec, RepoTask
+from looplab.runtime.sandbox import SubprocessSandbox
 
 # A program that reports the TRUE metric on stdout but writes a FAKE (better) metrics.json —
 # i.e. a reward hack through the eval workdir.

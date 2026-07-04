@@ -9,9 +9,9 @@ from pathlib import Path
 import anyio
 import pytest
 
-from looplab.models import Event
-from looplab.replay import fold
-from looplab.report import generate_report, make_report_writer
+from looplab.core.models import Event
+from looplab.events.replay import fold
+from looplab.serve.report import generate_report, make_report_writer
 
 ROOT = Path(__file__).resolve().parents[1]
 TASK = ROOT / "examples" / "toy_task.json"
@@ -41,7 +41,7 @@ def test_report_generated_folds_latest_wins():
 
 
 def test_make_report_writer_offline_is_none():
-    from looplab.config import Settings
+    from looplab.core.config import Settings
     assert make_report_writer(Settings(), client=None) is None
 
 
@@ -49,11 +49,11 @@ def test_make_report_writer_offline_is_none():
 pytest.importorskip("fastapi")
 from fastapi.testclient import TestClient  # noqa: E402
 
-from looplab.orchestrator import Engine  # noqa: E402
-from looplab.policy import GreedyTree  # noqa: E402
-from looplab.sandbox import SubprocessSandbox  # noqa: E402
-from looplab.server import make_app  # noqa: E402
-from looplab.toytask import ToyTask  # noqa: E402
+from looplab.engine.orchestrator import Engine  # noqa: E402
+from looplab.search.policy import GreedyTree  # noqa: E402
+from looplab.runtime.sandbox import SubprocessSandbox  # noqa: E402
+from looplab.serve.server import make_app  # noqa: E402
+from looplab.adapters.toytask import ToyTask  # noqa: E402
 
 
 class _FakeWriter:
@@ -97,11 +97,11 @@ def test_report_refresh_endpoint(tmp_path, monkeypatch):
     _build_run(tmp_path, "demo", writer=None)
     client = TestClient(make_app(tmp_path))
     # Happy path: stub the generator so the route appends a report_generated event without an LLM.
-    import looplab.report as report_mod
+    import looplab.serve.report as report_mod
     monkeypatch.setattr(report_mod, "generate_report",
                         lambda st, c, **kw: {"headline": "live", "at_node": len(st.nodes),
                                              "trigger": kw.get("trigger", "")})
-    monkeypatch.setattr("looplab.server.make_llm_client", lambda s: object())
+    monkeypatch.setattr("looplab.serve.server.make_llm_client", lambda s: object())
     r = client.post("/api/runs/demo/report_refresh").json()
     assert r["ok"] is True and r["content"]["headline"] == "live"
     # it folded into state.report
@@ -115,7 +115,7 @@ def test_report_refresh_soft_fails_offline(tmp_path, monkeypatch):
 
     def _boom(_s):
         raise RuntimeError("no model")
-    monkeypatch.setattr("looplab.server.make_llm_client", _boom)
+    monkeypatch.setattr("looplab.serve.server.make_llm_client", _boom)
     r = client.post("/api/runs/demo/report_refresh")
     assert r.status_code == 200 and r.json()["ok"] is False  # soft-fail, no crash
 
@@ -128,11 +128,11 @@ def test_report_refresh_async_job_path(tmp_path, monkeypatch):
     import time as _t
     monkeypatch.setenv("LOOPLAB_JOB_INLINE_WAIT", "0")          # always take the async path
     _build_run(tmp_path, "demo", writer=None)
-    import looplab.report as report_mod
+    import looplab.serve.report as report_mod
     monkeypatch.setattr(report_mod, "generate_report",
                         lambda st, c, **kw: {"headline": "live", "at_node": len(st.nodes),
                                              "trigger": kw.get("trigger", "")})
-    monkeypatch.setattr("looplab.server.make_llm_client", lambda s: object())
+    monkeypatch.setattr("looplab.serve.server.make_llm_client", lambda s: object())
     client = TestClient(make_app(tmp_path))                     # reads the inline wait at construction
     r = client.post("/api/runs/demo/report_refresh").json()
     assert r["status"] == "running" and r["job_id"]            # handed back a job, didn't block
@@ -150,13 +150,13 @@ def test_report_refresh_async_job_path(tmp_path, monkeypatch):
 
 
 def _read_events(rd: Path):
-    from looplab.eventstore import iter_jsonl
+    from looplab.events.eventstore import iter_jsonl
     return [Event(**o) for o in iter_jsonl(rd / "events.jsonl")]
 
 
 # ---- Workstream C: chat action-router (/command) ----
 def test_command_to_action_mapping():
-    from looplab.server import _Action, _action_to_control
+    from looplab.serve.server import _Action, _action_to_control
 
     class _S:
         best_node_id = 9
@@ -176,7 +176,7 @@ def test_command_to_action_mapping():
 def test_action_labels_are_human_readable():
     """Every applied-row `label` is what the human reads in the chat timeline, so it must be a plain
     sentence — never a Python dict/`repr` leaking braces/quotes (the readability regression we fixed)."""
-    from looplab.server import _Action, _action_to_control
+    from looplab.serve.server import _Action, _action_to_control
 
     class _S:
         best_node_id = 9
@@ -200,9 +200,9 @@ def test_action_labels_are_human_readable():
 def test_command_endpoint_returns_action(tmp_path, monkeypatch):
     _build_run(tmp_path, "demo", writer=None)
     client = TestClient(make_app(tmp_path))
-    from looplab.server import _Action, _Plan
-    monkeypatch.setattr("looplab.server.make_llm_client", lambda s: object())
-    monkeypatch.setattr("looplab.parse.parse_structured",
+    from looplab.serve.server import _Action, _Plan
+    monkeypatch.setattr("looplab.serve.server.make_llm_client", lambda s: object())
+    monkeypatch.setattr("looplab.core.parse.parse_structured",
                         lambda *a, **k: _Plan(actions=[_Action(action="promote", node_id=2)]))
     r = client.post("/api/runs/demo/command", json={"instruction": "promote node 2"}).json()
     assert r["ok"] is True and r["actions"][0]["type"] == "promote" and r["actions"][0]["data"]["node_id"] == 2
@@ -214,9 +214,9 @@ def test_command_endpoint_guidance_becomes_steering_hint(tmp_path, monkeypatch):
     human ack in `rationale`; the endpoint surfaces both so the boss applies it as a control event."""
     _build_run(tmp_path, "demo", writer=None)
     client = TestClient(make_app(tmp_path))
-    from looplab.server import _Action, _Plan
-    monkeypatch.setattr("looplab.server.make_llm_client", lambda s: object())
-    monkeypatch.setattr("looplab.parse.parse_structured",
+    from looplab.serve.server import _Action, _Plan
+    monkeypatch.setattr("looplab.serve.server.make_llm_client", lambda s: object())
+    monkeypatch.setattr("looplab.core.parse.parse_structured",
         lambda *a, **k: _Plan(reply="Got it — I'll have the researcher try those.", actions=[
             _Action(action="hint", text="use log1p-transformed targets + volume features",
                     rationale="Got it — I'll have the researcher try those.")]))
@@ -230,22 +230,22 @@ def test_command_endpoint_guidance_becomes_steering_hint(tmp_path, monkeypatch):
 def test_pending_hint_reaches_researcher_prompt(monkeypatch):
     """End of the steering chain: a folded `hint` actually appears as an 'Operator directive' in the
     proposal prompt the researcher sends — this is HOW a chat guidance message changes the search."""
-    from looplab.roles import LLMResearcher
-    from looplab.models import Idea, RunState
+    from looplab.agents.roles import LLMResearcher
+    from looplab.core.models import Idea, RunState
     captured = {}
 
     def fake_parse(client, messages, schema, parser):
         captured["messages"] = messages
         return Idea(operator="improve", params={"degree": 3.0}, rationale="r")
 
-    monkeypatch.setattr("looplab.roles.parse_structured", fake_parse)
+    monkeypatch.setattr("looplab.agents.roles.parse_structured", fake_parse)
     r = LLMResearcher(client=object(), space_hint="space")
     st = RunState(goal="min", direction="min")
     st.pending_hints = [{"text": "use log1p targets + domain features"}]
     r.propose(st, None)
     user = next(m["content"] for m in captured["messages"] if m["role"] == "user")
     # "Operator directive" matches both the single-hint ("…directive (follow it):") and the
-    # multi-hint ("…directives, oldest first…") renderings from looplab.hints.
+    # multi-hint ("…directives, oldest first…") renderings from looplab.agents.hints.
     assert "Operator directive" in user and "log1p targets + domain features" in user
 
 
@@ -267,7 +267,7 @@ def test_chat_uses_the_runs_snapshot_model_not_ui_env(tmp_path, monkeypatch):
         def __init__(self, s): self.model = s.llm_model; captured["model"] = s.llm_model
         def complete_text(self, msgs): return "ok"
 
-    monkeypatch.setattr("looplab.server.make_llm_client", lambda s: _Cap(s))
+    monkeypatch.setattr("looplab.serve.server.make_llm_client", lambda s: _Cap(s))
     r = client.post("/api/runs/demo/chat", json={"messages": [{"role": "user", "content": "hi"}]}).json()
     assert captured["model"] == "deepseek/deepseek-v4-flash"     # the RUN's model, not the UI env
     assert r["trace"]["model"] == "deepseek/deepseek-v4-flash"   # and the trace reports it honestly
@@ -298,7 +298,7 @@ def test_boss_grounds_on_digest_and_uses_run_tools_then_acts(tmp_path, monkeypat
             return "advice"
 
     fake = _FakeBoss()
-    monkeypatch.setattr("looplab.server.make_llm_client", lambda s: fake)
+    monkeypatch.setattr("looplab.serve.server.make_llm_client", lambda s: fake)
     r = client.post("/api/runs/demo/command", json={"instruction": "focus on feature engineering"}).json()
     assert r["ok"] and r["actions"][0]["type"] == "hint" and "log1p" in r["actions"][0]["data"]["text"]
     # the boss's prompt was grounded on the digest (the working set), not just the single best node
@@ -311,7 +311,7 @@ def test_boss_context_includes_the_run_report(tmp_path, monkeypatch):
     """Regression (review-found dead code): the agent report is a _ReportOut dump (headline/verdict/
     next_directions — NOT a 'content' key), so it must be stitched into the boss/chat context, not
     silently dropped by reading a non-existent rep['content']."""
-    from looplab.eventstore import EventStore
+    from looplab.events.eventstore import EventStore
     _build_run(tmp_path, "demo", writer=None)
     EventStore(tmp_path / "demo" / "events.jsonl").append("report_generated", {"content": {
         "headline": "Quadratic solved near-optimally", "verdict": "metric improved a lot",
@@ -323,7 +323,7 @@ def test_boss_context_includes_the_run_report(tmp_path, monkeypatch):
         def __init__(self, s): self.model = s.llm_model
         def complete_text(self, msgs): captured["sys"] = msgs[0]["content"]; return "ok"
 
-    monkeypatch.setattr("looplab.server.make_llm_client", lambda s: _Cap(s))
+    monkeypatch.setattr("looplab.serve.server.make_llm_client", lambda s: _Cap(s))
     client.post("/api/runs/demo/chat", json={"messages": [{"role": "user", "content": "hi"}]})
     assert "Latest run report" in captured["sys"]
     assert "Quadratic solved near-optimally" in captured["sys"]       # the headline reached the boss
@@ -347,7 +347,7 @@ def test_chat_compact_summarizes_and_reports_tokens(tmp_path, monkeypatch):
             captured["user"] = msgs[-1]["content"]
             return "recap: agreed to try MLPs; budget raised by 10."
 
-    monkeypatch.setattr("looplab.server.make_llm_client", lambda s: _Cap(s))
+    monkeypatch.setattr("looplab.serve.server.make_llm_client", lambda s: _Cap(s))
     r = client.post("/api/runs/demo/chat-compact", json={"messages": [
         {"role": "user", "content": "try some neural nets"},
         {"role": "assistant", "content": "added two MLP baselines"}]}).json()
@@ -364,7 +364,7 @@ def test_chat_compact_empty_is_noop(tmp_path, monkeypatch):
     def _boom(_s):
         raise AssertionError("must not call the model when there's nothing to compact")
 
-    monkeypatch.setattr("looplab.server.make_llm_client", _boom)
+    monkeypatch.setattr("looplab.serve.server.make_llm_client", _boom)
     r = client.post("/api/runs/demo/chat-compact", json={"messages": []}).json()
     assert r["ok"] and r["summary"] == ""
 
@@ -384,8 +384,8 @@ def test_command_reply_carries_token_usage(tmp_path, monkeypatch):
             return "here's my take"
 
     # Force the advisory fallback: structured plan parse + tool-loop both unavailable.
-    monkeypatch.setattr("looplab.server.make_llm_client", lambda s: _Cap(s))
-    monkeypatch.setattr("looplab.parse.parse_structured",
+    monkeypatch.setattr("looplab.serve.server.make_llm_client", lambda s: _Cap(s))
+    monkeypatch.setattr("looplab.core.parse.parse_structured",
                         lambda *a, **k: (_ for _ in ()).throw(RuntimeError("no structured output")))
     r = client.post("/api/runs/demo/command",
                     json={"instruction": "what should I try?", "messages": []}).json()
@@ -396,7 +396,7 @@ def test_command_reply_carries_token_usage(tmp_path, monkeypatch):
 def test_boss_context_report_handles_malformed_fields(tmp_path, monkeypatch):
     """Robustness (review-found): a report whose list-fields hold a STRING (or is nested under
     'content') must be kept whole — not iterated character-by-character, and never crash."""
-    from looplab.eventstore import EventStore
+    from looplab.events.eventstore import EventStore
     _build_run(tmp_path, "demo", writer=None)
     EventStore(tmp_path / "demo" / "events.jsonl").append("report_generated", {"content": {
         "headline": "h", "next_directions": "try a finer sweep",   # a STRING where a list is expected
@@ -408,7 +408,7 @@ def test_boss_context_report_handles_malformed_fields(tmp_path, monkeypatch):
         def __init__(self, s): self.model = s.llm_model
         def complete_text(self, msgs): captured["sys"] = msgs[0]["content"]; return "ok"
 
-    monkeypatch.setattr("looplab.server.make_llm_client", lambda s: _Cap(s))
+    monkeypatch.setattr("looplab.serve.server.make_llm_client", lambda s: _Cap(s))
     r = client.post("/api/runs/demo/chat", json={"messages": [{"role": "user", "content": "hi"}]})
     assert r.json()["ok"]                          # did not crash on the non-list field
     sysp = captured["sys"]
@@ -422,7 +422,7 @@ def test_command_endpoint_soft_fails_offline(tmp_path, monkeypatch):
 
     def _boom(_s):
         raise RuntimeError("no model")
-    monkeypatch.setattr("looplab.server.make_llm_client", _boom)
+    monkeypatch.setattr("looplab.serve.server.make_llm_client", _boom)
     r = client.post("/api/runs/demo/command", json={"instruction": "confirm 1"})
     assert r.status_code == 200 and r.json()["ok"] is False
 
@@ -435,9 +435,9 @@ def test_command_async_job_path(tmp_path, monkeypatch):
     import time as _t
     monkeypatch.setenv("LOOPLAB_JOB_INLINE_WAIT", "0")          # always take the async path
     _build_run(tmp_path, "demo", writer=None)
-    from looplab.server import _Action, _Plan
-    monkeypatch.setattr("looplab.server.make_llm_client", lambda s: object())
-    monkeypatch.setattr("looplab.parse.parse_structured",
+    from looplab.serve.server import _Action, _Plan
+    monkeypatch.setattr("looplab.serve.server.make_llm_client", lambda s: object())
+    monkeypatch.setattr("looplab.core.parse.parse_structured",
                         lambda *a, **k: _Plan(actions=[_Action(action="promote", node_id=2)]))
     client = TestClient(make_app(tmp_path))                     # reads the inline wait at construction
     r = client.post("/api/runs/demo/command", json={"instruction": "promote node 2"}).json()
@@ -459,8 +459,8 @@ def test_start_accepts_inline_task_and_spawns(tmp_path, monkeypatch):
     import json as _j
     client = TestClient(make_app(tmp_path))
     calls = []
-    monkeypatch.setattr("looplab.server.subprocess.Popen", lambda cmd, **k: calls.append(cmd) or None)
-    monkeypatch.setattr("looplab.tasks.validate_task", lambda d: d)      # don't depend on the mle-bench registry
+    monkeypatch.setattr("looplab.serve.server.subprocess.Popen", lambda cmd, **k: calls.append(cmd) or None)
+    monkeypatch.setattr("looplab.adapters.tasks.validate_task", lambda d: d)      # don't depend on the mle-bench registry
     body = {"run_id": "g-run",
             "task": {"kind": "mlebench_real", "competition": "nomad2018-predict-transparent-conductors"},
             "settings": {"llm_model": "minimax/minimax-m3"}}
@@ -477,7 +477,7 @@ def test_start_accepts_inline_task_and_spawns(tmp_path, monkeypatch):
 
 def test_start_rejects_unknown_inline_kind(tmp_path, monkeypatch):
     client = TestClient(make_app(tmp_path))
-    monkeypatch.setattr("looplab.server.subprocess.Popen", lambda *a, **k: None)
+    monkeypatch.setattr("looplab.serve.server.subprocess.Popen", lambda *a, **k: None)
     r = client.post("/api/start", json={"run_id": "bad", "task": {"kind": "definitely-not-a-kind"}})
     assert r.status_code == 400                                          # validated before any spawn
 
@@ -485,7 +485,7 @@ def test_start_rejects_unknown_inline_kind(tmp_path, monkeypatch):
 def test_start_rejects_inline_task_missing_kind(tmp_path, monkeypatch):
     """An inline task without an explicit kind is rejected (no silent default to 'quadratic')."""
     client = TestClient(make_app(tmp_path))
-    monkeypatch.setattr("looplab.server.subprocess.Popen", lambda *a, **k: None)
+    monkeypatch.setattr("looplab.serve.server.subprocess.Popen", lambda *a, **k: None)
     r = client.post("/api/start", json={"run_id": "nk", "task": {"competition": "nomad2018-x"}})
     assert r.status_code == 400
     assert not (tmp_path / "nk" / "task.input.json").exists()            # nothing materialized
@@ -496,11 +496,11 @@ def test_start_rejects_invalid_inline_task_before_spawn(tmp_path, monkeypatch):
     instead of spawning a doomed detached engine."""
     client = TestClient(make_app(tmp_path))
     spawned = []
-    monkeypatch.setattr("looplab.server.subprocess.Popen", lambda *a, **k: spawned.append(a) or None)
+    monkeypatch.setattr("looplab.serve.server.subprocess.Popen", lambda *a, **k: spawned.append(a) or None)
 
     def _bad(_d):
         raise ValueError("unknown competition: nope")
-    monkeypatch.setattr("looplab.tasks.validate_task", _bad)
+    monkeypatch.setattr("looplab.adapters.tasks.validate_task", _bad)
     r = client.post("/api/start", json={"run_id": "iv", "task": {"kind": "mlebench_real", "competition": "nope"}})
     assert r.status_code == 400 and not spawned                          # validated -> rejected -> no engine
     assert not (tmp_path / "iv" / "task.input.json").exists()            # not materialized
@@ -509,7 +509,7 @@ def test_start_rejects_invalid_inline_task_before_spawn(tmp_path, monkeypatch):
 def test_start_rejects_reserved_run_id(tmp_path, monkeypatch):
     """run_id 'reports' is reserved (the cross-run report store dir) and must be rejected."""
     client = TestClient(make_app(tmp_path))
-    monkeypatch.setattr("looplab.server.subprocess.Popen", lambda *a, **k: None)
+    monkeypatch.setattr("looplab.serve.server.subprocess.Popen", lambda *a, **k: None)
     r = client.post("/api/start", json={"run_id": "reports", "task_file": str(TASK)})
     assert r.status_code == 400
 
@@ -518,10 +518,10 @@ def test_genesis_proposes_and_normalizes_spec(tmp_path, monkeypatch):
     """The pre-run BOSS turns a one-line goal into an editable spec: name slugified, task passed
     through, only known non-secret setting overrides kept."""
     client = TestClient(make_app(tmp_path))
-    from looplab.server import _GenesisSpec
-    monkeypatch.setattr("looplab.server.make_llm_client", lambda s: object())
+    from looplab.serve.server import _GenesisSpec
+    monkeypatch.setattr("looplab.serve.server.make_llm_client", lambda s: object())
     monkeypatch.setattr(
-        "looplab.parse.parse_structured",
+        "looplab.core.parse.parse_structured",
         lambda *a, **k: _GenesisSpec(
             run_id="Nomad Minimax!!",
             task={"kind": "mlebench_real", "competition": "nomad2018-predict-transparent-conductors"},
@@ -542,9 +542,9 @@ def test_genesis_run_id_dedupes_against_existing(tmp_path, monkeypatch):
     d = tmp_path / "nomad-minimax"; d.mkdir()                            # a REAL run (has events.jsonl)
     (d / "events.jsonl").write_text('{"seq":0,"type":"run_started","data":{}}\n', encoding="utf-8")
     client = TestClient(make_app(tmp_path))
-    from looplab.server import _GenesisSpec
-    monkeypatch.setattr("looplab.server.make_llm_client", lambda s: object())
-    monkeypatch.setattr("looplab.parse.parse_structured",
+    from looplab.serve.server import _GenesisSpec
+    monkeypatch.setattr("looplab.serve.server.make_llm_client", lambda s: object())
+    monkeypatch.setattr("looplab.core.parse.parse_structured",
                         lambda *a, **k: _GenesisSpec(run_id="nomad-minimax",
                                                      task={"kind": "mlebench_real", "competition": "x"}))
     r = client.post("/api/genesis", json={"instruction": "again"}).json()
@@ -556,9 +556,9 @@ def test_genesis_dedup_ignores_empty_leftover_dir(tmp_path, monkeypatch):
     stays free — matches /api/start's events.jsonl-keyed 409."""
     (tmp_path / "nomad-minimax").mkdir()                                 # empty, no events.jsonl
     client = TestClient(make_app(tmp_path))
-    from looplab.server import _GenesisSpec
-    monkeypatch.setattr("looplab.server.make_llm_client", lambda s: object())
-    monkeypatch.setattr("looplab.parse.parse_structured",
+    from looplab.serve.server import _GenesisSpec
+    monkeypatch.setattr("looplab.serve.server.make_llm_client", lambda s: object())
+    monkeypatch.setattr("looplab.core.parse.parse_structured",
                         lambda *a, **k: _GenesisSpec(run_id="nomad-minimax",
                                                      task={"kind": "mlebench_real", "competition": "x"}))
     r = client.post("/api/genesis", json={"instruction": "again"}).json()
@@ -570,7 +570,7 @@ def test_genesis_soft_fails_offline(tmp_path, monkeypatch):
 
     def _boom(_s):
         raise RuntimeError("no model")
-    monkeypatch.setattr("looplab.server.make_llm_client", _boom)
+    monkeypatch.setattr("looplab.serve.server.make_llm_client", _boom)
     r = client.post("/api/genesis", json={"instruction": "anything"})
     assert r.status_code == 200 and r.json()["ok"] is False and r.json()["reply"]  # usable, no crash
 
@@ -580,7 +580,7 @@ def test_genesis_authors_repo_task_with_setup_steps(tmp_path, monkeypatch):
     edit surface — and returns an adaptation checklist. The authored task must be launch-valid."""
     (tmp_path / "myrepo").mkdir()
     client = TestClient(make_app(tmp_path))
-    from looplab.server import _GenesisSpec
+    from looplab.serve.server import _GenesisSpec
     repo_task = {
         "kind": "repo", "goal": "maximize val accuracy", "direction": "max",
         "editable_path": str(tmp_path / "myrepo"), "edit_surface": ["**/*.py"],
@@ -588,9 +588,9 @@ def test_genesis_authors_repo_task_with_setup_steps(tmp_path, monkeypatch):
                  "metric": {"kind": "stdout_json", "key": "acc"},
                  "setup": ["pip", "install", "-r", "requirements.txt"]},
     }
-    monkeypatch.setattr("looplab.server.make_llm_client", lambda s: object())
+    monkeypatch.setattr("looplab.serve.server.make_llm_client", lambda s: object())
     monkeypatch.setattr(
-        "looplab.parse.parse_structured",
+        "looplab.core.parse.parse_structured",
         lambda *a, **k: _GenesisSpec(
             run_id="my-repo-run", task=repo_task,
             settings={"max_nodes": 20, "developer_backend": "opencode"},
@@ -608,7 +608,7 @@ def test_genesis_authors_repo_task_with_setup_steps(tmp_path, monkeypatch):
     assert len(spec["setup_steps"]) == 3 and any("requirements.txt" in s for s in spec["setup_steps"])
 
     # the authored task is a VALID repo task — /api/start would launch it, not 400.
-    from looplab.tasks import validate_task
+    from looplab.adapters.tasks import validate_task
     validate_task(spec["task"])
 
 
@@ -642,7 +642,7 @@ def test_genesis_boss_scouts_repo_before_planning(tmp_path, monkeypatch):
     repo = tmp_path / "myrepo"; repo.mkdir()
     (repo / "README.md").write_text("BEST TRAIN: python train.py --epochs 50\n", encoding="utf-8")
     boss = _ToolBoss(repo)
-    monkeypatch.setattr("looplab.server.make_llm_client", lambda s: boss)
+    monkeypatch.setattr("looplab.serve.server.make_llm_client", lambda s: boss)
     client = TestClient(make_app(tmp_path))
     r = client.post("/api/genesis", json={"instruction": f"optimize my repo at {repo}, metric recall@100"}).json()
     assert r["ok"] is True
@@ -663,7 +663,7 @@ def test_genesis_async_job_path(tmp_path, monkeypatch):
     repo = tmp_path / "myrepo"; repo.mkdir()
     (repo / "README.md").write_text("BEST TRAIN: python train.py\n", encoding="utf-8")
     boss = _ToolBoss(repo)
-    monkeypatch.setattr("looplab.server.make_llm_client", lambda s: boss)
+    monkeypatch.setattr("looplab.serve.server.make_llm_client", lambda s: boss)
     client = TestClient(make_app(tmp_path))
     r = client.post("/api/genesis", json={"instruction": f"optimize my repo at {repo}"}).json()
     assert r["status"] == "running" and r["job_id"]            # handed back a job, didn't block
@@ -682,7 +682,7 @@ def test_genesis_async_job_path(tmp_path, monkeypatch):
 def test_scope_report_module_deterministic_ranks_and_degrades():
     """The generator with no client returns an honest metrics rollup, ranks by the dominant direction,
     and always carries every key so the UI renders unconditionally."""
-    from looplab.scope_report import generate_scope_report
+    from looplab.serve.scope_report import generate_scope_report
     briefs = [{"run_id": "a", "direction": "min", "best_metric": 0.06, "report": None},
               {"run_id": "b", "direction": "min", "best_metric": 0.05, "report": {"headline": "h"}}]
     c = generate_scope_report({"type": "task", "id": "t", "label": "task t"}, briefs, None)
@@ -697,7 +697,7 @@ def test_scope_report_module_deterministic_ranks_and_degrades():
 def test_scope_report_ranks_each_run_by_its_own_direction():
     """A mixed-direction scope (project/super-task spanning tasks) must NOT rank a max-objective run
     backwards under a single set-wide direction."""
-    from looplab.scope_report import _ranked
+    from looplab.serve.scope_report import _ranked
     briefs = [{"run_id": "loss1", "direction": "min", "best_metric": 0.10},
               {"run_id": "loss2", "direction": "min", "best_metric": 0.50},
               {"run_id": "acc", "direction": "max", "best_metric": 0.95}]   # high accuracy = genuinely best
@@ -709,9 +709,9 @@ def test_scope_report_ranks_each_run_by_its_own_direction():
 def test_scope_report_blank_emit_falls_back_to_deterministic(monkeypatch):
     """A structurally-valid but all-empty emit_report ({}) must NOT be shown as a blank report — it
     drops through to the honest metrics rollup."""
-    from looplab import scope_report
+    from looplab.serve import scope_report
     # tool loop "emits" empty args -> finalize({}) -> blank _AggReport dump (non-empty dict, all defaults)
-    monkeypatch.setattr("looplab.agent.drive_tool_loop",
+    monkeypatch.setattr("looplab.agents.agent.drive_tool_loop",
                         lambda client, tools, messages, emit_spec, **kw: kw["finalize"]({}))
     c = scope_report.generate_scope_report(
         {"type": "task", "id": "t", "label": "task t"},
@@ -723,11 +723,11 @@ def test_scope_report_blank_emit_falls_back_to_deterministic(monkeypatch):
 def test_scope_report_forces_structured_synthesis_when_loop_doesnt_emit(monkeypatch):
     """If the agent never calls emit_report (a weaker model), we force one structured synthesis over
     the digest — a real report — instead of dropping straight to the metrics rollup."""
-    from looplab import scope_report
+    from looplab.serve import scope_report
     # simulate a tool loop that exhausts without emitting -> drive_tool_loop returns fallback(messages)
-    monkeypatch.setattr("looplab.agent.drive_tool_loop",
+    monkeypatch.setattr("looplab.agents.agent.drive_tool_loop",
                         lambda client, tools, messages, emit_spec, **kw: kw["fallback"](messages))
-    monkeypatch.setattr("looplab.parse.parse_structured",
+    monkeypatch.setattr("looplab.core.parse.parse_structured",
                         lambda *a, **k: scope_report._AggReport(headline="SYNTH", verdict="agent synthesized"))
     c = scope_report.generate_scope_report(
         {"type": "task", "id": "t", "label": "task t"},
@@ -747,7 +747,7 @@ def test_scope_report_generate_and_get_task_scope(tmp_path, monkeypatch):
     task_id = runs[0]["task_id"]
     assert task_id and all(r["task_id"] == task_id for r in runs)
     # offline → the endpoint still generates + persists the deterministic rollup over BOTH runs
-    monkeypatch.setattr("looplab.server.make_llm_client", _boom_client)
+    monkeypatch.setattr("looplab.serve.server.make_llm_client", _boom_client)
     g = client.post(f"/api/scope-report/task/{task_id}/generate").json()
     assert g["ok"] is True and set(g["run_ids"]) == {"r1", "r2"}
     assert "runs" in g["content"]["headline"]
@@ -760,7 +760,7 @@ def test_scope_report_absent_then_stale_on_new_run(tmp_path, monkeypatch):
     client = TestClient(make_app(tmp_path))
     task_id = client.get("/api/runs").json()[0]["task_id"]
     assert client.get(f"/api/scope-report/task/{task_id}").json()["exists"] is False   # nothing yet
-    monkeypatch.setattr("looplab.server.make_llm_client", _boom_client)
+    monkeypatch.setattr("looplab.serve.server.make_llm_client", _boom_client)
     client.post(f"/api/scope-report/task/{task_id}/generate")
     _build_run(tmp_path, "r2", writer=None)                # a new run joins the scope
     got = client.get(f"/api/scope-report/task/{task_id}").json()
@@ -776,7 +776,7 @@ def test_scope_report_project_scope_includes_descendants(tmp_path, monkeypatch):
     child = client.post("/api/projects", json={"name": "C", "parent_id": parent["id"]}).json()
     client.post("/api/runs/r1/project", json={"project_id": parent["id"]})
     client.post("/api/runs/r2/project", json={"project_id": child["id"]})
-    monkeypatch.setattr("looplab.server.make_llm_client", _boom_client)
+    monkeypatch.setattr("looplab.serve.server.make_llm_client", _boom_client)
     g = client.post(f"/api/scope-report/project/{parent['id']}/generate").json()
     assert set(g["run_ids"]) == {"r1", "r2"}              # nested run r2 included
 
@@ -792,15 +792,15 @@ def test_genesis_prompt_includes_prior_learnings(tmp_path, monkeypatch):
     _build_run(tmp_path, "r1", writer=None)
     client = TestClient(make_app(tmp_path))
     task_id = client.get("/api/runs").json()[0]["task_id"]
-    monkeypatch.setattr("looplab.server.make_llm_client", _boom_client)
+    monkeypatch.setattr("looplab.serve.server.make_llm_client", _boom_client)
     client.post(f"/api/scope-report/task/{task_id}/generate")   # persists a report w/ a headline
-    from looplab.server import _GenesisSpec
+    from looplab.serve.server import _GenesisSpec
     captured = {}
 
     def _cap_parse(_client, messages, schema, parser):
         captured["sys"] = messages[0]["content"]
         return _GenesisSpec(run_id="x", task={"kind": "mlebench_real", "competition": "y"})
-    monkeypatch.setattr("looplab.server.make_llm_client", lambda s: object())
-    monkeypatch.setattr("looplab.parse.parse_structured", _cap_parse)
+    monkeypatch.setattr("looplab.serve.server.make_llm_client", lambda s: object())
+    monkeypatch.setattr("looplab.core.parse.parse_structured", _cap_parse)
     client.post("/api/genesis", json={"instruction": "start something new"})
     assert "Prior cross-run learnings" in captured["sys"] and "runs" in captured["sys"]

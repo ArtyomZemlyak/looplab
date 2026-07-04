@@ -12,13 +12,13 @@ from pathlib import Path
 
 import anyio
 
-from looplab.eventstore import EventStore
-from looplab.models import NodeStatus
-from looplab.orchestrator import Engine
-from looplab.policy import GreedyTree
-from looplab.replay import fold
-from looplab.sandbox import SubprocessSandbox
-from looplab.toytask import ToyTask
+from looplab.events.eventstore import EventStore
+from looplab.core.models import NodeStatus
+from looplab.engine.orchestrator import Engine
+from looplab.search.policy import GreedyTree
+from looplab.events.replay import fold
+from looplab.runtime.sandbox import SubprocessSandbox
+from looplab.adapters.toytask import ToyTask
 
 ROOT = Path(__file__).resolve().parents[1]
 TASK = ROOT / "examples" / "toy_task.json"
@@ -234,7 +234,7 @@ def test_inject_node_ships_ready_made_code(tmp_path):
 
 # ---- mid-eval kill primitive (v2): cancel Event tree-kills an in-flight subprocess ----
 def test_run_argv_cancel_kills_inflight(tmp_path):
-    from looplab.sandbox import _run_argv
+    from looplab.runtime.sandbox import _run_argv
     cancel = threading.Event()
     timer = threading.Timer(0.4, cancel.set)
     timer.start()

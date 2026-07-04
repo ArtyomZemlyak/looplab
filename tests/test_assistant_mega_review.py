@@ -13,13 +13,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from fastapi.testclient import TestClient  # noqa: E402
 
 from looplab.agents.agent import drive_tool_loop  # noqa: E402
-from looplab.assistant import run_turn  # noqa: E402
-from looplab.git_tools import GitTools  # noqa: E402
-from looplab.knowledge_tools import KnowledgeWriteTools  # noqa: E402
-from looplab.llm import OpenAICompatibleClient  # noqa: E402
-from looplab.server import make_app  # noqa: E402
-from looplab.shell_tools import ShellTools  # noqa: E402
-from looplab.write_tools import WriteTools  # noqa: E402
+from looplab.serve.assistant import run_turn  # noqa: E402
+from looplab.tools.git_tools import GitTools  # noqa: E402
+from looplab.tools.knowledge_tools import KnowledgeWriteTools  # noqa: E402
+from looplab.core.llm import OpenAICompatibleClient  # noqa: E402
+from looplab.serve.server import make_app  # noqa: E402
+from looplab.tools.shell_tools import ShellTools  # noqa: E402
+from looplab.tools.write_tools import WriteTools  # noqa: E402
 
 ALLOW = lambda a: "allow_once"   # noqa: E731
 DENY = lambda a: "deny"          # noqa: E731
@@ -60,7 +60,7 @@ def test_message_stream_persists_raw_and_share_strips_it(tmp_path, monkeypatch):
     class _C(_Fake):
         def complete_text_stream(self, messages):
             yield "done"
-    monkeypatch.setattr("looplab.server.make_llm_client",
+    monkeypatch.setattr("looplab.serve.server.make_llm_client",
                         lambda s: _C([_call("final_answer", {"reply": "done"})]))
     client = TestClient(make_app(tmp_path))
     sid = client.post("/api/assistant/sessions", json={"mode": "plan"}).json()["id"]
@@ -164,7 +164,7 @@ def test_complete_text_stream_bails_on_a_keepalive_stall(monkeypatch):
 
         def __exit__(self, *a):
             return False
-    import looplab.llm as llm
+    import looplab.core.llm as llm
     monkeypatch.setattr(llm.urllib.request, "urlopen", lambda req, timeout=None: _Ctx())
     c = OpenAICompatibleClient("m", base_url="http://x/v1", timeout=0.0)
     monkeypatch.setattr(c, "complete_text", lambda messages: "FALLBACK")

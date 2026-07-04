@@ -11,8 +11,8 @@ questions". It is DERIVED by the fold, audit-only, and must NEVER change best-se
 All offline."""
 from __future__ import annotations
 
-from looplab.models import Event, hypothesis_id
-from looplab.replay import fold
+from looplab.core.models import Event, hypothesis_id
+from looplab.events.replay import fold
 
 
 def _mk(evs):
