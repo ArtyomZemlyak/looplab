@@ -267,6 +267,13 @@ class OpenAICompatibleClient:
         self.api_key = api_key or "x"
         self.temperature = temperature
         self.timeout = timeout
+        # First-byte (response-HEADERS) timeout: a shared endpoint sometimes accepts the TLS
+        # connection and never answers (black-holed request) — waiting the full idle `timeout` for
+        # headers ×retries turned one call into ~13 minutes of silence. Headers arrive fast when a
+        # request is actually admitted (streaming starts before generation finishes), so a short
+        # header window fails futile attempts over to a fresh connection quickly. The idle `timeout`
+        # still governs the BODY (inter-token) phase, restored right after headers arrive.
+        self.header_timeout = min(45.0, timeout) if timeout else 45.0
         # Stream EVERY request (SSE) and reassemble it, so `timeout` acts as an INTER-TOKEN idle
         # timeout, NOT a whole-request deadline: a long-but-alive generation keeps streaming tokens
         # (each resets the timer, so it's never cut off), while a genuinely STALLED endpoint (no data
@@ -483,7 +490,16 @@ class OpenAICompatibleClient:
                          "Authorization": f"Bearer {self.api_key}"},
             )
             try:
-                with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+                with urllib.request.urlopen(req, timeout=self.header_timeout) as resp:
+                    # Headers arrived — restore the full idle timeout for the BODY phase (the short
+                    # window above only bounds connect + first byte; slow token gaps are legitimate).
+                    _fp = getattr(resp, "fp", None)
+                    _sk = getattr(getattr(_fp, "raw", None), "_sock", None) or getattr(_fp, "_sock", None)
+                    if _sk is not None:
+                        try:
+                            _sk.settimeout(self.timeout)
+                        except OSError:
+                            pass
                     # Streaming: reassemble SSE lines (a stall raises socket.timeout HERE, inside the
                     # `with`, and lands in the transient-retry handler below). Non-streaming: one read.
                     parsed = self._read_stream(resp) if use_stream \
