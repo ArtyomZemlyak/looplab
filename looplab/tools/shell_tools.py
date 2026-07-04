@@ -6,6 +6,14 @@ Same `.specs()`/`.execute()` shape as the other providers. Commands are an argv 
 string) so there is no shell-injection surface; the child's environment already has secret-looking
 vars scrubbed by `sandbox._run_argv`. In `plan` mode shell is disabled (argv can't be reliably
 classified as read-only); in `default`/`acceptEdits` it asks; in `auto` it runs inline.
+
+TRUST BOUNDARY (important): unlike the read/write/scout providers, shell places NO `looks_secret`
+gate on the FILES a command reads — only `cwd` is confined to the roots. Under `trusted_local` this is
+by design (the operator runs their own code on their own box; env-var scrubbing is the only hardening,
+and the module makes no security claim). But it means that once shell is enabled in `auto` (or
+approved in a confirm mode), `run_command ["cat", "~/.ssh/id_rsa"]` returns the key to the model — the
+per-file secret gate is NOT a boundary here. The real boundary for untrusted code is the `untrusted`
+trust_mode's `docker run --network none` wrap, not the secret gate.
 """
 from __future__ import annotations
 
@@ -27,11 +35,52 @@ _MAX_TIMEOUT = 600.0
 _GIT_IDENTITY = {"GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_AUTHOR_DATE",
                  "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL", "GIT_COMMITTER_DATE"}
 
+# Substrings in a git-config KEY NAME that mark the pair as credential-bearing. `GIT_CONFIG_KEY_n` /
+# `GIT_CONFIG_VALUE_n` pairs (the multi-var config protocol) can smuggle the SAME secret the exclusion
+# above blocks — e.g. KEY_0=http.extraheader VALUE_0="Authorization: Bearer <token>" (a common CI
+# injection). Passing those through would let `git config --list` print the token into a tool result
+# returned to (and traced for) a possibly-remote model. Matched on the config KEY name (not a broad
+# "credential", which would wrongly drop the SAFE `credential.interactive=false` prompt-disabler).
+_GIT_CRED_KEY_MARKERS = ("extraheader", "askpass", "sshcommand", "proxyauthorization")
+
 
 def git_config_env() -> dict:
     import os as _os
-    return {k: v for k, v in _os.environ.items()
-            if k.startswith("GIT_CONFIG_") or k in _GIT_IDENTITY}
+    env = _os.environ
+    out: dict = {}
+    # Pass through commit identity + any non-COUNT-protocol GIT_CONFIG_* (GLOBAL/SYSTEM/NOSYSTEM…).
+    for k, v in env.items():
+        if k in _GIT_IDENTITY:
+            out[k] = v
+        elif (k.startswith("GIT_CONFIG_") and k != "GIT_CONFIG_COUNT"
+              and not k.startswith("GIT_CONFIG_KEY_") and not k.startswith("GIT_CONFIG_VALUE_")):
+            out[k] = v
+    # Rebuild the KEY_i/VALUE_i sequence CONTIGUOUSLY, dropping credential-bearing pairs. git requires
+    # indices 0..COUNT-1 with no gaps, so a pair can't just be deleted (git would 'missing config key'
+    # and abort) — survivors are renumbered and COUNT is reset to the kept length.
+    try:
+        count = int(env.get("GIT_CONFIG_COUNT", "0") or "0")
+    except (TypeError, ValueError):
+        count = 0
+    kept: list = []
+    for i in range(max(0, count)):
+        key = env.get(f"GIT_CONFIG_KEY_{i}")
+        if key is None:
+            continue
+        val = env.get(f"GIT_CONFIG_VALUE_{i}")
+        kname, vval = key.lower(), (val or "").lower()
+        credentialish = (any(m in kname for m in _GIT_CRED_KEY_MARKERS)
+                         or "authorization:" in vval or "bearer " in vval)
+        if credentialish:
+            continue
+        kept.append((key, val))
+    for j, (key, val) in enumerate(kept):
+        out[f"GIT_CONFIG_KEY_{j}"] = key
+        if val is not None:
+            out[f"GIT_CONFIG_VALUE_{j}"] = val
+    if "GIT_CONFIG_COUNT" in env:
+        out["GIT_CONFIG_COUNT"] = str(len(kept))
+    return out
 
 
 def _tail(s: str, n: int = 4000) -> str:

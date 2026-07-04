@@ -10,7 +10,11 @@ import string
 from pathlib import Path
 from typing import Optional
 
-_FRONTMATTER = re.compile(r"^---\n.*?^---\n", re.DOTALL | re.MULTILINE)
+# Anchored to the START of the string (\A), NOT ^…MULTILINE: a prompt body may use `---` as Markdown
+# horizontal rules, and a MULTILINE `^---` matches between ANY two of them, silently deleting the
+# section in between (Section A vanishes from a body like "intro\n---\nA\n---\nB"). Only a genuine
+# leading YAML frontmatter block (the file's FIRST line is `---`) is stripped.
+_FRONTMATTER = re.compile(r"\A---\r?\n.*?\r?\n---[ \t]*\r?\n", re.DOTALL)
 
 
 def _strip_frontmatter(text: str) -> str:

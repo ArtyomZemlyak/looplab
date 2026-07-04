@@ -29,6 +29,7 @@ from looplab.trust.gate import one_se_better
 from looplab.serve.htmlview import render_html
 from looplab.trust.leakage import target_leakage, temporal_leakage, train_test_contamination
 from looplab.engine.memory import JsonlCaseLibrary
+from looplab.core.llm import BudgetExceeded
 from looplab.core.models import Idea, NodeStatus, RunState
 from looplab.search.operators import merge_idea
 from looplab.search.policy import SearchPolicy, available_policies, make_policy
@@ -2004,15 +2005,22 @@ class Engine:
                             f"#{dup.id} ('{self._idea_text(dup.idea)[:160]}') — {outcome}. "
                             "Propose something MEANINGFULLY DIFFERENT (another approach, "
                             "component or direction), not a rewording.")
+                    prev = getattr(self.researcher, "_novelty_feedback", "")
+                    setattr(self.researcher, "_novelty_feedback", hint)
                     try:
-                        prev = getattr(self.researcher, "_novelty_feedback", "")
-                        setattr(self.researcher, "_novelty_feedback", hint)
                         idea2 = repropose()
-                        setattr(self.researcher, "_novelty_feedback", prev)
                         if idea2 is not None:
                             idea = idea2
+                    except BudgetExceeded:      # the hard budget stop must end the run, not be swallowed
+                        raise
                     except Exception:  # noqa: BLE001 — a repropose failure keeps the original idea
                         pass
+                    finally:
+                        # ALWAYS restore, even if repropose() raised: otherwise this transient
+                        # "you are duplicating #N" directive leaks into EVERY later proposal in the
+                        # run — including drafts in unrelated regions — permanently mis-steering the
+                        # researcher away from a direction the operator never banned.
+                        setattr(self.researcher, "_novelty_feedback", prev)
 
         params = {k: float(v) for k, v in idea.params.items() if isinstance(v, (int, float))}
         if not params:
@@ -2122,6 +2130,8 @@ class Engine:
                 out = fn(node, tagged, attempt, state=state, brief=brief)
                 if isinstance(out, dict) and out.get("action") in ("repair", "abandon", "reject_idea"):
                     return {"action": out["action"], "rationale": str(out.get("rationale", ""))[:300]}
+            except BudgetExceeded:      # the hard budget stop must propagate, not degrade to the rule
+                raise
             except Exception:  # noqa: BLE001 - agent triage is best-effort; fall through to the rule
                 pass
         # 0 = unlimited attempts -> pass a large cap so the rule path keeps repairing mechanical
@@ -2996,12 +3006,19 @@ class Engine:
                     new_code = self.developer.repair(
                         node.idea, node.code,
                         self._repair_error_context(reason, err, state=state, node=node))
+                # Snapshot the developer's per-call audit state IMMEDIATELY, before any `await`: under
+                # max_parallel>1 the developer instance is SHARED across concurrent _evaluate tasks,
+                # and `async with self._write_lock` below is a checkpoint — a sibling task's repair()
+                # would overwrite `developer.last_files` in the gap, so reading it after the lock would
+                # record (and re-materialize) ANOTHER node's edits as this node's. Capture now.
+                repaired_files = dict(getattr(self.developer, "last_files", {}) or {})
+                repaired_deleted = list(getattr(self.developer, "last_deleted", []) or [])
                 attempt += 1
                 async with self._write_lock:
                     self.store.append("node_repaired", {
                         "node_id": node_id, "attempt": attempt, "code": new_code,
-                        "files": getattr(self.developer, "last_files", {}) or {},
-                        "deleted": getattr(self.developer, "last_deleted", []) or [],
+                        "files": repaired_files,
+                        "deleted": repaired_deleted,
                         "error_in": err, "triage_action": "repair",
                         "rationale": str(triage.get("rationale", ""))[:300]})
                 node = fold(self.store.read_all()).nodes[node_id]   # node.code now == repaired code

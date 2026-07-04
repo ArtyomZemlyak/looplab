@@ -18,6 +18,7 @@ from typing import Optional
 
 from pydantic import BaseModel, Field
 
+from looplab.core.llm import BudgetExceeded
 from looplab.core.models import NodeStatus, ResearchMemo, RunState
 
 
@@ -185,6 +186,8 @@ class DeepResearcher:
                     break
             # Ran out of turns without an emit — force a structured memo from the accumulated context.
             return self._forced(messages, memo, sources)
+        except BudgetExceeded:      # a hard budget stop must end the run, not be swallowed as a memo
+            raise
         except Exception as e:  # noqa: BLE001 — research is best-effort; never crash the run
             memo.summary = f"(deep research unavailable: {e})"
             memo.sources = sources
@@ -214,6 +217,8 @@ class DeepResearcher:
                 self.client, messages + [{"role": "user", "content": "Emit the memo now."}],
                 _MemoOut, self.parser)
             return self._assemble(out, memo, sources)
+        except BudgetExceeded:      # a hard budget stop must end the run, not be swallowed as a memo
+            raise
         except (ParseError, Exception):  # noqa: BLE001
             memo.summary = "(deep research produced no memo)"
             memo.sources = sources

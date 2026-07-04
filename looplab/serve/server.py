@@ -1881,6 +1881,31 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
             return dec
         return approver
 
+    def _acquire_turn(sid: str, cancel_ev: "threading.Event"):
+        """Claim the SINGLE active-turn slot for a session. Two concurrent turns on one session (two
+        tabs, or the stream + non-stream endpoints) otherwise interleave: the second reads a `history`
+        missing the first's reply, `_asst_cancel[sid]` gets clobbered so Stop hits the wrong turn, and
+        replies append in completion order (u1,u2,a2,a1). Reject the second with 409 instead. Registers
+        the cancel event + a fresh progress entry, both owned by `cancel_ev`, atomically under the
+        lock."""
+        with _perm_lock:
+            existing = _asst_cancel.get(sid)
+            if existing is not None and not existing.is_set():
+                raise HTTPException(409, "a turn is already running for this session")
+            _asst_cancel[sid] = cancel_ev
+            _asst_progress[sid] = {"steps": [], "todos": [], "updated": time.time(),
+                                   "owner": cancel_ev}
+
+    def _release_turn(sid: str, cancel_ev: "threading.Event") -> None:
+        """Tear down ONLY this turn's registry entries (a newer turn may have replaced them): pop the
+        cancel event and progress entry only when `cancel_ev` still owns them."""
+        with _perm_lock:
+            if _asst_cancel.get(sid) is cancel_ev:
+                _asst_cancel.pop(sid, None)
+            p = _asst_progress.get(sid)
+            if p is not None and p.get("owner") is cancel_ev:
+                _asst_progress.pop(sid, None)
+
     def _deny_session_perms(sid: str) -> None:
         """Auto-deny + UNBLOCK every pending permission request for a session. Called on cancel/delete
         so a worker parked in `approver.ev.wait` un-parks immediately (returns "deny" → the mutating
@@ -2047,6 +2072,11 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
         history = list(sess["messages"])          # BEFORE appending the new user turn
         from looplab.serve.assistant import normalize_mode as _norm_mode2
         eff_mode = _norm_mode2(mode or sess["meta"].get("mode") or "plan")   # never persist a junk mode
+        # Claim the single active-turn slot (409 if a turn is already running) BEFORE mutating the
+        # transcript, so a rejected concurrent turn leaves no dangling user message. The cancel event
+        # also makes this endpoint's turn interruptible (Stop) — previously only the stream one was.
+        cancel_ev = threading.Event()
+        _acquire_turn(sid, cancel_ev)
         turn = {"role": "user", "content": display or instruction, "mode": eff_mode}
         if display and display != instruction:
             # Keep the FULL model-facing instruction (attached-file contents, UI-context preamble)
@@ -2060,41 +2090,46 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
         try:
             client = make_llm_client(s)
         except Exception as e:  # noqa: BLE001 - offline / no model -> soft fail with a usable message
+            _release_turn(sid, cancel_ev)
             reply = f"Couldn't reach the model ({e})."
             _asst.append(sid, {"role": "assistant", "content": reply})
             return {"ok": False, "error": str(e), "reply": reply, "mode": eff_mode}
 
-        approver = _make_approver(sid)
-        # Identity-guarded registry entry: touch/pop it ONLY while this turn still owns it, so a
-        # concurrent turn for the same session (another tab / the stream endpoint) can't have its
-        # live-progress entry clobbered or popped by this one.
-        prog = {"steps": [], "todos": [], "updated": time.time()}
-        with _perm_lock:
-            _asst_progress[sid] = prog
+        approver = _make_approver(sid, cancel_ev)   # a confirm raised after Stop denies instantly
 
         def _on_step(ev: dict) -> None:
             with _perm_lock:
-                if _asst_progress.get(sid) is prog:
-                    prog["steps"] = (prog["steps"] + [ev.get("label") or ev.get("tool") or "…"])[-40:]
-                    prog["updated"] = time.time()
+                p = _asst_progress.get(sid)   # owner-guarded: only OUR turn touches its progress entry
+                if p is not None and p.get("owner") is cancel_ev:
+                    p["steps"] = (p["steps"] + [ev.get("label") or ev.get("tool") or "…"])[-40:]
+                    p["updated"] = time.time()
 
         def _on_todos(items: list) -> None:
             with _perm_lock:
-                if _asst_progress.get(sid) is prog:
-                    prog["todos"] = items
-                    prog["updated"] = time.time()
+                p = _asst_progress.get(sid)
+                if p is not None and p.get("owner") is cancel_ev:
+                    p["todos"] = items
+                    p["updated"] = time.time()
 
         def _compute() -> dict:
             try:
                 res = _assistant_run_turn(client, root, history, instruction, eff_mode,
                                           alive_fn=_engine_alive, settings=s, approver=approver,
-                                          on_step=_on_step, on_todos=_on_todos)
+                                          on_step=_on_step, on_todos=_on_todos,
+                                          cancel_check=cancel_ev.is_set)
                 res["tokens"] = _client_tokens(client)
+                # Conditional append: persist the reply ONLY while the transcript still ends at OUR
+                # user turn (len(history)+1). If the user cancelled and sent a newer message, appending
+                # unconditionally would interleave the transcripts (u1,u2,a1,a2); drop the stale reply.
                 try:
-                    _asst.append(sid, {"role": "assistant", "content": res.get("reply", ""),
-                                       "steps": res.get("steps") or [], "applied": res.get("applied") or [],
-                                       "proposals": res.get("proposals") or [], "todos": res.get("todos") or [],
-                                       "tokens": res.get("tokens")})
+                    ok = _asst.append_if_len(
+                        sid, {"role": "assistant", "content": res.get("reply", ""),
+                              "steps": res.get("steps") or [], "applied": res.get("applied") or [],
+                              "proposals": res.get("proposals") or [], "todos": res.get("todos") or [],
+                              "tokens": res.get("tokens")},
+                        expected_len=len(history) + 1)
+                    if not ok:
+                        res["reply"] = ""   # dropped as stale; the job result still returns
                 except Exception:  # noqa: BLE001 - persistence is best-effort; still return the reply
                     pass
                 if not history:             # first turn -> title the session from the exchange (cheap)
@@ -2109,9 +2144,7 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
                         pass
                 return res
             finally:
-                with _perm_lock:            # drop OUR live-progress entry (no leak on error) — but
-                    if _asst_progress.get(sid) is prog:   # never a newer turn's entry
-                        _asst_progress.pop(sid, None)
+                _release_turn(sid, cancel_ev)
 
         return await _run_as_job(_compute)
 
@@ -2139,6 +2172,10 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
         history = list(sess["messages"])
         from looplab.serve.assistant import normalize_mode as _norm_mode
         eff_mode = _norm_mode(mode or sess["meta"].get("mode") or "plan")   # never persist a junk mode
+        # Claim the single active-turn slot (409 if a turn is already running) BEFORE mutating the
+        # transcript — one running turn per session across BOTH endpoints.
+        cancel_ev = threading.Event()
+        _acquire_turn(sid, cancel_ev)
         turn = {"role": "user", "content": display or instruction, "mode": eff_mode}
         if display and display != instruction:
             turn["raw"] = instruction   # full model-facing text — see the non-stream endpoint's note
@@ -2149,32 +2186,29 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
         try:
             client = make_llm_client(s)
         except Exception as e:  # noqa: BLE001 - offline -> stream a single error event
+            _release_turn(sid, cancel_ev)
             err_msg = str(e)
 
             async def _err_gen():
                 yield f"event: error\ndata: {json.dumps(err_msg)}\n\n"
             return StreamingResponse(_err_gen(), media_type="text/event-stream")
-        cancel_ev = threading.Event()
         approver = _make_approver(sid, cancel_ev)   # a confirm raised AFTER Stop denies instantly
-        with _perm_lock:
-            _asst_progress[sid] = {"steps": [], "todos": [], "updated": time.time()}
-            _asst_cancel[sid] = cancel_ev
 
         def _on_step(ev):
             with _perm_lock:
-                # Record progress ONLY while this turn still owns the session's registry entry — a
+                # Record progress ONLY while OUR turn still owns the session's progress entry — a
                 # cancelled worker's late tool steps must not re-create _asst_progress after a newer
                 # turn (or the finally) popped it, else `progress.active` stays true forever and every
                 # future open of the session reattaches to a phantom "thinking" turn.
-                if _asst_cancel.get(sid) is cancel_ev and not cancel_ev.is_set():
-                    p = _asst_progress.setdefault(sid, {"steps": [], "todos": [], "updated": 0})
+                p = _asst_progress.get(sid)
+                if p is not None and p.get("owner") is cancel_ev and not cancel_ev.is_set():
                     p["steps"] = (p["steps"] + [ev.get("label") or ev.get("tool") or "…"])[-40:]
             q.put(("step", ev.get("label") or ev.get("tool") or "…"))
 
         def _on_todos(items):
             with _perm_lock:   # mirror todos into the progress channel so a reattach restores them
-                if _asst_cancel.get(sid) is cancel_ev and not cancel_ev.is_set():
-                    p = _asst_progress.setdefault(sid, {"steps": [], "todos": [], "updated": 0})
+                p = _asst_progress.get(sid)
+                if p is not None and p.get("owner") is cancel_ev and not cancel_ev.is_set():
                     p["todos"] = items
             q.put(("todos", items))
 
@@ -2189,24 +2223,19 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
                                           reply_sink=lambda piece: q.put(("token", piece)),
                                           cancel_check=cancel_ev.is_set)
                 res["tokens"] = _client_tokens(client)
-                # A CANCELLED turn's late reply is persisted only while the transcript still ends at
-                # our own user message. If the user already sent a newer message, appending would
-                # interleave the transcripts (u1,u2,a1,a2) and recoverReply could finalize turn 2's
-                # placeholder with turn 1's stale reply — drop the late reply instead.
-                stale = False
-                if cancel_ev.is_set():
-                    try:
-                        stale = len(_asst.messages(sid)) > len(history) + 1
-                    except Exception:  # noqa: BLE001
-                        stale = False
-                if stale:
-                    res["reply"] = ""   # dropped; the done event still ends the (already reset) stream
-                else:
-                    _asst.append(sid, {"role": "assistant", "content": res.get("reply", ""),
-                                       "steps": res.get("steps") or [], "applied": res.get("applied") or [],
-                                       "proposals": res.get("proposals") or [], "todos": res.get("todos") or [],
-                                       "tokens": res.get("tokens")})
-                if not history:
+                # Persist the reply ONLY while the transcript still ends at OUR user message
+                # (len(history)+1) — atomically. If the user cancelled and sent a newer message,
+                # appending would interleave the transcripts (u1,u2,a1,a2) and recoverReply could
+                # finalize turn 2's placeholder with turn 1's stale reply — drop the late reply.
+                appended = _asst.append_if_len(
+                    sid, {"role": "assistant", "content": res.get("reply", ""),
+                          "steps": res.get("steps") or [], "applied": res.get("applied") or [],
+                          "proposals": res.get("proposals") or [], "todos": res.get("todos") or [],
+                          "tokens": res.get("tokens")},
+                    expected_len=len(history) + 1)
+                if not appended:
+                    res["reply"] = ""   # dropped as stale; the done event still ends the stream
+                if not history:         # first turn -> title from the user's message (reply-independent)
                     try:
                         t = client.complete_text([
                             {"role": "system", "content": "Reply with a SHORT title (<= 6 words, no "
@@ -2221,13 +2250,9 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
             except Exception as e:  # noqa: BLE001
                 q.put(("error", str(e)))
             finally:
-                # Only tear down OUR turn's registry entries: if a second turn for this session
-                # started meanwhile it will have replaced `_asst_cancel[sid]` with its own Event, and
-                # popping unconditionally would orphan it (its Stop + progress polling would break).
-                with _perm_lock:
-                    if _asst_cancel.get(sid) is cancel_ev:
-                        _asst_cancel.pop(sid, None)
-                        _asst_progress.pop(sid, None)
+                # Tear down ONLY OUR turn's registry entries (owner-guarded): a newer turn may have
+                # replaced them, and popping unconditionally would orphan it.
+                _release_turn(sid, cancel_ev)
                 q.put(("__end__", None))
         threading.Thread(target=_worker, daemon=True).start()
 

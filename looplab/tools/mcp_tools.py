@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 from pathlib import Path
 from typing import Optional
 
@@ -104,11 +105,19 @@ class McpTools:
     @classmethod
     def cached(cls) -> "McpTools":
         """Process-global instance: connect to each MCP server ONCE (a live server owns a background
-        thread + event loop + subprocess), not on every assistant turn. build_tools calls this."""
+        thread + event loop + subprocess), not on every assistant turn. build_tools calls this.
+
+        Double-checked under a lock: two concurrent first turns (two tabs/sessions — the workers are
+        plain threads) would otherwise both see `_CACHED is None`, both `from_config()`, and each spawn
+        a full set of server handles (thread + loop + subprocess); the loser's set orphans and leaks
+        for the process lifetime."""
         global _CACHED
         if _CACHED is None:
-            _CACHED = cls.from_config()
+            with _CACHE_LOCK:
+                if _CACHED is None:
+                    _CACHED = cls.from_config()
         return _CACHED
 
 
 _CACHED: Optional["McpTools"] = None
+_CACHE_LOCK = threading.Lock()

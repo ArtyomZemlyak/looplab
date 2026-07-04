@@ -148,9 +148,15 @@ def _retry_after_seconds(ra) -> Optional[float]:
 # `<｜DSML｜invoke name="emit"><｜DSML｜parameter name="arguments" ...>{...}</…></…>`. When that leaks
 # into content the agent loop sees no tool call and the raw markup reaches the user. These lift the
 # leaked call back into OpenAI-shaped tool_calls (name + JSON arguments) and clean the content.
-_NATIVE_INVOKE_RE = re.compile(r'invoke\s+name="([^"]+)"(.*?)</[^>]*?invoke>', re.DOTALL)
+#
+# Every pattern REQUIRES a genuine OPENING tag `<…invoke…` (negative lookahead `(?!/)` after the `<`
+# so a bare CLOSER `</invoke>` never counts as an opener): otherwise prose that merely QUOTES the
+# syntax un-fenced — 'write invoke name="delete_file" … and close with </invoke>' — would be lifted
+# into a real, EXECUTED tool call (the docstring's stated worst case). Weak local models routinely
+# omit code fences, so the code-span guard alone is not enough — the tag anchor is what makes it safe.
+_NATIVE_INVOKE_RE = re.compile(r'<(?!/)[^>]*?invoke\s+name="([^"]+)"(.*?)</[^>]*?invoke>', re.DOTALL)
 _NATIVE_PARAM_RE = re.compile(r'parameter\s+name="([^"]+)"[^>]*?>(.*?)</[^>]*?parameter>', re.DOTALL)
-_NATIVE_OPEN_RE = re.compile(r'<[^>]*?(?:DSML|tool_calls|\binvoke\b)')
+_NATIVE_OPEN_RE = re.compile(r'<(?!/)[^>]*?(?:DSML|tool_calls|\binvoke\b)')
 
 
 _CODE_SPAN_RE = re.compile(r"```.*?(?:```|$)|`[^`\n]*`", re.DOTALL)
@@ -248,6 +254,71 @@ def _assistant_text(msg: dict) -> str:
     return content
 
 
+def _tool_call_slot(tcs: dict, tc: dict) -> int:
+    """Pick the merge slot for a streamed tool-call delta. When the provider supplies `index` (the
+    OpenAI spec), use it verbatim. When it OMITS `index` (several Ollama builds / OpenAI-compat
+    gateways emit one WHOLE call per delta with no index), a blind `.get("index", 0)` collapses every
+    call into slot 0 — the later call overwrites the earlier's id/name and their argument fragments
+    concatenate into invalid JSON. So without an index we START A NEW SLOT when the delta begins a
+    new call (it carries a fresh `id`, or a `name` while the current slot already has one) and
+    otherwise keep appending to the open slot (so a single call streamed in fragments stays merged)."""
+    idx = tc.get("index")
+    if idx is not None:
+        return idx
+    if not tcs:
+        return 0
+    cur = max(tcs)
+    slot = tcs[cur]
+    fn = tc.get("function") or {}
+    new_id = tc.get("id") and slot.get("id") and tc["id"] != slot["id"]
+    new_named = fn.get("name") and slot["function"]["name"]
+    return cur + 1 if (new_id or new_named) else cur
+
+
+def _socket_watchdog(resp, idle_limit: float):
+    """Shared stream-stall watchdog. A stalled generation can hide from an in-loop wall-clock check
+    two ways: SSE keepalive heartbeats reset the per-socket read timeout forever, and a server that
+    trickles bytes WITHOUT completing a line blocks inside recv() so the loop's check never even runs
+    (both observed as multi-minute/hour hangs on glm-5.1). This starts a daemon thread that, once no
+    progress for `idle_limit`s, SHUTS DOWN the underlying socket — which is what actually interrupts a
+    recv() already blocked in the kernel (resp.close() alone does not: the blocked syscall keeps
+    waiting on the fd). shutdown() makes the recv raise OSError, retried on a fresh connection.
+
+    Returns (last_progress, killed, stop):
+      - last_progress[0]: set to time.monotonic() on every REAL token so a long-but-alive generation
+        is never cut off (no hard deadline — only true silence trips it).
+      - killed[0]: True once the watchdog fired (read the loop's EOF as a stall, not a clean end).
+      - stop(): end the watchdog thread — ALWAYS call it in a finally.
+    """
+    import socket as _socket
+    import threading
+    last_progress = [time.monotonic()]
+    killed = [False]
+    _stop = threading.Event()
+    # Best-effort grab of the raw socket behind the urllib response (http.client wraps it in a
+    # BufferedReader over a SocketIO). None for a non-socket body (e.g. a test mock) -> close() path.
+    _fp = getattr(resp, "fp", None)
+    _sock = getattr(getattr(_fp, "raw", None), "_sock", None) or getattr(_fp, "_sock", None)
+
+    def _watchdog():
+        while not _stop.wait(min(5.0, idle_limit / 4)):
+            if time.monotonic() - last_progress[0] > idle_limit:
+                killed[0] = True            # so the loop's EOF is read as a stall, not a clean end
+                if _sock is not None:
+                    try:
+                        _sock.shutdown(_socket.SHUT_RDWR)   # unblocks a recv() stuck in the kernel
+                    except Exception:  # noqa: BLE001
+                        pass
+                try:
+                    resp.close()            # fallback (and mock-friendly for tests)
+                except Exception:  # noqa: BLE001
+                    pass
+                return
+
+    threading.Thread(target=_watchdog, daemon=True).start()
+    return last_progress, killed, _stop.set
+
+
 class OpenAICompatibleClient:
     """Dependency-free OpenAI-compatible chat client (stdlib urllib). Implements the
     `parse.LLMClient` Protocol, so it drops into the LLM roles like any other backend.
@@ -322,52 +393,31 @@ class OpenAICompatibleClient:
         usage: dict = {}
         raw_lines: list[str] = []
         got_sse = False
-        # Idle timeout by PROGRESS, enforced two ways because a stall can hide from either alone:
-        #  (a) the per-socket read timeout resets on ANY byte, so SSE keepalive heartbeats keep a
-        #      STALLED generation's connection "alive" forever (observed: a ~70-min hang); and
-        #  (b) a server that trickles bytes WITHOUT completing a line (huge-prompt prefill, partial
-        #      chunks) blocks inside recv() so the in-loop check below never even runs (observed: a
-        #      ~15-min hang on glm-5.1 during a big implement prompt).
-        # So we track wall-clock since the last REAL token and (a) check it at the top of the loop AND
-        # (b) run a watchdog thread that, when it's exceeded, SHUTS DOWN the underlying socket — which
-        # is what actually interrupts a recv() already blocked in the kernel (resp.close() alone does
-        # NOT: it drops the file object but the blocked syscall keeps waiting on the fd). shutdown()
-        # makes the recv raise OSError, which _post catches and retries on a fresh connection. A
-        # long-but-alive generation keeps emitting content, resetting the clock — no hard deadline.
-        import socket as _socket
-        import threading
+        # Idle timeout by PROGRESS: tracked as wall-clock since the last REAL token and enforced both
+        # by an in-loop check (below) AND a socket-shutdown watchdog (`_socket_watchdog`) — a stall
+        # can hide from either alone (keepalive heartbeats reset the read timeout; a partial-line
+        # trickle blocks in recv() before the in-loop check runs). A long-but-alive generation keeps
+        # emitting content, resetting the clock — no hard deadline.
         idle_limit = self.timeout
-        last_progress = [time.monotonic()]
-        _killed = [False]
-        _stop = threading.Event()
-        # Best-effort grab of the raw socket behind the urllib response (http.client wraps it in a
-        # BufferedReader over a SocketIO). None for a non-socket body (e.g. a test mock) -> close() path.
-        _fp = getattr(resp, "fp", None)
-        _sock = getattr(getattr(_fp, "raw", None), "_sock", None) or getattr(_fp, "_sock", None)
-
-        def _watchdog():
-            while not _stop.wait(min(5.0, idle_limit / 4)):
-                if time.monotonic() - last_progress[0] > idle_limit:
-                    _killed[0] = True           # so the loop's EOF is read as a stall, not a clean end
-                    if _sock is not None:
-                        try:
-                            _sock.shutdown(_socket.SHUT_RDWR)   # unblocks a recv() stuck in the kernel
-                        except Exception:  # noqa: BLE001
-                            pass
-                    try:
-                        resp.close()            # fallback (and mock-friendly for tests)
-                    except Exception:  # noqa: BLE001
-                        pass
-                    return
-
-        _wd = threading.Thread(target=_watchdog, daemon=True)
-        _wd.start()
+        last_progress, _killed, _stop_wd = _socket_watchdog(resp, idle_limit)
         try:
             try:
                 lines = iter(resp)              # SSE responses iterate line-by-line
             except TypeError:
                 lines = iter(())                # a non-iterable body (e.g. a test mock) -> read() below
-            for raw in lines:
+            while True:
+                try:
+                    raw = next(lines)
+                except StopIteration:
+                    break
+                except ValueError:
+                    # The watchdog called resp.close() while lines buffered in the BufferedReader were
+                    # still draining -> readline-of-closed-file. That IS the stall the watchdog fired
+                    # on; fall through to the `_killed` check (a TimeoutError _post retries) instead of
+                    # leaking a bare ValueError past _post's transient tuple and crashing the run.
+                    if _killed[0]:
+                        break
+                    raise
                 if time.monotonic() - last_progress[0] > idle_limit:
                     raise TimeoutError(f"LLM stream stalled — no new tokens for {idle_limit:.0f}s; "
                                        f"retrying on a fresh connection")
@@ -398,7 +448,8 @@ class OpenAICompatibleClient:
                     last_progress[0] = time.monotonic()
                 for tc in (delta.get("tool_calls") or []):
                     last_progress[0] = time.monotonic()
-                    slot = tcs.setdefault(tc.get("index", 0),
+                    idx = _tool_call_slot(tcs, tc)   # provider-omitted `index` must not collapse calls
+                    slot = tcs.setdefault(idx,
                                           {"id": None, "type": "function",
                                            "function": {"name": "", "arguments": []}})
                     if tc.get("id"):
@@ -411,7 +462,7 @@ class OpenAICompatibleClient:
                 if ch.get("finish_reason"):
                     finish = ch["finish_reason"]
         finally:
-            _stop.set()                         # stop the watchdog before we return / propagate
+            _stop_wd()                          # stop the watchdog before we return / propagate
         if _killed[0]:                          # watchdog shut the socket -> a stall, not a real end;
             raise TimeoutError(f"LLM stream stalled — no new tokens for {idle_limit:.0f}s; "
                                f"retrying on a fresh connection")   # _post catches -> retry
@@ -565,9 +616,19 @@ class OpenAICompatibleClient:
                 # A parsed dict is accepted (an `{"error": ...}` envelope has no `choices` and fails
                 # fast at the post-loop check). Only two cases retry: an unparseable body (None), or a
                 # STREAM that produced an empty message (keepalive-only heartbeats, no content/tool_call).
-                m = ((parsed.get("choices") or [{}])[0] or {}).get("message") or {} if parsed else {}
+                ch0 = ((parsed.get("choices") or [{}])[0] or {}) if parsed else {}
+                m = ch0.get("message") or {}
+                # A stream is a "keepalive-only stall" ONLY when it produced NOTHING usable: no
+                # content, no tool_calls, no reasoning, AND no finish_reason. A reasoning model that
+                # hit its length limit while thinking (finish_reason="length", non-empty `reasoning`,
+                # empty `content`) is a REAL — if truncated — response, not a stall: retrying it 5×
+                # regenerates minutes of reasoning tokens and ratchets `_stream_stalls` to the
+                # permanent-degrade threshold, turning the idle timeout into a hard deadline for the
+                # rest of the run. finish_reason present (even "stop" with empty content) likewise
+                # means the endpoint answered — return it and let the no-choices check decide.
                 empty_stream = (use_stream and parsed is not None and parsed.get("choices")
-                                and not m.get("content") and not m.get("tool_calls"))
+                                and not m.get("content") and not m.get("tool_calls")
+                                and not m.get("reasoning") and not ch0.get("finish_reason"))
                 if parsed is not None and not empty_stream:
                     body = parsed
                     break
@@ -615,66 +676,106 @@ class OpenAICompatibleClient:
         content deltas as they arrive; used by the assistant to stream its final answer live. Falls
         back to a single yield of the whole text if the endpoint doesn't stream. Best-effort — any
         transport error mid-stream ends the generator (the caller keeps what it got)."""
-        payload = {"model": self.model, "messages": messages, "temperature": self.temperature,
-                   "stream": True, "stream_options": {"include_usage": True}}
-        if self.reasoning:
-            payload = {**payload, **self.reasoning}
-        req = urllib.request.Request(
-            f"{self.base_url}/chat/completions", data=json.dumps(payload).encode("utf-8"),
-            method="POST", headers={"Content-Type": "application/json",
-                                    "Authorization": f"Bearer {self.api_key}"})
         pieces: list[str] = []
         usage: dict = {}
         # The generation span stays open for the whole stream (its duration = time-to-full-answer).
         with tracing.generation(op="complete_text_stream", model=self.model, messages=messages,
                                 model_parameters=self._model_params()) as gen:
-            try:
-                # Idle timeout by PROGRESS (same stall class `_read_stream` guards against): SSE
-                # keepalive/heartbeat lines reset the socket read timeout on every line, so a STALLED
-                # generation that keeps heartbeating would spin here forever — and the caller's
-                # cancel check only runs per YIELDED piece, so Stop would never be observed. Track
-                # wall-clock since the last real token and bail once it exceeds the client timeout;
-                # the except below then falls back / returns what we have.
-                _last_progress = time.monotonic()
-                with urllib.request.urlopen(req, timeout=self.header_timeout) as resp:
-                    # stream path: headers arrive on admission; restore the idle timeout for the body
-                    _fp2 = getattr(resp, "fp", None)
-                    _sk2 = getattr(getattr(_fp2, "raw", None), "_sock", None) or getattr(_fp2, "_sock", None)
-                    if _sk2 is not None:
+            # Reasoning-param retry: like `_post`, a model that 400s on our reasoning toggle (glm-5.1
+            # behind litellm) must not silently lose streaming forever — flip `_reasoning_ok` off for
+            # this client and retry the stream ONCE without it, instead of paying a wasted 400
+            # round-trip per turn and always falling back to the blocking path.
+            for _attempt in range(2):
+                payload = {"model": self.model, "messages": messages,
+                           "temperature": self.temperature,
+                           "stream": True, "stream_options": {"include_usage": True}}
+                if self.reasoning and self._reasoning_ok:
+                    payload = {**payload, **self.reasoning}
+                req = urllib.request.Request(
+                    f"{self.base_url}/chat/completions", data=json.dumps(payload).encode("utf-8"),
+                    method="POST", headers={"Content-Type": "application/json",
+                                            "Authorization": f"Bearer {self.api_key}"})
+                try:
+                    # Idle timeout by PROGRESS, enforced by the SAME socket-shutdown watchdog as
+                    # `_read_stream`: the in-loop wall-clock check alone can't catch a server that
+                    # trickles bytes without completing a line (recv() blocks in the kernel — the
+                    # documented ~15-min hang), and the caller's cancel check only runs per yielded
+                    # piece, so Stop would never be observed. The watchdog shuts the socket down.
+                    with urllib.request.urlopen(req, timeout=self.header_timeout) as resp:
+                        _fp2 = getattr(resp, "fp", None)   # restore the idle timeout for the body phase
+                        _sk2 = (getattr(getattr(_fp2, "raw", None), "_sock", None)
+                                or getattr(_fp2, "_sock", None))
+                        if _sk2 is not None:
+                            try:
+                                _sk2.settimeout(self.timeout)
+                            except OSError:
+                                pass
+                        last_progress, _killed, _stop_wd = _socket_watchdog(resp, self.timeout)
                         try:
-                            _sk2.settimeout(self.timeout)
-                        except OSError:
-                            pass
-                    for raw in resp:
-                        if time.monotonic() - _last_progress > self.timeout:
+                            lines = iter(resp)
+                            while True:
+                                try:
+                                    raw = next(lines)
+                                except StopIteration:
+                                    break
+                                except ValueError:
+                                    if _killed[0]:
+                                        break
+                                    raise
+                                if time.monotonic() - last_progress[0] > self.timeout:
+                                    raise TimeoutError(
+                                        f"LLM stream stalled — no new tokens for {self.timeout:.0f}s")
+                                line = raw.decode("utf-8", "replace").strip()
+                                if not line or not line.startswith("data:"):
+                                    continue
+                                chunk = line[5:].strip()
+                                if chunk == "[DONE]":
+                                    break
+                                try:
+                                    obj = json.loads(chunk)
+                                except ValueError:
+                                    continue
+                                if obj.get("usage"):           # final usage chunk (include_usage)
+                                    usage = obj["usage"]
+                                    last_progress[0] = time.monotonic()
+                                delta = ((obj.get("choices") or [{}])[0] or {}).get("delta") or {}
+                                piece = delta.get("content") or ""
+                                if piece:
+                                    pieces.append(piece)
+                                    last_progress[0] = time.monotonic()
+                                    yield piece
+                        finally:
+                            _stop_wd()
+                        if _killed[0] and not pieces:   # watchdog killed a stalled, silent stream
                             raise TimeoutError(
                                 f"LLM stream stalled — no new tokens for {self.timeout:.0f}s")
-                        line = raw.decode("utf-8", "replace").strip()
-                        if not line or not line.startswith("data:"):
-                            continue
-                        chunk = line[5:].strip()
-                        if chunk == "[DONE]":
-                            break
+                    break                        # streamed (or cleanly ended) -> done
+                except urllib.error.HTTPError as e:
+                    if (e.code == 400 and self.reasoning and self._reasoning_ok
+                            and not pieces and _attempt == 0):
                         try:
-                            obj = json.loads(chunk)
-                        except ValueError:
-                            continue
-                        if obj.get("usage"):                       # final usage chunk (include_usage)
-                            usage = obj["usage"]
-                            _last_progress = time.monotonic()
-                        delta = ((obj.get("choices") or [{}])[0] or {}).get("delta") or {}
-                        piece = delta.get("content") or ""
-                        if piece:
-                            pieces.append(piece)
-                            _last_progress = time.monotonic()
-                            yield piece
-            except (urllib.error.URLError, TimeoutError, OSError, http.client.IncompleteRead):
-                if not pieces:                 # never streamed -> fall back to a single blocking call
-                    text = self.complete_text(messages)   # its own nested generation span
-                    if text:
-                        yield text
-                    return
-            if usage:                          # account the streamed answer's tokens like every other call
+                            eb = e.read().decode("utf-8", "replace").lower()
+                        except Exception:  # noqa: BLE001
+                            eb = ""
+                        if any(k in eb for k in ("reasoning", "unsupportedparams",
+                                                 "does not support parameters", "extra_forbidden",
+                                                 "unexpected keyword", "unrecognized")):
+                            self._reasoning_ok = False
+                            continue             # retry the stream once without the reasoning toggle
+                    if not pieces:               # any other HTTP error -> blocking fallback
+                        text = self.complete_text(messages)
+                        if text:
+                            yield text
+                        return
+                    break
+                except (urllib.error.URLError, TimeoutError, OSError, http.client.IncompleteRead):
+                    if not pieces:               # never streamed -> fall back to a single blocking call
+                        text = self.complete_text(messages)   # its own nested generation span
+                        if text:
+                            yield text
+                        return
+                    break
+            if usage:                            # account the streamed answer's tokens like every other call
                 self.accountant.add(0.0, usage=usage)
                 self._last_usage = usage
             gen.output("".join(pieces)).usage(usage or None)
@@ -788,6 +889,29 @@ class LiteLLMClient:
         import litellm  # lazy
         return litellm
 
+    def _completion(self, **kwargs):
+        """Call litellm.completion with the OpenAICompatibleClient's resilience contract: map any
+        provider exception to `LLMError` (so `parse_structured` and the role layer's `except LLMError`
+        retry+fallback treat it like any other bad response instead of crashing the run — the module
+        docstring's promise, previously honored by ONE backend only), and retry transient failures
+        (rate-limit / timeout / connection / 5xx) with exponential backoff before surfacing."""
+        litellm = self._litellm()
+        last: Optional[BaseException] = None
+        for attempt in range(4):
+            try:
+                return litellm.completion(model=self.model, **kwargs)
+            except Exception as e:  # noqa: BLE001 - normalize EVERY provider error to LLMError
+                last = e
+                name = type(e).__name__.lower()
+                transient = any(k in name for k in (
+                    "ratelimit", "timeout", "apiconnection", "serviceunavailable",
+                    "internalserver", "overloaded", "apierror"))
+                if transient and attempt < 3:
+                    time.sleep(min(2.0 * (2 ** attempt), 30.0))
+                    continue
+                raise LLMError(f"litellm completion for {self.model} failed: {e}") from e
+        raise LLMError(f"litellm completion for {self.model} failed: {last}")
+
     def _account(self, resp) -> None:
         cost = None
         try:
@@ -807,8 +931,10 @@ class LiteLLMClient:
 
     def complete_text(self, messages: list[dict]) -> str:
         with tracing.generation(op="complete_text", model=self.model, messages=messages) as gen:
-            resp = self._litellm().completion(model=self.model, messages=messages, **self.kwargs)
+            resp = self._completion(messages=messages, **self.kwargs)
             self._account(resp)
+            if not getattr(resp, "choices", None):
+                raise LLMError(f"litellm response had no choices for {self.model}")
             m = resp.choices[0].message
             out = m.content or ""
             thinking, answer = _clean_thinking(
@@ -830,11 +956,13 @@ class LiteLLMClient:
                          "parameters": json_schema},
         }
         with tracing.generation(op="complete_tool", model=self.model, messages=messages) as gen:
-            resp = self._litellm().completion(
-                model=self.model, messages=messages, tools=[tool],
+            resp = self._completion(
+                messages=messages, tools=[tool],
                 tool_choice={"type": "function", "function": {"name": "emit"}}, **self.kwargs,
             )
             self._account(resp)
+            if not getattr(resp, "choices", None):
+                raise LLMError(f"litellm response had no choices for {self.model}")
             calls = resp.choices[0].message.tool_calls
             if not calls:  # endpoint ignored tool_choice -> KeyError so parse.py falls back
                 gen.usage(self._usage(resp)).error("no tool_calls in response")

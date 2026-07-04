@@ -142,8 +142,10 @@ def test_self_plan_tool_exposed_stored_and_reinjected():
     assert out == ("emit", {"ok": True})
     # the update_plan tool is offered to the model
     assert "update_plan" in client.tool_names[0]
-    # at turn_idx=2 the current plan is re-injected as a system reminder
-    reinjected = any("do X" in str(m.get("content")) and m.get("role") == "system"
+    # at turn_idx=2 the current plan is re-injected as a reminder. It's a USER-role message (not
+    # `system`): the plan is verbatim model output, so re-injecting it with system authority would let
+    # content the model was steered into by injected tool output re-issue itself as a privileged rule.
+    reinjected = any("do X" in str(m.get("content")) and m.get("role") == "user"
                      for m in client.turns[2])
     assert reinjected
 

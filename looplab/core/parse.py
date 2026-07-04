@@ -118,7 +118,11 @@ def _coerce_value(val, ann):
             return float(val)
         if ann is str:
             return val if isinstance(val, str) else (json.dumps(val) if isinstance(val, (dict, list)) else str(val))
-    except (ValueError, TypeError):
+    except (ValueError, TypeError, OverflowError):
+        # OverflowError: `int(round(float("1e400")))` -> round(inf) raises it; without this catch it
+        # escapes both here AND parse_structured (which lists only ValueError/ParseError/…), crashing
+        # the run instead of failing over to the next parser. Return the raw value so model validation
+        # makes the final decision (it rejects an out-of-range int cleanly).
         return val
     if origin is dict and isinstance(val, dict):
         args = get_args(ann)
@@ -166,7 +170,12 @@ def parse_structured(
             if p == "tool_call":
                 obj = client.complete_tool(messages, schema)
             else:  # baml / outlines text path: ask for JSON, extract, validate
-                hint = {"role": "system",
+                # A trailing USER message, not a trailing `system`: several strict OpenAI-compatible
+                # chat templates (some llama.cpp / Mistral servers) require the system role to come
+                # FIRST and 400 on a mid-conversation system turn — which would make the very fallback
+                # path fail on the endpoints most likely to need it. A final user instruction is
+                # universally accepted.
+                hint = {"role": "user",
                         "content": f"Respond with ONLY a JSON object matching this schema: {json.dumps(schema)}"}
                 obj = _extract_json(client.complete_text([*messages, hint]))
             try:
@@ -177,8 +186,11 @@ def parse_structured(
                 # (e.g. {"degree":"3"} or single-quoted keys) parses instead of crashing the run.
                 return model.model_validate(_coerce_to_model(obj, model))
         except (ValidationError, ParseError, json.JSONDecodeError, KeyError, AttributeError,
-                LLMError) as e:
-            # LLMError (a transient endpoint/transport failure) is treated like an unparseable
+                ArithmeticError, TypeError, LLMError) as e:
+            # ArithmeticError/TypeError: belt-and-suspenders for a coercion path that raises on
+            # pathological model output (e.g. an int field fed an infinite float) — fall over to the
+            # next parser rather than crash, honoring the "returns validated or raises ParseError"
+            # contract. LLMError (a transient endpoint/transport failure) is treated like an unparseable
             # response: try the next parser, then let the caller fall back — never crash the run.
             last_err = e
             continue

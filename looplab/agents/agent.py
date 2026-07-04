@@ -14,6 +14,7 @@ import time
 from typing import Optional
 
 from looplab.core import tracing
+from looplab.core.llm import BudgetExceeded
 from looplab.core.models import Idea, Node, RunState
 from looplab.core.parse import ParseError, parse_structured
 from looplab.core.prompts import PromptStore, render
@@ -56,9 +57,14 @@ def _force_emit(client, messages: list, emit_spec: dict) -> Optional[dict]:
     regardless of `emit_spec`'s function name."""
     schema = (emit_spec.get("function") or {}).get("parameters") or {}
     try:
-        return client.complete_tool(list(messages), schema)
+        out = client.complete_tool(list(messages), schema)
+    except BudgetExceeded:                 # a hard budget stop must propagate, never be swallowed here
+        raise
     except Exception:  # noqa: BLE001 - no complete_tool / endpoint ignored tool_choice / transport
         return None
+    # Coerce a valid-but-non-object emit ("[…]", "\"x\"", "3") to {} so finalize()'s `.get()` can't
+    # AttributeError — the same guard the in-loop emit path applies. None still means "couldn't force".
+    return out if isinstance(out, dict) else {}
 
 
 _PLAN_TOOL_NAME = "update_plan"
@@ -203,12 +209,21 @@ def drive_tool_loop(client, tools, messages: list, emit_spec: dict, *,
         elif context_budget_chars:      # H4: else just middle-truncate stale tool output
             from looplab.core.context_budget import truncate_history
             messages[:] = truncate_history(messages, context_budget_chars)
-        # C1: re-surface the agent's own plan periodically so a long loop can't drift off-goal.
+        # C1: re-surface the agent's own plan periodically so a long loop can't drift off-goal. A
+        # `user`-role reminder, not `system`: the plan is verbatim MODEL output (from update_plan
+        # args), so a `system` reinjection would let content the model was steered into by injected
+        # tool output re-issue itself with system authority every few turns.
         if current_plan and plan_reinject_every and turn_idx and turn_idx % plan_reinject_every == 0:
-            messages.append({"role": "system",
-                             "content": "Your current plan/TODO (update it via update_plan as you "
-                                        "make progress):\n" + current_plan})
+            messages.append({"role": "user",
+                             "content": "Reminder — your current plan/TODO (update it via update_plan "
+                                        "as you make progress):\n" + current_plan})
+        # NB: a transport failure (LLMError after the client's retries) PROPAGATES out of the loop by
+        # design — the caller decides how to degrade. The assistant's `run_turn` surfaces it as an
+        # error dict; the engine's agentic callers (ToolUsingResearcher.propose /
+        # UnifiedAgent.choose_action / triage_crash) wrap this loop and fall back to a safe default,
+        # the same way ToolUsingStrategist.decide does. BudgetExceeded likewise propagates (hard stop).
         msg = client.chat(messages, tool_specs, tool_choice="auto")
+        calls = msg.get("tool_calls") or []
         calls = msg.get("tool_calls") or []
         if not calls:
             # Model replied in prose instead of calling a tool — it's done exploring. Force the
@@ -434,8 +449,16 @@ class ToolUsingResearcher:
                 "\nDecide the next experiment — a parameter change OR a structural one (architecture, "
                 "loss, data, training) if that's the stronger move. Consult knowledge if useful, then emit."},
         ]
-        return drive_tool_loop(
-            self.client, self.tools, messages, self._emit_spec(),
-            max_turns=self.max_turns, context_budget_chars=self.context_budget_chars,
-            time_budget_s=self.time_budget_s,
-            finalize=self._finalize, fallback=self._fallback, **self.loop_opts)
+        try:
+            return drive_tool_loop(
+                self.client, self.tools, messages, self._emit_spec(),
+                max_turns=self.max_turns, context_budget_chars=self.context_budget_chars,
+                time_budget_s=self.time_budget_s,
+                finalize=self._finalize, fallback=self._fallback, **self.loop_opts)
+        except BudgetExceeded:      # hard budget stop -> propagate and end the run
+            raise
+        except Exception:  # noqa: BLE001 - a transport/endpoint failure (LLMError after retries) on
+            # the flagship agentic path must NOT crash the run: degrade to a safe bounds-filled Idea,
+            # the same contract as LLMResearcher / ToolUsingStrategist. `_fallback` is itself resilient
+            # (parse_structured swallows LLMError -> draft Idea), so it can't re-raise the transport error.
+            return self._fallback(messages)

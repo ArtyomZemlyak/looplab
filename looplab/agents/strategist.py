@@ -23,6 +23,7 @@ from typing import Optional, Protocol, TypedDict
 
 from pydantic import BaseModel, Field
 
+from looplab.core.llm import BudgetExceeded
 from looplab.core.models import NodeStatus, RunState
 
 # A fully-serializable description of the active search machinery. Every field maps to an existing
@@ -372,6 +373,8 @@ class LLMStrategist:
         ]
         try:
             out = parse_structured(self.client, messages, _StrategyOut, self.parser)
+        except BudgetExceeded:      # a hard budget stop must end the run, not degrade to the rule
+            raise
         except (ParseError, Exception):  # noqa: BLE001 — never crash the run on a strategy call
             return self._rule.decide(state, ctx)   # graceful fallback to deterministic heuristics
         return _assemble_strategy(out)
@@ -435,6 +438,8 @@ class ToolUsingStrategist:
                 max_turns=self.max_turns, time_budget_s=self.time_budget_s,
                 context_budget_chars=self.context_budget_chars,
                 finalize=_finalize, fallback=_fallback, **self.loop_opts)
+        except BudgetExceeded:      # a hard budget stop must end the run, not degrade to the rule
+            raise
         except Exception:  # noqa: BLE001 — the model/endpoint can't drive tools at all -> rule baseline
             return self._rule.decide(state, ctx)
 

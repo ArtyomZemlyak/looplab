@@ -32,6 +32,19 @@ from typing import Optional, Protocol
 _SECRET_ENV = re.compile(r"(KEY|SECRET|TOKEN|PASSWORD|PASSWD|CREDENTIAL|API_KEY)", re.IGNORECASE)
 
 
+def _clamp_tail_bytes(s: str, max_bytes: int) -> str:
+    """Keep the last `max_bytes` BYTES of `s` (the cap is named …_bytes). A plain `s[-n:]` slices by
+    CHARACTER, so multibyte-heavy output (CJK ≈ 3 bytes/char) stores up to ~3× the intended byte
+    budget in the durable per-node stdout tail. Encode, slice on the byte boundary, decode back
+    (dropping a partial leading char)."""
+    if not s:
+        return s
+    b = s.encode("utf-8", "replace")
+    if len(b) <= max_bytes:
+        return s
+    return b[-max_bytes:].decode("utf-8", "ignore")
+
+
 @dataclass
 class RunResult:
     exit_code: int
@@ -206,7 +219,7 @@ def _run_argv(argv: list[str], workdir: str, timeout: float,
         return -1, "", f"failed to launch: {e}", False
     if log_path:
         rc, out, err, timed_out = _tee_drain(proc, log_path, timeout, max_output_bytes, cancel)
-        return rc, out[-max_output_bytes:], err[-max_output_bytes:], timed_out
+        return rc, _clamp_tail_bytes(out, max_output_bytes), _clamp_tail_bytes(err, max_output_bytes), timed_out
     timed_out = False
     if cancel is None:
         try:
@@ -229,7 +242,7 @@ def _run_argv(argv: list[str], workdir: str, timeout: float,
                     timed_out = True
                     break
     rc = proc.returncode if proc.returncode is not None else -1
-    return rc, (out or "")[-max_output_bytes:], (err or "")[-max_output_bytes:], timed_out
+    return rc, _clamp_tail_bytes(out or "", max_output_bytes), _clamp_tail_bytes(err or "", max_output_bytes), timed_out
 
 
 def _tee_drain(proc, log_path, timeout, max_output_bytes, cancel):

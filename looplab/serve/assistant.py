@@ -52,6 +52,10 @@ class SessionStore:
     def __init__(self, run_root):
         self.dir = Path(run_root) / "assistant"
         self._append_lock = threading.Lock()   # serialize appends so a large turn can't interleave
+        # Serialize meta read-modify-write so concurrent writers (a Share click landing while a turn's
+        # reply persist bumps `updated`, or two tabs switching mode) can't each read the same meta and
+        # clobber the other's field — losing a `shared` flag / title / mode.
+        self._meta_lock = threading.RLock()
 
     def _sdir(self, sid: str) -> Path:
         d = (self.dir / sid).resolve()
@@ -83,13 +87,15 @@ class SessionStore:
             return None
 
     def update_meta(self, sid: str, **fields) -> Optional[dict]:
-        meta = self._read_meta(sid)
-        if meta is None:
-            return None
-        meta.update({k: v for k, v in fields.items() if v is not None})
-        meta["updated"] = fields.get("updated", time.time())
-        atomic_write_text(self._meta_path(sid), json.dumps(meta))
-        return meta
+        # Read-modify-write under the meta lock so concurrent updates don't drop each other's fields.
+        with self._meta_lock:
+            meta = self._read_meta(sid)
+            if meta is None:
+                return None
+            meta.update({k: v for k, v in fields.items() if v is not None})
+            meta["updated"] = fields.get("updated", time.time())
+            atomic_write_text(self._meta_path(sid), json.dumps(meta))
+            return meta
 
     def list(self) -> list[dict]:
         if not self.dir.exists():
@@ -131,6 +137,32 @@ class SessionStore:
                 except OSError:
                     pass
         self.update_meta(sid, updated=line["ts"])
+
+    def append_if_len(self, sid: str, turn: dict, expected_len: int) -> bool:
+        """Append `turn` ONLY if the transcript currently holds exactly `expected_len` messages —
+        the check and the write happen atomically under the append lock. Returns True if appended,
+        False if a concurrent turn changed the length in between (so a late or cancelled reply can't
+        interleave into a newer turn's transcript, e.g. u1,u2,a1,a2). Closes the TOCTOU window a
+        separate 'count then append' left open."""
+        d = self._sdir(sid)
+        if not d.exists():
+            return False
+        line = {**turn, "ts": turn.get("ts", time.time())}
+        with self._append_lock:
+            try:
+                cur = sum(1 for _ in iter_jsonl(self._msgs_path(sid)))
+            except OSError:
+                cur = -1
+            if cur != expected_len:
+                return False
+            with open(self._msgs_path(sid), "ab") as f:
+                f.write((json.dumps(line, ensure_ascii=False) + "\n").encode("utf-8"))
+                try:
+                    best_effort_fsync(f.fileno())
+                except OSError:
+                    pass
+        self.update_meta(sid, updated=line["ts"])
+        return True
 
     def fork(self, sid: str, *, now: Optional[float] = None) -> Optional[dict]:
         """Clone a session's transcript into a fresh child session (OpenCode-style fork)."""
@@ -230,7 +262,7 @@ def _emit_spec() -> dict:
 def build_tools(run_root, alive_fn: Optional[Callable] = None, mode: str = DEFAULT_MODE, *,
                 approver: Optional[Callable] = None, trust_mode: str = "trusted_local", extra_roots=(),
                 client=None, subagents: bool = False, mcp: bool = False, settings=None,
-                on_todos: Optional[Callable] = None):
+                on_todos: Optional[Callable] = None, cancel_check: Optional[Callable] = None):
     """The assistant's toolset. Read tools (filesystem scout + cross-run introspection) are present in
     EVERY mode; the mutating write/shell/git providers are added only when the mode allows mutation
     (plan is read-only), mirroring "deny drops the tool from the schema". Each mutating provider gets
@@ -259,7 +291,8 @@ def build_tools(run_root, alive_fn: Optional[Callable] = None, mode: str = DEFAU
                       sh, GitTools(sh, cwd=REPO_ROOT)]
     providers.append(TodoTools(on_todos=on_todos))
     if subagents and client is not None:
-        providers.append(SubagentTools(client, run_root, alive_fn=alive_fn, settings=settings))
+        providers.append(SubagentTools(client, run_root, alive_fn=alive_fn, settings=settings,
+                                       cancel_check=cancel_check))
     if mcp:
         try:
             from looplab.tools.mcp_tools import McpTools
@@ -292,7 +325,7 @@ def run_turn(client, run_root, messages: list, instruction: str, mode: str = DEF
     tools = build_tools(run_root, alive_fn=alive_fn, mode=mode, approver=approver,
                         trust_mode=trust_mode, extra_roots=extra_roots,
                         client=client, subagents=not _subagent, mcp=not _subagent, settings=settings,
-                        on_todos=on_todos)
+                        on_todos=on_todos, cancel_check=cancel_check)
     roots = [Path.home(), REPO_ROOT, Path(run_root)] + list(extra_roots)
     from looplab.serve.assistant_commands import expand_command
     grounded, refs = expand_mentions(expand_command(instruction), run_root, alive_fn=alive_fn, roots=roots)
@@ -305,6 +338,16 @@ def run_turn(client, run_root, messages: list, instruction: str, mode: str = DEF
         # model loses the attachments on every turn after the one they were sent with (the browser
         # is the only other place that content exists).
         body = (m.get("raw") or m.get("content")) if role == "user" else m.get("content")
+        # A TYPED @mention (`@file:…`/`@run:…`) has display==instruction, so no `raw` was persisted —
+        # the stored `content` is only the literal mention text, and the grounding (file body / run
+        # summary) the model saw on the original turn would be LOST on every later turn. Re-expand a
+        # historical user turn's mentions here (skip turns that already carry a grounded `raw`) so the
+        # context stays present — the same asymmetry the `raw` mechanism fixed for attachments.
+        if role == "user" and not m.get("raw") and body and "@" in body:
+            try:
+                body, _ = expand_mentions(body, run_root, alive_fn=alive_fn, roots=roots)
+            except Exception:  # noqa: BLE001 - grounding re-expansion is best-effort
+                pass
         if role in ("user", "assistant") and body:
             convo.append({"role": role, "content": body})
     convo.append({"role": "user", "content": grounded})
@@ -463,11 +506,13 @@ class SubagentTools:
     main agent applies any change itself (under the user's mode/approval). Nesting is prevented — the
     inner turn is built with subagents=False."""
 
-    def __init__(self, client, run_root, alive_fn: Optional[Callable] = None, settings=None):
+    def __init__(self, client, run_root, alive_fn: Optional[Callable] = None, settings=None,
+                 cancel_check: Optional[Callable] = None):
         self.client = client
         self.run_root = run_root
         self.alive_fn = alive_fn
         self.settings = settings
+        self.cancel_check = cancel_check   # forwarded so Stop interrupts a long-running subagent too
 
     def bind_state(self, state=None, parent=None) -> None:
         return None
@@ -489,8 +534,18 @@ class SubagentTools:
         prompt = str((args or {}).get("prompt") or "").strip()
         if not prompt:
             return "(task needs a prompt)"
+        # Bail immediately if the user already hit Stop before this subtask even began.
+        if self.cancel_check is not None:
+            try:
+                if self.cancel_check():
+                    return "(cancelled by the user)"
+            except Exception:  # noqa: BLE001 - a broken cancel probe must not block the subtask
+                pass
         # Inner turn: read-only, no further subagents (build_tools called with subagents=False by
         # passing client=None to the recursive run_turn's build — enforced by _subagent flag).
+        # Forward cancel_check so Stop interrupts the inner loop at its next turn boundary instead of
+        # letting it run its full time-budget while the outer UI is already dead.
         res = run_turn(self.client, self.run_root, [], prompt, "plan",
-                       alive_fn=self.alive_fn, settings=self.settings, _subagent=True)
+                       alive_fn=self.alive_fn, settings=self.settings, _subagent=True,
+                       cancel_check=self.cancel_check)
         return res.get("reply") or "(subagent returned nothing)"

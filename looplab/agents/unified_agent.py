@@ -20,6 +20,7 @@ from __future__ import annotations
 from typing import Optional
 
 from looplab.agents.agent import drive_tool_loop
+from looplab.core.llm import BudgetExceeded
 from looplab.core.models import Idea, Node, RunState
 
 
@@ -180,10 +181,15 @@ class UnifiedAgent:
 
         if self._pilot_tools is not None and hasattr(self._pilot_tools, "bind_state"):
             self._pilot_tools.bind_state(state, None)
-        return drive_tool_loop(self._pilot_client, self._pilot_tools, messages, emit_spec,
-                               max_turns=self._agent_max_turns,
-                               time_budget_s=self._agent_time_budget_s,
-                               finalize=_finalize, fallback=_fallback, **self._loop_opts)
+        try:
+            return drive_tool_loop(self._pilot_client, self._pilot_tools, messages, emit_spec,
+                                   max_turns=self._agent_max_turns,
+                                   time_budget_s=self._agent_time_budget_s,
+                                   finalize=_finalize, fallback=_fallback, **self._loop_opts)
+        except BudgetExceeded:      # hard budget stop -> propagate and end the run
+            raise
+        except Exception:  # noqa: BLE001 - a transport failure must not crash the run; the pilot
+            return _fallback(messages)   # degrades to the policy recommendation (still within `legal`)
 
     # --------------------------------------------------- Crash triage (in-node repair)
     _TRIAGE_SYSTEM = (
@@ -247,7 +253,12 @@ class UnifiedAgent:
 
         if state is not None and self._pilot_tools is not None and hasattr(self._pilot_tools, "bind_state"):
             self._pilot_tools.bind_state(state, None)   # enable read_code / find_analogous on the run
-        return drive_tool_loop(self._pilot_client, self._pilot_tools, messages, emit_spec,
-                               max_turns=self._agent_max_turns,
-                               time_budget_s=self._agent_time_budget_s,
-                               finalize=_finalize, fallback=_fallback, **self._loop_opts)
+        try:
+            return drive_tool_loop(self._pilot_client, self._pilot_tools, messages, emit_spec,
+                                   max_turns=self._agent_max_turns,
+                                   time_budget_s=self._agent_time_budget_s,
+                                   finalize=_finalize, fallback=_fallback, **self._loop_opts)
+        except BudgetExceeded:      # hard budget stop -> propagate and end the run
+            raise
+        except Exception:  # noqa: BLE001 - a transport failure must not crash the run; triage
+            return _fallback(messages)   # degrades to the safe "attempt repair" action
