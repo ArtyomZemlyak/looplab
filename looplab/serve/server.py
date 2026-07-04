@@ -2077,16 +2077,23 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
         # also makes this endpoint's turn interruptible (Stop) — previously only the stream one was.
         cancel_ev = threading.Event()
         _acquire_turn(sid, cancel_ev)
-        turn = {"role": "user", "content": display or instruction, "mode": eff_mode}
-        if display and display != instruction:
-            # Keep the FULL model-facing instruction (attached-file contents, UI-context preamble)
-            # alongside the clean bubble: later turns rebuild the model's history from this transcript,
-            # and an attachment exists nowhere else (it was read in the browser). The UI renders
-            # `content` only, so the bubble stays clean.
-            turn["raw"] = instruction
-        _asst.append(sid, turn)
-        _asst.update_meta(sid, mode=eff_mode)   # remember the chosen mode so a reload/switch keeps it
-        s = _llm_settings()
+        # Own the slot from here: any failure BEFORE the background job takes over must release it, or
+        # the session wedges at 409 forever. `_asst.append` raises ValueError if a concurrent DELETE
+        # rmtree'd the session dir between `_asst.get` above and here; `_llm_settings` can also raise.
+        try:
+            turn = {"role": "user", "content": display or instruction, "mode": eff_mode}
+            if display and display != instruction:
+                # Keep the FULL model-facing instruction (attached-file contents, UI-context preamble)
+                # alongside the clean bubble: later turns rebuild the model's history from this
+                # transcript, and an attachment exists nowhere else (it was read in the browser). The UI
+                # renders `content` only, so the bubble stays clean.
+                turn["raw"] = instruction
+            _asst.append(sid, turn)
+            _asst.update_meta(sid, mode=eff_mode)   # remember the chosen mode so a reload/switch keeps it
+            s = _llm_settings()
+        except Exception:
+            _release_turn(sid, cancel_ev)
+            raise
         try:
             client = make_llm_client(s)
         except Exception as e:  # noqa: BLE001 - offline / no model -> soft fail with a usable message
@@ -2176,12 +2183,18 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
         # transcript — one running turn per session across BOTH endpoints.
         cancel_ev = threading.Event()
         _acquire_turn(sid, cancel_ev)
-        turn = {"role": "user", "content": display or instruction, "mode": eff_mode}
-        if display and display != instruction:
-            turn["raw"] = instruction   # full model-facing text — see the non-stream endpoint's note
-        _asst.append(sid, turn)
-        _asst.update_meta(sid, mode=eff_mode)   # remember the chosen mode so a reload/switch keeps it
-        s = _llm_settings()
+        # Own the slot from here: a failure BEFORE the worker thread takes over (concurrent DELETE
+        # making `_asst.append` raise, a settings error) must release it, or the session wedges at 409.
+        try:
+            turn = {"role": "user", "content": display or instruction, "mode": eff_mode}
+            if display and display != instruction:
+                turn["raw"] = instruction   # full model-facing text — see the non-stream endpoint's note
+            _asst.append(sid, turn)
+            _asst.update_meta(sid, mode=eff_mode)   # remember the chosen mode so a reload/switch keeps it
+            s = _llm_settings()
+        except Exception:
+            _release_turn(sid, cancel_ev)
+            raise
         q: "_queue.Queue" = _queue.Queue()
         try:
             client = make_llm_client(s)

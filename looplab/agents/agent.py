@@ -62,8 +62,10 @@ def _force_emit(client, messages: list, emit_spec: dict) -> Optional[dict]:
         raise
     except Exception:  # noqa: BLE001 - no complete_tool / endpoint ignored tool_choice / transport
         return None
+    if out is None:                        # a client that RETURNS None means "couldn't force" — keep
+        return None                        # it None so the caller nudges + retries, not finalize({})
     # Coerce a valid-but-non-object emit ("[…]", "\"x\"", "3") to {} so finalize()'s `.get()` can't
-    # AttributeError — the same guard the in-loop emit path applies. None still means "couldn't force".
+    # AttributeError — the same guard the in-loop emit path applies.
     return out if isinstance(out, dict) else {}
 
 
@@ -223,7 +225,6 @@ def drive_tool_loop(client, tools, messages: list, emit_spec: dict, *,
         # UnifiedAgent.choose_action / triage_crash) wrap this loop and fall back to a safe default,
         # the same way ToolUsingStrategist.decide does. BudgetExceeded likewise propagates (hard stop).
         msg = client.chat(messages, tool_specs, tool_choice="auto")
-        calls = msg.get("tool_calls") or []
         calls = msg.get("tool_calls") or []
         if not calls:
             # Model replied in prose instead of calling a tool — it's done exploring. Force the

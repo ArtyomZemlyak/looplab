@@ -76,8 +76,11 @@ def git_config_env() -> dict:
         kept.append((key, val))
     for j, (key, val) in enumerate(kept):
         out[f"GIT_CONFIG_KEY_{j}"] = key
-        if val is not None:
-            out[f"GIT_CONFIG_VALUE_{j}"] = val
+        # ALWAYS emit VALUE_j (empty when the original had none): the child inherits the host env, in
+        # which sandbox `_run_argv` scrubs GIT_CONFIG_KEY_* (name contains "KEY") but NOT VALUE_* — so a
+        # renumbered survivor with no value would otherwise leave a STALE GIT_CONFIG_VALUE_j (a dropped
+        # credential's value) visible at that index. Emitting our own value shadows it.
+        out[f"GIT_CONFIG_VALUE_{j}"] = val if val is not None else ""
     if "GIT_CONFIG_COUNT" in env:
         out["GIT_CONFIG_COUNT"] = str(len(kept))
     return out

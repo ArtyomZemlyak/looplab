@@ -254,14 +254,29 @@ def _assistant_text(msg: dict) -> str:
     return content
 
 
+def _args_complete(slot: dict) -> bool:
+    """True when a slot's accumulated `arguments` already form a COMPLETE JSON value — i.e. that call
+    is finished, so a following delta belongs to a NEW call, not this one's continuation."""
+    joined = "".join(slot["function"]["arguments"])
+    if not joined.strip():
+        return False
+    try:
+        json.loads(joined)
+        return True
+    except (ValueError, TypeError):
+        return False
+
+
 def _tool_call_slot(tcs: dict, tc: dict) -> int:
     """Pick the merge slot for a streamed tool-call delta. When the provider supplies `index` (the
     OpenAI spec), use it verbatim. When it OMITS `index` (several Ollama builds / OpenAI-compat
     gateways emit one WHOLE call per delta with no index), a blind `.get("index", 0)` collapses every
     call into slot 0 — the later call overwrites the earlier's id/name and their argument fragments
     concatenate into invalid JSON. So without an index we START A NEW SLOT when the delta begins a
-    new call (it carries a fresh `id`, or a `name` while the current slot already has one) and
-    otherwise keep appending to the open slot (so a single call streamed in fragments stays merged)."""
+    new call and otherwise keep appending to the open slot (so a single call streamed in fragments
+    stays merged). A new call is signalled by a NEW id, or — for a provider that ECHOES `function.name`
+    on every continuation delta while omitting ids — by a repeated name ONLY once the current slot's
+    arguments already parse as complete JSON (so an echoed name mid-fragment doesn't split one call)."""
     idx = tc.get("index")
     if idx is not None:
         return idx
@@ -271,7 +286,7 @@ def _tool_call_slot(tcs: dict, tc: dict) -> int:
     slot = tcs[cur]
     fn = tc.get("function") or {}
     new_id = tc.get("id") and slot.get("id") and tc["id"] != slot["id"]
-    new_named = fn.get("name") and slot["function"]["name"]
+    new_named = fn.get("name") and slot["function"]["name"] and _args_complete(slot)
     return cur + 1 if (new_id or new_named) else cur
 
 

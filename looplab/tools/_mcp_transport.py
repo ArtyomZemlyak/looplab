@@ -34,16 +34,11 @@ class _ServerHandle:
         self._loop.run_until_complete(self._boot())
         # Keep the loop alive for the session's lifetime ONLY when boot succeeded. If boot FAILED,
         # __init__ raises and the caller (McpTools.from_config) skips this server — but a bare
-        # run_forever() here would leak the daemon thread + event loop forever AND strand the
-        # partially-entered stdio/session context managers (the spawned subprocess), because their
-        # __aexit__ would never run. Tear those down and close the loop instead.
+        # run_forever() here would leak the daemon thread + event loop forever. `_boot` already unwound
+        # its own context managers IN-TASK on failure (see below), so here we just close the loop.
         if self._err is None and self._session is not None:
             self._loop.run_forever()
         else:
-            try:
-                self._loop.run_until_complete(self._teardown())
-            except Exception:  # noqa: BLE001 - teardown is best-effort cleanup of a failed boot
-                pass
             self._loop.close()
 
     async def _boot(self):
@@ -62,18 +57,19 @@ class _ServerHandle:
                 for t in listed.tools]
         except Exception as e:  # noqa: BLE001
             self._err = e
+            # Unwind the partially-entered context managers HERE — inside _boot's own task. The
+            # stdio/HTTP CMs are anyio cancel-scope / task-group based, so their __aexit__ MUST run in
+            # the SAME task that entered them; exiting from a separate run_until_complete task raises
+            # "Attempted to exit cancel scope in a different task" and leaves the subprocess un-reaped.
+            for cm in (self._session_cm, self._cm):
+                if cm is not None:
+                    try:
+                        await cm.__aexit__(type(e), e, e.__traceback__)
+                    except Exception:  # noqa: BLE001 - best-effort cleanup of a failed boot
+                        pass
+            self._session = None
         finally:
             self._ready.set()
-
-    async def _teardown(self):
-        """Exit any context managers boot entered before it failed — releases the stdio subprocess /
-        HTTP connection so a failed server doesn't leak a live child process."""
-        for cm in (self._session_cm, self._cm):
-            if cm is not None:
-                try:
-                    await cm.__aexit__(None, None, None)
-                except Exception:  # noqa: BLE001
-                    pass
 
     def tools(self) -> list:
         return list(self._tools_cache)

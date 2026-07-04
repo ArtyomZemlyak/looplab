@@ -94,6 +94,31 @@ def test_tool_call_slot_prefers_explicit_index():
                            {"index": 0}) == 0
 
 
+def test_streamed_single_call_with_echoed_name_stays_merged():
+    """A provider that ECHOES function.name on every continuation delta (no index/id) must not split
+    one call into invalid-JSON fragments."""
+    c = OpenAICompatibleClient("m", stream=True)
+    resp = _sse(
+        {"choices": [{"delta": {"tool_calls": [{"function": {"name": "emit", "arguments": '{"x":'}}]}}]},
+        {"choices": [{"delta": {"tool_calls": [{"function": {"name": "emit", "arguments": '1}'}}]}}]},
+        {"choices": [{"delta": {}, "finish_reason": "tool_calls"}]},
+    )
+    calls = c._read_stream(resp)["choices"][0]["message"]["tool_calls"]
+    assert len(calls) == 1 and calls[0]["function"]["arguments"] == '{"x":1}'
+
+
+def test_streamed_two_indexless_noid_calls_split_on_complete_args():
+    """Two distinct index-less, id-less calls (each with complete JSON args) must NOT merge into one."""
+    c = OpenAICompatibleClient("m", stream=True)
+    resp = _sse(
+        {"choices": [{"delta": {"tool_calls": [{"function": {"name": "f1", "arguments": '{"a":1}'}}]}}]},
+        {"choices": [{"delta": {"tool_calls": [{"function": {"name": "f2", "arguments": '{"b":2}'}}]}}]},
+        {"choices": [{"delta": {}, "finish_reason": "tool_calls"}]},
+    )
+    calls = c._read_stream(resp)["choices"][0]["message"]["tool_calls"]
+    assert len(calls) == 2
+
+
 # --------------------------------------------------------------------------- prompts: frontmatter
 def test_frontmatter_keeps_markdown_horizontal_rules():
     """`---` used as Markdown rules must NOT be treated as a frontmatter fence (Section A vanished)."""
@@ -271,3 +296,33 @@ def test_force_emit_coerces_non_object_to_dict():
 
     out = _force_emit(_Client(), [], {"function": {"parameters": {}}})
     assert out == {}
+
+
+def test_force_emit_preserves_none_for_couldnt_force():
+    """A client that RETURNS None (couldn't force a tool call) must stay None so the loop nudges +
+    retries, not finalize on empty args."""
+    from looplab.agents.agent import _force_emit
+
+    class _Client:
+        def complete_tool(self, messages, schema):
+            return None
+
+    assert _force_emit(_Client(), [], {"function": {"parameters": {}}}) is None
+
+
+def test_git_config_env_shadows_stale_value_for_valueless_survivor(monkeypatch):
+    """A renumbered survivor with no original value must emit an EMPTY VALUE so it shadows a stale
+    GIT_CONFIG_VALUE_i (a dropped credential) the child inherits from the host env."""
+    from looplab.tools.shell_tools import git_config_env
+    for k in list(__import__("os").environ):
+        if k.startswith("GIT_CONFIG") or k.startswith("GIT_AUTHOR"):
+            monkeypatch.delenv(k, raising=False)
+    monkeypatch.setenv("GIT_CONFIG_COUNT", "2")
+    monkeypatch.setenv("GIT_CONFIG_KEY_0", "http.extraheader")
+    monkeypatch.setenv("GIT_CONFIG_VALUE_0", "Authorization: Bearer TOKEN")
+    monkeypatch.setenv("GIT_CONFIG_KEY_1", "user.name")   # survivor WITHOUT a paired VALUE
+    env = git_config_env()
+    assert "TOKEN" not in json.dumps(env)
+    n = int(env["GIT_CONFIG_COUNT"])
+    for i in range(n):                                     # every kept index emits an authoritative VALUE
+        assert f"GIT_CONFIG_VALUE_{i}" in env

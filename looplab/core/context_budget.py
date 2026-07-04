@@ -6,8 +6,6 @@ turns intact), which is where stale tool output accumulates. Pure + deterministi
 """
 from __future__ import annotations
 
-import json
-
 # High-water mark (chars) at which auto-summary compacts a long tool-loop history when no explicit
 # `context_budget_chars` is set. ~120k chars ≈ ~30k tokens: short loops never hit it; a genuinely
 # long agent run gets its stale middle summarized before it can crowd the context window.
@@ -15,18 +13,16 @@ DEFAULT_SUMMARY_CHARS = 120_000
 
 
 def _msg_chars(m: dict) -> int:
-    """Size of a message for budgeting: its `content` PLUS any `tool_calls` arguments. A tool-using
-    turn (the assistant writing a whole file via `write_file(path, content=<KB of code>)`) carries
-    that payload in `tool_calls[].function.arguments` with an empty `content` — counting only
+    """Size of a message for budgeting: its `content` PLUS any `tool_calls` name+arguments. A
+    tool-using turn (the assistant writing a whole file via `write_file(path, content=<KB of code>)`)
+    carries that payload in `tool_calls[].function.arguments` with an empty `content` — counting only
     `content` lets an argument-heavy trace grow unboundedly below the trigger, so compaction never
-    fires and the endpoint eventually 400s on context length. Count both."""
+    fires and the endpoint eventually 400s on context length. Sum the field lengths directly (no
+    json.dumps — this runs once per message on every budget check; only a byte estimate is needed)."""
     n = len(str(m.get("content") or ""))
-    tcs = m.get("tool_calls")
-    if tcs:
-        try:
-            n += len(json.dumps(tcs, default=str))
-        except (TypeError, ValueError):
-            n += sum(len(str(((c or {}).get("function") or {}).get("arguments") or "")) for c in tcs)
+    for c in (m.get("tool_calls") or []):
+        fn = (c or {}).get("function") or {}
+        n += len(str(fn.get("name") or "")) + len(str(fn.get("arguments") or ""))
     return n
 
 
