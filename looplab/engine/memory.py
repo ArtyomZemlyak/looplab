@@ -188,6 +188,98 @@ def lesson_rank_key(sim: float, idx: int, o: dict):
 
 
 # --------------------------------------------------------------------------- #
+# M6 · Comparative lesson distillation (MARS "Comparative Reflective Memory", doc 13 §7 item 2):
+# credit-assigned lessons from PAIRS of solutions — a child vs. the parent it improved on or
+# regressed from ("Solution Lessons"), and a repair vs. the failure it fixed ("Debugging
+# Lessons") — instead of only one-shot reflection over a ranked list. Pure helpers: the
+# orchestrator owns the LLM call; these select pairs, assign deterministic param-level credit
+# (the offline fallback), render code diffs, and parse the LLM's per-pair verdicts.
+# --------------------------------------------------------------------------- #
+
+def _improvement(child_metric: float, parent_metric: float, direction: str) -> float:
+    """Signed improvement of child over parent, positive = better (direction-aware)."""
+    return ((child_metric - parent_metric) if direction == "max"
+            else (parent_metric - child_metric))
+
+
+def select_comparison_pairs(state, k: int = 3, exclude=None) -> list[dict]:
+    """Deterministically pick the most informative parent→child pairs to distill from. Two kinds:
+    `solution` (both evaluated — the biggest |Δ| wins and regressions are as informative as wins)
+    and `debug` (parent FAILED, child evaluated — what fixed it). `exclude` = (child, parent) id
+    tuples already distilled (mid-run firings must not re-spend LLM budget on the same pair).
+    Sorted debug-first then by |Δ| then by ids, so the output is stable under replay."""
+    from looplab.core.models import NodeStatus
+    excl = {tuple(p) for p in (exclude or [])}
+    pairs: list[dict] = []
+    for n in state.nodes.values():
+        if n.metric is None:
+            continue
+        for pid in n.parent_ids:
+            p = state.nodes.get(pid)
+            if p is None or (n.id, pid) in excl:
+                continue
+            if p.metric is not None:
+                pairs.append({"kind": "solution", "a": n.id, "b": pid,
+                              "delta": _improvement(n.metric, p.metric, state.direction)})
+            elif p.status is NodeStatus.failed:
+                pairs.append({"kind": "debug", "a": n.id, "b": pid, "delta": None})
+    pairs.sort(key=lambda pr: (0 if pr["kind"] == "debug" else 1,
+                               -abs(pr["delta"] or 0.0), pr["a"], pr["b"]))
+    return pairs[:max(0, k)]
+
+
+def param_credit_statement(winner, loser, delta: float):
+    """Deterministic (offline) credit assignment for a solution pair: when the two ideas differ in
+    a SMALL number of params, the changed params ARE the credited difference. None when the diff
+    is empty or too wide to attribute cleanly (>3 params) — no lesson beats a mushy lesson."""
+    pa = dict(getattr(winner.idea, "params", None) or {})
+    pb = dict(getattr(loser.idea, "params", None) or {})
+    changed = [(name, pb.get(name), pa.get(name))
+               for name in sorted(set(pa) | set(pb)) if pa.get(name) != pb.get(name)]
+    if not changed or len(changed) > 3:
+        return None
+    diff_txt = ", ".join(f"{name} {old!r}->{new!r}" for name, old, new in changed)
+    verb = "improved" if delta > 0 else "regressed"
+    return f"changing {diff_txt} {verb} the metric by {abs(delta):.4g}"
+
+
+def code_diff(old: str, new: str, max_lines: int = 60) -> str:
+    """Compact unified diff of two solutions (the comparative prompt's evidence). Empty when
+    either side has no code or the codes are identical."""
+    import difflib
+    if not (old or "").strip() or not (new or "").strip():
+        return ""
+    lines = list(difflib.unified_diff((old or "").splitlines(), (new or "").splitlines(),
+                                      fromfile="loser", tofile="winner", lineterm="", n=2))
+    return "\n".join(lines[:max_lines])
+
+
+_PAIR_LINE = re.compile(r"^P(\d+)\b\s*[:.\-]?\s*(.*)$", re.I)
+
+
+def parse_credit_lessons(text: str, n_pairs: int) -> list[tuple[int, str, str]]:
+    """Parse the LLM's per-pair verdict lines (`P<n> [GOOD|BAD] <lesson>`) into
+    (pair_index, statement, outcome) tuples. pair_index is -1 when the line carries no usable
+    P-marker (the lesson still counts, unattributed). Tolerant of bullets/numbering; capped."""
+    out: list[tuple[int, str, str]] = []
+    for line in (text or "").splitlines():
+        s = line.strip().lstrip("-*•").strip()
+        m = _PAIR_LINE.match(s)
+        idx = (int(m.group(1)) - 1) if m else -1
+        body = m.group(2) if m else s
+        low = body.lower()
+        good, bad = "[good]" in low, "[bad]" in low
+        body = re.sub(r"\[(good|bad)\]", "", body, flags=re.I).strip(" :-–")
+        if len(body) < 8:
+            continue
+        out.append((idx if 0 <= idx < n_pairs else -1, body,
+                    "failed" if bad else ("supported" if good else "tested")))
+        if len(out) >= max(3, n_pairs):
+            break
+    return out
+
+
+# --------------------------------------------------------------------------- #
 # M4 · Auto-distilled skills: episodic → procedural memory. A technique that repeatedly won
 # in a run is drafted as a candidate SKILL.md under <memory_dir>/skills/; it is PROMOTED when
 # a later run with a DIFFERENT task fingerprint confirms it (won on two distinct tasks).

@@ -326,6 +326,12 @@ def fold(events: Iterable[Event]) -> RunState:
             st.research.append(d.get("memo") or d)
             if d.get("served_manual"):
                 st.research_served += 1
+        elif t == "lessons_distilled":
+            # M6 mid-run comparative-lesson distillation (audit-only sidecar; NEVER touches
+            # nodes/best). at_node + pair ids are the replay-safe gates (cadence + no re-distill).
+            st.lessons_distilled.append(d)
+        elif t == "lessons_refreshed":
+            st.lessons_refreshed.append(d)   # M6 shared-store re-read (audit-only cadence gate)
         elif t == "report_generated":
             # Agent-authored run report (audit-only sidecar; NEVER touches nodes/best). Latest wins —
             # the cadence and manual-refresh paths both append this; the freshest narrative stands.

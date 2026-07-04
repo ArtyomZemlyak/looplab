@@ -252,6 +252,9 @@ class Engine:
         novelty_gate: bool = False,         # E1: dedup near-duplicate proposals
         novelty_epsilon: float = 0.05,
         reflection_priors: bool = False,    # E4/M2/M3: cross-run priors + lessons (needs memory_dir)
+        comparative_lessons: bool = False,  # M6: credit-assigned pair lessons (needs reflection_priors)
+        lessons_every: int = 0,             # M6: mid-run distill cadence in nodes (0 = run-end only)
+        lessons_refresh_every: int = 0,     # M6: mid-run shared-store re-read cadence (0 = start only)
         track_hypotheses: bool = True,      # P1: register deep-research directions as hypotheses
         surrogate_explore: float = 0.1,     # A2/A3: explore weight for a lazily-wired BOHB surrogate
         unified_agent: bool = False,        # one agent plays Researcher+Developer(+Strategist)
@@ -392,6 +395,11 @@ class Engine:
         self._lesson_abstractor = lesson_abstractor
         self._exploit_suite = None   # 4.3 hardened ruleset; loaded once memory_dir is set (below)
         self._reflection_priors = reflection_priors
+        # M6 comparative lessons: credit-assigned pair distillation (run-end and, when the
+        # cadences are set, mid-run into/from the SHARED cross-run store — the live-share seam).
+        self._comparative_lessons_on = comparative_lessons
+        self.lessons_every = max(0, lessons_every)
+        self.lessons_refresh_every = max(0, lessons_refresh_every)
         self._track_hypotheses = track_hypotheses
         self._surrogate_explore = surrogate_explore
         # Unified self-driving agent: in unified mode `researcher is developer` (one object plays
@@ -666,7 +674,10 @@ class Engine:
                 self._holdout_fraction = _entry.holdout_fraction
                 self._holdout_idx = self._build_holdout_idx(self._holdout_fraction)
             self._holdout_select = _entry.holdout_select
-        self._prior_note_text = self._load_reflection_priors()   # E4: cross-run meta-learned priors
+        # E4: cross-run meta-learned priors. Excluding THIS run's id matters on resume: a run that
+        # already mid-run-distilled its own comparative lessons (M6) must not read them back as if
+        # they were another run's experience — its own results are already in the digest.
+        self._prior_note_text = self._load_reflection_priors(exclude_run_id=_entry.run_id or None)
         start = time.time()
         while True:
             state = fold(self.store.read_all())
@@ -792,6 +803,14 @@ class Engine:
             # Report grows with the search. Audit-only sidecar; no-op when off. Replay-safe (gated on
             # the report's at_node). The deterministic report renders regardless.
             state = self._maybe_refresh_report(state)
+
+            # M6 comparative lessons, live-shared (doc 13 §7 items 2+5): on a node-count cadence,
+            # distill credit-assigned PAIR lessons into the SHARED cross-run store DURING the run
+            # (write side), and re-read the store so lessons distilled by CONCURRENT runs reach
+            # this run's proposals (read side). Audit-only sidecars; replay-safe (at_node gates);
+            # no-op when the cadences are 0.
+            state = self._maybe_distill_lessons(state)
+            state = self._maybe_refresh_lessons(state)
 
             # Effective node budget: a `budget_extend` with add_nodes (e.g. "give the run 10 more
             # nodes") raises the policy's max_nodes so a reopened/resumed run keeps proposing
@@ -1402,12 +1421,14 @@ class Engine:
         except Exception:  # noqa: BLE001
             pass
 
-    def _load_reflection_priors(self) -> str:
+    def _load_reflection_priors(self, exclude_run_id: Optional[str] = None) -> str:
         """E4 + M2/M3: build the cross-run prior injected into the proposal prompt. Two parts:
         (1) exact-task "what won" notes (meta_notes.jsonl — unchanged E4 warm-start), and
         (2) LESSONS retrieved by task-FINGERPRINT similarity (M2), so a *similar but new* task also
         benefits — including NEGATIVE lessons (what was tested/abandoned/failed, M3) so the search
-        doesn't re-tread a known dead end. Empty unless enabled + present."""
+        doesn't re-tread a known dead end. Empty unless enabled + present. `exclude_run_id` drops
+        lessons THIS run wrote (M6 mid-run distillation / resume): a run must not read its own
+        output back as another run's experience — those results are already in its digest."""
         if not (self._reflection_priors and self.memory_dir):
             return ""
         base = Path(self.memory_dir)
@@ -1444,6 +1465,8 @@ class Engine:
                     continue
                 if not isinstance(o, dict) or not o.get("statement"):
                     continue
+                if exclude_run_id and o.get("run_id") == exclude_run_id:
+                    continue                     # M6: never echo this run's own lessons back
                 all_lessons.append((idx, o))
                 stored_fp = o.get("fingerprint")
                 stored_fp = ([t for t in stored_fp if not str(t).startswith("param:")]
@@ -1541,6 +1564,14 @@ class Engine:
         # LLM-reflect over the whole run for transferable good/bad takeaways. Fingerprint-keyed, so a
         # later SIMILAR task retrieves them; consolidation then merges repeats into "verified on N runs".
         lessons.extend(self._reflect_lessons(final, best, fp))
+        # M6 comparative lessons at run end: credit-assigned pair distillation over whatever pairs
+        # the mid-run cadence did NOT already spend (their (child, parent) ids are recorded in the
+        # `lessons_distilled` events), so run-end never re-distills a pair.
+        if self._comparative_lessons_on:
+            used = [tuple(p) for d in (final.lessons_distilled or [])
+                    for p in (d.get("pairs") or [])]
+            comp, _ = self._comparative_lessons(final, fp, exclude=used)
+            lessons.extend(comp)
         for h in (final.hypotheses or {}).values():
             if h.status in ("supported", "tested", "abandoned"):
                 lessons.append({
@@ -1560,17 +1591,7 @@ class Engine:
                 "task_id": final.task_id, "fingerprint": fp, "kind": getattr(self.task, "kind", ""),
                 "statement": f"{reasons[top]} node(s) failed with reason '{top}'",
                 "outcome": "failed", "delta": None, "confidence": 0.4})
-        if lessons:
-            # One write call: concurrent engine processes append to the same shared store, and a
-            # single small O_APPEND write doesn't interleave mid-line the way per-line buffered
-            # writes flushed at 8 KB boundaries can.
-            payload = "".join(orjson.dumps(lz).decode() + "\n" for lz in lessons)
-            with open(base / "lessons.jsonl", "a", encoding="utf-8") as f:
-                f.write(payload)
-            # D2 hygiene: consolidate the store after appending — merge duplicate claims into an
-            # evidence_count, retire contradicted verdicts (newest wins), THEN bound the size.
-            self._consolidate_lessons_file(base / "lessons.jsonl")
-            self._compact_lessons(base / "lessons.jsonl")
+        self._append_lessons(lessons)
 
         # M4 · auto-distilled skills (episodic → procedural memory): a supported hypothesis that
         # actually moved the metric becomes a candidate SKILL.md; a later run on a DIFFERENT task
@@ -1631,6 +1652,146 @@ class Engine:
             if len(res) >= 3:
                 break
         return res or _winner_lesson()      # LLM gave nothing usable → keep the winner record
+
+    def _append_lessons(self, lessons: list) -> None:
+        """Append lessons to the SHARED cross-run store, then run the D2 hygiene pass. One write
+        call: concurrent engine processes append to the same store, and a single small O_APPEND
+        write doesn't interleave mid-line the way per-line buffered writes flushed at 8 KB
+        boundaries can. Used by run-end reflection AND the M6 mid-run distillation, so a lesson
+        distilled mid-flight is visible to a concurrent run's refresh immediately."""
+        if not (lessons and self.memory_dir):
+            return
+        base = Path(self.memory_dir)
+        base.mkdir(parents=True, exist_ok=True)
+        payload = "".join(orjson.dumps(lz).decode() + "\n" for lz in lessons)
+        with open(base / "lessons.jsonl", "a", encoding="utf-8") as f:
+            f.write(payload)
+        # D2 hygiene: consolidate the store after appending — merge duplicate claims into an
+        # evidence_count, retire contradicted verdicts (newest wins), THEN bound the size.
+        self._consolidate_lessons_file(base / "lessons.jsonl")
+        self._compact_lessons(base / "lessons.jsonl")
+
+    def _comparative_lessons(self, state: RunState, fp: list, exclude=()) -> tuple[list, list]:
+        """M6 (MARS comparative reflective memory): credit-assigned lessons from solution PAIRS —
+        which SPECIFIC difference made the child beat (or regress from) its parent, and what fixed
+        a failure. One LLM call for ALL pairs (budget: same order as `_reflect_lessons`); offline,
+        the deterministic param-diff credit stands in. Returns (lessons, pairs_used); ([], []) when
+        there is nothing informative to compare. Best-effort — never raises."""
+        from looplab.engine.memory import (code_diff, param_credit_statement,
+                                           parse_credit_lessons, select_comparison_pairs)
+        pairs = select_comparison_pairs(state, k=3, exclude=exclude)
+        if not pairs:
+            return [], []
+
+        def _lesson(pr: dict, statement: str, outcome: str, conf: float) -> dict:
+            return {"task_id": state.task_id, "fingerprint": fp,
+                    "kind": getattr(self.task, "kind", ""), "statement": statement,
+                    "outcome": outcome, "delta": pr.get("delta"), "confidence": conf,
+                    "run_id": state.run_id, "evidence": [pr["a"], pr["b"]],
+                    "source": "comparative", "pair": [pr["a"], pr["b"]]}
+
+        def _fallback() -> list:
+            out = []
+            for pr in pairs:
+                a, b = state.nodes[pr["a"]], state.nodes[pr["b"]]
+                if pr["kind"] == "debug":
+                    why = " ".join((a.idea.rationale or "").split())[:90]
+                    out.append(_lesson(pr, f"a node failing with '{b.error_reason or 'error'}' "
+                                           f"was fixed" + (f": {why}" if why else ""),
+                                       "supported", 0.5))
+                    continue
+                stmt = param_credit_statement(a, b, pr["delta"] or 0.0)
+                if stmt:   # no clean single-factor credit -> no lesson (beats a mushy lesson)
+                    out.append(_lesson(pr, stmt,
+                                       "supported" if (pr["delta"] or 0) > 0 else "failed", 0.55))
+            return out
+
+        client = self._reflect_client()
+        if client is None:
+            return _fallback(), pairs
+        blocks = []
+        for i, pr in enumerate(pairs, 1):
+            a, b = state.nodes[pr["a"]], state.nodes[pr["b"]]
+            if pr["kind"] == "debug":
+                head = (f"P{i} (debug): #{b.id} FAILED with '{b.error_reason or 'error'}'; its "
+                        f"repair #{a.id} reached metric={a.metric:.4g}.")
+            else:
+                verb = "IMPROVED on" if (pr["delta"] or 0) > 0 else "REGRESSED from"
+                head = (f"P{i}: #{a.id} (metric={a.metric:.4g}, params={a.idea.params}) {verb} "
+                        f"#{b.id} (metric={b.metric:.4g}, params={b.idea.params}) "
+                        f"by {abs(pr['delta'] or 0):.4g}.")
+            diff = code_diff(b.code or "", a.code or "")
+            blocks.append(head + (f"\nCode diff (#{b.id} -> #{a.id}):\n{diff[:2000]}"
+                                  if diff else ""))
+        prompt = ("Assign CREDIT for each experiment-pair outcome below: identify WHICH specific "
+                  "difference (code or params) caused the change, then state it as ONE "
+                  "generalizable lesson for future runs on SIMILAR tasks.\n"
+                  f"Task: {state.goal}\n\n" + "\n\n".join(blocks) +
+                  "\n\nFor EACH pair output exactly one line: `P<n> [GOOD] <lesson>` if the "
+                  "credited change should be reused, or `P<n> [BAD] <lesson>` if it should be "
+                  "avoided. Credit the SPECIFIC difference, stated generally (no exact numbers). "
+                  "No preamble.")
+        try:
+            out = client.complete_text([{"role": "user", "content": prompt}]) or ""
+        except Exception:  # noqa: BLE001 — reflection is best-effort, never fails the run
+            return _fallback(), pairs
+        lessons = []
+        for idx, stmt, outcome in parse_credit_lessons(out, len(pairs)):
+            pr = pairs[idx] if idx >= 0 else pairs[0]
+            lessons.append(_lesson(pr, stmt, outcome, 0.65 if idx >= 0 else 0.5))
+        return (lessons or _fallback()), pairs
+
+    def _maybe_distill_lessons(self, state: RunState) -> RunState:
+        """M6 write side (doc 13 §7 items 2+5): every `lessons_every` NEW nodes, distill
+        comparative lessons and append them to the SHARED cross-run store IMMEDIATELY — a
+        concurrent run's refresh (read side below) can pick them up mid-flight, the AgentRxiv
+        live-share pattern. The `lessons_distilled` event is the replay-safe gate (at_node +
+        the pair ids already spent); fires only at a creation decision point (no pending evals),
+        mirroring deep-research. No-op when the cadence is 0 or reflection memory is off."""
+        if (self.lessons_every <= 0 or not self._comparative_lessons_on
+                or not (self._reflection_priors and self.memory_dir)):
+            return state
+        if state.pending_nodes():
+            return state
+        n = len(state.nodes)
+        last = max((int(d.get("at_node") or 0) for d in state.lessons_distilled), default=0)
+        # Since-last threshold (not `n % every == 0`), same reason as the report cadence: a
+        # node-count jump must not step over the only multiple and silently skip the window.
+        if n == 0 or n - last < self.lessons_every:
+            return state
+        used = [tuple(p) for d in state.lessons_distilled for p in (d.get("pairs") or [])]
+        fp = self._task_fingerprint(state, state.best())
+        lessons, pairs = self._comparative_lessons(state, fp, exclude=used)
+        self._append_lessons(lessons)
+        # Always record the event — even with 0 lessons — so the at_node gate advances and the
+        # loop doesn't retry the same node-count every iteration. LLM output rides in the event,
+        # so a replay/resume never re-invokes the model (events-as-truth).
+        self.store.append("lessons_distilled", {
+            "at_node": n, "count": len(lessons),
+            "pairs": [[pr["a"], pr["b"]] for pr in pairs],
+            "lessons": [{"statement": lz["statement"], "outcome": lz["outcome"],
+                         "pair": lz.get("pair")} for lz in lessons]})
+        return fold(self.store.read_all())
+
+    def _maybe_refresh_lessons(self, state: RunState) -> RunState:
+        """M6 read side (doc 13 §7 item 5): every `lessons_refresh_every` NEW nodes, re-read the
+        SHARED cross-run store and rebuild the proposal prior — so lessons a CONCURRENT run
+        distilled after this run started reach this run's next proposals (pre-M6, the store was
+        read at run start only). Pure file re-read (no LLM call); this run's own lessons are
+        excluded (they're already in the digest). The `lessons_refreshed` event is the replay-safe
+        cadence gate. No-op when the cadence is 0 or reflection memory is off."""
+        if self.lessons_refresh_every <= 0 or not (self._reflection_priors and self.memory_dir):
+            return state
+        n = len(state.nodes)
+        last = max((int(d.get("at_node") or 0) for d in state.lessons_refreshed), default=0)
+        if n == 0 or n - last < self.lessons_refresh_every:
+            return state
+        before = self._prior_note_text
+        self._prior_note_text = self._load_reflection_priors(exclude_run_id=state.run_id or None)
+        self.store.append("lessons_refreshed", {
+            "at_node": n, "chars": len(self._prior_note_text),
+            "changed": self._prior_note_text != before})
+        return fold(self.store.read_all())
 
     def _distill_skill_body(self, final: RunState, h, ev: list) -> str:
         """A skill is a reusable BEST PRACTICE — the technique + a MINIMAL snippet/script the agent can
