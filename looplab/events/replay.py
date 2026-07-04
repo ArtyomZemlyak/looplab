@@ -533,10 +533,10 @@ def _derive_hypotheses(st: RunState) -> None:
     # FOREAGENT board prioritization: stamp each ranked card's `priority` (0-based position in the
     # latest `hypothesis_ranked` order) so the UI kanban sorts open cards by predicted payoff. Derived,
     # not stored on the event's cards — the ranking is by hypothesis id, robust to a card changing lane.
-    order = ((st.hypothesis_ranking or {}).get("order") or []) if isinstance(st.hypothesis_ranking, dict) else []
+    order = (st.hypothesis_ranking or {}).get("order") or []
     for rank_i, hid in enumerate(order):
         h = hyps.get(str(hid))
-        if h is not None:
+        if h is not None and h.status == "open":   # priority is the OPEN lane's ordering; None once resolved
             h.priority = rank_i
 
     st.hypotheses = hyps

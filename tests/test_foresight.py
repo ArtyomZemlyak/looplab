@@ -8,8 +8,7 @@ from looplab.core.models import (Event, Hypothesis, Idea, Node, NodeStatus, RunS
                                  hypothesis_id)
 from looplab.events.replay import fold
 from looplab.search.best_of_n import BestOfNDeveloper
-from looplab.search.foresight import (ForesightPanelResearcher, rank, rank_solutions,
-                                      verified_report)
+from looplab.search.foresight import ForesightPanelResearcher, rank, verified_report
 
 _A = "import json\nprint(json.dumps({'metric': 0.1}))\n"
 _B = "import json\nprint(json.dumps({'metric': 0.2}))\n"
@@ -85,11 +84,6 @@ def test_rank_fails_open_on_client_error():
     assert rank(None, "r", [_A, _B]) is None
 
 
-def test_rank_solutions_returns_index():
-    assert rank_solutions(_RankClient([1, 0]), "brief", [_A, _B]) == 1
-    assert rank_solutions(_BadClient(), "brief", [_A, _B]) is None
-
-
 # --------------------------------------------------------------------------- #
 # best-of-N integration (code path)
 # --------------------------------------------------------------------------- #
@@ -111,12 +105,15 @@ class _Dev:
         self._i += 1
         return c
 
+    def repair(self, idea, code, error):
+        return self._codes[0]
+
 
 def test_best_of_n_foresight_picks_predicted_candidate():
     client = _RankClient([1, 0])          # predict candidate 1 (_B) beats 0 (_A)
     dev = BestOfNDeveloper(_Dev([_A, _B], client), n=2)   # foresight on by default
     out = dev.implement(Idea(operator="draft", params={}))
-    assert out == _B and dev.last_foresight is True and client.calls == 1
+    assert out == _B and dev.last_foresight_pick is not None and client.calls == 1
     assert dev.audit_extra()["foresight"] is True
     pick = dev.last_foresight_pick                 # full pick telemetry for the `foresight_selected` event
     assert pick["kind"] == "solution" and pick["chosen"] == 1 and pick["reason"] == "test"
@@ -124,17 +121,27 @@ def test_best_of_n_foresight_picks_predicted_candidate():
 
 def test_best_of_n_foresight_abstains_falls_back_to_static():
     # predictor errors -> abstain; both candidates tie on static score -> D10 tie-break (bad client
-    # -> index 0) -> first candidate. last_foresight stays False.
+    # -> index 0) -> first candidate. last_foresight_pick stays None.
     dev = BestOfNDeveloper(_Dev([_A, _B], _BadClient()), n=2, listwise=True)
     out = dev.implement(Idea(operator="draft", params={}))
-    assert out == _A and dev.last_foresight is False
+    assert out == _A and dev.last_foresight_pick is None
 
 
 def test_best_of_n_foresight_off_is_static_only():
     client = _RankClient([1, 0])
     dev = BestOfNDeveloper(_Dev([_A, _B], client), n=2, foresight=False, listwise=False)
     out = dev.implement(Idea(operator="draft", params={}))
-    assert out == _A and client.calls == 0 and dev.last_foresight is False
+    assert out == _A and client.calls == 0 and dev.last_foresight_pick is None
+
+
+def test_best_of_n_repair_clears_stale_foresight_pick():
+    # a debug-repaired node uses no predictive ranker: the prior implement's pick must not leak into
+    # this node's audit / `foresight_selected` event.
+    dev = BestOfNDeveloper(_Dev([_A, _B], _RankClient([1, 0])), n=2)
+    dev.implement(Idea(operator="draft", params={}))
+    assert dev.last_foresight_pick is not None
+    dev.repair(Idea(operator="debug", params={}), "x", "err")
+    assert dev.last_foresight_pick is None and dev.audit_extra()["foresight"] is False
 
 
 # --------------------------------------------------------------------------- #
@@ -290,6 +297,24 @@ def test_fold_stamps_priority_and_keeps_trace():
     assert st.hypotheses[id1].priority == 0 and st.hypotheses[id0].priority == 1
     assert st.hypothesis_ranking["reason"] == "small data favors it"
     assert st.hypothesis_ranking["confidence"] == 0.8
+
+
+def test_fold_priority_only_stamped_on_open_cards():
+    # a card ranked while OPEN that later gains evidence and resolves must NOT keep a stale priority
+    # (models.py contract: priority is None once the card isn't open).
+    s0, s1 = "s0 becomes best", "s1 stays open"
+    id0, id1 = hypothesis_id(s0), hypothesis_id(s1)
+    st = fold([
+        Event(type="run_started", data={"run_id": "r", "task_id": "t", "direction": "max"}),
+        Event(type="hypothesis_added", data={"statement": s0}),
+        Event(type="hypothesis_added", data={"statement": s1}),
+        Event(type="hypothesis_ranked", data={"order": [id0, id1], "confidence": 0.5}),
+        Event(type="node_created", data={"node_id": 1, "operator": "draft",
+                                         "idea": {"operator": "draft", "hypothesis": s0}}),
+        Event(type="node_evaluated", data={"node_id": 1, "metric": 0.9}),   # node 1 becomes best -> s0 supported
+    ])
+    assert st.hypotheses[id0].status == "supported" and st.hypotheses[id0].priority is None
+    assert st.hypotheses[id1].status == "open" and st.hypotheses[id1].priority == 1
 
 
 def test_fold_priority_none_without_ranking():

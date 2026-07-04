@@ -2077,36 +2077,33 @@ class Engine(ConfirmPhaseMixin, AblationMixin):
                 data.update(extra())
             self.store.append(EV_AGENT_VALIDATED, data)
 
-    def _emit_hypothesis_ranked(self, node_id: int) -> None:
-        """FOREAGENT board prioritization audit: if the active Researcher (a
-        `ForesightPanelResearcher`) predicted an order over the OPEN-hypothesis board while proposing
-        THIS node, record it as a `hypothesis_ranked` event — the analysis + selection trace the UI
-        surfaces (kanban order + the model's `reason`). The engine stays the sole event writer: it
-        reads the role's `last_hyp_priority` telemetry (set during propose) and appends here.
+    def _emit_role_telemetry(self, role, attr: str, event_type: str, node_id: int) -> None:
+        """Append `event_type` from a role's predictive-telemetry attr (a dict set during
+        propose/implement), stamped with `node_id`, then CONSUME it (reset to None). Like
+        `_emit_agent_report` this relies on sequential node creation for correctness; the consume adds
+        a further guard specific to these predictive channels — a following non-propose action (merge /
+        debug-repair, which never re-predicts) then finds None and can't re-emit a stale pick for the
+        wrong node. No-op when the attr is absent/None (the role didn't predict for this node)."""
+        pick = getattr(role, attr, None)
+        if isinstance(pick, dict):
+            self.store.append(event_type, {"node_id": node_id, **pick})
+            setattr(role, attr, None)
 
-        Consumed on read (reset to None) so a subsequent non-propose action (merge / debug-repair,
-        which never re-prioritizes) can't re-emit a stale ranking for the wrong node — same
-        sequential-creation safety as `_emit_agent_report`."""
-        prio = getattr(self.researcher, "last_hyp_priority", None)
-        if prio:
-            self.store.append(EV_HYPOTHESIS_RANKED, {"node_id": node_id, **prio})
-        if hasattr(self.researcher, "last_hyp_priority"):
-            self.researcher.last_hyp_priority = None
+    def _emit_hypothesis_ranked(self, node_id: int) -> None:
+        """FOREAGENT board prioritization audit: if the active Researcher (a `ForesightPanelResearcher`)
+        predicted an order over the OPEN-hypothesis board while proposing THIS node, record it as a
+        `hypothesis_ranked` event — the analysis + selection trace the UI surfaces (kanban order + the
+        model's `reason`)."""
+        self._emit_role_telemetry(self.researcher, "last_hyp_priority", EV_HYPOTHESIS_RANKED, node_id)
 
     def _emit_foresight_selected(self, node_id: int) -> None:
         """FOREAGENT predict-before-execute audit: when the world model picked WHICH candidate becomes
         this node — the best of K generated ideas (the researcher panel) or of N code implementations
         (best-of-N) — record the ranking + confidence + the model's reasoning as a `foresight_selected`
         event. Without it the choice and its discarded alternatives vanish (only the winner survives in
-        `node_created`). The engine stays the sole writer: it reads the role's `last_foresight`(_pick)
-        telemetry set during propose/implement. Consumed on read so a following non-propose action
-        (merge / debug-repair) can't re-emit a stale pick — same safety as `_emit_agent_report`."""
-        for role, attr in ((self.developer, "last_foresight_pick"),
-                           (self.researcher, "last_foresight")):
-            pick = getattr(role, attr, None)
-            if isinstance(pick, dict):
-                self.store.append(EV_FORESIGHT_SELECTED, {"node_id": node_id, **pick})
-                setattr(role, attr, None)
+        `node_created`)."""
+        self._emit_role_telemetry(self.developer, "last_foresight_pick", EV_FORESIGHT_SELECTED, node_id)
+        self._emit_role_telemetry(self.researcher, "last_foresight", EV_FORESIGHT_SELECTED, node_id)
 
     @property
     def _probe_developer(self):

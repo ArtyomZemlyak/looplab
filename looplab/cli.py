@@ -183,10 +183,12 @@ def _engine(run_dir: Path, task: TaskAdapter, settings: Settings,
                                                  explore=settings.surrogate_explore)
         # FOREAGENT predict-before-execute for HYPOTHESES: rank K candidate ideas with the LLM world
         # model primed with the data profile + experiment memory — it compares the structural / text
-        # ideas the numeric surrogate can't. ON by default for the LLM backend; takes precedence over
-        # the numeric E2 panel. Needs a client (a bare surrogate wrapper exposes none -> falls through).
+        # ideas the numeric surrogate can't. ON by default for the LLM backend. Needs a client (a bare
+        # surrogate wrapper exposes none -> falls through). YIELDS to an explicitly-configured numeric
+        # `researcher_panel > 1` so opting into the k-NN panel is never silently overridden by the default.
         if (getattr(settings, "foresight", True) and settings.backend == "llm"
                 and getattr(settings, "foresight_panel", 1) > 1
+                and settings.researcher_panel <= 1
                 and getattr(researcher, "client", None) is not None):
             from looplab.search.foresight import ForesightPanelResearcher
             researcher = ForesightPanelResearcher(researcher, k=settings.foresight_panel)

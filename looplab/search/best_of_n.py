@@ -93,14 +93,16 @@ class BestOfNDeveloper(WrapsDeveloper):
         self.last_files: dict = {}
         self.last_deleted: list = []
         self.last_n_scores: list[float] = []
-        self.last_foresight: bool = False   # whether the last pick used the predictive ranker (audit)
-        self.last_foresight_pick: dict | None = None   # engine reads this -> `foresight_selected` event
+        # The predictive pick for THIS call (order/confidence/reason) or None when the ranker didn't
+        # decide the pick — the engine reads it to emit `foresight_selected`, and `audit_extra`/the D10
+        # guard derive "did foresight decide?" from `is not None` (one source of truth, no stale bool).
+        self.last_foresight_pick: dict | None = None
         self._last_candidates: list[tuple[str, dict, list]] = []   # (code, files, deleted) per N
 
     def audit_extra(self) -> dict:
         extra = super().audit_extra()
         extra["best_of_n"] = self.n
-        extra["foresight"] = self.last_foresight
+        extra["foresight"] = self.last_foresight_pick is not None
         return extra
 
     def implement(self, idea: Idea) -> str:
@@ -120,7 +122,6 @@ class BestOfNDeveloper(WrapsDeveloper):
         best_score = max(c[3] for c in cands)
         top = [c for c in cands if c[3] >= best_score - 1e-9]
         chosen = top[0]
-        self.last_foresight = False
         self.last_foresight_pick = None
         # FOREAGENT: predict-before-execute (arXiv:2601.05930). Among the top static-scorers — the
         # validity-tied candidates the execution-free score can't separate — the LLM world model
@@ -139,14 +140,13 @@ class BestOfNDeveloper(WrapsDeveloper):
             if r is not None:
                 order, conf, reason = r
                 chosen = top[order[0]]
-                self.last_foresight = True
                 self.last_foresight_pick = {
                     "kind": "solution", "method": "foresight", "n": len(top),
                     "chosen": order[0], "order": order, "confidence": conf, "reason": reason}
         # D10: break a tie among the top static-scorers with a list-wise LLM comparison (advisory).
         # Only when the predictor abstained, it would actually change the outcome (>1 tied), and a
         # client is available.
-        if not self.last_foresight and self.listwise and len(top) > 1 and self.client is not None:
+        if self.last_foresight_pick is None and self.listwise and len(top) > 1 and self.client is not None:
             # Pass the prompt store only when one is configured: callers/tests monkeypatch
             # `_listwise_pick` with its historical 4-arg signature, so the default (no-store)
             # path must keep that call shape unchanged.
@@ -159,7 +159,8 @@ class BestOfNDeveloper(WrapsDeveloper):
     def repair(self, idea: Idea, code: str, error: str) -> str:
         repair = getattr(self.inner, "repair", None)
         if callable(repair):
-            out = repair(idea, code, error)
-            self._sync_audit()   # else stale from prior implement()
+            self.last_foresight_pick = None   # repair uses no predictive ranker: clear the prior pick
+            out = repair(idea, code, error)   # so this node's audit/`foresight_selected` isn't stale
+            self._sync_audit()                # else last_files stale from prior implement()
             return out
         return self.implement(idea)

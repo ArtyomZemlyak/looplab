@@ -9,9 +9,9 @@ execution budget.
 Adapted to LoopLab's two existing "predict before you spend an eval" seams so the mechanism
 COMPOSES with what's here instead of replacing it:
 
-* code candidates — `rank_solutions` upgrades best-of-N (search/best_of_n.py) from an
-  execution-free STATIC score (+ a tie-break) into a real predictive ranker over the plausible
-  (statically-runnable) candidates; the static score stays a cheap validity PRE-FILTER.
+* code candidates — best-of-N (search/best_of_n.py) calls `rank` over the statically-tied top
+  candidates, upgrading from an execution-free STATIC score (+ a tie-break) into a real predictive
+  ranker; the static score stays a cheap validity PRE-FILTER.
 * hypotheses / ideas — `ForesightPanelResearcher` ranks K candidate ideas the numeric k-NN
   surrogate (serve/panel.py) is BLIND to (structural / text ideas), priming the predictor with the
   data profile AND the accumulated experiment memory (the EvoScientist-style synergy: memory feeds
@@ -33,17 +33,14 @@ from typing import Optional
 
 from pydantic import BaseModel, Field
 
+from looplab.agents.roles import RESEARCHER_HINT_ATTRS
 from looplab.core.parse import parse_structured
 from looplab.core.prompts import render
 
 _REPORT_CAP = 2000     # per-source char bound for the priming "Verified Data Analysis Report"
 _ITEM_CAP = 2000       # max chars rendered per candidate
-_MAX_ITEMS = 8         # hard cap on candidates presented together in one predictive call
-
-# Engine-set hint attributes the wrapper forwards to its base Researcher before each proposal, so the
-# predictive panel stays transparent to the same steering the plain researcher honors. Mirrors
-# `agents/roles.py::RESEARCHER_HINT_ATTRS` (hardcoded here to keep `search` from importing `agents`).
-_HINT_ATTRS = ("_digest_cap", "_complexity_hint", "_sweep_hint", "_novelty_feedback")
+_MAX_ITEMS = 20        # cap on candidates presented together in one predictive call (prompt-size bound;
+                       # beyond it `rank` appends the remainder in input order rather than scoring them)
 
 
 class _Ranking(BaseModel):
@@ -118,16 +115,6 @@ def rank(client, report: str, items: list[str], *, goal: str = "", direction: st
     return order, max(0.0, min(1.0, float(conf))), (out.reason or "").strip()[:600]
 
 
-def rank_solutions(client, brief: str, codes: list[str], *, goal: str = "", direction: str = "min",
-                   parser: str = "tool_call", prompts=None) -> Optional[int]:
-    """Predict which candidate SOLUTION (code) will score best, priming the world model with the
-    developer `brief` as the Verified Data Analysis Report. Returns the chosen 0-based index into
-    `codes`, or None to abstain (caller keeps its static-score / tie-break behavior)."""
-    r = rank(client, verified_report(brief=brief or ""), list(codes),
-             goal=goal, direction=direction, parser=parser, prompts=prompts)
-    return None if r is None else r[0][0]      # r = (order, confidence); order[0] = best index
-
-
 def _idea_text(idea) -> str:
     """Render an idea for the predictor: the HYPOTHESIS (the belief under test) first, then the
     rationale + params/grid — so the ranking is over WHAT each experiment tests, not just its
@@ -190,7 +177,7 @@ class ForesightPanelResearcher:
         """Mirror the engine-set steering hints onto the base Researcher so the panel stays
         transparent to novelty-gate feedback / complexity / sweep cues (the engine setattrs them on
         THIS wrapper — the active researcher — after construction)."""
-        for attr in _HINT_ATTRS:
+        for attr in RESEARCHER_HINT_ATTRS:
             if hasattr(self, attr):
                 setattr(self.base, attr, getattr(self, attr))
 
