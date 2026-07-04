@@ -144,6 +144,8 @@ See [LLM & coding agents](llm-and-agents.md) for full guidance.
 | `surrogate_proposer` | `LOOPLAB_SURROGATE_PROPOSER` | `false` | BO-lite: propose by a k-NN surrogate over (params→metric) |
 | `surrogate_explore` | `LOOPLAB_SURROGATE_EXPLORE` | `0.1` | UCB-style exploration weight |
 | `researcher_panel` | `LOOPLAB_RESEARCHER_PANEL` | `1` | Generate K ideas, keep the best by an empirical surrogate (1 = off) |
+| `foresight` | `LOOPLAB_FORESIGHT` | `true` | FOREAGENT predict-before-execute: LLM world model ranks candidates/ideas before an eval, primed with a data report + memory (master switch) |
+| `foresight_panel` | `LOOPLAB_FORESIGHT_PANEL` | `2` | Generate K ideas, keep the one predicted best pre-execution (ranks structural/text ideas the numeric surrogate can't; LLM backend only; 1 = off) |
 | `proxy_scoring` | `LOOPLAB_PROXY_SCORING` | `false` | Rank a candidate's potential from early signals |
 | `proxy_kill_fraction` | `LOOPLAB_PROXY_KILL_FRACTION` | `0.0` | Skip a full eval for the doomed bottom fraction (0 = off) |
 | `novelty_gate` | `LOOPLAB_NOVELTY_GATE` | `false` | Reject near-duplicate proposals (param-space distance) |
@@ -159,6 +161,7 @@ See [LLM & coding agents](llm-and-agents.md) for full guidance.
 | `complexity_cue` | `LOOPLAB_COMPLEXITY_CUE` | `false` | Inject a complexity hint keyed on the node's child count |
 | `feature_engineering` | `LOOPLAB_FEATURE_ENGINEERING` | `false` | Instruct the agent to add engineered features (CAAFE-style; CV gate enforced) |
 | `best_of_n` | `LOOPLAB_BEST_OF_N` | `1` | Generate N implementations per node, keep the best by execution-free reward (1 = off) |
+| `best_of_n_listwise` | `LOOPLAB_BEST_OF_N_LISTWISE` | `true` | Break a best-of-N static-score tie with a comparative LLM selection (D10) |
 
 ## Repair & resilience
 

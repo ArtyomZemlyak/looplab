@@ -361,6 +361,17 @@ class Settings(BaseSettings):
     # GAIA, arXiv:2506.12928). The static score stays the primary filter — the LLM is a weak
     # comparative prior, never the sole oracle. ON by default (no-op when best_of_n==1).
     best_of_n_listwise: bool = True
+    # FOREAGENT predict-before-execute (arXiv:2601.05930): use the LLM as an IMPLICIT WORLD MODEL to
+    # predict — WITHOUT executing — which candidate / hypothesis will score best, primed with a
+    # Verified Data Analysis Report (data profile / brief) + the accumulated experiment memory. Master
+    # switch, ON by default; a no-op wherever there is nothing to rank (best_of_n==1 and
+    # foresight_panel==1) or no LLM client. See `looplab/search/foresight.py`.
+    foresight: bool = True
+    # Hypothesis foresight breadth: generate K candidate ideas per proposal and keep the one PREDICTED
+    # best pre-execution by the world model — it ranks the STRUCTURAL / text ideas the numeric k-NN
+    # surrogate (researcher_panel) is blind to, primed with the data profile + memory (the synergy).
+    # >1 enables it (LLM backend only; needs `foresight` on); 2 = on by default at modest cost, 1 = off.
+    foresight_panel: int = 2
     # T7 LLM response cache: serve an identical DETERMINISTIC (temperature 0) request from an
     # in-process content-addressed cache instead of re-hitting the model — cuts cost on
     # retry/panel/verify flows. NEVER caches sampling calls (temp>0: best-of-N / panel / novelty

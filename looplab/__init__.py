@@ -67,6 +67,7 @@ _LAYOUT = {
     "eventstore": "events",
     "engine_proc": "serve",
     "finalize": "engine",
+    "foresight": "search",
     "gate": "trust",
     "genesis": "engine",
     "git_tools": "tools",

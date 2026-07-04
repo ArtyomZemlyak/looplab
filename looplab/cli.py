@@ -181,8 +181,17 @@ def _engine(run_dir: Path, task: TaskAdapter, settings: Settings,
             if _bounds:
                 researcher = SurrogateResearcher(_bounds, fallback=researcher,
                                                  explore=settings.surrogate_explore)
+        # FOREAGENT predict-before-execute for HYPOTHESES: rank K candidate ideas with the LLM world
+        # model primed with the data profile + experiment memory — it compares the structural / text
+        # ideas the numeric surrogate can't. ON by default for the LLM backend; takes precedence over
+        # the numeric E2 panel. Needs a client (a bare surrogate wrapper exposes none -> falls through).
+        if (getattr(settings, "foresight", True) and settings.backend == "llm"
+                and getattr(settings, "foresight_panel", 1) > 1
+                and getattr(researcher, "client", None) is not None):
+            from looplab.search.foresight import ForesightPanelResearcher
+            researcher = ForesightPanelResearcher(researcher, k=settings.foresight_panel)
         # E2 researcher panel: generate K ideas and keep the best by the empirical surrogate.
-        if settings.researcher_panel > 1:
+        elif settings.researcher_panel > 1:
             from looplab.serve.panel import PanelResearcher
             researcher = PanelResearcher(researcher, k=settings.researcher_panel)
     # RepoTask onboarding (Phase 3): if the task can propose its own eval spec, build the

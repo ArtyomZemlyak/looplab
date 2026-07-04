@@ -80,19 +80,26 @@ class BestOfNDeveloper(WrapsDeveloper):
 
     Forwarding (brief/client/prompts/is_code_generating/last_report) comes from `WrapsDeveloper`."""
 
-    def __init__(self, inner, n: int = 3, listwise: bool = True, parser: str = "tool_call"):
+    def __init__(self, inner, n: int = 3, listwise: bool = True, parser: str = "tool_call",
+                 foresight: bool = True):
         self.inner = inner
         self.n = max(1, n)
         self.listwise = listwise
+        # FOREAGENT predict-before-execute (search/foresight.py): rank the statically-runnable
+        # candidates with the LLM world model — a real predictor, not just the D10 tie-break — before
+        # spending an eval. ON by default; a no-op without a client or with <2 distinct candidates.
+        self.foresight = foresight
         self.parser = parser or "tool_call"
         self.last_files: dict = {}
         self.last_deleted: list = []
         self.last_n_scores: list[float] = []
+        self.last_foresight: bool = False   # whether the last pick used the predictive ranker (audit)
         self._last_candidates: list[tuple[str, dict, list]] = []   # (code, files, deleted) per N
 
     def audit_extra(self) -> dict:
         extra = super().audit_extra()
         extra["best_of_n"] = self.n
+        extra["foresight"] = self.last_foresight
         return extra
 
     def implement(self, idea: Idea) -> str:
@@ -111,10 +118,27 @@ class BestOfNDeveloper(WrapsDeveloper):
                           getattr(self.inner, "last_deleted", []) or [], sc))
         best_score = max(c[3] for c in cands)
         top = [c for c in cands if c[3] >= best_score - 1e-9]
-        # D10: break a tie among the top static-scorers with a list-wise LLM comparison (advisory).
-        # Only when it would actually change the outcome (>1 tied) and a client is available.
         chosen = top[0]
-        if self.listwise and len(top) > 1 and self.client is not None:
+        self.last_foresight = False
+        # FOREAGENT: predict-before-execute (arXiv:2601.05930). Among the top static-scorers — the
+        # validity-tied candidates the execution-free score can't separate — the LLM world model
+        # predicts which will score best WITHOUT running any, promoting the LLM from D10 tie-break-only
+        # to a genuine ranker primed with the task/data brief (the Verified Data Analysis Report). The
+        # static score stays the VALIDITY FLOOR (`top` excludes broken/no-metric candidates), so a
+        # hunch can never beat a valid candidate with a likely-invalid one. Fails open: on abstain
+        # (no client / <2 distinct / malformed output) `chosen` stays top[0] and the D10 tie-break runs.
+        if self.foresight and self.client is not None and len({c[0] for c in top}) > 1:
+            from looplab.search.foresight import rank_solutions
+            kw = {"prompts": self.prompts} if self.prompts is not None else {}
+            idx = rank_solutions(self.client, getattr(self, "brief", "") or "",
+                                 [c[0] for c in top], parser=self.parser, **kw)
+            if idx is not None:
+                chosen = top[idx]
+                self.last_foresight = True
+        # D10: break a tie among the top static-scorers with a list-wise LLM comparison (advisory).
+        # Only when the predictor abstained, it would actually change the outcome (>1 tied), and a
+        # client is available.
+        if not self.last_foresight and self.listwise and len(top) > 1 and self.client is not None:
             # Pass the prompt store only when one is configured: callers/tests monkeypatch
             # `_listwise_pick` with its historical 4-arg signature, so the default (no-store)
             # path must keep that call shape unchanged.
