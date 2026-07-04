@@ -284,6 +284,12 @@ class OpenAICompatibleClient:
         # silently drops it. Per-client (per-model), detected once and cached.
         self._reasoning_ok = True
         self._max_retries = 4               # 429/5xx backoff retries before surfacing an LLMError
+        # Stall-degrade: a shared/proxied endpoint can stall MID-STREAM on big (code-gen) requests
+        # while answering the same request fine without SSE (observed on glm-5.1: non-stream 2s vs a
+        # stream that hangs until the watchdog kills it). After a stream stall the NEXT attempt of
+        # that call goes non-streaming; after 2 stalls streaming is disabled for this client's
+        # lifetime. Bounded worst case: one idle-timeout, not retries × idle-timeout of silence.
+        self._stream_stalls = 0
         # H1: when the endpoint supports constrained decoding (vLLM/SGLang), drive structured calls
         # from the Pydantic JSON schema — `response_format` json_schema (OpenAI-standard, vLLM+SGLang)
         # + `guided_json` (vLLM extra) — so a weak model can't emit invalid JSON. Off by default
@@ -456,6 +462,7 @@ class OpenAICompatibleClient:
         # Retry-After header when given) BEFORE surfacing — free/shared endpoints (e.g. OpenRouter
         # free tier) rate-limit bursts, and a single 429 shouldn't crash the whole run.
         body = None
+        _stalled_prev = False               # this call's previous attempt stalled mid-stream
         for attempt in range(self._max_retries + 1):
             # Build the request per attempt so a param-compat retry (below) can drop the reasoning
             # toggle. `_reasoning_ok` starts True and flips off permanently for THIS client the first
@@ -463,7 +470,12 @@ class OpenAICompatibleClient:
             p = dict(payload)
             if self.reasoning and self._reasoning_ok:   # inject the reasoning toggle
                 p = {**p, **self.reasoning}
-            if self.stream:                     # force streaming so `timeout` is an inter-token idle guard
+            # Stall-degrade: stream by default (timeout = inter-token idle guard), but drop to a
+            # plain blocking read for the attempt right after a stream stall, and permanently once
+            # this client has stalled twice — a flaky proxied endpoint often answers the SAME request
+            # fine without SSE while its stream wedges mid-generation.
+            use_stream = self.stream and self._stream_stalls < 2 and not _stalled_prev
+            if use_stream:                      # force streaming so `timeout` is an inter-token idle guard
                 p = {**p, "stream": True, "stream_options": {"include_usage": True}}
             req = urllib.request.Request(
                 f"{self.base_url}/chat/completions", data=json.dumps(p).encode("utf-8"), method="POST",
@@ -474,7 +486,7 @@ class OpenAICompatibleClient:
                 with urllib.request.urlopen(req, timeout=self.timeout) as resp:
                     # Streaming: reassemble SSE lines (a stall raises socket.timeout HERE, inside the
                     # `with`, and lands in the transient-retry handler below). Non-streaming: one read.
-                    parsed = self._read_stream(resp) if self.stream \
+                    parsed = self._read_stream(resp) if use_stream \
                         else _parse_chat_body(resp.read().decode("utf-8", "replace"))
             except urllib.error.HTTPError as e:
                 # A 400 that rejects our REASONING toggle — e.g. a litellm-proxied model like glm-5.1
@@ -505,6 +517,9 @@ class OpenAICompatibleClient:
                 # directly and don't wrap LLMError. A refused connection / DNS / TLS CERT error is a
                 # steady-state "endpoint down or misconfigured" signal: fail FAST so /api/llm/health
                 # stays instant and a wrong base_url surfaces on the first call, not after backoff.
+                if use_stream:                  # a stalled/broken STREAM → degrade the next attempt
+                    _stalled_prev = True
+                    self._stream_stalls += 1
                 if _is_transient(e) and attempt < self._max_retries:
                     time.sleep(min(2.0 * (2 ** attempt), 30.0))
                     continue
@@ -521,11 +536,14 @@ class OpenAICompatibleClient:
                 # fast at the post-loop check). Only two cases retry: an unparseable body (None), or a
                 # STREAM that produced an empty message (keepalive-only heartbeats, no content/tool_call).
                 m = ((parsed.get("choices") or [{}])[0] or {}).get("message") or {} if parsed else {}
-                empty_stream = (self.stream and parsed is not None and parsed.get("choices")
+                empty_stream = (use_stream and parsed is not None and parsed.get("choices")
                                 and not m.get("content") and not m.get("tool_calls"))
                 if parsed is not None and not empty_stream:
                     body = parsed
                     break
+                if empty_stream:                # keepalive-only stream = the same stall family
+                    _stalled_prev = True
+                    self._stream_stalls += 1
                 if attempt < self._max_retries:
                     time.sleep(min(2.0 * (2 ** attempt), 30.0))
                     continue

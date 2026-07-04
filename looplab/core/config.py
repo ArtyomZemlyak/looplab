@@ -399,6 +399,10 @@ class Settings(BaseSettings):
     # is detected and retried on a fresh connection — the fix for silent multi-minute hangs. Set False
     # to use one blocking read (old per-op timeout semantics) if an endpoint streams badly.
     llm_stream: bool = True
+    # LLM IDLE timeout (seconds). Stream mode: the INTER-TOKEN stall limit — a steady generation is
+    # never cut off, only a silent endpoint. Non-stream: bounds the whole read. Raise for endpoints
+    # with a long prefill on huge prompts; lower to fail fast on a flaky shared endpoint.
+    llm_timeout: float = Field(default=180.0, gt=0)
     # H4: cap the growing agentic-researcher tool-call history (chars) by middle-truncating stale
     # tool output, so a long trace doesn't blow the context window. 0 = off (unbounded).
     context_budget_chars: int = 0

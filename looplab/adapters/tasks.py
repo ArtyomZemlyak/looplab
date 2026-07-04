@@ -82,8 +82,9 @@ def make_llm_client(settings, *, model: str | None = None,
                                getattr(settings, "llm_reasoning_style", "auto"),
                                getattr(settings, "llm_reasoning_extra", None))
     # `timeout` lets a caller bound a UI-side probe (e.g. the health check) well under a proxy's
-    # gateway timeout; omitted -> the client's own default (180s), unchanged for run/agent calls.
-    extra = {"timeout": timeout} if timeout is not None else {}
+    # gateway timeout; omitted -> the run-wide `llm_timeout` setting (idle/stall limit, default 180s).
+    extra = {"timeout": timeout if timeout is not None
+             else float(getattr(settings, "llm_timeout", 180.0) or 180.0)}
     return OpenAICompatibleClient(
         model=mdl, base_url=base_url or settings.llm_base_url, api_key=key,
         temperature=settings.llm_temperature, accountant=CostAccountant(),

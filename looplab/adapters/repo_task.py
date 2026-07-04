@@ -424,7 +424,8 @@ class LLMRepoDeveloper:
                         "its metric. Briefly summarize what you wrote.",
                         {"summary": {"type": "string"}}, [])
 
-    def _run(self, idea: Idea, error: Optional[str] = None) -> str:
+    def _run(self, idea: Idea, error: Optional[str] = None,
+             base: Optional[dict] = None, base_note: str = "") -> str:
         from looplab.agents.agent import drive_tool_loop
         write = RepoWriteTools(self._surface, self._protected, self._prefixes)
         if error and (self.last_files or self.last_deleted):   # repair: carry prior state so the
@@ -432,6 +433,11 @@ class LLMRepoDeveloper:
             write.deleted = list(self.last_deleted)            # recorded deletions aren't lost on
             #   a re-materialization (multi-seed confirm / replay / cross-run import), which would
             #   otherwise resurrect a file the search deleted and measure a different workspace.
+        elif base:
+            # IMPROVE/REFINE from a parent solution: pre-load the parent's files so untouched ones
+            # carry over verbatim (cumulative parent→child diff) — the agent PATCHES, it does not
+            # regenerate the whole solution from the pristine repo.
+            write.files = dict(base)
         params = ", ".join(f"{k}={v}" for k, v in (idea.params or {}).items()) or "(choose sensible values)"
         from looplab.core.hardware import operational_attention_points
         system = (
@@ -489,6 +495,23 @@ class LLMRepoDeveloper:
             + "=== REPOSITORY SOURCE ===\n" + self._repo_context())
         user = (f"Experiment concept (the researcher's idea): {idea.rationale}\nHyperparameters to use: {params}.\n"
                 "Design and implement the eval entrypoint (and any edits) now with write_file, then call done.")
+        if base:
+            cap_each, cap_total, used = 8000, 24000, 0
+            parts = []
+            for name, body in base.items():
+                b = str(body or "")[:cap_each]
+                if used + len(b) > cap_total:
+                    parts.append(f"--- {name} --- (omitted for space)")
+                    continue
+                used += len(b)
+                parts.append(f"--- {name} ---\n{b}")
+            user += ("\n\n=== PARENT SOLUTION (your starting point"
+                     + (f"; {base_note}" if base_note else "") + ") ===\n"
+                     "The files below are this experiment's PARENT — they are already loaded as your "
+                     "working set and carry over verbatim unless you re-write them. AMEND them: change "
+                     "ONLY what this idea requires (write_file re-writes a whole file) and keep "
+                     "everything else as-is. Do NOT rebuild the solution from scratch.\n\n"
+                     + "\n\n".join(parts))
         if error:
             already = ", ".join(self.last_files) or "(none)"
             user += ("\n\nThe PREVIOUS attempt FAILED — fix ONLY the stage that failed (see the error) by "
@@ -512,6 +535,15 @@ class LLMRepoDeveloper:
 
     def implement(self, idea: Idea) -> str:
         return self._run(idea)
+
+    def implement_from(self, idea: Idea, parent) -> str:
+        """Improve/refine: start from the PARENT node's solution and patch it (see _run(base=...)).
+        Falls back to a from-scratch implement when the parent carries no files (e.g. seeded rows)."""
+        files = dict(getattr(parent, "files", {}) or {})
+        if not files:
+            return self._run(idea)
+        note = f"parent experiment #{getattr(parent, 'id', '?')}, metric={getattr(parent, 'metric', None)}"
+        return self._run(idea, base=files, base_note=note)
 
     def repair(self, idea: Idea, code: str, error: str) -> str:
         return self._run(idea, error=error)

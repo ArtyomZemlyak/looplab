@@ -89,6 +89,14 @@ class UnifiedAgent:
         self._sync_dev_audit()
         return code
 
+    def implement_from(self, idea: Idea, parent) -> str:
+        """Parent-aware implement: delegate when the inner developer supports it (repo tasks), so an
+        improve patches the parent's solution instead of regenerating from the baseline."""
+        impl = getattr(self.developer, "implement_from", None)
+        code = impl(idea, parent) if callable(impl) else self.developer.implement(idea)
+        self._sync_dev_audit()
+        return code
+
     def repair(self, idea: Idea, code: str, error: str) -> str:
         rep = getattr(self.developer, "repair", None)
         out = rep(idea, code, error) if callable(rep) else self.developer.implement(idea)

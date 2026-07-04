@@ -2007,6 +2007,17 @@ class Engine:
             return installed
 
     # ---------------------------------------------------------------- private
+    def _implement(self, idea, parent=None) -> str:
+        """Route an implement through `implement_from(idea, parent)` when the Developer supports it
+        and a parent exists — so an IMPROVE/REFINE starts from the parent's actual solution (its
+        code/files) and patches it, instead of regenerating everything from the pristine baseline
+        (which loses the parent's accumulated edits and burns tokens re-deriving them). Falls back
+        to the plain `implement(idea)` for developers that don't take a parent (draft, offline)."""
+        impl_from = getattr(self.developer, "implement_from", None)
+        if parent is not None and callable(impl_from):
+            return impl_from(idea, parent)
+        return self.developer.implement(idea)
+
     def _create_node(self, action: dict) -> None:
         state = fold(self.store.read_all())
         node_id = max(state.nodes, default=-1) + 1  # monotonic across the whole run -> unique
@@ -2057,7 +2068,7 @@ class Engine:
                         idea = self.researcher.propose(state, parent)
                     idea.operator = "debug"
                     with self.tracer.span("implement"):
-                        code = self.developer.implement(idea)
+                        code = self._implement(idea, parent)
             else:  # improve
                 parent = state.nodes[action["parent_id"]]
                 self._set_complexity_hint(state, parent)   # A0d breadth-keyed complexity cue
@@ -2069,7 +2080,7 @@ class Engine:
                 idea.operator = "improve"
                 parents = [parent.id]
                 with self.tracer.span("implement"):
-                    code = self.developer.implement(idea)
+                    code = self._implement(idea, parent)
             # 💡 deep-research provenance: tag the first couple of nodes created right after a research
             # memo (its directions are the active steering) so the UI can show WHERE research landed in
             # the tree. Audit/UI only — never affects search. Coarse-but-honest (temporal proximity).
@@ -3060,7 +3071,7 @@ class Engine:
             new_params[top] = proposal.params[top]
         idea = Idea(operator="refine_block", params=new_params,
                     rationale=f"ablation: refine highest-impact '{top}' (impacts={impacts})")
-        code = self.developer.implement(idea)
+        code = self._implement(idea, parent)
         node_id = max(fold(self.store.read_all()).nodes, default=-1) + 1
         self.store.append("node_created", {
             "node_id": node_id, "parent_ids": [parent_id], "operator": "refine_block",
@@ -3136,7 +3147,7 @@ class Engine:
         idea = Idea(operator="refine_block", params=dict(parent.idea.params),
                     rationale=("code-block ablation: refine the highest-impact pipeline block "
                                f"#{top} and keep the rest. Block:\n{top_src}"))
-        new_code = self.developer.implement(idea)
+        new_code = self._implement(idea, parent)
         node_id = max(fold(self.store.read_all()).nodes, default=-1) + 1
         self.store.append("node_created", {
             "node_id": node_id, "parent_ids": [parent_id], "operator": "refine_block",
