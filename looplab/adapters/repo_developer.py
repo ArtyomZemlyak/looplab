@@ -11,6 +11,7 @@ exporting them, and this module needs nothing from `repo_task` at import time (n
 """
 from __future__ import annotations
 
+import ast
 from typing import Optional
 
 from looplab.core.models import Idea
@@ -125,6 +126,21 @@ class RepoWriteTools:
             return f"(refused: {p} is outside your editable surface: {', '.join(self._surface)})"
         return None
 
+    @staticmethod
+    def _py_syntax_error(path: str, content: str) -> Optional[str]:
+        """For a *.py file, the first SyntaxError `content` raises (line + message), else None.
+        The dominant real-run failure was an edit whose replace-block had the WRONG indentation
+        (a `--simcse_weight` arg inserted at 4 spaces among 8-space siblings), so the file only
+        broke minutes later as a training crash. Compiling the staged result here turns that into
+        an immediate, precise, actionable error the model fixes before the eval ever runs."""
+        if not path.endswith(".py"):
+            return None
+        try:
+            ast.parse(content)
+            return None
+        except SyntaxError as e:
+            return f"line {e.lineno}: {e.msg}"
+
     def _write(self, p, args: dict) -> str:
         if not p:
             return ("(refused: path must be REPO-RELATIVE and inside the repo — no absolute paths, "
@@ -133,6 +149,10 @@ class RepoWriteTools:
         if refusal:
             return refusal
         content = args.get("content", "")
+        err = self._py_syntax_error(p, content)
+        if err is not None:
+            return (f"(refused: the content you wrote for {p} is not valid Python — SyntaxError {err}. "
+                    "Fix it and write_file again; nothing was staged.)")
         self.files[p] = content
         if p in self.deleted:
             self.deleted.remove(p)
@@ -156,6 +176,16 @@ class RepoWriteTools:
         new, msg = apply_search_replace(cur, search, replace, path=p)
         if new is None:
             return msg
+        # Syntax gate: reject an edit that INTRODUCES a Python SyntaxError (the model's replace-block
+        # had the wrong indentation / a repeated kwarg — the #1 real-run failure). Only when the
+        # ORIGINAL parsed cleanly, so we never punish the model for editing an already-broken file.
+        if self._py_syntax_error(p, cur) is None:
+            err = self._py_syntax_error(p, new)
+            if err is not None:
+                return (f"(refused: this edit makes {p} invalid Python — SyntaxError {err}. Your "
+                        "`replace` block's indentation or syntax doesn't fit the surrounding code; "
+                        "match the exact indentation of the lines around the hunk and try again. "
+                        "Nothing was staged.)")
         self.files[p] = new
         if p in self.deleted:
             self.deleted.remove(p)          # an edit resurrects a previously-deleted file

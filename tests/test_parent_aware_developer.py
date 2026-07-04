@@ -269,3 +269,36 @@ def test_implement_from_carries_parent_deletions():
                   files={}, deleted=["old_module.py"], metric=0.8)
     dev.implement_from(Idea(operator="improve", params={}, rationale="tweak"), parent)
     assert dev.last_deleted == ["old_module.py"]       # deletion carried into the child's working set
+
+
+def test_edit_file_syntax_gate_rejects_broken_python():
+    """The #1 real-run failure: an edit_file replace-block with wrong indentation produced a
+    SyntaxError in train.py that only surfaced as a training crash minutes later. The syntax gate
+    rejects (does not stage) an edit that INTRODUCES a Python SyntaxError, with a precise message,
+    while allowing correct edits and edits that FIX an already-broken file."""
+    from looplab.adapters.repo_developer import RepoWriteTools
+    w = RepoWriteTools(["**/*.py", "**/*.yaml"], set(), [])
+    w.files["train.py"] = (
+        "def parse():\n"
+        "        parser.add_argument('--a', type=float)\n"
+        "        parser.add_argument('--b', type=int)\n"
+    )
+    # replace-block inserts a line at the WRONG indent (node-19 corruption)
+    bad = w.execute("edit_file", {"path": "train.py",
+        "search": "        parser.add_argument('--a', type=float)",
+        "replace": "        parser.add_argument('--a', type=float)\n    parser.add_argument('--c', type=float)"})
+    assert "invalid Python" in bad and "simcse" not in w.files["train.py"].lower()
+    assert "--c" not in w.files["train.py"]                     # broken edit NOT staged
+    # correctly-indented edit applies
+    ok = w.execute("edit_file", {"path": "train.py",
+        "search": "        parser.add_argument('--a', type=float)",
+        "replace": "        parser.add_argument('--a', type=float)\n        parser.add_argument('--c', type=float)"})
+    assert "1 hunk applied" in ok and "--c" in w.files["train.py"]
+    # write_file of broken python rejected, not staged
+    assert "not valid Python" in w.execute("write_file", {"path": "z.py", "content": "def f(:\n pass"})
+    assert "z.py" not in w.files
+    # a non-.py file is never syntax-gated
+    assert "wrote" in w.execute("write_file", {"path": "cfg.yaml", "content": "a: [1, 2"})
+    # editing an ALREADY-broken .py is allowed (fixing it)
+    w.files["broke.py"] = "def g(:\n pass\n"
+    assert "1 hunk applied" in w.execute("edit_file", {"path": "broke.py", "search": "def g(:", "replace": "def g():"})
