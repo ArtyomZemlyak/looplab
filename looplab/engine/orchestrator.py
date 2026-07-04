@@ -2157,9 +2157,12 @@ class Engine:
                               or ({} if req.get("code") else getattr(self.developer, "last_files", {}))) or {},
                     "deleted": req.get("deleted") or [],
                     "source": "manual",
-                    # Cross-run provenance: present when this inject SEEDED from a sibling run's
-                    # experiment (an `import` action). None for an ordinary operator-authored inject.
-                    "origin": req.get("origin"),
+                    # Cross-run provenance: a DICT when this inject seeded from a sibling run's
+                    # experiment (an `import` action), else None. Coerce defensively — a non-dict
+                    # origin (a hand-authored/API inject that passed a label string) would make the
+                    # folded Node fail validation and silently vanish, so the inject gate would keep
+                    # re-creating the SAME node id forever.
+                    "origin": req.get("origin") if isinstance(req.get("origin"), dict) else None,
                 },
             )
         if not req.get("code"):
