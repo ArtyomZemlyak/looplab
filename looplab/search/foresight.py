@@ -15,7 +15,10 @@ COMPOSES with what's here instead of replacing it:
 * hypotheses / ideas — `ForesightPanelResearcher` ranks K candidate ideas the numeric k-NN
   surrogate (serve/panel.py) is BLIND to (structural / text ideas), priming the predictor with the
   data profile AND the accumulated experiment memory (the EvoScientist-style synergy: memory feeds
-  the world model, the world model turns memory into a pre-execution prediction).
+  the world model, the world model turns memory into a pre-execution prediction). It ALSO
+  prioritizes the OPEN-hypothesis board — the batch of untested beliefs that arrives from deep
+  research, a human "+ Add", or the strategist — predicting which to test first instead of the
+  arbitrary insertion order `_state_brief` shows today.
 
 Replay-safety: the predictor only chooses WHICH already-generated candidate/idea becomes the node;
 that choice is recorded in `node_created` (the code / the idea), so replay re-folds it and never
@@ -175,7 +178,8 @@ class ForesightPanelResearcher:
         self.bounds = bounds if bounds is not None else getattr(base, "bounds", None)
         self.parser = parser
         self.prompts = prompts if prompts is not None else getattr(base, "prompts", None)
-        self.last_foresight: Optional[dict] = None   # telemetry: last ranking + confidence (audit)
+        self.last_foresight: Optional[dict] = None       # telemetry: last idea ranking + confidence
+        self.last_hyp_priority: Optional[dict] = None     # telemetry: last board prioritization
 
     @property
     def space_hint(self) -> str:
@@ -189,10 +193,41 @@ class ForesightPanelResearcher:
             if hasattr(self, attr):
                 setattr(self.base, attr, getattr(self, attr))
 
+    def _prioritize_board(self, state, parent) -> None:
+        """FOREAGENT prioritization of the OPEN-hypothesis board. Untested beliefs arrive in batches
+        from many sources — deep-research `recommended_directions`, a human "+ Add", the strategist —
+        and all land as `open` hypotheses in `state.hypotheses`; today `_state_brief` shows them in
+        arbitrary insertion order and truncates to 5, so which gets tested (and which is silently
+        dropped) is luck. Here the world model PREDICTS which is most likely to pay off (primed with
+        the data profile + experiment memory) and steers the base Researcher to test it first, by
+        setting `_hyp_order` (read by `_state_brief` to order the board best-first). No-op with <2
+        open hypotheses or on abstain; the resulting node's `idea.hypothesis` is what's recorded, so
+        replay never re-ranks."""
+        self.last_hyp_priority = None
+        hyps = [h for h in (state.hypotheses or {}).values()
+                if getattr(h, "status", "") == "open" and not getattr(h, "evidence", None)]
+        if len(hyps) < 2:
+            setattr(self.base, "_hyp_order", None)
+            return
+        r = rank(self.client,
+                 verified_report(data_profile=state.data_profile, memory=_memory_brief(state, parent)),
+                 ["Hypothesis: " + h.statement for h in hyps],
+                 goal=state.goal, direction=state.direction, parser=self.parser, prompts=self.prompts)
+        if r is None:
+            setattr(self.base, "_hyp_order", None)
+            return
+        order, conf = r
+        ids = [hyps[i].id for i in order]
+        setattr(self.base, "_hyp_order", ids)
+        self.last_hyp_priority = {"order": ids, "confidence": conf, "n": len(hyps)}
+
     def propose(self, state, parent):
-        if self.k == 1 or self.client is None:
+        if self.client is None:
             return self.base.propose(state, parent)     # transparent pass-through
         self._forward_hints()
+        self._prioritize_board(state, parent)            # rank the open-hypothesis board, steer the base
+        if self.k == 1:
+            return self.base.propose(state, parent)      # board prioritized; single proposal
         ideas = [self.base.propose(state, parent) for _ in range(self.k)]
         r = rank(self.client, verified_report(data_profile=state.data_profile,
                                               memory=_memory_brief(state, parent)),

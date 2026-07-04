@@ -203,7 +203,8 @@ def _clamp_fill(idea: Idea, bounds: Optional[dict]) -> Idea:
     return idea
 
 
-def _state_brief(state: RunState, parent: Optional[Node], digest_cap: int = 0) -> str:
+def _state_brief(state: RunState, parent: Optional[Node], digest_cap: int = 0,
+                 hyp_order: Optional[list[str]] = None) -> str:
     best = state.best()
     lines = [f"Goal: {state.goal}", f"Optimize direction: {state.direction}."]
     if best is not None:
@@ -226,8 +227,18 @@ def _state_brief(state: RunState, parent: Optional[Node], digest_cap: int = 0) -
     open_hyps = [h for h in (state.hypotheses or {}).values()
                  if h.status == "open" and h.evidence == []]
     if open_hyps:
-        lines.append("Untested hypotheses on the board (registered by the operator or deep "
-                     "research — none has evidence yet):")
+        # FOREAGENT predict-before-execute (search/foresight.py): when the world model has ranked the
+        # board by expected payoff (`hyp_order` = hypothesis ids best-first), surface the batch of
+        # untested beliefs — which arrives from deep research / a human / the strategist — in that
+        # predicted-value order, so the search tests the most promising one first and the [:5] cap now
+        # drops the LOWEST-payoff cards, not arbitrary insertion-order ones. No ranking -> insertion
+        # order (unchanged). Replay-safe: only the resulting node's `idea.hypothesis` is recorded.
+        if hyp_order:
+            pos = {hid: i for i, hid in enumerate(hyp_order)}
+            open_hyps.sort(key=lambda h: pos.get(h.id, len(hyp_order)))
+        lines.append("Untested hypotheses on the board (registered by the operator or deep research"
+                     + (", ordered by predicted payoff — best first" if hyp_order else "")
+                     + " — none has evidence yet):")
         lines.extend(f'- "{" ".join(h.statement.split())[:200]}"' for h in open_hyps[:5])
         lines.append("If your next experiment tests one of these, copy its statement EXACTLY "
                      "(verbatim, unchanged wording) into `hypothesis` so the evidence links to "
@@ -271,7 +282,8 @@ class LLMResearcher:
              "content": render(self.prompts, "researcher_system", _RESEARCHER_SYSTEM) + hyp_sys
                         + "\n\n" + _attention_points()},
             {"role": "user", "content": _state_brief(state, parent,
-                                                     digest_cap=getattr(self, "_digest_cap", 0))
+                                                     digest_cap=getattr(self, "_digest_cap", 0),
+                                                     hyp_order=getattr(self, "_hyp_order", None))
                                         + "\n" + self.space_hint +
                                         hint_block + cues +
                                         "\nPropose the next Idea (operator, params, rationale"

@@ -3,8 +3,8 @@ model predicts which candidate / hypothesis scores best BEFORE any eval — over
 over structural/text ideas (the hypothesis panel the numeric surrogate is blind to)."""
 from __future__ import annotations
 
-from looplab.core.models import Idea, Node, NodeStatus, RunState
-from looplab.search import foresight
+from looplab.agents.roles import _state_brief
+from looplab.core.models import Hypothesis, Idea, Node, NodeStatus, RunState, hypothesis_id
 from looplab.search.best_of_n import BestOfNDeveloper
 from looplab.search.foresight import (ForesightPanelResearcher, rank, rank_solutions,
                                       verified_report)
@@ -197,6 +197,68 @@ def test_panel_forwards_engine_hints_to_base():
     panel._novelty_feedback = "you already tried X"      # engine setattr on the active researcher
     panel.propose(_state(), None)
     assert base._novelty_feedback == "you already tried X"
+
+
+# --------------------------------------------------------------------------- #
+# open-hypothesis board prioritization (deep research / human / strategist)
+# --------------------------------------------------------------------------- #
+
+def _state_with_open_hyps(statements):
+    st = RunState(direction="min", goal="minimize loss")
+    for s in statements:
+        hid = hypothesis_id(s)
+        st.hypotheses[hid] = Hypothesis(id=hid, statement=s, status="open", evidence=[])
+    return st
+
+
+def test_prioritize_board_orders_open_hypotheses():
+    st = _state_with_open_hyps(["h zero", "h one", "h two"])
+    base = _SeqResearcher([Idea(operator="draft")], _RankClient([2, 0, 1]))
+    panel = ForesightPanelResearcher(base, k=2)
+    panel._prioritize_board(st, None)
+    ids = list(st.hypotheses)                       # insertion order
+    assert base._hyp_order == [ids[2], ids[0], ids[1]]
+    assert panel.last_hyp_priority["n"] == 3
+
+
+def test_prioritize_board_noop_below_two():
+    st = _state_with_open_hyps(["only one"])
+    panel = ForesightPanelResearcher(_SeqResearcher([Idea(operator="draft")], _RankClient([0])), k=2)
+    panel._prioritize_board(st, None)
+    assert panel.base._hyp_order is None and panel.last_hyp_priority is None
+
+
+def test_prioritize_board_abstains_on_bad_client():
+    st = _state_with_open_hyps(["a", "b"])
+    panel = ForesightPanelResearcher(_SeqResearcher([Idea(operator="draft")], _BadClient()), k=2)
+    panel._prioritize_board(st, None)
+    assert panel.base._hyp_order is None
+
+
+def test_state_brief_orders_board_by_hyp_order():
+    st = _state_with_open_hyps(["alpha belief", "beta belief"])
+    ids = [hypothesis_id("alpha belief"), hypothesis_id("beta belief")]
+    brief = _state_brief(st, None, hyp_order=[ids[1], ids[0]])     # rank beta first
+    assert "ordered by predicted payoff" in brief
+    assert brief.index("beta belief") < brief.index("alpha belief")
+
+
+def test_state_brief_default_insertion_order():
+    st = _state_with_open_hyps(["alpha belief", "beta belief"])
+    brief = _state_brief(st, None)                                 # no ranking
+    assert "ordered by predicted payoff" not in brief
+    assert brief.index("alpha belief") < brief.index("beta belief")
+
+
+def test_propose_prioritizes_board_and_ranks_ideas():
+    st = _state_with_open_hyps(["h a", "h b"])
+    a = Idea(operator="improve", params={"x": 1.0}, hypothesis="h a")
+    b = Idea(operator="improve", params={"x": 2.0}, hypothesis="h b")
+    panel = ForesightPanelResearcher(_SeqResearcher([a, b], _RankClient([0, 1])), k=2)
+    out = panel.propose(st, None)
+    assert panel.base._hyp_order is not None          # the board was prioritized for the base
+    assert panel.last_hyp_priority is not None
+    assert out.hypothesis == "h a"                    # idea ranking still picks the predicted best
 
 
 # --------------------------------------------------------------------------- #
