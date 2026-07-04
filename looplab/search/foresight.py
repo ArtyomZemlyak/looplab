@@ -245,7 +245,13 @@ class ForesightPanelResearcher:
             return ideas[0]
         order, conf, reason = r
         best = ideas[order[0]]
-        self.last_foresight = {"order": order, "confidence": conf, "reason": reason, "k": self.k}
+        # Telemetry the engine reads after propose() to emit `foresight_selected` (engine = sole event
+        # writer): WHICH of the K generated ideas won + the discarded alternatives + confidence + the
+        # model's analysis trace. Without it only the winner survives (in node_created).
+        self.last_foresight = {
+            "kind": "idea", "method": "foresight", "n": len(ideas), "k": self.k,
+            "chosen": order[0], "order": order, "confidence": conf, "reason": reason,
+            "candidates": [" ".join(_idea_text(i).split())[:160] for i in ideas]}
         best.rationale = (best.rationale
                           + f" [foresight: predicted best of {self.k} pre-execution]").strip()
         return best

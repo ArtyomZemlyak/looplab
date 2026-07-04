@@ -118,6 +118,8 @@ def test_best_of_n_foresight_picks_predicted_candidate():
     out = dev.implement(Idea(operator="draft", params={}))
     assert out == _B and dev.last_foresight is True and client.calls == 1
     assert dev.audit_extra()["foresight"] is True
+    pick = dev.last_foresight_pick                 # full pick telemetry for the `foresight_selected` event
+    assert pick["kind"] == "solution" and pick["chosen"] == 1 and pick["reason"] == "test"
 
 
 def test_best_of_n_foresight_abstains_falls_back_to_static():
@@ -166,7 +168,9 @@ def test_panel_picks_predicted_best_hypothesis():
     out = panel.propose(_state(), None)
     assert out.hypothesis == "interaction features help"
     assert "foresight" in out.rationale
-    assert panel.last_foresight and panel.last_foresight["confidence"] == 0.7
+    lf = panel.last_foresight
+    assert lf and lf["confidence"] == 0.7 and lf["kind"] == "idea" and lf["chosen"] == 1
+    assert len(lf["candidates"]) == 2                # both competing ideas kept for the audit trail
 
 
 def test_panel_abstain_returns_first_idea():
@@ -319,6 +323,32 @@ def test_engine_emits_and_consumes_hypothesis_ranked():
     assert len(ranked) == 1 and ranked[0][1]["node_id"] == 5 and ranked[0][1]["reason"] == "r"
     eng._emit_hypothesis_ranked(6)               # consumed -> a non-propose node re-emits nothing
     assert len([e for e in eng.store.events if e[0] == "hypothesis_ranked"]) == 1
+
+
+def test_engine_emits_foresight_selected_for_both_roles():
+    from looplab.engine.orchestrator import Engine
+
+    class _Store:
+        def __init__(self):
+            self.events = []
+
+        def append(self, t, d):
+            self.events.append((t, d))
+
+    class _Dev:
+        last_foresight_pick = {"kind": "solution", "chosen": 0, "n": 2, "confidence": 0.6, "reason": "c"}
+
+    class _Res:
+        last_foresight = {"kind": "idea", "chosen": 1, "n": 3, "confidence": 0.7, "reason": "i"}
+
+    eng = Engine.__new__(Engine)
+    eng.store, eng.developer, eng.researcher = _Store(), _Dev(), _Res()
+    eng._emit_foresight_selected(7)
+    ev = [e for e in eng.store.events if e[0] == "foresight_selected"]
+    assert len(ev) == 2 and {e[1]["kind"] for e in ev} == {"solution", "idea"}
+    assert all(e[1]["node_id"] == 7 for e in ev)
+    eng._emit_foresight_selected(8)              # consumed on both roles -> no re-emit
+    assert len([e for e in eng.store.events if e[0] == "foresight_selected"]) == 2
 
 
 # --------------------------------------------------------------------------- #

@@ -94,6 +94,7 @@ class BestOfNDeveloper(WrapsDeveloper):
         self.last_deleted: list = []
         self.last_n_scores: list[float] = []
         self.last_foresight: bool = False   # whether the last pick used the predictive ranker (audit)
+        self.last_foresight_pick: dict | None = None   # engine reads this -> `foresight_selected` event
         self._last_candidates: list[tuple[str, dict, list]] = []   # (code, files, deleted) per N
 
     def audit_extra(self) -> dict:
@@ -120,6 +121,7 @@ class BestOfNDeveloper(WrapsDeveloper):
         top = [c for c in cands if c[3] >= best_score - 1e-9]
         chosen = top[0]
         self.last_foresight = False
+        self.last_foresight_pick = None
         # FOREAGENT: predict-before-execute (arXiv:2601.05930). Among the top static-scorers — the
         # validity-tied candidates the execution-free score can't separate — the LLM world model
         # predicts which will score best WITHOUT running any, promoting the LLM from D10 tie-break-only
@@ -128,13 +130,19 @@ class BestOfNDeveloper(WrapsDeveloper):
         # hunch can never beat a valid candidate with a likely-invalid one. Fails open: on abstain
         # (no client / <2 distinct / malformed output) `chosen` stays top[0] and the D10 tie-break runs.
         if self.foresight and self.client is not None and len({c[0] for c in top}) > 1:
-            from looplab.search.foresight import rank_solutions
-            kw = {"prompts": self.prompts} if self.prompts is not None else {}
-            idx = rank_solutions(self.client, getattr(self, "brief", "") or "",
-                                 [c[0] for c in top], parser=self.parser, **kw)
-            if idx is not None:
-                chosen = top[idx]
+            # Call the ranker directly (not rank_solutions) to keep the FULL prediction — order,
+            # confidence, and the model's reason — for the `foresight_selected` audit event, not just
+            # the winning index.
+            from looplab.search.foresight import rank, verified_report
+            r = rank(self.client, verified_report(brief=getattr(self, "brief", "") or ""),
+                     [c[0] for c in top], parser=self.parser, prompts=self.prompts)
+            if r is not None:
+                order, conf, reason = r
+                chosen = top[order[0]]
                 self.last_foresight = True
+                self.last_foresight_pick = {
+                    "kind": "solution", "method": "foresight", "n": len(top),
+                    "chosen": order[0], "order": order, "confidence": conf, "reason": reason}
         # D10: break a tie among the top static-scorers with a list-wise LLM comparison (advisory).
         # Only when the predictor abstained, it would actually change the outcome (>1 tied), and a
         # client is available.

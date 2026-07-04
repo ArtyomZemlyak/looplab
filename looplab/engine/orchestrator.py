@@ -27,6 +27,7 @@ from looplab.events.types import (
     EV_DATA_LEAKAGE,
     EV_DATA_PROFILED, EV_DATA_PROVENANCE, EV_DEPS_INSTALLED,
     EV_DRIFT_UNAVAILABLE, EV_FORK_DONE, EV_HINT, EV_HOST_GRADING,
+    EV_FORESIGHT_SELECTED,
     EV_HYPOTHESIS_ADDED, EV_HYPOTHESIS_RANKED, EV_INJECT_DONE, EV_INJECT_FAILED,
     EV_NODE_ABORT, EV_NODE_CREATED,
     EV_NODE_EVALUATED, EV_NODE_FAILED, EV_NODE_REPAIRED, EV_NOVELTY_REJECTED,
@@ -1786,6 +1787,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin):
             )
         self._emit_agent_report(node_id)
         self._emit_hypothesis_ranked(node_id)
+        self._emit_foresight_selected(node_id)
 
     def _create_injected_node(self, req: dict) -> None:
         """Materialize an operator-authored experiment (`inject_node` control event) into a real
@@ -2090,6 +2092,21 @@ class Engine(ConfirmPhaseMixin, AblationMixin):
             self.store.append(EV_HYPOTHESIS_RANKED, {"node_id": node_id, **prio})
         if hasattr(self.researcher, "last_hyp_priority"):
             self.researcher.last_hyp_priority = None
+
+    def _emit_foresight_selected(self, node_id: int) -> None:
+        """FOREAGENT predict-before-execute audit: when the world model picked WHICH candidate becomes
+        this node — the best of K generated ideas (the researcher panel) or of N code implementations
+        (best-of-N) — record the ranking + confidence + the model's reasoning as a `foresight_selected`
+        event. Without it the choice and its discarded alternatives vanish (only the winner survives in
+        `node_created`). The engine stays the sole writer: it reads the role's `last_foresight`(_pick)
+        telemetry set during propose/implement. Consumed on read so a following non-propose action
+        (merge / debug-repair) can't re-emit a stale pick — same safety as `_emit_agent_report`."""
+        for role, attr in ((self.developer, "last_foresight_pick"),
+                           (self.researcher, "last_foresight")):
+            pick = getattr(role, attr, None)
+            if isinstance(pick, dict):
+                self.store.append(EV_FORESIGHT_SELECTED, {"node_id": node_id, **pick})
+                setattr(role, attr, None)
 
     @property
     def _probe_developer(self):
