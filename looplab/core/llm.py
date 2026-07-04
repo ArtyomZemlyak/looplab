@@ -92,6 +92,53 @@ def _sdk_transient(exc: Exception) -> bool:
     return True                                   # reset / EOF / protocol error mid-read → transient
 
 
+def _stream_with_idle_guard(stream, idle_limit: float):
+    """Yield the SDK stream's events, but a background watchdog CLOSES the underlying httpx response
+    if no event arrives for `idle_limit`s. httpx's per-read timeout only catches TRUE silence — an SSE
+    KEEPALIVE-COMMENT trickle (`: keepalive`) resets it on every byte, and the SDK's decoder skips
+    those comment lines, so its iterator blocks on the next `data:` event FOREVER while bytes keep
+    arriving (the exact multi-minute hang the old socket-watchdog prevented; httpx alone does not).
+    The watchdog keys on real EVENTS (the SDK already filters keepalives), closes the response to
+    unblock the read, and the stall surfaces as openai.APITimeoutError → `_post` degrades+retries.
+    idle_limit<=0 disables the guard (test iterators / non-httpx streams)."""
+    if not idle_limit:
+        yield from stream
+        return
+    import threading
+    resp = getattr(stream, "response", None)
+    if resp is None:                              # a plain iterator (tests) — nothing to close
+        yield from stream
+        return
+    last = [time.monotonic()]
+    killed = [False]
+    stop = threading.Event()
+
+    def _wd():
+        while not stop.wait(min(5.0, idle_limit / 4)):
+            if time.monotonic() - last[0] > idle_limit:
+                killed[0] = True
+                for closer in (resp, stream):
+                    try:
+                        closer.close()
+                    except Exception:  # noqa: BLE001
+                        pass
+                return
+
+    threading.Thread(target=_wd, daemon=True).start()
+    try:
+        for ev in stream:                         # each yielded event = real progress (keepalives filtered)
+            last[0] = time.monotonic()
+            yield ev
+    except Exception:
+        if killed[0]:
+            raise openai.APITimeoutError(request=getattr(resp, "request", None)) from None
+        raise
+    finally:
+        stop.set()
+    if killed[0]:
+        raise openai.APITimeoutError(request=getattr(resp, "request", None))
+
+
 def _reasoning_of(msg: dict) -> str:
     """The dedicated reasoning field of an OpenAI-shaped assistant message: `reasoning` (OpenRouter/
     Ollama) or `reasoning_content` (newer OpenAI/SGLang), whichever is present. '' when absent."""
@@ -553,12 +600,12 @@ class OpenAICompatibleClient:
         if use_stream:
             kwargs["stream"] = True
             kwargs["stream_options"] = {"include_usage": True}
-            return self._accumulate_stream(self._sdk.chat.completions.create(**kwargs))
+            return self._accumulate_stream(self._sdk.chat.completions.create(**kwargs), self.timeout)
         resp = self._sdk.chat.completions.create(**kwargs)
         return resp.model_dump()
 
     @staticmethod
-    def _accumulate_stream(stream) -> dict:
+    def _accumulate_stream(stream, idle_limit: float = 0.0) -> dict:
         """Reassemble an SDK streaming response into the non-streaming body shape. Merges tool_call
         deltas by index (partial name/arguments concatenated), captures reasoning deltas, and keeps
         the final include_usage chunk. httpx's read timeout bounds each iteration — a stall surfaces
@@ -568,7 +615,7 @@ class OpenAICompatibleClient:
         tcs: dict[int, dict] = {}
         finish = None
         usage: dict = {}
-        for ev in stream:
+        for ev in _stream_with_idle_guard(stream, idle_limit):
             if getattr(ev, "usage", None):
                 usage = ev.usage.model_dump()
             if not ev.choices:
@@ -869,7 +916,8 @@ class OpenAICompatibleClient:
                     # stream raises openai.APITimeoutError here instead of hanging — the reliable
                     # interrupt the urllib+watchdog path approximated. Reasoning-param retry mirrors
                     # `_post`: a model that 400s on the toggle (glm-5.1) drops it and retries once.
-                    for ev in self._sdk.chat.completions.create(**kwargs):
+                    for ev in _stream_with_idle_guard(
+                            self._sdk.chat.completions.create(**kwargs), self.timeout):
                         if getattr(ev, "usage", None):
                             usage = ev.usage.model_dump()
                         if not ev.choices:

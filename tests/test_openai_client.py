@@ -559,3 +559,37 @@ def test_llm_transport_error_is_clean_and_falls_back():
     # parse_structured treats it as a parse failure -> ParseError (the role layer then falls back)
     with pytest.raises(ParseError):
         parse_structured(client, [{"role": "user", "content": "hi"}], Idea, "tool_call")
+
+
+def test_stream_idle_guard_kills_keepalive_trickle():
+    """A stream that yields NO events (an SSE keepalive-comment trickle the SDK filters out) must not
+    hang: the idle-guard watchdog closes the response after idle_limit and surfaces APITimeoutError —
+    httpx's per-read timeout alone can't catch this (keepalive bytes reset it)."""
+    import threading
+    from looplab.core.llm import _stream_with_idle_guard
+    closed = threading.Event()
+
+    class _Resp:
+        request = None
+        def close(self):
+            closed.set()
+
+    class _Stream:
+        response = _Resp()
+        def close(self):
+            closed.set()
+        def __iter__(self):
+            return self
+        def __next__(self):
+            closed.wait(timeout=5)     # block like a keepalive-trickle read until the watchdog closes us
+            raise StopIteration
+
+    with pytest.raises(_openai.APITimeoutError):
+        list(_stream_with_idle_guard(_Stream(), idle_limit=0.3))
+    assert closed.is_set()
+
+
+def test_stream_idle_guard_disabled_passes_through():
+    """idle_limit<=0 (tests / plain iterators) just passes events through, no watchdog."""
+    from looplab.core.llm import _stream_with_idle_guard
+    assert list(_stream_with_idle_guard(iter([1, 2, 3]), idle_limit=0)) == [1, 2, 3]
