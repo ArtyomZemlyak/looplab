@@ -131,7 +131,7 @@ class WriteTools:
             if name == "delete_file":
                 return self._delete(args.get("path", ""))
             if name == "revert_file":
-                return self.revert(args.get("path", ""))
+                return self._revert_tool(args.get("path", ""))
             return f"(unknown tool: {name})"
         except Exception as e:  # noqa: BLE001 - tools are advisory; never crash the loop
             return f"(error: {e})"
@@ -273,6 +273,29 @@ class WriteTools:
         p.unlink()
         self.applied.append(action)
         return f"(deleted {rel})"
+
+    def _revert_tool(self, path: str) -> str:
+        """The MODEL-invocable revert: same disk mutation as `revert`, but gated by the permission
+        mode/approver like every other mutation (a revert overwrites the file from a snapshot —
+        possibly clobbering manual fixes the user made since) and recorded in `applied` so the turn
+        shows it. The bare `revert` below stays un-gated for the server's explicit user-clicked undo."""
+        p, rel, err = self._check(path)
+        if err:
+            return err
+        if not self.backups:
+            return "(no snapshots available to revert)"
+        # No abs_path in the record: the UI's per-change "undo" can't undo a revert (the snapshot is
+        # popped), so don't offer the affordance.
+        action = {"tool": "revert_file", "tool_kind": "write", "path": rel, "verb": f"revert {rel}",
+                  "label": f"revert {rel}", "preview": f"restore {rel} from its pre-edit snapshot"}
+        refusal = self._authorize("write", action)
+        if refusal:
+            return refusal
+        ok = self.backups.revert(p)
+        if ok:
+            self.applied.append(action)
+            return f"(reverted {rel})"
+        return f"(no snapshot to revert for {rel})"
 
     def revert(self, path: str) -> str:
         p, rel, err = self._check(path)

@@ -166,6 +166,13 @@ def drive_tool_loop(client, tools, messages: list, emit_spec: dict, *,
                 on_text(s)
         except Exception:               # noqa: BLE001 - transparency must not change behaviour
             pass
+    def _cancelled() -> bool:           # guarded probe — a broken cancel_check must not wedge the loop
+        if cancel_check is None:
+            return False
+        try:
+            return bool(cancel_check())
+        except Exception:               # noqa: BLE001
+            return False
     stuck = None
     if stuck_detection:                 # a FRESH detector per call — never share state across loops
         from looplab.agents.stuck import StuckDetector
@@ -181,21 +188,21 @@ def drive_tool_loop(client, tools, messages: list, emit_spec: dict, *,
     stalls = 0                          # consecutive prose turns we couldn't turn into a forced emit
     turns = itertools.count() if max_turns is None or max_turns <= 0 else range(max_turns)
     for turn_idx in turns:
-        if cancel_check is not None:
-            try:
-                if cancel_check():      # user hit stop -> finalize from what we have, promptly
-                    break
-            except Exception:           # noqa: BLE001 - a broken cancel probe must not wedge the loop
-                pass
+        if _cancelled():                # user hit stop -> finalize from what we have, promptly
+            break
         if time_budget_s and (time.monotonic() - started) > time_budget_s:
             break                       # out of wall-clock budget -> finalize from what we have
+        # Compaction happens IN PLACE (slice-assign, same list object): callers like the assistant's
+        # `run_turn` keep a reference to this list to post-process the trace (stream the final answer
+        # over it); a rebind would orphan their reference on a compacted turn and they'd re-answer
+        # BLIND, missing every post-compaction tool result.
         if auto_summary:                # C2: summarize the stale middle once the history grows long
             from looplab.core.context_budget import DEFAULT_SUMMARY_CHARS, compact_history
-            messages = compact_history(messages, context_budget_chars or DEFAULT_SUMMARY_CHARS,
-                                       summarize)
+            messages[:] = compact_history(messages, context_budget_chars or DEFAULT_SUMMARY_CHARS,
+                                          summarize)
         elif context_budget_chars:      # H4: else just middle-truncate stale tool output
             from looplab.core.context_budget import truncate_history
-            messages = truncate_history(messages, context_budget_chars)
+            messages[:] = truncate_history(messages, context_budget_chars)
         # C1: re-surface the agent's own plan periodically so a long loop can't drift off-goal.
         if current_plan and plan_reinject_every and turn_idx and turn_idx % plan_reinject_every == 0:
             messages.append({"role": "system",
@@ -242,7 +249,12 @@ def drive_tool_loop(client, tools, messages: list, emit_spec: dict, *,
                 args = {}
             if name == emit_name:
                 return finalize(args)
-            if self_plan and name == _PLAN_TOOL_NAME:
+            if _cancelled():
+                # Stop pressed while this turn's calls were executing: do NOT run the remaining
+                # (possibly slow/mutating) tools. Stub the result so no tool_call_id dangles in the
+                # trace; the top-of-turn check then ends the loop.
+                result = "(cancelled by the user: tool not executed)"
+            elif self_plan and name == _PLAN_TOOL_NAME:
                 current_plan = _render_plan(args) or current_plan
                 result = "plan updated"
             else:
