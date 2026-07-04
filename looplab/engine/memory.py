@@ -204,10 +204,11 @@ def _improvement(child_metric: float, parent_metric: float, direction: str) -> f
 
 def select_comparison_pairs(state, k: int = 3, exclude=None) -> list[dict]:
     """Deterministically pick the most informative parent→child pairs to distill from. Two kinds:
-    `solution` (both evaluated — the biggest |Δ| wins and regressions are as informative as wins)
-    and `debug` (parent FAILED, child evaluated — what fixed it). `exclude` = (child, parent) id
-    tuples already distilled (mid-run firings must not re-spend LLM budget on the same pair).
-    Sorted debug-first then by |Δ| then by ids, so the output is stable under replay."""
+    `solution` (both evaluated — the biggest |Δ| wins and regressions are as informative as wins;
+    exact ties are skipped: the outcome vocabulary has no 'no effect', so a Δ=0 pair could only be
+    mislabeled) and `debug` (parent FAILED, child evaluated — what fixed it). `exclude` = (child,
+    parent) id tuples already distilled (later firings must not re-spend LLM budget on the same
+    pair). Sorted debug-first then by |Δ| then by ids, so the output is stable under replay."""
     from looplab.core.models import NodeStatus
     excl = {tuple(p) for p in (exclude or [])}
     pairs: list[dict] = []
@@ -219,8 +220,9 @@ def select_comparison_pairs(state, k: int = 3, exclude=None) -> list[dict]:
             if p is None or (n.id, pid) in excl:
                 continue
             if p.metric is not None:
-                pairs.append({"kind": "solution", "a": n.id, "b": pid,
-                              "delta": _improvement(n.metric, p.metric, state.direction)})
+                delta = _improvement(n.metric, p.metric, state.direction)
+                if delta != 0:
+                    pairs.append({"kind": "solution", "a": n.id, "b": pid, "delta": delta})
             elif p.status is NodeStatus.failed:
                 pairs.append({"kind": "debug", "a": n.id, "b": pid, "delta": None})
     pairs.sort(key=lambda pr: (0 if pr["kind"] == "debug" else 1,
@@ -231,7 +233,10 @@ def select_comparison_pairs(state, k: int = 3, exclude=None) -> list[dict]:
 def param_credit_statement(winner, loser, delta: float):
     """Deterministic (offline) credit assignment for a solution pair: when the two ideas differ in
     a SMALL number of params, the changed params ARE the credited difference. None when the diff
-    is empty or too wide to attribute cleanly (>3 params) — no lesson beats a mushy lesson."""
+    is empty, too wide to attribute cleanly (>3 params), or the metric didn't move (a Δ=0 change
+    is neither GOOD nor BAD) — no lesson beats a mushy lesson."""
+    if not delta:
+        return None
     pa = dict(getattr(winner.idea, "params", None) or {})
     pb = dict(getattr(loser.idea, "params", None) or {})
     changed = [(name, pb.get(name), pa.get(name))
@@ -263,7 +268,7 @@ def parse_credit_lessons(text: str, n_pairs: int) -> list[tuple[int, str, str]]:
     P-marker (the lesson still counts, unattributed). Tolerant of bullets/numbering; capped."""
     out: list[tuple[int, str, str]] = []
     for line in (text or "").splitlines():
-        s = line.strip().lstrip("-*•").strip()
+        s = line.strip().lstrip("-*•0123456789.) ").strip()
         m = _PAIR_LINE.match(s)
         idx = (int(m.group(1)) - 1) if m else -1
         body = m.group(2) if m else s

@@ -98,6 +98,15 @@ def test_select_pairs_direction_and_exclude():
     assert select_comparison_pairs(st, exclude=[(1, 0)]) == []   # already-distilled pair skipped
 
 
+def test_select_pairs_skips_exact_ties():
+    # Δ=0 is uninformative (no GOOD/BAD verdict exists for "no effect") — never selected, so it
+    # can't burn a distillation slot or manufacture a "regressed by 0" lesson.
+    st = _state([_node(0, metric=5.0, op="draft", params={"x": 1.0}),
+                 _node(1, metric=5.0, parent_ids=[0], params={"x": 2.0})])
+    assert select_comparison_pairs(st) == []
+    assert param_credit_statement(st.nodes[1], st.nodes[0], 0.0) is None
+
+
 def test_select_pairs_skips_unevaluated_and_unknown_parents():
     st = _state([
         _node(0, metric=None, status=NodeStatus.pending, op="draft"),
@@ -164,7 +173,7 @@ def test_comparative_offline_fallback_lessons(tmp_path):
     ])
     lessons, pairs = eng._comparative_lessons(st, ["kind:quadratic"])
     assert pairs and lessons
-    by_pair = {tuple(lz["pair"]): lz for lz in lessons}
+    by_pair = {tuple(lz["evidence"]): lz for lz in lessons}
     solu = by_pair[(1, 0)]
     assert solu["source"] == "comparative" and solu["outcome"] == "supported"
     assert "x" in solu["statement"] and solu["evidence"] == [1, 0]
@@ -185,10 +194,24 @@ def test_comparative_llm_path_prompt_and_attribution(tmp_path, monkeypatch):
     lessons, pairs = eng._comparative_lessons(st, [])
     assert len(pairs) == 1 and len(lessons) == 1
     assert lessons[0]["statement"] == "moving x toward the optimum reduces the loss"
-    assert lessons[0]["outcome"] == "supported" and lessons[0]["pair"] == [1, 0]
+    assert lessons[0]["outcome"] == "supported" and lessons[0]["evidence"] == [1, 0]
     prompt = fake.prompts[0]
     assert "Assign CREDIT" in prompt and "P1" in prompt
     assert "-x = 1" in prompt and "+x = 3" in prompt              # code diff is the evidence
+
+
+def test_comparative_llm_unattributed_line_not_miscredited(tmp_path, monkeypatch):
+    # A verdict line with no usable P<n> marker must be recorded UNATTRIBUTED — not stamped with
+    # an arbitrary pair's node ids and delta (wrong provenance in the shared store).
+    eng = _engine(tmp_path, reflection_priors=True, memory_dir=str(tmp_path / "mem"),
+                  comparative_lessons=True)
+    st = _state([_node(0, metric=9.0, op="draft", params={"x": 1.0}),
+                 _node(1, metric=4.0, parent_ids=[0], params={"x": 3.0})])
+    fake = FakeClient("[GOOD] a generically worded lesson with no pair marker\n")
+    monkeypatch.setattr(eng, "_reflect_client", lambda: fake)
+    lessons, _ = eng._comparative_lessons(st, [])
+    assert len(lessons) == 1
+    assert lessons[0]["evidence"] == [] and lessons[0]["delta"] is None
 
 
 def test_comparative_llm_error_falls_back(tmp_path, monkeypatch):
@@ -223,7 +246,7 @@ def _store_rows(mem: Path) -> list[dict]:
     return [orjson.loads(l) for l in p.read_text().splitlines() if l.strip()]
 
 
-def test_run_end_writes_comparative_rows(tmp_path):
+def test_run_end_writes_comparative_rows_and_records_spent_pairs(tmp_path):
     mem = tmp_path / "mem"
     eng = _engine(tmp_path, reflection_priors=True, memory_dir=str(mem),
                   comparative_lessons=True)
@@ -233,6 +256,10 @@ def test_run_end_writes_comparative_rows(tmp_path):
     for r in comp:
         assert r.get("fingerprint") and len(r.get("evidence") or []) == 2
         assert r.get("outcome") in ("supported", "failed", "tested")
+    # run-end spends are event-recorded too, so a REOPENED run can't re-distill these pairs
+    final = fold(eng.store.read_all())
+    end_events = [d for d in final.lessons_distilled if d.get("trigger") == "run_end"]
+    assert end_events and end_events[0]["pairs"]
 
 
 def test_comparative_off_writes_no_comparative_rows(tmp_path):
@@ -329,6 +356,15 @@ def test_midrun_refresh_picks_up_concurrent_runs_lessons(tmp_path):
     assert eng._maybe_refresh_lessons(out) is out                 # same node-count: no refire
     assert len([e for e in eng.store.read_all()
                 if e.type == "lessons_refreshed"]) == 1
+    # store UNCHANGED + cadence due again -> the full re-read/re-score is skipped (stat stamp),
+    # but the gate still advances via a lightweight event.
+    st3 = fold(eng.store.read_all())
+    st3.nodes = {n.id: n for n in
+                 [_node(0, metric=9.0, op="draft"), _node(1, metric=4.0, parent_ids=[0]),
+                  _node(2, metric=3.0, parent_ids=[1]), _node(3, metric=2.5, parent_ids=[2])]}
+    eng._maybe_refresh_lessons(st3)
+    evs = [e for e in eng.store.read_all() if e.type == "lessons_refreshed"]
+    assert len(evs) == 2 and evs[-1].data.get("skipped") == "unchanged"
 
 
 def test_refresh_off_and_reflection_off_are_noops(tmp_path):

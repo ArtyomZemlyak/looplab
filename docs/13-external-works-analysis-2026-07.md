@@ -250,17 +250,22 @@ runs (item 5), so one cadence loop serves both:
   param-diff credit, the offline fallback), `code_diff`, `parse_credit_lessons`.
   `Engine._comparative_lessons` distills one lesson per pair — a single batched LLM call with the
   code diff as evidence, `P<n> [GOOD|BAD]` verdict lines — and run-end reflection
-  (`_write_reflection_note`) now appends these `source: "comparative"` rows (with `pair` +
-  `evidence` node ids and signed `delta`) alongside the legacy one-shot lessons.
+  (`_write_reflection_note`) now appends these `source: "comparative"` rows (with `evidence`
+  node-id pair and signed `delta`; unattributable verdict lines are stored unattributed rather
+  than mis-credited) alongside the legacy one-shot lessons. Exact-tie (Δ=0) pairs are never
+  selected — the outcome vocabulary has no "no effect".
 - **Item 5 (AgentRxiv live share).** Two new cadences close the "end-of-run write / start-of-run
   read" gap: `lessons_every` distills + appends comparative lessons to the shared
   `~/.looplab/memory/lessons.jsonl` **mid-run** (write side), and `lessons_refresh_every` re-reads
   the store mid-run and rebuilds the proposal prior (read side, no LLM call) — so lessons a
   concurrent run distilled after this run started reach this run's next proposals. This run's own
-  `run_id` is excluded on read (no echo). Both are replay-safe audit sidecars: `lessons_distilled`
-  events carry the at_node gate + the spent pair ids (a pair is never re-distilled, not even by
-  run-end reflection), `lessons_refreshed` carries the refresh gate; recorded LLM output is never
-  re-invoked on replay.
+  `run_id` is excluded on read (no echo; every lesson shape stamps `run_id`). Both are replay-safe
+  audit sidecars: `lessons_distilled` events carry the at_node gate + the spent pair ids — written
+  BEFORE the store append, and also at run end — so a pair is never re-distilled by a resumed,
+  crashed, or reopened run; `lessons_refreshed` carries the refresh gate and short-circuits on an
+  unchanged store (stat stamp) instead of re-reading/re-scoring every lesson. Store writes take
+  the event-store's interprocess lock, and the D2 consolidate/compact rewrite is deferred to run
+  end — a concurrent run's O_APPEND can no longer be clobbered by a mid-run full-file rewrite.
 - **Wiring.** Engine knobs `comparative_lessons` / `lessons_every` / `lessons_refresh_every`
   (defaults off at engine level); Settings defaults: `comparative_lessons=True` (no-op without
   `memory_dir`, like the rest of reflection memory), mid-run cadences 0 (opt-in), and the
