@@ -133,6 +133,7 @@ def test_repo_developer_seeds_parent_files():
     dev._surface = {"train.py": "print('train')"}
     dev._protected = set()
     dev._prefixes = ()
+    dev._editables = []
     dev._recipes = lambda: "(none)"
     dev._results_context = lambda: ""
     dev._repo_context = lambda: "(repo)"
@@ -147,3 +148,24 @@ def test_repo_developer_seeds_parent_files():
     # and the prompt showed the parent solution with the amend instruction
     user = next(m["content"] for m in dev.client.last_messages if m["role"] == "user")
     assert "PARENT SOLUTION" in user and "BASE = 1" in user and "AMEND" in user
+
+
+# ---------------------------------------------------------------- diff editing (edit_file patch-gate)
+def test_edit_file_patch_gate(tmp_path):
+    """SEARCH/REPLACE editing: exact-unique applies; staged overlay wins; ambiguous/no-match/protected
+    are refused with actionable errors; whitespace-tolerant fallback catches trailing-space drift."""
+    from looplab.adapters.repo_task import RepoWriteTools
+    (tmp_path / "train.py").write_text("LR = 0.1\ndef f():\n    return 1\n")
+    w = RepoWriteTools(["**/*.py"], {"grader.py"}, [], editables=[{"name": ".", "path": str(tmp_path)}])
+    assert "1 hunk" in w.execute("edit_file", {"path": "train.py", "search": "LR = 0.1", "replace": "LR = 0.01"})
+    assert "LR = 0.01" in w.files["train.py"]                     # disk original -> staged overlay
+    assert "1 hunk" in w.execute("edit_file", {"path": "train.py", "search": "LR = 0.01", "replace": "LR = 0.003"})
+    w.files["a.py"] = "x=1\nx=1\n"
+    assert "ambiguous" in w.execute("edit_file", {"path": "a.py", "search": "x=1", "replace": "x=2"})
+    assert "no match" in w.execute("edit_file", {"path": "train.py", "search": "NOPE", "replace": "y"})
+    assert "protected" in w.execute("edit_file", {"path": "grader.py", "search": "a", "replace": "b"})
+    assert "no such file" in w.execute("edit_file", {"path": "ghost.py", "search": "a", "replace": "b"})
+    w.files["b.py"] = "def g():   \n    return 1\n"               # trailing spaces in the file
+    assert "hunk applied" in w.execute(
+        "edit_file", {"path": "b.py", "search": "def g():\n    return 1", "replace": "def g():\n    return 2"})
+    assert "return 2" in w.files["b.py"]

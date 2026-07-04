@@ -158,12 +158,30 @@ class RepoWriteTools:
     just like an external coding agent's diff. The SAME gates are enforced here so the model gets
     immediate feedback (a refused write) instead of having the edit silently dropped downstream."""
 
-    def __init__(self, surface, protected, prefixes=None):
+    def __init__(self, surface, protected, prefixes=None, editables=None):
         self.files: dict[str, str] = {}
         self.deleted: list[str] = []
         self._surface = list(surface or [])
         self._protected = set(protected or [])
         self._prefixes = list(prefixes or [])
+        # Editable repo roots ({name,path}...) so edit_file can patch a file the node hasn't staged
+        # yet: current content = staged overlay first, else the original file on disk.
+        self._roots = [e.get("path") for e in (editables or []) if e.get("path")]
+
+    def _current(self, p: str):
+        """The file's CURRENT content for patching: the staged overlay wins (parent files pre-seeded
+        by implement_from, or an earlier write this turn), else the original from an editable root."""
+        if p in self.files:
+            return self.files[p]
+        from pathlib import Path as _P
+        for r in self._roots:
+            f = _P(r) / p
+            try:
+                if f.is_file():
+                    return f.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                continue
+        return None
 
     @staticmethod
     def _safe_rel(p: str):
@@ -182,6 +200,17 @@ class RepoWriteTools:
     def specs(self) -> list[dict]:
         from looplab.tools.knowledge_tools import _fn_spec
         return [
+            _fn_spec("edit_file",
+                     "Edit an EXISTING file with a minimal SEARCH/REPLACE patch — STRONGLY PREFERRED "
+                     "over write_file for changing existing code: it is far faster and safer than "
+                     "re-generating a whole file. `search` must be copied EXACTLY (including "
+                     "whitespace/indentation) from the file's current content and must occur exactly "
+                     "once; `replace` is its replacement. Make several small edit_file calls for "
+                     "several changes. Use write_file only for NEW files.",
+                     {"path": {"type": "string", "description": "repo-relative path"},
+                      "search": {"type": "string", "description": "exact existing snippet (unique in the file)"},
+                      "replace": {"type": "string", "description": "the replacement snippet"}},
+                     ["path", "search", "replace"]),
             _fn_spec("write_file",
                      "Create or OVERWRITE a file in the experiment repo you are editing. Provide the "
                      "FULL file content (not a diff, not a shell command). Use this ONLY to author the "
@@ -212,6 +241,47 @@ class RepoWriteTools:
             if p in self.deleted:
                 self.deleted.remove(p)
             return f"wrote {p} ({len(content)} bytes)"
+        if name == "edit_file":
+            if not p:
+                return ("(refused: path must be REPO-RELATIVE and inside the repo — no absolute paths, "
+                        "no `..`.)")
+            if p in self._protected:
+                return f"(refused: {p} is protected — the operator owns the eval; you may not modify it)"
+            if not _in_surface(p, self._surface, self._prefixes):
+                return f"(refused: {p} is outside your editable surface: {', '.join(self._surface)})"
+            cur = self._current(p)
+            if cur is None:
+                return (f"(no such file to edit: {p} — it is neither staged this turn nor in the repo. "
+                        "Create it with write_file instead.)")
+            search = str(args.get("search") or "")
+            replace = str(args.get("replace") or "")
+            if not search:
+                return "(refused: empty `search` — copy the exact snippet you want to replace)"
+            n = cur.count(search)
+            if n == 0:
+                # Whitespace-tolerant fallback: match ignoring trailing spaces on each line (models
+                # often lose trailing whitespace when copying a snippet).
+                def _norm(t: str) -> str:
+                    return "\n".join(l.rstrip() for l in t.splitlines())
+                cn, sn = _norm(cur), _norm(search)
+                if sn and cn.count(sn) == 1:
+                    pre_lines = cn[:cn.index(sn)].count("\n")
+                    cur_lines = cur.splitlines(keepends=True)
+                    s_len = len(search.splitlines())
+                    tail = "".join(cur_lines[pre_lines + s_len:])
+                    rep = replace if (replace.endswith("\n") or not tail) else replace + "\n"
+                    self.files[p] = "".join(cur_lines[:pre_lines]) + rep + tail
+                    return f"edited {p} (whitespace-tolerant match, 1 hunk applied)"
+                first = (search.splitlines() or [""])[0].strip()
+                near = next((l for l in cur.splitlines() if first and first in l), "")
+                return (f"(no match: `search` was not found in {p} — copy it EXACTLY from the current "
+                        f"content{', nearest line: ' + near[:120] if near else ''})")
+            if n > 1:
+                return f"(ambiguous: `search` occurs {n} times in {p} — include more surrounding lines to make it unique)"
+            self.files[p] = cur.replace(search, replace, 1)
+            if p in self.deleted:
+                self.deleted.remove(p)
+            return f"edited {p} (1 hunk applied)"
         if name == "delete_file":
             if not p:
                 return ("(refused: path must be REPO-RELATIVE and inside the repo — no absolute paths, "
@@ -427,7 +497,7 @@ class LLMRepoDeveloper:
     def _run(self, idea: Idea, error: Optional[str] = None,
              base: Optional[dict] = None, base_note: str = "") -> str:
         from looplab.agents.agent import drive_tool_loop
-        write = RepoWriteTools(self._surface, self._protected, self._prefixes)
+        write = RepoWriteTools(self._surface, self._protected, self._prefixes, editables=self._editables)
         if error and (self.last_files or self.last_deleted):   # repair: carry prior state so the
             write.files = dict(self.last_files)                # agent amends it — and so the node's
             write.deleted = list(self.last_deleted)            # recorded deletions aren't lost on
@@ -447,7 +517,9 @@ class LLMRepoDeveloper:
             "orchestrate, the stage structure, and how to compute + read the metric. " + self.brief + "\n\n"
             "The repository's current source files are included verbatim below — you have everything "
             "you need; do NOT try to read or inspect files, and do NOT write helper/'cat'/'check' "
-            "scripts. Author the eval entrypoint the eval command runs (it does not exist yet) by "
+            "scripts. To CHANGE an existing file, use edit_file with a minimal SEARCH/REPLACE hunk "
+            "(strongly preferred — never re-write a whole existing file). Author the eval entrypoint "
+            "the eval command runs (it does not exist yet) by "
             "calling write_file with a REPO-RELATIVE path and the FULL file content. The entrypoint "
             "must run the whole experiment and print the metric as the LAST stdout line (a JSON object "
             "with the required key). ALSO include any related metrics you compute in that SAME JSON "
@@ -508,14 +580,15 @@ class LLMRepoDeveloper:
             user += ("\n\n=== PARENT SOLUTION (your starting point"
                      + (f"; {base_note}" if base_note else "") + ") ===\n"
                      "The files below are this experiment's PARENT — they are already loaded as your "
-                     "working set and carry over verbatim unless you re-write them. AMEND them: change "
-                     "ONLY what this idea requires (write_file re-writes a whole file) and keep "
-                     "everything else as-is. Do NOT rebuild the solution from scratch.\n\n"
+                     "working set and carry over verbatim unless you change them. AMEND them with "
+                     "edit_file (small SEARCH/REPLACE hunks): change ONLY what this idea requires and "
+                     "keep everything else as-is. Do NOT rebuild the solution from scratch and do NOT "
+                     "re-write whole files that only need a small change.\n\n"
                      + "\n\n".join(parts))
         if error:
             already = ", ".join(self.last_files) or "(none)"
-            user += ("\n\nThe PREVIOUS attempt FAILED — fix ONLY the stage that failed (see the error) by "
-                     "RE-WRITING the offending file(s) with write_file. This runs in the SAME workdir, so "
+            user += ("\n\nThe PREVIOUS attempt FAILED — fix ONLY the stage that failed (see the error) with "
+                     "MINIMAL edit_file hunks on the offending file(s) (re-write a file only if it is beyond patching). This runs in the SAME workdir, so "
                      "any checkpoint/output an earlier stage already produced is STILL THERE: make the "
                      "code reuse it (skip retraining) and go straight to the failing step. Do not start "
                      f"over from scratch. Files you already wrote: {already}.\n"
