@@ -2152,7 +2152,10 @@ class Engine:
                               operator=idea.operator, source="manual"):
             if not code:
                 with self.tracer.span("implement"):
-                    code = self.developer.implement(idea)
+                    # An injected experiment usually BUILDS ON its parent (a human picked it as the
+                    # base) — hand the parent's solution to a parent-aware developer.
+                    _pnode = state.nodes.get(parents[0]) if parents else None
+                    code = self._implement(idea, _pnode)
             self.store.append(
                 "node_created",
                 {
