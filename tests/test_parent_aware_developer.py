@@ -169,3 +169,103 @@ def test_edit_file_patch_gate(tmp_path):
     assert "hunk applied" in w.execute(
         "edit_file", {"path": "b.py", "search": "def g():\n    return 1", "replace": "def g():\n    return 2"})
     assert "return 2" in w.files["b.py"]
+
+
+def test_header_timeout_applies_only_to_stream_attempts(monkeypatch):
+    """The short first-byte window is a STREAM-only bound (SSE headers arrive on admission). A
+    non-stream attempt's headers arrive only after the WHOLE generation — bounding them at 45s would
+    kill every legitimate >45s generation, self-triggering with the stall-degrade that switches a
+    call to non-stream. Regression for exactly that: the degraded attempt must get the full timeout."""
+    seen = []   # (stream?, urlopen timeout)
+
+    def fake_urlopen(req, timeout=None):
+        payload = json.loads(req.data.decode())
+        seen.append((bool(payload.get("stream")), timeout))
+        if payload.get("stream"):
+            raise TimeoutError("stream stalled")
+        return _Ctx(_nonstream_body("ok"))
+
+    monkeypatch.setattr(llm.urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(llm.time, "sleep", lambda s: None)
+    c = OpenAICompatibleClient("m", base_url="http://x/v1", stream=True, timeout=180.0)
+    assert c.complete_text([{"role": "user", "content": "hi"}]) == "ok"
+    assert seen[0] == (True, 45.0)      # stream attempt: short header window
+    assert seen[1] == (False, 180.0)    # degraded non-stream attempt: FULL timeout for the whole read
+
+
+def test_fail_fast_errors_do_not_count_as_stream_stalls(monkeypatch):
+    """A refused connection (endpoint down) says nothing about SSE health — it must not ratchet the
+    permanent stream-off counter."""
+    def fake_urlopen(req, timeout=None):
+        raise ConnectionRefusedError("down")
+
+    monkeypatch.setattr(llm.urllib.request, "urlopen", fake_urlopen)
+    c = OpenAICompatibleClient("m", base_url="http://x/v1", stream=True)
+    try:
+        c.complete_text([{"role": "user", "content": "hi"}])
+    except Exception:
+        pass
+    assert c._stream_stalls == 0
+
+
+def test_edit_file_fallback_is_line_anchored(tmp_path):
+    """The whitespace-tolerant fallback swaps WHOLE lines, so its match must be line-anchored — a
+    mid-line substring hit would silently eat the line's prefix/suffix (real corruption cases from
+    review). Non-anchored hits are refused; anchored ones preserve EOF newlines, don't swallow the
+    line after a trailing blank in `search`, delete cleanly on empty replace, and clear `deleted`."""
+    from looplab.adapters.repo_task import RepoWriteTools
+    w = RepoWriteTools(["**/*.py"], set(), [])
+    w.files["a.py"] = "x = compute()  \ny = 2\n"      # mid-line prefix must not be eaten
+    assert "no match" in w.execute("edit_file", {"path": "a.py", "search": "compute()\ny = 2", "replace": "R"})
+    assert w.files["a.py"] == "x = compute()  \ny = 2\n"
+    w.files["b.py"] = "a()   \nreturn foo(bar)\n"     # suffix must not be eaten
+    assert "no match" in w.execute("edit_file", {"path": "b.py", "search": "a()\nreturn foo(", "replace": "R"})
+    w.files["c.py"] = "foo1  \nbar\nbaz\n"            # trailing blank in search must not eat `baz`
+    w.execute("edit_file", {"path": "c.py", "search": "foo1\nbar\n\n", "replace": "NEW"})
+    assert "baz" in w.files["c.py"]
+    w.files["d.py"] = "def g():   \n    return 1\n"   # EOF match keeps the trailing newline
+    w.execute("edit_file", {"path": "d.py", "search": "def g():\n    return 1",
+                            "replace": "def g():\n    return 2"})
+    assert w.files["d.py"] == "def g():\n    return 2\n"
+    w.files["e.py"] = "keep\ndrop  \nrest\n"          # empty replace = clean line deletion
+    w.execute("edit_file", {"path": "e.py", "search": "drop\nrest", "replace": ""})
+    assert w.files["e.py"] == "keep\n"
+    w.deleted = ["f.py"]; w.files["f.py"] = "z = 1  \n"
+    w.execute("edit_file", {"path": "f.py", "search": "z = 1", "replace": "z = 2"})
+    assert "f.py" not in w.deleted                     # fallback edit resurrects a deleted file
+
+
+def test_edit_file_resolves_named_editable_prefix(tmp_path):
+    """Staged paths are prefixed with the editable's NAME (repo mounts at wd/<name>); _current must
+    strip the owning prefix before joining that editable's root, or every unstaged file is 'missing'."""
+    from looplab.adapters.repo_task import RepoWriteTools
+    (tmp_path / "x.py").write_text("V = 1\n")
+    w = RepoWriteTools(["**/*.py"], set(), [], editables=[{"name": "lib", "path": str(tmp_path)}])
+    r = w.execute("edit_file", {"path": "lib/x.py", "search": "V = 1", "replace": "V = 2"})
+    assert "hunk applied" in r and "V = 2" in w.files["lib/x.py"]
+
+
+def test_implement_from_carries_parent_deletions():
+    """A child of a parent that DELETED a repo file must inherit the deletion (deletions apply after
+    writes at materialization) — else the child's workdir re-seeds the pristine repo with the file
+    restored, measuring a different workspace than parent+patch. A delete-only parent still counts."""
+    from looplab.adapters.repo_task import LLMRepoDeveloper
+
+    class _DoneClient:
+        def chat(self, messages, tools, tool_choice="auto"):
+            return {"content": "", "tool_calls": [
+                {"id": "c1", "function": {"name": "done", "arguments": '{"summary":"ok"}'}}]}
+
+    dev = LLMRepoDeveloper.__new__(LLMRepoDeveloper)
+    dev.client = _DoneClient()
+    dev.brief = "brief"; dev.last_files, dev.last_deleted = {}, []
+    dev.loop_opts = {}; dev._surface = ["**/*.py"]; dev._protected = set()
+    dev._prefixes = (); dev._editables = []
+    dev._recipes = lambda: "(none)"; dev._results_context = lambda: ""
+    dev._repo_context = lambda: "(repo)"
+    dev._emit_spec = lambda: {"type": "function", "function": {
+        "name": "done", "parameters": {"type": "object", "properties": {"summary": {"type": "string"}}}}}
+    parent = Node(id=7, operator="improve", idea=Idea(operator="improve", params={}),
+                  files={}, deleted=["old_module.py"], metric=0.8)
+    dev.implement_from(Idea(operator="improve", params={}, rationale="tweak"), parent)
+    assert dev.last_deleted == ["old_module.py"]       # deletion carried into the child's working set

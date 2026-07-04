@@ -91,6 +91,7 @@ def make_llm_client(settings, *, model: str | None = None,
         guided_json=getattr(settings, "llm_guided_json", False),   # H1 constrained decoding
         reasoning=reasoning,                                        # provider-aware thinking toggle
         stream=getattr(settings, "llm_stream", True),              # inter-token idle-timeout via SSE
+        header_timeout=float(getattr(settings, "llm_header_timeout", 45.0) or 45.0),
         cache=getattr(settings, "llm_cache", False),               # T7 deterministic-response cache
         **extra,
     )

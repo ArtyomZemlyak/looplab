@@ -261,7 +261,8 @@ class OpenAICompatibleClient:
                  api_key: str = "ollama", temperature: float = 0.7,
                  timeout: float = 180.0, accountant: Optional["CostAccountant"] = None,
                  guided_json: bool = False, reasoning: Optional[dict] = None,
-                 stream: bool = True, cache: bool = False):
+                 stream: bool = True, cache: bool = False,
+                 header_timeout: Optional[float] = None):
         self.model = model
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key or "x"
@@ -273,7 +274,8 @@ class OpenAICompatibleClient:
         # request is actually admitted (streaming starts before generation finishes), so a short
         # header window fails futile attempts over to a fresh connection quickly. The idle `timeout`
         # still governs the BODY (inter-token) phase, restored right after headers arrive.
-        self.header_timeout = min(45.0, timeout) if timeout else 45.0
+        _ht = 45.0 if header_timeout is None else float(header_timeout)
+        self.header_timeout = min(_ht, timeout) if timeout else _ht   # never exceeds the idle timeout
         # Stream EVERY request (SSE) and reassemble it, so `timeout` acts as an INTER-TOKEN idle
         # timeout, NOT a whole-request deadline: a long-but-alive generation keeps streaming tokens
         # (each resets the timer, so it's never cut off), while a genuinely STALLED endpoint (no data
@@ -489,8 +491,15 @@ class OpenAICompatibleClient:
                 headers={"Content-Type": "application/json",
                          "Authorization": f"Bearer {self.api_key}"},
             )
+            # The short header window applies ONLY to stream attempts: an SSE response sends its
+            # headers as soon as the request is admitted (before generation finishes), so no-headers-
+            # in-45s ≈ black-holed. A NON-stream response sends nothing — headers included — until the
+            # whole generation completes, so its header wait must be the full idle timeout or every
+            # legitimate >45s generation would die at the header phase (self-triggering with the
+            # stall-degrade below, which is exactly what switches a call to non-stream).
+            _first_byte_to = self.header_timeout if use_stream else self.timeout
             try:
-                with urllib.request.urlopen(req, timeout=self.header_timeout) as resp:
+                with urllib.request.urlopen(req, timeout=_first_byte_to) as resp:
                     # Headers arrived — restore the full idle timeout for the BODY phase (the short
                     # window above only bounds connect + first byte; slow token gaps are legitimate).
                     _fp = getattr(resp, "fp", None)
@@ -533,7 +542,12 @@ class OpenAICompatibleClient:
                 # directly and don't wrap LLMError. A refused connection / DNS / TLS CERT error is a
                 # steady-state "endpoint down or misconfigured" signal: fail FAST so /api/llm/health
                 # stays instant and a wrong base_url surfaces on the first call, not after backoff.
-                if use_stream:                  # a stalled/broken STREAM → degrade the next attempt
+                # Count a stall ONLY for a transient failure of a STREAM attempt (idle timeout /
+                # reset / TLS EOF mid-stream). A fail-fast error (refused, DNS, cert) means the
+                # endpoint is down/misconfigured — it says nothing about SSE health, and counting it
+                # would ratchet `_stream_stalls` to the permanent-degrade threshold while the
+                # endpoint restarts. Degrade applies to the REMAINING attempts of this call.
+                if use_stream and _is_transient(e):
                     _stalled_prev = True
                     self._stream_stalls += 1
                 if _is_transient(e) and attempt < self._max_retries:
@@ -622,7 +636,15 @@ class OpenAICompatibleClient:
                 # wall-clock since the last real token and bail once it exceeds the client timeout;
                 # the except below then falls back / returns what we have.
                 _last_progress = time.monotonic()
-                with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+                with urllib.request.urlopen(req, timeout=self.header_timeout) as resp:
+                    # stream path: headers arrive on admission; restore the idle timeout for the body
+                    _fp2 = getattr(resp, "fp", None)
+                    _sk2 = getattr(getattr(_fp2, "raw", None), "_sock", None) or getattr(_fp2, "_sock", None)
+                    if _sk2 is not None:
+                        try:
+                            _sk2.settimeout(self.timeout)
+                        except OSError:
+                            pass
                     for raw in resp:
                         if time.monotonic() - _last_progress > self.timeout:
                             raise TimeoutError(

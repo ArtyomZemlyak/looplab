@@ -166,16 +166,20 @@ class RepoWriteTools:
         self._prefixes = list(prefixes or [])
         # Editable repo roots ({name,path}...) so edit_file can patch a file the node hasn't staged
         # yet: current content = staged overlay first, else the original file on disk.
-        self._roots = [e.get("path") for e in (editables or []) if e.get("path")]
+        self._roots = [(e.get("name") or "", e.get("path")) for e in (editables or []) if e.get("path")]
 
     def _current(self, p: str):
         """The file's CURRENT content for patching: the staged overlay wins (parent files pre-seeded
-        by implement_from, or an earlier write this turn), else the original from an editable root."""
+        by implement_from, or an earlier write this turn), else the original from an editable root.
+        Staged paths are workdir-relative and PREFIXED with the editable's name in multi-editable
+        setups (the repo mounts at wd/<name>), so strip the owning prefix before joining its root —
+        a bare join would probe <root>/<name>/<file> and read a missing (or wrong) original."""
         if p in self.files:
             return self.files[p]
         from pathlib import Path as _P
-        for r in self._roots:
-            f = _P(r) / p
+        for name, r in self._roots:
+            rel = p[len(name) + 1:] if name and name != "." and p.startswith(name + "/") else p
+            f = _P(r) / rel
             try:
                 if f.is_file():
                     return f.read_text(encoding="utf-8", errors="replace")
@@ -260,17 +264,34 @@ class RepoWriteTools:
             n = cur.count(search)
             if n == 0:
                 # Whitespace-tolerant fallback: match ignoring trailing spaces on each line (models
-                # often lose trailing whitespace when copying a snippet).
+                # often lose trailing whitespace when copying a snippet). The match must be LINE-
+                # ANCHORED — start at a line boundary and end at end-of-line/EOF — because the
+                # replacement swaps WHOLE lines: a mid-line substring hit would silently eat the
+                # line's prefix/suffix (verified corruption), and the reported success would hide it.
                 def _norm(t: str) -> str:
                     return "\n".join(l.rstrip() for l in t.splitlines())
                 cn, sn = _norm(cur), _norm(search)
-                if sn and cn.count(sn) == 1:
-                    pre_lines = cn[:cn.index(sn)].count("\n")
+                idx = cn.find(sn) if sn else -1
+                anchored = (idx >= 0 and cn.count(sn) == 1
+                            and (idx == 0 or cn[idx - 1] == "\n")
+                            and (idx + len(sn) == len(cn) or cn[idx + len(sn)] == "\n"))
+                if anchored:
+                    pre_lines = cn[:idx].count("\n")
+                    s_len = sn.count("\n") + 1          # lines in the MATCHED span (from sn, not search
+                    #                                     — a trailing blank line in `search` must not
+                    #                                     swallow the next real line)
                     cur_lines = cur.splitlines(keepends=True)
-                    s_len = len(search.splitlines())
                     tail = "".join(cur_lines[pre_lines + s_len:])
-                    rep = replace if (replace.endswith("\n") or not tail) else replace + "\n"
+                    last_had_nl = cur_lines[pre_lines + s_len - 1].endswith("\n")
+                    rep = replace
+                    if rep and last_had_nl and not rep.endswith("\n"):
+                        rep += "\n"                     # keep the file's line structure
+                    elif rep and not last_had_nl and rep.endswith("\n"):
+                        rep = rep[:-1]                  # match-at-EOF without trailing newline: keep it so
+                    # empty `replace` = deletion of the matched lines; no stray blank line
                     self.files[p] = "".join(cur_lines[:pre_lines]) + rep + tail
+                    if p in self.deleted:
+                        self.deleted.remove(p)          # an edit resurrects a previously-deleted file
                     return f"edited {p} (whitespace-tolerant match, 1 hunk applied)"
                 first = (search.splitlines() or [""])[0].strip()
                 near = next((l for l in cur.splitlines() if first and first in l), "")
@@ -495,7 +516,8 @@ class LLMRepoDeveloper:
                         {"summary": {"type": "string"}}, [])
 
     def _run(self, idea: Idea, error: Optional[str] = None,
-             base: Optional[dict] = None, base_note: str = "") -> str:
+             base: Optional[dict] = None, base_note: str = "",
+             base_deleted: Optional[list] = None) -> str:
         from looplab.agents.agent import drive_tool_loop
         write = RepoWriteTools(self._surface, self._protected, self._prefixes, editables=self._editables)
         if error and (self.last_files or self.last_deleted):   # repair: carry prior state so the
@@ -503,11 +525,14 @@ class LLMRepoDeveloper:
             write.deleted = list(self.last_deleted)            # recorded deletions aren't lost on
             #   a re-materialization (multi-seed confirm / replay / cross-run import), which would
             #   otherwise resurrect a file the search deleted and measure a different workspace.
-        elif base:
+        elif base or base_deleted:
             # IMPROVE/REFINE from a parent solution: pre-load the parent's files so untouched ones
             # carry over verbatim (cumulative parent→child diff) — the agent PATCHES, it does not
-            # regenerate the whole solution from the pristine repo.
-            write.files = dict(base)
+            # regenerate the whole solution from the pristine repo. Deletions carry too: without
+            # them the child's workdir re-seeds the pristine repo with the parent's deleted files
+            # RESTORED — a different workspace than "parent + patch".
+            write.files = dict(base or {})
+            write.deleted = list(base_deleted or [])
         params = ", ".join(f"{k}={v}" for k, v in (idea.params or {}).items()) or "(choose sensible values)"
         from looplab.core.hardware import operational_attention_points
         system = (
@@ -611,12 +636,14 @@ class LLMRepoDeveloper:
 
     def implement_from(self, idea: Idea, parent) -> str:
         """Improve/refine: start from the PARENT node's solution and patch it (see _run(base=...)).
-        Falls back to a from-scratch implement when the parent carries no files (e.g. seeded rows)."""
+        Falls back to a from-scratch implement when the parent carries no files AND no deletions
+        (e.g. seeded rows)."""
         files = dict(getattr(parent, "files", {}) or {})
-        if not files:
+        deleted = list(getattr(parent, "deleted", []) or [])
+        if not files and not deleted:
             return self._run(idea)
         note = f"parent experiment #{getattr(parent, 'id', '?')}, metric={getattr(parent, 'metric', None)}"
-        return self._run(idea, base=files, base_note=note)
+        return self._run(idea, base=files, base_note=note, base_deleted=deleted)
 
     def repair(self, idea: Idea, code: str, error: str) -> str:
         return self._run(idea, error=error)

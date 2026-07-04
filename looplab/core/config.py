@@ -420,6 +420,11 @@ class Settings(BaseSettings):
     # never cut off, only a silent endpoint. Non-stream: bounds the whole read. Raise for endpoints
     # with a long prefill on huge prompts; lower to fail fast on a flaky shared endpoint.
     llm_timeout: float = Field(default=180.0, gt=0)
+    # First-byte (response-headers) window for STREAM attempts, seconds: an SSE response sends its
+    # headers on admission, so no-headers ≈ a black-holed request — fail over to a fresh connection
+    # fast instead of waiting the full idle timeout. Clamped to llm_timeout. Non-stream attempts are
+    # NOT bounded by this (their headers arrive only after the whole generation).
+    llm_header_timeout: float = Field(default=45.0, gt=0)
     # H4: cap the growing agentic-researcher tool-call history (chars) by middle-truncating stale
     # tool output, so a long trace doesn't blow the context window. 0 = off (unbounded).
     context_budget_chars: int = 0
