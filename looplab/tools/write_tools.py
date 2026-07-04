@@ -202,6 +202,10 @@ class WriteTools:
         return f"(wrote {rel}, {len(content)} bytes)"
 
     def _edit(self, path: str, old_str: str, new_str: str) -> str:
+        # Deliberately NOT tools/edit_match.py's apply_search_replace: the assistant's edit_file is
+        # EXACT-match only (its own arg names + error strings are part of the tool contract here),
+        # and adopting the repo developer's whitespace-tolerant fallback would silently change what
+        # this tool applies. Keep the two matchers' semantics distinct on purpose.
         p, rel, err = self._check(path)
         if err:
             return err

@@ -23,6 +23,7 @@ from looplab.core.config import Settings
 from looplab.events.eventstore import EventStore
 from looplab.events.types import (EV_APPROVAL_GRANTED, EV_RUN_FINISHED, EV_RUN_REOPENED,
                                   EV_SPEC_APPROVED)
+from looplab.engine.options import EngineOptions
 from looplab.engine.orchestrator import Engine
 from looplab.search.policy import make_policy
 from looplab.events.replay import fold
@@ -223,6 +224,9 @@ def _engine(run_dir: Path, task: TaskAdapter, settings: Settings,
     if settings.proxy_scoring or settings.proxy_kill_fraction > 0:
         from looplab.runtime.proxy import ProxyScorer
         proxy_scorer = ProxyScorer(kill_fraction=settings.proxy_kill_fraction)
+    # Every pure-config Settings→Engine knob travels as ONE bundle (BACKLOG §4); only the built
+    # OBJECTS (roles, sandbox, policy, strategist, scorers, …) and genuinely CLI-specific values
+    # (crash_after comes from a CLI flag, not Settings) remain explicit kwargs.
     return Engine(
         run_dir,
         task=task,
@@ -235,82 +239,19 @@ def _engine(run_dir: Path, task: TaskAdapter, settings: Settings,
                            rung_nodes=settings.asha_rung_nodes,
                            debug_depth=settings.debug_depth,
                            operator_bandit=settings.operator_bandit),
-        max_parallel=settings.max_parallel,
-        timeout=settings.timeout,
-        sweep_timeout_mult=settings.sweep_timeout_mult,
+        options=EngineOptions.from_settings(settings),
         crash_after=crash_after,
-        confirm_top_k=settings.confirm_top_k,
-        confirm_seeds=settings.confirm_seeds,
-        confirm_seed_base=settings.confirm_seed_base,
-        holdout_fraction=settings.holdout_fraction,
-        holdout_select=settings.holdout_select,
-        holdout_top_k=settings.holdout_top_k,
-        max_seconds=settings.max_seconds,
-        max_eval_seconds=settings.max_eval_seconds,
-        memory_dir=settings.memory_dir,
-        require_approval=settings.require_approval,
-        archive_resolution=settings.archive_resolution,
         onboarder=onboarder,
-        eval_trust_mode=settings.eval_trust_mode,
-        trust_mode=settings.trust_mode,
-        docker_image=settings.docker_image,
-        seed_mode=settings.seed_mode,
-        n_seeds=settings.n_seeds,
-        max_nodes=settings.max_nodes,
-        policy_name=settings.policy,
-        ablate_every=settings.ablate_every,
         strategist=strategist,
-        strategist_every=settings.strategist_every,
         deep_researcher=deep_researcher,
-        deep_research_every=settings.deep_research_every,
-        concurrent_research=settings.concurrent_research,
         report_writer=report_writer,
-        report_every=settings.report_every,
         developer_factory=dev_factory,
-        merge_mode=settings.merge_mode,
-        complexity_cue=settings.complexity_cue,
-        budget_aware=settings.budget_aware,
-        failure_reflection=settings.failure_reflection,
-        deep_repair=settings.deep_repair,
-        inline_repair=settings.inline_repair,
-        inline_repair_attempts=settings.inline_repair_attempts,
-        inline_repair_stuck_repeat=settings.inline_repair_stuck_repeat,
-        inline_repair_reasons=settings.inline_repair_reasons,
-        auto_install_deps=settings.auto_install_deps,
-        dep_install_timeout=settings.dep_install_timeout,
-        agent_control=settings.agent_control,
-        localize_faults=settings.localize_faults,
-        feature_engineering=settings.feature_engineering,
-        ablate_code_blocks=settings.ablate_code_blocks,
         proxy_scorer=proxy_scorer,
-        proxy_kill_fraction=settings.proxy_kill_fraction,
-        reward_hack_detect=settings.reward_hack_detect,
-        trust_gate=settings.trust_gate,
-        code_leakage_detect=settings.code_leakage_detect,
-        critic_check=settings.critic_check,
-        redact_output=settings.redact_output,
-        novelty_gate=settings.novelty_gate,
-        novelty_epsilon=settings.novelty_epsilon,
-        novelty_semantic=settings.novelty_semantic,
-        novelty_semantic_threshold=settings.novelty_semantic_threshold,
         embedder=_make_embedder(settings),
-        debug_depth=settings.debug_depth,
-        operator_bandit=settings.operator_bandit,
-        digest_char_cap=settings.digest_char_cap,
-        research_verify=settings.research_verify,
-        workdir_audit=settings.workdir_audit,
         # Memora synergy: harmonic recall over the cross-run lessons tier (same abstractor Memora
         # uses for the case/KB index; shares its content-hash cache). None when memora is off; a
         # dead LLM endpoint degrades to the deterministic lexical abstractor inside make_abstractor.
         lesson_abstractor=_make_lesson_abstractor(settings),
-        reflection_priors=settings.reflection_priors,
-        comparative_lessons=settings.comparative_lessons,
-        lessons_every=settings.lessons_every,
-        lessons_refresh_every=settings.lessons_refresh_every,
-        track_hypotheses=settings.track_hypotheses,
-        surrogate_explore=settings.surrogate_explore,
-        unified_agent=settings.unified_agent,
-        agent_drives_actions=settings.agent_drives_actions,
     )
 
 

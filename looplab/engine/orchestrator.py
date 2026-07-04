@@ -41,6 +41,7 @@ from looplab.trust.gate import one_se_better
 from looplab.trust.leakage import target_leakage, temporal_leakage, train_test_contamination
 from looplab.engine.finalize import finalize_run
 from looplab.engine.lessons import LessonMemory
+from looplab.engine.options import EngineOptions
 # Pure triage/fingerprint helpers extracted to looplab/engine/triage.py, imported back under
 # their original names so `looplab.engine.orchestrator._normalize_error_sig`, `._holdout_indices`
 # (& friends) stay importable — tests import them from this module path.
@@ -65,6 +66,12 @@ from looplab.agents.roles import Developer, Researcher
 from looplab.runtime.sandbox import Sandbox
 from looplab.core.tracing import JsonlSpanExporter, Tracer
 
+# BACKLOG §4: sentinel default for every pure-config Engine.__init__ keyword. It distinguishes
+# "kwarg not passed" (fall back to the `options` bundle, then to the EngineOptions default) from
+# any REAL value, including None/0/False — so an explicitly passed kwarg always wins over
+# `options`, and the ~100 existing keyword call sites keep their exact pre-options behavior.
+_UNSET = object()
+
 
 class Engine:
     def __init__(
@@ -76,88 +83,169 @@ class Engine:
         developer: Developer,
         sandbox: Sandbox,
         policy: SearchPolicy,
-        max_parallel: int = 1,   # single experiment at a time; > 1 = backlog parallel seam
-        timeout: float = 30.0,
-        sweep_timeout_mult: float = 8.0,  # intra-node sweep nodes get this × the single-eval budget
+        # BACKLOG §4: every PURE-CONFIG knob below (the scalars/strings/bools/dicts that mirror
+        # Settings) also lives on EngineOptions, and its signature default is the _UNSET sentinel.
+        # Resolution per knob: explicitly passed kwarg > `options` field > EngineOptions default
+        # (whose value equals the old signature default — see engine/options.py). Object seams
+        # (task/roles/sandbox/policy above and the `*=None` hooks below) stay explicit parameters.
+        # The annotations keep the knobs' REAL types; _UNSET is resolved away first thing below.
+        options: Optional[EngineOptions] = None,
+        max_parallel: int = _UNSET,   # single experiment at a time; > 1 = backlog parallel seam
+        timeout: float = _UNSET,
+        sweep_timeout_mult: float = _UNSET,  # intra-node sweep nodes get this × the single-eval budget
         crash_after: Optional[int] = None,
-        confirm_top_k: int = 0,
-        confirm_seeds: int = 0,
-        confirm_seed_base: int = 1,   # D1: first confirm seed; 1 keeps confirm splits disjoint from search's seed 0
-        max_seconds: Optional[float] = None,
-        max_eval_seconds: Optional[float] = None,
-        memory_dir: Optional[str] = None,
-        require_approval: bool = False,
-        archive_resolution: float = 1.0,
+        confirm_top_k: int = _UNSET,
+        confirm_seeds: int = _UNSET,
+        confirm_seed_base: int = _UNSET,   # D1: first confirm seed; 1 keeps confirm splits disjoint from search's seed 0
+        max_seconds: Optional[float] = _UNSET,
+        max_eval_seconds: Optional[float] = _UNSET,
+        memory_dir: Optional[str] = _UNSET,
+        require_approval: bool = _UNSET,
+        archive_resolution: float = _UNSET,
         onboarder=None,
-        eval_trust_mode: str = "ratify_freeze",
-        trust_mode: str = "trusted_local",
-        docker_image: str = "python:3.12-slim",
-        seed_mode: str = "auto",    # RepoTask node seeding fallback: auto|tracked|all (per-editable overrides)
+        eval_trust_mode: str = _UNSET,
+        trust_mode: str = _UNSET,
+        docker_image: str = _UNSET,
+        seed_mode: str = _UNSET,    # RepoTask node seeding fallback: auto|tracked|all (per-editable overrides)
         # --- A7 Strategist + richer-operator knobs (config-first; defaults == today's behavior) ---
-        n_seeds: int = 3,
-        max_nodes: int = 8,
-        policy_name: str = "greedy",
-        ablate_every: int = 0,
+        n_seeds: int = _UNSET,
+        max_nodes: int = _UNSET,
+        policy_name: str = _UNSET,
+        ablate_every: int = _UNSET,
         strategist=None,            # Optional[Strategist]; None => static config policy (default)
-        strategist_every: int = 3,
+        strategist_every: int = _UNSET,
         deep_researcher=None,       # Optional[DeepResearcher]; None => Deep-Research stage off
-        deep_research_every: int = 0,  # run the stage every N created nodes (0 = manual/strategist only)
-        concurrent_research: bool = False,  # overlap a due research "think" with the GPU-bound eval (opt-in)
+        deep_research_every: int = _UNSET,  # run the stage every N created nodes (0 = manual/strategist only)
+        concurrent_research: bool = _UNSET,  # overlap a due research "think" with the GPU-bound eval (opt-in)
         report_writer=None,         # Optional[ReportWriter]; None => agent report off (deterministic only)
-        report_every: int = 0,      # regenerate the run report every N created nodes (0 = manual only)
+        report_every: int = _UNSET,      # regenerate the run report every N created nodes (0 = manual only)
         developer_factory=None,     # Optional[Callable[[str], Developer]] for live backend swap
-        merge_mode: str = "mean",        # A0b: "mean" | "ensemble"
-        complexity_cue: bool = False,    # A0d: breadth-keyed prompt hint
-        budget_aware: bool = False,      # A5: surface remaining eval budget into the prompt
-        failure_reflection: bool = False,  # A4: reflect on recent failed branches in the prompt
-        deep_repair: bool = False,       # C3: structured failure-taxonomy repair context
-        localize_faults: bool = False,   # C1: surface fault-localized files for repo tasks
-        feature_engineering: bool = False,  # I1: CV-gated feature-engineering directive
-        ablate_code_blocks: bool = False,  # A0a: ablate pipeline code blocks, not just params
+        merge_mode: str = _UNSET,        # A0b: "mean" | "ensemble"
+        complexity_cue: bool = _UNSET,    # A0d: breadth-keyed prompt hint
+        budget_aware: bool = _UNSET,      # A5: surface remaining eval budget into the prompt
+        failure_reflection: bool = _UNSET,  # A4: reflect on recent failed branches in the prompt
+        deep_repair: bool = _UNSET,       # C3: structured failure-taxonomy repair context
+        localize_faults: bool = _UNSET,   # C1: surface fault-localized files for repo tasks
+        feature_engineering: bool = _UNSET,  # I1: CV-gated feature-engineering directive
+        ablate_code_blocks: bool = _UNSET,  # A0a: ablate pipeline code blocks, not just params
         proxy_scorer=None,          # A6: Optional[ProxyScorer] early-signal candidate gate
-        proxy_kill_fraction: float = 0.0,
-        reward_hack_detect: bool = False,   # B5: flag suspicious wins
-        trust_gate: str = "audit",          # T2: audit|gate|block — what a hack/leak flag does to selection
-        code_leakage_detect: bool = False,  # I3: static code-leakage scan per node
-        critic_check: bool = False,         # C4: execution-free critic per node
-        redact_output: bool = False,        # B3: redact secrets from persisted output tails
-        novelty_gate: bool = False,         # E1: dedup near-duplicate proposals
-        novelty_epsilon: float = 0.05,
-        reflection_priors: bool = False,    # E4/M2/M3: cross-run priors + lessons (needs memory_dir)
-        comparative_lessons: bool = False,  # M6: credit-assigned pair lessons (needs reflection_priors)
-        lessons_every: int = 0,             # M6: mid-run distill cadence in nodes (0 = run-end only)
-        lessons_refresh_every: int = 0,     # M6: mid-run shared-store re-read cadence (0 = start only)
-        track_hypotheses: bool = True,      # P1: register deep-research directions as hypotheses
-        surrogate_explore: float = 0.1,     # A2/A3: explore weight for a lazily-wired BOHB surrogate
-        unified_agent: bool = False,        # one agent plays Researcher+Developer(+Strategist)
-        agent_drives_actions: bool = False,  # agent picks the next macro action (within a legal gate)
-        inline_repair: bool = True,          # hybrid: triage + repair a crashed node IN PLACE (no new node)
-        inline_repair_attempts: int = 0,     # max in-place repair retries per node (0 = UNLIMITED)
-        inline_repair_stuck_repeat: int = 4, # abandon when the SAME error repeats this many times in a row
-        inline_repair_reasons: tuple = ("crash", "timeout", "oom"),  # reasons eligible for inline repair
-        auto_install_deps: bool = True,      # pip-install a missing KNOWN lib + re-run (trusted_local only)
-        dep_install_timeout: float = 900.0,  # per-package install wall-clock budget (seconds)
+        proxy_kill_fraction: float = _UNSET,
+        reward_hack_detect: bool = _UNSET,   # B5: flag suspicious wins
+        trust_gate: str = _UNSET,          # T2: audit|gate|block — what a hack/leak flag does to selection
+        code_leakage_detect: bool = _UNSET,  # I3: static code-leakage scan per node
+        critic_check: bool = _UNSET,         # C4: execution-free critic per node
+        redact_output: bool = _UNSET,        # B3: redact secrets from persisted output tails
+        novelty_gate: bool = _UNSET,         # E1: dedup near-duplicate proposals
+        novelty_epsilon: float = _UNSET,
+        reflection_priors: bool = _UNSET,    # E4/M2/M3: cross-run priors + lessons (needs memory_dir)
+        comparative_lessons: bool = _UNSET,  # M6: credit-assigned pair lessons (needs reflection_priors)
+        lessons_every: int = _UNSET,             # M6: mid-run distill cadence in nodes (0 = run-end only)
+        lessons_refresh_every: int = _UNSET,     # M6: mid-run shared-store re-read cadence (0 = start only)
+        track_hypotheses: bool = _UNSET,      # P1: register deep-research directions as hypotheses
+        surrogate_explore: float = _UNSET,     # A2/A3: explore weight for a lazily-wired BOHB surrogate
+        unified_agent: bool = _UNSET,        # one agent plays Researcher+Developer(+Strategist)
+        agent_drives_actions: bool = _UNSET,  # agent picks the next macro action (within a legal gate)
+        inline_repair: bool = _UNSET,          # hybrid: triage + repair a crashed node IN PLACE (no new node)
+        inline_repair_attempts: int = _UNSET,     # max in-place repair retries per node (0 = UNLIMITED)
+        inline_repair_stuck_repeat: int = _UNSET, # abandon when the SAME error repeats this many times in a row
+        inline_repair_reasons: tuple = _UNSET,  # reasons eligible for inline repair
+        auto_install_deps: bool = _UNSET,      # pip-install a missing KNOWN lib + re-run (trusted_local only)
+        dep_install_timeout: float = _UNSET,  # per-package install wall-clock budget (seconds)
         dep_installer=None,                  # Optional[Callable] install hook (test seam; default = deps.install)
-        agent_control: Optional[dict] = None,  # per-setting allow-list of roles that may change it (governance)
+        agent_control: Optional[dict] = _UNSET,  # per-setting allow-list of roles that may change it (governance)
         # D1 holdout-gated promotion (B6): reserve a fraction of host-held labels as a FINAL
         # holdout partition the search never sees; at finish, re-score the val-top-k on it and
         # (when holdout_select) let the unseen signal pick the champion. Host-graded tasks only
         # (label-partition holdout is free — the predictions already exist); 0.0 = off.
-        holdout_fraction: float = 0.25,
-        holdout_select: bool = True,
-        holdout_top_k: int = 3,
+        holdout_fraction: float = _UNSET,
+        holdout_select: bool = _UNSET,
+        holdout_top_k: int = _UNSET,
         # Phase 2 (D3/D4/T10/P4) knobs — kept on the engine so strategist-driven policy swaps
         # rebuild policies with the same run-wide settings.
-        debug_depth: int = 1,            # T10: debug-lineage bound for every policy
-        operator_bandit: bool = False,   # P4: deterministic UCB over operator yields (GreedyTree)
-        novelty_semantic: bool = True,       # T5: embedding-similarity idea dedup (needs novelty_gate)
-        novelty_semantic_threshold: float = 0.92,
+        debug_depth: int = _UNSET,            # T10: debug-lineage bound for every policy
+        operator_bandit: bool = _UNSET,   # P4: deterministic UCB over operator yields (GreedyTree)
+        novelty_semantic: bool = _UNSET,       # T5: embedding-similarity idea dedup (needs novelty_gate)
+        novelty_semantic_threshold: float = _UNSET,
         embedder=None,                       # text→vector callable (default: zero-dep hash_embed)
-        digest_char_cap: int = 0,            # M5: digest prompt budget; 0 = auto-scale with run size
-        research_verify: bool = True,        # D8: verify memo claims against cited evidence
-        workdir_audit: bool = True,          # 4.4: flag unexpected writes in the eval workdir
+        digest_char_cap: int = _UNSET,            # M5: digest prompt budget; 0 = auto-scale with run size
+        research_verify: bool = _UNSET,        # D8: verify memo claims against cited evidence
+        workdir_audit: bool = _UNSET,          # 4.4: flag unexpected writes in the eval workdir
         lesson_abstractor=None,              # Memora synergy: harmonic recall over cross-run lessons
     ):
+        # Resolve each pure-config knob ONCE, up front — explicit kwarg > options field > default —
+        # so the assignment/validation body below is exactly the pre-EngineOptions code operating on
+        # plain locals (no behavior change, no re-plumbing of the ~100 keyword call sites).
+        if options is None:
+            options = EngineOptions()
+
+        def _opt(val, field: str):
+            return val if val is not _UNSET else getattr(options, field)
+
+        max_parallel = _opt(max_parallel, "max_parallel")
+        timeout = _opt(timeout, "timeout")
+        sweep_timeout_mult = _opt(sweep_timeout_mult, "sweep_timeout_mult")
+        confirm_top_k = _opt(confirm_top_k, "confirm_top_k")
+        confirm_seeds = _opt(confirm_seeds, "confirm_seeds")
+        confirm_seed_base = _opt(confirm_seed_base, "confirm_seed_base")
+        max_seconds = _opt(max_seconds, "max_seconds")
+        max_eval_seconds = _opt(max_eval_seconds, "max_eval_seconds")
+        memory_dir = _opt(memory_dir, "memory_dir")
+        require_approval = _opt(require_approval, "require_approval")
+        archive_resolution = _opt(archive_resolution, "archive_resolution")
+        eval_trust_mode = _opt(eval_trust_mode, "eval_trust_mode")
+        trust_mode = _opt(trust_mode, "trust_mode")
+        docker_image = _opt(docker_image, "docker_image")
+        seed_mode = _opt(seed_mode, "seed_mode")
+        n_seeds = _opt(n_seeds, "n_seeds")
+        max_nodes = _opt(max_nodes, "max_nodes")
+        policy_name = _opt(policy_name, "policy_name")
+        ablate_every = _opt(ablate_every, "ablate_every")
+        strategist_every = _opt(strategist_every, "strategist_every")
+        deep_research_every = _opt(deep_research_every, "deep_research_every")
+        concurrent_research = _opt(concurrent_research, "concurrent_research")
+        report_every = _opt(report_every, "report_every")
+        merge_mode = _opt(merge_mode, "merge_mode")
+        complexity_cue = _opt(complexity_cue, "complexity_cue")
+        budget_aware = _opt(budget_aware, "budget_aware")
+        failure_reflection = _opt(failure_reflection, "failure_reflection")
+        deep_repair = _opt(deep_repair, "deep_repair")
+        localize_faults = _opt(localize_faults, "localize_faults")
+        feature_engineering = _opt(feature_engineering, "feature_engineering")
+        ablate_code_blocks = _opt(ablate_code_blocks, "ablate_code_blocks")
+        proxy_kill_fraction = _opt(proxy_kill_fraction, "proxy_kill_fraction")
+        reward_hack_detect = _opt(reward_hack_detect, "reward_hack_detect")
+        trust_gate = _opt(trust_gate, "trust_gate")
+        code_leakage_detect = _opt(code_leakage_detect, "code_leakage_detect")
+        critic_check = _opt(critic_check, "critic_check")
+        redact_output = _opt(redact_output, "redact_output")
+        novelty_gate = _opt(novelty_gate, "novelty_gate")
+        novelty_epsilon = _opt(novelty_epsilon, "novelty_epsilon")
+        reflection_priors = _opt(reflection_priors, "reflection_priors")
+        comparative_lessons = _opt(comparative_lessons, "comparative_lessons")
+        lessons_every = _opt(lessons_every, "lessons_every")
+        lessons_refresh_every = _opt(lessons_refresh_every, "lessons_refresh_every")
+        track_hypotheses = _opt(track_hypotheses, "track_hypotheses")
+        surrogate_explore = _opt(surrogate_explore, "surrogate_explore")
+        unified_agent = _opt(unified_agent, "unified_agent")
+        agent_drives_actions = _opt(agent_drives_actions, "agent_drives_actions")
+        inline_repair = _opt(inline_repair, "inline_repair")
+        inline_repair_attempts = _opt(inline_repair_attempts, "inline_repair_attempts")
+        inline_repair_stuck_repeat = _opt(inline_repair_stuck_repeat, "inline_repair_stuck_repeat")
+        inline_repair_reasons = _opt(inline_repair_reasons, "inline_repair_reasons")
+        auto_install_deps = _opt(auto_install_deps, "auto_install_deps")
+        dep_install_timeout = _opt(dep_install_timeout, "dep_install_timeout")
+        agent_control = _opt(agent_control, "agent_control")
+        holdout_fraction = _opt(holdout_fraction, "holdout_fraction")
+        holdout_select = _opt(holdout_select, "holdout_select")
+        holdout_top_k = _opt(holdout_top_k, "holdout_top_k")
+        debug_depth = _opt(debug_depth, "debug_depth")
+        operator_bandit = _opt(operator_bandit, "operator_bandit")
+        novelty_semantic = _opt(novelty_semantic, "novelty_semantic")
+        novelty_semantic_threshold = _opt(novelty_semantic_threshold, "novelty_semantic_threshold")
+        digest_char_cap = _opt(digest_char_cap, "digest_char_cap")
+        research_verify = _opt(research_verify, "research_verify")
+        workdir_audit = _opt(workdir_audit, "workdir_audit")
+
         self.run_dir = Path(run_dir)
         self.task = task
         self.researcher = researcher

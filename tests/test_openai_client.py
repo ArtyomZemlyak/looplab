@@ -372,3 +372,31 @@ def test_h1_off_by_default_no_constraints():
         {"function": {"name": "emit", "arguments": "{}"}}]}}], "usage": {}})
     c.complete_tool([{"role": "user", "content": "x"}], {"type": "object"})
     assert "response_format" not in captured and "guided_json" not in captured
+
+
+def test_read_stream_falls_back_on_iterable_non_sse_body():
+    """A response that ITERATES line-by-line but never sends a `data:` line (a non-streaming endpoint
+    behind a streaming request) must be reassembled from its raw lines and parsed as one plain JSON
+    chat body — the `_sse_chunks` tail (raw_lines + got_sse) feeding `_read_stream`'s fallback."""
+    import looplab.llm as llm
+
+    class _IterResp:
+        """Iterable urllib-response stand-in with NO usable read() (forces the raw-lines path)."""
+        def __init__(self, lines):
+            self._lines = lines
+            self.fp = None
+
+        def __iter__(self):
+            return iter(self._lines)
+
+        def close(self):
+            pass
+
+    body = json.dumps({"choices": [{"message": {"role": "assistant", "content": "plain"}}],
+                       "usage": {"total_tokens": 3}}, indent=1)
+    # A multi-line JSON body (plus a leading ':' comment) — line iteration splits at real newlines.
+    lines = [b": PROCESSING\n"] + [(ln + "\n").encode() for ln in body.splitlines()]
+    c = llm.OpenAICompatibleClient("m", base_url="http://x/v1")
+    out = c._read_stream(_IterResp(lines))
+    assert out["choices"][0]["message"]["content"] == "plain"
+    assert out["usage"] == {"total_tokens": 3}

@@ -19,6 +19,7 @@ from looplab.events import digest
 from looplab.core.models import RunState
 from looplab.tools.run_tools import RunTools
 from looplab.tools._base import fn_spec
+from looplab.tools._runcache import RunStateCache
 
 # A trace is a whole conversation, but the shared tool loop HEAD-truncates every tool result to 4000
 # chars (agent.drive_tool_loop), so a larger budget would be silently cut there (losing the tail with
@@ -85,7 +86,8 @@ class RunsTools:
         self.run_root = Path(run_root)
         self.alive_fn = alive_fn
         self.max_chars = max_chars
-        self._cache: dict[str, tuple] = {}     # run_id -> (sig, RunState)
+        # Traversal-guarded, (size, mtime)-fingerprinted fold cache — shared with SiblingRunTools.
+        self._runs = RunStateCache(self.run_root)
         self._reader = RunTools(max_chars=max_chars)
 
     # RunsTools is not bound to a single run; accept bind_state for CompositeTools symmetry (no-op).
@@ -173,47 +175,13 @@ class RunsTools:
 
     # --- internals -----------------------------------------------------------
     def _run_ids(self) -> list[str]:
-        try:
-            return sorted(p.name for p in self.run_root.iterdir()
-                          if p.is_dir() and (p / "events.jsonl").exists())
-        except OSError:
-            return []
+        return self._runs.run_ids()
 
     def _safe_dir(self, run_id: Optional[str]) -> Optional[Path]:
-        if not run_id:
-            return None
-        rd = (self.run_root / str(run_id)).resolve()
-        if rd.parent != self.run_root.resolve():
-            return None
-        if not (rd / "events.jsonl").exists():
-            return None
-        return rd
-
-    @staticmethod
-    def _sig(rd: Path):
-        try:
-            s = (rd / "events.jsonl").stat()
-            return (s.st_size, int(s.st_mtime))
-        except OSError:
-            return (0, 0)
+        return self._runs.safe_dir(run_id)
 
     def _state(self, run_id: Optional[str]) -> Optional[RunState]:
-        rd = self._safe_dir(run_id)
-        if rd is None:
-            return None
-        sig = self._sig(rd)
-        hit = self._cache.get(str(run_id))
-        if hit and hit[0] == sig:
-            return hit[1]
-        from looplab.events.eventstore import iter_jsonl
-        from looplab.core.models import Event
-        from looplab.events.replay import fold
-        try:
-            st = fold(Event(**o) for o in iter_jsonl(rd / "events.jsonl"))
-        except (OSError, ValueError, TypeError):
-            return None
-        self._cache[str(run_id)] = (sig, st)
-        return st
+        return self._runs.state(run_id)
 
     def _alive(self, run_id: str) -> bool:
         if self.alive_fn is None:

@@ -361,6 +361,66 @@ def _socket_watchdog(resp, idle_limit: float):
     return last_progress, killed, _stop.set
 
 
+class _SSETail:
+    """Raw-line side channel of `_sse_chunks`, used by `_read_stream`'s non-SSE fallback: every line
+    as received (`raw_lines` — joined and parsed as one JSON body when the response turns out not to
+    be SSE at all) and whether any `data:` line was ever seen (`got_sse`)."""
+    __slots__ = ("raw_lines", "got_sse")
+
+    def __init__(self):
+        self.raw_lines: list[str] = []
+        self.got_sse = False
+
+
+def _sse_chunks(lines, last_progress, killed, idle_limit: float, stall_msg: str,
+                tail: Optional[_SSETail] = None):
+    """Shared SSE consumption for `_read_stream` and `complete_text_stream`: iterate the response's
+    lines and yield each parsed `data:` chunk as a dict, ending at EOF or the `[DONE]` sentinel.
+    The two callers MERGE chunks differently (full chat-response reassembly incl. tool_calls/usage
+    vs. yielded text deltas), so chunk interpretation — including bumping `last_progress[0]` on every
+    real token — stays with them; this generator owns only the transport concerns they duplicated:
+
+      - `last_progress`/`killed` are the `_socket_watchdog` cells for this response. No progress for
+        `idle_limit`s raises TimeoutError(stall_msg) (each caller passes its own exact message); a
+        ValueError from a watchdog-closed response ends the stream so the CALLER's post-`killed`
+        check decides what a watchdog kill means (always-raise vs. keep a partial stream).
+      - keepalive/comment lines (no `data:` prefix) and non-JSON heartbeat payloads are skipped.
+      - `tail` (passed by `_read_stream` only) records every raw line and the got-SSE flag, feeding
+        its whole-body fallback for a non-SSE (plain JSON) response.
+    """
+    while True:
+        try:
+            raw = next(lines)
+        except StopIteration:
+            return
+        except ValueError:
+            # The watchdog called resp.close() while lines buffered in the BufferedReader were
+            # still draining -> readline-of-closed-file. That IS the stall the watchdog fired
+            # on; fall through to the `_killed` check (a TimeoutError _post retries) instead of
+            # leaking a bare ValueError past _post's transient tuple and crashing the run.
+            if killed[0]:
+                return
+            raise
+        if time.monotonic() - last_progress[0] > idle_limit:
+            raise TimeoutError(stall_msg)
+        s = raw.decode("utf-8", "replace") if isinstance(raw, (bytes, bytearray)) else str(raw)
+        if tail is not None:
+            tail.raw_lines.append(s)
+        line = s.strip()
+        if not line or not line.startswith("data:"):
+            continue
+        if tail is not None:
+            tail.got_sse = True
+        chunk = line[5:].strip()
+        if chunk == "[DONE]":
+            return
+        try:
+            obj = json.loads(chunk)
+        except ValueError:
+            continue                    # keepalive / non-JSON heartbeat line
+        yield obj
+
+
 class OpenAICompatibleClient:
     """Dependency-free OpenAI-compatible chat client (stdlib urllib). Implements the
     `parse.LLMClient` Protocol, so it drops into the LLM roles like any other backend.
@@ -434,49 +494,22 @@ class OpenAICompatibleClient:
         tcs: dict[int, dict] = {}
         finish = None
         usage: dict = {}
-        raw_lines: list[str] = []
-        got_sse = False
+        tail = _SSETail()                       # raw lines + got-SSE flag for the non-SSE fallback
         # Idle timeout by PROGRESS: tracked as wall-clock since the last REAL token and enforced both
-        # by an in-loop check (below) AND a socket-shutdown watchdog (`_socket_watchdog`) — a stall
-        # can hide from either alone (keepalive heartbeats reset the read timeout; a partial-line
-        # trickle blocks in recv() before the in-loop check runs). A long-but-alive generation keeps
-        # emitting content, resetting the clock — no hard deadline.
+        # by an in-loop check (in `_sse_chunks`) AND a socket-shutdown watchdog (`_socket_watchdog`)
+        # — a stall can hide from either alone (keepalive heartbeats reset the read timeout; a
+        # partial-line trickle blocks in recv() before the in-loop check runs). A long-but-alive
+        # generation keeps emitting content, resetting the clock — no hard deadline.
         idle_limit = self.timeout
         last_progress, _killed, _stop_wd = _socket_watchdog(resp, idle_limit)
+        stall_msg = (f"LLM stream stalled — no new tokens for {idle_limit:.0f}s; "
+                     f"retrying on a fresh connection")
         try:
             try:
                 lines = iter(resp)              # SSE responses iterate line-by-line
             except TypeError:
                 lines = iter(())                # a non-iterable body (e.g. a test mock) -> read() below
-            while True:
-                try:
-                    raw = next(lines)
-                except StopIteration:
-                    break
-                except ValueError:
-                    # The watchdog called resp.close() while lines buffered in the BufferedReader were
-                    # still draining -> readline-of-closed-file. That IS the stall the watchdog fired
-                    # on; fall through to the `_killed` check (a TimeoutError _post retries) instead of
-                    # leaking a bare ValueError past _post's transient tuple and crashing the run.
-                    if _killed[0]:
-                        break
-                    raise
-                if time.monotonic() - last_progress[0] > idle_limit:
-                    raise TimeoutError(f"LLM stream stalled — no new tokens for {idle_limit:.0f}s; "
-                                       f"retrying on a fresh connection")
-                s = raw.decode("utf-8", "replace") if isinstance(raw, (bytes, bytearray)) else str(raw)
-                raw_lines.append(s)
-                line = s.strip()
-                if not line or not line.startswith("data:"):
-                    continue
-                got_sse = True
-                chunk = line[5:].strip()
-                if chunk == "[DONE]":
-                    break
-                try:
-                    obj = json.loads(chunk)
-                except ValueError:
-                    continue                    # keepalive / non-JSON heartbeat line
+            for obj in _sse_chunks(lines, last_progress, _killed, idle_limit, stall_msg, tail=tail):
                 if obj.get("usage"):
                     usage = obj["usage"]
                     last_progress[0] = time.monotonic()
@@ -507,12 +540,11 @@ class OpenAICompatibleClient:
         finally:
             _stop_wd()                          # stop the watchdog before we return / propagate
         if _killed[0]:                          # watchdog shut the socket -> a stall, not a real end;
-            raise TimeoutError(f"LLM stream stalled — no new tokens for {idle_limit:.0f}s; "
-                               f"retrying on a fresh connection")   # _post catches -> retry
+            raise TimeoutError(stall_msg)       # _post catches -> retry
         # Not actually an SSE stream (a non-streaming endpoint, or a test mock that returns one JSON
         # body): parse the whole body as a normal chat completion so streaming stays transparent.
-        if not got_sse and not content and not tcs:
-            blob = "".join(raw_lines)
+        if not tail.got_sse and not content and not tcs:
+            blob = "".join(tail.raw_lines)
             if not blob and hasattr(resp, "read"):
                 try:
                     blob = resp.read().decode("utf-8", "replace")
@@ -750,30 +782,10 @@ class OpenAICompatibleClient:
                             except OSError:
                                 pass
                         last_progress, _killed, _stop_wd = _socket_watchdog(resp, self.timeout)
+                        stall_msg = f"LLM stream stalled — no new tokens for {self.timeout:.0f}s"
                         try:
-                            lines = iter(resp)
-                            while True:
-                                try:
-                                    raw = next(lines)
-                                except StopIteration:
-                                    break
-                                except ValueError:
-                                    if _killed[0]:
-                                        break
-                                    raise
-                                if time.monotonic() - last_progress[0] > self.timeout:
-                                    raise TimeoutError(
-                                        f"LLM stream stalled — no new tokens for {self.timeout:.0f}s")
-                                line = raw.decode("utf-8", "replace").strip()
-                                if not line or not line.startswith("data:"):
-                                    continue
-                                chunk = line[5:].strip()
-                                if chunk == "[DONE]":
-                                    break
-                                try:
-                                    obj = json.loads(chunk)
-                                except ValueError:
-                                    continue
+                            for obj in _sse_chunks(iter(resp), last_progress, _killed,
+                                                   self.timeout, stall_msg):
                                 if obj.get("usage"):           # final usage chunk (include_usage)
                                     usage = obj["usage"]
                                     last_progress[0] = time.monotonic()
@@ -786,8 +798,7 @@ class OpenAICompatibleClient:
                         finally:
                             _stop_wd()
                         if _killed[0] and not pieces:   # watchdog killed a stalled, silent stream
-                            raise TimeoutError(
-                                f"LLM stream stalled — no new tokens for {self.timeout:.0f}s")
+                            raise TimeoutError(stall_msg)
                     break                        # streamed (or cleanly ended) -> done
                 except urllib.error.HTTPError as e:
                     if (e.code == 400 and self.reasoning and self._reasoning_ok

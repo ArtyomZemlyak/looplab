@@ -17,6 +17,7 @@ from typing import Optional
 from looplab.events import digest
 from looplab.core.models import NodeStatus, RunState
 from looplab.tools._base import fn_spec
+from looplab.tools._runcache import RunStateCache
 
 
 def _is_number(v: str) -> bool:
@@ -294,7 +295,8 @@ class SiblingRunTools:
         self.self_run_id = self_run_id
         self.task_id = ""
         self.max_chars = max_chars
-        self._cache: dict[str, tuple] = {}        # run_id -> (sig, RunState)
+        # Traversal-guarded, (size, mtime)-fingerprinted fold cache — shared with RunsTools.
+        self._runs = RunStateCache(self.run_root)
         self._reader = RunTools(max_chars=max_chars)
 
     # The agent loop calls this each turn; we use it to learn our OWN run_id + task_id from the live
@@ -344,52 +346,12 @@ class SiblingRunTools:
             return f"(tool error: {e})"
 
     # --- internals -----------------------------------------------------------
-    def _safe_dir(self, run_id: Optional[str]) -> Optional[Path]:
-        """Resolve <run_root>/<run_id>, with the same path-traversal guard as server._run_dir: the
-        directory must sit directly under run_root and carry an events.jsonl. Returns None otherwise."""
-        if not run_id:
-            return None
-        rd = (self.run_root / str(run_id)).resolve()
-        root = self.run_root.resolve()
-        if rd.parent != root:
-            return None
-        if not (rd / "events.jsonl").exists():
-            return None
-        return rd
-
-    @staticmethod
-    def _sig(rd: Path):
-        try:
-            s = (rd / "events.jsonl").stat()
-            return (s.st_size, int(s.st_mtime))
-        except OSError:
-            return (0, 0)
-
     def _state(self, run_id: Optional[str]) -> Optional[RunState]:
-        rd = self._safe_dir(run_id)
-        if rd is None:
-            return None
-        sig = self._sig(rd)
-        hit = self._cache.get(str(run_id))
-        if hit and hit[0] == sig:
-            return hit[1]
-        from looplab.events.eventstore import iter_jsonl
-        from looplab.core.models import Event
-        from looplab.events.replay import fold
-        try:
-            st = fold(Event(**o) for o in iter_jsonl(rd / "events.jsonl"))
-        except (OSError, ValueError, TypeError):
-            return None
-        self._cache[str(run_id)] = (sig, st)
-        return st
+        return self._runs.state(run_id)
 
     def _sibling_ids(self) -> list[str]:
         """Run ids under run_root, excluding self, restricted to the same task_id when we know ours."""
-        try:
-            cand = sorted(p.name for p in self.run_root.iterdir()
-                          if p.is_dir() and (p / "events.jsonl").exists())
-        except OSError:
-            return []
+        cand = self._runs.run_ids()
         out = []
         for rid in cand:
             if rid == self.self_run_id:
