@@ -16,6 +16,7 @@ from typing import Optional
 from looplab.core.models import Idea
 from looplab.core.parse import LLMClient
 from looplab.tools.edit_match import apply_search_replace
+from looplab.tools.patch import SurfacePolicy
 
 
 class RepoWriteTools:
@@ -106,15 +107,31 @@ class RepoWriteTools:
             return self._delete(p)
         return f"(unknown tool: {name})"
 
+    def _refusal(self, p: str, verb: str):
+        """Run the shared SurfacePolicy (tools/patch.py) over an already-canonicalized path and map
+        its reason codes onto THIS tool's historical refusal strings (byte-identical — the model
+        steers on them). `p` came through `_safe_rel`, which is this site's escape gate — hence
+        `check_escapes=False`: _safe_rel's rules differ from patch._escapes (it also strips `./`,
+        rejects `~`, and accepts a drive-letter path on POSIX). Protected matching is EXACT and
+        case-sensitive here (`protected_exact=True`) — the protect entries arrive pre-normalized
+        from RepoTask._protected_names — unlike the diff gate's case-insensitive globs. Prefixes
+        pass through VERBATIM (no rstrip); see SurfacePolicy's docstring. Returns None when the
+        write may proceed."""
+        reason = SurfacePolicy(self._surface, self._protected, self._prefixes,
+                               protected_exact=True, check_escapes=False).check(p)
+        if reason == SurfacePolicy.PROTECTED:
+            return f"(refused: {p} is protected — the operator owns the eval; you may not {verb} it)"
+        if reason is not None:
+            return f"(refused: {p} is outside your editable surface: {', '.join(self._surface)})"
+        return None
+
     def _write(self, p, args: dict) -> str:
-        from looplab.tools.patch import _in_surface
         if not p:
             return ("(refused: path must be REPO-RELATIVE and inside the repo — no absolute paths, "
                     "no `..`. Write the eval entrypoint, e.g. write_file path='test_looplab.py'.)")
-        if p in self._protected:
-            return f"(refused: {p} is protected — the operator owns the eval; you may not modify it)"
-        if not _in_surface(p, self._surface, self._prefixes):
-            return f"(refused: {p} is outside your editable surface: {', '.join(self._surface)})"
+        refusal = self._refusal(p, "modify")
+        if refusal:
+            return refusal
         content = args.get("content", "")
         self.files[p] = content
         if p in self.deleted:
@@ -122,14 +139,12 @@ class RepoWriteTools:
         return f"wrote {p} ({len(content)} bytes)"
 
     def _edit(self, p, args: dict) -> str:
-        from looplab.tools.patch import _in_surface
         if not p:
             return ("(refused: path must be REPO-RELATIVE and inside the repo — no absolute paths, "
                     "no `..`.)")
-        if p in self._protected:
-            return f"(refused: {p} is protected — the operator owns the eval; you may not modify it)"
-        if not _in_surface(p, self._surface, self._prefixes):
-            return f"(refused: {p} is outside your editable surface: {', '.join(self._surface)})"
+        refusal = self._refusal(p, "modify")
+        if refusal:
+            return refusal
         cur = self._current(p)
         if cur is None:
             return (f"(no such file to edit: {p} — it is neither staged this turn nor in the repo. "
@@ -147,17 +162,15 @@ class RepoWriteTools:
         return msg
 
     def _delete(self, p) -> str:
-        from looplab.tools.patch import _in_surface
         if not p:
             return ("(refused: path must be REPO-RELATIVE and inside the repo — no absolute paths, "
                     "no `..`.)")
         # SAME gates as write_file: a deletion must not remove a protected file (the operator's
         # eval/metric/grader) or reach outside the editable surface. Without these, delete_file
         # was a hole around the write-surface enforcement.
-        if p in self._protected:
-            return f"(refused: {p} is protected — the operator owns the eval; you may not delete it)"
-        if not _in_surface(p, self._surface, self._prefixes):
-            return f"(refused: {p} is outside your editable surface: {', '.join(self._surface)})"
+        refusal = self._refusal(p, "delete")
+        if refusal:
+            return refusal
         self.files.pop(p, None)
         if p not in self.deleted:
             self.deleted.append(p)

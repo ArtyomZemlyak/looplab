@@ -21,8 +21,9 @@ import pytest
 from tests.live import scenarios as S
 
 _GATE = bool(os.environ.get("LOOPLAB_LIVE_SCENARIOS")) and S.live_llm_reachable()
-pytestmark = pytest.mark.skipif(
-    not _GATE, reason="set LOOPLAB_LIVE_SCENARIOS=1 with a reachable LLM to run the live scenarios")
+# `live` marker: selection only (`-m "not live"`); the skipif stays the enforcement gate.
+pytestmark = [pytest.mark.live, pytest.mark.skipif(
+    not _GATE, reason="set LOOPLAB_LIVE_SCENARIOS=1 with a reachable LLM to run the live scenarios")]
 
 
 @pytest.mark.parametrize("sc", S.REGISTRY, ids=lambda s: s.name)

@@ -108,6 +108,68 @@ def _in_surface(p: str, allow: list[str], prefixes: list[str]) -> bool:
     return any(_match(pl, g) for g in globs)
 
 
+class SurfacePolicy:
+    """The write-gate trust boundary as ONE value object (BACKLOG §4 "SurfacePolicy"): may this
+    repo-relative path be edited? Combines the three checks the write paths used to re-implement
+    independently — escape (absolute / drive letter / `..`), the edit-surface allow globs, and
+    the protect-list — and `check()` returns a REASON CODE (None = editable), so each consumer
+    keeps its OWN user-visible refusal wording (those strings are per-site contracts).
+
+    The sites' semantics are deliberately NOT identical; the differences are explicit
+    constructor parameters — do not "simplify" them away:
+      * `surface=None` disables the surface check entirely (WriteTools gates containment via
+        resolved roots instead); an EMPTY list keeps diff-gate semantics (no allow-list =>
+        nothing is editable).
+      * `protected_exact=True` matches the protect-list by EXACT, case-SENSITIVE string
+        membership (RepoWriteTools' historical semantics — its protect entries are already
+        normalized workspace-relative names). The default is case-insensitive equality-or-glob
+        (`_ci`/`_match`) — the diff-gate/WriteTools semantics, which also catches an NTFS
+        case-variant of a protected file.
+      * `check_escapes=False` skips the escape test for a caller that already canonicalized the
+        path under its own rules (RepoWriteTools._safe_rel also strips `./`, rejects `~`, and —
+        unlike `_escapes` — accepts a drive-letter path on POSIX; re-checking here would change
+        what that gate accepts).
+      * `prefixes` are passed to `_in_surface` VERBATIM — the diff gate rstrips trailing
+        slashes before constructing the policy (as it always did); RepoWriteTools historically
+        does not, and with a trailing-slash prefix the two resolve the owning repo differently.
+
+    Check order is fixed escapes -> protected -> outside_surface: RepoWriteTools reports
+    'protected' over 'outside your surface' when both apply, and the diff gate only tests
+    None-vs-not-None, so this order preserves every site's behavior."""
+
+    ESCAPES = "escapes"
+    PROTECTED = "protected"
+    OUTSIDE_SURFACE = "outside_surface"
+
+    def __init__(self, surface: list[str] | None, protected=None, prefixes: list[str] | None = None,
+                 *, protected_exact: bool = False, check_escapes: bool = True):
+        self.surface = None if surface is None else list(surface)
+        self.prefixes = list(prefixes or [])
+        self.protected_exact = protected_exact
+        # Exact mode keeps the raw names (case-sensitive set membership); glob mode pre-folds to
+        # the case-insensitive/forward-slash canonical form once, like gate() always did.
+        self.protected = (set(protected or []) if protected_exact
+                          else [_ci(g) for g in (protected or [])])
+        self.check_escapes = check_escapes
+
+    def _is_protected(self, path: str) -> bool:
+        if self.protected_exact:
+            return path in self.protected
+        pc = _ci(path)
+        return any(pc == g or _match(pc, g) for g in self.protected)
+
+    def check(self, path: str) -> str | None:
+        """None if `path` is editable, else the first failing reason code
+        (ESCAPES | PROTECTED | OUTSIDE_SURFACE)."""
+        if self.check_escapes and _escapes(path):
+            return self.ESCAPES
+        if self._is_protected(path):
+            return self.PROTECTED
+        if self.surface is not None and not _in_surface(path, self.surface, self.prefixes):
+            return self.OUTSIDE_SURFACE
+        return None
+
+
 def gate(diff_text: str, allow: list[str], protect: list[str] | None = None,
          prefixes: list[str] | None = None) -> dict:
     """Check every target path against the allow-list (globs), the protect-list, and escape
@@ -116,13 +178,9 @@ def gate(diff_text: str, allow: list[str], protect: list[str] | None = None,
     — the agent must never edit the eval/grader/metric/adapter files, case-insensitively (the
     surface gate + NTFS are case-insensitive, so a case-variant must not slip through).
     `prefixes` (named multi-editable repo dirs) scopes each repo's surface to its own subdir."""
-    prot = [_ci(g) for g in (protect or [])]
-    pre = [x.rstrip("/") for x in (prefixes or [])]
+    policy = SurfacePolicy(allow, protect, [x.rstrip("/") for x in (prefixes or [])])
     paths = changed_paths(diff_text)
-    rejected = [p for p in paths
-                if _escapes(p)
-                or not _in_surface(p, allow, pre)
-                or any(_ci(p) == g or _match(_ci(p), g) for g in prot)]
+    rejected = [p for p in paths if policy.check(p) is not None]
     return {"ok": bool(paths) and not rejected, "paths": paths, "rejected": rejected}
 
 

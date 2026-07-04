@@ -274,7 +274,14 @@ class RepoTask(BaseModel):
     def _normp(p: str) -> str:
         """Canonicalize a protected path to match git-diff paths (forward slashes, no leading
         './') so exact-string membership in `_write_node_files` actually fires for operator
-        entries like './secret.py' or 'src\\secret.py'."""
+        entries like './secret.py' or 'src\\secret.py'.
+
+        Deliberately NOT `tools.patch.SurfacePolicy` (the write-gate value object): this is the
+        read-side *builder* of the protected-name list, not a path gate — it normalizes operator
+        input and never rejects, and its rules differ from the write gates' canonicalizers
+        (RepoWriteTools._safe_rel also strips whitespace and rejects `~`/`..`; patch._escapes
+        rejects rather than normalizes). The names built here are what SurfacePolicy consumers
+        then match against."""
         p = str(p).replace("\\", "/")
         while p.startswith("./"):
             p = p[2:]

@@ -27,8 +27,10 @@ def _ollama_has(model: str) -> bool:
         return False
 
 
-pytestmark = pytest.mark.skipif(not _ollama_has(MODEL),
-                                reason=f"Ollama with {MODEL} not reachable")
+# `live` marker: selection only (`-m "not live"`); the skipif stays the enforcement gate.
+pytestmark = [pytest.mark.live,
+              pytest.mark.skipif(not _ollama_has(MODEL),
+                                 reason=f"Ollama with {MODEL} not reachable")]
 
 ROOT = __import__("pathlib").Path(__file__).resolve().parents[1]
 

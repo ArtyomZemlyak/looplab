@@ -21,27 +21,29 @@ import anyio
 import orjson
 
 from looplab.tools.agents_md import generate_agents_md
-from looplab.trust.cv import cv_summary
 from looplab.events.eventstore import EventStore
 from looplab.events.types import (
-    EV_ABLATE, EV_AGENT_DECISION, EV_AGENT_VALIDATED, EV_APPROVAL_REQUESTED,
-    EV_BEST_CONFIRMED, EV_CONFIRM_DONE, EV_CONFIRM_EVAL, EV_DATA_LEAKAGE,
+    EV_AGENT_DECISION, EV_AGENT_VALIDATED, EV_APPROVAL_REQUESTED,
+    EV_DATA_LEAKAGE,
     EV_DATA_PROFILED, EV_DATA_PROVENANCE, EV_DEPS_INSTALLED,
-    EV_DRIFT_UNAVAILABLE, EV_FORK_DONE, EV_HINT, EV_HOLDOUT_EVALUATED, EV_HOST_GRADING,
+    EV_DRIFT_UNAVAILABLE, EV_FORK_DONE, EV_HINT, EV_HOST_GRADING,
     EV_HYPOTHESIS_ADDED, EV_INJECT_DONE, EV_INJECT_FAILED,
-    EV_NODE_ABORT, EV_NODE_CONFIRMED, EV_NODE_CREATED,
+    EV_NODE_ABORT, EV_NODE_CREATED,
     EV_NODE_EVALUATED, EV_NODE_FAILED, EV_NODE_REPAIRED, EV_NOVELTY_REJECTED,
     EV_POLICY_DECISION, EV_PROXY_SCORED, EV_REPORT_GENERATED,
     EV_RESEARCH_COMPLETED, EV_REWARD_HACK_SUSPECTED, EV_RUN_FINISHED,
     EV_RUN_SETUP_FINISHED, EV_RUN_SETUP_STARTED, EV_RUN_STARTED, EV_RUNG_PROMOTED,
     EV_SETUP_FINISHED, EV_SETUP_STARTED, EV_SETUP_STEP, EV_SPEC_APPROVAL_REQUESTED,
     EV_SPEC_APPROVED, EV_SPEC_DRIFT, EV_SPEC_PROPOSED, EV_STRATEGY_DECISION,
-    EV_WORKSPACE_CHANGED, EV_WORKSPACE_SEEDED)
-from looplab.trust.gate import one_se_better
+    EV_WORKSPACE_CHANGED)
 from looplab.trust.leakage import target_leakage, temporal_leakage, train_test_contamination
+from looplab.engine.ablation import AblationMixin
+from looplab.engine.confirm_phase import ConfirmPhaseMixin
 from looplab.engine.finalize import finalize_run
+from looplab.engine.holdout import HoldoutGrader
 from looplab.engine.lessons import LessonMemory
 from looplab.engine.options import EngineOptions
+from looplab.engine.workspace import WorkspaceSeeder
 # Pure triage/fingerprint helpers extracted to looplab/engine/triage.py, imported back under
 # their original names so `looplab.engine.orchestrator._normalize_error_sig`, `._holdout_indices`
 # (& friends) stay importable — tests import them from this module path.
@@ -72,8 +74,16 @@ from looplab.core.tracing import JsonlSpanExporter, Tracer
 # `options`, and the ~100 existing keyword call sites keep their exact pre-options behavior.
 _UNSET = object()
 
+# Sentinel for `_emit_node_created`'s optional payload keys: distinguishes "key not passed"
+# (the key is OMITTED from the event, matching each call site's historical payload shape)
+# from a REAL value, including None (e.g. `research_origin=None` must still be emitted).
+_OMIT = object()
 
-class Engine:
+
+# The confirm phase (engine/confirm_phase.py) and ablation (engine/ablation.py) clusters are
+# MIXINS — pure file-level moves inherited unchanged, so every `self._confirm_phase(...)` /
+# `self._ablate(...)` call site (and every test poking those names on Engine) is untouched.
+class Engine(ConfirmPhaseMixin, AblationMixin):
     def __init__(
         self,
         run_dir: str | os.PathLike,
@@ -434,6 +444,14 @@ class Engine:
         # FS or the event log. Works for ANY solution.py-path task, not just MLEBench.
         hg = getattr(task, "host_grader", None)
         self._host_grader: Optional[dict] = hg() if callable(hg) else None
+        # Host-grading/holdout cluster (looplab/engine/holdout.py) and workspace-seeding cluster
+        # (looplab/engine/workspace.py). Like `self.lessons` above, the Engine keeps thin
+        # delegators under the original `_`-names (tests + internal callers use them); both
+        # wrappers read engine state live through their engine handle, so construction order
+        # only matters relative to the first CALL (`_build_holdout_idx` just below needs
+        # `self.holdout`; the first workspace call is in run()).
+        self.holdout = HoldoutGrader(self)
+        self.workspace = WorkspaceSeeder(self)
         # D1 holdout partition: a deterministic subset of the host-held labels reserved as the
         # final unseen signal. Every search/confirm eval is scored on the COMPLEMENT only; the
         # holdout rows are touched exactly once, at finish, to re-score the val-top-k. The
@@ -461,66 +479,20 @@ class Engine:
                 "RepoTask has no eval and no onboarder: set `onboard: true` with "
                 "backend=llm (so an onboarder is built), or provide `eval` in the task.")
 
+    # --------------------- workspace materialization (extracted to engine/workspace.py)
+    # The workspace seeding / materialization cluster lives in looplab/engine/workspace.py
+    # (`WorkspaceSeeder`, constructed as `self.workspace` in __init__). These thin delegators
+    # keep the ORIGINAL method names on the Engine — tests call e.g. `engine._write_node_files`
+    # / `engine._seed_workspace` directly — and WorkspaceSeeder routes its internal cross-calls
+    # back through them, so an instance-level monkeypatch intercepts every path.
     def _write_assets(self, workdir) -> None:
-        if not self._assets:
-            return
-        wd = Path(workdir)
-        wd.mkdir(parents=True, exist_ok=True)
-        for name, content in self._assets.items():
-            (wd / name).write_text(content, encoding="utf-8")
+        return self.workspace.write_assets(workdir)
 
     def _write_node_files(self, node, workdir) -> None:
-        """Materialize a multi-file solution's helper files (ADR-7 patch-gated agent)
-        into the eval workdir. Skipped: `solution.py` (the sandbox writes it from
-        `node.code`) and any **task-asset name** — an agent must never be able to
-        overwrite a task-owned file (e.g. the private `grader.py` answer key) via an
-        in-surface `*.py` edit. Paths are surface-gated (no escapes) by the developer; we
-        re-check defensively. Call BEFORE `_write_assets` so task assets always win."""
-        files = getattr(node, "files", None) or {}
-        deleted = getattr(node, "deleted", None) or []
-        if not files and not deleted:
-            return
-        # Case-insensitive protected match (defense-in-depth): the surface gate uses fnmatch and
-        # NTFS is case-insensitive, so a case-variant name (Ttrain.PY) would otherwise dodge the
-        # freeze and overwrite the real metric/grader/eval file on Windows.
-        import os as _os
-        protected = {_os.path.normcase(n) for n in
-                     ("solution.py", *self._assets, *self._repo_spec.get("protected_names", []))}
-        wd = Path(workdir).resolve()
-        wd.mkdir(parents=True, exist_ok=True)
-        def _protected_after_resolve(target) -> bool:
-            # Check the RESOLVED relative path against the protected set, not the raw name: a name like
-            # "sub/../grader.py" passes a raw-string compare yet resolves to wd/grader.py and would
-            # overwrite the protected grader otherwise.
-            try:
-                rel = target.relative_to(wd).as_posix()
-            except ValueError:
-                return False
-            return _os.path.normcase(rel) in protected
-        for name, content in files.items():
-            if _os.path.normcase(str(name).replace("\\", "/")) in protected:
-                continue
-            target = (wd / name).resolve()
-            if wd not in target.parents:        # defense-in-depth: never escape workdir
-                continue
-            if _protected_after_resolve(target):
-                continue
-            target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_text(content, encoding="utf-8")
-        # Apply accepted deletions (the agent removed an in-surface file). Skip protected names
-        # and never escape the workdir; missing is fine (idempotent).
-        for name in deleted:
-            if _os.path.normcase(str(name).replace("\\", "/")) in protected:
-                continue
-            target = (wd / name).resolve()
-            if wd not in target.parents:
-                continue
-            if _protected_after_resolve(target):
-                continue
-            try:
-                target.unlink(missing_ok=True)
-            except OSError:
-                pass
+        return self.workspace.write_node_files(node, workdir)
+
+    def _materialize(self, node, workdir) -> None:
+        return self.workspace.materialize(node, workdir)
 
     # ------------------------------------------------------------ loop control
     async def run(self) -> RunState:
@@ -1681,6 +1653,25 @@ class Engine:
             return impl_from(idea, parent)
         return self.developer.implement(idea)
 
+    def _emit_node_created(self, *, node_id: int, parent_ids: list, operator: str, idea: dict,
+                           code: str, files: dict, deleted=_OMIT, research_origin=_OMIT,
+                           source=_OMIT, origin=_OMIT) -> None:
+        """The single `node_created` emitter for all four creation sites (`_create_node`,
+        `_create_injected_node`, `_ablate`, `_ablate_code`). Optional keys default to the
+        `_OMIT` sentinel and are LEFT OUT of the payload when not passed — never None-filled —
+        so every site emits EXACTLY its historical payload shape (key set AND key order),
+        byte-identical event data. Known quirk kept for replay compatibility: the two ablate
+        sites emit NO `deleted` key at all (`_create_node` always emits it, `_create_injected_node`
+        emits `deleted` + `source` + `origin` but no `research_origin`) — the fold reads every
+        optional key with a default, so do not "normalize" the shapes here."""
+        data = {"node_id": node_id, "parent_ids": parent_ids, "operator": operator,
+                "idea": idea, "code": code, "files": files}
+        for k, v in (("deleted", deleted), ("research_origin", research_origin),
+                     ("source", source), ("origin", origin)):
+            if v is not _OMIT:
+                data[k] = v
+        self.store.append(EV_NODE_CREATED, data)
+
     def _create_node(self, action: dict) -> None:
         state = fold(self.store.read_all())
         node_id = max(state.nodes, default=-1) + 1  # monotonic across the whole run -> unique
@@ -1753,18 +1744,15 @@ class Engine:
                 _ra = _m.get("at_node")
                 if _ra is not None and _ra <= node_id < _ra + 2:
                     research_origin = {"at_node": _ra, "trigger": _m.get("trigger")}
-            self.store.append(
-                EV_NODE_CREATED,
-                {
-                    "node_id": node_id,
-                    "parent_ids": parents,
-                    "operator": idea.operator,
-                    "idea": idea.model_dump(mode="json"),
-                    "code": code,
-                    "files": getattr(self.developer, "last_files", {}) or {},
-                    "deleted": getattr(self.developer, "last_deleted", []) or [],
-                    "research_origin": research_origin,
-                },
+            self._emit_node_created(
+                node_id=node_id,
+                parent_ids=parents,
+                operator=idea.operator,
+                idea=idea.model_dump(mode="json"),
+                code=code,
+                files=getattr(self.developer, "last_files", {}) or {},
+                deleted=getattr(self.developer, "last_deleted", []) or [],
+                research_origin=research_origin,
             )
         self._emit_agent_report(node_id)
 
@@ -1819,28 +1807,25 @@ class Engine:
                     # base) — hand the parent's solution to a parent-aware developer.
                     _pnode = state.nodes.get(parents[0]) if parents else None
                     code = self._implement(idea, _pnode)
-            self.store.append(
-                EV_NODE_CREATED,
-                {
-                    "node_id": node_id,
-                    "parent_ids": parents,
-                    "operator": idea.operator,
-                    "idea": idea.model_dump(mode="json"),
-                    "code": code,
-                    # Honour explicit files/deleted on the request (a cross-run `import` ships the
-                    # sibling's full multi-file solution); else use the Developer's last build, and
-                    # only when the Developer actually implemented (no ready-made code was supplied).
-                    "files": (req.get("files")
-                              or ({} if req.get("code") else getattr(self.developer, "last_files", {}))) or {},
-                    "deleted": req.get("deleted") or [],
-                    "source": "manual",
-                    # Cross-run provenance: a DICT when this inject seeded from a sibling run's
-                    # experiment (an `import` action), else None. Coerce defensively — a non-dict
-                    # origin (a hand-authored/API inject that passed a label string) would make the
-                    # folded Node fail validation and silently vanish, so the inject gate would keep
-                    # re-creating the SAME node id forever.
-                    "origin": req.get("origin") if isinstance(req.get("origin"), dict) else None,
-                },
+            self._emit_node_created(
+                node_id=node_id,
+                parent_ids=parents,
+                operator=idea.operator,
+                idea=idea.model_dump(mode="json"),
+                code=code,
+                # Honour explicit files/deleted on the request (a cross-run `import` ships the
+                # sibling's full multi-file solution); else use the Developer's last build, and
+                # only when the Developer actually implemented (no ready-made code was supplied).
+                files=(req.get("files")
+                       or ({} if req.get("code") else getattr(self.developer, "last_files", {}))) or {},
+                deleted=req.get("deleted") or [],
+                source="manual",
+                # Cross-run provenance: a DICT when this inject seeded from a sibling run's
+                # experiment (an `import` action), else None. Coerce defensively — a non-dict
+                # origin (a hand-authored/API inject that passed a label string) would make the
+                # folded Node fail validation and silently vanish, so the inject gate would keep
+                # re-creating the SAME node id forever.
+                origin=req.get("origin") if isinstance(req.get("origin"), dict) else None,
             )
         if not req.get("code"):
             self._emit_agent_report(node_id)
@@ -1861,129 +1846,18 @@ class Engine:
         self._spec_activated = True
 
     # --------------------------------------------------------- workspace seeding
+    # (extracted to engine/workspace.py — see the delegator block after __init__)
     def _workspace_fingerprint(self) -> dict:
-        """A per-source fingerprint of the editable repos + mounted data (item #4): the git
-        HEAD SHA when the source is a git repo, else a cheap content signature over
-        (relpath, size, mtime). Used to detect that the operator's source changed between a
-        run's start and a resume. {} for non-repo tasks."""
-        if not self._repo_spec:
-            return {}
-        srcs: dict[str, str] = {}
-        # Editable repos are the drift-detection TARGET (the agent edits them, the search
-        # continues over them) and are small code trees -> deep content fingerprint. Data and
-        # reference mounts are typically large + immutable inputs -> cheap shallow signature, so
-        # the fingerprint never walks a multi-GB dataset on every (re)start.
-        for ed in self._repo_spec.get("editables", []):
-            srcs[f"editable:{ed['name']}"] = _dir_fingerprint(ed["path"])
-        for name, src in self._repo_spec.get("data", {}).items():
-            srcs[f"data:{name}"] = _shallow_fingerprint(src)
-        for ref in self._repo_spec.get("references", []):
-            if ref.get("mount"):
-                srcs[f"ref:{ref['name']}"] = _shallow_fingerprint(ref["path"])
-        return srcs
+        return self.workspace.workspace_fingerprint()
 
     def _seed_workspace(self, workdir) -> None:
-        """RepoTask (ADR-7): materialize the editable repo tree(s) into the eval workdir, plus
-        any runtime-mounted reference repos and data files. Phase 4: each editable repo is
-        mounted at its own subdir (name=".") -> workspace root). The agent's `Node.files` edits
-        are applied on top by `_write_node_files`; task assets win last. No-op for non-repo
-        tasks."""
-        if not self._repo_spec:
-            return
-        import shutil
-        wd = Path(workdir)
-        wd.mkdir(parents=True, exist_ok=True)
-        ignore = shutil.ignore_patterns(".git", "__pycache__", "*.pyc", ".venv", "node_modules")
-        sp = (self.tracer.span("seed_workspace") if self.tracer is not None
-              else __import__("contextlib").nullcontext(None))
-        with sp as _h:
-            seeded: list[str] = []
-            for ed in self._repo_spec.get("editables", []):
-                dst = wd if ed["name"] in (".", "") else wd / ed["name"]
-                mode = (ed.get("seed_mode") or self._seed_mode or "auto")
-                n = self._seed_repo_tree(ed["path"], dst, ignore, mode)
-                seeded.append(f"{ed['name']}[{mode}]:{'copytree' if n < 0 else str(n)+' tracked'}")
-            for ref in self._repo_spec.get("references", []):
-                if ref.get("mount"):             # runtime dependency -> symlink read-only input
-                    self._link_input(ref["path"], wd / ref["name"])
-                    seeded.append(f"ref:{ref['name']}->link")
-            for name, src in self._repo_spec.get("data", {}).items():
-                self._link_input(src, wd / name)
-                seeded.append(f"data:{name}->link")
-            if _h is not None:
-                _h.set_many(materialized=", ".join(seeded))
-            # Observability: surface WHAT got materialized into this node's workdir (the "data setup"
-            # step) in the activity feed — which editable trees were seeded (tracked vs full copy) and
-            # which data/reference inputs were mounted. node_id parsed from the workdir name.
-            try:
-                nid = int(str(wd.name).split("_")[-1])
-            except (ValueError, IndexError):
-                nid = None
-            self.store.append(EV_WORKSPACE_SEEDED, {"node_id": nid, "materialized": seeded})
+        return self.workspace.seed_workspace(workdir)
 
     def _seed_repo_tree(self, src, dst, ignore, mode: str = "auto") -> int:
-        """Materialize an editable repo's *source* into the node workdir under a seeding `mode`:
-        - "auto" (default) / "tracked": copy the git-TRACKED files (the real code surface — fast,
-          deterministic) so a working tree bloated with untracked artifacts (model checkpoints,
-          datasets — often many GB) is NOT deep-copied into every node. "auto" silently falls back
-          to a full copy when `src` is not a git repo; "tracked" also falls back (there's nothing
-          else to copy) but is the explicit "code only" intent.
-        - "all": force a full recursive copytree (legacy behavior) — use for small repos or when
-          untracked files are needed at eval time.
-        Returns the number of tracked files copied, or -1 when a full copytree was used."""
-        import shutil
-        import subprocess
-        src = Path(src); dst = Path(dst)
-        tracked = None
-        if mode != "all":
-            # Ask git directly (no `.git`-at-root check): the editable repo is often a SUBDIR of a
-            # larger git repo whose `.git` lives in a parent, so `(src/'.git').exists()` is False even
-            # though `git -C src ls-files` correctly lists the files tracked under src. Use it whenever
-            # git returns a non-empty tracked set; otherwise (non-git / nothing tracked) fall back.
-            try:
-                out = subprocess.run(["git", "-C", str(src), "ls-files", "-z"],
-                                     capture_output=True, text=True, timeout=120)
-                if out.returncode == 0:
-                    files = [p for p in out.stdout.split("\0") if p]
-                    if files:
-                        tracked = files
-            except Exception:
-                tracked = None                   # git missing / not a repo -> copytree fallback
-        if tracked is None:
-            shutil.copytree(src, dst, dirs_exist_ok=True, ignore=ignore)
-            return -1
-        dst.mkdir(parents=True, exist_ok=True)
-        n = 0
-        for rel in tracked:
-            s = src / rel
-            if s.is_dir() or not s.exists():     # submodule dir / deleted-but-tracked path
-                continue
-            d = dst / rel
-            d.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(s, d)
-            n += 1
-        return n
+        return self.workspace.seed_repo_tree(src, dst, ignore, mode)
 
     def _link_input(self, src, dst) -> None:
-        """Mount a large, read-only task input (dataset / reference repo) into the node workdir as a
-        SYMLINK rather than a deep copy: these are immutable inputs the eval reads, not the agent's
-        edit target, so per-node copies just burn wall-clock + disk (acute on an S3-backed FUSE
-        mount). Idempotent (resume / re-seed); falls back to a copy if the symlink can't be made."""
-        import os as _os
-        import shutil
-        src = Path(src); dst = Path(dst)
-        if dst.is_symlink() or dst.exists():
-            return
-        dst.parent.mkdir(parents=True, exist_ok=True)
-        try:
-            _os.symlink(src, dst, target_is_directory=src.is_dir())
-            return
-        except OSError:
-            pass
-        if src.is_dir():
-            shutil.copytree(src, dst, dirs_exist_ok=True)
-        elif src.is_file():
-            shutil.copy2(src, dst)
+        return self.workspace.link_input(src, dst)
 
     # ------------------------------------------------------------- eval dispatch
     def _agent_may(self, role: str, setting: str) -> bool:
@@ -2029,26 +1903,8 @@ class Engine:
                                + (err or out or "")[-500:])
 
     def _sandbox_cwd(self, workdir, cwd_spec) -> str:
-        """Resolve the eval `cwd` against the node's sandbox workdir. A relative cwd joins the
-        workdir (the conventional case). An ABSOLUTE cwd that points inside an editable repo's
-        *source* is remapped onto the node workdir, so the eval runs in the sandboxed copy (with
-        the agent's edits + the seeded tree) instead of the shared original repo — `Path(wd)/'/abs'`
-        would otherwise collapse to '/abs', silently bypassing the sandbox. An absolute cwd that is
-        not under any editable source is trusted as given (e.g. an external tool dir)."""
-        wd = Path(workdir).resolve()
-        p = Path(cwd_spec)
-        if not p.is_absolute():
-            return str((wd / cwd_spec).resolve())
-        ap = p.resolve()
-        for ed in (self._repo_spec or {}).get("editables", []):
-            src = Path(ed["path"]).resolve()
-            base = wd if ed["name"] in (".", "") else wd / ed["name"]
-            try:
-                rel = ap.relative_to(src)
-            except ValueError:
-                continue
-            return str((base / rel).resolve())
-        return str(ap)
+        # extracted to engine/workspace.py — see the delegator block after __init__
+        return self.workspace.sandbox_cwd(workdir, cwd_spec)
 
     def _run_eval(self, node, workdir, env=None, profile=None, cancel=None):
         """Eval dispatcher: RepoTask runs the operator's command + reads its metric;
@@ -2140,154 +1996,36 @@ class Engine:
         if extra:
             res.extra_metrics = {**(res.extra_metrics or {}), **extra}
 
+    # ---------------------- host grading / holdout (extracted to engine/holdout.py)
+    # The host-grading + D1 holdout cluster lives in looplab/engine/holdout.py
+    # (`HoldoutGrader`, constructed as `self.holdout` in __init__). These thin delegators keep
+    # the ORIGINAL method names on the Engine — internal callers (_run_eval / run() / the
+    # critic seam) use them, and HoldoutGrader routes its internal cross-calls back through
+    # them, so an instance-level monkeypatch intercepts every path. The holdout-owned MUTABLE
+    # state (`_holdout_idx`, `_holdout_fraction`, `_holdout_select`, `_holdout_top_k`)
+    # deliberately stays on the Engine: __init__ and run()'s resume block assign it directly
+    # (and tests read `eng._holdout_idx`), so plain attributes are lower churn than
+    # lessons-style properties.
     def _graded_output_name(self) -> Optional[str]:
-        """The filename the candidate must write for out-of-process grading (the file
-        `_apply_host_grade` scores), or None when grading is in-workdir. Single source of truth
-        for the host-grader output name so the host-grading audit event and the critic's
-        submission-output check resolve it identically and can't drift."""
-        hg = self._host_grader
-        if not hg:
-            return None
-        # Mirror `_apply_host_grade` EXACTLY so the name can't drift: real MLE-bench scores the
-        # `submission` file; every other host grader scores the `predictions` file.
-        if hg.get("kind") == "mlebench":
-            return hg.get("submission", "submission.csv")
-        return hg.get("predictions", "predictions.json")
+        return self.holdout.graded_output_name()
 
     def _apply_host_grade(self, res, workdir):
-        """B1+ out-of-process grading: read the candidate's predictions file from its workdir and score
-        it on the HOST against the held-out labels (held in engine memory, never on the candidate FS).
-        Overrides `res.metric`; missing/malformed predictions -> no metric (the node fails, so a
-        candidate that doesn't actually produce predictions can't pass)."""
-        import json as _json
-        from looplab.runtime.command_eval import host_score
-        g = self._host_grader
-        # Real MLE-bench: the candidate writes submission.csv; mle-bench's REAL grader scores it
-        # out-of-process against private/test.csv answers (in the mle-bench data dir, never copied
-        # into the candidate workdir). The official score replaces any self-report; the medal/
-        # above-median report rides along in extra_metrics for the trust panel + final report.
-        if g.get("kind") == "mlebench":
-            from looplab.adapters.mlebench_grade import grade_in_subprocess
-            # Resolve so the grader subprocess (run from the repo root) reads the submission from the
-            # node workdir regardless of whether run_dir was relative.
-            sub = (Path(workdir) / g.get("submission", "submission.csv")).resolve()
-            metric, report = (None, None)
-            if sub.is_file():
-                metric, report = grade_in_subprocess(
-                    g["competition"], sub, g.get("data_dir"),
-                    timeout=float(g.get("timeout", 300.0)))
-            res.metric = metric
-            # The official medal/above-median report is a STRUCTURED dict, not a scalar — it must NOT
-            # go into extra_metrics (typed dict[str, float]; the UI treats each value as a numeric
-            # Pareto objective). Persist it as a per-node artifact instead: files-as-truth, inspectable.
-            if report is not None:
-                try:
-                    (Path(workdir) / "mlebench_report.json").write_text(
-                        _json.dumps(report), encoding="utf-8")
-                except OSError:
-                    pass
-            return res
-        preds_path = Path(workdir) / g.get("predictions", "predictions.json")
-        m = None
-        if preds_path.is_file():
-            from looplab.runtime.sandbox import _to_float
-            try:
-                preds = _json.loads(preds_path.read_text(encoding="utf-8-sig", errors="replace"))
-                # D1 holdout: when a holdout partition is reserved, the SEARCH signal is the score
-                # on the complement rows only — the holdout rows are scored exactly once, at
-                # finish, for the val-top-k (see _holdout_phase). No partition => legacy full score.
-                if self._holdout_idx:
-                    m = self._host_score_split(preds, g, holdout=False)
-                else:
-                    # .get (not g["labels"]): a host_grader() dict missing labels yields metric None
-                    # (node fails) rather than an uncaught KeyError that would crash the eval worker.
-                    # _to_float: a non-finite (NaN/Inf) host score reads as None so an untrusted candidate
-                    # can't self-elect champion via a crafted prediction (mirrors command_eval/sweep paths).
-                    m = _to_float(host_score(g.get("scorer", "rmse"), preds, g.get("labels"), key=g.get("key")))
-            except (ValueError, OSError):
-                m = None
-        res.metric = m
-        return res
+        return self.holdout.apply_host_grade(res, workdir)
 
     def _host_score_split(self, preds, g: dict, *, holdout: bool) -> Optional[float]:
-        """D1: score predictions on ONE side of the holdout partition — the search side
-        (complement) for every regular/confirm eval, the holdout side once at finish. Length
-        mismatch or an empty side yields None (the node fails / gets no holdout metric), the
-        same contract as host_score itself."""
-        from looplab.runtime.command_eval import _LABEL_KEYS, _PRED_KEYS, _as_list, host_score
-        from looplab.runtime.sandbox import _to_float
-        yp = _as_list(preds, g.get("key"), _PRED_KEYS)
-        yt = _as_list(g.get("labels"), g.get("key"), _LABEL_KEYS)
-        if not isinstance(yp, list) or not isinstance(yt, list) or len(yp) != len(yt):
-            return None
-        keep = (lambda i: i in self._holdout_idx) if holdout else \
-               (lambda i: i not in self._holdout_idx)
-        yp2 = [v for i, v in enumerate(yp) if keep(i)]
-        yt2 = [v for i, v in enumerate(yt) if keep(i)]
-        if not yt2:
-            return None
-        return _to_float(host_score(g.get("scorer", "rmse"), yp2, yt2))
+        return self.holdout.host_score_split(preds, g, holdout=holdout)
 
     def _build_holdout_idx(self, fraction: float) -> frozenset:
-        """D1: the reserved holdout partition for a given fraction, or empty when holdout doesn't
-        apply (no host grader, real MLE-bench, non-list labels, or fraction<=0)."""
-        if (self._host_grader is None or self._host_grader.get("kind") == "mlebench"
-                or float(fraction) <= 0):
-            return frozenset()
-        from looplab.runtime.command_eval import _LABEL_KEYS, _as_list
-        yt = _as_list(self._host_grader.get("labels"), self._host_grader.get("key"), _LABEL_KEYS)
-        if isinstance(yt, list) and len(yt) >= 2:
-            return _holdout_indices(len(yt), float(fraction))
-        return frozenset()
+        return self.holdout.build_holdout_idx(fraction)
 
     def _holdout_topk(self, state: RunState) -> list[int]:
-        """The val-leaders that get a holdout evaluation: top-k feasible by the robust search
-        metric (confirmed mean when the confirm phase ran, else the single metric). EXCLUDES
-        trust-gate-flagged nodes under gate/block — exactly as fold's holdout pick does — so a
-        flagged node can't consume a holdout slot the legitimate runner-up needs (else, under
-        `gate`, the winner is flagged, fold drops it from the holdout pool, and no clean node ever
-        received a holdout eval → the discipline silently no-ops)."""
-        from looplab.events.replay import flagged_node_ids
-        flagged = flagged_node_ids(state)
-
-        def _key(n):
-            return ((n.confirmed_mean if n.confirmed_mean is not None else n.metric), n.id)
-        pool = sorted((n for n in state.feasible_nodes() if n.id not in flagged),
-                      key=_key, reverse=(state.direction == "max"))
-        return [n.id for n in pool[: self._holdout_top_k]]
+        return self.holdout.holdout_topk(state)
 
     def _holdout_pending(self, state: RunState) -> bool:
-        if not (self._holdout_idx and self._host_grader is not None):
-            return False
-        return any(nid not in state.holdout_evaluated_ids for nid in self._holdout_topk(state))
+        return self.holdout.holdout_pending(state)
 
     async def _holdout_phase(self, state: RunState) -> None:
-        """D1 holdout-gated promotion: re-score the val-top-k's EXISTING predictions on the
-        reserved holdout partition (no re-training — free), emit `holdout_evaluated` per node.
-        The fold then (a) surfaces the val-holdout generalization gap in the Trust panel and
-        (b) under holdout_select picks the champion by the unseen signal among these leaders.
-        Replay/resume-safe: gated per node on holdout_evaluated_ids; an event is emitted even
-        when the predictions file is gone (metric None) so the gate always closes."""
-        import json as _json
-        g = self._host_grader
-        for nid in self._holdout_topk(state):
-            if nid in state.holdout_evaluated_ids:
-                continue
-            n = state.nodes[nid]
-            preds = None
-            p = self.run_dir / "nodes" / f"node_{nid}" / g.get("predictions", "predictions.json")
-            try:
-                preds = _json.loads(p.read_text(encoding="utf-8-sig", errors="replace"))
-            except (OSError, ValueError):
-                preds = None
-            m = self._host_score_split(preds, g, holdout=True) if preds is not None else None
-            gap = None
-            if m is not None and n.metric is not None:
-                gap = (n.metric - m) if state.direction == "max" else (m - n.metric)
-            async with self._write_lock:
-                self.store.append(EV_HOLDOUT_EVALUATED, {
-                    "node_id": nid, "metric": m, "gap": gap,
-                    "n_holdout": len(self._holdout_idx)})
+        return await self.holdout.holdout_phase(state)
 
     def _emit_agent_report(self, node_id: int) -> None:
         """External-agent audit (ADR-7): if the Developer validated its output (a
@@ -2342,9 +2080,7 @@ class Engine:
                     if skip:
                         return
             workdir = self.run_dir / "nodes" / f"node_{node_id}"
-            self._seed_workspace(workdir)           # RepoTask: editable repo tree (ADR-7) …
-            self._write_node_files(node, workdir)   # … agent edits on top …
-            self._write_assets(workdir)             # … task assets win any name collision
+            self._materialize(node, workdir)        # seed tree -> node edits -> task assets
             # Hybrid crash repair: each attempt runs the eval (with the mid-eval abort watcher) and,
             # if it CRASHES, the agent triages it and may repair the code IN PLACE and re-run — all
             # within this one node (no new tree node, no max_nodes spent). At most
@@ -2580,253 +2316,12 @@ class Engine:
         return sigs
 
     # ------------------------------------------------------------------- confirm
-    @staticmethod
-    def _already_confirmed(state: RunState) -> bool:
-        return state.confirmed_done  # gated on completion, not on partial progress
-
-    async def _confirm_phase(self, state: RunState) -> None:
-        """Re-run the top-k evaluated nodes under `confirm_seeds` seeds. Selection picks
-        the robust winner (best confirmed MEAN), demoting any seed-lucky leader; the
-        variance gate records whether that demotion is statistically significant.
-
-        Resume-safe: nodes already confirmed (from an earlier crashed attempt) are
-        reused, and a `best_confirmed` event is ALWAYS emitted to mark completion — so a
-        confirm pass where every seed run fails can't loop forever."""
-        # Only confirm FEASIBLE leaders (#5): spending the expensive full-profile seed budget
-        # on a constraint-violating node is wasted, and it must never be promoted to best.
-        evaluated = sorted(state.feasible_nodes(), key=lambda n: (n.metric, n.id),
-                           reverse=(state.direction == "max"))
-        topk = evaluated[: self.confirm_top_k]
-        if not topk:
-            async with self._write_lock:
-                self.store.append(EV_BEST_CONFIRMED, {"node_id": None, "significant": False})
-            return
-
-        summaries: list[dict] = []
-        for nd in topk:
-            if nd.confirmed_mean is not None:  # reuse a prior (crashed) attempt's result
-                # Use the REAL seed count from that attempt, not confirm_seeds — some
-                # seeds may have failed, and inflating n shrinks the SE in the variance
-                # gate, overstating significance.
-                summaries.append({"node_id": nd.id, "mean": nd.confirmed_mean,
-                                  "std": nd.confirmed_std or 0.0,
-                                  "n": nd.confirmed_seeds or self.confirm_seeds})
-                continue
-            # Per-seed resume (#0): reuse seeds already run in a prior (crashed) attempt instead
-            # of re-executing every expensive full-profile seed. `done` maps seed -> metric|None.
-            done = state.confirm_seed_results.get(nd.id, {})
-            scores: list[float] = [m for m in done.values() if m is not None]
-            # D1 seed-holdout: confirm seeds start at confirm_seed_base (default 1) so every
-            # confirm split is DISJOINT from the search's implicit seed 0 — the confirm metric
-            # is a generalization signal, not a re-measurement of what the search optimized.
-            for s in range(self.confirm_seed_base, self.confirm_seed_base + self.confirm_seeds):
-                if s in done:                         # already evaluated this seed earlier
-                    continue
-                workdir = self.run_dir / "confirm" / f"node_{nd.id}_seed_{s}"
-                self._seed_workspace(workdir)         # RepoTask: editable repo tree (ADR-7) …
-                self._write_node_files(nd, workdir)   # … agent edits on top …
-                self._write_assets(workdir)           # … task assets win any collision
-                # Confirmation uses the FULL eval profile (robust check on the leaders),
-                # regardless of the cheaper profile the Researcher used during search.
-                _t0 = time.time()
-                # Keep the per-seed events INSIDE the span so they carry its trace/span id
-                # (events<->spans UI join), consistent with the _evaluate path.
-                with self.tracer.span("confirm_seed", new_trace=True, node_id=nd.id, seed=s):
-                    res = await anyio.to_thread.run_sync(
-                        self._run_eval, nd, str(workdir), {"LOOPLAB_EVAL_SEED": str(s)}, "full",
-                    )
-                    valid = res.metric is not None and res.exit_code == 0 and not res.timed_out
-                    async with self._write_lock:            # confirm-seed eval cost (#2) + memo (#0)
-                        self.store.append(EV_CONFIRM_EVAL, {
-                            "node_id": nd.id, "seed": s,
-                            "eval_seconds": round(time.time() - _t0, 3),
-                            "metric": res.metric if valid else None})
-                        if res.drift is not None:           # Phase 4: drop + audit drifted seeds
-                            self.store.append(EV_SPEC_DRIFT, {"node_id": nd.id, "seed": s, **res.drift})
-                if valid:
-                    scores.append(res.metric)
-            if scores:
-                summ = cv_summary(scores)
-                summaries.append({"node_id": nd.id, **summ})
-                async with self._write_lock:
-                    self.store.append(EV_NODE_CONFIRMED, {
-                        "node_id": nd.id, "mean": summ["mean"],
-                        "std": summ["std"], "seeds": len(scores),
-                    })
-
-        if summaries:
-            chooser = min if state.direction == "min" else max
-            robust = chooser(summaries, key=lambda s: (s["mean"], s["node_id"]))
-            leader = next((s for s in summaries if s["node_id"] == topk[0].id), robust)
-            significant = robust["node_id"] != leader["node_id"] and one_se_better(
-                robust["mean"], leader["mean"], robust["std"], robust["n"],
-                state.direction, incumbent_std=leader["std"], incumbent_n=leader["n"])
-            chosen = robust["node_id"]
-        else:
-            chosen, significant = topk[0].id, False  # all seeds failed -> keep leader
-        async with self._write_lock:
-            self.store.append(EV_BEST_CONFIRMED, {"node_id": chosen, "significant": significant})
-
-    async def _confirm_node(self, nd) -> None:
-        """Operator-forced multi-seed confirmation of ONE node (force_confirm). Records the per-seed
-        results (for the UI Metrics/Trust tabs) + a `confirm_done` gate, but deliberately does NOT
-        emit `node_confirmed` — that would put this node into the robust-selection pool and could
-        promote an otherwise-worse node to best. So a forced confirm informs the operator without
-        altering deterministic best-selection. Replay-safe (gated on confirm_done + per-seed memo)."""
-        state = fold(self.store.read_all())
-        seeds = max(self.confirm_seeds, 3)
-        done = state.confirm_seed_results.get(nd.id, {})
-        for s in range(self.confirm_seed_base, self.confirm_seed_base + seeds):
-            if s in done:
-                continue
-            workdir = self.run_dir / "confirm" / f"node_{nd.id}_seed_{s}"
-            self._seed_workspace(workdir)
-            self._write_node_files(nd, workdir)
-            self._write_assets(workdir)
-            _t0 = time.time()
-            with self.tracer.span("confirm_seed", new_trace=True, node_id=nd.id, seed=s):
-                res = await anyio.to_thread.run_sync(
-                    self._run_eval, nd, str(workdir), {"LOOPLAB_EVAL_SEED": str(s)}, "full")
-                valid = res.metric is not None and res.exit_code == 0 and not res.timed_out
-                async with self._write_lock:
-                    self.store.append(EV_CONFIRM_EVAL, {
-                        "node_id": nd.id, "seed": s, "eval_seconds": round(time.time() - _t0, 3),
-                        "metric": res.metric if valid else None})
-                    if res.drift is not None:
-                        self.store.append(EV_SPEC_DRIFT, {"node_id": nd.id, "seed": s, **res.drift})
-        async with self._write_lock:
-            self.store.append(EV_CONFIRM_DONE, {"node_id": nd.id})   # fulfill the request (gate)
+    # `_already_confirmed` / `_run_confirm_seed` / `_confirm_phase` / `_confirm_node` live in
+    # looplab/engine/confirm_phase.py (ConfirmPhaseMixin — inherited, zero call-site churn).
 
     # ------------------------------------------------------------------ ablation
-    async def _ablate(self, parent_id: int) -> None:
-        """Ablation-driven refinement (I7, MLE-STAR): probe each parameter's impact by
-        setting it to a neutral baseline (0.0) and re-running, then create a
-        `refine_block` child that refines only the highest-impact parameter."""
-        state = fold(self.store.read_all())
-        parent = state.nodes[parent_id]
-        # Ablation probes run via the solution.py sandbox path (self.sandbox.run on generated
-        # code) and seed only assets — they do NOT mount the editable repo or apply node files.
-        # For a RepoTask (command-eval) that path is wrong (the repo tree is absent and the
-        # baseline developer emits no code), so ablation is a no-op there. Skip cleanly.
-        if self._repo_spec or self._eval_spec:
-            # Still emit an (empty) ablate event so an operator `force_ablate` request is marked
-            # done — otherwise the forced-ablate gate, which waits for an ablate event for this
-            # parent, never closes and the loop spins forever on repo/eval-spec runs.
-            self.store.append(EV_ABLATE, {"parent_id": parent_id, "impacts": {},
-                                         "skipped": "repo_or_eval_spec"})
-            return
-        # A0a (MLE-STAR): ablate generated *pipeline code blocks*, not just numeric params — the
-        # verified higher-leverage refinement. Only when configured AND the parent has real code.
-        if self._ablate_code_blocks and parent.code.strip():
-            await self._ablate_code(parent_id)
-            return
-        base = parent.metric if parent.metric is not None else 0.0
-        impacts: dict[str, float] = {}
-        with self.tracer.span("ablate", new_trace=True, node_id=parent_id):
-            for p in sorted(parent.idea.params):
-                ablated = parent.idea.model_copy(deep=True)
-                ablated.params[p] = 0.0
-                workdir = self.run_dir / "ablate" / f"node_{parent_id}_{p}"
-                self._write_assets(workdir)
-                code = await anyio.to_thread.run_sync(self._probe_developer.implement, ablated)
-                res = await anyio.to_thread.run_sync(
-                    self.sandbox.run, code, str(workdir), self.timeout)
-                if res.metric is not None and res.exit_code == 0 and not res.timed_out:
-                    impacts[p] = abs(res.metric - base)
-        async with self._write_lock:
-            self.store.append(EV_ABLATE, {"parent_id": parent_id, "impacts": impacts})
-
-        top = max(impacts, key=impacts.get) if impacts else (
-            sorted(parent.idea.params)[0] if parent.idea.params else None)
-        proposal = self.researcher.propose(state, parent)  # refine only `top`
-        new_params = dict(parent.idea.params)
-        if top is not None and top in proposal.params:
-            new_params[top] = proposal.params[top]
-        idea = Idea(operator="refine_block", params=new_params,
-                    rationale=f"ablation: refine highest-impact '{top}' (impacts={impacts})")
-        code = self._implement(idea, parent)
-        node_id = max(fold(self.store.read_all()).nodes, default=-1) + 1
-        self.store.append(EV_NODE_CREATED, {
-            "node_id": node_id, "parent_ids": [parent_id], "operator": "refine_block",
-            "idea": idea.model_dump(mode="json"), "code": code,
-            "files": getattr(self.developer, "last_files", {}) or {}})
-        self._emit_agent_report(node_id)
-
-    @staticmethod
-    def _segment_blocks(code: str) -> list[tuple[int, int]]:
-        """A0a: split solution code into blank-line-separated paragraph blocks -> (start,end) line
-        ranges (end exclusive). Deterministic; the unit of code-block ablation (an ML-pipeline
-        component: data prep / feature-eng / model / loss / ensembling tends to be one paragraph)."""
-        lines = code.splitlines()
-        blocks: list[tuple[int, int]] = []
-        i, n = 0, len(lines)
-        while i < n:
-            if lines[i].strip() == "":
-                i += 1
-                continue
-            j = i
-            while j < n and lines[j].strip() != "":
-                j += 1
-            blocks.append((i, j))
-            i = j
-        return blocks
-
-    @staticmethod
-    def _comment_block(code: str, block: tuple[int, int]) -> str:
-        """Neutralize one block by commenting its lines out (the ablation), keeping the rest intact."""
-        s, e = block
-        lines = code.splitlines()
-        for k in range(s, e):
-            lines[k] = "# [ablated] " + lines[k]
-        return "\n".join(lines) + "\n"
-
-    async def _ablate_code(self, parent_id: int) -> None:
-        """A0a code-block ablation → targeted refinement (MLE-STAR, 64% MLE-bench-Lite). Score each
-        generated code block's contribution by neutralizing it and measuring the metric delta (a
-        block whose removal BREAKS the pipeline is maximally essential), then refine only the
-        highest-impact block. Replay-safe: probes are off-tree; only the `ablate` audit event +
-        the `refine_block` child enter the log."""
-        state = fold(self.store.read_all())
-        parent = state.nodes[parent_id]
-        code = parent.code
-        base = parent.metric if parent.metric is not None else 0.0
-        blocks = self._segment_blocks(code)
-        impacts: dict[str, Optional[float]] = {}
-        with self.tracer.span("ablate_code", new_trace=True, node_id=parent_id, blocks=len(blocks)):
-            for idx, blk in enumerate(blocks):
-                ablated = self._comment_block(code, blk)
-                workdir = self.run_dir / "ablate" / f"node_{parent_id}_block_{idx}"
-                self._write_assets(workdir)
-                res = await anyio.to_thread.run_sync(
-                    self.sandbox.run, ablated, str(workdir), self.timeout)
-                if res.metric is not None and res.exit_code == 0 and not res.timed_out:
-                    impacts[str(idx)] = round(abs(res.metric - base), 6)
-                else:
-                    impacts[str(idx)] = None   # removing this block broke the run => essential block
-
-        # Rank: a None (the pipeline broke without it) is the most essential; else the largest delta.
-        def _rank(item):
-            _k, v = item
-            return (1, float("inf")) if v is None else (0, v)
-        top = max(impacts.items(), key=_rank)[0] if impacts else None
-        async with self._write_lock:
-            self.store.append(EV_ABLATE, {"parent_id": parent_id, "impacts": impacts,
-                                         "mode": "code_blocks", "blocks": len(blocks),
-                                         "top_block": top})
-        top_src = ""
-        if top is not None:
-            s, e = blocks[int(top)]
-            top_src = "\n".join(code.splitlines()[s:e])[:300]
-        idea = Idea(operator="refine_block", params=dict(parent.idea.params),
-                    rationale=("code-block ablation: refine the highest-impact pipeline block "
-                               f"#{top} and keep the rest. Block:\n{top_src}"))
-        new_code = self._implement(idea, parent)
-        node_id = max(fold(self.store.read_all()).nodes, default=-1) + 1
-        self.store.append(EV_NODE_CREATED, {
-            "node_id": node_id, "parent_ids": [parent_id], "operator": "refine_block",
-            "idea": idea.model_dump(mode="json"), "code": new_code,
-            "files": getattr(self.developer, "last_files", {}) or {}})
-        self._emit_agent_report(node_id)
+    # `_ablate` / `_segment_blocks` / `_comment_block` / `_ablate_code` live in
+    # looplab/engine/ablation.py (AblationMixin — inherited, zero call-site churn).
 
     # ------------------------------------------------------------- trust & audit
     def _redact(self, text: str) -> str:

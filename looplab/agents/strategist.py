@@ -25,6 +25,7 @@ from pydantic import BaseModel, Field
 
 from looplab.core.llm import BudgetExceeded
 from looplab.core.models import NodeStatus, RunState
+from looplab.core.prompts import PromptStore, render
 
 # A fully-serializable description of the active search machinery. Every field maps to an existing
 # config knob, so a Strategy is just "a settings delta the engine applies live".
@@ -360,15 +361,16 @@ class LLMStrategist:
     """Structured-output meta-controller. Falls back to the rule baseline (and ultimately None) on
     any parse/transport failure, so a flaky local model never crashes the run."""
 
-    def __init__(self, client, n_seeds: int = 3, parser: str = "tool_call"):
+    def __init__(self, client, n_seeds: int = 3, parser: str = "tool_call", prompts=None):
         self.client = client
         self.parser = parser
+        self.prompts = prompts   # hot-reloadable PromptStore (I18, ADR-8); None = inline default
         self._rule = RuleStrategist(n_seeds=n_seeds)
 
     def decide(self, state: RunState, ctx: StrategyContext) -> Optional[Strategy]:
         from looplab.core.parse import ParseError, parse_structured
         messages = [
-            {"role": "system", "content": _STRATEGIST_SYSTEM},
+            {"role": "system", "content": render(self.prompts, "strategist_system", _STRATEGIST_SYSTEM)},
             {"role": "user", "content": _strategist_brief(state, ctx)},
         ]
         try:
@@ -398,10 +400,11 @@ class ToolUsingStrategist:
 
     def __init__(self, client, tools=None, n_seeds: int = 3, parser: str = "tool_call",
                  loop_opts: Optional[dict] = None, max_turns: int = 0,
-                 time_budget_s: float = 0.0, context_budget_chars: int = 0):
+                 time_budget_s: float = 0.0, context_budget_chars: int = 0, prompts=None):
         self.client = client
         self.tools = tools          # CompositeTools of read-only providers (None = emit-only, like LLM)
         self.parser = parser
+        self.prompts = prompts      # hot-reloadable PromptStore (I18, ADR-8); None = inline default
         self._rule = RuleStrategist(n_seeds=n_seeds)
         self.loop_opts = loop_opts or {}
         self.max_turns = max_turns
@@ -418,7 +421,8 @@ class ToolUsingStrategist:
         if self.tools is not None and hasattr(self.tools, "bind_state"):
             self.tools.bind_state(state)        # let the run-aware tools read the current search
         messages = [
-            {"role": "system", "content": _TOOL_STRATEGIST_SYSTEM},
+            {"role": "system",
+             "content": render(self.prompts, "tool_strategist_system", _TOOL_STRATEGIST_SYSTEM)},
             {"role": "user", "content": _strategist_brief(state, ctx)
                 + "\nInvestigate with the tools if useful, then emit the strategy."},
         ]
@@ -456,16 +460,21 @@ def make_strategist(settings, *, client=None, n_seeds: int = 3, tools=None) -> O
     if backend == "rule":
         return RuleStrategist(n_seeds=n_seeds)
     parser = getattr(settings, "llm_parser", "tool_call")
+    # Hot-reloadable prompt store (I18, ADR-8): lets `strategist_system.md` /
+    # `tool_strategist_system.md` override the built-in system prompts; no prompt_dir (or no
+    # file) keeps the inline defaults byte-identical.
+    prompts = (PromptStore(settings.prompt_dir)
+               if getattr(settings, "prompt_dir", None) else None)
     if backend == "llm":
         if client is None:
             return RuleStrategist(n_seeds=n_seeds)   # no model wired -> deterministic fallback
-        return LLMStrategist(client, n_seeds=n_seeds, parser=parser)
+        return LLMStrategist(client, n_seeds=n_seeds, parser=parser, prompts=prompts)
     if backend == "agent":
         if client is None:
             return RuleStrategist(n_seeds=n_seeds)
         from looplab.agents.agent import loop_opts_from_settings
         return ToolUsingStrategist(
-            client, tools=tools, n_seeds=n_seeds, parser=parser,
+            client, tools=tools, n_seeds=n_seeds, parser=parser, prompts=prompts,
             loop_opts=loop_opts_from_settings(settings),
             max_turns=getattr(settings, "agent_max_turns", 0),
             time_budget_s=getattr(settings, "agent_time_budget_s", 0.0),

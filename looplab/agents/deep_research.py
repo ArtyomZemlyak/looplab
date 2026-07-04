@@ -20,6 +20,7 @@ from pydantic import BaseModel, Field
 from looplab.agents.agent import drive_tool_loop
 from looplab.core.llm import BudgetExceeded
 from looplab.core.models import NodeStatus, ResearchMemo, RunState
+from looplab.core.prompts import PromptStore, render
 
 
 class _ClaimOut(BaseModel):
@@ -99,10 +100,11 @@ class DeepResearcher:
     def __init__(self, client, tools=None, parser: str = "tool_call", max_turns: int = 0,
                  context_budget_chars: int = 0, time_budget_s: float = 0.0,
                  stuck_detection: bool = True, stuck_repeat: int = 4, stuck_alternate: int = 4,
-                 auto_summary: bool = True):
+                 auto_summary: bool = True, prompts=None):
         self.client = client
         self.tools = tools
         self.parser = parser
+        self.prompts = prompts              # hot-reloadable PromptStore (I18, ADR-8); None = inline default
         self.max_turns = max_turns          # 0 = unlimited (config-driven via Settings.agent_max_turns)
         self.context_budget_chars = context_budget_chars
         self.time_budget_s = time_budget_s  # 0 = no wall-clock cap (Settings.agent_time_budget_s)
@@ -122,7 +124,7 @@ class DeepResearcher:
         if self.tools is not None and hasattr(self.tools, "bind_state"):
             self.tools.bind_state(state)     # let run-aware tools read the current search
         messages = [
-            {"role": "system", "content": _SYSTEM},
+            {"role": "system", "content": render(self.prompts, "deep_research_system", _SYSTEM)},
             {"role": "user", "content": state_brief(state) +
                 "\nReview the run. Consult sources if useful, then emit your memo."},
         ]
@@ -230,7 +232,12 @@ def make_deep_researcher(settings, *, client=None, task=None) -> Optional[DeepRe
     # (default ON — this stage never exposes an update_plan tool) and the D11 `summary_client`
     # (compressor_model — this stage has always compacted with its own client), so spreading it
     # would change the memo loop's behavior. Keep the explicit per-setting kwargs instead.
+    # Hot-reloadable prompt store (I18, ADR-8): lets `deep_research_system.md` override the
+    # built-in system prompt; no prompt_dir (or no file) keeps the inline default byte-identical.
+    prompts = (PromptStore(settings.prompt_dir)
+               if getattr(settings, "prompt_dir", None) else None)
     return DeepResearcher(client, tools, parser=getattr(settings, "llm_parser", "tool_call"),
+                          prompts=prompts,
                           context_budget_chars=getattr(settings, "context_budget_chars", 0),
                           max_turns=getattr(settings, "agent_max_turns", 0),
                           time_budget_s=getattr(settings, "agent_time_budget_s", 0.0),

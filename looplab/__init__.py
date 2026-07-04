@@ -36,6 +36,7 @@ _LAYOUT = {
     "_mcp_transport": "tools",
     "_pathsafe": "core",
     "_runcache": "tools",
+    "ablation": "engine",
     "agent": "agents",
     "agents_md": "tools",
     "appconfig": "core",
@@ -52,6 +53,7 @@ _LAYOUT = {
     "command_eval": "runtime",
     "config": "core",
     "confirm": "trust",
+    "confirm_phase": "engine",   # engine confirm mixin ("confirm" is taken by trust/confirm.py)
     "context_budget": "core",
     "critic": "trust",
     "cv": "trust",
@@ -70,6 +72,7 @@ _LAYOUT = {
     "git_tools": "tools",
     "hardware": "core",
     "hints": "agents",
+    "holdout": "engine",
     "htmlview": "serve",
     "jobs": "serve",
     "jupyter": "runtime",
@@ -143,6 +146,7 @@ _LAYOUT = {
     "vectorstore": "tools",
     "verify": "trust",
     "web": "tools",
+    "workspace": "engine",
     "write_tools": "tools",
 }
 

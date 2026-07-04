@@ -20,19 +20,34 @@ from __future__ import annotations
 from typing import Optional
 
 from looplab.agents.agent import drive_tool_loop
-from looplab.agents.roles import RESEARCHER_HINT_ATTRS
+from looplab.agents.roles import RESEARCHER_HINT_ATTRS, WrapsDeveloper
 from looplab.core.llm import BudgetExceeded
 from looplab.core.models import Idea, Node, RunState
+from looplab.core.prompts import render
 
 
-class UnifiedAgent:
+class UnifiedAgent(WrapsDeveloper):
     """Facade composing per-stage role backends behind one identity.
 
     `researcher` drives `propose` (an Idea), `developer` drives `implement`/`repair` (code),
     `strategist` drives `decide` (a Strategy at meta-cadence). `pilot_client`/`pilot_tools`
     drive `choose_action` (the next macro action). Each backend is already bound to its own
     per-stage client (H3), so `propose` and `implement` can run on different models.
+
+    Developer-facing forwarding (brief/is_code_generating/client/last_report/audit_extra)
+    comes from `WrapsDeveloper`, delegating to `self.developer` via `_wrapped` below.
     """
+
+    # `prompts` is LOCAL (a plain handle threaded at construction, read by the pilot/triage
+    # prompt renders below) — shadow the mixin's forwarding property so `self.prompts = prompts`
+    # binds on the instance instead of pushing into the internal developer.
+    prompts = None
+
+    # Delegation target for the WrapsDeveloper forwarders: the (possibly wrapped) internal
+    # developer — while `inner` (set in __init__) exposes the fully-unwrapped probe developer.
+    @property
+    def _wrapped(self):
+        return self.developer
 
     def __init__(self, *, researcher, developer, strategist=None,
                  pilot_client=None, pilot_tools=None, stage_clients=None, prompts=None,
@@ -61,10 +76,10 @@ class UnifiedAgent:
         # Forwarded so make_roles-style introspection keeps working.
         self.bounds = getattr(researcher, "bounds", None)
         self.space_hint = getattr(researcher, "space_hint", "")
-        # Developer-protocol audit attributes the orchestrator reads off `self.developer`.
+        # Developer-protocol audit attributes the orchestrator reads off `self.developer`
+        # (`last_report` is forwarded live by the WrapsDeveloper mixin).
         self.last_files: dict = {}
         self.last_deleted: list = []
-        self.last_report = None
 
     # ----------------------------------------------------------- Researcher
     def propose(self, state: RunState, parent: Optional[Node]) -> Idea:
@@ -76,19 +91,10 @@ class UnifiedAgent:
                 setattr(self.researcher, attr, getattr(self, attr))
         return self.researcher.propose(state, parent)
 
-    @property
-    def brief(self) -> str:
-        return getattr(self.developer, "brief", "")
-
-    # T8/A0b: capability follows the internal developer (merge_mode="auto" resolution)
-    @property
-    def is_code_generating(self) -> bool:
-        return bool(getattr(self.developer, "is_code_generating", False))
-
     # ----------------------------------------------------------- Developer
     def implement(self, idea: Idea) -> str:
         code = self.developer.implement(idea)
-        self._sync_dev_audit()
+        self._sync_audit()
         return code
 
     def implement_from(self, idea: Idea, parent) -> str:
@@ -96,23 +102,14 @@ class UnifiedAgent:
         improve patches the parent's solution instead of regenerating from the baseline."""
         impl = getattr(self.developer, "implement_from", None)
         code = impl(idea, parent) if callable(impl) else self.developer.implement(idea)
-        self._sync_dev_audit()
+        self._sync_audit()
         return code
 
     def repair(self, idea: Idea, code: str, error: str) -> str:
         rep = getattr(self.developer, "repair", None)
         out = rep(idea, code, error) if callable(rep) else self.developer.implement(idea)
-        self._sync_dev_audit()
+        self._sync_audit()
         return out
-
-    def _sync_dev_audit(self) -> None:
-        self.last_files = getattr(self.developer, "last_files", {}) or {}
-        self.last_deleted = getattr(self.developer, "last_deleted", []) or []
-        self.last_report = getattr(self.developer, "last_report", None)
-
-    def audit_extra(self) -> dict:
-        fn = getattr(self.developer, "audit_extra", None)
-        return fn() if callable(fn) else {}
 
     # ----------------------------------------------------------- Strategist
     def decide(self, state: RunState, ctx):
@@ -155,7 +152,7 @@ class UnifiedAgent:
         rec = ("\nPolicy recommends index "
                f"{default_idx}: {legal[default_idx].get('kind')}.") if recommended is not None else ""
         messages = [
-            {"role": "system", "content": self._PILOT_SYSTEM},
+            {"role": "system", "content": render(self.prompts, "pilot_system", self._PILOT_SYSTEM)},
             {"role": "user", "content": (brief + "\nLegal actions:\n" + menu + rec +
                                          "\nChoose the next action.").strip()},
         ]
@@ -226,7 +223,7 @@ class UnifiedAgent:
             return None                       # no triage model -> engine uses the rule-based fallback
         code_tail = (getattr(node, "code", "") or "")[-1500:]
         messages = [
-            {"role": "system", "content": self._TRIAGE_SYSTEM},
+            {"role": "system", "content": render(self.prompts, "triage_system", self._TRIAGE_SYSTEM)},
             {"role": "user", "content": (
                 (brief + "\n" if brief else "") +
                 f"Crashed node {getattr(node, 'id', '?')} (repair attempt {attempt}).\n"

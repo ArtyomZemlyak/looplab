@@ -9,7 +9,8 @@ import os
 import sys
 from pathlib import Path
 
-_envfile = Path(__file__).resolve().parent / ".env.dev"
+# .env.dev lives at the repo root; this shim lives in tools/, hence parents[1].
+_envfile = Path(__file__).resolve().parents[1] / ".env.dev"
 if _envfile.exists():
     for _line in _envfile.read_text(encoding="utf-8-sig").splitlines():
         _line = _line.strip()

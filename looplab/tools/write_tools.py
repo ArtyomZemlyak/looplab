@@ -20,7 +20,7 @@ from typing import Callable, Optional
 
 from looplab.core import _pathsafe
 from looplab.tools._base import fn_spec
-from looplab.tools.patch import _ci, _match, apply_patch as _apply_patch, gate as _gate
+from looplab.tools.patch import SurfacePolicy, apply_patch as _apply_patch, gate as _gate
 from looplab.tools.perm_modes import DEFAULT_PROTECT, decide, default_approver
 
 _MAX_PREVIEW = 4000
@@ -146,8 +146,12 @@ class WriteTools:
         return p.name
 
     def _protected(self, rel: str) -> bool:
-        pc = _ci(rel)
-        return any(pc == _ci(g) or _match(pc, _ci(g)) for g in self.protect)
+        # SurfacePolicy in protect-only form: surface=None (containment is enforced by
+        # resolve_within on the resolved roots, not globs) and check_escapes=False (a traversal
+        # can't survive resolve_within). Built per call so a live mutation of `self.protect`
+        # keeps taking effect, exactly like the old inline loop.
+        policy = SurfacePolicy(None, self.protect, check_escapes=False)
+        return policy.check(rel) == SurfacePolicy.PROTECTED
 
     def _check(self, path: str):
         """Return (resolved_path, rel, None) or (None, None, refusal_string)."""

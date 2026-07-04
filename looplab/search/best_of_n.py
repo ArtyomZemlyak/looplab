@@ -8,7 +8,9 @@ with the ADR-7 cost rule. N=1 is a transparent pass-through (== today).
 """
 from __future__ import annotations
 
+from looplab.agents.roles import WrapsDeveloper
 from looplab.core.models import Idea
+from looplab.core.prompts import render
 from looplab.core.validate import validate_agent_code
 
 
@@ -30,7 +32,8 @@ def _score(code: str) -> float:
     return s
 
 
-def _listwise_pick(client, idea, candidates: list[str], parser: str = "tool_call") -> int:
+def _listwise_pick(client, idea, candidates: list[str], parser: str = "tool_call",
+                   prompts=None) -> int:
     """D10 (OPPO arXiv:2506.12928): comparative LLM selection over candidates presented TOGETHER —
     +~3 pts over independent pointwise scoring on GAIA, and beats majority voting. Used only to
     break a TIE among the top static-scorers (the execution-free score stays the primary filter;
@@ -47,11 +50,12 @@ def _listwise_pick(client, idea, candidates: list[str], parser: str = "tool_call
 
         blocks = "\n\n".join(f"--- CANDIDATE {i} ---\n{c[:2000]}" for i, c in enumerate(candidates))
         msgs = [
-            {"role": "system", "content":
-             "You are selecting the single best ML solution implementation from several candidates "
-             "for the SAME task. Compare them side by side; prefer correct, complete, robust code "
-             "that faithfully realizes the idea and avoids obvious bugs/leakage. Call `emit` with "
-             "`choice` = the 0-based index of the best candidate."},
+            {"role": "system", "content": render(
+                prompts, "bestofn_judge_system",
+                "You are selecting the single best ML solution implementation from several candidates "
+                "for the SAME task. Compare them side by side; prefer correct, complete, robust code "
+                "that faithfully realizes the idea and avoids obvious bugs/leakage. Call `emit` with "
+                "`choice` = the 0-based index of the best candidate.")},
             {"role": "user", "content":
              f"Idea: {getattr(idea, 'rationale', '') or ''}\n\n{blocks}\n\n"
              f"Pick the best candidate (0..{len(candidates) - 1})."},
@@ -67,12 +71,14 @@ def _listwise_pick(client, idea, candidates: list[str], parser: str = "tool_call
     return 0
 
 
-class BestOfNDeveloper:
+class BestOfNDeveloper(WrapsDeveloper):
     """Generate `n` candidates from `inner.implement` and return the best. The EXECUTION-FREE static
     score is the primary filter; when `listwise` is on and the top scorers TIE, an LLM comparative
     selection (D10) breaks the tie — the LLM as a weak comparative prior, never the sole oracle.
     Deterministic given a deterministic inner (toy); with an LLM at temperature>0 the candidates
-    vary, so best-of-N actually explores. `repair` delegates to inner (single attempt)."""
+    vary, so best-of-N actually explores. `repair` delegates to inner (single attempt).
+
+    Forwarding (brief/client/prompts/is_code_generating/last_report) comes from `WrapsDeveloper`."""
 
     def __init__(self, inner, n: int = 3, listwise: bool = True, parser: str = "tool_call"):
         self.inner = inner
@@ -84,49 +90,15 @@ class BestOfNDeveloper:
         self.last_n_scores: list[float] = []
         self._last_candidates: list[tuple[str, dict, list]] = []   # (code, files, deleted) per N
 
-    # T8/A0b: capability follows the inner developer (merge_mode="auto" resolution)
-    @property
-    def is_code_generating(self) -> bool:
-        return bool(getattr(self.inner, "is_code_generating", False))
-
-    # forward the hooks make_roles / the engine poke at, to the wrapped developer
-    @property
-    def brief(self) -> str:
-        return getattr(self.inner, "brief", "")
-
-    @property
-    def client(self):
-        return getattr(self.inner, "client", None)
-
-    @client.setter
-    def client(self, value) -> None:        # H3 per-role client rewiring reaches the inner developer
-        if hasattr(self.inner, "client"):
-            self.inner.client = value
-
-    @property
-    def prompts(self):
-        return getattr(self.inner, "prompts", None)
-
-    @prompts.setter
-    def prompts(self, value) -> None:
-        if hasattr(self.inner, "prompts"):
-            self.inner.prompts = value
-
-    @property
-    def last_report(self):
-        return getattr(self.inner, "last_report", None)
-
     def audit_extra(self) -> dict:
-        fn = getattr(self.inner, "audit_extra", None)
-        extra = fn() if callable(fn) else {}
+        extra = super().audit_extra()
         extra["best_of_n"] = self.n
         return extra
 
     def implement(self, idea: Idea) -> str:
         if self.n == 1:
             code = self.inner.implement(idea)
-            self.last_files = getattr(self.inner, "last_files", {}) or {}
-            self.last_deleted = getattr(self.inner, "last_deleted", []) or []
+            self._sync_audit()
             self.last_n_scores = [_score(code)]
             return code
         self.last_n_scores = []          # per-node telemetry: reset so it holds only THIS node's N
@@ -143,7 +115,11 @@ class BestOfNDeveloper:
         # Only when it would actually change the outcome (>1 tied) and a client is available.
         chosen = top[0]
         if self.listwise and len(top) > 1 and self.client is not None:
-            idx = _listwise_pick(self.client, idea, [c[0] for c in top], parser=self.parser)
+            # Pass the prompt store only when one is configured: callers/tests monkeypatch
+            # `_listwise_pick` with its historical 4-arg signature, so the default (no-store)
+            # path must keep that call shape unchanged.
+            kw = {"prompts": self.prompts} if self.prompts is not None else {}
+            idx = _listwise_pick(self.client, idea, [c[0] for c in top], parser=self.parser, **kw)
             chosen = top[idx]
         self.last_files, self.last_deleted = chosen[1], chosen[2]
         return chosen[0]
@@ -152,7 +128,6 @@ class BestOfNDeveloper:
         repair = getattr(self.inner, "repair", None)
         if callable(repair):
             out = repair(idea, code, error)
-            self.last_files = getattr(self.inner, "last_files", {}) or {}
-            self.last_deleted = getattr(self.inner, "last_deleted", []) or []   # else stale from prior implement()
+            self._sync_audit()   # else stale from prior implement()
             return out
         return self.implement(idea)

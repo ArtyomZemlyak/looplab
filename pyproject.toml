@@ -55,3 +55,9 @@ include = ["looplab*"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"
+# Selection-only markers (`-m "not live"` / `-m "not docker"`); the module-level skipif gates in
+# the test files remain the enforcement — a marked test still auto-skips when its backend is absent.
+markers = [
+    "live: needs a reachable LLM endpoint (auto-skipped offline)",
+    "docker: needs a Docker daemon",
+]

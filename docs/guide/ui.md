@@ -113,7 +113,7 @@ cd ui && npm install && npm run build
 `looplab ui --rebuild` does the same and then serves. For live HMR while hacking on the UI, run the
 Vite dev server (`cd ui && npm run dev`) against the API.
 
-A preview launcher (`ui_preview.py`) serves the built UI with the dev `.env.dev` on a dedicated port
+A preview launcher (`tools/ui_preview.py`) serves the built UI with the dev `.env.dev` on a dedicated port
 (`:8771`) so a review session can run alongside the main instance.
 
 ## Troubleshooting

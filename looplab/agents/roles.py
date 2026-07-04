@@ -322,7 +322,7 @@ class LLMDeveloper:
             [{"role": "system", "content": system}, {"role": "user", "content": user}]))
 
     def repair(self, idea: Idea, code: str, error: str) -> str:
-        system = ("You are an expert Python debugger. " +
+        system = (render(self.prompts, "developer_repair_prefix", "You are an expert Python debugger. ") +
                   render(self.prompts, "developer_system", _DEVELOPER_SYSTEM) + self.brief)
         user = ("The script below failed. Return a corrected, complete script that runs "
                 "and prints the required JSON metric line.\n\n--- SCRIPT ---\n" + code +
@@ -337,11 +337,91 @@ class LLMDeveloper:
 
 
 # --------------------------------------------------------------------------- #
+# Wrapper-forwarding mixin: the Developer-wrapper contract, documented once
+# --------------------------------------------------------------------------- #
+
+
+class WrapsDeveloper:
+    """Forwarding half of the Developer-WRAPPER contract (`ValidatingDeveloper`,
+    `BestOfNDeveloper`, `UnifiedAgent`). A wrapper composes an inner Developer and must stay
+    transparent to every duck-typed probe the engine/factories make against `developer`:
+
+    - `inner` (plain attribute, set by the wrapper's ``__init__``): the wrapped Developer.
+      The engine's ablation probe reads ``getattr(developer, "inner", developer)`` to bypass
+      wrapper retry/fallback/best-of-N machinery (``orchestrator._probe_developer``), so
+      `inner` must always be the raw developer a probe should hit.
+    - `brief` / `is_code_generating` / `client` / `prompts` / `last_report`: read-through
+      (and, for `client`/`prompts`, hasattr-guarded write-through) to the wrapped developer —
+      `make_roles` pokes `prompts`, H3 per-role rewiring pokes `client`, T8/A0b
+      merge_mode="auto" resolution reads `is_code_generating`, and the orchestrator reads
+      `last_report` for the `agent_validated` audit event.
+    - `last_files` / `last_deleted`: per-call audit attributes the orchestrator reads AFTER
+      implement/repair. Wrappers own them as plain attributes: either mirrored from the
+      wrapped developer via `_sync_audit()`, or set by the wrapper's own logic (e.g.
+      best-of-N's chosen candidate, the validator's fell-back handling).
+    - `audit_extra()`: wrapper-specific audit fields merged into the `agent_validated` event.
+
+    Delegation target: `_wrapped` (defaults to `inner`). `UnifiedAgent` overrides it — its
+    delegate is `self.developer` (possibly itself a wrapper) while its `inner` exposes the
+    fully-unwrapped probe developer.
+
+    A wrapper whose semantics for a member differ from these defaults keeps that member local
+    (e.g. `ValidatingDeveloper`'s unconditional `prompts` setter, its agent-vs-fallback
+    `is_code_generating`/`last_report`, and `UnifiedAgent`'s locally-held `prompts` handle).
+    """
+
+    @property
+    def _wrapped(self):
+        return self.inner
+
+    # forward the hooks make_roles / the engine poke at, to the wrapped developer
+    @property
+    def brief(self) -> str:
+        return getattr(self._wrapped, "brief", "")
+
+    # T8/A0b: capability follows the wrapped developer (merge_mode="auto" resolution)
+    @property
+    def is_code_generating(self) -> bool:
+        return bool(getattr(self._wrapped, "is_code_generating", False))
+
+    @property
+    def client(self):
+        return getattr(self._wrapped, "client", None)
+
+    @client.setter
+    def client(self, value) -> None:        # H3 per-role client rewiring reaches the inner developer
+        if hasattr(self._wrapped, "client"):
+            self._wrapped.client = value
+
+    @property
+    def prompts(self):
+        return getattr(self._wrapped, "prompts", None)
+
+    @prompts.setter
+    def prompts(self, value) -> None:
+        if hasattr(self._wrapped, "prompts"):
+            self._wrapped.prompts = value
+
+    @property
+    def last_report(self):
+        return getattr(self._wrapped, "last_report", None)
+
+    def audit_extra(self) -> dict:
+        fn = getattr(self._wrapped, "audit_extra", None)
+        return fn() if callable(fn) else {}
+
+    def _sync_audit(self) -> None:
+        """Mirror the wrapped developer's per-call file audit onto this wrapper."""
+        self.last_files = getattr(self._wrapped, "last_files", {}) or {}
+        self.last_deleted = getattr(self._wrapped, "last_deleted", []) or []
+
+
+# --------------------------------------------------------------------------- #
 # Validating wrapper (ADR-7): audit how an external coding agent performed
 # --------------------------------------------------------------------------- #
 
 
-class ValidatingDeveloper:
+class ValidatingDeveloper(WrapsDeveloper):
     """Wrap a Developer and validate how it performed before the orchestrator spends a
     sandbox evaluation on its output (see `validate.py`).
 
@@ -358,6 +438,10 @@ class ValidatingDeveloper:
     `last_seed` (as `CliAgentDeveloper` does), the report also includes process-level
     checks (launched / not-timed-out / exit) and the no-op (`modified_seed`) check.
     """
+
+    # `last_report` is genuinely LOCAL state — it always describes the EXTERNAL AGENT (even
+    # when we fall back) — so shadow the mixin's live forwarder with a plain attribute.
+    last_report: Optional[AgentReport] = None
 
     def __init__(self, inner, *, fallback=None, max_retries: int = 1,
                  metric_key: str = "metric", repo_mode: bool = False):
@@ -380,16 +464,15 @@ class ValidatingDeveloper:
         self.last_deleted: list[str] = []      # accepted in-surface deletions of the shipped attempt
 
     # T8/A0b: code-generation capability follows the INNER developer (the fallback is LLM anyway)
+    # — kept local: unlike the mixin's forwarder, the fallback's capability counts too.
     @property
     def is_code_generating(self) -> bool:
         return bool(getattr(self.inner, "is_code_generating", False)
                     or getattr(self.fallback, "is_code_generating", False))
 
-    # forward the brief/prompt hooks make_roles pokes at, to the wrapped developer
-    @property
-    def brief(self) -> str:
-        return getattr(self.inner, "brief", "")
-
+    # forward the prompt hook make_roles pokes at, to the wrapped developer — kept local:
+    # the setter is UNCONDITIONAL (it must create the attribute on an inner that lacks one),
+    # unlike the mixin's hasattr-guarded write-through.
     @property
     def prompts(self):
         return getattr(self.inner, "prompts", None)

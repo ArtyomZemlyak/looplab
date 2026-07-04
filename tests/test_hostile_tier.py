@@ -23,6 +23,8 @@ def test_explicit_runtime_override():
     assert s.runtime == "kata-runtime"
 
 
+# `docker` marker: selection only (`-m "not docker"`); the skipif stays the enforcement gate.
+@pytest.mark.docker
 @pytest.mark.skipif(not shutil.which("docker"), reason="docker not on PATH")
 def test_docker_wrap_includes_runtime_flag(tmp_path):
     from looplab.command_eval import make_docker_wrap

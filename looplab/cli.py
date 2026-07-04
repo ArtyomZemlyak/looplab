@@ -255,6 +255,23 @@ def _engine(run_dir: Path, task: TaskAdapter, settings: Settings,
     )
 
 
+def _run_engine_guarded(eng: Engine):
+    """Drive the engine loop to completion, funneling any fatal abort into a terminal event.
+    Shared by `run` and `resume` (previously duplicated verbatim in both)."""
+    try:
+        return anyio.run(eng.run)
+    except Exception as e:  # noqa: BLE001 - any fatal abort (e.g. an unreachable LLM endpoint
+        # during implement/repair, a missing dep) must surface as a TERMINAL event, not a silent
+        # stalled run the UI shows "thinking" forever. Mark finished-with-error, then re-raise so
+        # the traceback still lands in engine.stderr.log. (A user Ctrl-C / cancel is BaseException,
+        # not Exception, so an intentional stop stays resumable.)
+        try:
+            eng.store.append(EV_RUN_FINISHED, {"reason": "error", "error": str(e)[:500]})
+        except Exception:  # noqa: BLE001 - best-effort; never mask the original failure
+            pass
+        raise
+
+
 def _missing_task_paths(task_dict: dict) -> list[tuple[str, str]]:
     """Return (field, expanded_path) for every input path the task names that does NOT exist on disk.
     CLI Genesis is a single LLM call (not an agent) — it can author a path the user mis-stated or that
@@ -483,18 +500,7 @@ def run(
                 + " — reopening to continue with the current task/settings "
                   "(use a new --out for a fresh run).")
             eng.store.append(EV_RUN_REOPENED, {})
-        try:
-            state = anyio.run(eng.run)
-        except Exception as e:  # noqa: BLE001 - any fatal abort (e.g. an unreachable LLM endpoint
-            # during implement/repair, a missing dep) must surface as a TERMINAL event, not a silent
-            # stalled run the UI shows "thinking" forever. Mark finished-with-error, then re-raise so
-            # the traceback still lands in engine.stderr.log. (A user Ctrl-C / cancel is BaseException,
-            # not Exception, so an intentional stop stays resumable.)
-            try:
-                eng.store.append(EV_RUN_FINISHED, {"reason": "error", "error": str(e)[:500]})
-            except Exception:  # noqa: BLE001 - best-effort; never mask the original failure
-                pass
-            raise
+        state = _run_engine_guarded(eng)
     _print_result(state)
 
 
@@ -535,18 +541,7 @@ def resume(
         if not ok:
             typer.echo(f"engine already running on {run_dir} — not resuming a second loop")
             return
-        try:
-            state = anyio.run(eng.run)
-        except Exception as e:  # noqa: BLE001 - any fatal abort (e.g. an unreachable LLM endpoint
-            # during implement/repair, a missing dep) must surface as a TERMINAL event, not a silent
-            # stalled run the UI shows "thinking" forever. Mark finished-with-error, then re-raise so
-            # the traceback still lands in engine.stderr.log. (A user Ctrl-C / cancel is BaseException,
-            # not Exception, so an intentional stop stays resumable.)
-            try:
-                eng.store.append(EV_RUN_FINISHED, {"reason": "error", "error": str(e)[:500]})
-            except Exception:  # noqa: BLE001 - best-effort; never mask the original failure
-                pass
-            raise
+        state = _run_engine_guarded(eng)
     _print_result(state)
 
 

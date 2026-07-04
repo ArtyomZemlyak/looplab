@@ -13,6 +13,7 @@ pip install -e ".[dev,ui]"        # dev deps; [ui] needed for server/assistant/T
 python -m pytest                  # full suite (~1150 tests, a few minutes; addopts already has -q)
 python -m pytest tests/test_events_replay.py           # targeted run — always do this first
 python -m pytest -o addopts="" -q ...                  # if you need to override the default -q
+python -m pytest -m "not docker"  # skip Docker-daemon tests
 looplab run --no-genesis --kind quadratic --goal "min (x-3)^2" --direction min --out runs/demo  # offline smoke
 # (--no-genesis matters: any --goal otherwise invokes Genesis, which needs a reachable LLM)
 looplab replay runs/demo          # rebuild state from the event log (reproducibility check)
