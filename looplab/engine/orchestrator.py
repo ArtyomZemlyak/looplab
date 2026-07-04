@@ -400,6 +400,7 @@ class Engine:
         self._comparative_lessons_on = comparative_lessons
         self.lessons_every = max(0, lessons_every)
         self.lessons_refresh_every = max(0, lessons_refresh_every)
+        self._lessons_seen_stamp = None   # (size, mtime_ns) of the store at the last read
         self._track_hypotheses = track_hypotheses
         self._surrogate_explore = surrogate_explore
         # Unified self-driving agent: in unified mode `researcher is developer` (one object plays
@@ -676,7 +677,9 @@ class Engine:
             self._holdout_select = _entry.holdout_select
         # E4: cross-run meta-learned priors. Excluding THIS run's id matters on resume: a run that
         # already mid-run-distilled its own comparative lessons (M6) must not read them back as if
-        # they were another run's experience — its own results are already in the digest.
+        # they were another run's experience — its own results are already in the digest. The stamp
+        # is taken BEFORE the read (a write landing in between is re-read next refresh — safe).
+        self._lessons_seen_stamp = self._lessons_store_stamp()
         self._prior_note_text = self._load_reflection_priors(exclude_run_id=_entry.run_id or None)
         start = time.time()
         while True:
@@ -1338,13 +1341,8 @@ class Engine:
         if state.pending_nodes() or not state.evaluated_nodes():
             return state
         n = len(state.nodes)
-        last = (state.report or {}).get("at_node")
-        if n == 0 or last == n:                       # nothing new / already current (resume-safe)
-            return state
-        # Fire once at least `report_every` NEW nodes have accumulated since the last report. Using a
-        # since-last threshold (not `n % report_every == 0`) means a failed/merge/ablate node-count
-        # jump can't step over the only multiple and silently skip the whole window.
-        if n - (last or 0) < self.report_every:
+        last = int((state.report or {}).get("at_node") or 0)
+        if not self._cadence_due(n, last, self.report_every):   # resume-safe since-last gate
             return state
         return self._write_report(state, trigger="cadence")
 
@@ -1565,12 +1563,18 @@ class Engine:
         # later SIMILAR task retrieves them; consolidation then merges repeats into "verified on N runs".
         lessons.extend(self._reflect_lessons(final, best, fp))
         # M6 comparative lessons at run end: credit-assigned pair distillation over whatever pairs
-        # the mid-run cadence did NOT already spend (their (child, parent) ids are recorded in the
-        # `lessons_distilled` events), so run-end never re-distills a pair.
+        # the mid-run cadence did NOT already spend. Run-end spends are recorded as a
+        # `lessons_distilled` event too — a run reopened later (budget_extend/add_nodes) must not
+        # re-distill these pairs any more than a resumed one may re-distill the mid-run ones.
         if self._comparative_lessons_on:
-            used = [tuple(p) for d in (final.lessons_distilled or [])
-                    for p in (d.get("pairs") or [])]
-            comp, _ = self._comparative_lessons(final, fp, exclude=used)
+            comp, pairs = self._comparative_lessons(final, fp,
+                                                    exclude=self._spent_pairs(final))
+            if pairs:
+                self.store.append("lessons_distilled", {
+                    "at_node": len(final.nodes), "trigger": "run_end", "count": len(comp),
+                    "pairs": [[pr["a"], pr["b"]] for pr in pairs],
+                    "lessons": [{"statement": lz["statement"], "outcome": lz["outcome"],
+                                 "evidence": lz.get("evidence")} for lz in comp]})
             lessons.extend(comp)
         for h in (final.hypotheses or {}).values():
             if h.status in ("supported", "tested", "abandoned"):
@@ -1587,10 +1591,12 @@ class Engine:
                 reasons[n.error_reason] = reasons.get(n.error_reason, 0) + 1
         if reasons:
             top = max(reasons, key=reasons.get)
+            # run_id stamped like every other lesson shape: the M6 own-run exclusion filters on it,
+            # and a row without the key would be read back as another run's experience on resume.
             lessons.append({
                 "task_id": final.task_id, "fingerprint": fp, "kind": getattr(self.task, "kind", ""),
                 "statement": f"{reasons[top]} node(s) failed with reason '{top}'",
-                "outcome": "failed", "delta": None, "confidence": 0.4})
+                "outcome": "failed", "delta": None, "confidence": 0.4, "run_id": final.run_id})
         self._append_lessons(lessons)
 
         # M4 · auto-distilled skills (episodic → procedural memory): a supported hypothesis that
@@ -1637,39 +1643,39 @@ class Engine:
             out = client.complete_text([{"role": "user", "content": prompt}]) or ""
         except Exception:   # noqa: BLE001 - best-effort
             return _winner_lesson()
-        res = []
-        for line in out.splitlines():
-            s = line.strip().lstrip("-*•0123456789.) ").strip()
-            low = s.lower()
-            good, bad_ = "[good]" in low, "[bad]" in low
-            s = re.sub(r"\[(good|bad)\]", "", s, flags=re.I).strip()
-            if len(s) < 8:
-                continue
-            res.append({"task_id": final.task_id, "fingerprint": fp,
-                        "kind": getattr(self.task, "kind", ""), "statement": s,
-                        "outcome": "failed" if bad_ else ("supported" if good else "tested"),
-                        "delta": None, "confidence": 0.6, "run_id": final.run_id, "evidence": []})
-            if len(res) >= 3:
-                break
+        from looplab.engine.memory import parse_credit_lessons
+        res = [{"task_id": final.task_id, "fingerprint": fp,
+                "kind": getattr(self.task, "kind", ""), "statement": stmt,
+                "outcome": outcome, "delta": None, "confidence": 0.6,
+                "run_id": final.run_id, "evidence": []}
+               for _, stmt, outcome in parse_credit_lessons(out, 0)[:3]]
         return res or _winner_lesson()      # LLM gave nothing usable → keep the winner record
 
-    def _append_lessons(self, lessons: list) -> None:
-        """Append lessons to the SHARED cross-run store, then run the D2 hygiene pass. One write
-        call: concurrent engine processes append to the same store, and a single small O_APPEND
-        write doesn't interleave mid-line the way per-line buffered writes flushed at 8 KB
-        boundaries can. Used by run-end reflection AND the M6 mid-run distillation, so a lesson
-        distilled mid-flight is visible to a concurrent run's refresh immediately."""
+    def _append_lessons(self, lessons: list, *, hygiene: bool = True) -> None:
+        """Append lessons to the SHARED cross-run store. Used by run-end reflection AND the M6
+        mid-run distillation, so a lesson distilled mid-flight is visible to a concurrent run's
+        refresh immediately. Concurrency: the whole append (and the optional hygiene rewrite) runs
+        under the same best-effort interprocess lock the event store uses — the D2 consolidate/
+        compact pass is a full-file read-modify-write, and without the lock a concurrent run's
+        O_APPEND between our read and our rewrite would be silently clobbered (losing exactly the
+        cross-run lesson the live share exists to propagate). `hygiene=False` (the mid-run path)
+        skips consolidate/compact entirely: the read path already dedups and quarantines, so
+        hygiene can wait for run end instead of rewriting a shared file every few nodes."""
         if not (lessons and self.memory_dir):
             return
+        from looplab.events.eventstore import _interprocess_lock
         base = Path(self.memory_dir)
         base.mkdir(parents=True, exist_ok=True)
+        path = base / "lessons.jsonl"
         payload = "".join(orjson.dumps(lz).decode() + "\n" for lz in lessons)
-        with open(base / "lessons.jsonl", "a", encoding="utf-8") as f:
-            f.write(payload)
-        # D2 hygiene: consolidate the store after appending — merge duplicate claims into an
-        # evidence_count, retire contradicted verdicts (newest wins), THEN bound the size.
-        self._consolidate_lessons_file(base / "lessons.jsonl")
-        self._compact_lessons(base / "lessons.jsonl")
+        with _interprocess_lock(Path(str(path) + ".lock")):
+            with open(path, "a", encoding="utf-8") as f:
+                f.write(payload)
+            if hygiene:
+                # D2 hygiene: consolidate the store after appending — merge duplicate claims into
+                # an evidence_count, retire contradicted verdicts (newest wins), THEN bound size.
+                self._consolidate_lessons_file(path)
+                self._compact_lessons(path)
 
     def _comparative_lessons(self, state: RunState, fp: list, exclude=()) -> tuple[list, list]:
         """M6 (MARS comparative reflective memory): credit-assigned lessons from solution PAIRS —
@@ -1683,12 +1689,15 @@ class Engine:
         if not pairs:
             return [], []
 
-        def _lesson(pr: dict, statement: str, outcome: str, conf: float) -> dict:
+        def _lesson(pr: Optional[dict], statement: str, outcome: str, conf: float) -> dict:
+            # `evidence` [child, parent] IS the credited pair (no separate `pair` field to drift).
+            # pr=None = the LLM line carried no usable P<n> marker: record the lesson UNATTRIBUTED
+            # rather than stamping it with an arbitrary pair's nodes/delta (wrong provenance).
             return {"task_id": state.task_id, "fingerprint": fp,
                     "kind": getattr(self.task, "kind", ""), "statement": statement,
-                    "outcome": outcome, "delta": pr.get("delta"), "confidence": conf,
-                    "run_id": state.run_id, "evidence": [pr["a"], pr["b"]],
-                    "source": "comparative", "pair": [pr["a"], pr["b"]]}
+                    "outcome": outcome, "delta": pr.get("delta") if pr else None,
+                    "confidence": conf, "run_id": state.run_id,
+                    "evidence": [pr["a"], pr["b"]] if pr else [], "source": "comparative"}
 
         def _fallback() -> list:
             out = []
@@ -1737,9 +1746,24 @@ class Engine:
             return _fallback(), pairs
         lessons = []
         for idx, stmt, outcome in parse_credit_lessons(out, len(pairs)):
-            pr = pairs[idx] if idx >= 0 else pairs[0]
+            pr = pairs[idx] if idx >= 0 else None
             lessons.append(_lesson(pr, stmt, outcome, 0.65 if idx >= 0 else 0.5))
         return (lessons or _fallback()), pairs
+
+    @staticmethod
+    def _cadence_due(n: int, last: int, every: int) -> bool:
+        """The shared since-last node-count gate (report/distill/refresh cadences). Since-last
+        (not `n % every == 0`): a failed/merge/ablate node-count jump must not step over the only
+        multiple and silently skip the whole window."""
+        return every > 0 and n > 0 and n - last >= every
+
+    @staticmethod
+    def _spent_pairs(state: RunState) -> list:
+        """Every (child, parent) pair a prior distillation already spent — the ledger both the
+        mid-run cadence and run-end reflection exclude against, folded from `lessons_distilled`
+        events (incl. the run-end one, so a reopened run never re-distills)."""
+        return [tuple(p) for d in (state.lessons_distilled or [])
+                for p in (d.get("pairs") or [])]
 
     def _maybe_distill_lessons(self, state: RunState) -> RunState:
         """M6 write side (doc 13 §7 items 2+5): every `lessons_every` NEW nodes, distill
@@ -1755,37 +1779,56 @@ class Engine:
             return state
         n = len(state.nodes)
         last = max((int(d.get("at_node") or 0) for d in state.lessons_distilled), default=0)
-        # Since-last threshold (not `n % every == 0`), same reason as the report cadence: a
-        # node-count jump must not step over the only multiple and silently skip the window.
-        if n == 0 or n - last < self.lessons_every:
+        if not self._cadence_due(n, last, self.lessons_every):
             return state
-        used = [tuple(p) for d in state.lessons_distilled for p in (d.get("pairs") or [])]
         fp = self._task_fingerprint(state, state.best())
-        lessons, pairs = self._comparative_lessons(state, fp, exclude=used)
-        self._append_lessons(lessons)
-        # Always record the event — even with 0 lessons — so the at_node gate advances and the
-        # loop doesn't retry the same node-count every iteration. LLM output rides in the event,
-        # so a replay/resume never re-invokes the model (events-as-truth).
+        lessons, pairs = self._comparative_lessons(state, fp, exclude=self._spent_pairs(state))
+        # Event BEFORE the store write, and always — even with 0 lessons — so the at_node gate
+        # advances and the loop doesn't retry this node-count. Event-first ordering: if the
+        # process dies between the two writes, a resume sees the gate advanced and skips — the
+        # store misses one batch (best-effort memory) instead of re-invoking the LLM and
+        # appending the same lessons twice. The statements ride in the event for audit.
         self.store.append("lessons_distilled", {
-            "at_node": n, "count": len(lessons),
+            "at_node": n, "trigger": "cadence", "count": len(lessons),
             "pairs": [[pr["a"], pr["b"]] for pr in pairs],
             "lessons": [{"statement": lz["statement"], "outcome": lz["outcome"],
-                         "pair": lz.get("pair")} for lz in lessons]})
+                         "evidence": lz.get("evidence")} for lz in lessons]})
+        # Hygiene deferred to run end: the read path dedups/quarantines already, and a full-file
+        # rewrite of the shared store every few nodes would race other runs' appends for nothing.
+        self._append_lessons(lessons, hygiene=False)
         return fold(self.store.read_all())
+
+    def _lessons_store_stamp(self):
+        """(size, mtime_ns) of the shared lessons store, or None — the cheap change detector the
+        refresh gate uses to skip a full re-read/re-score when no run has written since."""
+        if not self.memory_dir:
+            return None
+        try:
+            st = (Path(self.memory_dir) / "lessons.jsonl").stat()
+            return (st.st_size, st.st_mtime_ns)
+        except OSError:
+            return None
 
     def _maybe_refresh_lessons(self, state: RunState) -> RunState:
         """M6 read side (doc 13 §7 item 5): every `lessons_refresh_every` NEW nodes, re-read the
         SHARED cross-run store and rebuild the proposal prior — so lessons a CONCURRENT run
         distilled after this run started reach this run's next proposals (pre-M6, the store was
-        read at run start only). Pure file re-read (no LLM call); this run's own lessons are
-        excluded (they're already in the digest). The `lessons_refreshed` event is the replay-safe
-        cadence gate. No-op when the cadence is 0 or reflection memory is off."""
+        read at run start only). No LLM call; this run's own lessons are excluded (they're already
+        in the digest). The `lessons_refreshed` event is the replay-safe cadence gate. When the
+        store file is UNCHANGED since the last look (stat stamp), the rebuild — a full re-read +
+        re-score (+ harmonic re-embed) of every lesson — is skipped; the gate still advances.
+        No-op when the cadence is 0 or reflection memory is off."""
         if self.lessons_refresh_every <= 0 or not (self._reflection_priors and self.memory_dir):
             return state
         n = len(state.nodes)
         last = max((int(d.get("at_node") or 0) for d in state.lessons_refreshed), default=0)
-        if n == 0 or n - last < self.lessons_refresh_every:
+        if not self._cadence_due(n, last, self.lessons_refresh_every):
             return state
+        stamp = self._lessons_store_stamp()
+        if stamp == self._lessons_seen_stamp:
+            self.store.append("lessons_refreshed", {"at_node": n, "skipped": "unchanged"})
+            return fold(self.store.read_all())
+        self._lessons_seen_stamp = stamp
         before = self._prior_note_text
         self._prior_note_text = self._load_reflection_priors(exclude_run_id=state.run_id or None)
         self.store.append("lessons_refreshed", {

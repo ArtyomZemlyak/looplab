@@ -240,16 +240,17 @@ class Settings(BaseSettings):
     # credit-assigned lessons from PAIRS of solutions — which SPECIFIC change made a child beat
     # (or regress from) its parent, and what fixed a failure — on top of the one-shot run-end
     # reflection. At most one extra LLM call per distillation (all pairs batched); offline a
-    # deterministic param-diff credit stands in. ON by default; a NO-OP unless reflection_priors
-    # is on AND memory_dir is set (same gate as the rest of cross-run memory).
+    # deterministic param-diff credit stands in. Gated on reflection_priors + memory_dir like the
+    # rest of cross-run memory — and since memory_dir has a default (~/.looplab/memory), this is
+    # ACTIVE out of the box; clear memory_dir to disable cross-run memory wholesale.
     comparative_lessons: bool = True
     # M6 mid-run cadences (doc 13 §7 item 5 — the AgentRxiv live-share pattern): every N created
-    # nodes, WRITE comparative lessons to the shared cross-run store during the run (lessons_every)
-    # and RE-READ the store so lessons distilled by CONCURRENT runs reach this run's proposals
-    # (lessons_refresh_every; pure file re-read, no LLM call). ON by default (every 4 nodes; the
-    # write side batches all pairs into one LLM call, so the added cost is bounded); 0 = off —
-    # run-end write / run-start read only, the pre-M6 behavior. Like the rest of reflection
-    # memory, both are a NO-OP until memory_dir is set.
+    # nodes, WRITE comparative lessons to the shared cross-run store during the run (lessons_every
+    # — one batched LLM call per firing) and RE-READ the store so lessons distilled by CONCURRENT
+    # runs reach this run's proposals (lessons_refresh_every; file re-read, no LLM call, skipped
+    # when the store is unchanged). ON by default (every 4 nodes) and, like comparative_lessons
+    # above, live out of the box because memory_dir defaults on; 0 = off — run-end write /
+    # run-start read only, the pre-M6 behavior.
     lessons_every: int = Field(default=4, ge=0)
     lessons_refresh_every: int = Field(default=4, ge=0)
     # B3 output redaction: mask credentials (known key shapes + high-entropy tokens) in the
