@@ -6,7 +6,7 @@ import json
 
 from looplab.agents.agent import ToolUsingResearcher
 from looplab.tools.knowledge_tools import KnowledgeTools
-from looplab.core.models import RunState
+from looplab.core.models import Idea, RunState
 
 
 def _seed_kb(d):
@@ -78,3 +78,91 @@ def test_agent_loop_clamps_out_of_bounds_emit(tmp_path):
     idea = r.propose(RunState(goal="g"), None)
     assert idea.params["degree"] == 6.0           # clamped to the bound
     assert idea.params["lam"] == 50.0             # missing -> filled with midpoint
+
+
+# --- tool-using Researcher loop resilience (review rounds, mega-review, deep audit) ---------------
+
+# live-surfaced bug — the agentic Researcher must survive a junk emit (non-numeric params)
+def test_tool_researcher_finalize_drops_nonnumeric_params():
+    from looplab.agents.agent import ToolUsingResearcher
+    r = ToolUsingResearcher(client=None, tools=None, bounds=None)
+    # the live model returned this and crashed the run before the fix
+    idea = r._finalize({"operator": "modify_metric", "params": {"new_metric": "linear"},
+                        "rationale": "switch reward landscape"})
+    assert idea.params == {} and idea.rationale == "switch reward landscape"
+    # numeric params survive; bounds still fill/clamp
+    r2 = ToolUsingResearcher(client=None, tools=None, bounds={"x": (0.0, 10.0)})
+    idea2 = r2._finalize({"operator": "improve", "params": {"x": "99", "junk": "nope"}})
+    assert idea2.params == {"x": 10.0}                       # "99" clamped to 10, junk dropped
+
+
+def test_tool_researcher_propose_survives_transport_failure():
+    """A transport failure (LLMError after retries) on the agentic path degrades to a safe Idea,
+    it does NOT crash the run."""
+    from looplab.agents.agent import ToolUsingResearcher
+    from looplab.core.llm import LLMError
+    from looplab.core.models import Idea, RunState
+
+    class _DeadClient:
+        def chat(self, *a, **k):
+            raise LLMError("endpoint down")
+
+        def complete_tool(self, *a, **k):
+            raise LLMError("endpoint down")
+
+        def complete_text(self, *a, **k):
+            raise LLMError("endpoint down")
+
+    class _Tools:
+        def specs(self):
+            return []
+
+        def execute(self, name, args):
+            return "(none)"
+
+    r = ToolUsingResearcher(_DeadClient(), _Tools())
+    idea = r.propose(RunState(run_id="r"), None)
+    assert isinstance(idea, Idea)                              # degraded, not crashed
+
+
+def test_force_emit_coerces_non_object_to_dict():
+    """A forced emit returning a valid-but-non-object JSON ("[…]") must become {} so finalize's .get
+    can't AttributeError."""
+    from looplab.agents.agent import _force_emit
+
+    class _Client:
+        def complete_tool(self, messages, schema):
+            return ["not", "a", "dict"]
+
+    out = _force_emit(_Client(), [], {"function": {"parameters": {}}})
+    assert out == {}
+
+
+def test_force_emit_preserves_none_for_couldnt_force():
+    """A client that RETURNS None (couldn't force a tool call) must stay None so the loop nudges +
+    retries, not finalize on empty args."""
+    from looplab.agents.agent import _force_emit
+
+    class _Client:
+        def complete_tool(self, messages, schema):
+            return None
+
+    assert _force_emit(_Client(), [], {"function": {"parameters": {}}}) is None
+
+
+# B1 — the agentic Researcher survives a malformed-JSON tool call (does not crash the run)
+def test_tool_loop_survives_malformed_json_args():
+    from looplab.agents.agent import ToolUsingResearcher
+
+    class _Tools:
+        def specs(self): return []
+        def execute(self, n, a): return ""
+
+    class _Client:
+        def chat(self, messages, tool_specs, tool_choice="auto"):
+            return {"tool_calls": [{"id": "1", "function": {"name": "emit",
+                                                            "arguments": '{"params": {'}}]}  # malformed
+
+    r = ToolUsingResearcher(client=_Client(), tools=_Tools(), bounds=None)
+    idea = r.propose(RunState(goal="g", direction="max"), None)
+    assert isinstance(idea, Idea) and idea.operator                # fell back, no crash

@@ -61,3 +61,15 @@ def test_session_share_roundtrip(tmp_path):
     assert r["ok"] and r["url"].endswith(sid)
     shared = client.get(f"/api/assistant/shared/{sid}").json()
     assert shared["meta"]["shared"] is True
+
+
+def test_background_closes_handle_after_exit(tmp_path):
+    mgr = BackgroundManager()
+    tid = mgr.start([sys.executable, "-c", "print('x')"], str(tmp_path))
+    for _ in range(50):
+        r = mgr.read(tid)
+        if r["status"] == "exited":
+            break
+        time.sleep(0.05)
+    assert mgr._tasks[tid].get("closed") is True
+    assert mgr._tasks[tid]["fh"].closed

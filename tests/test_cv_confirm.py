@@ -54,3 +54,11 @@ def test_confirmation_demotes_seed_lucky_leader():
     out = confirm_top_k(nodes, eval_fn, k=2, seeds=[0, 1, 2, 3], direction="min")
     assert out["best_node_id"] == 1                 # robust winner
     assert out["demoted_single_leader"] is True     # the lucky leader was demoted
+
+
+# #38 — confirm_top_k does not crown a node that produced zero usable seed scores
+def test_confirm_top_k_skips_scoreless_node():
+    nodes = [Node(id=0, operator="draft", idea=Idea(operator="draft"), metric=1.0,
+                  status=NodeStatus.evaluated)]
+    res = confirm_top_k(nodes, lambda n, s: 0.0, k=1, seeds=[], direction="min")
+    assert res["best_node_id"] is None                             # no seeds -> no fabricated 0.0 winner

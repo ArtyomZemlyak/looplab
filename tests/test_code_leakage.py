@@ -1,7 +1,7 @@
 """I3 static code-leakage scan."""
 from __future__ import annotations
 
-from looplab.trust.leakage import code_leakage_scan
+from looplab.trust.leakage import _pearson, code_leakage_scan
 
 
 def test_flags_fit_on_test():
@@ -34,3 +34,8 @@ def test_clean_pipeline_no_flags():
 
 def test_empty_code():
     assert code_leakage_scan("")["leak"] is False
+
+
+def test_pearson_ragged_columns_still_correlate():
+    # a near-perfect proxy that is one row short must NOT silently read as 0.0 (which hides the leak)
+    assert abs(_pearson([1.0, 2.0, 3.0, 4.0], [1.0, 2.0, 3.0])) > 0.99

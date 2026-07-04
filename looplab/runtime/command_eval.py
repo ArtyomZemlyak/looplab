@@ -23,7 +23,8 @@ from contextlib import nullcontext
 from pathlib import Path
 from typing import Optional
 
-from looplab.runtime.sandbox import RunResult, _to_float, json_line_extras, json_line_metric, json_line_trials, run_argv
+from looplab.runtime.sandbox import (RunResult, _to_float, docker_timed_out, json_line_extras,
+                                     json_line_metric, json_line_trials, run_argv)
 
 
 def _dig(obj, key: str):
@@ -352,7 +353,7 @@ def run_command_eval(command: list[str], cwd: str, timeout: float, metric: dict,
             rc, out, err, to = run_argv(_w(_bound(setup, setup_timeout), str(swd)), swd,
                                          setup_timeout + grace, env, max_output_bytes, cancel,
                                          log_path=_log("setup.log"))
-        to = to or (is_docker and rc == 124)            # coreutils timeout -> exit 124
+        to = to or (is_docker and docker_timed_out(rc))   # coreutils timeout -> exit 124 or 137
         if rc != 0 or to:
             return RunResult(exit_code=rc, stdout=out, stderr="setup failed:\n" + err,
                              metric=None, timed_out=to)
@@ -360,7 +361,7 @@ def run_command_eval(command: list[str], cwd: str, timeout: float, metric: dict,
         rc, out, err, to = run_argv(_w(_bound(command, timeout), str(wd)), wd,
                                      timeout + grace, env, max_output_bytes, cancel,
                                      log_path=_log("eval.log"))
-        to = to or (is_docker and rc == 124)
+        to = to or (is_docker and docker_timed_out(rc))   # 124 (SIGTERM) or 137 (SIGKILL escalation)
         if _h is not None:
             _h.set_many(exit_code=rc, timed_out=to)
     with _sp("read_metric", kind=metric.get("kind", "stdout_json")):

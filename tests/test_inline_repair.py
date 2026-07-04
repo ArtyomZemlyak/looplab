@@ -6,6 +6,8 @@ suppression in `debug_action`.
 """
 from __future__ import annotations
 
+import json
+import sys
 from pathlib import Path
 
 import anyio
@@ -15,11 +17,14 @@ from looplab.core.models import Idea, Node, NodeStatus, RunState
 from looplab.engine.orchestrator import Engine, _rule_triage
 from looplab.search.policy import GreedyTree, debug_action
 from looplab.events.replay import fold
+from looplab.adapters.repo_task import EvalSpec, RepoTask
 from looplab.runtime.sandbox import SubprocessSandbox
 from looplab.adapters.toytask import ToyTask
 
 ROOT = Path(__file__).resolve().parents[1]
 TASK = ROOT / "examples" / "toy_task.json"
+FIXTURE = Path(__file__).resolve().parent / "fixtures" / "repo_fixture"
+_M = {"kind": "stdout_json", "key": "metric"}
 
 # A solution that raises a MECHANICAL crash (ModuleNotFoundError) — the rule-based triage treats
 # this as repairable in place.
@@ -178,3 +183,31 @@ def test_idea_rejected_lineage_skipped_by_debug_action():
     st.nodes[0].error_reason = "crash"
     act = debug_action(st, debug_depth=1)
     assert act and act["parent_id"] == 0
+
+
+# #5 — the error-feedback repair loop fires for a repo task even when the failing node had
+#      empty files (e.g. after a baseline fallback)
+def test_repair_fires_for_repo_with_empty_files(tmp_path):
+    class _Dev:
+        def __init__(self):
+            self.last_files: dict = {}
+            self.repaired = False
+
+        def implement(self, idea: Idea) -> str:
+            self.last_files = {}                        # no edits -> baseline eval fails
+            return ""
+
+        def repair(self, idea: Idea, code: str, error: str) -> str:
+            self.repaired = True
+            self.last_files = {"config.json": json.dumps({"needed_x": 3.0})}
+            return ""
+
+    t = RepoTask(id="r", direction="max", editable_path=str(FIXTURE), edit_surface=["*.json"],
+                 protect=["ttrain_strict.py"],
+                 eval=EvalSpec(command=[sys.executable, "ttrain_strict.py"], metric=_M))
+    r, _ = t.build_roles()
+    dev = _Dev()
+    eng = Engine(tmp_path / "run", task=t, researcher=r, developer=dev,
+                 sandbox=SubprocessSandbox(), policy=GreedyTree(n_seeds=1, max_nodes=4))
+    anyio.run(eng.run)
+    assert dev.repaired                                 # repair fired despite empty parent.files

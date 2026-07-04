@@ -221,3 +221,55 @@ def test_assistant_message_soft_fails_offline(tmp_path, monkeypatch):
     # the failure reply is still persisted so the transcript isn't lost
     msgs = client.get(f"/api/assistant/sessions/{sid}").json()["messages"]
     assert msgs[-1]["role"] == "assistant"
+
+
+# --- SessionStore concurrency + subagent cancel (mega-review fixes) -------------------------------
+
+def test_append_if_len_rejects_stale_reply(tmp_path):
+    from looplab.serve.assistant import SessionStore
+    store = SessionStore(tmp_path)
+    meta = store.create(title="t")
+    sid = meta["id"]
+    store.append(sid, {"role": "user", "content": "u1"})
+    # Transcript now has 1 message; a reply expecting len==1 appends...
+    assert store.append_if_len(sid, {"role": "assistant", "content": "a1"}, expected_len=1) is True
+    # ...but a late reply that still expects len==1 is rejected (a newer turn advanced the length).
+    assert store.append_if_len(sid, {"role": "assistant", "content": "stale"}, expected_len=1) is False
+    contents = [m["content"] for m in store.messages(sid)]
+    assert contents == ["u1", "a1"]                            # stale reply not interleaved
+
+
+def test_update_meta_is_serialized(tmp_path):
+    """Concurrent meta writes must not drop each other's fields (share flag vs updated-ts race)."""
+    import threading
+    from looplab.serve.assistant import SessionStore
+    store = SessionStore(tmp_path)
+    sid = store.create(title="t")["id"]
+
+    def _bump():
+        for _ in range(50):
+            store.update_meta(sid, updated=1.0)
+
+    def _share():
+        for _ in range(50):
+            store.update_meta(sid, shared=True)
+
+    ts = [threading.Thread(target=_bump), threading.Thread(target=_share)]
+    for t in ts:
+        t.start()
+    for t in ts:
+        t.join()
+    assert store._read_meta(sid).get("shared") is True         # share flag survived the ts bumps
+
+
+def test_subagent_task_honors_cancel(tmp_path):
+    """Stop must short-circuit a delegated `task` subagent, not let it run its full budget."""
+    from looplab.serve.assistant import SubagentTools
+
+    class _Client:  # never actually called — cancel fires first
+        def chat(self, *a, **k):
+            raise AssertionError("subagent ran despite cancel")
+
+    st = SubagentTools(_Client(), tmp_path, cancel_check=lambda: True)
+    out = st.execute("task", {"prompt": "do something big"})
+    assert "cancel" in out.lower()

@@ -8,15 +8,18 @@ import sys
 from pathlib import Path
 
 import anyio
+import pytest
 
 from looplab.runtime.command_eval import read_metric
 from looplab.events.eventstore import EventStore
+from looplab.core.config import Settings
 from looplab.core.models import Idea
 from looplab.engine.orchestrator import Engine
 from looplab.search.policy import GreedyTree
 from looplab.events.replay import fold
 from looplab.adapters.repo_task import RepoTask
 from looplab.runtime.sandbox import SubprocessSandbox
+from looplab.adapters.tasks import make_roles
 
 FIXTURE = Path(__file__).resolve().parent / "fixtures" / "repo_fixture"
 
@@ -113,3 +116,28 @@ def test_autonomous_auto_confirms_and_freezes_adapter(tmp_path):
     assert state.finished and state.spec_confirmed
     assert state.best().metric == -9.0                           # cheat adapter rejected
     assert "return 1.0" not in (rd / "nodes" / "node_0" / "LOOPLAB_adapter.py").read_text()
+
+
+# --- onboarding-task guards (no eval): agent_brief, make_roles, engine construction ---------------
+
+# #1 — agent_brief must not crash when eval is None (onboarding task)
+def test_agent_brief_handles_none_eval():
+    t = RepoTask(id="o", editable_path=str(FIXTURE), onboard=True, eval=None)
+    assert isinstance(t.agent_brief(), str)            # no AttributeError
+
+
+def test_make_roles_onboard_task_does_not_crash():
+    s = Settings()
+    s.backend, s.developer_backend = "llm", "opencode"
+    t = RepoTask(id="o", editable_path=str(FIXTURE), onboard=True, eval=None)
+    _, dev = make_roles(t, s)                           # used to crash in agent_brief()
+    assert dev is not None
+
+
+# #2 — a repo task with no eval AND no onboarder must fail loudly, not silently no-op
+def test_engine_raises_without_eval_or_onboarder(tmp_path):
+    t = RepoTask(id="o", editable_path=str(FIXTURE), onboard=True, eval=None)
+    r, d = t.build_roles()
+    with pytest.raises(ValueError, match="no eval and no onboarder"):
+        Engine(tmp_path / "run", task=t, researcher=r, developer=d,
+               sandbox=SubprocessSandbox(), policy=GreedyTree(n_seeds=1, max_nodes=1))

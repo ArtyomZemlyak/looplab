@@ -4,6 +4,12 @@ The key property is *consistency*: every candidate is scored on the **same** fol
 so node-to-node comparisons in the search tree are valid. Includes a custom
 purged/embargoed walk-forward splitter for temporal tasks (no library models the
 look-ahead gap — that's our code, per ADR-15).
+
+Wired vs. library: only ``cv_summary`` is on the live engine path today (the confirm/variance
+gate). ``kfold_indices``, ``purged_walk_forward``, ``consistent_cv`` and the ``Evaluator``
+Protocol are the ADR-15 splitter *library* — complete and tested, but not yet consumed by a
+shipped adapter; a temporal TaskAdapter that runs its own consistent CV is their intended caller.
+Kept (not deleted) because they are the documented seam for that adapter.
 """
 from __future__ import annotations
 

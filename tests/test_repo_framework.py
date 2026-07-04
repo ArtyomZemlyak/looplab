@@ -8,13 +8,16 @@ from pathlib import Path
 import anyio
 
 from looplab.runtime.command_eval import build_command
+from looplab.core.config import Settings
 from looplab.core.models import Idea
 from looplab.engine.orchestrator import Engine
 from looplab.search.policy import GreedyTree
-from looplab.adapters.repo_task import EvalSpec, RepoParamResearcher, RepoTask
+from looplab.adapters.repo_task import EvalSpec, NoOpRepoDeveloper, RepoParamResearcher, RepoTask
 from looplab.runtime.sandbox import SubprocessSandbox
+from looplab.adapters.tasks import make_roles
 
 FIXTURE = Path(__file__).resolve().parent / "fixtures" / "repo_fixture"
+_M = {"kind": "stdout_json", "key": "metric"}
 
 
 # ------------------------------ build_command (unit) -------------------------
@@ -84,3 +87,32 @@ def test_confirm_phase_uses_full_profile(tmp_path):
                     confirm_top_k=2, confirm_seeds=2)
     state = anyio.run(engine.run)
     assert state.finished and state.best() is not None
+
+
+# --- cli_overrides param-search must NOT wire the editing agent; build_command profile handling ----
+
+# #3 — cli_overrides param-search must NOT wire the editing agent even with a preset backend
+def test_make_roles_param_search_ignores_agent_backend():
+    s = Settings()
+    s.backend, s.developer_backend, s.unified_agent = "llm", "opencode", False
+    t = RepoTask(id="p", direction="max", editable_path=str(FIXTURE), protect=["ttrain_cli.py"],
+                 params={"x": (-5.0, 5.0)},
+                 eval=EvalSpec(command=[sys.executable, "ttrain_cli.py"],
+                               params_style="cli_overrides", metric=_M))
+    _, dev = make_roles(t, s)
+    assert isinstance(dev, NoOpRepoDeveloper)           # baseline, not a ValidatingDeveloper
+
+
+# #4 — confirm's requested 'full' profile, when undefined, runs the BASE command (full eval),
+#      never silently the cheap 'smoke' overrides
+def test_build_command_missing_requested_profile_uses_base():
+    es = {"command": ["python", "t.py"], "timeout": 999,
+          "profiles": {"smoke": {"overrides": ["s=1"], "timeout": 5}}}
+    cmd, t = build_command(es, {}, "full")             # 'full' not defined
+    assert cmd == ["python", "t.py"] and t == 999      # base command + base timeout, not s=1/5
+
+
+# #10 — a configured timeout of 0 is honored (not coerced to the 600 default)
+def test_build_command_zero_timeout_honored():
+    es = {"command": ["python", "t.py"], "profiles": {"smoke": {"overrides": [], "timeout": 0}}}
+    assert build_command(es, {}, "smoke")[1] == 0

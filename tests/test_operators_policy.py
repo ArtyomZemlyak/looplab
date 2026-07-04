@@ -8,7 +8,7 @@ import anyio
 from looplab.core.models import Idea, Node, NodeStatus, RunState
 from looplab.search.operators import merge_idea
 from looplab.engine.orchestrator import Engine
-from looplab.search.policy import GreedyTree
+from looplab.search.policy import ASHAPolicy, GreedyTree, MCTSPolicy, make_policy
 from looplab.runtime.sandbox import SubprocessSandbox
 from looplab.adapters.toytask import ToyTask
 
@@ -93,3 +93,41 @@ def test_end_to_end_produces_a_merge_node(tmp_path):
     assert merges, "expected at least one merge node in a 12-node run"
     assert all(len(n.parent_ids) == 2 for n in merges)  # multi-parent DAG
     assert state.finished and len(state.nodes) == 12
+
+
+# --- merge: non-numeric params are skipped, not summed -------------------------------------------
+
+def test_merge_idea_skips_non_numeric_params():
+    a = Node(id=0, operator="draft", idea=Idea(operator="draft", params={"x": 2.0}))
+    # A free-form repo param that isn't numeric must be skipped, not crash sum().
+    b = Node(id=1, operator="draft", idea=Idea.model_construct(operator="draft",
+                                                               params={"x": 4.0, "name": "linear"}))
+    idea = merge_idea([a, b])
+    assert idea.params["x"] == 3.0 and "name" not in idea.params
+
+
+# --- ASHA rung-0 width knob actually takes effect -------------------------------------------------
+
+def test_asha_rung_nodes_overrides_rung0_width():
+    p = make_policy("asha", n_seeds=4, max_nodes=20, eta=3, rung_nodes=8)
+    assert isinstance(p, ASHAPolicy) and p.rung0 == 8
+    # 0 falls back to n_seeds (default, preserving prior behavior).
+    assert make_policy("asha", n_seeds=4, max_nodes=20, eta=3, rung_nodes=0).rung0 == 4
+    # policy_params colliding with explicit make_policy kwargs must not crash via the strategist path.
+    assert make_policy("asha", n_seeds=4, max_nodes=20, rung_nodes=6, eta=2).rung0 == 6
+
+
+# #27/#31 — MCTS values a candidate by its FEASIBLE descendants only
+def test_mcts_ignores_infeasible_descendant_metric():
+    st = RunState(direction="max")
+    p = Node(id=0, operator="draft", idea=Idea(operator="draft"), metric=1.0,
+             status=NodeStatus.evaluated, feasible=True)
+    child = Node(id=1, parent_ids=[0], operator="improve", idea=Idea(operator="improve"),
+                 metric=99.0, status=NodeStatus.evaluated, feasible=False)   # great but infeasible
+    other = Node(id=2, operator="draft", idea=Idea(operator="draft"), metric=2.0,
+                 status=NodeStatus.evaluated, feasible=True)
+    st.nodes = {0: p, 1: child, 2: other}
+    act = MCTSPolicy(n_seeds=1, max_nodes=10).next_actions(st)
+    # node 0's only high score is its infeasible child (99) — it must NOT be valued by it, so the
+    # feasible node 2 (metric 2 > 1) is the better-valued expansion target.
+    assert act and act[0]["kind"] == "improve" and act[0]["parent_id"] == 2

@@ -88,3 +88,49 @@ def test_ledger_never_changes_best_selection():
     # a re-fold is deterministic
     assert {h.statement: h.status for h in _run().hypotheses.values()} == \
            {h.statement: h.status for h in st.hypotheses.values()}
+
+
+# ── deep-review round: malformed entries, failed-evidence, re-adding an abandoned hypothesis ──────
+
+def test_malformed_hypothesis_added_does_not_brick_fold():
+    # A scripted API client can append any JSON via the control endpoint; one malformed entry
+    # must not make every later fold of the run raise.
+    st = fold(_mk([
+        ("run_started", {"run_id": "r", "task_id": "t", "direction": "max"}),
+        ("hypothesis_added", {"statement": "x helps", "at_node": "soon"}),      # non-numeric at_node
+        ("hypothesis_added", {"statement": "y helps", "id": 5}),                # non-string id
+        ("hypothesis_added", {"statement": "z helps", "source": {"who": "me"}}),  # non-string source
+    ]))
+    stmts = {h.statement for h in st.hypotheses.values()}
+    assert {"x helps", "y helps", "z helps"} <= stmts
+
+
+def test_failed_evidence_hypothesis_returns_to_open_not_testing():
+    st = fold(_mk([
+        ("run_started", {"run_id": "r", "task_id": "t", "direction": "max"}),
+        ("node_created", {"node_id": 1, "operator": "draft",
+                          "idea": {"operator": "draft", "hypothesis": "bigger net helps"}}),
+        ("node_failed", {"node_id": 1, "reason": "crash"}),
+        ("run_finished", {"reason": "done"}),
+    ]))
+    h = st.hypotheses[hypothesis_id("bigger net helps")]
+    assert h.status == "open"          # not "testing": nothing is running in a finished run
+
+
+def test_re_adding_abandoned_hypothesis_reopens_it():
+    hid = hypothesis_id("try polars")
+    st = fold(_mk([
+        ("run_started", {"run_id": "r", "task_id": "t", "direction": "max"}),
+        ("hypothesis_added", {"statement": "try polars", "id": hid}),
+        ("hypothesis_updated", {"id": hid, "status": "abandoned"}),
+        ("hypothesis_added", {"statement": "try polars", "id": hid}),   # mis-click undo: re-add
+    ]))
+    assert st.hypotheses[hid].status == "open"
+    # and an explicit non-abandoned status update also clears the override
+    st2 = fold(_mk([
+        ("run_started", {"run_id": "r", "task_id": "t", "direction": "max"}),
+        ("hypothesis_added", {"statement": "try polars", "id": hid}),
+        ("hypothesis_updated", {"id": hid, "status": "abandoned"}),
+        ("hypothesis_updated", {"id": hid, "status": "open"}),
+    ]))
+    assert st2.hypotheses[hid].status == "open"

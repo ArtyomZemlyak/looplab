@@ -148,3 +148,29 @@ def test_forget_drops_supertask_assignment(tmp_path):
     s.assign_supertask("run_z", st["id"])
     s.forget("run_z")                                 # called when a run dir is deleted
     assert s.supertask_of("run_z") is None
+
+
+# --- projects.json load tolerance (malformed / wrong-typed) --------------------------------------
+
+def test_projects_load_tolerates_non_dict_json(tmp_path):
+    p = tmp_path / "projects.json"
+    p.write_text("[]", encoding="utf-8")      # valid JSON, wrong shape — must not raise AttributeError
+    data = ProjectStore(p).load()
+    assert isinstance(data, dict) and "projects" in data
+
+
+def test_projects_load_coerces_wrong_typed_keys(tmp_path):
+    # A hand-edited projects.json that IS a dict but has a wrong-typed inner key must be coerced to
+    # the skeleton type for that key, not left to TypeError downstream (_index / assign).
+    (tmp_path / "projects.json").write_text(json.dumps({"assignments": [], "projects": "oops"}))
+    data = ProjectStore(tmp_path / "projects.json").load()
+    assert data["assignments"] == {}     # list -> {} (skeleton)
+    assert data["projects"] == []        # str  -> [] (skeleton)
+    assert data["labels"] == {}          # missing key -> default
+
+
+def test_projects_load_preserves_wellformed(tmp_path):
+    good = {"projects": [{"id": "p1", "name": "X"}], "assignments": {"r1": "p1"},
+            "labels": {}, "supertasks": [], "supertask_assignments": {}}
+    (tmp_path / "p.json").write_text(json.dumps(good))
+    assert ProjectStore(tmp_path / "p.json").load() == good

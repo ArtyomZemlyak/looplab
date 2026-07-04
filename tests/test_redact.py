@@ -59,3 +59,36 @@ def test_engine_redacts_persisted_tail(tmp_path):
     state = anyio.run(eng.run)
     tails = " ".join(n.stdout_tail for n in state.nodes.values())
     assert "sk-abcdefABCDEF0123456789TOKEN" not in tails and "sk-***" in tails
+
+
+# --- redact: compound credential key names are masked --------------------------------------------
+
+def test_redact_masks_compound_secret_keys():
+    out = redact_secrets("env={'AWS_SECRET_ACCESS_KEY': 'abcdefabcdefabcd'}", entropy=False)
+    assert "abcdefabcdefabcd" not in out and "***" in out
+    out2 = redact_secrets("db_password=supersecretvalue", entropy=False)
+    assert "supersecretvalue" not in out2
+
+
+def test_redact_modern_key_prefixes():
+    assert "sk-proj-ABCDEFGHIJKLMNOPQRSTUVWX" not in redact_secrets("key sk-proj-ABCDEFGHIJKLMNOPQRSTUVWX")
+    assert "***" in redact_secrets("token=github_pat_ABCDEFGHIJKLMNOPQRSTUV")
+    assert "hf_ABCDEFGHIJKLMNOPQRSTUV" not in redact_secrets("hf_ABCDEFGHIJKLMNOPQRSTUV")
+
+
+def test_benign_token_fields_not_overmasked():
+    # Field NAMES that merely contain a credential substring ("token") but are benign diagnostics
+    # must NOT be masked — operators rely on these in the persisted stdout tail.
+    assert redact_secrets("tokenizer=gpt2") == "tokenizer=gpt2"
+    assert redact_secrets("max_tokens: 1024") == "max_tokens: 1024"
+    assert redact_secrets("usage: total_tokens=512") == "usage: total_tokens=512"
+
+
+def test_real_secret_fields_still_redacted():
+    # The broad key-name match is preserved: genuine secret fields are still masked.
+    for s in ("AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMIKDENGbPxRfiCY",
+              "db_password=hunter2hunter2",
+              "MY_API_KEY=abcd1234efgh"):
+        masked = redact_secrets(s)
+        secret = s.split("=", 1)[1]
+        assert "***" in masked and secret not in masked

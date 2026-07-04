@@ -52,6 +52,26 @@ _HYPOTHESIS_INSTRUCTION = (
     "expect the result to support or refute (e.g. \"adding interaction features raises CV accuracy\", "
     "\"a deeper tree overfits this small dataset\"). Reuse the SAME wording when a later experiment "
     "tests the same belief, so the run builds a ledger of what's been learned.")
+
+
+def _hypothesis_system_suffix(track_hypotheses: bool) -> str:
+    """The system-prompt tail that asks for the per-experiment `hypothesis` (P1), or "" when the
+    knob is off. Shared VERBATIM by BOTH researchers (`LLMResearcher` here and agent.py's
+    `ToolUsingResearcher`) so the `"\\n" + _HYPOTHESIS_INSTRUCTION` splice lives in ONE place."""
+    return ("\n" + _HYPOTHESIS_INSTRUCTION) if track_hypotheses else ""
+
+
+# The "your idea space is the WHOLE experiment / the Developer owns HOW" guidance, as worded for
+# LLMResearcher's per-turn USER message (it follows the rationale ask). A SECOND, deliberately
+# DIFFERENT wording lives in agent.py's `ToolUsingResearcher._IDEA_SPACE_TOOL` (a system prompt).
+# The two are NOT normalized — prompt strings are contracts and the phrasings have drifted — but
+# both are named `_IDEA_SPACE_*` so `grep _IDEA_SPACE` surfaces the pair despite the byte drift.
+_IDEA_SPACE_PLAIN = ("Your idea space is the whole "
+                     "experiment: propose a parameter change OR a structural one "
+                     "(architecture, loss, data, training) when that's the stronger "
+                     "move — describe non-numeric changes in the rationale. You do not "
+                     "write the code yourself (the Developer owns how, and may edit the "
+                     "code to realise it), but you ARE free to direct code-level changes.")
 _DEVELOPER_SYSTEM = ("You are an expert ML engineer. Output ONLY a single fenced "
                      "```python``` block containing a complete, self-contained script. "
                      # 1.3 consistent evaluation: every candidate must be measured on the SAME
@@ -91,9 +111,10 @@ RESEARCHER_HINT_ATTRS: tuple[str, ...] = (
 `UnifiedAgent.propose` forwards them to its internal researcher. Keep this tuple in
 sync with the orchestrator's setattr sites.
 
-NOTE: agent.py's `ToolUsingResearcher.propose` currently omits `_sweep_hint` (it folds
-only `_complexity_hint` + `_novelty_feedback` into its prompt) — a potential bug, kept
-as-is deliberately so its rendered prompts stay byte-identical."""
+Both researchers now honor all four hints: `LLMResearcher.propose` and agent.py's
+`ToolUsingResearcher.propose` fold the same `(_complexity_hint, _sweep_hint,
+_novelty_feedback)` cue set into their prompts, so the strategist's `prefer_sweep` nudge
+reaches the agentic path too (`_digest_cap` is consumed separately as a numeric cap)."""
 
 
 def collect_hint_cues(obj, attrs) -> str:
@@ -244,7 +265,7 @@ class LLMResearcher:
         # - _novelty_feedback — T5 novelty-gate feedback (one re-propose): "you already tried X, it
         #   failed because Y — propose something meaningfully different". Empty in the normal path.
         cues = collect_hint_cues(self, ("_complexity_hint", "_sweep_hint", "_novelty_feedback"))
-        hyp_sys = ("\n" + _HYPOTHESIS_INSTRUCTION) if self.track_hypotheses else ""
+        hyp_sys = _hypothesis_system_suffix(self.track_hypotheses)
         messages = [
             {"role": "system",
              "content": render(self.prompts, "researcher_system", _RESEARCHER_SYSTEM) + hyp_sys
@@ -259,12 +280,7 @@ class LLMResearcher:
                                         "`rationale` is your conclusion the operator reads: in 1-3 "
                                         "sentences state WHY this experiment next and WHAT you expect "
                                         "it to learn/improve given the results so far — not a "
-                                        "restatement of the params. Your idea space is the whole "
-                                        "experiment: propose a parameter change OR a structural one "
-                                        "(architecture, loss, data, training) when that's the stronger "
-                                        "move — describe non-numeric changes in the rationale. You do not "
-                                        "write the code yourself (the Developer owns how, and may edit the "
-                                        "code to realise it), but you ARE free to direct code-level changes."
+                                        "restatement of the params. " + _IDEA_SPACE_PLAIN
                                         + (" The `hypothesis` is the one-line belief this experiment "
                                            "tests (reuse wording across experiments that test the same "
                                            "belief)." if self.track_hypotheses else "")},

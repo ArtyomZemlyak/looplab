@@ -84,3 +84,28 @@ def test_apply_patch_rejects_malformed(tmp_path):
     (tmp_path / "solution.py").write_text("totally different\n", encoding="utf-8")
     res = apply_patch(_DIFF, str(tmp_path), allow=["*.py"])
     assert not res["applied"] and res["error"]
+
+
+# --- patch gate: protected-file rejection + per-repo surface prefixes (deep audit) ----------------
+
+# A3 — the patch gate rejects a protected file even when it matches the surface
+def test_patch_gate_rejects_protected():
+    diff = ("diff --git a/ttrain.py b/ttrain.py\n--- a/ttrain.py\n+++ b/ttrain.py\n"
+            "@@ -1 +1 @@\n-x\n+y\n")
+    assert gate(diff, ["*.py"])["ok"] is True                      # in surface
+    g = gate(diff, ["*.py"], ["ttrain.py"])                        # but protected
+    assert g["ok"] is False and "ttrain.py" in g["rejected"]
+    # case-variant is also rejected
+    diff2 = diff.replace("ttrain.py", "Ttrain.PY")
+    assert gate(diff2, ["*.py"], ["ttrain.py"])["ok"] is False
+
+
+# #32 — the patch gate scopes each named repo's surface to its own subdir
+def test_gate_prefix_scopes_named_repo_surface():
+    diff = ("diff --git a/model/evil.py b/model/evil.py\n--- a/model/evil.py\n"
+            "+++ b/model/evil.py\n@@ -1 +1 @@\n-x\n+y\n")
+    allow = ["**/*.py", "model/keep/*.py"]                          # model repo's narrow surface
+    assert gate(diff, allow)["ok"] is True                          # without prefixes: root glob leaks
+    assert gate(diff, allow, prefixes=["model"])["ok"] is False     # scoped: not in model/keep/*
+    assert gate(diff.replace("model/evil.py", "model/keep/m.py"), allow, prefixes=["model"])["ok"]
+    assert gate(diff.replace("model/evil.py", "top.py"), allow, prefixes=["model"])["ok"]

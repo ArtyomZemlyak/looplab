@@ -11,7 +11,7 @@ from looplab.tools.agents_md import generate_agents_md
 from looplab.events.eventstore import EventStore
 from looplab.engine.orchestrator import Engine
 from looplab.search.policy import GreedyTree
-from looplab.core.prompts import PromptStore, render
+from looplab.core.prompts import PromptStore, _strip_frontmatter, render
 from looplab.runtime.sandbox import SubprocessSandbox
 from looplab.tools.skills import SkillLibrary, SkillTools
 from looplab.adapters.toytask import ToyTask
@@ -84,3 +84,17 @@ def test_engine_writes_agents_md(tmp_path):
                  sandbox=SubprocessSandbox(), policy=GreedyTree(n_seeds=2, max_nodes=4))
     anyio.run(eng.run)
     assert (tmp_path / "run" / "AGENTS.md").exists()
+
+
+# --- prompts: frontmatter stripping vs Markdown horizontal rules ---------------------------------
+
+def test_frontmatter_keeps_markdown_horizontal_rules():
+    """`---` used as Markdown rules must NOT be treated as a frontmatter fence (Section A vanished)."""
+    t = "Rules for the researcher.\n---\nSection A: do X.\n---\nSection B: do Y.\n"
+    out = _strip_frontmatter(t)
+    assert "Section A" in out and "Section B" in out
+
+
+def test_frontmatter_strips_real_leading_block():
+    fm = "---\ntitle: x\nauthor: y\n---\nBody starts here.\n"
+    assert _strip_frontmatter(fm).strip() == "Body starts here."

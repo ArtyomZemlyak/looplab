@@ -145,3 +145,13 @@ def test_live_opencode_validated_ships_valid_code(tmp_path):
     if not dev.last_fell_back:                        # when the agent itself succeeded …
         assert dev.last_report.ok                     # … its report is clean (modified seed, parses)
     assert dev.last_report is not None and dev.last_report.ok, dev.last_report.feedback()
+
+
+# #53 — opencode_config tolerates a trailing-slash model id
+def test_opencode_config_trailing_slash():
+    import json as _j
+    from looplab.agents.cli_agent import opencode_config
+    cfg = _j.loads(opencode_config("http://h:1", "ollama/"))
+    assert "ollama" in cfg["provider"]
+    models = cfg["provider"]["ollama"]["models"]
+    assert "ollama/" not in models                     # not the broken empty-name id

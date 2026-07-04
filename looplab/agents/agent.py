@@ -18,7 +18,25 @@ from looplab.core.llm import BudgetExceeded
 from looplab.core.models import Idea, Node, RunState
 from looplab.core.parse import ParseError, parse_structured
 from looplab.core.prompts import PromptStore, render
-from looplab.agents.roles import _clamp_fill, _state_brief, collect_hint_cues
+from looplab.agents.roles import (
+    _clamp_fill, _hypothesis_system_suffix, _state_brief, collect_hint_cues)
+
+
+# The "your idea space is the WHOLE experiment / the Developer owns HOW" guidance, as worded for
+# ToolUsingResearcher's SYSTEM prompt. A SECOND, deliberately DIFFERENT wording lives in
+# roles.py's `_IDEA_SPACE_PLAIN` (that one rides the plain researcher's per-turn user message).
+# The two are NOT normalized — prompt strings are contracts and the phrasings have drifted — but
+# both are named `_IDEA_SPACE_*` so `grep _IDEA_SPACE` surfaces the pair despite the byte drift.
+_IDEA_SPACE_TOOL = ("Your idea space is the WHOLE experiment, not just hyperparameters: you may propose "
+                    "changes to the model ARCHITECTURE, the LOSS/objective, the DATA (features, augmentation, "
+                    "filtering, negatives, sampling), the TRAINING procedure, or the evaluation — anything "
+                    "that could move the metric. Do NOT limit yourself to parameter tuning when a structural "
+                    "change is the stronger experiment. Numeric knobs go in `params`; describe any non-numeric "
+                    "or structural change (a new loss, an architecture tweak, a data-pipeline change) clearly "
+                    "in `rationale` so the Developer can build it.\n"
+                    "Propose WHAT to try and WHY (the concept + expected learning). You do not write the code "
+                    "yourself — the Developer owns HOW, and is free to edit the repo's code to realise your "
+                    "idea — but you ARE free to direct structural, code-level changes when they're warranted. ")
 
 
 class CompositeTools:
@@ -383,16 +401,7 @@ class ToolUsingResearcher:
                "retrieval tools to consult prior knowledge/results, then call `emit` exactly once with "
                "your final Idea (operator, params, rationale, and a short reusable `theme` slug that "
                "groups related experiments, e.g. \"loss-fn\" or \"architecture\").\n"
-               "Your idea space is the WHOLE experiment, not just hyperparameters: you may propose "
-               "changes to the model ARCHITECTURE, the LOSS/objective, the DATA (features, augmentation, "
-               "filtering, negatives, sampling), the TRAINING procedure, or the evaluation — anything "
-               "that could move the metric. Do NOT limit yourself to parameter tuning when a structural "
-               "change is the stronger experiment. Numeric knobs go in `params`; describe any non-numeric "
-               "or structural change (a new loss, an architecture tweak, a data-pipeline change) clearly "
-               "in `rationale` so the Developer can build it.\n"
-               "Propose WHAT to try and WHY (the concept + expected learning). You do not write the code "
-               "yourself — the Developer owns HOW, and is free to edit the repo's code to realise your "
-               "idea — but you ARE free to direct structural, code-level changes when they're warranted. ")
+               + _IDEA_SPACE_TOOL)
 
     def __init__(self, client, tools, space_hint: str = "",
                  bounds: Optional[dict] = None, parser: str = "tool_call",
@@ -460,15 +469,14 @@ class ToolUsingResearcher:
             self.tools.bind_state(state, parent)
         from looplab.agents.hints import render_hint_directives
         hint_block = render_hint_directives(state.pending_hints)
-        # A0d breadth-keyed complexity cue + T5 novelty-gate re-propose feedback (each empty=off).
-        # Deliberately NOT `_sweep_hint` — see the note on roles.RESEARCHER_HINT_ATTRS.
-        cue = collect_hint_cues(self, ("_complexity_hint", "_novelty_feedback"))
+        # A0d breadth-keyed complexity cue + Strategist `prefer_sweep` bias + T5 novelty-gate
+        # re-propose feedback (each empty=off). Matches LLMResearcher's cue set exactly, so the
+        # agentic path now honors the strategist's sweep nudge just like the plain researcher.
+        cue = collect_hint_cues(self, ("_complexity_hint", "_sweep_hint", "_novelty_feedback"))
         # Hypotheses ledger (P1): honor track_hypotheses on the agentic path too (default on, matching
         # config) — ask for the per-experiment `hypothesis` so the ledger of tested beliefs fills in.
-        hyp = ""
-        if getattr(self, "track_hypotheses", True):
-            from looplab.agents.roles import _HYPOTHESIS_INSTRUCTION
-            hyp = "\n" + _HYPOTHESIS_INSTRUCTION
+        # Shared `_hypothesis_system_suffix` splices `_HYPOTHESIS_INSTRUCTION` identically to LLMResearcher.
+        hyp = _hypothesis_system_suffix(getattr(self, "track_hypotheses", True))
         messages = [
             {"role": "system",
              "content": render(self.prompts, "tool_researcher_system", self._SYSTEM)

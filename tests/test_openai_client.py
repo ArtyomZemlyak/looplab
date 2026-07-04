@@ -8,7 +8,12 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import pytest
 
-from looplab.core.llm import OpenAICompatibleClient
+from looplab.core.llm import (
+    OpenAICompatibleClient,
+    _apply_native_tool_calls,
+    _extract_native_tool_calls,
+    _tool_call_slot,
+)
 from looplab.core.models import Idea
 from looplab.core.parse import parse_structured
 
@@ -400,3 +405,131 @@ def test_read_stream_falls_back_on_iterable_non_sse_body():
     out = c._read_stream(_IterResp(lines))
     assert out["choices"][0]["message"]["content"] == "plain"
     assert out["usage"] == {"total_tokens": 3}
+
+
+# ─────────────────────────────── native tool-call recovery + stream reassembly (mega review) ─────
+
+class _FakeResp:
+    """A minimal iterable/closable stand-in for a urllib SSE response."""
+    def __init__(self, lines):
+        self._lines = lines
+        self.fp = None
+
+    def __iter__(self):
+        return iter(self._lines)
+
+    def close(self):
+        pass
+
+
+def _sse(*chunks):
+    lines = [("data: " + json.dumps(c) + "\n").encode() for c in chunks]
+    lines.append(b"data: [DONE]\n")
+    return _FakeResp(lines)
+
+
+def test_native_tool_call_quoted_prose_is_not_executed():
+    """Un-fenced prose that merely QUOTES the tool syntax must NOT be lifted into a real tool call
+    (it would execute e.g. delete_file on documentation text)."""
+    txt = ('To call a tool you write: invoke name="delete_file" with parameter name="arguments">'
+           '{"path": "main.py"}</parameter> and close with </invoke>. That is the syntax.')
+    calls, _clean = _extract_native_tool_calls(txt)
+    assert calls is None
+
+
+def test_native_tool_call_real_leak_is_recovered():
+    """A genuine leaked native block (opening tag present) is still recovered."""
+    leaked = ('<｜DSML｜invoke name="emit"><｜DSML｜parameter name="arguments">'
+              '{"x": 1}</｜DSML｜parameter></｜DSML｜invoke>')
+    calls, _clean = _extract_native_tool_calls(leaked)
+    assert calls and calls[0]["function"]["name"] == "emit"
+    assert json.loads(calls[0]["function"]["arguments"]) == {"x": 1}
+
+
+def test_streamed_tool_calls_without_index_stay_separate():
+    """Providers that omit `index` (one whole call per delta) must not collapse both calls into slot 0."""
+    c = OpenAICompatibleClient("m", stream=True)
+    resp = _sse(
+        {"choices": [{"delta": {"tool_calls": [
+            {"id": "a", "type": "function", "function": {"name": "f1", "arguments": '{"x":1}'}}]}}]},
+        {"choices": [{"delta": {"tool_calls": [
+            {"id": "b", "type": "function", "function": {"name": "f2", "arguments": '{"y":2}'}}]}}]},
+        {"choices": [{"delta": {}, "finish_reason": "tool_calls"}]},
+    )
+    out = c._read_stream(resp)
+    calls = out["choices"][0]["message"]["tool_calls"]
+    assert [(t["function"]["name"], t["function"]["arguments"]) for t in calls] == [
+        ("f1", '{"x":1}'), ("f2", '{"y":2}')]
+
+
+def test_streamed_single_call_fragments_stay_merged():
+    """Fragments of ONE call (id/name only on the first delta) must not split into two calls."""
+    c = OpenAICompatibleClient("m", stream=True)
+    resp = _sse(
+        {"choices": [{"delta": {"tool_calls": [
+            {"id": "a", "function": {"name": "f1", "arguments": '{"x":'}}]}}]},
+        {"choices": [{"delta": {"tool_calls": [{"function": {"arguments": '1}'}}]}}]},
+        {"choices": [{"delta": {}, "finish_reason": "tool_calls"}]},
+    )
+    out = c._read_stream(resp)
+    calls = out["choices"][0]["message"]["tool_calls"]
+    assert len(calls) == 1 and calls[0]["function"]["arguments"] == '{"x":1}'
+
+
+def test_tool_call_slot_prefers_explicit_index():
+    assert _tool_call_slot({}, {"index": 3}) == 3
+    assert _tool_call_slot({0: {"id": "a", "function": {"name": "f", "arguments": []}}},
+                           {"index": 0}) == 0
+
+
+def test_streamed_single_call_with_echoed_name_stays_merged():
+    """A provider that ECHOES function.name on every continuation delta (no index/id) must not split
+    one call into invalid-JSON fragments."""
+    c = OpenAICompatibleClient("m", stream=True)
+    resp = _sse(
+        {"choices": [{"delta": {"tool_calls": [{"function": {"name": "emit", "arguments": '{"x":'}}]}}]},
+        {"choices": [{"delta": {"tool_calls": [{"function": {"name": "emit", "arguments": '1}'}}]}}]},
+        {"choices": [{"delta": {}, "finish_reason": "tool_calls"}]},
+    )
+    calls = c._read_stream(resp)["choices"][0]["message"]["tool_calls"]
+    assert len(calls) == 1 and calls[0]["function"]["arguments"] == '{"x":1}'
+
+
+def test_streamed_two_indexless_noid_calls_split_on_complete_args():
+    """Two distinct index-less, id-less calls (each with complete JSON args) must NOT merge into one."""
+    c = OpenAICompatibleClient("m", stream=True)
+    resp = _sse(
+        {"choices": [{"delta": {"tool_calls": [{"function": {"name": "f1", "arguments": '{"a":1}'}}]}}]},
+        {"choices": [{"delta": {"tool_calls": [{"function": {"name": "f2", "arguments": '{"b":2}'}}]}}]},
+        {"choices": [{"delta": {}, "finish_reason": "tool_calls"}]},
+    )
+    calls = c._read_stream(resp)["choices"][0]["message"]["tool_calls"]
+    assert len(calls) == 2
+
+
+def test_native_recovery_ignores_markup_quoted_in_code_blocks():
+    quoted = ('Here is how the DSML template looks:\n```\n<tool_calls><invoke name="run_command">'
+              '<parameter name="command">rm -rf /</parameter></invoke></tool_calls>\n```\nSafe.')
+    calls, clean = _extract_native_tool_calls(quoted)
+    assert calls is None and clean == quoted                       # quoted example: untouched
+    msg = {"role": "assistant", "content": quoted}
+    assert _apply_native_tool_calls(msg).get("tool_calls") is None
+    assert msg["content"] == quoted                                # reply not truncated
+
+    leaked = ('<tool_calls><invoke name="read_file"><parameter name="path">/tmp/x</parameter>'
+              '</invoke></tool_calls>')
+    calls2, clean2 = _extract_native_tool_calls(leaked)            # a REAL leak still recovers
+    assert calls2 and calls2[0]["function"]["name"] == "read_file"
+    assert clean2 == ""
+
+
+def test_llm_transport_error_is_clean_and_falls_back():
+    from looplab.core.llm import OpenAICompatibleClient, LLMError
+    from looplab.core.models import Idea
+    from looplab.core.parse import ParseError, parse_structured
+    client = OpenAICompatibleClient(model="x", base_url="http://127.0.0.1:9/v1", timeout=2.0)
+    with pytest.raises(LLMError):                 # raw URLError no longer escapes
+        client.complete_text([{"role": "user", "content": "hi"}])
+    # parse_structured treats it as a parse failure -> ParseError (the role layer then falls back)
+    with pytest.raises(ParseError):
+        parse_structured(client, [{"role": "user", "content": "hi"}], Idea, "tool_call")

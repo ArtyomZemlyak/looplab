@@ -1,0 +1,27 @@
+"""Settings config schema: lower-bound validation and run-only settings round-tripping through the
+masked snapshot on resume.
+
+Regressions from the code-review rounds (round 5 config lower bounds; audit C1 resume settings)."""
+from __future__ import annotations
+
+import pytest
+
+from looplab.core.config import Settings
+
+
+def test_config_lower_bounds():
+    from pydantic import ValidationError
+    for bad in ({"max_parallel": 0}, {"max_nodes": 0}, {"n_seeds": 0}, {"timeout": 0}):
+        with pytest.raises(ValidationError):
+            Settings(**bad)
+    assert Settings().max_parallel == 1  # default still valid
+
+
+# C1 — resume reconstructs run-only settings from the snapshot
+def test_settings_roundtrip_through_snapshot():
+    s = Settings()
+    s.require_approval, s.trust_mode, s.confirm_seeds = True, "untrusted", 4
+    snap = s.masked_snapshot()
+    snap.pop("llm_api_key", None)
+    s2 = Settings(**snap)
+    assert s2.require_approval is True and s2.trust_mode == "untrusted" and s2.confirm_seeds == 4

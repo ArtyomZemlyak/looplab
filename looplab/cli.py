@@ -365,7 +365,13 @@ def run(
       - looplab run --kind dataset --goal "predict target" --data data.csv -s backend=llm
 
     Any engine setting can be overridden with `-s/--set key=value` (full parity with the settings:
-    block and LOOPLAB_* env). Run `looplab init` to scaffold a documented config file."""
+    block and LOOPLAB_* env). Run `looplab init` to scaffold a documented config file.
+
+    Maintainer note: the typed `--flag` surface below is FROZEN. `-s/--set` already reaches every
+    `Settings` field with full parity, so a NEW engine knob needs only a `Settings` field — do NOT
+    add a new typer.Option here (each one also has to be threaded into the settings dict at the
+    `# 3. Merge engine settings` block below, doubling the edit and the drift risk). The existing
+    flags stay for back-compat and ergonomics."""
     if backend is not None:
         _choice(backend, _BACKENDS, "--backend")
     if developer_backend is not None:

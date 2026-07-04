@@ -194,3 +194,33 @@ def test_fold_ignores_spans(tmp_path):
     (run_dir / "spans.jsonl").write_text("garbage not json\n", encoding="utf-8")
     s2 = fold(list(EventStore(run_dir / "events.jsonl").read_all()))
     assert s1.best_node_id == s2.best_node_id and len(s1.nodes) == len(s2.nodes)
+
+
+# #5 — an exception inside a span marks it ERROR (and re-raises)
+def test_span_error_status(tmp_path):
+    tr = Tracer(JsonlSpanExporter(tmp_path / "s.jsonl"), run_id="r")
+    try:
+        with tr.span("boom", new_trace=True):
+            raise ValueError("x")
+    except ValueError:
+        pass
+    rec = orjson.loads((tmp_path / "s.jsonl").read_bytes().splitlines()[0])
+    assert rec["status"] == "ERROR"
+
+
+# #9 — confirm events are correlated to their span (carry a trace_id)
+def test_confirm_events_carry_trace_id(tmp_path):
+    from looplab.events.eventstore import EventStore
+    repo = tmp_path / "repo"; repo.mkdir()
+    (repo / "run.py").write_text('import json; print(json.dumps({"metric": 1.0}))\n',
+                                 encoding="utf-8")
+    t = RepoTask(id="ce", direction="max", editable_path=str(repo), edit_surface=["*.txt"],
+                 eval=EvalSpec(command=[sys.executable, "run.py"], metric=_M))
+    r, d = t.build_roles()
+    eng = Engine(tmp_path / "run", task=t, researcher=r, developer=d,
+                 sandbox=SubprocessSandbox(), policy=GreedyTree(n_seeds=2, max_nodes=3),
+                 confirm_top_k=1, confirm_seeds=1)
+    anyio.run(eng.run)
+    events = list(EventStore(tmp_path / "run" / "events.jsonl").read_all())
+    confirm_evs = [e for e in events if e.type == "confirm_eval"]
+    assert confirm_evs and all(e.trace_id for e in confirm_evs)

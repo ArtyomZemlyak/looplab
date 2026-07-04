@@ -5,7 +5,7 @@ import pytest
 
 from looplab.core.llm import BudgetExceeded, CostAccountant
 from looplab.core.models import Idea
-from looplab.core.parse import ParseError, parse_structured
+from looplab.core.parse import ParseError, _coerce_value, parse_structured
 from looplab.agents.roles import LLMResearcher
 
 
@@ -98,3 +98,40 @@ def test_cost_accountant_warn_and_stop():
     assert round(acc.remaining(), 4) == 0.1
     with pytest.raises(BudgetExceeded):
         acc.add(0.2)  # 1.1 -> stop
+
+
+# --- parse: boolean/int coercion safety ----------------------------------------------------------
+
+def test_coerce_bool_recognizes_on_and_rejects_garbage():
+    assert _coerce_value("on", bool) is True
+    assert _coerce_value("off", bool) is False
+    # An unrecognized string is returned as-is (so model validation rejects it) — not silently False.
+    assert _coerce_value("maybe", bool) == "maybe"
+
+
+def test_coerce_int_rounds_not_truncates_and_rejects_bool():
+    assert _coerce_value(3.9, int) == 4       # round, not truncate to 3
+    assert _coerce_value("3.9", int) == 4
+    assert _coerce_value(True, int) is True   # a JSON bool is not silently flipped to 1
+
+
+def test_coerce_infinite_float_to_int_does_not_raise():
+    # round(inf) raises OverflowError; the coercer must return the raw value, not crash.
+    assert _coerce_value("1e400", int) == "1e400"
+
+
+def test_parse_structured_infinite_int_raises_parse_error_not_overflow():
+    from pydantic import BaseModel
+
+    class M(BaseModel):
+        choice: int
+
+    class _Fake:
+        def complete_tool(self, messages, schema):
+            return {"choice": "1e400"}
+
+        def complete_text(self, messages):
+            return '{"choice": "1e400"}'
+
+    with pytest.raises(ParseError):
+        parse_structured(_Fake(), [{"role": "user", "content": "x"}], M, "tool_call")

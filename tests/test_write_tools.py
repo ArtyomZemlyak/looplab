@@ -1,7 +1,7 @@
 """WriteTools: path/secret/protect gating and the permission-mode behavior (deny / ask / inline)."""
 from __future__ import annotations
 
-from looplab.tools.write_tools import WriteTools
+from looplab.tools.write_tools import FileBackups, WriteTools
 
 ALLOW = lambda a: "allow_once"      # noqa: E731
 DENY = lambda a: "deny"             # noqa: E731
@@ -71,3 +71,29 @@ def test_apply_patch_gated(tmp_path):
     w = WriteTools([tmp_path], mode="auto", repo_root=tmp_path)
     r = w.execute("apply_patch", {"diff": diff})
     assert "applied" in r and (tmp_path / "a.txt").read_text() == "two\n"
+
+
+# --- secret-check is root-relative; backup index is gap-safe (assistant review fixes) -------------
+
+def test_secret_check_is_root_relative_not_absolute(tmp_path):
+    # A root whose absolute path contains a secret-named component (e.g. ".docker") must NOT poison
+    # every file under it — the secret check is on the root-relative path.
+    root = tmp_path / ".docker" / "workspace"
+    root.mkdir(parents=True)
+    w = WriteTools([root], mode="auto")
+    assert "wrote" in w.execute("write_file", {"path": str(root / "a.py"), "content": "x"})
+    assert (root / "a.py").read_text() == "x"
+    # a real secret INSIDE the workspace is still refused (relative path matches)
+    assert "secret" in w.execute("write_file", {"path": str(root / ".env"), "content": "K=1"})
+    assert "secret" in w.execute("write_file", {"path": str(root / ".ssh" / "id_rsa"), "content": "k"})
+
+
+def test_file_backups_index_survives_a_gap(tmp_path):
+    b = FileBackups(tmp_path / "bak")
+    f = tmp_path / "a.txt"; f.write_text("v0")
+    b.save(f); f.write_text("v1")           # 0.bak = v0
+    b.save(f); f.write_text("v2")           # 1.bak = v1
+    assert b.revert(f) and f.read_text() == "v1"   # pops 1.bak -> gap; content restored to v1
+    b.save(f); f.write_text("v3")           # next index must be max+1 = 1 (not len()=1 collision-safe)
+    # revert now restores the snapshot taken just before v3 (which was v1)
+    assert b.revert(f) and f.read_text() == "v1"

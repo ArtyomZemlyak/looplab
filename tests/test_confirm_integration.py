@@ -1,15 +1,22 @@
 """I12 integration: the orchestrator-wired multi-seed confirmation phase."""
 from __future__ import annotations
 
+import sys
+
 import anyio
 
 from looplab.events.eventstore import EventStore
+from looplab.core.models import Idea, Node, NodeStatus, RunState
 from looplab.engine.orchestrator import Engine
 from looplab.search.policy import GreedyTree
 from looplab.events.replay import fold
 from looplab.agents.roles import ToyObjectiveDeveloper, ToyResearcher
+from looplab.adapters.repo_task import EvalSpec, RepoTask
 from looplab.runtime.sandbox import SubprocessSandbox
 from looplab.adapters.toytask import ToyTask
+
+_M = {"kind": "stdout_json", "key": "metric"}
+_LAT = {"kind": "stdout_json", "key": "latency"}
 
 
 def _noisy_engine(run_dir, *, confirm_top_k, confirm_seeds, max_nodes=10):
@@ -58,3 +65,61 @@ def test_confirmation_survives_replay(tmp_path):
     s2 = fold(EventStore(rd / "events.jsonl").read_all())
     assert s2.best_node_id == s1.best_node_id
     assert s2.model_dump() == s1.model_dump()
+
+
+# --- feasibility + confirm-phase resume (feasibility/NaN review round, deep audit) ----------------
+
+# #1/#2 — an infeasible node must NOT become best even via the confirm phase
+def test_infeasible_node_not_promoted_by_confirm(tmp_path):
+    repo = tmp_path / "repo"; repo.mkdir()
+    # metric is great but latency violates the constraint -> infeasible
+    (repo / "run.py").write_text(
+        'import json; print(json.dumps({"metric": 100.0, "latency": 999}))\n', encoding="utf-8")
+    t = RepoTask(id="c", direction="max", editable_path=str(repo), edit_surface=["*.txt"],
+                 eval=EvalSpec(command=[sys.executable, "run.py"], metric=_M,
+                               constraints=[{**_LAT, "name": "latency", "max": 100}]))
+    r, d = t.build_roles()
+    eng = Engine(tmp_path / "run", task=t, researcher=r, developer=d,
+                 sandbox=SubprocessSandbox(),
+                 policy=GreedyTree(n_seeds=2, max_nodes=3),
+                 confirm_top_k=2, confirm_seeds=2)
+    state = anyio.run(eng.run)
+    assert state.finished
+    assert all(not n.feasible for n in state.evaluated_nodes())
+    assert state.best() is None                       # confirm cannot promote an infeasible node
+
+
+def test_feasible_nodes_helper():
+    st = RunState(direction="max")
+    a = Node(id=0, operator="draft", idea=Idea(operator="draft"), metric=1.0,
+             status=NodeStatus.evaluated, feasible=True)
+    b = Node(id=1, operator="draft", idea=Idea(operator="draft"), metric=9.0,
+             status=NodeStatus.evaluated, feasible=False)
+    st.nodes = {0: a, 1: b}
+    assert [n.id for n in st.feasible_nodes()] == [0]
+
+
+# #0/#36 — confirm resumes mid-node: seeds already recorded are NOT re-run
+def test_confirm_phase_skips_already_run_seeds(tmp_path):
+    from looplab.adapters.toytask import ToyTask
+    from looplab.runtime.sandbox import RunResult
+    task = ToyTask.load(__import__("pathlib").Path("examples/toy_task.json"))
+    r, d = task.build_roles()
+    eng = Engine(tmp_path / "run", task=task, researcher=r, developer=d,
+                 sandbox=SubprocessSandbox(), policy=GreedyTree(n_seeds=1, max_nodes=1),
+                 confirm_top_k=1, confirm_seeds=3)
+    ran: list[int] = []
+
+    def fake_run_eval(node, workdir, env=None, profile=None, cancel=None):
+        ran.append(int((env or {}).get("LOOPLAB_EVAL_SEED", -1)))
+        return RunResult(exit_code=0, stdout="", stderr="", metric=1.0, timed_out=False)
+
+    eng._run_eval = fake_run_eval
+    st = RunState(direction="max")
+    st.nodes = {0: Node(id=0, operator="draft", idea=Idea(operator="draft"), metric=1.0,
+                        status=NodeStatus.evaluated, feasible=True)}
+    # Seeds 1,2 already done in a prior attempt. (Confirm seeds are 1..3 by default now —
+    # confirm_seed_base=1 keeps them disjoint from the search's implicit seed 0, D1.)
+    st.confirm_seed_results = {0: {1: 1.0, 2: 1.0}}
+    anyio.run(eng._confirm_phase, st)
+    assert ran == [3]                                  # only the missing seed re-runs

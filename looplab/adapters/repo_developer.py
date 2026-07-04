@@ -331,6 +331,11 @@ class LLMRepoDeveloper:
 
     # Files most useful to PRELOAD verbatim so the agent authors the entrypoint without fumbling with
     # a (truncating) read tool. Order = priority; the rest of the surface is appended within budget.
+    # PROVENANCE / HEURISTIC ONLY: these names (incl. the repo-specific `to_stf.py`/`tokenizing.py`)
+    # come from the reference repo LoopLab was first exercised on. They are a soft *ordering* prior,
+    # not a requirement — an absent name simply doesn't preload, and the full surface is appended
+    # anyway — so the heuristic degrades gracefully on any other repo. Generalize to an
+    # `EditableSpec.preload_priority` knob if a task ever needs to override the order.
     _PRELOAD_PRIORITY = ("test.py", "settings.py", "train.py", "to_stf.py", "model.py", "loss.py",
                          "dataset.py", "tokenizing.py", "metrics.py", "inference.py", "README.md")
 
@@ -386,6 +391,11 @@ class LLMRepoDeveloper:
                 continue
             for i, ln in enumerate(lines):
                 s = ln.strip()
+                # The script-name allow-list is a HEURISTIC (train/test are generic; `to_stf`/
+                # `tokenizing` are from the first reference repo — see `_PRELOAD_PRIORITY`). It only
+                # decides which README command lines get surfaced as recipes; a repo without these
+                # names just yields no recipes here, no failure. Widen the pattern if a new repo's
+                # entrypoints are missed.
                 if s.startswith("python ") and re.search(r"\b(train|test|to_stf|tokenizing)\.py\b", s):
                     label = ""
                     for j in range(i - 1, max(i - 4, -1), -1):

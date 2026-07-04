@@ -66,3 +66,32 @@ def test_surrogate_end_to_end_toy(tmp_path):
     state = anyio.run(eng.run)
     assert state.finished and state.best() is not None
     assert any("surrogate" in n.idea.rationale for n in state.nodes.values())
+
+
+# --- a mid-run strategy switch to BOHB wires the surrogate (not bare ASHA) -------------------------
+
+def test_strategy_switch_to_bohb_wires_surrogate(tmp_path):
+    from looplab.engine.orchestrator import Engine
+    from looplab.search.policy import GreedyTree
+    from looplab.runtime.sandbox import SubprocessSandbox
+    from looplab.search.surrogate import SurrogateResearcher
+    from pydantic import BaseModel
+
+    class _T(BaseModel):
+        kind: str = "t"; id: str = "t"; goal: str = "g"; direction: str = "min"
+
+    class _R:
+        bounds = {"k": (1.0, 9.0)}
+        def propose(self, state, parent):
+            return Idea(operator="draft", params={"k": 3.0})
+
+    class _D:
+        def implement(self, idea):
+            return "print('{\"metric\": 0.0}')"
+
+    eng = Engine(tmp_path / "b", task=_T(), researcher=_R(), developer=_D(),
+                 sandbox=SubprocessSandbox(), policy=GreedyTree(n_seeds=1, max_nodes=1))
+    assert not isinstance(eng.researcher, SurrogateResearcher)
+    eng._apply_strategy({"policy": "bohb", "policy_params": {"n_seeds": 4}})  # collision must not crash
+    assert isinstance(eng.researcher, SurrogateResearcher)   # surrogate now wired
+    assert eng._policy_name == "bohb"

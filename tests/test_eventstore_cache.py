@@ -7,6 +7,7 @@ scan would, across appends, torn tails, heal-truncation, and concurrent (threade
 optimization can never change engine behavior. All offline."""
 from __future__ import annotations
 
+import json
 import threading
 from pathlib import Path
 
@@ -73,3 +74,17 @@ def test_concurrent_readers_are_race_free(tmp_path):
         t.join()
     assert not errs
     assert [e.seq for e in s.read_all()] == _fresh_seqs(p)
+
+
+def test_read_all_tolerates_invalid_event_record(tmp_path):
+    p = tmp_path / "events.jsonl"
+    es = EventStore(p)
+    es.append("run_started", {"run_id": "r"})
+    es.append("hint", {"text": "x"})
+    with open(p, "a", encoding="utf-8") as f:                      # valid JSON dict, invalid Event
+        f.write(json.dumps({"seq": 99, "type": "x", "data": [1, 2, 3]}) + "\n")
+    first = [e.seq for e in es.read_all()]
+    second = [e.seq for e in es.read_all()]
+    third = [e.seq for e in es.read_all()]
+    assert first == second == third                                # no duplicated prefix growth
+    assert len(first) == 2

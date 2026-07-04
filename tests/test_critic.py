@@ -100,3 +100,15 @@ def test_improve_params_still_checked_when_host_graded():
     issues = critique(Idea(operator="improve", params={"n_estimators": 700.0, "max_depth": 5.0}),
                       code, submission_file="submission.csv")
     assert any(i["issue"] == "params_ignored" for i in issues)
+
+
+# --- critic: a computed metric must not be flagged as hard-coded ----------------------------------
+
+def test_critic_no_false_positive_on_computed_metric():
+    idea = Idea(operator="draft", params={"k": 3.0}, rationale="x")
+    computed = ("k = 3\nscore = sum(range(k)) / k\n"
+                "import json; print(json.dumps({'metric': score}))")
+    assert not any(i["issue"] == "hardcoded_metric" for i in critique(idea, computed))
+    # A genuinely hard-coded literal with no computation is still flagged.
+    hard = "import json\nprint(json.dumps({'metric': 0.99}))\nk = 3\n"
+    assert any(i["issue"] == "hardcoded_metric" for i in critique(idea, hard))

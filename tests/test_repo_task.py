@@ -8,16 +8,24 @@ import sys
 from pathlib import Path
 
 import anyio
+import pytest
 
 from looplab.runtime.command_eval import read_metric, run_command_eval
-from looplab.core.models import Idea
+from looplab.core.models import Idea, Node
 from looplab.engine.orchestrator import Engine
 from looplab.search.policy import GreedyTree
-from looplab.adapters.repo_task import EvalSpec, RepoTask
+from looplab.adapters.repo_task import EditableSpec, EvalSpec, ReferenceSpec, RepoTask
 from looplab.runtime.sandbox import SubprocessSandbox
 from looplab.adapters.tasks import TaskAdapter, load_task
 
 FIXTURE = Path(__file__).resolve().parent / "fixtures" / "repo_fixture"
+_M = {"kind": "stdout_json", "key": "metric"}
+
+
+def _eng(tmp_path, task, **kw):
+    r, d = task.build_roles()
+    return Engine(tmp_path / "run", task=task, researcher=r, developer=d,
+                  sandbox=SubprocessSandbox(), policy=GreedyTree(n_seeds=1, max_nodes=1), **kw)
 
 
 # --------------------------- metric readers (unit) ---------------------------
@@ -192,3 +200,86 @@ def test_live_opencode_edits_repo_end_to_end(tmp_path):
     assert state.finished and state.best() is not None
     assert state.best().metric is not None                     # the command-eval produced a metric
     assert (tmp_path / "run" / "nodes" / "node_0" / "metrics.json").exists()
+
+
+# --- eval-file / protected-name hardening (deep audit + review rounds) ----------------------------
+
+# A1 — an explicit (non-onboarded) adapter metric is protected from agent edits
+def test_adapter_metric_protected_explicit_eval():
+    t = RepoTask(id="a", editable_path="/x", edit_surface=["*.py"],
+                 eval=EvalSpec(command=["python", "t.py"],
+                               metric={"kind": "adapter", "path": "LOOPLAB_adapter.py"}))
+    assert "LOOPLAB_adapter.py" in t.repo_spec()["protected_names"]
+
+
+# A2 — protected check is case-insensitive (Windows/NTFS + fnmatch)
+def test_write_node_files_case_insensitive_protect(tmp_path):
+    repo = tmp_path / "repo"; repo.mkdir()
+    (repo / "ttrain.py").write_text("real", encoding="utf-8")
+    t = RepoTask(id="p", editable_path=str(repo), edit_surface=["*.py"], protect=["ttrain.py"],
+                 eval=EvalSpec(command=[sys.executable, "ttrain.py"], metric=_M))
+    eng = _eng(tmp_path, t)
+    wd = tmp_path / "wd"; wd.mkdir()
+    (wd / "ttrain.py").write_text("real", encoding="utf-8")
+    node = Node(id=0, operator="draft", idea=Idea(operator="draft"),
+                files={"Ttrain.PY": "raise SystemExit('cheat')"})
+    eng._write_node_files(node, wd)
+    # case-variant name must NOT overwrite the protected file
+    assert (wd / "ttrain.py").read_text(encoding="utf-8") == "real"
+
+
+# A5 — reference/data mount names are validated (used as wd/name)
+def test_reference_data_names_validated():
+    with pytest.raises(ValueError, match="simple subdir"):
+        RepoTask(id="r", editable_path="/x", references=[ReferenceSpec(name="../etc", path="/y")])
+    with pytest.raises(ValueError, match="collision"):
+        RepoTask(id="r", editable_path="/x", editables=[EditableSpec(name="dup", path="/m")],
+                 data={"dup": "/d"})
+
+
+# E — an accepted in-surface deletion is applied to the eval workdir
+def test_deletion_applied_in_write_node_files(tmp_path):
+    repo = tmp_path / "repo"; repo.mkdir()
+    (repo / "keep.py").write_text("k", encoding="utf-8")
+    t = RepoTask(id="d", editable_path=str(repo), edit_surface=["*.py"],
+                 eval=EvalSpec(command=[sys.executable, "keep.py"], metric=_M))
+    eng = _eng(tmp_path, t)
+    wd = tmp_path / "wd"; wd.mkdir()
+    (wd / "old.py").write_text("dead", encoding="utf-8")
+    node = Node(id=0, operator="draft", idea=Idea(operator="draft"), deleted=["old.py"])
+    eng._write_node_files(node, wd)
+    assert not (wd / "old.py").exists()                            # accepted deletion took effect
+
+
+# #33 — protected names are normalized (./ , backslash) to match git-diff paths
+def test_protected_names_normalized():
+    t = RepoTask(id="n", editable_path="/x", edit_surface=["*.py"], protect=["./secret.py"],
+                 eval=EvalSpec(command=["python", "t.py"],
+                               metric={"kind": "file_json", "path": "./metrics.json"}))
+    pn = t.repo_spec()["protected_names"]
+    assert "secret.py" in pn and "metrics.json" in pn
+
+
+# #80 — RepoTask direction is validated (a typo can't silently flip the objective)
+def test_repo_task_direction_validated():
+    with pytest.raises(ValueError, match="direction must be"):
+        RepoTask(id="d", editable_path="/x", direction="maximize",
+                 eval=EvalSpec(command=["python", "t.py"]))
+
+
+def test_repo_eval_protects_every_reader_path(tmp_path):
+    repo = tmp_path / "repo"; repo.mkdir()
+    (repo / "run.py").write_text("print('{\"metric\": 1.0}')\n", encoding="utf-8")
+    t = RepoTask(
+        id="p", direction="max", editable_path=str(repo), edit_surface=["*.py"],
+        eval=EvalSpec(
+            command=[sys.executable, "run.py"],
+            metric={"kind": "file_json", "path": "out/metric.json", "key": "metric"},
+            metrics={"aux": {"kind": "file_json", "path": "out/aux.json", "key": "a"}},
+            constraints=[{"kind": "file_json", "path": "out/lat.json", "key": "lat",
+                          "max": 100, "name": "lat"}],
+            cross_check={"kind": "file_json", "path": "out/cross.json", "key": "metric"}))
+    protected = set(t._protected_names())
+    # every file-based reader (primary + aux metric + constraint + cross-check) is now forge-proof
+    for p in ("out/metric.json", "out/aux.json", "out/lat.json", "out/cross.json"):
+        assert p in protected, f"{p} not protected: {protected}"

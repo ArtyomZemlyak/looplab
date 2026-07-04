@@ -87,3 +87,18 @@ def test_secret_is_masked_and_never_persisted(tmp_path, monkeypatch):
     for f in rd.rglob("*"):
         if f.is_file():
             assert secret not in f.read_text(encoding="utf-8", errors="replace"), f"leak in {f}"
+
+
+def test_sandbox_redacts_secret_env(tmp_path, monkeypatch):
+    from looplab.runtime.sandbox import SubprocessSandbox
+    monkeypatch.setenv("MY_SECRET_TOKEN", "leak-me")
+    monkeypatch.setenv("LLM_API_KEY", "sk-leak")
+    code = ("import os, json\n"
+            "print(json.dumps({'secret': 'MY_SECRET_TOKEN' in os.environ,"
+            " 'apikey': 'LLM_API_KEY' in os.environ, 'has_path': 'PATH' in os.environ}))\n"
+            "print(json.dumps({'metric': 0.0}))\n")
+    res = SubprocessSandbox().run(code, str(tmp_path), timeout=30.0)
+    assert "sk-leak" not in res.stdout
+    info = json.loads(res.stdout.splitlines()[0])
+    assert info["secret"] is False and info["apikey"] is False   # secrets stripped from child env
+    assert info["has_path"] is True                              # but PATH (functionality) kept

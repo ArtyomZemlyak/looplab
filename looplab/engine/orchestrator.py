@@ -497,6 +497,157 @@ class Engine(ConfirmPhaseMixin, AblationMixin):
     # ------------------------------------------------------------ loop control
     async def run(self) -> RunState:
         state = fold(self.store.read_all())
+        self._setup_phase(state)
+
+        entry_finished = self._reentry_repin()
+        start = time.time()
+        while True:
+            state = fold(self.store.read_all())
+            if state.finished:
+                break
+            # Live operator control (UI intervention via the event log). The UI appends a
+            # control event; the engine — sole writer of domain events — reads the intent here
+            # and writes the effect. `run_abort` terminates (resumable=no); `pause` breaks
+            # WITHOUT finishing (a later `resume` event + re-entering run() continues), the same
+            # files-as-truth shape as the HITL approval gate below.
+            if state.stop_requested:
+                self.store.append(EV_RUN_FINISHED, {"reason": "aborted"})
+                break
+            if state.paused:
+                break
+            # Onboarding pre-phase (Phase 3, ADR-7): the agent proposes a trusted eval
+            # spec + metric adapter; a human ratifies it once (or autonomous auto-confirms);
+            # then it's frozen + protected and the optimization loop trusts it.
+            if self.onboarder is not None and not state.spec_confirmed:
+                if state.proposed_spec is None:
+                    with self.tracer.span("onboard", new_trace=True):
+                        proposal = self.onboarder()
+                    self.store.append(EV_SPEC_PROPOSED, proposal)
+                    continue
+                if self.eval_trust_mode == "autonomous":
+                    self.store.append(EV_SPEC_APPROVED, {})   # no human gate
+                    continue
+                if not state.spec_approval_requested:
+                    self.store.append(EV_SPEC_APPROVAL_REQUESTED,
+                                      {"eval": state.proposed_spec.get("eval_spec")})
+                break  # pause for `LoopLab approve` (ratify_freeze)
+            if self.onboarder is not None and not self._spec_activated:
+                self._activate_spec(state.proposed_spec)
+            # Drift coverage (#8): ratify_freeze_drift only corroborates the metric if a
+            # cross_check reader exists. An adapter metric (agent-authored reader) with no
+            # cross_check would make the drift guard a SILENT no-op exactly where it matters
+            # most — surface it loudly once instead of pretending the metric is corroborated.
+            if (self.eval_trust_mode == "ratify_freeze_drift" and self._eval_spec
+                    and not self._drift_warned):
+                self._drift_warned = True
+                _m = self._eval_spec.get("metric", {})
+                if _m.get("kind") == "adapter" and not self._eval_spec.get("cross_check"):
+                    self.store.append(EV_DRIFT_UNAVAILABLE, {
+                        "reason": "ratify_freeze_drift selected but the adapter metric has no "
+                                  "cross_check; the agent-authored reader is trusted WITHOUT "
+                                  "independent corroboration. Add eval.cross_check (a built-in "
+                                  "reader) to enable the drift guard."})
+            max_s, max_es = self._apply_control_overrides(state)
+            # Budget (I13): per-invocation wall-clock ceiling (resets on each resume).
+            if max_s is not None and (time.time() - start) >= max_s:
+                self.store.append(EV_RUN_FINISHED, {"reason": "time_budget"})
+                break
+            # Eval-compute budget (#2): cumulative time spent inside evals across the whole run
+            # (persisted via the event log, so it survives resume — unlike wall-clock). Stops
+            # the silent multi-hour sweep that real training runs can produce.
+            if (max_es is not None
+                    and state.total_eval_seconds >= max_es):
+                self.store.append(EV_RUN_FINISHED, {"reason": "eval_budget"})
+                break
+
+            if await self._serve_forced_requests(state):
+                continue
+
+            state = self._run_cadences(state)
+
+            # Effective node budget: a `budget_extend` with add_nodes (e.g. "give the run 10 more
+            # nodes") raises the policy's max_nodes so a reopened/resumed run keeps proposing
+            # experiments instead of immediately re-finishing. Applied HERE — AFTER any in-loop policy
+            # swap (strategist / set_strategy above, which rebuilds the policy un-extended) and right
+            # before action selection — so the override is never dropped on a swap iteration. Floored
+            # at the current node count so a stale/negative delta can't shrink the gate below work done.
+            self.policy.max_nodes = max(
+                len(state.nodes),
+                self._base_max_nodes + int(state.budget_overrides.get("add_nodes", 0) or 0))
+
+            # Action selection: the pure policy decides, UNLESS the unified agent self-drives —
+            # in which case it picks one action from the policy-derived legal-action gate (so the
+            # pipeline stays disciplined no matter what the agent chooses).
+            actions = (self._agent_next_actions(state) if self.agent_drives_actions
+                       else self.policy.next_actions(state))
+            if not actions:
+                # Optional multi-seed confirmation pass (I12) before finishing:
+                # re-evaluate the top-k under several seeds and record robust metrics.
+                if (self.confirm_top_k > 0 and self.confirm_seeds > 0
+                        and not self._already_confirmed(state)):
+                    await self._confirm_phase(state)
+                    continue
+                # D1 holdout-gated promotion: AFTER the confirm pass (so confirmed means pick the
+                # top-k), re-score the val-leaders' predictions on the reserved holdout partition.
+                # Free (no re-training) and replay-safe (gated per node). The fold then lets the
+                # unseen signal pick the champion (holdout_select) + surfaces the gap.
+                if self._holdout_pending(state):
+                    await self._holdout_phase(state)
+                    continue
+                # HITL gate (I21, ADR-11): pause for human approval of the final best.
+                # Approval flows through the event log (a UI/human appends
+                # `approval_granted`); the engine, sole writer of domain events, reads it.
+                if self.require_approval and not state.approved:
+                    if not state.awaiting_approval:
+                        best = state.best()
+                        self.store.append(EV_APPROVAL_REQUESTED, {
+                            "node_id": best.id if best else None,
+                            "metric": best.metric if best else None})
+                    break  # awaiting approval -> stop without finishing
+                # Final report on clean completion: the confirm pass just ran, so the champion +
+                # robustness are settled — this is the definitive report (it reflects post-confirmation
+                # state a same-at_node cadence report wouldn't). Skip only when the cadence is off
+                # (report_every=0 = manual-only), so "manual only" stays truly call-free.
+                if self.report_writer is not None and self.report_every > 0:
+                    state = self._write_report(state, trigger="finish")
+                self.store.append(EV_RUN_FINISHED, {})
+                break
+
+            ablates = [a for a in actions if a["kind"] == "ablate"]
+            if ablates:
+                for a in ablates:
+                    await self._ablate(a["parent_id"])
+                continue
+
+            evals = [a for a in actions if a["kind"] == "evaluate"]
+            creates = [a for a in actions
+                       if a["kind"] in ("draft", "improve", "debug", "merge")]
+
+            if creates:
+                for a in creates:
+                    if "_scores" in a:   # policy exposed candidate scores -> surface "why this node"
+                        self.store.append(EV_POLICY_DECISION,
+                                          {"scores": a["_scores"], "chosen": a.get("_chosen"),
+                                           "reason": a.get("_reason")})
+                    if a.get("_rung") is not None:   # A1 ASHA: surface the successive-halving promotion
+                        self.store.append(EV_RUNG_PROMOTED,
+                                          {"rung": a["_rung"], "survivors": a.get("_promoted", [])})
+                    self._create_node(a)  # sequential -> deterministic ids/proposals
+                continue
+
+            await self._dispatch_evals(evals, state, max_es)
+
+        # Finalize (extracted to looplab/engine/finalize.py, a pure move): budget summary,
+        # diversity archive, LLM cost roll-up, case store + reflection note, read-model,
+        # trace.json + tree.html. Event emission order is preserved exactly.
+        return finalize_run(self, entry_finished=entry_finished, start_time=start)
+
+    # -------------------------------------------------- run() phase helpers (§4 decomposition)
+    # Pure structural decomposition of run(): each method is a cohesive span lifted verbatim so the
+    # loop body reads as a table of guarded steps. No behavior/ordering/gating change — every event
+    # emission, _write_lock point, and fold site stays exactly where it was in the original run().
+
+    def _setup_phase(self, state: RunState) -> None:
         if not state.run_id:
             # SETUP PHASE (task + data), made an explicit, ONLINE-watchable phase: the pre-node work
             # (fingerprint the workspace, hash data provenance, profile columns, write AGENTS.md) is
@@ -591,6 +742,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin):
             if now != state.workspace:
                 self.store.append(EV_WORKSPACE_CHANGED, {"was": state.workspace, "now": now})
 
+    def _reentry_repin(self) -> bool:
         entry_finished = fold(self.store.read_all()).finished  # resuming a done run?
         # A7 Strategist: re-apply the last-decided strategy on (re)entry so a resumed run continues
         # with it WITHOUT re-consulting the Strategist (the decision lives in the event log).
@@ -612,280 +764,158 @@ class Engine(ConfirmPhaseMixin, AblationMixin):
         # is taken BEFORE the read (a write landing in between is re-read next refresh — safe).
         self._lessons_seen_stamp = self._lessons_store_stamp()
         self._prior_note_text = self._load_reflection_priors(exclude_run_id=_entry.run_id or None)
-        start = time.time()
-        while True:
-            state = fold(self.store.read_all())
-            if state.finished:
-                break
-            # Live operator control (UI intervention via the event log). The UI appends a
-            # control event; the engine — sole writer of domain events — reads the intent here
-            # and writes the effect. `run_abort` terminates (resumable=no); `pause` breaks
-            # WITHOUT finishing (a later `resume` event + re-entering run() continues), the same
-            # files-as-truth shape as the HITL approval gate below.
-            if state.stop_requested:
-                self.store.append(EV_RUN_FINISHED, {"reason": "aborted"})
-                break
-            if state.paused:
-                break
-            # Onboarding pre-phase (Phase 3, ADR-7): the agent proposes a trusted eval
-            # spec + metric adapter; a human ratifies it once (or autonomous auto-confirms);
-            # then it's frozen + protected and the optimization loop trusts it.
-            if self.onboarder is not None and not state.spec_confirmed:
-                if state.proposed_spec is None:
-                    with self.tracer.span("onboard", new_trace=True):
-                        proposal = self.onboarder()
-                    self.store.append(EV_SPEC_PROPOSED, proposal)
-                    continue
-                if self.eval_trust_mode == "autonomous":
-                    self.store.append(EV_SPEC_APPROVED, {})   # no human gate
-                    continue
-                if not state.spec_approval_requested:
-                    self.store.append(EV_SPEC_APPROVAL_REQUESTED,
-                                      {"eval": state.proposed_spec.get("eval_spec")})
-                break  # pause for `LoopLab approve` (ratify_freeze)
-            if self.onboarder is not None and not self._spec_activated:
-                self._activate_spec(state.proposed_spec)
-            # Drift coverage (#8): ratify_freeze_drift only corroborates the metric if a
-            # cross_check reader exists. An adapter metric (agent-authored reader) with no
-            # cross_check would make the drift guard a SILENT no-op exactly where it matters
-            # most — surface it loudly once instead of pretending the metric is corroborated.
-            if (self.eval_trust_mode == "ratify_freeze_drift" and self._eval_spec
-                    and not self._drift_warned):
-                self._drift_warned = True
-                _m = self._eval_spec.get("metric", {})
-                if _m.get("kind") == "adapter" and not self._eval_spec.get("cross_check"):
-                    self.store.append(EV_DRIFT_UNAVAILABLE, {
-                        "reason": "ratify_freeze_drift selected but the adapter metric has no "
-                                  "cross_check; the agent-authored reader is trusted WITHOUT "
-                                  "independent corroboration. Add eval.cross_check (a built-in "
-                                  "reader) to enable the drift guard."})
-            # Effective budgets: an operator may raise (or lower) them live via a `budget_extend`
-            # control event (folded into state.budget_overrides), e.g. "keep going for 600s more".
-            max_s = state.budget_overrides.get("max_seconds", self.max_seconds)
-            max_es = state.budget_overrides.get("max_eval_seconds", self.max_eval_seconds)
-            # Boss (run-chat) resource retune: a `budget_extend` may carry timeout / max_parallel. Apply
-            # to self.* (read fresh per eval / per batch) only when the matrix grants the boss — so the
-            # operator can e.g. give the run more per-eval time or more parallelism mid-flight.
-            _bo = state.budget_overrides
-            if "timeout" in _bo and self._agent_may("boss", "timeout"):
-                try: self.timeout = max(0.1, float(_bo["timeout"]))
-                except (TypeError, ValueError): pass
-            if "max_parallel" in _bo and self._agent_may("boss", "max_parallel"):
-                try: self.max_parallel = max(1, int(_bo["max_parallel"]))
-                except (TypeError, ValueError): pass
-            # Budget (I13): per-invocation wall-clock ceiling (resets on each resume).
-            if max_s is not None and (time.time() - start) >= max_s:
-                self.store.append(EV_RUN_FINISHED, {"reason": "time_budget"})
-                break
-            # Eval-compute budget (#2): cumulative time spent inside evals across the whole run
-            # (persisted via the event log, so it survives resume — unlike wall-clock). Stops
-            # the silent multi-hour sweep that real training runs can produce.
-            if (max_es is not None
-                    and state.total_eval_seconds >= max_es):
-                self.store.append(EV_RUN_FINISHED, {"reason": "eval_budget"})
-                break
+        return entry_finished
 
-            # Operator-forced steering (Phase 5), one per iteration then re-fold. Each is gated on
-            # the domain event it produces (fork_done / an ablate event / node_confirmed), so a
-            # resume never repeats it — deterministic under replay.
-            if len(state.fork_requests) > state.forks_done:
-                req = state.fork_requests[state.forks_done]
-                pid = req.get("from_node_id")
-                if pid in state.nodes:
-                    self._create_node({"kind": "improve", "parent_id": pid})  # operator-seeded branch
-                self.store.append(EV_FORK_DONE, {"from_node_id": pid})         # always advance the gate
-                continue
-            # Operator-authored experiment (manual tree edit): the human hand-adds a node (an idea
-            # + optional parent + optional ready-made code). Materialize it into a real pending node;
-            # the policy then evaluates it next (pending nodes are scheduled first). Gated on
-            # `inject_done` so a resume never re-creates it — deterministic under replay.
-            if len(state.inject_requests) > state.injects_done:
-                req = state.inject_requests[state.injects_done]
-                try:
-                    self._create_injected_node(req)
-                except Exception as e:  # noqa: BLE001 - a malformed operator/API inject must not
-                    # crash-loop the engine: without advancing the gate, every resume replays the same
-                    # bad request and dies again, leaving the run unrecoverable. Record + skip it.
-                    self.store.append(EV_INJECT_FAILED,
-                                      {"idx": state.injects_done, "error": str(e)[:500]})
-                self.store.append(EV_INJECT_DONE, {"idx": state.injects_done})
-                continue
-            forced_ablate = next((p for p in state.ablate_requests
-                                  if p in state.nodes
-                                  and not any(a.get("parent_id") == p for a in state.ablations)), None)
-            if forced_ablate is not None:
-                await self._ablate(forced_ablate)
-                continue
-            forced_confirm = next((n for n in state.confirm_requests
-                                   if n in state.nodes
-                                   and state.nodes[n].status is NodeStatus.evaluated
-                                   and n not in state.confirmed_forced), None)
-            if forced_confirm is not None:
-                await self._confirm_node(state.nodes[forced_confirm])
-                continue
+    def _apply_control_overrides(self, state: RunState) -> tuple[Optional[float], Optional[float]]:
+        # Effective budgets: an operator may raise (or lower) them live via a `budget_extend`
+        # control event (folded into state.budget_overrides), e.g. "keep going for 600s more".
+        max_s = state.budget_overrides.get("max_seconds", self.max_seconds)
+        max_es = state.budget_overrides.get("max_eval_seconds", self.max_eval_seconds)
+        # Boss (run-chat) resource retune: a `budget_extend` may carry timeout / max_parallel. Apply
+        # to self.* (read fresh per eval / per batch) only when the matrix grants the boss — so the
+        # operator can e.g. give the run more per-eval time or more parallelism mid-flight.
+        _bo = state.budget_overrides
+        if "timeout" in _bo and self._agent_may("boss", "timeout"):
+            try: self.timeout = max(0.1, float(_bo["timeout"]))
+            except (TypeError, ValueError): pass
+        if "max_parallel" in _bo and self._agent_may("boss", "max_parallel"):
+            try: self.max_parallel = max(1, int(_bo["max_parallel"]))
+            except (TypeError, ValueError): pass
+        return max_s, max_es
 
-            # A7 Strategist: adapt the search machinery (policy/operators/fidelity/Developer) before
-            # the policy proposes the next actions. No-op when strategist is off (== today).
-            state = self._maybe_consult_strategist(state)
+    async def _serve_forced_requests(self, state: RunState) -> bool:
+        # Operator-forced steering (Phase 5), one per iteration then re-fold. Each is gated on
+        # the domain event it produces (fork_done / an ablate event / node_confirmed), so a
+        # resume never repeats it — deterministic under replay. Returns True when a request was
+        # served (the caller re-folds via `continue`); False lets the loop fall through.
+        if len(state.fork_requests) > state.forks_done:
+            req = state.fork_requests[state.forks_done]
+            pid = req.get("from_node_id")
+            if pid in state.nodes:
+                self._create_node({"kind": "improve", "parent_id": pid})  # operator-seeded branch
+            self.store.append(EV_FORK_DONE, {"from_node_id": pid})         # always advance the gate
+            return True
+        # Operator-authored experiment (manual tree edit): the human hand-adds a node (an idea
+        # + optional parent + optional ready-made code). Materialize it into a real pending node;
+        # the policy then evaluates it next (pending nodes are scheduled first). Gated on
+        # `inject_done` so a resume never re-creates it — deterministic under replay.
+        if len(state.inject_requests) > state.injects_done:
+            req = state.inject_requests[state.injects_done]
+            try:
+                self._create_injected_node(req)
+            except Exception as e:  # noqa: BLE001 - a malformed operator/API inject must not
+                # crash-loop the engine: without advancing the gate, every resume replays the same
+                # bad request and dies again, leaving the run unrecoverable. Record + skip it.
+                self.store.append(EV_INJECT_FAILED,
+                                  {"idx": state.injects_done, "error": str(e)[:500]})
+            self.store.append(EV_INJECT_DONE, {"idx": state.injects_done})
+            return True
+        forced_ablate = next((p for p in state.ablate_requests
+                              if p in state.nodes
+                              and not any(a.get("parent_id") == p for a in state.ablations)), None)
+        if forced_ablate is not None:
+            await self._ablate(forced_ablate)
+            return True
+        forced_confirm = next((n for n in state.confirm_requests
+                               if n in state.nodes
+                               and state.nodes[n].status is NodeStatus.evaluated
+                               and n not in state.confirmed_forced), None)
+        if forced_confirm is not None:
+            await self._confirm_node(state.nodes[forced_confirm])
+            return True
+        return False
 
-            # Deep-Research stage (Phase 2): a "go think hard" step over all results + the web that
-            # writes a memo to steer the next batch. Fires on a manual request, a cadence, or a
-            # Strategist `request_research`. No-op when the stage is off. Replay-safe (gated).
-            state = self._maybe_deep_research(state)
+    def _run_cadences(self, state: RunState) -> RunState:
+        # A7 Strategist: adapt the search machinery (policy/operators/fidelity/Developer) before
+        # the policy proposes the next actions. No-op when strategist is off (== today).
+        state = self._maybe_consult_strategist(state)
 
-            # Run report (conclusion-first, agent-authored): regenerate on a node-count cadence so the
-            # Report grows with the search. Audit-only sidecar; no-op when off. Replay-safe (gated on
-            # the report's at_node). The deterministic report renders regardless.
-            state = self._maybe_refresh_report(state)
+        # Deep-Research stage (Phase 2): a "go think hard" step over all results + the web that
+        # writes a memo to steer the next batch. Fires on a manual request, a cadence, or a
+        # Strategist `request_research`. No-op when the stage is off. Replay-safe (gated).
+        state = self._maybe_deep_research(state)
 
-            # M6 comparative lessons, live-shared (doc 13 §7 items 2+5): on a node-count cadence,
-            # distill credit-assigned PAIR lessons into the SHARED cross-run store DURING the run
-            # (write side), and re-read the store so lessons distilled by CONCURRENT runs reach
-            # this run's proposals (read side). Audit-only sidecars; replay-safe (at_node gates);
-            # no-op when the cadences are 0.
-            state = self._maybe_distill_lessons(state)
-            state = self._maybe_refresh_lessons(state)
+        # Run report (conclusion-first, agent-authored): regenerate on a node-count cadence so the
+        # Report grows with the search. Audit-only sidecar; no-op when off. Replay-safe (gated on
+        # the report's at_node). The deterministic report renders regardless.
+        state = self._maybe_refresh_report(state)
 
-            # Effective node budget: a `budget_extend` with add_nodes (e.g. "give the run 10 more
-            # nodes") raises the policy's max_nodes so a reopened/resumed run keeps proposing
-            # experiments instead of immediately re-finishing. Applied HERE — AFTER any in-loop policy
-            # swap (strategist / set_strategy above, which rebuilds the policy un-extended) and right
-            # before action selection — so the override is never dropped on a swap iteration. Floored
-            # at the current node count so a stale/negative delta can't shrink the gate below work done.
-            self.policy.max_nodes = max(
-                len(state.nodes),
-                self._base_max_nodes + int(state.budget_overrides.get("add_nodes", 0) or 0))
+        # M6 comparative lessons, live-shared (doc 13 §7 items 2+5): on a node-count cadence,
+        # distill credit-assigned PAIR lessons into the SHARED cross-run store DURING the run
+        # (write side), and re-read the store so lessons distilled by CONCURRENT runs reach
+        # this run's proposals (read side). Audit-only sidecars; replay-safe (at_node gates);
+        # no-op when the cadences are 0.
+        state = self._maybe_distill_lessons(state)
+        state = self._maybe_refresh_lessons(state)
+        return state
 
-            # Action selection: the pure policy decides, UNLESS the unified agent self-drives —
-            # in which case it picks one action from the policy-derived legal-action gate (so the
-            # pipeline stays disciplined no matter what the agent chooses).
-            actions = (self._agent_next_actions(state) if self.agent_drives_actions
-                       else self.policy.next_actions(state))
-            if not actions:
-                # Optional multi-seed confirmation pass (I12) before finishing:
-                # re-evaluate the top-k under several seeds and record robust metrics.
-                if (self.confirm_top_k > 0 and self.confirm_seeds > 0
-                        and not self._already_confirmed(state)):
-                    await self._confirm_phase(state)
-                    continue
-                # D1 holdout-gated promotion: AFTER the confirm pass (so confirmed means pick the
-                # top-k), re-score the val-leaders' predictions on the reserved holdout partition.
-                # Free (no re-training) and replay-safe (gated per node). The fold then lets the
-                # unseen signal pick the champion (holdout_select) + surfaces the gap.
-                if self._holdout_pending(state):
-                    await self._holdout_phase(state)
-                    continue
-                # HITL gate (I21, ADR-11): pause for human approval of the final best.
-                # Approval flows through the event log (a UI/human appends
-                # `approval_granted`); the engine, sole writer of domain events, reads it.
-                if self.require_approval and not state.approved:
-                    if not state.awaiting_approval:
-                        best = state.best()
-                        self.store.append(EV_APPROVAL_REQUESTED, {
-                            "node_id": best.id if best else None,
-                            "metric": best.metric if best else None})
-                    break  # awaiting approval -> stop without finishing
-                # Final report on clean completion: the confirm pass just ran, so the champion +
-                # robustness are settled — this is the definitive report (it reflects post-confirmation
-                # state a same-at_node cadence report wouldn't). Skip only when the cadence is off
-                # (report_every=0 = manual-only), so "manual only" stays truly call-free.
-                if self.report_writer is not None and self.report_every > 0:
-                    state = self._write_report(state, trigger="finish")
-                self.store.append(EV_RUN_FINISHED, {})
-                break
+    def _skip_if_aborted(self, a: dict, cur: RunState) -> bool:
+        # Operator stopped this specific node (`node_abort`): skip the eval and record
+        # the effect as a node_failed reason="aborted" (cooperative pre-eval skip; a
+        # mid-eval kill of an in-flight subprocess is the deferred v2). An aborted node
+        # keeps no metric, so replay excludes it from best-selection.
+        if a["node_id"] in cur.aborted_nodes:
+            n = cur.nodes.get(a["node_id"])
+            if n is not None and n.status is NodeStatus.pending:
+                self.store.append(EV_NODE_FAILED, {
+                    "node_id": a["node_id"], "error": "aborted by operator",
+                    "reason": "aborted", "eval_seconds": 0.0})
+            return True
+        return False
 
-            ablates = [a for a in actions if a["kind"] == "ablate"]
-            if ablates:
-                for a in ablates:
-                    await self._ablate(a["parent_id"])
-                continue
-
-            evals = [a for a in actions if a["kind"] == "evaluate"]
-            creates = [a for a in actions
-                       if a["kind"] in ("draft", "improve", "debug", "merge")]
-
-            if creates:
-                for a in creates:
-                    if "_scores" in a:   # policy exposed candidate scores -> surface "why this node"
-                        self.store.append(EV_POLICY_DECISION,
-                                          {"scores": a["_scores"], "chosen": a.get("_chosen"),
-                                           "reason": a.get("_reason")})
-                    if a.get("_rung") is not None:   # A1 ASHA: surface the successive-halving promotion
-                        self.store.append(EV_RUNG_PROMOTED,
-                                          {"rung": a["_rung"], "survivors": a.get("_promoted", [])})
-                    self._create_node(a)  # sequential -> deterministic ids/proposals
-                continue
-
-            # Single experiment at a time is the base mode: run evals sequentially and
-            # deterministically. Concurrent fan-out (the task-group below) is a backlog
-            # seam — opt in with max_parallel > 1.
-            if self.max_parallel <= 1:
-                limiter = anyio.CapacityLimiter(1)
-                # Concurrency seam (opt-in, default off): overlap a DUE deep-research "think" with the
-                # GPU-bound eval — the agent is otherwise idle while the node trains. _compute_deep_research
-                # is pure compute on the `state` snapshot (no event-log writes, span skipped), so the
-                # engine stays the SOLE writer: the memo is recorded from THIS (main) task after the evals.
-                # Only a real win when the LLM is remote (no GPU contention); needs live-run validation.
-                rtrig = self._due_research_trigger(state) if self.concurrent_research else None
-                rbox: dict = {}
-                async with anyio.create_task_group() as tg:
-                    if rtrig is not None:
-                        async def _bg_research(snap=state, trig=rtrig):
-                            rbox["memo"] = await anyio.to_thread.run_sync(
-                                functools.partial(self._compute_deep_research, snap, trig, trace=False))
-                        tg.start_soon(_bg_research)
-                    for a in evals:
-                        cur = fold(self.store.read_all())
-                        # Operator stopped this specific node (`node_abort`): skip the eval and record
-                        # the effect as a node_failed reason="aborted" (cooperative pre-eval skip; a
-                        # mid-eval kill of an in-flight subprocess is the deferred v2). An aborted node
-                        # keeps no metric, so replay excludes it from best-selection.
-                        if a["node_id"] in cur.aborted_nodes:
-                            n = cur.nodes.get(a["node_id"])
-                            if n is not None and n.status is NodeStatus.pending:
-                                self.store.append(EV_NODE_FAILED, {
-                                    "node_id": a["node_id"], "error": "aborted by operator",
-                                    "reason": "aborted", "eval_seconds": 0.0})
-                            continue
-                        # Re-check the eval-compute budget BEFORE each eval (not just per loop
-                        # iteration), so a multi-eval batch can't overshoot by a whole batch (#2/#25).
-                        if (max_es is not None and cur.total_eval_seconds >= max_es):
-                            break
-                        await self._evaluate(a["node_id"], limiter)
-                # Record the overlapped memo now — main task is the sole writer, AFTER the eval events.
-                if rbox.get("memo") is not None:
-                    self._record_deep_research(rbox["memo"], trigger=rtrig, manual=False)
-            else:
-                # G3 distributed/parallel eval: fan out under a CapacityLimiter (worker pool). The
-                # eval-budget guard the review flagged for this path: cap the number STARTED so an
-                # over-budget run launches at most ~max_parallel more evals, not the whole batch.
-                limiter = anyio.CapacityLimiter(self.max_parallel)
-                cur = fold(self.store.read_all())
-                started = 0
-                async with anyio.create_task_group() as tg:
-                    for a in evals:
-                        if a["node_id"] in cur.aborted_nodes:
-                            n = cur.nodes.get(a["node_id"])
-                            if n is not None and n.status is NodeStatus.pending:
-                                self.store.append(EV_NODE_FAILED, {
-                                    "node_id": a["node_id"], "error": "aborted by operator",
-                                    "reason": "aborted", "eval_seconds": 0.0})
-                            continue
-                        # Budget guard (parallel path): cap each fan-out batch to the worker-pool size.
-                        # `cur` is folded ONCE before this loop and never changes mid-batch (the evals
-                        # join only at the task-group exit), so a budget check on cur here is dead — the
-                        # real enforcement is the per-iteration outer guard (it re-folds and finishes the
-                        # run once total_eval_seconds >= max_es). Capping the batch to max_parallel bounds
-                        # the overshoot to ~one batch instead of launching the whole `evals` list at once.
-                        if started >= self.max_parallel:
-                            break
-                        tg.start_soon(self._evaluate, a["node_id"], limiter)
-                        started += 1
-
-        # Finalize (extracted to looplab/engine/finalize.py, a pure move): budget summary,
-        # diversity archive, LLM cost roll-up, case store + reflection note, read-model,
-        # trace.json + tree.html. Event emission order is preserved exactly.
-        return finalize_run(self, entry_finished=entry_finished, start_time=start)
+    async def _dispatch_evals(self, evals: list, state: RunState,
+                              max_es: Optional[float]) -> None:
+        # Single experiment at a time is the base mode: run evals sequentially and
+        # deterministically. Concurrent fan-out (the task-group below) is a backlog
+        # seam — opt in with max_parallel > 1.
+        if self.max_parallel <= 1:
+            limiter = anyio.CapacityLimiter(1)
+            # Concurrency seam (opt-in, default off): overlap a DUE deep-research "think" with the
+            # GPU-bound eval — the agent is otherwise idle while the node trains. _compute_deep_research
+            # is pure compute on the `state` snapshot (no event-log writes, span skipped), so the
+            # engine stays the SOLE writer: the memo is recorded from THIS (main) task after the evals.
+            # Only a real win when the LLM is remote (no GPU contention); needs live-run validation.
+            rtrig = self._due_research_trigger(state) if self.concurrent_research else None
+            rbox: dict = {}
+            async with anyio.create_task_group() as tg:
+                if rtrig is not None:
+                    async def _bg_research(snap=state, trig=rtrig):
+                        rbox["memo"] = await anyio.to_thread.run_sync(
+                            functools.partial(self._compute_deep_research, snap, trig, trace=False))
+                    tg.start_soon(_bg_research)
+                for a in evals:
+                    cur = fold(self.store.read_all())
+                    if self._skip_if_aborted(a, cur):
+                        continue
+                    # Re-check the eval-compute budget BEFORE each eval (not just per loop
+                    # iteration), so a multi-eval batch can't overshoot by a whole batch (#2/#25).
+                    if (max_es is not None and cur.total_eval_seconds >= max_es):
+                        break
+                    await self._evaluate(a["node_id"], limiter)
+            # Record the overlapped memo now — main task is the sole writer, AFTER the eval events.
+            if rbox.get("memo") is not None:
+                self._record_deep_research(rbox["memo"], trigger=rtrig, manual=False)
+        else:
+            # G3 distributed/parallel eval: fan out under a CapacityLimiter (worker pool). The
+            # eval-budget guard the review flagged for this path: cap the number STARTED so an
+            # over-budget run launches at most ~max_parallel more evals, not the whole batch.
+            limiter = anyio.CapacityLimiter(self.max_parallel)
+            cur = fold(self.store.read_all())
+            started = 0
+            async with anyio.create_task_group() as tg:
+                for a in evals:
+                    if self._skip_if_aborted(a, cur):
+                        continue
+                    # Budget guard (parallel path): cap each fan-out batch to the worker-pool size.
+                    # `cur` is folded ONCE before this loop and never changes mid-batch (the evals
+                    # join only at the task-group exit), so a budget check on cur here is dead — the
+                    # real enforcement is the per-iteration outer guard (it re-folds and finishes the
+                    # run once total_eval_seconds >= max_es). Capping the batch to max_parallel bounds
+                    # the overshoot to ~one batch instead of launching the whole `evals` list at once.
+                    if started >= self.max_parallel:
+                        break
+                    tg.start_soon(self._evaluate, a["node_id"], limiter)
+                    started += 1
 
     # -------------------------------------------------- strategist cadence (A7)
     @staticmethod

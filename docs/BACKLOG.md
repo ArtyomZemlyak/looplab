@@ -277,6 +277,36 @@ green — 1165 passed / 22 skipped):
   intent?; `command_eval` docker rc 137 vs 124; `parse._ORDER` `"outlines"` alias;
   `_PRELOAD_PRIORITY`/`_recipes` hardcoded filenames.)*
 
-**Still open (carried forward):** `run()` phase-method decomposition; `cv.py` splitter docstrings;
-`run()` flag-surface freeze; researcher-prose shared fragments; the review-round test-file reorg;
-the four one-off behavior decisions above.
+**Wave 6 (final) closed the rest:**
+
+- ✅ **`run()` phase-method decomposition.** `Engine.run()` ~390 → ~151 lines: `_setup_phase`,
+  `_reentry_repin`, `_apply_control_overrides`, `_serve_forced_requests`, `_run_cadences`,
+  `_dispatch_evals`, `_skip_if_aborted` (the verbatim-duplicated abort-skip, now one helper). Pure
+  mechanical; every `fold()` point, event order and `_write_lock` acquisition unchanged; loop
+  control flow / terminal-event gating left inline by design.
+- ✅ **`cv.py` splitter docstrings.** Module docstring now marks `kfold_indices`/
+  `purged_walk_forward`/`consistent_cv`/`Evaluator` as the ADR-15 library seam (complete, tested,
+  not yet wired) vs. the live `cv_summary`.
+- ✅ **`run()` flag-surface freeze.** Maintainer note on the `run` command: the typed `--flag`
+  surface is frozen; new engine knobs go through a `Settings` field + `-s/--set` (full parity), not
+  a new `typer.Option`.
+- ✅ **researcher instruction-prose fragments.** The shared hypothesis suffix extracted to one
+  helper; the drifted idea-space guidance kept as two named constants (`_IDEA_SPACE_TOOL` /
+  `_IDEA_SPACE_PLAIN`) — one grep target, byte-identical prompts (16-cell parity capture).
+- ✅ **review-round test-file reorg.** All 12 `test_review_fixes*`/`test_*_fixes` files dissolved;
+  111 tests moved verbatim into per-subject homes (+6 new subject files); the near-collision
+  `test_review_fixes2.py`/`test_review_fixes_2.py` pair eliminated. Test-name multiset byte-identical
+  (independently verified: 1185 = 1185), suite unchanged.
+- ✅ **the one-off behavior decisions:**
+  - `_sweep_hint`: **fixed** — `ToolUsingResearcher` now honors it too (additive; the strategist's
+    `prefer_sweep` nudge reaches the agentic researcher, consistent with `LLMResearcher`).
+  - **docker rc 137**: **fixed** — `runtime/sandbox.py::docker_timed_out(rc)` is now the single home
+    of the 124-vs-137 rule; `command_eval` uses it at both eval sites (was flagging only 124, so a
+    SIGKILL-escalation timeout was mislabeled OOM). Regression test added.
+  - `parse._ORDER` `"outlines"` alias: kept, with its wave-1 explanatory comment (alias for the text
+    path until constrained decoding lands).
+  - `_PRELOAD_PRIORITY`/`_recipes` hardcoded filenames: provenance comments added (soft ordering
+    heuristic from the first reference repo; degrades gracefully; generalize to an `EditableSpec`
+    knob only if a task needs to override).
+
+**§4 is now fully addressed** (every item shipped or explicitly resolved-as-kept).

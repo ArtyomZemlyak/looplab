@@ -4,7 +4,7 @@ from __future__ import annotations
 import pytest
 
 from looplab.trust.gate import one_se_better
-from looplab.runtime.sandbox import SubprocessSandbox
+from looplab.runtime.sandbox import SubprocessSandbox, _json_line_extras, _parse_metric
 
 
 def test_sandbox_captures_metric(tmp_path):
@@ -55,3 +55,29 @@ def test_sandbox_timeout_is_killed(tmp_path):
 )
 def test_one_se_gate(cand, inc, std, n, direction, expected):
     assert one_se_better(cand, inc, std, n, direction) is expected
+
+
+# --- sandbox metric parsing: NaN/inf rejected, byte cap honored, tier kwargs tolerated ------------
+
+def test_inf_metric_rejected_in_solution_path():
+    assert _parse_metric('{"metric": Infinity}') is None
+    assert _parse_metric('{"metric": 1.5}') == 1.5
+
+
+def test_make_sandbox_tolerates_extra_kwargs():
+    from looplab.runtime.sandbox import SubprocessSandbox, make_sandbox
+    s = make_sandbox("trusted_local", image="ignored", max_output_bytes=1000)
+    assert isinstance(s, SubprocessSandbox) and s.max_output_bytes == 1000
+
+
+def test_json_line_extras_rejects_nan_and_inf():
+    out = '{"metric": 0.5, "loss": NaN, "lr": Infinity, "recall": 0.7}'
+    extras = _json_line_extras(out)
+    assert extras == {"recall": 0.7}
+
+
+def test_clamp_tail_bytes_respects_byte_budget_on_multibyte():
+    from looplab.runtime.sandbox import _clamp_tail_bytes
+    s = "世" * 100                                              # 300 UTF-8 bytes
+    out = _clamp_tail_bytes(s, 90)
+    assert len(out.encode("utf-8")) <= 90                       # a plain [-90:] would keep 270 bytes

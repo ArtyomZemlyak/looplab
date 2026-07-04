@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from looplab.trust.leakage import target_leakage, temporal_leakage, train_test_contamination
 from looplab.engine.memory import CaseLibrary
-from looplab.core.profile import profile_dataset
+from looplab.core.profile import profile_column, profile_dataset
 from looplab.tools.retrieval import grep, glob_files
 from looplab.tools.vectorstore import InMemoryVectorStore, hash_embed
 
@@ -76,3 +76,21 @@ def test_case_library_retrieve_and_retain():
     assert lib.retain_if_improved("c3", "time series forecast", {"sol": "arima"}, 0.5, "min")
     assert not lib.retain_if_improved("c3", "time series forecast", {"sol": "arima2"}, 0.9, "min")
     assert lib.retain_if_improved("c3", "time series forecast", {"sol": "arima3"}, 0.2, "min")
+
+
+def test_profile_nan_is_missing_and_unhashable_ok():
+    c = profile_column([1.0, float("nan"), 3.0])
+    assert c["n_missing"] == 1
+    assert c["mean"] == 2.0
+    # Unhashable (nested-list) column must not raise.
+    c2 = profile_column([[1, 2], [3, 4], [1, 2]])
+    assert c2["n_unique"] == 2
+
+
+# #21/#22 — grep rejects a bad/over-long (ReDoS) pattern and caps file size
+def test_grep_guards_bad_and_long_pattern(tmp_path):
+    from looplab.tools.retrieval import grep
+    (tmp_path / "a.txt").write_text("hello", encoding="utf-8")
+    assert grep("(", str(tmp_path)) == []                          # invalid regex -> []
+    assert grep("a" * 2000, str(tmp_path)) == []                   # over-long pattern -> []
+    assert [h.line for h in grep("hello", str(tmp_path))] == ["hello"]

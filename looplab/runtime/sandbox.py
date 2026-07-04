@@ -33,6 +33,18 @@ SECRET_ENV = re.compile(r"(KEY|SECRET|TOKEN|PASSWORD|PASSWD|CREDENTIAL|API_KEY)"
 _SECRET_ENV = SECRET_ENV   # back-compat alias (pre-rename importers)
 
 
+def docker_timed_out(rc: int) -> bool:
+    """True when a coreutils-``timeout``-wrapped docker exit code means THIS run hit its wall-clock
+    deadline. `timeout` exits 124 when SIGTERM stopped the process at the deadline, and 137 (128+9)
+    when the process outlived the `-k 5` grace and needed the SIGKILL escalation — common for a tight
+    BLAS/numpy loop that never hits a Python signal check. BOTH are a timeout, so flag both: otherwise
+    the 137 falls through to `_failure_reason`'s OOM heuristic and a real timeout is mislabeled "oom"
+    (wrong repair directive). A container OOM also exits 137, but in this `timeout -k` tier the
+    escalation is the dominant 137 source and "reduce compute" is a fine response either way. This is
+    the single home of the 124-vs-137 rule — the DockerSandbox and command_eval both use it."""
+    return rc in (124, 137)
+
+
 def _clamp_tail_bytes(s: str, max_bytes: int) -> str:
     """Keep the last `max_bytes` BYTES of `s` (the cap is named …_bytes). A plain `s[-n:]` slices by
     CHARACTER, so multibyte-heavy output (CJK ≈ 3 bytes/char) stores up to ~3× the intended byte
@@ -418,14 +430,9 @@ class DockerSandbox:
                  "-v", f"{wd.as_posix()}:/work", "-w", "/work"] + envs
                 + [self.image, "timeout", "-k", "5", str(secs), "python", "solution.py"])
         rc, out, err, to = _run_argv(argv, str(wd), timeout + 15.0, None, self.max_output_bytes, cancel)
-        # coreutils `timeout` exits 124 when SIGTERM stopped the process at the deadline, and 137
-        # (128+9) when the process outlived the `-k 5` grace and needed the SIGKILL escalation — common
-        # for a tight BLAS/numpy loop that never hits a Python signal check. BOTH are this run's
-        # wall-clock timeout, so flag both: otherwise the 137 falls through to _failure_reason's OOM
-        # heuristic and a real timeout is mislabeled "oom" (wrong repair directive). A container OOM
-        # also exits 137, but in this `timeout -k` tier the escalation is the dominant 137 source and
-        # "reduce compute" is a fine response either way.
-        timed_out = to or rc in (124, 137)
+        # See docker_timed_out: both 124 (SIGTERM at deadline) and 137 (SIGKILL escalation past the
+        # `-k 5` grace) are this run's wall-clock timeout, not an OOM.
+        timed_out = to or docker_timed_out(rc)
         return RunResult(exit_code=rc, stdout=out, stderr=err,
                          metric=(None if timed_out else _parse_metric(out)), timed_out=timed_out,
                          extra_metrics=(None if timed_out else (json_line_extras(out) or None)),
