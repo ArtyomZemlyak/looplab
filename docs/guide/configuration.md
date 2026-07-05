@@ -167,7 +167,7 @@ See [LLM & coding agents](llm-and-agents.md) for full guidance.
 |---|---|---|---|
 | `ablate_every` | `LOOPLAB_ABLATE_EVERY` | `0` | Ablation-driven refinement every N improves (0 = off; greedy only) |
 | `ablate_code_blocks` | `LOOPLAB_ABLATE_CODE_BLOCKS` | `false` | Treat each pipeline code block as an ablation unit (MLE-STAR) |
-| `merge_mode` | `LOOPLAB_MERGE_MODE` | `mean` | `mean` (param mean) or `ensemble` (code-recombination ensemble) |
+| `merge_mode` | `LOOPLAB_MERGE_MODE` | `auto` | `auto` (ensemble when the Developer writes code, else mean) · `mean` (param mean) · `ensemble` (code recombination) |
 | `complexity_cue` | `LOOPLAB_COMPLEXITY_CUE` | `false` | Inject a complexity hint keyed on the node's child count |
 | `feature_engineering` | `LOOPLAB_FEATURE_ENGINEERING` | `false` | Instruct the agent to add engineered features (CAAFE-style; CV gate enforced) |
 | `best_of_n` | `LOOPLAB_BEST_OF_N` | `1` | Generate N implementations per node, keep the best by execution-free reward (1 = off) |
@@ -179,13 +179,13 @@ See [LLM & coding agents](llm-and-agents.md) for full guidance.
 | Setting | Env | Default | Description |
 |---|---|---|---|
 | `inline_repair` | `LOOPLAB_INLINE_REPAIR` | `true` | Repair mechanical crashes in place within the same eval (no extra node) |
-| `inline_repair_attempts` | `LOOPLAB_INLINE_REPAIR_ATTEMPTS` | `1` | Max in-place repair attempts per node |
-| `inline_repair_reasons` | `LOOPLAB_INLINE_REPAIR_REASONS` | `["crash","timeout"]` | Which failure reasons are eligible for inline repair |
+| `inline_repair_attempts` | `LOOPLAB_INLINE_REPAIR_ATTEMPTS` | `0` | Max in-place repair attempts per node (**0 = unlimited**, bounded by the anti-stuck guard) |
+| `inline_repair_reasons` | `LOOPLAB_INLINE_REPAIR_REASONS` | `["crash","timeout","oom"]` | Which failure reasons are eligible for inline repair |
 | `deep_repair` | `LOOPLAB_DEEP_REPAIR` | `true` | Hand the Developer a failure taxonomy + "reproduce then fix" directive on debug |
 | `auto_install_deps` | `LOOPLAB_AUTO_INSTALL_DEPS` | `true` | Pip-install a known missing library and re-run (trusted_local only) |
 | `dep_install_timeout` | `LOOPLAB_DEP_INSTALL_TIMEOUT` | `900.0` | Per-package install budget (seconds) |
 | `localize_faults` | `LOOPLAB_LOCALIZE_FAULTS` | `false` | Rank the source files most relevant to a failure (repo tasks) |
-| `failure_reflection` | `LOOPLAB_FAILURE_REFLECTION` | `false` | Feed recent failed branches back into the proposal prompt (LATS-style) |
+| `failure_reflection` | `LOOPLAB_FAILURE_REFLECTION` | `true` | Feed recent failed branches back into the proposal prompt (LATS-style); selective — only when recent failures exist |
 | `debug_depth` | `LOOPLAB_DEBUG_DEPTH` | `2` | T10: how many error-feedback repairs a failing lineage gets before it is abandoned |
 | `inline_repair_stuck_repeat` | `LOOPLAB_INLINE_REPAIR_STUCK_REPEAT` | `4` | Identical inline-repair failures in a row that count as "stuck" and stop the in-place retry loop |
 
@@ -193,7 +193,7 @@ See [LLM & coding agents](llm-and-agents.md) for full guidance.
 
 | Setting | Env | Default | Description |
 |---|---|---|---|
-| `strategist_backend` | `LOOPLAB_STRATEGIST_BACKEND` | `llm` | Meta-controller: `off` / `rule` / `llm` |
+| `strategist_backend` | `LOOPLAB_STRATEGIST_BACKEND` | `llm` | Meta-controller: `off` / `rule` / `llm` / `agent` (tool-using — reads run/data/siblings/KB/memory) |
 | `strategist_every` | `LOOPLAB_STRATEGIST_EVERY` | `3` | Consult cadence (created nodes) |
 | `budget_aware` | `LOOPLAB_BUDGET_AWARE` | `false` | Surface remaining eval-compute budget into the proposal prompt |
 | `agent_control` | `LOOPLAB_AGENT_CONTROL` | *(see below)* | Per-setting allow-list of which agent roles may change it at runtime |
@@ -211,7 +211,7 @@ default grants resource/search-shape knobs to the agents and keeps infra (`llm_*
 | `confirm_top_k` | `LOOPLAB_CONFIRM_TOP_K` | `0` | Confirm the top-k under multiple seeds before finishing (0 = off) |
 | `confirm_seeds` | `LOOPLAB_CONFIRM_SEEDS` | `0` | Seeds for the confirmation pass |
 | `confirm_seed_base` | `LOOPLAB_CONFIRM_SEED_BASE` | `1` | Base offset for the disjoint confirmation seeds (kept away from the selection seeds so confirmation is independent) |
-| `seed_mode` | `LOOPLAB_SEED_MODE` | `auto` | How eval seeds are drawn: `fixed` (reproducible) vs varied — controls whether repeats re-use the same seeds |
+| `seed_mode` | `LOOPLAB_SEED_MODE` | `auto` | RepoTask node-seeding: which files are copied per node — `auto` (git-tracked when the editable is a git repo, else full copy) · `tracked` (code only) · `all` (full recursive copy) |
 | `holdout_select` | `LOOPLAB_HOLDOUT_SELECT` | `true` | Re-rank the top candidates on a held-out split before declaring the best, so the winner isn't a lucky fit to the selection metric (no re-training; uses the eval's own holdout) |
 | `holdout_top_k` | `LOOPLAB_HOLDOUT_TOP_K` | `3` | How many top candidates the holdout re-ranks |
 | `holdout_fraction` | `LOOPLAB_HOLDOUT_FRACTION` | `0.25` | Fraction of the eval reserved as the holdout |
@@ -238,8 +238,8 @@ See [Concepts → Trust & sandbox](concepts.md#trust--the-sandbox) for what each
 
 | Setting | Env | Default | Description |
 |---|---|---|---|
-| `memory_dir` | `LOOPLAB_MEMORY_DIR` | — | Cross-run case library (best result of each run becomes retrievable knowledge) |
-| `knowledge_dir` | `LOOPLAB_KNOWLEDGE_DIR` | — | Notes dir; the Researcher gets grep/kb_search/read tools over it |
+| `memory_dir` | `LOOPLAB_MEMORY_DIR` | `~/.looplab/memory` | Cross-run memory dir (lessons, cases, meta-notes, skills). **On by default**; set blank to disable cross-run memory |
+| `knowledge_dir` | `LOOPLAB_KNOWLEDGE_DIR` | `~/.looplab/knowledge` | Knowledge-base dir (notes + cross-run cases); Researcher gets grep/kb_search/read. **On by default** |
 | `embed_model` | `LOOPLAB_EMBED_MODEL` | — | Embedding model for **semantic** `kb_search` / case retrieval (e.g. `nomic-embed-text`). Blank = dependency-free lexical hashing. Offline/misconfigured endpoint degrades back to lexical (never crashes) |
 | `embed_base_url` | `LOOPLAB_EMBED_BASE_URL` | — | Endpoint for embeddings if different from the chat model's (blank = reuse `llm_base_url`) |
 | `memora` | `LOOPLAB_MEMORA` | `true` | **Harmonic memory** (idea import from Memora): index cases/notes by abstraction + cue anchors, consolidate near-duplicates on write, expand retrieval through anchors. On by default (lexical abstractor, zero LLM calls); set `false` to restore the raw-text index |
@@ -254,8 +254,8 @@ See [Concepts → Trust & sandbox](concepts.md#trust--the-sandbox) for what each
 | `literature_search` | `LOOPLAB_LITERATURE_SEARCH` | `false` | arXiv search tool for the Researcher (network-optional) |
 | `web_search` | `LOOPLAB_WEB_SEARCH` | `false` | Web search/fetch for the DeepResearcher (network-optional) |
 | `research_verify` | `LOOPLAB_RESEARCH_VERIFY` | `true` | Verify a deep-research memo's claims against their cited evidence before it's recorded (synthesis is the documented weak link); verdicts ride inside the memo, audit-only |
-| `deep_research_every` | `LOOPLAB_DEEP_RESEARCH_EVERY` | `0` | Run the Deep-Research stage every N created nodes (0 = off) |
-| `concurrent_research` | `LOOPLAB_CONCURRENT_RESEARCH` | `false` | Overlap a due research "think" with the GPU-bound eval (remote-LLM win) |
+| `deep_research_every` | `LOOPLAB_DEEP_RESEARCH_EVERY` | `3` | Run the Deep-Research stage every N created nodes (0 = off) |
+| `concurrent_research` | `LOOPLAB_CONCURRENT_RESEARCH` | `true` | Overlap a due research "think" with the GPU-bound eval; the memo is recorded immediately when it finishes |
 | `track_hypotheses` | `LOOPLAB_TRACK_HYPOTHESES` | `true` | P1: ask the Researcher to state each experiment's hypothesis, register deep-research directions, track them to a verdict on the Hypotheses board (audit-only). Also drives AGENTIC paraphrase-merge of the board (hybrid retrieval + the Researcher decides; `hypothesis_merged` events, applied deterministically in the fold) |
 | `reflection_priors` | `LOOPLAB_REFLECTION_PRIORS` | `true` | E4/M2/M3: at run end distill the winner + lessons (incl. negatives) with a task fingerprint; at run start inject exact-task notes + fingerprint-matched lessons from similar runs. No-op until `memory_dir` is set |
 | `comparative_lessons` | `LOOPLAB_COMPARATIVE_LESSONS` | `True` | M6: distill credit-assigned lessons from PAIRS (which specific change made a child beat/regress its parent). At run end + mid-run; gated on reflection_priors + memory_dir |

@@ -46,7 +46,7 @@ looplab run examples/code_regression_task.json --backend llm --max-nodes 6
 | **SGLang** | `http://host:30000/v1` | Use `--tool-call-parser qwen` for Qwen tool-calls |
 | **OpenAI / compatible** | the vendor's `/v1` | Set `LOOPLAB_LLM_API_KEY` |
 
-The client is stdlib-only (`OpenAICompatibleClient`); a LiteLLM client is also available. Structured
+The client (`OpenAICompatibleClient`) runs on the **openai SDK over an httpx transport** (migrated from the old stdlib-urllib transport for reliable timeouts + a streaming idle-guard); `openai`/`httpx` are declared deps but import-guarded so offline/replay still imports. A LiteLLM client is also available. Structured
 output uses tool-calling with an automatic text-parse fallback, so weaker models still work.
 
 ## Reasoning / thinking

@@ -27,6 +27,15 @@ Docs are built with `mkdocs build --strict` in CI — broken doc links fail the 
 `looplab build-ui` builds the React UI (`npm ci && npm run build` in `ui/`); `looplab ui`
 auto-builds when the dist is missing.
 
+**Keep the docs and the process diagram in sync with the code — in the SAME change.** When you
+change a default, a cadence/threshold, an event type, or add/rename a subsystem, update: (1) the
+settings table in `docs/guide/configuration.md` (every `Settings` field must have a row with the
+CORRECT default) and the relevant `docs/guide/*.md` page; (2) the **full process diagram**
+`docs/infographic/agent-architecture.html` — a self-contained boxes-and-arrows flowchart whose
+numbers/cadences/thresholds are verified against `looplab/` (embedded on `docs/guide/architecture.md`).
+Stale docs/diagram are treated as a bug. The diagram is data-driven (a `B` block map + `E` edge list
+in its inline `<script>`); edit the data, not hand-placed SVG.
+
 ## Package map (what lives where)
 
 | Path | Contents |
@@ -34,9 +43,9 @@ auto-builds when the dist is missing.
 | `looplab/core/` | foundation: domain models, `Settings` (config.py = schema, appconfig.py = loader), LLM client (`llm.py`), parsing, tracing, shared errors |
 | `looplab/events/` | event store, `types.py` (event-type registry), `replay.py::fold` (event log → `RunState`), digest, readmodel, exporters |
 | `looplab/runtime/` | sandboxes (subprocess/Docker tiers), command evaluation, dep install, background tasks |
-| `looplab/tools/` | agent-facing tools; `_base.py` documents the ToolProvider contract |
+| `looplab/tools/` | agent-facing tools; `_base.py` documents the ToolProvider contract; `env_inspect.py` (repo Developer's read-only env inspector: pkg version/API/source), `vectorstore.py` + `memora.py` (embeddings + harmonic index) |
 | `looplab/agents/` | LLM personas: plain roles (`roles.py`), tool-loop roles (`agent.py::drive_tool_loop`), external CLI backend (`cli_agent.py`), facade (`unified_agent.py`) |
-| `looplab/search/` | search policies (`policy.py` — action kinds/meta-key constants live here), best-of-N, surrogate, archive |
+| `looplab/search/` | search policies (`policy.py` — action kinds/meta-key constants live here), `operators.py`, best-of-N, surrogate, archive, `foresight.py` (hypothesis prioritization / predict-before-execute), `hybrid_merge.py` (grep+BM25+vector RRF retrieval + agent-decided merge, shared by lesson & hypothesis-board consolidation) |
 | `looplab/trust/` | gates that keep results honest: leakage, reward-hack, CV, redaction, confirmation |
 | `looplab/engine/` | **the orchestrator loop** (`orchestrator.py`, the largest file) + cross-run memory; see invariants below |
 | `looplab/adapters/` | task types (toy → dataset → repo → MLE-bench); the TaskAdapter contract is documented in `adapters/tasks.py` |

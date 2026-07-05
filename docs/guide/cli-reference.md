@@ -16,6 +16,9 @@ looplab ui              Serve the live React UI (needs the [ui] extra)
 looplab tui             Terminal control plane: start/steer runs by chat (no browser)
 looplab export-mlflow   Log the champion to MLflow
 looplab export-notebook Export the champion as a runnable .ipynb
+looplab harden          Grow the reward-hack exploit ruleset (hacker–fixer–solver)
+looplab tensorboard     Serve TensorBoard over per-node training logs
+looplab build-ui        Build the React UI bundle (ui/dist)
 ```
 
 Anything set on the command line can also be set via a `LOOPLAB_*` environment variable or the

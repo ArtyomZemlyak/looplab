@@ -1,818 +1,240 @@
-<title>LoopLab — How the agent works</title>
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LoopLab — full process diagram</title>
 <style>
-/* ============================================================= TOKENS */
-:root{
-  color-scheme: light dark;
-  /* neutrals — slate with a faint teal bias (chosen, not defaulted) */
-  --ink:#0d141b;
-  --bg:#f2f5f4;
-  --panel:#ffffff;
-  --panel-2:#e9edec;
-  --line:#d3dbd9;
-  --line-strong:#b8c2bf;
-  --tx:#182028;
-  --tx-2:#47555a;
-  --tx-3:#6b787c;
-  /* signal accent — "running / live" teal-cyan, the one bold hue */
-  --sig:#0f9c8c;
-  --sig-ink:#0a6a5f;
-  --sig-wash:#d8efeb;
-  /* stage spectrum — the four roles, walking the loop */
-  --s-research:#6b5fd6;   /* Researcher — indigo */
-  --s-develop:#2f7fd6;    /* Developer  — blue   */
-  --s-sandbox:#159b93;    /* Sandbox    — teal   */
-  --s-evaluate:#3f9d55;   /* Evaluator  — green  */
-  --s-policy:#8a6d3b;     /* Policy/Gate — bronze back-edge */
-  /* champion — used ONLY for the terminal result */
-  --gold:#b5842a;
-  --gold-wash:#f4e7c8;
-  /* semantic status */
-  --ok:#3f9d55;
-  --warn:#b5842a;
-  --bad:#c0554f;
-  --dormant:#7c7f88;
-  /* type */
-  --sans:"Söhne","SF Pro Text",system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
-  --mono:ui-monospace,"SF Mono","JetBrains Mono","Cascadia Code",Menlo,Consolas,monospace;
-  --maxw:1140px;
-  --r:14px;
-}
-@media (prefers-color-scheme:dark){
-  :root{
-    --ink:#e8edf0;
-    --bg:#0b1117;
-    --panel:#121a22;
-    --panel-2:#0e161d;
-    --line:#20303a;
-    --line-strong:#2c414d;
-    --tx:#dfe7ea;
-    --tx-2:#9fb0b6;
-    --tx-3:#6f818a;
-    --sig:#33d6c2;
-    --sig-ink:#8ff0e4;
-    --sig-wash:#0d2b2a;
-    --s-research:#9285f2;
-    --s-develop:#5aa6f5;
-    --s-sandbox:#33c6ba;
-    --s-evaluate:#63cf7f;
-    --s-policy:#c79a5a;
-    --gold:#e7b24a;
-    --gold-wash:#2c2413;
-    --ok:#63cf7f;
-    --warn:#e7b24a;
-    --bad:#e07d77;
-    --dormant:#8b939c;
-  }
-}
-:root[data-theme="light"]{
-  color-scheme:light;
-  --ink:#0d141b;--bg:#f2f5f4;--panel:#ffffff;--panel-2:#e9edec;--line:#d3dbd9;--line-strong:#b8c2bf;
-  --tx:#182028;--tx-2:#47555a;--tx-3:#6b787c;--sig:#0f9c8c;--sig-ink:#0a6a5f;--sig-wash:#d8efeb;
-  --s-research:#6b5fd6;--s-develop:#2f7fd6;--s-sandbox:#159b93;--s-evaluate:#3f9d55;--s-policy:#8a6d3b;
-  --gold:#b5842a;--gold-wash:#f4e7c8;--ok:#3f9d55;--warn:#b5842a;--bad:#c0554f;--dormant:#7c7f88;
-}
-:root[data-theme="dark"]{
-  color-scheme:dark;
-  --ink:#e8edf0;--bg:#0b1117;--panel:#121a22;--panel-2:#0e161d;--line:#20303a;--line-strong:#2c414d;
-  --tx:#dfe7ea;--tx-2:#9fb0b6;--tx-3:#6f818a;--sig:#33d6c2;--sig-ink:#8ff0e4;--sig-wash:#0d2b2a;
-  --s-research:#9285f2;--s-develop:#5aa6f5;--s-sandbox:#33c6ba;--s-evaluate:#63cf7f;--s-policy:#c79a5a;
-  --gold:#e7b24a;--gold-wash:#2c2413;--ok:#63cf7f;--warn:#e7b24a;--bad:#e07d77;--dormant:#8b939c;
-}
-
-/* ============================================================= BASE */
-*{box-sizing:border-box}
-html{-webkit-text-size-adjust:100%}
-body{
-  margin:0;background:var(--bg);color:var(--tx);
-  font-family:var(--sans);font-size:16px;line-height:1.62;
-  -webkit-font-smoothing:antialiased;text-rendering:optimizeLegibility;
-}
-.wrap{max-width:var(--maxw);margin:0 auto;padding:0 22px}
-h1,h2,h3{margin:0;line-height:1.1;text-wrap:balance;letter-spacing:-.02em;font-weight:760}
-p{margin:0}
-a{color:var(--sig-ink);text-decoration:none;border-bottom:1px solid color-mix(in srgb,var(--sig) 40%,transparent)}
-a:hover{border-bottom-color:var(--sig)}
-:focus-visible{outline:2.5px solid var(--sig);outline-offset:3px;border-radius:4px}
-.mono{font-family:var(--mono)}
-.eyebrow{
-  font-family:var(--mono);font-size:11.5px;font-weight:600;letter-spacing:.18em;
-  text-transform:uppercase;color:var(--tx-3);
-}
-.tnum{font-variant-numeric:tabular-nums}
-
-/* ============================================================= MASTHEAD */
-.mast{
-  border-bottom:1px solid var(--line);
-  background:
-    radial-gradient(120% 90% at 88% -10%, color-mix(in srgb,var(--sig) 12%,transparent), transparent 60%),
-    linear-gradient(180deg, var(--panel-2), var(--bg));
-}
-.mast .wrap{padding-top:54px;padding-bottom:46px}
-.brandline{display:flex;align-items:center;gap:12px;margin-bottom:26px}
-.logo{
-  width:34px;height:34px;flex:0 0 auto;border-radius:9px;
-  background:var(--panel);border:1px solid var(--line-strong);
-  display:grid;place-items:center;
-}
-.brandname{font-family:var(--mono);font-weight:700;font-size:15px;letter-spacing:.02em;color:var(--tx)}
-.brandname b{color:var(--sig-ink)}
-.brandtag{font-family:var(--mono);font-size:11.5px;color:var(--tx-3);margin-left:auto;letter-spacing:.04em}
-h1.title{
-  font-size:clamp(32px,6vw,60px);font-weight:800;letter-spacing:-.033em;max-width:16ch;
-}
-h1.title .glow{
-  background:linear-gradient(92deg,var(--s-research),var(--s-develop),var(--s-sandbox),var(--s-evaluate));
-  -webkit-background-clip:text;background-clip:text;color:transparent;
-}
-.lede{margin-top:20px;font-size:clamp(16px,2.1vw,19px);color:var(--tx-2);max-width:60ch}
-.verbs{display:flex;flex-wrap:wrap;gap:8px;margin-top:24px}
-.verb{
-  font-family:var(--mono);font-size:12.5px;font-weight:600;letter-spacing:.03em;
-  padding:7px 13px;border-radius:999px;background:var(--panel);border:1px solid var(--line);color:var(--tx);
-  display:inline-flex;align-items:center;gap:8px;
-}
-.verb .dot{width:7px;height:7px;border-radius:50%}
-.verb .arw{color:var(--tx-3)}
-
-/* ============================================================= SECTION SCAFFOLD */
-section{padding:56px 0}
-.sec-head{margin-bottom:30px;max-width:64ch}
-.sec-head h2{font-size:clamp(23px,3.4vw,31px);margin-top:8px}
-.sec-head p{margin-top:12px;color:var(--tx-2);font-size:16px}
-.rule{height:1px;background:var(--line);border:0;max-width:var(--maxw);margin:0 auto}
-
-/* ============================================================= LIFECYCLE TIMELINE */
-.life{display:grid;grid-template-columns:repeat(6,1fr);gap:0;border:1px solid var(--line);border-radius:var(--r);overflow:hidden;background:var(--panel)}
-.life .stage{padding:18px 16px;border-right:1px solid var(--line);position:relative;min-width:0}
-.life .stage:last-child{border-right:0}
-.life .snum{font-family:var(--mono);font-size:11px;color:var(--tx-3);letter-spacing:.1em}
-.life .sname{font-weight:720;font-size:15px;margin-top:7px;letter-spacing:-.01em}
-.life .sdesc{font-size:12.5px;color:var(--tx-2);margin-top:6px;line-height:1.5}
-.life .stage.hot{background:linear-gradient(180deg,var(--sig-wash),transparent)}
-.life .bar{height:3px;border-radius:3px;margin-top:12px;background:var(--line-strong)}
-.life .stage.hot .bar{background:var(--sig)}
-@media(max-width:820px){.life{grid-template-columns:repeat(2,1fr)}.life .stage{border-bottom:1px solid var(--line)}}
-
-/* ============================================================= THE LOOP (HERO) */
-.loopwrap{
-  border:1px solid var(--line);border-radius:var(--r);background:
-   radial-gradient(80% 120% at 50% 0%, color-mix(in srgb,var(--sig) 7%,transparent), transparent 55%),
-   var(--panel);
-  padding:12px;
-}
-.loopgrid{display:grid;grid-template-columns:1.15fr .85fr;gap:8px}
-@media(max-width:900px){.loopgrid{grid-template-columns:1fr}}
-.diagram{padding:10px}
-.diagram svg{width:100%;height:auto;display:block;overflow:visible}
-.loopside{padding:16px 18px;border-left:1px solid var(--line)}
-@media(max-width:900px){.loopside{border-left:0;border-top:1px solid var(--line)}}
-.loopside h3{font-size:16px;margin-bottom:4px}
-.loopside .k{font-family:var(--mono);font-size:11px;letter-spacing:.06em;color:var(--tx-3);text-transform:uppercase;margin:18px 0 8px}
-.legrow{display:flex;gap:10px;align-items:flex-start;padding:8px 0;border-top:1px dashed var(--line)}
-.legrow:first-of-type{border-top:0}
-.legrow .sw{width:12px;height:12px;border-radius:4px;flex:0 0 auto;margin-top:4px}
-.legrow .lt{font-weight:680;font-size:13.5px}
-.legrow .lt small{display:block;font-weight:400;color:var(--tx-2);font-size:12px;font-family:var(--sans);margin-top:2px;letter-spacing:0}
-/* event spine */
-.spine{margin-top:8px;border:1px solid var(--line);border-radius:12px;background:var(--panel-2);padding:14px 16px}
-.spine .lbl{font-family:var(--mono);font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:var(--sig-ink)}
-.spine p{font-size:12.5px;color:var(--tx-2);margin-top:6px}
-.evtrack{display:flex;flex-wrap:wrap;gap:6px;margin-top:12px}
-.evt{font-family:var(--mono);font-size:11px;padding:4px 9px;border-radius:6px;background:var(--panel);border:1px solid var(--line-strong);color:var(--tx-2);white-space:nowrap}
-.evt.hi{color:var(--sig-ink);border-color:color-mix(in srgb,var(--sig) 45%,var(--line-strong))}
-
-/* ============================================================= STAGE DETAIL CARDS */
-.stages{display:grid;grid-template-columns:repeat(2,1fr);gap:16px}
-@media(max-width:720px){.stages{grid-template-columns:1fr}}
-.scard{border:1px solid var(--line);border-radius:var(--r);background:var(--panel);padding:20px 20px 18px;position:relative;overflow:hidden}
-.scard::before{content:"";position:absolute;left:0;top:0;bottom:0;width:4px;background:var(--c)}
-.scard .shdr{display:flex;align-items:baseline;gap:10px;margin-bottom:4px}
-.scard .sidx{font-family:var(--mono);font-size:12px;font-weight:700;color:var(--c)}
-.scard h3{font-size:18px}
-.scard .role{font-family:var(--mono);font-size:11px;color:var(--tx-3);letter-spacing:.04em;margin-top:2px}
-.scard p{font-size:14px;color:var(--tx-2);margin-top:11px}
-.scard ul{margin:12px 0 0;padding:0;list-style:none;display:flex;flex-direction:column;gap:7px}
-.scard li{font-size:13px;color:var(--tx);padding-left:18px;position:relative;line-height:1.5}
-.scard li::before{content:"";position:absolute;left:2px;top:8px;width:6px;height:6px;border-radius:50%;background:var(--c)}
-.scard li b{font-weight:640}
-.scard .op{font-family:var(--mono);font-size:11.5px}
-
-/* ============================================================= SUBSYSTEMS GRID */
-.subs{display:grid;grid-template-columns:repeat(3,1fr);gap:16px}
-@media(max-width:900px){.subs{grid-template-columns:repeat(2,1fr)}}
-@media(max-width:600px){.subs{grid-template-columns:1fr}}
-.sub{border:1px solid var(--line);border-radius:var(--r);background:var(--panel);padding:18px}
-.sub .st{display:flex;align-items:center;gap:9px;margin-bottom:10px}
-.sub .st h3{font-size:15px}
-.sub .ic{width:26px;height:26px;border-radius:7px;display:grid;place-items:center;flex:0 0 auto;background:var(--panel-2);border:1px solid var(--line)}
-.sub .ic svg{width:15px;height:15px;stroke:var(--sig)}
-/* icons use var() in presentation attributes (invalid there) — override via CSS */
-.sub .ic svg [fill]:not([fill="none"]){fill:var(--sig)}
-.sub p{font-size:13px;color:var(--tx-2);line-height:1.55}
-.sub .tags{display:flex;flex-wrap:wrap;gap:5px;margin-top:12px}
-.tag{font-family:var(--mono);font-size:10.5px;padding:3px 7px;border-radius:5px;background:var(--panel-2);border:1px solid var(--line);color:var(--tx-2)}
-.tag.mod{color:var(--sig-ink);border-color:color-mix(in srgb,var(--sig) 30%,var(--line))}
-
-/* ============================================================= MEMORY TIERS */
-.mem{display:grid;grid-template-columns:repeat(4,1fr);gap:14px}
-@media(max-width:900px){.mem{grid-template-columns:repeat(2,1fr)}}
-@media(max-width:520px){.mem{grid-template-columns:1fr}}
-.mtile{border:1px solid var(--line);border-radius:var(--r);background:var(--panel);padding:16px}
-.mtile .mt{font-family:var(--mono);font-size:11px;color:var(--tx-3);letter-spacing:.05em;text-transform:uppercase}
-.mtile h4{margin:8px 0 0;font-size:15px;letter-spacing:-.01em}
-.mtile .file{font-family:var(--mono);font-size:11.5px;color:var(--sig-ink);margin-top:3px}
-.mtile p{font-size:12.5px;color:var(--tx-2);margin-top:9px;line-height:1.5}
-.mtile .flow{font-family:var(--mono);font-size:10.5px;color:var(--tx-3);margin-top:11px;padding-top:10px;border-top:1px dashed var(--line)}
-
-/* ============================================================= DEFAULTS BOARD */
-.board{border:1px solid var(--line);border-radius:var(--r);overflow:hidden;background:var(--panel)}
-.brow{display:grid;grid-template-columns:1.5fr 1fr 2.4fr;gap:0;border-top:1px solid var(--line);align-items:center}
-.brow:first-child{border-top:0}
-.bhead{background:var(--panel-2)}
-.bhead div{font-family:var(--mono);font-size:11px;letter-spacing:.09em;text-transform:uppercase;color:var(--tx-3);padding:11px 16px}
-.brow>div{padding:12px 16px;font-size:13.5px;min-width:0}
-.brow .setting{font-family:var(--mono);font-size:12.5px;color:var(--tx);word-break:break-word}
-.brow .desc{color:var(--tx-2);font-size:12.5px}
-.st-pill{display:inline-flex;align-items:center;gap:7px;font-family:var(--mono);font-size:11px;font-weight:600;letter-spacing:.03em;padding:4px 10px;border-radius:999px;white-space:nowrap}
-.st-pill .d{width:7px;height:7px;border-radius:50%}
-.p-on{background:color-mix(in srgb,var(--ok) 15%,transparent);color:var(--ok)}
-.p-on .d{background:var(--ok)}
-.p-off{background:color-mix(in srgb,var(--tx-3) 14%,transparent);color:var(--tx-2)}
-.p-off .d{background:var(--tx-3)}
-.p-dorm{background:color-mix(in srgb,var(--warn) 15%,transparent);color:var(--warn)}
-.p-dorm .d{background:var(--warn)}
-.brow .val{font-family:var(--mono);font-size:12px;color:var(--sig-ink)}
-@media(max-width:680px){
-  .brow{grid-template-columns:1fr 1fr}
-  .brow .desc{grid-column:1/-1;padding-top:0}
-  .bhead .desc{display:none}
-}
-.note{margin-top:16px;font-size:13px;color:var(--tx-2);background:var(--panel-2);border:1px solid var(--line);border-left:3px solid var(--warn);border-radius:8px;padding:13px 16px}
-.note b{color:var(--tx)}
-
-/* ============================================================= KEYSTONE / CALLOUT */
-.key{display:grid;grid-template-columns:1fr 1fr;gap:16px}
-@media(max-width:720px){.key{grid-template-columns:1fr}}
-.kcard{border:1px solid var(--line);border-radius:var(--r);padding:22px;background:
-  linear-gradient(180deg,color-mix(in srgb,var(--sig) 6%,var(--panel)),var(--panel))}
-.kcard h3{font-size:17px;display:flex;align-items:center;gap:9px}
-.kcard p{font-size:13.5px;color:var(--tx-2);margin-top:10px}
-.kcard code{font-family:var(--mono);font-size:12px;background:var(--panel-2);border:1px solid var(--line);border-radius:5px;padding:1px 6px;color:var(--tx)}
-
-/* ============================================================= FOOTER */
-footer{border-top:1px solid var(--line);padding:34px 0 48px;background:var(--panel-2)}
-footer .wrap{display:flex;flex-wrap:wrap;gap:16px;align-items:center;justify-content:space-between}
-footer p{font-family:var(--mono);font-size:11.5px;color:var(--tx-3);line-height:1.7}
-footer .files{display:flex;flex-wrap:wrap;gap:6px}
-
-@media(prefers-reduced-motion:no-preference){
-  .pulse{animation:pulse 3.4s ease-in-out infinite}
-  @keyframes pulse{0%,100%{opacity:.35}50%{opacity:1}}
-  .flowdash{stroke-dasharray:5 5;animation:march 1.2s linear infinite}
-  @keyframes march{to{stroke-dashoffset:-20}}
-}
+  :root{--ground:#0c1117;--ink:#e8eef4;--mut:#8ba0b4;--faint:#5f7387;--line:#26333f;--sig:#34d3bd;
+    --r:#7aa2f7;--d:#e6b062;--s:#c3a6f9;--dr:#f7768e;--ev:#9ece6a;--mem:#f0c675;--trust:#ff9e64;
+    --mono:ui-monospace,"SF Mono","JetBrains Mono",Menlo,Consolas,monospace;
+    --sans:ui-sans-serif,-apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;}
+  *{box-sizing:border-box}
+  body{margin:0;background:radial-gradient(1400px 700px at 80% -4%,#122430 0,transparent 55%),var(--ground);color:var(--ink);font-family:var(--sans)}
+  .head{padding:22px clamp(14px,3vw,34px) 4px;max-width:1500px}
+  .eyebrow{font-family:var(--mono);font-size:12px;letter-spacing:.22em;text-transform:uppercase;color:var(--faint)}
+  h1{font-size:clamp(22px,3.4vw,34px);font-weight:750;letter-spacing:-.02em;margin:6px 0 6px}
+  .lede{color:#b9c8d8;max-width:78ch;font-size:14px;margin:0}
+  .legend{display:flex;flex-wrap:wrap;gap:6px 14px;margin:12px 0 2px;font-size:12.5px}
+  .lg{display:inline-flex;align-items:center;gap:6px;color:#b7c4d2}.sw{width:12px;height:12px;border-radius:3px}
+  .scroll{overflow:auto;margin:6px 0 30px;border-top:1px solid var(--line)}
+  svg{display:block}
+  .hint{padding:0 clamp(14px,3vw,34px);color:var(--faint);font-size:12px;font-family:var(--mono)}
 </style>
-
-<!-- ================================================================ MASTHEAD -->
-<header class="mast">
-  <div class="wrap">
-    <div class="brandline">
-      <span class="logo" aria-hidden="true">
-        <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
-          <circle cx="10" cy="10" r="6.4" style="stroke:var(--sig)" stroke-width="1.7"/>
-          <path d="M10 3.6 A6.4 6.4 0 0 1 15.9 7.7" style="stroke:var(--gold)" stroke-width="1.7" stroke-linecap="round"/>
-          <circle cx="10" cy="10" r="1.9" style="fill:var(--sig)"/>
-        </svg>
-      </span>
-      <span class="brandname"><b>loop</b>lab</span>
-      <span class="brandtag">autonomous ML/DS research engine · defaults view</span>
-    </div>
-
-    <h1 class="title">The agent that <span class="glow">invents, builds, tests &amp; improves</span> — on a loop.</h1>
-    <p class="lede">
-      Give LoopLab a goal. It runs a closed research loop — a Researcher proposes an idea, a Developer
-      writes the code, a sandbox runs it, an evaluator scores it — then refines and merges the best
-      candidates until the budget runs out, and returns the best <em>verified</em> result. Every step
-      is one line in an append-only event log, so a run is fully reproducible and crash-resumable by replay.
-    </p>
-
-    <div class="verbs" role="list" aria-label="the loop in four verbs">
-      <span class="verb" role="listitem"><span class="dot" style="background:var(--s-research)"></span>Invent<span class="arw">→</span></span>
-      <span class="verb" role="listitem"><span class="dot" style="background:var(--s-develop)"></span>Implement<span class="arw">→</span></span>
-      <span class="verb" role="listitem"><span class="dot" style="background:var(--s-sandbox)"></span>Test<span class="arw">→</span></span>
-      <span class="verb" role="listitem"><span class="dot" style="background:var(--s-evaluate)"></span>Improve<span class="arw">↺</span></span>
-      <span class="verb" role="listitem"><span class="dot" style="background:var(--gold)"></span>Champion</span>
-    </div>
+</head>
+<body>
+<div class="head">
+  <div class="eyebrow">LoopLab · full engine process · code default</div>
+  <h1>The whole loop — boxes &amp; arrows, every nuance</h1>
+  <p class="lede">Read the top row left→right: one node is proposed → novelty-gated → built → run → scored &amp; trust-checked → refined, then loops. Under each stage sit its detail boxes; the hypothesis board, cross-run memory and the event spine hang below. Every number is a built-in default.</p>
+  <div class="legend">
+    <span class="lg"><span class="sw" style="background:var(--r)"></span>Researcher</span>
+    <span class="lg"><span class="sw" style="background:var(--d)"></span>Developer</span>
+    <span class="lg"><span class="sw" style="background:var(--s)"></span>Strategist</span>
+    <span class="lg"><span class="sw" style="background:var(--dr)"></span>Deep Researcher</span>
+    <span class="lg"><span class="sw" style="background:var(--ev)"></span>Sandbox/engine</span>
+    <span class="lg"><span class="sw" style="background:var(--trust)"></span>Trust/rigor</span>
+    <span class="lg"><span class="sw" style="background:var(--mem)"></span>Memory</span>
+    <span class="lg"><span class="sw" style="background:var(--sig)"></span>Event spine</span>
   </div>
-</header>
+</div>
+<div class="hint">◱ scroll — the canvas is large (pinch/scroll to pan)</div>
+<div class="scroll"><svg id="d" xmlns="http://www.w3.org/2000/svg"></svg></div>
 
-<!-- ================================================================ LIFECYCLE -->
-<section>
-  <div class="wrap">
-    <div class="sec-head">
-      <span class="eyebrow">A run, end to end</span>
-      <h2>Six stages from a goal to a verified champion</h2>
-      <p>The middle stage — <b>The Loop</b> — is where the work happens; it repeats until the node
-         budget is spent. Everything to its left sets the run up; everything to its right hardens and
-         remembers the result.</p>
-    </div>
+<script>
+const NS="http://www.w3.org/2000/svg",svg=document.getElementById("d");
+const C={r:"#7aa2f7",d:"#e6b062",s:"#c3a6f9",dr:"#f7768e",ev:"#9ece6a",mem:"#f0c675",trust:"#ff9e64",sig:"#34d3bd",mut:"#6b7f92"};
+function el(n,a){const e=document.createElementNS(NS,n);for(const k in a)e.setAttribute(k,a[k]);return e;}
+const B={},E=[];
+function box(id,x,y,w,h,t,tag,c,sub){B[id]={x,y,w,h,t,tag,c:c||C.mut,sub:sub||[]};}
+// vertical stack helper: items=[{id,h,t,tag,c,sub}] placed down from y0 at column x/w; returns next y
+function stack(x,w,y0,items,gap){gap=gap==null?12:gap;let y=y0;for(const it of items){box(it.id,x,y,w,it.h,it.t,it.tag,it.c,it.sub);y+=it.h+gap;}return y;}
+function edge(f,fs,t,ts,o){E.push([f,fs,t,ts,o||{}]);}
 
-    <div class="life" role="list">
-      <div class="stage" role="listitem">
-        <div class="snum">STAGE 01</div>
-        <div class="sname">Configure</div>
-        <div class="sdesc">Describe the task in words (Genesis authors it), a YAML/JSON file, or <span class="mono">--kind</span>. Layered settings resolve to a masked snapshot.</div>
-        <div class="bar"></div>
-      </div>
-      <div class="stage" role="listitem">
-        <div class="snum">STAGE 02</div>
-        <div class="sname">Start up</div>
-        <div class="sdesc">Open the append-only <span class="mono">events.jsonl</span>. On resume, replay folds the log back into the exact frontier. The baseline node is evaluated.</div>
-        <div class="bar"></div>
-      </div>
-      <div class="stage hot" role="listitem">
-        <div class="snum">STAGE 03</div>
-        <div class="sname">The Loop ↺</div>
-        <div class="sdesc">Propose → implement → run → score → gate → pick next. Repeats up to <span class="mono tnum">max_nodes</span> (default 8). The heart of the engine.</div>
-        <div class="bar"></div>
-      </div>
-      <div class="stage" role="listitem">
-        <div class="snum">STAGE 04</div>
-        <div class="sname">Confirm</div>
-        <div class="sdesc">Re-run the top candidates on several seeds so a lucky run can't win. A held-out partition picks the robust best.</div>
-        <div class="bar"></div>
-      </div>
-      <div class="stage" role="listitem">
-        <div class="snum">STAGE 05</div>
-        <div class="sname">Champion</div>
-        <div class="sdesc">The best verified candidate, reported with variance. Exportable to MLflow or a notebook; the full lineage renders as <span class="mono">tree.html</span>.</div>
-        <div class="bar"></div>
-      </div>
-      <div class="stage" role="listitem">
-        <div class="snum">STAGE 06</div>
-        <div class="sname">Reflect</div>
-        <div class="sdesc">Distil the run into cross-run memory: a case, a causal note on <em>why</em> it won, generalizable lessons, and a reusable skill.</div>
-        <div class="bar"></div>
-      </div>
-    </div>
-  </div>
-</section>
+/* ============ SETUP row ============ */
+box("genesis",40,44,300,58,"Genesis","⌘",C.mut,["author task from a plain goal (LLM)","picks kind · direction · metric · data"]);
+box("onboard",370,44,360,58,"Onboarding · repo","□",C.ev,["agent proposes → human ratifies eval spec","ratify_freeze | autonomous | ratify_freeze_drift"]);
+box("boss",1740,44,360,58,"Boss / Assistant · UI","⌘",C.s,["steer live: inject · add hypothesis · approve","UI writes control intents; engine writes events"]);
 
-<hr class="rule">
+/* ============ MAIN LOOP row (y=150) ============ */
+const LY=150,LH=76;
+box("propose",40,LY,330,LH,"PROPOSE","R",C.r,["draft idea (op+params) + 1-line hypothesis","prompt = brief + cues + idea-space guidance"]);
+box("novelty",410,LY,210,LH,"NOVELTY GATE","R",C.r,["reject a near-duplicate idea","one informed re-propose"]);
+box("implement",660,LY,300,LH,"IMPLEMENT","D",C.d,["write/edit code · minimal SEARCH/REPLACE","every edit auto-compiled"]);
+box("evaluate",1000,LY,320,LH,"EVALUATE","□",C.ev,["run isolated across seeds","repair a mechanical crash in place"]);
+box("score",1360,LY,360,LH,"SCORE · TRUST","R/✓",C.trust,["metric in → holdout re-rank","then the rigor layer (below)"]);
+box("refine",1760,LY,300,LH,"REFINE","R",C.r,["policy picks next move over the DAG","improve · merge · ablate · debug"]);
 
-<!-- ================================================================ THE LOOP HERO -->
-<section>
-  <div class="wrap">
-    <div class="sec-head">
-      <span class="eyebrow">Stage 03 · one iteration</span>
-      <h2>Inside the loop: four roles, one turn of the wheel</h2>
-      <p>A candidate solution is a <b>node</b>. Each turn expands one node into a child, colored here as
-         it moves through the four roles. Two edges break the circle: a failed run loops back to the
-         Developer to be repaired, and the merge operator fuses two strong lineages into a
-         multi-parent child.</p>
-    </div>
+/* ============ detail stacks under each loop stage ============ */
+const DY=300;
+// PROPOSE — the read funnel (reads flow UP into propose)
+stack(40,330,DY,[
+ {id:"f_meta",h:66,t:"① Meta-notes",tag:"×3",c:C.mem,sub:["exact task_id · last 3","causal ‘why the winner won’ (≤700c)"]},
+ {id:"f_less",h:92,t:"② Cross-run lessons",tag:"×5",c:C.mem,sub:["fingerprint Jaccard ≥ 0.34 (exact=1.0)","harmonic expand k=8 / min 0.15","rank (−sim, −(conf×min3,ev), −recency)","quarantine → dedup → top 5"]},
+ {id:"f_dig",h:80,t:"③ Experiment digest",tag:"in-run",c:C.mem,sub:["cap = min(6000, max(1200, 60×nodes))","strong×5 · sweep×10 · weak×3 · themes · ablation×5"]},
+ {id:"f_sib",h:66,t:"④ Siblings · lineage · board",tag:"",c:C.mem,sub:["siblings×5 · lineage×5 (by |Δ|)","open hypotheses ×5 (foresight order)"]},
+ {id:"f_kb",h:56,t:"⑤ KB / Memora",tag:"k=3",c:C.mem,sub:["kb_search 3 + anchor-expand 3 · case 3"]},
+ {id:"f_tools",h:66,t:"⑥ Mid-loop read tools",tag:"R",c:C.r,sub:["RunTools · DataTools · KnowledgeTools","list/read experiments, code, logs, profile"]},
+]);
+// NOVELTY
+stack(410,210,DY,[
+ {id:"n_sem",h:78,t:"Semantic dedup",tag:"0.92",c:C.r,sub:["cosine ≥ 0.92 on rationale+hypothesis","re-propose ‘tried X, failed because Y’"]},
+ {id:"n_num",h:78,t:"Numeric dedup",tag:"0.05",c:C.ev,sub:["L2 < 0.05 → deterministic nudge","seed=id×1009+7 · scale=max(|p|,1)×0.1"]},
+]);
+// IMPLEMENT
+stack(660,300,DY,[
+ {id:"i_env",h:82,t:"Env inspector",tag:"D",c:C.d,sub:["ground API in the REAL installed env","pkg_info · py_api (enum values) · read/grep_installed"]},
+ {id:"i_val",h:58,t:"Auto-validate",tag:"gate",c:C.d,sub:["compile after every edit → error flies back"]},
+ {id:"i_bon",h:78,t:"Best-of-N",tag:"off",c:C.d,sub:["N impls · score∈[−1,3.5] (compile+1/valid+2/metric+.5)","tie: foresight → listwise LLM pick"]},
+]);
+// EVALUATE
+stack(1000,320,DY,[
+ {id:"e_box",h:60,t:"Sandbox tiers",tag:"□",c:C.ev,sub:["trusted_local subprocess | untrusted Docker --network none"]},
+ {id:"e_seed",h:60,t:"Seeds & holdout",tag:"□",c:C.ev,sub:["search seed 0 · n_seeds 3 · holdout 25% reserved (Knuth hash)"]},
+ {id:"e_ir",h:82,t:"Inline repair",tag:"□",c:C.ev,sub:["reasons crash/timeout/oom/setup","abandon at 2 identical errors (norm. signature)"]},
+ {id:"e_dep",h:72,t:"Auto-install deps",tag:"□",c:C.ev,sub:["allow-list ~70 · ≤6 rounds/node","stop after 2 pip timeouts (no egress)"]},
+ {id:"e_dr",h:82,t:"Deep repair",tag:"D",c:C.d,sub:["timeout→cut compute · oom→cut memory","+ lineage prior fixes · taxonomy"]},
+]);
+// SCORE / TRUST
+stack(1360,360,DY,[
+ {id:"t_rh",h:74,t:"Reward-hack",tag:"✓",c:C.trust,sub:["grader/answer-key access · write to frozen file","metric at 0.0/1.0 floor/ceiling"]},
+ {id:"t_lk",h:74,t:"Leakage",tag:"✓",c:C.trust,sub:["train↔test · target |r|≥0.98 · temporal","code: fit-on-test / fit-before-split"]},
+ {id:"t_cr",h:58,t:"Critic + CV",tag:"advisory",c:C.trust,sub:["stub · hardcoded metric · params ignored · mean/std/SE"]},
+ {id:"t_gate",h:86,t:"Trust gate",tag:"select",c:C.trust,sub:["audit = surface only","gate = can’t be best (stays breedable)","block = also feasible=False"]},
+ {id:"t_conf",h:82,t:"Confirm",tag:"□",c:C.ev,sub:["top-K on disjoint seeds [base=1…)","robust=best mean; demote by ≥1 SE (variance gate)"]},
+ {id:"t_ho",h:64,t:"Holdout-select",tag:"top-3",c:C.ev,sub:["re-rank top-3 on reserved 25% · no retrain"]},
+ {id:"t_best",h:64,t:"Best-selection order",tag:"",c:C.ev,sub:["feasible→non-flagged→metric→confirmed→holdout→(metric,id)"]},
+]);
+// REFINE
+stack(1760,300,DY,[
+ {id:"r_gt",h:72,t:"GreedyTree (default)",tag:"R",c:C.r,sub:["n_seeds 3 → improve best","merge every 3 (max 2) · ablate_every 0"]},
+ {id:"r_op",h:60,t:"Operators",tag:"",c:C.r,sub:["draft·improve·debug·merge·ablate · mean|ensemble(+9pp)"]},
+ {id:"r_ba",h:60,t:"Operator bandit",tag:"UCB off",c:C.r,sub:["gain/gmax + c=0.8·√(ln(t+1)/(n+1))"]},
+ {id:"r_pol",h:60,t:"Other policies",tag:"opt-in",c:C.r,sub:["ASHA · BOHB (ASHA+surrogate) · MCTS · evolutionary"]},
+]);
+// CROSS-CUTTING (right column)
+stack(2100,360,DY,[
+ {id:"deepres",h:132,t:"Deep Researcher",tag:"every 3",c:C.dr,sub:["tools: Run/Data/Knowledge/Literature/Web","overlaps eval · memo recorded immediately","memo: summary·findings·claims·directions×5","VERIFY claims vs cited evidence","each direction → open hypothesis"]},
+ {id:"strat",h:96,t:"Strategist",tag:"every 3",c:C.s,sub:["retune: policy·operators·fidelity·request-research","rule → LLM → agentic tool-loop","agent_control allow-list per role"]},
+]);
 
-    <div class="loopwrap">
-      <div class="loopgrid">
-        <!-- ---------- SVG diagram ---------- -->
-        <div class="diagram">
-          <svg viewBox="0 0 460 440" role="img" aria-label="Cyclic diagram of the four loop roles with repair and merge edges" style="font-family:var(--mono)">
-            <defs>
-              <marker id="ah" markerWidth="9" markerHeight="9" refX="6.5" refY="4.5" orient="auto">
-                <path d="M1 1 L7 4.5 L1 8" fill="none" style="stroke:var(--tx-3)" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
-              </marker>
-              <marker id="ah-sig" markerWidth="9" markerHeight="9" refX="6.5" refY="4.5" orient="auto">
-                <path d="M1 1 L7 4.5 L1 8" fill="none" style="stroke:var(--sig)" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
-              </marker>
-              <marker id="ah-bad" markerWidth="9" markerHeight="9" refX="6.5" refY="4.5" orient="auto">
-                <path d="M1 1 L7 4.5 L1 8" fill="none" style="stroke:var(--bad)" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
-              </marker>
-            </defs>
+/* ============ HYPOTHESIS pipeline (row y≈900) ============ */
+const HY=920;
+box("h_state",40,HY,270,72,"State hypothesis","R",C.r,["id = slug-md5[:6] (exact hash)","src: researcher·deep-research·human·strategist"]);
+box("h_dedup",350,HY,340,72,"Dedup + merge","R",C.r,["exact id (fold) + agentic paraphrase merge","hybrid grep+BM25+vector RRF → agent decides (open≥4 & +2)"]);
+box("h_prio",730,HY,300,72,"Prioritize · foresight","R",C.r,["world-model ranks open board (pre-eval)","panel _MAX_ITEMS 20 · agentic max_turns 4"]);
+box("kanban",1070,HY-8,640,90,"Hypothesis board · kanban","A",C.r,["derived on every fold — never stored","open → testing → supported (Δ>0/best) → tested → abandoned"]);
 
-            <!-- circular flow arrows (clockwise) -->
-            <path d="M300 92 A150 150 0 0 1 388 210" fill="none" style="stroke:var(--tx-3)" stroke-width="1.8" marker-end="url(#ah)"/>
-            <path d="M372 268 A150 150 0 0 1 268 372" fill="none" style="stroke:var(--tx-3)" stroke-width="1.8" marker-end="url(#ah)"/>
-            <path d="M192 388 A150 150 0 0 1 78 288" fill="none" style="stroke:var(--tx-3)" stroke-width="1.8" marker-end="url(#ah)"/>
-            <path d="M74 214 A150 150 0 0 1 128 108" fill="none" style="stroke:var(--tx-3)" stroke-width="1.8" marker-end="url(#ah)"/>
+/* ============ MEMORY WRITE (row y≈1080) ============ */
+const WY=1080;
+box("w_order",40,WY,260,72,"Write order","fin",C.mem,["budget → diversity → llm-cost","→ store_case → reflection_note"]);
+box("w_case",320,WY,290,72,"KB case","cases.jsonl",C.mem,["task_id·goal·dir·params·metric·rationale","upsert-if-better · Memora consolidate 0.86"]);
+box("w_reflect",630,WY,300,72,"Lessons: reflect","R",C.mem,["LLM: 1–3 generalizable [GOOD]/[BAD]","from top5 + fail3 · conf 0.6"]);
+box("w_hyp",950,WY,300,72,"Lessons: hyp + failure","",C.mem,["per hypothesis: conf 0.7 sup / 0.5 · evidence[:8]","failure-theme lesson conf 0.4"]);
+box("w_comp",1270,WY,300,72,"Comparative (M6)","≤3",C.mem,["credit-assign which change won (pairs≤3)","conf 0.65/0.5 · mid-run every 4 nodes"]);
+box("w_meta",1590,WY,260,72,"Meta-note","R",C.mem,["causal ‘why won’ ≤700c","→ meta_notes.jsonl"]);
+box("w_skill",1870,WY,290,72,"Auto-skill","R",C.mem,["supported hyp & Δ>0 → SKILL.md","candidate→promoted when fp sim < 0.6"]);
 
-            <!-- repair back-edge: Sandbox -> Developer (dashed red) -->
-            <path class="flowdash" d="M300 356 C 356 330 372 300 372 276" fill="none" style="stroke:var(--bad)" stroke-width="1.7" marker-end="url(#ah-bad)"/>
+/* ============ HYGIENE (row y≈1240) ============ */
+const GY=1240;
+box("g_ex",40,GY,320,66,"Dedup pass1 · exact","",C.mem,["group (normalize[:160], task_id)","newest wins · evidence summed (agreeing)"]);
+box("g_ag",380,GY,320,66,"Dedup pass2 · agentic","R",C.mem,["per task_id HybridRetriever RRF","Researcher merges paraphrases + synthesizes"]);
+box("g_ct",720,GY,300,66,"Contradiction quarantine","read",C.mem,["drop old supported vs newer negative","never drop the newest verdict"]);
+box("g_cp",1040,GY,320,66,"Compact + fingerprint","",C.mem,["lessons 4000→keep 2000","fp = kind·dir·metric·goal-kw·params"]);
 
-            <!-- policy pick to center then next -->
-            <path d="M230 118 L230 176" fill="none" style="stroke:var(--sig)" stroke-width="1.8" marker-end="url(#ah-sig)"/>
+/* ============ MEMORY TIERS (row y≈1360) ============ */
+const TY=1360;
+box("mA",40,TY,300,72,"A · Hypothesis board","in-run",C.mem,["state.hypotheses — derived each fold"]);
+box("mB",356,TY,300,72,"B · Experiment memory","in-run",C.mem,["state.nodes + digest (the search tree)"]);
+box("mC",672,TY,320,72,"C · Cross-run lessons","cross-run",C.mem,["~/.looplab/memory/lessons.jsonl"]);
+box("mD",1008,TY,330,72,"D · Knowledge base · Memora","cross-run",C.mem,["~/.looplab/knowledge · cases.jsonl · abstraction+anchors"]);
+box("mE",1354,TY,300,72,"E · Skills & meta-notes","cross-run",C.mem,["memory/skills · meta_notes.jsonl"]);
+box("sim",1670,TY,470,72,"Three kinds of ‘same’","",C.sig,["exact hash → hypotheses · embedding → novelty 0.92 / Memora 0.86","hybrid+agent → lessons & board merges"]);
 
-            <!-- ROLE NODES -->
-            <!-- Researcher (top) -->
-            <g>
-              <circle cx="230" cy="66" r="52" style="fill:color-mix(in srgb,var(--s-research) 16%,var(--panel));stroke:var(--s-research)" stroke-width="2"/>
-              <text x="230" y="52" text-anchor="middle" font-size="10" style="fill:var(--s-research)" font-weight="700">01 · PROPOSE</text>
-              <text x="230" y="70" text-anchor="middle" font-size="15" style="fill:var(--tx);font-family:var(--sans)" font-weight="700">Researcher</text>
-              <text x="230" y="87" text-anchor="middle" font-size="10.5" style="fill:var(--tx-2);font-family:var(--sans)">idea + params</text>
-            </g>
-            <!-- Developer (right) -->
-            <g>
-              <circle cx="394" cy="230" r="52" style="fill:color-mix(in srgb,var(--s-develop) 16%,var(--panel));stroke:var(--s-develop)" stroke-width="2"/>
-              <text x="394" y="216" text-anchor="middle" font-size="10" style="fill:var(--s-develop)" font-weight="700">02 · BUILD</text>
-              <text x="394" y="234" text-anchor="middle" font-size="15" style="fill:var(--tx);font-family:var(--sans)" font-weight="700">Developer</text>
-              <text x="394" y="251" text-anchor="middle" font-size="10.5" style="fill:var(--tx-2);font-family:var(--sans)">writes code</text>
-            </g>
-            <!-- Sandbox (bottom) -->
-            <g>
-              <circle cx="230" cy="394" r="52" style="fill:color-mix(in srgb,var(--s-sandbox) 16%,var(--panel));stroke:var(--s-sandbox)" stroke-width="2"/>
-              <text x="230" y="380" text-anchor="middle" font-size="10" style="fill:var(--s-sandbox)" font-weight="700">03 · RUN</text>
-              <text x="230" y="398" text-anchor="middle" font-size="15" style="fill:var(--tx);font-family:var(--sans)" font-weight="700">Sandbox</text>
-              <text x="230" y="415" text-anchor="middle" font-size="10.5" style="fill:var(--tx-2);font-family:var(--sans)">isolated · timed</text>
-            </g>
-            <!-- Evaluator (left) -->
-            <g>
-              <circle cx="66" cy="230" r="52" style="fill:color-mix(in srgb,var(--s-evaluate) 16%,var(--panel));stroke:var(--s-evaluate)" stroke-width="2"/>
-              <text x="66" y="216" text-anchor="middle" font-size="10" style="fill:var(--s-evaluate)" font-weight="700">04 · SCORE</text>
-              <text x="66" y="234" text-anchor="middle" font-size="15" style="fill:var(--tx);font-family:var(--sans)" font-weight="700">Evaluator</text>
-              <text x="66" y="251" text-anchor="middle" font-size="10.5" style="fill:var(--tx-2);font-family:var(--sans)">CV + gate</text>
-            </g>
+/* ============ EVENT SPINE (row y≈1480) ============ */
+box("spine",40,1480,2100,84,"THE EVENT SPINE","",C.sig,["any block → append 1 domain event → events.jsonl → replay.fold → RunState","single writer · deterministic fold → exact replay · every event stamped trace_id/span_id → spans.jsonl (+OTLP)"]);
 
-            <!-- CENTER hub: Policy / Strategist -->
-            <g>
-              <rect x="171" y="176" width="118" height="88" rx="12" style="fill:var(--panel-2);stroke:var(--s-policy)" stroke-width="1.6"/>
-              <text x="230" y="200" text-anchor="middle" font-size="9.5" style="fill:var(--s-policy)" font-weight="700">PICK NEXT</text>
-              <text x="230" y="219" text-anchor="middle" font-size="13.5" style="fill:var(--tx);font-family:var(--sans)" font-weight="700">Policy</text>
-              <text x="230" y="235" text-anchor="middle" font-size="10" style="fill:var(--tx-2);font-family:var(--sans)">greedy tree</text>
-              <text x="230" y="252" text-anchor="middle" font-size="9" style="fill:var(--tx-3)">+ Strategist ✧</text>
-            </g>
+/* ================= EDGES ================= */
+// setup → loop
+edge("genesis","r","onboard","l",{c:C.mut});
+edge("onboard","b","propose","t",{c:C.ev,label:"eval ready"});
+edge("boss","b","refine","t",{c:C.s,dash:1,thin:1,label:"steer"});
+// main loop
+edge("propose","r","novelty","l",{c:C.sig,wide:1});
+edge("novelty","r","implement","l",{c:C.sig,wide:1});
+edge("implement","r","evaluate","l",{c:C.sig,wide:1});
+edge("evaluate","r","score","l",{c:C.sig,wide:1});
+edge("score","r","refine","l",{c:C.sig,wide:1});
+edge("refine","t","propose","t",{c:C.sig,label:"↺ next node — until budget",arc:110});
+// stage → its detail head (down)
+edge("propose","b","f_meta","t",{c:C.mem,thin:1,dash:1,label:"reads"});
+edge("novelty","b","n_sem","t",{c:C.r,thin:1});
+edge("implement","b","i_env","t",{c:C.d,thin:1});
+edge("evaluate","b","e_box","t",{c:C.ev,thin:1});
+edge("score","b","t_rh","t",{c:C.trust,thin:1});
+edge("refine","b","r_gt","t",{c:C.r,thin:1});
+// cross-cutting into loop
+edge("deepres","l","kanban","r",{c:C.dr,dash:1,label:"+ hypotheses"});
+edge("deepres","t","evaluate","b",{c:C.dr,dash:1,thin:1,label:"overlap"});
+edge("strat","t","refine","b",{c:C.s,dash:1,thin:1,label:"retune"});
+// hypothesis pipeline (propose feeds it down the LEFT margin to skirt the read funnel)
+edge("propose","l","h_state","l",{c:C.r,thin:1,dash:1,label:"states a belief",arc:30});
+edge("h_state","r","h_dedup","l",{c:C.r});
+edge("h_dedup","r","h_prio","l",{c:C.r});
+edge("h_prio","r","kanban","l",{c:C.r});
+edge("evaluate","b","kanban","t",{c:C.ev,dash:1,thin:1,label:"status",arc:220});
+edge("score","b","kanban","t",{c:C.trust,dash:1,thin:1,label:"verdict",arc:220});
+// close-out → memory write
+edge("refine","b","w_order","t",{c:C.mem,thin:1,dash:1,label:"run end",arc:150});
+edge("w_order","r","w_case","l",{c:C.mem,thin:1});
+edge("w_case","r","w_reflect","l",{c:C.mem,thin:1});
+edge("w_reflect","r","w_hyp","l",{c:C.mem,thin:1});
+edge("w_hyp","r","w_comp","l",{c:C.mem,thin:1});
+edge("w_comp","r","w_meta","l",{c:C.mem,thin:1});
+edge("w_meta","r","w_skill","l",{c:C.mem,thin:1});
+// write → hygiene → tiers
+edge("w_reflect","b","g_ex","t",{c:C.mem,thin:1,label:"hygiene"});
+edge("g_ex","r","g_ag","l",{c:C.mem,thin:1});
+edge("g_ag","r","g_ct","l",{c:C.mem,thin:1});
+edge("g_ct","r","g_cp","l",{c:C.mem,thin:1});
+edge("g_ex","b","mC","t",{c:C.mem,thin:1});
+edge("w_case","b","mD","t",{c:C.mem,thin:1,arc:60});
+edge("w_skill","b","mE","t",{c:C.mem,thin:1,arc:60});
+// (the funnel boxes ① ② ⑤ under Propose ARE the reads of tiers C/D/E — no long back-arrows needed)
 
-            <!-- labels on edges -->
-            <text x="356" y="150" text-anchor="middle" font-size="9" style="fill:var(--tx-3)">idea→code</text>
-            <text x="356" y="332" text-anchor="middle" font-size="9" style="fill:var(--bad)">repair ↺</text>
-            <text x="150" y="330" text-anchor="middle" font-size="9" style="fill:var(--tx-3)">result</text>
-            <text x="120" y="150" text-anchor="middle" font-size="9" style="fill:var(--tx-3)">verdict</text>
-          </svg>
-        </div>
-
-        <!-- ---------- side legend + event spine ---------- -->
-        <div class="loopside">
-          <h3>What flows around the wheel</h3>
-          <p style="font-size:13px;color:var(--tx-2);margin-top:6px">
-            The color advances with the candidate. The Policy hub at the center selects which node to
-            expand next; the optional <span class="mono">Strategist ✧</span> re-tunes policy, operators
-            and fidelity every few nodes.</p>
-
-          <div class="k">The two broken edges</div>
-          <div class="legrow">
-            <span class="sw" style="background:var(--bad)"></span>
-            <span class="lt">Repair ↺<small>A crash or timeout is fed back with its stderr. Mechanical faults are fixed <em>in place</em> — no node spent; deeper ones get a "reproduce, then fix" directive.</small></span>
-          </div>
-          <div class="legrow">
-            <span class="sw" style="background:var(--s-policy)"></span>
-            <span class="lt">Merge / ensemble<small>The policy fuses two strong lineages into one multi-parent child — the highest-evidenced single lift.</small></span>
-          </div>
-
-          <div class="spine">
-            <span class="lbl">▐ the event-log spine</span>
-            <p>Every arrow above also <b>appends one line</b> to <span class="mono">events.jsonl</span> — the single source of truth. Nothing else is canonical; the tree, the read-model and trace spans are all regenerable folds of this log.</p>
-            <div class="evtrack" aria-label="real event kinds appended to events.jsonl">
-              <span class="evt">run_started</span>
-              <span class="evt">policy_decision</span>
-              <span class="evt hi">node_created</span>
-              <span class="evt hi">node_evaluated</span>
-              <span class="evt">node_failed</span>
-              <span class="evt">node_repaired</span>
-              <span class="evt">node_confirmed</span>
-              <span class="evt hi">best_confirmed</span>
-              <span class="evt">run_finished</span>
-            </div>
-          </div>
-        </div>
-      </div>
-    </div>
-  </div>
-</section>
-
-<hr class="rule">
-
-<!-- ================================================================ STAGE DETAIL -->
-<section>
-  <div class="wrap">
-    <div class="sec-head">
-      <span class="eyebrow">The four roles, in detail</span>
-      <h2>What each role actually does</h2>
-      <p>By default one LLM identity — the <b>unified agent</b> — plays every role across stages,
-         choosing its model and tools per stage and driving the next action within a legal-action gate
-         that keeps pipeline discipline.</p>
-    </div>
-
-    <div class="stages">
-      <article class="scard" style="--c:var(--s-research)">
-        <div class="shdr"><span class="sidx">01</span><h3>Researcher</h3></div>
-        <div class="role">proposes an Idea = operator + params + hypothesis</div>
-        <p>Reasons about the goal and everything tried so far, then proposes the next experiment. It's
-           conditioned on injected memory — and can actively pull more with tools.</p>
-        <ul>
-          <li><b>Sees</b> fingerprint-matched lessons, exact-task meta-notes, open hypotheses, and digests of winners &amp; failures</li>
-          <li><b>Can call tools</b> to read its own experiments, sibling runs, cases, lessons, skills &amp; the knowledge base <span class="op">(researcher_tools · cross_run_tools)</span></li>
-          <li><b>Picks an operator:</b> <span class="op">draft · improve · debug · ablate · merge · sweep</span></li>
-        </ul>
-      </article>
-
-      <article class="scard" style="--c:var(--s-develop)">
-        <div class="shdr"><span class="sidx">02</span><h3>Developer</h3></div>
-        <div class="role">turns the idea into runnable code</div>
-        <p>Emits a complete solution (or applies params to a repo), restricted to the task's allowed
-           edit surface. On a live model it writes the whole script; the toy backend fills a template.</p>
-        <ul>
-          <li><b>Edit-surface gate</b> is reject-not-strip: a patch touching a protected file or escaping the surface is rejected wholesale</li>
-          <li><b>Every accepted child is a commit</b> — lineage is always reconstructable</li>
-          <li><b>Can be an external agent</b> (OpenCode / Aider / Goose) in a worktree, diff-gated back to the surface</li>
-        </ul>
-      </article>
-
-      <article class="scard" style="--c:var(--s-sandbox)">
-        <div class="shdr"><span class="sidx">03</span><h3>Sandbox</h3></div>
-        <div class="role">runs the candidate in isolation</div>
-        <p>Executes the solution under a hard budget and captures everything. The tier is chosen by
-           <span class="op">trust_mode</span>, not your environment.</p>
-        <ul>
-          <li><b>Default <span class="op">trusted_local</span>:</b> a subprocess — process isolation + 30&nbsp;s timeout + whole-tree kill + ~64&nbsp;KB output caps. No Docker</li>
-          <li><b>Runs <span class="op tnum">n_seeds=3</span></b> so a score isn't a single sample</li>
-          <li><b>Auto-installs</b> a known-missing library and re-runs; <span class="op">untrusted</span> tier swaps in Docker <span class="op">--network none</span></li>
-        </ul>
-      </article>
-
-      <article class="scard" style="--c:var(--s-evaluate)">
-        <div class="shdr"><span class="sidx">04</span><h3>Evaluator</h3></div>
-        <div class="role">decides if the run is a real improvement</div>
-        <p>Turns a run into a gated verdict — never a bare number. Leakage-first, variance-aware,
-           so noise and cheating don't crown a candidate.</p>
-        <ul>
-          <li><b>Validity → objective</b> on a consistent CV protocol: K-fold or purged walk-forward (no look-ahead)</li>
-          <li><b>Variance gate:</b> beat the incumbent by more than ~1 standard error, or it's noise</li>
-          <li><b>Held-out partition</b> <span class="op tnum">(holdout 0.25)</span> selects the robust best; leakage &amp; reward-hack monitors are available as audit gates</li>
-        </ul>
-      </article>
-    </div>
-  </div>
-</section>
-
-<hr class="rule">
-
-<!-- ================================================================ SUBSYSTEMS -->
-<section>
-  <div class="wrap">
-    <div class="sec-head">
-      <span class="eyebrow">The supporting cast</span>
-      <h2>The subsystems around the loop</h2>
-      <p>The loop is small on purpose. These subsystems make it honest, resumable, and smarter over time —
-         each is a swappable seam wired from config.</p>
-    </div>
-
-    <div class="subs">
-      <!-- orchestrator + event log -->
-      <div class="sub">
-        <div class="st">
-          <span class="ic"><svg viewBox="0 0 20 20" fill="none"><rect x="3" y="3" width="14" height="4" rx="1" stroke="var(--sig)" stroke-width="1.5"/><rect x="3" y="8" width="14" height="4" rx="1" stroke="var(--sig)" stroke-width="1.5"/><rect x="3" y="13" width="14" height="4" rx="1" stroke="var(--sig)" stroke-width="1.5"/></svg></span>
-          <h3>Orchestrator &amp; Event Log</h3>
-        </div>
-        <p>The sole writer of run state. It drives the loop, owns the budget, and appends every step to
-           <span class="mono">events.jsonl</span>. <b>Replay</b> folds the log into state with a pure
-           function — identical every time — so a hard-killed run <b>resumes from the exact frontier</b>.</p>
-        <div class="tags"><span class="tag mod">orchestrator.py</span><span class="tag mod">eventstore.py</span><span class="tag mod">replay.py</span></div>
-      </div>
-
-      <!-- trust / evaluation -->
-      <div class="sub">
-        <div class="st">
-          <span class="ic"><svg viewBox="0 0 20 20" fill="none"><path d="M10 2.5 L16.5 5.2 V10 C16.5 14 13.5 16.5 10 17.5 C6.5 16.5 3.5 14 3.5 10 V5.2 Z" stroke="var(--sig)" stroke-width="1.5" stroke-linejoin="round"/><path d="M7.3 10 L9.2 12 L12.9 8" stroke="var(--sig)" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg></span>
-          <h3>Trust &amp; Evaluation</h3>
-        </div>
-        <p>The leakage-first rigor layer: consistent cross-validation, train/test·temporal·target leakage
-           detectors, the variance gate, and multi-seed confirmation at the frontier. Reward-hack, code-leakage
-           and critic monitors run as audit events.</p>
-        <div class="tags"><span class="tag mod">cv.py</span><span class="tag mod">leakage.py</span><span class="tag mod">gate.py</span><span class="tag mod">confirm.py</span></div>
-      </div>
-
-      <!-- search + operators -->
-      <div class="sub">
-        <div class="st">
-          <span class="ic"><svg viewBox="0 0 20 20" fill="none"><circle cx="10" cy="4" r="2.2" stroke="var(--sig)" stroke-width="1.5"/><circle cx="5" cy="15" r="2.2" stroke="var(--sig)" stroke-width="1.5"/><circle cx="15" cy="15" r="2.2" stroke="var(--sig)" stroke-width="1.5"/><path d="M9 6 L6 13 M11 6 L14 13" stroke="var(--sig)" stroke-width="1.5"/></svg></span>
-          <h3>Search &amp; Operators</h3>
-        </div>
-        <p>The policy decides <em>where</em> to expand; operators decide <em>what</em> each step does —
-           and operators do the heavy lifting. Default is a greedy tree with multi-parent merge;
-           ASHA, MCTS and evolutionary policies are drop-in.</p>
-        <div class="tags"><span class="tag mod">policy.py</span><span class="tag mod">operators.py</span><span class="tag mod">sweep.py</span><span class="tag mod">archive.py</span></div>
-      </div>
-
-      <!-- memory -->
-      <div class="sub">
-        <div class="st">
-          <span class="ic"><svg viewBox="0 0 20 20" fill="none"><path d="M4 6 C4 4 7 3 10 3 C13 3 16 4 16 6 V14 C16 16 13 17 10 17 C7 17 4 16 4 14 Z" stroke="var(--sig)" stroke-width="1.5"/><path d="M4 6 C4 8 7 9 10 9 C13 9 16 8 16 6" stroke="var(--sig)" stroke-width="1.5"/><path d="M4 10 C4 12 7 13 10 13 C13 13 16 12 16 10" stroke="var(--sig)" stroke-width="1.3" opacity=".6"/></svg></span>
-          <h3>Memory &amp; Knowledge</h3>
-        </div>
-        <p>Both stores are on by default. Across runs the engine accumulates cases, causal meta-notes,
-           lessons, skills and a knowledge base — injected into prompts <em>and</em> agentically
-           retrievable. <b>Memora</b> indexes them by abstraction + anchors and consolidates duplicates.</p>
-        <div class="tags"><span class="tag mod">memory.py</span><span class="tag mod">retrieval.py</span><span class="tag mod">memora.py</span><span class="tag mod">vectorstore.py</span></div>
-      </div>
-
-      <!-- llm backend -->
-      <div class="sub">
-        <div class="st">
-          <span class="ic"><svg viewBox="0 0 20 20" fill="none"><rect x="4" y="4" width="12" height="12" rx="2.5" stroke="var(--sig)" stroke-width="1.5"/><circle cx="10" cy="10" r="2.4" stroke="var(--sig)" stroke-width="1.5"/><path d="M10 1.5V4 M10 16V18.5 M1.5 10H4 M16 10H18.5" stroke="var(--sig)" stroke-width="1.5" stroke-linecap="round"/></svg></span>
-          <h3>LLM Backend</h3>
-        </div>
-        <p>One call surface over any OpenAI-compatible endpoint — Ollama, vLLM, SGLang, OpenAI —
-           a <span class="mono">base_url</span> change, not a code change. Per-role and per-stage model
-           routing, structured output via tool-calls with a text fallback, and cost accounting.</p>
-        <div class="tags"><span class="tag mod">llm.py</span><span class="tag mod">parse.py</span><span class="tag mod">unified_agent.py</span></div>
-      </div>
-
-      <!-- observability / UI -->
-      <div class="sub">
-        <div class="st">
-          <span class="ic"><svg viewBox="0 0 20 20" fill="none"><path d="M3 16 L7 10 L10 13 L17 4" stroke="var(--sig)" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/><circle cx="17" cy="4" r="1.6" fill="var(--sig)"/></svg></span>
-          <h3>Observability &amp; UI</h3>
-        </div>
-        <p>Every step emits a trace span to <span class="mono">spans.jsonl</span> (LLM prompts + completions
-           captured by default). A live React control plane and a terminal TUI read the same files and
-           append command intents — no engine coupling, no write races.</p>
-        <div class="tags"><span class="tag mod">tracing.py</span><span class="tag mod">server.py</span><span class="tag mod">htmlview.py</span><span class="tag mod">tui.py</span></div>
-      </div>
-    </div>
-  </div>
-</section>
-
-<hr class="rule">
-
-<!-- ================================================================ MEMORY TIERS -->
-<section>
-  <div class="wrap">
-    <div class="sec-head">
-      <span class="eyebrow">Stage 06 · what the run leaves behind</span>
-      <h2>Cross-run memory: how a run makes the next one smarter</h2>
-      <p>At run end, reflection distils the run into four distinct kinds of durable memory — each with a
-         different job, never interchangeable — retained only when the result earned it.</p>
-    </div>
-
-    <div class="mem">
-      <div class="mtile">
-        <div class="mt">the list of the best</div>
-        <h4>Cases</h4>
-        <div class="file">cases.jsonl</div>
-        <p>The winning config per task, verbatim — retained only when it beats the prior best (retain-on-improvement).</p>
-        <div class="flow">winner → case · warm-start</div>
-      </div>
-      <div class="mtile">
-        <div class="mt">why it won</div>
-        <h4>Meta-notes</h4>
-        <div class="file">meta_notes.jsonl</div>
-        <p>A short, LLM-distilled <em>causal</em> summary of what actually mattered — not the config, the reason.</p>
-        <div class="flow">winner → causal note</div>
-      </div>
-      <div class="mtile">
-        <div class="mt">generalizable findings</div>
-        <h4>Lessons</h4>
-        <div class="file">lessons.jsonl</div>
-        <p>Higher-level claims ("larger batch tends to help") with a verdict and how many observations back it. Fingerprint-matched to similar tasks.</p>
-        <div class="flow">hypotheses + failures → lessons</div>
-      </div>
-      <div class="mtile">
-        <div class="mt">best practice + the script</div>
-        <h4>Skills</h4>
-        <div class="file">skills/*.md</div>
-        <p>A reusable technique <em>with the code that implemented it</em> — promoted when it re-confirms on a different task.</p>
-        <div class="flow">supported technique → skill</div>
-      </div>
-    </div>
-  </div>
-</section>
-
-<hr class="rule">
-
-<!-- ================================================================ KEYSTONE -->
-<section>
-  <div class="wrap">
-    <div class="sec-head">
-      <span class="eyebrow">Two properties everything rests on</span>
-      <h2>Why the event log is the keystone</h2>
-    </div>
-    <div class="key">
-      <div class="kcard">
-        <h3><span aria-hidden="true">↻</span> Reproducible by replay</h3>
-        <p><code>looplab replay RUN_DIR</code> folds the event log into the current state with a pure
-           function — no side effects, identical result every time. Because the task and config are
-           snapshotted into the run dir, a run is fully self-describing.</p>
-      </div>
-      <div class="kcard">
-        <h3><span aria-hidden="true">⏻</span> Crash-resumable, exactly</h3>
-        <p>Hard-kill a run at any point; <code>looplab resume RUN_DIR</code> replays the log, reconstructs
-           the exact frontier, and continues — no duplicated or lost work. The append-only writer even
-           tolerates a torn final line from a mid-write kill.</p>
-      </div>
-    </div>
-  </div>
-</section>
-
-<hr class="rule">
-
-<!-- ================================================================ DEFAULTS BOARD -->
-<section>
-  <div class="wrap">
-    <div class="sec-head">
-      <span class="eyebrow">Out of the box</span>
-      <h2>What's on by default — and what's dormant</h2>
-      <p>A plain <span class="mono">looplab run</span> ships lean and honest. The full agent stack is
-         <em>enabled</em> but <b>dormant</b> until you switch <span class="mono">backend=llm</span>; the
-         heavier trust gates stay off until you ask for them with <span class="mono">profile=thorough</span>.</p>
-    </div>
-
-    <div class="board" role="table" aria-label="default settings and their status">
-      <div class="brow bhead" role="row">
-        <div role="columnheader">Setting · default</div>
-        <div role="columnheader">Status</div>
-        <div class="desc" role="columnheader">What it means</div>
-      </div>
-
-      <div class="brow" role="row">
-        <div class="setting" role="cell">backend = <span class="val">toy</span></div>
-        <div role="cell"><span class="st-pill p-on"><span class="d"></span>OFFLINE</span></div>
-        <div class="desc" role="cell">A deterministic optimizer — no LLM, no network, no Docker. Set <span class="mono">backend=llm</span> to wake the reasoning agent.</div>
-      </div>
-      <div class="brow" role="row">
-        <div class="setting" role="cell">policy = <span class="val">greedy</span></div>
-        <div role="cell"><span class="st-pill p-on"><span class="d"></span>ON</span></div>
-        <div class="desc" role="cell">Greedy tree search with multi-parent merge — strong because the operators carry the work.</div>
-      </div>
-      <div class="brow" role="row">
-        <div class="setting" role="cell">trust_mode = <span class="val">trusted_local</span></div>
-        <div role="cell"><span class="st-pill p-on"><span class="d"></span>ON</span></div>
-        <div class="desc" role="cell">Subprocess sandbox: isolation + timeout + tree-kill + output caps. No Docker daemon.</div>
-      </div>
-      <div class="brow" role="row">
-        <div class="setting" role="cell">max_nodes = <span class="val tnum">8</span> · n_seeds = <span class="val tnum">3</span></div>
-        <div role="cell"><span class="st-pill p-on"><span class="d"></span>ON</span></div>
-        <div class="desc" role="cell">Candidate budget for the search; three seeds per evaluation. Timeout <span class="mono tnum">30&nbsp;s</span>/node.</div>
-      </div>
-      <div class="brow" role="row">
-        <div class="setting" role="cell">unified_agent = <span class="val">true</span></div>
-        <div role="cell"><span class="st-pill p-dorm"><span class="d"></span>DORMANT</span></div>
-        <div class="desc" role="cell">One identity plays every role. Active only under <span class="mono">backend=llm</span>.</div>
-      </div>
-      <div class="brow" role="row">
-        <div class="setting" role="cell">strategist_backend = <span class="val">llm</span></div>
-        <div role="cell"><span class="st-pill p-dorm"><span class="d"></span>DORMANT</span></div>
-        <div class="desc" role="cell">Meta-controller adapts policy/operators/fidelity every 3 nodes. Active under <span class="mono">backend=llm</span>.</div>
-      </div>
-      <div class="brow" role="row">
-        <div class="setting" role="cell">memory + knowledge dirs</div>
-        <div role="cell"><span class="st-pill p-on"><span class="d"></span>ON</span></div>
-        <div class="desc" role="cell">Cross-run case library + knowledge base at <span class="mono">~/.looplab/</span>. Set to <span class="mono">""</span> to disable.</div>
-      </div>
-      <div class="brow" role="row">
-        <div class="setting" role="cell">memora = <span class="val">true</span></div>
-        <div role="cell"><span class="st-pill p-on"><span class="d"></span>ON</span></div>
-        <div class="desc" role="cell">Harmonic indexing by abstraction + anchors (lexical by default — zero LLM calls).</div>
-      </div>
-      <div class="brow" role="row">
-        <div class="setting" role="cell">reflection_priors = <span class="val">true</span></div>
-        <div role="cell"><span class="st-pill p-on"><span class="d"></span>ON</span></div>
-        <div class="desc" role="cell">Distil winner + lessons at run end; inject task-matched notes at the next run's start.</div>
-      </div>
-      <div class="brow" role="row">
-        <div class="setting" role="cell">repair: inline · deep · auto-deps</div>
-        <div role="cell"><span class="st-pill p-on"><span class="d"></span>ON</span></div>
-        <div class="desc" role="cell">Self-heal crashes in place, hand deeper failures a reproduce-then-fix directive, pip-install missing libs.</div>
-      </div>
-      <div class="brow" role="row">
-        <div class="setting" role="cell">trace_llm_io = <span class="val">true</span></div>
-        <div role="cell"><span class="st-pill p-on"><span class="d"></span>ON</span></div>
-        <div class="desc" role="cell">Capture each LLM call's full prompt + completion into <span class="mono">spans.jsonl</span>.</div>
-      </div>
-      <div class="brow" role="row">
-        <div class="setting" role="cell">confirm_top_k = <span class="val tnum">0</span> · gates · novelty</div>
-        <div role="cell"><span class="st-pill p-off"><span class="d"></span>OFF</span></div>
-        <div class="desc" role="cell">Multi-seed confirmation, reward-hack / leakage / critic gates and the novelty gate. <span class="mono">profile=thorough</span> turns the set on.</div>
-      </div>
-    </div>
-
-    <p class="note"><b>The honest read:</b> a stock run is deterministic and offline — it proves the loop,
-       the event log, replay and crash-resume without a single API call. Point it at
-       <span class="mono">backend=llm</span> and the Researcher, Developer, Strategist, agentic retrieval
-       and self-repair all come alive; add <span class="mono">profile=thorough</span> and the frontier
-       rigor (multi-seed confirmation + trust gates) switches on in one word.</p>
-  </div>
-</section>
-
-<!-- ================================================================ FOOTER -->
-<footer>
-  <div class="wrap">
-    <p>LoopLab · autonomous ML/DS research engine<br>
-       Files are the source of truth · the engine is the sole writer · derived views rebuild from the log.</p>
-    <div class="files">
-      <span class="tag">events.jsonl</span>
-      <span class="tag">config.snapshot.json</span>
-      <span class="tag">task.snapshot.json</span>
-      <span class="tag">tree.html</span>
-      <span class="tag">spans.jsonl</span>
-    </div>
-  </div>
-</footer>
+/* ================= RENDER ================= */
+let maxX=0,maxY=0;for(const id in B){const b=B[id];maxX=Math.max(maxX,b.x+b.w);maxY=Math.max(maxY,b.y+b.h);}
+const W=maxX+60,Hh=maxY+50;
+svg.setAttribute("viewBox",`0 0 ${W} ${Hh}`);svg.setAttribute("width",W);svg.setAttribute("height",Hh);
+const defs=el("defs",{});const mk=el("marker",{id:"ah",viewBox:"0 0 10 10",refX:"8.5",refY:"5",markerWidth:"7",markerHeight:"7",orient:"auto-start-reverse"});
+mk.appendChild(el("path",{d:"M0 0L10 5L0 10z",fill:"context-stroke"}));defs.appendChild(mk);svg.appendChild(defs);
+const anchor=(b,s)=>({l:[b.x,b.y+b.h/2],r:[b.x+b.w,b.y+b.h/2],t:[b.x+b.w/2,b.y],b:[b.x+b.w/2,b.y+b.h]}[s]);
+const nrm=s=>({l:[-1,0],r:[1,0],t:[0,-1],b:[0,1]}[s]);
+function drawEdge([f,fs,t,ts,o]){
+ const Aa=anchor(B[f],fs),Z=anchor(B[t],ts),col=o.c||C.mut,na=nrm(fs),nz=nrm(ts);
+ const arc=o.arc||Math.max(34,Math.hypot(Z[0]-Aa[0],Z[1]-Aa[1])*0.3);
+ const c1=[Aa[0]+na[0]*arc,Aa[1]+na[1]*arc],c2=[Z[0]+nz[0]*arc,Z[1]+nz[1]*arc];
+ const p=el("path",{d:`M${Aa[0]} ${Aa[1]} C ${c1[0]} ${c1[1]} ${c2[0]} ${c2[1]} ${Z[0]} ${Z[1]}`,fill:"none",stroke:col,
+   "stroke-width":o.wide?3:(o.thin?1.4:2.2),"marker-end":"url(#ah)",opacity:o.thin?0.66:0.95});
+ if(o.dash)p.setAttribute("stroke-dasharray","5 5");svg.appendChild(p);
+ if(o.label){const mx=(Aa[0]+Z[0])/2+(c1[0]+c2[0]-Aa[0]-Z[0])*0.16,my=(Aa[1]+Z[1])/2+(c1[1]+c2[1]-Aa[1]-Z[1])*0.16;
+  const tw=o.label.length*6.2+12;
+  svg.appendChild(el("rect",{x:mx-tw/2,y:my-9,width:tw,height:16,rx:4,fill:"#0c1117",stroke:col,"stroke-width":.8}));
+  const tx=el("text",{x:mx,y:my+3,"text-anchor":"middle",fill:col,"font-size":"10.5","font-family":"var(--mono)"});tx.textContent=o.label;svg.appendChild(tx);}
+}
+for(const e of E){if(!(e[4].dash||e[4].thin))drawEdge(e);}
+// blocks
+for(const id in B){const b=B[id],g=el("g",{});
+ const big=b.t.length>0 && b.t===b.t.toUpperCase() && b.h>=76 && id.length<9;
+ g.appendChild(el("rect",{x:b.x,y:b.y,width:b.w,height:b.h,rx:11,fill:id==="spine"?"#0e1a1c":"#141d28",stroke:b.c,"stroke-width":big?2:1.4,opacity:.99}));
+ g.appendChild(el("rect",{x:b.x,y:b.y,width:5,height:b.h,rx:2,fill:b.c}));
+ if(b.tag){const cw=b.tag.length*7+16;g.appendChild(el("rect",{x:b.x+b.w-cw-9,y:b.y+9,width:cw,height:18,rx:9,fill:"none",stroke:b.c,"stroke-width":1}));
+  const tg=el("text",{x:b.x+b.w-cw/2-9,y:b.y+21.5,"text-anchor":"middle",fill:b.c,"font-size":"10.5","font-weight":"700","font-family":"var(--mono)"});tg.textContent=b.tag;g.appendChild(tg);}
+ const t=el("text",{x:b.x+15,y:b.y+ (big?27:24),fill:"#eef4fa","font-size":big?"15":"13.5","font-weight":"700"});t.textContent=b.t;g.appendChild(t);
+ (b.sub||[]).forEach((ln,i)=>{const e2=el("text",{x:b.x+15,y:b.y+(big?46:42)+i*14,fill:"#a8bccf","font-size":"11","font-family":"var(--mono)"});
+  let s=ln;const max=Math.floor((b.w-26)/5.85);if(s.length>max)s=s.slice(0,max-1)+"…";e2.textContent=s;g.appendChild(e2);});
+ svg.appendChild(g);}
+for(const e of E){if(e[4].dash||e[4].thin)drawEdge(e);}
+</script>
+</body>
+</html>

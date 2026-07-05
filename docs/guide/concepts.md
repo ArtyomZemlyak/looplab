@@ -8,17 +8,21 @@ guides. For the full design rationale and decision records, see [`../00-INDEX.md
 A run is an `Engine` (orchestrator) driving four roles in a cycle:
 
 1. **Researcher** — proposes an `Idea` (an operator + params), reasoning about the goal and prior
-   results.
-2. **Developer** — implements the idea as runnable code (or applies params to an existing repo).
-3. **Sandbox** — runs the candidate in isolation with a timeout and output caps.
-4. **Evaluator** — scores it (cross-validation, a held-out grader, or a repo's own eval command).
+   results. Foresight ranks the candidates *before* an eval; the idea also states a one-line
+   **hypothesis** that lands on the board.
+2. **Novelty gate** — rejects a proposal too close to one already tried (idea-text cosine ≥ `0.92`,
+   or numeric param distance < `0.05`), with one informed re-propose.
+3. **Developer** — implements the idea as runnable code (or applies params to an existing repo).
+4. **Sandbox** — runs the candidate in isolation with a timeout and output caps.
+5. **Evaluator** — scores it (cross-validation, a held-out grader, or a repo's own eval command);
+   then the trust gates + optional multi-seed confirmation decide what may be selected best.
 
 The **policy** then picks the next node to expand, and the cycle repeats until a budget is hit. At
 the end, the top candidates can be **confirmed** under multiple seeds, and the best becomes the
 **champion**.
 
 ```
-Researcher → Developer → Sandbox → Evaluator → policy picks next → repeat → confirm → champion
+Researcher → Novelty gate → Developer → Sandbox → Evaluator → trust/confirm → policy picks next → repeat → champion
 ```
 
 ## Event log = source of truth
@@ -129,10 +133,15 @@ roles) — see [Configuration → Strategist & meta-control](configuration.md#st
 
 ## Cross-run memory
 
-With `memory_dir` set, the best result of each run is stored as a **case** and becomes retrievable
-knowledge for future runs (retain-on-improvement). With `reflection_priors`, a one-line meta-review
-is distilled at run end and injected into the proposal prompt at the next run's start — gradient-free
-cross-run meta-learning.
+Cross-run memory is **on by default** — `memory_dir` / `knowledge_dir` default to
+`~/.looplab/memory` and `~/.looplab/knowledge` (set `LOOPLAB_MEMORY_DIR=""` to disable). The best
+result of each run is retained as a **case** (retain-on-improvement); at run end `reflection_priors`
+(also on by default) distills a causal **meta-note** ("why the winner won"), generalizable
+**lessons** (good *and* bad, with a verdict + evidence count), and reusable **skills** — all stamped
+with a task fingerprint and matched into the next similar run's proposal prompt. Duplicate lessons
+are merged (exact-hash **plus** a hybrid-retrieval → agentic paraphrase-merge pass); the in-run
+**hypothesis board** is deduped the same way and prioritized by foresight. See
+**[Memory & knowledge](memory.md)** for the full tier-by-tier breakdown.
 
 ### Harmonic memory (`memora`, optional)
 
