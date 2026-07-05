@@ -61,7 +61,7 @@ auto-injected:
 
 - `LOOPLAB_MEMORY_DIR` — cross-run memory home (default `~/.looplab/memory`; `""` disables).
 - `LOOPLAB_KNOWLEDGE_DIR` — knowledge base home (default `~/.looplab/knowledge`; `""` disables).
-- `LOOPLAB_MEMORA` — turn on harmonic indexing (abstraction+anchors) over the stores.
+- `LOOPLAB_MEMORA` — harmonic indexing (abstraction+anchors) over the stores; **on by default**, set `=0`/`false` to restore the raw-text index.
 - `LOOPLAB_RESEARCHER_TOOLS` — master switch for the tool-using Researcher (agentic retrieval); off → a plain researcher that only sees the injected memory.
 
 The assistant can grow the knowledge base directly: share experiment results/lessons and ask it to

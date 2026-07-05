@@ -7,7 +7,8 @@ Opt-in and LLM-optional *by construction* — mirroring how `vectorstore.LLMEmbe
 `hash_embed`: the abstractor degrades from a live chat model (`LLMAbstractor`) to a deterministic
 lexical one (`lexical_abstraction`), so the three structural benefits work fully offline. With **no**
 abstractor at all (`make_abstractor` returns None), the callers stay byte-identical to their pre-Memora
-behavior — `memora` is off by default, so nothing changes until you turn it on.
+behavior — `memora` is ON by default (lexical abstractor, zero LLM calls); set `memora=false` to
+restore the pre-Memora raw-text index.
 
 Nothing here is a source of truth: abstractions/anchors live only in *derived, rebuildable* indexes
 (the in-memory `VectorStore` behind `KnowledgeTools`/`CaseLibrary`), never in the append-only event log
