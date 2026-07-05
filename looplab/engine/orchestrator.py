@@ -502,8 +502,20 @@ class Engine(ConfirmPhaseMixin, AblationMixin):
 
         entry_finished = self._reentry_repin()
         start = time.time()
+        # Creation-level runaway guard: if the loop keeps CREATING nodes while NO node reaches a
+        # terminal (evaluated/failed), it is spinning — e.g. `fold` returning empty `nodes` makes
+        # `_create_node` re-mint id 0 forever (the 184MB node_created(0) spin). The eval loop has its
+        # own anti-stuck guard, but node CREATION had none. Local counters (not replayed) → on trip we
+        # append run_finished (which IS replayed), so resume sees a cleanly-finished run.
+        _created_no_terminal = 0
+        _prev_terminal = -1
         while True:
             state = fold(self.store.read_all())
+            _terminal_now = sum(1 for _n in state.nodes.values()
+                                if _n.status is not NodeStatus.pending)
+            if _terminal_now != _prev_terminal:      # a node reached terminal (progress) -> reset
+                _created_no_terminal = 0
+                _prev_terminal = _terminal_now
             if state.finished:
                 break
             # Live operator control (UI intervention via the event log). The UI appends a
@@ -625,6 +637,15 @@ class Engine(ConfirmPhaseMixin, AblationMixin):
                        if a["kind"] in ("draft", "improve", "debug", "merge")]
 
             if creates:
+                # Runaway trip: created too many nodes with ZERO reaching terminal since the last
+                # progress. A healthy run creates a batch then evaluates it (which resets the counter);
+                # only a spin (empty-nodes fold re-minting the same id) grows this unbounded. Cap
+                # generously so operator injects / wide seed batches never false-trip.
+                _created_no_terminal += len(creates)
+                if _created_no_terminal > max(self.policy.max_nodes, 4) * 3 + 50:
+                    self.store.append(EV_RUN_FINISHED, {
+                        "reason": "stuck: node creation not converging (no node reached terminal)"})
+                    break
                 for a in creates:
                     if "_scores" in a:   # policy exposed candidate scores -> surface "why this node"
                         self.store.append(EV_POLICY_DECISION,

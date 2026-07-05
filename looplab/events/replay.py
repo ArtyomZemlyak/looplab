@@ -89,6 +89,12 @@ def fold(events: Iterable[Event]) -> RunState:
                     origin=d.get("origin"),   # cross-run provenance (None for ordinary nodes)
                     research_origin=d.get("research_origin"),   # 💡 proposed just after a deep-research memo
                 )
+            except (MemoryError, RecursionError):
+                # A RESOURCE glitch is NOT a corrupt-data error: it must fail LOUD, not be swallowed.
+                # A MemoryError silently caught here drops the node -> fold returns empty nodes ->
+                # `_create_node` re-computes node_id=0 forever -> a 184MB node_created(0) runaway. Let
+                # it propagate so a transient glitch surfaces instead of self-sustaining into a spin.
+                raise
             except Exception:
                 continue
             st.nodes[n.id] = n
