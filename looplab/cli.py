@@ -196,6 +196,18 @@ def _engine(run_dir: Path, task: TaskAdapter, settings: Settings,
         elif settings.researcher_panel > 1:
             from looplab.serve.panel import PanelResearcher
             researcher = PanelResearcher(researcher, k=settings.researcher_panel)
+    elif (getattr(settings, "foresight", True) and getattr(settings, "foresight_panel", 1) > 1
+          and settings.researcher_panel <= 1
+          and getattr(researcher, "client", None) is not None):
+        # Foresight in UNIFIED mode: the wrappers above are skipped because they'd re-wrap only the
+        # researcher handle, but ForesightPanelResearcher now DELEGATES its whole developer surface to
+        # the wrapped agent (__getattr__), so wrapping the single unified agent and using it for BOTH
+        # handles keeps them identical — predict-before-execute + hypothesis-board prioritization work,
+        # implement/repair pass straight through. (Numeric surrogate/panel stay researcher-only, so
+        # they remain unified-skipped; only the client-based foresight is safe to share.)
+        from looplab.search.foresight import ForesightPanelResearcher
+        researcher = ForesightPanelResearcher(researcher, k=settings.foresight_panel)
+        developer = researcher
     # RepoTask onboarding (Phase 3): if the task can propose its own eval spec, build the
     # onboarder (Researcher proposes + Developer writes the adapter).
     mk = getattr(task, "make_onboarder", None)

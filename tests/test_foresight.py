@@ -394,3 +394,29 @@ def test_make_roles_passes_foresight_to_best_of_n():
     task = load_task(root / "examples" / "code_regression_task.json")
     _r, dev = make_roles(task, Settings(backend="llm", best_of_n=2, unified_agent=False))
     assert isinstance(dev, BestOfNDeveloper) and dev.foresight is True
+
+
+def test_foresight_delegates_developer_surface_for_unified_agent():
+    """In UNIFIED mode the SAME agent is researcher+developer. ForesightPanelResearcher must intercept
+    propose (predict-before-execute + board prioritization) while DELEGATING the developer surface
+    (implement/repair/choose_action/assets) to the wrapped agent, so wrapping once and using it for
+    both handles keeps them identical."""
+    from looplab.search.foresight import ForesightPanelResearcher
+
+    class FakeUnified:
+        client = object()
+        bounds = None
+        def propose(self, state, parent): return "IDEA"
+        def implement(self, idea, parent=None): return "IMPL"
+        def repair(self, node, err): return "REPAIR"
+        def choose_action(self, state, legal, **k): return 7
+        def assets(self): return {"a": 1}
+
+    fp = ForesightPanelResearcher(FakeUnified(), k=2)
+    assert fp.implement("x") == "IMPL"
+    assert fp.repair("n", "e") == "REPAIR"
+    assert fp.choose_action(None, []) == 7
+    assert fp.assets() == {"a": 1}
+    import pytest
+    with pytest.raises(AttributeError):            # missing attr -> AttributeError, not recursion
+        _ = fp.no_such_attr_here

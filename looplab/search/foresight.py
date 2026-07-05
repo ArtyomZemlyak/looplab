@@ -169,6 +169,18 @@ class ForesightPanelResearcher:
         self.last_foresight: Optional[dict] = None       # telemetry: last idea ranking + confidence
         self.last_hyp_priority: Optional[dict] = None     # telemetry: last board prioritization
 
+    def __getattr__(self, name):
+        """Delegate every attribute NOT defined here (implement / repair / choose_action / assets /
+        last_files / …) to the wrapped agent. This lets the panel wrap a UNIFIED agent (where the
+        researcher IS the developer): `propose` is intercepted for predict-before-execute + board
+        prioritization, while the whole DEVELOPER surface passes straight through to the SAME object,
+        so the two handles never diverge (the R1 hazard that made the engine skip wrappers in unified
+        mode). Only reached for names missing on the instance — `base`/`client`/`propose`/… are real
+        attrs and never hit this. Guard dunders so copy/pickle/introspection don't misfire."""
+        if name.startswith("__") and name.endswith("__"):
+            raise AttributeError(name)
+        return getattr(object.__getattribute__(self, "base"), name)
+
     @property
     def space_hint(self) -> str:
         return getattr(self.base, "space_hint", "")
