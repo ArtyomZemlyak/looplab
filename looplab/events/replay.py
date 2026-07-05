@@ -13,7 +13,7 @@ from looplab.events.types import (
     EV_APPROVAL_REQUESTED, EV_BEST_CONFIRMED, EV_BUDGET_EXTEND, EV_CONFIRM_DONE,
     EV_CONFIRM_EVAL, EV_DATA_LEAKAGE, EV_DATA_PROFILED, EV_DATA_PROVENANCE,
     EV_DEEP_RESEARCH, EV_DIVERSITY_ARCHIVE, EV_FORCE_ABLATE, EV_FORCE_CONFIRM, EV_FORK,
-    EV_FORK_DONE, EV_HINT, EV_HOLDOUT_EVALUATED, EV_HOST_GRADING, EV_HYPOTHESIS_ADDED,
+    EV_FORK_DONE, EV_HINT, EV_HOLDOUT_EVALUATED, EV_HOST_GRADING, EV_HYPOTHESIS_ADDED, EV_HYPOTHESIS_MERGED,
     EV_HYPOTHESIS_RANKED, EV_HYPOTHESIS_UPDATED, EV_INJECT_DONE, EV_INJECT_NODE, EV_LESSONS_DISTILLED,
     EV_LESSONS_REFRESHED, EV_LLM_COST, EV_NODE_ABORT, EV_NODE_CONFIRMED, EV_NODE_CREATED,
     EV_NODE_EVALUATED, EV_NODE_FAILED, EV_NODE_REPAIRED, EV_NOVELTY_REJECTED, EV_PAUSE,
@@ -236,6 +236,12 @@ def fold(events: Iterable[Event]) -> RunState:
             st.reward_hacks.append({"node_id": d.get("node_id"), "signals": d.get("signals", [])})
         elif t == EV_NOVELTY_REJECTED:
             st.novelty_events.append(d)   # E1: a near-duplicate proposal nudged off (audit)
+        elif t == EV_HYPOTHESIS_MERGED:
+            # P1+: engine-written agentic merge — fold alias hypotheses into a canonical. Collected
+            # here, APPLIED deterministically in `_derive_hypotheses` (no LLM in the fold). A malformed
+            # entry is tolerated there; unknown on old logs -> skipped by the outer dispatch.
+            if d.get("canonical") and d.get("aliases"):
+                st.hypotheses_merged.append(d)
         elif t == EV_HYPOTHESIS_ADDED:
             # P1: an explicitly-registered hypothesis (human `add_hypothesis`, or a deep-research
             # direction) — may have no evidence yet. Evidence + verdict are DERIVED post-loop.
@@ -494,6 +500,48 @@ def _derive_hypotheses(st: RunState) -> None:
             hyps[hid] = h
         if n.id not in h.evidence:
             h.evidence.append(n.id)
+
+    # 2b) apply agentic merges (`hypothesis_merged` events): fold each ALIAS hypothesis's evidence into
+    # its CANONICAL. Fully DETERMINISTIC — no LLM here (the decision was made + recorded by the engine);
+    # order-tolerant (evidence is unioned then sorted); back-compat (no merge events -> untouched).
+    alias: dict[str, str] = {}
+    merged_stmt: dict[str, str] = {}
+    for d in st.hypotheses_merged:
+        canon = str(d.get("canonical") or "").strip()
+        if not canon:
+            continue
+        s = str(d.get("statement", "")).strip()
+        if s:
+            merged_stmt[canon] = s
+        for a in (d.get("aliases") or []):
+            a = str(a).strip()
+            if a and a != canon:
+                alias[a] = canon
+
+    def _canon(x: str) -> str:                      # resolve alias chains a->b->c, cycle-safe
+        seen: set[str] = set()
+        while x in alias and x not in seen:
+            seen.add(x)
+            x = alias[x]
+        return x
+
+    if alias:
+        folded: dict[str, Hypothesis] = {}
+        for hid in list(hyps):
+            cid = _canon(hid)
+            tgt = folded.get(cid)
+            if tgt is None:
+                base = hyps.get(cid, hyps[hid])     # seed from the canonical row if it exists, else this
+                tgt = Hypothesis(id=cid, statement=merged_stmt.get(cid, base.statement),
+                                 source=base.source, rationale=base.rationale,
+                                 created_at_node=base.created_at_node)
+                folded[cid] = tgt
+            for e in hyps[hid].evidence:
+                if e not in tgt.evidence:
+                    tgt.evidence.append(e)
+        for tgt in folded.values():
+            tgt.evidence.sort()
+        hyps = folded
 
     # 3) compute a verdict per hypothesis from its evidence nodes.
     for h in hyps.values():

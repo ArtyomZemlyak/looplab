@@ -102,6 +102,7 @@ EV_APPROVAL_GRANTED = "approval_granted"
 EV_SPEC_APPROVED = "spec_approved"
 EV_HYPOTHESIS_ADDED = "hypothesis_added"       # also engine-written after deep research
 EV_HYPOTHESIS_UPDATED = "hypothesis_updated"
+EV_HYPOTHESIS_MERGED = "hypothesis_merged"     # engine-written: fold alias hypotheses into a canonical
 EV_RUN_REOPENED = "run_reopened"
 EV_TRUST_GATE_CHANGED = "trust_gate_changed"   # server config edit; folded last-write-wins
 

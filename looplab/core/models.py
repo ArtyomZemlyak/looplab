@@ -339,6 +339,9 @@ class RunState(BaseModel):
     # kept separately so the derived-from-nodes pass can merge evidence into them. `abandoned` ids are
     # a human/agent override of the derived status.
     hypotheses_added: list[dict] = Field(default_factory=list)
+    # P1+ agentic merge: `hypothesis_merged` events fold ALIAS hypotheses (paraphrases the exact-hash
+    # ledger kept separate) into a CANONICAL id, deterministically applied in `_derive_hypotheses`.
+    hypotheses_merged: list[dict] = Field(default_factory=list)
     hypotheses_abandoned: list[str] = Field(default_factory=list)
     # FOREAGENT board prioritization (audit-only — NEVER read by best-selection). The latest
     # `hypothesis_ranked` event: {at_node, order:[ids], confidence, reason, ranked:[{id,statement}]}.

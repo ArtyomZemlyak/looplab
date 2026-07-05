@@ -28,7 +28,7 @@ from looplab.events.types import (
     EV_DATA_PROFILED, EV_DATA_PROVENANCE, EV_DEPS_INSTALLED,
     EV_DRIFT_UNAVAILABLE, EV_FORK_DONE, EV_HINT, EV_HOST_GRADING,
     EV_FORESIGHT_SELECTED,
-    EV_HYPOTHESIS_ADDED, EV_HYPOTHESIS_RANKED, EV_INJECT_DONE, EV_INJECT_FAILED,
+    EV_HYPOTHESIS_ADDED, EV_HYPOTHESIS_MERGED, EV_HYPOTHESIS_RANKED, EV_INJECT_DONE, EV_INJECT_FAILED,
     EV_NODE_ABORT, EV_NODE_CREATED,
     EV_NODE_EVALUATED, EV_NODE_FAILED, EV_NODE_REPAIRED, EV_NOVELTY_REJECTED,
     EV_POLICY_DECISION, EV_PROXY_SCORED, EV_REPORT_GENERATED,
@@ -841,6 +841,12 @@ class Engine(ConfirmPhaseMixin, AblationMixin):
         # the report's at_node). The deterministic report renders regardless.
         state = self._maybe_refresh_report(state)
 
+        # Agentic hypothesis-board consolidation: the exact-hash ledger keeps paraphrases apart, so the
+        # open board accumulates near-duplicate beliefs (deep-research directions + researcher + human
+        # all phrasing the same idea). Hybrid-retrieve the near-dups + let the Researcher decide the
+        # true merges, recorded as `hypothesis_merged` events the fold applies deterministically.
+        state = self._maybe_merge_hypotheses(state)
+
         # M6 comparative lessons, live-shared (doc 13 §7 items 2+5): on a node-count cadence,
         # distill credit-assigned PAIR lessons into the SHARED cross-run store DURING the run
         # (write side), and re-read the store so lessons distilled by CONCURRENT runs reach
@@ -1237,6 +1243,43 @@ class Engine(ConfirmPhaseMixin, AblationMixin):
                 and (hist[-1].get("strategy") or {}).get("request_research")):
             return "strategist"
         return None
+
+    def _maybe_merge_hypotheses(self, state: RunState) -> RunState:
+        """Agentic consolidation of the OPEN-hypothesis board (P1+). The fold merges hypotheses only by
+        EXACT statement hash, so paraphrases of one belief pile up as separate open entries. Here —
+        LIVE only, gated on `track_hypotheses` + a reflect client — hybrid retrieval clusters near-dups
+        and the agent decides the true merges, appended as `hypothesis_merged` events that the fold
+        applies deterministically (alias evidence -> canonical). Best-effort: never raises, never
+        blocks the loop. Cadence: only when the open board has grown to >=4 and by >=2 since the last
+        pass, so it doesn't re-run every node or thrash. Replay-safe — the engine only WRITES the
+        decision here; on replay the fold reapplies the recorded merges with no model call, and a
+        re-run finds already-merged aliases gone (converges)."""
+        if not self._track_hypotheses:
+            return state
+        client = self._reflect_client()
+        if client is None:
+            return state
+        open_hyps = [h for h in state.hypotheses.values() if getattr(h, "status", "") == "open"]
+        n = len(open_hyps)
+        if n < 4 or (n - getattr(self, "_last_hyp_merge_n", -1)) < 2:
+            return state
+        self._last_hyp_merge_n = n
+        try:
+            from looplab.search.hybrid_merge import consolidate
+            texts = [h.statement for h in open_hyps]
+            wrote = False
+            for g in consolidate(texts, client, kind="research hypotheses",
+                                 embed=self._embedder, goal=state.goal):
+                if len(g["members"]) < 2:
+                    continue
+                ids = [open_hyps[i].id for i in g["members"]]
+                self.store.append(EV_HYPOTHESIS_MERGED, {
+                    "canonical": ids[0], "aliases": ids[1:], "statement": g["merged"],
+                    "at_node": len(state.nodes)})
+                wrote = True
+        except Exception:  # noqa: BLE001 — advisory hygiene; a merge hiccup must not disturb the loop
+            return state
+        return fold(self.store.read_all()) if wrote else state
 
     def _maybe_refresh_report(self, state: RunState) -> RunState:
         """Regenerate the agent-authored run report on a node-count cadence, then re-fold. No-op when
