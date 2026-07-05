@@ -115,6 +115,28 @@ def _stream_raw_socket(resp):
         return None
 
 
+def _chunk_has_content(ev) -> bool:
+    """Does a streamed SDK chunk carry REAL progress — a text / tool-call / reasoning / function
+    delta, a finish_reason, or the final usage frame? Empty keepalive/heartbeat chunks (role-only or
+    blank deltas that some litellm/openrouter proxies trickle to hold the connection open) return
+    False, so the idle-guard doesn't count them as progress and can't be fooled into never timing out
+    on a stalled generation. Unknown shapes count as progress (never false-kill a real stream)."""
+    try:
+        if getattr(ev, "usage", None):
+            return True
+        for ch in (getattr(ev, "choices", None) or []):
+            if getattr(ch, "finish_reason", None):
+                return True
+            d = getattr(ch, "delta", None)
+            if d is not None and (getattr(d, "content", None) or getattr(d, "tool_calls", None)
+                                  or getattr(d, "reasoning", None) or getattr(d, "reasoning_content", None)
+                                  or getattr(d, "function_call", None)):
+                return True
+        return False
+    except Exception:  # noqa: BLE001 — unknown chunk shape: treat as progress, don't false-kill
+        return True
+
+
 def _stream_with_idle_guard(stream, idle_limit: float, first_byte_limit: float = 0.0):
     """Yield the SDK stream's events, but a background watchdog SHUTS DOWN the underlying socket if no
     event arrives in time. Two deadlines: `first_byte_limit` until the FIRST event (bounds a black-
@@ -145,16 +167,24 @@ def _stream_with_idle_guard(stream, idle_limit: float, first_byte_limit: float =
         if sock is None:                              # a plain iterator / no socket handle — nothing to kill
             yield from stream
             return
-        last = [time.monotonic()]
-        seen = [False]                                # has the FIRST real event arrived yet
+        start = time.monotonic()
+        last = [start]                                # last REAL-CONTENT time (init = setup)
+        conn = [False]                               # has ANY chunk (keepalive incl.) arrived
         killed = [False]
         stop = threading.Event()
         fb = first_byte_limit if first_byte_limit and first_byte_limit > 0 else idle_limit
 
         def _wd():
             while not stop.wait(min(5.0, min(fb, idle_limit) / 4)):
-                limit = idle_limit if seen[0] else fb   # first-byte window before any event, idle after
-                if time.monotonic() - last[0] > limit:
+                now = time.monotonic()
+                # Before ANY chunk: bound the black-holed first byte by `fb`. Once the connection is
+                # producing, bound the gap between REAL-CONTENT chunks by `idle_limit` — a proxy that
+                # trickles EMPTY keepalive chunks (role-only / blank deltas) to hold the socket open
+                # can no longer mask a stalled generation, because empties don't reset `last` (the
+                # bug: a 74-min live hang where the watchdog never fired because every keepalive chunk
+                # reset the idle timer).
+                stalled = (now - start > fb) if not conn[0] else (now - last[0] > idle_limit)
+                if stalled:
                     killed[0] = True
                     try:
                         sock.shutdown(_socket.SHUT_RDWR)   # unblocks a recv() stuck in the kernel
@@ -168,9 +198,10 @@ def _stream_with_idle_guard(stream, idle_limit: float, first_byte_limit: float =
 
         threading.Thread(target=_wd, daemon=True).start()
         try:
-            for ev in stream:                     # each yielded event = real progress (keepalives filtered)
-                seen[0] = True
-                last[0] = time.monotonic()
+            for ev in stream:
+                conn[0] = True                    # connection is producing (even an empty keepalive)
+                if _chunk_has_content(ev):        # only REAL content resets the idle timer
+                    last[0] = time.monotonic()
                 yield ev
         except Exception:
             if killed[0]:
