@@ -181,15 +181,18 @@ class EnvInspectTools:
             return f"(grep_installed: {package} not found)"
         import os
         roots = list(getattr(spec, "submodule_search_locations", None) or [])
-        if not roots and spec.origin:
-            roots = [os.path.dirname(spec.origin)]
+        # A single-file top-level module (e.g. `six`) has NO submodule_search_locations and its origin
+        # is the .py itself — grep JUST that file. Falling back to its DIRECTORY would be site-packages,
+        # so os.walk would scan every OTHER installed package and mis-attribute hits (verified).
+        single = spec.origin if (not roots and spec.origin and spec.origin.endswith(".py")) else None
         cap = int(max_hits) if max_hits else 20
         scanned = 0
         _FILE_BUDGET = 4000     # bound the walk so a not-found query on a huge pkg (torch) can't
         #                         crawl thousands of files — report the truncation, don't lie "absent"
         hits: list[str] = []
-        for root in roots:
-            for dirpath, _dirs, files in os.walk(root):
+        walked = ([(os.path.dirname(single), [], [os.path.basename(single)])] if single
+                  else ((dp, d, f) for root in roots for dp, d, f in os.walk(root)))
+        for dirpath, _dirs, files in walked:
                 for fn in files:
                     if not fn.endswith(".py"):
                         continue
