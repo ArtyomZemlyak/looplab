@@ -28,6 +28,48 @@ def _top(name: str) -> str:
     return (name or "").split(".", 1)[0].strip()
 
 
+_INSTALLED_NAMES = None
+
+
+def _installed_names() -> list:
+    """All installed distribution names + top-level importable module names (cached). The pool a
+    not-found lookup is fuzzy-matched against."""
+    global _INSTALLED_NAMES
+    if _INSTALLED_NAMES is None:
+        names: set = set()
+        try:
+            for d in _md.distributions():
+                nm = (d.metadata.get("Name") or "").strip()
+                if nm:
+                    names.add(nm)
+                    names.add(nm.replace("-", "_"))
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            import pkgutil
+            for m in pkgutil.iter_modules():
+                names.add(m.name)
+        except Exception:  # noqa: BLE001
+            pass
+        _INSTALLED_NAMES = sorted(names)
+    return _INSTALLED_NAMES
+
+
+def _suggest(name: str) -> str:
+    """A ' — did you mean X, Y?' hint from the closest installed dist/module names, so a not-found
+    lookup dead-ends usefully instead of blankly: 'lightning' -> 'pytorch_lightning, lightning_fabric'.
+    Combines difflib closest-matches with substring hits (the pytorch_lightning case)."""
+    import difflib
+    top = _top(name)
+    if not top:
+        return ""
+    pool = _installed_names()
+    close = difflib.get_close_matches(top, pool, n=3, cutoff=0.6)
+    subs = [n for n in pool if top.lower() in n.lower() and n.lower() != top.lower()][:3]
+    hits = list(dict.fromkeys(close + subs))[:4]
+    return f" — did you mean: {', '.join(hits)}?" if hits else ""
+
+
 class EnvInspectTools:
     """ToolProvider (specs()/execute()) giving the Developer read-only visibility into the ACTUAL
     installed Python environment, so it grounds generated code in the real API instead of guessing."""
@@ -114,7 +156,7 @@ class EnvInspectTools:
             v = getattr(mod, "__version__", "(no __version__)")
             return f"{_top(name)} {v}\nlocation: {getattr(mod, '__file__', '')}"
         except Exception:  # noqa: BLE001
-            return f"({name}: not installed)"
+            return f"({name}: not installed{_suggest(name)})"
 
     # ------------------------------------------------------------------- py_api
     def _py_api(self, target: str) -> str:
@@ -153,7 +195,7 @@ class EnvInspectTools:
         try:
             spec = importlib.util.find_spec(module)
         except (ImportError, ValueError, ModuleNotFoundError) as e:
-            return f"(read_installed: cannot locate {module}: {e})"
+            return f"(read_installed: cannot locate {module}: {e}{_suggest(module)})"
         if spec is None or not spec.origin or not spec.origin.endswith(".py"):
             return f"(read_installed: {module} has no readable .py source at {getattr(spec, 'origin', None)})"
         try:
@@ -176,9 +218,9 @@ class EnvInspectTools:
         try:
             spec = importlib.util.find_spec(_top(package))
         except (ImportError, ValueError, ModuleNotFoundError) as e:
-            return f"(grep_installed: cannot locate {package}: {e})"
+            return f"(grep_installed: cannot locate {package}: {e}{_suggest(package)})"
         if spec is None:
-            return f"(grep_installed: {package} not found)"
+            return f"(grep_installed: {package} not found{_suggest(package)})"
         import os
         roots = list(getattr(spec, "submodule_search_locations", None) or [])
         # A single-file top-level module (e.g. `six`) has NO submodule_search_locations and its origin

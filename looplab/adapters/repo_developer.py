@@ -18,6 +18,8 @@ from looplab.core.parse import LLMClient
 from looplab.tools.edit_match import apply_search_replace
 from looplab.tools.patch import SurfacePolicy
 
+_CAP = 16000        # per-result char cap for the read-only repo scouts (big enough to see a whole file)
+
 
 class RepoWriteTools:
     """Write side of the in-house repo developer (the LLM authors/edits files via tools). Writes are
@@ -94,10 +96,47 @@ class RepoWriteTools:
             fn_spec("delete_file",
                      "Delete a file you previously wrote in this experiment (within your surface).",
                      {"path": {"type": "string"}}, ["path"]),
+            # READ-ONLY scouts over the REPO YOU EDIT (its OWN files: train.py, model.py, loss.py, …) —
+            # NOT installed packages (those are pkg_info/read_installed/grep_installed). This is the tool
+            # to VERIFY a CLI flag / function signature / config key in the actual code instead of
+            # GUESSING it: guessing an arg name that the embedded (truncated) source didn't show is a
+            # top cause of a training crash. Not surface-gated: you may READ any repo file, even a
+            # protected one you can't write.
+            fn_spec("read_repo_file",
+                     "Read a file from the repo you are editing — FULL content (line-numbered), or a "
+                     "line range. Use this to see a file the embedded source truncated (e.g. check "
+                     "train.py's argparse for the EXACT `--flag` names before you build a command). "
+                     "Read-only; repo-relative path.",
+                     {"path": {"type": "string", "description": "repo-relative path, e.g. train.py"},
+                      "start_line": {"type": "integer", "description": "1-based first line (optional)"},
+                      "max_lines": {"type": "integer", "description": "how many lines (optional, default 400)"}},
+                     ["path"]),
+            fn_spec("grep_repo",
+                     "Search the repo you are editing for a literal string across its files — find where "
+                     "an arg is parsed (grep 'add_argument'), a key is read, a function is defined. "
+                     "Returns file:line snippets. Read-only.",
+                     {"query": {"type": "string", "description": "literal substring to find"},
+                      "path": {"type": "string", "description": "optional file/dir to restrict to"},
+                      "max_hits": {"type": "integer", "description": "cap on hits (optional, default 40)"}},
+                     ["query"]),
+            fn_spec("list_repo",
+                     "List the files in the repo you are editing (so you know what exists before "
+                     "reading/editing). Optional subdir to scope. Read-only.",
+                     {"path": {"type": "string", "description": "optional subdir (repo-relative)"}},
+                     []),
         ]
 
     def execute(self, name: str, args: dict) -> str:
         args = args or {}
+        if name == "read_repo_file":
+            return self._read_repo(self._safe_rel(args.get("path", "")),
+                                   args.get("start_line"), args.get("max_lines"))
+        if name == "grep_repo":
+            return self._grep_repo(str(args.get("query", "")),
+                                   self._safe_rel(args.get("path", "")) if args.get("path") else None,
+                                   args.get("max_hits"))
+        if name == "list_repo":
+            return self._list_repo(self._safe_rel(args.get("path", "")) if args.get("path") else None)
         p = self._safe_rel(args.get("path", ""))
         if name == "write_file":
             return self._write(p, args)
@@ -106,6 +145,93 @@ class RepoWriteTools:
         if name == "delete_file":
             return self._delete(p)
         return f"(unknown tool: {name})"
+
+    # --------------------------------------------------------------- read-only repo scouts
+    # Code/config files a developer greps/reads — NOT model weights / data / checkpoints (a repo like a
+    # trainer carries GBs of those in bge/e5-*/ckpt dirs; walking them stalls a grep on a FUSE mount).
+    _TEXT_EXTS = {".py", ".yaml", ".yml", ".json", ".jsonl", ".toml", ".cfg", ".ini", ".txt", ".md",
+                  ".sh", ".cu", ".cpp", ".h", ".c", ".pyx", ".rst", ".env"}
+    _SKIP_DIRS = {".git", "__pycache__", ".ipynb_checkpoints", "node_modules", ".mypy_cache",
+                  ".pytest_cache", ".venv", "venv", "wandb", "lightning_logs", "ckpt", "checkpoints"}
+
+    def _iter_repo_files(self, exts=None):
+        """Yield (repo-relative-path, content) across the editable roots + the staged overlay (staged
+        wins). Restricted to TEXT/code files by default (`exts` defaults to `_TEXT_EXTS`), prunes heavy
+        dirs, skips >512KB files, and stops after a file budget — so a grep can't stall on a repo full
+        of model-weight/checkpoint binaries on a slow FUSE mount."""
+        import os as _os
+        from pathlib import Path as _P
+        exts = self._TEXT_EXTS if exts is None else exts
+        seen = set()
+        for p, content in self.files.items():                 # staged this turn win over disk
+            if _P(p).suffix.lower() in exts:
+                seen.add(p)
+                yield p, content
+        budget = 4000
+        for name, r in self._roots:
+            if not _os.path.isdir(r):
+                continue
+            for dp, dirs, files in _os.walk(r):
+                dirs[:] = [d for d in dirs if d not in self._SKIP_DIRS and not d.startswith(".")]
+                for fn in sorted(files):
+                    if budget <= 0:
+                        return
+                    if _P(fn).suffix.lower() not in exts:
+                        continue
+                    fp = _os.path.join(dp, fn)
+                    try:
+                        if _os.path.getsize(fp) > 512_000:     # skip a huge generated/text blob
+                            continue
+                    except OSError:
+                        continue
+                    rel = _os.path.relpath(fp, r).replace("\\", "/")
+                    p = f"{name}/{rel}" if name and name != "." else rel
+                    if p in seen:
+                        continue
+                    seen.add(p)
+                    budget -= 1
+                    try:
+                        with open(fp, encoding="utf-8", errors="replace") as fh:
+                            yield p, fh.read()
+                    except OSError:
+                        continue
+
+    def _read_repo(self, p, start_line, max_lines) -> str:
+        if not p:
+            return "(read_repo_file: give a repo-relative path, e.g. train.py)"
+        cur = self._current(p)
+        if cur is None:
+            return (f"(read_repo_file: {p} not found in the repo. Use list_repo to see what exists.)")
+        lines = cur.splitlines()
+        s = max(0, int(start_line) - 1) if start_line else 0
+        n = int(max_lines) if max_lines else 400
+        chunk = lines[s:s + n]
+        body = "\n".join(f"{s + i + 1}\t{ln}" for i, ln in enumerate(chunk))
+        head = f"# {p} (lines {s + 1}..{s + len(chunk)} of {len(lines)})\n"
+        return (head + body)[:_CAP]
+
+    def _grep_repo(self, query: str, restrict, max_hits) -> str:
+        query = query.strip()
+        if not query:
+            return "(grep_repo: give a literal substring to find)"
+        cap = int(max_hits) if max_hits else 40
+        hits: list[str] = []
+        for p, content in self._iter_repo_files():
+            if restrict and not (p == restrict or p.startswith(restrict.rstrip("/") + "/")):
+                continue
+            for i, line in enumerate(content.splitlines(), 1):
+                if query in line:
+                    hits.append(f"{p}:{i}: {line.strip()[:160]}")
+                    if len(hits) >= cap:
+                        return "\n".join(hits) + f"\n(capped at {cap} hits)"
+        return "\n".join(hits) if hits else f"(grep_repo: '{query}' not found in the repo)"
+
+    def _list_repo(self, subdir) -> str:
+        names = sorted(p for p, _ in self._iter_repo_files()
+                       if not subdir or p == subdir or p.startswith(subdir.rstrip("/") + "/"))
+        if not names:
+            return f"(list_repo: no files{' under ' + subdir if subdir else ''})"
+        return "\n".join(names[:400]) + (f"\n(+{len(names) - 400} more)" if len(names) > 400 else "")
 
     def _refusal(self, p: str, verb: str):
         """Run the shared SurfacePolicy (tools/patch.py) over an already-canonicalized path and map
@@ -276,16 +402,22 @@ _REPO_DEV_SYSTEM_INTRO = (
     "hyperparameters; YOU decide how to realise it in code — which existing scripts to "
     "orchestrate, the stage structure, and how to compute + read the metric. ")
 _REPO_DEV_SYSTEM_BODY = (
-    "The repository's current source files are included verbatim below — you have everything "
-    "you need about the REPO; do NOT write helper/'cat'/'check' scripts to read repo files. But do "
-    "GROUND every framework API call in the ACTUAL installed environment with the read-only inspection "
+    "The repository's key source files are PREVIEWED below (each is TRUNCATED to save space). This is "
+    "a preview, NOT the full code — to read a whole file or find an exact symbol/flag/signature, use "
+    "the read-only repo scouts: read_repo_file(path) for full content, grep_repo(query) to find where "
+    "something is defined, list_repo() to see what exists. Do NOT write helper/'cat'/'check' scripts. "
+    "NEVER GUESS a CLI flag / arg name / config key from the truncated preview — grep_repo or "
+    "read_repo_file it first (guessing a flag the script doesn't define is the #1 cause of a crash). "
+    "Also GROUND every framework API call in the ACTUAL installed environment with the read-only "
+    "inspection "
     "tools, instead of guessing (wrong-version APIs are the #1 cause of failed runs): pkg_info(name) "
     "for a package's exact VERSION (e.g. check pytorch-lightning's version before choosing a Trainer "
     "arg — an arg or an accepted value like precision may differ across versions); py_api(dotted) for "
     "a class/function signature or an Enum's VALID VALUES; read_installed(module) to read an installed "
     "module's source; grep_installed(query, package) to find where an arg is parsed / a value "
     "validated. Also: only pass a CLI flag to a repo script if that flag EXISTS in the script's "
-    "argparse (it's shown below / grep it) — otherwise EDIT the script to add it; never invent a flag. "
+    "argparse — CONFIRM it with grep_repo('add_argument') or read_repo_file before you build the "
+    "command; otherwise EDIT the script to add it; never invent a flag. "
     "Your write_file/edit_file results are AUTO-VALIDATED (the file is compiled after every change) — "
     "if you get 'not valid Python — line N: …', fix that line immediately; a rejected edit was NOT "
     "staged. To CHANGE an existing file, use edit_file with a minimal SEARCH/REPLACE hunk "
@@ -343,7 +475,7 @@ _REPO_DEV_COMMANDS_HEADER = (
 _REPO_DEV_RESULTS_HEADER = (
     "=== PAST EXPERIMENTS / RESULTS (the repo's own history — which configs reached which "
     "metric; use it to pick strong hyperparameters and beat the best) ===\n")
-_REPO_DEV_SOURCE_HEADER = "=== REPOSITORY SOURCE ===\n"
+_REPO_DEV_SOURCE_HEADER = "=== REPOSITORY SOURCE (PREVIEW — truncated; read_repo_file / grep_repo for full) ===\n"
 _REPO_DEV_PARENT_BLOCK = (
     "\n\n=== PARENT SOLUTION (your starting point{note}) ===\n"
     "The files below are this experiment's PARENT — they are already loaded as your "
@@ -401,7 +533,7 @@ class LLMRepoDeveloper:
     _PRELOAD_PRIORITY = ("test.py", "settings.py", "train.py", "to_stf.py", "model.py", "loss.py",
                          "dataset.py", "tokenizing.py", "metrics.py", "inference.py", "README.md")
 
-    def _repo_context(self, per_file: int = 12000, total_budget: int = 90000) -> str:
+    def _repo_context(self, per_file: int = 3000, total_budget: int = 30000) -> str:
         """Embed the repo's key source files VERBATIM in the prompt so the agent can author the eval
         entrypoint from them directly — instead of writing throwaway 'cat' scripts to dribble a file
         in through a truncating read tool (the failure mode we hit). Listing first, then prioritized
