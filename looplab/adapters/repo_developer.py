@@ -548,10 +548,9 @@ class LLMRepoDeveloper:
                         ["steps"])
 
     def _propose_plan(self, system: str, idea: Idea) -> list:
-        """Plan phase: the developer proposes an ordered atomic plan (READ-ONLY — no writes yet).
+        """Plan phase: the developer proposes an ordered atomic plan (emit-only, no writes yet).
         Returns a list of {title, detail}; [] on empty/failure so the caller falls back to one session."""
-        from looplab.agents.agent import drive_tool_loop, CompositeTools
-        from looplab.tools.env_inspect import EnvInspectTools
+        from looplab.agents.agent import drive_tool_loop
         params = ", ".join(f"{k}={v}" for k, v in (idea.params or {}).items()) or "(choose sensible values)"
         plan_user = (
             f"Experiment concept (the researcher's idea): {idea.rationale}\nHyperparameters: {params}.\n"
@@ -560,11 +559,15 @@ class LLMRepoDeveloper:
             "installed versions. Keep steps small and independently testable.")
         messages = [{"role": "system", "content": system}, {"role": "user", "content": plan_user}]
         try:
+            # EMIT-ONLY (tools=None): the repo source is already in `system`, so the planner needs no
+            # read tools — and WITH them a non-converging model (minimax) just explores for every turn
+            # and never emits, exhausting the loop to an empty plan. Toolless => it must call
+            # propose_plan (or a prose reply force-emits it) on the FIRST turn.
             plan = drive_tool_loop(
-                self.client, CompositeTools([EnvInspectTools()]), messages, self._plan_emit_spec(),
+                self.client, None, messages, self._plan_emit_spec(),
                 finalize=lambda a: (a or {}).get("steps", []), fallback=lambda m: [],
-                **self._session_opts(max_turns=min(8, self._session_max_turns),
-                                     time_budget=min(300.0, self._session_time_budget_s)))
+                **self._session_opts(max_turns=min(4, self._session_max_turns),
+                                     time_budget=min(240.0, self._session_time_budget_s)))
         except Exception:  # noqa: BLE001 — a failed plan phase just degrades to a single session
             return []
         steps = []
