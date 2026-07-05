@@ -306,8 +306,10 @@ class LessonMemory:
                 f.write(payload)
             if hygiene:
                 # D2 hygiene: consolidate the store after appending — merge duplicate claims into
-                # an evidence_count, retire contradicted verdicts (newest wins), THEN bound size.
-                self._e._consolidate_lessons_file(path)
+                # an evidence_count, retire contradicted verdicts (newest wins), THEN bound size. The
+                # Researcher client + embedder enable the hybrid+agent paraphrase-merge pass (run end
+                # only — hygiene=False mid-run skips it, so the shared file isn't rewritten every node).
+                self._e._consolidate_lessons_file(path, self._e._reflect_client(), self._e._embedder)
                 self._e._compact_lessons(path)
 
     def comparative_lessons(self, state: RunState, fp: list, exclude=()) -> tuple[list, list]:
@@ -527,10 +529,11 @@ class LessonMemory:
             return None
 
     @staticmethod
-    def consolidate_lessons_file(path: Path) -> None:
+    def consolidate_lessons_file(path: Path, client=None, embed=None) -> None:
         """D2: rewrite lessons.jsonl through `consolidate_lessons` — duplicate claims merge into
-        an evidence_count and a contradicted verdict is retired (the newest observation wins).
-        Atomic rewrite; best-effort (a hygiene failure must never fail the run)."""
+        an evidence_count and a contradicted verdict is retired (the newest observation wins). When a
+        `client` is wired, a hybrid-retrieval + agent pass ALSO merges paraphrase-level duplicates the
+        exact key misses. Atomic rewrite; best-effort (a hygiene failure must never fail the run)."""
         try:
             from looplab.engine.memory import consolidate_lessons
             rows = []
@@ -541,7 +544,7 @@ class LessonMemory:
                     continue
                 if isinstance(o, dict):
                     rows.append(o)
-            merged = consolidate_lessons(rows)
+            merged = consolidate_lessons(rows, client=client, embed=embed)
             if len(merged) < len(rows):
                 from looplab.core.atomicio import atomic_write_text
                 atomic_write_text(path, "".join(orjson.dumps(o).decode() + "\n" for o in merged))

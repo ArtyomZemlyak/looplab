@@ -75,6 +75,7 @@ _LAYOUT = {
     "hardware": "core",
     "hints": "agents",
     "holdout": "engine",
+    "hybrid_merge": "search",
     "htmlview": "serve",
     "jobs": "serve",
     "jupyter": "runtime",

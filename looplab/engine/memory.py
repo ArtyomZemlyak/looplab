@@ -61,13 +61,20 @@ def normalize_statement(s: str) -> str:
     return " ".join(str(s or "").split()).lower()[:160]
 
 
-def consolidate_lessons(lessons: list[dict]) -> list[dict]:
+def consolidate_lessons(lessons: list[dict], *, client=None, embed=None) -> list[dict]:
     """Merge near-duplicate lessons and resolve contradictions — the write-path hygiene pass.
     Input: lessons in FILE ORDER (oldest first). For each (normalized statement, task_id) group:
     the NEWEST entry wins (its outcome is the current verdict — forgetting the stale one), and it
     absorbs the group's support as `evidence_count`. A newer NEGATIVE verdict silently retires an
     older positive duplicate (contradiction resolution), and vice versa — last observation is the
-    truth, prior observations only add confidence when they AGREE."""
+    truth, prior observations only add confidence when they AGREE.
+
+    The exact-normalized pass above is the deterministic BASE. When a `client` is supplied, a second
+    HYBRID + AGENT pass then merges PARAPHRASE-level duplicates the exact key misses ('raise the LR' vs
+    'increase the learning rate'): per task_id, hybrid retrieval (lexical+BM25+vector) clusters
+    candidates and the agent decides the true merges + a synthesized statement. Agreeing evidence is
+    summed across the merged rows; a conflicting verdict never absorbs support. No client -> identical
+    to the old deterministic behavior (we never merge paraphrases on the blind signal alone)."""
     groups: dict[tuple, list[dict]] = {}
     order: list[tuple] = []
     for o in lessons:
@@ -88,7 +95,39 @@ def consolidate_lessons(lessons: list[dict]) -> list[dict]:
         merged["evidence_count"] = sum(int(o.get("evidence_count", 1) or 1) for o in grp
                                        if o.get("outcome") == newest.get("outcome"))
         out.append(merged)
-    return out
+    if client is None or len(out) < 2:
+        return out
+    return _agentic_merge_lessons(out, client=client, embed=embed)
+
+
+def _agentic_merge_lessons(rows: list[dict], *, client, embed=None) -> list[dict]:
+    """Second-pass paraphrase merge (hybrid retrieval + agent decision), per task_id, over already
+    exact-deduped lesson rows. Best-effort: any failure returns `rows` unchanged. Order-preserving by
+    each merged group's earliest row."""
+    from looplab.search.hybrid_merge import consolidate
+    by_task: dict[object, list[int]] = {}
+    for i, o in enumerate(rows):
+        by_task.setdefault(o.get("task_id"), []).append(i)
+    keep: list[tuple[int, dict]] = []                          # (earliest original index, row)
+    try:
+        for _tid, idxs in by_task.items():
+            if len(idxs) < 2:
+                keep.append((idxs[0], rows[idxs[0]]))
+                continue
+            texts = [str(rows[i].get("statement", "")) for i in idxs]
+            for g in consolidate(texts, client, kind="research lessons", embed=embed):
+                members = [idxs[j] for j in g["members"]]      # back to original rows indices
+                base = rows[members[-1]]                        # newest wins for non-statement fields
+                row = dict(base)
+                if len(members) > 1:
+                    row["statement"] = g["merged"]
+                    row["evidence_count"] = sum(int(rows[m].get("evidence_count", 1) or 1) for m in members
+                                                if rows[m].get("outcome") == base.get("outcome"))
+                keep.append((min(members), row))
+        keep.sort(key=lambda t: t[0])
+        return [row for _i, row in keep]
+    except Exception:  # noqa: BLE001 — hygiene is best-effort; never drop lessons on a merge hiccup
+        return rows
 
 
 def filter_contradicted(scored: list[tuple[float, int, dict]]) -> list[tuple[float, int, dict]]:
