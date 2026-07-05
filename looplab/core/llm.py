@@ -13,6 +13,7 @@ from __future__ import annotations
 import copy
 import json
 import re
+import threading
 import time
 from typing import Optional
 
@@ -663,10 +664,16 @@ class OpenAICompatibleClient:
         # (`timeout=`), which wins over the http_client's; the http_client exists only to set
         # `trust_env=False` (the internal endpoint needs a DIRECT connection — no proxy env). See
         # `llm_trust_env` if a proxy/custom-CA is required. max_retries=0: we own the retry loop.
-        self._sdk = openai.OpenAI(
+        self._trust_env = trust_env
+        self._sdk = self._new_sdk()
+
+    def _new_sdk(self):
+        """Build (or rebuild) the openai SDK client. Rebuilt after a bounded-non-stream abort closes
+        the httpx client to interrupt a trickled body read (a closed client is unusable afterwards)."""
+        return openai.OpenAI(
             base_url=self.base_url, api_key=self.api_key, max_retries=0,
             timeout=httpx.Timeout(read=self.timeout, connect=self.header_timeout, write=30.0, pool=10.0),
-            http_client=httpx.Client(trust_env=trust_env))
+            http_client=httpx.Client(trust_env=self._trust_env))
 
     def _sdk_chat(self, payload: dict, use_stream: bool) -> dict:
         """The single transport seam: one openai-SDK chat call, returned in the legacy body shape
@@ -694,8 +701,37 @@ class OpenAICompatibleClient:
             kwargs["stream_options"] = {"include_usage": True}
             return self._accumulate_stream(self._sdk.chat.completions.create(**kwargs),
                                            self.timeout, self.header_timeout)
-        resp = self._sdk.chat.completions.create(**kwargs)
-        return resp.model_dump()
+        return self._nonstream_bounded(kwargs)
+
+    def _nonstream_bounded(self, kwargs: dict) -> dict:
+        """A NON-STREAM chat call bounded by a wall-clock deadline. httpx's per-read timeout can't catch
+        a proxy that TRICKLES the response body (a byte resets the read timer while the payload never
+        completes — the keepalive pathology the stream idle-guard exists for, but there's no SSE loop
+        to guard here). Run the blocking call in a worker thread; if it overruns the read+connect
+        budget, ABORT by closing the httpx client (tears the connection down, unblocking the read),
+        rebuild the client, and raise APITimeoutError so `_post` retries/degrades instead of hanging."""
+        box: dict = {}
+
+        def _call():
+            try:
+                box["resp"] = self._sdk.chat.completions.create(**kwargs)
+            except BaseException as e:  # noqa: BLE001 — ferry ANY error back to the caller thread
+                box["exc"] = e
+
+        th = threading.Thread(target=_call, daemon=True)
+        th.start()
+        th.join(self.timeout + self.header_timeout + 10)
+        if th.is_alive():
+            try:
+                self._sdk._client.close()
+            except Exception:  # noqa: BLE001
+                pass
+            th.join(5)
+            self._sdk = self._new_sdk()
+            raise openai.APITimeoutError(request=httpx.Request("POST", self.base_url))
+        if "exc" in box:
+            raise box["exc"]
+        return box["resp"].model_dump()
 
     @staticmethod
     def _accumulate_stream(stream, idle_limit: float = 0.0, first_byte_limit: float = 0.0) -> dict:

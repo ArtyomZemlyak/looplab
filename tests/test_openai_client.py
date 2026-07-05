@@ -709,3 +709,37 @@ def test_openai_and_httpx_are_core_dependencies():
         deps = tomllib.load(fh)["project"]["dependencies"]
     names = {d.split(">=")[0].split("==")[0].split("[")[0].strip().lower() for d in deps}
     assert {"openai", "httpx"} <= names, f"openai/httpx must be core deps; got {sorted(names)}"
+
+
+def test_nonstream_bounded_aborts_a_trickled_body(monkeypatch):
+    """A NON-STREAM call whose body never completes (a proxy trickling bytes past httpx's per-read
+    timeout) must be aborted by the wall-clock deadline — client closes+rebuilds, raises APITimeoutError."""
+    import time as _t
+    import looplab.core.llm as llm
+    c = llm.OpenAICompatibleClient("m", base_url="http://x/v1", api_key="k", stream=False,
+                                   timeout=0.5, header_timeout=0.5)
+    closed = {"n": 0}; rebuilt = {"n": 0}
+
+    class _Comp:
+        def create(self, **k): _t.sleep(30)
+    c._sdk = type("S", (), {"chat": type("Ch", (), {"completions": _Comp()})(),
+                            "_client": type("Cl", (), {"close": lambda s: closed.__setitem__("n", 1)})()})()
+    monkeypatch.setattr(c, "_new_sdk", lambda: (rebuilt.__setitem__("n", rebuilt["n"] + 1) or c._sdk))
+    t0 = _t.monotonic()
+    with pytest.raises(_openai.APITimeoutError):
+        c._nonstream_bounded({"model": "m", "messages": []})
+    assert _t.monotonic() - t0 < 20            # fired near the ~1s deadline + cleanup join, did not hang
+    assert closed["n"] == 1 and rebuilt["n"] == 1
+
+
+def test_nonstream_bounded_passes_a_fast_response():
+    import looplab.core.llm as llm
+    c = llm.OpenAICompatibleClient("m", base_url="http://x/v1", api_key="k", stream=False)
+
+    class _Resp:
+        def model_dump(self): return {"choices": [{"message": {"content": "ok"}}], "usage": {}}
+
+    class _Comp:
+        def create(self, **k): return _Resp()
+    c._sdk = type("S", (), {"chat": type("Ch", (), {"completions": _Comp()})()})()
+    assert c._nonstream_bounded({"model": "m", "messages": []})["choices"][0]["message"]["content"] == "ok"
