@@ -230,6 +230,87 @@ def test_post_retries_transient_ssl_eof(monkeypatch):
     assert calls["n"] == 3           # retried the transient TLS/protocol drop, then succeeded
 
 
+class _RawHttpxStream:
+    """A stream whose BODY iteration raises a raw httpx error — exactly how the openai SDK's
+    Stream.__stream__ leaves a mid-response gateway reset/EOF UNWRAPPED (only the initial header
+    request is mapped to openai.APIConnectionError). No `.response` -> the idle-guard has no socket
+    and passes the raw error straight through, the escape path this exercises."""
+    def __init__(self, exc):
+        self._exc = exc
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        raise self._exc
+
+
+def test_seam_normalizes_raw_httpx_to_apiconnectionerror():
+    """`_stream_with_idle_guard` is the single seam that normalizes a raw httpx stream-body error (which
+    the openai SDK leaves UNWRAPPED) into openai.APIConnectionError, preserving the httpx error as
+    __cause__ so `_sdk_transient` still classifies reset/EOF (transient) vs connect/DNS (fail-fast)."""
+    import looplab.core.llm as llm
+    with pytest.raises(_openai.APIConnectionError) as ei:
+        list(llm._stream_with_idle_guard(_RawHttpxStream(_httpx.RemoteProtocolError("reset")),
+                                         idle_limit=5.0))
+    assert isinstance(ei.value.__cause__, _httpx.RemoteProtocolError)
+    assert llm._sdk_transient(ei.value) is True                      # reset/EOF -> transient
+    with pytest.raises(_openai.APIConnectionError) as ec:
+        list(llm._stream_with_idle_guard(_RawHttpxStream(_httpx.ConnectError("refused")), idle_limit=5.0))
+    assert llm._sdk_transient(ec.value) is False                     # connect/DNS -> fail fast
+
+
+def test_raw_httpx_mid_stream_surfaces_clean_llmerror(monkeypatch):
+    """CRITICAL regression: a raw httpx transport error raised while iterating the STREAM BODY (a busy
+    gateway that resets/hangs up mid-response) must NOT escape `_post` uncaught and abort the run — the
+    seam normalizes it to openai.APIConnectionError, which `_post` already handles. Persistent failure
+    (stream reset every attempt, degraded non-stream also times out) -> clean LLMError, never raw httpx."""
+    import looplab.core.llm as llm
+
+    def create(**kwargs):
+        if kwargs.get("stream"):
+            return _RawHttpxStream(_httpx.RemoteProtocolError("peer closed connection mid-body"))
+        raise _timeout_exc()                         # degraded non-stream also dead -> exhaust retries
+
+    monkeypatch.setattr(llm.time, "sleep", lambda *_a: None)
+    c = llm.OpenAICompatibleClient("m", base_url="http://x/v1", stream=True)
+    monkeypatch.setattr(c._sdk.chat.completions, "create", create)
+    with pytest.raises(llm.LLMError):                 # NOT a raw httpx.RemoteProtocolError
+        c.complete_text([{"role": "user", "content": "go"}])
+
+
+def test_raw_httpx_mid_stream_degrades_and_recovers(monkeypatch):
+    """The raw-httpx stream error is transient: it degrades the next attempt to non-stream (a flaky
+    proxied endpoint often answers the same request fine without SSE) and recovers instead of failing."""
+    import looplab.core.llm as llm
+
+    class _Body:
+        def model_dump(self):
+            return dict(_OK_BODY)
+
+    def create(**kwargs):
+        if kwargs.get("stream"):
+            return _RawHttpxStream(_httpx.ReadError("connection reset mid-read"))
+        return _Body()                               # non-stream retry answers fine
+
+    monkeypatch.setattr(llm.time, "sleep", lambda *_a: None)
+    c = llm.OpenAICompatibleClient("m", base_url="http://x/v1", stream=True)
+    monkeypatch.setattr(c._sdk.chat.completions, "create", create)
+    assert c.complete_text([{"role": "user", "content": "go"}]) == "ok"
+    assert c._stream_stalls == 1                      # the stream stall was counted for stall-degrade
+
+
+def test_complete_text_stream_raw_httpx_falls_back(monkeypatch):
+    """The assistant's live-answer generator is best-effort: a raw httpx transport error mid-stream
+    (SDK-unwrapped, normalized by the seam) must end it cleanly via the blocking fallback, not crash."""
+    import looplab.core.llm as llm
+    c = llm.OpenAICompatibleClient("m", base_url="http://x/v1", stream=True)
+    monkeypatch.setattr(c._sdk.chat.completions, "create",
+                        lambda **k: _RawHttpxStream(_httpx.RemoteProtocolError("reset")))
+    monkeypatch.setattr(c, "complete_text", lambda messages: "FALLBACK")
+    assert list(c.complete_text_stream([{"role": "user", "content": "hi"}])) == ["FALLBACK"]
+
+
 def test_post_fails_fast_on_tls_cert_error(monkeypatch):
     """A TLS CERT verification error is a steady-state misconfig — fail fast, do NOT retry."""
     import ssl

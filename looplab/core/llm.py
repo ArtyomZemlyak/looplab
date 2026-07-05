@@ -125,52 +125,72 @@ def _stream_with_idle_guard(stream, idle_limit: float, first_byte_limit: float =
     comment lines, so its iterator blocks on the next `data:` event FOREVER. The watchdog keys on
     real EVENTS (keepalives are already filtered) and calls socket.shutdown() — `resp.close()` alone
     can't unblock a kernel recv (verified live) — so the stall surfaces as openai.APITimeoutError →
-    `_post` degrades+retries. idle_limit<=0 or a non-httpx stream (test iterators) disables it."""
-    if not idle_limit:
-        yield from stream
-        return
-    import socket as _socket
-    import threading
-    resp = getattr(stream, "response", None)
-    sock = _stream_raw_socket(resp) if resp is not None else None
-    if sock is None:                              # a plain iterator / no socket handle — nothing to kill
-        yield from stream
-        return
-    last = [time.monotonic()]
-    seen = [False]                                # has the FIRST real event arrived yet
-    killed = [False]
-    stop = threading.Event()
-    fb = first_byte_limit if first_byte_limit and first_byte_limit > 0 else idle_limit
+    `_post` degrades+retries. idle_limit<=0 or a non-httpx stream (test iterators) disables it.
 
-    def _wd():
-        while not stop.wait(min(5.0, min(fb, idle_limit) / 4)):
-            limit = idle_limit if seen[0] else fb   # first-byte window before any event, idle after
-            if time.monotonic() - last[0] > limit:
-                killed[0] = True
-                try:
-                    sock.shutdown(_socket.SHUT_RDWR)   # unblocks a recv() stuck in the kernel
-                except Exception:  # noqa: BLE001
-                    pass
-                try:
-                    resp.close()                       # fallback (mock-friendly / frees the response)
-                except Exception:  # noqa: BLE001
-                    pass
-                return
-
-    threading.Thread(target=_wd, daemon=True).start()
+    This seam is ALSO the single owner of transport normalization: the openai SDK maps transport
+    failures to openai.APIConnectionError only for the INITIAL request (headers), so a reset/EOF/read-
+    timeout while iterating the STREAM BODY escapes its `Stream.__stream__` as a RAW httpx exception
+    (verified live — it aborted runs). Every streaming caller (`_accumulate_stream` for `_post`, and
+    `complete_text_stream`) funnels through here, so we normalize it HERE — to openai.APIConnectionError
+    with the httpx error as `__cause__` — and the callers' existing openai.* handlers classify it (via
+    `_sdk_transient`, which reads reset/EOF-vs-connect off `__cause__`). No caller needs to know httpx."""
     try:
-        for ev in stream:                         # each yielded event = real progress (keepalives filtered)
-            seen[0] = True
-            last[0] = time.monotonic()
-            yield ev
-    except Exception:
+        if not idle_limit:
+            yield from stream
+            return
+        import socket as _socket
+        import threading
+        resp = getattr(stream, "response", None)
+        sock = _stream_raw_socket(resp) if resp is not None else None
+        if sock is None:                              # a plain iterator / no socket handle — nothing to kill
+            yield from stream
+            return
+        last = [time.monotonic()]
+        seen = [False]                                # has the FIRST real event arrived yet
+        killed = [False]
+        stop = threading.Event()
+        fb = first_byte_limit if first_byte_limit and first_byte_limit > 0 else idle_limit
+
+        def _wd():
+            while not stop.wait(min(5.0, min(fb, idle_limit) / 4)):
+                limit = idle_limit if seen[0] else fb   # first-byte window before any event, idle after
+                if time.monotonic() - last[0] > limit:
+                    killed[0] = True
+                    try:
+                        sock.shutdown(_socket.SHUT_RDWR)   # unblocks a recv() stuck in the kernel
+                    except Exception:  # noqa: BLE001
+                        pass
+                    try:
+                        resp.close()                       # fallback (mock-friendly / frees the response)
+                    except Exception:  # noqa: BLE001
+                        pass
+                    return
+
+        threading.Thread(target=_wd, daemon=True).start()
+        try:
+            for ev in stream:                     # each yielded event = real progress (keepalives filtered)
+                seen[0] = True
+                last[0] = time.monotonic()
+                yield ev
+        except Exception:
+            if killed[0]:
+                raise openai.APITimeoutError(request=getattr(resp, "request", None)) from None
+            raise
+        finally:
+            stop.set()
         if killed[0]:
-            raise openai.APITimeoutError(request=getattr(resp, "request", None)) from None
-        raise
-    finally:
-        stop.set()
-    if killed[0]:
-        raise openai.APITimeoutError(request=getattr(resp, "request", None))
+            raise openai.APITimeoutError(request=getattr(resp, "request", None))
+    except httpx.HTTPError as e:
+        # Raw httpx from stream-body iteration (SDK-unwrapped) -> normalize to the openai exception the
+        # callers already handle. `from e` keeps the httpx error as __cause__ so `_sdk_transient` still
+        # tells a transient reset/EOF from a fail-fast connect/DNS. httpx exposes `.request` as a
+        # property that RAISES when unset, so extract it defensively (not getattr, which wouldn't
+        # swallow that RuntimeError). Covers the no-socket / no-idle-limit passthroughs above too.
+        try:
+            _req = e.request
+        except Exception:  # noqa: BLE001 - the .request property raises RuntimeError when unset
+            _req = None
+        raise openai.APIConnectionError(message=str(e) or e.__class__.__name__, request=_req) from e
 
 
 def _reasoning_of(msg: dict) -> str:
@@ -844,7 +864,9 @@ class OpenAICompatibleClient:
                 # reliable interrupt the urllib+ssl path lacked (a glm SSE stall hung for minutes).
                 # A plain APIConnectionError is retried only when `_sdk_transient` says so (reset/EOF),
                 # else it fails fast (refused/DNS/cert). A STREAM stall degrades the next attempt to
-                # non-stream and ratchets the permanent-degrade counter.
+                # non-stream and ratchets the permanent-degrade counter. This ALSO catches a raw httpx
+                # stream-body error that `_stream_with_idle_guard` normalized to APIConnectionError
+                # (the SDK leaves those unwrapped) — `_sdk_transient` reads its httpx __cause__.
                 is_timeout = isinstance(e, openai.APITimeoutError)
                 transient = is_timeout or _sdk_transient(e)
                 if use_stream and transient:
@@ -982,6 +1004,9 @@ class OpenAICompatibleClient:
                         return
                     break
                 except openai.APIError:
+                    # Covers a raw httpx stream-body error too: `_stream_with_idle_guard` normalizes it
+                    # to openai.APIConnectionError (an openai.APIError subclass), so this best-effort
+                    # generator ends via the blocking fallback instead of crashing the caller.
                     if not pieces:               # never streamed -> fall back to a single blocking call
                         text = self.complete_text(messages)   # its own nested generation span
                         if text:
