@@ -250,12 +250,12 @@ def test_implement_from_carries_parent_deletions():
 
 
 def test_edit_file_syntax_gate_rejects_broken_python():
-    """The #1 real-run failure: an edit_file replace-block at the WRONG indentation produced an
-    IndentationError in train.py that only surfaced as a training crash minutes later. The gate
-    HARD-rejects a version-invariant break (IndentationError) that an edit INTRODUCES, WARNS (but
-    still stages) on any other SyntaxError — which could be syntax newer than this interpreter, so
-    valid-for-target code is never wedged — allows correct edits, and never punishes editing an
-    already-broken file. Uses compile() so a repeated-kwarg (which ast.parse misses) is seen too."""
+    """Auto-validator: every write_file/edit_file result is compiled, and an edit that INTRODUCES ANY
+    compile error (wrong indentation, an unmatched paren, a repeated kwarg, `return` outside a
+    function) is HARD-rejected + not staged, with the error flying straight back — so the model fixes
+    it now instead of ~112 min later as a training crash. The eval sandbox runs on this interpreter,
+    so any compile error here won't run there either. Correct edits apply; a non-.py file is never
+    gated; editing an already-broken file is allowed (fixing it)."""
     from looplab.adapters.repo_developer import RepoWriteTools
     w = RepoWriteTools(["**/*.py", "**/*.yaml"], set(), [])
     w.files["train.py"] = (
@@ -273,18 +273,21 @@ def test_edit_file_syntax_gate_rejects_broken_python():
         "search": "        parser.add_argument('--a', type=float)",
         "replace": "        parser.add_argument('--a', type=float)\n        parser.add_argument('--c', type=float)"})
     assert "1 hunk applied" in ok and "--c" in w.files["train.py"]
-    # a repeated-kwarg (compile-only error, non-indentation) -> WARNS but STILL STAGES (version-safe)
-    w.files["c.py"] = "v = g(x=1)\n"
-    r = w.execute("edit_file", {"path": "c.py", "search": "v = g(x=1)", "replace": "v = g(x=1, x=2)"})
-    assert w.files["c.py"] == "v = g(x=1, x=2)\n" and "⚠" in r
-    # write_file of an INDENTATION-broken .py is hard-rejected, not staged
+    # an UNMATCHED-PAREN edit (node-34 crash) is now HARD-rejected, not staged
+    w.files["c.py"] = "v = g(1)\n"
+    r = w.execute("edit_file", {"path": "c.py", "search": "v = g(1)", "replace": "v = g(1))"})
+    assert "invalid Python" in r and w.files["c.py"] == "v = g(1)\n"
+    # a repeated-kwarg (compile-only, AST-validation error) is hard-rejected too
+    w.files["d.py"] = "v = g(x=1)\n"
+    r2 = w.execute("edit_file", {"path": "d.py", "search": "v = g(x=1)", "replace": "v = g(x=1, x=2)"})
+    assert "invalid Python" in r2 and w.files["d.py"] == "v = g(x=1)\n"
+    # write_file of a broken .py is hard-rejected, not staged
     assert "not valid Python" in w.execute("write_file", {"path": "z.py", "content": "def f():\n  a=1\n b=2\n"})
     assert "z.py" not in w.files
-    # write_file of NEWER-looking syntax is only WARNED (staged), never falsely blocked
-    r2 = w.execute("write_file", {"path": "n.py", "content": "return 1\n"})   # 'return' outside function
-    assert "n.py" in w.files and "⚠" in r2
-    # a valid modern construct compiles clean -> no warning
-    assert "⚠" not in w.execute("write_file", {"path": "m.py", "content": "match x:\n    case 1: pass\n"})
+    assert "not valid Python" in w.execute("write_file", {"path": "n.py", "content": "return 1\n"})  # 'return' outside fn
+    assert "n.py" not in w.files
+    # a valid modern construct compiles clean -> applies
+    assert "wrote" in w.execute("write_file", {"path": "m.py", "content": "match x:\n    case 1: pass\n"})
     # a non-.py file is never syntax-gated
     assert "wrote" in w.execute("write_file", {"path": "cfg.yaml", "content": "a: [1, 2"})
     # editing an ALREADY-broken .py is allowed (fixing it)

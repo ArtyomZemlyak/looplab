@@ -126,34 +126,25 @@ class RepoWriteTools:
         return None
 
     @staticmethod
-    def _py_syntax_check(path: str, content: str) -> tuple[bool, Optional[str]]:
-        """Compile a *.py result: returns (hard, msg).
-          - (True, "line N: msg")  → an IndentationError/TabError (or an unparseable-content
-            ValueError, e.g. a NUL byte). These are VERSION-INVARIANT — the indentation grammar is
-            fixed across Python versions — and are the dominant real-run failure (a replace-block
-            inserted at the wrong indent, so train.py only broke minutes later as a crash). HARD-
-            reject: never stage.
-          - (False, "line N: msg") → any OTHER SyntaxError. Could be syntax NEWER than the
-            interpreter running this check (the sandbox that executes train.py may be a newer
-            Python: PEP 695 generics, `type X = …`), which would false-reject valid code. So surface
-            it as a non-blocking WARNING and still stage — the model sees it and can fix a genuine
-            break, but valid-for-target code is never wedged.
-          - (False, None)          → compiles cleanly here.
-
-        Uses compile() (not ast.parse) so it ALSO catches the AST-validation errors ast.parse lets
-        through — a repeated keyword arg, `return` outside a function, a duplicate parameter — which
-        were part of the real-run failures."""
+    def _py_syntax_error(path: str, content: str) -> Optional[str]:
+        """Auto-validator (aider/Claude-Code style: compile after every edit, feed the error straight
+        back). For a *.py result, the first compile() error as "line N: msg", else None. Uses
+        compile() (not ast.parse) so it ALSO catches the AST-validation errors ast.parse lets through
+        — a repeated keyword arg, `return` outside a function, an unmatched paren, a duplicate param.
+        The eval sandbox for a repo task runs on THIS interpreter, so ANY compile error here means the
+        code won't run there either — hence ALL of them are hard-rejected, not just indentation (a
+        stray `unmatched ')'` crashed a real training run). The rare cost: a Docker tier on a NEWER
+        Python could reject valid PEP-695-style syntax — acceptable, and the developer should target
+        the run's interpreter anyway."""
         if not path.endswith(".py"):
-            return (False, None)
+            return None
         try:
             compile(content, path, "exec")
-            return (False, None)
-        except IndentationError as e:      # subclass of SyntaxError; TabError subclasses this too
-            return (True, f"line {e.lineno}: {e.msg}")
-        except SyntaxError as e:
-            return (False, f"line {e.lineno}: {e.msg}")
+            return None
+        except SyntaxError as e:           # IndentationError/TabError subclass this
+            return f"line {e.lineno}: {e.msg}"
         except ValueError as e:            # source with NUL bytes etc. — genuinely unrunnable
-            return (True, str(e)[:80])
+            return str(e)[:80]
 
     def _write(self, p, args: dict) -> str:
         if not p:
@@ -163,15 +154,14 @@ class RepoWriteTools:
         if refusal:
             return refusal
         content = args.get("content", "")
-        hard, err = self._py_syntax_check(p, content)
-        if hard:
+        err = self._py_syntax_error(p, content)
+        if err is not None:
             return (f"(refused: the content you wrote for {p} is not valid Python — {err}. "
-                    "Fix the indentation/syntax and write_file again; nothing was staged.)")
+                    "Fix the syntax and write_file again; nothing was staged.)")
         self.files[p] = content
         if p in self.deleted:
             self.deleted.remove(p)
-        warn = (f"  ⚠ this may not be valid Python ({err}) — verify before calling done" if err else "")
-        return f"wrote {p} ({len(content)} bytes){warn}"
+        return f"wrote {p} ({len(content)} bytes)"
 
     def _edit(self, p, args: dict) -> str:
         if not p:
@@ -191,22 +181,20 @@ class RepoWriteTools:
         new, msg = apply_search_replace(cur, search, replace, path=p)
         if new is None:
             return msg
-        # Syntax gate: reject an edit that INTRODUCES an indentation break (the model's replace-block
-        # at the wrong indent — the #1 real-run failure) — but only when the ORIGINAL parsed cleanly,
-        # so we never punish the model for editing an already-broken file, and only HARD on the
-        # version-invariant class (see _py_syntax_check); a newer-syntax SyntaxError is a warning.
-        _, cur_err = self._py_syntax_check(p, cur)       # cur_err None => original parsed cleanly
-        new_hard, new_err = self._py_syntax_check(p, new)
-        if cur_err is None and new_hard:                 # the edit INTRODUCED an indentation break
-            return (f"(refused: this edit makes {p} invalid Python — {new_err}. Your `replace` "
-                    "block's indentation doesn't fit the surrounding code; match the exact "
-                    "indentation of the lines around the hunk and try again. Nothing was staged.)")
+        # Auto-validate: reject an edit that INTRODUCES a compile error (bad indentation, an unmatched
+        # paren, a repeated kwarg — all crashed real runs), but only when the ORIGINAL compiled
+        # cleanly, so we never punish the model for editing an already-broken file. The error flies
+        # straight back so the model fixes it NOW instead of ~112 min later as a training crash.
+        cur_err = self._py_syntax_error(p, cur)          # None => original compiled cleanly
+        new_err = self._py_syntax_error(p, new)
+        if cur_err is None and new_err is not None:
+            return (f"(refused: this edit makes {p} invalid Python — {new_err}. Check the "
+                    "indentation/brackets of your `replace` block against the surrounding code and "
+                    "try again. Nothing was staged.)")
         self.files[p] = new
         if p in self.deleted:
             self.deleted.remove(p)          # an edit resurrects a previously-deleted file
-        warn = (f"  ⚠ this edit may make {p} invalid Python ({new_err}) — verify before done"
-                if (new_err and not new_hard) else "")
-        return msg + warn
+        return msg
 
     def _delete(self, p) -> str:
         if not p:
@@ -289,8 +277,18 @@ _REPO_DEV_SYSTEM_INTRO = (
     "orchestrate, the stage structure, and how to compute + read the metric. ")
 _REPO_DEV_SYSTEM_BODY = (
     "The repository's current source files are included verbatim below — you have everything "
-    "you need; do NOT try to read or inspect files, and do NOT write helper/'cat'/'check' "
-    "scripts. To CHANGE an existing file, use edit_file with a minimal SEARCH/REPLACE hunk "
+    "you need about the REPO; do NOT write helper/'cat'/'check' scripts to read repo files. But do "
+    "GROUND every framework API call in the ACTUAL installed environment with the read-only inspection "
+    "tools, instead of guessing (wrong-version APIs are the #1 cause of failed runs): pkg_info(name) "
+    "for a package's exact VERSION (e.g. check pytorch-lightning's version before choosing a Trainer "
+    "arg — an arg or an accepted value like precision may differ across versions); py_api(dotted) for "
+    "a class/function signature or an Enum's VALID VALUES; read_installed(module) to read an installed "
+    "module's source; grep_installed(query, package) to find where an arg is parsed / a value "
+    "validated. Also: only pass a CLI flag to a repo script if that flag EXISTS in the script's "
+    "argparse (it's shown below / grep it) — otherwise EDIT the script to add it; never invent a flag. "
+    "Your write_file/edit_file results are AUTO-VALIDATED (the file is compiled after every change) — "
+    "if you get 'not valid Python — line N: …', fix that line immediately; a rejected edit was NOT "
+    "staged. To CHANGE an existing file, use edit_file with a minimal SEARCH/REPLACE hunk "
     "(strongly preferred — never re-write a whole existing file). Author the eval entrypoint "
     "the eval command runs (it does not exist yet) by "
     "calling write_file with a REPO-RELATIVE path and the FULL file content. The entrypoint "
@@ -561,8 +559,14 @@ class LLMRepoDeveloper:
             already = ", ".join(self.last_files) or "(none)"
             user += _REPO_DEV_REPAIR_BLOCK.format(already=already) + error[:4000]
         messages = [{"role": "system", "content": system}, {"role": "user", "content": user}]
+        # Compose the write/edit tools with read-only ENVIRONMENT INTROSPECTION (pkg_info / py_api /
+        # read_installed / grep_installed) so the Developer grounds generated code in the ACTUAL
+        # installed API/version instead of guessing (the precision='16-mixed'-on-Lightning-1.5 class).
+        from looplab.agents.agent import CompositeTools
+        from looplab.tools.env_inspect import EnvInspectTools
+        tools = CompositeTools([write, EnvInspectTools()])
         try:
-            drive_tool_loop(self.client, write, messages, self._emit_spec(),
+            drive_tool_loop(self.client, tools, messages, self._emit_spec(),
                             finalize=lambda a: (a or {}).get("summary", ""),
                             fallback=lambda m: "", **self.loop_opts)
         except Exception as e:  # noqa: BLE001 - never crash the engine on a developer hiccup

@@ -63,6 +63,7 @@ _LAYOUT = {
     "deps": "runtime",
     "digest": "events",
     "edit_match": "tools",
+    "env_inspect": "tools",
     "errors": "core",
     "eventstore": "events",
     "engine_proc": "serve",
