@@ -110,6 +110,13 @@ These are no-ops unless `backend=llm`.
 | `llm_reasoning` | `LOOPLAB_LLM_REASONING` | `high` | Thinking depth: `""` (server default) / `off` / `on` / `low` / `medium` / `high` |
 | `llm_reasoning_style` | `LOOPLAB_LLM_REASONING_STYLE` | `auto` | How to shape the request: `auto` / `qwen` / `effort` / `none` |
 | `llm_reasoning_extra` | `LOOPLAB_LLM_REASONING_EXTRA` | `{}` | Raw fields merged into the request body (escape hatch) |
+| `llm_stream` | `LOOPLAB_LLM_STREAM` | `True` | Stream the response (SSE) and reassemble it — bounds a stalled generation via an idle-guard watchdog; off = one blocking request |
+| `llm_timeout` | `LOOPLAB_LLM_TIMEOUT` | `180.0` | Per-request inter-token idle limit (s): a stream with no new token for this long is aborted + retried |
+| `llm_header_timeout` | `LOOPLAB_LLM_HEADER_TIMEOUT` | `45.0` | First-byte / connection-establish deadline (s) before a request is treated as stalled |
+| `llm_trust_env` | `LOOPLAB_LLM_TRUST_ENV` | `False` | Honor HTTP(S)_PROXY / NO_PROXY env for the LLM client. Default false = a direct connection (the internal endpoint needs no proxy) |
+| `llm_cache` | `LOOPLAB_LLM_CACHE` | `False` | Cache identical LLM requests on disk (dev/replay speedup); off by default so live runs always hit the model |
+| `compressor_model` | `LOOPLAB_COMPRESSOR_MODEL` | — | Model id for the history auto-summary compressor (blank = the shared chat model) |
+| `compressor_base_url` | `LOOPLAB_COMPRESSOR_BASE_URL` | — | Endpoint for the compressor model (blank = reuse llm_base_url) |
 | `context_budget_chars` | `LOOPLAB_CONTEXT_BUDGET_CHARS` | `0` | Cap on the agentic tool-call history (chars); 0 = unbounded |
 | `agent_max_turns` | `LOOPLAB_AGENT_MAX_TURNS` | `0` | Max tool-loop turns before the emit is forced; 0 = unlimited (the agent loops until done) |
 | `agent_time_budget_s` | `LOOPLAB_AGENT_TIME_BUDGET_S` | `0` | Wall-clock ceiling across an agent's tool-loop turns; 0 = no cap |
@@ -165,6 +172,7 @@ See [LLM & coding agents](llm-and-agents.md) for full guidance.
 | `feature_engineering` | `LOOPLAB_FEATURE_ENGINEERING` | `false` | Instruct the agent to add engineered features (CAAFE-style; CV gate enforced) |
 | `best_of_n` | `LOOPLAB_BEST_OF_N` | `1` | Generate N implementations per node, keep the best by execution-free reward (1 = off) |
 | `best_of_n_listwise` | `LOOPLAB_BEST_OF_N_LISTWISE` | `true` | Break a best-of-N static-score tie with a comparative LLM selection (D10) |
+| `operator_bandit` | `LOOPLAB_OPERATOR_BANDIT` | `False` | P4: replace the fixed merge/ablate cadences with a UCB bandit over per-operator yield (Δmetric per eval-second). Off by default; `thorough` turns it on |
 
 ## Repair & resilience
 
@@ -178,6 +186,8 @@ See [LLM & coding agents](llm-and-agents.md) for full guidance.
 | `dep_install_timeout` | `LOOPLAB_DEP_INSTALL_TIMEOUT` | `900.0` | Per-package install budget (seconds) |
 | `localize_faults` | `LOOPLAB_LOCALIZE_FAULTS` | `false` | Rank the source files most relevant to a failure (repo tasks) |
 | `failure_reflection` | `LOOPLAB_FAILURE_REFLECTION` | `false` | Feed recent failed branches back into the proposal prompt (LATS-style) |
+| `debug_depth` | `LOOPLAB_DEBUG_DEPTH` | `2` | T10: how many error-feedback repairs a failing lineage gets before it is abandoned |
+| `inline_repair_stuck_repeat` | `LOOPLAB_INLINE_REPAIR_STUCK_REPEAT` | `4` | Identical inline-repair failures in a row that count as "stuck" and stop the in-place retry loop |
 
 ## Strategist & meta-control
 
@@ -200,6 +210,8 @@ default grants resource/search-shape knobs to the agents and keeps infra (`llm_*
 |---|---|---|---|
 | `confirm_top_k` | `LOOPLAB_CONFIRM_TOP_K` | `0` | Confirm the top-k under multiple seeds before finishing (0 = off) |
 | `confirm_seeds` | `LOOPLAB_CONFIRM_SEEDS` | `0` | Seeds for the confirmation pass |
+| `confirm_seed_base` | `LOOPLAB_CONFIRM_SEED_BASE` | `1` | Base offset for the disjoint confirmation seeds (kept away from the selection seeds so confirmation is independent) |
+| `seed_mode` | `LOOPLAB_SEED_MODE` | `auto` | How eval seeds are drawn: `fixed` (reproducible) vs varied — controls whether repeats re-use the same seeds |
 | `holdout_select` | `LOOPLAB_HOLDOUT_SELECT` | `true` | Re-rank the top candidates on a held-out split before declaring the best, so the winner isn't a lucky fit to the selection metric (no re-training; uses the eval's own holdout) |
 | `holdout_top_k` | `LOOPLAB_HOLDOUT_TOP_K` | `3` | How many top candidates the holdout re-ranks |
 | `holdout_fraction` | `LOOPLAB_HOLDOUT_FRACTION` | `0.25` | Fraction of the eval reserved as the holdout |
@@ -244,8 +256,11 @@ See [Concepts → Trust & sandbox](concepts.md#trust--the-sandbox) for what each
 | `research_verify` | `LOOPLAB_RESEARCH_VERIFY` | `true` | Verify a deep-research memo's claims against their cited evidence before it's recorded (synthesis is the documented weak link); verdicts ride inside the memo, audit-only |
 | `deep_research_every` | `LOOPLAB_DEEP_RESEARCH_EVERY` | `0` | Run the Deep-Research stage every N created nodes (0 = off) |
 | `concurrent_research` | `LOOPLAB_CONCURRENT_RESEARCH` | `false` | Overlap a due research "think" with the GPU-bound eval (remote-LLM win) |
-| `track_hypotheses` | `LOOPLAB_TRACK_HYPOTHESES` | `true` | P1: ask the Researcher to state each experiment's hypothesis, register deep-research directions, track them to a verdict on the Hypotheses board (audit-only) |
+| `track_hypotheses` | `LOOPLAB_TRACK_HYPOTHESES` | `true` | P1: ask the Researcher to state each experiment's hypothesis, register deep-research directions, track them to a verdict on the Hypotheses board (audit-only). Also drives AGENTIC paraphrase-merge of the board (hybrid retrieval + the Researcher decides; `hypothesis_merged` events, applied deterministically in the fold) |
 | `reflection_priors` | `LOOPLAB_REFLECTION_PRIORS` | `true` | E4/M2/M3: at run end distill the winner + lessons (incl. negatives) with a task fingerprint; at run start inject exact-task notes + fingerprint-matched lessons from similar runs. No-op until `memory_dir` is set |
+| `comparative_lessons` | `LOOPLAB_COMPARATIVE_LESSONS` | `True` | M6: distill credit-assigned lessons from PAIRS (which specific change made a child beat/regress its parent). At run end + mid-run; gated on reflection_priors + memory_dir |
+| `lessons_every` | `LOOPLAB_LESSONS_EVERY` | `4` | M6 live-share: write comparative lessons to the shared store every N created nodes (0 = run-end only) |
+| `lessons_refresh_every` | `LOOPLAB_LESSONS_REFRESH_EVERY` | `4` | M6 live-share: re-read the shared lessons store every N nodes so lessons from CONCURRENT runs reach this run (0 = run-start only) |
 
 ## Reporting & observability
 
@@ -253,6 +268,7 @@ See [Concepts → Trust & sandbox](concepts.md#trust--the-sandbox) for what each
 |---|---|---|---|
 | `report_every` | `LOOPLAB_REPORT_EVERY` | `3` | Regenerate the agent-authored run report every N created nodes (0 = off) |
 | `trace_llm_io` | `LOOPLAB_TRACE_LLM_IO` | `true` | Capture each LLM call's prompt + completion into `spans.jsonl` |
+| `digest_char_cap` | `LOOPLAB_DIGEST_CHAR_CAP` | `0` | Cap (chars) on the in-run experiment digest injected into prompts (0 = built-in default) |
 
 ## External-agent governance
 
