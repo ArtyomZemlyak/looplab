@@ -182,3 +182,59 @@ def test_two_prose_stalls_fall_back_to_forced_memo():
     nudges = [m for m in client.turns[1] if m["role"] == "user"
               and m["content"] == "Now call `emit` with your memo."]
     assert len(nudges) == 1
+
+
+# --- concurrent deep research records IMMEDIATELY when it finishes, independent of the eval + of max_parallel
+def test_spawn_research_records_immediately_via_its_own_task():
+    """`_spawn_research` records the memo from the RESEARCH task the moment it finishes — decoupled
+    from the eval completing (so its directions steer the very next proposal), and independent of
+    max_parallel."""
+    import anyio
+    from looplab.engine.orchestrator import Engine
+    eng = Engine.__new__(Engine)
+    eng.concurrent_research = True
+    eng._due_research_trigger = lambda state: "cadence"
+    eng._compute_deep_research = lambda snap, trig, trace=False: {"memo": "M"}
+    recorded = []
+    eng._record_deep_research = lambda memo, *, trigger, manual: recorded.append((memo, trigger, manual))
+
+    async def run():
+        async with anyio.create_task_group() as tg:
+            eng._spawn_research(tg, state=object())      # no eval at all — research still records
+    anyio.run(run)
+    assert recorded == [({"memo": "M"}, "cadence", False)]
+
+
+def test_spawn_research_noop_when_disabled_or_not_due():
+    import anyio
+    from looplab.engine.orchestrator import Engine
+    eng = Engine.__new__(Engine)
+    recorded = []
+    eng._record_deep_research = lambda *a, **k: recorded.append(1)
+    eng._compute_deep_research = lambda *a, **k: {"memo": "M"}
+
+    async def run(concurrent, trig):
+        eng.concurrent_research = concurrent
+        eng._due_research_trigger = lambda state: trig
+        async with anyio.create_task_group() as tg:
+            eng._spawn_research(tg, state=object())
+    anyio.run(run, False, "cadence")   # disabled -> no research
+    anyio.run(run, True, None)          # not due -> no research
+    assert recorded == []
+
+
+def test_spawn_research_skips_record_on_none_memo():
+    import anyio
+    from looplab.engine.orchestrator import Engine
+    eng = Engine.__new__(Engine)
+    eng.concurrent_research = True
+    eng._due_research_trigger = lambda state: "cadence"
+    eng._compute_deep_research = lambda *a, **k: None     # compute yielded nothing
+    recorded = []
+    eng._record_deep_research = lambda *a, **k: recorded.append(1)
+
+    async def run():
+        async with anyio.create_task_group() as tg:
+            eng._spawn_research(tg, state=object())
+    anyio.run(run)
+    assert recorded == []

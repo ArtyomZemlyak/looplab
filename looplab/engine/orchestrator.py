@@ -864,26 +864,38 @@ class Engine(ConfirmPhaseMixin, AblationMixin):
             return True
         return False
 
+    def _spawn_research(self, tg, state: RunState) -> None:
+        """Overlap a DUE deep-research 'think' with the in-flight eval(s), INDEPENDENT of max_parallel.
+        The memo is computed on a `state` snapshot in a worker thread, then RECORDED IMMEDIATELY when
+        research finishes — NOT coupled to the eval completing — so its directions steer the very next
+        proposal instead of landing ~an eval later. Recording from the research task is safe: it's an
+        AUDIT-only event (the fold ignores it for node selection) and `EventStore.append` serializes
+        writers under an interprocess lock with collision-safe seq derivation. No-op when
+        concurrent_research is off or no trigger is due."""
+        if not self.concurrent_research:
+            return
+        rtrig = self._due_research_trigger(state)
+        if rtrig is None:
+            return
+
+        async def _bg(snap=state, trig=rtrig):
+            memo = await anyio.to_thread.run_sync(
+                functools.partial(self._compute_deep_research, snap, trig, trace=False))
+            if memo is not None:
+                await anyio.to_thread.run_sync(
+                    functools.partial(self._record_deep_research, memo, trigger=trig, manual=False))
+        tg.start_soon(_bg)
+
     async def _dispatch_evals(self, evals: list, state: RunState,
                               max_es: Optional[float]) -> None:
         # Single experiment at a time is the base mode: run evals sequentially and
         # deterministically. Concurrent fan-out (the task-group below) is a backlog
-        # seam — opt in with max_parallel > 1.
+        # seam — opt in with max_parallel > 1. Deep research overlaps + records immediately
+        # in BOTH modes (see _spawn_research), independent of max_parallel.
         if self.max_parallel <= 1:
             limiter = anyio.CapacityLimiter(1)
-            # Concurrency seam (opt-in, default off): overlap a DUE deep-research "think" with the
-            # GPU-bound eval — the agent is otherwise idle while the node trains. _compute_deep_research
-            # is pure compute on the `state` snapshot (no event-log writes, span skipped), so the
-            # engine stays the SOLE writer: the memo is recorded from THIS (main) task after the evals.
-            # Only a real win when the LLM is remote (no GPU contention); needs live-run validation.
-            rtrig = self._due_research_trigger(state) if self.concurrent_research else None
-            rbox: dict = {}
             async with anyio.create_task_group() as tg:
-                if rtrig is not None:
-                    async def _bg_research(snap=state, trig=rtrig):
-                        rbox["memo"] = await anyio.to_thread.run_sync(
-                            functools.partial(self._compute_deep_research, snap, trig, trace=False))
-                    tg.start_soon(_bg_research)
+                self._spawn_research(tg, state)
                 for a in evals:
                     cur = fold(self.store.read_all())
                     if self._skip_if_aborted(a, cur):
@@ -893,9 +905,6 @@ class Engine(ConfirmPhaseMixin, AblationMixin):
                     if (max_es is not None and cur.total_eval_seconds >= max_es):
                         break
                     await self._evaluate(a["node_id"], limiter)
-            # Record the overlapped memo now — main task is the sole writer, AFTER the eval events.
-            if rbox.get("memo") is not None:
-                self._record_deep_research(rbox["memo"], trigger=rtrig, manual=False)
         else:
             # G3 distributed/parallel eval: fan out under a CapacityLimiter (worker pool). The
             # eval-budget guard the review flagged for this path: cap the number STARTED so an
@@ -904,6 +913,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin):
             cur = fold(self.store.read_all())
             started = 0
             async with anyio.create_task_group() as tg:
+                self._spawn_research(tg, state)   # overlap deep research here too (max_parallel-independent)
                 for a in evals:
                     if self._skip_if_aborted(a, cur):
                         continue
