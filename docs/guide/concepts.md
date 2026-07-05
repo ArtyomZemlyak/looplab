@@ -51,7 +51,7 @@ runs/<name>/
 ├── config.snapshot.json  # resolved settings at launch (secret-masked)
 ├── task.snapshot.json    # verbatim task copy → the run is self-describing
 ├── engine.lock           # single-writer lock (one live engine per run dir)
-├── <node-id>/            # per-node workdirs (the eval scratch for each candidate)
+├── nodes/node_<id>/      # per-node eval workdirs (also confirm/ and ablate/ scratch dirs)
 ├── tree.html             # static lineage view (regenerable)
 └── spans.jsonl           # diagnostic trace spans (regenerable; never read by replay)
 ```
