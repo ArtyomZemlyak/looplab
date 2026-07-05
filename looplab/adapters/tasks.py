@@ -368,8 +368,13 @@ def make_roles(task: TaskAdapter, settings, run_dir=None):
             and task.repo_spec().get("editables")):
         from looplab.adapters.repo_task import LLMRepoDeveloper
         from looplab.agents.agent import loop_opts_from_settings as _loop_opts
-        developer = LLMRepoDeveloper(client, task, parser=settings.llm_parser,
-                                     loop_opts=_loop_opts(settings))
+        developer = LLMRepoDeveloper(  # C4: plan decomposition + hard per-session backstop
+            client, task, parser=settings.llm_parser, loop_opts=_loop_opts(settings),
+            plan_decompose=getattr(settings, "developer_plan_decompose", True),
+            plan_min_steps=getattr(settings, "developer_plan_min_steps", 2),
+            plan_max_steps=getattr(settings, "developer_plan_max_steps", 8),
+            session_max_turns=getattr(settings, "developer_session_max_turns", 30),
+            session_time_budget_s=getattr(settings, "developer_session_time_budget_s", 900.0))
 
     # External coding-agent Developer (ADR-7): an external CLI agent writes/repairs the
     # solution code, reusing the task's brief. Tool-agnostic via cli_agent presets.

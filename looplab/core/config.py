@@ -508,6 +508,23 @@ class Settings(BaseSettings):
     # loops are untouched. Falls back to truncation on any summarizer error; one extra model call per
     # over-budget turn.
     agent_auto_summary: bool = True
+    # C4 · Repo-developer plan decomposition. A big feature attempted in ONE developer session made a
+    # non-converging reasoning model loop indefinitely — it kept writing + exploring without ever
+    # emitting `done` (10k+ LLM calls / hours; agentic stuck-detection can't catch VARIED exploration,
+    # only literal repeats). Fix: the developer first proposes an ordered plan of ATOMIC steps; a
+    # multi-step plan is executed step-by-step, each in a FRESH bounded session with only that step's
+    # scope + the files accumulated so far, syntax-validated per write. Every session stays
+    # small-context and convergent. ON by default for repo tasks (a 1-step plan == the old single pass).
+    developer_plan_decompose: bool = True
+    developer_plan_min_steps: int = 2      # a proposed plan with >= this many steps runs step-by-step
+    developer_plan_max_steps: int = 8      # cap on plan length (a runaway planner can't spawn 100 steps)
+    # Hard per-session backstop for the repo developer — the ONE write-heavy agent that can run away
+    # even with stuck-detection on (varied writes/reads never trip the repeat/ping-pong signal). Bounds
+    # the plan phase, EACH step, and the single-session fallback. Unlike the global agent_* limits
+    # (0 = unlimited, meant for read-only agents), the developer always gets a FINITE ceiling so a
+    # model that never emits `done` fails cleanly with the code it wrote so far, instead of looping.
+    developer_session_max_turns: int = 30
+    developer_session_time_budget_s: float = 900.0   # 15 min wall-clock per developer session
     # Observability (ADR-17): capture each LLM call's full prompt + completion into the active
     # span (spans.jsonl) so the UI can show exactly what the model read and wrote per node.
     # Diagnostics only — `replay.fold` never reads spans. Default on for local single-user; set

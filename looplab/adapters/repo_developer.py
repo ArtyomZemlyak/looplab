@@ -369,11 +369,19 @@ class LLMRepoDeveloper:
     materializes on top of the seeded tree and evaluates."""
 
     def __init__(self, client: LLMClient, task, *, parser: str = "tool_call",
-                 loop_opts: Optional[dict] = None):
+                 loop_opts: Optional[dict] = None, plan_decompose: bool = True,
+                 plan_min_steps: int = 2, plan_max_steps: int = 8,
+                 session_max_turns: int = 30, session_time_budget_s: float = 900.0):
         self.client = client
         self.task = task
         self.parser = parser
         self.loop_opts = dict(loop_opts or {})
+        # C4 plan decomposition + hard per-session backstop (see Settings.developer_*).
+        self._plan_decompose = plan_decompose
+        self._plan_min_steps = max(2, int(plan_min_steps))
+        self._plan_max_steps = max(1, int(plan_max_steps))
+        self._session_max_turns = int(session_max_turns)
+        self._session_time_budget_s = float(session_time_budget_s)
         self.brief = task.agent_brief()
         rs = task.repo_spec()
         self._surface = rs["edit_surface"]
@@ -513,6 +521,83 @@ class LLMRepoDeveloper:
                         "its metric. Briefly summarize what you wrote.",
                         {"summary": {"type": "string"}}, [])
 
+    def _session_opts(self, *, max_turns=None, time_budget=None) -> dict:
+        """loop_opts + the HARD per-session ceiling. A developer session ALWAYS gets a finite bound so
+        a model that keeps writing/exploring without ever emitting `done` fails cleanly with the code
+        it has written, instead of the 10k-call / multi-hour runaway a big task produced."""
+        opts = dict(getattr(self, "loop_opts", {}) or {})
+        opts["max_turns"] = int(max_turns if max_turns is not None
+                                else getattr(self, "_session_max_turns", 30))
+        opts["time_budget_s"] = float(time_budget if time_budget is not None
+                                      else getattr(self, "_session_time_budget_s", 900.0))
+        return opts
+
+    def _plan_emit_spec(self) -> dict:
+        from looplab.tools._base import fn_spec
+        return fn_spec("propose_plan",
+                        "Propose an ORDERED plan of ATOMIC implementation steps for this experiment. "
+                        "Each step is ONE self-contained, independently-verifiable change (e.g. 'add the "
+                        "second-stage fine-tune loop to train.py', 'wire the stage-2 hyperparameters', "
+                        "'write the eval entrypoint that prints the metric'). Prefer 2-6 SMALL steps; use "
+                        "a single step only if the change is genuinely trivial. Do NOT write code here — "
+                        "plan only. Call this exactly once when the plan is ready.",
+                        {"steps": {"type": "array", "items": {"type": "object", "properties": {
+                            "title": {"type": "string", "description": "short imperative title"},
+                            "detail": {"type": "string", "description": "concretely what to change and why"}},
+                            "required": ["title"]}}},
+                        ["steps"])
+
+    def _propose_plan(self, system: str, idea: Idea) -> list:
+        """Plan phase: the developer proposes an ordered atomic plan (READ-ONLY — no writes yet).
+        Returns a list of {title, detail}; [] on empty/failure so the caller falls back to one session."""
+        from looplab.agents.agent import drive_tool_loop, CompositeTools
+        from looplab.tools.env_inspect import EnvInspectTools
+        params = ", ".join(f"{k}={v}" for k, v in (idea.params or {}).items()) or "(choose sensible values)"
+        plan_user = (
+            f"Experiment concept (the researcher's idea): {idea.rationale}\nHyperparameters: {params}.\n"
+            "BEFORE writing any code, break this into an ordered plan of ATOMIC steps and call "
+            "propose_plan. Use the read-only inspection tools first if you need to check the repo API / "
+            "installed versions. Keep steps small and independently testable.")
+        messages = [{"role": "system", "content": system}, {"role": "user", "content": plan_user}]
+        try:
+            plan = drive_tool_loop(
+                self.client, CompositeTools([EnvInspectTools()]), messages, self._plan_emit_spec(),
+                finalize=lambda a: (a or {}).get("steps", []), fallback=lambda m: [],
+                **self._session_opts(max_turns=min(8, self._session_max_turns),
+                                     time_budget=min(300.0, self._session_time_budget_s)))
+        except Exception:  # noqa: BLE001 — a failed plan phase just degrades to a single session
+            return []
+        steps = []
+        for s in (plan or [])[: getattr(self, "_plan_max_steps", 8)]:
+            if isinstance(s, dict) and (s.get("title") or s.get("detail")):
+                steps.append({"title": str(s.get("title", "")).strip(),
+                              "detail": str(s.get("detail", "")).strip()})
+        return steps
+
+    def _run_step(self, idea: Idea, step: dict, idx: int, total: int, write, system: str) -> str:
+        """Execute ONE atomic plan step in a FRESH bounded session, on top of the files accumulated so
+        far (carried in `write.files`; syntax is validated per write by the write tool). A step's own
+        error never aborts the plan — later steps + the eval still run on whatever got written."""
+        from looplab.agents.agent import drive_tool_loop, CompositeTools
+        from looplab.tools.env_inspect import EnvInspectTools
+        done_so_far = ", ".join(write.files) or "(none yet)"
+        step_user = (
+            f"You are implementing a multi-step plan — STEP {idx} of {total}.\n"
+            f"Overall experiment: {idea.rationale}\n\n"
+            f"THIS STEP — {step['title']}:\n{step.get('detail') or step['title']}\n\n"
+            f"Files already written by earlier steps (present in the workdir now): {done_so_far}\n"
+            "Make ONLY the edits THIS step needs with write_file/edit_file — PATCH existing files, don't "
+            "regenerate untouched ones — then call done. Do the minimum for this step; later steps handle "
+            "the rest. If this is the last step, make sure the eval entrypoint runs end-to-end.")
+        messages = [{"role": "system", "content": system}, {"role": "user", "content": step_user}]
+        try:
+            drive_tool_loop(self.client, CompositeTools([write, EnvInspectTools()]), messages,
+                            self._emit_spec(), finalize=lambda a: (a or {}).get("summary", ""),
+                            fallback=lambda m: "", **self._session_opts())
+        except Exception as e:  # noqa: BLE001
+            return f"(step {idx} error: {e})"
+        return ""
+
     def _run(self, idea: Idea, error: Optional[str] = None,
              base: Optional[dict] = None, base_note: str = "",
              base_deleted: Optional[list] = None) -> str:
@@ -565,10 +650,23 @@ class LLMRepoDeveloper:
         from looplab.agents.agent import CompositeTools
         from looplab.tools.env_inspect import EnvInspectTools
         tools = CompositeTools([write, EnvInspectTools()])
+        # C4 plan decomposition: a big NON-repair task is split into ATOMIC per-step sessions (each
+        # fresh + bounded, building on the files accumulated so far) so a non-converging model can't
+        # run away (the 10k-call / multi-hour spin). A repair stays ONE focused session (already
+        # narrow), and a plan shorter than min_steps falls back to the single bounded session —
+        # equivalent to the old single pass for a trivial change.
+        # getattr defaults: a bare / __new__-constructed developer (unit tests, legacy) skips planning
+        # and runs the single bounded session; a real one (built via __init__) plans.
+        steps = (self._propose_plan(system, idea)
+                 if (getattr(self, "_plan_decompose", False) and error is None) else [])
         try:
-            drive_tool_loop(self.client, tools, messages, self._emit_spec(),
-                            finalize=lambda a: (a or {}).get("summary", ""),
-                            fallback=lambda m: "", **self.loop_opts)
+            if len(steps) >= getattr(self, "_plan_min_steps", 2):
+                for i, step in enumerate(steps, 1):
+                    self._run_step(idea, step, i, len(steps), write, system)  # a step's error can't abort the plan
+            else:
+                drive_tool_loop(self.client, tools, messages, self._emit_spec(),
+                                finalize=lambda a: (a or {}).get("summary", ""),
+                                fallback=lambda m: "", **self._session_opts())
         except Exception as e:  # noqa: BLE001 - never crash the engine on a developer hiccup
             self.last_files = dict(write.files)
             self.last_deleted = list(write.deleted)
