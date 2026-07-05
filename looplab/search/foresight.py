@@ -102,17 +102,75 @@ def rank(client, report: str, items: list[str], *, goal: str = "", direction: st
         out = parse_structured(client, msgs, _Ranking, parser or "tool_call")
     except Exception:  # noqa: BLE001 — advisory predictor: fall back on ANY error (parse/transport)
         return None
+    return _sanitize_ranking(out, len(items))
+
+
+def _sanitize_ranking(out, n: int) -> Optional[tuple[list[int], float, str]]:
+    """Turn a raw `_Ranking` into (order, confidence, reason): DISTINCT valid indices best-first (any
+    the model dropped are appended in input order), confidence clamped to [0,1]. None if unusable."""
+    if out is None:
+        return None
     seen: set[int] = set()
     order: list[int] = []
-    for idx in out.order or []:
-        if isinstance(idx, int) and 0 <= idx < len(items) and idx not in seen:
+    for idx in getattr(out, "order", None) or []:
+        if isinstance(idx, int) and 0 <= idx < n and idx not in seen:
             seen.add(idx)
             order.append(idx)
     if not order:
         return None
-    order.extend(i for i in range(len(items)) if i not in seen)   # append any indices the model dropped
-    conf = out.confidence if isinstance(out.confidence, (int, float)) else 0.0
-    return order, max(0.0, min(1.0, float(conf))), (out.reason or "").strip()[:600]
+    order.extend(i for i in range(n) if i not in seen)
+    conf = out.confidence if isinstance(getattr(out, "confidence", None), (int, float)) else 0.0
+    return order, max(0.0, min(1.0, float(conf))), (getattr(out, "reason", "") or "").strip()[:600]
+
+
+def _rank_user_msg(report: str, items: list[str], goal: str, direction: str) -> str:
+    blocks = "\n\n".join(f"--- CANDIDATE {i} ---\n{c[:_ITEM_CAP]}" for i, c in enumerate(items))
+    rep = (report or "").strip()
+    return ((("VERIFIED DATA ANALYSIS REPORT\n" + rep + "\n\n") if rep else "")
+            + f"Goal: {goal or '(unspecified)'} | optimize direction: {direction}.\n\n"
+            + blocks + "\n\n"
+            + f"Predict the best->worst order of candidates 0..{len(items) - 1} and your confidence.")
+
+
+def rank_agentic(client, tools, report: str, items: list[str], *, goal: str = "", direction: str = "min",
+                 parser: str = "tool_call", prompts=None, max_turns: int = 4
+                 ) -> Optional[tuple[list[int], float, str]]:
+    """AGENTIC variant of `rank`: the world-model runs a TOOL-USING loop (`drive_tool_loop`) so it can
+    PULL specific evidence — actual experiment results, data facts — via `tools` before committing to
+    an order, instead of reasoning only from a pre-baked report. Emits the same `_Ranking`; returns
+    the same `(order, confidence, reason)`. Falls back to the single-call `rank` when there are no
+    tools, and on ANY loop error (advisory — never raises)."""
+    if client is None or len(items) < 2:
+        return None
+    if tools is None:
+        return rank(client, report, items, goal=goal, direction=direction, parser=parser, prompts=prompts)
+    items = items[:_MAX_ITEMS]
+    try:
+        from looplab.agents.agent import drive_tool_loop
+        emit_spec = {"type": "function", "function": {
+            "name": "emit", "description": "Emit the predicted best->worst order + confidence.",
+            "parameters": _Ranking.model_json_schema()}}
+        msgs = [{"role": "system", "content": render(prompts, "foresight_system", _SYSTEM)
+                 + " You MAY consult tools to check actual results before deciding; then call `emit`."},
+                {"role": "user", "content": _rank_user_msg(report, items, goal, direction)}]
+        box: dict = {}
+
+        def _finalize(args):
+            try:
+                box["out"] = _Ranking.model_validate(args)
+            except Exception:  # noqa: BLE001
+                box["out"] = None
+            return box.get("out")
+
+        drive_tool_loop(client, tools, msgs, emit_spec, max_turns=max_turns,
+                        finalize=_finalize, fallback=lambda _m: None,
+                        nudge_prompt="Now call `emit` with the order.",
+                        stuck_prompt="Stop ({reason}). Call `emit` with the order now.")
+        got = _sanitize_ranking(box.get("out"), len(items))
+        return got if got is not None else rank(client, report, items, goal=goal,
+                                                direction=direction, parser=parser, prompts=prompts)
+    except Exception:  # noqa: BLE001 — agentic path is best-effort; fall back to the one-shot predictor
+        return rank(client, report, items, goal=goal, direction=direction, parser=parser, prompts=prompts)
 
 
 def _idea_text(idea) -> str:
@@ -159,15 +217,26 @@ class ForesightPanelResearcher:
     """
 
     def __init__(self, base, k: int = 2, *, client=None, bounds=None,
-                 parser: str = "tool_call", prompts=None):
+                 parser: str = "tool_call", prompts=None, tools=None):
         self.base = base
         self.k = max(1, k)
         self.client = client if client is not None else getattr(base, "client", None)
         self.bounds = bounds if bounds is not None else getattr(base, "bounds", None)
         self.parser = parser
         self.prompts = prompts if prompts is not None else getattr(base, "prompts", None)
+        # When `tools` is wired, ranking runs in AGENTIC mode (a drive_tool_loop that can pull actual
+        # experiment/data evidence before deciding); else it's the one-shot predictor. Optional.
+        self.tools = tools
         self.last_foresight: Optional[dict] = None       # telemetry: last idea ranking + confidence
         self.last_hyp_priority: Optional[dict] = None     # telemetry: last board prioritization
+
+    def _rank(self, report: str, items: list[str], *, goal: str, direction: str):
+        """Dispatch to the agentic ranker when tools are wired, else the one-shot predictor."""
+        if self.tools is not None:
+            return rank_agentic(self.client, self.tools, report, items, goal=goal, direction=direction,
+                                parser=self.parser, prompts=self.prompts)
+        return rank(self.client, report, items, goal=goal, direction=direction,
+                    parser=self.parser, prompts=self.prompts)
 
     def __getattr__(self, name):
         """Delegate every attribute NOT defined here (implement / repair / choose_action / assets /
@@ -209,10 +278,10 @@ class ForesightPanelResearcher:
         if len(hyps) < 2:
             setattr(self.base, "_hyp_order", None)
             return
-        r = rank(self.client,
+        r = self._rank(
                  verified_report(data_profile=state.data_profile, memory=_memory_brief(state, parent)),
                  ["Hypothesis: " + h.statement for h in hyps],
-                 goal=state.goal, direction=state.direction, parser=self.parser, prompts=self.prompts)
+                 goal=state.goal, direction=state.direction)
         if r is None:
             setattr(self.base, "_hyp_order", None)
             return
@@ -230,15 +299,16 @@ class ForesightPanelResearcher:
         if self.client is None:
             return self.base.propose(state, parent)     # transparent pass-through
         self._forward_hints()
+        if self.tools is not None and hasattr(self.tools, "bind_state"):
+            self.tools.bind_state(state)                 # let the agentic ranker read the live run
         self._prioritize_board(state, parent)            # rank the open-hypothesis board, steer the base
         if self.k == 1:
             return self.base.propose(state, parent)      # board prioritized; single proposal
         ideas = [self.base.propose(state, parent) for _ in range(self.k)]
-        r = rank(self.client, verified_report(data_profile=state.data_profile,
-                                              memory=_memory_brief(state, parent)),
-                 [_idea_text(i) for i in ideas],
-                 goal=state.goal, direction=state.direction,
-                 parser=self.parser, prompts=self.prompts)
+        r = self._rank(verified_report(data_profile=state.data_profile,
+                                       memory=_memory_brief(state, parent)),
+                       [_idea_text(i) for i in ideas],
+                       goal=state.goal, direction=state.direction)
         if r is None:
             self.last_foresight = None
             return ideas[0]

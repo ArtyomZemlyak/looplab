@@ -372,6 +372,12 @@ class Settings(BaseSettings):
     # surrogate (researcher_panel) is blind to, primed with the data profile + memory (the synergy).
     # >1 enables it (LLM backend only; needs `foresight` on); 2 = on by default at modest cost, 1 = off.
     foresight_panel: int = 2
+    # AGENTIC foresight: run the ranking (hypothesis-board prioritization + K-idea pick) as a TOOL-USING
+    # loop that can pull actual experiment results / data facts before deciding, instead of a one-shot
+    # prediction from a pre-baked report. ON by default (needs foresight + a client; falls back to the
+    # one-shot predictor on any hiccup). A few extra LLM calls per proposal; set False for the cheaper
+    # single-call ranker.
+    foresight_agentic: bool = True
     # T7 LLM response cache: serve an identical DETERMINISTIC (temperature 0) request from an
     # in-process content-addressed cache instead of re-hitting the model — cuts cost on
     # retry/panel/verify flows. NEVER caches sampling calls (temp>0: best-of-N / panel / novelty

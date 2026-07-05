@@ -420,3 +420,36 @@ def test_foresight_delegates_developer_surface_for_unified_agent():
     import pytest
     with pytest.raises(AttributeError):            # missing attr -> AttributeError, not recursion
         _ = fp.no_such_attr_here
+
+
+def test_rank_agentic_falls_back_to_one_shot_without_tools(monkeypatch):
+    """rank_agentic with no tools is exactly the one-shot rank() — the agentic loop only engages when
+    introspection tools are wired."""
+    import looplab.search.foresight as f
+    seen = {"n": 0}
+    monkeypatch.setattr(f, "rank", lambda *a, **k: (seen.__setitem__("n", seen["n"] + 1) or ([0, 1], 0.5, "r")))
+    out = f.rank_agentic(object(), None, "report", ["a", "b"])
+    assert out == ([0, 1], 0.5, "r") and seen["n"] == 1
+
+
+def test_rank_agentic_runs_tool_loop_and_sanitizes(monkeypatch):
+    """With tools, rank_agentic drives a tool loop, then sanitizes the emitted order (distinct, valid,
+    dropped indices appended)."""
+    import looplab.search.foresight as f
+
+    def fake_loop(client, tools, msgs, emit_spec, **kw):
+        # drive_tool_loop calls finalize(args) with the emit tool-call ARGUMENTS (a dict)
+        return kw["finalize"]({"order": [1, 1, 9, 0], "confidence": 0.8, "reason": "because"})
+
+    monkeypatch.setattr("looplab.agents.agent.drive_tool_loop", fake_loop)
+    out = f.rank_agentic(object(), object(), "report", ["a", "b"])
+    assert out == ([1, 0], 0.8, "because")     # dup + out-of-range sanitized
+
+
+def test_rank_agentic_falls_back_when_loop_yields_nothing(monkeypatch):
+    import looplab.search.foresight as f
+    monkeypatch.setattr("looplab.agents.agent.drive_tool_loop",
+                        lambda *a, **k: k["finalize"](None))       # emit gave junk -> None
+    monkeypatch.setattr(f, "rank", lambda *a, **k: ([0, 1], 0.3, "fallback"))
+    out = f.rank_agentic(object(), object(), "report", ["a", "b"])
+    assert out == ([0, 1], 0.3, "fallback")

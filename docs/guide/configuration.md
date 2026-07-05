@@ -146,6 +146,7 @@ See [LLM & coding agents](llm-and-agents.md) for full guidance.
 | `researcher_panel` | `LOOPLAB_RESEARCHER_PANEL` | `1` | Generate K ideas, keep the best by an empirical surrogate (1 = off) |
 | `foresight` | `LOOPLAB_FORESIGHT` | `true` | FOREAGENT predict-before-execute: LLM world model ranks candidates/ideas before an eval, primed with a data report + memory (master switch) |
 | `foresight_panel` | `LOOPLAB_FORESIGHT_PANEL` | `2` | Generate K ideas, keep the one predicted best pre-execution (ranks structural/text ideas the numeric surrogate can't; LLM backend only; 1 = off) |
+| `foresight_agentic` | `LOOPLAB_FORESIGHT_AGENTIC` | `true` | Run foresight ranking as a TOOL-USING loop that can pull actual experiment results / data facts before deciding (vs a one-shot prediction). A few extra LLM calls per proposal; falls back to one-shot on any hiccup |
 | `proxy_scoring` | `LOOPLAB_PROXY_SCORING` | `false` | Rank a candidate's potential from early signals |
 | `proxy_kill_fraction` | `LOOPLAB_PROXY_KILL_FRACTION` | `0.0` | Skip a full eval for the doomed bottom fraction (0 = off) |
 | `novelty_gate` | `LOOPLAB_NOVELTY_GATE` | `false` | Reject near-duplicate proposals (param-space distance) |
