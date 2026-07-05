@@ -80,7 +80,7 @@ def test_malformed_merge_event_is_tolerated():
     assert id1 in st.hypotheses
 
 
-def test_engine_pass_writes_merge_events_gated(tmp_path):
+def test_engine_pass_writes_merge_events_gated(tmp_path, monkeypatch):
     """`_maybe_merge_hypotheses` records `hypothesis_merged` for agent-decided merges, gated on
     track_hypotheses + a client + a grown board; then re-folds so the aliases fold away."""
     import looplab.search.hybrid_merge as hm
@@ -107,9 +107,13 @@ def test_engine_pass_writes_merge_events_gated(tmp_path):
     def fake_consolidate(texts, client, **kw):
         return [{"members": [0, 1], "merged": "merged 01"}] + [{"members": [i], "merged": texts[i]}
                                                                for i in range(2, len(texts))]
-    hm.consolidate = fake_consolidate
+    # monkeypatch (NOT raw assignment) so pytest RESTORES these module globals at teardown — a bare
+    # `hm.consolidate = ...` / `orch.fold = ...` leaks into every later test in the process: the
+    # leaked `orch.fold` (returning this fixed st with empty .nodes) made a real Engine's `_create_node`
+    # compute node_id=max({},default=-1)+1==0 forever, spinning the whole suite (184MB log / 95% CPU).
+    monkeypatch.setattr(hm, "consolidate", fake_consolidate)
     import looplab.engine.orchestrator as orch
-    orch.fold = lambda evs: st                 # keep the returned state simple for the assertion
+    monkeypatch.setattr(orch, "fold", lambda evs: st)   # keep the returned state simple for the assertion
 
     eng._maybe_merge_hypotheses(st)
     rows = list(EventStore(tmp_path / "events.jsonl").read_all())
