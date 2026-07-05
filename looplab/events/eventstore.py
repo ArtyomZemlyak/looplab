@@ -126,6 +126,13 @@ class EventStore:
         # from worker THREADS while the main loop may also read — guard the cache top-up so a
         # concurrent extend/offset update can't race into a corrupt cache.
         self._read_lock = threading.Lock()
+        # Serialize appends WITHIN this process. The interprocess flock already serializes across
+        # processes (UI server + engine) AND, via a fresh fd per call, across threads — but it
+        # DEGRADES TO A NO-OP where flock is unavailable (some FUSE/S3 mounts). Since the engine can
+        # now append from a worker thread (concurrent deep-research memo) while the main loop appends,
+        # this intra-process lock keeps seq-derivation + `_seq` update atomic even when the flock is a
+        # no-op — no torn line / duplicate seq. Held OUTSIDE the flock (consistent order, no deadlock).
+        self._append_lock = threading.Lock()
         self._seq = self._scan_last_seq()
 
     def _scan_last_seq(self) -> int:
@@ -201,7 +208,7 @@ class EventStore:
         (FUSE/S3) never abort the engine, because reads tolerate a torn final line.
         `_seq` advances only AFTER the durable write succeeds."""
         trace_id, span_id = current_ids()
-        with _interprocess_lock(Path(str(self.path) + ".lock")):
+        with self._append_lock, _interprocess_lock(Path(str(self.path) + ".lock")):
             self._heal_torn_tail()
             # Derive seq from max(in-memory, on-disk tail) so a concurrent writer can't collide.
             # Single-process: _disk_last_seq == self._seq, so seq == self._seq + 1 (unchanged).

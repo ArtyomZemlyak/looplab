@@ -238,3 +238,25 @@ def test_spawn_research_skips_record_on_none_memo():
             eng._spawn_research(tg, state=object())
     anyio.run(run)
     assert recorded == []
+
+
+def test_spawn_research_swallows_errors_so_it_cannot_cancel_the_eval():
+    """A crash in the advisory research must NOT propagate out of the shared task group (it would
+    cancel the in-flight eval). _bg swallows everything."""
+    import anyio
+    from looplab.engine.orchestrator import Engine
+    eng = Engine.__new__(Engine)
+    eng.concurrent_research = True
+    eng._due_research_trigger = lambda state: "cadence"
+    eng._compute_deep_research = lambda *a, **k: {"memo": "M"}
+    def _boom(*a, **k):
+        raise RuntimeError("record blew up")
+    eng._record_deep_research = _boom
+
+    reached_after = []
+    async def run():
+        async with anyio.create_task_group() as tg:
+            eng._spawn_research(tg, state=object())
+        reached_after.append(True)          # group exited cleanly despite the record raising
+    anyio.run(run)                          # must NOT raise
+    assert reached_after == [True]

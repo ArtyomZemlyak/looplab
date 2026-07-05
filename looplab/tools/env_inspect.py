@@ -184,12 +184,19 @@ class EnvInspectTools:
         if not roots and spec.origin:
             roots = [os.path.dirname(spec.origin)]
         cap = int(max_hits) if max_hits else 20
+        scanned = 0
+        _FILE_BUDGET = 4000     # bound the walk so a not-found query on a huge pkg (torch) can't
+        #                         crawl thousands of files — report the truncation, don't lie "absent"
         hits: list[str] = []
         for root in roots:
             for dirpath, _dirs, files in os.walk(root):
                 for fn in files:
                     if not fn.endswith(".py"):
                         continue
+                    if scanned >= _FILE_BUDGET:
+                        return ("\n".join(hits) + f"\n(stopped after scanning {scanned} files; "
+                                "narrow `package` to a submodule to search deeper)")
+                    scanned += 1
                     fp = os.path.join(dirpath, fn)
                     try:
                         with open(fp, encoding="utf-8", errors="replace") as f:

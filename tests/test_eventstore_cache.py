@@ -88,3 +88,29 @@ def test_read_all_tolerates_invalid_event_record(tmp_path):
     third = [e.seq for e in es.read_all()]
     assert first == second == third                                # no duplicated prefix growth
     assert len(first) == 2
+
+
+def test_append_is_thread_safe_for_concurrent_writers(tmp_path):
+    """The engine now appends the concurrent deep-research memo from a WORKER THREAD while the main
+    loop also appends. `_append_lock` must keep seq-derivation atomic even if the interprocess flock
+    degrades to a no-op — every event gets a UNIQUE seq and no line is torn."""
+    import threading
+    from looplab.events.eventstore import EventStore, iter_jsonl
+    st = EventStore(tmp_path / "events.jsonl")
+    N, M = 8, 40
+
+    def worker(w):
+        for i in range(M):
+            st.append("probe", {"w": w, "i": i})
+
+    threads = [threading.Thread(target=worker, args=(w,)) for w in range(N)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    rows = list(iter_jsonl(tmp_path / "events.jsonl"))
+    assert len(rows) == N * M                               # nothing dropped / torn
+    seqs = sorted(r["seq"] for r in rows)
+    assert len(set(seqs)) == N * M                          # every seq UNIQUE (no collision)
+    assert seqs == list(range(seqs[0], seqs[0] + N * M))    # a dense, gap-free consecutive range

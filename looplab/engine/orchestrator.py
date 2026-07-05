@@ -879,11 +879,16 @@ class Engine(ConfirmPhaseMixin, AblationMixin):
             return
 
         async def _bg(snap=state, trig=rtrig):
-            memo = await anyio.to_thread.run_sync(
-                functools.partial(self._compute_deep_research, snap, trig, trace=False))
-            if memo is not None:
-                await anyio.to_thread.run_sync(
-                    functools.partial(self._record_deep_research, memo, trigger=trig, manual=False))
+            # Best-effort: an error in the advisory research MUST NOT propagate — it shares the eval's
+            # task group, so an uncaught raise here would CANCEL the in-flight eval. Swallow everything.
+            try:
+                memo = await anyio.to_thread.run_sync(
+                    functools.partial(self._compute_deep_research, snap, trig, trace=False))
+                if memo is not None:
+                    await anyio.to_thread.run_sync(
+                        functools.partial(self._record_deep_research, memo, trigger=trig, manual=False))
+            except Exception:  # noqa: BLE001 — never let deep research disturb the eval
+                pass
         tg.start_soon(_bg)
 
     async def _dispatch_evals(self, evals: list, state: RunState,
