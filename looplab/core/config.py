@@ -147,7 +147,8 @@ class Settings(BaseSettings):
     # evidenced form of reflection; reflecting at every step shows no gains, arXiv:2506.12928).
     failure_reflection: bool = True
     # C3 deep test-driven repair: hand the Developer the failure taxonomy + a structured "reproduce
-    # then fix" directive on debug, not just the raw stderr tail. Off by default.
+    # then fix" directive on debug, not just the raw stderr tail. ON by default (product surface); the
+    # conservative library default in EngineOptions stays off, per that module's contract.
     deep_repair: bool = True
     # Hybrid in-node crash repair: when an LLM-generated node CRASHES at runtime (mechanical errors
     # — bad import, removed kwarg, typo), the agent triages it and may repair the code IN PLACE within

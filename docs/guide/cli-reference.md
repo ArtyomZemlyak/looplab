@@ -207,14 +207,17 @@ Serve the live React web UI over a directory of run dirs. Requires the `[ui]` ex
 turns UI actions into appended control events; it never changes the engine.
 
 ```bash
-looplab ui [--run-root DIR] [--host HOST] [--port PORT]
+looplab ui [--run-root DIR] [--host HOST] [--port PORT] [--root-path PATH] [--build/--no-build] [--rebuild]
 ```
 
 | Option | Default | Description |
 |---|---|---|
-| `--run-root DIR` | `runs` | Directory containing run subdirectories |
+| `--run-root DIR` | `$LOOPLAB_RUN_ROOT` or `runs` | Directory containing run subdirectories |
 | `--host HOST` | `127.0.0.1` | Bind host |
 | `--port PORT` | `8765` | Bind port |
+| `--root-path PATH` | `""` | ASGI `root_path` for a non-prefix-stripping proxy; auto-derived from `JUPYTERHUB_SERVICE_PREFIX` when unset |
+| `--build` / `--no-build` | `--build` | Auto-build the React bundle if it's missing (needs Node/npm); `--no-build` serves a prebuilt bundle only |
+| `--rebuild` | off | Force a fresh `npm run build` even if a bundle already exists |
 
 See the [Web UI](ui.md) guide.
 

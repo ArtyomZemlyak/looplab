@@ -10,8 +10,9 @@ A run is an `Engine` (orchestrator) driving four roles in a cycle:
 1. **Researcher** — proposes an `Idea` (an operator + params), reasoning about the goal and prior
    results. Foresight ranks the candidates *before* an eval; the idea also states a one-line
    **hypothesis** that lands on the board.
-2. **Novelty gate** — rejects a proposal too close to one already tried (idea-text cosine ≥ `0.92`,
-   or numeric param distance < `0.05`), with one informed re-propose.
+2. **Novelty gate** *(opt-in — `novelty_gate`, off by default; on under `profile=thorough`)* — rejects
+   a proposal too close to one already tried (idea-text cosine ≥ `0.92`, or numeric param distance
+   < `0.05`), with one informed re-propose.
 3. **Developer** — implements the idea as runnable code (or applies params to an existing repo).
 4. **Sandbox** — runs the candidate in isolation with a timeout and output caps.
 5. **Evaluator** — scores it (cross-validation, a held-out grader, or a repo's own eval command);
@@ -49,6 +50,8 @@ runs/<name>/
 ├── events.jsonl          # append-only event log — the source of truth
 ├── config.snapshot.json  # resolved settings at launch (secret-masked)
 ├── task.snapshot.json    # verbatim task copy → the run is self-describing
+├── engine.lock           # single-writer lock (one live engine per run dir)
+├── nodes/node_<id>/      # per-node eval workdirs (also confirm/ and ablate/ scratch dirs)
 ├── tree.html             # static lineage view (regenerable)
 └── spans.jsonl           # diagnostic trace spans (regenerable; never read by replay)
 ```
@@ -106,6 +109,7 @@ The sandbox tier is chosen by **trust mode**, not your environment (`make_sandbo
 |---|---|---|
 | `trusted_local` (default) | `SubprocessSandbox` | Your own research on your own box. Process isolation + timeout + tree-kill + output caps. **No Docker.** |
 | `untrusted` | `DockerSandbox` (`--network none`) | Executing untrusted code on shared infra (hosted/multi-tenant UI) |
+| `hostile` | `DockerSandbox` (`--network none` + gVisor `--runtime runsc`) | Actively hostile code — a real kernel-level isolation boundary |
 
 Additional, audit-only safety monitors (all off by default, never change selection):
 

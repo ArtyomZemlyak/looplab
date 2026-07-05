@@ -91,8 +91,8 @@ stack(660,300,DY,[
 stack(1000,320,DY,[
  {id:"e_box",h:60,t:"Sandbox tiers",tag:"□",c:C.ev,sub:["trusted_local subprocess | untrusted Docker --network none"]},
  {id:"e_seed",h:60,t:"Seeds & holdout",tag:"□",c:C.ev,sub:["search seed 0 · n_seeds 3 · holdout 25% reserved (Knuth hash)"]},
- {id:"e_ir",h:82,t:"Inline repair",tag:"□",c:C.ev,sub:["reasons crash/timeout/oom/setup","abandon at 2 identical errors (norm. signature)"]},
- {id:"e_dep",h:72,t:"Auto-install deps",tag:"□",c:C.ev,sub:["allow-list ~70 · ≤6 rounds/node","stop after 2 pip timeouts (no egress)"]},
+ {id:"e_ir",h:82,t:"Inline repair",tag:"□",c:C.ev,sub:["reasons crash/timeout/oom","abandon at 4 identical errors (norm. signature)"]},
+ {id:"e_dep",h:72,t:"Auto-install deps",tag:"□",c:C.ev,sub:["allow-list ~55 · ≤6 rounds/node","stop after 2 pip timeouts (no egress)"]},
  {id:"e_dr",h:82,t:"Deep repair",tag:"D",c:C.d,sub:["timeout→cut compute · oom→cut memory","+ lineage prior fixes · taxonomy"]},
 ]);
 // SCORE / TRUST

@@ -114,7 +114,7 @@ These are no-ops unless `backend=llm`.
 | `llm_timeout` | `LOOPLAB_LLM_TIMEOUT` | `180.0` | Per-request inter-token idle limit (s): a stream with no new token for this long is aborted + retried |
 | `llm_header_timeout` | `LOOPLAB_LLM_HEADER_TIMEOUT` | `45.0` | First-byte / connection-establish deadline (s) before a request is treated as stalled |
 | `llm_trust_env` | `LOOPLAB_LLM_TRUST_ENV` | `False` | Honor HTTP(S)_PROXY / NO_PROXY env for the LLM client. Default false = a direct connection (the internal endpoint needs no proxy) |
-| `llm_cache` | `LOOPLAB_LLM_CACHE` | `False` | Cache identical LLM requests on disk (dev/replay speedup); off by default so live runs always hit the model |
+| `llm_cache` | `LOOPLAB_LLM_CACHE` | `False` | Serve identical **deterministic** (temperature-0) LLM requests from an in-process content-addressed cache (cuts cost on retry/panel/verify); sampling calls (temp>0) are never cached. Off by default |
 | `compressor_model` | `LOOPLAB_COMPRESSOR_MODEL` | — | Model id for the history auto-summary compressor (blank = the shared chat model) |
 | `compressor_base_url` | `LOOPLAB_COMPRESSOR_BASE_URL` | — | Endpoint for the compressor model (blank = reuse llm_base_url) |
 | `context_budget_chars` | `LOOPLAB_CONTEXT_BUDGET_CHARS` | `0` | Cap on the agentic tool-call history (chars); 0 = unbounded |
@@ -221,7 +221,7 @@ default grants resource/search-shape knobs to the agents and keeps infra (`llm_*
 
 | Setting | Env | Default | Description |
 |---|---|---|---|
-| `trust_mode` | `LOOPLAB_TRUST_MODE` | `trusted_local` | Sandbox tier: `trusted_local` (subprocess) or `untrusted` (Docker `--network none`) |
+| `trust_mode` | `LOOPLAB_TRUST_MODE` | `trusted_local` | Sandbox tier: `trusted_local` (subprocess) · `untrusted` (Docker `--network none`) · `hostile` (Docker `--network none` **+ gVisor** `--runtime runsc`) |
 | `docker_image` | `LOOPLAB_DOCKER_IMAGE` | `python:3.12-slim` | Image for the untrusted command-eval tier |
 | `redact_output` | `LOOPLAB_REDACT_OUTPUT` | `false` | Mask credentials in stdout/stderr before persisting (recommend on for untrusted) |
 | `reward_hack_detect` | `LOOPLAB_REWARD_HACK_DETECT` | `false` | Flag suspicious wins (grader access, frozen-file writes) |
@@ -242,7 +242,7 @@ See [Concepts → Trust & sandbox](concepts.md#trust--the-sandbox) for what each
 | `knowledge_dir` | `LOOPLAB_KNOWLEDGE_DIR` | `~/.looplab/knowledge` | Knowledge-base dir (notes + cross-run cases); Researcher gets grep/kb_search/read. **On by default** |
 | `embed_model` | `LOOPLAB_EMBED_MODEL` | — | Embedding model for **semantic** `kb_search` / case retrieval (e.g. `nomic-embed-text`). Blank = dependency-free lexical hashing. Offline/misconfigured endpoint degrades back to lexical (never crashes) |
 | `embed_base_url` | `LOOPLAB_EMBED_BASE_URL` | — | Endpoint for embeddings if different from the chat model's (blank = reuse `llm_base_url`) |
-| `memora` | `LOOPLAB_MEMORA` | `true` | **Harmonic memory** (idea import from Memora): index cases/notes by abstraction + cue anchors, consolidate near-duplicates on write, expand retrieval through anchors. On by default (lexical abstractor, zero LLM calls); set `false` to restore the raw-text index |
+| `memora` | `LOOPLAB_MEMORA` | `true` | **Harmonic memory** (idea import from Memora): index cases/notes by abstraction + cue anchors, consolidate near-duplicates on write, expand retrieval through anchors. On by default; the abstractor itself is chosen by `memora_llm` (LLM by default, lexical fallback). Set `false` to restore the raw-text index |
 | `memora_llm` | `LOOPLAB_MEMORA_LLM` | `true` | Write abstractions with the wired chat model (richer than lexical); results are **cached** by content hash and any endpoint failure degrades to lexical. Set `false` to force the deterministic lexical abstractor (zero LLM calls). No-op unless `memora` is on |
 | `memora_cache` | `LOOPLAB_MEMORA_CACHE` | — | JSON path for the LLM-abstraction cache. Blank = derived from `memory_dir` / `knowledge_dir`, else in-memory only. No-op unless `memora_llm` is on |
 | `memora_anchors` | `LOOPLAB_MEMORA_ANCHORS` | `6` | Max cue anchors kept per memory |
