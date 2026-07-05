@@ -1,9 +1,12 @@
 """LLM client + cost accounting (I2/I13, ADR-14/17/11).
 
-`LiteLLMClient` wraps LiteLLM (lazy import — not required for the offline path or
-tests). `CostAccountant` tallies per-call cost with warn/hard-stop thresholds and
-raises `BudgetExceeded` at 100%. Secrets are never stored as values here — the
-client takes a model name and reads the key from the environment via LiteLLM.
+`OpenAICompatibleClient` is the LIVE path — an OpenAI-compatible chat client on the
+openai SDK (httpx transport), whose per-read timeout reliably bounds a stalled stream.
+`LiteLLMClient` wraps LiteLLM (lazy import) as the documented production gateway. The
+openai/httpx imports are declared deps but GUARDED, so the offline engine + replay still
+import this module (via `core.config`) without the live LLM stack. `CostAccountant`
+tallies per-call cost with warn/hard-stop thresholds and raises `BudgetExceeded` at 100%.
+Secrets are never stored as values here — the client reads the key from config/env.
 """
 from __future__ import annotations
 
@@ -13,8 +16,17 @@ import re
 import time
 from typing import Optional
 
-import httpx
-import openai
+# The LIVE transport runs on the openai SDK over an httpx client. Both are declared runtime deps
+# (pyproject `dependencies`), but the import is GUARDED: `core.config` imports `DEFAULT_HEADER_TIMEOUT_S`
+# from this module, so this module backs the whole-package import — an offline/replay/`--no-deps`
+# install must still `import looplab` without the live LLM stack. When absent, the names are None and
+# constructing `OpenAICompatibleClient` raises a clear LLMError (the offline engine never builds one).
+try:
+    import httpx
+    import openai
+except ModuleNotFoundError:  # pragma: no cover - deps are declared; guard is for stripped/offline installs
+    httpx = None   # type: ignore[assignment]
+    openai = None  # type: ignore[assignment]
 
 # Legacy urllib-transport helpers (still imported by a few direct unit tests) — the LIVE path now
 # goes through the openai SDK (see OpenAICompatibleClient._sdk_chat). Kept import-safe until the
@@ -525,20 +537,27 @@ def _sse_chunks(lines, last_progress, killed, idle_limit: float, stall_msg: str,
 
 
 class OpenAICompatibleClient:
-    """Dependency-free OpenAI-compatible chat client (stdlib urllib). Implements the
+    """OpenAI-compatible chat client on the openai SDK (httpx transport). Implements the
     `parse.LLMClient` Protocol, so it drops into the LLM roles like any other backend.
 
     Works against ANY OpenAI-compatible endpoint — Ollama (`/v1`), SGLang, vLLM, or
-    the OpenAI API itself — so the serving backend is a base_url change, not code.
-    Chosen for the live path because it has no install footprint and runs on the same
-    Python 3.14 the engine uses (LiteLLM remains the documented production gateway)."""
+    the OpenAI API itself — so the serving backend is a base_url change, not code. The
+    SDK's per-read httpx timeout is what reliably bounds a stalled mid-stream read (the
+    stdlib-urllib transport this replaced could not interrupt one). LiteLLM remains the
+    documented production gateway (see `LiteLLMClient`)."""
 
     def __init__(self, model: str, base_url: str = "http://localhost:11434/v1",
                  api_key: str = "ollama", temperature: float = 0.7,
                  timeout: float = 180.0, accountant: Optional["CostAccountant"] = None,
                  guided_json: bool = False, reasoning: Optional[dict] = None,
                  stream: bool = True, cache: bool = False,
-                 header_timeout: Optional[float] = None, trust_env: bool = True):
+                 header_timeout: Optional[float] = None, trust_env: bool = False):
+        # The live transport needs the openai SDK + httpx. They are declared deps, but the module
+        # import is guarded (offline/replay import-safety), so fail with a clear, actionable message
+        # here rather than an opaque `NoneType has no attribute 'OpenAI'` if someone stripped them.
+        if openai is None or httpx is None:
+            raise LLMError("the live LLM path needs the 'openai' and 'httpx' packages — "
+                           "`pip install looplab` pulls them in (or `pip install openai httpx`)")
         self.model = model
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key or "x"

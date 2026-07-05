@@ -601,3 +601,30 @@ def test_stream_idle_guard_disabled_passes_through():
     """idle_limit<=0 (tests / plain iterators) just passes events through, no watchdog."""
     from looplab.core.llm import _stream_with_idle_guard
     assert list(_stream_with_idle_guard(iter([1, 2, 3]), idle_limit=0)) == [1, 2, 3]
+
+
+def test_module_import_safe_without_live_deps_and_guard_raises(monkeypatch):
+    """Regression: the openai-SDK migration added a top-level `import openai`/`import httpx` to
+    core.llm, but core.config imports a constant from core.llm — so a MISSING openai broke the
+    WHOLE-package import (offline engine, replay, config) with a bare ModuleNotFoundError. The import
+    is now guarded: the module loads with the names None, and constructing the live client fails with
+    a clear LLMError instead of an opaque `NoneType has no attribute 'OpenAI'`."""
+    import looplab.core.config as _cfg  # must import even in a stripped env  # noqa: F401
+    import looplab.core.llm as llm
+    monkeypatch.setattr(llm, "openai", None)
+    monkeypatch.setattr(llm, "httpx", None)
+    with pytest.raises(llm.LLMError, match="openai"):
+        llm.OpenAICompatibleClient("m", base_url="http://x/v1")
+
+
+def test_openai_and_httpx_are_core_dependencies():
+    """Regression guard: openai + httpx must be DECLARED runtime deps (not dev-only / undeclared) —
+    the live transport imports them and core.config transitively pulls core.llm at import time, so a
+    plain `pip install looplab` that omitted them shipped a package that crashed on import."""
+    import tomllib
+    from pathlib import Path
+    root = Path(__file__).resolve().parents[1]
+    with open(root / "pyproject.toml", "rb") as fh:
+        deps = tomllib.load(fh)["project"]["dependencies"]
+    names = {d.split(">=")[0].split("==")[0].split("[")[0].strip().lower() for d in deps}
+    assert {"openai", "httpx"} <= names, f"openai/httpx must be core deps; got {sorted(names)}"
