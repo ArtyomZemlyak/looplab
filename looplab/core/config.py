@@ -523,8 +523,8 @@ class Settings(BaseSettings):
     # the plan phase, EACH step, and the single-session fallback. Unlike the global agent_* limits
     # (0 = unlimited, meant for read-only agents), the developer always gets a FINITE ceiling so a
     # model that never emits `done` fails cleanly with the code it wrote so far, instead of looping.
-    developer_session_max_turns: int = 30
-    developer_session_time_budget_s: float = 900.0   # 15 min wall-clock per developer session
+    developer_session_max_turns: int = 500
+    developer_session_time_budget_s: float = 1200.0  # 20 min wall-clock per developer session
     # Observability (ADR-17): capture each LLM call's full prompt + completion into the active
     # span (spans.jsonl) so the UI can show exactly what the model read and wrote per node.
     # Diagnostics only — `replay.fold` never reads spans. Default on for local single-user; set

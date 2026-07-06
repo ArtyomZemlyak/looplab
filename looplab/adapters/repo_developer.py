@@ -503,7 +503,7 @@ class LLMRepoDeveloper:
     def __init__(self, client: LLMClient, task, *, parser: str = "tool_call",
                  loop_opts: Optional[dict] = None, plan_decompose: bool = True,
                  plan_min_steps: int = 2, plan_max_steps: int = 8,
-                 session_max_turns: int = 30, session_time_budget_s: float = 900.0):
+                 session_max_turns: int = 500, session_time_budget_s: float = 1200.0):
         self.client = client
         self.task = task
         self.parser = parser
@@ -659,9 +659,9 @@ class LLMRepoDeveloper:
         it has written, instead of the 10k-call / multi-hour runaway a big task produced."""
         opts = dict(getattr(self, "loop_opts", {}) or {})
         opts["max_turns"] = int(max_turns if max_turns is not None
-                                else getattr(self, "_session_max_turns", 30))
+                                else getattr(self, "_session_max_turns", 500))
         opts["time_budget_s"] = float(time_budget if time_budget is not None
-                                      else getattr(self, "_session_time_budget_s", 900.0))
+                                      else getattr(self, "_session_time_budget_s", 1200.0))
         return opts
 
     def _plan_emit_spec(self) -> dict:
