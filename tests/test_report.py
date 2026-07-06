@@ -164,7 +164,10 @@ def test_command_to_action_mapping():
     assert _action_to_control(_Action(action="confirm", node_id=5), s)["type"] == "force_confirm"
     assert _action_to_control(_Action(action="fork", node_id=4), s)["data"] == {"from_node_id": 4}
     assert _action_to_control(_Action(action="approve"), s)["data"] == {"node_id": 9}  # defaults to best
-    assert _action_to_control(_Action(action="stop"), s)["type"] == "run_abort"
+    # 3-verb operator control: stop = freeze (pause), finalize = wrap up (run_abort), resume
+    assert _action_to_control(_Action(action="stop"), s)["type"] == "pause"
+    assert _action_to_control(_Action(action="finalize"), s)["type"] == "run_abort"
+    assert _action_to_control(_Action(action="resume"), s)["type"] == "resume"
     assert _action_to_control(_Action(action="advise"), s) is None  # not actionable -> chat reply
     # guidance steers the search via a hint (not a forced node): text carries the researcher directive
     h = _action_to_control(_Action(action="hint", text="use log1p targets + domain features"), s)

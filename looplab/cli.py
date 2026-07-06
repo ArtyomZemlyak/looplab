@@ -21,8 +21,8 @@ from looplab import __version__
 from looplab.core.atomicio import atomic_write_text
 from looplab.core.config import Settings
 from looplab.events.eventstore import EventStore
-from looplab.events.types import (EV_APPROVAL_GRANTED, EV_RUN_FINISHED, EV_RUN_REOPENED,
-                                  EV_SPEC_APPROVED)
+from looplab.events.types import (EV_APPROVAL_GRANTED, EV_PAUSE, EV_RESUME, EV_RUN_ABORT,
+                                  EV_RUN_FINISHED, EV_RUN_REOPENED, EV_SPEC_APPROVED)
 from looplab.engine.options import EngineOptions
 from looplab.engine.orchestrator import Engine
 from looplab.search.policy import make_policy
@@ -576,12 +576,72 @@ def resume(
     if max_nodes is not None:
         settings.max_nodes = max_nodes
     eng = _engine(run_dir, task, settings, crash_after=None)
+    # Continuing a STOPPED run: a `stop` (paused) or natural finish re-breaks on the first iteration
+    # and does no work unless we LIFT it — so append the universal `resume` event (fold clears
+    # paused + finished). BUT a pending FINALIZE (stop_requested set, not yet finished — e.g. the UI
+    # appended run_abort then spawned us) must be RESPECTED: don't lift it, let the loop fold
+    # stop_requested -> run_finished -> the wrap-up. This is why the UI's finalize path can spawn the
+    # same `resume` command and still finalize.
+    prior = fold(eng.store.read_all())
+    if prior.stop_requested and not prior.finished:
+        typer.echo("run has a pending finalize — wrapping it up (report / cross-run lessons / cost)")
+    elif prior.paused or prior.finished:
+        typer.echo(f"run was {'finished' if prior.finished else 'stopped'} — resuming to continue "
+                   "with the current settings")
+        eng.store.append(EV_RESUME, {})
     with _engine_singleton(run_dir) as ok:
         if not ok:
             typer.echo(f"engine already running on {run_dir} — not resuming a second loop")
             return
         state = _run_engine_guarded(eng)
     _print_result(state)
+
+
+@app.command()
+def stop(run_dir: Path = typer.Argument(..., help="Run directory to STOP (freeze, no finalize).")):
+    """STOP a run: freeze it WITHOUT finalizing — no end-of-run report/lessons/cost roll-up. A running
+    engine breaks on its next iteration; the run is resumable (`looplab resume`) or you can `finalize`
+    it later to wrap it up."""
+    if not (run_dir / "events.jsonl").exists():
+        typer.echo(f"no run found at {run_dir}")
+        raise typer.Exit(2)
+    EventStore(run_dir / "events.jsonl").append(EV_PAUSE, {})
+    typer.echo(f"stopped {run_dir} (frozen, not finalized) — `looplab resume` to continue, "
+               "`looplab finalize` to wrap it up")
+
+
+@app.command()
+def finalize(run_dir: Path = typer.Argument(..., help="Run directory to FINALIZE (stop + wrap up).")):
+    """FINALIZE a run: stop it AND run the end-of-run wrap-up (report, cross-run lessons/case, cost
+    roll-up, tree.html). Works whether the run is live or already `stop`ped. Idempotent."""
+    if not (run_dir / "events.jsonl").exists():
+        typer.echo(f"no run found at {run_dir}")
+        raise typer.Exit(2)
+    store = EventStore(run_dir / "events.jsonl")
+    store.append(EV_RUN_ABORT, {"reason": "finalized"})
+    # If no engine is driving the run, re-enter the loop ourselves so the wrap-up actually runs: the
+    # loop folds, sees stop_requested, appends run_finished and finalizes (report/lessons/…), then exits.
+    if fold(store.read_all()).finished:
+        typer.echo(f"finalized {run_dir}")
+        return
+    snap = run_dir / "task.snapshot.json"
+    if not snap.exists():
+        typer.echo(f"marked {run_dir} for finalize; a running engine will wrap it up "
+                   "(no task.snapshot.json here to drive the wrap-up directly)")
+        return
+    settings = Settings()
+    csnap = run_dir / "config.snapshot.json"
+    if csnap.exists():
+        data = json.loads(csnap.read_text(encoding="utf-8"))
+        data.pop("llm_api_key", None)
+        settings = Settings(**data)
+    eng = _engine(run_dir, _load_task(snap), settings, crash_after=None)
+    with _engine_singleton(run_dir) as ok:
+        if not ok:
+            typer.echo(f"engine already running on {run_dir} — it will finalize on its next iteration")
+            return
+        _run_engine_guarded(eng)
+    typer.echo(f"finalized {run_dir}")
 
 
 @app.command()

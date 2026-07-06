@@ -21,7 +21,8 @@ const NARR = {
   data_leakage: (d) => `leakage scan: ${d.leak ? 'LEAK DETECTED' : 'clean'}`,
   approval_requested: (d) => `awaiting approval of #${d.node_id}`,
   approval_granted: (d) => `approved #${d.node_id}`,
-  pause: () => 'paused by operator', resume: () => 'resumed', run_abort: () => 'abort requested',
+  pause: () => 'stopped (frozen — not finalized)', resume: () => 'resumed', run_abort: () => 'finalize requested (wrap-up)',
+  run_reopened: () => 'reopened', run_finished: (d) => d?.reason === 'aborted' ? 'finalized' : 'finished',
   node_abort: (d) => `stop requested for #${d.node_id}`,
   budget_extend: (d) => {
     const bits = []
@@ -436,10 +437,12 @@ export default function Dock({ runId, live, liveSeq, viewSeq, setViewSeq, onFocu
   // resume button instead of the running-run's pause/stop (which would do nothing useful).
   const stalled = !finished && !paused && live?.engine_running === false
   const mode = finished ? 'finished' : stalled ? 'stalled' : paused ? 'paused' : 'running'
-  const onPause = () => CONTROL.pause(runId).then(() => onToast?.('paused')).catch(e => onToast?.('pause failed: ' + e.message))
-  const onResume = () => CONTROL.resume(runId).then(() => onToast?.('resumed')).catch(e => onToast?.('resume failed: ' + e.message))
-  const onStop = () => CONTROL.abort(runId).then(() => onToast?.('stop requested')).catch(e => onToast?.('stop failed: ' + e.message))
-  const onReopen = async () => { try { await CONTROL.reopen(runId); await resumeRun(runId); onToast?.('reopened & resumed') } catch (e) { onToast?.('reopen failed: ' + e.message) } }
+  // Three operator controls: STOP freezes (no wrap-up), FINALIZE stops AND wraps up (report/lessons/
+  // cost), RESUME continues from any stopped state. finalize/resume also (re)spawn the engine if it
+  // already exited (the /resume endpoint no-ops when one is alive), so a stopped run actually acts.
+  const onStop = () => CONTROL.stop(runId).then(() => onToast?.('stopped — frozen, not finalized')).catch(e => onToast?.('stop failed: ' + e.message))
+  const onFinalize = async () => { try { await CONTROL.finalize(runId); await resumeRun(runId); onToast?.('finalizing — wrapping up') } catch (e) { onToast?.('finalize failed: ' + e.message) } }
+  const onResume = async () => { try { await CONTROL.resume(runId); await resumeRun(runId); onToast?.('resumed') } catch (e) { onToast?.('resume failed: ' + e.message) } }
   const onReplay = async () => {
     if (!window.confirm('Reset this run? Wipes all events & nodes and restarts from scratch.')) return
     try { await resetRun(runId); onToast?.('replaying from scratch') } catch (e) { onToast?.('reset failed: ' + e.message) }
@@ -500,20 +503,17 @@ export default function Dock({ runId, live, liveSeq, viewSeq, setViewSeq, onFocu
         </div>
         <div className="dock-foot">
           <span className="muted" style={{ fontSize: 11, flex: 1 }}>
-            Steer this run from the assistant bar below — say what to do, or use <code className="cmd-hint">/pause</code> · <code className="cmd-hint">/stop</code> · <code className="cmd-hint">/approve #id</code>.
+            Steer this run from the assistant bar below — say what to do, or use <code className="cmd-hint">/stop</code> · <code className="cmd-hint">/finalize</code> · <code className="cmd-hint">/resume</code> · <code className="cmd-hint">/approve #id</code>.
           </span>
           <div className="transport">
             {mode === 'running' && <>
-              <button className="btn sm" title="pause the run" onClick={onPause}><OpIcon name="pause" size={13} /></button>
-              <button className="btn sm danger" title="stop the run" onClick={onStop}><OpIcon name="stop" size={13} /></button></>}
-            {mode === 'paused' && <>
-              <button className="btn sm primary" title="resume the run" onClick={onResume}><OpIcon name="play" size={13} /></button>
-              <button className="btn sm danger" title="stop the run" onClick={onStop}><OpIcon name="stop" size={13} /></button></>}
-            {mode === 'stalled' && <>
-              <button className="btn sm primary" title="engine stopped — resume to keep going" onClick={onReopen}><OpIcon name="play" size={13} /></button>
-              <button className="btn sm danger" title="give up — mark the run finished" onClick={onStop}><OpIcon name="stop" size={13} /></button></>}
+              <button className="btn sm" title="Stop — freeze the run (no wrap-up; resume or finalize later)" onClick={onStop}><OpIcon name="pause" size={13} /></button>
+              <button className="btn sm danger" title="Finalize — stop AND wrap up (report, cross-run lessons, cost)" onClick={onFinalize}><OpIcon name="stop" size={13} /></button></>}
+            {(mode === 'paused' || mode === 'stalled') && <>
+              <button className="btn sm primary" title="Resume — continue the run" onClick={onResume}><OpIcon name="play" size={13} /></button>
+              <button className="btn sm danger" title="Finalize — wrap it up now (report, cross-run lessons, cost)" onClick={onFinalize}><OpIcon name="stop" size={13} /></button></>}
             {mode === 'finished' && <>
-              <button className="btn sm primary" title="reopen & resume" onClick={onReopen}><OpIcon name="play" size={13} /></button>
+              <button className="btn sm primary" title="Resume — reopen & continue" onClick={onResume}><OpIcon name="play" size={13} /></button>
               <button className="btn sm" title="reset & restart from scratch" onClick={onReplay}><OpIcon name="replay" size={13} /></button></>}
           </div>
         </div>

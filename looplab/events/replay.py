@@ -283,24 +283,28 @@ def fold(events: Iterable[Event]) -> RunState:
         elif t == EV_RUN_FINISHED:
             st.finished = True
             st.stop_reason = d.get("reason")
-        elif t == EV_RUN_REOPENED:
-            # An operator added an experiment to a FINISHED run and wants to continue it: clear the
-            # terminal flags so re-entering the loop (resume) processes the new node(s) and then
-            # re-finishes. Deterministic under replay — a later run_finished simply sets it again.
-            # Also clear a lingering ABORT: a run stopped from the UI carries stop_requested, and the
-            # loop re-aborts on the next resume before doing any work — so reopening must lift it too,
-            # else a UI-stopped run can never be continued with injected experiments.
+        elif t in (EV_RESUME, EV_RUN_REOPENED):
+            # RESUME (the one operator "continue"): lift EVERY stopped state so re-entering the loop
+            # keeps going — whether the run was PAUSED (stop, no finalize), ABORTED (finalize →
+            # stop_requested → run_finished), or naturally FINISHED (budget exhausted, then reopened
+            # with more budget). Clears paused + finished + stop_requested + stop_reason. Deterministic
+            # under replay — a later run_finished simply sets `finished` again. EV_RUN_REOPENED is the
+            # legacy alias of RESUME (kept so old logs + the UI's reopen path fold identically); the two
+            # 3-verb operator controls are `stop` (EV_PAUSE) and `finalize` (EV_RUN_ABORT).
+            st.paused = False
             st.finished = False
             st.stop_reason = None
             st.stop_requested = None
         # --- live operator control events (UI intervention). Intent only; the engine reads
         # these and writes the matching domain effect. Deterministic under replay. ---
         elif t == EV_RUN_ABORT:
+            # FINALIZE: the loop turns stop_requested into a run_finished (which runs the end-of-run
+            # finalization — report/lessons/case/cost). A bare `stop` uses EV_PAUSE instead (no finalize).
             st.stop_requested = d.get("reason", "operator")
         elif t == EV_PAUSE:
+            # STOP: freeze WITHOUT finalizing (finalize.py gates the wrap-up on `finished`, which a pause
+            # never sets). A later `finalize` (EV_RUN_ABORT) can still wrap it up; RESUME lifts it.
             st.paused = True
-        elif t == EV_RESUME:
-            st.paused = False
         elif t == EV_NODE_ABORT:
             nid = d.get("node_id")
             if nid is not None and nid not in st.aborted_nodes:

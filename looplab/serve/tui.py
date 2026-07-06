@@ -283,7 +283,9 @@ def slug(s: str) -> str:
 # Actions whose effect on a FINISHED/zombie run only takes hold once the engine is reopened+resumed —
 # the Python twin of util.js NEEDS_RESUME, so the TUI's apply path matches the web Dock's exactly.
 _NEEDS_RESUME = {"fork", "inject_node", "force_confirm", "force_ablate", "deep_research",
-                 "set_strategy", "budget_extend", "resume"}
+                 "set_strategy", "budget_extend", "resume", "run_abort"}
+# run_abort = FINALIZE: on a run whose engine already exited (stopped/finished), the wrap-up
+# (report/lessons/cost) only runs once the engine is (re)spawned to fold stop_requested -> run_finished.
 
 
 def action_needs_engine(action: dict) -> bool:
@@ -742,11 +744,19 @@ class Tui:
                 self._pause("")                              # let them read it before the live redraw
                 continue
             # Quick controls map to the same /control endpoint the web buttons use — deterministic, no LLM.
-            if low in ("pause", "resume", "stop"):
-                if low == "stop" and not self._confirm("Stop this run? (it aborts the loop)"):
+            # 3 verbs: stop = freeze (no wrap-up, reversible), finalize = stop + wrap-up (terminal),
+            # resume = continue from any stopped state. `pause` is a back-compat alias of `stop`.
+            if low in ("stop", "pause", "finalize", "resume"):
+                if low == "finalize" and not self._confirm(
+                        "Finalize this run? (stops AND writes the final report / cross-run lessons / cost)"):
                     continue
-                self._control(run_id, "run_abort" if low == "stop" else low,
-                              {"reason": "tui"} if low == "stop" else {})
+                _ev = {"stop": "pause", "pause": "pause", "finalize": "run_abort", "resume": "resume"}[low]
+                self._control(run_id, _ev, {"reason": "finalized"} if _ev == "run_abort" else {})
+                if low in ("finalize", "resume"):      # (re)spawn the engine so a stopped run actually acts
+                    try:
+                        self.api.post(f"/api/runs/{run_id}/resume", {})
+                    except Exception:  # noqa: BLE001 — a running engine no-ops the spawn; ignore
+                        pass
                 continue
             # Anything else: talk to the boss. It may just reply, or propose a plan we confirm then run.
             user_turn = {"role": "user", "content": raw}
@@ -764,7 +774,7 @@ class Tui:
         self._render_chat(history)
         live = "[green]● live[/green] · " if self._interactive() else ""
         self.console.print(f"[dim]{live}Chat with the boss · [bold]s[/bold]tatus · "
-                           "[bold]pause/resume/stop[/bold] · [bold]?[/bold] help · "
+                           "[bold]stop/finalize/resume[/bold] · [bold]?[/bold] help · "
                            "[bold]back[/bold] · [bold]q[/bold]uit[/dim]")
 
     def _render_chat(self, history: list, tail: int = 8) -> None:

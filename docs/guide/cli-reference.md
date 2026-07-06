@@ -6,7 +6,9 @@ Every command is available as `looplab <command>` (after `pip install -e .`) or,
 ```text
 looplab init            Scaffold a documented looplab.yaml config template
 looplab run             Start (or continue) a run from a config/task file or --goal/--kind
-looplab resume          Resume a crashed/incomplete run by replay
+looplab resume          Resume/continue a run (crash, stopped, or finished) by replay
+looplab stop            Stop a run: freeze it, NO wrap-up (resumable)
+looplab finalize        Finalize a run: stop AND wrap up (report/lessons/cost)
 looplab inspect         Show the resolved config + best result
 looplab replay          Pure fold of the event log → state (read-only)
 looplab smoke           Ping the configured LLM endpoint (self-test)

@@ -32,7 +32,7 @@ from pydantic import BaseModel  # noqa: E402
 
 
 class _Action(BaseModel):
-    action: str = "advise"   # advise|confirm|ablate|fork|promote|hint|note|strategy|budget|deep_research|inject|import|approve|ratify|pause|resume|stop
+    action: str = "advise"   # advise|confirm|ablate|fork|promote|hint|note|strategy|budget|deep_research|inject|import|approve|ratify|stop|finalize|resume
     node_id: Optional[int] = None
     text: str = ""           # hint text / note text / free rationale
     operator: str = "improve"
@@ -105,9 +105,15 @@ def _action_to_control(c: "_Action", st) -> Optional[dict]:
         return {"type": EV_APPROVAL_GRANTED, "data": {"node_id": node}, "label": f"Approve #{node}"}
     if a == "ratify":
         return {"type": EV_SPEC_APPROVED, "data": {}, "label": "Ratify the eval spec"}
-    if a in ("pause", "resume", "stop"):
-        t = {"pause": EV_PAUSE, "resume": EV_RESUME, "stop": EV_RUN_ABORT}[a]
-        return {"type": t, "data": ({"reason": "ui"} if a == "stop" else {}), "label": a.capitalize() + " the run"}
+    if a in ("stop", "pause", "finalize", "abort", "resume"):
+        # 3 verbs: stop = freeze (EV_PAUSE, no wrap-up); finalize = stop + wrap-up (EV_RUN_ABORT →
+        # run_finished → report/lessons/cost); resume = continue (EV_RESUME). pause≡stop, abort≡finalize
+        # (back-compat aliases the LLM might still emit).
+        t = {"stop": EV_PAUSE, "pause": EV_PAUSE, "finalize": EV_RUN_ABORT,
+             "abort": EV_RUN_ABORT, "resume": EV_RESUME}[a]
+        return {"type": t, "data": ({"reason": "finalized"} if t == EV_RUN_ABORT else {}),
+                "label": ("Resume" if t == EV_RESUME else
+                          "Finalize (wrap up)" if t == EV_RUN_ABORT else "Stop (freeze)") + " the run"}
     return None
 
 

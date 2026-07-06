@@ -385,9 +385,16 @@ export function phaseLabel(state) {
 }
 
 export const CONTROL = {
-  pause: (rid) => post(`/api/runs/${rid}/control`, { type: 'pause', data: {} }),
+  // Three operator controls (see docs/guide/concepts.md → "Stopping a run"):
+  //   stop     — freeze the run, NO finalization (event: pause). Resumable; finalize later if wanted.
+  //   finalize — stop AND wrap up (report / cross-run lessons+case / cost roll-up). event: run_abort.
+  //   resume   — continue from ANY stopped state (pause / finalize / natural finish). event: resume.
+  stop: (rid) => post(`/api/runs/${rid}/control`, { type: 'pause', data: {} }),
+  finalize: (rid) => post(`/api/runs/${rid}/control`, { type: 'run_abort', data: { reason: 'finalized' } }),
   resume: (rid) => post(`/api/runs/${rid}/control`, { type: 'resume', data: {} }),
-  abort: (rid) => post(`/api/runs/${rid}/control`, { type: 'run_abort', data: { reason: 'ui' } }),
+  // back-compat aliases (older callers / NL control): pause≡stop, abort≡finalize, reopen≡resume.
+  pause: (rid) => post(`/api/runs/${rid}/control`, { type: 'pause', data: {} }),
+  abort: (rid) => post(`/api/runs/${rid}/control`, { type: 'run_abort', data: { reason: 'finalized' } }),
   nodeAbort: (rid, id) => post(`/api/runs/${rid}/control`, { type: 'node_abort', data: { node_id: id, reason: 'ui' } }),
   approve: (rid, id) => post(`/api/runs/${rid}/control`, { type: 'approval_granted', data: { node_id: id } }),
   ratify: (rid) => post(`/api/runs/${rid}/control`, { type: 'spec_approved', data: {} }),
@@ -429,7 +436,10 @@ export const CONTROL = {
 // processes them (mirrors InjectModal's reopen→inject→resume). These verbs need the loop running.
 // `budget_extend` is here too: raising the node budget on a finished run is pointless unless the run
 // reopens and keeps going (the agentic boss pairs it with inject/hint steps).
-const NEEDS_RESUME = new Set(['fork', 'inject_node', 'force_confirm', 'force_ablate', 'deep_research', 'set_strategy', 'budget_extend', 'resume'])
+// Actions whose effect only takes hold once the engine is (re)spawned on a stopped/finished run.
+// run_abort = FINALIZE: the wrap-up (report/lessons/cost) needs the engine to fold stop_requested
+// into run_finished; resume needs it to keep going. (Twin of tui.py _NEEDS_RESUME.)
+const NEEDS_RESUME = new Set(['fork', 'inject_node', 'force_confirm', 'force_ablate', 'deep_research', 'set_strategy', 'budget_extend', 'resume', 'run_abort'])
 
 // Does applying this action on a FINISHED run require reopening + resuming the engine? (Used to batch a
 // multi-action plan: append every step's intent, then reopen+resume ONCE if any step needs the loop.)

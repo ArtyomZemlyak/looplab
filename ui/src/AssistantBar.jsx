@@ -30,10 +30,11 @@ const sleep = (ms) => new Promise(r => setTimeout(r, ms))
 
 // Run-control commands safe to fire directly (no model). `arg:true` needs a node id (e.g. /approve #12).
 const DIRECT = {
-  stop:    { run: (rid) => CONTROL.abort(rid),   ok: '⏹ run stopped' },
-  abort:   { run: (rid) => CONTROL.abort(rid),   ok: '⏹ run aborted' },
-  pause:   { run: (rid) => CONTROL.pause(rid),   ok: '⏸ run paused' },
-  resume:  { run: (rid) => CONTROL.resume(rid),  ok: '▶ run resumed' },
+  stop:     { run: (rid) => CONTROL.stop(rid),     ok: '⏸ run stopped (frozen — not finalized)' },
+  finalize: { run: (rid) => CONTROL.finalize(rid), ok: '⏹ run finalizing (wrapping up)' },
+  resume:   { run: (rid) => CONTROL.resume(rid),   ok: '▶ run resumed' },
+  pause:    { run: (rid) => CONTROL.stop(rid),     ok: '⏸ run stopped (frozen)' },     // alias of /stop
+  abort:    { run: (rid) => CONTROL.finalize(rid), ok: '⏹ run finalizing' },           // alias of /finalize
   ratify:  { run: (rid) => CONTROL.ratify(rid),  ok: '✓ eval spec ratified' },
   approve: { arg: true, run: (rid, id) => CONTROL.approve(rid, id), ok: (id) => `✓ approved #${id}` },
 }
@@ -52,10 +53,11 @@ function parseDirect(t) {
 const firstLine = (s) => (s || '').replace(/[#*`>_-]/g, '').split('\n').map(l => l.trim()).find(Boolean) || ''
 
 // U5 · cheap pre-router: catch a few natural-language control phrases WITHOUT paying for an LLM
-// round-trip. Fires ONLY when the phrase names the run ("stop the run", "pause run") — a bare
-// "stop" or "continue" is everyday chat directed at the assistant, and silently firing an
-// irreversible run_abort (or resuming a paused run) on it is far worse than one LLM round-trip.
-const _NL_CONTROL = { stop: 'abort', abort: 'abort', halt: 'abort', pause: 'pause',
+// round-trip. Fires ONLY when the phrase names the run ("stop the run", "finalize run") — a bare
+// "stop" or "continue" is everyday chat directed at the assistant. `stop` is now a reversible FREEZE
+// (safe); the terminal wrap-up is `finalize` (maps everyday "abort/halt/wrap up" onto it).
+const _NL_CONTROL = { stop: 'stop', freeze: 'stop', pause: 'stop',
+  finalize: 'finalize', abort: 'finalize', halt: 'finalize', wrapup: 'finalize',
   resume: 'resume', continue: 'resume', unpause: 'resume' }
 function preRoute(t) {
   const cleaned = t.toLowerCase().replace(/^(please\s+|can you\s+)/, '').replace(/[.!]+$/, '').trim()

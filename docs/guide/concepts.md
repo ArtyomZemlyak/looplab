@@ -58,6 +58,24 @@ runs/<name>/
 
 Because the task and config are snapshotted, a run can be resumed from its directory alone.
 
+## Stopping & resuming a run — three verbs
+
+Operator control (the UI transport buttons, the TUI `stop/finalize/resume`, the `looplab` commands,
+and the boss chat) is exactly **three verbs**, all appended as events to the log:
+
+| Verb | Event | Effect | Wrap-up? |
+|---|---|---|---|
+| **stop** | `pause` | Freeze the run where it is. Reversible. | **No** — no report/lessons/cost |
+| **finalize** | `run_abort` → `run_finished` | Stop **and** run the end-of-run wrap-up | **Yes** — report, cross-run lessons + KB case, cost roll-up, tree.html |
+| **resume** | `resume` | Continue from any stopped state (stopped / finalized / naturally finished) | — |
+
+The one real difference is **finalization**: the end-of-run wrap-up (`finalize.py`) is gated on the
+run being *finished*, and only **finalize** sets that. **stop** is a cheap freeze — so you can stop to
+look at something and `resume` with no premature/duplicate lessons, or `finalize` later to wrap it up
+(finalize works on a live *or* an already-stopped run). `resume` lifts every stopped state, so it also
+"reopens" a run that finished naturally to continue it with more budget. (Under the hood the fold still
+understands the legacy `run_reopened` alias of `resume` for old logs.)
+
 ## Search policies
 
 The policy decides which node to expand next. It's pluggable (`make_policy`) and swapping it changes
