@@ -24,7 +24,7 @@ from looplab.tools.agents_md import generate_agents_md
 from looplab.events.eventstore import EventStore
 from looplab.events.types import (
     EV_AGENT_DECISION, EV_AGENT_VALIDATED, EV_APPROVAL_REQUESTED,
-    EV_DATA_LEAKAGE,
+    EV_COVERAGE_SNAPSHOT, EV_DATA_LEAKAGE,
     EV_DATA_PROFILED, EV_DATA_PROVENANCE, EV_DEPS_INSTALLED,
     EV_DRIFT_UNAVAILABLE, EV_FORK_DONE, EV_HINT, EV_HOST_GRADING,
     EV_FORESIGHT_SELECTED,
@@ -53,6 +53,7 @@ from looplab.engine.triage import (_MAX_DEP_ROUNDS, _MECHANICAL_MARKERS,  # noqa
                                    _normalize_error_sig, _rule_triage, _shallow_fingerprint)
 from looplab.core.llm import BudgetExceeded
 from looplab.core.models import Idea, NodeStatus, RunState
+from looplab.search.coverage import coverage_signal
 from looplab.search.operators import merge_idea
 from looplab.search.policy import SearchPolicy, available_policies, make_policy
 from looplab.agents.strategist import (
@@ -181,6 +182,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin):
         digest_char_cap: int = _UNSET,            # M5: digest prompt budget; 0 = auto-scale with run size
         research_verify: bool = _UNSET,        # D8: verify memo claims against cited evidence
         workdir_audit: bool = _UNSET,          # 4.4: flag unexpected writes in the eval workdir
+        coverage_context: bool = _UNSET,       # narrowing signal: coverage_snapshot at strategist cadence
         lesson_abstractor=None,              # Memora synergy: harmonic recall over cross-run lessons
     ):
         # Resolve each pure-config knob ONCE, up front — explicit kwarg > options field > default —
@@ -203,6 +205,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin):
         memory_dir = _opt(memory_dir, "memory_dir")
         require_approval = _opt(require_approval, "require_approval")
         archive_resolution = _opt(archive_resolution, "archive_resolution")
+        coverage_context = _opt(coverage_context, "coverage_context")
         eval_trust_mode = _opt(eval_trust_mode, "eval_trust_mode")
         trust_mode = _opt(trust_mode, "trust_mode")
         docker_image = _opt(docker_image, "docker_image")
@@ -360,6 +363,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin):
             pass
         self._research_verify = bool(research_verify)
         self._workdir_audit = bool(workdir_audit)
+        self._coverage_context = bool(coverage_context)
         # Memora synergy: the SAME abstractor Memora uses for the case/KB index, applied to the
         # cross-run LESSONS tier so lesson retrieval gains anchor-expansion (harmonic recall)
         # instead of fingerprint-Jaccard alone. None (memora off) => the legacy Jaccard-only path.
@@ -848,6 +852,12 @@ class Engine(ConfirmPhaseMixin, AblationMixin):
         return False
 
     def _run_cadences(self, state: RunState) -> RunState:
+        # Breadth read-model: record the run's narrowing curve at the strategist cadence BEFORE the
+        # Strategist decides, so the same snapshot both (a) feeds the meta-controller's decision
+        # context and (b) lands in the log for the UI / historical-replay measurement. Audit-only,
+        # replay-safe (at_node gate); no-op when coverage_context is off. See search/coverage.py.
+        state = self._maybe_snapshot_coverage(state)
+
         # A7 Strategist: adapt the search machinery (policy/operators/fidelity/Developer) before
         # the policy proposes the next actions. No-op when strategist is off (== today).
         state = self._maybe_consult_strategist(state)
@@ -998,6 +1008,8 @@ class Engine(ConfirmPhaseMixin, AblationMixin):
             available_policies=available_policies(),
             available_developers=self._available_developers(),
             defaults=defaults,
+            coverage=(coverage_signal(state, resolution=self.archive_resolution)
+                      if self._coverage_context else {}),
         )
 
     def _should_consult(self, state: RunState) -> bool:
@@ -1105,6 +1117,25 @@ class Engine(ConfirmPhaseMixin, AblationMixin):
                 self._developer_name = dev
             except Exception:  # noqa: BLE001 — a bad backend swap must never abort the run
                 pass
+
+    @staticmethod
+    def _already_covered_at(state: RunState, n: int) -> bool:
+        return any((c or {}).get("at_node") == n for c in state.coverage_snapshots)
+
+    def _maybe_snapshot_coverage(self, state: RunState) -> RunState:
+        """Record a `coverage_snapshot` (breadth read-model) at the strategist cadence, then re-fold.
+        Recorded even when NO Strategist is wired, so the run's narrowing curve is always queryable
+        over the log / replayable historically (fold -> coverage_signal). Audit-only — it never
+        affects node selection; folded only so the at_node gate makes a resume idempotent (each
+        node-count decision point is reached once across the run's lifetime). No-op when
+        coverage_context is off, off-cadence, mid-eval, or already snapshotted at this node-count."""
+        n = len(state.nodes)
+        if (not self._coverage_context or not self._should_consult(state)
+                or self._already_covered_at(state, n)):
+            return state
+        self.store.append(EV_COVERAGE_SNAPSHOT, {
+            "at_node": n, **coverage_signal(state, resolution=self.archive_resolution)})
+        return fold(self.store.read_all())
 
     def _maybe_consult_strategist(self, state: RunState) -> RunState:
         """Operator/boss pin first (HITL parity), then the bounded-cadence Strategist consult.

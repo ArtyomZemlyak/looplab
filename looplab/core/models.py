@@ -249,6 +249,10 @@ class RunState(BaseModel):
     awaiting_approval: bool = False       # HITL: approval requested, not yet granted (I21)
     approved: bool = False                # HITL: a human approved the result (I21)
     archive: Optional[dict] = None        # diversity-archive summary at run end (I22)
+    # Breadth read-model recorded at the strategist cadence: the run's narrowing curve (themes,
+    # niches, theme entropy, dominant-theme fraction). Audit-only — never affects selection; each
+    # entry carries `at_node` so the emission gate is idempotent on resume. See search/coverage.py.
+    coverage_snapshots: list[dict] = Field(default_factory=list)
     # RepoTask onboarding (Phase 3, ADR-7): the agent proposes a trusted eval spec + metric
     # adapter; a human ratifies it once; then the loop trusts it.
     proposed_spec: Optional[dict] = None  # {eval_spec, adapter_files, goal} from the agent

@@ -144,7 +144,13 @@ untrusted tier.
 
 - **Strategist** (`strategist_backend`, default `llm`) — an optional meta-controller that adapts the
   search policy, operator mix, and fidelity per situation. Every choice it makes is also a direct
-  config knob, so you can run fully static (`off`).
+  config knob, so you can run fully static (`off`). At its consult cadence it reads a **coverage
+  read-model** (`coverage_context`, on by default): a deterministic breadth summary of the run so
+  far — distinct themes and parameter-niches, the theme entropy, and the dominant-theme fraction —
+  recorded as a `coverage_snapshot` audit event (the run's *narrowing curve*). This is context, not
+  a decision: it gives the controller eyes on whether the search is broadening or collapsing onto a
+  single line of attack, so breadth can be a deliberate signal rather than only a reaction to metric
+  stagnation.
 - **Unified agent** (`unified_agent`, on by default) — one LLM identity plays Researcher +
   Developer (+ Strategist) across stages, choosing its model/toolset per stage and driving the next
   macro action within a *pure legal-action gate* that keeps pipeline discipline. Set

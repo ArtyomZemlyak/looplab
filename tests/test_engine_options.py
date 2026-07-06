@@ -97,6 +97,7 @@ ATTR_BY_FIELD = {
     "novelty_semantic_threshold": "_novelty_semantic_threshold",
     "research_verify": "_research_verify",
     "workdir_audit": "_workdir_audit",
+    "coverage_context": "_coverage_context",
 }
 
 

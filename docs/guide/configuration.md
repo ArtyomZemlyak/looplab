@@ -222,6 +222,7 @@ default grants resource/search-shape knobs to the agents and keeps infra (`llm_*
 | `holdout_top_k` | `LOOPLAB_HOLDOUT_TOP_K` | `3` | How many top candidates the holdout re-ranks |
 | `holdout_fraction` | `LOOPLAB_HOLDOUT_FRACTION` | `0.25` | Fraction of the eval reserved as the holdout |
 | `archive_resolution` | `LOOPLAB_ARCHIVE_RESOLUTION` | `1.0` | Diversity-archive niche bucket width in parameter space |
+| `coverage_context` | `LOOPLAB_COVERAGE_CONTEXT` | `true` | Compute the run's breadth read-model (themes / param-niches / theme entropy / dominant-theme fraction) at the strategist cadence, record it as a `coverage_snapshot` audit event, and feed it into the Strategist's decision context (the narrowing signal). Deterministic; additive context only |
 
 ## Trust & security
 

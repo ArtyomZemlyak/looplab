@@ -71,6 +71,10 @@ class StrategyContext(BaseModel):
     available_policies: list[str] = Field(default_factory=list)
     available_developers: list[str] = Field(default_factory=list)
     defaults: dict = Field(default_factory=dict)   # the static config Strategy (fallback/start)
+    # Breadth read-model (search/coverage.py): themes/niches/theme_entropy/dominant_theme_frac.
+    # CONTEXT the Strategist reads to judge how much novelty pressure to apply — it is informative,
+    # not a decision (the LLM decides). Empty when coverage_context is off.
+    coverage: dict = Field(default_factory=dict)
 
 
 class Strategist(Protocol):

@@ -43,6 +43,7 @@ _LAYOUT = {
     "appstate": "serve",
     "archive": "search",
     "artifacts": "serve",
+    "coverage": "search",
     "assistant": "serve",
     "assistant_commands": "serve",
     "atomicio": "core",
