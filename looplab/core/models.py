@@ -235,6 +235,11 @@ class RunState(BaseModel):
     # The engine re-uses this on resume so the split every metric was scored against never changes.
     holdout_fraction: Optional[float] = None
     nodes: dict[int, Node] = Field(default_factory=dict)
+    # The node currently BEING BUILT (a `node_building` marker), shown in the UI the instant work starts
+    # on it — before the dev session finishes with node_created. Transient: {node_id, operator,
+    # parent_ids, started}; cleared when that node's node_created/node_failed folds. NOT in `nodes`, so it
+    # never affects id allocation (max(nodes)+1) or resume. None when no node is mid-build.
+    building: Optional[dict] = None
     best_node_id: Optional[int] = None
     finished: bool = False
     data_profile: Optional[dict] = None   # set by the grounding pre-phase (I16)

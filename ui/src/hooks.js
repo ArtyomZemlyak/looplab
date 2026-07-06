@@ -1,6 +1,19 @@
 import { useEffect, useRef, useState } from 'react'
 import { apiUrl } from './util'   // join the served path prefix so SSE works behind a proxy subpath
 
+// Splice the currently-BUILDING node (server marker `state.building`) into `nodes` as a synthetic
+// status:'building' card, so it shows the INSTANT the engine starts on it — before node_created — and
+// every node consumer (canvas / list / panels) renders it with no extra wiring. Cleared server-side the
+// moment node_created folds. Kept out of the real event-sourced node set on the backend (id allocation).
+function withBuilding(state) {
+  const b = state && state.building
+  if (!b || b.node_id == null || !state.nodes || state.nodes[b.node_id]) return state
+  return { ...state, nodes: { ...state.nodes, [b.node_id]: {
+    id: b.node_id, operator: b.operator || 'improve', parent_ids: b.parent_ids || [],
+    status: 'building', building: true, idea: { operator: b.operator || 'improve', rationale: 'building…' },
+  } } }
+}
+
 // Subscribe to a run's live folded state over SSE. The server emits `event: state` frames whose
 // data is { state, seq }. Returns the latest live state + connection status. Auto-reconnects.
 export function useRunState(runId) {
@@ -32,7 +45,7 @@ export function useRunState(runId) {
         // new event/seq); track lastAlive in the closure (NOT stale React `live`) to avoid churn.
         const alive = p.state && p.state.engine_running
         if (p.seq === lastSeq && alive === lastAlive) return
-        lastSeq = p.seq; lastAlive = alive; setLive(p.state); setSeq(p.seq)
+        lastSeq = p.seq; lastAlive = alive; setLive(withBuilding(p.state)); setSeq(p.seq)
       })
       // `done` = the run reached a terminal state and the server ends the stream. We do NOT treat it
       // as "stop forever": reconnect-poll so a reopen (fork / branch / add-experiment) is picked up

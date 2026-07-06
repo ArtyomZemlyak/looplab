@@ -67,6 +67,8 @@ export function fmtAgo(sec) {
 // isn't paused/finished) — a good-enough "working" heuristic for the live pulse.
 export function workingId(state) {
   if (!state || state.finished || state.paused) return null
+  // A node mid-BUILD (dev session running) is the true "working" node — it precedes any pending eval.
+  if (state.building && state.building.node_id != null) return state.building.node_id
   const pend = Object.values(state.nodes || {}).filter(n => n.status === 'pending')
   if (!pend.length) return null
   return Math.max(...pend.map(n => n.id))

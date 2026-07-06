@@ -210,6 +210,11 @@ button { font: inherit; }
 .node-card.s-evaluated { background-color: color-mix(in srgb, var(--ok) 13%, var(--bg-2)); }
 .node-card.s-failed { background-color: color-mix(in srgb, var(--fail) 15%, var(--bg-2)); animation: shake .4s 1; }
 .node-card.s-pending { background-color: color-mix(in srgb, var(--pending) 12%, var(--bg-2)); }
+/* A node the engine has JUST STARTED building (before node_created): dashed + breathing so it reads as
+   "forming", distinct from a pending node that's queued/evaluating. */
+.node-card.s-building { background-color: color-mix(in srgb, var(--accent) 9%, var(--bg-2));
+  border-style: dashed; border-color: color-mix(in srgb, var(--accent) 55%, transparent);
+  animation: breathe 1.6s ease-in-out infinite; }
 .node-card.working { border-color: var(--working); animation: pulse 1.3s infinite; }
 .node-card.infeasible { opacity: .62; background-image: repeating-linear-gradient(45deg, transparent, transparent 7px, rgba(122,107,154,.10) 7px, rgba(122,107,154,.10) 14px); }
 .node-card.best { border-color: var(--best); box-shadow: 0 0 0 2px rgba(255,213,74,.35), var(--shadow-card); }

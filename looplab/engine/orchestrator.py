@@ -29,7 +29,7 @@ from looplab.events.types import (
     EV_DRIFT_UNAVAILABLE, EV_FORK_DONE, EV_HINT, EV_HOST_GRADING,
     EV_FORESIGHT_SELECTED,
     EV_HYPOTHESIS_ADDED, EV_HYPOTHESIS_MERGED, EV_HYPOTHESIS_RANKED, EV_INJECT_DONE, EV_INJECT_FAILED,
-    EV_NODE_ABORT, EV_NODE_CREATED,
+    EV_NODE_ABORT, EV_NODE_BUILDING, EV_NODE_CREATED,
     EV_NODE_EVALUATED, EV_NODE_FAILED, EV_NODE_REPAIRED, EV_NOVELTY_REJECTED,
     EV_POLICY_DECISION, EV_PROXY_SCORED, EV_REPORT_GENERATED,
     EV_RESEARCH_COMPLETED, EV_REWARD_HACK_SUSPECTED, EV_RUN_FINISHED,
@@ -1797,6 +1797,14 @@ class Engine(ConfirmPhaseMixin, AblationMixin):
         node_id = max(state.nodes, default=-1) + 1  # monotonic across the whole run -> unique
         kind = action["kind"]
         with self.tracer.span("create_node", new_trace=True, node_id=node_id, operator=kind):
+            # Announce the node the INSTANT we start building it — before the Researcher/Developer run —
+            # so the UI shows it (and streams its live agent-trace) immediately, not only after the
+            # minutes-long dev session ends with node_created. Transient marker (folds to st.building,
+            # NOT st.nodes), so node-id allocation + resume are untouched; node_created supersedes it.
+            _bparents = (list(action["parent_ids"]) if action.get("parent_ids")
+                         else ([action["parent_id"]] if action.get("parent_id") is not None else []))
+            self.store.append(EV_NODE_BUILDING,
+                              {"node_id": node_id, "operator": kind, "parent_ids": _bparents})
             if kind == "draft":
                 self._set_complexity_hint(state, None)   # A0d breadth-keyed complexity cue
                 with self.tracer.span("propose"):

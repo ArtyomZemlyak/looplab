@@ -15,8 +15,8 @@ from looplab.events.types import (
     EV_DEEP_RESEARCH, EV_DIVERSITY_ARCHIVE, EV_FORCE_ABLATE, EV_FORCE_CONFIRM, EV_FORK,
     EV_FORK_DONE, EV_HINT, EV_HOLDOUT_EVALUATED, EV_HOST_GRADING, EV_HYPOTHESIS_ADDED, EV_HYPOTHESIS_MERGED,
     EV_HYPOTHESIS_RANKED, EV_HYPOTHESIS_UPDATED, EV_INJECT_DONE, EV_INJECT_NODE, EV_LESSONS_DISTILLED,
-    EV_LESSONS_REFRESHED, EV_LLM_COST, EV_NODE_ABORT, EV_NODE_CONFIRMED, EV_NODE_CREATED,
-    EV_NODE_EVALUATED, EV_NODE_FAILED, EV_NODE_REPAIRED, EV_NOVELTY_REJECTED, EV_PAUSE,
+    EV_LESSONS_REFRESHED, EV_LLM_COST, EV_NODE_ABORT, EV_NODE_BUILDING, EV_NODE_CONFIRMED,
+    EV_NODE_CREATED, EV_NODE_EVALUATED, EV_NODE_FAILED, EV_NODE_REPAIRED, EV_NOVELTY_REJECTED, EV_PAUSE,
     EV_POLICY_DECISION, EV_PROMOTE, EV_PROXY_SCORED, EV_REPORT_GENERATED,
     EV_RESEARCH_COMPLETED, EV_RESUME, EV_REWARD_HACK_SUSPECTED, EV_RUN_ABORT,
     EV_RUN_FINISHED, EV_RUN_REOPENED, EV_RUN_STARTED, EV_RUNG_PROMOTED, EV_SET_STRATEGY,
@@ -72,6 +72,12 @@ def fold(events: Iterable[Event]) -> RunState:
             _tg = str(d.get("trust_gate", "")).strip().lower()
             if _tg in ("audit", "gate", "block"):
                 st.trust_gate = _tg
+        elif t == EV_NODE_BUILDING:
+            # Transient "a node is being built RIGHT NOW" marker (see EV_NODE_BUILDING docs): show it in
+            # the UI the instant work starts, before node_created. NOT added to st.nodes, so id
+            # allocation + resume are untouched. Superseded/cleared by this node's node_created below.
+            st.building = {"node_id": d.get("node_id"), "operator": d.get("operator"),
+                           "parent_ids": d.get("parent_ids", []), "started": e.ts}
         elif t == EV_NODE_CREATED:
             # Defensive like the per-trial / unknown-node tolerance below: a malformed or incomplete
             # node_created (missing key, non-coercible idea param in a hand-edited / bring-your-own-script
@@ -98,6 +104,8 @@ def fold(events: Iterable[Event]) -> RunState:
             except Exception:
                 continue
             st.nodes[n.id] = n
+            if st.building and st.building.get("node_id") == n.id:
+                st.building = None          # the real node is here now — drop the "building" marker
         elif t == EV_NODE_EVALUATED:
             n = st.nodes.get(d.get("node_id"))          # tolerate an event for an unknown/missing node
             if n is not None:                           # (corrupt/hand-edited log) — skip, don't crash
@@ -125,6 +133,8 @@ def fold(events: Iterable[Event]) -> RunState:
                 if first_terminal:
                     st.total_eval_seconds += d.get("eval_seconds") or 0.0
         elif t == EV_NODE_FAILED:
+            if st.building and st.building.get("node_id") == d.get("node_id"):
+                st.building = None
             n = st.nodes.get(d.get("node_id"))
             if n is not None:
                 first_terminal = n.status is NodeStatus.pending

@@ -43,6 +43,11 @@ from __future__ import annotations
 # --- DOMAIN events (folded into RunState by `replay.fold`; the engine is the sole writer,
 #     except `spec_approved`/`approval_granted` which the CLI/UI may also ratify). ---
 EV_RUN_STARTED = "run_started"
+# Emitted at the START of building a node — BEFORE the Researcher/Developer run — so the UI can show the
+# node the instant work begins on it (its live agent-trace streams in) instead of only after the minutes-
+# long dev session ends with node_created. A TRANSIENT marker (folds to st.building, NOT st.nodes) so it
+# never affects node-id allocation or resume: node_created clears it and adds the real node.
+EV_NODE_BUILDING = "node_building"
 EV_NODE_CREATED = "node_created"
 EV_NODE_EVALUATED = "node_evaluated"
 EV_NODE_FAILED = "node_failed"
