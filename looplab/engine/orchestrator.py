@@ -2000,6 +2000,15 @@ class Engine(ConfirmPhaseMixin, AblationMixin):
                 deleted=getattr(self.developer, "last_deleted", []) or [],
                 research_origin=research_origin,
             )
+            # The Developer session CRASHED when its code is the "(developer error: …)" sentinel (an
+            # exception in _run — e.g. an LLM 401/timeout). FAIL the node now: without this it stays
+            # pending, and the eval runs the PARENT's carried-over entrypoint and inherits the PARENT's
+            # metric — a false success that pollutes the search (the 401-window nodes 50-54 each faked
+            # the parent's 0.81 this way). node_created → node_failed keeps the one-terminal invariant.
+            if isinstance(code, str) and code.startswith("(developer error:"):
+                self.store.append(EV_NODE_FAILED, {
+                    "node_id": node_id, "error": code, "reason": "developer_crash",
+                    "eval_seconds": 0.0})
         self._emit_agent_report(node_id)
         self._emit_hypothesis_ranked(node_id)
         self._emit_foresight_selected(node_id)
