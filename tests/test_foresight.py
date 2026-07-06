@@ -335,7 +335,7 @@ def test_engine_emits_and_consumes_hypothesis_ranked():
         def __init__(self):
             self.events = []
 
-        def append(self, t, d):
+        def append(self, t, d, **kw):
             self.events.append((t, d))
 
     class _Researcher:
@@ -357,7 +357,7 @@ def test_engine_emits_foresight_selected_for_both_roles():
         def __init__(self):
             self.events = []
 
-        def append(self, t, d):
+        def append(self, t, d, **kw):
             self.events.append((t, d))
 
     class _Dev:

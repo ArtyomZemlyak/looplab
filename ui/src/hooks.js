@@ -7,7 +7,11 @@ import { apiUrl } from './util'   // join the served path prefix so SSE works be
 // moment node_created folds. Kept out of the real event-sourced node set on the backend (id allocation).
 function withBuilding(state) {
   const b = state && state.building
-  if (!b || b.node_id == null || !state.nodes || state.nodes[b.node_id]) return state
+  // Don't splice a phantom "building…" card once the run is over: a finished run clears the marker
+  // server-side, but a STALLED run (engine died mid-build, engine_running===false, not finished) would
+  // otherwise leave a breathing card for a node that will never appear.
+  if (!b || b.node_id == null || state.finished || state.engine_running === false
+      || !state.nodes || state.nodes[b.node_id]) return state
   return { ...state, nodes: { ...state.nodes, [b.node_id]: {
     id: b.node_id, operator: b.operator || 'improve', parent_ids: b.parent_ids || [],
     status: 'building', building: true, idea: { operator: b.operator || 'improve', rationale: 'building…' },

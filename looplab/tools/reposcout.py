@@ -41,8 +41,15 @@ _SKIP_DIRS = {".git", "__pycache__", ".ipynb_checkpoints", "node_modules", ".myp
 
 
 class RepoScoutTools:
-    def __init__(self, roots, default_root=None, overlay=None, deleted=None):
+    def __init__(self, roots, default_root=None, overlay=None, deleted=None, named_roots=None):
         self._roots = _pathsafe.resolve_roots(roots)
+        # (name, resolved_root) for each editable, MIRRORING RepoWriteTools._roots. When set, a disk path
+        # is shown/deduped PREFIXED with its owning editable's name (`<name>/train.py`) — the SAME key
+        # shape the write tools + overlay use in a MULTI-editable repo, so a grep/find hit round-trips
+        # into edit_file and dedups against the staged overlay. Empty (boss / single unnamed root) =>
+        # fall back to the plain default_root-relative rendering below.
+        self._named_roots = [(n or "", _pathsafe.resolve_roots([p])[0])
+                             for (n, p) in (named_roots or []) if p]
         # A repo-RELATIVE path (e.g. "train.py") resolves against this root, so a caller whose write
         # tools already use repo-relative paths (the repo Developer) can read/grep with the SAME paths
         # instead of switching to absolutes. None => relative paths resolve against CWD (the boss case).
@@ -79,6 +86,15 @@ class RepoScoutTools:
         _safe_rel, and mixing it with the staged overlay's relative hits confuses the model). For the
         boss (no default_root, multiple unrelated roots like ~/ + the repo) an absolute path is
         unambiguous, so keep it verbatim."""
+        # MULTI-editable: key by the OWNING editable's name (`<name>/rel`), exactly as RepoWriteTools does,
+        # so a hit under a SECONDARY root round-trips too (relative_to(default_root=roots[0]) would raise
+        # for those and leak an absolute path, and would drop the name prefix for the first root).
+        for name, root in self._named_roots:
+            try:
+                rel = str(Path(p).relative_to(root)).replace("\\", "/")
+            except ValueError:
+                continue
+            return f"{name}/{rel}" if name and name != "." else rel
         if not self._default_root:
             return str(p)
         try:
@@ -236,7 +252,7 @@ class RepoScoutTools:
             rx = _re.compile(pattern)
         except _re.error:
             rx = _re.compile(_re.escape(pattern))   # not a valid regex -> treat as a literal substring
-        cap = int(max_hits) if max_hits else 40
+        cap = max(1, min(int(max_hits) if max_hits else 40, 200))   # clamp: a model-supplied max can't disable the cap
         hits: list[str] = []
         # STAGED overlay first — the code the caller is EDITING wins over disk, and its paths dedup the
         # disk walk (so a patched file isn't grepped in both its edited and pristine form).
@@ -250,7 +266,6 @@ class RepoScoutTools:
                     hits.append(f"{rel}:{i}: {line.strip()[:200]}")
                     if len(hits) >= cap:
                         return "\n".join(hits) + f"\n(capped at {cap} hits)"
-        _dedup_base = self._default_root or base
         scanned = 0
         for dp, dirs, files in _os.walk(base):
             dirs[:] = [d for d in dirs if d not in _SKIP_DIRS and not d.startswith(".")]
@@ -260,14 +275,21 @@ class RepoScoutTools:
                 if not _fnmatch(fn, glob):
                     continue
                 fp = Path(dp) / fn
-                try:                                # skip a file STAGED (grepped above) or DELETED this session
-                    _rel = str(fp.relative_to(_dedup_base)).replace("\\", "/")
-                    if _rel in staged_rel or self._is_deleted(_rel):
-                        continue
-                except ValueError:
-                    pass
-                if _looks_secret(fp) or not _readable(fp):
-                    continue                        # never grep a credential file or a binary
+                # skip a file STAGED (grepped above) or DELETED this session. Key it exactly as the overlay
+                # does (`_disp` == the write-tool path shape, prefixed per editable) so the dedup HITS in a
+                # multi-editable repo — else an already-edited file is re-grepped from PRISTINE disk and the
+                # model is shown the old content it already changed.
+                _rel = self._disp(fp)
+                if _rel in staged_rel or self._is_deleted(_rel):
+                    continue
+                # Resolve the (possibly symlinked) path and RE-VALIDATE on the resolved target — exactly as
+                # find_files does. os.walk + open() follow symlinks, so an innocuously-named link
+                # (configs/data.json -> ~/.aws/credentials) would slip past _looks_secret (which sees only
+                # the link's OWN name/parts) and leak an off-sandbox file into the hits fed to a remote model.
+                rp = _pathsafe.resolve_within(self._roots, str(fp))
+                if rp is None or _looks_secret(rp) or not _readable(rp):
+                    continue                        # out-of-root symlink, credential file, or a binary
+                fp = rp
                 try:
                     if fp.stat().st_size > 2_000_000:
                         continue

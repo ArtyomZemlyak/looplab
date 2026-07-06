@@ -1156,6 +1156,15 @@ class Engine(ConfirmPhaseMixin, AblationMixin):
             "at_node": n, **coverage_signal(state, resolution=self.archive_resolution)})
         return fold(self.store.read_all())
 
+    def _op_span(self, name: str, **attrs):
+        """A named NEW-trace span for a sub-operation (strategist consult, hypothesis merge …) so the
+        event appended inside it is auto-stamped with THIS op's trace_id (eventstore reads current_ids),
+        letting the UI scope the event's trace to just that operation. Null-context when no tracer is
+        wired (tests build Engine via __new__ and skip __init__) — the op still runs, just untraced."""
+        import contextlib
+        tr = getattr(self, "tracer", None)
+        return tr.span(name, new_trace=True, **attrs) if tr is not None else contextlib.nullcontext()
+
     def _maybe_consult_strategist(self, state: RunState) -> RunState:
         """Operator/boss pin first (HITL parity), then the bounded-cadence Strategist consult.
         Records a `strategy_decision` and re-folds only when the strategy actually changes.
@@ -1197,13 +1206,20 @@ class Engine(ConfirmPhaseMixin, AblationMixin):
                 self._record_strategy(strat, state, ctx)
                 return fold(self.store.read_all())
         # 2. Bounded-cadence Strategist consult — but the pin wins over it for the pinned fields.
+        # Its own trace (new_trace) so the strategy_decision event — appended INSIDE via _record_strategy
+        # — is stamped with THIS operation's trace_id (eventstore auto-stamps current_ids()), letting the
+        # UI show only the strategist's own reasoning trace under that event, not the whole node's trace.
         if consulting:
-            strat = validate_strategy(self.strategist.decide(state, ctx), ctx)
-            if strat:
-                strat.update(pin_fields)   # pinned (validated) policy/fidelity are non-negotiable
-                if self._strategy_core(strat) != self._strategy_core(state.active_strategy):
-                    self._record_strategy(strat, state, ctx)
-                    return fold(self.store.read_all())
+            # No node_id on the op span: stamping it would file the strategist's LLM generations under
+            # the NEXT node (id == len(nodes)) in /trace, polluting that node's Trace tab. The event still
+            # gets THIS span's trace_id (current_ids), which is how the UI scopes it via by_trace.
+            with self._op_span("strategist_consult"):
+                strat = validate_strategy(self.strategist.decide(state, ctx), ctx)
+                if strat:
+                    strat.update(pin_fields)   # pinned (validated) policy/fidelity are non-negotiable
+                    if self._strategy_core(strat) != self._strategy_core(state.active_strategy):
+                        self._record_strategy(strat, state, ctx)
+                        return fold(self.store.read_all())
         return state
 
     # ---------------------------------------------------- research cadence (P2)
@@ -1237,8 +1253,12 @@ class Engine(ConfirmPhaseMixin, AblationMixin):
         """Execute one Deep-Research step (serial path) and record it, then re-fold. Always records a
         `research_completed` event (even with no model wired, so a manual request's gate advances and
         the loop doesn't spin)."""
-        memo = self._compute_deep_research(state, trigger)
-        self._record_deep_research(memo, trigger=trigger, manual=manual)
+        # One trace for the whole serial step: compute WITHOUT its own inner span (trace=False) so the
+        # research LLM spans + the research_completed append both live in THIS op-trace → the event is
+        # stamped with it (UI scopes the event's trace to just the research, not a node).
+        with self._op_span("deep_research", trigger=trigger):
+            memo = self._compute_deep_research(state, trigger, trace=False)
+            self._record_deep_research(memo, trigger=trigger, manual=manual)
         return fold(self.store.read_all())
 
     def _compute_deep_research(self, state: RunState, trigger: str, *, trace: bool = True):
@@ -1339,15 +1359,18 @@ class Engine(ConfirmPhaseMixin, AblationMixin):
             from looplab.search.hybrid_merge import consolidate
             texts = [h.statement for h in open_hyps]
             wrote = False
-            for g in consolidate(texts, client, kind="research hypotheses",
-                                 embed=self._embedder, goal=state.goal):
-                if len(g["members"]) < 2:
-                    continue
-                ids = [open_hyps[i].id for i in g["members"]]
-                self.store.append(EV_HYPOTHESIS_MERGED, {
-                    "canonical": ids[0], "aliases": ids[1:], "statement": g["merged"],
-                    "at_node": len(state.nodes)})
-                wrote = True
+            # Own trace so each hypothesis_merged event (appended INSIDE) is stamped with THIS merge's
+            # trace_id — the UI can then show only the merge's own retrieval+decision trace under it.
+            with self._op_span("hypothesis_merge"):   # no node_id — see strategist_consult (avoids leaking into a node's trace)
+                for g in consolidate(texts, client, kind="research hypotheses",
+                                     embed=self._embedder, goal=state.goal):
+                    if len(g["members"]) < 2:
+                        continue
+                    ids = [open_hyps[i].id for i in g["members"]]
+                    self.store.append(EV_HYPOTHESIS_MERGED, {
+                        "canonical": ids[0], "aliases": ids[1:], "statement": g["merged"],
+                        "at_node": len(state.nodes)})
+                    wrote = True
         except Exception:  # noqa: BLE001 — advisory hygiene; a merge hiccup must not disturb the loop
             return state
         return fold(self.store.read_all()) if wrote else state
@@ -1373,8 +1396,9 @@ class Engine(ConfirmPhaseMixin, AblationMixin):
             return state
         with self.tracer.span("report", new_trace=True, trigger=trigger):
             content = self.report_writer.generate(state, trigger=trigger)
-        self.store.append(EV_REPORT_GENERATED, {
-            "content": content, "at_node": content.get("at_node"), "trigger": trigger})
+            # append INSIDE the span so report_generated is stamped with the report op-trace (UI scopes it).
+            self.store.append(EV_REPORT_GENERATED, {
+                "content": content, "at_node": content.get("at_node"), "trigger": trigger})
         return fold(self.store.read_all())
 
     def _set_complexity_hint(self, state: RunState, parent) -> None:
@@ -1517,13 +1541,17 @@ class Engine(ConfirmPhaseMixin, AblationMixin):
     _spent_pairs = staticmethod(LessonMemory.spent_pairs)
 
     def _maybe_distill_lessons(self, state: RunState) -> RunState:
-        return self.lessons.maybe_distill_lessons(state)
+        # Own op-trace: LessonMemory writes lessons_distilled via the SAME store, so an append inside
+        # this span is stamped with it (current_ids) → the UI scopes the event's trace to the distill.
+        with self._op_span("lessons_distill"):
+            return self.lessons.maybe_distill_lessons(state)
 
     def _lessons_store_stamp(self):
         return self.lessons.lessons_store_stamp()
 
     def _maybe_refresh_lessons(self, state: RunState) -> RunState:
-        return self.lessons.maybe_refresh_lessons(state)
+        with self._op_span("lessons_refresh"):
+            return self.lessons.maybe_refresh_lessons(state)
 
     def _distill_skill_body(self, final: RunState, h, ev: list) -> str:
         return self.lessons.distill_skill_body(final, h, ev)
@@ -2273,7 +2301,11 @@ class Engine(ConfirmPhaseMixin, AblationMixin):
         wrong node. No-op when the attr is absent/None (the role didn't predict for this node)."""
         pick = getattr(role, attr, None)
         if isinstance(pick, dict):
-            self.store.append(event_type, {"node_id": node_id, **pick})
+            pick = dict(pick)   # copy before consuming; strip the captured op-trace ids out of the data
+            tid, sid = pick.pop("_trace_id", None), pick.pop("_span_id", None)
+            # The ranking LLM ran DURING propose in its own named span (captured there); stamp the event
+            # with THAT trace so the UI scopes it to just the ranking, not the whole node.
+            self.store.append(event_type, {"node_id": node_id, **pick}, trace_id=tid, span_id=sid)
             setattr(role, attr, None)
 
     def _emit_hypothesis_ranked(self, node_id: int) -> None:

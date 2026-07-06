@@ -66,7 +66,9 @@ export function fmtAgo(sec) {
 // Is this node the one currently being evaluated? (pending + the highest-id pending, and the run
 // isn't paused/finished) — a good-enough "working" heuristic for the live pulse.
 export function workingId(state) {
-  if (!state || state.finished || state.paused) return null
+  // A stalled run (engine_running===false, not finished) has no live work — no "working" pulse on a
+  // node whose dev session already died.
+  if (!state || state.finished || state.paused || state.engine_running === false) return null
   // A node mid-BUILD (dev session running) is the true "working" node — it precedes any pending eval.
   if (state.building && state.building.node_id != null) return state.building.node_id
   const pend = Object.values(state.nodes || {}).filter(n => n.status === 'pending')

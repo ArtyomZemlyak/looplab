@@ -168,6 +168,30 @@ def test_time_travel_seq(tmp_path):
     assert len(full["state"]["nodes"]) > 0
 
 
+def test_trace_tail_survives_a_huge_recent_span_line(tmp_path):
+    """Mega-review 07-06: the live trace feed read a FIXED 256KB tail window of spans.jsonl. A single
+    span line can be 100KB+ (a repo-Developer generation carries the whole prompt+output on it), so one
+    giant most-recent line could fill the window and blank the feed exactly during the heavy generations
+    a user most wants to watch. The backward reader must still surface it."""
+    _build_run(tmp_path)                                   # a real run dir at tmp_path/demo
+    rd = tmp_path / "demo"
+    big = "Z" * 400_000                                    # one generation span > the 256KB window
+    spans = [
+        {"span_id": "s1", "kind": "generation", "start": 1.0, "duration_s": 0.5, "status": "ok",
+         "attributes": {"model": "m", "output": "early small gen"}},
+        {"span_id": "s2", "kind": "generation", "start": 2.0, "duration_s": 9.0, "status": "ok",
+         "attributes": {"model": "m", "output": big}},
+    ]
+    (rd / "spans.jsonl").write_text("\n".join(json.dumps(s) for s in spans) + "\n", encoding="utf-8")
+    client = TestClient(make_app(tmp_path))
+    r = client.get("/api/runs/demo/trace/tail", params={"limit": 5})
+    assert r.status_code == 200
+    tail = r.json()["tail"]
+    assert tail, "feed blanked on a >256KB span line"      # the bug: an empty list
+    assert tail[-1]["span_id"] == "s2"                     # the huge, most-recent generation is present
+    assert len(tail[-1]["text"]) <= 500                    # text still capped for the browser
+
+
 def test_control_append_and_validation(tmp_path):
     _build_run(tmp_path)
     client = TestClient(make_app(tmp_path))

@@ -58,3 +58,15 @@ def test_a_second_build_replaces_the_first_marker():
         _ev("node_building", node_id=8, operator="merge", parent_ids=[7, 6]),
     ])
     assert st.building["node_id"] == 8 and st.building["operator"] == "merge"
+
+
+def test_run_finished_clears_a_dangling_build_marker():
+    """Mega-review 07-06: a dev session that dies MID-BUILD (no node_created / node_failed) would leave
+    `st.building` set. When the run then finishes, the fold must drop the marker — else the UI shows a
+    breathing 'building…' card + a false 'working' pulse on a run that is over."""
+    st = fold(_BASE + [
+        _ev("node_building", node_id=9, operator="improve", parent_ids=[]),
+        _ev("run_finished", reason="aborted"),
+    ])
+    assert st.finished is True
+    assert st.building is None                          # no phantom card survives the finish

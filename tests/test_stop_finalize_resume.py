@@ -121,3 +121,37 @@ def test_cli_finalize_appends_run_abort(tmp_path):
     assert "run_abort" in types
     ab = [e for e in EventStore(rd / "events.jsonl").read_all() if e.type == "run_abort"][0]
     assert ab.data.get("reason") == "finalized"
+
+
+# ------------------------------------------------------------------ finalize wrap-up (live engine)
+def _toy_engine(run_dir, max_nodes=4):
+    from looplab.engine.orchestrator import Engine
+    from looplab.search.policy import GreedyTree
+    from looplab.runtime.sandbox import SubprocessSandbox
+    from looplab.adapters.toytask import ToyTask
+    task = ToyTask.load(Path(__file__).resolve().parents[1] / "examples" / "toy_task.json")
+    researcher, developer = task.build_roles()
+    return Engine(run_dir, task=task, researcher=researcher, developer=developer,
+                  sandbox=SubprocessSandbox(), policy=GreedyTree(n_seeds=3, max_nodes=max_nodes),
+                  max_parallel=4)
+
+
+def test_finalize_wrap_up_runs_once_and_re_entry_is_idempotent(tmp_path):
+    """FINALIZE runs the end-of-run wrap-up EXACTLY once. A finalize (run_abort) appended to a run that
+    already reached a terminal `run_finished`, then re-entered by the engine, must be a pure NO-OP: the
+    `finished` guard wins over the pending stop_requested, so there is NO second run_finished and the
+    wrap-up (report / cross-run lessons+case / cost roll-up) is not duplicated. (mega-review 07-06 — the
+    fold-flag tests above never drove the actual wrap-up / re-entry path.)"""
+    import anyio
+    rd = tmp_path / "run"
+    s1 = anyio.run(_toy_engine(rd).run)
+    assert s1.finished
+    ev1 = list(EventStore(rd / "events.jsonl").read_all())
+    assert sum(e.type == "run_finished" for e in ev1) == 1     # the wrap-up ran once
+    assert (rd / "tree.html").exists()                          # a wrap-up artifact was produced
+    # operator FINALIZEs the already-finished run; the engine re-enters on the log
+    EventStore(rd / "events.jsonl").append("run_abort", {"reason": "finalized"})
+    s2 = anyio.run(_toy_engine(rd).run)
+    assert s2.finished and sorted(s2.nodes) == sorted(s1.nodes)  # no new work
+    ev2 = list(EventStore(rd / "events.jsonl").read_all())
+    assert sum(e.type == "run_finished" for e in ev2) == 1      # STILL one — the wrap-up did not re-run

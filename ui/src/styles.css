@@ -958,23 +958,26 @@ textarea.text { min-height: 220px; font-family: ui-monospace, Consolas, monospac
 .cmd-keys { display: block; margin-top: 3px; color: var(--line-2); font-size: 10.5px; }
 
 /* live "what's the agent doing now" strip at the foot of the feed (round-6) */
-.agent-status { display: flex; align-items: center; gap: 8px; padding: 5px 8px; margin: 2px 0;
+.agent-status { display: flex; flex-direction: column; gap: 3px; padding: 5px 8px; margin: 2px 0;
   font-size: 12px; color: var(--fg-dim); }
+.agent-status .as-line { display: flex; align-items: center; gap: 8px; }
 .agent-status .as-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--accent);
   box-shadow: 0 0 7px var(--accent); animation: breathe 1.4s infinite; flex: none; }
 .agent-status .as-seg { display: inline-flex; align-items: center; gap: 4px; }
 .agent-status .as-bullet { color: var(--line-2); }
 .agent-status .as-reply { color: var(--accent); }   /* the boss is replying to you, concurrently */
 
-/* Live agent-trace disclosure (LiveTrace): a collapsed peek at the streaming thoughts + tool calls. */
-.live-trace { flex: none; font-size: 11px; }
-.live-trace > summary { cursor: pointer; list-style: none; color: var(--fg-dim); padding: 1px 7px;
-  border: 1px solid var(--line-2); border-radius: 10px; user-select: none; white-space: nowrap; }
-.live-trace > summary:hover { color: var(--fg); border-color: var(--accent); }
-.live-trace[open] > summary { color: var(--accent); border-color: var(--accent); }
-.live-trace .lt-body { position: absolute; right: 8px; z-index: 30; margin-top: 5px; width: min(560px, 88vw);
-  max-height: 320px; overflow-y: auto; background: var(--bg-1, #14161c); border: 1px solid var(--line-2);
-  border-radius: 8px; padding: 6px 8px; box-shadow: 0 8px 26px rgba(0,0,0,.45);
+/* Live agent-trace: a STANDARD inline disclosure — caret ▸ to the LEFT of the label (like every other
+   expandable row), expanding IN PLACE. No pill, no floating popup. */
+.live-trace { font-size: 11px; }
+.live-trace .lt-toggle { cursor: pointer; user-select: none; color: var(--fg-dim); white-space: nowrap;
+  display: inline-flex; align-items: center; gap: 3px; }
+.live-trace .lt-toggle:hover { color: var(--fg); }
+.live-trace.open .lt-toggle { color: var(--accent); }
+.live-trace .lt-caret { display: inline-block; width: 9px; font-size: 10px; text-align: center; }
+/* Expands inline, indented under the caret with a thread rule; scrolls internally when long. */
+.live-trace .lt-body { margin: 3px 0 2px 13px; max-height: 240px; overflow-y: auto;
+  border-left: 2px solid var(--line-2); padding: 2px 0 2px 8px;
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace; line-height: 1.4; }
 .live-trace .lt-row { display: flex; gap: 6px; padding: 2px 0; border-bottom: 1px solid var(--line-1, rgba(255,255,255,.04)); align-items: baseline; }
 .live-trace .lt-ic { flex: none; }
@@ -982,6 +985,11 @@ textarea.text { min-height: 220px; font-family: ui-monospace, Consolas, monospac
 .live-trace .lt-tool-name { color: var(--accent); font-weight: 600; flex: none; }
 .live-trace .lt-arg { color: var(--fg-dim); opacity: .85; word-break: break-all; }
 .live-trace .lt-empty { padding: 4px 2px; }
+
+/* Node Trace tab: live "what's the LLM doing now" status + scroll nav. */
+.trace-live-status { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--accent); margin-bottom: 8px; }
+.trace-live-status .tls-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--accent); box-shadow: 0 0 7px var(--accent); animation: breathe 1.4s infinite; flex: none; }
+.trace-nav { display: inline-flex; gap: 4px; }
 
 /* per-message trace (round-6): click "▸ trace" on an assistant reply to read its LLM I/O */
 .chat-trace-tog { font-size: 11px; color: var(--fg-mut); cursor: pointer; user-select: none; margin-top: 4px; }

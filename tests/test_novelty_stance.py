@@ -80,6 +80,26 @@ def test_rule_stance_none_when_broad():
     assert _rule_novelty_stance(_ctx(phase="explore", coverage=cov)) is None
 
 
+def test_rule_stance_thresholds_are_exact():
+    """Guard the EXACT comparison boundaries (mega-review 07-06): an off-by-one (`>=`→`>`, `<3`→`<=3`)
+    in any of the four thresholds would flip a real decision yet still pass the in-region tests above."""
+    strong = {"dominant_theme_frac": 0.9, "recent_dominant_frac": 1.0}
+    # signal-trust floor: 3 nodes is ENOUGH to steer, 2 is not
+    assert _rule_novelty_stance(_ctx(coverage={**strong, "nodes": 3})) == "explore"
+    assert _rule_novelty_stance(_ctx(coverage={**strong, "nodes": 2})) is None
+    # budget endgame: 0.80 exploits (inclusive), 0.79 does not
+    broad = {"nodes": 8, "dominant_theme_frac": 0.3, "recent_dominant_frac": 0.3}
+    assert _rule_novelty_stance(_ctx(coverage=broad, node_budget_frac=0.80)) == "exploit"
+    assert _rule_novelty_stance(_ctx(coverage=broad, node_budget_frac=0.79)) is None
+    # narrowing: recent_dominant_frac>=0.75 and dominant_theme_frac>=0.60 are each INCLUSIVE
+    assert _rule_novelty_stance(_ctx(coverage={"nodes": 8, "recent_dominant_frac": 0.75,
+                                               "dominant_theme_frac": 0.3})) == "explore"
+    assert _rule_novelty_stance(_ctx(coverage={"nodes": 8, "recent_dominant_frac": 0.60,
+                                               "dominant_theme_frac": 0.60})) == "explore"
+    assert _rule_novelty_stance(_ctx(coverage={"nodes": 8, "recent_dominant_frac": 0.74,
+                                               "dominant_theme_frac": 0.59})) is None
+
+
 def test_rule_decide_overlays_stance_but_keeps_machinery():
     cov = {"nodes": 8, "dominant_theme_frac": 0.9, "recent_dominant_frac": 1.0}
     s = RuleStrategist().decide(RunState(), _ctx(phase="exploit", improves_since_best=4, coverage=cov))

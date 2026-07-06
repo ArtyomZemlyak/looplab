@@ -295,6 +295,10 @@ def fold(events: Iterable[Event]) -> RunState:
         elif t == EV_RUN_FINISHED:
             st.finished = True
             st.stop_reason = d.get("reason")
+            # Drop any dangling "building" marker: if a dev session died mid-build (no node_created /
+            # node_failed) the marker would otherwise persist, and the UI would show a breathing
+            # "building…" card + a false "working" pulse on a run that is over.
+            st.building = None
         elif t in (EV_RESUME, EV_RUN_REOPENED):
             # RESUME (the one operator "continue"): lift EVERY stopped state so re-entering the loop
             # keeps going — whether the run was PAUSED (stop, no finalize), ABORTED (finalize →

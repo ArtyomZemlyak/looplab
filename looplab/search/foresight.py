@@ -247,12 +247,21 @@ class ForesightPanelResearcher:
         self.last_hyp_priority: Optional[dict] = None     # telemetry: last board prioritization
 
     def _rank(self, report: str, items: list[str], *, goal: str, direction: str):
-        """Dispatch to the agentic ranker when tools are wired, else the one-shot predictor."""
-        if self.tools is not None:
-            return rank_agentic(self.client, self.tools, report, items, goal=goal, direction=direction,
-                                parser=self.parser, prompts=self.prompts)
-        return rank(self.client, report, items, goal=goal, direction=direction,
-                    parser=self.parser, prompts=self.prompts)
+        """Dispatch to the agentic ranker when tools are wired, else the one-shot predictor. Runs in its
+        OWN named trace so the ranking's LLM spans are isolated from the node's propose/implement trace —
+        the captured (trace_id, span_id) rides on the telemetry dict and stamps the hypothesis_ranked /
+        foresight_selected event, scoping its trace in the UI to JUST the ranking."""
+        import contextlib
+        from looplab.core import tracing
+        tr = tracing._current_tracer.get()
+        cm = tr.span("foresight_rank", new_trace=True) if tr is not None else contextlib.nullcontext()
+        with cm:
+            self._last_rank_ids = tracing.current_ids() if tr is not None else (None, None)
+            if self.tools is not None:
+                return rank_agentic(self.client, self.tools, report, items, goal=goal, direction=direction,
+                                    parser=self.parser, prompts=self.prompts)
+            return rank(self.client, report, items, goal=goal, direction=direction,
+                        parser=self.parser, prompts=self.prompts)
 
     def __getattr__(self, name):
         """Delegate every attribute NOT defined here (implement / repair / choose_action / assets /
@@ -307,9 +316,11 @@ class ForesightPanelResearcher:
         # Telemetry the ENGINE reads after propose() to emit the `hypothesis_ranked` audit event
         # (engine = sole event writer): the predicted board order + confidence + the model's analysis
         # trace (`reason`). `ranked` pairs id->statement so the event/UI needn't re-resolve ids.
+        _tid, _sid = getattr(self, "_last_rank_ids", (None, None))
         self.last_hyp_priority = {
             "order": ids, "confidence": conf, "reason": reason, "n": len(hyps),
-            "ranked": [{"id": hyps[i].id, "statement": hyps[i].statement} for i in order]}
+            "ranked": [{"id": hyps[i].id, "statement": hyps[i].statement} for i in order],
+            "_trace_id": _tid, "_span_id": _sid}   # stamped onto the hypothesis_ranked event by the engine
 
     def propose(self, state, parent):
         if self.client is None:
@@ -339,11 +350,13 @@ class ForesightPanelResearcher:
         # Telemetry the engine reads after propose() to emit `foresight_selected` (engine = sole event
         # writer): WHICH of the K generated ideas won + the discarded alternatives + confidence + the
         # model's analysis trace + the novelty stance in force. Without it only the winner survives.
+        _tid, _sid = getattr(self, "_last_rank_ids", (None, None))
         self.last_foresight = {
             "kind": "idea", "method": "foresight", "n": len(ideas), "k": self.k,
             "chosen": order[0], "order": order, "confidence": conf, "reason": reason,
             "novelty_stance": stance,
-            "candidates": [" ".join(_idea_text(i).split())[:160] for i in ideas]}
+            "candidates": [" ".join(_idea_text(i).split())[:160] for i in ideas],
+            "_trace_id": _tid, "_span_id": _sid}   # stamped onto the foresight_selected event by the engine
         best.rationale = (best.rationale
                           + f" [foresight: predicted best of {self.k} pre-execution]").strip()
         return best

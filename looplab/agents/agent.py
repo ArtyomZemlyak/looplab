@@ -277,7 +277,12 @@ def drive_tool_loop(client, tools, messages: list, emit_spec: dict, *,
         # the emit/final-answer call, since that same prose is regenerated as the streamed answer (it
         # would show twice). Only genuine between-tool-rounds prose reaches the UI here.
         if not any((c.get("function") or {}).get("name") == emit_name for c in calls):
-            _text(msg.get("content"))
+            # Surface the model's between-tool "thinking out loud". Many models (minimax-m3 via
+            # OpenRouter, SGLang) put it in the dedicated `reasoning`/`reasoning_content` field and leave
+            # `content` empty on a tool-calling turn — without this fallback the chat showed only tool
+            # steps and NO intermediate assistant prose. content wins when present (the real prose).
+            from looplab.core.llm import _reasoning_of
+            _text(msg.get("content") or _reasoning_of(msg))
         messages.append({"role": "assistant", "content": msg.get("content") or "",
                          "tool_calls": calls})
         stuck_reason = None

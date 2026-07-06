@@ -377,6 +377,7 @@ def _fmt_coverage(cov: dict) -> str:
     if not cov:
         return "unavailable"
     return (f"themes={cov.get('themes', 0)} niches={cov.get('niches', 0)} "
+            f"operators={cov.get('operators', 0)} "
             f"theme_entropy={cov.get('theme_entropy', 0.0)} "
             f"dominant_theme_frac={cov.get('dominant_theme_frac', 0.0)} "
             f"recent_dominant_frac={cov.get('recent_dominant_frac', 0.0)} "

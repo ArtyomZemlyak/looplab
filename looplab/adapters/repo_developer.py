@@ -561,8 +561,9 @@ class LLMRepoDeveloper:
         plan_user = (
             f"Experiment concept (the researcher's idea): {idea.rationale}\nHyperparameters: {params}.\n"
             "BEFORE writing any code, break this into an ordered plan of ATOMIC steps and call "
-            "propose_plan. Use the read-only inspection tools first if you need to check the repo API / "
-            "installed versions. Keep steps small and independently testable.")
+            "propose_plan. Plan DIRECTLY from the repo source already included above — this planning "
+            "step has NO tools (you'll read/grep the repo and check installed versions when you "
+            "IMPLEMENT each step, not now). Keep steps small and independently testable.")
         messages = [{"role": "system", "content": system}, {"role": "user", "content": plan_user}]
         try:
             # EMIT-ONLY (tools=None): the repo source is already in `system`, so the planner needs no
@@ -622,7 +623,11 @@ class LLMRepoDeveloper:
         from looplab.tools.reposcout import RepoScoutTools
         overlay = write.files if write is not None else None      # live dict the write tools mutate
         deleted = write.deleted if write is not None else None    # staged deletions hidden from read/grep/list
-        return [RepoScoutTools(roots=roots, default_root=roots[0], overlay=overlay, deleted=deleted)]
+        # (name, path) per editable — MIRRORS RepoWriteTools._roots so a scout hit is rendered/deduped with
+        # the SAME `<name>/rel` key the write tools use in a multi-editable repo (round-trips into an edit).
+        named = [(e.get("name") or "", e["path"]) for e in (getattr(self, "_editables", None) or []) if e.get("path")]
+        return [RepoScoutTools(roots=roots, default_root=roots[0], overlay=overlay, deleted=deleted,
+                               named_roots=named)]
 
     def _run(self, idea: Idea, error: Optional[str] = None,
              base: Optional[dict] = None, base_note: str = "",

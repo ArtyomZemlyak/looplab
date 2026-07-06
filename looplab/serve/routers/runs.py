@@ -239,18 +239,32 @@ def build_router(srv) -> APIRouter:
         text is capped here, the full I/O is at /spans/{sid}."""
         rd = _run_dir(run_id)
         limit = max(1, min(int(limit or 30), 100))
-        # Read only the last ~256KB so a multi-MB spans.jsonl doesn't get re-parsed in full every poll.
+        # Read BACKWARD from EOF until we have `limit` complete lines (or hit a hard ceiling), instead of
+        # a fixed 256KB window: a single span line can be 100KB+ (a repo-Developer generation carries the
+        # whole prompt+output on it), so a fixed window could land ENTIRELY inside one line and return an
+        # empty feed exactly during the heavy generations a user most wants to watch. Still bounded so a
+        # multi-MB spans.jsonl is never re-parsed in full every poll.
         recent: list[dict] = []
+        _CHUNK = 262144
+        _MAX_TAIL = 8 * 1024 * 1024
         try:
             import os
             p = rd / "spans.jsonl"
             sz = os.path.getsize(p)
             with open(p, "rb") as f:
-                if sz > 262144:
-                    f.seek(sz - 262144)
-                    f.readline()                 # drop the partial first line after the seek
-                blob = f.read()
-            for line in blob.splitlines():
+                start = sz
+                blob = b""
+                while start > 0 and (sz - start) < _MAX_TAIL:
+                    step = min(_CHUNK, start)
+                    start -= step
+                    f.seek(start)
+                    blob = f.read(step) + blob
+                    if blob.count(b"\n") > limit:    # enough complete lines past the (partial) first
+                        break
+            lines = blob.splitlines()
+            if start > 0 and lines:
+                lines = lines[1:]                    # drop the partial first line (didn't reach BOF)
+            for line in lines:
                 try:
                     s = json.loads(line)
                 except (ValueError, TypeError):
@@ -351,6 +365,22 @@ def build_router(srv) -> APIRouter:
         except Exception:  # noqa: BLE001 — a malformed/foreign spans.jsonl must degrade, not 500
             return {"run_id": run_id, "task_id": "", "nodes": {}, "unscoped": [],
                     "summary": {"spans": 0, "errors": 0, "total_eval_seconds": 0}}
+
+    @router.get("/api/runs/{run_id}/trace/by_trace/{trace_id}")
+    def trace_by_trace(run_id: str, trace_id: str):
+        """Spans of ONE operation's trace (by trace_id) as a tree, WITH capped I/O — powers the
+        per-event trace expansion: a strategy_decision / hypothesis_merged event carries its own
+        operation's trace_id (the engine wraps each op in a named new_trace span and appends the event
+        inside, so eventstore stamps it), and the UI shows only THAT trace here, not the node's whole
+        Researcher+Developer trace."""
+        rd = _run_dir(run_id)
+        from looplab.serve.traceview import load_spans, _tree, _cap_span_io
+        try:
+            spans = [_cap_span_io(s) for s in load_spans(rd / "spans.jsonl")
+                     if s.get("trace_id") == trace_id]
+            return {"spans": _tree(spans), "count": len(spans)}
+        except Exception:  # noqa: BLE001 — malformed spans must degrade, not 500
+            return {"spans": [], "count": 0}
 
     @router.get("/api/runs/{run_id}/prov")
     def prov(run_id: str):

@@ -19,6 +19,10 @@ from looplab.core.atomicio import best_effort_fsync
 from looplab.core.models import Event
 from looplab.core.tracing import current_ids
 
+# Sentinel for EventStore.append's trace_id/span_id: distinguishes "not passed" (stamp with the ambient
+# span via current_ids) from an EXPLICIT None (a telemetry event that must carry NO trace).
+_UNSET_TRACE = object()
+
 
 @contextmanager
 def _interprocess_lock(lock_path: Path):
@@ -197,7 +201,8 @@ class EventStore:
         except OSError:
             pass  # best-effort healing; a read still tolerates the torn tail
 
-    def append(self, type: str, data: dict[str, Any]) -> Event:
+    def append(self, type: str, data: dict[str, Any], *,
+               trace_id: "str | None" = _UNSET_TRACE, span_id: "str | None" = _UNSET_TRACE) -> Event:
         """Durably append one event and return it (the envelope with its assigned seq).
 
         Under a best-effort cross-process lock (the UI server and the engine write the SAME
@@ -207,7 +212,12 @@ class EventStore:
         The record is written as one line + flush + best-effort fsync — fsync failures
         (FUSE/S3) never abort the engine, because reads tolerate a torn final line.
         `_seq` advances only AFTER the durable write succeeds."""
-        trace_id, span_id = current_ids()
+        # Stamp the event with the active span's (trace_id, span_id) so the UI can join events to the
+        # trace — UNLESS the caller passes an EXPLICIT pair (even None): a telemetry event emitted AFTER
+        # its op's span closed (foresight ranking) carries the captured trace_id of that op, and an
+        # explicit None means "no trace" (so it never inherits the ambient node/eval trace by accident).
+        if trace_id is _UNSET_TRACE:
+            trace_id, span_id = current_ids()
         with self._append_lock, _interprocess_lock(Path(str(self.path) + ".lock")):
             self._heal_torn_tail()
             # Derive seq from max(in-memory, on-disk tail) so a concurrent writer can't collide.

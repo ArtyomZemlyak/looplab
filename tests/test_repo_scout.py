@@ -132,6 +132,87 @@ def test_staged_deletion_hidden_from_scouts(tmp_path):
     assert "train.py" not in s.execute("find_files", {"root": str(tmp_path), "pattern": "*.py"})
 
 
+def test_grep_refuses_a_symlink_out_of_root(tmp_path):
+    """SECURITY (mega-review 07-06): `grep` walks with os.walk + open(), both of which follow symlinks.
+    An innocuously-named link inside the repo (configs/data.json -> a secret OUTSIDE the roots) must be
+    RE-VALIDATED on its RESOLVED target — else _looks_secret (which sees only the link's own name) is
+    fooled and the off-sandbox file leaks into the hits fed to a (possibly remote) model. read_file and
+    find_files already resolve-then-validate; grep must match them."""
+    import os
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "train.py").write_text("p.add_argument('--lr')\n", encoding="utf-8")
+    outside = tmp_path / "outside_secret.txt"                    # a sibling of repo/ — OUTSIDE the root
+    outside.write_text("LEAKED_TOKEN = 'abc123'\n", encoding="utf-8")
+    cfg = repo / "configs"
+    cfg.mkdir()
+    try:
+        os.symlink(outside, cfg / "data.json")                  # innocuous name + readable extension
+    except (OSError, NotImplementedError):
+        import pytest
+        pytest.skip("filesystem does not support symlinks")
+    s = RepoScoutTools(roots=[str(repo)], default_root=str(repo))
+    g = s.execute("grep", {"pattern": "LEAKED_TOKEN", "glob": "*"})
+    # assert on the secret VALUE (not the pattern name, which the "not found" message echoes back):
+    # a leak would surface the line `configs/data.json:1: LEAKED_TOKEN = 'abc123'`.
+    assert "abc123" not in g                                    # the out-of-root secret never surfaces
+    assert "not found" in g                                     # the symlink was skipped, not walked
+    assert "--lr" in s.execute("grep", {"pattern": "add_argument"})   # legit in-root grep still works
+
+
+def test_multi_editable_hits_are_name_prefixed_and_dedup(tmp_path):
+    """MULTI-editable (mega-review 07-06): the write tools key staged files `<name>/rel`, so a scout
+    grep/find hit must come back in the SAME shape or it can't round-trip into edit_file. Before the fix
+    _disp rendered relative_to(roots[0]) — BARE for the first root, ABSOLUTE (relative_to raises) for a
+    secondary root — and the dedup key never matched the overlay, so an already-edited file was
+    re-grepped from PRISTINE disk."""
+    a = tmp_path / "repoA"
+    a.mkdir()
+    (a / "train.py").write_text("p.add_argument('--old')\n", encoding="utf-8")
+    b = tmp_path / "repoB"
+    b.mkdir()
+    (b / "util.py").write_text("HELPER = 1  # add_argument marker\n", encoding="utf-8")
+    named = [("repoA", str(a)), ("repoB", str(b))]
+    staged: dict[str, str] = {}
+    s = RepoScoutTools(roots=[str(a), str(b)], default_root=str(a), overlay=staged, named_roots=named)
+    g = s.execute("grep", {"pattern": "add_argument"})
+    assert "repoA/train.py:1:" in g                              # first root — NAME-prefixed, round-trips
+    f = s.execute("find_files", {"root": str(b), "pattern": "**/*.py"})
+    assert "repoB/util.py" in f.splitlines()                     # secondary root — prefixed, not absolute
+    assert str(tmp_path) not in f
+    # edit repoA/train.py via the overlay using the WRITE-tool key shape -> pristine must NOT re-appear
+    staged["repoA/train.py"] = "p.add_argument('--new')\n"
+    g2 = s.execute("grep", {"pattern": "add_argument"})
+    assert "--new" in g2 and "--old" not in g2                   # staged wins
+    assert g2.count("repoA/train.py:1:") == 1                    # deduped — no pristine duplicate
+
+
+def test_default_root_branch_still_refuses_traversal(tmp_path):
+    """The repo-relative `default_root` branch (tried FIRST for a relative path) must not open an escape:
+    a `..` climb or an out-of-root absolute path is still refused (mega-review 07-06 — the sibling
+    traversal test uses NO default_root, so this branch was untested)."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "train.py").write_text("x = 1\n", encoding="utf-8")
+    secret = tmp_path / "secret.txt"                        # a sibling of repo/, outside the root
+    secret.write_text("TOKEN = 'nope'\n", encoding="utf-8")
+    s = RepoScoutTools(roots=[str(repo)], default_root=str(repo))
+    climb = s.execute("read_file", {"path": "../secret.txt"})
+    assert "not allowed" in climb.lower() and "TOKEN" not in climb     # `..` escape refused
+    absolute = s.execute("read_file", {"path": str(secret)})
+    assert "not allowed" in absolute.lower() and "TOKEN" not in absolute   # out-of-root absolute refused
+    assert "x = 1" in s.execute("read_file", {"path": "train.py"})    # the legit repo-relative read works
+
+
+def test_grep_max_hits_is_clamped(tmp_path):
+    """A model-supplied max_hits can't disable the cap (mega-review 07-06): it's clamped to 200."""
+    (tmp_path / "big.py").write_text(
+        "\n".join(f"x{i} = 1  # add_argument" for i in range(500)), encoding="utf-8")
+    s = RepoScoutTools(roots=[str(tmp_path)], default_root=str(tmp_path))
+    g = s.execute("grep", {"pattern": "add_argument", "max_hits": 100000})
+    assert "capped at 200 hits" in g
+
+
 def test_grep_installed_honors_a_submodule_scope():
     # scoping to a SUBMODULE actually narrows the walk: `def detect_encoding` lives in json/__init__.py,
     # so a search scoped to json.decoder must NOT find it (the old _top-stripping searched all of json).

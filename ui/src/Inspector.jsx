@@ -24,6 +24,21 @@ export default function Inspector({ runId, nodeId, state, live, tab, setTab, onT
     get(`/api/runs/${runId}/nodes/${nodeId}`).then(d => on && setDetail(d)).catch(() => {})
     return () => { on = false }
   }, [runId, nodeId, state?.nodes?.[nodeId]?.status])
+  // Live-refresh the node detail (it carries n.trace spans + the agent report) while the run is ACTIVELY
+  // working this node — so the Trace tab fills in WITHOUT the user toggling tabs. Only while an LLM is
+  // plausibly working it (building / still pending), engine alive; stops at terminal or engine death.
+  // "Working" = an LLM is ACTUALLY authoring this node RIGHT NOW (building = propose+implement, or a
+  // repair). NOT during training: a `pending` node is being EVALUATED (the sandbox trains it, no LLM),
+  // so no live pulse/poll there — that's the "тренировка уже не надо" case.
+  const nodeWorking = !!live && live.engine_running !== false && !live.finished
+    && nodeId != null && live.building?.node_id === nodeId
+  useEffect(() => {
+    if (!nodeWorking) return
+    const iv = setInterval(() => {
+      get(`/api/runs/${runId}/nodes/${nodeId}`).then(d => { if (d) setDetail(d) }).catch(() => {})
+    }, 4000)
+    return () => clearInterval(iv)
+  }, [runId, nodeId, nodeWorking])
 
   if (nodeId == null) return <div className="insp-empty">Select a node to inspect its idea, code, metrics, trust, and agent trace.</div>
   const n = detail || (state.nodes[nodeId])
@@ -48,7 +63,7 @@ export default function Inspector({ runId, nodeId, state, live, tab, setTab, onT
 
         {activeTab === 'Overview' && <Overview n={n} state={state} />}
         {activeTab === 'Trials' && <Trials n={n} detail={detail} state={state} />}
-        {activeTab === 'Trace' && <Trace n={n} runId={runId} />}
+        {activeTab === 'Trace' && <Trace n={n} runId={runId} live={live} working={nodeWorking} />}
         {activeTab === 'Code' && <Code n={n} />}
         {activeTab === 'Metrics' && <Metrics n={n} detail={detail} state={state} />}
         {activeTab === 'Training' && <Training runId={runId} nodeId={nodeId} n={n} />}
@@ -568,34 +583,52 @@ function ConvStage({ st }) {
   </div>
 }
 
-function Conversation({ n, runId }) {
+function Conversation({ n, runId, working }) {
   const [conv, setConv] = useState(null)
   useEffect(() => {
     let on = true
-    setConv(null)
-    nodeConversation(runId, n.id).then(d => on && setConv(d || { stages: [] })).catch(() => on && setConv({ stages: [] }))
-    return () => { on = false }
-  }, [runId, n.id])
+    setConv(null)   // node changed → clear before the first load (poll ticks below don't clear, so no flash)
+    const load = () => nodeConversation(runId, n.id).then(d => on && setConv(d || { stages: [] })).catch(() => on && setConv({ stages: [] }))
+    load()
+    const iv = working ? setInterval(load, 4000) : null   // live-refresh while the agent works this node
+    return () => { on = false; if (iv) clearInterval(iv) }
+  }, [runId, n.id, working])
   if (conv === null) return <div className="muted" style={{ fontSize: 12 }}>loading…</div>
   const stages = conv.stages || []
   if (!stages.length) return <div className="muted">No conversation captured for this node yet.</div>
   return <div className="conv">{stages.map((st, i) => <ConvStage key={i} st={st} />)}</div>
 }
 
-function Trace({ n, runId }) {
+function Trace({ n, runId, live, working }) {
   const [view, setView] = useState('conversation')   // linear reading by default; raw tree on demand
+  const bodyRef = useRef(null)
   const spans = n.trace?.nodes || []
   const agent = n.agent_report
+  // Live status: what an LLM is doing on this node RIGHT NOW — only while it's actually working the node
+  // (writing code / repairing), never during the training eval (the user doesn't want a pulse then).
+  const _op = (working && live?.building?.node_id === n.id) ? (live.building.operator || '') : ''
+  const statusLabel = working
+    ? (/repair|debug/.test(_op) ? '🔧 repairing…' : /merge/.test(_op) ? '🔀 merging…' : '✍️ writing code…')
+    : null
+  const status = statusLabel && <div className="trace-live-status"><span className="tls-dot" />{statusLabel}
+    <span className="muted" style={{ marginLeft: 6, fontSize: 11 }}>live — updates on its own</span></div>
+  const scrollTo = (where) => { const c = bodyRef.current?.closest('.insp-body'); if (c) c.scrollTop = where === 'top' ? 0 : c.scrollHeight }
+  const nav = <span className="trace-nav">
+    <button className="seg" title="scroll to top" onClick={() => scrollTo('top')}>↑</button>
+    <button className="seg" title="scroll to newest (bottom)" onClick={() => scrollTo('bottom')}>↓</button></span>
   if (!spans.length && !agent)
-    return <div className="muted">No execution spans for this node yet — toy/offline nodes have minimal spans, and a node still in progress fills its trace as it runs.</div>
+    return <div className="trace" ref={bodyRef}>{status}<div className="muted">{working
+      ? 'Trace fills in here as the agent works — new steps appear automatically.'
+      : 'No execution spans for this node yet — toy/offline nodes have minimal spans, and a node still in progress fills its trace as it runs.'}</div></div>
   const toggle = <div className="conv-toggle">
     <button className={'seg' + (view === 'conversation' ? ' on' : '')} onClick={() => setView('conversation')}
       title="Linear, de-duplicated reading: request once, then each turn's reasoning + tools">conversation</button>
     <button className={'seg' + (view === 'raw' ? ' on' : '')} onClick={() => setView('raw')}
       title="The raw span tree with each generation's full re-sent message list">raw spans</button>
+    <span style={{ flex: 1 }} />{nav}
   </div>
   if (view === 'conversation')
-    return <div className="trace">{toggle}<Conversation n={n} runId={runId} />
+    return <div className="trace" ref={bodyRef}>{status}{toggle}<Conversation n={n} runId={runId} working={working} />
       {agent && <AgentReport r={agent} />}</div>
   const { t0, total } = traceBounds(spans)
   // create_node already nests propose→implement; if an agent wrote the node, the report belongs
@@ -603,7 +636,8 @@ function Trace({ n, runId }) {
   const authorIdx = spans.findIndex(s => ['create_node', 'implement', 'repair'].includes(s.name))
   const roll = n.trace?.rollup || {}
   const rtok = roll.tokens || {}
-  return <div className="trace">
+  return <div className="trace" ref={bodyRef}>
+    {status}
     {toggle}
     <div className="muted" style={{ marginBottom: 10 }}>
       Lifecycle of node #{n.id} — each part on a shared timeline (offset = when it ran, bar = how long).

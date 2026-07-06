@@ -11,6 +11,7 @@ import { OpIcon } from './icons.jsx'
 
 const NARR = {
   run_started: (d) => `run started — ${d.goal || d.task_id} (${d.direction})`,
+  node_building: (d) => `building node #${d.node_id} via ${d.operator || 'improve'}…`,
   node_created: (d) => `node #${d.node_id} via ${d.operator}${d.idea?.rationale ? ' — ' + d.idea.rationale.slice(0, 80) : ''}`,
   node_evaluated: (d) => `node #${d.node_id} → ${fmt(d.metric)}`,
   node_failed: (d) => `node #${d.node_id} failed (${d.reason})${d.triage_action === 'reject_idea' ? ' — idea rejected' + (d.triage_rationale ? ': ' + String(d.triage_rationale).slice(0, 70) : '') : ''}`,
@@ -55,6 +56,14 @@ const NARR = {
   inject_node: (d) => { const i = d.idea || {}; return `added experiment: ${i.operator || 'improve'}${d.parent_id != null ? ' from #' + d.parent_id : ''}${i.rationale ? ' — ' + String(i.rationale).slice(0, 70) : ''}` },
   annotation: (d) => `note on #${d.node_id}: ${String(d.text || '').slice(0, 80)}`,
   run_reopened: () => 'run reopened to keep going',
+  resume: () => 'run resumed — continuing',
+  run_abort: (d) => `finalize requested${d.reason ? ' (' + d.reason + ')' : ''} — wrapping up`,
+  hypothesis_added: (d) => `hypothesis added${d.source ? ' (' + d.source + ')' : ''} — ${String(d.statement || '').slice(0, 90)}`,
+  hypothesis_merged: (d) => `hypotheses merged — ${String(d.statement || '').slice(0, 80)}${(d.aliases || []).length ? ` (${(d.aliases || []).length} paraphrase${(d.aliases || []).length === 1 ? '' : 's'} folded)` : ''}`,
+  lessons_distilled: (d) => `distilled ${d.count || 0} lesson${d.count === 1 ? '' : 's'}${d.trigger ? ' (' + d.trigger + ')' : ''}`,
+  lessons_refreshed: (d) => d.skipped ? 'cross-run lessons refresh skipped' : 'cross-run lessons refreshed',
+  coverage_snapshot: (d) => `coverage — ${d.themes || 0} theme${d.themes === 1 ? '' : 's'} · ${d.niches || 0} niche${d.niches === 1 ? '' : 's'}${d.dominant_theme_frac != null ? ` · dominant ${Math.round(d.dominant_theme_frac * 100)}%` : ''}`,
+  deps_installed: (d) => `dependencies installed${d.packages ? ': ' + (Array.isArray(d.packages) ? d.packages.slice(0, 6).join(', ') : String(d.packages).slice(0, 80)) : ''}`,
   fork_done: () => 'fork fulfilled — branch added',
   inject_done: () => 'experiment injected into the tree',
   confirm_done: (d) => `multi-seed confirm finished for #${d.node_id}`,
@@ -101,10 +110,11 @@ const GROUPS = [
   ['lifecycle', 'lifecycle'],
 ]
 const TYPE2GROUP = {
-  node_created: 'proposal',
+  node_building: 'proposal', node_created: 'proposal',
   node_evaluated: 'eval', node_failed: 'eval', node_repaired: 'eval', node_confirmed: 'eval', best_confirmed: 'eval', proxy_scored: 'eval', ablate: 'eval',
   policy_decision: 'decision', strategy_decision: 'decision', rung_promoted: 'decision', agent_decision: 'decision', set_strategy: 'decision', hypothesis_ranked: 'decision', foresight_selected: 'decision',
   research_completed: 'research', deep_research: 'research',
+  hypothesis_added: 'research', hypothesis_merged: 'research', lessons_refreshed: 'research', lessons_distilled: 'research', coverage_snapshot: 'decision', deps_installed: 'eval',
   report_generated: 'report', reflection_note: 'report',
   reward_hack_suspected: 'trust', data_leakage: 'trust', spec_drift: 'trust', novelty_rejected: 'trust',
   hint: 'control', pause: 'control', resume: 'control', run_abort: 'control', node_abort: 'control',
@@ -138,6 +148,16 @@ function kindOf(type) {
 
 // Events whose row expands to a "why" detail card (reasoning, considered alternatives, context).
 const REASONING_TYPES = new Set(['node_created', 'policy_decision', 'strategy_decision', 'research_completed'])
+// Events that OWN a node's agent trace — only these expand to the node's span tree (create_node =
+// propose+implement, evaluate, repair). Every other event that happens to carry a node_id (foresight/
+// hypothesis/strategy/coverage/lessons) shows only its OWN detail, never the node's whole trace.
+const TRACE_OWNER_TYPES = new Set(['node_created', 'node_evaluated', 'node_failed', 'node_repaired', 'node_building', 'setup_started'])
+// Events the engine wraps in their OWN new_trace op-span (so their trace_id isolates just that
+// operation). ONLY these get the per-op trace expansion — an allow-list, because eventstore stamps
+// EVERY event with the ambient span's trace_id, so an incidental event appended inside evaluate/
+// create_node (spec_drift, novelty_rejected) would otherwise dump that whole node/eval trace.
+const OP_TRACE_TYPES = new Set(['strategy_decision', 'hypothesis_merged', 'research_completed',
+  'report_generated', 'hypothesis_ranked', 'foresight_selected', 'lessons_distilled', 'lessons_refreshed'])
 
 // Pull the model's raw <think> chain-of-thought for a node out of the trace view (spans.jsonl) — so
 // the feed can surface "what was the Researcher thinking" inline. Returns [{op, text}] for the node.
@@ -174,9 +194,13 @@ function LiveTrace({ runId, active }) {
   }, [runId, active, open])
   useEffect(() => { if (open && bodyRef.current) bodyRef.current.scrollTop = bodyRef.current.scrollHeight }, [tail, open])
   return (
-    <details className="live-trace" onToggle={e => setOpen(e.currentTarget.open)}>
-      <summary title="stream the agent's thoughts + tool calls">trace ⏦</summary>
-      <div className="lt-body" ref={bodyRef}>
+    <div className={'live-trace' + (open ? ' open' : '')}>
+      {/* Standard inline disclosure — caret ▸ left of the label, expands IN PLACE (not a popup). */}
+      <div className="lt-toggle" onClick={() => setOpen(o => !o)}
+           title="stream the agent's thoughts + tool calls">
+        <span className="lt-caret">{open ? '▾' : '▸'}</span>trace
+      </div>
+      {open && <div className="lt-body" ref={bodyRef}>
         {tail.length === 0
           ? <div className="muted lt-empty">waiting for the next agent step…</div>
           : tail.map((it, i) => it.kind === 'generation'
@@ -189,10 +213,18 @@ function LiveTrace({ runId, active }) {
                 <span className="lt-tool-name">{it.tool}</span>
                 {it.arg && <span className="lt-arg">{it.arg}</span>}
               </div>)}
-      </div>
-    </details>
+      </div>}
+    </div>
   )
 }
+
+// Bookkeeping events that do NOT reflect what the agent is DOING — skip them when inferring the
+// between-experiments status, else the strip flickers to "Thinking…" every time one of these lands
+// right after a node (coverage/cost/lessons/reflection all fire post-eval).
+const STATUS_NOISE = new Set([
+  'coverage_snapshot', 'llm_cost', 'reflection_note', 'diversity_archive',
+  'lessons_distilled', 'lessons_refreshed', 'budget', 'node_building',
+])
 
 function agentStatus(live, log) {
   if (!live || live.finished) return null
@@ -205,16 +237,29 @@ function agentStatus(live, log) {
   if (phase === 'grounding' || phase === 'onboarding') return 'Setting up the task & data…'
   if (phase === 'approval') return 'Waiting for your approval…'
   if (phase === 'spec_approval') return 'Waiting to ratify the eval spec…'
-  const wid = workingId(live)                                   // a node is pending → it's evaluating
-  if (wid != null) return `Running experiment #${wid}…`
-  const last = log.length ? log[log.length - 1].type : null     // between nodes → infer from last event
+  // WRITING vs RUNNING are distinct and were conflated before (both said "Running experiment"):
+  //   • `building` is set from node_building until node_created folds → the Developer is WRITING code;
+  //   • a node with status 'pending' → its code is written and the sandbox is TRAINING it.
+  if (live.building && live.building.node_id != null) {
+    const op = live.building.operator || ''
+    const id = live.building.node_id
+    return /repair|debug/.test(op) ? `Repairing experiment #${id}…`
+      : /merge/.test(op) ? `Merging into experiment #${id}…`
+      : `Writing experiment #${id}…`
+  }
+  const pend = Object.values(live.nodes || {}).filter(n => n.status === 'pending').map(n => n.id)
+  if (pend.length) return `Running experiment #${Math.max(...pend)}… (training)`
+  // Between experiments: infer from the last MEANINGFUL event (skip the bookkeeping noise above), so the
+  // label stays put on "Planning…" instead of blinking every time a coverage/cost event lands.
+  let last = null
+  for (let i = log.length - 1; i >= 0; i--) { if (!STATUS_NOISE.has(log[i].type)) { last = log[i].type; break } }
   if (last === 'setup_started' || last === 'setup_step' || last === 'workspace_seeded') return 'Setting up task & data…'
   if (last === 'run_setup_started') return 'Installing dependencies…'
   if (last === 'strategy_decision' || last === 'set_strategy') return 'Choosing a strategy…'
-  if (last === 'policy_decision' || last === 'agent_decision') return 'Planning the next experiment…'
   if (last === 'research_completed' || last === 'deep_research') return 'Reading the literature…'
   if (last === 'node_created') return 'Writing & running the experiment…'
-  return 'Thinking about the next step…'
+  // node_evaluated / node_failed / policy_decision / agent_decision → the loop is picking what's next.
+  return 'Planning the next experiment…'
 }
 
 const Disclosure = ({ label, children }) => {
@@ -341,9 +386,24 @@ function GenericDetail({ e }) {
     <React.Fragment key={i}><div className="section-h">{k}</div><div className="v">{v}</div></React.Fragment>)}</div>
 }
 
+// The trace of ONE sub-operation (strategy_consult / hypothesis_merge …), fetched lazily by the
+// event's own trace_id — so a strategy_decision row shows only the strategist's reasoning, not the
+// whole node. Rendered with the same span-tree component as a node's trace.
+function OpTrace({ runId, traceId }) {
+  const [spans, setSpans] = useState(null)
+  useEffect(() => {
+    let on = true
+    setSpans(null)
+    get(`/api/runs/${runId}/trace/by_trace/${traceId}`)
+      .then(d => on && setSpans(d?.spans || [])).catch(() => on && setSpans([]))
+    return () => { on = false }
+  }, [runId, traceId])
+  if (spans === null) return <div className="muted" style={{ fontSize: 12, padding: '4px 2px' }}>loading trace…</div>
+  if (!spans.length) return <div className="muted" style={{ fontSize: 12, padding: '4px 2px' }}>no trace captured for this step</div>
+  return <NodeTrace spans={spans} runId={runId} />
+}
+
 // One feed row, chat-message styled: an icon/color by kind, the narration, an expandable "why" card.
-// node_created auto-expands ONLY while its node is the live frontier (the Researcher is "thinking");
-// once the node is evaluated the card collapses to its one-line key info.
 function EventRow({ e, trace, onFocusEvent, autoOpen, runId }) {
   const [open, setOpen] = useState(autoOpen)
   const touched = useRef(false)   // once the user toggles, stop auto-following the live frontier
@@ -352,21 +412,28 @@ function EventRow({ e, trace, onFocusEvent, autoOpen, runId }) {
   useEffect(() => { if (!touched.current) setOpen(autoOpen) }, [autoOpen])
   const nid = eventNode(e)
   const hasReason = REASONING_TYPES.has(e.type)
-  // langfuse-style: any event that resolves a node expands to that node's span trace inline (it
-  // appears once spans land, so the toggle shows up for evaluated/failed/repaired nodes too).
-  // Use the event's OWN node_id (not eventNode's parent_id fallback) so e.g. an `ablate` row — which
-  // carries only parent_id — never renders the PARENT node's trace mislabeled as its own. The
-  // `setup_started` row surfaces the SETUP phase's span tree (task/data materialization, profiling,
-  // genesis) — traced under the pseudo-node -1 — so the opaque "setting up task & data" step becomes a
-  // watchable trace like any experiment.
-  const traceNid = e.data?.node_id ?? (e.type === 'setup_started' ? -1 : null)
+  // The node's span trace (create_node = propose+implement, or evaluate) belongs ONLY to the events
+  // that ARE that node's work — its lifecycle. Incidental sub-operation events (foresight_ranked/
+  // _selected, hypothesis_ranked/_merged, strategy_decision, coverage_snapshot, …) merely carry a
+  // node_id for CONTEXT; expanding them must NOT dump the node's whole Researcher+Developer trace —
+  // that isn't their work, and it's the exact "why is the Researcher+Developer trace under a foresight
+  // row" bug. They fall through to their OWN reasoning/data detail below. (Per-operation LLM traces
+  // for these would need a named span + an event span_id — a backend change; TODO.) `setup_started`
+  // surfaces the SETUP phase's tree (pseudo-node -1). OWN node_id only — never the parent_id fallback.
+  const traceNid = TRACE_OWNER_TYPES.has(e.type)
+    ? (e.data?.node_id ?? (e.type === 'setup_started' ? -1 : null))
+    : null
   const nodeSpans = traceNid != null ? (trace?.nodes || {})[String(traceNid)] : null
   const hasTrace = !!(nodeSpans && nodeSpans.length)
+  // A sub-operation event the engine wrapped in its OWN named trace (strategy_decision, hypothesis_
+  // merged) carries a trace_id — expand to ONLY that operation's trace (lazily fetched by trace_id),
+  // never the node's whole Researcher+Developer trace. Old events (no trace_id) fall through to detail.
+  const opTraceId = (OP_TRACE_TYPES.has(e.type) && e.trace_id) ? e.trace_id : null
   // no-truncation: a row whose one-line narration clamped text (or used the raw JSON fallback) is
   // expandable to its FULL content even without a dedicated reasoning card.
   const isRawFallback = !hasReason && !NARR[e.type]
   const hasGeneric = !hasReason && (genericRows(e).length > 0 || isRawFallback)
-  const expandable = hasReason || hasTrace || hasGeneric
+  const expandable = hasReason || hasTrace || !!opTraceId || hasGeneric
   const { group, glyph } = kindOf(e.type)
   const narr = (NARR[e.type] || ((d) => JSON.stringify(d).slice(0, 80)))(e.data)
   return (
@@ -383,6 +450,7 @@ function EventRow({ e, trace, onFocusEvent, autoOpen, runId }) {
           {hasReason && reasoningDetail(e, trace)}
           {hasGeneric && <GenericDetail e={e} />}
           {hasTrace && <NodeTrace spans={nodeSpans} runId={runId} />}
+          {opTraceId && <OpTrace runId={runId} traceId={opTraceId} />}
         </div>}
       </div>
     </div>
@@ -416,15 +484,30 @@ export default function Dock({ runId, live, liveSeq, viewSeq, setViewSeq, onFocu
   // triggers never fire and its span tree would sit frozen. While in setup, key the refetch on liveSeq
   // so the setup trace streams in live (the phase is short; a few small refetches). Once the first node
   // lands this collapses to 0 and normal node-based refetching resumes.
-  const inSetup = !!live && !live.finished && nodeCount === 0
+  const inSetup = !!live && !live.finished && live.engine_running !== false && nodeCount === 0
   useEffect(() => { get(`/api/runs/${runId}/trace`).then(setTrace).catch(() => {}) },
     [runId, nodeCount, settledCount, live?.finished, inSetup ? liveSeq : 0])
+  // While a node is BUILDING, its spans stream in but nodeCount/settledCount don't change — so the
+  // fetch above never re-runs and the building node's Trace stays FROZEN (you see spans, but they never
+  // grow). Poll the trace while a node builds so its Trace tab/row fills in live; the poll stops the
+  // moment building ends (node_created clears `building`), and the fetch above does the final refresh.
+  const buildingId = live && !live.finished && live.engine_running !== false && live.building
+    ? live.building.node_id : null
+  useEffect(() => {
+    if (buildingId == null) return
+    const tick = () => get(`/api/runs/${runId}/trace`).then(setTrace).catch(() => {})
+    tick()
+    const iv = setInterval(tick, 4000)
+    return () => clearInterval(iv)
+  }, [runId, buildingId])
   const atLive = viewSeq == null || viewSeq >= liveSeq
 
   // The live frontier: the highest-id node still pending while the run runs — its proposal card stays
-  // expanded ("thinking") until it resolves. null on a finished/replayed run.
+  // expanded ("thinking") until it resolves. null on a finished/replayed run — AND on a STALLED/zombie
+  // run (engine_running===false): a run whose engine died mid-eval leaves a node stuck 'pending', and
+  // without this guard its node_created row would auto-expand and dump the full span trace forever.
   const livePendingId = useMemo(() => {
-    if (!live || live.finished) return null
+    if (!live || live.finished || live.engine_running === false) return null
     const pend = Object.values(live.nodes || {}).filter(n => n.status === 'pending').map(n => n.id)
     return pend.length ? Math.max(...pend) : null
   }, [live])
@@ -528,16 +611,16 @@ export default function Dock({ runId, live, liveSeq, viewSeq, setViewSeq, onFocu
             ? <div className="muted">{(filter || kinds.size) ? 'nothing matches the filter' : 'no events yet'}</div>
             : feed.map(e =>
                 <EventRow key={'e' + e.seq} e={e} trace={trace} onFocusEvent={focusEvent} runId={runId}
-                    autoOpen={(e.type === 'node_created' && eventNode(e) === livePendingId)
-                      || (e.type === 'setup_started' && inSetup)} />)}
+                    autoOpen={false} />)}
           {(() => {
             // A short, honest "what's the agent doing now" strip at the foot of the feed.
             const pipeline = atLive ? agentStatus(live, log) : null
             if (!pipeline) return null
             return <div className="agent-status">
-              <span className="as-dot" />
-              <span className="as-seg">{pipeline}</span>
-              <span style={{ flex: 1 }} />
+              <div className="as-line">
+                <span className="as-dot" />
+                <span className="as-seg">{pipeline}</span>
+              </div>
               <LiveTrace runId={runId} active={atLive} />
             </div>
           })()}

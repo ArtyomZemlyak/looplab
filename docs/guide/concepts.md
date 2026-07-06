@@ -76,6 +76,11 @@ look at something and `resume` with no premature/duplicate lessons, or `finalize
 "reopens" a run that finished naturally to continue it with more budget. (Under the hood the fold still
 understands the legacy `run_reopened` alias of `resume` for old logs.)
 
+The UI also shows a node the **instant** the engine starts building it: a transient `node_building`
+marker (folded to a `building` slot, *not* the event-sourced node set, so it never affects node-id
+allocation or resume) that streams the node's live agent-trace right away, then is superseded by
+`node_created` when the node materializes — or dropped if the run ends first.
+
 ## Search policies
 
 The policy decides which node to expand next. It's pluggable (`make_policy`) and swapping it changes
@@ -207,6 +212,24 @@ on (default), each LLM call's full prompt + completion is captured so the UI can
 the model read and wrote per node. Installing the `[otel]` extra and setting `OTEL_*` sends the same
 spans to any OTLP collector (Jaeger / Tempo / Honeycomb) with no code change. Spans are diagnostics
 only — `replay` never reads them.
+
+**Per-operation traces.** A node's own work (propose → implement → repair, then evaluate/training)
+is one trace, shown under the node. But every OTHER LLM sub-operation runs in its **own** named trace
+(`new_trace`) — `strategist_consult`, `hypothesis_merge`, `deep_research`, `report`, `lessons_distill`/
+`lessons_refresh`, and the `foresight_rank` behind `hypothesis_ranked`/`foresight_selected`. The event
+that operation emits is **stamped with that trace's id** (the event store reads the active span's ids
+on append; a telemetry event whose op-span already closed carries the captured id explicitly), so the
+UI expands that event's row to ONLY that operation's trace — never the whole node's Researcher+Developer
+tree. `GET /api/runs/{id}/trace/by_trace/{trace_id}` returns one operation's span sub-tree; the node's
+full trace is at `/api/runs/{id}/trace`. Events with no LLM (e.g. `coverage_snapshot`, deterministic)
+carry no trace; a `node_evaluated` row shows the **training** run (the `evaluate` span), not an LLM call.
+
+**Live status.** The UI reads what an LLM is doing right now from the append-only markers: a
+`node_building` marker (emitted the instant `_create_node` starts, before the minutes-long author step)
+drives a `✍️ writing` / `🔧 repairing` / `🔀 merging` status (by the node's operator) and streams that
+node's trace live; a `pending` node is being **trained** (the sandbox eval — no LLM), shown as
+`running (training)` with no live pulse. The assistant chat streams the same way — interstitial prose
+(`SSE_TEXT`) and tool steps (`SSE_STEP`) between tool rounds, Claude-Desktop-style.
 
 ## Module map
 
