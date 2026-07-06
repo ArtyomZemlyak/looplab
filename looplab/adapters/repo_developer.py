@@ -620,8 +620,9 @@ class LLMRepoDeveloper:
         if not roots:
             return []
         from looplab.tools.reposcout import RepoScoutTools
-        overlay = write.files if write is not None else None   # live dict the write tools mutate
-        return [RepoScoutTools(roots=roots, default_root=roots[0], overlay=overlay)]
+        overlay = write.files if write is not None else None      # live dict the write tools mutate
+        deleted = write.deleted if write is not None else None    # staged deletions hidden from read/grep/list
+        return [RepoScoutTools(roots=roots, default_root=roots[0], overlay=overlay, deleted=deleted)]
 
     def _run(self, idea: Idea, error: Optional[str] = None,
              base: Optional[dict] = None, base_note: str = "",

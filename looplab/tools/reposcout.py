@@ -41,7 +41,7 @@ _SKIP_DIRS = {".git", "__pycache__", ".ipynb_checkpoints", "node_modules", ".myp
 
 
 class RepoScoutTools:
-    def __init__(self, roots, default_root=None, overlay=None):
+    def __init__(self, roots, default_root=None, overlay=None, deleted=None):
         self._roots = _pathsafe.resolve_roots(roots)
         # A repo-RELATIVE path (e.g. "train.py") resolves against this root, so a caller whose write
         # tools already use repo-relative paths (the repo Developer) can read/grep with the SAME paths
@@ -53,6 +53,24 @@ class RepoScoutTools:
         # live dict the write tools mutate, so a read reflects the latest edit. Empty for the boss (disk
         # only). NOT secret-filtered — the caller authored these files itself; disk reads still are.
         self._overlay = overlay if overlay is not None else {}
+        # STAGED deletions: repo-relative paths the caller removed this session. They still sit on the
+        # editable-root disk, so read/grep/list must HIDE them to reflect the staged tree, not the
+        # pristine repo. Live list => a later delete takes effect immediately.
+        self._deleted = deleted if deleted is not None else []
+
+    def _is_deleted(self, rel: str) -> bool:
+        rel = str(rel or "").replace("\\", "/").lstrip("./")
+        return any(str(d).replace("\\", "/").lstrip("./") == rel for d in self._deleted)
+
+    def _is_deleted_abs(self, p) -> bool:
+        """Is an ABSOLUTE path a staged deletion? Maps it back to a repo-relative path first."""
+        if not self._deleted:
+            return False
+        base = self._default_root or (self._roots[0] if self._roots else None)
+        try:
+            return base is not None and self._is_deleted(str(Path(p).relative_to(base)))
+        except ValueError:
+            return False
 
     def _resolve(self, path: str):
         """Resolve a user/model-supplied path and confirm it's inside an allowed root (else None).
@@ -119,9 +137,9 @@ class RepoScoutTools:
         if not p.is_dir():
             return f"(not a directory: {path})"
         # Hide credential files/dirs from the listing too — not just from read_file — so a secret's
-        # existence + name never reaches the model.
+        # existence + name never reaches the model. Staged deletions are hidden too (reflect the tree).
         children = [c for c in sorted(p.iterdir(), key=lambda x: (x.is_file(), x.name.lower()))
-                    if not _looks_secret(c)]
+                    if not _looks_secret(c) and not self._is_deleted_abs(c)]
         rows = []
         for c in children[:_MAX_ENTRIES]:
             if c.is_dir():
@@ -147,6 +165,8 @@ class RepoScoutTools:
         staged = self._overlay_get(path)
         if staged is not None:               # the code the caller is EDITING wins over the pristine disk
             return staged[:_MAX_READ] + ("\n… (truncated)" if len(staged) > _MAX_READ else "")
+        if self._is_deleted(path):           # reflect the STAGED tree: a file deleted this session is gone
+            return f"(deleted this session: {path} — not read)"
         p = self._resolve(path)
         if not p:
             return f"(path not allowed or outside permitted roots: {path})"
@@ -179,7 +199,7 @@ class RepoScoutTools:
                 # "../../etc/*" escapes the allowed roots — re-validate every hit against the roots
                 # (and run the secret filter on the RESOLVED path so a symlinked secret is caught).
                 rm = _pathsafe.resolve_within(self._roots, str(m))
-                if rm is None or _looks_secret(rm):
+                if rm is None or _looks_secret(rm) or self._is_deleted_abs(rm):
                     continue
                 hits.append(str(rm))
                 if len(hits) >= _MAX_ENTRIES:
@@ -226,8 +246,9 @@ class RepoScoutTools:
                 if not _fnmatch(fn, glob):
                     continue
                 fp = Path(dp) / fn
-                try:                                # a file the caller has STAGED was grepped above
-                    if str(fp.relative_to(_dedup_base)).replace("\\", "/") in staged_rel:
+                try:                                # skip a file STAGED (grepped above) or DELETED this session
+                    _rel = str(fp.relative_to(_dedup_base)).replace("\\", "/")
+                    if _rel in staged_rel or self._is_deleted(_rel):
                         continue
                 except ValueError:
                     pass

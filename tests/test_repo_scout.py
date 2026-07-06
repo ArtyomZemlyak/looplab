@@ -96,6 +96,32 @@ def test_developer_wires_reused_scout_with_overlay(tmp_path):
     assert dev._scout_tools(write) == []
 
 
+def test_staged_deletion_hidden_from_scouts(tmp_path):
+    # a file deleted THIS session (but still on the editable-root disk) must read/grep/list as gone —
+    # the scouts reflect the STAGED tree, not the pristine repo. `deleted` is a live list, so a later
+    # delete takes effect at once. (Reused equivalent of the old bespoke deletion handling.)
+    (tmp_path / "train.py").write_text("p.add_argument('--gone')\n", encoding="utf-8")
+    (tmp_path / "model.py").write_text("KEEP = 1\n", encoding="utf-8")
+    deleted: list[str] = []
+    s = RepoScoutTools(roots=[str(tmp_path)], default_root=str(tmp_path), deleted=deleted)
+    assert "--gone" in s.execute("grep", {"pattern": "add_argument"})       # present before the delete
+    deleted.append("train.py")
+    assert "deleted this session" in s.execute("read_file", {"path": "train.py"})   # read reports gone
+    assert "not found" in s.execute("grep", {"pattern": "add_argument"})    # grep can't resurface it
+    assert "KEEP" in s.execute("grep", {"pattern": "KEEP"})                 # siblings unaffected
+    assert "train.py" not in s.execute("find_files", {"root": str(tmp_path), "pattern": "*.py"})
+
+
+def test_grep_installed_honors_a_submodule_scope():
+    # scoping to a SUBMODULE actually narrows the walk: `def detect_encoding` lives in json/__init__.py,
+    # so a search scoped to json.decoder must NOT find it (the old _top-stripping searched all of json).
+    t = EnvInspectTools()
+    assert "detect_encoding" in t.execute("grep_installed",
+                                          {"query": "def detect_encoding", "package": "json"})
+    scoped = t.execute("grep_installed", {"query": "def detect_encoding", "package": "json.decoder"})
+    assert "not found" in scoped and "json/__init__" not in scoped
+
+
 def test_env_suggest_points_at_the_real_name():
     # a near-miss of an installed package suggests it ('pytes' -> 'pytest', always installed in dev)
     hint = _suggest("pytes")
