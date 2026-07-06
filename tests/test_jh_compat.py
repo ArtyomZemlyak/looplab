@@ -29,35 +29,16 @@ def test_best_effort_fsync_swallows_unsupported(monkeypatch):
     assert open(p, encoding="utf-8").read() == '{"ok": true}'
 
 
-def test_fsync_timeout_env_parse_tolerates_garbage():
+def test_fsync_timeout_env_parse_tolerates_garbage(monkeypatch):
     """LOOPLAB_FSYNC_TIMEOUT is read at import; atomicio is imported transitively everywhere, so a
     garbage override (LOOPLAB_FSYNC_TIMEOUT=abc) must degrade to the default, not crash the app at
-    load. A valid override is still honored."""
-    import importlib
+    load. A valid override is still honored. (`_fsync_timeout` reads the env live, so no reload.)"""
     import looplab.core.atomicio as aio
-    assert aio._fsync_timeout() == 5.0  # sanity: default when unset
-    with mock_env("LOOPLAB_FSYNC_TIMEOUT", "abc"):
-        assert aio._fsync_timeout() == 5.0          # garbage -> default, no ValueError at import
-    with mock_env("LOOPLAB_FSYNC_TIMEOUT", "12.5"):
-        assert aio._fsync_timeout() == 12.5         # valid -> honored
-    importlib.reload(aio)                            # restore module-level constant for other tests
-
-
-def mock_env(key, val):
-    import contextlib
-
-    @contextlib.contextmanager
-    def _cm():
-        old = os.environ.get(key)
-        os.environ[key] = val
-        try:
-            yield
-        finally:
-            if old is None:
-                os.environ.pop(key, None)
-            else:
-                os.environ[key] = old
-    return _cm()
+    assert aio._fsync_timeout() == 5.0              # default when unset
+    monkeypatch.setenv("LOOPLAB_FSYNC_TIMEOUT", "abc")
+    assert aio._fsync_timeout() == 5.0              # garbage -> default, no ValueError at import
+    monkeypatch.setenv("LOOPLAB_FSYNC_TIMEOUT", "12.5")
+    assert aio._fsync_timeout() == 12.5             # valid -> honored
 
 
 def test_atomic_write_uses_unique_temp_and_leaves_no_leftover(tmp_path):

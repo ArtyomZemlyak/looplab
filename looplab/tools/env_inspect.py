@@ -215,14 +215,23 @@ class EnvInspectTools:
         query = query.strip()
         if not query or not package.strip():
             return "(grep_installed: give a query and a package)"
+        pkg = package.strip()
         try:
             # Resolve the FULL dotted path (not just `_top`), so scoping to a submodule actually
             # narrows the walk — `grep_installed(query, "torch.nn")` searches torch/nn, not all of
             # torch. This is what makes the `_FILE_BUDGET` overflow hint ("narrow `package` to a
             # submodule to search deeper") actionable; `read_installed` already resolves full paths.
-            spec = importlib.util.find_spec(package.strip())
+            spec = importlib.util.find_spec(pkg)
         except (ImportError, ValueError, ModuleNotFoundError) as e:
             return f"(grep_installed: cannot locate {package}: {e}{_suggest(package)})"
+        except Exception:  # noqa: BLE001 — resolving a DOTTED name imports the parent package, which in a
+            # broken env can raise anything (an OSError on a missing native lib). A TOP-LEVEL name isn't
+            # imported by find_spec, so fall back to grepping the whole top package on disk — grep stays
+            # useful (import-free) exactly when introspection matters most, just without the submodule scope.
+            try:
+                spec = importlib.util.find_spec(_top(pkg))
+            except Exception:  # noqa: BLE001
+                spec = None
         if spec is None:
             return f"(grep_installed: {package} not found{_suggest(package)})"
         import os
