@@ -147,6 +147,18 @@ def _one_node_state(tmp_path) -> RunState:
     return fold(s.read_all())
 
 
+def test_stamp_novelty_hint_sets_and_neutralizes(tmp_path):
+    # explore stamps a directive + the stance value; a later "balanced" stamp (the debug/repair path)
+    # CLEARS both, so a repair proposal is never mis-instructed by a stale explore hint.
+    eng = _engine(tmp_path / "n")
+    eng._stamp_novelty_hint(RunState(), "explore")
+    assert "EXPLORE" in getattr(eng.researcher, "_novelty_hint", "")
+    assert getattr(eng.researcher, "_novelty_stance", None) == "explore"
+    eng._stamp_novelty_hint(RunState(), "balanced")
+    assert getattr(eng.researcher, "_novelty_hint", "x") == ""
+    assert getattr(eng.researcher, "_novelty_stance", None) == "balanced"
+
+
 def test_novelty_gate_engages_under_explore_even_with_gate_off(tmp_path):
     # gate off (default) + a duplicate param proposal: balanced leaves it untouched (early return),
     # explore engages the numeric dedup and nudges it off the duplicate.

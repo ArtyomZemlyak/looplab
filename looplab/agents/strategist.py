@@ -28,6 +28,13 @@ from looplab.core.llm import BudgetExceeded
 from looplab.core.models import NodeStatus, RunState
 from looplab.core.prompts import PromptStore, render
 
+# The novelty-stance vocabulary (the Strategist-owned dial). Centralized so the write side
+# (validate_strategy) and the apply side (Engine._apply_strategy) share ONE source of truth — a typo
+# can't silently accept an unknown stance, and a new stance is added in exactly one place.
+# "balanced" == today's behavior. (The `== "explore"` READ-side checks in the proposer / foresight /
+# novelty gate stay inline literals — each is exercised by tests, so a typo there fails loudly.)
+NOVELTY_STANCES: tuple[str, ...] = ("explore", "balanced", "exploit")
+
 # A fully-serializable description of the active search machinery. Every field maps to an existing
 # config knob, so a Strategy is just "a settings delta the engine applies live".
 #
@@ -189,7 +196,7 @@ def validate_strategy(strat: Optional[Strategy], ctx: StrategyContext) -> Option
     if fid in ("smoke", "full", "adaptive"):
         out["fidelity"] = fid
     ns = strat.get("novelty_stance")
-    if ns in ("explore", "balanced", "exploit"):
+    if ns in NOVELTY_STANCES:
         out["novelty_stance"] = ns
     # Resource budgets (bounds match config: timeout>0, max_parallel>=1). Whitelisted here for shape;
     # the engine's _apply_strategy applies them ONLY if the governance matrix grants the strategist.

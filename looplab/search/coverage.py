@@ -52,9 +52,12 @@ def coverage_signal(state: RunState, *, resolution: float = 1.0, recent: int = 4
     additive/reader-defaulted; an empty run yields zeros. `recent` bounds the recency window for the
     trailing "narrowing NOW?" signal.
 
-    The theme histogram is the CANONICAL one (`events.digest.theme_rollup`), so the themes the
-    Strategist reads here match the digest's theme map and the /runs API exactly. `dominant_*`
-    fractions are over nodes that carry a theme (untitled ideas are not a theme, per the rollup).
+    The theme VOCABULARY (which themes / their counts) is the CANONICAL one
+    (`events.digest.theme_rollup`), so the themes the Strategist reads here match the digest's theme
+    map and the /runs API exactly. The dominant-* FRACTIONS are over ALL idea-carrying nodes (not
+    just themed ones): an untitled idea is real effort NOT on a named theme, so it DILUTES the
+    fraction — a mostly-untitled run correctly does not read as concentrated, and the fraction shares
+    the same denominator as `_rule_novelty_stance`'s node-count trust guard.
 
     Keys:
       nodes                - ideas proposed so far (nodes that carry an idea)
@@ -62,8 +65,8 @@ def coverage_signal(state: RunState, *, resolution: float = 1.0, recent: int = 4
       niches               - distinct parameter-niches among evaluated nodes (DiversityArchive)
       operators            - distinct operator kinds used
       theme_entropy        - in [0,1], 1 = spread across themes, 0 = single theme (broad<->narrow)
-      dominant_theme_frac  - in [0,1], share of themed nodes on the most-explored theme (narrowing)
-      recent_dominant_frac - in [0,1], same over the last `recent` themed nodes (narrowing NOW?)
+      dominant_theme_frac  - in [0,1], share of ALL idea-nodes on the most-explored theme (narrowing)
+      recent_dominant_frac - in [0,1], same over the last `recent` idea-nodes (narrowing NOW?)
       top_themes           - [[theme, count], ...] top few, so the LLM can name the concentration
     """
     nodes = [n for n in state.nodes.values() if getattr(n, "idea", None) is not None]
@@ -74,15 +77,16 @@ def coverage_signal(state: RunState, *, resolution: float = 1.0, recent: int = 4
     from looplab.events.digest import theme_rollup     # local: keep `search` import-time free of digest
     rollup = theme_rollup(state)                        # {theme: {count, best_metric}} — canonical
     counts = [v["count"] for v in rollup.values()]
-    themed = sum(counts)
     ops = {getattr(n, "operator", None) for n in nodes}
     ops.discard(None)
     niches = len(DiversityArchive(resolution).build(state))
     dominant = max(counts) if counts else 0
-    # Recency window: themes of the last `recent` THEMED nodes (same extraction as the rollup).
-    recent_themes = [t for t in (_node_theme(n) for n in sorted(nodes, key=lambda n: n.id)) if t]
-    recent_themes = recent_themes[-max(1, recent):]
-    recent_dom = Counter(recent_themes).most_common(1)[0][1] if recent_themes else 0
+    # Recency window: the last `recent` NODES (by id) — then how concentrated their THEMES are. Taking
+    # nodes-first (not themed-first) keeps this a genuine "narrowing NOW?" measure: a window of fresh
+    # UNTITLED drafts reads as un-concentrated (0.0), not as the dominant OLD theme reaching forward.
+    recent_nodes = sorted(nodes, key=lambda n: n.id)[-max(1, recent):]
+    recent_dom = Counter(t for t in (_node_theme(n) for n in recent_nodes) if t).most_common(1)
+    recent_dom_count = recent_dom[0][1] if recent_dom else 0
     top = sorted(rollup.items(), key=lambda kv: (-kv[1]["count"], kv[0]))[:3]
     return {
         "nodes": len(nodes),
@@ -90,7 +94,7 @@ def coverage_signal(state: RunState, *, resolution: float = 1.0, recent: int = 4
         "niches": niches,
         "operators": len(ops),
         "theme_entropy": normalized_entropy(counts),
-        "dominant_theme_frac": round(dominant / themed, 4) if themed else 0.0,
-        "recent_dominant_frac": round(recent_dom / len(recent_themes), 4) if recent_themes else 0.0,
+        "dominant_theme_frac": round(dominant / len(nodes), 4),
+        "recent_dominant_frac": round(recent_dom_count / len(recent_nodes), 4),
         "top_themes": [[t, v["count"]] for t, v in top],
     }

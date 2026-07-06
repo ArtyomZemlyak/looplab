@@ -79,6 +79,25 @@ def test_recent_window_flags_narrowing_now(tmp_path):
     assert sig["dominant_theme_frac"] < 1.0      # ... even though overall it was broader
 
 
+def test_untitled_ideas_dilute_dominant_fraction(tmp_path):
+    # 6 untitled ideas + 2 on theme 'a': the dominant fraction is over ALL idea-nodes (2/8=0.25),
+    # NOT over themed nodes (which would be a misleading 2/2=1.0). Untitled effort is not narrowing.
+    nodes = [(None, {"x": float(i)}, float(i)) for i in range(6)]
+    nodes += [("a", {"x": 6.0}, 6.0), ("a", {"x": 7.0}, 7.0)]
+    sig = coverage_signal(fold(_store(tmp_path, nodes).read_all()))
+    assert sig["themes"] == 1
+    assert sig["dominant_theme_frac"] == 0.25   # 2/8 — untitled dilute, not 1.0
+
+
+def test_recent_window_is_time_based_not_theme_filtered(tmp_path):
+    # old themed 'a','a' then the last 4 nodes are all untitled (fresh breadth): the recency window
+    # is the last `recent` NODES, so it reads 0.0 — the old dominant theme must not reach forward.
+    nodes = [("a", {"x": 0.0}, 0.0), ("a", {"x": 1.0}, 1.0)]
+    nodes += [(None, {"x": float(k)}, float(k)) for k in range(2, 6)]
+    sig = coverage_signal(fold(_store(tmp_path, nodes).read_all()), recent=4)
+    assert sig["recent_dominant_frac"] == 0.0   # last 4 untitled -> not narrowing NOW
+
+
 def test_failed_nodes_count_for_themes_but_not_niches(tmp_path):
     # a failed node has an idea (theme/params) but no metric -> it is a theme, not a param-niche elite
     st = fold(_store(tmp_path, [("lr", {"x": 1.0}, None), ("arch", {"y": 2.0}, 3.0)]).read_all())

@@ -57,6 +57,7 @@ from looplab.search.coverage import coverage_signal
 from looplab.search.operators import merge_idea
 from looplab.search.policy import SearchPolicy, available_policies, make_policy
 from looplab.agents.strategist import (
+    NOVELTY_STANCES,
     StrategyContext,
     failure_rate,
     improves_since_best,
@@ -1071,7 +1072,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin):
         """Rebuild the live search machinery from a Strategy (pure wiring, no events). Policies share
         the action vocabulary and are pure, so swapping between loop iterations is safe; the Developer
         is swapped only between sequential _create_node calls."""
-        if strat.get("novelty_stance") in ("explore", "balanced", "exploit"):
+        if strat.get("novelty_stance") in NOVELTY_STANCES:
             self._novelty_stance = strat["novelty_stance"]   # Strategist's novelty dial (slice 2)
         ops = strat.get("operators") or {}
         if "ablate_every" in ops:
@@ -1437,17 +1438,25 @@ class Engine(ConfirmPhaseMixin, AblationMixin):
             setattr(self.researcher, "_sweep_hint", sweep_hint)
         except Exception:  # noqa: BLE001
             pass
-        # Novelty stance (slice 2/4): the Strategist-owned dial, threaded to the proposer as a
-        # directive PLUS the coverage gaps it should act on. "balanced" -> empty hint (byte-identical
-        # to today's prompt); "explore"/"exploit" steer toward a NEW theme or toward deepening the
-        # leader. The stance VALUE also rides on the researcher so the foresight ranker can weight it.
-        stance = self._novelty_stance
+        self._stamp_novelty_hint(state, self._novelty_stance)
+
+    def _stamp_novelty_hint(self, state: RunState, stance: str) -> None:
+        """Stamp the Strategist's novelty dial onto the ACTIVE researcher (slice 2/4): a prose
+        directive `_novelty_hint` (+ the coverage gaps to act on) that the researcher folds into its
+        prompt, plus the stance VALUE `_novelty_stance` the foresight ranker reads. "balanced" ->
+        empty hint (byte-identical to today's prompt). Extracted so the DEBUG/repair path can force a
+        NEUTRAL "balanced" stance — novelty pressure ("open a new direction") is wrong when the job is
+        to FIX a failure — and so draft/improve refresh it from the live `self._novelty_stance` every
+        node (no stale hint bleeds from a prior operator into a later one)."""
         nov_hint = ""
         if stance == "explore":
-            cov = coverage_signal(state, resolution=self.archive_resolution) if self._coverage_context else {}
+            # Reuse the breadth snapshot the strategist cadence already recorded (its most recent view)
+            # instead of recomputing the O(nodes) signal on this per-proposal hot path — the hint is
+            # prose, so the last snapshot is fresh enough. Falls back to {} before the first snapshot.
+            cov = state.coverage_snapshots[-1] if state.coverage_snapshots else {}
             top = cov.get("top_themes") or []
             spread = (f" So far the search concentrates on '{top[0][0]}' "
-                      f"({cov.get('dominant_theme_frac', 0.0):.0%} of themed experiments); "
+                      f"({cov.get('dominant_theme_frac', 0.0):.0%} of experiments); "
                       f"themes tried: {[t for t, _ in top]}." if top else "")
             nov_hint = ("\nNovelty stance: EXPLORE — the search is narrowing." + spread +
                         " Propose a MEANINGFULLY DIFFERENT direction (a new theme / approach / "
@@ -1914,6 +1923,11 @@ class Engine(ConfirmPhaseMixin, AblationMixin):
                     with self.tracer.span("repair", parent_id=parent.id):
                         code = self._repair(parent, err)   # seed from parent's OWN files (repair_from)
                 else:
+                    # Debug/repair is stance-NEUTRAL: novelty pressure ("open a new direction") is
+                    # wrong when the job is to FIX a failure. Clear any stale explore/exploit hint a
+                    # prior draft/improve left on the researcher before this repair proposal (this
+                    # branch does not call _set_complexity_hint, so nothing else refreshes it).
+                    self._stamp_novelty_hint(state, "balanced")
                     with self.tracer.span("propose"):
                         idea = self.researcher.propose(state, parent)
                     idea.operator = "debug"
