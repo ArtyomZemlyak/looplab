@@ -27,18 +27,18 @@ from looplab.core.models import RunState
 from looplab.search.archive import DiversityArchive
 
 
-def _theme(node) -> str:
-    """The node's theme slug (lower-cased), or a stable placeholder for an unset theme so untitled
-    ideas still count as ONE bucket rather than vanishing from the distribution."""
-    idea = getattr(node, "idea", None)
-    t = (getattr(idea, "theme", "") or "").strip().lower()
-    return t or "(untitled)"
+def _node_theme(node):
+    """A node's theme exactly as the canonical `theme_rollup` reads it (idea.theme, untitled -> None
+    skipped). Kept identical so the coverage themes the Strategist sees match the digest's theme map
+    and the /runs API — one theme vocabulary across every surface."""
+    return getattr(getattr(node, "idea", None), "theme", None) or None
 
 
 def normalized_entropy(counts) -> float:
-    """Shannon entropy of a category distribution, normalized to [0,1] by log(#categories).
-    1.0 = perfectly even spread across the observed categories; 0.0 = all mass on one (or <=1
-    category). Deterministic; empty / single-category -> 0.0."""
+    """Shannon entropy of a category distribution, normalized to [0,1] by log(#NON-EMPTY categories).
+    1.0 = perfectly even spread across the observed (non-zero) categories; 0.0 = all mass on one
+    (or <=1 non-empty category). Empty bins are dropped, not treated as categories — so this measures
+    concentration among the themes ACTUALLY tried. Deterministic; empty / single-category -> 0.0."""
     total = sum(counts)
     cats = [c for c in counts if c > 0]
     if total <= 0 or len(cats) <= 1:
@@ -52,14 +52,18 @@ def coverage_signal(state: RunState, *, resolution: float = 1.0, recent: int = 4
     additive/reader-defaulted; an empty run yields zeros. `recent` bounds the recency window for the
     trailing "narrowing NOW?" signal.
 
+    The theme histogram is the CANONICAL one (`events.digest.theme_rollup`), so the themes the
+    Strategist reads here match the digest's theme map and the /runs API exactly. `dominant_*`
+    fractions are over nodes that carry a theme (untitled ideas are not a theme, per the rollup).
+
     Keys:
       nodes                - ideas proposed so far (nodes that carry an idea)
-      themes               - distinct theme slugs
+      themes               - distinct themes (canonical theme_rollup vocabulary)
       niches               - distinct parameter-niches among evaluated nodes (DiversityArchive)
       operators            - distinct operator kinds used
       theme_entropy        - in [0,1], 1 = spread across themes, 0 = single theme (broad<->narrow)
-      dominant_theme_frac  - in [0,1], share of nodes on the most-explored theme (narrowing)
-      recent_dominant_frac - in [0,1], same over the last `recent` nodes (is it narrowing NOW?)
+      dominant_theme_frac  - in [0,1], share of themed nodes on the most-explored theme (narrowing)
+      recent_dominant_frac - in [0,1], same over the last `recent` themed nodes (narrowing NOW?)
       top_themes           - [[theme, count], ...] top few, so the LLM can name the concentration
     """
     nodes = [n for n in state.nodes.values() if getattr(n, "idea", None) is not None]
@@ -67,21 +71,26 @@ def coverage_signal(state: RunState, *, resolution: float = 1.0, recent: int = 4
         return {"nodes": 0, "themes": 0, "niches": 0, "operators": 0,
                 "theme_entropy": 0.0, "dominant_theme_frac": 0.0,
                 "recent_dominant_frac": 0.0, "top_themes": []}
-    themes = Counter(_theme(n) for n in nodes)
+    from looplab.events.digest import theme_rollup     # local: keep `search` import-time free of digest
+    rollup = theme_rollup(state)                        # {theme: {count, best_metric}} — canonical
+    counts = [v["count"] for v in rollup.values()]
+    themed = sum(counts)
     ops = {getattr(n, "operator", None) for n in nodes}
     ops.discard(None)
     niches = len(DiversityArchive(resolution).build(state))
-    dominant = themes.most_common(1)[0][1]
-    recent_nodes = sorted(nodes, key=lambda n: n.id)[-max(1, recent):]
-    recent_themes = Counter(_theme(n) for n in recent_nodes)
-    recent_dom = recent_themes.most_common(1)[0][1]
+    dominant = max(counts) if counts else 0
+    # Recency window: themes of the last `recent` THEMED nodes (same extraction as the rollup).
+    recent_themes = [t for t in (_node_theme(n) for n in sorted(nodes, key=lambda n: n.id)) if t]
+    recent_themes = recent_themes[-max(1, recent):]
+    recent_dom = Counter(recent_themes).most_common(1)[0][1] if recent_themes else 0
+    top = sorted(rollup.items(), key=lambda kv: (-kv[1]["count"], kv[0]))[:3]
     return {
         "nodes": len(nodes),
-        "themes": len(themes),
+        "themes": len(rollup),
         "niches": niches,
         "operators": len(ops),
-        "theme_entropy": normalized_entropy(list(themes.values())),
-        "dominant_theme_frac": round(dominant / len(nodes), 4),
-        "recent_dominant_frac": round(recent_dom / len(recent_nodes), 4),
-        "top_themes": [[t, c] for t, c in themes.most_common(3)],
+        "theme_entropy": normalized_entropy(counts),
+        "dominant_theme_frac": round(dominant / themed, 4) if themed else 0.0,
+        "recent_dominant_frac": round(recent_dom / len(recent_themes), 4) if recent_themes else 0.0,
+        "top_themes": [[t, v["count"]] for t, v in top],
     }

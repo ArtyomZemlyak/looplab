@@ -150,7 +150,13 @@ untrusted tier.
   recorded as a `coverage_snapshot` audit event (the run's *narrowing curve*). This is context, not
   a decision: it gives the controller eyes on whether the search is broadening or collapsing onto a
   single line of attack, so breadth can be a deliberate signal rather than only a reaction to metric
-  stagnation.
+  stagnation. From that reading the Strategist sets a **novelty stance** (`explore` / `balanced` /
+  `exploit`) — the single dial for how hard the run pushes for NEW directions. `balanced` is today's
+  behavior; `explore` (chosen when coverage shows narrowing) threads one directive into the three
+  places ideas are shaped — the Researcher's proposal (propose a different theme), the foresight
+  rank (break near-ties toward the more divergent candidate), and the novelty gate (engage a soft
+  dedup + one informed re-propose even when the static gate is off) — so novelty pressure is one
+  meta-decision, applied coherently, and always via the LLM roles rather than a hard-coded rule.
 - **Unified agent** (`unified_agent`, on by default) — one LLM identity plays Researcher +
   Developer (+ Strategist) across stages, choosing its model/toolset per stage and driving the next
   macro action within a *pure legal-action gate* that keeps pipeline discipline. Set
