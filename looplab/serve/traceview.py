@@ -218,28 +218,23 @@ def build_trace_view(state: RunState, spans: list[dict], *, light: bool = False)
     for s in spans:
         by_trace[s.get("trace_id")].append(s)
 
-    # Resolve each span's EFFECTIVE node: its own stamped node_id, else the nearest ancestor's. node_id
-    # is now stamped per-span (tracing._node_ctx), so a single long-lived Developer tool-loop trace —
-    # which serves several nodes in sequence — splits correctly across them instead of all landing on
-    # its (unflushed / non-create_node) root. The parent-inheritance fallback keeps OLD logs working,
-    # where only a trace's root carried node_id and the children relied on the tree.
-    by_id = {s.get("span_id"): s for s in spans}
-
-    def _eff_node(s):
-        seen = set()
-        cur = s
-        while cur is not None and cur.get("span_id") not in seen:
-            own = _node_id_of(cur)
-            if own is not None:
-                return own
-            seen.add(cur.get("span_id"))
-            cur = by_id.get(cur.get("parent_id"))
-        return None
+    # Resolve each span's EFFECTIVE node: its own stamped node_id, else the node_id on its trace's ROOT.
+    # node_id is now stamped PER-SPAN (tracing._node_ctx), so a single long-lived Developer tool-loop
+    # trace — which serves several nodes in sequence — splits correctly across them by each span's own
+    # id. The root fallback (NOT a full ancestor walk, which would bleed one node's id onto the whole
+    # of a shared trace) keeps OLD root-only logs working: a create_node trace whose children carry no
+    # id attributes to its root's node. Spans with neither → `unscoped`.
+    root_nid: dict[str, Optional[int]] = {}
+    for tid, sps in by_trace.items():
+        f = _tree(sps)
+        root_nid[tid] = _node_id_of(f[0]) if f else None
 
     node_spans: dict[str, list[dict]] = defaultdict(list)
     unscoped_spans: list[dict] = []
     for s in spans:
-        nid = _eff_node(s)
+        nid = _node_id_of(s)
+        if nid is None:
+            nid = root_nid.get(s.get("trace_id"))
         (node_spans[str(nid)] if nid is not None else unscoped_spans).append(s)
     nodes: dict[str, list[dict]] = {nid: _tree(sps) for nid, sps in node_spans.items()}
     unscoped = _tree(unscoped_spans)
