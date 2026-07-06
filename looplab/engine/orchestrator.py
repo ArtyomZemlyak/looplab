@@ -2427,9 +2427,21 @@ class Engine(ConfirmPhaseMixin, AblationMixin):
                 if ok:
                     break
                 reason = _failure_reason(res)
+                # A clean run (exit 0) with no parseable metric is the most confusing failure for the
+                # repair agent — the terse "no_metric" gave it nothing to fix, so the debug node just
+                # re-ran and failed again. Tell it EXACTLY what the eval reads (the configured metric
+                # key + the one line it must print), so a no-metric node can actually be repaired.
+                _ms = (self._eval_spec.get("metric") or {}) if isinstance(self._eval_spec, dict) else {}
+                _mk = _ms.get("key", "metric")
+                _no_metric_hint = (
+                    f" — the command ran cleanly (exit 0) but printed NO parseable metric. The eval reads"
+                    f" a stdout JSON line for key {_mk!r}; the entrypoint MUST print exactly one line like"
+                    f" print(json.dumps({{{_mk!r}: <float>}})) as its last stdout."
+                    if _ms.get("kind", "stdout_json") == "stdout_json"
+                    else " — ran cleanly but produced no parseable metric (check the eval's metric reader).")
                 err = self._redact(res.stderr[-500:]) or (
                     f"metric drift: {res.drift}" if res.drift is not None else
-                    f"exit={res.exit_code} timed_out={res.timed_out} no_metric"
+                    f"exit={res.exit_code} timed_out={res.timed_out} no_metric{_no_metric_hint}"
                 )
                 # Environment self-prep (deps.py): a crash that is purely a missing KNOWN library is
                 # not a bad idea — install it (trusted_local only) and re-run BEFORE the crash-triage
