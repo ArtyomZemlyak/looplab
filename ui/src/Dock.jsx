@@ -22,7 +22,6 @@ const NARR = {
   approval_requested: (d) => `awaiting approval of #${d.node_id}`,
   approval_granted: (d) => `approved #${d.node_id}`,
   pause: () => 'stopped (frozen — not finalized)', resume: () => 'resumed', run_abort: () => 'finalize requested (wrap-up)',
-  run_reopened: () => 'reopened', run_finished: (d) => d?.reason === 'aborted' ? 'finalized' : 'finished',
   node_abort: (d) => `stop requested for #${d.node_id}`,
   budget_extend: (d) => {
     const bits = []
@@ -45,7 +44,8 @@ const NARR = {
   novelty_rejected: (d) => `dedup: proposal near #${d.near_node} (dist ${fmt(d.distance, 3)}) nudged to diversify`,
   hypothesis_ranked: (d) => `foresight ranked ${d.n || (d.order || []).length} open hypotheses by predicted payoff${d.confidence != null ? ` (${Math.round(d.confidence * 100)}% conf)` : ''}${d.reason ? ' — ' + String(d.reason).slice(0, 70) : ''}`,
   foresight_selected: (d) => `foresight picked ${d.kind === 'solution' ? 'implementation' : 'idea'} ${(d.chosen ?? 0) + 1} of ${d.n || (d.order || []).length}${d.confidence != null ? ` (${Math.round(d.confidence * 100)}% conf)` : ''}${d.reason ? ' — ' + String(d.reason).slice(0, 70) : ''}`,
-  run_finished: (d) => `run finished${d.reason ? ' (' + d.reason + ')' : ''}`,
+  run_finished: (d) => (d?.reason === 'aborted' || d?.reason === 'finalized') ? 'run finalized (wrapped up)'
+    : `run finished${d.reason ? ' (' + d.reason + ')' : ''}`,
   llm_cost: (d) => `LLM: ${d.total_tokens} tokens, $${fmt(d.cost)}`,
   // --- operator/boss control INTENTS + their engine confirmations. Every event the agentic boss can
   // produce gets a plain-English line here, so an action never shows in the feed as a raw-JSON blob. ---
