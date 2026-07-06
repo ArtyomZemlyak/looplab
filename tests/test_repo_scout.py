@@ -37,6 +37,26 @@ def test_grep_finds_the_flag(tmp_path):
     assert "not found" in s.execute("grep", {"pattern": "definitely_absent_zzz"})
 
 
+def test_disk_hits_are_repo_relative_for_the_developer(tmp_path):
+    """A grep/find hit in a PRISTINE on-disk file must come back REPO-RELATIVE ("train.py"), NOT
+    absolute ("/abs/train.py") — the Developer feeds that exact path straight into edit_file, whose
+    _safe_rel REJECTS absolutes. (The staged-overlay hits were already relative; disk hits must match
+    so grep→edit round-trips. The old substring assertions missed this — "train.py:3" is a substring
+    of the absolute path too.)"""
+    (tmp_path / "train.py").write_text("p.add_argument('--lr')\n", encoding="utf-8")
+    (tmp_path / "sub").mkdir()
+    (tmp_path / "sub" / "m.py").write_text("p.add_argument('--wd')\n", encoding="utf-8")
+    dev = RepoScoutTools(roots=[str(tmp_path)], default_root=str(tmp_path))
+    g = dev.execute("grep", {"pattern": "add_argument"})
+    assert "train.py:1:" in g and "sub/m.py:1:" in g
+    assert str(tmp_path) not in g                 # NOT the absolute prefix
+    f = dev.execute("find_files", {"root": str(tmp_path), "pattern": "**/*.py"})
+    assert "train.py" in f.splitlines() and "sub/m.py" in f.splitlines()   # bare repo-relative lines
+    # the boss (no default_root, unrelated roots) keeps ABSOLUTE paths — unambiguous across roots
+    boss = RepoScoutTools(roots=[str(tmp_path)])
+    assert str(tmp_path) in boss.execute("grep", {"pattern": "add_argument"})
+
+
 def test_grep_prunes_heavy_dirs(tmp_path):
     s = _scout(tmp_path)
     # ckpt/ is a pruned dir -> its file is invisible to grep (a clean "not found", not the ckpt hit)

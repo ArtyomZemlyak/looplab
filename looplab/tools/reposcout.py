@@ -72,6 +72,20 @@ class RepoScoutTools:
         except ValueError:
             return False
 
+    def _disp(self, p) -> str:
+        """How a DISK path is shown to the caller. For the repo Developer (`default_root` set) render it
+        REPO-RELATIVE (e.g. "train.py") — the SAME path shape its write_file/edit_file expects, so a
+        grep/find hit ROUND-TRIPS back into an edit (an absolute path is rejected by the write tools'
+        _safe_rel, and mixing it with the staged overlay's relative hits confuses the model). For the
+        boss (no default_root, multiple unrelated roots like ~/ + the repo) an absolute path is
+        unambiguous, so keep it verbatim."""
+        if not self._default_root:
+            return str(p)
+        try:
+            return str(Path(p).relative_to(self._default_root)).replace("\\", "/")
+        except ValueError:
+            return str(p)     # outside the repo root (a secondary root) — absolute is the honest form
+
     def _resolve(self, path: str):
         """Resolve a user/model-supplied path and confirm it's inside an allowed root (else None).
         A relative path is tried against `default_root` first (repo-relative), then CWD."""
@@ -201,7 +215,7 @@ class RepoScoutTools:
                 rm = _pathsafe.resolve_within(self._roots, str(m))
                 if rm is None or _looks_secret(rm) or self._is_deleted_abs(rm):
                     continue
-                hits.append(str(rm))
+                hits.append(self._disp(rm))   # repo-relative for the Developer so a hit round-trips
                 if len(hits) >= _MAX_ENTRIES:
                     break
         except (OSError, ValueError) as e:
@@ -264,7 +278,9 @@ class RepoScoutTools:
                     with open(fp, encoding="utf-8", errors="replace") as fh:
                         for i, line in enumerate(fh, 1):
                             if rx.search(line):
-                                hits.append(f"{fp}:{i}: {line.strip()[:200]}")
+                                # repo-relative label for the Developer (matches the staged-overlay hits
+                                # above + write_file's path shape, so a hit round-trips into an edit).
+                                hits.append(f"{self._disp(fp)}:{i}: {line.strip()[:200]}")
                                 if len(hits) >= cap:
                                     return "\n".join(hits) + f"\n(capped at {cap} hits)"
                 except OSError:
