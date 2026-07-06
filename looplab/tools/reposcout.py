@@ -20,6 +20,7 @@ to the model (possibly a REMOTE provider):
 """
 from __future__ import annotations
 
+from pathlib import Path
 
 from looplab.core import _pathsafe
 from looplab.tools._base import fn_spec   # shared OpenAI function-schema builder (one schema shape)
@@ -33,12 +34,34 @@ _MAX_READ = 16000          # bytes returned from one read_file
 _MAX_ENTRIES = 200         # entries per list_dir / find_files
 
 
+# Directories that are never worth walking for a content grep — model weights / checkpoints / caches
+# that a trainer repo carries by the GB (walking them stalls a grep on a FUSE mount).
+_SKIP_DIRS = {".git", "__pycache__", ".ipynb_checkpoints", "node_modules", ".mypy_cache",
+              ".pytest_cache", ".venv", "venv", "wandb", "lightning_logs", "ckpt", "checkpoints"}
+
+
 class RepoScoutTools:
-    def __init__(self, roots):
+    def __init__(self, roots, default_root=None, overlay=None):
         self._roots = _pathsafe.resolve_roots(roots)
+        # A repo-RELATIVE path (e.g. "train.py") resolves against this root, so a caller whose write
+        # tools already use repo-relative paths (the repo Developer) can read/grep with the SAME paths
+        # instead of switching to absolutes. None => relative paths resolve against CWD (the boss case).
+        self._default_root = _pathsafe.resolve_roots([default_root])[0] if default_root else None
+        # STAGED overlay: {repo-relative-path: content} that WINS over disk. This is the whole point for
+        # the repo Developer — the code it is CURRENTLY EDITING (its own writes this session, or a
+        # pre-seeded base) is what it needs to read/grep, not the pristine on-disk repo. Pass the SAME
+        # live dict the write tools mutate, so a read reflects the latest edit. Empty for the boss (disk
+        # only). NOT secret-filtered — the caller authored these files itself; disk reads still are.
+        self._overlay = overlay if overlay is not None else {}
 
     def _resolve(self, path: str):
-        """Resolve a user/model-supplied path and confirm it's inside an allowed root (else None)."""
+        """Resolve a user/model-supplied path and confirm it's inside an allowed root (else None).
+        A relative path is tried against `default_root` first (repo-relative), then CWD."""
+        import os as _os
+        if self._default_root and path and not _os.path.isabs(_os.path.expanduser(str(path))):
+            hit = _pathsafe.resolve_within(self._roots, str(self._default_root / path))
+            if hit is not None:
+                return hit
         return _pathsafe.resolve_within(self._roots, path)
 
     def specs(self) -> list[dict]:
@@ -58,6 +81,17 @@ class RepoScoutTools:
                      {"root": {"type": "string"},
                       "pattern": {"type": "string", "description": "glob, e.g. **/*.py or **/README*"}},
                      ["root"]),
+            fn_spec("grep",
+                     "Search file CONTENTS for a regex across a repo (read-only) — find where a CLI arg "
+                     "is parsed (grep 'add_argument'), a config key is read, a function is defined. "
+                     "Returns file:line snippets. Use this to CONFIRM an exact flag/name in the real "
+                     "code instead of guessing it.",
+                     {"pattern": {"type": "string", "description": "regex (or a plain substring)"},
+                      "root": {"type": "string", "description": "dir to search under (optional; "
+                               "defaults to the repo)"},
+                      "glob": {"type": "string", "description": "filename glob to restrict (optional, e.g. *.py)"},
+                      "max_hits": {"type": "integer", "description": "cap on hits (optional, default 40)"}},
+                     ["pattern"]),
         ]
 
     def execute(self, name: str, args: dict) -> str:
@@ -69,6 +103,9 @@ class RepoScoutTools:
                 return self._read_file(args.get("path", ""))
             if name == "find_files":
                 return self._find_files(args.get("root", ""), args.get("pattern", "*"))
+            if name == "grep":
+                return self._grep(str(args.get("pattern", "")), args.get("root", ""),
+                                  args.get("glob") or "*", args.get("max_hits"))
         except Exception as e:  # noqa: BLE001 - tools are advisory; never crash the loop
             return f"(error: {e})"
         return f"(unknown tool: {name})"
@@ -99,7 +136,17 @@ class RepoScoutTools:
             rows.append(f"… (+{len(children) - _MAX_ENTRIES} more)")
         return f"{p}:\n" + ("\n".join(rows) if rows else "(empty)")
 
+    def _overlay_get(self, path: str):
+        """The staged content for a repo-relative path, if the caller has one overlaid (else None)."""
+        if not self._overlay or not path:
+            return None
+        key = str(path).replace("\\", "/").lstrip("./")
+        return self._overlay.get(path) or self._overlay.get(key)
+
     def _read_file(self, path: str) -> str:
+        staged = self._overlay_get(path)
+        if staged is not None:               # the code the caller is EDITING wins over the pristine disk
+            return staged[:_MAX_READ] + ("\n… (truncated)" if len(staged) > _MAX_READ else "")
         p = self._resolve(path)
         if not p:
             return f"(path not allowed or outside permitted roots: {path})"
@@ -140,3 +187,65 @@ class RepoScoutTools:
         except (OSError, ValueError) as e:
             return f"(bad pattern: {e})"
         return "\n".join(hits) if hits else f"(no matches for {pattern!r} under {root})"
+
+    def _grep(self, pattern: str, root: str, glob: str, max_hits) -> str:
+        import os as _os
+        import re as _re
+        from fnmatch import fnmatch as _fnmatch
+        pattern = (pattern or "").strip()
+        if not pattern or len(pattern) > 1000:      # cheap ReDoS guard (Python re has no match timeout)
+            return "(grep: give a (short) pattern to search for)"
+        base = self._resolve(root) if root else (self._default_root or (self._roots[0] if self._roots else None))
+        if base is None or not base.is_dir():
+            return f"(grep: {root or 'repo'} is not a searchable directory)"
+        try:
+            rx = _re.compile(pattern)
+        except _re.error:
+            rx = _re.compile(_re.escape(pattern))   # not a valid regex -> treat as a literal substring
+        cap = int(max_hits) if max_hits else 40
+        hits: list[str] = []
+        # STAGED overlay first — the code the caller is EDITING wins over disk, and its paths dedup the
+        # disk walk (so a patched file isn't grepped in both its edited and pristine form).
+        staged_rel = set()
+        for rel, content in sorted(self._overlay.items()):
+            if not _fnmatch(rel.rsplit("/", 1)[-1], glob):
+                continue
+            staged_rel.add(rel)
+            for i, line in enumerate(str(content).splitlines(), 1):
+                if rx.search(line):
+                    hits.append(f"{rel}:{i}: {line.strip()[:200]}")
+                    if len(hits) >= cap:
+                        return "\n".join(hits) + f"\n(capped at {cap} hits)"
+        _dedup_base = self._default_root or base
+        scanned = 0
+        for dp, dirs, files in _os.walk(base):
+            dirs[:] = [d for d in dirs if d not in _SKIP_DIRS and not d.startswith(".")]
+            for fn in sorted(files):
+                if scanned >= 4000:                 # file budget so a huge repo can't stall the grep
+                    return "\n".join(hits) + "\n(stopped after 4000 files; narrow `root`/`glob`)"
+                if not _fnmatch(fn, glob):
+                    continue
+                fp = Path(dp) / fn
+                try:                                # a file the caller has STAGED was grepped above
+                    if str(fp.relative_to(_dedup_base)).replace("\\", "/") in staged_rel:
+                        continue
+                except ValueError:
+                    pass
+                if _looks_secret(fp) or not _readable(fp):
+                    continue                        # never grep a credential file or a binary
+                try:
+                    if fp.stat().st_size > 2_000_000:
+                        continue
+                except OSError:
+                    continue
+                scanned += 1
+                try:
+                    with open(fp, encoding="utf-8", errors="replace") as fh:
+                        for i, line in enumerate(fh, 1):
+                            if rx.search(line):
+                                hits.append(f"{fp}:{i}: {line.strip()[:200]}")
+                                if len(hits) >= cap:
+                                    return "\n".join(hits) + f"\n(capped at {cap} hits)"
+                except OSError:
+                    continue
+        return "\n".join(hits) if hits else f"(grep: {pattern!r} not found)"
