@@ -106,7 +106,9 @@ class Settings(BaseSettings):
     # `timeout` as its wall-clock budget (solution.py path; RepoTasks use their per-profile timeout).
     sweep_timeout_mult: float = Field(default=8.0, ge=1)
     # Sandbox tier (ADR-13): "trusted_local" (subprocess, no Docker) for the CLI;
-    # "untrusted" (Docker --network none -> gVisor) for hosted/multi-tenant UI.
+    # "untrusted" (Docker --network none, shared-kernel runtime) for hosted/multi-tenant UI;
+    # "hostile" (untrusted + a true-isolation OCI runtime, gVisor `runsc` by default / Kata) for
+    # running untrusted code. See runtime/sandbox.py::make_sandbox for the tier selection.
     trust_mode: str = "trusted_local"
     # Image for the untrusted command-eval tier (RepoTask, Phase 4): the framework's deps
     # should be baked in (the container runs --network none, so a pip setup can't fetch).

@@ -62,7 +62,8 @@ file's `settings:` **>** env/`.env` **>** defaults.
 built-and-tested machinery on in one word — multi-seed confirmation (`confirm_top_k=3`,
 `confirm_seeds=3`), the novelty gate, the reward-hack / leakage / critic monitors **plus**
 `trust_gate=gate` (a flagged win can no longer be selected as best), ablation-driven refinement
-(`ablate_every=3`), and the proposal cues (`complexity_cue`, `budget_aware`, `failure_reflection`).
+(`ablate_every=3`), the adaptive operator bandit (`operator_bandit`), and the proposal cues
+(`complexity_cue`, `budget_aware`, `failure_reflection`).
 
 A profile is **config-first**: it only fills fields you did *not* set yourself, so any explicit
 knob — in the file, on the CLI (`--set`), or via `LOOPLAB_*` — always wins. It deliberately touches
