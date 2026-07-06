@@ -216,7 +216,11 @@ class EnvInspectTools:
         if not query or not package.strip():
             return "(grep_installed: give a query and a package)"
         try:
-            spec = importlib.util.find_spec(_top(package))
+            # Resolve the FULL dotted path (not just `_top`), so scoping to a submodule actually
+            # narrows the walk — `grep_installed(query, "torch.nn")` searches torch/nn, not all of
+            # torch. This is what makes the `_FILE_BUDGET` overflow hint ("narrow `package` to a
+            # submodule to search deeper") actionable; `read_installed` already resolves full paths.
+            spec = importlib.util.find_spec(package.strip())
         except (ImportError, ValueError, ModuleNotFoundError) as e:
             return f"(grep_installed: cannot locate {package}: {e}{_suggest(package)})"
         if spec is None:

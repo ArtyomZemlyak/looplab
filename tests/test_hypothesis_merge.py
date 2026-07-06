@@ -75,7 +75,10 @@ def test_malformed_merge_event_is_tolerated():
     h1 = "increase the learning rate"
     id1 = hypothesis_id(h1)
     st = _state([{"statement": h1, "id": id1, "at_node": 1}],
-                [{"canonical": "", "aliases": []}, {"aliases": ["x"]}, {"canonical": "y"}])
+                [{"canonical": "", "aliases": []}, {"aliases": ["x"]}, {"canonical": "y"},
+                 # truthy but NON-ITERABLE aliases — the dispatch guard admits it (both fields truthy),
+                 # so an un-guarded `for a in aliases` would TypeError and brick EVERY subsequent fold.
+                 {"canonical": "z", "aliases": 1}, {"canonical": "w", "aliases": True, "statement": 5}])
     _derive_hypotheses(st)                                # must not raise
     assert id1 in st.hypotheses
 

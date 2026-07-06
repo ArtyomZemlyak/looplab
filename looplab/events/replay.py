@@ -513,16 +513,24 @@ def _derive_hypotheses(st: RunState) -> None:
     alias: dict[str, str] = {}
     merged_stmt: dict[str, str] = {}
     for d in st.hypotheses_merged:
-        canon = str(d.get("canonical") or "").strip()
-        if not canon:
+        # Per-entry guard: the dispatch only checks `aliases` is TRUTHY, so a malformed record (a
+        # hand-edited log, a foreign/future writer where `aliases` is a scalar like `1`/`true`) would
+        # make `for a in aliases` raise TypeError and — since `_derive_hypotheses` runs unwrapped —
+        # brick EVERY subsequent fold of the run (no replay/resume/view). Tolerate it here, matching
+        # the node_created / hypotheses_added handlers and the "malformed entry is tolerated" promise.
+        try:
+            canon = str(d.get("canonical") or "").strip()
+            if not canon:
+                continue
+            s = str(d.get("statement", "")).strip()
+            if s:
+                merged_stmt[canon] = s
+            for a in (d.get("aliases") or []):
+                a = str(a).strip()
+                if a and a != canon:
+                    alias[a] = canon
+        except Exception:  # noqa: BLE001 — one bad merge record must not brick the whole fold
             continue
-        s = str(d.get("statement", "")).strip()
-        if s:
-            merged_stmt[canon] = s
-        for a in (d.get("aliases") or []):
-            a = str(a).strip()
-            if a and a != canon:
-                alias[a] = canon
 
     def _canon(x: str) -> str:                      # resolve alias chains a->b->c, cycle-safe
         seen: set[str] = set()

@@ -16,7 +16,16 @@ import threading
 from pathlib import Path
 
 # fsync timeout (seconds) before we give up on it for the rest of the process. Env-overridable.
-_FSYNC_TIMEOUT = float(os.environ.get("LOOPLAB_FSYNC_TIMEOUT", "5") or 5)
+# Parsed defensively: this module is imported transitively everywhere, so a garbage override
+# (LOOPLAB_FSYNC_TIMEOUT=abc) must degrade to the default, not crash `import looplab` at load.
+def _fsync_timeout() -> float:
+    try:
+        return float(os.environ.get("LOOPLAB_FSYNC_TIMEOUT", "5") or 5)
+    except (TypeError, ValueError):
+        return 5.0
+
+
+_FSYNC_TIMEOUT = _fsync_timeout()
 _FSYNC_DISABLED = False   # flips permanently once fsync is seen to BLOCK — a stalled FUSE mount
 
 

@@ -162,7 +162,11 @@ class RepoWriteTools:
         import os as _os
         from pathlib import Path as _P
         exts = self._TEXT_EXTS if exts is None else exts
-        seen = set()
+        # Seed `seen` with staged DELETIONS so a file the developer deleted this turn (but still present
+        # on the editable root) doesn't resurface from the disk walk — the scout must reflect the STAGED
+        # tree, not the pristine repo. (Deletions are popped from `self.files`, so the staged loop below
+        # never re-adds them; `_current`'s edit-resurrect path is intentionally left untouched.)
+        seen = set(self.deleted)
         for p, content in self.files.items():                 # staged this turn win over disk
             if _P(p).suffix.lower() in exts:
                 seen.add(p)
@@ -199,6 +203,8 @@ class RepoWriteTools:
     def _read_repo(self, p, start_line, max_lines) -> str:
         if not p:
             return "(read_repo_file: give a repo-relative path, e.g. train.py)"
+        if p in self.deleted:      # reflect the STAGED tree: a file deleted this turn reads as gone
+            return (f"(read_repo_file: {p} was deleted in this experiment. Use list_repo to see what exists.)")
         cur = self._current(p)
         if cur is None:
             return (f"(read_repo_file: {p} not found in the repo. Use list_repo to see what exists.)")

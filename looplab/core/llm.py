@@ -708,8 +708,12 @@ class OpenAICompatibleClient:
         a proxy that TRICKLES the response body (a byte resets the read timer while the payload never
         completes — the keepalive pathology the stream idle-guard exists for, but there's no SSE loop
         to guard here). Run the blocking call in a worker thread; if it overruns the read+connect
-        budget, ABORT by closing the httpx client (tears the connection down, unblocking the read),
-        rebuild the client, and raise APITimeoutError so `_post` retries/degrades instead of hanging."""
+        budget, ABORT: close the httpx client (drops the pooled connection) + rebuild it, and raise
+        APITimeoutError so `_post` retries/degrades instead of hanging. This reliably unblocks the
+        CALLER (the wall-clock join is the guarantee); the worker thread may LINGER if the endpoint is
+        wedged mid-`recv`, because close() — unlike the stream path's socket.shutdown() — can't force a
+        kernel read to return (see `_stream_raw_socket`). It's daemon + bounded (~one per `_post` retry,
+        reclaimed when the server/OS finally drops the socket), so the run proceeds regardless."""
         box: dict = {}
 
         def _call():

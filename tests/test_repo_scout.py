@@ -72,6 +72,28 @@ def test_read_repo_not_surface_gated(tmp_path):
     assert "--lr" in w.execute("read_repo_file", {"path": "train.py"})
 
 
+def test_scouts_reflect_staged_deletions(tmp_path):
+    # a file deleted THIS turn (but still on the editable-root disk) must read as gone across all three
+    # scouts — they reflect the STAGED tree, not the pristine repo. (edit_file still resurrects it.)
+    w = _repo(tmp_path)
+    assert "train.py" in w.execute("list_repo", {})
+    w.execute("delete_file", {"path": "train.py"})
+    assert "train.py" not in w.execute("list_repo", {})            # list excludes it
+    assert "model.py" in w.execute("list_repo", {})                # siblings unaffected
+    assert "deleted" in w.execute("read_repo_file", {"path": "train.py"})   # read reports gone
+    assert "not found" in w.execute("grep_repo", {"query": "add_argument"})  # grep can't resurface it
+
+
+def test_grep_installed_honors_a_submodule_scope():
+    # scoping to a SUBMODULE actually narrows the walk: `def detect_encoding` lives in json/__init__.py,
+    # so a search scoped to json.decoder must NOT find it (the old _top-stripping searched all of json).
+    t = EnvInspectTools()
+    assert "detect_encoding" in t.execute("grep_installed",
+                                          {"query": "def detect_encoding", "package": "json"})
+    scoped = t.execute("grep_installed", {"query": "def detect_encoding", "package": "json.decoder"})
+    assert "not found" in scoped and "json/__init__" not in scoped
+
+
 def test_env_suggest_points_at_the_real_name():
     # a near-miss of an installed package suggests it ('pytes' -> 'pytest', always installed in dev)
     hint = _suggest("pytes")
