@@ -74,9 +74,6 @@ def fmt_params(params: dict, max_k: int = 4) -> str:
     return f"[{body}{extra}]" if body else "[]"
 
 
-# Back-compat aliases for pre-rename importers.
-
-
 # Default number of intra-node sweep trials surfaced in the always-on context (digest). A small,
 # REPRESENTATIVE sample — best + worst plus an even spread between — conveys the tuning landscape
 # (dispersion + how the metric moves with the params) without flooding the prompt budget. The

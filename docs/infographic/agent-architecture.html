@@ -26,7 +26,7 @@
 <div class="head">
   <div class="eyebrow">LoopLab · full engine process · code default</div>
   <h1>The whole loop — boxes &amp; arrows, every nuance</h1>
-  <p class="lede">Read the top row left→right: one node is proposed → novelty-gated → built → run → scored &amp; trust-checked → refined, then loops. Under each stage sit its detail boxes; the hypothesis board, cross-run memory and the event spine hang below. Every number is a built-in default.</p>
+  <p class="lede">Read the top row left→right: one node is proposed → novelty-gated <em>(opt-in)</em> → built → run → scored &amp; trust-checked → refined, then loops. Under each stage sit its detail boxes; the hypothesis board, cross-run memory and the event spine hang below. Every number is a built-in default.</p>
   <div class="legend">
     <span class="lg"><span class="sw" style="background:var(--r)"></span>Researcher</span>
     <span class="lg"><span class="sw" style="background:var(--d)"></span>Developer</span>
@@ -59,7 +59,7 @@ box("boss",1740,44,360,58,"Boss / Assistant · UI","⌘",C.s,["steer live: injec
 /* ============ MAIN LOOP row (y=150) ============ */
 const LY=150,LH=76;
 box("propose",40,LY,330,LH,"PROPOSE","R",C.r,["draft idea (op+params) + 1-line hypothesis","prompt = brief + cues + idea-space guidance"]);
-box("novelty",410,LY,210,LH,"NOVELTY GATE","R",C.r,["reject a near-duplicate idea","one informed re-propose"]);
+box("novelty",410,LY,210,LH,"NOVELTY GATE","off",C.r,["reject a near-duplicate idea (OFF; engaged under explore stance)","one informed re-propose"]);
 box("implement",660,LY,300,LH,"IMPLEMENT","D",C.d,["write/edit code · minimal SEARCH/REPLACE","every edit auto-compiled"]);
 box("evaluate",1000,LY,320,LH,"EVALUATE","□",C.ev,["run isolated across seeds","repair a mechanical crash in place"]);
 box("score",1360,LY,360,LH,"SCORE · TRUST","R/✓",C.trust,["metric in → holdout re-rank","then the rigor layer (below)"]);
@@ -101,7 +101,7 @@ stack(1360,360,DY,[
  {id:"t_lk",h:74,t:"Leakage",tag:"✓",c:C.trust,sub:["train↔test · target |r|≥0.98 · temporal","code: fit-on-test / fit-before-split"]},
  {id:"t_cr",h:58,t:"Critic + CV",tag:"advisory",c:C.trust,sub:["stub · hardcoded metric · params ignored · mean/std/SE"]},
  {id:"t_gate",h:86,t:"Trust gate",tag:"select",c:C.trust,sub:["audit = surface only","gate = can’t be best (stays breedable)","block = also feasible=False"]},
- {id:"t_conf",h:82,t:"Confirm",tag:"□",c:C.ev,sub:["top-K on disjoint seeds [base=1…)","robust=best mean; demote by ≥1 SE (variance gate)"]},
+ {id:"t_conf",h:82,t:"Confirm",tag:"off",c:C.ev,sub:["default OFF · top-K on disjoint seeds [base=1…)","robust=best mean; demote by ≥1 SE (variance gate)"]},
  {id:"t_ho",h:64,t:"Holdout-select",tag:"top-3",c:C.ev,sub:["re-rank top-3 on reserved 25% · no retrain"]},
  {id:"t_best",h:64,t:"Best-selection order",tag:"",c:C.ev,sub:["feasible→non-flagged→metric→confirmed→holdout→(metric,id)"]},
 ]);
@@ -115,7 +115,7 @@ stack(1760,300,DY,[
 // CROSS-CUTTING (right column)
 stack(2100,360,DY,[
  {id:"deepres",h:132,t:"Deep Researcher",tag:"every 3",c:C.dr,sub:["tools: Run/Data/Knowledge/Literature/Web","overlaps eval · memo recorded immediately","memo: summary·findings·claims·directions×5","VERIFY claims vs cited evidence","each direction → open hypothesis"]},
- {id:"strat",h:96,t:"Strategist",tag:"every 3",c:C.s,sub:["retune: policy·operators·fidelity·request-research","rule → LLM → agentic tool-loop","agent_control allow-list per role"]},
+ {id:"strat",h:140,t:"Strategist",tag:"every 3",c:C.s,sub:["reads coverage: themes·niches·entropy (narrowing signal)","sets novelty_stance explore|balanced|exploit → proposer·foresight·gate","retune: policy·operators·fidelity·request-research","rule → LLM → agentic tool-loop","agent_control allow-list per role"]},
 ]);
 
 /* ============ HYPOTHESIS pipeline (row y≈900) ============ */

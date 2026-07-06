@@ -106,7 +106,9 @@ class Settings(BaseSettings):
     # `timeout` as its wall-clock budget (solution.py path; RepoTasks use their per-profile timeout).
     sweep_timeout_mult: float = Field(default=8.0, ge=1)
     # Sandbox tier (ADR-13): "trusted_local" (subprocess, no Docker) for the CLI;
-    # "untrusted" (Docker --network none -> gVisor) for hosted/multi-tenant UI.
+    # "untrusted" (Docker --network none, shared-kernel runtime) for hosted/multi-tenant UI;
+    # "hostile" (untrusted + a true-isolation OCI runtime, gVisor `runsc` by default / Kata) for
+    # running untrusted code. See runtime/sandbox.py::make_sandbox for the tier selection.
     trust_mode: str = "trusted_local"
     # Image for the untrusted command-eval tier (RepoTask, Phase 4): the framework's deps
     # should be baked in (the container runs --network none, so a pip setup can't fetch).
@@ -348,6 +350,12 @@ class Settings(BaseSettings):
     require_approval: bool = False
     # Diversity archive (I22): niche bucket width in parameter space.
     archive_resolution: float = 1.0
+    # Coverage read-model (narrowing signal): at the strategist cadence, compute a breadth summary
+    # (themes / param-niches / theme entropy / dominant-theme fraction) from the folded run, record
+    # it as a `coverage_snapshot` audit event, and surface it into the Strategist's decision context.
+    # Deterministic, cheap, and purely additive context — no search-behavior change on its own. On by
+    # default (like the rest of the always-on situational context). See search/coverage.py.
+    coverage_context: bool = True
     # Role backend (ADR-7/14): "toy" (offline optimizer) | "llm" (live model).
     backend: str = "toy"
     # Developer backend (ADR-7): "default" (templated/LLM from the task) or an external

@@ -103,18 +103,19 @@ class Developer(Protocol):
 
 
 RESEARCHER_HINT_ATTRS: tuple[str, ...] = (
-    "_digest_cap", "_complexity_hint", "_sweep_hint", "_novelty_feedback")
+    "_digest_cap", "_complexity_hint", "_sweep_hint", "_novelty_feedback", "_novelty_hint")
 """Ephemeral hint attributes the engine communicates to the ACTIVE Researcher via
-`setattr` (orchestrator.py: `_digest_cap` ~388, `_complexity_hint` ~1409,
-`_sweep_hint` ~1419, `_novelty_feedback` ~2008-2023). Readers consume them with
-`getattr(self, name, default)`: `LLMResearcher.propose` (below) reads all four;
-`UnifiedAgent.propose` forwards them to its internal researcher. Keep this tuple in
-sync with the orchestrator's setattr sites.
+`setattr` (orchestrator.py: `_digest_cap` ~388, `_complexity_hint`/`_sweep_hint`/
+`_novelty_hint` in `_set_complexity_hint`, `_novelty_feedback` in the novelty gate).
+Readers consume them with `getattr(self, name, default)`: `LLMResearcher.propose`
+(below) reads all the text cues; `UnifiedAgent.propose` forwards them to its internal
+researcher. Keep this tuple in sync with the orchestrator's setattr sites.
 
-Both researchers now honor all four hints: `LLMResearcher.propose` and agent.py's
+Both researchers now honor the same cues: `LLMResearcher.propose` and agent.py's
 `ToolUsingResearcher.propose` fold the same `(_complexity_hint, _sweep_hint,
-_novelty_feedback)` cue set into their prompts, so the strategist's `prefer_sweep` nudge
-reaches the agentic path too (`_digest_cap` is consumed separately as a numeric cap)."""
+_novelty_feedback, _novelty_hint)` cue set into their prompts, so the strategist's
+`prefer_sweep` nudge and `novelty_stance` directive reach the agentic path too
+(`_digest_cap` is consumed separately as a numeric cap)."""
 
 
 def collect_hint_cues(obj, attrs) -> str:
@@ -275,7 +276,10 @@ class LLMResearcher:
         #   toward an intra-node sweep when the cost model favors in-process execution.
         # - _novelty_feedback — T5 novelty-gate feedback (one re-propose): "you already tried X, it
         #   failed because Y — propose something meaningfully different". Empty in the normal path.
-        cues = collect_hint_cues(self, ("_complexity_hint", "_sweep_hint", "_novelty_feedback"))
+        # - _novelty_hint — slice 2/4: the Strategist's novelty stance directive + coverage gaps
+        #   (EXPLORE a new theme / EXPLOIT the leader). Empty when stance is "balanced" (today).
+        cues = collect_hint_cues(self, ("_complexity_hint", "_sweep_hint", "_novelty_feedback",
+                                        "_novelty_hint"))
         hyp_sys = _hypothesis_system_suffix(self.track_hypotheses)
         messages = [
             {"role": "system",

@@ -472,7 +472,8 @@ class ToolUsingResearcher:
         # A0d breadth-keyed complexity cue + Strategist `prefer_sweep` bias + T5 novelty-gate
         # re-propose feedback (each empty=off). Matches LLMResearcher's cue set exactly, so the
         # agentic path now honors the strategist's sweep nudge just like the plain researcher.
-        cue = collect_hint_cues(self, ("_complexity_hint", "_sweep_hint", "_novelty_feedback"))
+        cue = collect_hint_cues(self, ("_complexity_hint", "_sweep_hint", "_novelty_feedback",
+                                       "_novelty_hint"))
         # Hypotheses ledger (P1): honor track_hypotheses on the agentic path too (default on, matching
         # config) — ask for the per-experiment `hypothesis` so the ledger of tested beliefs fills in.
         # Shared `_hypothesis_system_suffix` splices `_HYPOTHESIS_INSTRUCTION` identically to LLMResearcher.

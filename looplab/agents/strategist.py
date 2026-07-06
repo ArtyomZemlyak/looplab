@@ -6,7 +6,8 @@ operator mix, the eval fidelity, and (when a Developer factory is wired) the Dev
 It never selects a node itself and never writes a domain event — it emits an audit-only
 `strategy_decision` that swaps the active policy/operators. Every field it can decide is also a
 direct `Settings` knob, so the Strategist is a convenience layer over the same config, fully
-hand-overridable, and `backend="off"` (the default) is byte-identical to today's behavior.
+hand-overridable, and `backend="off"` is byte-identical to today's legacy static-config
+behavior (the shipped default is `"llm"` — an adaptive meta-controller consulted at cadence).
 
 Replay-safe by construction: the chosen `Strategy` is recorded in the event log and reconstructed
 by `replay.fold`; the (possibly non-deterministic) LLM backend is NEVER re-invoked during replay —
@@ -27,6 +28,13 @@ from looplab.core.llm import BudgetExceeded
 from looplab.core.models import NodeStatus, RunState
 from looplab.core.prompts import PromptStore, render
 
+# The novelty-stance vocabulary (the Strategist-owned dial). Centralized so the write side
+# (validate_strategy) and the apply side (Engine._apply_strategy) share ONE source of truth — a typo
+# can't silently accept an unknown stance, and a new stance is added in exactly one place.
+# "balanced" == today's behavior. (The `== "explore"` READ-side checks in the proposer / foresight /
+# novelty gate stay inline literals — each is exercised by tests, so a typo there fails loudly.)
+NOVELTY_STANCES: tuple[str, ...] = ("explore", "balanced", "exploit")
+
 # A fully-serializable description of the active search machinery. Every field maps to an existing
 # config knob, so a Strategy is just "a settings delta the engine applies live".
 #
@@ -45,6 +53,9 @@ Strategy = TypedDict(
         "developer": str,       # "default"|"llm"|"opencode"|... (whatever the dev factory knows)
         "operators": dict,      # {"ablate_every":int, "merge_mode":str, "complexity_cue":bool, ...}
         "fidelity": str,        # "smoke"|"full"|"adaptive"
+        "novelty_stance": str,  # "explore"|"balanced"|"exploit" — how much novelty pressure to apply
+                                # downstream (researcher proposal + foresight rank + novelty gate).
+                                # "balanced" == today's behavior; the Strategist owns this dial.
         "timeout": float,       # per-eval wall-clock budget (s) — applied only if the matrix allows it
         "max_parallel": int,    # concurrent evals — applied only if the matrix allows it
         "request_research": bool,  # ask the engine to run the Deep-Research stage before continuing
@@ -70,6 +81,10 @@ class StrategyContext(BaseModel):
     available_policies: list[str] = Field(default_factory=list)
     available_developers: list[str] = Field(default_factory=list)
     defaults: dict = Field(default_factory=dict)   # the static config Strategy (fallback/start)
+    # Breadth read-model (search/coverage.py): themes/niches/theme_entropy/dominant_theme_frac.
+    # CONTEXT the Strategist reads to judge how much novelty pressure to apply — it is informative,
+    # not a decision (the LLM decides). Empty when coverage_context is off.
+    coverage: dict = Field(default_factory=dict)
 
 
 class Strategist(Protocol):
@@ -120,6 +135,24 @@ def run_phase(state: RunState, n_seeds: int) -> str:
     return "exploit" if feasible >= max(1, n_seeds) and state.best_node_id is not None else "explore"
 
 
+def _rule_novelty_stance(ctx: StrategyContext) -> Optional[str]:
+    """Deterministic novelty stance from the coverage read-model (the RuleStrategist's counterpart to
+    the LLM's own choice). Returns None (leave unset -> balanced) unless there's a clear signal, so a
+    bare StrategyContext with no coverage never perturbs today's behavior:
+      - endgame / nearly-spent budget -> `exploit` (converge on the leader, don't open new breadth);
+      - the run is NARROWING (the recent window or the whole run concentrates on one theme) with
+        enough nodes to trust the signal -> `explore`;
+      - otherwise None."""
+    cov = ctx.coverage or {}
+    if cov.get("nodes", 0) < 3:                       # too little signal to steer novelty
+        return None
+    if ctx.node_budget_frac >= 0.8 or ctx.defaults.get("_budget_frac", 1.0) < 0.2:
+        return "exploit"
+    if cov.get("recent_dominant_frac", 0.0) >= 0.75 or cov.get("dominant_theme_frac", 0.0) >= 0.6:
+        return "explore"
+    return None
+
+
 # --------------------------------------------------------------------------- #
 # Validation — whitelist every field before a Strategy is applied
 # --------------------------------------------------------------------------- #
@@ -162,6 +195,9 @@ def validate_strategy(strat: Optional[Strategy], ctx: StrategyContext) -> Option
     fid = strat.get("fidelity")
     if fid in ("smoke", "full", "adaptive"):
         out["fidelity"] = fid
+    ns = strat.get("novelty_stance")
+    if ns in NOVELTY_STANCES:
+        out["novelty_stance"] = ns
     # Resource budgets (bounds match config: timeout>0, max_parallel>=1). Whitelisted here for shape;
     # the engine's _apply_strategy applies them ONLY if the governance matrix grants the strategist.
     tmo = strat.get("timeout")
@@ -193,6 +229,21 @@ class RuleStrategist:
         self.stall_window = max(1, stall_window)
 
     def decide(self, state: RunState, ctx: StrategyContext) -> Optional[Strategy]:
+        """Pick the search machinery, then overlay a coverage-driven `novelty_stance` (deterministic,
+        pure over ctx). The stance is the offline/fallback counterpart to the LLM Strategist's own
+        stance choice: `explore` when the coverage read-model shows the run narrowing onto one theme,
+        `exploit` in the endgame/low-budget, else left unset (== balanced, today's behavior). Empty
+        coverage (e.g. a bare StrategyContext) leaves the stance unset, so nothing changes."""
+        strat = self._decide_machinery(state, ctx)
+        ns = _rule_novelty_stance(ctx)
+        if ns:
+            strat = dict(strat or {})
+            strat.setdefault("source", "rule")
+            strat.setdefault("rationale", f"novelty_stance={ns} (coverage-driven)")
+            strat["novelty_stance"] = ns
+        return strat or None
+
+    def _decide_machinery(self, state: RunState, ctx: StrategyContext) -> Optional[Strategy]:
         avail = ctx.available_policies
         # Seed phase: cheap broad drafts at smoke fidelity (greedy is fine; nothing to exploit yet).
         if ctx.phase == "seed":
@@ -296,8 +347,14 @@ _STRATEGIST_SYSTEM = (
     "You are the search Strategist for an autonomous ML research engine. Given the current run "
     "state and a menu of available search policies, operators and fidelities, decide the BEST "
     "machinery to use next. You never pick a specific experiment — only the strategy. Prefer "
-    "richer operators over fancier search (operators are the verified bottleneck). Respond ONLY "
-    "with the requested structured fields; pick `policy` from the provided available list."
+    "richer operators over fancier search (operators are the verified bottleneck). You also own "
+    "`novelty_stance` (explore|balanced|exploit): how hard the proposer, the foresight ranker and "
+    "the novelty gate should push for NEW directions vs refining the leader. READ the coverage "
+    "signal (theme spread / dominant-theme concentration) — choose `explore` when the search is "
+    "NARROWING onto one theme (high dominant-theme fraction / low theme entropy, especially in the "
+    "recent window), `exploit` in the endgame or when a fresh lead is compounding, else `balanced` "
+    "(== today's behavior). Respond ONLY with the requested structured fields; pick `policy` from "
+    "the provided available list."
 )
 
 
@@ -305,12 +362,25 @@ class _StrategyOut(BaseModel):
     """Structured shape the LLM fills (a subset of Strategy; validated again by validate_strategy)."""
     policy: Optional[str] = None
     fidelity: Optional[str] = None
+    novelty_stance: Optional[str] = None    # explore|balanced|exploit — novelty pressure downstream
     ablate_every: Optional[int] = None
     merge_mode: Optional[str] = None
     complexity_cue: Optional[bool] = None
     prefer_sweep: Optional[bool] = None
     request_research: Optional[bool] = None
     rationale: str = ""
+
+
+def _fmt_coverage(cov: dict) -> str:
+    """Render the breadth read-model as one compact line for the Strategist prompt (the narrowing
+    signal is CONTEXT: it informs the novelty_stance the model chooses, it does not decide it)."""
+    if not cov:
+        return "unavailable"
+    return (f"themes={cov.get('themes', 0)} niches={cov.get('niches', 0)} "
+            f"theme_entropy={cov.get('theme_entropy', 0.0)} "
+            f"dominant_theme_frac={cov.get('dominant_theme_frac', 0.0)} "
+            f"recent_dominant_frac={cov.get('recent_dominant_frac', 0.0)} "
+            f"top_themes={cov.get('top_themes', [])}")
 
 
 def _strategist_brief(state: RunState, ctx: StrategyContext) -> str:
@@ -320,7 +390,11 @@ def _strategist_brief(state: RunState, ctx: StrategyContext) -> str:
         f"improves_since_best={ctx.improves_since_best} numeric_space={ctx.is_numeric_space} "
         f"eval_budget_remaining={ctx.eval_budget_remaining}\n"
         f"available_policies={ctx.available_policies} avg_eval_seconds={ctx.avg_eval_seconds}\n"
+        f"coverage (narrowing signal): {_fmt_coverage(ctx.coverage)}\n"
         "Choose the next strategy (policy from the available list; fidelity smoke|full|adaptive; "
+        "novelty_stance explore|balanced|exploit — pick explore when coverage shows the search "
+        "narrowing onto one theme (high dominant_theme_frac / low theme_entropy), exploit in the "
+        "endgame or on a compounding lead, else balanced; "
         "optional ablate_every, merge_mode mean|ensemble, complexity_cue, prefer_sweep — set "
         "prefer_sweep=true to bias the researcher toward an in-process hyperparameter sweep when "
         "evals are costly and the space is numeric; set request_research=true when the run is "
@@ -349,6 +423,8 @@ def _assemble_strategy(out: "_StrategyOut", *, source: str = "llm") -> Strategy:
         strat["policy"] = out.policy
     if out.fidelity:
         strat["fidelity"] = out.fidelity
+    if out.novelty_stance:
+        strat["novelty_stance"] = out.novelty_stance
     if out.request_research:
         strat["request_research"] = True
     ops: dict = {}

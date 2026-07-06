@@ -66,6 +66,10 @@ EV_SPEC_APPROVAL_REQUESTED = "spec_approval_requested"
 EV_SPEC_DRIFT = "spec_drift"
 EV_WORKSPACE_CHANGED = "workspace_changed"
 EV_DIVERSITY_ARCHIVE = "diversity_archive"
+# Breadth read-model recorded at the strategist cadence (narrowing curve). Audit-only — it never
+# affects node selection; folded ONLY so the at_node gate makes resume idempotent and the UI/replay
+# can plot coverage over time. See looplab/search/coverage.py.
+EV_COVERAGE_SNAPSHOT = "coverage_snapshot"
 EV_LLM_COST = "llm_cost"
 EV_ABLATE = "ablate"
 EV_POLICY_DECISION = "policy_decision"
