@@ -40,6 +40,15 @@ _stack: contextvars.ContextVar[tuple] = contextvars.ContextVar("LOOPLAB_spans", 
 # another task sees its own tracer (or None when nothing is traced). None => the helpers no-op.
 _current_tracer: contextvars.ContextVar = contextvars.ContextVar("LOOPLAB_tracer", default=None)
 
+# Active node_id for THIS task/thread. Set whenever a span carries an explicit `node_id` (create_node /
+# evaluate / repair), and STAMPED onto every nested span that doesn't set its own — so a generation/tool
+# span deep inside the Developer's tool-loop is attributable to the node being built, even when the
+# tool-loop opens its spans in a long-lived trace of its own (the LLM client / agent don't nest under
+# create_node's trace). Without this, per-node trace views come back empty for the very spans a user
+# most wants to see (what the agent thought + which tools it called). Copied across task/thread spawns
+# like the other contextvars, so it survives the worker-thread eval + anyio.to_thread offloads.
+_node_ctx: contextvars.ContextVar = contextvars.ContextVar("LOOPLAB_node", default=None)
+
 def _init_otel():  # pragma: no cover - exercised only with the [otel] extra installed
     """Return an OpenTelemetry tracer if the SDK is installed, configuring an OTLP exporter
     from the standard OTEL_* env when an endpoint is set (so `OTEL_EXPORTER_OTLP_ENDPOINT=…`
@@ -317,6 +326,14 @@ class Tracer:
     def span(self, name: str, *, new_trace: bool = False, kind: str = "operation", **attributes):
         st = _stack.get()
         parent = st[-1] if st else None
+        # Propagate node_id via a contextvar (see _node_ctx): a span that names an explicit node_id sets
+        # it for the block; a span that doesn't INHERITS the active one, so nested generation/tool spans
+        # get attributed to the node even when they open in a trace of their own. Stamp onto attributes
+        # so the on-disk span (and the trace view that reads it) carries it.
+        _nid_own = attributes.get("node_id")
+        if _nid_own is None and _node_ctx.get() is not None:
+            attributes = {**attributes, "node_id": _node_ctx.get()}
+        _tok_node = _node_ctx.set(attributes["node_id"]) if attributes.get("node_id") is not None else None
         otel_cm = _OTEL.start_as_current_span(name) if _OTEL is not None else None
         otel_span = otel_cm.__enter__() if otel_cm is not None else None
         # IDs come from the real OTel span when bridged (so JSONL and the collector agree),
@@ -379,6 +396,8 @@ class Tracer:
                     pass
             _stack.reset(token)
             _current_tracer.reset(tok_tr)
+            if _tok_node is not None:
+                _node_ctx.reset(_tok_node)
             try:
                 self.exporter.export(rec)
             except Exception:  # noqa: BLE001 - spans are diagnostics: an export failure (disk full,

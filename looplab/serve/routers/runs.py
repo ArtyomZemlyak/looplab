@@ -230,6 +230,53 @@ def build_router(srv) -> APIRouter:
             pass
         return {"span_id": sid, "attributes": {}, "events": []}
 
+    @router.get("/api/runs/{run_id}/trace/tail")
+    def trace_tail(run_id: str, limit: int = 30):
+        """LIVE 'what is the agent doing right now' feed: the most recent generation (LLM thinking/
+        output) + tool (name + args) observations, newest last. Powers the Dock's live-trace disclosure
+        so a user can watch the agent reason/act during a coarse 'Thinking…'/'Planning…' status instead
+        of only seeing the label. Reads just the TAIL of spans.jsonl (bounded regardless of run length);
+        text is capped here, the full I/O is at /spans/{sid}."""
+        rd = _run_dir(run_id)
+        limit = max(1, min(int(limit or 30), 100))
+        # Read only the last ~256KB so a multi-MB spans.jsonl doesn't get re-parsed in full every poll.
+        recent: list[dict] = []
+        try:
+            import os
+            p = rd / "spans.jsonl"
+            sz = os.path.getsize(p)
+            with open(p, "rb") as f:
+                if sz > 262144:
+                    f.seek(sz - 262144)
+                    f.readline()                 # drop the partial first line after the seek
+                blob = f.read()
+            for line in blob.splitlines():
+                try:
+                    s = json.loads(line)
+                except (ValueError, TypeError):
+                    continue
+                if s.get("kind") not in ("generation", "tool"):
+                    continue
+                a = s.get("attributes") or {}
+                it = {"span_id": s.get("span_id"), "kind": s.get("kind"), "node_id": a.get("node_id"),
+                      "start": s.get("start"), "duration_s": s.get("duration_s"),
+                      "status": s.get("status")}
+                if s.get("kind") == "generation":
+                    it["model"] = a.get("model")
+                    txt = a.get("thinking") or a.get("output") or ""
+                    it["text"] = txt[:500] if isinstance(txt, str) else ""
+                else:
+                    it["tool"] = a.get("tool")
+                    inp = a.get("input")
+                    if isinstance(inp, dict):
+                        it["arg"] = str(inp.get("path") or inp.get("pattern") or inp.get("query")
+                                        or inp.get("command") or inp.get("root") or "")[:160]
+                    it["output"] = str(a.get("output") or "")[:200]
+                recent.append(it)
+        except OSError:
+            pass
+        return {"tail": recent[-limit:]}
+
     @router.get("/api/runs/{run_id}/nodes/{nid}/conversation")
     def node_conversation(run_id: str, nid: int):
         """The node's trace as a LINEAR, de-duplicated conversation: the system+user request shown

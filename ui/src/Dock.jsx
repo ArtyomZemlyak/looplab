@@ -155,6 +155,45 @@ function collectThinking(trace, nid) {
 
 // A short, honest "what's the agent doing now" line, derived purely from the live state + the latest
 // event (no backend signal needed). Drives the animated status strip at the foot of the feed.
+// Live agent trace: a collapsed disclosure under the "Thinking…/Planning…" status that streams the
+// most recent LLM thoughts + tool calls (with args), so you can see WHAT the agent is doing, not just
+// a coarse label. Polls /trace/tail only while OPEN + live (cheap when collapsed). Server-side the feed
+// is bounded (tail of spans.jsonl); full I/O of any observation is at /spans/{sid}.
+function LiveTrace({ runId, active }) {
+  const [tail, setTail] = useState([])
+  const [open, setOpen] = useState(false)
+  const bodyRef = useRef(null)
+  useEffect(() => {
+    if (!active || !open) return
+    let alive = true
+    const tick = () => get(`/api/runs/${runId}/trace/tail?limit=40`)
+      .then(r => { if (alive) setTail(r.tail || []) }).catch(() => {})
+    tick()
+    const iv = setInterval(tick, 3000)
+    return () => { alive = false; clearInterval(iv) }
+  }, [runId, active, open])
+  useEffect(() => { if (open && bodyRef.current) bodyRef.current.scrollTop = bodyRef.current.scrollHeight }, [tail, open])
+  return (
+    <details className="live-trace" onToggle={e => setOpen(e.currentTarget.open)}>
+      <summary title="stream the agent's thoughts + tool calls">trace ⏦</summary>
+      <div className="lt-body" ref={bodyRef}>
+        {tail.length === 0
+          ? <div className="muted lt-empty">waiting for the next agent step…</div>
+          : tail.map((it, i) => it.kind === 'generation'
+            ? <div key={it.span_id || i} className="lt-row lt-gen">
+                <span className="lt-ic">🧠</span>
+                <span className="lt-txt">{it.text || <span className="muted">({it.model})</span>}</span>
+              </div>
+            : <div key={it.span_id || i} className="lt-row lt-tool">
+                <span className="lt-ic">🔧</span>
+                <span className="lt-tool-name">{it.tool}</span>
+                {it.arg && <span className="lt-arg">{it.arg}</span>}
+              </div>)}
+      </div>
+    </details>
+  )
+}
+
 function agentStatus(live, log) {
   if (!live || live.finished) return null
   if (live.paused) return 'Paused'
@@ -498,6 +537,8 @@ export default function Dock({ runId, live, liveSeq, viewSeq, setViewSeq, onFocu
             return <div className="agent-status">
               <span className="as-dot" />
               <span className="as-seg">{pipeline}</span>
+              <span style={{ flex: 1 }} />
+              <LiveTrace runId={runId} active={atLive} />
             </div>
           })()}
         </div>
