@@ -190,6 +190,22 @@ def _idea_text(idea) -> str:
     return "\n".join(parts) or (getattr(idea, "operator", "") or "idea")
 
 
+def _novelty_rank_directive(stance: str) -> str:
+    """The novelty clause appended to the predictor's report for the K->1 idea pick (slice 3). Empty
+    for the default "balanced" stance (ranking stays a pure predicted-metric choice); "explore" tells
+    the world-model to break near-ties toward the MORE DIVERGENT candidate so breadth isn't silently
+    discarded; "exploit" reinforces backing the safest predicted improvement."""
+    if stance == "explore":
+        return ("\n\nNOVELTY DIRECTIVE (strategist stance = explore): the search is narrowing. When "
+                "two candidates are close on predicted metric, PREFER the one that explores a more "
+                "DIFFERENT direction / theme (broaden the hypothesis space); do not rank a near-"
+                "duplicate of an already-tried idea first.")
+    if stance == "exploit":
+        return ("\n\nNOVELTY DIRECTIVE (strategist stance = exploit): back the candidate with the "
+                "safest predicted improvement to the current leader; novelty is not a priority now.")
+    return ""
+
+
 def _memory_brief(state, parent) -> str:
     """The accumulated experiment memory that primes the hypothesis predictor (EvoScientist-style):
     the whole-search working set + the lineage lessons under the node being refined. Best-effort;
@@ -305,9 +321,15 @@ class ForesightPanelResearcher:
         if self.k == 1:
             return self.base.propose(state, parent)      # board prioritized; single proposal
         ideas = [self.base.propose(state, parent) for _ in range(self.k)]
-        r = self._rank(verified_report(data_profile=state.data_profile,
-                                       memory=_memory_brief(state, parent)),
-                       [_idea_text(i) for i in ideas],
+        # Slice 3: the Strategist's novelty stance biases the K->1 pick. "balanced" (default) leaves
+        # the ranking a pure predicted-metric choice — byte-identical to today; "explore" appends a
+        # directive so that when candidates are close the ranker PREFERS the more novel/divergent one
+        # (breadth is otherwise silently discarded here). Injected via the report, so `_SYSTEM` and
+        # the ranker signatures are untouched.
+        stance = getattr(self, "_novelty_stance", "balanced")
+        report = verified_report(data_profile=state.data_profile, memory=_memory_brief(state, parent))
+        report += _novelty_rank_directive(stance)
+        r = self._rank(report, [_idea_text(i) for i in ideas],
                        goal=state.goal, direction=state.direction)
         if r is None:
             self.last_foresight = None
@@ -316,10 +338,11 @@ class ForesightPanelResearcher:
         best = ideas[order[0]]
         # Telemetry the engine reads after propose() to emit `foresight_selected` (engine = sole event
         # writer): WHICH of the K generated ideas won + the discarded alternatives + confidence + the
-        # model's analysis trace. Without it only the winner survives (in node_created).
+        # model's analysis trace + the novelty stance in force. Without it only the winner survives.
         self.last_foresight = {
             "kind": "idea", "method": "foresight", "n": len(ideas), "k": self.k,
             "chosen": order[0], "order": order, "confidence": conf, "reason": reason,
+            "novelty_stance": stance,
             "candidates": [" ".join(_idea_text(i).split())[:160] for i in ideas]}
         best.rationale = (best.rationale
                           + f" [foresight: predicted best of {self.k} pre-execution]").strip()

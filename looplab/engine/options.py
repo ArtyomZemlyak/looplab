@@ -109,6 +109,7 @@ class EngineOptions:
     digest_char_cap: int = 0             # M5: digest prompt budget; 0 = auto-scale with run size
     research_verify: bool = True         # D8: verify memo claims against cited evidence
     workdir_audit: bool = True           # 4.4: flag unexpected writes in the eval workdir
+    coverage_context: bool = True        # narrowing signal: coverage_snapshot at the strategist cadence
 
     @classmethod
     def from_settings(cls, s: "Settings") -> "EngineOptions":

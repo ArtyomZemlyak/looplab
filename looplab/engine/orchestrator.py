@@ -24,7 +24,7 @@ from looplab.tools.agents_md import generate_agents_md
 from looplab.events.eventstore import EventStore
 from looplab.events.types import (
     EV_AGENT_DECISION, EV_AGENT_VALIDATED, EV_APPROVAL_REQUESTED,
-    EV_DATA_LEAKAGE,
+    EV_COVERAGE_SNAPSHOT, EV_DATA_LEAKAGE,
     EV_DATA_PROFILED, EV_DATA_PROVENANCE, EV_DEPS_INSTALLED,
     EV_DRIFT_UNAVAILABLE, EV_FORK_DONE, EV_HINT, EV_HOST_GRADING,
     EV_FORESIGHT_SELECTED,
@@ -53,9 +53,11 @@ from looplab.engine.triage import (_MAX_DEP_ROUNDS, _MECHANICAL_MARKERS,  # noqa
                                    _normalize_error_sig, _rule_triage, _shallow_fingerprint)
 from looplab.core.llm import BudgetExceeded
 from looplab.core.models import Idea, NodeStatus, RunState
+from looplab.search.coverage import coverage_signal
 from looplab.search.operators import merge_idea
 from looplab.search.policy import SearchPolicy, available_policies, make_policy
 from looplab.agents.strategist import (
+    NOVELTY_STANCES,
     StrategyContext,
     failure_rate,
     improves_since_best,
@@ -181,6 +183,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin):
         digest_char_cap: int = _UNSET,            # M5: digest prompt budget; 0 = auto-scale with run size
         research_verify: bool = _UNSET,        # D8: verify memo claims against cited evidence
         workdir_audit: bool = _UNSET,          # 4.4: flag unexpected writes in the eval workdir
+        coverage_context: bool = _UNSET,       # narrowing signal: coverage_snapshot at strategist cadence
         lesson_abstractor=None,              # Memora synergy: harmonic recall over cross-run lessons
     ):
         # Resolve each pure-config knob ONCE, up front — explicit kwarg > options field > default —
@@ -203,6 +206,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin):
         memory_dir = _opt(memory_dir, "memory_dir")
         require_approval = _opt(require_approval, "require_approval")
         archive_resolution = _opt(archive_resolution, "archive_resolution")
+        coverage_context = _opt(coverage_context, "coverage_context")
         eval_trust_mode = _opt(eval_trust_mode, "eval_trust_mode")
         trust_mode = _opt(trust_mode, "trust_mode")
         docker_image = _opt(docker_image, "docker_image")
@@ -360,6 +364,11 @@ class Engine(ConfirmPhaseMixin, AblationMixin):
             pass
         self._research_verify = bool(research_verify)
         self._workdir_audit = bool(workdir_audit)
+        self._coverage_context = bool(coverage_context)
+        # Novelty stance (Strategist-owned dial): how hard the proposer / foresight ranker / novelty
+        # gate push for NEW directions. "balanced" == today's behavior; the Strategist raises it to
+        # "explore" when coverage shows narrowing, or "exploit" to converge. Set by _apply_strategy.
+        self._novelty_stance = "balanced"
         # Memora synergy: the SAME abstractor Memora uses for the case/KB index, applied to the
         # cross-run LESSONS tier so lesson retrieval gains anchor-expansion (harmonic recall)
         # instead of fingerprint-Jaccard alone. None (memora off) => the legacy Jaccard-only path.
@@ -848,6 +857,12 @@ class Engine(ConfirmPhaseMixin, AblationMixin):
         return False
 
     def _run_cadences(self, state: RunState) -> RunState:
+        # Breadth read-model: record the run's narrowing curve at the strategist cadence BEFORE the
+        # Strategist decides, so the same snapshot both (a) feeds the meta-controller's decision
+        # context and (b) lands in the log for the UI / historical-replay measurement. Audit-only,
+        # replay-safe (at_node gate); no-op when coverage_context is off. See search/coverage.py.
+        state = self._maybe_snapshot_coverage(state)
+
         # A7 Strategist: adapt the search machinery (policy/operators/fidelity/Developer) before
         # the policy proposes the next actions. No-op when strategist is off (== today).
         state = self._maybe_consult_strategist(state)
@@ -967,7 +982,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin):
         REAL change so the engine doesn't re-record/re-apply an identical strategy every iteration."""
         if not s:
             return {}
-        return {k: s.get(k) for k in ("policy", "policy_params", "developer", "operators", "fidelity", "request_research")}
+        return {k: s.get(k) for k in ("policy", "policy_params", "developer", "operators", "fidelity", "novelty_stance", "request_research")}
 
     def _available_developers(self) -> list[str]:
         from looplab.agents.cli_agent import PRESETS
@@ -998,7 +1013,21 @@ class Engine(ConfirmPhaseMixin, AblationMixin):
             available_policies=available_policies(),
             available_developers=self._available_developers(),
             defaults=defaults,
+            coverage=self._coverage_for_ctx(state),
         )
+
+    def _coverage_for_ctx(self, state: RunState) -> dict:
+        """The breadth read-model for the Strategist's decision context. On the cadence path the
+        snapshot `_maybe_snapshot_coverage` just recorded (it runs FIRST in `_run_cadences`) already
+        sits in `state` at this node-count — reuse it instead of recomputing the O(nodes) signal
+        twice; an off-cadence pin_drift consult (no snapshot at this n) computes fresh. Empty when
+        coverage_context is off."""
+        if not self._coverage_context:
+            return {}
+        snaps = state.coverage_snapshots
+        if snaps and snaps[-1].get("at_node") == len(state.nodes):
+            return {k: v for k, v in snaps[-1].items() if k != "at_node"}
+        return coverage_signal(state, resolution=self.archive_resolution)
 
     def _should_consult(self, state: RunState) -> bool:
         """Bounded, deterministic cadence: only at a creation decision point (no pending evals),
@@ -1043,6 +1072,8 @@ class Engine(ConfirmPhaseMixin, AblationMixin):
         """Rebuild the live search machinery from a Strategy (pure wiring, no events). Policies share
         the action vocabulary and are pure, so swapping between loop iterations is safe; the Developer
         is swapped only between sequential _create_node calls."""
+        if strat.get("novelty_stance") in NOVELTY_STANCES:
+            self._novelty_stance = strat["novelty_stance"]   # Strategist's novelty dial (slice 2)
         ops = strat.get("operators") or {}
         if "ablate_every" in ops:
             self._ablate_every = int(ops["ablate_every"])
@@ -1105,6 +1136,25 @@ class Engine(ConfirmPhaseMixin, AblationMixin):
                 self._developer_name = dev
             except Exception:  # noqa: BLE001 — a bad backend swap must never abort the run
                 pass
+
+    @staticmethod
+    def _already_covered_at(state: RunState, n: int) -> bool:
+        return any((c or {}).get("at_node") == n for c in state.coverage_snapshots)
+
+    def _maybe_snapshot_coverage(self, state: RunState) -> RunState:
+        """Record a `coverage_snapshot` (breadth read-model) at the strategist cadence, then re-fold.
+        Recorded even when NO Strategist is wired, so the run's narrowing curve is always queryable
+        over the log / replayable historically (fold -> coverage_signal). Audit-only — it never
+        affects node selection; folded only so the at_node gate makes a resume idempotent (each
+        node-count decision point is reached once across the run's lifetime). No-op when
+        coverage_context is off, off-cadence, mid-eval, or already snapshotted at this node-count."""
+        n = len(state.nodes)
+        if (not self._coverage_context or not self._should_consult(state)
+                or self._already_covered_at(state, n)):
+            return state
+        self.store.append(EV_COVERAGE_SNAPSHOT, {
+            "at_node": n, **coverage_signal(state, resolution=self.archive_resolution)})
+        return fold(self.store.read_all())
 
     def _maybe_consult_strategist(self, state: RunState) -> RunState:
         """Operator/boss pin first (HITL parity), then the bounded-cadence Strategist consult.
@@ -1388,6 +1438,37 @@ class Engine(ConfirmPhaseMixin, AblationMixin):
             setattr(self.researcher, "_sweep_hint", sweep_hint)
         except Exception:  # noqa: BLE001
             pass
+        self._stamp_novelty_hint(state, self._novelty_stance)
+
+    def _stamp_novelty_hint(self, state: RunState, stance: str) -> None:
+        """Stamp the Strategist's novelty dial onto the ACTIVE researcher (slice 2/4): a prose
+        directive `_novelty_hint` (+ the coverage gaps to act on) that the researcher folds into its
+        prompt, plus the stance VALUE `_novelty_stance` the foresight ranker reads. "balanced" ->
+        empty hint (byte-identical to today's prompt). Extracted so the DEBUG/repair path can force a
+        NEUTRAL "balanced" stance — novelty pressure ("open a new direction") is wrong when the job is
+        to FIX a failure — and so draft/improve refresh it from the live `self._novelty_stance` every
+        node (no stale hint bleeds from a prior operator into a later one)."""
+        nov_hint = ""
+        if stance == "explore":
+            # Reuse the breadth snapshot the strategist cadence already recorded (its most recent view)
+            # instead of recomputing the O(nodes) signal on this per-proposal hot path — the hint is
+            # prose, so the last snapshot is fresh enough. Falls back to {} before the first snapshot.
+            cov = state.coverage_snapshots[-1] if state.coverage_snapshots else {}
+            top = cov.get("top_themes") or []
+            spread = (f" So far the search concentrates on '{top[0][0]}' "
+                      f"({cov.get('dominant_theme_frac', 0.0):.0%} of experiments); "
+                      f"themes tried: {[t for t, _ in top]}." if top else "")
+            nov_hint = ("\nNovelty stance: EXPLORE — the search is narrowing." + spread +
+                        " Propose a MEANINGFULLY DIFFERENT direction (a new theme / approach / "
+                        "component), not a variation of the current leader — broaden the space.")
+        elif stance == "exploit":
+            nov_hint = ("\nNovelty stance: EXPLOIT — refine and deepen the current best line of "
+                        "attack; a focused improvement beats opening a new direction now.")
+        for _attr, _val in (("_novelty_hint", nov_hint), ("_novelty_stance", stance)):
+            try:
+                setattr(self.researcher, _attr, _val)
+            except Exception:  # noqa: BLE001
+                pass
 
     # ---------------------------- cross-run memory / lessons / reflection (extracted)
     # The lessons/reflection cluster lives in looplab/engine/lessons.py (`LessonMemory`,
@@ -1514,8 +1595,11 @@ class Engine(ConfirmPhaseMixin, AblationMixin):
         (2) NUMERIC (E1 legacy): params within `novelty_epsilon` (normalized L2) of an existing
             node are deterministically nudged off the duplicate.
         Loop-safe (always returns a usable idea) and replay-safe (the final idea lands in
-        node_created; the gate is not re-run on replay). No-op unless `novelty_gate` is on."""
-        if not self._novelty_gate:
+        node_created; the gate is not re-run on replay). Runs when `novelty_gate` is on OR the
+        Strategist's novelty stance is "explore" (slice 5): the stance can engage a soft dedup +
+        one informed re-propose even when the static gate is off, so novelty pressure follows the
+        meta-controller. "balanced"/"exploit" (and gate off) leave this a no-op — exactly as before."""
+        if not (self._novelty_gate or self._novelty_stance == "explore"):
             return idea
         import random as _random
 
@@ -1529,7 +1613,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin):
                            else f"it scored {dup.metric}")
                 self.store.append(EV_NOVELTY_REJECTED, {
                     "node_id": len(state.nodes), "near_node": dup.id, "kind": "semantic",
-                    "similarity": round(sim, 4),
+                    "similarity": round(sim, 4), "stance": self._novelty_stance,
                     "action": "reproposed" if callable(repropose) else "kept"})
                 if callable(repropose):
                     hint = (f"\nNOVELTY GATE: your proposal is a near-duplicate of experiment "
@@ -1572,6 +1656,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin):
             nudged[k] = round(params[k] + rng.uniform(-1.0, 1.0) * scale, 4)
         self.store.append(EV_NOVELTY_REJECTED, {
             "node_id": nid, "near_node": nearest, "distance": round(mind, 4),
+            "stance": self._novelty_stance,
             "original": idea.params, "nudged": nudged})
         out = idea.model_copy()
         out.params = nudged
@@ -1838,6 +1923,11 @@ class Engine(ConfirmPhaseMixin, AblationMixin):
                     with self.tracer.span("repair", parent_id=parent.id):
                         code = self._repair(parent, err)   # seed from parent's OWN files (repair_from)
                 else:
+                    # Debug/repair is stance-NEUTRAL: novelty pressure ("open a new direction") is
+                    # wrong when the job is to FIX a failure. Clear any stale explore/exploit hint a
+                    # prior draft/improve left on the researcher before this repair proposal (this
+                    # branch does not call _set_complexity_hint, so nothing else refreshes it).
+                    self._stamp_novelty_hint(state, "balanced")
                     with self.tracer.span("propose"):
                         idea = self.researcher.propose(state, parent)
                     idea.operator = "debug"
