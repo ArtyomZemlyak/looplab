@@ -65,9 +65,23 @@ def test_secret_clear_and_reject_unknown(tmp_path, _restore_key):
     assert client.put("/api/settings/secret", json={"key": "nope", "value": "x"}).status_code == 400
 
 
-def test_stored_secret_primes_env_on_app_start(tmp_path, _restore_key):
+def test_stored_secret_primes_env_on_app_start(tmp_path, _restore_key, monkeypatch):
     # A secret saved in a prior session is loaded into the env when the server next starts.
+    # cwd = tmp_path (no local .env) so prime_env has nothing to defer to and primes the store.
+    monkeypatch.chdir(tmp_path)
     (tmp_path / "secrets.json").write_text(json.dumps({"llm_api_key": "sk-from-disk"}), encoding="utf-8")
     os.environ.pop("LOOPLAB_LLM_API_KEY", None)
     TestClient(make_app(tmp_path))
     assert os.environ.get("LOOPLAB_LLM_API_KEY") == "sk-from-disk"
+
+
+def test_dotenv_key_wins_over_stored_secret(tmp_path, _restore_key, monkeypatch):
+    # The fix: a key the operator put in a local .env must WIN over the saved UI secret store — priming
+    # must NOT clobber it (os.environ would otherwise outrank the .env file in pydantic).
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".env").write_text("LOOPLAB_LLM_API_KEY=sk-from-dotenv\n", encoding="utf-8")
+    (tmp_path / "secrets.json").write_text(json.dumps({"llm_api_key": "sk-from-store"}), encoding="utf-8")
+    os.environ.pop("LOOPLAB_LLM_API_KEY", None)
+    TestClient(make_app(tmp_path))
+    # os.environ is NOT primed from the store (so pydantic reads sk-from-dotenv from .env, not the store)
+    assert os.environ.get("LOOPLAB_LLM_API_KEY") != "sk-from-store"

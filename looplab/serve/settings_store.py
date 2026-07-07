@@ -80,9 +80,22 @@ class SettingsStore:
 
     def prime_env(self) -> None:
         # Prime this process's env from the stored secrets at startup, WITHOUT clobbering a value the
-        # operator exported explicitly (an env var / .env wins over the saved store).
+        # operator set explicitly — via an EXPORTED env var OR a `.env` file. Subtlety this fixes: a
+        # `.env` value is NOT in os.environ yet here, so a bare setdefault would prime the secret into
+        # os.environ and then WIN over `.env` (pydantic ranks os.environ above the .env file) — silently
+        # overriding a key the operator just edited in `.env`. So we skip any key the local `.env`
+        # already provides, keeping the documented ".env wins over the saved store" contract true.
+        dotenv_keys: set = set()
+        try:
+            from dotenv import dotenv_values
+            dotenv_keys = {k for k, v in dotenv_values(".env").items() if v}
+        except Exception:  # noqa: BLE001 — no/unreadable .env just means nothing to defer to
+            dotenv_keys = set()
         for _k, _v in self.load_secrets().items():
-            os.environ.setdefault(_SECRET_ENV[_k], _v)
+            env_name = _SECRET_ENV[_k]
+            if env_name in dotenv_keys:            # .env provides it → let .env win, don't prime
+                continue
+            os.environ.setdefault(env_name, _v)
 
     def resolved_settings(self, s: Optional["Settings"] = None) -> dict:
         """Engine defaults (Settings(): defaults+env) overlaid with the saved UI overrides — i.e.
