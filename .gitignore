@@ -56,3 +56,7 @@ examples/live-*.json
 
 # MkDocs build output (site is published by CI to GitHub Pages)
 site/
+
+# Jupyter checkpoint copies (can mirror .env with secrets — never commit)
+.ipynb_checkpoints/
+**/.ipynb_checkpoints/
