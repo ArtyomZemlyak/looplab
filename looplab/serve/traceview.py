@@ -197,6 +197,37 @@ def build_conversation(state: RunState, spans: list[dict], node_id) -> dict:
         nid = _node_id_of(root) if root else None
         if nid is None or str(nid) != str(node_id):
             continue
+        # `create_node` is just a WRAPPER ("Author node") the reader doesn't care about — split it into
+        # its real sub-stages (propose / implement / repair) so each is its own band. Every OTHER trace
+        # (evaluate, foresight_rank, strategy_consult, …) is already one meaningful stage. Group each
+        # generation/tool under the TOP-LEVEL sub-operation it lives in (falling back to create_node
+        # itself when a generation sits directly under the root — so nothing is ever dropped).
+        if (root or {}).get("name") == "create_node" and root:
+            by_sid = {s.get("span_id"): s for s in ss_sorted}
+            root_sid = root["span_id"]
+
+            def _stage_of(s):
+                cur, top_op = by_sid.get(s.get("parent_id")), None
+                while cur is not None and cur.get("span_id") != root_sid:
+                    if cur.get("kind") == "operation":
+                        top_op = cur
+                    cur = by_sid.get(cur.get("parent_id"))
+                return top_op or root
+
+            groups: dict = {}
+            for s in ss_sorted:
+                if s.get("span_id") == root_sid:
+                    continue
+                stg = _stage_of(s)
+                groups.setdefault(stg.get("span_id"), {"span": stg, "spans": []})["spans"].append(s)
+            for g in sorted(groups.values(), key=lambda x: x["span"].get("start", 0.0)):
+                grp = sorted(g["spans"], key=lambda x: x.get("start", 0.0))
+                turns = _thread_turns(grp, by_id)
+                if turns:
+                    stages.append({"trace_id": tid, "label": g["span"].get("name"),
+                                   "start": g["span"].get("start", 0.0),
+                                   "rollup": _rollup(grp), "turns": turns})
+            continue
         turns = _thread_turns(ss_sorted, by_id)
         if turns:
             stages.append({"trace_id": tid, "label": (root or {}).get("name"),
