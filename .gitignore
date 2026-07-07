@@ -60,3 +60,5 @@ site/
 # Jupyter checkpoint copies (can mirror .env with secrets — never commit)
 .ipynb_checkpoints/
 **/.ipynb_checkpoints/
+run.md
+*.log
