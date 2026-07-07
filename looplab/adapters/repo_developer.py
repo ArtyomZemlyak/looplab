@@ -564,27 +564,33 @@ class LLMRepoDeveloper:
                         ["steps"])
 
     def _propose_plan(self, system: str, idea: Idea) -> list:
-        """Plan phase: the developer proposes an ordered atomic plan (emit-only, no writes yet).
-        Returns a list of {title, detail}; [] on empty/failure so the caller falls back to one session."""
-        from looplab.agents.agent import drive_tool_loop
+        """Plan phase: a READ-ONLY stage — the developer inspects the real code/experiments (it CANNOT
+        write here), and its only exit is `propose_plan` (the ordered atomic plan). Returns a list of
+        {title, detail}; [] on empty/failure so the caller falls back to one session."""
+        from looplab.agents.agent import drive_tool_loop, CompositeTools
+        from looplab.tools.env_inspect import EnvInspectTools
         params = ", ".join(f"{k}={v}" for k, v in (idea.params or {}).items()) or "(choose sensible values)"
         plan_user = (
             f"Experiment concept (the researcher's idea): {idea.rationale}\nHyperparameters: {params}.\n"
-            "BEFORE writing any code, break this into an ordered plan of ATOMIC steps and call "
-            "propose_plan. Plan DIRECTLY from the repo source already included above — this planning "
-            "step has NO tools (you'll read/grep the repo and check installed versions when you "
-            "IMPLEMENT each step, not now). Keep steps small and independently testable.")
+            "This is the PLANNING stage. You can READ and inspect the repo (read_file — it paginates, so "
+            "read a file ONCE, don't re-read; grep, find_files, list_dir, pkg_info, py_api, gpu_info) but "
+            "you CANNOT write code yet. Actually READ the relevant source (the eval/entry script, the "
+            "files you'll change) and any prior experiment you're building on — enough to know EXACTLY "
+            "what to change — THEN call propose_plan with an ordered list of ATOMIC, independently-"
+            "testable steps, each naming concretely what to change and why. Do NOT guess from the "
+            "truncated preview; the implement stage (and update_plan) come next.")
         messages = [{"role": "system", "content": system}, {"role": "user", "content": plan_user}]
+        # READ-ONLY toolset: repo scouts + env inspection, but NO write tools — the plan stage's only
+        # output is the plan. (This used to be tools=None to force convergence, which made the planner
+        # work BLIND off the truncated preview; the read_file pagination fix + emit_after/emit_force
+        # convergence backstop now let it read PROPERLY without exploring forever.)
+        read_only = CompositeTools([EnvInspectTools()] + self._scout_tools(None))
         try:
-            # EMIT-ONLY (tools=None): the repo source is already in `system`, so the planner needs no
-            # read tools — and WITH them a non-converging model (minimax) just explores for every turn
-            # and never emits, exhausting the loop to an empty plan. Toolless => it must call
-            # propose_plan (or a prose reply force-emits it) on the FIRST turn.
             plan = drive_tool_loop(
-                self.client, None, messages, self._plan_emit_spec(),
+                self.client, read_only, messages, self._plan_emit_spec(),
                 finalize=lambda a: (a or {}).get("steps", []), fallback=lambda m: [],
-                **self._session_opts(max_turns=min(4, self._session_max_turns),
-                                     time_budget=min(240.0, self._session_time_budget_s)))
+                **self._session_opts(max_turns=min(40, self._session_max_turns),
+                                     time_budget=min(360.0, self._session_time_budget_s)))
         except Exception:  # noqa: BLE001 — a failed plan phase just degrades to a single session
             return []
         steps = []
