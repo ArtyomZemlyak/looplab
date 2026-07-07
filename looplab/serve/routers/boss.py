@@ -18,7 +18,7 @@ from looplab.events.replay import fold
 from looplab.events.types import (
     EV_ANNOTATION, EV_APPROVAL_GRANTED, EV_BUDGET_EXTEND, EV_DEEP_RESEARCH,
     EV_FORCE_ABLATE, EV_FORCE_CONFIRM, EV_FORK, EV_HINT,
-    EV_INJECT_NODE, EV_PAUSE, EV_PROMOTE,
+    EV_INJECT_NODE, EV_NODE_RESET, EV_PAUSE, EV_PROMOTE,
     EV_REPORT_GENERATED, EV_RESUME, EV_RUN_ABORT, EV_SET_STRATEGY,
     EV_SPEC_APPROVED)
 from looplab.serve.llm_context import _boss_context, _client_tokens, _node_context
@@ -32,9 +32,10 @@ from pydantic import BaseModel  # noqa: E402
 
 
 class _Action(BaseModel):
-    action: str = "advise"   # advise|confirm|ablate|fork|promote|hint|note|strategy|budget|deep_research|inject|import|approve|ratify|stop|finalize|resume
+    action: str = "advise"   # advise|confirm|ablate|fork|promote|reset|hint|note|strategy|budget|deep_research|inject|import|approve|ratify|stop|finalize|resume
     node_id: Optional[int] = None
     text: str = ""           # hint text / note text / free rationale
+    stage: str = ""          # reset: propose|implement|eval — which stage to re-run the node FROM
     operator: str = "improve"
     params: dict = {}
     policy: str = ""
@@ -62,6 +63,16 @@ def _action_to_control(c: "_Action", st) -> Optional[dict]:
         return {"type": EV_FORK, "data": {"from_node_id": nid}, "label": f"Fork an improve-branch from #{nid}"}
     if a == "promote" and nid is not None:
         return {"type": EV_PROMOTE, "data": {"node_id": nid, "alias": "champion"}, "label": f"Promote #{nid} to champion"}
+    if a == "reset" and nid is not None:
+        # Re-run an EXISTING node in place (never a new node). Stage picks how far back to rewind:
+        # eval (keep code, re-score) < implement (keep idea, re-develop) < propose (full re-do).
+        stage = (c.stage or "eval").lower()
+        if stage not in ("propose", "implement", "eval"):
+            stage = "eval"
+        how = {"propose": "re-propose from scratch", "implement": "re-run the Developer (keep the idea)",
+               "eval": "re-score (keep the code)"}[stage]
+        return {"type": EV_NODE_RESET, "data": {"node_id": nid, "from_stage": stage},
+                "label": f"Reset #{nid} in place — {how}"}
     if a == "hint" and c.text:
         # The boss authors the COMPLETE current directive each turn (it has the full chat + run
         # context), so a boss hint REPLACES the standing one rather than piling up — the researcher/
