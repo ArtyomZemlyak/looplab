@@ -312,10 +312,15 @@ def fold(events: Iterable[Event]) -> RunState:
                     pass
         elif t == EV_HYPOTHESIS_UPDATED:
             # Carries a status override (human/agent drops — or reopens — a line of inquiry).
-            # Last write wins: "abandoned" adds the override, any other status clears it.
+            # Last write wins: "deleted" removes the card entirely (sticky); "abandoned" adds the
+            # abandoned override; any other status clears the abandoned override (reopen).
             hid = d.get("id")
             if hid:
-                if d.get("status") == "abandoned":
+                status = d.get("status")
+                if status == "deleted":
+                    if hid not in st.hypotheses_deleted:
+                        st.hypotheses_deleted.append(hid)
+                elif status == "abandoned":
                     if hid not in st.hypotheses_abandoned:
                         st.hypotheses_abandoned.append(hid)
                 elif hid in st.hypotheses_abandoned:
@@ -615,6 +620,19 @@ def _derive_hypotheses(st: RunState) -> None:
             tgt.evidence.sort()
         hyps = folded
 
+    # A node "supported" its hypothesis by ADVANCING the run's SOTA — and a record it set STAYS a support
+    # even after a later node overtakes it. Computing "is the CURRENT best" (a moving target) instead made
+    # a draft-backed hypothesis flip supported→tested the moment something beat it (read as a board bug).
+    # So mark record-SETTERS once, in creation order, and treat that as sticky evidence below.
+    _record_setters: set[int] = set()
+    _running: float | None = None
+    for _n in sorted(st.nodes.values(), key=lambda x: x.id):
+        if _n.status is NodeStatus.evaluated and _n.feasible and _n.metric is not None:
+            if _running is not None and better(_n.metric, _running):
+                _record_setters.add(_n.id)          # beat the standing record — a real, permanent advance
+            if _running is None or better(_n.metric, _running):
+                _running = _n.metric
+
     # 3) compute a verdict per hypothesis from its evidence nodes.
     for h in hyps.values():
         ev = [st.nodes[i] for i in h.evidence if i in st.nodes]
@@ -633,8 +651,8 @@ def _derive_hypotheses(st: RunState) -> None:
                 best_delta = delta if best_delta is None else max(best_delta, delta)
                 if better(n.metric, base):
                     supported = True
-            if n.id == st.best_node_id:            # a draft with no parent that became the run best
-                supported = True
+            if n.id in _record_setters:            # a draft/node that advanced the run's SOTA (sticky —
+                supported = True                   # stays supported even after a later node overtakes it)
         h.best_delta = best_delta
         pending = [n for n in ev if n.status is NodeStatus.pending]
         if h.id in st.hypotheses_abandoned:
@@ -659,4 +677,4 @@ def _derive_hypotheses(st: RunState) -> None:
         if h is not None and h.status == "open":   # priority is the OPEN lane's ordering; None once resolved
             h.priority = rank_i
 
-    st.hypotheses = hyps
+    st.hypotheses = {k: v for k, v in hyps.items() if k not in st.hypotheses_deleted}

@@ -379,6 +379,9 @@ class RunState(BaseModel):
     # ledger kept separate) into a CANONICAL id, deterministically applied in `_derive_hypotheses`.
     hypotheses_merged: list[dict] = Field(default_factory=list)
     hypotheses_abandoned: list[str] = Field(default_factory=list)
+    # Human-DELETED hypotheses (hypothesis_updated status=deleted): removed from the board entirely,
+    # unlike `abandoned` (which stays visible in its own column). Excluded from `hypotheses` on fold.
+    hypotheses_deleted: list[str] = Field(default_factory=list)
     # FOREAGENT board prioritization (audit-only — NEVER read by best-selection). The latest
     # `hypothesis_ranked` event: {at_node, order:[ids], confidence, reason, ranked:[{id,statement}]}.
     # `_derive_hypotheses` stamps each open card's `priority` from `order`; the UI kanban sorts by it

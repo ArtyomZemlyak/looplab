@@ -766,7 +766,13 @@ const _HYP_ICON = { researcher: 'search', deep_research: 'bulb', human: 'user', 
 
 export function HypothesisBoard({ state, runId, onSelect, onClose, onToast }) {
   const [draft, setDraft] = useState('')
+  // Optimistic status overrides {id: 'abandoned'|'deleted'}: the run-state round-trip that reflects a
+  // control event can lag (its SSE is buffered by a proxy), so apply the click to the board AT ONCE
+  // instead of leaving it looking dead for up to a minute. The real fold catches up idempotently.
+  const [optim, setOptim] = useState({})
   const hyps = Object.values(state.hypotheses || {})
+    .filter(h => optim[h.id] !== 'deleted')
+    .map(h => optim[h.id] ? { ...h, status: optim[h.id] } : h)
   // FOREAGENT board prioritization: order cards by predicted payoff (`priority`, 0 = best;
   // unranked cards last), so the kanban shows the sort the world model chose. `ranking` carries the
   // analysis trace (reason + confidence) surfaced as a header note and per-card tooltip.
@@ -780,9 +786,16 @@ export function HypothesisBoard({ state, runId, onSelect, onClose, onToast }) {
     try { await CONTROL.addHypothesis(runId, s); setDraft(''); onToast && onToast('hypothesis added') }
     catch { onToast && onToast('could not add (run not live?)') }
   }
+  const _revert = (id) => setOptim(o => { const n = { ...o }; delete n[id]; return n })
   const abandon = async (h) => {
+    setOptim(o => ({ ...o, [h.id]: 'abandoned' }))          // reflect immediately (SSE lag)
     try { await CONTROL.abandonHypothesis(runId, h.id); onToast && onToast('hypothesis abandoned') }
-    catch { onToast && onToast('could not update') }
+    catch { _revert(h.id); onToast && onToast('could not update') }
+  }
+  const del = async (h) => {
+    setOptim(o => ({ ...o, [h.id]: 'deleted' }))            // remove from the board at once
+    try { await CONTROL.deleteHypothesis(runId, h.id); onToast && onToast('hypothesis deleted') }
+    catch { _revert(h.id); onToast && onToast('could not delete') }
   }
   return (
     <Panel title="Hypotheses" sub={`${hyps.length} tracked — what the run is trying to learn`} onClose={onClose} wide>
@@ -820,8 +833,10 @@ export function HypothesisBoard({ state, runId, onSelect, onClose, onToast }) {
                     title={`experiment #${nid}`} onClick={() => { onSelect && onSelect(nid); onClose() }}>#{nid}</button>)}
                   {h.best_delta != null && <span className={'chip xs ' + (h.best_delta > 0 ? 'ok' : '')}
                     title="best improvement over parent among the evidence">Δ{fmt(h.best_delta)}</span>}
-                  {key !== 'abandoned' && <button className="btn xs ghost" title="abandon this line of inquiry"
+                  {key !== 'abandoned' && <button className="btn xs ghost" title="abandon — move to the Abandoned column (keeps the record)"
                     onClick={() => abandon(h)}><OpIcon name="cross" size={11} /></button>}
+                  <button className="btn xs ghost danger" title="delete this hypothesis permanently (remove from the board)"
+                    onClick={() => del(h)}>🗑</button>
                 </div>
               </div>)}
               {col.length === 0 && <div className="muted hyp-empty">—</div>}

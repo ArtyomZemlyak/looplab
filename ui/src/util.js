@@ -429,6 +429,7 @@ export const CONTROL = {
   // P1: register an open hypothesis on the board (a question the search should resolve), or drop one.
   addHypothesis: (rid, statement) => post(`/api/runs/${rid}/control`, { type: 'hypothesis_added', data: { statement, source: 'human' } }),
   abandonHypothesis: (rid, id) => post(`/api/runs/${rid}/control`, { type: 'hypothesis_updated', data: { id, status: 'abandoned' } }),
+  deleteHypothesis: (rid, id) => post(`/api/runs/${rid}/control`, { type: 'hypothesis_updated', data: { id, status: 'deleted' } }),
   // Workstream A: force a high-quality regeneration of the agent-authored run report now. Dedicated
   // endpoint (not /control) — appends a `report_generated` event. Runs as a background job, so we
   // jobAwait the response (a slow/large regen can't 504 behind a proxy; a fast one returns inline).
