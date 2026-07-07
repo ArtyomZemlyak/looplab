@@ -501,13 +501,15 @@ class Settings(BaseSettings):
     # boss at max_turns=3 / 45s), which silently dropped a slow reasoning model to a no-op reply.
     agent_max_turns: int = 0           # max tool turns before the emit is forced (0 = unlimited)
     agent_time_budget_s: float = 0.0   # wall-clock ceiling across the loop's turns (0 = no cap)
-    # G · Soft convergence SAFETY NET (not a research cap): after this many tool turns the loop NUDGES
-    # the agent to commit + emit, and FORCES the emit at 2×. Set GENEROUSLY — a focused researcher may
-    # legitimately read ~30-50 files/experiments before it can propose a grounded idea; this only catches
+    # G · Soft convergence SAFETY NET (not a research cap). Two thresholds on the agent's tool-turn count:
+    # at `agent_emit_after` the loop NUDGES the agent once ("you've investigated enough — emit now"); at
+    # `agent_emit_force` it FORCES the emit from what was gathered. Set GENEROUSLY — a focused researcher
+    # may legitimately read many files/experiments before it can propose a grounded idea; these only catch
     # a genuine runaway that keeps issuing DIFFERENT calls forever (which stuck-detection, keyed on
-    # repeats, misses). NB: most of the old 499-read runaway (node 63) was REDUNDANT re-reads caused by a
+    # repeats, misses). NB: the old 499-read runaway (node 63) was 79% REDUNDANT re-reads caused by a
     # broken read_file — fixing read_file (pagination) is the real cure; this is just insurance. 0 = off.
-    agent_emit_after: int = 50
+    agent_emit_after: int = 300
+    agent_emit_force: int = 500
     # B1 · No-progress / stuck detection — the safety net that makes "unlimited turns" safe. The
     # turn/time ceilings above are only BACKSTOPS; this is what actually stops a runaway loop, on the
     # cheapest signal: when the model repeats the SAME tool call (or ping-pongs between two, or keeps

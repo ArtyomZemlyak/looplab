@@ -120,6 +120,8 @@ These are no-ops unless `backend=llm`.
 | `compressor_base_url` | `LOOPLAB_COMPRESSOR_BASE_URL` | — | Endpoint for the compressor model (blank = reuse llm_base_url) |
 | `context_budget_chars` | `LOOPLAB_CONTEXT_BUDGET_CHARS` | `0` | Cap on the agentic tool-call history (chars); 0 = unbounded |
 | `agent_max_turns` | `LOOPLAB_AGENT_MAX_TURNS` | `0` | Max tool-loop turns before the emit is forced; 0 = unlimited (the agent loops until done) |
+| `agent_emit_after` | `LOOPLAB_AGENT_EMIT_AFTER` | `300` | Convergence nudge: after N tool turns, prompt the agent once to stop investigating and emit (0 = off) |
+| `agent_emit_force` | `LOOPLAB_AGENT_EMIT_FORCE` | `500` | Hard backstop: force the emit at N tool turns so a non-committing model can't burn the whole budget (0 = off) |
 | `agent_time_budget_s` | `LOOPLAB_AGENT_TIME_BUDGET_S` | `0` | Wall-clock ceiling across an agent's tool-loop turns; 0 = no cap |
 | `agent_stuck_detection` | `LOOPLAB_AGENT_STUCK_DETECTION` | `true` | **B1** — stop an agent that repeats the same call / ping-pongs / re-hits the same error with no progress (forces its emit). The safety net that makes unlimited turns safe |
 | `agent_stuck_repeat` | `LOOPLAB_AGENT_STUCK_REPEAT` | `4` | Identical call+result turns in a row that count as "stuck" (min 2) |
