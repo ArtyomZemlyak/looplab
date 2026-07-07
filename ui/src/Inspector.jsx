@@ -242,6 +242,16 @@ const STAGE = {
   evaluate:     { icon: 'target', role: 'Evaluation', desc: 'run the solution & score it', tone: '#a87da8' },
   confirm_seed: { icon: 'replay', role: 'Confirmation', desc: 'multi-seed robustness check', tone: '#9aa06f' },
   ablate:       { icon: 'sliders', role: 'Ablation', desc: 'sensitivity probe', tone: '#6f8bb0' },
+  // sub-operation traces the engine wraps in their own named span — give each a distinct hue so the
+  // conversation reads as coloured bands (foresight vs strategy vs research vs merge) at a glance.
+  foresight_rank: { icon: 'bulb', role: 'Foresight', desc: 'predict payoff / rank open hypotheses', tone: '#c2a24e' },
+  foresight:      { icon: 'bulb', role: 'Foresight', desc: 'predict payoff / rank open hypotheses', tone: '#c2a24e' },
+  strategy_consult: { icon: 'trending', role: 'Strategist', desc: 'pick policy / operators / fidelity', tone: '#b0729e' },
+  strategy_decision: { icon: 'trending', role: 'Strategist', desc: 'pick policy / operators / fidelity', tone: '#b0729e' },
+  hypothesis_merge: { icon: 'confluence', role: 'Hypothesis merge', desc: 'fold paraphrase hypotheses', tone: '#5fa0a8' },
+  deep_research:  { icon: 'search', role: 'Deep research', desc: 'read the literature first', tone: '#6fb0a3' },
+  lessons:        { icon: 'doc', role: 'Lessons', desc: 'reflect / distil cross-run lessons', tone: '#9a8fb0' },
+  novelty:        { icon: 'gitbranch', role: 'Novelty gate', desc: 'dedup near-duplicate proposals', tone: '#a89a6f' },
 }
 const stageMeta = (name) => STAGE[name] || { icon: 'dot', role: name, desc: '', tone: 'var(--accent)' }
 
@@ -597,23 +607,32 @@ function ConvTool({ t }) {
   </div>
 }
 
-function ConvStage({ st }) {
+function ConvStage({ st, defaultOpen = true }) {
   const m = stageMeta(st.label)
+  const [open, setOpen] = useState(defaultOpen)
   const roll = st.rollup || {}
   const rtok = (roll.tokens || {}).total
-  return <div className={'stage' + (st.status === 'ERROR' ? ' err' : '')}>
-    <div className="stage-h" title={m.desc}>
-      <span className="stage-ic"><OpIcon name={m.icon} /></span>
-      <b>{m.role}</b>
+  const nTurns = (st.turns || []).length
+  const err = st.status === 'ERROR'
+  // Colour-band the stage by its tone: a left rail + a tinted header, so foresight/strategy/researcher/
+  // developer/eval read as distinct bands. Click the header to collapse the whole band.
+  return <div className={'stage' + (err ? ' err' : '')}
+              style={{ borderLeft: `3px solid ${err ? 'var(--fail)' : m.tone}` }}>
+    <div className="stage-h" title={m.desc + ' — click to collapse'} onClick={() => setOpen(o => !o)}
+         style={{ cursor: 'pointer', background: err ? undefined : `color-mix(in srgb, ${m.tone} 12%, transparent)` }}>
+      <span className="stage-caret" style={{ opacity: 0.6, fontSize: 10, width: 10, display: 'inline-block' }}>{open ? '▾' : '▸'}</span>
+      <span className="stage-ic" style={{ color: err ? 'var(--fail)' : m.tone }}><OpIcon name={m.icon} /></span>
+      <b style={{ color: err ? 'var(--fail)' : m.tone }}>{m.role}</b>
       {(roll.generations || roll.tools) ? <span className="stage-roll">
         {roll.generations || 0} turn{roll.generations === 1 ? '' : 's'}
         {roll.tools ? ` · ${roll.tools} tool call${roll.tools === 1 ? '' : 's'}` : ''}
         {rtok ? ` · ${ktok(rtok)} tok` : ''}</span> : null}
+      {!open && nTurns ? <span className="muted" style={{ marginLeft: 6, fontSize: 10 }}>· {nTurns} step{nTurns === 1 ? '' : 's'} hidden</span> : null}
     </div>
-    <div className="conv-turns">
+    {open && <div className="conv-turns">
       {(st.turns || []).map((t, j) => t.type === 'request' ? <ConvRequest key={j} t={t} />
         : t.type === 'tool' ? <ConvTool key={j} t={t} /> : <ConvGen key={j} t={t} />)}
-    </div>
+    </div>}
   </div>
 }
 
@@ -627,10 +646,19 @@ function Conversation({ n, runId, working }) {
     const iv = working ? setInterval(load, 4000) : null   // live-refresh while the agent works this node
     return () => { on = false; if (iv) clearInterval(iv) }
   }, [runId, n.id, working])
+  const [allOpen, setAllOpen] = useState(true)
   if (conv === null) return <div className="muted" style={{ fontSize: 12 }}>loading…</div>
   const stages = conv.stages || []
   if (!stages.length) return <div className="muted">No conversation captured for this node yet.</div>
-  return <div className="conv">{stages.map((st, i) => <ConvStage key={i} st={st} />)}</div>
+  // key includes allOpen so a collapse/expand-all click remounts every band at the new default; a live
+  // poll (allOpen unchanged) keeps the key stable, so per-band toggles survive the 4s refresh.
+  return <div className="conv">
+    <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 4 }}>
+      <button className="seg" style={{ fontSize: 10 }} title="collapse or expand every stage"
+        onClick={() => setAllOpen(o => !o)}>{allOpen ? '⊟ collapse all' : '⊞ expand all'}</button>
+    </div>
+    {stages.map((st, i) => <ConvStage key={i + ':' + allOpen} st={st} defaultOpen={allOpen} />)}
+  </div>
 }
 
 function Trace({ n, runId, live, working }) {
