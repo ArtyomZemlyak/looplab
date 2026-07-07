@@ -158,6 +158,29 @@ def build_router(srv) -> APIRouter:
         except Exception:  # noqa: BLE001 - no GPU / no nvidia-smi -> soft fail
             return {"available": False}
 
+    @router.get("/api/memory")
+    def memory():
+        # Cross-run memory dir holds several tiers in separate .jsonl files — SPLIT them by filename so
+        # the UI can show cases / lessons / notes each with their own shape. MUST be declared BEFORE the
+        # `/api/{kind}` catch-all below, else it's swallowed as an unknown kind (→ 404, the reason the
+        # Memory panel was silently empty). `cases` stays populated for back-compat.
+        s = Settings()
+        out = {"dir": None, "cases": [], "lessons": [], "notes": []}
+        if not s.memory_dir:
+            return out
+        md = Path(s.memory_dir)
+        out["dir"] = str(md)
+        for f in sorted(md.glob("*.jsonl")) if md.exists() else []:
+            rows = list(iter_jsonl(f))
+            nm = f.name.lower()
+            if "lesson" in nm:
+                out["lessons"].extend(rows)
+            elif "note" in nm or "meta" in nm:
+                out["notes"].extend(rows)
+            else:                                    # cases.jsonl (or any other tier) → cases
+                out["cases"].extend(rows)
+        return out
+
     # ------------------------------------------------------------------ authoring (files-as-truth)
     def _author_dir(kind: str) -> Optional[Path]:
         s = Settings()
@@ -190,49 +213,5 @@ def build_router(srv) -> APIRouter:
         body = await request.body()
         target.write_text(body.decode("utf-8"), encoding="utf-8")  # engine hot-reloads on next run
         return {"ok": True, "name": name}
-
-    @router.get("/api/memory")
-    def memory():
-        # Cross-run memory dir holds several tiers in separate .jsonl files — SPLIT them by filename so
-        # the UI can show cases / lessons / notes each with their own shape (they were previously all
-        # dumped into `cases`, which mis-rendered the 30+ lessons + meta-notes). `cases` stays populated
-        # for back-compat with any old caller.
-        s = Settings()
-        out = {"dir": None, "cases": [], "lessons": [], "notes": []}
-        if not s.memory_dir:
-            return out
-        md = Path(s.memory_dir)
-        out["dir"] = str(md)
-        for f in sorted(md.glob("*.jsonl")) if md.exists() else []:
-            rows = list(iter_jsonl(f))
-            nm = f.name.lower()
-            if "lesson" in nm:
-                out["lessons"].extend(rows)
-            elif "note" in nm or "meta" in nm:
-                out["notes"].extend(rows)
-            else:                                    # cases.jsonl (or any other tier) → cases
-                out["cases"].extend(rows)
-        return out
-
-    @router.get("/api/knowledge")
-    def knowledge():
-        # The agentic knowledge base: markdown notes the agents distil + save (best configs, recipes,
-        # skills) and later retrieve via kb_search. Surfaced read-only so the operator can see what the
-        # run has learned. Content is capped so a huge note can't bloat the payload.
-        s = Settings()
-        kd = getattr(s, "knowledge_dir", None)
-        out = {"dir": None, "notes": []}
-        if not kd:
-            return out
-        kdp = Path(kd)
-        out["dir"] = str(kdp)
-        for f in sorted(kdp.glob("*.md")) if kdp.exists() else []:
-            try:
-                content = f.read_text("utf-8", "replace")
-            except OSError:
-                content = ""
-            out["notes"].append({"name": f.stem, "content": content[:12000],
-                                 "truncated": len(content) > 12000})
-        return out
 
     return router

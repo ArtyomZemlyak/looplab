@@ -525,8 +525,7 @@ function KbNote({ note }) {
   return <div className="mem-card">
     <div style={{ cursor: 'pointer', fontWeight: 600 }} onClick={() => setOpen(o => !o)}>
       <span style={{ opacity: 0.6, fontSize: 10, marginRight: 4 }}>{open ? '▾' : '▸'}</span>{note.name}</div>
-    {open && <div style={{ marginTop: 6 }}><Markdown>{note.content || ''}</Markdown>
-      {note.truncated && <div className="muted" style={{ fontSize: 11 }}>… truncated</div>}</div>}
+    {open && <div style={{ marginTop: 6 }}><Markdown>{note.text || note.content || ''}</Markdown></div>}
   </div>
 }
 
@@ -534,14 +533,15 @@ export function MemoryPanel({ onClose }) {
   // Everything the run has LEARNED, in one place: distilled lessons, solved-task cases, meta-notes, and
   // the agentic knowledge-base markdown notes (best configs / recipes the agents save + later retrieve).
   const [mem, setMem] = useState({ dir: null, cases: [], lessons: [], notes: [] })
-  const [kb, setKb] = useState({ dir: null, notes: [] })
+  const [kb, setKb] = useState({ dir: null, files: [] })   // /api/knowledge → {dir, files:[{name,text}]}
   const [tab, setTab] = useState('lessons')
   useEffect(() => {
     get('/api/memory').then(setMem).catch(() => {})
     get('/api/knowledge').then(setKb).catch(() => {})
   }, [])
+  const kbFiles = kb.files || []
   const tabs = [['lessons', 'Lessons', mem.lessons.length], ['cases', 'Cases', mem.cases.length],
-    ['notes', 'Notes', mem.notes.length], ['knowledge', 'Knowledge', kb.notes.length]]
+    ['notes', 'Notes', mem.notes.length], ['knowledge', 'Knowledge', kbFiles.length]]
   return (
     <Panel title="Memory & knowledge — what the runs have learned" sub={mem.dir || 'no memory dir'} onClose={onClose} wide>
       <div className="conv-toggle" style={{ marginBottom: 12 }}>
@@ -570,9 +570,9 @@ export function MemoryPanel({ onClose }) {
             {n.task_id && <div className="muted" style={{ fontSize: 11, marginBottom: 2 }}>{n.task_id}</div>}
             <Markdown>{n.note || n.statement || JSON.stringify(n)}</Markdown></div>)
         : <div className="muted">No meta-notes yet.</div>)}
-      {tab === 'knowledge' && (kb.notes.length
+      {tab === 'knowledge' && (kbFiles.length
         ? <><div className="muted" style={{ fontSize: 11, marginBottom: 6 }}>{kb.dir} — agents save + retrieve these via kb_search</div>
-          {kb.notes.map((n, i) => <KbNote key={i} note={n} />)}</>
+          {kbFiles.map((n, i) => <KbNote key={i} note={n} />)}</>
         : <div className="muted">No knowledge notes ({kb.dir || 'no knowledge dir'}).</div>)}
     </Panel>
   )
