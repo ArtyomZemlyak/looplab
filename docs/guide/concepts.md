@@ -10,9 +10,12 @@ A run is an `Engine` (orchestrator) driving four roles in a cycle:
 1. **Researcher** — proposes an `Idea` (an operator + params), reasoning about the goal and prior
    results. Foresight ranks the candidates *before* an eval; the idea also states a one-line
    **hypothesis** that lands on the board.
-2. **Novelty gate** *(opt-in — `novelty_gate`, off by default; on under `profile=thorough`)* — rejects
-   a proposal too close to one already tried (idea-text cosine ≥ `0.92`, or numeric param distance
-   < `0.05`), with one informed re-propose.
+2. **Novelty gate** *(opt-in — `novelty_gate`, off by default)* — an algorithmic reject of a
+   proposal too close to one already tried (idea-text cosine ≥ `0.92`, or numeric param distance
+   < `0.05`), with one informed re-propose. **Off by default** (and *not* turned on by
+   `profile=thorough`): duplicate-detection is the agentic Researcher's call — it reads past
+   experiments and *decides* — and the semantic/embedding search only **suggests** candidates for the
+   LLM to adjudicate.
 3. **Developer** — implements the idea as runnable code (or applies params to an existing repo).
 4. **Sandbox** — runs the candidate in isolation with a timeout and output caps.
 5. **Evaluator** — scores it (cross-validation, a held-out grader, or a repo's own eval command);
@@ -147,9 +150,11 @@ untrusted tier.
 
 ## Meta-control: the Strategist & unified agent
 
-- **Strategist** (`strategist_backend`, default `llm`) — an optional meta-controller that adapts the
-  search policy, operator mix, and fidelity per situation. Every choice it makes is also a direct
-  config knob, so you can run fully static (`off`). At its consult cadence it reads a **coverage
+- **Strategist** (`strategist_backend`, default `agent`) — a meta-controller that adapts the
+  search policy, operator mix, and fidelity per situation. It defaults to the **agentic** backend: a
+  tool-using loop that *reads* the run / data / siblings / KB / memory before deciding (the `llm`
+  backend is a single-shot call over aggregate stats; `rule` is a fixed heuristic; `off` runs fully
+  static). Every choice it makes is also a direct config knob, so you can run fully static (`off`). At its consult cadence it reads a **coverage
   read-model** (`coverage_context`, on by default): a deterministic breadth summary of the run so
   far — distinct themes and parameter-niches, the theme entropy, and the dominant-theme fraction —
   recorded as a `coverage_snapshot` audit event (the run's *narrowing curve*). This is context, not
@@ -223,6 +228,13 @@ UI expands that event's row to ONLY that operation's trace — never the whole n
 tree. `GET /api/runs/{id}/trace/by_trace/{trace_id}` returns one operation's span sub-tree; the node's
 full trace is at `/api/runs/{id}/trace`. Events with no LLM (e.g. `coverage_snapshot`, deterministic)
 carry no trace; a `node_evaluated` row shows the **training** run (the `evaluate` span), not an LLM call.
+
+Every one of these auxiliary LLM steps is now **agentic** (via the shared `agentic_text` /
+`agentic_struct` helpers): lessons distillation (reflect / comparative / skill / causal), the
+research + reward-hack / leakage **verify** pass, the end-of-run **report**, and **Genesis** (goal →
+task plan) each *read* the real experiments / code / data through read-only tools before emitting,
+rather than reasoning single-shot over a text preview. (`best_of_n` and `hybrid_merge` ride the same
+agentic path but with `tools=None` — there is no run state to read at those call sites.)
 
 **Live status.** The UI reads what an LLM is doing right now from the append-only markers: a
 `node_building` marker (emitted the instant `_create_node` starts, before the minutes-long author step)

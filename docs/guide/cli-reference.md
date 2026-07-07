@@ -11,6 +11,7 @@ looplab stop            Stop a run: freeze it, NO wrap-up (resumable)
 looplab finalize        Finalize a run: stop AND wrap up (report/lessons/cost)
 looplab inspect         Show the resolved config + best result
 looplab replay          Pure fold of the event log → state (read-only)
+looplab timings         Per-node wall-clock breakdown (LLM / eval / repair / tools)
 looplab smoke           Ping the configured LLM endpoint (self-test)
 looplab approve         Ratify a paused run (HITL / onboarding)
 looplab bench           Capability self-benchmark across tasks
@@ -151,6 +152,22 @@ reproducibility check — it has no side effects.
 ```bash
 looplab replay RUN_DIR
 ```
+
+## `timings`
+
+Show where a run's wall-clock actually went, **per node** — LLM generations vs eval vs repair vs
+tools — computed from the `duration_s` of each span in `spans.jsonl`. Answers "what is this run
+spending its time on right now" at a glance. Needs tracing on (the default); errors on a run with no
+`spans.jsonl`.
+
+```bash
+looplab timings RUN_DIR [--node N]
+```
+
+| Option | Default | Description |
+|---|---|---|
+| `RUN_DIR` | *(required)* | Run directory (reads its `spans.jsonl`) |
+| `--node N` | all nodes | Restrict the breakdown to a single node id |
 
 ---
 

@@ -201,7 +201,7 @@ See [LLM & coding agents](llm-and-agents.md) for full guidance.
 
 | Setting | Env | Default | Description |
 |---|---|---|---|
-| `strategist_backend` | `LOOPLAB_STRATEGIST_BACKEND` | `llm` | Meta-controller: `off` / `rule` / `llm` / `agent` (tool-using — reads run/data/siblings/KB/memory) |
+| `strategist_backend` | `LOOPLAB_STRATEGIST_BACKEND` | `agent` | Meta-controller: `off` / `rule` / `llm` (single-shot over aggregate stats) / `agent` (default — tool-using, READS run/data/siblings/KB/memory before deciding) |
 | `strategist_every` | `LOOPLAB_STRATEGIST_EVERY` | `3` | Consult cadence (created nodes) |
 | `budget_aware` | `LOOPLAB_BUDGET_AWARE` | `false` | Surface remaining eval-compute budget into the proposal prompt |
 | `agent_control` | `LOOPLAB_AGENT_CONTROL` | *(see below)* | Per-setting allow-list of which agent roles may change it at runtime |

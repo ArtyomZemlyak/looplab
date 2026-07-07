@@ -17,6 +17,7 @@ python -m pytest -m "not docker"  # skip Docker-daemon tests
 looplab run --no-genesis --kind quadratic --goal "min (x-3)^2" --direction min --out runs/demo  # offline smoke
 # (--no-genesis matters: any --goal otherwise invokes Genesis, which needs a reachable LLM)
 looplab replay runs/demo          # rebuild state from the event log (reproducibility check)
+looplab timings runs/demo         # per-node wall-clock: LLM / eval / repair / tools (from spans.jsonl)
 looplab ui                        # FastAPI server + React UI (see looplab/serve/)
 ```
 

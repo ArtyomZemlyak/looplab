@@ -128,6 +128,40 @@ this robust (all on by default):
 The built-in LLM Developer (writes code via your endpoint, no external fetch) remains the
 zero-dependency default coding path.
 
+## The Developer: read-only planning + env inspection
+
+Before it writes anything, the repo Developer runs a **read-only PLAN stage**: it gets the read-only
+repo scouts plus the env inspector (`read_file`, `grep`, `find_files`, `list_dir`, `pkg_info`,
+`py_api`, `gpu_info`) — but **no write tools** — and its only output is an ordered plan. So it reads
+the real eval/entry script and the files it will change *before* deciding what to do, instead of
+planning blind off a truncated preview. Two tools make this practical:
+
+- **`read_file` paginates.** It takes `start_line` + `lines` to window a large file (like an editor's
+  "go to line N, show M lines"), so the planner reads a file *once* and resumes from where it left off
+  rather than only ever seeing the first 16 KB.
+- **`gpu_info`** reports the visible GPUs (count / names / memory via `torch.cuda`) — the `nvidia-smi`
+  equivalent for an agent that has no shell, so the plan can size a model/batch to the real hardware.
+
+## Agentic auxiliary steps
+
+Every remaining single-shot LLM step is now a **tool-using agent** (via the shared `agentic_text` /
+`agentic_struct` helpers). Lessons distillation, the research + reward-hack / leakage **verify** pass,
+the end-of-run **report**, and **Genesis** (goal → task plan) each *read* the real experiments / code
+/ data before emitting. The **Strategist** likewise defaults to the agentic backend
+(`strategist_backend=agent`). Novelty/dedup is decided the same way — the embedding / param search
+only *suggests* near-duplicates and the LLM adjudicates; `novelty_gate` (and semantic novelty) stay
+**off by default**.
+
+## LLM-outage resilience
+
+The LLM client is hardened against a flaky or throttling endpoint. A rate-limit-shaped **403** (a
+proxy/WAF burst-throttle, not a real auth failure) is treated as retryable and backed off, and the
+client makes up to **8 retries** (429 / 5xx / throttle-403) before surfacing an error. If the model
+is genuinely unreachable, a Developer session crashes (`developer_crash`); the engine then **pauses
+the whole run** on the *first* such crash (an `EV_PAUSE`) rather than rapid-firing dozens of dead
+nodes — resume once the endpoint is back. Use `looplab timings RUN_DIR` to see where a run's
+wall-clock actually went (LLM vs eval vs repair vs tools, per node).
+
 ## Knowledge, skills & prompts
 
 Give the agentic Researcher extra context and tools:

@@ -74,7 +74,7 @@ stack(40,330,DY,[
  {id:"f_dig",h:80,t:"③ Experiment digest",tag:"in-run",c:C.mem,sub:["cap = min(6000, max(1200, 60×nodes))","strong×5 · sweep×10 · weak×3 · themes · ablation×5"]},
  {id:"f_sib",h:66,t:"④ Siblings · lineage · board",tag:"",c:C.mem,sub:["siblings×5 · lineage×5 (by |Δ|)","open hypotheses ×5 (foresight order)"]},
  {id:"f_kb",h:56,t:"⑤ KB / Memora",tag:"k=3",c:C.mem,sub:["kb_search 3 + anchor-expand 3 · case 3"]},
- {id:"f_tools",h:66,t:"⑥ Mid-loop read tools",tag:"R",c:C.r,sub:["RunTools · DataTools · KnowledgeTools","list/read experiments, code, logs, profile"]},
+ {id:"f_tools",h:66,t:"⑥ Mid-loop read tools",tag:"R",c:C.r,sub:["RunTools · DataTools · KnowledgeTools · AllRunsTools","list/read experiments·code·logs — this + every run"]},
 ]);
 // NOVELTY
 stack(410,210,DY,[
@@ -83,7 +83,7 @@ stack(410,210,DY,[
 ]);
 // IMPLEMENT
 stack(660,300,DY,[
- {id:"i_env",h:82,t:"Env inspector",tag:"D",c:C.d,sub:["ground API in the REAL installed env","pkg_info · py_api (enum values) · read/grep_installed"]},
+ {id:"i_env",h:82,t:"Env inspector",tag:"D",c:C.d,sub:["ground API in the REAL installed env","pkg_info · py_api · read/grep_installed · gpu_info","read-only PLAN stage · read_file paginates"]},
  {id:"i_val",h:58,t:"Auto-validate",tag:"gate",c:C.d,sub:["compile after every edit → error flies back"]},
  {id:"i_bon",h:78,t:"Best-of-N",tag:"off",c:C.d,sub:["N impls · score∈[−1,3.5] (compile+1/valid+2/metric+.5)","tie: foresight → listwise LLM pick"]},
 ]);
@@ -115,7 +115,7 @@ stack(1760,300,DY,[
 // CROSS-CUTTING (right column)
 stack(2100,360,DY,[
  {id:"deepres",h:132,t:"Deep Researcher",tag:"every 3",c:C.dr,sub:["tools: Run/Data/Knowledge/Literature/Web","overlaps eval · memo recorded immediately","memo: summary·findings·claims·directions×5","VERIFY claims vs cited evidence","each direction → open hypothesis"]},
- {id:"strat",h:140,t:"Strategist",tag:"every 3",c:C.s,sub:["reads coverage: themes·niches·entropy (narrowing signal)","sets novelty_stance explore|balanced|exploit → proposer·foresight·gate","retune: policy·operators·fidelity·request-research","rule → LLM → agentic tool-loop","agent_control allow-list per role"]},
+ {id:"strat",h:140,t:"Strategist",tag:"every 3",c:C.s,sub:["reads coverage: themes·niches·entropy (narrowing signal)","sets novelty_stance explore|balanced|exploit → proposer·foresight·gate","retune: policy·operators·fidelity·request-research","off | rule | llm | agentic tool-loop (default: agent — reads run·data·siblings·KB·memory)","agent_control allow-list per role"]},
 ]);
 
 /* ============ HYPOTHESIS pipeline (row y≈900) ============ */
