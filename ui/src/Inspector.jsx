@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useRef } from 'react'
-import { get, fmt, fmtInt, isSweep, spanDetail, nodeConversation } from './util.js'
+import { get, fmt, fmtInt, isSweep, spanDetail, nodeConversation, CONTROL } from './util.js'
 import { Trajectory, ParallelCoords, Scatter, MetricLines } from './charts.jsx'
 import { groupAggregate } from './grouping.js'
 import { mergeSummary, nodeChip } from './report.js'
@@ -14,6 +14,40 @@ import Markdown from './markdown.jsx'
 // chat (add the node via its ＋#id chip, or use a /command), so there's no per-node button toolbar.
 // Tab order (user preference): Overview → Trace → Training → Code → Metrics → Trust → Cost.
 const TABS = ['Overview', 'Trace', 'Training', 'Code', 'Metrics', 'Trust', 'Cost']
+
+// The ONE per-node write action (Workstream-C exception): re-run THIS node in place — no new node —
+// from a chosen stage. It's a recovery/fix control (natural to trigger from the failed node itself),
+// unlike the exploratory confirm/ablate/fork which stay in the chat. Appends a node_reset control
+// event; the engine applies it on the next resume.
+function ResetBtn({ runId, id, onToast }) {
+  const [open, setOpen] = useState(false)
+  const STAGES = [
+    ['eval', 're-score', 'keep the idea + code, just re-run the evaluation (an infra / API-key blip)'],
+    ['implement', 're-run the Developer', "keep the Researcher's idea, re-write the code (its code crashed)"],
+    ['propose', 'full redo', 're-propose the idea, re-develop, then re-evaluate'],
+  ]
+  const doReset = (stage) => {
+    setOpen(false)
+    CONTROL.resetNode(runId, id, stage)
+      .then(() => onToast && onToast(`Reset #${id} (${stage}) queued — resume the run to apply`))
+      .catch(() => onToast && onToast(`Reset #${id} failed`))
+  }
+  return <span style={{ position: 'relative', marginLeft: 8 }}>
+    <button className="ctx-chip" style={{ padding: '0 6px', cursor: 'pointer' }}
+            title="re-run THIS node in place (no new node) from a chosen stage"
+            onClick={() => setOpen(o => !o)}>↻ Reset ▾</button>
+    {open && <div style={{ position: 'absolute', zIndex: 30, top: '110%', left: 0, background: 'var(--panel,#1b1f2a)', border: '1px solid var(--border,#333)', borderRadius: 6, padding: 4, minWidth: 240, boxShadow: '0 4px 16px rgba(0,0,0,.4)' }}>
+      {STAGES.map(([stage, label, desc]) =>
+        <div key={stage} style={{ padding: '6px 8px', cursor: 'pointer', borderRadius: 4 }}
+             title={desc} onMouseDown={() => doReset(stage)}
+             onMouseEnter={e => e.currentTarget.style.background = 'var(--hover,#2a3140)'}
+             onMouseLeave={e => e.currentTarget.style.background = 'transparent'}>
+          <div><b style={{ fontSize: 12 }}>{label}</b> <span className="muted" style={{ fontSize: 10 }}>from {stage}</span></div>
+          <div className="muted" style={{ fontSize: 10 }}>{desc}</div>
+        </div>)}
+    </div>}
+  </span>
+}
 
 export default function Inspector({ runId, nodeId, state, live, tab, setTab, onToast }) {
   const [detail, setDetail] = useState(null)
@@ -59,7 +93,7 @@ export default function Inspector({ runId, nodeId, state, live, tab, setTab, onT
                             onClick={() => setTab(t)}>{t}</div>)}
       </div>
       <div className="insp-body">
-        <div className="insp-hint muted">Actions (confirm · ablate · fork · promote · note) live in the chat — <button className="ctx-chip" style={{ padding: '0 6px', cursor: 'pointer' }} title="attach this experiment to the assistant context" onClick={() => window.dispatchEvent(new CustomEvent('ll:attach-node', { detail: { id: n.id } }))}>＋ #{n.id}</button> as context there, or type a <code>/command</code>.</div>
+        <div className="insp-hint muted">Actions (confirm · ablate · fork · promote · note) live in the chat — <button className="ctx-chip" style={{ padding: '0 6px', cursor: 'pointer' }} title="attach this experiment to the assistant context" onClick={() => window.dispatchEvent(new CustomEvent('ll:attach-node', { detail: { id: n.id } }))}>＋ #{n.id}</button> as context there, or type a <code>/command</code>.<ResetBtn runId={runId} id={n.id} onToast={onToast} /></div>
 
         {activeTab === 'Overview' && <Overview n={n} state={state} />}
         {activeTab === 'Trials' && <Trials n={n} detail={detail} state={state} />}

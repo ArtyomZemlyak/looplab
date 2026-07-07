@@ -400,6 +400,9 @@ export const CONTROL = {
   pause: (rid) => post(`/api/runs/${rid}/control`, { type: 'pause', data: {} }),
   abort: (rid) => post(`/api/runs/${rid}/control`, { type: 'run_abort', data: { reason: 'finalized' } }),
   nodeAbort: (rid, id) => post(`/api/runs/${rid}/control`, { type: 'node_abort', data: { node_id: id, reason: 'ui' } }),
+  // Re-run an existing node IN PLACE from a stage (no new node): eval=re-score (keep code),
+  // implement=re-run the Developer (keep the idea), propose=full redo. Resume the run to apply.
+  resetNode: (rid, id, stage) => post(`/api/runs/${rid}/control`, { type: 'node_reset', data: { node_id: id, from_stage: stage } }),
   approve: (rid, id) => post(`/api/runs/${rid}/control`, { type: 'approval_granted', data: { node_id: id } }),
   ratify: (rid) => post(`/api/runs/${rid}/control`, { type: 'spec_approved', data: {} }),
   hint: (rid, text) => post(`/api/runs/${rid}/control`, { type: 'hint', data: { text } }),
