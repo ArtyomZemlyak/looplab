@@ -78,6 +78,17 @@ def _is_reasoning_reject(err_body: str) -> bool:
     return any(k in err_body for k in _REASONING_REJECT_KEYS)
 
 
+def _is_throttle_403(err_body: str) -> bool:
+    """True when a 403 body looks like a RATE-LIMIT / burst security throttle (retryable with backoff),
+    NOT a hard 'forbidden' (bad key / plan / route, which must fail fast). A hosted gateway (OpenRouter)
+    or a corporate proxy/WAF returns a 403 when a request BURST trips its abuse/rate policy — observed
+    live as {"success": false, "error": "Access denied by security policy"}; a backed-off retry rides
+    through it (this is what let a 403 outage rapid-fire dozens of dev-crash nodes)."""
+    b = (err_body or "").lower()
+    return any(k in b for k in ("access denied by security policy", "security policy", "rate limit",
+                                "rate-limit", "too many request", "throttl", "temporarily", "try again"))
+
+
 def _err_body(exc: Exception) -> str:
     """Lowercased text of an openai SDK error (its parsed `body` + message), for reasoning-reject
     detection — the SDK surfaces the endpoint's error payload on `.body` and `.message`."""
@@ -944,6 +955,11 @@ class OpenAICompatibleClient:
                     _stalled_prev = True
                     self._stream_stalls += 1
                 if transient and attempt < self._max_retries:
+                    time.sleep(_backoff(attempt))
+                    continue
+                raise LLMError(f"LLM request to {self.base_url} failed: {e}") from e
+            except openai.PermissionDeniedError as e:   # 403 — often a burst/rate-limit throttle, not hard-forbidden
+                if _is_throttle_403(_err_body(e)) and attempt < self._max_retries:
                     time.sleep(_backoff(attempt))
                     continue
                 raise LLMError(f"LLM request to {self.base_url} failed: {e}") from e
