@@ -194,11 +194,24 @@ class RepoScoutTools:
         return f"{p}:\n" + ("\n".join(rows) if rows else "(empty)")
 
     def _overlay_get(self, path: str):
-        """The staged content for a repo-relative path, if the caller has one overlaid (else None)."""
+        """The staged content for a path, if the caller has one overlaid (else None). Matches by exact
+        key, by normalized repo-relative key, AND by trailing-suffix: an ABSOLUTE sandbox path the agent
+        used to read its OWN just-written file (`…/nodes/node_59/test_looplab.py`) ends with the overlay's
+        repo-relative key (`test_looplab.py`), so it now resolves to the staged content instead of missing
+        to disk — the read/write 'split' that left an agent unable to read what it had just written."""
         if not self._overlay or not path:
             return None
-        key = str(path).replace("\\", "/").lstrip("./")
-        return self._overlay.get(path) or self._overlay.get(key)
+        norm = str(path).replace("\\", "/")
+        key = norm.lstrip("./")
+        if norm in self._overlay:
+            return self._overlay[norm]
+        if key in self._overlay:
+            return self._overlay[key]
+        for k, v in self._overlay.items():                 # suffix match: full path ↦ repo-relative key
+            kk = str(k).replace("\\", "/")
+            if kk and (norm == kk or norm.endswith("/" + kk)):
+                return v
+        return None
 
     def _read_file(self, path: str, start_line=0, lines=0) -> str:
         staged = self._overlay_get(path)
