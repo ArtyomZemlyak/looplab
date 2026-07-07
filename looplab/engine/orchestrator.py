@@ -148,7 +148,8 @@ class Engine(ConfirmPhaseMixin, AblationMixin):
         code_leakage_detect: bool = _UNSET,  # I3: static code-leakage scan per node
         critic_check: bool = _UNSET,         # C4: execution-free critic per node
         redact_output: bool = _UNSET,        # B3: redact secrets from persisted output tails
-        novelty_gate: bool = _UNSET,         # E1: dedup near-duplicate proposals
+        novelty_mode: str = _UNSET,          # off | algo | llm — how a proposal is dedup-checked
+        novelty_gate: bool = _UNSET,         # E1: dedup near-duplicate proposals (algo mode)
         novelty_epsilon: float = _UNSET,
         reflection_priors: bool = _UNSET,    # E4/M2/M3: cross-run priors + lessons (needs memory_dir)
         comparative_lessons: bool = _UNSET,  # M6: credit-assigned pair lessons (needs reflection_priors)
@@ -233,6 +234,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin):
         code_leakage_detect = _opt(code_leakage_detect, "code_leakage_detect")
         critic_check = _opt(critic_check, "critic_check")
         redact_output = _opt(redact_output, "redact_output")
+        novelty_mode = _opt(novelty_mode, "novelty_mode")
         novelty_gate = _opt(novelty_gate, "novelty_gate")
         novelty_epsilon = _opt(novelty_epsilon, "novelty_epsilon")
         reflection_priors = _opt(reflection_priors, "reflection_priors")
@@ -342,6 +344,8 @@ class Engine(ConfirmPhaseMixin, AblationMixin):
         self._code_leakage_detect = code_leakage_detect
         self._critic_check = critic_check
         self._redact_output = redact_output
+        # novelty_mode is the primary selector; a legacy novelty_gate=True forces the "algo" path.
+        self._novelty_mode = str(novelty_mode or "llm") if not novelty_gate else "algo"
         self._novelty_gate = novelty_gate
         self._novelty_epsilon = novelty_epsilon
         # T5 semantic novelty (Phase 2): reject a proposal whose idea TEXT is a near-duplicate of
@@ -1612,6 +1616,78 @@ class Engine(ConfirmPhaseMixin, AblationMixin):
             return best_n, best_s
         return None, best_s
 
+    def _llm_novelty_gate(self, state: RunState, idea: Idea, repropose=None) -> Idea:
+        """novelty_mode="llm": an LLM (not an embedding/param-distance heuristic) judges whether the
+        proposed idea near-duplicates an already-tried experiment — READING the real experiments via
+        tools when unsure — and, if it does and a `repropose` callable is given, asks the Researcher once
+        more for a meaningfully different idea (surfacing the duplicate's outcome). Loop-safe + best-
+        effort: any failure just returns the original idea. Emits the same `novelty_rejected` audit
+        event (kind="llm") the algorithmic gate does."""
+        if not state.nodes:
+            return idea
+        try:
+            client = self._reflect_client()
+        except Exception:  # noqa: BLE001
+            client = None
+        if client is None:
+            return idea
+        from pydantic import BaseModel
+        from looplab.agents.agent import agentic_struct, CompositeTools
+        from looplab.tools.run_tools import RunTools
+
+        class _NoveltyVerdict(BaseModel):
+            is_duplicate: bool = False
+            near_node_id: Optional[int] = None
+            reason: str = ""
+
+        brief = "; ".join(f"#{n.id} {n.operator}: {self._idea_text(n.idea)[:80]}"
+                          for n in list(state.nodes.values())[-25:])
+        msgs = [{"role": "system",
+                 "content": "You judge experiment NOVELTY for an ML research loop. Decide if a PROPOSED "
+                            "idea is a near-duplicate of an experiment already tried in THIS run. Read the "
+                            "actual experiments (read_experiment / read_code) when unsure. A rewording or a "
+                            "trivially-close variant of a tried idea is a DUPLICATE; a genuinely different "
+                            "approach, component, loss, data or direction is NOVEL. Prefer NOVEL unless "
+                            "clearly a repeat."},
+                {"role": "user",
+                 "content": f"PROPOSED idea: {self._idea_text(idea)}\n\nAlready tried: {brief}\n\n"
+                            "Emit is_duplicate, near_node_id (the tried experiment it duplicates, or null), "
+                            "and a one-line reason."}]
+        try:
+            rt = RunTools()
+            rt.bind_state(state, None)
+            v = agentic_struct(client, CompositeTools([rt]), msgs, _NoveltyVerdict,
+                               loop_opts={"max_turns": 12})
+        except Exception:  # noqa: BLE001
+            return idea
+        if not (v and getattr(v, "is_duplicate", False)
+                and isinstance(v.near_node_id, int) and v.near_node_id in state.nodes):
+            return idea
+        dup = state.nodes[v.near_node_id]
+        outcome = (f"it FAILED ({dup.error_reason})" if dup.status is NodeStatus.failed
+                   else f"it scored {dup.metric}")
+        self.store.append(EV_NOVELTY_REJECTED, {
+            "node_id": len(state.nodes), "near_node": dup.id, "kind": "llm",
+            "reason": str(v.reason)[:200], "stance": self._novelty_stance,
+            "action": "reproposed" if callable(repropose) else "kept"})
+        if callable(repropose):
+            hint = (f"\nNOVELTY GATE (LLM): your proposal near-duplicates experiment #{dup.id} — "
+                    f"{outcome} ({str(v.reason)[:160]}). Propose something MEANINGFULLY DIFFERENT "
+                    "(another approach, component or direction), not a rewording.")
+            prev = getattr(self.researcher, "_novelty_feedback", "")
+            setattr(self.researcher, "_novelty_feedback", hint)
+            try:
+                idea2 = repropose()
+                if idea2 is not None:
+                    idea = idea2
+            except BudgetExceeded:
+                raise
+            except Exception:  # noqa: BLE001
+                pass
+            finally:
+                setattr(self.researcher, "_novelty_feedback", prev)
+        return idea
+
     def _apply_novelty_gate(self, state: RunState, idea: Idea, repropose=None) -> Idea:
         """E1+T5: novelty/dedup gate over fresh proposals, BEFORE any compute is spent.
         Two layers:
@@ -1627,7 +1703,16 @@ class Engine(ConfirmPhaseMixin, AblationMixin):
         Strategist's novelty stance is "explore" (slice 5): the stance can engage a soft dedup +
         one informed re-propose even when the static gate is off, so novelty pressure follows the
         meta-controller. "balanced"/"exploit" (and gate off) leave this a no-op — exactly as before."""
-        if not (self._novelty_gate or self._novelty_stance == "explore"):
+        mode = getattr(self, "_novelty_mode", "llm")
+        # "llm" -> an LLM adjudicates duplication by READING the real experiments (not an embedding/
+        # distance heuristic), then re-proposes if it's a dup.
+        if mode == "llm":
+            return self._llm_novelty_gate(state, idea, repropose)
+        # The deterministic "algo" gate below runs when mode is "algo" OR the Strategist's novelty stance
+        # is "explore" (the stance can engage a cheap soft dedup + one informed re-propose even when the
+        # mode is otherwise off). "off" without explore leaves this a no-op — the Researcher's own
+        # read-the-history judgment stands.
+        if not (mode == "algo" or self._novelty_stance == "explore"):
             return idea
         import random as _random
 

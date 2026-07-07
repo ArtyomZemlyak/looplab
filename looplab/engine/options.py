@@ -79,7 +79,8 @@ class EngineOptions:
     code_leakage_detect: bool = False    # I3: static code-leakage scan per node
     critic_check: bool = False           # C4: execution-free critic per node
     redact_output: bool = False          # B3: redact secrets from persisted output tails
-    novelty_gate: bool = False           # E1: dedup near-duplicate proposals
+    novelty_mode: str = "llm"            # off | algo | llm — how a proposal is dedup-checked
+    novelty_gate: bool = False           # E1: dedup near-duplicate proposals (algo mode)
     novelty_epsilon: float = 0.05
     reflection_priors: bool = False      # E4/M2/M3: cross-run priors + lessons (needs memory_dir)
     comparative_lessons: bool = False    # M6: credit-assigned pair lessons (needs reflection_priors)

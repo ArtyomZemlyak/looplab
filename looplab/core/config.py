@@ -232,6 +232,15 @@ class Settings(BaseSettings):
     # E1 novelty/dedup gate: reject near-duplicate proposals (normalized param-space distance below
     # `novelty_epsilon`) by deterministically nudging them off the duplicate — stops the search
     # wasting evals re-trying the same idea. Audit event `novelty_rejected`. Off by default.
+    # Novelty/dedup MODE selector: how a fresh proposal is checked against already-tried experiments.
+    #   "off"  — no explicit gate; the agentic Researcher's own read-the-history judgment is trusted.
+    #   "algo" — the deterministic gate: numeric param-distance (`novelty_epsilon`) + optional embedding
+    #            similarity (`novelty_semantic`). Cheap, no LLM call, but can't explain itself.
+    #   "llm"  — an LLM adjudicates (reads the real experiments via tools) whether the idea is a
+    #            near-duplicate and, if so, asks the Researcher once more for something different. One
+    #            extra LLM call per proposal — highest quality, follows the "let the LLM decide" line.
+    novelty_mode: str = "llm"
+    # Legacy sub-toggles, honored by the "algo" mode (and back-compat: novelty_gate=True forces "algo"):
     novelty_gate: bool = False
     novelty_epsilon: float = 0.05
     # T5 semantic novelty (needs novelty_gate): reject a proposal whose idea TEXT embeds within

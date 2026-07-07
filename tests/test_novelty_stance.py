@@ -186,6 +186,7 @@ def test_novelty_gate_engages_under_explore_even_with_gate_off(tmp_path):
     dup = Idea(operator="improve", params={"x": 1.0}, rationale="short")
 
     eng = _engine(tmp_path / "e")               # novelty_gate off by default
+    eng._novelty_mode = "off"                   # off mode: only the explore stance can engage the algo gate
     eng._novelty_stance = "balanced"
     assert eng._apply_novelty_gate(st, dup.model_copy()).params == {"x": 1.0}   # unchanged
 
