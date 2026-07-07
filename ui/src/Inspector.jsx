@@ -685,7 +685,7 @@ function Conversation({ n, runId, working }) {
       <button className="seg" style={{ fontSize: 10 }} title="collapse or expand every stage"
         onClick={() => setAllOpen(o => !o)}>{allOpen ? '⊟ collapse all' : '⊞ expand all'}</button>
     </div>
-    {stages.map((st, i) => <ConvStage key={i + ':' + allOpen} st={st} defaultOpen={allOpen} />)}
+    {stages.map((st, i) => <ConvStage key={`${st.trace_id || ''}:${st.label || ''}:${st.start || i}:${allOpen}`} st={st} defaultOpen={allOpen} />)}
   </div>
 }
 

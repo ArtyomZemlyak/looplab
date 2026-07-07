@@ -88,12 +88,16 @@ class SettingsStore:
         dotenv_keys: set = set()
         try:
             from dotenv import dotenv_values
-            dotenv_keys = {k for k, v in dotenv_values(".env").items() if v}
+            # UPPERCASE every key present (pydantic-settings matches env vars case-INsensitively, so a
+            # lower/mixed-case .env key still feeds Settings) and keep keys with an EMPTY value too (an
+            # explicit `KEY=` is the operator deliberately clearing it — that must still win over the
+            # stored secret). Both were gaps that let the secret store override `.env`.
+            dotenv_keys = {str(k).upper() for k in dotenv_values(".env")}
         except Exception:  # noqa: BLE001 — no/unreadable .env just means nothing to defer to
             dotenv_keys = set()
         for _k, _v in self.load_secrets().items():
             env_name = _SECRET_ENV[_k]
-            if env_name in dotenv_keys:            # .env provides it → let .env win, don't prime
+            if env_name.upper() in dotenv_keys:    # .env provides it → let .env win, don't prime
                 continue
             os.environ.setdefault(env_name, _v)
 

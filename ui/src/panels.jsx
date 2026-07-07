@@ -770,6 +770,20 @@ export function HypothesisBoard({ state, runId, onSelect, onClose, onToast }) {
   // control event can lag (its SSE is buffered by a proxy), so apply the click to the board AT ONCE
   // instead of leaving it looking dead for up to a minute. The real fold catches up idempotently.
   const [optim, setOptim] = useState({})
+  // Drop an optimistic override once the real fold REFLECTS it (deleted card gone from state; abandoned
+  // card now status='abandoned'), so a stale override can't keep masking a LATER server-side reopen of
+  // the same hypothesis while the board stays mounted.
+  useEffect(() => {
+    setOptim(o => {
+      const next = {}
+      for (const [id, v] of Object.entries(o)) {
+        const h = (state.hypotheses || {})[id]
+        if (v === 'deleted' && h) next[id] = v                          // not yet dropped by the fold
+        else if (v === 'abandoned' && h && h.status !== 'abandoned') next[id] = v   // not yet reflected
+      }
+      return next
+    })
+  }, [state.hypotheses])
   const hyps = Object.values(state.hypotheses || {})
     .filter(h => optim[h.id] !== 'deleted')
     .map(h => optim[h.id] ? { ...h, status: optim[h.id] } : h)

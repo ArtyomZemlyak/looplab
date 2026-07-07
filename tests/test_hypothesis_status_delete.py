@@ -36,7 +36,7 @@ def test_support_is_sticky_when_a_record_setter_is_overtaken():
     assert st.best_node_id == 3                                       # #3 is now best
     assert b["H2 record"].status == "supported"                      # ... yet #2's verdict STANDS
     assert b["H3 winner"].status == "supported"                      # the current record too
-    assert b["H1 baseline"].status == "tested"                       # first node set no record -> no support
+    assert b["H1 baseline"].status == "supported"                    # the first node ESTABLISHED the SOTA
 
 
 def test_hypothesis_delete_removes_it_from_the_board():

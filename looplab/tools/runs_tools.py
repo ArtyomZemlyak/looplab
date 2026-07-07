@@ -375,8 +375,26 @@ class RunControlTools:
         return None
 
     def _live(self, rd: Path) -> bool:
+        """Is a run's engine actively writing its log? The flock probe is primary, but on FUSE / NFS / S3
+        mounts flock can wrongly report "not live" — so ALSO trip on a fresh-write backstop: a run that
+        is neither paused nor finished AND whose events.jsonl was appended in the last 30s is treated as
+        live (a running engine is the sole writer and appends constantly). This gates the destructive
+        delete_node/delete_run so they can't rewrite the log out from under a live engine even when flock
+        lies. Conservative: a genuinely crashed run (stale mtime) still deletes."""
         try:
-            return bool(self.alive_fn and self.alive_fn(rd))
+            if self.alive_fn and self.alive_fn(rd):
+                return True
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            import time as _time
+            from looplab.events.eventstore import EventStore
+            from looplab.events.replay import fold
+            evp = rd / "events.jsonl"
+            st = fold(EventStore(evp).read_all())
+            if st.finished or st.paused:
+                return False                              # a settled run is safe to act on
+            return (_time.time() - evp.stat().st_mtime) < 30.0   # recent write on an unsettled run -> live
         except Exception:  # noqa: BLE001
             return False
 

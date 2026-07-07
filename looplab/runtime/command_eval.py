@@ -378,6 +378,7 @@ def run_command_eval(command: list[str], cwd: str, timeout: float, metric: dict,
                     _run_from = _i
                     break
         stage_results = []
+        rc, out, err, to = 0, "", "", False      # bound even if every stage is reused/empty (defensive)
         for _i, _stg in enumerate(stages):
             _sname = str(_stg.get("name") or f"stage{_i}")
             _scmd = list(_stg.get("command") or [])

@@ -2578,10 +2578,15 @@ class Engine(ConfirmPhaseMixin, AblationMixin):
                         return
             workdir = self.run_dir / "nodes" / f"node_{node_id}"
             # Phase 2 stage-scoped re-run: REUSE the existing workdir (earlier stages' artifacts — the
-            # checkpoint `train` wrote) instead of re-seeding it, which would wipe them. Fall back to a
-            # fresh materialize if the workdir is gone (nothing to reuse).
-            if not (node.rerun_stage and workdir.exists()):
+            # checkpoint `train` wrote) instead of re-seeding it, which would wipe them.
+            _reuse = bool(node.rerun_stage and workdir.exists())
+            if not _reuse:
                 self._materialize(node, workdir)    # seed tree -> node edits -> task assets
+                # A stage-scoped re-run whose workdir was GONE has nothing to reuse — the re-seed just
+                # wiped any artifacts. Skipping earlier stages now would run the restarted stage against
+                # MISSING inputs, so drop the start_stage and re-run the FULL pipeline instead.
+                if node.rerun_stage:
+                    node.rerun_stage = None
             # Hybrid crash repair: each attempt runs the eval (with the mid-eval abort watcher) and,
             # if it CRASHES, the agent triages it and may repair the code IN PLACE and re-run — all
             # within this one node (no new tree node, no max_nodes spent). At most

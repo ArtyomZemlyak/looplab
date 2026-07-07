@@ -185,7 +185,16 @@ def fold(events: Iterable[Event]) -> RunState:
                 n.feasible = True
                 n.trials = []
                 n.confirmed_mean = None
+                n.confirmed_std = None
+                n.confirmed_seeds = None
                 n.failed_stage = None
+                # Finish-time scores computed on the NOW-discarded code must not survive the reset, or a
+                # holdout-gated best pick / generalization-gap audit keeps using a stale number the node
+                # can no longer reproduce (holdout is append-only + skips already-scored ids, so it would
+                # never be recomputed for this node).
+                n.holdout_metric = None
+                if n.id in st.holdout_evaluated_ids:
+                    st.holdout_evaluated_ids.remove(n.id)
                 if stage in ("implement", "propose"):
                     n.code = ""
                     n.files = {}
@@ -653,10 +662,10 @@ def _derive_hypotheses(st: RunState) -> None:
     _running: float | None = None
     for _n in sorted(st.nodes.values(), key=lambda x: x.id):
         if _n.status is NodeStatus.evaluated and _n.feasible and _n.metric is not None:
-            if _running is not None and better(_n.metric, _running):
-                _record_setters.add(_n.id)          # beat the standing record — a real, permanent advance
             if _running is None or better(_n.metric, _running):
-                _running = _n.metric
+                _record_setters.add(_n.id)          # first node ESTABLISHES the SOTA, or a later node
+                _running = _n.metric                # BEATS the standing record — either is a real advance
+                #                                     that stays supported even after being overtaken
 
     # 3) compute a verdict per hypothesis from its evidence nodes.
     for h in hyps.values():

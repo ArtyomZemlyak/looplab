@@ -41,7 +41,7 @@ def test_plan_mode_denies(tmp_path):
 
 def test_delete_node_takes_subtree_and_heals_best(tmp_path):
     rd = tmp_path / "r3"
-    _run(rd, nodes=(0, 1, 2))               # chain; #2 is best (max metric under… direction min → best is #0)
+    _run(rd, nodes=(0, 1, 2)).append("pause", {})   # settled → the fresh-write live backstop stands down
     t = RunControlTools(tmp_path, alive_fn=lambda _rd: False, mode="auto")
     out = t.execute("delete_node", {"run_id": "r3", "node_id": 1})   # deletes 1 AND its descendant 2
     assert "deleted node(s) [1, 2]" in out
@@ -62,3 +62,12 @@ def test_traversal_and_unknown_run_rejected(tmp_path):
     t = RunControlTools(tmp_path, mode="auto", alive_fn=lambda _rd: False)
     assert "no such run" in t.execute("finalize_run", {"run_id": "../etc"})
     assert "no such run" in t.execute("finalize_run", {"run_id": "nope"})
+
+
+def test_delete_refuses_fresh_write_even_when_flock_says_dead(tmp_path):
+    # security backstop: on a FUSE mount flock (alive_fn) can wrongly say "dead"; a fresh events.jsonl
+    # write on a non-settled run must still be treated as LIVE so the log isn't rewritten under it.
+    _run(tmp_path / "r5", nodes=(0, 1))     # just written, not paused/finished
+    t = RunControlTools(tmp_path, alive_fn=lambda _rd: False, mode="auto")   # flock lies: "dead"
+    assert "LIVE" in t.execute("delete_node", {"run_id": "r5", "node_id": 1})
+    assert not (tmp_path / "r5" / "events.jsonl.bak-del1").exists()          # never rewrote the log
