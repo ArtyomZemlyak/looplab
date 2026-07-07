@@ -193,13 +193,46 @@ def build_router(srv) -> APIRouter:
 
     @router.get("/api/memory")
     def memory():
+        # Cross-run memory dir holds several tiers in separate .jsonl files — SPLIT them by filename so
+        # the UI can show cases / lessons / notes each with their own shape (they were previously all
+        # dumped into `cases`, which mis-rendered the 30+ lessons + meta-notes). `cases` stays populated
+        # for back-compat with any old caller.
         s = Settings()
+        out = {"dir": None, "cases": [], "lessons": [], "notes": []}
         if not s.memory_dir:
-            return {"dir": None, "cases": []}
+            return out
         md = Path(s.memory_dir)
-        cases: list[dict] = []
+        out["dir"] = str(md)
         for f in sorted(md.glob("*.jsonl")) if md.exists() else []:
-            cases.extend(iter_jsonl(f))
-        return {"dir": str(md), "cases": cases}
+            rows = list(iter_jsonl(f))
+            nm = f.name.lower()
+            if "lesson" in nm:
+                out["lessons"].extend(rows)
+            elif "note" in nm or "meta" in nm:
+                out["notes"].extend(rows)
+            else:                                    # cases.jsonl (or any other tier) → cases
+                out["cases"].extend(rows)
+        return out
+
+    @router.get("/api/knowledge")
+    def knowledge():
+        # The agentic knowledge base: markdown notes the agents distil + save (best configs, recipes,
+        # skills) and later retrieve via kb_search. Surfaced read-only so the operator can see what the
+        # run has learned. Content is capped so a huge note can't bloat the payload.
+        s = Settings()
+        kd = getattr(s, "knowledge_dir", None)
+        out = {"dir": None, "notes": []}
+        if not kd:
+            return out
+        kdp = Path(kd)
+        out["dir"] = str(kdp)
+        for f in sorted(kdp.glob("*.md")) if kdp.exists() else []:
+            try:
+                content = f.read_text("utf-8", "replace")
+            except OSError:
+                content = ""
+            out["notes"].append({"name": f.stem, "content": content[:12000],
+                                 "truncated": len(content) > 12000})
+        return out
 
     return router

@@ -520,15 +520,60 @@ export function AuthoringPanel({ onClose, onToast }) {
   )
 }
 
+function KbNote({ note }) {
+  const [open, setOpen] = useState(false)
+  return <div className="mem-card">
+    <div style={{ cursor: 'pointer', fontWeight: 600 }} onClick={() => setOpen(o => !o)}>
+      <span style={{ opacity: 0.6, fontSize: 10, marginRight: 4 }}>{open ? '▾' : '▸'}</span>{note.name}</div>
+    {open && <div style={{ marginTop: 6 }}><Markdown>{note.content || ''}</Markdown>
+      {note.truncated && <div className="muted" style={{ fontSize: 11 }}>… truncated</div>}</div>}
+  </div>
+}
+
 export function MemoryPanel({ onClose }) {
-  const [data, setData] = useState({ dir: null, cases: [] })
-  useEffect(() => { get('/api/memory').then(setData).catch(() => {}) }, [])
+  // Everything the run has LEARNED, in one place: distilled lessons, solved-task cases, meta-notes, and
+  // the agentic knowledge-base markdown notes (best configs / recipes the agents save + later retrieve).
+  const [mem, setMem] = useState({ dir: null, cases: [], lessons: [], notes: [] })
+  const [kb, setKb] = useState({ dir: null, notes: [] })
+  const [tab, setTab] = useState('lessons')
+  useEffect(() => {
+    get('/api/memory').then(setMem).catch(() => {})
+    get('/api/knowledge').then(setKb).catch(() => {})
+  }, [])
+  const tabs = [['lessons', 'Lessons', mem.lessons.length], ['cases', 'Cases', mem.cases.length],
+    ['notes', 'Notes', mem.notes.length], ['knowledge', 'Knowledge', kb.notes.length]]
   return (
-    <Panel title="Cross-run memory — case library" sub={data.dir || 'no memory dir'} onClose={onClose} wide>
-      {data.cases.length
+    <Panel title="Memory & knowledge — what the runs have learned" sub={mem.dir || 'no memory dir'} onClose={onClose} wide>
+      <div className="conv-toggle" style={{ marginBottom: 12 }}>
+        {tabs.map(([k, label, n]) => <button key={k} className={'seg' + (tab === k ? ' on' : '')}
+          onClick={() => setTab(k)}>{label} <span className="muted">{n}</span></button>)}
+      </div>
+      {tab === 'lessons' && (mem.lessons.length
+        ? mem.lessons.map((l, i) => <div key={i} className="mem-card">
+            <div>{l.statement}</div>
+            <div className="mem-meta" style={{ marginTop: 4, display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' }}>
+              {l.kind && <span className="chip xs">{l.kind}</span>}
+              {l.outcome && <span className="chip xs">{l.outcome}</span>}
+              {l.delta != null && <span className={'chip xs' + (l.delta > 0 ? ' ok' : '')}>Δ{fmt(l.delta)}</span>}
+              {l.confidence != null && <span className="muted" style={{ fontSize: 11 }}>conf {Math.round(l.confidence * 100)}%</span>}
+              {l.evidence_count ? <span className="muted" style={{ fontSize: 11 }}>· {l.evidence_count} evidence</span> : null}
+              {l.task_id && <span className="muted" style={{ fontSize: 11 }}>· {l.task_id}</span>}
+            </div>
+          </div>)
+        : <div className="muted">No lessons yet — they accrue as runs finish (reflection distils them into memory).</div>)}
+      {tab === 'cases' && (mem.cases.length
         ? <table className="tbl"><thead><tr><th>task</th><th>goal</th><th>metric</th><th>params</th></tr></thead><tbody>
-          {data.cases.map((c, i) => <tr key={i}><td>{c.task_id}</td><td className="muted">{c.goal}</td><td>{fmt(c.metric)}</td><td className="muted">{JSON.stringify(c.params)}</td></tr>)}</tbody></table>
-        : <div className="muted">No cases stored (set memory_dir to accumulate cross-run knowledge).</div>}
+          {mem.cases.map((c, i) => <tr key={i}><td>{c.task_id}</td><td className="muted">{c.goal}</td><td>{fmt(c.metric)}</td><td className="muted">{JSON.stringify(c.params)}</td></tr>)}</tbody></table>
+        : <div className="muted">No cases stored.</div>)}
+      {tab === 'notes' && (mem.notes.length
+        ? mem.notes.map((n, i) => <div key={i} className="mem-card">
+            {n.task_id && <div className="muted" style={{ fontSize: 11, marginBottom: 2 }}>{n.task_id}</div>}
+            <Markdown>{n.note || n.statement || JSON.stringify(n)}</Markdown></div>)
+        : <div className="muted">No meta-notes yet.</div>)}
+      {tab === 'knowledge' && (kb.notes.length
+        ? <><div className="muted" style={{ fontSize: 11, marginBottom: 6 }}>{kb.dir} — agents save + retrieve these via kb_search</div>
+          {kb.notes.map((n, i) => <KbNote key={i} note={n} />)}</>
+        : <div className="muted">No knowledge notes ({kb.dir || 'no knowledge dir'}).</div>)}
     </Panel>
   )
 }

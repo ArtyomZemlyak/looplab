@@ -813,6 +813,10 @@ textarea.text { min-height: 220px; font-family: ui-monospace, Consolas, monospac
   margin: -9px -12px 8px; padding: 9px 12px 2px; border-bottom: 1px solid var(--line-2); }
 .trace-head .conv-toggle, .trace-head .trace-live-status { margin-bottom: 6px; }
 .conv .stage .conv-turns { padding: 4px 8px; }
+/* Memory & knowledge cards (lessons / meta-notes / KB notes). */
+.mem-card { border: 1px solid var(--line-2); border-radius: 8px; padding: 8px 10px; margin-bottom: 6px;
+  background: var(--bg-1); font-size: 13px; line-height: 1.45; }
+.mem-card .chip.xs { font-size: 10px; padding: 1px 6px; }
 .conv-turns > div { padding: 3px 0; }
 .conv-turns > div + div { border-top: 1px dashed var(--line); }
 .conv-req-h, .conv-tool-h { display: flex; align-items: center; gap: 6px; cursor: pointer; font-size: 13px; }
