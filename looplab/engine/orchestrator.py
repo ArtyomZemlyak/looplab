@@ -1937,7 +1937,16 @@ class Engine(ConfirmPhaseMixin, AblationMixin):
                 idea = (self._ensemble_idea(pnodes) if self._merge_mode == "ensemble"
                         else merge_idea(pnodes))
                 with self.tracer.span("implement"):
-                    code = self.developer.implement(idea)
+                    # A code-ensemble merge must SEED from the primary parent's solution (like improve),
+                    # not implement() from scratch: from-scratch gave the Developer no base, so the
+                    # ensemble node shipped without the agent-authored eval entrypoint and crash-failed
+                    # ("can't open file test_looplab.py" — live node 63, 3 repairs couldn't recover). Now
+                    # parent[0]'s working code + entrypoint carry over and the idea directs blending in
+                    # the other parent. Mean-param merges (numeric tasks, no files) stay from-scratch.
+                    _impl_from = getattr(self.developer, "implement_from", None)
+                    code = (_impl_from(idea, pnodes[0])
+                            if (self._merge_mode == "ensemble" and _impl_from and pnodes)
+                            else self.developer.implement(idea))
             elif kind == "debug":
                 parent = state.nodes[action["parent_id"]]
                 parents = [parent.id]
