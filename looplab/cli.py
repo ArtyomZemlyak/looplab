@@ -811,6 +811,58 @@ def replay(run_dir: Path = typer.Argument(...)):
 
 
 @app.command()
+def timings(run_dir: Path = typer.Argument(...),
+            node: Optional[int] = typer.Option(None, help="only this node id")):
+    """Where the wall-clock went, per node: LLM generations vs eval vs repair vs tools (from spans.jsonl
+    `duration_s`). Answers 'what is this run actually spending time on right now' at a glance."""
+    import json as _json
+    from collections import defaultdict
+    sp_path = run_dir / "spans.jsonl"
+    if not sp_path.exists():
+        typer.echo(f"no spans.jsonl at {run_dir} (tracing off or pre-tracing run).")
+        raise typer.Exit(2)
+
+    def _cat(sp: dict) -> str:
+        k = sp.get("kind")
+        if k == "generation":
+            return "LLM"
+        if k == "tool":
+            return "tools"
+        if k == "operation":
+            nm = str(sp.get("name") or "")
+            if "eval" in nm:
+                return "eval"
+            if "repair" in nm:
+                return "repair"
+            return f"op:{nm}" if nm else "op"
+        return k or "other"
+
+    per_node: dict = defaultdict(lambda: defaultdict(lambda: [0.0, 0]))
+    for line in sp_path.read_text(encoding="utf-8", errors="replace").splitlines():
+        try:
+            sp = _json.loads(line)
+        except ValueError:
+            continue
+        nid = (sp.get("attributes") or {}).get("node_id")
+        try:
+            nid = int(nid)
+        except (TypeError, ValueError):
+            continue
+        if node is not None and nid != node:
+            continue
+        cell = per_node[nid][_cat(sp)]
+        cell[0] += float(sp.get("duration_s") or 0.0)
+        cell[1] += 1
+
+    for nid in sorted(per_node):
+        cats = per_node[nid]
+        total = sum(v[0] for v in cats.values()) or 1.0
+        typer.echo(f"\nnode {nid} — {round(total/60, 1)} min:")
+        for cat, (secs, n) in sorted(cats.items(), key=lambda x: -x[1][0]):
+            typer.echo(f"  {cat:10} {round(secs/60, 1):>6} min  ({n} spans, {round(100*secs/total)}%)")
+
+
+@app.command()
 def inspect(run_dir: Path = typer.Argument(...)):
     """Show the resolved config snapshot + the run's best result."""
     snap = run_dir / "config.snapshot.json"
