@@ -80,6 +80,23 @@ def test_agent_loop_clamps_out_of_bounds_emit(tmp_path):
     assert idea.params["lam"] == 50.0             # missing -> filled with midpoint
 
 
+def test_agent_loop_rejects_empty_emit_and_reprompts(tmp_path):
+    _seed_kb(tmp_path)
+    client = _FakeChatClient([
+        _tool_call("emit", {"operator": "draft", "params": {}, "rationale": ""}),   # empty no-op -> bounced
+        _tool_call("emit", {"operator": "draft", "params": {"degree": 3.0},          # re-emit: real idea
+                            "rationale": "try degree 3"}),
+    ])
+    r = ToolUsingResearcher(client, KnowledgeTools(str(tmp_path)),
+                            bounds={"degree": (0.0, 6.0), "lam": (0.0, 100.0)})
+    idea = r.propose(RunState(goal="g"), None)
+    assert idea.params.get("degree") == 3.0 and (idea.rationale or "").strip()   # the SECOND, valid emit won
+    # The empty emit was answered with a rejection tool-message before the re-emit turn.
+    second_turn = client.turns[1]
+    rej = [m for m in second_turn if m.get("role") == "tool" and "not accepted" in m.get("content", "").lower()]
+    assert rej, "empty emit should have been bounced back with a rejection message"
+
+
 # --- tool-using Researcher loop resilience (review rounds, mega-review, deep audit) ---------------
 
 # live-surfaced bug — the agentic Researcher must survive a junk emit (non-numeric params)

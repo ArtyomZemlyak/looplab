@@ -136,7 +136,8 @@ def drive_tool_loop(client, tools, messages: list, emit_spec: dict, *,
                     self_plan: bool = False, plan_reinject_every: int = 5,
                     auto_summary: bool = False, summary_client=None, on_step=None, on_text=None,
                     cancel_check=None, on_tool_result=None,
-                    nudge_prompt: str = "", stuck_prompt: str = ""):
+                    nudge_prompt: str = "", stuck_prompt: str = "",
+                    validate=None, emit_retries: int = 2):
     """Multi-turn tool loop shared by every tool-using agent (Researcher, unified-agent pilot/triage,
     Boss, genesis scout, cross-run report). The model MAY call the provided retrieval tools across
     turns; when it calls the emit function (named in `emit_spec`), `finalize(args)` is returned. If
@@ -226,6 +227,7 @@ def drive_tool_loop(client, tools, messages: list, emit_spec: dict, *,
     # loop's own client. Loop-invariant: build once, not per turn.
     summarize = _summarizer(summary_client or client) if auto_summary else None
     stalls = 0                          # consecutive prose turns we couldn't turn into a forced emit
+    emit_rejects = 0                    # bad emits bounced back for a re-emit (validate + emit_retries)
     turns = itertools.count() if max_turns is None or max_turns <= 0 else range(max_turns)
     for turn_idx in turns:
         if _cancelled():                # user hit stop -> finalize from what we have, promptly
@@ -302,6 +304,27 @@ def drive_tool_loop(client, tools, messages: list, emit_spec: dict, *,
                 # tools.execute() and blow up on .get(); a junk model must never crash the run.
                 args = {}
             if name == emit_name:
+                # Bounce a malformed emit BACK to the model with the concrete error instead of silently
+                # accepting a degraded/empty idea (the "fallback (agent parse failed)" no-op nodes that
+                # tested nothing and polluted the experiment history). `validate(args) -> err|None`; on
+                # an error we re-inject it and let the model re-emit, up to `emit_retries` times, then
+                # accept whatever we have so the loop still always terminates.
+                if validate is not None and emit_rejects < emit_retries:
+                    err = None
+                    try:
+                        err = validate(args)
+                    except Exception:  # noqa: BLE001 — a broken validator must never crash the loop
+                        err = None
+                    if err:
+                        # The assistant turn (with this tool_call) is already in `messages`; just answer
+                        # the emit call with the error and `continue` so any sibling calls this turn still
+                        # get their tool results (no dangling tool_call_id) and the NEXT turn re-prompts.
+                        emit_rejects += 1
+                        messages.append({"role": "tool", "tool_call_id": tc.get("id", ""),
+                                         "content": f"Your `{emit_name}` was NOT accepted: {err}. Fix it "
+                                                    "and call it again with a valid, COMPLETE idea — "
+                                                    "never an empty one."})
+                        continue
                 return finalize(args)
             if _cancelled():
                 # Stop pressed while this turn's calls were executing: do NOT run the remaining
@@ -448,6 +471,20 @@ class ToolUsingResearcher:
             out["params"] = {}
         return out
 
+    def _validate_emit(self, args: dict) -> Optional[str]:
+        # Pre-accept check for drive_tool_loop: a bad/empty emit is bounced back to the model with THIS
+        # message so it re-emits, instead of being silently turned into a no-op idea. Returns an error
+        # string to reject, or None to accept.
+        try:
+            idea = Idea.model_validate(self._sanitize(args))
+        except Exception as e:  # noqa: BLE001
+            return (f"it didn't parse ({str(e)[:180]}). Emit an object with `operator`, numeric "
+                    "`params`, and a `rationale` naming WHAT you change and WHY")
+        if not (idea.params or (idea.rationale or "").strip() or (idea.hypothesis or "").strip()):
+            return ("it is EMPTY — no params and no rationale. Every experiment must state a concrete "
+                    "change and its reason; propose a real one (a param OR a structural change)")
+        return None
+
     def _finalize(self, args: dict) -> Idea:
         # Never let a malformed emit (non-numeric params, bad shape) crash the loop — sanitize,
         # then fall back to a rationale-preserving draft if validation still fails.
@@ -499,7 +536,8 @@ class ToolUsingResearcher:
                 self.client, self.tools, messages, self._emit_spec(),
                 max_turns=self.max_turns, context_budget_chars=self.context_budget_chars,
                 time_budget_s=self.time_budget_s,
-                finalize=self._finalize, fallback=self._fallback, **self.loop_opts)
+                finalize=self._finalize, fallback=self._fallback,
+                validate=self._validate_emit, **self.loop_opts)
         except BudgetExceeded:      # hard budget stop -> propagate and end the run
             raise
         except Exception:  # noqa: BLE001 - a transport/endpoint failure (LLMError after retries) on
