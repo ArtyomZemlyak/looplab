@@ -7,9 +7,9 @@ def _t():
     return EnvInspectTools()
 
 
-def test_specs_expose_the_four_read_only_tools():
+def test_specs_expose_the_read_only_tools():
     names = [s["function"]["name"] for s in _t().specs()]
-    assert names == ["pkg_info", "py_api", "read_installed", "grep_installed"]
+    assert names == ["pkg_info", "py_api", "read_installed", "grep_installed", "gpu_info"]
 
 
 def test_pkg_info_reports_version_for_an_installed_dist():

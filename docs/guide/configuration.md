@@ -60,7 +60,7 @@ file's `settings:` **>** env/`.env` **>** defaults.
 `profile` is a **named bundle of setting defaults**. The engine ships every intelligence feature
 *off* so a toy `looplab run` stays cheap and deterministic; `profile: thorough` turns the
 built-and-tested machinery on in one word — multi-seed confirmation (`confirm_top_k=3`,
-`confirm_seeds=3`), the novelty gate, the reward-hack / leakage / critic monitors **plus**
+`confirm_seeds=3`), the reward-hack / leakage / critic monitors **plus**
 `trust_gate=gate` (a flagged win can no longer be selected as best), ablation-driven refinement
 (`ablate_every=3`), the adaptive operator bandit (`operator_bandit`), and the proposal cues
 (`complexity_cue`, `budget_aware`, `failure_reflection`).

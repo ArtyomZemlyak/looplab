@@ -110,6 +110,11 @@ class EnvInspectTools:
                                  "e.g. 'lightning'"},
                      "max_hits": {"type": "integer", "description": "cap on hits (optional, default 20)"}},
                     ["query", "package"]),
+            fn_spec("gpu_info",
+                    "Report the GPUs available for training: count, names, and per-device memory (via "
+                    "torch.cuda). Use this INSTEAD of `nvidia-smi` — you have no shell, so nvidia-smi is "
+                    "not callable; this is the equivalent. Returns '(no CUDA / torch)' when unavailable "
+                    "(e.g. CPU-only).", {}),
         ]
 
     def execute(self, name: str, args: dict) -> str:
@@ -125,9 +130,29 @@ class EnvInspectTools:
             if name == "grep_installed":
                 return self._grep_installed(str(args.get("query", "")), str(args.get("package", "")),
                                             args.get("max_hits"))
+            if name == "gpu_info":
+                return self._gpu_info()
         except Exception as e:  # noqa: BLE001 — a read-only probe must never crash the tool loop
             return f"(inspect error: {type(e).__name__}: {e})"
         return f"(unknown tool: {name})"
+
+    @staticmethod
+    def _gpu_info() -> str:
+        try:
+            import torch
+        except Exception:  # noqa: BLE001
+            return "(no torch installed — cannot query GPUs)"
+        if not torch.cuda.is_available():
+            return "(no CUDA GPU available — CPU only)"
+        n = torch.cuda.device_count()
+        lines = [f"CUDA available: {n} GPU(s)"]
+        for i in range(n):
+            try:
+                p = torch.cuda.get_device_properties(i)
+                lines.append(f"  cuda:{i} = {p.name}, {round(p.total_memory / 1024**3, 1)} GiB")
+            except Exception as e:  # noqa: BLE001
+                lines.append(f"  cuda:{i} = (props unavailable: {e})")
+        return "\n".join(lines)
 
     # ------------------------------------------------------------------ pkg_info
     def _pkg_info(self, name: str) -> str:
