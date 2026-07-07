@@ -318,7 +318,9 @@ class Settings(BaseSettings):
     # the search policy/operators/fidelity per situation; set "off" for static config-driven search.
     # "agent" = a tool-using Strategist that READS the run/data/sibling-runs/KB/memory (B1-guarded)
     # before deciding, instead of the single-shot "llm" call over aggregate stats.
-    strategist_backend: str = "llm"            # "off" | "rule" | "llm" | "agent"
+    strategist_backend: str = "agent"          # "off" | "rule" | "llm" | "agent" — default AGENTIC: the
+    #   Strategist READS the run/data/sibling-runs/KB/memory with tools before deciding, not a single-shot
+    #   call over aggregate stats. "llm" = the old non-agentic single-shot; "rule"/"off" = no LLM.
     strategist_every: int = Field(default=3, ge=1)   # consult cadence (created nodes)
     # Multi-seed confirmation (I12, ADR-15): confirm the top-k under N seeds before
     # finishing. 0 disables (default). Only meaningful when eval has variance.
