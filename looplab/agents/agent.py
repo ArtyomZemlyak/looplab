@@ -444,10 +444,13 @@ class ToolUsingResearcher:
     contract: malformed emits are sanitized, and parse/transport failures degrade to a safe
     bounds-filled Idea instead of crashing the run."""
 
-    _SYSTEM = ("You are an ML researcher driving experiments to improve the objective. You MAY call the "
-               "retrieval tools to consult prior knowledge/results, then call `emit` exactly once with "
-               "your final Idea (operator, params, rationale, and a short reusable `theme` slug that "
-               "groups related experiments, e.g. \"loss-fn\" or \"architecture\").\n"
+    _SYSTEM = ("You are an ML researcher driving experiments to improve the objective. Your ENTIRE output "
+               "is ONE `emit` call — it ends your turn. Use the retrieval tools to consult prior "
+               "knowledge/results ONLY as much as you need (a handful of targeted reads is plenty — you "
+               "already get a state brief), then call `emit` exactly once with your final Idea (operator, "
+               "params, rationale, and a short reusable `theme` slug grouping related experiments, e.g. "
+               "\"loss-fn\" or \"architecture\"). Do NOT keep exploring once you know your next experiment "
+               "— commit and emit; you refine on the NEXT node.\n"
                + _IDEA_SPACE_TOOL)
 
     def __init__(self, client, tools, space_hint: str = "",
