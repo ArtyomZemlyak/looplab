@@ -281,12 +281,16 @@ class RunLauncherTools:
                 "READER — one of stdout_json / stdout_regex / file_json / file_regex — NOT the direction "
                 "(do NOT put \"max\" in metric.kind; the objective key goes in `key`, e.g. "
                 "{\"kind\":\"stdout_json\",\"key\":\"recall@100\"}).\n"
-                "• Use `eval` ONLY when its command's entrypoint ALREADY EXISTS in the base repo and "
-                "prints the metric. If the entrypoint must be BUILT (it doesn't exist in a fresh checkout — "
-                "e.g. it was authored by a PRIOR run's agent, or the user says the agents may write/modify "
-                "the train/test scripts), set `onboard:true` (and describe how to run+score it in the goal) "
-                "so THIS run's agent builds it — do NOT reference a file that won't be in a fresh workspace. "
-                "When continuing a sibling run, only copy its `eval` if that entrypoint lives in the repo.",
+                "• When the agent must BUILD the eval entrypoint (it doesn't exist yet — e.g. a training "
+                "repo where agents write/modify the train/test scripts), STILL use `eval` with "
+                "command=[\"python\",\"<entrypoint>.py\"] + metric {kind:stdout_json,key:...}: the agent "
+                "WRITES <entrypoint>.py during the run so it runs the WHOLE experiment (TRAIN a fresh "
+                "model, THEN test) and prints the metric JSON. Say so in the goal: the entrypoint MUST "
+                "actually run training each node and score THAT model — NEVER read a pre-existing "
+                "checkpoint or a static results file (e.g. results_last.csv is a PRIOR run's output, not a "
+                "score). Reserve `onboard:true` (+ `onboard_command`) for the narrow case where a training "
+                "COMMAND already runs and you only need an adapter to READ its metric — do NOT use onboard "
+                "to BUILD a pipeline (with no command it degrades to reading a static file).",
                 {"run_id": {"type": "string", "description": "short kebab-case name you invent"},
                  "task": {"type": "object", "description": "inline task; repo needs eval-or-onboard, absolute editable_path, direction max|min, metric.kind a reader (not the direction)"},
                  "task_file": {"type": "string", "description": "a catalogue task path (alternative to task)"},

@@ -309,7 +309,12 @@ _REPO_DEV_SYSTEM_BODY = (
     "the eval command runs (it does not exist yet) by "
     "calling write_file with a REPO-RELATIVE path and the FULL file content. The entrypoint "
     "must run the whole experiment and print the metric as the LAST stdout line (a JSON object "
-    "with the required key). ALSO include any related metrics you compute in that SAME JSON "
+    "with the required key). CRITICAL for a TRAINING task: the entrypoint MUST actually TRAIN a model "
+    "for THIS experiment (run the repo's train script with your config → produce a FRESH checkpoint) and "
+    "THEN score that model. NEVER shortcut by loading a pre-existing/best checkpoint, or by reading a "
+    "static results file (a prior run's results_last.csv / *.ckpt is NOT this node's score) — a node that "
+    "doesn't train can't test your idea and silently fakes the parent's number. ALSO include any related "
+    "metrics you compute in that SAME JSON "
     "object under their own names (e.g. {\"metric\": <objective>, \"recall@10\": .., \"mrr\": ..}) "
     "— every extra key is recorded and shown alongside the objective; only the required key "
     "drives selection, so report generously. Bake the chosen hyperparameters into the code. Stay within your "
@@ -805,9 +810,11 @@ class LLMOnboarder:
         user = (f"Repository files:\n{listing}\n\nKey file contents:\n{snippets}\n\n"
                 f"The training command `{cmd}` runs in the work directory. Goal: {self.goal} "
                 f"({self.direction}imize). Write `read_metric(workdir)` that, AFTER the run, "
-                "returns the final metric by reading whatever the framework wrote (match the "
+                "returns the final metric by reading what the framework wrote FOR THIS RUN (match the "
                 "metric key/format you see in the files above — e.g. a JSON like "
-                '{"metric": <float>}). Prefer stdlib; if you use an optional tracker lib '
+                '{"metric": <float>}). Read ONLY the CURRENT run\'s freshly-written output; NEVER read a '
+                "pre-existing/committed results file or a prior run's checkpoint (e.g. results_last.csv is "
+                "a PRIOR run's output, not this run's score). Prefer stdlib; if you use an optional tracker lib "
                 "(tensorboard/mlflow), import it INSIDE a try/except and fall back. Return a "
                 "float; on any problem return a clearly-bad value so the run is not rewarded.")
         try:

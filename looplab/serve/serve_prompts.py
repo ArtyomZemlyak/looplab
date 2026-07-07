@@ -37,16 +37,19 @@ def genesis_system(kinds: list, key_defaults: dict, cat_lines: str) -> str:
         '{"metric": 0.93}). Three rules that are the USUAL mistakes: (1) `direction` is EXACTLY "max" '
         'or "min" — never "maximize"/"minimize". (2) In `eval.metric`, `kind` is the READER '
         "(stdout_json / stdout_regex / file_json / file_regex) — NOT the direction; NEVER put "
-        '"max"/"min" in metric.kind (the objective name goes in `key`). (3) Use `eval` ONLY when its '
-        "command's entrypoint ALREADY EXISTS in the base repo. If that entrypoint must be BUILT — it is "
-        "NOT in a fresh checkout (e.g. it was authored by a PRIOR run's agent), or the user says the "
-        "agents may write/modify the train/test scripts — set "
-        '"onboard": true (with "onboard_command" = the run command) and describe scoring in `reply`, so '
-        "THIS run's agent builds the entrypoint. Do NOT reference a file that won't exist in a fresh "
-        "workspace. A repo task MUST carry EITHER `eval` OR `onboard:true` — one is REQUIRED "
-        "(a repo task with neither is rejected: nothing could score a node). If you are CONTINUING a "
-        "sibling run of the same repo, copy its `editable_path`, `edit_surface` and `data` verbatim — but "
-        "copy its `eval` only if that entrypoint lives IN the repo (else onboard). Copy any path / "
+        '"max"/"min" in metric.kind (the objective name goes in `key`). (3) When the agent must BUILD the eval '
+        "entrypoint (it doesn't exist yet — a training repo where agents write/modify the scripts), STILL "
+        'use `eval` with command=["python","<entrypoint>.py"] + {"metric":{"kind":"stdout_json","key":..}}: '
+        "the agent WRITES <entrypoint>.py so it runs the WHOLE experiment (TRAIN a fresh model, THEN test) "
+        "and prints the metric JSON. State in the goal that the entrypoint MUST actually run training each "
+        "node and score THAT model — NEVER read a pre-existing checkpoint or a static results file "
+        "(results_last.csv is a PRIOR run's output, not a score). Reserve `onboard:true` (+ "
+        "`onboard_command`) for the NARROW case where a training command ALREADY runs and you only need an "
+        "adapter to READ its metric — do NOT use onboard to BUILD a pipeline (with no command it degrades "
+        "to reading a static file). A repo task MUST carry EITHER `eval` OR `onboard:true` — one is "
+        "REQUIRED (a repo task with neither is rejected: nothing could score a node). If you are CONTINUING "
+        "a sibling run of the same repo, copy its `editable_path`, `edit_surface` and `data` verbatim — but "
+        "copy its `eval` only if that entrypoint lives IN the repo (else the agent rebuilds it). Copy any path / "
         "command / metric-key the user gives VERBATIM; never "
         "invent a path you weren't given (leave editable_path empty and ask instead). When the user "
         "points you at their OWN repo (gives a path), ALWAYS author this inline repo task with that "
