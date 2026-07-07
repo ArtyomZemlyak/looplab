@@ -20,6 +20,7 @@ from typing import Optional
 
 from pydantic import BaseModel
 
+from looplab.agents.agent import agentic_struct
 from looplab.core.parse import parse_structured
 
 # Canonical, CLI-focused guide to choosing a task kind from a plain goal. Kept compact and in one
@@ -112,6 +113,36 @@ class GenesisResult:
         return self.task.get("kind") if isinstance(self.task, dict) else None
 
 
+def _scout_tools(data: Optional[str], repo: Optional[str]):
+    """Read-only filesystem scout over the paths the user actually NAMED (a --data location and/or a
+    --repo), so Genesis can GROUND the task it authors in the real files (README, entry/eval script,
+    a data file's header) instead of guessing. Returns None when the user named NO on-disk path (a
+    pure goal→plan generation, e.g. a `quadratic` objective): with nothing concrete to read,
+    `agentic_struct` then just delegates to the single-shot `parse_structured`.
+
+    Deliberately NOT RunTools/DataTools: Genesis runs BEFORE a run or a TaskAdapter exists, so there
+    are no experiments to introspect and no constructed task to profile — the only concrete thing to
+    read at bootstrap is the filesystem the user pointed at. Never raises — a bad/absent path degrades
+    to no tools rather than crashing bootstrap (the run must always be authorable)."""
+    import os
+    from pathlib import Path
+    named = [p for p in (repo, data) if p]
+    if not named:
+        return None
+    try:
+        from looplab.agents.agent import CompositeTools
+        from looplab.tools.reposcout import RepoScoutTools
+        roots = [Path.home()]
+        for p in named:
+            fp = Path(os.path.expanduser(p))
+            roots += [fp, fp.parent]           # the path itself AND its parent, so a sibling is visible
+        primary = Path(os.path.expanduser(named[0]))
+        default_root = str(primary if primary.is_dir() else primary.parent)
+        return CompositeTools([RepoScoutTools(roots, default_root=default_root)])
+    except Exception:  # noqa: BLE001 - scouting is best-effort; a scout we can't build must not block
+        return None
+
+
 def author_task(goal: str, *, client, kinds: tuple[str, ...], data: Optional[str] = None,
                 repo: Optional[str] = None, direction: Optional[str] = None,
                 kind: Optional[str] = None, draft: Optional[dict] = None,
@@ -147,10 +178,26 @@ def author_task(goal: str, *, client, kinds: tuple[str, ...], data: Optional[str
         "You bootstrap a new autonomous-ML run from the user's goal. Decide the TASK and author it as "
         "an inline `task` object.\n\n" + kind_rule + "\n\n" + DATA_GUIDE + "\n\n" + REPO_AUTONOMY_GUIDE +
         f"\n\nRegistered task kinds: {list(kinds)}." + _attn)
+    # AGENTIC grounding: when the user named a real on-disk path (a --data location or a --repo), give
+    # the model a read-only filesystem scout so it authors the task from what's REALLY there (the
+    # README/entry-script/eval for a repo, the data file's header/schema for a dataset) instead of a
+    # promise — the same repo-scouting the Web UI's Genesis chat does. With no named path it stays
+    # None (pure goal→plan) and `agentic_struct` degrades to the single-shot parse_structured.
+    tools = _scout_tools(data, repo)
+    if tools is not None:
+        sys_prompt += (
+            "\n\nYou have READ-ONLY tools to inspect this machine BEFORE you author the task: "
+            "list_dir(path), read_file(path), find_files(root, pattern). The user pointed you at a real "
+            "path on disk — ACTUALLY use them first: list the repo/data directory, read a repo's README "
+            "and entry/eval script, and sample a data file's header for a dataset, so the task (its eval "
+            "command, metric, edit_surface, data fields) is grounded in what's really there. Never "
+            "invent a path, command, or column you didn't see. Then emit the task once.")
     user = f"Goal: {goal}{hint_block}"
     messages = [{"role": "system", "content": sys_prompt}, {"role": "user", "content": user}]
     try:
-        plan = parse_structured(client, messages, _TaskPlan, parser)
+        plan = agentic_struct(client, tools, messages, _TaskPlan, parser=parser,
+                              loop_opts={"max_turns": 15},
+                              fallback=lambda m: parse_structured(client, m, _TaskPlan, parser))
     except Exception as e:  # noqa: BLE001 - transport/parse failure: report it as an ERROR, distinct
         # from a vague goal (which parses fine but returns an empty task). The caller surfaces the two
         # differently — "reach the model" vs "your goal was too vague".

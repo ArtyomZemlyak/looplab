@@ -105,11 +105,26 @@ def _g(v: Optional[float]) -> str:
     return "?" if v is None else f"{v:.4g}"
 
 
+def _report_tools(state: RunState):
+    """Read-only run-introspection tools so the report is GROUNDED by reading the real experiments
+    (read_experiment / read_code / read_logs / list_experiments) instead of synthesizing blind from the
+    aggregate summary in the prompt. None on any failure => plain parse_structured (old behaviour)."""
+    try:
+        from looplab.tools.run_tools import RunTools
+        from looplab.agents.agent import CompositeTools
+        rt = RunTools()
+        rt.bind_state(state, None)
+        return CompositeTools([rt])
+    except Exception:  # noqa: BLE001 — grounding is best-effort; degrade to the non-agentic path
+        return None
+
+
 def generate_report(state: RunState, client, *, parser: str = "tool_call", trigger: str = "") -> dict:
     """Synthesize one conclusion-first report dict from the run state. Best-effort: a transport/parse
     failure (or no usable model) returns a minimal report rather than raising — the caller records it
     as a `report_generated` event regardless, so the UI always has the deterministic analysis."""
     from looplab.core.parse import parse_structured
+    from looplab.agents.agent import agentic_struct
     try:
         # Build the context INSIDE the try too — a malformed state must degrade to a minimal report,
         # not propagate out of the (un-try'd) _write_report and kill the run.
@@ -117,7 +132,12 @@ def generate_report(state: RunState, client, *, parser: str = "tool_call", trigg
             {"role": "system", "content": _SYSTEM},
             {"role": "user", "content": _report_context(state) + "\n\nWrite the run report now."},
         ]
-        out = parse_structured(client, messages, _ReportOut, parser)
+        # AGENTIC: the model MAY first read the real experiments (RunTools) to ground the report,
+        # then emit the structured _ReportOut. Degrades to plain parse_structured when tools/loop
+        # yield nothing (or no client), preserving the offline minimal-report contract below.
+        out = agentic_struct(client, _report_tools(state), messages, _ReportOut,
+                             parser=parser, loop_opts={"max_turns": 15},
+                             fallback=lambda m: parse_structured(client, m, _ReportOut, parser))
         content = out.model_dump(mode="json")
     except Exception as e:  # noqa: BLE001 — report is best-effort; never crash the run
         content = _ReportOut(headline="(report unavailable)",

@@ -43,6 +43,7 @@ def _listwise_pick(client, idea, candidates: list[str], parser: str = "tool_call
         from pydantic import BaseModel
 
         from looplab.core.parse import parse_structured
+        from looplab.agents.agent import agentic_struct
 
         class _Pick(BaseModel):
             choice: int = 0
@@ -63,7 +64,16 @@ def _listwise_pick(client, idea, candidates: list[str], parser: str = "tool_call
         # Use the run's configured parser (threaded from settings.llm_parser) — a non-tool_call
         # backend (baml/json/guided) must not be forced through tool_call, or the selection
         # silently no-ops to top[0].
-        out = parse_structured(client, msgs, _Pick, parser or "tool_call")
+        # AGENTIC: upgrade to `agentic_struct` so the ranker MAY read the real experiments/code
+        # (read_experiment/read_code via RunTools) before emitting its pick, instead of judging from
+        # the truncated candidate blocks alone. No RunState reaches this selection path (the Developer
+        # protocol's `implement(idea)` carries no state, and `WrapsDeveloper` forwards only
+        # brief/client/prompts) — so `tools=None`, which makes `agentic_struct` degrade to the exact
+        # `parse_structured` call below. The fallback preserves the old behavior on any agentic failure.
+        out = agentic_struct(
+            client, None, msgs, _Pick, parser=(parser or "tool_call"),
+            loop_opts={"max_turns": 15},
+            fallback=lambda m: parse_structured(client, m, _Pick, parser or "tool_call"))
         if isinstance(out.choice, int) and 0 <= out.choice < len(candidates):
             return out.choice
     except Exception:  # noqa: BLE001 — selection is advisory; fall back to the first top-scorer

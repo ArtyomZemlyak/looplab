@@ -182,12 +182,21 @@ def agent_merge(client, items: list[str], *, kind: str = "items", goal: str = ""
         return singletons
     try:
         from looplab.core.prompts import render
+        from looplab.agents.agent import agentic_struct
         blocks = "\n".join(f"[{i}] {c[:600]}" for i, c in enumerate(items))
         sysmsg = render(prompts, "merge_system", _MERGE_SYSTEM).replace("{kind}", kind)
         user = ((f"Goal context: {goal}\n\n" if goal else "")
                 + f"Candidate {kind} (decide which indices are the SAME):\n" + blocks)
-        plan = parse_structured(client, [{"role": "system", "content": sysmsg},
-                                         {"role": "user", "content": user}], _MergePlan, parser or "tool_call")
+        msgs = [{"role": "system", "content": sysmsg}, {"role": "user", "content": user}]
+        # AGENTIC upgrade of the adjudication call: were a run/tools threaded in, the adjudicator
+        # could READ the real candidate experiments before deciding. This is a shared utility that
+        # only ever receives the candidate TEXTS (no RunState/tools), so there is nothing extra to
+        # read — pass tools=None and `agentic_struct` degrades to plain `parse_structured`, the exact
+        # prior behavior. The fallback references THIS module's `parse_structured` so tests that
+        # monkeypatch `hybrid_merge.parse_structured` still intercept it.
+        plan = agentic_struct(
+            client, None, msgs, _MergePlan, parser=parser or "tool_call", loop_opts={"max_turns": 15},
+            fallback=lambda m: parse_structured(client, m, _MergePlan, parser or "tool_call"))
     except Exception:  # noqa: BLE001 — advisory: a merge failure must never lose or corrupt data
         return singletons
     # Rebuild a clean partition: honor only VALID, DISJOINT groups of >=2; every unclaimed index stays

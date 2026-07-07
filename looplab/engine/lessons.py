@@ -404,7 +404,10 @@ class LessonMemory:
                   "avoided. Credit the SPECIFIC difference, stated generally (no exact numbers). "
                   "No preamble.")
         try:
-            out = client.complete_text([{"role": "user", "content": prompt}]) or ""
+            from looplab.agents.agent import agentic_text
+            out = agentic_text(client, self._reflect_tools(state), [{"role": "user", "content": prompt}],
+                               loop_opts=self._reflect_loop_opts(),
+                               answer_desc="one credited lesson per pair: `P<n> [GOOD]/[BAD] <lesson>`") or ""
         except Exception:  # noqa: BLE001 — reflection is best-effort, never fails the run
             return _fallback(), pairs
         lessons = []
@@ -515,7 +518,11 @@ class LessonMemory:
                   "3. When to use it (preconditions) and when NOT to.\n"
                   "Keep it concise — a card someone reuses, never a code dump.")
         try:
-            out = (client.complete_text([{"role": "user", "content": prompt}]) or "").strip()
+            from looplab.agents.agent import agentic_text
+            out = (agentic_text(client, self._reflect_tools(final), [{"role": "user", "content": prompt}],
+                                loop_opts=self._reflect_loop_opts(),
+                                answer_desc="a short reusable skill card: technique + minimal snippet + when to use")
+                   or "").strip()
             return (f"{out[:1800]}\n\n_Verified on `{final.task_id}` (Δ={h.best_delta:+.4g})._"
                     if out else base)
         except Exception:   # noqa: BLE001 - best-effort
@@ -551,7 +558,11 @@ class LessonMemory:
                   "that mattered and what did NOT help — a reusable CAUSAL note a future run on this "
                   "task can learn from. Be specific and concise; no preamble, don't just restate params.")
         try:
-            out = (client.complete_text([{"role": "user", "content": prompt}]) or "").strip()
+            from looplab.agents.agent import agentic_text
+            out = (agentic_text(client, self._reflect_tools(final), [{"role": "user", "content": prompt}],
+                                loop_opts=self._reflect_loop_opts(),
+                                answer_desc="a 2-3 sentence reusable causal note on WHY the winner won")
+                   or "").strip()
             return out[:700] or None
         except Exception:   # noqa: BLE001 - reflection is best-effort
             return None

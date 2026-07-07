@@ -89,6 +89,21 @@ _RUBRIC = (
 )
 
 
+def _verify_tools(state: RunState):
+    """Read-only run-introspection tools so the semantic verifier READS the actual node it's judging
+    (read_code / read_experiment / read_logs / list_experiments) before grading, instead of deciding
+    blind from the EVIDENCE summary baked into the prompt. None on any failure => plain parse (the
+    exact legacy behavior). Mirrors engine.lessons._reflect_tools."""
+    try:
+        from looplab.tools.run_tools import RunTools
+        from looplab.agents.agent import CompositeTools
+        rt = RunTools()
+        rt.bind_state(state, None)
+        return CompositeTools([rt])
+    except Exception:  # noqa: BLE001 — no tools => degrade to the deterministic/plain path
+        return None
+
+
 def verify_memo(memo: dict, state: RunState, client=None,
                 parser: str = "tool_call") -> Optional[dict]:
     """Verify a memo's claims. Deterministic layer always runs; the LLM rubric pass upgrades
@@ -109,11 +124,19 @@ def verify_memo(memo: dict, state: RunState, client=None,
             for k, (i, c) in enumerate(todo, start=1):
                 lines.append(f"CLAIM {k}: {str(c.get('statement', ''))[:300]}\n"
                              f"EVIDENCE:\n{_evidence_text(c, state)}")
-            out = parse_structured(
-                client,
-                [{"role": "system", "content": _RUBRIC},
-                 {"role": "user", "content": "\n\n".join(lines)}],
-                _VerdictOut, parser)
+            msgs = [{"role": "system", "content": _RUBRIC},
+                    {"role": "user", "content": "\n\n".join(lines)}]
+            # AGENTIC upgrade: rather than grade blind from the EVIDENCE summary above, let the verifier
+            # first READ the actual node it's judging (read_code / read_experiment / read_logs) via
+            # read-only RunTools bound to this run's state, then emit the structured verdicts. Degrades to
+            # the plain parse_structured pass when tools can't be built (tools=None) or the loop yields
+            # nothing valid (fallback below) — byte-identical to the old behavior. max_turns=15: read a
+            # bit, then emit (these judge, they don't investigate for 300 turns) — mirrors reflect_lessons.
+            from looplab.agents.agent import agentic_struct
+            out = agentic_struct(
+                client, _verify_tools(state), msgs, _VerdictOut, parser=parser,
+                loop_opts={"max_turns": 15},
+                fallback=lambda m: parse_structured(client, m, _VerdictOut, parser))
             for k, (i, _c) in enumerate(todo):
                 if k < len(out.verdicts) and out.verdicts[k] in ("supported", "unsupported",
                                                                  "unclear"):
