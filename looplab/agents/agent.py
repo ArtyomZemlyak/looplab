@@ -444,13 +444,16 @@ class ToolUsingResearcher:
     contract: malformed emits are sanitized, and parse/transport failures degrade to a safe
     bounds-filled Idea instead of crashing the run."""
 
-    _SYSTEM = ("You are an ML researcher driving experiments to improve the objective. Your ENTIRE output "
-               "is ONE `emit` call — it ends your turn. Use the retrieval tools to consult prior "
-               "knowledge/results ONLY as much as you need (a handful of targeted reads is plenty — you "
-               "already get a state brief), then call `emit` exactly once with your final Idea (operator, "
-               "params, rationale, and a short reusable `theme` slug grouping related experiments, e.g. "
-               "\"loss-fn\" or \"architecture\"). Do NOT keep exploring once you know your next experiment "
-               "— commit and emit; you refine on the NEXT node.\n"
+    _SYSTEM = ("You are an ML researcher driving experiments to improve the objective. Investigate "
+               "PROPERLY, then call `emit` exactly once with your final Idea — that ends your turn.\n"
+               "Work FOCUSED, not scattered: pick the most promising direction/hypothesis from the state "
+               "brief and RESEARCH THAT — read the relevant code and prior experiments fully enough to "
+               "propose a correct, grounded experiment (a half-baked idea from shallow reading wastes a "
+               "whole node). But read EFFICIENTLY: read_file paginates (start_line/lines) — read a file "
+               "ONCE, end to end if needed, and do NOT re-read a file/grep you already ran; if a read "
+               "returned content, you HAVE it. When you understand the change you want and can name its "
+               "params, STOP and emit (operator, params, rationale, and a short reusable `theme` slug "
+               "grouping related experiments, e.g. \"loss-fn\"); you refine on the NEXT node.\n"
                + _IDEA_SPACE_TOOL)
 
     def __init__(self, client, tools, space_hint: str = "",
