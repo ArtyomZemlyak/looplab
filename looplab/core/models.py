@@ -62,6 +62,28 @@ class Idea(BaseModel):
             self.rationale = self.hypothesis.strip()[:500]
         return self
 
+    @model_validator(mode="after")
+    def _clamp_params_to_space(self) -> "Idea":
+        # Safety net: clamp any `params` value that falls OUTSIDE its declared `space` bound back into
+        # range. A mutation/latent-sampling path occasionally leaked raw out-of-range values into the
+        # idea — e.g. lr_stage2=-0.0204, temperature=-0.0119, batch_size=17541 with space
+        # lr_stage2=[3e-4, 1e-3] — and the Developer either crash-implemented them or wasted reasoning
+        # decoding "why is the learning rate negative" (live nodes 59, 61 both crashed off this). Only
+        # values strictly outside [lo, hi] are touched, so valid points pass through untouched; replay
+        # rebuilds ideas through this validator, healing such params in existing logs too.
+        for k, val in list(self.params.items()):
+            rng = self.space.get(k)
+            if not (isinstance(rng, (list, tuple)) and len(rng) >= 2):
+                continue
+            try:
+                lo, hi = float(min(rng)), float(max(rng))
+                v = float(val)
+            except (TypeError, ValueError):
+                continue
+            if v < lo or v > hi:
+                self.params[k] = round(min(hi, max(lo, v)), 6)
+        return self
+
 
 class Trial(BaseModel):
     """One configuration evaluated inside an intra-node sweep. Audit/UI data — the node's scalar
