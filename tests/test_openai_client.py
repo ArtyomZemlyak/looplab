@@ -419,7 +419,7 @@ def test_post_wraps_raw_decode_error_as_llmerror(monkeypatch):
     monkeypatch.setattr(c, "_sdk_chat", fake)
     with pytest.raises(llm.LLMError, match="unparseable"):
         c.complete_text([{"role": "user", "content": "go"}])
-    assert calls["n"] == 5                            # 1 + _max_retries, then clean LLMError
+    assert calls["n"] == c._max_retries + 1           # 1 + _max_retries, then clean LLMError
 
 
 def test_sdk_chat_forwards_guided_json_and_response_format(monkeypatch):
