@@ -56,6 +56,11 @@ Then open the printed URL. The server serves the **built** React bundle from `ui
   onboarding) plus how to point at your data.
 - **Drive a run** — start, resume, fork, branch, or inject nodes from the browser; the server spawns
   the engine as a subprocess. A finished run can be extended with a new batch.
+- **Reset a node in place** — the node inspector's **↻ Reset** button (or `reset(node_id, stage)` in
+  chat) re-runs an EXISTING node from a chosen stage instead of spawning a new one: `eval` re-scores it
+  (keep the idea + code — for an infra/API-key blip), `implement` re-runs only the Developer (keep the
+  Researcher's idea — for crashed code), `propose` is a full redo. Same node id, no proliferation;
+  applied on the next resume (`node_reset` control event).
 - **Chat / boss** — an agentic run chat turns one message into a plan of ordered actions, with each
   action narrated in a durable feed (`chat.jsonl`).
 - **Reports** — an agent-authored, conclusion-first run report plus deterministic metric-improvement
