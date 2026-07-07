@@ -650,11 +650,14 @@ class OpenAICompatibleClient:
         # the request is retried without it and the model works. Deepseek keeps its reasoning; glm-5.1
         # silently drops it. Per-client (per-model), detected once and cached.
         self._reasoning_ok = True
-        self._max_retries = 6               # 429/5xx/throttle-403 backoff retries before surfacing an
-        #   LLMError. 6 (≈90s: 2+4+8+16+30+30) not 4 (~30s) so a node rides an INTERMITTENT gateway
-        #   rate-limit/throttle window out WITHIN the node (one node = one experiment) instead of
-        #   developer-crashing → the run auto-pausing on every burst. A genuine persistent outage just
-        #   surfaces ~60s later, then the circuit-breaker pauses — no spam either way.
+        self._max_retries = 8               # 429/5xx/throttle-403 backoff retries before surfacing an
+        #   LLMError. 8 (≈150s: 2+4+8+16+30+30+30+30) rides out the gateway's COLD-START throttle: after
+        #   the engine sits idle (e.g. paused), the FIRST call-burst on resume gets a 403 "security
+        #   policy" throttle for up to ~2min, then clears (measured: 1st call 63s, next 11 instant). At 4
+        #   (~30s) or even 6 (~90s) that first node developer-crashed → the run auto-paused → resumed →
+        #   hit the cold throttle AGAIN: a pause/resume loop. Riding it out WITHIN the node (one node =
+        #   one experiment) breaks the loop. A genuine persistent outage just surfaces ~2min later, then
+        #   the circuit-breaker pauses — no spam either way.
         # Stall-degrade: a shared/proxied endpoint can stall MID-STREAM on big (code-gen) requests
         # while answering the same request fine without SSE (observed on glm-5.1: non-stream 2s vs a
         # stream that hangs until the watchdog kills it). After a stream stall the NEXT attempt of
