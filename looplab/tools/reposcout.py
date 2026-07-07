@@ -121,13 +121,17 @@ class RepoScoutTools:
                      ["path"]),
             fn_spec("read_file",
                      "Read a text file on this machine (read-only, up to ~16KB per call). Use for README, "
-                     "the train/eval entry script (e.g. test.py), configs, requirements. For a file "
-                     "larger than one page, PAGINATE with start_line: the reply ends with the exact "
+                     "the train/eval entry script (e.g. test.py), configs, requirements. Read a WINDOW "
+                     "with start_line + lines (like an editor's 'go to line N, show M lines'); omit both "
+                     "to read from the top. For a file larger than one page the reply ends with the exact "
                      "start_line to resume from — do NOT re-read from the top.",
                      {"path": {"type": "string", "description": "File path (absolute or ~-relative)."},
                       "start_line": {"type": "integer",
                                      "description": "1-based line to start from (default 1/top). Use the "
-                                     "'read MORE with start_line=N' value from a truncated reply to continue."}},
+                                     "'read MORE with start_line=N' value from a truncated reply to continue."},
+                      "lines": {"type": "integer",
+                                "description": "How many lines to return from start_line (a bounded window). "
+                                "Omit for as many as fit in ~16KB."}},
                      ["path"]),
             fn_spec("find_files",
                      "Recursively find files matching a glob under a directory (read-only).",
@@ -153,7 +157,7 @@ class RepoScoutTools:
             if name == "list_dir":
                 return self._list_dir(args.get("path", ""))
             if name == "read_file":
-                return self._read_file(args.get("path", ""), args.get("start_line", 0))
+                return self._read_file(args.get("path", ""), args.get("start_line", 0), args.get("lines", 0))
             if name == "find_files":
                 return self._find_files(args.get("root", ""), args.get("pattern", "*"))
             if name == "grep":
@@ -196,10 +200,10 @@ class RepoScoutTools:
         key = str(path).replace("\\", "/").lstrip("./")
         return self._overlay.get(path) or self._overlay.get(key)
 
-    def _read_file(self, path: str, start_line=0) -> str:
+    def _read_file(self, path: str, start_line=0, lines=0) -> str:
         staged = self._overlay_get(path)
         if staged is not None:               # the code the caller is EDITING wins over the pristine disk
-            return self._paginate(staged, start_line)
+            return self._paginate(staged, start_line, lines)
         if self._is_deleted(path):           # reflect the STAGED tree: a file deleted this session is gone
             return f"(deleted this session: {path} — not read)"
         p = self._resolve(path)
@@ -219,30 +223,37 @@ class RepoScoutTools:
             data = p.read_text(encoding="utf-8-sig", errors="replace")
         except OSError as e:
             return f"(could not read: {e})"
-        return self._paginate(data, start_line)
+        return self._paginate(data, start_line, lines)
 
     @staticmethod
-    def _paginate(data: str, start_line=0) -> str:
-        """Return up to _MAX_READ chars of `data`, honoring a 1-based `start_line` so a caller can PAGE
-        through a file larger than the cap. start_line 0/None/'' = from the top; a stringy '180' coerces.
-        On truncation the reply names the exact start_line to RESUME from. (Before this, read_file ignored
-        start_line entirely and always returned the first 16KB — agents re-read the same file head 13-21×
-        and burned their whole budget, per the node 56/59/61/62 traces.)"""
-        try:
-            start = max(0, int(start_line) - 1) if start_line else 0
-        except (TypeError, ValueError):
-            start = 0
-        if start > 0:
-            lines = data.splitlines(keepends=True)
-            head = f"(showing from line {start + 1} of {len(lines)})\n"
-            body = "".join(lines[start:])
-        else:
-            head, body = "", data
-        if len(body) <= _MAX_READ:
-            return head + body
-        chunk = body[:_MAX_READ]
-        resume = start + chunk.count("\n") + 1          # next unseen 1-based line
-        return head + chunk + f"\n… (truncated at {_MAX_READ} chars — read MORE with start_line={resume})"
+    def _paginate(data: str, start_line=0, lines=0) -> str:
+        """Return a WINDOW of `data`: `lines` lines starting at 1-based `start_line`, capped at _MAX_READ
+        chars. start_line 0/None/'' = from the top; `lines` 0/None = as many as fit; stringy '180'/'40'
+        coerce. When more remains (line window ran into the char cap, or no `lines` given and the file is
+        bigger than one page) the reply names the exact start_line to RESUME from. (Before this, read_file
+        ignored start_line entirely and always returned the first 16KB — agents re-read the same file head
+        13-21× and burned their whole budget, per the node 56/59/61/62 traces.)"""
+        def _int(v):
+            try:
+                return int(v) if v else 0
+            except (TypeError, ValueError):
+                return 0
+        start = max(0, _int(start_line) - 1)
+        want = max(0, _int(lines))
+        all_lines = data.splitlines(keepends=True)
+        n = len(all_lines)
+        window = all_lines[start: (start + want) if want else n]
+        head = f"(lines {start + 1}-{start + len(window)} of {n})\n" if (start > 0 or want) else ""
+        body = "".join(window)
+        if len(body) > _MAX_READ:                      # window ran into the char cap — truncate mid-window
+            body = body[:_MAX_READ]
+            shown = body.count("\n")                   # whole lines that survived the cut
+            more = True
+        else:                                          # the full line-window was returned
+            shown = len(window)
+            more = (start + shown) < n                 # anything after the window?
+        tail = f"\n… (more below — read on with start_line={start + shown + 1})" if more else ""
+        return head + body + tail
 
     def _find_files(self, root: str, pattern: str) -> str:
         p = self._resolve(root)
