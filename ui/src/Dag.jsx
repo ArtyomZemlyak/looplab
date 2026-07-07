@@ -442,6 +442,10 @@ export default function Dag({ state, selectedId, onSelect, groupMode = 'none', c
         <button className="nm-item" onClick={() => act('ablate')}><OpIcon name="target" size={13} /> Ablate</button>
         <button className="nm-item" onClick={() => act('diff')}><OpIcon name="doc" size={13} /> Diff vs champion</button>
         <button className="nm-item" onClick={() => act('inspect')}><OpIcon name="search" size={13} /> Inspect</button>
+        <div className="nm-h" style={{ marginTop: 4 }}>re-run in place (same #, no new node)</div>
+        <button className="nm-item" onClick={() => act('reset:eval')}><OpIcon name="play" size={13} /> Re-run · re-score (keep code)</button>
+        <button className="nm-item" onClick={() => act('reset:implement')}><OpIcon name="play" size={13} /> Re-run · re-code (keep idea)</button>
+        <button className="nm-item" onClick={() => act('reset:propose')}><OpIcon name="play" size={13} /> Re-run · full redo</button>
         <button className="nm-item danger" onClick={() => act('kill')}><OpIcon name="cross" size={13} /> Kill branch</button>
       </div>
     </>}

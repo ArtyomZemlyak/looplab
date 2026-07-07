@@ -142,6 +142,12 @@ export default function RunView({ runId, onBack }) {
       // panel folded (sideC persists in localStorage!) selecting alone changes nothing visible
       else if (action === 'diff') { setComparePair([live2?.best_node_id ?? id, id]); setPanel('compare') }
       else if (action === 'merge') { setMergeFrom(id); showToast(`click a node to merge with #${id}`) }
+      else if (action.startsWith('reset:')) {   // re-run this node IN PLACE from a stage (no new node)
+        const stage = action.split(':')[1]
+        await CONTROL.resetNode(runId, id, stage)
+        await kickEngine(`re-running #${id} from ${stage}`)
+        showToast(`#${id}: re-running from ${stage} — applied on resume`)
+      }
       else if (action === 'kill') {
         const ids = pendingDescendants(id)
         if (!ids.length) { showToast(`#${id}: nothing pending to kill (already evaluated)`); return }
