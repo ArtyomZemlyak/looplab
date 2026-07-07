@@ -225,9 +225,10 @@ export default function AssistantBar({ runId, hidden = false }) {
             try {
               const pp = await assistantProgress(id)
               if (!pp.active) break
-              if (mountedRef.current && sidRef.current === id && (pp.steps || []).length)
+              if (mountedRef.current && sidRef.current === id && ((pp.steps || []).length || pp.text))
                 patchLast(prev => prev && prev.role === 'assistant' && prev.streaming   // only the live placeholder
-                  ? { activity: [{ type: 'tools', labels: pp.steps }] } : prev)
+                  ? { ...(pp.text ? { content: pp.text } : {}),
+                      activity: (pp.steps || []).length ? [{ type: 'tools', labels: pp.steps }] : prev.activity } : prev)
               // A reattached turn may be PARKED on a HITL confirm — surface its card too (the send
               // path polls permissions; without this a reload hides the card until the 900s deny).
               const perms = await assistantPermissions(id)
@@ -378,8 +379,28 @@ export default function AssistantBar({ runId, hidden = false }) {
     // sid-guarded like every other callback: after a mid-turn session switch, a late poll result
     // must not surface the DEPARTED session's confirm-cards over the one the user switched to.
     ;(async () => { while (polling && mountedRef.current && sidRef.current === id) { try { const p = await assistantPermissions(id); if (mountedRef.current && sidRef.current === id) setPending(p.pending || []) } catch { /* transient */ } await sleep(800) } })()
-    const safeSid = (fn) => (...a) => { if (mountedRef.current && sidRef.current === id) fn(...a) }
     let acc = ''
+    // Concurrent PROGRESS poll — the SSE fallback. Behind a buffering proxy (jupyter-server-proxy /
+    // nginx) the token/text/step SSE events arrive batched only at the END, leaving a dead "thinking"
+    // bubble the whole time. So ALSO poll /progress: while the real SSE tokens haven't arrived yet
+    // (acc still shorter than the server's mirrored answer-so-far), surface that live text + tool steps.
+    // Once tokens actually flow, acc overtakes it and the authoritative SSE content wins — this only
+    // fills the buffered gap, never fights a working stream.
+    ;(async () => {
+      while (polling && runningRef.current && mountedRef.current && sidRef.current === id) {
+        await sleep(1000)
+        try {
+          const pp = await assistantProgress(id)
+          if (!pp || !pp.active) continue
+          if (mountedRef.current && sidRef.current === id && acc.length < (pp.text || '').length)
+            patchLast(prev => (prev && prev.role === 'assistant' && prev.streaming)
+              ? { content: pp.text || prev.content,
+                  activity: (pp.steps || []).length ? [{ type: 'tools', labels: pp.steps }] : prev.activity }
+              : prev)
+        } catch { /* transient */ }
+      }
+    })()
+    const safeSid = (fn) => (...a) => { if (mountedRef.current && sidRef.current === id) fn(...a) }
     const fullInstruction = instruction + filePreamble(atts)
     try {
       // A just-fired Stop's cancel POST may still be in flight — wait it out so it can't register

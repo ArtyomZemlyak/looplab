@@ -108,7 +108,7 @@ def build_router(srv) -> APIRouter:
             if existing is not None and not existing.is_set():
                 raise HTTPException(409, "a turn is already running for this session")
             _asst_cancel[sid] = cancel_ev
-            _asst_progress[sid] = {"steps": [], "todos": [], "updated": time.time(),
+            _asst_progress[sid] = {"steps": [], "todos": [], "text": "", "updated": time.time(),
                                    "owner": cancel_ev}
 
     def _release_turn(sid: str, cancel_ev: "threading.Event") -> None:
@@ -177,7 +177,9 @@ def build_router(srv) -> APIRouter:
         with _perm_lock:
             p = _asst_progress.get(session)
             return {"steps": list(p["steps"]) if p else [],
-                    "todos": list(p.get("todos", [])) if p else [], "active": bool(p)}
+                    "todos": list(p.get("todos", [])) if p else [],
+                    "text": p.get("text", "") if p else "",   # live answer-so-far (proxy-buffered SSE fallback)
+                    "active": bool(p)}
 
     @router.post("/api/assistant/sessions/{sid}/cancel")
     def assistant_cancel(sid: str):
@@ -437,15 +439,32 @@ def build_router(srv) -> APIRouter:
         approver = _make_approver(sid, cancel_ev)   # a confirm raised AFTER Stop denies instantly
         _on_step, _on_todos = _make_progress_hooks(sid, cancel_ev, q)
 
+        def _progress_text(piece):
+            # Mirror the live assistant output into the POLLED progress channel too, not only the SSE
+            # queue: behind a buffering proxy (jupyter-server-proxy / nginx) the token/text SSE events
+            # arrive batched at the very END, so a client that also polls /progress still watches the
+            # answer form live. Owner-guarded + last-8KB capped like `steps`.
+            if not piece:
+                return
+            with _perm_lock:
+                p = _asst_progress.get(sid)
+                if p is not None and p.get("owner") is cancel_ev and not cancel_ev.is_set():
+                    p["text"] = (p.get("text", "") + piece)[-8000:]
+
         def _on_text(content):
             q.put((SSE_TEXT, content))        # interstitial assistant prose (between tool rounds)
+            _progress_text(content)
+
+        def _reply_sink(piece):
+            q.put((SSE_TOKEN, piece))
+            _progress_text(piece)
 
         def _worker():
             try:
                 res = _assistant_run_turn(client, root, history, instruction, eff_mode,
                                           alive_fn=_engine_alive, settings=s, approver=approver,
                                           on_step=_on_step, on_todos=_on_todos, on_text=_on_text,
-                                          reply_sink=lambda piece: q.put((SSE_TOKEN, piece)),
+                                          reply_sink=_reply_sink,
                                           cancel_check=cancel_ev.is_set)
                 res = _finish_turn(sid, history, instruction, client, res,
                                    best_effort_persist=False)

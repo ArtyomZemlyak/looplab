@@ -650,10 +650,15 @@ function Trace({ n, runId, live, working }) {
   const nav = <span className="trace-nav">
     <button className="seg" title="scroll to top" onClick={() => scrollTo('top')}>↑</button>
     <button className="seg" title="scroll to newest (bottom)" onClick={() => scrollTo('bottom')}>↓</button></span>
-  if (!spans.length && !agent)
-    return <div className="trace" ref={bodyRef}>{status}<div className="muted">{working
-      ? 'Trace fills in here as the agent works — new steps appear automatically.'
-      : 'No execution spans for this node yet — toy/offline nodes have minimal spans, and a node still in progress fills its trace as it runs.'}</div></div>
+  if (!spans.length && !agent) {
+    // While the agent is WORKING this node, node_detail's trace may still be empty (its create_node
+    // root span hasn't closed) — but /conversation rebuilds LIVE from the sub-spans that have already
+    // flushed. So mount the live-polling Conversation (it refreshes every 4s) instead of a dead
+    // placeholder: steps now appear as each generation/tool completes, not all at once at the end.
+    if (working)
+      return <div className="trace" ref={bodyRef}>{status}<Conversation n={n} runId={runId} working={working} /></div>
+    return <div className="trace" ref={bodyRef}>{status}<div className="muted">No execution spans for this node yet — toy/offline nodes have minimal spans, and a node still in progress fills its trace as it runs.</div></div>
+  }
   const toggle = <div className="conv-toggle">
     <button className={'seg' + (view === 'conversation' ? ' on' : '')} onClick={() => setView('conversation')}
       title="Linear, de-duplicated reading: request once, then each turn's reasoning + tools">conversation</button>

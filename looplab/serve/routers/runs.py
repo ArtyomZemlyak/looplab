@@ -146,6 +146,18 @@ def build_router(srv) -> APIRouter:
         st = fold(_events(rd))
         n = st.nodes.get(nid)
         if n is None:
+            # A node still BUILDING has no node_created yet (not in st.nodes), but its create_node
+            # sub-spans (propose/implement generations + tool calls) already flush to spans.jsonl tagged
+            # with this node_id AS THEY COMPLETE. Serve a minimal in-progress detail carrying that live
+            # trace instead of 404ing — otherwise the Trace tab can't fill in until the whole build ends
+            # (the exact "nothing, then everything at once" the operator hit).
+            trace = _node_trace(rd, nid)
+            building = bool(st.building and st.building.get("node_id") == nid)
+            if building or trace.get("nodes"):
+                b = st.building or {}
+                return {"id": nid, "status": "building",
+                        "operator": b.get("operator"), "parent_ids": b.get("parent_ids", []),
+                        "idea": None, "code": "", "annotations": [], "trace": trace}
             raise HTTPException(404, "no such node")
         out = n.model_dump(mode="json")
         out["annotations"] = st.annotations.get(nid, [])
