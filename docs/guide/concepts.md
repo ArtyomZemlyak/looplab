@@ -114,6 +114,36 @@ The win comes from rich operators, not exotic search. The Researcher/Developer a
   (`merge_mode=ensemble`). This is the multi-parent DAG.
 - **sweep** — one node runs a whole grid of trials in a single process.
 
+## Multi-stage eval pipeline
+
+For a repo task the eval can be a **declared pipeline of named stages** instead of one opaque command.
+The Developer writes `looplab_stages.json` in the workdir (a task may recommend a default via its eval
+spec's `stages`):
+
+```json
+{"stages": [
+  {"name": "data_prep", "command": ["python", "prep.py"]},
+  {"name": "train",     "command": ["python", "train.py"], "timeout": 7200, "check": true},
+  {"name": "eval",      "command": ["python", "test.py"]}
+]}
+```
+
+Stages run in order in the **same workdir** so artifacts persist (train writes a checkpoint → eval reads
+it). Each stage gets its own span + `<name>.log` and a pass/fail (`stage_finished` events fold onto
+`node.stages`). Three payoffs:
+
+- **A crash is pinpointed** to its stage (`node.failed_stage`), not hidden behind one command — a run
+  that never actually trains is obvious (no `train` stage / a red one).
+- **Fix only the broken stage** — re-run the node *from* a stage (the Overview's clickable "eval
+  pipeline" strip, `reset(stage)` in chat, or a `node_reset` with the stage name): earlier stages are
+  marked *reused* and skipped, so a failed `eval` is fixed in seconds without paying to re-`train`.
+- **Optional inter-stage verify** — a stage flagged `"check": true` hands its output to an agentic
+  checker (Researcher/Developer) before the next stage runs; a concern stops the pipeline early so a
+  diverged train can't silently feed eval.
+
+The **last stage is the metric stage** — its stdout must print the metric JSON line. With no manifest,
+the single eval command is used exactly as before.
+
 ## Evaluation rigor
 
 A reported number is only useful if it generalizes. The trust layer is leakage-first:
