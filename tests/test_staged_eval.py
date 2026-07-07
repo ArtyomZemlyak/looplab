@@ -68,3 +68,52 @@ def test_fold_stage_is_last_wins_by_name_and_reset_clears():
     assert len(st.nodes[0].stages) == 1 and st.nodes[0].stages[0]["status"] == "ok"
     st2 = fold(base + [_ev("node_reset", {"node_id": 0, "from_stage": "implement"}, 3)])
     assert st2.nodes[0].stages == [] and st2.nodes[0].failed_stage is None
+
+
+# --------------------------------------------------------------- Phase 2: stage-scoped re-run
+
+def test_reset_from_pipeline_stage_sets_rerun_stage_and_clears_on_terminal():
+    base = [_created(0),
+            _ev("stage_finished", {"node_id": 0, "name": "train", "status": "ok"}, 1),
+            _ev("stage_finished", {"node_id": 0, "name": "eval", "status": "fail"}, 2),
+            _ev("node_failed", {"node_id": 0, "error": "e", "reason": "crash", "failed_stage": "eval"}, 3)]
+    # reset from the 'eval' stage → node pending-with-code, rerun_stage='eval' (skip train on re-run)
+    st = fold(base + [_ev("node_reset", {"node_id": 0, "from_stage": "eval"}, 4)])
+    assert st.nodes[0].status is NodeStatus.pending
+    assert st.nodes[0].rerun_stage == "eval" and st.nodes[0].rerun_from is None
+    assert st.nodes[0].failed_stage is None and st.nodes[0].code == "c"   # code kept (eval-type)
+    # the re-run's terminal clears the marker
+    st2 = fold(base + [_ev("node_reset", {"node_id": 0, "from_stage": "eval"}, 4),
+                       _ev("stage_finished", {"node_id": 0, "name": "eval", "status": "ok"}, 5),
+                       _ev("node_evaluated", {"node_id": 0, "metric": 0.9}, 6)])
+    assert st2.nodes[0].rerun_stage is None and st2.nodes[0].metric == 0.9
+
+
+# --------------------------------------------------------------- Phase 3: inter-stage verify
+
+def test_inter_stage_check_stops_pipeline_on_concern():
+    d = tempfile.mkdtemp()
+    Path(d, "ev.py").write_text("import json; print(json.dumps({'m': 0.9}))")
+    stages = [{"name": "train", "command": ["python", "-c", "print('flat loss')"], "check": True},
+              {"name": "eval", "command": ["python", "ev.py"]}]
+    seen = []
+
+    def checker(name, tail):
+        seen.append(name)
+        return "train produced no checkpoint" if name == "train" else None
+    r = run_command_eval(["true"], d, 30, {"kind": "stdout_json", "key": "m"},
+                         stages=stages, check_fn=checker)
+    assert seen == ["train"]                                  # eval's check never reached
+    assert r.metric is None and r.failed_stage == "train"
+    assert [s["status"] for s in r.stages] == ["check_failed"]   # eval never ran
+    assert "verification" in r.stderr
+
+
+def test_inter_stage_check_ok_lets_pipeline_continue():
+    d = tempfile.mkdtemp()
+    Path(d, "ev.py").write_text("import json; print(json.dumps({'m': 0.7}))")
+    stages = [{"name": "train", "command": ["python", "-c", "print('ok')"], "check": True},
+              {"name": "eval", "command": ["python", "ev.py"]}]
+    r = run_command_eval(["true"], d, 30, {"kind": "stdout_json", "key": "m"},
+                         stages=stages, check_fn=lambda name, tail: None)   # always OK
+    assert r.metric == 0.7 and [s["status"] for s in r.stages] == ["ok", "ok"]

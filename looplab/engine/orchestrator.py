@@ -2335,6 +2335,36 @@ class Engine(ConfirmPhaseMixin, AblationMixin):
                  and isinstance(s.get("command"), list) and s.get("command")]
         return clean or None
 
+    def _stage_check_fn(self, node):
+        """Phase 3 inter-stage verify: a callback (stage_name, log_tail) -> concern|None that asks an LLM
+        whether a `check`-flagged stage plausibly succeeded (train actually trained + saved a checkpoint,
+        no silent fallback) BEFORE the next stage runs. Returns None (checks skipped) when no client is
+        available. Runs inside the eval worker thread, so complete_text blocks there — fine, like the eval."""
+        try:
+            client = self._reflect_client()
+        except Exception:  # noqa: BLE001
+            client = None
+        if client is None:
+            return None
+        idea_text = self._idea_text(node.idea) if node is not None else ""
+
+        def _check(stage_name, tail):
+            msgs = [{"role": "system", "content":
+                     "You verify ONE stage of an ML eval pipeline before the next runs. Given the stage "
+                     "name and its output tail, decide if it plausibly SUCCEEDED and produced a sane "
+                     "artifact for the next stage (e.g. train actually trained and saved a checkpoint, "
+                     "loss moved, no silent fallback to a stale/pretrained model). Reply EXACTLY 'OK' if "
+                     "fine, otherwise a ONE-LINE concern."},
+                    {"role": "user", "content":
+                     f"Experiment: {idea_text[:400]}\n\nStage '{stage_name}' output tail:\n{tail}"}]
+            try:
+                out = (client.complete_text(msgs) or "").strip()
+            except Exception:  # noqa: BLE001 — a checker failure must never fail the eval
+                return None
+            return None if (not out or out.upper().startswith("OK")) else out[:300]
+
+        return _check
+
     def _run_eval(self, node, workdir, env=None, profile=None, cancel=None):
         """Eval dispatcher: RepoTask runs the operator's command + reads its metric;
         otherwise the classic solution.py sandbox path. Both return a `RunResult`, so all
@@ -2357,6 +2387,8 @@ class Engine(ConfirmPhaseMixin, AblationMixin):
             cmd, timeout = command_eval.build_command(es, params, prof)
             root = str(Path(workdir).resolve())               # repo/workdir root
             stages = self._resolve_stages(root, es)           # multi-stage pipeline (Developer file / task default)
+            check_fn = (self._stage_check_fn(node)            # Phase 3: inter-stage verify (only if any stage asks)
+                        if stages and any(s.get("check") for s in stages) else None)
             cwd = self._sandbox_cwd(workdir, es.get("cwd", "."))
             # untrusted tier (Phase 4): sandbox the eval in docker, mounting the workspace
             # root so the cwd subdir + host metric reading line up. Fails loudly w/o docker.
@@ -2377,7 +2409,9 @@ class Engine(ConfirmPhaseMixin, AblationMixin):
                 tracer=self.tracer,                           # child spans: setup/command/read
                 cancel=cancel,                                # operator mid-eval node_abort
                 log_dir=root,                                 # live setup.log/eval.log in the node workdir
-                stages=stages)                                # multi-stage pipeline (Phase 1); None = single command
+                stages=stages,                                # multi-stage pipeline (Phase 1); None = single command
+                start_stage=(node.rerun_stage if node is not None else None),  # Phase 2: re-run from a stage
+                check_fn=check_fn)                            # Phase 3: optional inter-stage agentic verify
         else:
             # Intra-node sweep nodes run a whole grid in one process, so they need ~N× the
             # single-eval budget. `sweep_timeout_mult` scales the wall-clock for sweep nodes only;
@@ -2543,7 +2577,11 @@ class Engine(ConfirmPhaseMixin, AblationMixin):
                     if skip:
                         return
             workdir = self.run_dir / "nodes" / f"node_{node_id}"
-            self._materialize(node, workdir)        # seed tree -> node edits -> task assets
+            # Phase 2 stage-scoped re-run: REUSE the existing workdir (earlier stages' artifacts — the
+            # checkpoint `train` wrote) instead of re-seeding it, which would wipe them. Fall back to a
+            # fresh materialize if the workdir is gone (nothing to reuse).
+            if not (node.rerun_stage and workdir.exists()):
+                self._materialize(node, workdir)    # seed tree -> node edits -> task assets
             # Hybrid crash repair: each attempt runs the eval (with the mid-eval abort watcher) and,
             # if it CRASHES, the agent triages it and may repair the code IN PLACE and re-run — all
             # within this one node (no new tree node, no max_nodes spent). At most

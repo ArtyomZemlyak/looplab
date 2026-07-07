@@ -424,9 +424,9 @@ class RunControlTools:
             nid = int(args.get("node_id"))
         except (TypeError, ValueError):
             return "(reset_node needs an integer node_id)"
-        stage = str(args.get("stage") or "eval")
-        if stage not in ("propose", "implement", "eval"):
-            return "(stage must be propose|implement|eval)"
+        stage = str(args.get("stage") or "eval").strip()
+        if not stage or len(stage) > 64:      # propose|implement|eval OR an eval-pipeline stage name
+            return "(stage must be a non-empty stage name)"
         if nid not in fold(EventStore(rd / "events.jsonl").read_all()).nodes:
             return f"(no node #{nid} in {rid})"
         blocked = self._gate("reset_node", rid, f"reset node #{nid} of {rid} from {stage}")

@@ -65,12 +65,13 @@ def _action_to_control(c: "_Action", st) -> Optional[dict]:
         return {"type": EV_PROMOTE, "data": {"node_id": nid, "alias": "champion"}, "label": f"Promote #{nid} to champion"}
     if a == "reset" and nid is not None:
         # Re-run an EXISTING node in place (never a new node). Stage picks how far back to rewind:
-        # eval (keep code, re-score) < implement (keep idea, re-develop) < propose (full re-do).
-        stage = (c.stage or "eval").lower()
-        if stage not in ("propose", "implement", "eval"):
-            stage = "eval"
+        # propose (full re-do) / implement (keep idea, re-develop) / eval (re-score, keep code) — OR the
+        # name of an eval-PIPELINE stage (train / data_prep / …) to restart the pipeline from, reusing
+        # earlier stages' artifacts.
+        stage = (c.stage or "eval").strip()
         how = {"propose": "re-propose from scratch", "implement": "re-run the Developer (keep the idea)",
-               "eval": "re-score (keep the code)"}[stage]
+               "eval": "re-score (keep the code)"}.get(stage.lower(),
+               f"re-run the eval pipeline from '{stage}' (reuse earlier stages)")
         return {"type": EV_NODE_RESET, "data": {"node_id": nid, "from_stage": stage},
                 "label": f"Reset #{nid} in place — {how}"}
     if a == "hint" and c.text:

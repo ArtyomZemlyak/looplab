@@ -149,6 +149,9 @@ class Node(BaseModel):
     # empty/None on the classic single-command eval.
     stages: list = Field(default_factory=list)
     failed_stage: Optional[str] = None
+    # Phase 2 stage-scoped re-run: the pipeline stage a reset asked to RESTART from (skip earlier stages,
+    # reuse their artifacts). Transient — set by node_reset, cleared on the next terminal.
+    rerun_stage: Optional[str] = None
     # External-agent audit (ADR-7): set by an `agent_validated` event when the code was
     # produced by a validated CLI-agent Developer. {"ok": bool, "checks": [...]}.
     agent_report: Optional[dict] = None

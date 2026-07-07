@@ -95,7 +95,7 @@ export default function Inspector({ runId, nodeId, state, live, tab, setTab, onT
       <div className="insp-body">
         <div className="insp-hint muted">Actions (confirm · ablate · fork · promote · note) live in the chat — <button className="ctx-chip" style={{ padding: '0 6px', cursor: 'pointer' }} title="attach this experiment to the assistant context" onClick={() => window.dispatchEvent(new CustomEvent('ll:attach-node', { detail: { id: n.id } }))}>＋ #{n.id}</button> as context there, or type a <code>/command</code>.<ResetBtn runId={runId} id={n.id} onToast={onToast} /></div>
 
-        {activeTab === 'Overview' && <Overview n={n} state={state} />}
+        {activeTab === 'Overview' && <Overview n={n} state={state} runId={runId} onToast={onToast} />}
         {activeTab === 'Trials' && <Trials n={n} detail={detail} state={state} />}
         {activeTab === 'Trace' && <Trace n={n} runId={runId} live={live} working={nodeWorking} />}
         {activeTab === 'Code' && <Code n={n} />}
@@ -186,7 +186,34 @@ export function GroupSummary({ groupKey, memberIds, state, onSelectNode, onClose
   </>
 }
 
-function Overview({ n, state }) {
+// Phase 1: the node's declared eval pipeline as a coloured strip (data_prep ✓ → train ✓ → eval ✗), so a
+// crash is pinpointed to its stage instead of hiding behind one opaque "evaluate". Empty on single-command
+// evals. The failed stage is tinted red; a still-pending tail (not yet reached) shows muted.
+function StagePipeline({ stages, failed, runId, id, onToast }) {
+  if (!stages || !stages.length) return null
+  const tone = (s) => s.status === 'ok' ? 'var(--ok)' : s.status === 'timeout' ? 'var(--working)'
+    : s.status === 'reused' ? 'var(--muted, #888)' : 'var(--fail)'
+  const ic = (s) => s.status === 'ok' ? '✓' : s.status === 'timeout' ? '⧗' : s.status === 'reused' ? '↺' : '✗'
+  const rerun = (name) => runId && CONTROL.resetNode(runId, id, name)
+    .then(() => onToast && onToast(`re-running #${id} from '${name}' — reuses earlier stages`))
+    .catch(() => onToast && onToast('re-run failed'))
+  return <div style={{ margin: '8px 0' }}>
+    <div className="muted" style={{ fontSize: 10, marginBottom: 3 }}>
+      eval pipeline{failed ? ` — failed at ${failed}` : ''} · click a stage to re-run from there</div>
+    <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4, alignItems: 'center' }}>
+      {stages.map((s, i) => <React.Fragment key={i}>
+        <span onClick={() => rerun(s.name)}
+          style={{ padding: '2px 7px', borderRadius: 4, fontSize: 11, cursor: 'pointer',
+                   border: `1px solid ${tone(s)}`, color: tone(s) }}
+          title={`${s.name}: ${s.status}${s.seconds != null ? ` · ${s.seconds}s` : ''}${s.exit_code != null ? ` · exit ${s.exit_code}` : ''} — click to re-run the pipeline FROM here (reuse earlier stages)`}>
+          {ic(s)} {s.name}</span>
+        {i < stages.length - 1 && <span className="muted" style={{ fontSize: 10 }}>→</span>}
+      </React.Fragment>)}
+    </div>
+  </div>
+}
+
+function Overview({ n, state, runId, onToast }) {
   const p = n.idea?.params || {}
   const uses = mergeSummary(n, state.nodes || {})   // E3: for merges, which technique each parent fused
   const chg = nodeChip(n, state.nodes || {})        // same chip as the card (sweep-aware; '' for merges)
@@ -201,6 +228,7 @@ function Overview({ n, state }) {
       <KV k="feasible" v={String(n.feasible)} />
       <KV k="eval seconds" v={fmt(n.eval_seconds)} />
     </div>
+    <StagePipeline stages={n.stages} failed={n.failed_stage} runId={runId} id={n.id} onToast={onToast} />
     {chg && <><div className="section-h">What this node did</div><div className="v">{chg}</div></>}
     {uses.length > 0 && <><div className="section-h">Merge — techniques fused</div>
       <ul className="bul">{uses.map(u => <li key={u.parentId}>

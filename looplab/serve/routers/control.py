@@ -42,9 +42,12 @@ def build_router(srv) -> APIRouter:
                 nid = int(data.get("node_id"))
             except (TypeError, ValueError):
                 raise HTTPException(400, "node_id must be an integer")
-            stage = data.get("from_stage", "eval")
-            if stage not in ("propose", "implement", "eval"):
-                raise HTTPException(400, "from_stage must be one of propose|implement|eval")
+            # propose|implement are the lifecycle stages; anything else is an eval-PIPELINE stage name
+            # to restart from (train / eval / data_prep / …) — those are per-node, so accept any sane
+            # non-empty name rather than a fixed allow-list.
+            stage = str(data.get("from_stage", "eval")).strip()
+            if not stage or len(stage) > 64:
+                raise HTTPException(400, "from_stage must be a non-empty stage name")
             if nid not in fold(_events(rd)).nodes:
                 raise HTTPException(404, f"no node #{nid} in this run")
             data = {"node_id": nid, "from_stage": stage}

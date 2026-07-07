@@ -116,6 +116,7 @@ def fold(events: Iterable[Event]) -> RunState:
                 first_terminal = n.status is NodeStatus.pending
                 n.metric = d.get("metric")              # missing -> None (feasible_nodes filters it)
                 n.status = NodeStatus.evaluated
+                n.rerun_stage = None                    # any stage-scoped re-run has now landed
                 n.stdout_tail = d.get("stdout_tail", "")
                 n.eval_seconds = d.get("eval_seconds")
                 n.extra_metrics = d.get("extra_metrics", {}) or {}
@@ -143,6 +144,7 @@ def fold(events: Iterable[Event]) -> RunState:
                 n.error = d.get("error", "")
                 n.error_reason = d.get("reason", "")
                 n.eval_seconds = d.get("eval_seconds")
+                n.rerun_stage = None                    # any stage-scoped re-run has now landed
                 if d.get("failed_stage"):
                     n.failed_stage = d.get("failed_stage")   # Phase 1: which pipeline stage broke
                 if first_terminal:
@@ -190,8 +192,13 @@ def fold(events: Iterable[Event]) -> RunState:
                     n.deleted = []
                     n.stages = []                # a re-develop discards the old pipeline outcomes too
                     n.rerun_from = stage
+                    n.rerun_stage = None
                 else:
-                    n.rerun_from = None          # eval-only: pending-with-code, the eval loop re-scores it
+                    # eval-type reset: pending-with-code, the eval loop re-scores it. `from_stage` names
+                    # the pipeline stage to RESTART from (Phase 2) — the eval re-runs from there, reusing
+                    # earlier stages' artifacts. Plain "eval" on a single-command node is a full re-score.
+                    n.rerun_from = None
+                    n.rerun_stage = stage
                 if st.building and st.building.get("node_id") == n.id:
                     st.building = None
                 # A reset means there is work to do again, so it RE-OPENS a finished run — else the

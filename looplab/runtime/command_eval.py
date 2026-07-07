@@ -309,7 +309,9 @@ def run_command_eval(command: list[str], cwd: str, timeout: float, metric: dict,
                      wrap=None, metrics: Optional[dict] = None,
                      constraints: Optional[list] = None, tracer=None, cancel=None,
                      log_dir: Optional[str] = None,
-                     stages: Optional[list] = None) -> RunResult:
+                     stages: Optional[list] = None,
+                     start_stage: Optional[str] = None,
+                     check_fn=None) -> RunResult:
     """Run `command` (argv, no shell) in `cwd`, capped + timeout + tree-kill, then read the
     metric. If `setup` is given (e.g. a dependency install), it runs FIRST in `setup_cwd`
     (defaults to the repo/workdir root, NOT the eval `cwd` subdir — so a root-level
@@ -366,10 +368,22 @@ def run_command_eval(command: list[str], cwd: str, timeout: float, metric: dict,
         # FIRST failure stops the pipeline and returns "failed at stage <name>" — so a crash in `train`
         # is pinpointed (not hidden behind an opaque single command) and the good earlier stages' outputs
         # stay on disk for a later stage-scoped re-run. The LAST stage's stdout carries the metric.
+        # Stage-scoped re-run (Phase 2): `start_stage` re-runs the pipeline FROM that stage, reusing the
+        # earlier stages' on-disk artifacts (the checkpoint `train` wrote survives in the workdir). So a
+        # crashed `eval` is fixed without paying to re-`train`. Stages before it are marked "reused".
+        _run_from = 0
+        if start_stage:
+            for _i, _s in enumerate(stages):
+                if str(_s.get("name")) == str(start_stage):
+                    _run_from = _i
+                    break
         stage_results = []
         for _i, _stg in enumerate(stages):
             _sname = str(_stg.get("name") or f"stage{_i}")
             _scmd = list(_stg.get("command") or [])
+            if _i < _run_from:
+                stage_results.append({"name": _sname, "status": "reused", "exit_code": 0, "seconds": 0.0})
+                continue
             _sto = float(_stg.get("timeout", timeout))
             if not _scmd:
                 continue
@@ -387,6 +401,21 @@ def run_command_eval(command: list[str], cwd: str, timeout: float, metric: dict,
             if _status != "ok":
                 return RunResult(exit_code=rc, stdout=out, stderr=f"stage '{_sname}' failed:\n{err}",
                                  metric=None, timed_out=to, stages=stage_results, failed_stage=_sname)
+            # Phase 3 — optional inter-stage verify: a stage flagged `"check": true` hands its output tail
+            # to an agentic checker (Researcher/Developer) BEFORE the next stage runs; a returned concern
+            # stops the pipeline early ("failed verification") so a bad artifact (e.g. a diverged train)
+            # doesn't silently feed the next stage. No check_fn / no flag => never called (zero overhead).
+            if _stg.get("check") and check_fn is not None:
+                try:
+                    _concern = check_fn(_sname, out[-4000:])
+                except Exception:  # noqa: BLE001 — a checker failure must not crash the eval
+                    _concern = None
+                if _concern:
+                    stage_results[-1]["status"] = "check_failed"
+                    stage_results[-1]["concern"] = str(_concern)[:300]
+                    return RunResult(exit_code=0, stdout=out, metric=None, timed_out=False,
+                                     stderr=f"stage '{_sname}' failed verification: {_concern}",
+                                     stages=stage_results, failed_stage=_sname)
         # all stages passed -> the LAST stage's `out`/`rc`/`to` flow into read_metric below.
     else:
         with _sp("command", sandboxed=bool(wrap)) as _h:
