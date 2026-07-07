@@ -89,6 +89,22 @@ class EvalSpec(BaseModel):
     metrics: dict[str, dict] = Field(default_factory=dict)
     constraints: list[dict] = Field(default_factory=list)
 
+    @field_validator("metric")
+    @classmethod
+    def _valid_metric_kind(cls, v):
+        # `kind` is HOW to READ the metric, not the optimization direction — catch the common mix-up of
+        # putting "max"/"min" here (that goes in the task's `direction`). An unknown kind makes the metric
+        # unreadable → every node fails with no_metric, so reject it at submit with a clear message.
+        _KINDS = {"stdout_json", "stdout_regex", "file_json", "file_regex", "host_score", "adapter"}
+        if isinstance(v, dict):
+            k = v.get("kind", "stdout_json")
+            if k not in _KINDS:
+                raise ValueError(
+                    f"eval.metric.kind {k!r} is not a metric reader. Use one of {sorted(_KINDS)} (HOW to "
+                    "read the printed metric, e.g. stdout_json). The max/min DIRECTION belongs in the "
+                    "task's `direction`, not here.")
+        return v
+
     @field_validator("cross_check")
     @classmethod
     def _cross_check_not_adapter(cls, v):
