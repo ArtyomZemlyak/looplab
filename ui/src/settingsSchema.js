@@ -11,7 +11,7 @@ export const SETTINGS_GROUPS = [
     title: 'Search & policy', sub: 'how the loop explores the solution tree',
     fields: [
       { key: 'profile', label: 'Profile', type: 'enum', options: ['default', 'fast', 'thorough'],
-        help: 'Preset bundle. default/fast = lean defaults; thorough = turn on multi-seed confirmation, the novelty gate, the reward-hack/leakage/critic monitors AND gate them (trust_gate=gate), ablation refinement and the prompt cues — in one word. A profile only fills fields you have not set yourself; any explicit knob here still wins.' },
+        help: 'Preset bundle. default/fast = lean defaults; thorough = turn on multi-seed confirmation, the reward-hack/leakage/critic monitors AND gate them (trust_gate=gate), ablation refinement and the prompt cues — in one word. (Novelty is the agentic Researcher\'s call by default; the algorithmic novelty gates stay OFF.) A profile only fills fields you have not set yourself; any explicit knob here still wins.' },
       { key: 'policy', label: 'Policy', type: 'enum', options: ['greedy', 'evolutionary', 'mcts', 'asha', 'bohb'],
         agents: ['strategist'],
         help: 'Search strategy: greedy, evolutionary, MCTS, ASHA (multi-fidelity racing), or BOHB (ASHA racing × surrogate proposal).' },
