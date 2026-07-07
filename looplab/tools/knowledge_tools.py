@@ -47,7 +47,13 @@ class RepoTools:
             fn_spec("repo_list", f"List source files in an editable repo ({names}).",
                      {"repo": {"type": "string"}, "glob": {"type": "string"}}, []),
             fn_spec("repo_read", "Read a file from an editable repo, given a <repo>/<path> "
-                     "(or just <path> for the root repo).", {"path": {"type": "string"}}, ["path"]),
+                     "(or just <path> for the root repo). PAGINATES: pass start_line (+ optional lines) to "
+                     "window a large file; a truncated reply names the start_line to resume from — do NOT "
+                     "re-read from the top.",
+                     {"path": {"type": "string"},
+                      "start_line": {"type": "integer", "description": "1-based line to start from (default top)"},
+                      "lines": {"type": "integer", "description": "how many lines to return (optional window)"}},
+                     ["path"]),
         ]
 
     def _resolve(self, rel: str):
@@ -104,7 +110,11 @@ class RepoTools:
                             return f"(refused: {target.name} looks like a secret/credential)"
                     except ValueError:
                         continue
-                return read_file(str(target))[:self.max_bytes]
+                # PAGINATE (reuse read_file's window logic) instead of a blind [:max_bytes] head — the
+                # same truncation that made the agent re-read the same file 8× on a >max_bytes file.
+                from looplab.tools.reposcout import RepoScoutTools
+                return RepoScoutTools._paginate(read_file(str(target)),
+                                                args.get("start_line", 0), args.get("lines", 0))
         except Exception as e:  # noqa: BLE001 — tool errors are fed back to the model
             return f"(tool error: {e})"
         return f"(unknown tool: {name})"
