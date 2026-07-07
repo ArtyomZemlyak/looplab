@@ -144,6 +144,11 @@ class Node(BaseModel):
     # just clear the terminal — the node becomes pending-with-code and the normal eval loop re-scores it,
     # no marker needed.) Not persisted meaningfully — always None on a settled node.
     rerun_from: Optional[str] = None
+    # Multi-stage eval pipeline (Phase 1): per-stage outcomes [{name, status, exit_code, seconds}] in run
+    # order (from stage_finished events); `failed_stage` names the stage that broke a failed node. Both
+    # empty/None on the classic single-command eval.
+    stages: list = Field(default_factory=list)
+    failed_stage: Optional[str] = None
     # External-agent audit (ADR-7): set by an `agent_validated` event when the code was
     # produced by a validated CLI-agent Developer. {"ok": bool, "checks": [...]}.
     agent_report: Optional[dict] = None

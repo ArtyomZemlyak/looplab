@@ -35,7 +35,7 @@ from looplab.events.types import (
     EV_RESEARCH_COMPLETED, EV_REWARD_HACK_SUSPECTED, EV_RUN_FINISHED,
     EV_RUN_SETUP_FINISHED, EV_RUN_SETUP_STARTED, EV_RUN_STARTED, EV_RUNG_PROMOTED,
     EV_SETUP_FINISHED, EV_SETUP_STARTED, EV_SETUP_STEP, EV_SPEC_APPROVAL_REQUESTED,
-    EV_SPEC_APPROVED, EV_SPEC_DRIFT, EV_SPEC_PROPOSED, EV_STRATEGY_DECISION,
+    EV_SPEC_APPROVED, EV_SPEC_DRIFT, EV_SPEC_PROPOSED, EV_STAGE_FINISHED, EV_STRATEGY_DECISION,
     EV_WORKSPACE_CHANGED)
 from looplab.trust.leakage import target_leakage, temporal_leakage, train_test_contamination
 from looplab.engine.ablation import AblationMixin
@@ -2313,6 +2313,28 @@ class Engine(ConfirmPhaseMixin, AblationMixin):
         # extracted to engine/workspace.py — see the delegator block after __init__
         return self.workspace.sandbox_cwd(workdir, cwd_spec)
 
+    def _resolve_stages(self, workdir, es):
+        """Multi-stage eval manifest (Phase 1): the Developer's `looplab_stages.json` in the workdir wins,
+        else the task's recommended default (`es["stages"]`). Shape: {"stages": [{name, command, timeout?,
+        check?}, …]} (or a bare list). The LAST stage is the metric stage — its stdout is read for the
+        metric. Returns None (classic single-command eval) when no valid manifest is present."""
+        import json
+        stages = None
+        mf = Path(workdir) / "looplab_stages.json"
+        if mf.exists():
+            try:
+                data = json.loads(mf.read_text(encoding="utf-8"))
+                stages = data.get("stages") if isinstance(data, dict) else data
+            except Exception:  # noqa: BLE001 — a malformed manifest just falls back to the single command
+                stages = None
+        if not stages:
+            stages = es.get("stages")
+        if not isinstance(stages, list) or not stages:
+            return None
+        clean = [s for s in stages if isinstance(s, dict)
+                 and isinstance(s.get("command"), list) and s.get("command")]
+        return clean or None
+
     def _run_eval(self, node, workdir, env=None, profile=None, cancel=None):
         """Eval dispatcher: RepoTask runs the operator's command + reads its metric;
         otherwise the classic solution.py sandbox path. Both return a `RunResult`, so all
@@ -2334,6 +2356,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin):
             params = node.idea.params if node is not None else {}
             cmd, timeout = command_eval.build_command(es, params, prof)
             root = str(Path(workdir).resolve())               # repo/workdir root
+            stages = self._resolve_stages(root, es)           # multi-stage pipeline (Developer file / task default)
             cwd = self._sandbox_cwd(workdir, es.get("cwd", "."))
             # untrusted tier (Phase 4): sandbox the eval in docker, mounting the workspace
             # root so the cwd subdir + host metric reading line up. Fails loudly w/o docker.
@@ -2353,7 +2376,8 @@ class Engine(ConfirmPhaseMixin, AblationMixin):
                 constraints=es.get("constraints") or None,
                 tracer=self.tracer,                           # child spans: setup/command/read
                 cancel=cancel,                                # operator mid-eval node_abort
-                log_dir=root)                                 # live setup.log/eval.log in the node workdir
+                log_dir=root,                                 # live setup.log/eval.log in the node workdir
+                stages=stages)                                # multi-stage pipeline (Phase 1); None = single command
         else:
             # Intra-node sweep nodes run a whole grid in one process, so they need ~N× the
             # single-eval budget. `sweep_timeout_mult` scales the wall-clock for sweep nodes only;
@@ -2664,6 +2688,11 @@ class Engine(ConfirmPhaseMixin, AblationMixin):
             if res.drift is not None:
                 sp.set("drift", True)
             async with self._write_lock:
+                # Multi-stage pipeline (Phase 1): record each stage's pass/fail BEFORE the terminal so the
+                # fold + trace show data_prep ✓ / train ✓ / eval ✗, and a later stage-scoped re-run knows
+                # which stages already passed. Empty on the classic single-command eval.
+                for _st in (res.stages or []):
+                    self.store.append(EV_STAGE_FINISHED, {"node_id": node_id, **_st})
                 if res.drift is not None:               # Phase 4: uncorroborated metric (audit)
                     self.store.append(EV_SPEC_DRIFT, {"node_id": node_id, **res.drift})
                 if ok:
@@ -2726,6 +2755,8 @@ class Engine(ConfirmPhaseMixin, AblationMixin):
                     sp.set("error_reason", reason)
                     data = {"node_id": node_id, "error": err, "reason": reason,
                             "eval_seconds": total_eval}
+                    if res.failed_stage:                # Phase 1: pinpoint which pipeline stage broke
+                        data["failed_stage"] = res.failed_stage
                     if triage_outcome is not None:
                         data["triage_action"], data["triage_rationale"] = (
                             triage_outcome[0], str(triage_outcome[1])[:300])

@@ -19,6 +19,7 @@ import json
 import os
 import re
 import sys
+import time
 from contextlib import nullcontext
 from pathlib import Path
 from typing import Optional
@@ -307,7 +308,8 @@ def run_command_eval(command: list[str], cwd: str, timeout: float, metric: dict,
                      drift_tolerance: float = 1e-6, enforce_drift: bool = False,
                      wrap=None, metrics: Optional[dict] = None,
                      constraints: Optional[list] = None, tracer=None, cancel=None,
-                     log_dir: Optional[str] = None) -> RunResult:
+                     log_dir: Optional[str] = None,
+                     stages: Optional[list] = None) -> RunResult:
     """Run `command` (argv, no shell) in `cwd`, capped + timeout + tree-kill, then read the
     metric. If `setup` is given (e.g. a dependency install), it runs FIRST in `setup_cwd`
     (defaults to the repo/workdir root, NOT the eval `cwd` subdir — so a root-level
@@ -357,13 +359,43 @@ def run_command_eval(command: list[str], cwd: str, timeout: float, metric: dict,
         if rc != 0 or to:
             return RunResult(exit_code=rc, stdout=out, stderr="setup failed:\n" + err,
                              metric=None, timed_out=to)
-    with _sp("command", sandboxed=bool(wrap)) as _h:
-        rc, out, err, to = run_argv(_w(_bound(command, timeout), str(wd)), wd,
-                                     timeout + grace, env, max_output_bytes, cancel,
-                                     log_path=_log("eval.log"))
-        to = to or (is_docker and docker_timed_out(rc))   # 124 (SIGTERM) or 137 (SIGKILL escalation)
-        if _h is not None:
-            _h.set_many(exit_code=rc, timed_out=to)
+    stage_results = None
+    if stages:
+        # Multi-stage pipeline (data_prep → train → eval): run each stage in ORDER in the SAME workdir
+        # (artifacts persist across stages), each in its own span + <name>.log, tracking pass/fail. The
+        # FIRST failure stops the pipeline and returns "failed at stage <name>" — so a crash in `train`
+        # is pinpointed (not hidden behind an opaque single command) and the good earlier stages' outputs
+        # stay on disk for a later stage-scoped re-run. The LAST stage's stdout carries the metric.
+        stage_results = []
+        for _i, _stg in enumerate(stages):
+            _sname = str(_stg.get("name") or f"stage{_i}")
+            _scmd = list(_stg.get("command") or [])
+            _sto = float(_stg.get("timeout", timeout))
+            if not _scmd:
+                continue
+            _t0 = time.monotonic()
+            with _sp(_sname, kind="operation", sandboxed=bool(wrap), stage=_sname) as _sh:
+                rc, out, err, to = run_argv(_w(_bound(_scmd, _sto), str(wd)), wd,
+                                            _sto + grace, env, max_output_bytes, cancel,
+                                            log_path=_log(f"{_sname}.log"))
+                to = to or (is_docker and docker_timed_out(rc))
+                if _sh is not None:
+                    _sh.set_many(exit_code=rc, timed_out=to, stage=_sname)
+            _status = "timeout" if to else ("ok" if rc == 0 else "fail")
+            stage_results.append({"name": _sname, "status": _status, "exit_code": rc,
+                                  "seconds": round(time.monotonic() - _t0, 3)})
+            if _status != "ok":
+                return RunResult(exit_code=rc, stdout=out, stderr=f"stage '{_sname}' failed:\n{err}",
+                                 metric=None, timed_out=to, stages=stage_results, failed_stage=_sname)
+        # all stages passed -> the LAST stage's `out`/`rc`/`to` flow into read_metric below.
+    else:
+        with _sp("command", sandboxed=bool(wrap)) as _h:
+            rc, out, err, to = run_argv(_w(_bound(command, timeout), str(wd)), wd,
+                                         timeout + grace, env, max_output_bytes, cancel,
+                                         log_path=_log("eval.log"))
+            to = to or (is_docker and docker_timed_out(rc))   # 124 (SIGTERM) or 137 (SIGKILL escalation)
+            if _h is not None:
+                _h.set_many(exit_code=rc, timed_out=to)
     with _sp("read_metric", kind=metric.get("kind", "stdout_json")):
         m = read_metric(out, str(wd), metric, wrap=wrap) if not to else None
     drift = None
@@ -395,6 +427,7 @@ def run_command_eval(command: list[str], cwd: str, timeout: float, metric: dict,
     # it so the engine can collapse it to the node's best metric (no eval_spec change required).
     trials = json_line_trials(out) if not to else None
     return RunResult(exit_code=rc, stdout=out, stderr=err, metric=m, timed_out=to, drift=drift,
-                     extra_metrics=extra, violations=(viol or None), trials=trials)
+                     extra_metrics=extra, violations=(viol or None), trials=trials,
+                     stages=stage_results)
 
 

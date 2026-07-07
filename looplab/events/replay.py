@@ -17,7 +17,7 @@ from looplab.events.types import (
     EV_HYPOTHESIS_RANKED, EV_HYPOTHESIS_UPDATED, EV_INJECT_DONE, EV_INJECT_NODE, EV_LESSONS_DISTILLED,
     EV_LESSONS_REFRESHED, EV_LLM_COST, EV_NODE_ABORT, EV_NODE_BUILDING, EV_NODE_CONFIRMED,
     EV_NODE_CREATED, EV_NODE_EVALUATED, EV_NODE_FAILED, EV_NODE_REPAIRED, EV_NODE_RESET,
-    EV_NOVELTY_REJECTED, EV_PAUSE,
+    EV_NOVELTY_REJECTED, EV_PAUSE, EV_STAGE_FINISHED,
     EV_POLICY_DECISION, EV_PROMOTE, EV_PROXY_SCORED, EV_REPORT_GENERATED,
     EV_RESEARCH_COMPLETED, EV_RESUME, EV_REWARD_HACK_SUSPECTED, EV_RUN_ABORT,
     EV_RUN_FINISHED, EV_RUN_REOPENED, EV_RUN_STARTED, EV_RUNG_PROMOTED, EV_SET_STRATEGY,
@@ -143,6 +143,8 @@ def fold(events: Iterable[Event]) -> RunState:
                 n.error = d.get("error", "")
                 n.error_reason = d.get("reason", "")
                 n.eval_seconds = d.get("eval_seconds")
+                if d.get("failed_stage"):
+                    n.failed_stage = d.get("failed_stage")   # Phase 1: which pipeline stage broke
                 if first_terminal:
                     st.total_eval_seconds += d.get("eval_seconds") or 0.0
         elif t == EV_NODE_REPAIRED:
@@ -181,10 +183,12 @@ def fold(events: Iterable[Event]) -> RunState:
                 n.feasible = True
                 n.trials = []
                 n.confirmed_mean = None
+                n.failed_stage = None
                 if stage in ("implement", "propose"):
                     n.code = ""
                     n.files = {}
                     n.deleted = []
+                    n.stages = []                # a re-develop discards the old pipeline outcomes too
                     n.rerun_from = stage
                 else:
                     n.rerun_from = None          # eval-only: pending-with-code, the eval loop re-scores it
@@ -197,6 +201,20 @@ def fold(events: Iterable[Event]) -> RunState:
                 st.finished = False
                 st.stop_reason = None
                 st.stop_requested = None
+        elif t == EV_STAGE_FINISHED:
+            # Multi-stage eval pipeline (Phase 1): one stage of a node's declared pipeline finished.
+            # Last-wins by stage name so a stage-scoped RE-RUN (Phase 2) replaces the prior outcome
+            # rather than appending a duplicate.
+            n = st.nodes.get(d.get("node_id"))
+            if n is not None:
+                rec = {"name": d.get("name"), "status": d.get("status"),
+                       "exit_code": d.get("exit_code"), "seconds": d.get("seconds")}
+                for i, s in enumerate(n.stages):
+                    if s.get("name") == rec["name"]:
+                        n.stages[i] = rec
+                        break
+                else:
+                    n.stages.append(rec)
         elif t == EV_CONFIRM_EVAL:
             st.total_eval_seconds += d.get("eval_seconds") or 0.0   # confirm-seed eval cost
             if "node_id" in d and "seed" in d:                       # per-seed resume memo (#0)

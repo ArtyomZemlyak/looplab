@@ -79,6 +79,12 @@ class RunResult:
     # `{"trials": [...]}` line; this carries that raw list of trial dicts. The orchestrator picks
     # the best feasible trial to set the node's scalar `metric`. None on the single-config path.
     trials: Optional[list] = None
+    # Staged eval (multi-stage pipeline: data_prep → train → eval): per-stage outcome dicts
+    # {name, status "ok"|"fail"|"timeout", exit_code, seconds}, in run order. `failed_stage` is the
+    # name of the first stage that failed (None on full success). The last stage is the metric stage.
+    # None on the classic single-command path.
+    stages: Optional[list] = None
+    failed_stage: Optional[str] = None
 
 
 class Sandbox(Protocol):
