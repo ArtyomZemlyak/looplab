@@ -97,6 +97,7 @@ EV_RUN_ABORT = "run_abort"
 EV_PAUSE = "pause"
 EV_RESUME = "resume"
 EV_NODE_ABORT = "node_abort"
+EV_NODE_RESET = "node_reset"      # re-run an EXISTING node in place from a stage (propose|implement|eval)
 EV_BUDGET_EXTEND = "budget_extend"
 EV_HINT = "hint"
 EV_SET_STRATEGY = "set_strategy"

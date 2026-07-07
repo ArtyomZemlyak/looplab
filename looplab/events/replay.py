@@ -16,7 +16,8 @@ from looplab.events.types import (
     EV_FORK_DONE, EV_HINT, EV_HOLDOUT_EVALUATED, EV_HOST_GRADING, EV_HYPOTHESIS_ADDED, EV_HYPOTHESIS_MERGED,
     EV_HYPOTHESIS_RANKED, EV_HYPOTHESIS_UPDATED, EV_INJECT_DONE, EV_INJECT_NODE, EV_LESSONS_DISTILLED,
     EV_LESSONS_REFRESHED, EV_LLM_COST, EV_NODE_ABORT, EV_NODE_BUILDING, EV_NODE_CONFIRMED,
-    EV_NODE_CREATED, EV_NODE_EVALUATED, EV_NODE_FAILED, EV_NODE_REPAIRED, EV_NOVELTY_REJECTED, EV_PAUSE,
+    EV_NODE_CREATED, EV_NODE_EVALUATED, EV_NODE_FAILED, EV_NODE_REPAIRED, EV_NODE_RESET,
+    EV_NOVELTY_REJECTED, EV_PAUSE,
     EV_POLICY_DECISION, EV_PROMOTE, EV_PROXY_SCORED, EV_REPORT_GENERATED,
     EV_RESEARCH_COMPLETED, EV_RESUME, EV_REWARD_HACK_SUSPECTED, EV_RUN_ABORT,
     EV_RUN_FINISHED, EV_RUN_REOPENED, EV_RUN_STARTED, EV_RUNG_PROMOTED, EV_SET_STRATEGY,
@@ -159,6 +160,43 @@ def fold(events: Iterable[Event]) -> RunState:
                     n.files = d["files"]
                 if d.get("deleted"):
                     n.deleted = d["deleted"]
+        elif t == EV_NODE_RESET:
+            # Re-run an EXISTING node in place (no new id). Discard its state FROM `from_stage` so it
+            # becomes pending again; the engine then re-runs just that stage, appending fresh events for
+            # the SAME id (which land as the first-terminal-after-reset). Replay-safe: the reset marks
+            # where the old lifecycle is abandoned. `eval` = keep idea+code, just re-score (the normal
+            # eval loop picks a pending-with-code node up — no marker). `implement`/`propose` = also drop
+            # the code and flag `rerun_from` so the engine re-develops (re-proposes for `propose`).
+            n = st.nodes.get(d.get("node_id"))
+            if n is not None:
+                stage = d.get("from_stage", "eval")
+                n.status = NodeStatus.pending
+                n.metric = None
+                n.error = ""
+                n.error_reason = ""
+                n.eval_seconds = None
+                n.stdout_tail = ""
+                n.extra_metrics = {}
+                n.violations = []
+                n.feasible = True
+                n.trials = []
+                n.confirmed_mean = None
+                if stage in ("implement", "propose"):
+                    n.code = ""
+                    n.files = {}
+                    n.deleted = []
+                    n.rerun_from = stage
+                else:
+                    n.rerun_from = None          # eval-only: pending-with-code, the eval loop re-scores it
+                if st.building and st.building.get("node_id") == n.id:
+                    st.building = None
+                # A reset means there is work to do again, so it RE-OPENS a finished run — else the
+                # loop would see the stale run_finished and exit before re-running/re-scoring the node.
+                # (Mirrors EV_RESUME's finished-clear; a later run_finished sets it again. `paused` is
+                # left alone — that's the operator's separate resume.)
+                st.finished = False
+                st.stop_reason = None
+                st.stop_requested = None
         elif t == EV_CONFIRM_EVAL:
             st.total_eval_seconds += d.get("eval_seconds") or 0.0   # confirm-seed eval cost
             if "node_id" in d and "seed" in d:                       # per-seed resume memo (#0)

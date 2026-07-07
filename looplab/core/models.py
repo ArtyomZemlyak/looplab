@@ -139,6 +139,11 @@ class Node(BaseModel):
     extra_metrics: dict[str, Optional[float]] = Field(default_factory=dict)
     violations: list[dict] = Field(default_factory=list)
     feasible: bool = True
+    # Transient re-run marker (node_reset): "propose" | "implement" set it so the engine RE-RUNS this
+    # existing node in place from that stage; cleared once the re-run's node_created lands. ("eval" resets
+    # just clear the terminal — the node becomes pending-with-code and the normal eval loop re-scores it,
+    # no marker needed.) Not persisted meaningfully — always None on a settled node.
+    rerun_from: Optional[str] = None
     # External-agent audit (ADR-7): set by an `agent_validated` event when the code was
     # produced by a validated CLI-agent Developer. {"ok": bool, "checks": [...]}.
     agent_report: Optional[dict] = None

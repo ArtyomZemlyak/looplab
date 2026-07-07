@@ -15,7 +15,7 @@ from looplab.core.atomicio import best_effort_fsync
 from looplab.core.config import Settings
 from looplab.events.eventstore import EventStore
 from looplab.events.replay import fold
-from looplab.events.types import EV_INJECT_NODE
+from looplab.events.types import EV_INJECT_NODE, EV_NODE_RESET
 from looplab.serve.appstate import _RESERVED_RUN_IDS
 from looplab.serve.engine_proc import _engine_alive, _spawn_engine
 from looplab.serve.protocol import CONTROL_EVENTS, GENESIS_CHAT_SEQ_BASE
@@ -35,6 +35,19 @@ def build_router(srv) -> APIRouter:
         if etype not in CONTROL_EVENTS:
             raise HTTPException(400, f"unknown control event: {etype!r}")
         data = body.get("data") or {}
+        # node_reset: re-run an existing node in place — validate the target + stage so a typo can't
+        # append a no-op reset (the fold would silently ignore an unknown node_id).
+        if etype == EV_NODE_RESET:
+            try:
+                nid = int(data.get("node_id"))
+            except (TypeError, ValueError):
+                raise HTTPException(400, "node_id must be an integer")
+            stage = data.get("from_stage", "eval")
+            if stage not in ("propose", "implement", "eval"):
+                raise HTTPException(400, "from_stage must be one of propose|implement|eval")
+            if nid not in fold(_events(rd)).nodes:
+                raise HTTPException(404, f"no node #{nid} in this run")
+            data = {"node_id": nid, "from_stage": stage}
         # Cross-run import: an inject seeded from a sibling run. Resolve the source experiment from disk
         # NOW and bake its code + `origin` provenance into the inject_node, so the engine reproduces it
         # faithfully and the lineage is recorded. (_run_dir guards path traversal on the sibling id.)

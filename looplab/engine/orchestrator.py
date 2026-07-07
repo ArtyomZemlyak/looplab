@@ -524,6 +524,15 @@ class Engine(ConfirmPhaseMixin, AblationMixin):
         _prev_terminal = -1
         while True:
             state = fold(self.store.read_all())
+            # node_reset (operator "re-run this node from a stage"): a reset from implement/propose
+            # re-develops the SAME node id IN PLACE before any other loop work, so it never mints a new
+            # node. (An eval-reset needs no help here — the fold left it pending-with-code and the normal
+            # eval dispatch below re-scores it.)
+            _resets = [n for n in state.nodes.values() if n.rerun_from in ("implement", "propose")]
+            if _resets:
+                for _n in _resets:
+                    self._rerun_node(_n, state)
+                continue
             _terminal_now = sum(1 for _n in state.nodes.values()
                                 if _n.status is not NodeStatus.pending)
             if _terminal_now != _prev_terminal:      # a node reached terminal (progress) -> reset
@@ -2116,6 +2125,43 @@ class Engine(ConfirmPhaseMixin, AblationMixin):
         self._emit_agent_report(node_id)
         self._emit_hypothesis_ranked(node_id)
         self._emit_foresight_selected(node_id)
+
+    def _rerun_node(self, node: Node, state: RunState) -> None:
+        """node_reset "propose"/"implement": re-run this EXISTING node id IN PLACE (never mints a new
+        id — the whole point is to FIX a node, not proliferate). "implement" keeps the Researcher's idea
+        (only the Developer re-runs — the "researcher ok, developer crashed" case); "propose" re-proposes
+        a fresh idea too. Emits node_building + node_created for the SAME id — the fold applies it over the
+        reset (clearing the rerun marker), the node goes pending-with-code, and the eval loop scores it
+        next. Same developer-crash circuit-breaker as a first build. (An "eval" reset never reaches here —
+        the fold left it pending-with-code and the eval dispatch re-scores it directly.)"""
+        stage = node.rerun_from
+        parents = list(node.parent_ids)
+        parent = state.nodes.get(parents[0]) if parents else None
+        with self.tracer.span("create_node", new_trace=True, node_id=node.id, operator=node.operator):
+            self.store.append(EV_NODE_BUILDING,
+                              {"node_id": node.id, "operator": node.operator, "parent_ids": parents})
+            # "propose" re-proposes (draft/improve/debug); a merge node has no single proposable idea
+            # (it's an ensemble of parents), so a propose-reset there degrades to re-implement.
+            if stage == "propose" and node.operator != "merge":
+                with self.tracer.span("propose"):
+                    idea = self.researcher.propose(state, parent)
+                idea.operator = node.operator      # operator stays authoritative (from the original node)
+            else:                                   # "implement" (or merge): keep the idea, re-develop
+                idea = node.idea
+            with self.tracer.span("implement"):
+                code = self._implement(idea, parent)
+            self._emit_node_created(
+                node_id=node.id, parent_ids=parents, operator=idea.operator,
+                idea=idea.model_dump(mode="json"), code=code,
+                files=getattr(self.developer, "last_files", {}) or {},
+                deleted=getattr(self.developer, "last_deleted", []) or [])
+            if isinstance(code, str) and code.startswith("(developer error:"):
+                self.store.append(EV_NODE_FAILED, {
+                    "node_id": node.id, "error": code, "reason": "developer_crash", "eval_seconds": 0.0})
+                self.store.append(EV_PAUSE, {
+                    "reason": "auto-paused: a Developer session crashed (LLM unreachable or a hard error, "
+                              "unresolved within the node) — resume once it's fixed"})
+        self._emit_agent_report(node.id)
 
     def _create_injected_node(self, req: dict) -> None:
         """Materialize an operator-authored experiment (`inject_node` control event) into a real
