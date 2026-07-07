@@ -1185,6 +1185,10 @@ class CostAccountant:
         self.prompt_tokens = 0
         self.completion_tokens = 0
         self.total_tokens = 0
+        # The LARGEST single prompt seen = how big the model's CONTEXT WINDOW actually got. Distinct from
+        # prompt_tokens (which SUMS the same context re-sent every tool-loop turn → O(turns²)); the UI
+        # reads this to show "context" honestly instead of the billed re-send sum.
+        self.peak_prompt = 0
 
     def add(self, cost: Optional[float], usage: Optional[dict] = None) -> float:
         self.spent += max(0.0, float(cost or 0.0))
@@ -1195,6 +1199,7 @@ class CostAccountant:
             self.prompt_tokens += pt
             self.completion_tokens += ct
             self.total_tokens += int(usage.get("total_tokens") or (pt + ct))
+            self.peak_prompt = max(self.peak_prompt, pt)
         if self.limit is not None:
             if not self.warned and self.spent >= self.warn_frac * self.limit:
                 self.warned = True  # caller may surface a warning event

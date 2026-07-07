@@ -20,12 +20,16 @@ def _client_tokens(client) -> Optional[dict]:
     when the client/model doesn't report usage (older local servers) — the UI just omits the badge."""
     acc = getattr(client, "accountant", None)
     if acc is not None and getattr(acc, "total_tokens", 0):
+        # `context` = the peak single prompt = the real context-window size, NOT prompt_tokens which
+        # SUMS the same context re-sent every tool-loop turn (billed, O(turns²)). The UI shows context.
         return {"prompt": acc.prompt_tokens, "completion": acc.completion_tokens,
-                "total": acc.total_tokens, "calls": acc.calls}
+                "total": acc.total_tokens, "calls": acc.calls,
+                "context": getattr(acc, "peak_prompt", 0) or acc.prompt_tokens}
     u = getattr(client, "_last_usage", None) or {}
     if u:
         return {"prompt": u.get("prompt_tokens", 0), "completion": u.get("completion_tokens", 0),
-                "total": u.get("total_tokens", 0), "calls": 1}
+                "total": u.get("total_tokens", 0), "calls": 1,
+                "context": u.get("prompt_tokens", 0)}   # single call → its prompt IS the context
     return None
 
 

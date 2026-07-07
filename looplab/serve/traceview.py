@@ -48,19 +48,25 @@ def _rollup(spans: list[dict]) -> dict:
     gens = [s for s in spans if s.get("kind") == "generation"]
     tools = [s for s in spans if s.get("kind") == "tool"]
     pt = ct = tt = 0
+    peak = 0
     cost = 0.0
     for g in gens:
         a = g.get("attributes", {})
         u = a.get("usage") or {}
-        pt += int(u.get("prompt") or 0)
+        p = int(u.get("prompt") or 0)
+        pt += p                                       # SUM of every call's prompt (billed — a tool loop
+        peak = max(peak, p)                           # re-sends the growing context, so this is O(turns²))
         ct += int(u.get("completion") or 0)
         tt += int(u.get("total") or 0)
         try:
             cost += float(a.get("cost") or 0.0)
         except (TypeError, ValueError):
             pass
+    # `context` = the LARGEST single prompt = how big the LLM's context window actually got (what the
+    # user reads as "the context"), distinct from `total`/`prompt` which SUM the same context re-sent
+    # every turn (billed cost, not context size). The UI shows context↑ + output↓, billed in the tooltip.
     return {"generations": len(gens), "tools": len(tools),
-            "tokens": {"prompt": pt, "completion": ct, "total": tt},
+            "tokens": {"prompt": pt, "completion": ct, "total": tt, "context": peak},
             "cost": round(cost, 6)}
 
 

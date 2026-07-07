@@ -492,10 +492,12 @@ export default function AssistantBar({ runId, hidden = false }) {
   }
 
   const activeMode = MODES.find(x => x.id === mode) || MODES[0]
-  // Context usage: the last turn's PROMPT tokens ≈ how much context the assistant is carrying right now
-  // (grows as the chat gets longer); the sum of turn totals ≈ what the chat has spent. Shown as a faint
-  // chip so you can watch the window fill and know when to start a fresh chat.
-  const lastCtxTok = [...msgs].reverse().find(m => m.tokens?.prompt)?.tokens?.prompt || 0
+  // Context usage: the last turn's CONTEXT (its peak single prompt) ≈ how much the assistant is carrying
+  // right now (grows as the chat gets longer) — NOT tokens.prompt, which SUMS the same context re-sent by
+  // every tool-loop call in the turn (billed, O(calls²)). The sum of turn totals ≈ what the chat spent
+  // (billed). Shown as a faint chip so you can watch the window fill and know when to start a fresh chat.
+  const lastCtx = [...msgs].reverse().find(m => m.tokens?.context || m.tokens?.prompt)?.tokens || {}
+  const lastCtxTok = lastCtx.context || lastCtx.prompt || 0
   const chatTok = msgs.reduce((s, m) => s + (m.tokens?.total || 0), 0)
   const ktok = (n) => n >= 1000 ? (n / 1000).toFixed(n < 10000 ? 1 : 0) + 'k' : String(n || 0)
   const ctxChip = lastCtxTok > 0

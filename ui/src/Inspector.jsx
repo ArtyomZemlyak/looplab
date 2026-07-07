@@ -303,14 +303,17 @@ function callPreview(c) {
 // the stage/span header so you see the expensive steps without expanding anything. Counts first-class
 // GENERATION spans (kind), and legacy `llm_call` events (older runs) so both render.
 function spanRollup(s) {
-  let calls = 0, tok = 0
+  // tok = SUM of every call's total (billed — a tool loop re-sends the growing context each turn, O(n²)).
+  // ctx = the PEAK single prompt = the real context-window size. out = generated tokens. The UI shows
+  // ctx + out (billed tok in the tooltip) so the number reads as "context", not the re-send sum.
+  let calls = 0, tok = 0, ctx = 0, out = 0
   const walk = (x) => {
-    if (x.kind === 'generation') { calls++; const u = (x.attributes || {}).usage || {}; tok += (u.total != null ? u.total : (u.prompt || 0) + (u.completion || 0)) }
-    ;(x.events || []).forEach(e => { if (e.name === 'llm_call') { calls++; const t = callTok(e); tok += t.total || 0 } })
+    if (x.kind === 'generation') { calls++; const u = (x.attributes || {}).usage || {}; const p = u.prompt || 0; tok += (u.total != null ? u.total : p + (u.completion || 0)); ctx = Math.max(ctx, p); out += u.completion || 0 }
+    ;(x.events || []).forEach(e => { if (e.name === 'llm_call') { calls++; const t = callTok(e); tok += t.total || 0; ctx = Math.max(ctx, t.in || 0); out += t.out || 0 } })
     ;(x.children || []).forEach(walk)
   }
   walk(s)
-  return { calls, tok }
+  return { calls, tok, ctx, out }
 }
 
 // Adapt a first-class GENERATION span (kind='generation', I/O held in attributes) to the same
@@ -528,7 +531,7 @@ function StageBlock({ s, t0, total, runId }) {
     <div className="stage-h" title={m.desc}>
       <span className="stage-ic"><OpIcon name={m.icon} /></span>
       <b>{m.role}</b>
-      {roll.calls > 0 && <span className="stage-roll" title={`${roll.calls} model call(s) · ~${roll.tok} tokens in this stage`}>{roll.calls} call{roll.calls > 1 ? 's' : ''} · {ktok(roll.tok)} tok</span>}
+      {roll.calls > 0 && <span className="stage-roll" title={`${roll.calls} model call(s) · context peaked at ~${roll.ctx} tokens, generated ~${roll.out} · ${roll.tok} billed (context re-sent each turn)`}>{roll.calls} call{roll.calls > 1 ? 's' : ''}{roll.ctx ? ` · ${ktok(roll.ctx)} ctx` : ''}{roll.out ? ` · ${ktok(roll.out)} out` : ''}</span>}
       <span className="spacer" style={{ flex: 1 }} />
       <span className="t">{fmt(s.duration_s, 3)}s</span>
     </div>
@@ -639,7 +642,7 @@ function ConvStage({ st, defaultOpen = true }) {
   const m = stageMeta(st.label)
   const [open, setOpen] = useState(defaultOpen)
   const roll = st.rollup || {}
-  const rtok = (roll.tokens || {}).total
+  const tk = roll.tokens || {}
   const nTurns = (st.turns || []).length
   const err = st.status === 'ERROR'
   // Colour-band the stage by its tone: a left rail + a tinted header, so foresight/strategy/researcher/
@@ -651,10 +654,12 @@ function ConvStage({ st, defaultOpen = true }) {
       <span className="stage-caret" style={{ opacity: 0.6, fontSize: 10, width: 10, display: 'inline-block' }}>{open ? '▾' : '▸'}</span>
       <span className="stage-ic" style={{ color: err ? 'var(--fail)' : m.tone }}><OpIcon name={m.icon} /></span>
       <b style={{ color: err ? 'var(--fail)' : m.tone }}>{m.role}</b>
-      {(roll.generations || roll.tools) ? <span className="stage-roll">
+      {(roll.generations || roll.tools) ? <span className="stage-roll"
+          title={tk.total ? `context window peaked at ${tk.context || 0} tokens; the model generated ${tk.completion || 0}. Billed ${tk.total} total — a tool loop RE-SENDS the growing context every turn, so billed ≫ context.` : undefined}>
         {roll.generations || 0} turn{roll.generations === 1 ? '' : 's'}
         {roll.tools ? ` · ${roll.tools} tool call${roll.tools === 1 ? '' : 's'}` : ''}
-        {rtok ? ` · ${ktok(rtok)} tok` : ''}</span> : null}
+        {tk.context ? ` · ${ktok(tk.context)} ctx` : ''}
+        {tk.completion ? ` · ${ktok(tk.completion)} out` : ''}</span> : null}
       {!open && nTurns ? <span className="muted" style={{ marginLeft: 6, fontSize: 10 }}>· {nTurns} step{nTurns === 1 ? '' : 's'} hidden</span> : null}
     </div>
     {open && <div className="conv-turns">
@@ -741,10 +746,12 @@ function Trace({ n, runId, live, working }) {
     <div className="muted" style={{ marginBottom: 10 }}>
       Lifecycle of node #{n.id} — each part on a shared timeline (offset = when it ran, bar = how long).
       Expand any observation to read its input &amp; output.
-      {(roll.generations || roll.tools) ? <span className="trace-totals">
+      {(roll.generations || roll.tools) ? <span className="trace-totals"
+          title={rtok.total ? `context window peaked at ${rtok.context || 0} tokens; the model generated ${rtok.completion || 0}. Billed ${rtok.total} total — each turn RE-SENDS the growing context, so billed ≫ context.` : undefined}>
         {' · '}{roll.generations || 0} generation{roll.generations === 1 ? '' : 's'}
         {roll.tools ? ` · ${roll.tools} tool call${roll.tools === 1 ? '' : 's'}` : ''}
-        {rtok.total ? ` · ${ktok(rtok.total)} tok` : ''}
+        {rtok.context ? ` · ${ktok(rtok.context)} ctx` : ''}
+        {rtok.completion ? ` · ${ktok(rtok.completion)} out` : ''}
         {roll.cost ? ` · $${roll.cost}` : ''}
       </span> : null}
     </div>
