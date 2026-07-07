@@ -299,3 +299,193 @@ class RunLauncherTools:
         what = (task.get("kind") if task else None) or task_file or "a task"
         return (f"(proposed run '{rid}' ({what}) — shown to the user as a launch card; they will start "
                 "it. Tell them what you proposed.)")
+
+
+class RunControlTools:
+    """Lets the assistant DRIVE an existing run's lifecycle — finalize, stop, resume, reset a node,
+    delete a node, or delete the whole run — by writing the control event / editing the log the way the
+    UI does. Mutating: every verb goes through `decide(mode, ...)` + the injected `approver` (a UI
+    confirm-card), so it's denied in read-only `plan` mode, asks in default/acceptEdits, and runs inline
+    only in `auto`. Destructive edits (delete node/run) additionally REFUSE while the engine is live —
+    the engine is the sole writer of events.jsonl, so rewriting it under a live one would corrupt it."""
+
+    def __init__(self, run_root, alive_fn: Optional[Callable[[Path], bool]] = None,
+                 mode: str = "plan", approver: Optional[Callable] = None):
+        self.run_root = Path(run_root)
+        self.alive_fn = alive_fn
+        self.mode = mode
+        self.approver = approver
+
+    def bind_state(self, state=None, parent=None) -> None:
+        return None
+
+    def specs(self) -> list[dict]:
+        return [
+            fn_spec("finalize_run",
+                "Finalize a run: stop it AND wrap up (final report + cross-run lessons + cost roll-up). "
+                "Use to END a run cleanly. Takes effect while the engine is running (it reads the event).",
+                {"run_id": {"type": "string"}}, ["run_id"]),
+            fn_spec("stop_run",
+                "Freeze a run (pause, NO wrap-up) — resumable later. Use to PAUSE without finalizing.",
+                {"run_id": {"type": "string"}}, ["run_id"]),
+            fn_spec("resume_run",
+                "Mark a stopped/finished run to resume. (Records the resume intent; if no engine is "
+                "attached, the user still starts it from the UI Resume button.)",
+                {"run_id": {"type": "string"}}, ["run_id"]),
+            fn_spec("reset_node",
+                "Re-run an existing node IN PLACE from a stage (no new node): 'eval' re-scores (keep the "
+                "code), 'implement' re-runs only the Developer (keep the idea), 'propose' is a full redo. "
+                "Applied on the next resume.",
+                {"run_id": {"type": "string"}, "node_id": {"type": "integer"},
+                 "stage": {"type": "string", "enum": ["propose", "implement", "eval"]}},
+                ["run_id", "node_id"]),
+            fn_spec("delete_node",
+                "DELETE a node AND its descendants from a run (removes their events, spans and workdirs; "
+                "the best node is recomputed). DESTRUCTIVE + backs the log up. Refuses while the engine "
+                "is live — stop the run first.",
+                {"run_id": {"type": "string"}, "node_id": {"type": "integer"}},
+                ["run_id", "node_id"]),
+            fn_spec("delete_run",
+                "DELETE an entire run and all its artifacts. DESTRUCTIVE + irreversible. Refuses while "
+                "the engine is live — stop the run first.",
+                {"run_id": {"type": "string"}}, ["run_id"]),
+        ]
+
+    # ------------------------------------------------------------------ helpers
+    def _rd(self, run_id) -> Optional[Path]:
+        # Resolve a run_id to its dir, refusing traversal (must be a direct, existing child of run-root).
+        rid = str(run_id or "").strip().strip("/")
+        if not rid or "/" in rid or "\\" in rid or rid.startswith("."):
+            return None
+        rd = self.run_root / rid
+        return rd if (rd / "events.jsonl").exists() else None
+
+    def _gate(self, name: str, rid: str, verb: str) -> Optional[str]:
+        # Returns a "declined/disabled" string to short-circuit, or None to proceed.
+        from looplab.tools.perm_modes import decide
+        d = decide(self.mode, "run_control")
+        if d == "deny":
+            return "(run control is disabled in read-only plan mode — switch to default/acceptEdits/auto.)"
+        if d == "ask":
+            action = {"tool": name, "tool_kind": "run_control", "label": f"{name} {rid}",
+                      "verb": verb, "preview": f"{name}({rid})"}
+            verdict = str(self.approver(action) or "deny") if self.approver else "deny"
+            if not verdict.startswith("allow"):
+                return f"(declined by the user: {name} {rid})"
+        return None
+
+    def _live(self, rd: Path) -> bool:
+        try:
+            return bool(self.alive_fn and self.alive_fn(rd))
+        except Exception:  # noqa: BLE001
+            return False
+
+    # ------------------------------------------------------------------ dispatch
+    def execute(self, name: str, args: dict) -> str:
+        args = args or {}
+        rid = str(args.get("run_id") or "").strip()
+        rd = self._rd(rid)
+        if rd is None:
+            return f"(no such run: {rid!r})"
+        try:
+            if name in ("finalize_run", "stop_run", "resume_run"):
+                return self._control(name, rid, rd)
+            if name == "reset_node":
+                return self._reset_node(rid, rd, args)
+            if name == "delete_node":
+                return self._delete_node(rid, rd, args)
+            if name == "delete_run":
+                return self._delete_run(rid, rd)
+        except Exception as e:  # noqa: BLE001 — a tool error must never crash the loop
+            return f"(tool error in {name}: {e})"
+        return f"(unknown tool: {name})"
+
+    def _control(self, name: str, rid: str, rd: Path) -> str:
+        from looplab.events.eventstore import EventStore
+        from looplab.events.types import EV_PAUSE, EV_RESUME, EV_RUN_ABORT
+        etype, data, verb = {
+            "finalize_run": (EV_RUN_ABORT, {"reason": "finalized"}, f"finalize run {rid} (stop + wrap up)"),
+            "stop_run": (EV_PAUSE, {}, f"stop (freeze) run {rid}"),
+            "resume_run": (EV_RESUME, {}, f"resume run {rid}"),
+        }[name]
+        blocked = self._gate(name, rid, verb)
+        if blocked:
+            return blocked
+        EventStore(rd / "events.jsonl").append(etype, data)
+        tail = (" — takes effect while the engine is running; if it isn't, start it from the UI."
+                if name != "resume_run" else " — start it from the UI Resume if no engine is attached.")
+        return f"({name.split('_')[0]} recorded for {rid}{tail})"
+
+    def _reset_node(self, rid: str, rd: Path, args: dict) -> str:
+        from looplab.events.eventstore import EventStore
+        from looplab.events.replay import fold
+        from looplab.events.types import EV_NODE_RESET
+        try:
+            nid = int(args.get("node_id"))
+        except (TypeError, ValueError):
+            return "(reset_node needs an integer node_id)"
+        stage = str(args.get("stage") or "eval")
+        if stage not in ("propose", "implement", "eval"):
+            return "(stage must be propose|implement|eval)"
+        if nid not in fold(EventStore(rd / "events.jsonl").read_all()).nodes:
+            return f"(no node #{nid} in {rid})"
+        blocked = self._gate("reset_node", rid, f"reset node #{nid} of {rid} from {stage}")
+        if blocked:
+            return blocked
+        EventStore(rd / "events.jsonl").append(EV_NODE_RESET, {"node_id": nid, "from_stage": stage})
+        return f"(node #{nid} of {rid} queued to re-run from {stage} — applied on the next resume)"
+
+    def _delete_node(self, rid: str, rd: Path, args: dict) -> str:
+        import json
+        import shutil
+        from looplab.events.eventstore import EventStore
+        from looplab.events.replay import fold
+        try:
+            nid = int(args.get("node_id"))
+        except (TypeError, ValueError):
+            return "(delete_node needs an integer node_id)"
+        if self._live(rd):
+            return f"(run {rid} is LIVE — stop it first; the engine is the sole writer of its log)"
+        st = fold(EventStore(rd / "events.jsonl").read_all())
+        if nid not in st.nodes:
+            return f"(no node #{nid} in {rid})"
+        # The node AND every descendant (deleting a node alone would orphan its children's parent links).
+        subtree = {nid}
+        changed = True
+        while changed:
+            changed = False
+            for n in st.nodes.values():
+                if n.id not in subtree and any(p in subtree for p in n.parent_ids):
+                    subtree.add(n.id)
+                    changed = True
+        blocked = self._gate("delete_node", rid, f"delete node(s) {sorted(subtree)} of {rid}")
+        if blocked:
+            return blocked
+        evp = rd / "events.jsonl"
+        recs = [json.loads(x) for x in evp.read_text("utf-8").splitlines() if x.strip()]
+        kept = [r for r in recs
+                if not (isinstance(r.get("data"), dict) and r["data"].get("node_id") in subtree)]
+        shutil.copy(evp, rd / f"events.jsonl.bak-del{nid}")     # recoverable backup
+        evp.write_text("".join(json.dumps(r) + "\n" for r in kept), "utf-8")
+        sp = rd / "spans.jsonl"
+        if sp.exists():
+            skept = [x for x in sp.read_text("utf-8").splitlines()
+                     if x.strip() and (json.loads(x).get("attributes") or {}).get("node_id") not in subtree]
+            sp.write_text("".join(x + "\n" for x in skept), "utf-8")
+        for d in subtree:
+            shutil.rmtree(rd / "nodes" / f"node_{d}", ignore_errors=True)
+        st2 = fold(EventStore(evp).read_all())
+        broken = sorted({p for n in st2.nodes.values() for p in n.parent_ids if p not in st2.nodes})
+        return (f"(deleted node(s) {sorted(subtree)} from {rid}; {len(st2.nodes)} nodes left, "
+                f"best now #{st2.best_node_id}, broken parent links: {broken or 'none'}. "
+                f"Backup: events.jsonl.bak-del{nid})")
+
+    def _delete_run(self, rid: str, rd: Path) -> str:
+        import shutil
+        if self._live(rd):
+            return f"(run {rid} is LIVE — stop it first before deleting)"
+        blocked = self._gate("delete_run", rid, f"DELETE the entire run {rid} (irreversible)")
+        if blocked:
+            return blocked
+        shutil.rmtree(rd, ignore_errors=True)
+        return f"(deleted run {rid} and all its artifacts)"

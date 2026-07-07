@@ -271,7 +271,7 @@ def build_tools(run_root, alive_fn: Optional[Callable] = None, mode: str = DEFAU
     only — a subagent runs with subagents=False to prevent unbounded nesting)."""
     from looplab.agents.agent import CompositeTools
     from looplab.tools.reposcout import RepoScoutTools
-    from looplab.tools.runs_tools import RunsTools, RunLauncherTools
+    from looplab.tools.runs_tools import RunsTools, RunLauncherTools, RunControlTools
     mode = normalize_mode(mode)
     roots = [Path.home(), REPO_ROOT, Path(run_root)] + list(extra_roots)
     providers = [RepoScoutTools(roots), RunsTools(run_root, alive_fn=alive_fn), RunLauncherTools()]
@@ -288,7 +288,10 @@ def build_tools(run_root, alive_fn: Optional[Callable] = None, mode: str = DEFAU
         backup_dir = Path(run_root) / "assistant" / "backups"
         providers += [WriteTools(roots, mode=mode, approver=approver, repo_root=REPO_ROOT,
                                  backup_dir=backup_dir),
-                      sh, GitTools(sh, cwd=REPO_ROOT)]
+                      sh, GitTools(sh, cwd=REPO_ROOT),
+                      # Drive an existing run's lifecycle (finalize/stop/resume/reset/delete node/run),
+                      # self-gated by the same mode+approver so destructive verbs raise a confirm card.
+                      RunControlTools(run_root, alive_fn=alive_fn, mode=mode, approver=approver)]
     providers.append(TodoTools(on_todos=on_todos))
     if subagents and client is not None:
         providers.append(SubagentTools(client, run_root, alive_fn=alive_fn, settings=settings,
