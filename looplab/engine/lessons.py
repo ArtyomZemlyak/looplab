@@ -243,6 +243,31 @@ class LessonMemory:
                         for lz in lessons[:12]],
             "skills": skills[:8]})
 
+    def _reflect_tools(self, state: RunState):
+        """Read-only run-introspection tools so reflection / distillation READS the real experiments
+        (read_experiment / read_code / read_logs / list_experiments) to ground its output, instead of
+        distilling blind from the aggregate summary in the prompt. None on any failure => plain call."""
+        try:
+            from looplab.tools.run_tools import RunTools
+            from looplab.agents.agent import CompositeTools
+            rt = RunTools()
+            rt.bind_state(state, None)
+            return CompositeTools([rt])
+        except Exception:  # noqa: BLE001
+            return None
+
+    def _reflect_loop_opts(self) -> dict:
+        """Bounded tool-loop opts for the auxiliary agentic passes (reflection/distillation) — the same
+        config-driven B1/C1/C2 options as the main agents, plus a tight turn cap (these READ a bit then
+        emit, they don't investigate for 300 turns)."""
+        try:
+            from looplab.agents.agent import loop_opts_from_settings
+            opts = loop_opts_from_settings(getattr(self._e, "settings", None))
+        except Exception:  # noqa: BLE001
+            opts = {}
+        opts["max_turns"] = 15
+        return opts
+
     def reflect_lessons(self, final: RunState, best, fp: list) -> list:
         """LLM reflection over the whole run → 1-3 GENERALIZABLE lessons (transferable good/bad
         takeaways), the DS-Agent/MARS reflective-memory idea — not per-run specifics. [] on no-client
@@ -273,7 +298,10 @@ class LessonMemory:
                   "(e.g. 'a larger batch size aided convergence', 'polynomial features overfit on small "
                   "data'). Tag each [GOOD] (reuse this) or [BAD] (avoid this). One per line, no preamble.")
         try:
-            out = client.complete_text([{"role": "user", "content": prompt}]) or ""
+            from looplab.agents.agent import agentic_text
+            out = agentic_text(client, self._reflect_tools(final), [{"role": "user", "content": prompt}],
+                               loop_opts=self._reflect_loop_opts(),
+                               answer_desc="1-3 generalizable lessons, one per line, each tagged [GOOD]/[BAD]") or ""
         except Exception:   # noqa: BLE001 - best-effort
             return _winner_lesson()
         from looplab.engine.memory import parse_credit_lessons

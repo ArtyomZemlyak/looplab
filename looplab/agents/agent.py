@@ -386,6 +386,29 @@ def drive_tool_loop(client, tools, messages: list, emit_spec: dict, *,
     return fallback(messages)
 
 
+def agentic_text(client, tools, messages, *, loop_opts=None, fallback=None,
+                 answer_desc="your final answer") -> str:
+    """`client.complete_text(messages)` upgraded to AGENTIC: the model MAY first call the provided
+    read-only tools (run introspection, repo scouts, …) to GROUND its answer in the real experiments/
+    code, then emits the text. Any single-shot text call becomes tool-using just by passing `tools`.
+    Degrades to a plain completion when `tools` is falsy or the loop yields nothing — so callers keep
+    their exact old behavior with no client/tools. Returns the emitted text (str)."""
+    fb = fallback or (lambda m: str(client.complete_text(m) or ""))
+    if not tools:
+        return fb(messages)
+    emit_spec = {"type": "function", "function": {
+        "name": "answer", "description": f"Emit {answer_desc}. This ends your turn.",
+        "parameters": {"type": "object",
+                       "properties": {"text": {"type": "string", "description": answer_desc}},
+                       "required": ["text"]}}}
+    try:
+        return drive_tool_loop(client, tools, messages, emit_spec,
+                               finalize=lambda a: str((a or {}).get("text", "") or ""),
+                               fallback=fb, **(loop_opts or {}))
+    except Exception:  # noqa: BLE001 — an agentic-path failure must never break a best-effort step
+        return fb(messages)
+
+
 def _summarizer(client):
     """Build a `summarize(text) -> str` callable from an LLM client for `compact_history` (C2).
     Best-effort: any failure makes the caller fall back to deterministic truncation."""
