@@ -664,7 +664,7 @@ function ConvStage({ st, defaultOpen = true }) {
   </div>
 }
 
-function Conversation({ n, runId, working }) {
+function Conversation({ n, runId, working, allOpen = true }) {
   const [conv, setConv] = useState(null)
   useEffect(() => {
     let on = true
@@ -674,23 +674,20 @@ function Conversation({ n, runId, working }) {
     const iv = working ? setInterval(load, 4000) : null   // live-refresh while the agent works this node
     return () => { on = false; if (iv) clearInterval(iv) }
   }, [runId, n.id, working])
-  const [allOpen, setAllOpen] = useState(true)
   if (conv === null) return <div className="muted" style={{ fontSize: 12 }}>loading…</div>
   const stages = conv.stages || []
   if (!stages.length) return <div className="muted">No conversation captured for this node yet.</div>
-  // key includes allOpen so a collapse/expand-all click remounts every band at the new default; a live
-  // poll (allOpen unchanged) keeps the key stable, so per-band toggles survive the 4s refresh.
+  // `allOpen` is owned by the sticky Trace header (so collapse-all lives in the pinned bar). It's folded
+  // into each band's key so a collapse/expand-all click remounts them at the new default; a live poll
+  // (allOpen unchanged) keeps the key stable, so per-band toggles survive the 4s refresh.
   return <div className="conv">
-    <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 4 }}>
-      <button className="seg" style={{ fontSize: 10 }} title="collapse or expand every stage"
-        onClick={() => setAllOpen(o => !o)}>{allOpen ? '⊟ collapse all' : '⊞ expand all'}</button>
-    </div>
     {stages.map((st, i) => <ConvStage key={`${st.trace_id || ''}:${st.label || ''}:${st.start || i}:${allOpen}`} st={st} defaultOpen={allOpen} />)}
   </div>
 }
 
 function Trace({ n, runId, live, working }) {
   const [view, setView] = useState('conversation')   // linear reading by default; raw tree on demand
+  const [allOpen, setAllOpen] = useState(true)        // collapse/expand-all, lifted here for the sticky bar
   const bodyRef = useRef(null)
   const spans = n.trace?.nodes || []
   const agent = n.agent_report
@@ -706,24 +703,32 @@ function Trace({ n, runId, live, working }) {
   const nav = <span className="trace-nav">
     <button className="seg" title="scroll to top" onClick={() => scrollTo('top')}>↑</button>
     <button className="seg" title="scroll to newest (bottom)" onClick={() => scrollTo('bottom')}>↓</button></span>
+  // STICKY control bar: pinned to the top of the scroll area (position:sticky in .trace-head) so the view
+  // toggle / collapse-all / scroll nav stay reachable while you page through a long trace, instead of
+  // scrolling off the top. collapse-all is shown only for the conversation view (it acts on the bands).
+  const head = <div className="trace-head">
+    {status}
+    <div className="conv-toggle">
+      <button className={'seg' + (view === 'conversation' ? ' on' : '')} onClick={() => setView('conversation')}
+        title="Linear, de-duplicated reading: request once, then each turn's reasoning + tools">conversation</button>
+      <button className={'seg' + (view === 'raw' ? ' on' : '')} onClick={() => setView('raw')}
+        title="The raw span tree with each generation's full re-sent message list">raw spans</button>
+      {view === 'conversation' && <button className="seg" style={{ fontSize: 10 }} title="collapse or expand every stage"
+        onClick={() => setAllOpen(o => !o)}>{allOpen ? '⊟ collapse all' : '⊞ expand all'}</button>}
+      <span style={{ flex: 1 }} />{nav}
+    </div>
+  </div>
   if (!spans.length && !agent) {
     // While the agent is WORKING this node, node_detail's trace may still be empty (its create_node
     // root span hasn't closed) — but /conversation rebuilds LIVE from the sub-spans that have already
     // flushed. So mount the live-polling Conversation (it refreshes every 4s) instead of a dead
     // placeholder: steps now appear as each generation/tool completes, not all at once at the end.
     if (working)
-      return <div className="trace" ref={bodyRef}>{status}<Conversation n={n} runId={runId} working={working} /></div>
-    return <div className="trace" ref={bodyRef}>{status}<div className="muted">No execution spans for this node yet — toy/offline nodes have minimal spans, and a node still in progress fills its trace as it runs.</div></div>
+      return <div className="trace" ref={bodyRef}>{head}<Conversation n={n} runId={runId} working={working} allOpen={allOpen} /></div>
+    return <div className="trace" ref={bodyRef}>{head}<div className="muted">No execution spans for this node yet — toy/offline nodes have minimal spans, and a node still in progress fills its trace as it runs.</div></div>
   }
-  const toggle = <div className="conv-toggle">
-    <button className={'seg' + (view === 'conversation' ? ' on' : '')} onClick={() => setView('conversation')}
-      title="Linear, de-duplicated reading: request once, then each turn's reasoning + tools">conversation</button>
-    <button className={'seg' + (view === 'raw' ? ' on' : '')} onClick={() => setView('raw')}
-      title="The raw span tree with each generation's full re-sent message list">raw spans</button>
-    <span style={{ flex: 1 }} />{nav}
-  </div>
   if (view === 'conversation')
-    return <div className="trace" ref={bodyRef}>{status}{toggle}<Conversation n={n} runId={runId} working={working} />
+    return <div className="trace" ref={bodyRef}>{head}<Conversation n={n} runId={runId} working={working} allOpen={allOpen} />
       {agent && <AgentReport r={agent} />}</div>
   const { t0, total } = traceBounds(spans)
   // create_node already nests propose→implement; if an agent wrote the node, the report belongs
@@ -732,8 +737,7 @@ function Trace({ n, runId, live, working }) {
   const roll = n.trace?.rollup || {}
   const rtok = roll.tokens || {}
   return <div className="trace" ref={bodyRef}>
-    {status}
-    {toggle}
+    {head}
     <div className="muted" style={{ marginBottom: 10 }}>
       Lifecycle of node #{n.id} — each part on a shared timeline (offset = when it ran, bar = how long).
       Expand any observation to read its input &amp; output.

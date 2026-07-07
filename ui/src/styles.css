@@ -806,6 +806,12 @@ textarea.text { min-height: 220px; font-family: ui-monospace, Consolas, monospac
   border: none; cursor: pointer; }
 .conv-toggle .seg + .seg { border-left: 1px solid var(--line-2); }
 .conv-toggle .seg.on { background: var(--accent); color: #fff; }
+/* Sticky trace control bar: pins the status + view toggle + collapse-all + scroll nav to the top of the
+   scrolling .insp-body so they stay reachable while paging a long trace. The negative margins/top cancel
+   the .insp-body 9px×12px padding so it sits flush and spans the full width when pinned. */
+.trace-head { position: sticky; top: -9px; z-index: 5; background: var(--bg-1);
+  margin: -9px -12px 8px; padding: 9px 12px 2px; border-bottom: 1px solid var(--line-2); }
+.trace-head .conv-toggle, .trace-head .trace-live-status { margin-bottom: 6px; }
 .conv .stage .conv-turns { padding: 4px 8px; }
 .conv-turns > div { padding: 3px 0; }
 .conv-turns > div + div { border-top: 1px dashed var(--line); }
