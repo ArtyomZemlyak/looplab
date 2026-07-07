@@ -258,6 +258,7 @@ See [Concepts → Trust & sandbox](concepts.md#trust--the-sandbox) for what each
 | `prompt_dir` | `LOOPLAB_PROMPT_DIR` | — | Dir of editable, hot-reloaded role-prompt `.md` files |
 | `researcher_tools` | `LOOPLAB_RESEARCHER_TOOLS` | `true` | Let the Researcher read its own experiments + task data mid-loop |
 | `cross_run_tools` | `LOOPLAB_CROSS_RUN_TOOLS` | `true` | Read-only tools over sibling runs (same task, same run-root) |
+| `all_runs_tools` | `LOOPLAB_ALL_RUNS_TOOLS` | `true` | Read-only tools (`list_all_runs`, `read_run_code`, `read_run_experiment`) over EVERY run on the machine, across ALL tasks — read/reuse any past experiment's code + result |
 | `literature_search` | `LOOPLAB_LITERATURE_SEARCH` | `false` | arXiv search tool for the Researcher (network-optional) |
 | `web_search` | `LOOPLAB_WEB_SEARCH` | `false` | Web search/fetch for the DeepResearcher (network-optional) |
 | `research_verify` | `LOOPLAB_RESEARCH_VERIFY` | `true` | Verify a deep-research memo's claims against their cited evidence before it's recorded (synthesis is the documented weak link); verdicts ride inside the memo, audit-only |

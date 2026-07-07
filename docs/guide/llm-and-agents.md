@@ -139,6 +139,7 @@ Give the agentic Researcher extra context and tools:
 | `prompt_dir` | Editable, hot-reloaded role-prompt `.md` files (override the built-in prompts) |
 | `researcher_tools` | (on) Read its own experiments + the task data mid-loop |
 | `cross_run_tools` | (on) Read-only tools over sibling runs (same task id, same run-root) |
+| `all_runs_tools` | (on) Read-only tools over EVERY run on the machine, across ALL tasks — read any experiment's code + result to reuse it |
 | `literature_search` | An arXiv search tool (network-optional) |
 | `web_search` | Web search/fetch for the Deep-Research stage (network-optional) |
 

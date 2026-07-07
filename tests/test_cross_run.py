@@ -62,6 +62,40 @@ def test_sibling_tools_read_filter_and_traversal_guard(tmp_path):
         "read_sibling_code", {"run_id": "nope", "node_id": 0})
 
 
+# --------------------------------------------------------------------------- AllRunsTools
+def test_all_runs_tools_span_all_tasks(tmp_path):
+    from looplab.tools.run_tools import AllRunsTools
+
+    # runA: a real finished toy run (evaluated nodes + code).
+    rdA = tmp_path / "runA"
+    stA = anyio.run(_engine(rdA).run)
+    task_id, nidA = stA.task_id, stA.best().id
+
+    # runC: a run of a DIFFERENT task — sibling tools EXCLUDE it, AllRunsTools must INCLUDE it.
+    storeC = EventStore(tmp_path / "runC" / "events.jsonl")
+    storeC.append("run_started", {"run_id": "runC", "task_id": "other-task", "direction": "min"})
+    storeC.append("node_created", {"node_id": 0, "operator": "draft",
+                                   "idea": {"operator": "draft", "params": {}}, "code": "x=1  # runC code"})
+
+    tools = AllRunsTools(tmp_path, "runB")
+    tools.bind_state(RunState(run_id="runB", task_id=task_id))
+
+    listing = tools.execute("list_all_runs", {})
+    assert "runA" in listing            # same-task run surfaced
+    assert "runC" in listing            # DIFFERENT-task run ALSO surfaced (the whole point)
+    assert "runB" not in listing        # self excluded
+
+    # Code + experiment of ANY run readable — including the foreign-task one.
+    code = tools.execute("read_run_code", {"run_id": "runC", "node_id": 0})
+    assert "from run runC" in code and "runC code" in code
+    detail = tools.execute("read_run_experiment", {"run_id": "runA", "node_id": nidA})
+    assert "run runA" in detail and f"experiment #{nidA}" in detail
+
+    # Traversal guard + unknown run soft-fail to a string, never raise.
+    assert "no such run" in tools.execute("read_run_code", {"run_id": "../runA", "node_id": 0})
+    assert "no such run" in tools.execute("read_run_experiment", {"run_id": "nope", "node_id": 0})
+
+
 def test_sibling_find_analogous_across_runs(tmp_path):
     rdA = tmp_path / "runA"
     stA = anyio.run(_engine(rdA).run)

@@ -210,6 +210,9 @@ def _shared_providers(task: TaskAdapter, settings, run_dir=None, *, core_only: b
     if run_dir is not None and getattr(settings, "cross_run_tools", True):
         from looplab.tools.run_tools import SiblingRunTools
         providers.append(SiblingRunTools(Path(run_dir).parent, Path(run_dir).name))   # other runs
+    if run_dir is not None and getattr(settings, "all_runs_tools", True):
+        from looplab.tools.run_tools import AllRunsTools
+        providers.append(AllRunsTools(Path(run_dir).parent, Path(run_dir).name))   # ANY run, any task
     if core_only:
         return providers
     cases_path = (str(Path(settings.memory_dir) / "cases.jsonl")

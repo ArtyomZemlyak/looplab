@@ -416,6 +416,99 @@ class SiblingRunTools:
             f"dist={d:.3f}  run {rid} {self._reader._line(n)}" for d, rid, n in scored[:k])
 
 
+class AllRunsTools:
+    """Read-only view over EVERY run on this machine — ACROSS ALL TASKS, not just same-task siblings —
+    so the Developer/Researcher can read the code + result of ANY past experiment anywhere when it
+    wants to reuse or learn from an approach. Where `SiblingRunTools` restricts to the current task,
+    this deliberately does NOT filter by task: it just gives the agent the capability, and the agent
+    decides when a foreign run is relevant. Same `.specs()`/`.execute()`/`bind_state()` shape as the
+    other providers; every `execute` returns a string and soft-fails (a junk call must never crash the
+    loop). Runs are folded on demand and cached by each event log's (size, mtime) fingerprint (shared
+    RunStateCache), and reading one run's experiment/code delegates to an internal `RunTools` bound to
+    it — the SAME reader the in-run agent uses, so the output format is identical."""
+
+    def __init__(self, run_root, self_run_id: str = "", max_chars: int = 3500):
+        self.run_root = Path(run_root)
+        self.self_run_id = self_run_id
+        self.max_chars = max_chars
+        self._runs = RunStateCache(self.run_root)   # traversal-guarded, (size,mtime)-fingerprinted
+        self._reader = RunTools(max_chars=max_chars)
+
+    def bind_state(self, state: Optional[RunState] = None, parent=None) -> None:
+        # Learn our OWN run_id so we never list/read ourselves (own experiments already come via RunTools).
+        if state is not None and getattr(state, "run_id", ""):
+            self.self_run_id = state.run_id
+
+    def specs(self) -> list[dict]:
+        return [
+            fn_spec("list_all_runs",
+                "List EVERY run on this machine, ACROSS ALL TASKS (not just same-task siblings), with "
+                "its task, best metric, node count and phase — so you can find a run whose code you "
+                "want to read or reuse. Broader than list_sibling_runs.", {}),
+            fn_spec("read_run_code",
+                "Read the solution code (solution + files) of ONE node in ANY run on this machine — to "
+                "reuse or learn from how it was implemented. Use a run_id from list_all_runs; pair with "
+                "read_run_experiment to check that node's result first.",
+                {"run_id": {"type": "string"}, "node_id": {"type": "integer"}},
+                ["run_id", "node_id"]),
+            fn_spec("read_run_experiment",
+                "Read ONE node of ANY run in detail: params, metric, rationale/idea, failure, sweep "
+                "trials — so you can judge whether its approach is worth reading the code for.",
+                {"run_id": {"type": "string"}, "node_id": {"type": "integer"},
+                 "trials": {"type": "string", "description": "how many sweep trials: a number, or 'all'"}},
+                ["run_id", "node_id"]),
+        ]
+
+    def execute(self, name: str, args: dict) -> str:
+        try:
+            if name == "list_all_runs":
+                return self._list_runs()
+            if name == "read_run_code":
+                return self._code(args.get("run_id"), int(args.get("node_id")))
+            if name == "read_run_experiment":
+                return self._read(args.get("run_id"), int(args.get("node_id")), args.get("trials"))
+            return f"(unknown tool: {name})"
+        except (KeyError, TypeError, ValueError, ArithmeticError) as e:
+            return f"(tool error: {e})"
+
+    # --- internals -----------------------------------------------------------
+    def _state(self, run_id: Optional[str]) -> Optional[RunState]:
+        return self._runs.state(run_id)
+
+    def _all_ids(self) -> list[str]:
+        """Every run id under run_root EXCEPT self (own experiments already reachable via RunTools)."""
+        return [rid for rid in self._runs.run_ids() if rid != self.self_run_id]
+
+    def _list_runs(self) -> str:
+        lines = []
+        for rid in self._all_ids():
+            st = self._state(rid)
+            if st is None:
+                continue
+            best = st.best()
+            phase = "finished" if st.finished else "running"
+            lines.append(f"{rid} [{st.task_id or '?'}]: best={digest.fmt_num(best.metric) if best else '—'} "
+                         f"({st.direction}) · {len(st.nodes)} nodes · {phase}"
+                         + (f" · best=#{best.id}" if best else ""))
+        return (f"{len(lines)} run(s) on this machine (across all tasks):\n" + "\n".join(lines)
+                ) if lines else "(no other runs on this machine)"
+
+    def _code(self, run_id, nid: int) -> str:
+        st = self._state(run_id)
+        if st is None:
+            return f"(no such run: {run_id!r})"
+        self._reader.bind_state(st, None)
+        return f"# from run {run_id}\n" + self._reader.execute("read_code", {"node_id": nid})
+
+    def _read(self, run_id, nid: int, trials_arg=None) -> str:
+        st = self._state(run_id)
+        if st is None:
+            return f"(no such run: {run_id!r})"
+        self._reader.bind_state(st, None)
+        return f"run {run_id} · " + self._reader.execute(
+            "read_experiment", {"node_id": nid, "trials": trials_arg})
+
+
 class DataTools:
     """Read the concrete task data — schema, column profiling, and asset samples — so the Researcher
     proposes from the REAL data rather than guessing. Degrades gracefully for tasks with no dataset
