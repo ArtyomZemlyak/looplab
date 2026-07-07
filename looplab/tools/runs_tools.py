@@ -273,12 +273,22 @@ class RunLauncherTools:
                 "settings). The user reviews an editable card and starts it — you do not launch it. "
                 "Give EITHER an inline `task` object (with a `kind`: dataset/repo/mlebench_real/…) OR a "
                 "`task_file` from the catalogue. Put model/max_nodes/etc. in `settings`. The task is "
-                "VALIDATED before it becomes a card — an invalid one is bounced back to you to fix. For "
-                "kind='repo' the task MUST have either an `eval` {command:[...], metric:{kind,key}} OR "
-                "`onboard: true`, and `editable_path` MUST be an ABSOLUTE path that exists on disk "
-                "(copy the eval/paths from a sibling run of the same repo when continuing one).",
+                "VALIDATED before it becomes a card — an invalid one is bounced back to you to fix.\n"
+                "REPO TASK RULES (get these right — they are the usual mistakes):\n"
+                "• `direction` is EXACTLY \"max\" or \"min\" — never \"maximize\"/\"minimize\".\n"
+                "• `editable_path` MUST be an ABSOLUTE path that EXISTS on disk (e.g. /home/jovyan/…).\n"
+                "• A repo task needs EITHER `eval` OR `onboard:true`. In `eval.metric`, `kind` is the "
+                "READER — one of stdout_json / stdout_regex / file_json / file_regex — NOT the direction "
+                "(do NOT put \"max\" in metric.kind; the objective key goes in `key`, e.g. "
+                "{\"kind\":\"stdout_json\",\"key\":\"recall@100\"}).\n"
+                "• Use `eval` ONLY when its command's entrypoint ALREADY EXISTS in the base repo and "
+                "prints the metric. If the entrypoint must be BUILT (it doesn't exist in a fresh checkout — "
+                "e.g. it was authored by a PRIOR run's agent, or the user says the agents may write/modify "
+                "the train/test scripts), set `onboard:true` (and describe how to run+score it in the goal) "
+                "so THIS run's agent builds it — do NOT reference a file that won't be in a fresh workspace. "
+                "When continuing a sibling run, only copy its `eval` if that entrypoint lives in the repo.",
                 {"run_id": {"type": "string", "description": "short kebab-case name you invent"},
-                 "task": {"type": "object", "description": "inline task object with a `kind` (repo needs eval-or-onboard + an absolute editable_path)"},
+                 "task": {"type": "object", "description": "inline task; repo needs eval-or-onboard, absolute editable_path, direction max|min, metric.kind a reader (not the direction)"},
                  "task_file": {"type": "string", "description": "a catalogue task path (alternative to task)"},
                  "settings": {"type": "object", "description": "engine overrides, e.g. {\"llm_model\":..,\"max_nodes\":..}"},
                  "rationale": {"type": "string"}},

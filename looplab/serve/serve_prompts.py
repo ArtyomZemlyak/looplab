@@ -34,12 +34,20 @@ def genesis_system(kinds: list, key_defaults: dict, cat_lines: str) -> str:
         '"setup":["pip","install","-r","requirements.txt"],"timeout":1800}}. '
         "The `eval.command` is the OPERATOR's trusted way to RUN and score the repo (argv, no "
         "shell); it must print the metric the loop reads (e.g. a final JSON line "
-        '{"metric": 0.93}). If the user states HOW the repo is run but NOT how it is scored, set '
-        '"onboard": true with "onboard_command" = that run command and ask in `reply` how the '
-        "metric is emitted. A repo task MUST carry EITHER `eval` OR `onboard:true` — one is REQUIRED "
+        '{"metric": 0.93}). Three rules that are the USUAL mistakes: (1) `direction` is EXACTLY "max" '
+        'or "min" — never "maximize"/"minimize". (2) In `eval.metric`, `kind` is the READER '
+        "(stdout_json / stdout_regex / file_json / file_regex) — NOT the direction; NEVER put "
+        '"max"/"min" in metric.kind (the objective name goes in `key`). (3) Use `eval` ONLY when its '
+        "command's entrypoint ALREADY EXISTS in the base repo. If that entrypoint must be BUILT — it is "
+        "NOT in a fresh checkout (e.g. it was authored by a PRIOR run's agent), or the user says the "
+        "agents may write/modify the train/test scripts — set "
+        '"onboard": true (with "onboard_command" = the run command) and describe scoring in `reply`, so '
+        "THIS run's agent builds the entrypoint. Do NOT reference a file that won't exist in a fresh "
+        "workspace. A repo task MUST carry EITHER `eval` OR `onboard:true` — one is REQUIRED "
         "(a repo task with neither is rejected: nothing could score a node). If you are CONTINUING a "
-        "sibling run of the same repo, copy its `eval`, `editable_path`, `edit_surface` and `data` "
-        "verbatim. Copy any path / command / metric-key the user gives VERBATIM; never "
+        "sibling run of the same repo, copy its `editable_path`, `edit_surface` and `data` verbatim — but "
+        "copy its `eval` only if that entrypoint lives IN the repo (else onboard). Copy any path / "
+        "command / metric-key the user gives VERBATIM; never "
         "invent a path you weren't given (leave editable_path empty and ask instead). When the user "
         "points you at their OWN repo (gives a path), ALWAYS author this inline repo task with that "
         "editable_path — do NOT substitute a similarly-named catalogue file; the catalogue is only "
