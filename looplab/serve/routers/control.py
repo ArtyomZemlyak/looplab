@@ -189,11 +189,19 @@ def build_router(srv) -> APIRouter:
             if kind not in kinds():
                 raise HTTPException(400, f"unknown task kind: {kind!r} (known: {kinds()})")
             try:
-                await anyio.to_thread.run_sync(lambda: validate_task(task))
+                adapter = await anyio.to_thread.run_sync(lambda: validate_task(task))
             except HTTPException:
                 raise
             except Exception as e:  # noqa: BLE001 - kind-specific validation failed (e.g. bad competition)
                 raise HTTPException(400, f"invalid task: {e}")
+            # Repo task: the editable repo must actually exist on THIS machine at submit time (the
+            # model can't check that — a snapshot loads on any host). A relative/missing path would
+            # otherwise only surface as a warning, then fail deep in materialize. Reject it now.
+            if kind == "repo":
+                ep = getattr(adapter, "editable_path", "") or ""
+                if ep and not Path(ep).exists():
+                    raise HTTPException(400, f"editable_path does not exist: {ep!r} — point it at the "
+                                             "repo to edit (an ABSOLUTE path, e.g. /home/jovyan/data/…).")
             rd.mkdir(parents=True, exist_ok=True)
             task_file = str(rd / "task.input.json")
             Path(task_file).write_text(json.dumps(task, indent=2), encoding="utf-8")

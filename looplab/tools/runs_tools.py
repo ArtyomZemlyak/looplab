@@ -272,9 +272,13 @@ class RunLauncherTools:
                 "Propose a NEW LoopLab run for the user to launch (a run name + a task + optional "
                 "settings). The user reviews an editable card and starts it — you do not launch it. "
                 "Give EITHER an inline `task` object (with a `kind`: dataset/repo/mlebench_real/…) OR a "
-                "`task_file` from the catalogue. Put model/max_nodes/etc. in `settings`.",
+                "`task_file` from the catalogue. Put model/max_nodes/etc. in `settings`. The task is "
+                "VALIDATED before it becomes a card — an invalid one is bounced back to you to fix. For "
+                "kind='repo' the task MUST have either an `eval` {command:[...], metric:{kind,key}} OR "
+                "`onboard: true`, and `editable_path` MUST be an ABSOLUTE path that exists on disk "
+                "(copy the eval/paths from a sibling run of the same repo when continuing one).",
                 {"run_id": {"type": "string", "description": "short kebab-case name you invent"},
-                 "task": {"type": "object", "description": "inline task object with a `kind`"},
+                 "task": {"type": "object", "description": "inline task object with a `kind` (repo needs eval-or-onboard + an absolute editable_path)"},
                  "task_file": {"type": "string", "description": "a catalogue task path (alternative to task)"},
                  "settings": {"type": "object", "description": "engine overrides, e.g. {\"llm_model\":..,\"max_nodes\":..}"},
                  "rationale": {"type": "string"}},
@@ -292,6 +296,17 @@ class RunLauncherTools:
         task_file = args.get("task_file") or None
         if not task and not task_file:
             return "(propose_run needs an inline `task` object with a kind, or a `task_file`)"
+        # VALIDATE before proposing so the card the user sees is actually launchable — an invalid spec
+        # (e.g. a repo task with no `eval` and no `onboard`) is bounced BACK to you to fix here, instead
+        # of failing only when the user clicks Start (which spawns an engine that dies with no events).
+        if task:
+            try:
+                from looplab.adapters.tasks import validate_task
+                validate_task(task)
+            except Exception as e:  # noqa: BLE001
+                return (f"(NOT proposed — the task is INVALID: {e}\nFix it and call propose_run again. "
+                        "For kind='repo' you MUST give either an `eval` {command, metric} OR set "
+                        "`onboard: true`, and `editable_path` must be an ABSOLUTE path that exists.)")
         spec = {"run_id": rid, "task": task or {}, "task_file": task_file,
                 "settings": args.get("settings") if isinstance(args.get("settings"), dict) else {},
                 "rationale": str(args.get("rationale") or "")}

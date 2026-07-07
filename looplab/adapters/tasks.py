@@ -82,7 +82,17 @@ def validate_task(data: dict) -> TaskAdapter:
     cls = _KINDS.get(kind)
     if cls is None:
         raise ValueError(f"unknown task kind: {kind!r} (known: {sorted(_KINDS)})")
-    return cls.model_validate(data)
+    adapter = cls.model_validate(data)
+    # The engine's startup invariant (orchestrator.__init__), pulled UP to submit time so /api/start
+    # rejects a bad repo spec with a 400 (and the assistant re-proposes) instead of spawning a detached
+    # engine that dies before writing any events — the "click Start, then GET events → 404" trap. Kept
+    # here (not on the RepoTask model) so unit tests can still construct a partial RepoTask.
+    if kind == "repo" and getattr(adapter, "eval", None) is None and not getattr(adapter, "onboard", False):
+        raise ValueError(
+            "RepoTask has no `eval` and onboard is off — every node would be scored with no real "
+            "evaluation. Either give an `eval` (a command + a metric to read), OR set `onboard: true` "
+            "(with backend=llm) so an onboarder builds the eval entrypoint first.")
+    return adapter
 
 
 def load_task(path: str | Path) -> TaskAdapter:
