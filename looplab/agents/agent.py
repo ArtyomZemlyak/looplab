@@ -409,6 +409,32 @@ def agentic_text(client, tools, messages, *, loop_opts=None, fallback=None,
         return fb(messages)
 
 
+def agentic_struct(client, tools, messages, model_cls, *, parser="tool_call",
+                   loop_opts=None, fallback=None):
+    """`parse_structured(client, messages, model_cls, parser)` upgraded to AGENTIC: the model MAY first
+    call the provided read-only tools to GROUND its structured emit in the real experiments/code, then
+    emits the object. Returns a validated `model_cls` instance. Degrades to plain `parse_structured` when
+    `tools` are absent or the loop yields nothing invalid — so callers keep their exact old behavior."""
+    from looplab.core.parse import parse_structured
+    fb = fallback or (lambda m: parse_structured(client, m, model_cls, parser))
+    if not tools:
+        return fb(messages)
+    emit_spec = {"type": "function", "function": {
+        "name": "emit", "description": "Emit the final structured result. This ends your turn.",
+        "parameters": model_cls.model_json_schema()}}
+
+    def _final(args):
+        try:
+            return model_cls.model_validate(args or {})
+        except Exception:  # noqa: BLE001 — a malformed emit falls back to the plain structured path
+            return fb(messages)
+    try:
+        return drive_tool_loop(client, tools, messages, emit_spec, finalize=_final, fallback=fb,
+                               **(loop_opts or {}))
+    except Exception:  # noqa: BLE001 — the agentic path must never break a best-effort step
+        return fb(messages)
+
+
 def _summarizer(client):
     """Build a `summarize(text) -> str` callable from an LLM client for `compact_history` (C2).
     Best-effort: any failure makes the caller fall back to deterministic truncation."""
