@@ -46,7 +46,10 @@ PROFILES: dict[str, dict] = {
     "thorough": {
         "confirm_top_k": 3,
         "confirm_seeds": 3,
-        "novelty_gate": True,
+        # novelty_gate intentionally NOT enabled here: duplicate-detection is the agentic Researcher's
+        # job (it reads past experiments + find_analogous_across_runs and DECIDES), not an algorithmic
+        # param-distance / embedding auto-reject that mis-fired (it nudged a good fresh idea onto a
+        # twice-dead lineage — live node 61). Search stays as tools; the LLM judges novelty.
         "operator_bandit": True,   # P4: adaptive operator mix over folded yields (GreedyTree)
         "reward_hack_detect": True,
         "code_leakage_detect": True,
@@ -231,12 +234,13 @@ class Settings(BaseSettings):
     # wasting evals re-trying the same idea. Audit event `novelty_rejected`. Off by default.
     novelty_gate: bool = False
     novelty_epsilon: float = 0.05
-    # T5 semantic novelty (Phase 2, needs novelty_gate): ALSO reject a proposal whose idea TEXT
-    # (rationale+hypothesis) embeds within `novelty_semantic_threshold` cosine of an existing
-    # node's — with one informed re-propose surfacing the duplicate's outcome ("you tried X, it
-    # failed because Y"). ShinkaEvolve's ablation ranks duplicate-rejection-before-eval above
-    # model routing. Uses the T4 embedder (hash_embed fallback, zero-dep).
-    novelty_semantic: bool = True
+    # T5 semantic novelty (needs novelty_gate): reject a proposal whose idea TEXT embeds within
+    # `novelty_semantic_threshold` cosine of an existing node's. OFF BY DEFAULT: novelty is the agentic
+    # Researcher's call, made by READING the actual prior experiments (read_experiment /
+    # find_analogous_across_runs / list_experiments), NOT an embedding-similarity auto-reject that can't
+    # explain itself and mis-fires on paraphrases. Semantic/param search stays available as TOOLS in the
+    # Researcher's context; the LLM decides whether an idea is a true duplicate.
+    novelty_semantic: bool = False
     novelty_semantic_threshold: float = Field(default=0.92, ge=0.5, le=1.0)
     # T10: debug-lineage depth bound for every policy — how many error-feedback repairs a failing
     # lineage gets before it is abandoned. The old default (1) abandoned lineages after ONE repair;
