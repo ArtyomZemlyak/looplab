@@ -80,6 +80,25 @@ def test_agent_loop_clamps_out_of_bounds_emit(tmp_path):
     assert idea.params["lam"] == 50.0             # missing -> filled with midpoint
 
 
+def test_agent_loop_emit_after_nudges_to_commit(tmp_path):
+    _seed_kb(tmp_path)
+    client = _FakeChatClient([
+        _tool_call("kb_search", {"query": "a"}),                       # turn 1: investigate
+        _tool_call("kb_search", {"query": "b"}),                       # turn 2: reaches emit_after=2 -> nudge
+        _tool_call("emit", {"operator": "draft", "params": {"degree": 2.0}, "rationale": "commit"}),
+    ])
+    r = ToolUsingResearcher(client, KnowledgeTools(str(tmp_path)),
+                            bounds={"degree": (0.0, 6.0), "lam": (0.0, 100.0)},
+                            loop_opts={"emit_after": 2, "self_plan": False,
+                                       "stuck_detection": False, "auto_summary": False})
+    idea = r.propose(RunState(goal="g"), None)
+    assert idea.params.get("degree") == 2.0
+    # The third turn's messages must contain the "investigated enough … call emit NOW" nudge.
+    third = client.turns[2]
+    assert any(m.get("role") == "user" and "call `emit` now" in m.get("content", "").lower()
+               for m in third), "emit_after should have injected a commit nudge"
+
+
 def test_agent_loop_rejects_empty_emit_and_reprompts(tmp_path):
     _seed_kb(tmp_path)
     client = _FakeChatClient([

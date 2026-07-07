@@ -497,6 +497,11 @@ class Settings(BaseSettings):
     # boss at max_turns=3 / 45s), which silently dropped a slow reasoning model to a no-op reply.
     agent_max_turns: int = 0           # max tool turns before the emit is forced (0 = unlimited)
     agent_time_budget_s: float = 0.0   # wall-clock ceiling across the loop's turns (0 = no cap)
+    # G · Soft convergence: after this many tool (investigation) turns the loop NUDGES the agent to
+    # stop exploring and emit, and FORCES the emit at 2×. Unlike stuck-detection (which keys on repeated
+    # calls) this catches an agent that keeps making DIFFERENT calls forever (a strong model over-
+    # investigating: one idea's worth of intent, then a few hundred more reads). 0 = off.
+    agent_emit_after: int = 25
     # B1 · No-progress / stuck detection — the safety net that makes "unlimited turns" safe. The
     # turn/time ceilings above are only BACKSTOPS; this is what actually stops a runaway loop, on the
     # cheapest signal: when the model repeats the SAME tool call (or ping-pongs between two, or keeps

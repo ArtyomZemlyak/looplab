@@ -601,7 +601,8 @@ class LLMRepoDeveloper:
             f"You are implementing a multi-step plan — STEP {idx} of {total}.\n"
             f"Overall experiment: {idea.rationale}\n\n"
             f"THIS STEP — {step['title']}:\n{step.get('detail') or step['title']}\n\n"
-            f"Files already written by earlier steps (present in the workdir now): {done_so_far}\n"
+            f"Files CURRENTLY in the workspace (the parent solution + whatever earlier steps wrote — read "
+            f"any of them with read_file to see their real content, do NOT assume): {done_so_far}\n"
             "Make ONLY the edits THIS step needs with write_file/edit_file — PATCH existing files, don't "
             "regenerate untouched ones — then call done. Do the minimum for this step; later steps handle "
             "the rest. If this is the last step, make sure the eval entrypoint runs end-to-end.")

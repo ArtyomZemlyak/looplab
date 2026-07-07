@@ -137,7 +137,7 @@ def drive_tool_loop(client, tools, messages: list, emit_spec: dict, *,
                     auto_summary: bool = False, summary_client=None, on_step=None, on_text=None,
                     cancel_check=None, on_tool_result=None,
                     nudge_prompt: str = "", stuck_prompt: str = "",
-                    validate=None, emit_retries: int = 2):
+                    validate=None, emit_retries: int = 2, emit_after: int = 0):
     """Multi-turn tool loop shared by every tool-using agent (Researcher, unified-agent pilot/triage,
     Boss, genesis scout, cross-run report). The model MAY call the provided retrieval tools across
     turns; when it calls the emit function (named in `emit_spec`), `finalize(args)` is returned. If
@@ -228,6 +228,8 @@ def drive_tool_loop(client, tools, messages: list, emit_spec: dict, *,
     summarize = _summarizer(summary_client or client) if auto_summary else None
     stalls = 0                          # consecutive prose turns we couldn't turn into a forced emit
     emit_rejects = 0                    # bad emits bounced back for a re-emit (validate + emit_retries)
+    tool_turns = 0                      # G: investigation turns, for the emit_after soft-convergence nudge
+    emit_nudged = False
     turns = itertools.count() if max_turns is None or max_turns <= 0 else range(max_turns)
     for turn_idx in turns:
         if _cancelled():                # user hit stop -> finalize from what we have, promptly
@@ -354,6 +356,22 @@ def drive_tool_loop(client, tools, messages: list, emit_spec: dict, *,
                              "name": name, "content": result})
             if stuck is not None:       # B1: flag no-progress on the cheapest signal (a repeat)
                 stuck_reason = stuck.push(name, args, result) or stuck_reason
+        # G: soft convergence. A model that keeps issuing DIFFERENT tool calls never trips the
+        # StuckDetector (it keys on repeats) and, with max_turns unlimited, investigates until the budget
+        # runs out (live GLM node 63: one idea's worth of intent, then ~200 more reads). Nudge it to
+        # commit at `emit_after` tool turns; FORCE the emit if it blows past 2× and still hasn't.
+        if emit_after and tools is not None:
+            tool_turns += 1
+            if tool_turns >= 2 * emit_after:
+                forced = _force_emit(client, messages, emit_spec)
+                if forced is not None:
+                    return finalize(forced)
+            elif tool_turns == emit_after and not emit_nudged:
+                emit_nudged = True
+                messages.append({"role": "user",
+                                 "content": f"You have investigated enough ({tool_turns} tool turns). STOP "
+                                            f"exploring and call `{emit_name}` NOW with your best idea — "
+                                            "you can refine on the next node."})
         if stuck_reason:
             # No progress — stop gracefully WITH a result instead of spinning forever. Nudge once,
             # then force the structured emit; if the client can't force it, fall through to fallback.
@@ -402,6 +420,7 @@ def loop_opts_from_settings(settings) -> dict:
         "self_plan": bool(g(settings, "agent_self_plan", True)),
         "plan_reinject_every": int(g(settings, "agent_plan_reinject_every", 5)),
         "auto_summary": bool(g(settings, "agent_auto_summary", True)),
+        "emit_after": int(g(settings, "agent_emit_after", 25)),   # G: nudge to emit after N tool turns
     }
     # D11 compression model slot (open_deep_research's four-slot pattern): a dedicated CHEAP
     # summarizer for history compression, instead of paying the main model for it. Blank = the
