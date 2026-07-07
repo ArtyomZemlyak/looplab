@@ -2009,21 +2009,16 @@ class Engine(ConfirmPhaseMixin, AblationMixin):
                 self.store.append(EV_NODE_FAILED, {
                     "node_id": node_id, "error": code, "reason": "developer_crash",
                     "eval_seconds": 0.0})
-                # Circuit-breaker: N consecutive Developer crashes means the LLM itself is unreachable
-                # (auth 401 / rate-limit or security 403 / outage), NOT a code problem. Each crash fails
-                # INSTANTLY (no eval to pace the loop), so without this a persistent outage rapid-fires
-                # node after node and burns the ENTIRE budget in minutes — the exact 403 blowout that
-                # ended rubertlite-auto-v1 (67 dev-crash nodes in 25 min). Halt so the run can be resumed
-                # once the LLM recovers, instead of spinning it to a budget-exhausted finish.
-                self._dev_crash_streak = getattr(self, "_dev_crash_streak", 0) + 1
-                if self._dev_crash_streak >= 5:
-                    # PAUSE (freeze, no wrap-up) rather than finish: the LLM is likely transiently down,
-                    # so a plain `resume` continues once it recovers — no premature report/lessons.
-                    self.store.append(EV_PAUSE, {
-                        "reason": f"auto-paused: LLM unreachable ({self._dev_crash_streak} consecutive "
-                                  "developer crashes) — resume once it recovers"})
-            else:
-                self._dev_crash_streak = 0   # the Developer produced real code → the LLM is up again
+                # Circuit-breaker — PAUSE on the FIRST developer_crash. A developer_crash means the
+                # Developer couldn't finish THIS node even after the LLM client's own within-call retries
+                # (429 / 5xx / throttle-403 all back off + retry): a problem that a NEW node can't fix
+                # (LLM unreachable, or a hard error), NOT a bad experiment. One node = one experiment; if
+                # it can't be resolved within the node, stop the whole run rather than rapid-fire more
+                # dead nodes (the 403 blowout spun 67 of them). Freeze (not finish) so a plain `resume`
+                # continues once the cause is resolved — no premature report/lessons.
+                self.store.append(EV_PAUSE, {
+                    "reason": "auto-paused: a Developer session crashed (LLM unreachable or a hard error, "
+                              "unresolved within the node) — resume once it's fixed"})
         self._emit_agent_report(node_id)
         self._emit_hypothesis_ranked(node_id)
         self._emit_foresight_selected(node_id)
