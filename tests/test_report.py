@@ -486,7 +486,9 @@ def test_start_rejects_unknown_inline_kind(tmp_path, monkeypatch):
 
 
 def test_start_rejects_inline_task_missing_kind(tmp_path, monkeypatch):
-    """An inline task without an explicit kind is rejected (no silent default to 'quadratic')."""
+    """A kind-less inline task is now INFERRED from its composable fields (redesign): a bare
+    `competition` reads as a Kaggle/mlebench_real task, so an UNKNOWN competition is still rejected
+    (via validation), just not with a 'must declare kind' error. Nothing is materialized on reject."""
     client = TestClient(make_app(tmp_path))
     monkeypatch.setattr("looplab.serve.server.subprocess.Popen", lambda *a, **k: None)
     r = client.post("/api/start", json={"run_id": "nk", "task": {"competition": "nomad2018-x"}})

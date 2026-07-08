@@ -99,11 +99,13 @@ def normalize_task(data: dict) -> dict:
     if d.get("benchmark") and not d.get("kind"):
         d["kind"] = d.pop("benchmark")
 
-    # --- kaggle competition -> the mlebench_real adapter ---
+    # --- kaggle competition -> the mlebench_real adapter (accept the `kaggle` alias or a bare
+    #     `competition`; either one, with no explicit kind, IS a competition task) ---
     if d.get("kaggle"):
         d.setdefault("competition", d.get("kaggle"))
         d.pop("kaggle", None)
-        d.setdefault("kind", "mlebench_real")
+    if d.get("competition") and not d.get("kind"):
+        d["kind"] = "mlebench_real"
 
     # --- repo (editable codebase): "do whatever WITHIN it" — default the surface to ALL files ---
     if "repo" in d and not d.get("editable_path"):

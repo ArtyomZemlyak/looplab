@@ -88,25 +88,40 @@ export default function GenesisChat({ onClose, onStarted, seed }) {
 
   const setSetting = (k, v) => setSpec(s => ({ ...s, settings: { ...(s?.settings || {}), [k]: v } }))
   const setTaskField = (k, v) => setSpec(s => ({ ...s, task: { ...(s?.task || {}), [k]: v } }))
-  // Nested eval edits for a repo task: command (argv as a space-joined string) + the metric key.
-  const setEvalField = (k, v) => setSpec(s => { const t = s?.task || {}; return { ...s, task: { ...t, eval: { ...(t.eval || {}), [k]: v } } } })
+  // COMPOSABLE schema: the boss authors `repo`/`dataset`/`cmd` (no `kind`). The form reads either the
+  // composable name or its legacy alias, and WRITES the composable one. `cmd` is the run+score spec
+  // (an object {command, metric:{reader,key}, timeout}); the legacy alias is `eval`.
+  const _cmdObj = (task => (task.cmd && typeof task.cmd === 'object' && !Array.isArray(task.cmd)) ? task.cmd
+    : (Array.isArray(task.cmd) ? { command: task.cmd } : (task.eval || {})))(spec?.task || {})
+  const setCmdField = (k, v) => setSpec(s => { const t = s?.task || {}; const cur = (t.cmd && typeof t.cmd === 'object' && !Array.isArray(t.cmd)) ? t.cmd : (Array.isArray(t.cmd) ? { command: t.cmd } : (t.eval || {})); const { eval: _e, ...rest } = t; return { ...s, task: { ...rest, cmd: { ...cur, [k]: v } } } })
   // Quote-aware tokenize so an argument containing spaces survives (e.g. --run-name "my model"): the
   // engine runs this argv with NO shell, so a plain whitespace split would tear quoted args apart.
-  const setEvalCommand = (str) => setEvalField('command',
+  const setCmdCommand = (str) => setCmdField('command',
     (String(str).match(/"[^"]*"|'[^']*'|\S+/g) || []).map(t => t.replace(/^(['"])([\s\S]*)\1$/, '$2')))
-  const setMetricKey = (v) => setSpec(s => { const t = s?.task || {}; const ev = t.eval || {}; return { ...s, task: { ...t, eval: { ...ev, metric: { kind: 'stdout_json', ...(ev.metric || {}), key: v } } } } })
+  const setMetricKey = (v) => setCmdField('metric', { reader: 'stdout_json', ..._cmdObj.metric, key: v })
+  const setRepoPath = (v) => setSpec(s => { const { editable_path: _e, ...rest } = (s?.task || {}); return { ...s, task: { ...rest, repo: v } } })
+  // Data mounts textarea: one "name /abs/path" per line -> {name: path}. Writes the composable `dataset`.
+  const setDataset = (str) => setSpec(s => { const { data: _d, ...rest } = (s?.task || {}); const mounts = {}; for (const ln of String(str).split('\n')) { const m = ln.trim().match(/^(\S+)\s+(.+)$/); if (m) mounts[m[1]] = m[2].trim() } return { ...s, task: { ...rest, dataset: mounts } } })
 
   const task = spec?.task || {}
-  const isRepo = task.kind === 'repo'
-  const isDataset = task.kind === 'dataset'
-  // launchable when there's a name + a task; mlebench_real needs a competition, a repo task needs an
-  // editable path + a way to score it (an eval command, or onboard mode), a dataset task needs a data
-  // path. The backend 400s on an invalid task too, but gate here for a clean UX (no doomed launch).
-  const repoReady = !isRepo || (task.editable_path?.trim() &&
-    ((Array.isArray(task.eval?.command) && task.eval.command.length) || task.onboard))
+  const repoPath = task.repo || task.editable_path || ''
+  const cmdCommand = _cmdObj.command || []
+  const dataMounts = task.dataset || task.data || {}
+  const dataText = Object.entries(dataMounts).map(([n, p]) => `${n} ${p}`).join('\n')
+  // Infer the task type from which fields are present (composable), falling back to an explicit kind.
+  const inferredKind = task.kind || (repoPath ? 'repo'
+    : ((task.dataset || task.data || task.data_path) ? 'dataset'
+    : ((task.kaggle || task.competition) ? 'mlebench_real' : '')))
+  const isRepo = inferredKind === 'repo'
+  const isDataset = inferredKind === 'dataset'
+  // launchable when there's a name + a task; a competition needs its slug, a repo task needs a `repo`
+  // path + a way to score it (a cmd command, metric reader "auto", or onboard). The backend validates
+  // too, but gate here for a clean UX (no doomed launch).
+  const repoReady = !isRepo || (repoPath.trim() &&
+    ((Array.isArray(cmdCommand) && cmdCommand.length) || task.onboard || _cmdObj.metric?.reader === 'auto'))
   const datasetReady = !isDataset || !!task.data_path?.trim()
-  const taskReady = spec?.task_file || (task.kind &&
-    (task.kind !== 'mlebench_real' || task.competition?.trim()) && repoReady && datasetReady)
+  const taskReady = spec?.task_file || (inferredKind &&
+    (inferredKind !== 'mlebench_real' || (task.kaggle || task.competition)?.trim()) && repoReady && datasetReady)
   const ready = spec && spec.run_id?.trim() && taskReady
   const launch = async () => {
     if (!ready) { setErr('describe a goal first so the boss can pick a task (and a competition for MLE-bench)'); return }
@@ -188,18 +203,18 @@ export default function GenesisChat({ onClose, onStarted, seed }) {
                   it in rather than being stuck on a read-only "—". */}
               {spec.task_file
                 ? <div className="gen-ro">{taskLabel}</div>
-                : <select className="text" value={task.kind || ''} onChange={e => setTaskField('kind', e.target.value || undefined)}>
+                : <select className="text" value={inferredKind} onChange={e => setTaskField('kind', e.target.value || undefined)}>
                     <option value="">— choose a task type —</option>
                     <option value="repo">repo — optimize an existing code project</option>
                     <option value="dataset">dataset — here's my data, get the best metric</option>
-                    <option value="mlebench_real">mlebench_real — a Kaggle / MLE-bench competition</option>
-                    {task.kind && !['repo', 'dataset', 'mlebench_real'].includes(task.kind) &&
-                      <option value={task.kind}>{task.kind}</option>}
+                    <option value="mlebench_real">kaggle — a Kaggle / MLE-bench competition</option>
+                    {inferredKind && !['repo', 'dataset', 'mlebench_real'].includes(inferredKind) &&
+                      <option value={inferredKind}>{inferredKind}</option>}
                   </select>}
-              <div className="gen-help">{spec.task_file ? 'from the task catalogue' : (task.kind ? '' : 'pick a type, then fill the fields below')}</div>
+              <div className="gen-help">{spec.task_file ? 'from the task catalogue' : (inferredKind ? '' : 'pick a type, then fill the fields below')}</div>
             </div>
-            {!spec.task_file && task.kind === 'mlebench_real' && <div className="gen-field"><div className="gen-lab">Competition</div>
-              <input className="text" value={task.competition || ''} onChange={e => setTaskField('competition', e.target.value)} placeholder="kaggle-competition-id" />
+            {!spec.task_file && inferredKind === 'mlebench_real' && <div className="gen-field"><div className="gen-lab">Kaggle competition</div>
+              <input className="text" value={task.kaggle || task.competition || ''} onChange={e => setTaskField('kaggle', e.target.value)} placeholder="kaggle-competition-id" />
               <div className="gen-help">MLE-bench / Kaggle competition id (the full slug).</div></div>}
             {isDataset && !spec.task_file && <div className="gen-repo">
               <div className="gen-field"><div className="gen-lab">Goal</div>
@@ -215,14 +230,17 @@ export default function GenesisChat({ onClose, onStarted, seed }) {
               <div className="gen-field"><div className="gen-lab">Goal</div>
                 <input className="text" value={task.goal || ''} onChange={e => setTaskField('goal', e.target.value)} placeholder="what to optimize, e.g. validation accuracy" /></div>
               <div className="gen-field"><div className="gen-lab">Repo path (editable)</div>
-                <input className="text" value={task.editable_path || ''} onChange={e => setTaskField('editable_path', e.target.value)} placeholder="/abs/path/to/your/repo" />
-                <div className="gen-help">The repo the agent may edit — an absolute path on this machine.</div></div>
-              <div className="gen-field"><div className="gen-lab">Run / eval command</div>
-                <input className="text" value={(task.eval?.command || []).join(' ')} onChange={e => setEvalCommand(e.target.value)} placeholder="python train.py" />
-                <div className="gen-help">{task.onboard ? 'Onboarding: the agent will propose the eval from this run command.' : 'How LoopLab runs + scores the repo. It must print the metric (see steps below).'}</div></div>
+                <input className="text" value={repoPath} onChange={e => setRepoPath(e.target.value)} placeholder="/abs/path/to/your/repo" />
+                <div className="gen-help">The codebase the agent may edit — an absolute path on this machine.</div></div>
+              <div className="gen-field"><div className="gen-lab">Data mounts (optional)</div>
+                <textarea className="text" rows={2} value={dataText} onChange={e => setDataset(e.target.value)} placeholder={"dataset /abs/path/to/data\nmodel /abs/path/to/weights"} />
+                <div className="gen-help">Read-only datasets / model weights outside the repo — one <code>name /abs/path</code> per line (appear at ./name).</div></div>
+              <div className="gen-field"><div className="gen-lab">Run + score command (cmd)</div>
+                <input className="text" value={(cmdCommand || []).join(' ')} onChange={e => setCmdCommand(e.target.value)} placeholder="python test.py" />
+                <div className="gen-help">{_cmdObj.metric?.reader === 'auto' ? 'Auto reader: the agent writes the metric reader for this command.' : 'How LoopLab runs + scores the repo. It must print the metric (see steps below).'}</div></div>
               <div className="gen-grid">
                 <div className="gen-field"><div className="gen-lab">Metric key</div>
-                  <input className="text" value={task.eval?.metric?.key || ''} onChange={e => setMetricKey(e.target.value)} placeholder="metric" />
+                  <input className="text" value={_cmdObj.metric?.key || ''} onChange={e => setMetricKey(e.target.value)} placeholder="metric" />
                   <div className="gen-help">JSON key the command prints, e.g. {'{'}&quot;metric&quot;: 0.93{'}'}.</div></div>
                 <div className="gen-field"><div className="gen-lab">Direction</div>
                   <select className="text" value={task.direction || 'max'} onChange={e => setTaskField('direction', e.target.value)}>
