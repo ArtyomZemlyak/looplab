@@ -93,10 +93,26 @@ class RepoWriteTools:
             fn_spec("delete_file",
                      "Delete a file you previously wrote in this experiment (within your surface).",
                      {"path": {"type": "string"}}, ["path"]),
+            fn_spec("declare_stages",
+                     "Declare the PRECEDING pipeline stages that run BEFORE the operator's scoring "
+                     "command (e.g. a `data_prep` then a `train` stage). Each stage is "
+                     "{name, command:[argv...], timeout?, check?} and they run IN ORDER in the same "
+                     "workdir — artifacts persist, so `train` writes a checkpoint the scoring step "
+                     "reads. The operator's `cmd` is ALWAYS appended as the final, protected `score` "
+                     "stage: you CANNOT replace or rewrite how the run is scored, only add work before "
+                     "it. Put `%params%` inside a command to inject THIS node's hyperparameters as "
+                     "`--key value` (omit it to bake values yourself). Give a long-running `train` a "
+                     "generous `timeout` (seconds). This VALIDATES the manifest and reports errors "
+                     "back to you — use it INSTEAD of hand-writing looplab_stages.json.",
+                     {"stages": {"type": "array", "description":
+                                 "ordered preceding stages, each {name, command:[argv...], timeout?, check?}"}},
+                     ["stages"]),
         ]
 
     def execute(self, name: str, args: dict) -> str:
         args = args or {}
+        if name == "declare_stages":
+            return self._declare_stages((args or {}).get("stages"))
         p = self._safe_rel(args.get("path", ""))
         if name == "write_file":
             return self._write(p, args)
@@ -105,6 +121,44 @@ class RepoWriteTools:
         if name == "delete_file":
             return self._delete(p)
         return f"(unknown tool: {name})"
+
+    def _declare_stages(self, stages) -> str:
+        """Validate + stage a `looplab_stages.json` of PRECEDING stages. Reserves the final `score`
+        stage for the operator's cmd (appended by the engine), so a Developer can add train/prep work
+        but never rewrite the scoring. Returns a clear error string on any problem (nothing staged) so
+        the tool loop gets actionable feedback instead of the silent malformed-manifest fallback."""
+        import json
+        if not isinstance(stages, list) or not stages:
+            return "(refused: `stages` must be a non-empty array of {name, command:[argv...]} objects.)"
+        seen, clean = set(), []
+        for i, s in enumerate(stages):
+            if not isinstance(s, dict):
+                return f"(refused: stage {i} is not an object — expected {{name, command:[...]}}.)"
+            nm = str(s.get("name") or "").strip()
+            if not nm:
+                return f"(refused: stage {i} has no `name`.)"
+            if nm.lower() == "score":
+                return ("(refused: 'score' is reserved for the operator's final scoring stage. Name "
+                        "your PRECEDING stages e.g. data_prep, train — the cmd is appended after them.)")
+            if nm in seen:
+                return f"(refused: duplicate stage name {nm!r}.)"
+            seen.add(nm)
+            cmd = s.get("command")
+            if not isinstance(cmd, list) or not cmd or not all(isinstance(x, str) for x in cmd):
+                return (f"(refused: stage {nm!r} needs a `command` as a non-empty list of string argv "
+                        "items, e.g. [\"python\",\"train.py\",\"%params%\"].)")
+            st = {"name": nm, "command": cmd}
+            if "timeout" in s:
+                try:
+                    st["timeout"] = float(s["timeout"])
+                except (TypeError, ValueError):
+                    return f"(refused: stage {nm!r} `timeout` must be a number of seconds.)"
+            if s.get("check"):
+                st["check"] = True
+            clean.append(st)
+        self.files["looplab_stages.json"] = json.dumps({"stages": clean}, indent=1)
+        chain = " → ".join(s["name"] for s in clean) + " → score (operator cmd)"
+        return f"declared {len(clean)} preceding stage(s): {chain}"
 
     def _refusal(self, p: str, verb: str):
         """Run the shared SurfacePolicy (tools/patch.py) over an already-canonicalized path and map
@@ -332,22 +386,24 @@ _REPO_DEV_SYSTEM_BODY = (
     "drives selection, so report generously. Bake the chosen hyperparameters into the code. Stay within your "
     "editable surface; never write protected or absolute paths. When all files are written and "
     "the eval would succeed, call done.\n\n"
-    "MULTI-STAGE PIPELINE — REQUIRED whenever the experiment TRAINS then evaluates: declare the eval as "
-    "ordered stages by writing `looplab_stages.json` in the workdir root: "
-    "{\"stages\": [{\"name\": \"data_prep\", \"command\": [\"python\", \"prep.py\"]}, "
-    "{\"name\": \"train\", \"command\": [\"python\", \"train.py\", ...], \"timeout\": 14400, \"check\": true}, "
-    "{\"name\": \"eval\", \"command\": [\"python\", \"test.py\", ...], \"timeout\": 1800}]}. Stages run in "
-    "order in the SAME workdir (artifacts persist: train writes a checkpoint, eval reads it); each shows "
-    "its own pass/fail and the LAST stage must print the metric JSON line. This is the ONLY correct way to "
-    "get 'a failed eval is fixed and re-run WITHOUT paying to re-train': the ENGINE reuses the completed "
-    "`train` stage's checkpoint and re-runs only `eval` (and a FRESH node still trains from scratch — "
-    "stages are tracked PER NODE, never inherited). Give `train` a GENEROUS timeout that covers the full "
-    "schedule (epochs × minutes/epoch × 60 — the pipeline default is short and will SIGKILL a long train "
-    "into an undertrained checkpoint). Do NOT hand-roll this as a single monolithic entrypoint with a "
-    "'skip training if a checkpoint already exists' check: the engine can't see stage boundaries there, so "
-    "it can't re-run just the eval, and that check silently reuses a PARENT node's or a half-finished "
-    "run's checkpoint (freezing an undertrained/borrowed model). Add \"check\": true to a stage to have it "
-    "verified before the next runs. Without the file, your single entrypoint is used exactly as before.\n\n"
+    "TRAIN-THEN-SCORE PIPELINE — REQUIRED whenever the experiment TRAINS then evaluates: use the "
+    "`declare_stages` tool to declare the ordered stages that run BEFORE the operator's scoring command "
+    "(e.g. declare_stages(stages=[{name:'data_prep',command:['python','prep.py']}, "
+    "{name:'train',command:['python','train.py','%params%'],timeout:14400,check:true}]). The operator's "
+    "`cmd` is APPENDED automatically as the final, protected `score` stage — you CANNOT rewrite how the "
+    "run is scored (that's the trust boundary), only add work before it. Stages run in ORDER in the SAME "
+    "workdir (artifacts persist: `train` writes a checkpoint the `score` step reads). This is the ONLY "
+    "correct way to get 'a failed step is fixed and re-run WITHOUT paying to re-train': the ENGINE reuses "
+    "the completed `train` stage's checkpoint and re-runs only what changed (a FRESH node still trains "
+    "from scratch — stages are tracked PER NODE, never inherited). Give `train` a GENEROUS `timeout` that "
+    "covers the full schedule (epochs × minutes/epoch × 60 — the default is short and would SIGKILL a long "
+    "train into an undertrained checkpoint). Put `%params%` inside a stage command to inject THIS node's "
+    "hyperparameters as `--key value`, or bake the values into the code yourself. Do NOT hand-roll a "
+    "single monolithic entrypoint with a 'skip training if a checkpoint already exists' check: the engine "
+    "can't see stage boundaries there, so it can't re-run just the scoring, and that check silently reuses "
+    "a PARENT node's / half-finished run's checkpoint (freezing an undertrained model). `declare_stages` "
+    "validates your manifest and reports errors back to you. Without stages, your single entrypoint (the "
+    "operator's cmd) runs as one command.\n\n"
     "For a ROUTINE hyperparameter experiment, prefer ORCHESTRATING the repo's EXISTING scripts "
     "via subprocess (`subprocess.run([sys.executable, 'train.py', ...], check=True)`) and map the "
     "proposed hyperparameters onto the scripts' CLI flags (respect each flag's type — e.g. an int "
