@@ -25,17 +25,23 @@ def _dev(**kw):
     return LLMRepoDeveloper(object(), _task(), **kw)
 
 
-def _install_fake_loop(monkeypatch, plan_steps, record):
+def _install_fake_loop(monkeypatch, plan_steps, record, capture=None, stages_emit=None):
     """Patch drive_tool_loop: the plan-phase call returns `plan_steps`; every `done` session writes
     one file (named after the step index) via the real write tool, so file ACCUMULATION is exercised.
-    Records (emit_name, max_turns, time_budget) per call."""
+    Records (emit_name, max_turns, time_budget) per call. `capture` (optional list) additionally gets
+    the FULL per-call context ({name, tools, messages, opts}) so a test can pin the phase toolsets /
+    prompts / validate wiring. `stages_emit` overrides the stages-phase emit args (e.g. an invalid
+    manifest, to exercise the empty-declared degradation)."""
     import looplab.agents.agent as agent_mod
 
     def fake_loop(client, tools, messages, emit_spec, *, finalize, fallback, **opts):
         name = emit_spec["function"]["name"]
         record.append((name, opts.get("max_turns"), opts.get("time_budget_s")))
+        if capture is not None:
+            capture.append({"name": name, "tools": tools, "messages": list(messages), "opts": opts})
         if name == "declare_stages":     # the mandatory stages phase (fresh repo implement) — declare a train stage
-            return finalize({"stages": [{"name": "train", "command": ["python", "train.py"]}]})
+            return finalize(stages_emit if stages_emit is not None
+                            else {"stages": [{"name": "train", "command": ["python", "train.py"]}]})
         if name == "propose_plan":
             return finalize({"steps": plan_steps})
         # a `done` session (a step, or the single-session fallback): write a file via the write tool
@@ -123,6 +129,101 @@ def test_stages_phase_treats_onboard_command_as_the_cmd():
     dev = LLMRepoDeveloper(object(), t)
     ev, has_cmd = dev._cmd_context()
     assert has_cmd and ev.get("command") == [_sys.executable, "ttrain.py"]
+
+
+def test_stages_and_plan_phases_are_read_only(monkeypatch):
+    """The first two phases must NOT be able to mutate the repo: their toolsets are the scouts + the
+    env inspector only — a regression that passes the write-capable composite into the stages/plan
+    loop would let a 'read-only' phase write code (mega-review A1)."""
+    rec: list = []
+    cap: list = []
+    _install_fake_loop(monkeypatch, [{"title": "A", "detail": "a"}, {"title": "B", "detail": "b"}],
+                       rec, capture=cap)
+    dev = _dev(plan_decompose=True, plan_min_steps=2)
+    dev.implement(Idea(operator="draft", params={}, rationale="x"))
+    by_name = {c["name"]: c for c in cap}
+    for phase in ("declare_stages", "propose_plan"):
+        names = {s["function"]["name"] for s in by_name[phase]["tools"].specs()}
+        assert not names & {"write_file", "edit_file", "delete_file", "apply_patch"}, \
+            f"{phase} phase got WRITE tools: {names}"
+        assert "read_file" in names and "pkg_info" in names       # scouts + env inspector present
+    # ... while the implement session IS write-capable, and can also FIX the stage manifest (a repair
+    # whose root cause is a bad stage command/timeout has no other route — mega-review D1)
+    done_names = {s["function"]["name"] for s in by_name["done"]["tools"].specs()}
+    assert {"write_file", "edit_file", "declare_stages"} <= done_names
+
+
+def test_stages_phase_validate_wiring_reserves_score(monkeypatch):
+    """The stages loop must carry the shared validator so a malformed manifest (or a reserved `score`
+    stage) is bounced BACK to the model with the reason — not silently accepted (mega-review A2)."""
+    rec: list = []
+    cap: list = []
+    _install_fake_loop(monkeypatch, [], rec, capture=cap)
+    dev = _dev(plan_decompose=False)
+    dev.implement(Idea(operator="draft", params={}, rationale="x"))
+    stages_call = next(c for c in cap if c["name"] == "declare_stages")
+    validate = stages_call["opts"].get("validate")
+    assert callable(validate)                                     # wired into the loop
+    err = validate({"stages": [{"name": "score", "command": ["python", "s.py"]}]})
+    assert err and "score" in err.lower()                         # reserved name bounced with a reason
+    assert validate({"stages": [{"name": "train", "command": ["python", "t.py"]}]}) is None
+
+
+def test_manifest_written_in_the_shape_the_engine_consumes(monkeypatch):
+    """looplab_stages.json must parse to {"stages": [{name, command}, …]} — the exact shape
+    _resolve_stages reads back; a wrapperless or malformed manifest is silently ignored engine-side."""
+    import json as _json
+    rec: list = []
+    _install_fake_loop(monkeypatch, [], rec)
+    dev = _dev(plan_decompose=False)
+    dev.implement(Idea(operator="draft", params={}, rationale="x"))
+    data = _json.loads(dev.last_files["looplab_stages.json"])
+    assert isinstance(data, dict) and isinstance(data["stages"], list)
+    assert data["stages"][0]["name"] == "train" and data["stages"][0]["command"]
+
+
+def test_protected_manifest_skips_stages_phase_and_prompt_says_no_stages(monkeypatch):
+    """protect: ['looplab_stages.json'] is the operator knob that disables Developer pipelines — the
+    STAGES phase must be SKIPPED (its manifest could never materialize; the old code burned a full LLM
+    loop whose output was silently dropped) and the implement prompt must say NO stages exist instead
+    of asserting a train stage was declared (mega-review D2/D3)."""
+    rec: list = []
+    cap: list = []
+    _install_fake_loop(monkeypatch, [], rec, capture=cap)
+    t = RepoTask(id="r", goal="g", direction="max", editable_path=str(FIXTURE),
+                 edit_surface=["*.py"], protect=["looplab_stages.json"],
+                 eval=EvalSpec(command=[sys.executable, "main.py"], metric=_M))
+    from looplab.adapters.repo_task import LLMRepoDeveloper
+    dev = LLMRepoDeveloper(object(), t, plan_decompose=False)
+    dev.implement(Idea(operator="draft", params={}, rationale="x"))
+    assert [r[0] for r in rec] == ["done"]                        # no declare_stages loop at all
+    user = cap[0]["messages"][1]["content"]
+    assert "NO pipeline stages" in user and "protected" in user
+
+
+def test_stage_note_states_the_declared_pipeline(monkeypatch):
+    """The implement session is told the node's ACTUAL pipeline — never an assumed one."""
+    rec: list = []
+    cap: list = []
+    _install_fake_loop(monkeypatch, [], rec, capture=cap)
+    dev = _dev(plan_decompose=False)
+    dev.implement(Idea(operator="draft", params={}, rationale="x"))
+    user = next(c for c in cap if c["name"] == "done")["messages"][1]["content"]
+    assert "PIPELINE for this node" in user and "train" in user
+
+
+def test_empty_stages_phase_degrades_the_prompt_not_asserts_train(monkeypatch):
+    """A failed/empty stages phase (LLM never declared, or 3 invalid emits) must flip the implement
+    prompt to 'cmd runs ALONE — the entrypoint must train then score', not assert a train stage that
+    doesn't exist (which produced score-only entrypoints scoring stale checkpoints — mega-review D2)."""
+    rec: list = []
+    cap: list = []
+    _install_fake_loop(monkeypatch, [], rec, capture=cap, stages_emit={"stages": []})
+    dev = _dev(plan_decompose=False)
+    dev.implement(Idea(operator="draft", params={}, rationale="x"))
+    user = next(c for c in cap if c["name"] == "done")["messages"][1]["content"]
+    assert "NO pipeline stages" in user
+    assert "train a FRESH model" in user
 
 
 def test_operator_declared_stages_skip_the_stages_phase(monkeypatch):

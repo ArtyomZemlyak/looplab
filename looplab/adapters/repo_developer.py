@@ -101,9 +101,22 @@ class RepoWriteTools:
             fn_spec("delete_file",
                      "Delete a file you previously wrote in this experiment (within your surface).",
                      {"path": {"type": "string"}}, ["path"]),
-            # NB: the pipeline stages are declared in the Developer's dedicated STAGES phase (its
-            # `declare_stages` emit), which runs BEFORE this implement phase — NOT here — so the manifest
-            # (looplab_stages.json) is already written and this write toolset must not re-declare it.
+            # The pipeline is AUTHORED in the Developer's dedicated STAGES phase (its `declare_stages`
+            # emit) BEFORE implement — but a write session still needs a validated route to FIX the
+            # manifest: a repair whose root cause is a bad stage (wrong argv / too-low timeout) has no
+            # other way to change it (write_file refuses under the default *.py surface; without this
+            # spec every repair repeats the identical stage failure until abandon — mega-review D1).
+            fn_spec("declare_stages",
+                     "FIX the eval pipeline manifest (looplab_stages.json). The stages were already "
+                     "declared in the STAGES phase — call this ONLY when the failure you are fixing is "
+                     "IN the pipeline itself (a stage's command/timeout/name is wrong), passing the "
+                     "FULL corrected ordered list of preceding stages (the operator's protected `score` "
+                     "step stays appended after them). `%params%` in a command injects this node's "
+                     "hyperparameters; give a long `train` a generous `timeout` (seconds). It VALIDATES "
+                     "the manifest and reports errors back. Do not use it to re-plan working stages.",
+                     {"stages": {"type": "array", "description":
+                                 "ordered preceding stages, each {name, command:[argv...], timeout?, check?}"}},
+                     ["stages"]),
         ]
 
     def execute(self, name: str, args: dict) -> str:
@@ -356,9 +369,9 @@ _REPO_DEV_SYSTEM_BODY = (
     "must print the metric as the LAST stdout line (a JSON object with the required key). CRITICAL: the "
     "eval command runs `<entrypoint>.py`, so THAT FILE MUST EXIST in the workspace after your edits — a "
     "fresh node starts WITHOUT it (unless the operator PROTECTED an existing scorer, which you must NOT "
-    "rewrite). For TRAINING work your STAGES phase already declared a separate "
-    "`train` stage (before this) so the entrypoint here only SCORES, and a fixed eval re-runs without "
-    "paying to re-train. If instead a single entrypoint is used, it must orchestrate train→test; "
+    "rewrite). For TRAINING work, WHEN the node's declared pipeline (see the task message) has a separate "
+    "`train` stage, the entrypoint here only SCORES, and a fixed eval re-runs without "
+    "paying to re-train. When NO train stage is declared, the single entrypoint must orchestrate train→test; "
     "editing only train.py leaves the eval with 'no such file: "
     "<entrypoint>.py'. CRITICAL for a TRAINING task: the entrypoint MUST actually TRAIN a model "
     "for THIS experiment (run the repo's train script with your config → produce a FRESH checkpoint) and "
@@ -379,8 +392,9 @@ _REPO_DEV_SYSTEM_BODY = (
     "drives selection, so report generously. Bake the chosen hyperparameters into the code. Stay within your "
     "editable surface; never write protected or absolute paths. When all files are written and "
     "the eval would succeed, call done.\n\n"
-    "TRAIN-THEN-SCORE PIPELINE — the ordered stages were already declared in your dedicated STAGES phase "
-    "(the phase before this one) and written to `looplab_stages.json`; HERE you implement the CODE those "
+    "TRAIN-THEN-SCORE PIPELINE — the ordered stages are declared in your dedicated STAGES phase and "
+    "written to `looplab_stages.json` (the task message states this node's ACTUAL pipeline — trust it, "
+    "not an assumption); HERE you implement the CODE those "
     "stages run (e.g. the train.py the `train` stage invokes, the prep.py a `data_prep` stage invokes, the "
     "eval entrypoint the `score` step runs). For reference, a stage is "
     "{name:'train',command:['python','train.py','%params%'],timeout:14400,check:true}; the operator's "
@@ -688,16 +702,19 @@ class LLMRepoDeveloper:
                               "detail": str(s.get("detail", "")).strip()})
         return steps
 
-    def _run_step(self, idea: Idea, step: dict, idx: int, total: int, write, system: str) -> str:
+    def _run_step(self, idea: Idea, step: dict, idx: int, total: int, write, system: str,
+                  stage_note: str = "") -> str:
         """Execute ONE atomic plan step in a FRESH bounded session, on top of the files accumulated so
         far (carried in `write.files`; syntax is validated per write by the write tool). A step's own
-        error never aborts the plan — later steps + the eval still run on whatever got written."""
+        error never aborts the plan — later steps + the eval still run on whatever got written.
+        `stage_note` restates the node's ACTUAL declared pipeline (or its absence) so a step session
+        never assumes a train stage the stages phase didn't produce."""
         from looplab.agents.agent import drive_tool_loop, CompositeTools
         from looplab.tools.env_inspect import EnvInspectTools
         done_so_far = ", ".join(write.files) or "(none yet)"
         step_user = (
             f"You are implementing a multi-step plan — STEP {idx} of {total}.\n"
-            f"Overall experiment: {idea.rationale}\n\n"
+            f"Overall experiment: {idea.rationale}\n{stage_note}\n"
             f"THIS STEP — {step['title']}:\n{step.get('detail') or step['title']}\n\n"
             f"Files CURRENTLY in the workspace (the parent solution + whatever earlier steps wrote — read "
             f"any of them with read_file to see their real content, do NOT assume): {done_so_far}\n"
@@ -784,7 +801,9 @@ class LLMRepoDeveloper:
         else:
             contract = (
                 "There is NO operator scoring command — declare the FULL pipeline, INCLUDING a final stage "
-                "that runs the evaluation and PRINTS the metric the task's metric reader parses.")
+                "that runs the evaluation and PRINTS the metric the task's metric reader parses. Name that "
+                "final stage e.g. `evaluate` — the name `score` is RESERVED (it always denotes an "
+                "engine-appended operator step and will be rejected).")
         return (
             f"Experiment concept (the researcher's idea): {idea.rationale}\nHyperparameters for THIS node: "
             f"{params}.\n\nThis is the STAGES phase (first). {contract}\n\n"
@@ -875,43 +894,84 @@ class LLMRepoDeveloper:
         if error:
             already = ", ".join(self.last_files) or "(none)"
             user += _REPO_DEV_REPAIR_BLOCK.format(already=already) + error[:4000]
-        messages = [{"role": "system", "content": system}, {"role": "user", "content": user}]
-        # Compose the write/edit tools with read-only ENVIRONMENT INTROSPECTION (pkg_info / py_api /
-        # read_installed / grep_installed) so the Developer grounds generated code in the ACTUAL
-        # installed API/version instead of guessing (the precision='16-mixed'-on-Lightning-1.5 class).
-        from looplab.agents.agent import CompositeTools
-        from looplab.tools.env_inspect import EnvInspectTools
-        tools = CompositeTools([write, EnvInspectTools()] + self._scout_tools(write))
         # A fresh implement (not a repair) on a real repo runs THREE explicit, separately-traced phases —
         # each its own focused tool-loop + emit so the context stays small and the trace reads cleanly
         # (Developer · stages → plan → implement):
-        #   1. STAGES (mandatory): declare the ordered eval pipeline (prep → train → …) around the
-        #      operator's protected `score` cmd — hardcoding this node's train params / adding a data_prep
-        #      stage where useful. The Developer knows the repo; the planner (Genesis) may not.
+        #   1. STAGES (mandatory, unless the operator declared `eval.stages` or protected the manifest):
+        #      declare the ordered eval pipeline (prep → train → …) around the operator's protected
+        #      `score` cmd — hardcoding this node's train params / adding a data_prep stage where useful.
+        #      The Developer knows the repo; the planner (Genesis) may not.
         #   2. PLAN: decompose the code changes into ATOMIC steps (C4 — bounds a non-converging model).
         #   3. IMPLEMENT: write the code, one bounded session per plan step (each step its own trace block).
         # A REPAIR (error set) OR a bare / __new__-constructed dev (unit tests, no `_editables`) skips
         # straight to a single bounded session — repair is already narrow; the toy dev has no repo to stage.
         is_fresh_repo = error is None and getattr(self, "_editables", None)
-        # Skip the STAGES phase when the OPERATOR already declared a full `eval.stages` pipeline: the engine
-        # uses that verbatim (a Developer manifest would be IGNORED by _resolve_stages), so the phase would
-        # be wasted cost and its "cmd is appended" contract a lie.
-        operator_stages = bool(is_fresh_repo and (self._cmd_context()[0].get("stages")))
+        from looplab.agents.agent import CompositeTools
+        from looplab.tools.env_inspect import EnvInspectTools
         try:
+            operator_stages: list = []
+            declared: list = []
+            manifest_protected = False
             if is_fresh_repo:
-                # STAGES + PLAN are the Developer's own sub-phases (each its own trace band, via the phase
-                # stamped on their generations). IMPLEMENT runs under the orchestrator's "implement" span
-                # (so its generations band there, and non-repo developers keep that band unchanged).
-                if not operator_stages:
+                # Skip the STAGES phase when the OPERATOR already declared an `eval.stages` pipeline the
+                # engine will actually USE: _resolve_stages takes a VALID operator list verbatim (a
+                # Developer manifest would be IGNORED) but falls through to the Developer manifest on an
+                # invalid one — so gate on the SAME shared validation, not truthiness. Protecting
+                # `looplab_stages.json` is the operator knob that disables Developer pipelines entirely:
+                # skip the phase (its manifest could never materialize) instead of burning a full LLM
+                # loop whose output workspace-materialization silently drops.
+                ev0 = self._cmd_context()[0]
+                if ev0.get("stages"):
+                    from looplab.runtime.command_eval import validate_stages
+                    operator_stages = validate_stages(ev0["stages"])[0] or []
+                manifest_protected = SurfacePolicy(
+                    None, self._protected, self._prefixes, protected_exact=True,
+                    check_escapes=False).check("looplab_stages.json") is not None
+                if operator_stages:
+                    declared = operator_stages
+                elif not manifest_protected:
+                    # STAGES is the Developer's own sub-phase (its own trace band, via the phase
+                    # stamped on its generations).
                     with tracing.operation("stages"):
-                        self._declare_stages_phase(idea, write, system)
+                        declared = self._declare_stages_phase(idea, write, system) or []
+                # Tell the implement sessions what pipeline ACTUALLY exists. The old prompt asserted
+                # "your STAGES phase already declared a train stage" unconditionally — after a failed/
+                # empty stages phase the model then wrote a score-only entrypoint that scored a stale
+                # checkpoint (or crashed on a missing one) instead of training.
+                _chain = " → ".join(str(s.get("name")) for s in declared)
+                if operator_stages:
+                    stage_note = (f"\nPIPELINE for this node (OPERATOR-declared, runs verbatim): "
+                                  f"{_chain}. Implement the code those stages run.")
+                elif declared:
+                    stage_note = (f"\nPIPELINE for this node (declared by your STAGES phase): {_chain} "
+                                  "→ score (operator cmd). Implement the code those stages run; the "
+                                  "eval entrypoint only SCORES the artifacts the earlier stages produce.")
+                else:
+                    stage_note = ("\nNO pipeline stages are declared for this node"
+                                  + (" (the operator protected looplab_stages.json)"
+                                     if manifest_protected else "")
+                                  + ": the operator's cmd runs ALONE as a single command. The code it "
+                                  "runs must do ALL the work itself when invoked — train a FRESH model, "
+                                  "then score it and print the metric (never read a pre-existing "
+                                  "checkpoint or a static results file).")
+                user += stage_note
+            messages = [{"role": "system", "content": system}, {"role": "user", "content": user}]
+            # Compose the write/edit tools with read-only ENVIRONMENT INTROSPECTION (pkg_info / py_api /
+            # read_installed / grep_installed) so the Developer grounds generated code in the ACTUAL
+            # installed API/version instead of guessing (the precision='16-mixed'-on-Lightning-1.5 class).
+            tools = CompositeTools([write, EnvInspectTools()] + self._scout_tools(write))
+            if is_fresh_repo:
+                # PLAN is the Developer's second sub-phase (its own trace band). IMPLEMENT runs under
+                # the orchestrator's "implement" span (so its generations band there, and non-repo
+                # developers keep that band unchanged).
                 steps = []
                 if getattr(self, "_plan_decompose", False):
                     with tracing.operation("plan"):
                         steps = self._propose_plan(system, idea, write)
                 if len(steps) >= getattr(self, "_plan_min_steps", 2):
                     for i, step in enumerate(steps, 1):
-                        self._run_step(idea, step, i, len(steps), write, system)  # a step error can't abort the plan
+                        self._run_step(idea, step, i, len(steps), write, system,
+                                       stage_note=stage_note)  # a step error can't abort the plan
                 else:
                     drive_tool_loop(self.client, tools, messages, self._emit_spec(),
                                     finalize=lambda a: (a or {}).get("summary", ""),
