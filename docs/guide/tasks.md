@@ -27,7 +27,7 @@ which capability fields are present (`looplab/adapters/tasks.py::normalize_task`
 | Field | Meaning |
 |---|---|
 | `repo` | Absolute path to an **editable codebase** — the agent may edit any file within it (`protect: [...]` for exceptions; default edit surface is everything). |
-| `dataset` | **Read-only** data / model weights that live outside the repo, as `{ "<mount>": "<abs path>" }` (a bare path mounts as `./dataset`). They appear at `./<mount>` in the workdir. |
+| `dataset` | Data / model weights that live outside the repo, as `{ "<mount>": "<abs path>" }` (a bare path mounts as `./dataset`). Read-only by default; a value may be an object with [per-source permissions](#per-source-data-permissions). They appear at `./<mount>` in the workdir. |
 | `cmd` | **How to run + score** one experiment — either a bare argv `["python","test.py"]` or an object `{ "command"\|"stages", "metric": {"reader","key"}, "timeout" }`. This is the operator's **authoritative, non-rewritable** scorer. |
 | `kaggle` | A Kaggle / MLE-bench competition slug (the official grader scores a submission — no `cmd` needed). |
 | `benchmark` | A built-in synthetic task (`quadratic`, `regression`, …) for testing the loop. |
@@ -53,12 +53,41 @@ which capability fields are present (`looplab/adapters/tasks.py::normalize_task`
 }
 ```
 
-**How it's scored is the trust boundary.** The agent builds whatever training code the experiment
-needs inside `repo`, but it cannot rewrite `cmd`: if `cmd` is a single command, the Developer may
-only declare **preceding** stages (data-prep, train — via the `declare_stages` tool, see
-[generating code](generating-code.md)) and the operator's `cmd` is appended as the protected final
-`score` stage; if `cmd` itself declares `stages`, those are canonical. Put `%params%` in any command
+### `cmd` is a contract; edit-scope is separate
+
+**`cmd` is the run+score CONTRACT** — the command that runs and the reader that reads its metric. It is
+the *scoring* step, not the trainer: **training is a separate stage the agent declares** at run time (its
+`declare_stages` tool), which the engine runs BEFORE `cmd`. If `cmd` is a single command the Developer may
+only declare **preceding** stages (data-prep, train) and the operator's `cmd` is appended as the protected
+final `score` stage; if `cmd` itself declares `stages`, those are canonical. Put `%params%` in any command
 to inject the node's hyperparameters as `--key value`.
+
+**What the agent may EDIT is a separate, independent decision** — `edit_surface` (globs the agent may
+edit; default = the whole repo) minus `protect` (exceptions). The engine does **not** auto-protect the
+file `cmd` runs, so: if `cmd` points at an operator-owned scorer the agent must not change (e.g. the
+framework's `test.py`), add that file to `protect`; if the scorer must be *built*, leave it editable (a
+protected file can't be created).
+
+### Per-source data permissions
+
+Each `dataset` (or legacy `data`) value may be a bare path (all defaults) or an object with five
+independent flags. **Default: everything allowed EXCEPT editing the original.**
+
+```jsonc
+"dataset": {
+  "raw":  { "path": "/data/train",
+            "mount": true,        // (1) read-only symlink at ./raw (default) | false = copy INTO the workdir
+            "edit": false,        // (2) edit the ORIGINAL in place? default false (protect the source)
+            "copy_modify": true,  // (3) copy it and modify the copy
+            "preprocess": true,   // (4) preprocess / augment / feature-engineer into a training set
+            "extend": true },     // (5) extend / expand the data
+  "test": "/data/test"            // a bare path = all defaults
+}
+```
+
+A source with `edit:false` (the default) is protected against writes under its mount (`name` + `name/**`),
+so the agent can read it and derive/augment a training set in the workdir but cannot mutate the original.
+The permissions are also surfaced in the agent's brief.
 
 Every legacy spelling still works — `{"kind":"repo","editable_path":...,"eval":{...,"metric":{"kind":...}},"onboard":...}`
 parses unchanged, so old task files and snapshots keep running (`examples/repo_task.json` is the
