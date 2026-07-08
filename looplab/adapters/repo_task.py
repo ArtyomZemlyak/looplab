@@ -54,31 +54,33 @@ class DataSpec(BaseModel):
     all defaults (everything allowed EXCEPT editing the original)."""
     path: str
     mount: bool = True         # (1) read-only symlink at ./<name> (default) | False = copy INTO the workdir
-    edit: bool = False         # (2) may the agent modify the source/copy IN PLACE? default False (protect original)
-    copy_modify: bool = True   # (3) may the agent copy it and modify the copy?
-    preprocess: bool = True    # (4) may the agent preprocess/augment/feature-engineer it into a training set?
-    extend: bool = True        # (5) may the agent extend / expand the data?
+    edit: bool = False         # (2) may the agent modify the ORIGINAL in place (through its mount)?
+    #                              default False (protect original). A mount:false copy is always
+    #                              node-local and writable — edits there can't reach the original.
+    copy_modify: bool = True   # (3) may the agent copy it and modify the copy?          (advisory)
+    preprocess: bool = True    # (4) may it preprocess/augment it into a training set?    (advisory)
+    extend: bool = True        # (5) may it extend / expand the data?                     (advisory)
+    # (3)-(5) are ADVISORY: they shape the agent brief's allow-list (_data_brief) but no gate
+    # enforces them mechanically — only `mount` and `edit` have enforced semantics (the write gate
+    # + the untrusted tier's read-only binds). Documented in docs/guide/tasks.md.
 
 
 class EvalSpec(BaseModel):
     """The operator's trusted evaluation (the agent does not author this)."""
     command: list[str] = Field(default_factory=list)   # argv, no shell; carries env activation
     # Operator-declared ordered pipeline (data_prep → train → …); when set these ARE the canonical
-    # stages the engine runs (the Developer implements the scripts, not the structure). Each stage is
-    # {name, command:[argv], timeout?, check?}. The LAST stage's stdout carries the metric. When empty,
-    # the single `command` runs (and the Developer MAY declare PRECEDING stages before it). Exactly one
-    # of `command` / `stages` must be non-empty.
+    # stages the engine runs — the Developer implements the scripts, not the structure, and its
+    # looplab_stages.json is IGNORED (see Engine._resolve_stages). Each stage is
+    # {name, command:[argv], timeout?, check?}; the LAST stage's stdout carries the metric. When
+    # empty, the single `command` runs (and the Developer MAY declare PRECEDING stages before it).
+    # Validated by the SAME shared rules as the declare_stages tool
+    # (runtime/command_eval.validate_stages); a stage named 'score' is allowed HERE — the operator
+    # owns scoring, the reservation only guards Developer manifests.
     stages: list[dict] = Field(default_factory=list)
     cwd: str = "."                           # relative to the node eval workdir
     metric: dict = Field(default_factory=lambda: {"kind": "stdout_json", "key": "metric"})
     params_style: str = "none"               # none | cli_overrides
     timeout: float = 600.0
-
-    @model_validator(mode="after")
-    def _command_or_stages(self):
-        if not self.command and not self.stages:
-            raise ValueError("eval/cmd needs a `command` (argv) OR `stages` (an ordered pipeline).")
-        return self
     # Optional setup command run in the workdir BEFORE the eval each time (e.g.
     # ["pip", "install", "-r", "requirements.txt"]). This is how an e2e Developer's
     # dependency changes take effect reproducibly: the agent edits requirements (in the
@@ -135,6 +137,28 @@ class EvalSpec(BaseModel):
     def _cross_check_not_adapter(cls, v):
         from looplab.runtime.command_eval import validate_cross_check
         return validate_cross_check(v)
+
+    @field_validator("stages")
+    @classmethod
+    def _stages_valid(cls, v):
+        # Reject a malformed operator pipeline at SUBMIT time with the shared stage rules — without
+        # this, a bad `cmd.stages` entry silently vanished (pydantic ignored the unknown key entirely
+        # before this field existed) and the Developer's manifest quietly took over the pipeline.
+        if not v:
+            return v
+        from looplab.runtime.command_eval import validate_stages
+        clean, err = validate_stages(v)          # no reserved names: the operator owns `score`
+        if err:
+            raise ValueError(f"cmd.stages invalid: {err}")
+        return clean
+
+    @model_validator(mode="after")
+    def _command_or_stages(self):
+        # The documented cmd shape is {"command" | "stages", ...}: one of the two must actually run.
+        if not self.command and not self.stages:
+            raise ValueError("cmd/eval needs a `command` (argv list) or a `stages` pipeline "
+                             "— nothing would run otherwise.")
+        return self
 
 
 class RepoResearcher:
@@ -381,9 +405,12 @@ class RepoTask(BaseModel):
             names += [self._normp(pre + p) for p in ed["protect"]]
         # A data source the agent may NOT edit (the default) is protected against writes UNDER its
         # mount, so the agent can't mutate the original through the ./<name> symlink. `edit:true`
-        # sources stay writable (the agent works on them in place).
+        # sources stay writable (the agent works on them in place). A `mount:false` source is a
+        # PHYSICAL per-node copy whose writes can't reach the original — protecting it contradicted
+        # the agent brief's "a writable copy: may copy+modify, preprocess, extend" and made copy-in
+        # mode unusable (every write under ./<name> was refused), so only mounted originals guard.
         for name, spec in self.data.items():
-            if not spec.edit:
+            if not spec.edit and spec.mount:
                 nm = name.rstrip("/")
                 names += [self._normp(nm), self._normp(nm + "/**")]
         return names + self._eval_protected()
@@ -400,7 +427,15 @@ class RepoTask(BaseModel):
             surf_globs += [pre + g for g in ed["surface"]]
         surf = ", ".join(surf_globs)
         prot = ", ".join(self._protected_names()) or "(none)"
-        cmd = " ".join(self.eval.command) if self.eval else "(proposed during onboarding)"
+        # A stages-only cmd (the composable pipeline form) has no single command line to show —
+        # render the declared stage chain instead of an empty ``.
+        if self.eval and self.eval.command:
+            cmd = " ".join(self.eval.command)
+        elif self.eval and self.eval.stages:
+            cmd = ("the operator-declared stage pipeline: "
+                   + " → ".join(str(s.get("name", "?")) for s in self.eval.stages))
+        else:
+            cmd = "(proposed during onboarding)"
         setup = " ".join(self.eval.setup) if (self.eval and self.eval.setup) else ""
         deps = (f" Dependencies are installed before each eval by `{setup}`, so to add a "
                 "package, edit the requirements file it reads (if it is in your allowed "
@@ -421,7 +456,10 @@ class RepoTask(BaseModel):
             where = f"./{name}" + (" (read-only mount)" if s.mount else " (a writable copy)")
             allow = [w for w, on in (("edit-in-place", s.edit), ("copy+modify", s.copy_modify),
                                      ("preprocess/augment", s.preprocess), ("extend", s.extend)) if on]
-            deny = "" if s.edit else " — do NOT edit the original; write any derived data elsewhere in the workdir"
+            # The "don't edit" warning applies only to a MOUNTED original: a mount:false copy is
+            # node-local and writable (matching _protected_names, which no longer guards copies).
+            deny = ("" if (s.edit or not s.mount)
+                    else " — do NOT edit the original; write any derived data elsewhere in the workdir")
             parts.append(f"{where}: may {', '.join(allow) or 'read'}{deny}")
         return " Data inputs: " + "; ".join(parts) + "."
 

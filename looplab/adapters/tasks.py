@@ -97,7 +97,9 @@ def normalize_task(data: dict) -> dict:
 
     Returns a canonical dict the registered adapters validate (with an inferred `kind`). Idempotent
     and back-compatible: a legacy `{kind, eval, onboard, editable_path, metric.kind}` dict passes
-    through unchanged, so old snapshots / example files / tests keep working."""
+    through unchanged, so old snapshots / example files / tests keep working. Raises ValueError on
+    a task that cannot be a task — a non-argv `cmd`, or no recognizable capability field at all
+    (never a silent default to the quadratic toy)."""
     d = dict(data)
 
     # --- built-in benchmarks: an explicit selector for the internal synthetic tasks ---
@@ -107,8 +109,10 @@ def normalize_task(data: dict) -> dict:
     # --- kaggle competition -> the mlebench_real adapter (accept the `kaggle` alias or a bare
     #     `competition`; either one, with no explicit kind, IS a competition task) ---
     if d.get("kaggle"):
-        d.setdefault("competition", d.get("kaggle"))
-        d.pop("kaggle", None)
+        # `kaggle` is the composable spelling and WINS over a stale `competition` riding along in the
+        # same dict (setdefault kept the old value, so a user editing the Kaggle field in a boss-
+        # authored spec launched the DISPLAYED slug's predecessor — the wrong competition).
+        d["competition"] = d.pop("kaggle")
     if d.get("competition") and not d.get("kind"):
         d["kind"] = "mlebench_real"
 
@@ -128,6 +132,15 @@ def normalize_task(data: dict) -> dict:
                 name, i = f"dataset{i}", i + 1
             mounts[name] = ds
         elif isinstance(ds, dict):
+            # A name spelled in BOTH `data` and `dataset` is a config error: mounts.update would
+            # silently shadow one path and every node would evaluate against the wrong source, far
+            # from the misconfiguration. (The bare-path branch above can rename because its name is
+            # invented; an explicit name collision has no right answer.)
+            clash = sorted(set(mounts) & set(ds))
+            if clash:
+                raise ValueError(
+                    f"data mount name(s) declared in BOTH `data` and `dataset`: {', '.join(clash)} — "
+                    "the same name would silently shadow one of the paths; rename or drop one side.")
             mounts.update(ds)
         if mounts:
             d["data"] = mounts
@@ -135,7 +148,19 @@ def normalize_task(data: dict) -> dict:
     # --- cmd (how to run + score) is the new name for `eval` ---
     if "cmd" in d and "eval" not in d:
         cmd = d.pop("cmd")
-        d["eval"] = {"command": list(cmd)} if isinstance(cmd, list) else dict(cmd or {})
+        if isinstance(cmd, list):
+            d["eval"] = {"command": list(cmd)}
+        elif isinstance(cmd, dict):
+            d["eval"] = dict(cmd)
+        elif cmd:
+            # The natural authoring mistake is a shell STRING — dict("python test.py") would raise a
+            # cryptic 'dictionary update sequence' ValueError (a 500 on /api/start, a TUI crash).
+            # Reject it with an actionable message instead; the engine runs argv with NO shell.
+            raise ValueError(
+                f"`cmd` must be an argv list ([\"python\",\"test.py\"]) or a spec object "
+                f"{{command, metric, timeout}}, got {type(cmd).__name__}: {str(cmd)[:80]!r} — "
+                "split a shell string into argv items.")
+        # falsy cmd (None/""/{}) -> treated as absent; the repo-task gate below gives the real message
 
     # --- inside the eval/cmd spec: metric.reader alias + "auto" -> onboarding fold ---
     def _reader_to_kind(spec):
@@ -181,8 +206,28 @@ def normalize_task(data: dict) -> dict:
             d["kind"] = "repo"            # a bare run+score spec is a (path-less) repo-style task
         elif d.get("data") or d.get("data_path"):
             d["kind"] = "dataset"
+        elif d.get("bounds"):
+            # the classic kind-less TOY file (examples/toy_task.json predates `kind`): a numeric
+            # `bounds` space with no repo/data/cmd IS the toy capability — keep those loading.
+            d["kind"] = "quadratic"
         else:
-            d["kind"] = "quadratic"       # nothing declared -> the offline toy default
+            # NO silent default to the quadratic toy (the guarantee the old /api/start kind-guard
+            # gave): a typo'd capability field (repo_path for repo, …) would otherwise validate as a
+            # ToyTask and burn the run's nodes/LLM budget optimizing (x-3)^2. An offline toy run says
+            # so explicitly (`kind`/`benchmark`: "quadratic").
+            raise ValueError(
+                "cannot infer the task: no capability field recognized. Give one of `repo` (an "
+                "editable codebase), `dataset`/`data` (data mounts), `cmd` (how to run + score), "
+                "`kaggle`/`competition` (a competition slug), `benchmark` (a built-in synthetic "
+                "task) — or an explicit legacy `kind`.")
+
+    # Per-source permission OBJECTS ({path, mount, edit, …}) are repo-task machinery — mount/edit
+    # drive the repo workspace seeding and the write gate. The dataset kind reads data by ABSOLUTE
+    # path with no mounts (DatasetTask.data is name -> path), so only the path survives here:
+    # flatten the documented object form instead of bouncing it with a pydantic type error.
+    if d["kind"] == "dataset" and isinstance(d.get("data"), dict):
+        d["data"] = {k: (v.get("path", "") if isinstance(v, dict) else v)
+                     for k, v in d["data"].items()}
 
     return d
 
@@ -193,7 +238,7 @@ def validate_task(data: dict) -> TaskAdapter:
     competition slug) — the SAME validation the engine runs at startup, so callers can reject a bad
     spec synchronously instead of spawning a detached engine that dies before writing any events."""
     data = normalize_task(data)                       # composable/legacy schema -> canonical + inferred kind
-    kind = data.get("kind", "quadratic")
+    kind = data["kind"]                               # normalize_task guarantees it (or raises)
     cls = _KINDS.get(kind)
     if cls is None:
         raise ValueError(f"unknown task kind: {kind!r} (known: {sorted(_KINDS)})")

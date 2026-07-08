@@ -304,8 +304,10 @@ class RunLauncherTools:
                 "it; your protected cmd scores the freshly-trained model).\n"
                 "  • `cmd` points at a file the agent must BUILD → leave it editable (a protected file can't "
                 "be created).\n"
-                "  • NO `cmd` at all → the agent builds the whole train+score entrypoint; just say in the "
-                "goal how the metric is printed and it's parsed normally.\n"
+                "  • NO existing scorer anywhere → point `cmd` at an entrypoint the agent will BUILD "
+                "(e.g. [\"python\",\"looplab_eval.py\"]) and leave it editable — a repo task ALWAYS "
+                "carries a `cmd` (or metric.reader \"auto\"); say in the goal what it must train and "
+                "print.\n"
                 "In every case say each node must actually TRAIN a fresh model and score THAT model — never "
                 "read a pre-existing checkpoint or a static results file (results_last.csv is a PRIOR run's "
                 "output, not a score). If training happens, set `cmd.timeout` GENEROUSLY (seconds): training "
@@ -349,8 +351,9 @@ class RunLauncherTools:
                 validate_task(task)
             except Exception as e:  # noqa: BLE001
                 return (f"(NOT proposed — the task is INVALID: {e}\nFix it and call propose_run again. "
-                        "For kind='repo' you MUST give either an `eval` {command, metric} OR set "
-                        "`onboard: true`, and `editable_path` must be an ABSOLUTE path that exists.)")
+                        "A repo task MUST carry a `cmd` {command|stages, metric:{reader,key}} — point it "
+                        "at a file the agent will BUILD if no scorer exists — or set metric.reader "
+                        "\"auto\"; `repo` must be an ABSOLUTE path that exists.)")
         spec = {"run_id": rid, "task": task or {}, "task_file": task_file,
                 "settings": args.get("settings") if isinstance(args.get("settings"), dict) else {},
                 "rationale": str(args.get("rationale") or "")}

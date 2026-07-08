@@ -222,6 +222,46 @@ def expand_params(argv: list, params: Optional[dict]) -> list:
     return out
 
 
+def validate_stages(stages, *, reserved: tuple = ()) -> tuple[Optional[list], Optional[str]]:
+    """Validate a stage list ({name, command:[argv...], timeout?, check?}) into its canonical clean
+    form: (clean, None) on success, (None, reason) on the first problem. This is the SINGLE
+    definition of "a valid stage", shared by the Developer's `declare_stages` tool (authoring time),
+    `EvalSpec.stages` (the operator's cmd pipeline, submit time) and the engine's `_resolve_stages`
+    (consume time) — so the two ends of the manifest handshake can't drift: a stage one side accepts
+    is never silently dropped or re-interpreted by the other. `reserved` names are refused — the
+    engine appends the operator's protected `score` stage to a DEVELOPER manifest, so the tool passes
+    ("score",); operator-declared stages reserve nothing (the operator owns scoring)."""
+    if not isinstance(stages, list) or not stages:
+        return None, "`stages` must be a non-empty array of {name, command:[argv...]} objects."
+    seen, clean = set(), []
+    for i, s in enumerate(stages):
+        if not isinstance(s, dict):
+            return None, f"stage {i} is not an object — expected {{name, command:[...]}}."
+        nm = str(s.get("name") or "").strip()
+        if not nm:
+            return None, f"stage {i} has no `name`."
+        if nm.lower() in reserved:
+            return None, ("'score' is reserved for the operator's final scoring stage. Name "
+                          "your PRECEDING stages e.g. data_prep, train — the cmd is appended after them.")
+        if nm in seen:
+            return None, f"duplicate stage name {nm!r}."
+        seen.add(nm)
+        cmd = s.get("command")
+        if not isinstance(cmd, list) or not cmd or not all(isinstance(x, str) for x in cmd):
+            return None, (f"stage {nm!r} needs a `command` as a non-empty list of string argv "
+                          "items, e.g. [\"python\",\"train.py\",\"%params%\"].")
+        st = {"name": nm, "command": list(cmd)}
+        if "timeout" in s:
+            try:
+                st["timeout"] = float(s["timeout"])
+            except (TypeError, ValueError):
+                return None, f"stage {nm!r} `timeout` must be a number of seconds."
+        if s.get("check"):
+            st["check"] = True
+        clean.append(st)
+    return clean, None
+
+
 def build_command(eval_spec: dict, params: Optional[dict] = None,
                   profile: Optional[str] = None) -> tuple[list[str], float]:
     """Build the eval argv + timeout from an eval_spec, an eval profile (smoke/full), and
@@ -275,19 +315,32 @@ def _drift(primary: Optional[float], cross: Optional[float], tol: float) -> bool
 
 
 def make_docker_wrap(mount_root: str, image: str, network: str = "none",
-                     mem: Optional[str] = None, runtime: Optional[str] = None):
+                     mem: Optional[str] = None, runtime: Optional[str] = None,
+                     binds: Optional[list] = None):
     """untrusted tier (ADR-13, Phase 4): return a `wrap(argv, host_cwd) -> argv` that runs the
     command inside `docker run` with the run workspace bind-mounted at /work and the network
     off by default — a real isolation boundary for executing an arbitrary framework. The bind
     mount means files the container writes (metrics, logs) appear on the host, so metric
     reading still happens on host paths afterward. Fails LOUDLY if the docker CLI is absent
-    rather than silently running unsandboxed (mirrors sandbox.DockerSandbox)."""
+    rather than silently running unsandboxed (mirrors sandbox.DockerSandbox).
+
+    `binds`: extra (host_path, read_only) mounts, bound at the SAME absolute path inside the
+    container. Symlink-mounted data/reference sources need this — the /work bind carries only the
+    symlink, which would otherwise dangle in the container — and binding a non-editable source
+    `:ro` is the MOUNT-LAYER enforcement of the per-source `edit:false` permission: code running
+    in the sandbox physically cannot write the operator's original, matching the write-tool gate
+    (mega-review fix; the write gate alone couldn't stop a declared train stage from mutating the
+    original through ./<name>)."""
     import shutil as _sh
     if not _sh.which("docker"):
         raise RuntimeError(
             "trust_mode='untrusted' needs the docker CLI to sandbox the eval, but it was not "
             "found on PATH. Install Docker or use trust_mode='trusted_local'.")
     root = Path(mount_root).resolve()
+    extra: list[str] = []
+    for p, ro in (binds or []):
+        ap = Path(p).resolve().as_posix()
+        extra += ["-v", f"{ap}:{ap}:ro" if ro else f"{ap}:{ap}"]
 
     def wrap(argv: list[str], host_cwd: str) -> list[str]:
         rel = os.path.relpath(Path(host_cwd).resolve(), root).replace(os.sep, "/")
@@ -297,7 +350,7 @@ def make_docker_wrap(mount_root: str, image: str, network: str = "none",
         rt = ["--runtime", runtime] if runtime else []   # B4+ gVisor/Kata true-isolation tier
         base = ["docker", "run", "--rm", "--network", network, *rt,
                 "--pids-limit", "1024",       # fork-bomb guard (review C1: no pids limit before)
-                "-v", f"{root.as_posix()}:/work", "-w", cdir]
+                "-v", f"{root.as_posix()}:/work", *extra, "-w", cdir]
         if mem:
             base += ["--memory", mem]
         return base + [image] + list(argv)

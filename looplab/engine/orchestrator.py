@@ -2313,6 +2313,26 @@ class Engine(ConfirmPhaseMixin, AblationMixin):
         # extracted to engine/workspace.py — see the delegator block after __init__
         return self.workspace.sandbox_cwd(workdir, cwd_spec)
 
+    def _data_binds(self) -> Optional[list]:
+        """(host_path, read_only) binds for the untrusted tier: every SYMLINK-mounted data /
+        reference source, bound at its own absolute path inside the container (the workspace bind
+        carries only the symlink, which would otherwise dangle there). read_only unless the data
+        source's `edit` permission grants in-place writes — so `edit:false` is enforced at the
+        MOUNT layer for sandboxed runs, not just in the agent-facing write-tool gate. (The
+        trusted_local tier runs on the host and keeps only the tool gate; documented in
+        docs/guide/tasks.md.) Copy-in (mount:false) sources live inside the workdir already."""
+        binds: list = []
+        for spec in (self._repo_spec or {}).get("data", {}).values():
+            if isinstance(spec, dict):                    # DataSpec dict | bare path (back-compat)
+                if spec.get("mount", True) and spec.get("path"):
+                    binds.append((spec["path"], not spec.get("edit", False)))
+            elif spec:
+                binds.append((spec, True))
+        for ref in (self._repo_spec or {}).get("references", []):
+            if ref.get("mount") and ref.get("path"):
+                binds.append((ref["path"], True))         # references are read-only by definition
+        return binds or None
+
     def _resolve_stages(self, workdir, es, params=None, score_cmd=None, score_timeout=None):
         """Resolve the ordered eval pipeline, with the operator's `cmd` (es) AUTHORITATIVE and
         non-overridable (redesign: the agent can't rewrite how it's scored):
@@ -2332,18 +2352,19 @@ class Engine(ConfirmPhaseMixin, AblationMixin):
         import json
         from looplab.runtime import command_eval
 
-        def _clean(stages):
-            out = []
-            for s in stages:
-                if isinstance(s, dict) and isinstance(s.get("command"), list) and s.get("command"):
-                    s = dict(s)
-                    s["command"] = command_eval.expand_params(s["command"], params)
-                    out.append(s)
-            return out
+        def _expand(stages):
+            # per-node %params% expansion over an already-VALIDATED clean stage list
+            return [dict(s, command=command_eval.expand_params(list(s["command"]), params))
+                    for s in stages]
 
         task_stages = es.get("stages")
         if isinstance(task_stages, list) and task_stages:
-            return _clean(task_stages) or None      # cmd declares stages → canonical, dev file ignored
+            # cmd declares stages → canonical, dev file ignored. EvalSpec validated these at submit
+            # time; re-run the shared validator anyway (an old/hand-edited snapshot bypasses pydantic)
+            # and fall back to the single command on a bad list rather than run a half-parsed pipeline.
+            clean, err = command_eval.validate_stages(task_stages)
+            if err is None:
+                return _expand(clean)
 
         # single-command cmd: read the Developer's PRECEDING stages, append the protected cmd stage
         dev = None
@@ -2355,15 +2376,21 @@ class Engine(ConfirmPhaseMixin, AblationMixin):
             except Exception:  # noqa: BLE001 — a malformed manifest just falls back to the single command
                 dev = None
         if isinstance(dev, list) and dev:
-            preceding = _clean(dev)
-            if preceding:
+            # SAME shared rules as the declare_stages tool (reserved 'score', no duplicates, argv
+            # shape) — the tool is the friendly authoring path, but write_file / a CLI-agent diff /
+            # a pre-redesign run can still hand-write the manifest, and an unvalidated one could
+            # smuggle a second 'score' stage (clobbering score.log and confusing stage-scoped
+            # re-runs) or a full scorer that double-runs the eval after cmd is appended. Invalid →
+            # ignore the whole manifest (single-command fallback), never a half-cleaned pipeline.
+            preceding, err = command_eval.validate_stages(dev, reserved=("score",))
+            if err is None and preceding:
                 # the operator's cmd is the FINAL + protected scoring stage; reuse the already
                 # profile-resolved command/timeout (build_command) so smoke/full still applies.
                 final = {"name": "score",
                          "command": list(score_cmd) if score_cmd is not None
                                     else command_eval.expand_params(list(es.get("command") or []), params),
                          "timeout": score_timeout if score_timeout is not None else es.get("timeout", 600.0)}
-                return preceding + [final]
+                return _expand(preceding) + [final]
         return None
 
     def _stage_check_fn(self, node):
@@ -2424,9 +2451,13 @@ class Engine(ConfirmPhaseMixin, AblationMixin):
             cwd = self._sandbox_cwd(workdir, es.get("cwd", "."))
             # untrusted tier (Phase 4): sandbox the eval in docker, mounting the workspace
             # root so the cwd subdir + host metric reading line up. Fails loudly w/o docker.
+            # Symlink-mounted data/reference sources ride along as same-path binds (the /work
+            # bind alone leaves their symlinks dangling in the container) — read-only unless the
+            # source's `edit` permission grants writes (mount-layer enforcement of edit:false).
             wrap = (command_eval.make_docker_wrap(
                         root, self.docker_image,
-                        runtime=("runsc" if self.trust_mode == "hostile" else None))
+                        runtime=("runsc" if self.trust_mode == "hostile" else None),
+                        binds=self._data_binds())
                     if self.trust_mode in ("untrusted", "hostile") else None)
             res = command_eval.run_command_eval(
                 cmd, cwd, timeout, es["metric"], env,

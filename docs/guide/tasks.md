@@ -60,7 +60,10 @@ the *scoring* step, not the trainer: **training is a separate stage the agent de
 `declare_stages` tool), which the engine runs BEFORE `cmd`. If `cmd` is a single command the Developer may
 only declare **preceding** stages (data-prep, train) and the operator's `cmd` is appended as the protected
 final `score` stage; if `cmd` itself declares `stages`, those are canonical. Put `%params%` in any command
-to inject the node's hyperparameters as `--key value`.
+to inject the node's hyperparameters as `--key value`. Stage lists are validated by ONE shared rule set
+(`runtime/command_eval.py::validate_stages`) at authoring (`declare_stages`), submit (`cmd.stages`) and
+consume time (the engine re-validates even a hand-written `looplab_stages.json`; `score` is reserved in a
+Developer manifest, and an invalid manifest falls back to the single command instead of half-running).
 
 **What the agent may EDIT is a separate, independent decision** — `edit_surface` (globs the agent may
 edit; default = the whole repo) minus `protect` (exceptions). The engine does **not** auto-protect the
@@ -85,9 +88,24 @@ independent flags. **Default: everything allowed EXCEPT editing the original.**
 }
 ```
 
-A source with `edit:false` (the default) is protected against writes under its mount (`name` + `name/**`),
-so the agent can read it and derive/augment a training set in the workdir but cannot mutate the original.
-The permissions are also surfaced in the agent's brief.
+**What is mechanically enforced.** `mount` and `edit` have enforced semantics; flags (3)–(5) are
+**advisory** — they shape the allow-list in the agent's brief but no gate checks them.
+
+- A **mounted** source with `edit:false` (the default) is protected against writes under its mount
+  (`name` + `name/**`) in the Developer's write gate and the external agent's diff gate, and — under the
+  `untrusted`/`hostile` tiers — is bind-mounted into the eval container **read-only**, so even code the
+  eval *runs* (a declared `train` stage, a subprocess) physically cannot mutate the original. The
+  `trusted_local` tier runs on the host, where only the write/diff gates apply — treat `edit:false`
+  there as a guard against the *agent's edits*, not a hard sandbox.
+- A **`mount:false`** source is a physical per-node **copy** inside the workdir: writes cannot reach the
+  original, so the copy is writable regardless of `edit` (the brief calls it "a writable copy"). On a
+  CoW filesystem (btrfs/XFS) the per-node copy is a reflink clone (~free); on ext4 it is a full byte
+  copy per node — budget disk accordingly for a large dataset.
+- Declaring the same mount name in **both** `data` and `dataset` is rejected at submit time (one path
+  would silently shadow the other). A `kaggle` slug **overwrites** a legacy `competition` value riding
+  along in the same dict.
+- For a **dataset**-kind task (no repo), permission objects are flattened to their `path` — the
+  mount/edit machinery is repo-task infrastructure; the dataset kind reads data by absolute path.
 
 Every legacy spelling still works — `{"kind":"repo","editable_path":...,"eval":{...,"metric":{"kind":...}},"onboard":...}`
 parses unchanged, so old task files and snapshots keep running (`examples/repo_task.json` is the
