@@ -6,8 +6,8 @@ scenario here **manufactures a controlled situation** — a crafted dataset plus
 pre-seeded node history — then runs the **real agent** (LLM Researcher + Developer) over the `looplab`
 CLI and asserts the *outcome* (a plateau broken, a cheater excluded, a broken node repaired).
 
-- **Harness + registry:** [`tests/live/scenarios.py`](../../tests/live/scenarios.py)
-- **Pytest wrapper:** [`tests/test_live_scenarios.py`](../../tests/test_live_scenarios.py)
+- **Harness + registry:** `tests/live/scenarios.py`
+- **Pytest wrapper:** `tests/test_live_scenarios.py`
 
 The harness owns nothing at runtime: it writes **files-as-truth** (a dataset + a fabricated event log)
 and shells out to `looplab run` / `looplab resume`, exactly as a user would — so a scenario exercises

@@ -11,7 +11,7 @@ first*), so reach for it before hand-writing JSON. Every case below shows both t
 the equivalent task file.
 
 > **New composable schema.** A task no longer needs a `kind` — describe what you HAVE (`repo`,
-> `dataset`, `cmd`, `kaggle`) and the engine infers the rest (see [Tasks → the composable schema](tasks.md#the-composable-schema-recommended)). The legacy `kind`/`editable_path`/`eval`/`onboard`/`metric.kind`
+> `dataset`, `cmd`, `kaggle`, `benchmark`) and the engine infers the rest (see [Tasks → the composable schema](tasks.md#the-composable-schema-recommended)). The legacy `kind`/`editable_path`/`eval`/`onboard`/`metric.kind`
 > spellings below all still work (they're accepted as aliases), but the composable names are preferred.
 > Three things worth knowing for a **training** repo:
 > - **`cmd` is the SCORING step, not the trainer.** Training is a separate stage the agent declares at
@@ -151,19 +151,22 @@ authors a `dataset` task; for a Kaggle competition it sets the `mlebench_real` s
 ### I have a repo with code and an eval → edit mode
 
 The canonical [`repo`](tasks.md#repo) task: the agent edits files matching `edit_surface`, and
-success is **your own** `eval.command` + metric. The eval entrypoint and any file the metric is read
-from are **protected** — the agent can't overwrite them to fake a score.
+success is **your own** `cmd` (the scorer) + metric. The file the metric is **read from** (a
+`file_json`/`file_regex` path, or an onboarding adapter) is auto-protected so the agent can't fake a
+score. The scorer **entrypoint itself is NOT auto-protected** — `cmd` is a contract for *how it's
+scored*, separate from *what may be edited* — so if the agent must not change your scorer, list it in
+`protect` (as below). Composable form:
 
 ```jsonc
 {
-  "kind": "repo", "goal": "improve validation AUC", "direction": "max",
-  "editable_path": "~/proj/model",          // your repo (a worktree copy is mounted per eval)
+  "goal": "improve validation AUC", "direction": "max",
+  "repo": "~/proj/model",                    // your repo (a worktree copy is mounted per eval)
   "edit_surface": ["src/**/*.py"],           // only these files may change
   "protect": ["eval.py"],                    // the agent must never touch the scorer
-  "eval": {
+  "cmd": {
     "command": ["python", "eval.py"],
-    "metric": {"kind": "stdout_json", "key": "metric"},   // eval prints {"metric": <score>}
-    "setup": ["pip", "install", "-r", "requirements.txt"],
+    "metric": {"reader": "stdout_json", "key": "metric"},  // eval prints {"metric": <score>}
+    "setup": ["pip", "install", "-r", "requirements.txt"], // dependency install only
     "timeout": 1800
   }
 }
@@ -174,37 +177,39 @@ the fields in your README/entry script.
 
 ### I have a test but no train → the agent writes it
 
-Common case: you have a `test.py`/`eval.py` that scores a model, but **no training script**. The
-agent **generates `train.py` for you** — it's just code inside the edit surface. Wire training to run
-**before** scoring with `eval.setup`, which runs once before the eval each iteration:
+Common case: you have a `test.py`/`eval.py` that scores a model, but **no training script**. `cmd` is
+the SCORING step, not the trainer — **training is a separate stage the agent declares at run time**
+(its `declare_stages` tool), which the engine runs BEFORE your `cmd`. You do **not** put training in
+`cmd.setup` (that's for dependency installs). Just set `cmd` to your scorer and `protect` it:
 
 ```jsonc
 {
-  "kind": "repo", "goal": "train a model that maximizes the test metric", "direction": "max",
-  "editable_path": "~/proj",
-  "edit_surface": ["train.py", "src/**/*.py"],   // the agent CREATES train.py here…
-  "protect": ["test.py"],                         // …and may never edit the scorer
-  "eval": {
-    "setup":   ["python", "train.py"],            // ← training: written & improved by the agent
-    "command": ["python", "test.py"],             // ← your trusted scorer reads the trained artifact
-    "metric":  {"kind": "stdout_json", "key": "metric"},
-    "timeout": 1800
+  "goal": "train a model that maximizes the test metric", "direction": "max",
+  "repo": "~/proj",
+  "edit_surface": ["**/*.py"],               // the agent CREATES train.py + edits code here…
+  "protect": ["test.py"],                     // …and may never edit the scorer (contract)
+  "cmd": {
+    "command": ["python", "test.py"],         // your trusted scorer reads the trained checkpoint
+    "metric":  {"reader": "stdout_json", "key": "metric"},
+    "timeout": 14400                           // GENEROUS — it covers the train stage the agent adds
   }
 }
 ```
 
-Each iteration: your repo is mounted → the agent's edits to `train.py` are applied → `setup` trains
-with the new code → `test.py` scores it → the metric is read. If the generated `train.py` crashes,
-its stderr is fed back to the agent to repair. Notes:
+Each iteration the agent writes `train.py`, then calls `declare_stages` to declare a `train` stage; the
+engine runs `train` → appends your protected `cmd` as the final `score` stage → reads the metric from
+its stdout. A fixed scoring bug re-runs **only** `score` (the trained checkpoint is reused). If `train`
+crashes, its stderr is fed back to the agent to repair. Notes:
 
-- `eval.command` is an **argv list, not a shell** — there's no `&&`. Use `setup` for the "train
-  first" step (or have a single script do both and point `command` at it).
-- Keep `test.py` in `protect`: it's the scorer, so the agent improves *training*, not the metric.
-- If `test.py` doesn't print the metric, read it from a file (`"metric": {"kind": "file_json",
+- Give `cmd.timeout` room for the whole schedule (often `7200`–`14400`s) — the 600s default SIGKILLs a
+  long train into an undertrained checkpoint.
+- Keep `test.py` in `protect`: `cmd` says *how it's scored*; `protect` says *what may not be edited* —
+  two separate decisions.
+- If `test.py` doesn't print the metric, read it from a file (`"metric": {"reader": "file_json",
   "path": "result.json", "key": "metric"}`) or use [onboarding](#i-can-run-it-but-dont-know-how-its-scored-onboarding).
 
-*Genesis:* tell it *"there's a `test.py` that scores but no trainer — write the training and run it
-before the test"*; it sets `setup`/`command` and puts `train.py` in the surface.
+*Genesis:* tell it *"there's a `test.py` that scores but no trainer"*; it sets `cmd` to the scorer,
+protects it, and states in the goal that the agent must add a training stage.
 
 ### I can run it, but don't know how it's scored → onboarding
 
@@ -239,22 +244,26 @@ search fast. See [Framework mode](tasks.md#framework-mode-tune-with-no-code-edit
 ## Pointing at your data
 
 Don't hard-code absolute machine paths in your scripts — **mount** the data so the run is
-reproducible and works under the sandbox. A `repo` task takes two fields; both are copied into each
-eval workdir and addressed by a **relative path** (relative to `eval.cwd`, default `.`):
+reproducible and works under the sandbox. A `repo` task takes two fields, addressed by a **relative
+path** (relative to `eval.cwd`, default `.`):
 
 ```jsonc
 {
-  "data": { "dataset": "~/proj/data" },        // name → path; copied to ./dataset in the eval workdir
+  "dataset": { "data": "~/proj/data" },        // name → path; read-only symlink mount at ./data
   "references": [
     { "name": "libs", "path": "~/shared/lib", "mount": true }   // read-only runtime dep → ./libs
   ]
 }
 ```
 
-- **`data`** (`name → path`): a directory or single file copied to `./<name>` in the eval workdir.
-  Your script reads `./dataset/...`. Large/immutable inputs are fingerprinted cheaply (no multi-GB
-  walk on every start).
-- **`references`** with `"mount": true`: same copy-in, for a read-only runtime dependency; with
+- **`dataset`** (`name → path`, legacy alias `data`): each source is a **read-only symlink mount** at
+  `./<name>` by default (no per-node copy — cheap on a large/immutable input, fingerprinted without a
+  multi-GB walk). Your script reads `./data/...`. A value may instead be an object with
+  [per-source permissions](tasks.md#per-source-data-permissions) — `{path, mount, edit, copy_modify,
+  preprocess, extend}`: `mount:false` copies it INTO the workdir (writable copy); `edit:false` (the
+  default) protects the original; `copy_modify`/`preprocess`/`extend` tell the agent it may derive an
+  augmented training set (defaults: everything allowed except editing the original).
+- **`references`** with `"mount": true`: a read-only symlink mount for a runtime dependency; with
   `"mount": false` it's shown to the agent as **context only**, not placed in the runtime.
 - `~` and `$HOME`/`$VARS` are expanded, so `"~/proj/data"` and `"$DATA_DIR"` resolve.
 - Mount names must be simple subdir names (no `/`, `..`) and must not collide with each other or an
@@ -280,13 +289,15 @@ can always add/adjust the `data` field on the card before launching.
 The search-driven argument mechanisms attach to **`eval.command` only** — never to `eval.setup`. Two
 of them:
 
-- **`params` + `params_style: "cli_overrides"`** — the Researcher's proposed hyperparameters are
-  appended to `command` as `key=value` tokens (Hydra-style). This is a **no-code-edit** mode (the
-  agent only tunes numbers, it doesn't write code).
+- **`params` + a `%params%` token** — put `%params%` in the `command` (or in a declared stage's
+  command) exactly where the flags belong; the Researcher's proposed hyperparameters expand there as
+  `--key value`. This is a **no-code-edit** tuning mode. (The legacy `params_style: "cli_overrides"`
+  still appends `key=value` Hydra-style tokens.)
 - **`profiles`** — named override sets the engine picks per phase, e.g. a cheap `smoke` during search
-  and a `full` on confirmation. Each profile's `overrides` are appended to `command`.
+  and a `full` on confirmation. Each profile's `overrides` are appended to `command` (and the profile
+  timeout applies even in stage mode).
 
-So if **train (`setup`) and test (`command`) need different arguments**, pick the pattern that fits:
+So if the **agent's train stage and the scorer `cmd` need different arguments**, pick the pattern that fits:
 
 | You want | Do this |
 |---|---|
@@ -423,11 +434,13 @@ node fails and its stderr is fed back to the agent's repair.
   argv there;* that's how your framework gets invoked. Under the default `trusted_local` tier LoopLab
   does **not** sandbox you from your own command.
 - **The agent** (the LLM / coding agent) **cannot author or change** those commands, nor the file the
-  metric is read from. They're task-owned and **protected** — the surface gate is *reject-not-strip*
-  (a patch touching anything outside `edit_surface`, or a protected/escape path like `..`/absolute, is
-  rejected wholesale), and the eval entrypoint + metric source are auto-protected. So the agent's only
-  influence on execution is the **code it writes inside `edit_surface`**, which runs under the sandbox
-  tier — it can't issue an arbitrary host command.
+  metric is read from. The metric-source file (a `file_json`/`file_regex` path or an onboarding
+  adapter) is auto-protected; the scorer **entrypoint** is protected only when you list it in `protect`
+  (`cmd` is a contract for *how it's scored*, separate from the edit-scope). The surface gate is
+  *reject-not-strip* (a patch touching anything outside `edit_surface`, or a protected/escape path like
+  `..`/absolute, is rejected wholesale). So the agent's only influence on execution is the **code it
+  writes inside `edit_surface`**, which runs under the sandbox tier — it can't issue an arbitrary host
+  command.
 
 **Isolation tier** is chosen by `trust_mode`, not your environment (see
 [Trust & the sandbox](concepts.md#trust-the-sandbox)):

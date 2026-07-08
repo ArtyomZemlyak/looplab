@@ -26,7 +26,7 @@
 <div class="head">
   <div class="eyebrow">LoopLab · full engine process · code default</div>
   <h1>The whole loop — boxes &amp; arrows, every nuance</h1>
-  <p class="lede">Read the top row left→right: one node is proposed → novelty-gated <em>(opt-in)</em> → built → run → scored &amp; trust-checked → refined, then loops. Under each stage sit its detail boxes; the hypothesis board, cross-run memory and the event spine hang below. Every number is a built-in default.</p>
+  <p class="lede">Read the top row left→right: one node is proposed → novelty-gated <em>(LLM by default)</em> → built → run → scored &amp; trust-checked → refined, then loops. Under each stage sit its detail boxes; the hypothesis board, cross-run memory and the event spine hang below. Every number is a built-in default.</p>
   <div class="legend">
     <span class="lg"><span class="sw" style="background:var(--r)"></span>Researcher</span>
     <span class="lg"><span class="sw" style="background:var(--d)"></span>Developer</span>
@@ -59,7 +59,7 @@ box("boss",1740,44,360,58,"Boss / Assistant · UI","⌘",C.s,["steer: inject · 
 /* ============ MAIN LOOP row (y=150) ============ */
 const LY=150,LH=76;
 box("propose",40,LY,330,LH,"PROPOSE","R",C.r,["draft idea (op+params) + 1-line hypothesis","prompt = brief + cues + idea-space guidance"]);
-box("novelty",410,LY,210,LH,"NOVELTY GATE","off",C.r,["reject a near-duplicate idea (OFF; engaged under explore stance)","one informed re-propose"]);
+box("novelty",410,LY,210,LH,"NOVELTY GATE","llm",C.r,["LLM adjudicates novelty (default novelty_mode=llm): reads the real experiments, forces one informed re-propose","the algo cosine/L2 gate below is opt-in (novelty_mode=algo / explore stance)"]);
 box("implement",660,LY,300,LH,"IMPLEMENT","D",C.d,["write/edit code · minimal SEARCH/REPLACE","every edit auto-compiled"]);
 box("evaluate",1000,LY,320,LH,"EVALUATE","□",C.ev,["run isolated across seeds","repair a mechanical crash in place"]);
 box("score",1360,LY,360,LH,"SCORE · TRUST","R/✓",C.trust,["metric in → holdout re-rank","then the rigor layer (below)"]);

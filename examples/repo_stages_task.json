@@ -1,0 +1,25 @@
+{
+  "id": "repo_stages_example",
+  "goal": "demonstrate a declared train→score pipeline with %params% tuning and per-source data permissions",
+  "direction": "max",
+  "repo": "examples/repo_example",
+  "protect": ["ttrain.py"],
+  "params": {"x": [0, 6]},
+  "dataset": {
+    "raw": {
+      "path": "examples/repo_example",
+      "mount": true,
+      "edit": false,
+      "copy_modify": true,
+      "preprocess": true,
+      "extend": true
+    }
+  },
+  "cmd": {
+    "stages": [
+      {"name": "train", "command": ["python", "ttrain.py", "%params%"], "timeout": 120, "check": true},
+      {"name": "score", "command": ["python", "ttrain.py"], "timeout": 60}
+    ],
+    "metric": {"reader": "stdout_json", "key": "metric"}
+  }
+}

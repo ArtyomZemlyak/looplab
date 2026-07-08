@@ -13,7 +13,7 @@ Every task shares these:
 
 | Field | Type | Description |
 |---|---|---|
-| `kind` | string | The adapter to use (table below). Defaults to `quadratic` if omitted |
+| `kind` | string | The adapter to use (table below). **Optional** — with the composable schema it's inferred from the fields; a `kind`-less task with no recognizable capability field is rejected (no silent quadratic default). The CLI's `--kind quadratic` offline default is separate. |
 | `id` | string | A short identifier for the task (groups sibling runs) |
 | `goal` | string | A natural-language objective; the agent reads this |
 | `direction` | `min` \| `max` | Whether lower or higher metric is better |
@@ -109,7 +109,9 @@ independent flags. **Default: everything allowed EXCEPT editing the original.**
 
 Every legacy spelling still works — `{"kind":"repo","editable_path":...,"eval":{...,"metric":{"kind":...}},"onboard":...}`
 parses unchanged, so old task files and snapshots keep running (`examples/repo_task.json` is the
-legacy form; `examples/repo_composable_task.json` the composable form).
+legacy form; `examples/repo_composable_task.json` the composable form; and
+`examples/repo_stages_task.json` shows a declared `cmd.stages` train→score pipeline with `%params%`
+tuning and a per-source `dataset` permission object).
 
 ## The nine kinds (internal / legacy view)
 
@@ -304,7 +306,8 @@ success is the **repo's own eval command + metric** — never a metric the agent
 | `references` | Read-only inputs: `[{name, path, mount}]` — `mount: true` copies to `./name`, `false` is context-only |
 | `editables` | Multi-repo workspace: extra editable repos, each mounted at its own `name/` subdir |
 
-Eval and protected files cannot be overwritten by the agent (enforced by construction). Offline or
+The metric-source file and the files you list in `protect` cannot be overwritten by the agent
+(enforced by the write/diff gate); the scorer entrypoint is protected only if you `protect` it. Offline or
 on agent failure, a no-op developer leaves the repo unmodified.
 
 > **Have a test/eval but no training script?** Set `cmd` to the scorer (`["python","test.py"]`) and
