@@ -81,7 +81,7 @@ agent writes the file behind it.
 **Truly no repo — just data + a goal?** Genesis can instead pick a **from-scratch generative kind**
 (`code_regression` / `mlebench_real`), where the Developer writes the *entire* solution each iteration
 and you bring only the data + metric — cleaner than a `repo` task with an empty surface. See
-[I have only a goal + data](#i-have-only-a-goal--data--generate-everything).
+[I have only a goal + data](#i-have-only-a-goal-data-generate-everything).
 
 The one thing to pin down either way is the **metric**: if you can't yet say how it's scored, Genesis
 sets `onboard: true` (the agent proposes a metric adapter, you ratify it) or bakes the convention
@@ -106,7 +106,7 @@ these explicitly and it handles the rest:
   [Pointing at your data](#pointing-at-your-data).
 - **A non-stdout metric** — if the metric isn't printed as JSON on stdout, say where it ends up (a
   file, TensorBoard/MLflow); Genesis switches to a `file_json`/`file_regex` reader or to
-  [onboarding](#i-can-run-it-but-dont-know-how-its-scored--onboarding).
+  [onboarding](#i-can-run-it-but-dont-know-how-its-scored-onboarding).
 - **No scripts / args-or-config-driven / hyperparameter-only** — just describe it; Genesis now knows
   these patterns (it'll have the agent create a missing script, drive it via a config the agent edits,
   or set up `cli_overrides` for a pure tuning run).
@@ -117,11 +117,11 @@ these explicitly and it handles the rest:
 
 | Your situation | Mode | Section |
 |---|---|---|
-| Only a goal + data, no code at all | from-scratch generative kind | [↓](#i-have-only-a-goal--data--generate-everything) |
-| A repo with working code **and** a way to score it | `repo` edit mode | [↓](#i-have-a-repo-with-code-and-an-eval--edit-mode) |
-| A **test/eval but no training script** | `repo` edit mode (agent writes `train.py`) | [↓](#i-have-a-test-but-no-train--the-agent-writes-it) |
-| Can run it, but the score isn't exposed | `repo` **onboarding** | [↓](#i-can-run-it-but-dont-know-how-its-scored--onboarding) |
-| Only want to tune hyperparameters, no code edits | `repo` **framework** mode | [↓](#i-only-want-to-tune-knobs-no-code-edits--framework-mode) |
+| Only a goal + data, no code at all | from-scratch generative kind | [↓](#i-have-only-a-goal-data-generate-everything) |
+| A repo with working code **and** a way to score it | `repo` edit mode | [↓](#i-have-a-repo-with-code-and-an-eval-edit-mode) |
+| A **test/eval but no training script** | `repo` edit mode (agent writes `train.py`) | [↓](#i-have-a-test-but-no-train-the-agent-writes-it) |
+| Can run it, but the score isn't exposed | `repo` **onboarding** | [↓](#i-can-run-it-but-dont-know-how-its-scored-onboarding) |
+| Only want to tune hyperparameters, no code edits | `repo` **framework** mode | [↓](#i-only-want-to-tune-knobs-no-code-edits-framework-mode) |
 
 ### I have only a goal + data → generate everything
 
@@ -201,7 +201,7 @@ its stderr is fed back to the agent to repair. Notes:
   first" step (or have a single script do both and point `command` at it).
 - Keep `test.py` in `protect`: it's the scorer, so the agent improves *training*, not the metric.
 - If `test.py` doesn't print the metric, read it from a file (`"metric": {"kind": "file_json",
-  "path": "result.json", "key": "metric"}`) or use [onboarding](#i-can-run-it-but-dont-know-how-its-scored--onboarding).
+  "path": "result.json", "key": "metric"}`) or use [onboarding](#i-can-run-it-but-dont-know-how-its-scored-onboarding).
 
 *Genesis:* tell it *"there's a `test.py` that scores but no trainer — write the training and run it
 before the test"*; it sets `setup`/`command` and puts `train.py` in the surface.
@@ -430,7 +430,7 @@ node fails and its stderr is fed back to the agent's repair.
   tier — it can't issue an arbitrary host command.
 
 **Isolation tier** is chosen by `trust_mode`, not your environment (see
-[Trust & the sandbox](concepts.md#trust--the-sandbox)):
+[Trust & the sandbox](concepts.md#trust-the-sandbox)):
 
 | `trust_mode` | What runs the command | Boundary |
 |---|---|---|

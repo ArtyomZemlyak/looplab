@@ -242,7 +242,7 @@ default grants resource/search-shape knobs to the agents and keeps infra (`llm_*
 | `eval_trust_mode` | `LOOPLAB_EVAL_TRUST_MODE` | `ratify_freeze` | Trust policy for an agent-authored eval spec (onboarding): `ratify_freeze` / `autonomous` / `ratify_freeze_drift` |
 | `require_approval` | `LOOPLAB_REQUIRE_APPROVAL` | `false` | HITL: pause for `approve` before finishing |
 
-See [Concepts → Trust & sandbox](concepts.md#trust--the-sandbox) for what each detector does.
+See [Concepts → Trust & sandbox](concepts.md#trust-the-sandbox) for what each detector does.
 
 ## Knowledge, research & memory
 

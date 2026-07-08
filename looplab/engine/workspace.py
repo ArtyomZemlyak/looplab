@@ -56,8 +56,14 @@ class WorkspaceSeeder:
         # NTFS is case-insensitive, so a case-variant name (Ttrain.PY) would otherwise dodge the
         # freeze and overwrite the real metric/grader/eval file on Windows.
         import os as _os
-        protected = {_os.path.normcase(n) for n in
-                     ("solution.py", *self._e._assets, *self._e._repo_spec.get("protected_names", []))}
+        _prot_names = ("solution.py", *self._e._assets, *self._e._repo_spec.get("protected_names", []))
+        protected = {_os.path.normcase(n) for n in _prot_names}
+        # A `dir/**` protect entry guards the whole TREE under `dir` (a read-only mounted data source);
+        # honor that prefix here too so this defense-in-depth layer matches SurfacePolicy (exact mode).
+        _prot_prefixes = tuple(_os.path.normcase(n[:-2]) for n in _prot_names if n.endswith("/**"))
+        def _is_prot(rel: str) -> bool:
+            r = _os.path.normcase(rel)
+            return r in protected or r.startswith(_prot_prefixes) if _prot_prefixes else r in protected
         wd = Path(workdir).resolve()
         wd.mkdir(parents=True, exist_ok=True)
         def _protected_after_resolve(target) -> bool:
@@ -68,9 +74,9 @@ class WorkspaceSeeder:
                 rel = target.relative_to(wd).as_posix()
             except ValueError:
                 return False
-            return _os.path.normcase(rel) in protected
+            return _is_prot(rel)
         for name, content in files.items():
-            if _os.path.normcase(str(name).replace("\\", "/")) in protected:
+            if _is_prot(str(name).replace("\\", "/")):
                 continue
             target = (wd / name).resolve()
             if wd not in target.parents:        # defense-in-depth: never escape workdir

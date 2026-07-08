@@ -62,11 +62,23 @@ class DataSpec(BaseModel):
 
 class EvalSpec(BaseModel):
     """The operator's trusted evaluation (the agent does not author this)."""
-    command: list[str]                       # argv, no shell; carries env activation
+    command: list[str] = Field(default_factory=list)   # argv, no shell; carries env activation
+    # Operator-declared ordered pipeline (data_prep → train → …); when set these ARE the canonical
+    # stages the engine runs (the Developer implements the scripts, not the structure). Each stage is
+    # {name, command:[argv], timeout?, check?}. The LAST stage's stdout carries the metric. When empty,
+    # the single `command` runs (and the Developer MAY declare PRECEDING stages before it). Exactly one
+    # of `command` / `stages` must be non-empty.
+    stages: list[dict] = Field(default_factory=list)
     cwd: str = "."                           # relative to the node eval workdir
     metric: dict = Field(default_factory=lambda: {"kind": "stdout_json", "key": "metric"})
     params_style: str = "none"               # none | cli_overrides
     timeout: float = 600.0
+
+    @model_validator(mode="after")
+    def _command_or_stages(self):
+        if not self.command and not self.stages:
+            raise ValueError("eval/cmd needs a `command` (argv) OR `stages` (an ordered pipeline).")
+        return self
     # Optional setup command run in the workdir BEFORE the eval each time (e.g.
     # ["pip", "install", "-r", "requirements.txt"]). This is how an e2e Developer's
     # dependency changes take effect reproducibly: the agent edits requirements (in the
@@ -200,7 +212,7 @@ class RepoTask(BaseModel):
     editables: list[EditableSpec] = Field(default_factory=list)
     references: list[ReferenceSpec] = Field(default_factory=list)
     # name -> data input. A value may be a bare abs-path string (all-default permissions) or a
-    # DataSpec {path, mount, edit, copy, preprocess, extend}. Mounted read-only at ./<name> unless
+    # DataSpec {path, mount, edit, copy_modify, preprocess, extend}. Mounted read-only at ./<name> unless
     # its spec says otherwise. See DataSpec for the per-source permission semantics.
     data: dict[str, DataSpec] = Field(default_factory=dict)
 
@@ -419,6 +431,12 @@ class RepoTask(BaseModel):
         for ed in mounts:
             pre = "" if ed["name"] in (".", "") else ed["name"].rstrip("/") + "/"
             surface += [pre + g for g in ed["surface"]]
+        # An `edit:true` data source must be EDITABLE regardless of the repo's edit_surface, so add its
+        # tree to the surface (otherwise a narrow surface like ["src/**"] would refuse writes to it even
+        # though the operator granted edit). Non-edit sources are protected instead (see _protected_names).
+        for name, spec in self.data.items():
+            if spec.edit:
+                surface.append(name.rstrip("/") + "/**")
         return {
             "editables": mounts,                         # Phase 4: every editable repo + mount
             "edit_surface": surface,                     # namespaced union over all repos

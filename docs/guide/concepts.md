@@ -117,15 +117,16 @@ The win comes from rich operators, not exotic search. The Researcher/Developer a
 ## Multi-stage eval pipeline
 
 For a repo task the eval can be a **declared pipeline of named stages** instead of one opaque command.
-The Developer writes `looplab_stages.json` in the workdir (a task may recommend a default via its eval
-spec's `stages`):
+The Developer declares the **preceding** stages with its `declare_stages` tool (or the operator sets
+them on the `cmd` via `eval.stages`); the operator's `cmd` is appended as the final, protected `score`
+stage (the trust boundary — the agent adds work before scoring but never rewrites it):
 
 ```json
 {"stages": [
   {"name": "data_prep", "command": ["python", "prep.py"]},
-  {"name": "train",     "command": ["python", "train.py"], "timeout": 7200, "check": true},
-  {"name": "eval",      "command": ["python", "test.py"]}
+  {"name": "train",     "command": ["python", "train.py"], "timeout": 7200, "check": true}
 ]}
+// + the operator's cmd (e.g. ["python", "test.py"]) runs last as the protected `score` stage
 ```
 
 Stages run in order in the **same workdir** so artifacts persist (train writes a checkpoint → eval reads
@@ -207,7 +208,7 @@ untrusted tier.
   `unified_agent=false` and `agent_drives_actions=false` for the legacy split-role behavior.
 
 What an agent may change at runtime is governed by `agent_control` (a per-setting allow-list of
-roles) — see [Configuration → Strategist & meta-control](configuration.md#strategist--meta-control).
+roles) — see [Configuration → Strategist & meta-control](configuration.md#strategist-meta-control).
 
 ## Cross-run memory
 

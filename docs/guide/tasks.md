@@ -278,23 +278,23 @@ success is the **repo's own eval command + metric** — never a metric the agent
 | `edit_surface` | Globs the agent may edit **or create** (reject-not-strip) |
 | `protect` | Files the agent may **never** touch (e.g. the eval entrypoint) |
 | `eval.command` | The command run to evaluate a candidate (**argv list, no shell** — no `&&`) |
-| `eval.setup` | Optional command run **before** each eval (e.g. install deps, **or train** — see below) |
-| `eval.metric.kind` | How to read the metric: `stdout_json` / `stdout_regex` / `file_json` / `file_regex` / `adapter` |
+| `eval.setup` | Optional command run **before** each eval to install **dependencies** (e.g. `pip install -r requirements.txt`). **Not for training** — training is a stage the agent declares (see below). |
+| `eval.metric.reader` | How to read the metric: `stdout_json` / `stdout_regex` / `file_json` / `file_regex` / `auto`. (Legacy `eval.metric.kind` still works.) |
 | `eval.metric.key` | The JSON key / regex / file path to read |
-| `eval.timeout` | Per-eval timeout (seconds) |
-| `data` | `name → path` map; each is copied into the eval workdir as `./name`. `~`/`$VARS` expand |
+| `eval.timeout` | Per-eval timeout (seconds) — set it generously for training (often 7200–14400) |
+| `data` / `dataset` | `name → path` map, **read-only symlink-mounted** at `./name` by default; a value may be a [per-source permission object](#per-source-data-permissions). `~`/`$VARS` expand |
 | `references` | Read-only inputs: `[{name, path, mount}]` — `mount: true` copies to `./name`, `false` is context-only |
 | `editables` | Multi-repo workspace: extra editable repos, each mounted at its own `name/` subdir |
 
 Eval and protected files cannot be overwritten by the agent (enforced by construction). Offline or
 on agent failure, a no-op developer leaves the repo unmodified.
 
-> **Have a test/eval but no training script?** The agent can write `train.py` for you — put it in
-> `edit_surface` and run it via `eval.setup` (which runs before the scorer each iteration), e.g.
-> `"setup": ["python","train.py"], "command": ["python","test.py"]`, while keeping `test.py` in
-> `protect`. See **[Generating train & test code](generating-code.md)** for this and every other
-> "let the agent write the code" case, including pointing at your data — and the **Genesis** flow that
-> authors the whole spec from a plain-text goal.
+> **Have a test/eval but no training script?** Set `cmd` to the scorer (`["python","test.py"]`) and
+> `protect` it, then let the agent declare a `train` **stage** (its `declare_stages` tool) that runs
+> before the scorer — the engine trains, then your protected `cmd` scores the freshly-trained model. Do
+> **not** run training via `eval.setup` (that's for dependency installs and reruns every eval). See
+> **[Generating train & test code](generating-code.md)** for this and every other "let the agent write
+> the code" case — and the **Genesis** flow that authors the whole spec from a plain-text goal.
 
 ### Framework mode (tune with no code edits)
 

@@ -185,6 +185,25 @@ def test_build_command_no_double_inject_with_token_and_params_style():
     assert cmd == ["python", "t.py", "--lr", "0.001"]      # only the token form, not also lr=0.001
 
 
+def test_operator_cmd_stages_survive_validation(tmp_path):
+    # review fix (HIGH): EvalSpec had no `stages` field, so an operator-declared cmd.stages was silently
+    # dropped and the "cmd declares stages → canonical" branch was dead. They must round-trip now.
+    repo = tmp_path / "r"; repo.mkdir()
+    t = validate_task({"goal": "g", "direction": "max", "repo": str(repo),
+                       "cmd": {"stages": [{"name": "train", "command": ["python", "train.py"], "timeout": 9000},
+                                          {"name": "score", "command": ["python", "test.py"]}],
+                               "metric": {"reader": "stdout_json", "key": "r"}}})
+    es = t.eval_spec()
+    assert [s["name"] for s in es["stages"]] == ["train", "score"]   # not stripped
+    assert es["command"] == []                                       # command optional when stages given
+
+
+def test_eval_needs_command_or_stages():
+    from looplab.adapters.repo_task import EvalSpec
+    with pytest.raises(ValueError, match="command.*OR.*stages|stages"):
+        EvalSpec()                                                   # neither → rejected
+
+
 def test_per_source_data_permissions(tmp_path):
     repo = tmp_path / "r"; repo.mkdir()
     src = tmp_path / "d"; src.mkdir()
