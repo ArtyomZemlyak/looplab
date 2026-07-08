@@ -14,11 +14,12 @@ the equivalent task file.
 > `dataset`, `cmd`, `kaggle`, `benchmark`) and the engine infers the rest (see [Tasks → the composable schema](tasks.md#the-composable-schema-recommended)). The legacy `kind`/`editable_path`/`eval`/`onboard`/`metric.kind`
 > spellings below all still work (they're accepted as aliases), but the composable names are preferred.
 > Three things worth knowing for a **training** repo:
-> - **`cmd` is the SCORING step, not the trainer.** Training is a separate stage the agent declares at
->   run time with its `declare_stages` tool; the engine runs the agent's `train` stage first, then your
->   `cmd` scores the freshly-trained model. Do **not** put training in `cmd.setup` (that's for dependency
->   installs). If your repo has an existing scorer (`test.py`), pass it as `cmd` and `protect` it; if the
->   scorer must be built, point `cmd` at a file the agent will create and don't protect it.
+> - **`cmd` is the SCORING step, not the trainer.** The Developer declares training (and any prep) as
+>   separate stages in a **dedicated, mandatory STAGES phase** it runs *first* (before plan + implement);
+>   the engine runs those stages, then appends your `cmd` as the final protected `score` stage over the
+>   freshly-trained model. Do **not** put training in `cmd.setup` (that's for dependency installs). If
+>   your repo has an existing scorer (`test.py`), pass it as `cmd` and `protect` it; if the scorer must be
+>   built, point `cmd` at a file the agent will create and don't protect it.
 > - **Give a training `cmd.timeout` generously** (often `7200`–`14400`s) — the 600s default SIGKILLs a
 >   long train into an undertrained checkpoint.
 > - **`%params%`** in a command expands to the node's tuned hyperparameters (`--key value`); **per-source
@@ -178,9 +179,10 @@ the fields in your README/entry script.
 ### I have a test but no train → the agent writes it
 
 Common case: you have a `test.py`/`eval.py` that scores a model, but **no training script**. `cmd` is
-the SCORING step, not the trainer — **training is a separate stage the agent declares at run time**
-(its `declare_stages` tool), which the engine runs BEFORE your `cmd`. You do **not** put training in
-`cmd.setup` (that's for dependency installs). Just set `cmd` to your scorer and `protect` it:
+the SCORING step, not the trainer — **the Developer declares training as a stage in its dedicated,
+mandatory STAGES phase** (the first of its three phases: **stages → plan → implement**), which the
+engine runs BEFORE your `cmd`. You do **not** put training in `cmd.setup` (that's for dependency
+installs). Just set `cmd` to your scorer and `protect` it:
 
 ```jsonc
 {
@@ -196,10 +198,12 @@ the SCORING step, not the trainer — **training is a separate stage the agent d
 }
 ```
 
-Each iteration the agent writes `train.py`, then calls `declare_stages` to declare a `train` stage; the
-engine runs `train` → appends your protected `cmd` as the final `score` stage → reads the metric from
-its stdout. A fixed scoring bug re-runs **only** `score` (the trained checkpoint is reused). If `train`
-crashes, its stderr is fed back to the agent to repair. Notes:
+Each iteration the Developer's STAGES phase declares a `train` stage (baking this node's
+hyperparameters into it), then its implement phase writes the `train.py` that stage runs; the engine
+runs `train` → appends your protected `cmd` as the final `score` stage → reads the metric from its
+stdout. A fixed scoring bug re-runs **only** `score` (the trained checkpoint is reused). If `train`
+crashes, its stderr is fed back to the agent to repair (a repair is one focused session — no stages or
+plan phase). Notes:
 
 - Give `cmd.timeout` room for the whole schedule (often `7200`–`14400`s) — the 600s default SIGKILLs a
   long train into an undertrained checkpoint.

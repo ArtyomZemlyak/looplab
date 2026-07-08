@@ -56,14 +56,18 @@ which capability fields are present (`looplab/adapters/tasks.py::normalize_task`
 ### `cmd` is a contract; edit-scope is separate
 
 **`cmd` is the run+score CONTRACT** — the command that runs and the reader that reads its metric. It is
-the *scoring* step, not the trainer: **training is a separate stage the agent declares** at run time (its
-`declare_stages` tool), which the engine runs BEFORE `cmd`. If `cmd` is a single command the Developer may
-only declare **preceding** stages (data-prep, train) and the operator's `cmd` is appended as the protected
-final `score` stage; if `cmd` itself declares `stages`, those are canonical. Put `%params%` in any command
-to inject the node's hyperparameters as `--key value`. Stage lists are validated by ONE shared rule set
-(`runtime/command_eval.py::validate_stages`) at authoring (`declare_stages`), submit (`cmd.stages`) and
-consume time (the engine re-validates even a hand-written `looplab_stages.json`; `score` is reserved in a
-Developer manifest, and an invalid manifest falls back to the single command instead of half-running).
+the *scoring* step, not the trainer: **the Developer declares training (and any prep) as separate stages
+in a dedicated, mandatory STAGES phase** — the first of its three phases (**stages → plan → implement**),
+run before it writes any code — which the engine runs BEFORE `cmd`. The cmd-context rule: if `cmd` is
+present it is **immutable**, so the Developer declares only the **preceding** stages (data-prep, train)
+and the operator's `cmd` is appended as the protected final `score` stage; if `cmd` is absent the STAGES
+phase declares the **full** pipeline including a final scoring stage; if `cmd` itself declares `stages`,
+those are canonical. Separate **prep / train / test** stages are recommended (a fresh model every node).
+Put `%params%` in any command to inject the node's hyperparameters as `--key value`. Stage lists are
+validated by ONE shared rule set (`runtime/command_eval.py::validate_stages`) at authoring (the STAGES
+phase's `declare_stages` emit), submit (`cmd.stages`) and consume time (the engine re-validates even a
+hand-written `looplab_stages.json`; `score` is reserved in a Developer manifest, and an invalid manifest
+falls back to the single command instead of half-running).
 
 **What the agent may EDIT is a separate, independent decision** — `edit_surface` (globs the agent may
 edit; default = the whole repo) minus `protect` (exceptions). The engine does **not** auto-protect the
@@ -311,9 +315,10 @@ The metric-source file and the files you list in `protect` cannot be overwritten
 on agent failure, a no-op developer leaves the repo unmodified.
 
 > **Have a test/eval but no training script?** Set `cmd` to the scorer (`["python","test.py"]`) and
-> `protect` it, then let the agent declare a `train` **stage** (its `declare_stages` tool) that runs
-> before the scorer — the engine trains, then your protected `cmd` scores the freshly-trained model. Do
-> **not** run training via `eval.setup` (that's for dependency installs and reruns every eval). See
+> `protect` it — the Developer declares a `train` **stage** in its dedicated, mandatory STAGES phase (the
+> first of its three phases: stages → plan → implement) that runs before the scorer, then the engine
+> trains and your protected `cmd` scores the freshly-trained model. Do **not** run training via
+> `eval.setup` (that's for dependency installs and reruns every eval). See
 > **[Generating train & test code](generating-code.md)** for this and every other "let the agent write
 > the code" case — and the **Genesis** flow that authors the whole spec from a plain-text goal.
 

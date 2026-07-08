@@ -60,7 +60,7 @@ box("boss",1740,44,360,58,"Boss / Assistant · UI","⌘",C.s,["steer: inject · 
 const LY=150,LH=76;
 box("propose",40,LY,330,LH,"PROPOSE","R",C.r,["draft idea (op+params) + 1-line hypothesis","prompt = brief + cues + idea-space guidance"]);
 box("novelty",410,LY,210,LH,"NOVELTY GATE","llm",C.r,["LLM adjudicates novelty (default novelty_mode=llm): reads the real experiments, forces one informed re-propose","the algo cosine/L2 gate below is opt-in (novelty_mode=algo / explore stance)"]);
-box("implement",660,LY,300,LH,"IMPLEMENT","D",C.d,["write/edit code · minimal SEARCH/REPLACE","every edit auto-compiled"]);
+box("implement",660,LY,300,LH,"DEVELOPER","D",C.d,["stages → plan → implement (fresh repo node)","repair = 1 session · every edit auto-compiled"]);
 box("evaluate",1000,LY,320,LH,"EVALUATE","□",C.ev,["run isolated across seeds","repair a mechanical crash in place"]);
 box("score",1360,LY,360,LH,"SCORE · TRUST","R/✓",C.trust,["metric in → holdout re-rank","then the rigor layer (below)"]);
 box("refine",1760,LY,300,LH,"REFINE","R",C.r,["policy picks next move over the DAG","improve · merge · ablate · debug"]);
@@ -81,16 +81,21 @@ stack(410,210,DY,[
  {id:"n_sem",h:78,t:"Semantic dedup",tag:"0.92",c:C.r,sub:["cosine ≥ 0.92 on rationale+hypothesis","re-propose ‘tried X, failed because Y’"]},
  {id:"n_num",h:78,t:"Numeric dedup",tag:"0.05",c:C.ev,sub:["L2 < 0.05 → deterministic nudge","seed=id×1009+7 · scale=max(|p|,1)×0.1"]},
 ]);
-// IMPLEMENT
+// DEVELOPER — three separately-traced phases on a fresh repo node (stages → plan → implement);
+// a repair skips them for one focused session. Env inspector / auto-validate / best-of-N below
+// are the capabilities those phases use.
 stack(660,300,DY,[
- {id:"i_env",h:82,t:"Env inspector",tag:"D",c:C.d,sub:["ground API in the REAL installed env","pkg_info · py_api · read/grep_installed · gpu_info","read-only PLAN stage · read_file paginates"]},
+ {id:"d_stages",h:78,t:"① Stages phase",tag:"1st",c:C.d,sub:["read-only · MANDATORY · emits declare_stages","…prep → train → before protected score (cmd)","cmd present → declare preceding · absent → full"]},
+ {id:"d_plan",h:66,t:"② Plan phase",tag:"C4",c:C.d,sub:["read-only · propose_plan → atomic steps","2–8 steps · developer_plan_decompose"]},
+ {id:"d_impl",h:66,t:"③ Implement phase",tag:"D",c:C.d,sub:["write the code the stages run · per-step","repair = 1 session (no stages/plan)"]},
+ {id:"i_env",h:82,t:"Env inspector",tag:"D",c:C.d,sub:["ground API in the REAL installed env","pkg_info · py_api · read/grep_installed · gpu_info","read-only in STAGES + PLAN phases · paginates"]},
  {id:"i_val",h:58,t:"Auto-validate",tag:"gate",c:C.d,sub:["compile after every edit → error flies back"]},
  {id:"i_bon",h:78,t:"Best-of-N",tag:"off",c:C.d,sub:["N impls · score∈[−1,3.5] (compile+1/valid+2/metric+.5)","tie: foresight → listwise LLM pick"]},
 ]);
 // EVALUATE
 stack(1000,320,DY,[
  {id:"e_box",h:66,t:"Sandbox tiers",tag:"□",c:C.ev,sub:["trusted_local subprocess | untrusted Docker --network none","data mounts bound :ro unless edit:true"]},
- {id:"e_stg",h:72,t:"Stage pipeline",tag:"□",c:C.ev,sub:["declare_stages / cmd.stages → …prep → train → protected score (cmd)","one shared validator · %params% per stage · stage-scoped re-run"]},
+ {id:"e_stg",h:72,t:"Stage pipeline",tag:"□",c:C.ev,sub:["stages phase / cmd.stages → …prep → train → protected score (cmd)","one shared validator · %params% per stage · stage-scoped re-run"]},
  {id:"e_seed",h:60,t:"Seeds & holdout",tag:"□",c:C.ev,sub:["search seed 0 · n_seeds 3 · holdout 25% reserved (Knuth hash)"]},
  {id:"e_ir",h:82,t:"Inline repair",tag:"□",c:C.ev,sub:["reasons crash/timeout/oom","abandon at 4 identical errors (norm. signature)"]},
  {id:"e_dep",h:72,t:"Auto-install deps",tag:"□",c:C.ev,sub:["allow-list ~55 · ≤6 rounds/node","stop after 2 pip timeouts (no egress)"]},
@@ -170,7 +175,10 @@ edge("refine","t","propose","t",{c:C.sig,label:"↺ next node — until budget",
 // stage → its detail head (down)
 edge("propose","b","f_meta","t",{c:C.mem,thin:1,dash:1,label:"reads"});
 edge("novelty","b","n_sem","t",{c:C.r,thin:1});
-edge("implement","b","i_env","t",{c:C.d,thin:1});
+edge("implement","b","d_stages","t",{c:C.d,thin:1});
+edge("d_stages","b","d_plan","t",{c:C.d,thin:1});   // ordered phases: stages → plan → implement
+edge("d_plan","b","d_impl","t",{c:C.d,thin:1});
+edge("d_impl","b","i_env","t",{c:C.d,thin:1});
 edge("evaluate","b","e_box","t",{c:C.ev,thin:1});
 edge("score","b","t_rh","t",{c:C.trust,thin:1});
 edge("refine","b","r_gt","t",{c:C.r,thin:1});

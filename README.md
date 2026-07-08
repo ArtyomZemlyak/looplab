@@ -11,8 +11,10 @@
 
 LoopLab runs a closed research loop: a **Researcher** proposes ideas, a **Developer** writes the
 code, a sandbox runs it, an evaluator scores it, and the loop refines and **merges** the best
-candidates — repeating until the budget runs out. Every step is appended to an **event log that is
-the single source of truth**, so a run is fully **reproducible and crash-resumable by replay**.
+candidates — repeating until the budget runs out. On a fresh repo node the Developer works in three
+phases — **stages → plan → implement** (declare the eval pipeline, decompose into atomic steps, then
+write the code). Every step is appended to an **event log that is the single source of truth**, so a
+run is fully **reproducible and crash-resumable by replay**.
 
 It runs **fully offline with zero external services** (no API keys, no Docker) on a local task, and
 scales up to driving a live LLM, working inside a real repo, or grading actual Kaggle competitions.
@@ -32,7 +34,7 @@ plane is deterministic, and the Search / Memory / Knowledge stores feed the loop
 - **Offline, or any OpenAI-compatible LLM** — no keys or Docker for local runs; change `base_url` to drive it with Ollama, vLLM, SGLang, or OpenAI. See [LLM & coding agents](docs/guide/llm-and-agents.md).
 - **Describe the task in words** — Genesis (the LLM planner) authors the whole task from a `--goal`, including where your data lives. See [Generating code](docs/guide/generating-code.md).
 - **Nine task adapters** — from a toy objective to your own dataset, an existing repo, or real Kaggle competitions. See [Tasks](docs/guide/tasks.md).
-- **The agent writes and repairs the code** — the Developer emits a full solution; a self-repair operator feeds failing code plus stderr back to fix it. See [Generating code](docs/guide/generating-code.md).
+- **The agent writes and repairs the code** — on a fresh repo node the Developer runs three phases (**stages → plan → implement**): it declares the eval pipeline, decomposes the work into atomic steps, then writes the code; a self-repair operator feeds failing code plus stderr back to fix it in one focused session. See [Generating code](docs/guide/generating-code.md).
 - **Cross-run memory and knowledge** — cases, lessons, causal meta-notes, skills, and a knowledge base accumulate across runs, both injected into prompts and **agentically retrievable**. See [Memory & knowledge](docs/guide/memory.md).
 - **Adaptive search** — MCTS/ASHA policies, a novelty gate, and stagnation-driven broadening of the idea space. See [Concepts](docs/guide/concepts.md).
 - **Trust tiers and sandbox** — a subprocess sandbox by default (no Docker), a `--network none` Docker tier for untrusted code, and reward-hack / leakage gates on scoring. See [Deployment](docs/guide/deployment.md).

@@ -16,7 +16,9 @@ A run is an `Engine` (orchestrator) driving four roles in a cycle:
    `profile=thorough`): duplicate-detection is the agentic Researcher's call — it reads past
    experiments and *decides* — and the semantic/embedding search only **suggests** candidates for the
    LLM to adjudicate.
-3. **Developer** — implements the idea as runnable code (or applies params to an existing repo).
+3. **Developer** — implements the idea as runnable code (or applies params to an existing repo). On
+   a fresh repo node it runs three phases — **stages → plan → implement** (see
+   [below](#the-developers-three-phases-stages-plan-implement)); a repair is one focused session.
 4. **Sandbox** — runs the candidate in isolation with a timeout and output caps.
 5. **Evaluator** — scores it (cross-validation, a held-out grader, or a repo's own eval command);
    then the trust gates + optional multi-seed confirmation decide what may be selected best.
@@ -114,12 +116,36 @@ The win comes from rich operators, not exotic search. The Researcher/Developer a
   (`merge_mode=ensemble`). This is the multi-parent DAG.
 - **sweep** — one node runs a whole grid of trials in a single process.
 
+## The Developer's three phases (stages → plan → implement)
+
+On a fresh (non-repair) implement of a repo node the Developer runs **three separately-traced
+phases**, each its own focused tool-loop so the context stays small and the trace reads cleanly
+(`Developer · stages → plan → implement`):
+
+1. **STAGES** (mandatory, **first**) — a **read-only** phase whose only exit is a `declare_stages`
+   emit. The repo-savvy Developer studies the repo *and* the operator's `cmd`, then declares the
+   ordered eval pipeline (`data_prep → train → …`) that runs **before** the operator's protected
+   `score` step, baking **this node's** hyperparameters into the `train` command. It writes
+   `looplab_stages.json`. It is **always** run — the Developer owns the stages, **not** the
+   planner/Genesis. Good practice: separate stages for data/feature **preparation**, **training**
+   (a fresh model every node — never reuse a checkpoint), and **testing**.
+2. **PLAN** — the read-only atomic-step decomposition (`propose_plan`; **C4**,
+   `developer_plan_decompose`), unchanged.
+3. **IMPLEMENT** — writes the code the stages run, one bounded session per plan step.
+
+A **repair** (an error to fix) stays a single focused session — no stages, no plan.
+
+The **cmd-context rule** governs the stages phase: the operator's `cmd` is passed in as context. If
+it is **present**, it is shown as **immutable** and the final `score` stage is reserved for it — the
+Developer declares only the *preceding* stages. If it is **absent**, the Developer must declare the
+**full** pipeline, including the final scoring stage that prints the metric.
+
 ## Multi-stage eval pipeline
 
-For a repo task the eval can be a **declared pipeline of named stages** instead of one opaque command.
-The Developer declares the **preceding** stages with its `declare_stages` tool (or the operator sets
-them on the `cmd` via `eval.stages`); the operator's `cmd` is appended as the final, protected `score`
-stage (the trust boundary — the agent adds work before scoring but never rewrites it):
+For a repo task the eval is a **declared pipeline of named stages** instead of one opaque command.
+The Developer declares the **preceding** stages in its dedicated STAGES phase above (or the operator
+sets them on the `cmd` via `eval.stages`); the operator's `cmd` is appended as the final, protected
+`score` stage (the trust boundary — the agent adds work before scoring but never rewrites it):
 
 ```json
 {"stages": [
@@ -143,11 +169,11 @@ it). Each stage gets its own span + `<name>.log` and a pass/fail (`stage_finishe
   diverged train can't silently feed eval.
 
 The operator's `cmd` is the **authoritative, non-rewritable scoring stage** and its stdout is where the
-trusted metric reader reads. The agent's `declare_stages` supplies only the stages that run BEFORE it
+trusted metric reader reads. The Developer's STAGES phase supplies only the stages that run BEFORE it
 (`data_prep`, `train`, …); the engine appends `cmd` as the final protected `score` stage. When `cmd`
 itself declares `stages`, those are canonical (the agent implements the scripts, not the structure). With
-no stages at all, the single `cmd` command runs exactly as before. A `%params%` token in any command
-expands to the node's tuned hyperparameters.
+no operator `cmd` at all, the STAGES phase declares the full pipeline including the final scoring stage.
+A `%params%` token in any command expands to the node's tuned hyperparameters.
 
 ## Evaluation rigor
 

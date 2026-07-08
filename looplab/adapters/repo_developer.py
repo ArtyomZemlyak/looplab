@@ -4,6 +4,14 @@ write/edit/delete tool provider whose writes are COLLECTED, not applied), `LLMRe
 (the tool-loop LLM developer that authors/patches the repo's files), `LLMOnboarder` (Phase 3
 eval onboarding) and the `_xlsx_to_markdown` results renderer.
 
+A fresh (non-repair) repo implement runs THREE separately-traced phases — STAGES → PLAN →
+IMPLEMENT (see `LLMRepoDeveloper._run`): a mandatory READ-ONLY stages phase declares the ordered
+eval pipeline (prep → train → … before the operator's protected `score` cmd) via a `declare_stages`
+emit and writes `looplab_stages.json`; the plan phase decomposes the code changes into atomic steps;
+the implement phase writes the code those stages run. A repair is a single focused session (no
+stages/plan). Because stages are owned by this dedicated phase, `declare_stages` is NOT in the
+implement write toolset (`RepoWriteTools`) — the manifest is already written before implement starts.
+
 The task/spec half (`RepoTask`, `ReferenceSpec`/`EditableSpec`/`EvalSpec`, the researchers and
 `NoOpRepoDeveloper`) stays in `repo_task.py`, which re-imports these names at its END for
 back-compat — so `looplab.adapters.repo_task` and the flat `looplab.repo_task` alias keep
@@ -457,7 +465,12 @@ class LLMRepoDeveloper:
     `write_file`, driven by the shared agentic tool loop. Repo editing was originally an
     external-agent-only path (the in-house repo developer is a NoOp); this lets a repo task run on
     just the in-house LLM. The written files become the node's `last_files`, which the orchestrator
-    materializes on top of the seeded tree and evaluates."""
+    materializes on top of the seeded tree and evaluates.
+
+    A fresh implement runs THREE separately-traced phases (see `_run`): STAGES (mandatory, first —
+    a read-only phase that declares the ordered eval pipeline around the operator's protected `score`
+    cmd, writing `looplab_stages.json`), PLAN (read-only atomic-step decomposition), then IMPLEMENT
+    (write the code, one bounded session per step). A REPAIR skips both and runs a single session."""
 
     def __init__(self, client: LLMClient, task, *, parser: str = "tool_call",
                  loop_opts: Optional[dict] = None, plan_decompose: bool = True,
@@ -746,6 +759,14 @@ class LLMRepoDeveloper:
             ev = self.task.eval_spec() or {}
         except Exception:  # noqa: BLE001 — a task without eval_spec (toy/tests) => no cmd, full pipeline
             ev = {}
+        # Onboard mode: `eval` is None until the adapter is ratified, but the onboard COMMAND is the scorer
+        # (the frozen metric adapter reads ITS output). Treat it as the immutable cmd so the stages phase
+        # declares PRECEDING train/prep stages around it — NOT a full pipeline whose own score stage would
+        # fight the onboarder's adapter (that broke the onboarding run: finished=False).
+        if not ev.get("command") and not ev.get("stages"):
+            oc = getattr(self.task, "onboard_command", None)
+            if oc:
+                ev = {**ev, "command": list(oc)}
         has_cmd = bool(ev.get("command") or ev.get("stages"))
         return ev, has_cmd
 

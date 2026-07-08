@@ -109,3 +109,17 @@ def test_stages_phase_cmd_context_and_prompt():
     # NO operator cmd (has_cmd=False) -> the developer must declare the FULL pipeline (score NOT reserved)
     u2 = dev._stages_user(idea, {}, False)
     assert "FULL pipeline" in u2
+
+
+def test_stages_phase_treats_onboard_command_as_the_cmd():
+    """Onboard task: eval is None (adapter not ratified yet) but the onboard COMMAND is the scorer — the
+    stages phase must see it as the immutable cmd (declare PRECEDING stages), NOT ask for a full pipeline
+    whose own score stage would fight the onboarder's frozen adapter (that broke the onboarding run)."""
+    import sys as _sys
+    t = RepoTask(id="onb", goal="g", direction="max", editable_path=str(FIXTURE),
+                 edit_surface=["*.json"], protect=["ttrain.py"],
+                 onboard=True, onboard_command=[_sys.executable, "ttrain.py"], eval=None)
+    from looplab.adapters.repo_task import LLMRepoDeveloper
+    dev = LLMRepoDeveloper(object(), t)
+    ev, has_cmd = dev._cmd_context()
+    assert has_cmd and ev.get("command") == [_sys.executable, "ttrain.py"]
