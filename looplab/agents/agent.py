@@ -306,6 +306,7 @@ def drive_tool_loop(client, tools, messages: list, emit_spec: dict, *,
                 # Valid-but-non-object JSON ("[0]", "\"x\"", "3") would otherwise reach finalize()/
                 # tools.execute() and blow up on .get(); a junk model must never crash the run.
                 args = {}
+            stuck_obs = None      # what StuckDetector sees this turn (dedup hit overrides with the 1st result)
             if name == emit_name:
                 # Bounce a malformed emit BACK to the model with the concrete error instead of silently
                 # accepting a degraded/empty idea (the "fallback (agent parse failed)" no-op nodes that
@@ -349,8 +350,12 @@ def drive_tool_loop(client, tools, messages: list, emit_spec: dict, *,
                     m in _nl for m in ("write", "edit", "apply", "delete", "create", "run", "exec",
                                        "patch", "stage", "commit", "remove", "emit", "propose")))
                 _dk = (name, json.dumps(args, sort_keys=True, default=str)) if _read_only else None
+                # The observation the StuckDetector sees. On a dedup hit it's the FIRST (real) result, not
+                # the stub — so a genuinely-stuck model repeating one call still trips stuck at the SAME
+                # count (the stub is only what we send the model to save tokens; it must not offset B1).
+                stuck_obs = None
                 if _dk is not None and _dk in read_seen:
-                    read_seen[_dk] += 1
+                    stuck_obs = read_seen[_dk]
                     _step(turn=turn_idx, tool=name, arg="(repeat suppressed)")
                     result = (f"(already ran `{name}` with these exact args earlier this turn — result "
                               f"unchanged, not re-sent. Use the earlier output; to learn more read a "
@@ -358,8 +363,6 @@ def drive_tool_loop(client, tools, messages: list, emit_spec: dict, *,
                     if on_tool_result is not None:
                         on_tool_result(name, args, result)
                 else:
-                    if _dk is not None:
-                        read_seen[_dk] = 0
                     # Surface what the agent is about to do BEFORE the (possibly slow) tool runs, so a
                     # live progress view advances turn-by-turn instead of jumping only at the end.
                     _step(turn=turn_idx, tool=name,
@@ -377,13 +380,15 @@ def drive_tool_loop(client, tools, messages: list, emit_spec: dict, *,
                     # Cap once, up front, so the provenance hook receives EXACTLY what the tool message
                     # below will carry (a single expression, not two kept-in-sync copies).
                     result = str(result)[:4000]
+                    if _dk is not None:               # remember the first result for dedup + stuck parity
+                        read_seen[_dk] = result
                     if on_tool_result is not None:      # provenance hook: exceptions propagate
                         on_tool_result(name, args, result)
             result = str(result)[:4000]
             messages.append({"role": "tool", "tool_call_id": tc.get("id", ""),
                              "name": name, "content": result})
             if stuck is not None:       # B1: flag no-progress on the cheapest signal (a repeat)
-                stuck_reason = stuck.push(name, args, result) or stuck_reason
+                stuck_reason = stuck.push(name, args, stuck_obs if stuck_obs is not None else result) or stuck_reason
         # G: soft convergence. A model that keeps issuing DIFFERENT tool calls never trips the
         # StuckDetector (it keys on repeats) and, with max_turns unlimited, investigates until the budget
         # runs out (live GLM node 63: one idea's worth of intent, then ~200 more reads). Nudge it to

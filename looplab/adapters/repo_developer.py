@@ -731,10 +731,97 @@ class LLMRepoDeveloper:
         return [RepoScoutTools(roots=roots, default_root=roots[0], overlay=overlay, deleted=deleted,
                                named_roots=named)]
 
+    def _stages_emit_spec(self) -> dict:
+        from looplab.tools._base import fn_spec
+        return fn_spec("declare_stages",
+                        "Declare the ORDERED pipeline stages for this experiment and finish the stages "
+                        "phase. Each stage is {name, command:[argv...], timeout?, check?}; they run IN "
+                        "ORDER in the same workdir so artifacts (a trained checkpoint, prepared data) "
+                        "persist to later stages. Put `%params%` in a command to inject THIS node's "
+                        "hyperparameters as `--key value`, or bake the values into the argv yourself. "
+                        "Give a long training stage a GENEROUS timeout (seconds).",
+                        {"stages": {"type": "array", "items": {"type": "object", "properties": {
+                            "name": {"type": "string"},
+                            "command": {"type": "array", "items": {"type": "string"}},
+                            "timeout": {"type": "number"}, "check": {"type": "boolean"}},
+                            "required": ["name", "command"]}}},
+                        ["stages"])
+
+    def _cmd_context(self) -> tuple[dict, bool]:
+        """The operator's scoring contract (eval_spec) + whether one exists. The stages phase shows it to
+        the Developer as IMMUTABLE (the engine appends it as the final protected `score` stage); with no
+        cmd the Developer must declare the FULL pipeline including a final scoring stage."""
+        ev = {}
+        try:
+            ev = self.task.eval_spec() or {}
+        except Exception:  # noqa: BLE001 — a task without eval_spec (toy/tests) => no cmd, full pipeline
+            ev = {}
+        has_cmd = bool(ev.get("command") or ev.get("stages"))
+        return ev, has_cmd
+
+    def _stages_user(self, idea: Idea, ev: dict, has_cmd: bool) -> str:
+        import json as _json
+        params = ", ".join(f"{k}={v}" for k, v in (idea.params or {}).items()) or "(bake sensible values)"
+        if has_cmd:
+            cmd_desc = _json.dumps(ev.get("stages") or ev.get("command"), ensure_ascii=False)[:800]
+            metric = _json.dumps(ev.get("metric"), ensure_ascii=False)[:200]
+            contract = (
+                f"The operator's SCORING command is FIXED (you may NOT change it): `{cmd_desc}`; it reads "
+                f"the metric via {metric}. The engine appends it as the final, protected `score` stage. "
+                "Your job: declare the ordered stages that run BEFORE it (do NOT include a `score` stage — "
+                "it's reserved), producing whatever that scorer reads (a trained checkpoint, prepared data).")
+        else:
+            contract = (
+                "There is NO operator scoring command — declare the FULL pipeline, INCLUDING a final stage "
+                "that runs the evaluation and PRINTS the metric the task's metric reader parses.")
+        return (
+            f"Experiment concept (the researcher's idea): {idea.rationale}\nHyperparameters for THIS node: "
+            f"{params}.\n\nThis is the STAGES phase (first). {contract}\n\n"
+            "READ the repo to ground the stages in the ACTUAL entry scripts/args (read_file paginates — "
+            "read a file ONCE; grep, find_files, list_dir, pkg_info, py_api). GOOD PRACTICE: separate "
+            "stages for data/feature PREPARATION, TRAINING (fresh model every node — never reuse a "
+            "checkpoint), and TESTING; bake this node's hyperparameters into the `train` command (or use "
+            "`%params%`). Give training a generous timeout. Then call `declare_stages` once. You are NOT "
+            "writing code yet — the plan + implement phases come next.")
+
+    def _declare_stages_phase(self, idea: Idea, write, system: str) -> list:
+        """Stages phase (MANDATORY, FIRST): a READ-ONLY phase where the Developer studies the repo + the
+        operator's cmd and emits `declare_stages` — the ordered pipeline (prep → train → …) that runs
+        before the protected `score` step. Writes `looplab_stages.json`. Returns the clean stage list ([]
+        on failure — the eval then falls back to just the operator cmd)."""
+        from looplab.agents.agent import drive_tool_loop, CompositeTools
+        from looplab.tools.env_inspect import EnvInspectTools
+        from looplab.runtime.command_eval import validate_stages
+        import json as _json
+        ev, has_cmd = self._cmd_context()
+        reserved = ("score",) if has_cmd else ()
+        messages = [{"role": "system", "content": system},
+                    {"role": "user", "content": self._stages_user(idea, ev, has_cmd)}]
+        read_only = CompositeTools([EnvInspectTools()] + self._scout_tools(None))
+
+        def _validate(args):                      # bounce a malformed manifest back to the model
+            _, err = validate_stages((args or {}).get("stages"), reserved=reserved)
+            return err
+
+        def _finalize(args):
+            clean, _ = validate_stages((args or {}).get("stages"), reserved=reserved)
+            if clean:
+                write.files["looplab_stages.json"] = _json.dumps({"stages": clean}, indent=1)
+            return clean or []
+        try:
+            return drive_tool_loop(
+                self.client, read_only, messages, self._stages_emit_spec(),
+                finalize=_finalize, fallback=lambda m: [], validate=_validate,
+                **self._session_opts(max_turns=min(30, self._session_max_turns),
+                                     time_budget=min(300.0, self._session_time_budget_s))) or []
+        except Exception:  # noqa: BLE001 — a failed stages phase degrades to the operator cmd alone
+            return []
+
     def _run(self, idea: Idea, error: Optional[str] = None,
              base: Optional[dict] = None, base_note: str = "",
              base_deleted: Optional[list] = None) -> str:
         from looplab.agents.agent import drive_tool_loop
+        from looplab.core import tracing
         write = RepoWriteTools(self._surface, self._protected, self._prefixes, editables=self._editables)
         if base is not None or base_deleted is not None:
             # An EXPLICIT base is the node's OWN solution — the parent's (improve/refine via
@@ -783,19 +870,35 @@ class LLMRepoDeveloper:
         from looplab.agents.agent import CompositeTools
         from looplab.tools.env_inspect import EnvInspectTools
         tools = CompositeTools([write, EnvInspectTools()] + self._scout_tools(write))
-        # C4 plan decomposition: a big NON-repair task is split into ATOMIC per-step sessions (each
-        # fresh + bounded, building on the files accumulated so far) so a non-converging model can't
-        # run away (the 10k-call / multi-hour spin). A repair stays ONE focused session (already
-        # narrow), and a plan shorter than min_steps falls back to the single bounded session —
-        # equivalent to the old single pass for a trivial change.
-        # getattr defaults: a bare / __new__-constructed developer (unit tests, legacy) skips planning
-        # and runs the single bounded session; a real one (built via __init__) plans.
-        steps = (self._propose_plan(system, idea)
-                 if (getattr(self, "_plan_decompose", False) and error is None) else [])
+        # A fresh implement (not a repair) on a real repo runs THREE explicit, separately-traced phases —
+        # each its own focused tool-loop + emit so the context stays small and the trace reads cleanly
+        # (Developer · stages → plan → implement):
+        #   1. STAGES (mandatory): declare the ordered eval pipeline (prep → train → …) around the
+        #      operator's protected `score` cmd — hardcoding this node's train params / adding a data_prep
+        #      stage where useful. The Developer knows the repo; the planner (Genesis) may not.
+        #   2. PLAN: decompose the code changes into ATOMIC steps (C4 — bounds a non-converging model).
+        #   3. IMPLEMENT: write the code, one bounded session per plan step (each step its own trace block).
+        # A REPAIR (error set) OR a bare / __new__-constructed dev (unit tests, no `_editables`) skips
+        # straight to a single bounded session — repair is already narrow; the toy dev has no repo to stage.
+        is_fresh_repo = error is None and getattr(self, "_editables", None)
         try:
-            if len(steps) >= getattr(self, "_plan_min_steps", 2):
-                for i, step in enumerate(steps, 1):
-                    self._run_step(idea, step, i, len(steps), write, system)  # a step's error can't abort the plan
+            if is_fresh_repo:
+                # STAGES + PLAN are the Developer's own sub-phases (each its own trace band, via the phase
+                # stamped on their generations). IMPLEMENT runs under the orchestrator's "implement" span
+                # (so its generations band there, and non-repo developers keep that band unchanged).
+                with tracing.operation("stages"):
+                    self._declare_stages_phase(idea, write, system)
+                steps = []
+                if getattr(self, "_plan_decompose", False):
+                    with tracing.operation("plan"):
+                        steps = self._propose_plan(system, idea)
+                if len(steps) >= getattr(self, "_plan_min_steps", 2):
+                    for i, step in enumerate(steps, 1):
+                        self._run_step(idea, step, i, len(steps), write, system)  # a step error can't abort the plan
+                else:
+                    drive_tool_loop(self.client, tools, messages, self._emit_spec(),
+                                    finalize=lambda a: (a or {}).get("summary", ""),
+                                    fallback=lambda m: "", **self._session_opts())
             else:
                 drive_tool_loop(self.client, tools, messages, self._emit_spec(),
                                 finalize=lambda a: (a or {}).get("summary", ""),

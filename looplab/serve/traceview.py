@@ -218,22 +218,22 @@ def build_conversation(state: RunState, spans: list[dict], node_id) -> dict:
             root_sid = root["span_id"]
 
             def _stage_of(s):
+                # Prefer the phase stamped on the span (tracing._phase_ctx): the sub-loop it ran in
+                # (propose / stages / plan / implement / repair). This bands a generation by its REAL
+                # phase even when the phase's operation span is NESTED (the Developer's `stages`/`plan`
+                # spans sit under the orchestrator's `implement` span) or not yet flushed to disk (LIVE —
+                # the op span is written only on close, so the walk below can't find it and would fall back
+                # to the create_node root, showing Developer calls under the Researcher until the node
+                # ends). Fall back to the nearest-ancestor operation for spans written before phase-stamping.
+                ph = (s.get("attributes") or {}).get("phase")
+                if ph:
+                    return {"span_id": f"phase:{ph}", "name": ph, "start": s.get("start", 0.0)}
                 cur, top_op = by_sid.get(s.get("parent_id")), None
                 while cur is not None and cur.get("span_id") != root_sid:
                     if cur.get("kind") == "operation":
                         top_op = cur
                     cur = by_sid.get(cur.get("parent_id"))
-                if top_op is not None:
-                    return top_op
-                # LIVE: the enclosing operation span (e.g. implement) isn't flushed to disk yet — it's
-                # written on close — so the walk can't find it and the child would fall back to the
-                # create_node root (Developer calls shown under the Researcher until the node finishes).
-                # The child carries its `phase` (tracing._phase_ctx); synthesize a stable stage from it so
-                # it bands under the right phase immediately. Post-hoc the real op span exists and wins.
-                ph = (s.get("attributes") or {}).get("phase")
-                if ph:
-                    return {"span_id": f"phase:{ph}", "name": ph, "start": s.get("start", 0.0)}
-                return root
+                return top_op or root
 
             groups: dict = {}
             for s in ss_sorted:

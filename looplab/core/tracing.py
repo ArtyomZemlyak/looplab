@@ -274,6 +274,21 @@ def tool(name: str, arguments=None):
         yield ObservationHandle(h)
 
 
+@contextmanager
+def operation(name: str, **attributes):
+    """Open a first-class OPERATION span (a phase / sub-loop — propose / stages / plan / implement /
+    repair) as a child of the active span, on the CURRENT run's tracer, so a role (e.g. the Developer)
+    can delimit its own phases in the trace WITHOUT holding a Tracer reference. Inherits node_id and
+    stamps the phase onto child generations/tools like any operation span. No-op (still runs the body,
+    yields None) when nothing is being traced — unit tests / the toy backend keep working."""
+    tr = _current_tracer.get()
+    if tr is None:
+        yield None
+        return
+    with tr.span(name, kind="operation", **attributes):
+        yield
+
+
 class JsonlSpanExporter:
     """Default exporter: one JSON span per line in `spans.jsonl` (files-as-truth, offline)."""
 

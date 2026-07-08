@@ -250,3 +250,23 @@ def test_live_developer_spans_band_under_implement_not_researcher(tmp_path):
     assert "implement" in labels and "propose" in labels          # two distinct phases, not merged
     impl = next(s for s in conv["stages"] if s["label"] == "implement")
     assert impl["turns"]                                          # the Developer generation lives here
+
+
+def test_conversation_bands_all_phases_in_order():
+    """The per-node conversation reads as ordered role/phase bands (the user's target trace): Researcher
+    propose, then the Developer's stages -> plan -> implement — grouped by the `phase` stamped on each
+    generation, so nesting (stages/plan sit under the orchestrator's implement span) doesn't merge them."""
+    from types import SimpleNamespace
+    from looplab.serve.traceview import build_conversation
+    T = "t"
+
+    def gen(sid, phase, start):
+        return {"span_id": sid, "parent_id": "X", "trace_id": T, "name": "gen", "kind": "generation",
+                "start": start, "attributes": {"node_id": 0, "phase": phase,
+                                               "input": [{"role": "user", "content": "x"}]}}
+    spans = [{"span_id": "R", "parent_id": None, "trace_id": T, "name": "create_node", "kind": "operation",
+              "start": 0.0, "attributes": {"node_id": 0}},
+             gen("g1", "propose", 1.0), gen("g2", "stages", 2.0),
+             gen("g3", "plan", 3.0), gen("g4", "implement", 4.0)]
+    conv = build_conversation(SimpleNamespace(run_id="r", task_id="t", nodes={}), spans, 0)
+    assert [s["label"] for s in conv["stages"]] == ["propose", "stages", "plan", "implement"]

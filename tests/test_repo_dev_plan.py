@@ -34,6 +34,8 @@ def _install_fake_loop(monkeypatch, plan_steps, record):
     def fake_loop(client, tools, messages, emit_spec, *, finalize, fallback, **opts):
         name = emit_spec["function"]["name"]
         record.append((name, opts.get("max_turns"), opts.get("time_budget_s")))
+        if name == "declare_stages":     # the mandatory stages phase (fresh repo implement) — declare a train stage
+            return finalize({"stages": [{"name": "train", "command": ["python", "train.py"]}]})
         if name == "propose_plan":
             return finalize({"steps": plan_steps})
         # a `done` session (a step, or the single-session fallback): write a file via the write tool
@@ -55,9 +57,9 @@ def test_multistep_plan_runs_atomic_steps_and_accumulates(monkeypatch):
     dev.implement(Idea(operator="draft", params={"lr": 0.1}, rationale="a big multi-part change"))
 
     names = [r[0] for r in rec]
-    assert names == ["propose_plan", "done", "done", "done"]      # plan + one session per step
-    # files accumulated across the 3 step sessions
-    assert set(dev.last_files) == {"stage1.py", "stage2.py", "stage3.py"}
+    assert names == ["declare_stages", "propose_plan", "done", "done", "done"]  # stages + plan + one per step
+    # files accumulated across the 3 step sessions (+ the manifest the mandatory stages phase wrote)
+    assert set(dev.last_files) == {"looplab_stages.json", "stage1.py", "stage2.py", "stage3.py"}
     # every step session is BOUNDED with the configured ceiling (never 0/unlimited)
     step_calls = [r for r in rec if r[0] == "done"]
     assert all(mt == 7 and tb == 123.0 for _, mt, tb in step_calls)
@@ -81,8 +83,8 @@ def test_trivial_plan_falls_back_to_single_bounded_session(monkeypatch):
     _install_fake_loop(monkeypatch, [{"title": "only step", "detail": "trivial"}], rec)   # 1 step < min_steps
     dev = _dev(plan_decompose=True, plan_min_steps=2, session_max_turns=11)
     dev.implement(Idea(operator="draft", params={}, rationale="tiny change"))
-    # planned (1 step), but < min_steps -> single session fallback (still bounded)
-    assert [r[0] for r in rec] == ["propose_plan", "done"]
+    # stages (mandatory) then planned (1 step), but < min_steps -> single session fallback (still bounded)
+    assert [r[0] for r in rec] == ["declare_stages", "propose_plan", "done"]
     assert rec[-1][1] == 11
 
 
@@ -91,5 +93,19 @@ def test_decompose_off_is_single_session(monkeypatch):
     _install_fake_loop(monkeypatch, [{"title": "A", "detail": "a"}, {"title": "B", "detail": "b"}], rec)
     dev = _dev(plan_decompose=False, session_max_turns=13)
     dev.implement(Idea(operator="draft", params={}, rationale="x"))
-    assert [r[0] for r in rec] == ["done"]                        # no plan phase when off
-    assert rec[0][1] == 13
+    # stages phase is ALWAYS mandatory (even with decompose off); then the single implement session
+    assert [r[0] for r in rec] == ["declare_stages", "done"]      # no PLAN phase when off, but stages stays
+    assert rec[-1][1] == 13
+
+
+def test_stages_phase_cmd_context_and_prompt():
+    dev = _dev()
+    idea = Idea(operator="draft", params={"lr": 0.1}, rationale="x")
+    # the task carries an operator cmd -> _cmd_context sees it; the prompt shows it as FIXED + reserves score
+    ev, has_cmd = dev._cmd_context()
+    assert has_cmd and ev.get("command")
+    u = dev._stages_user(idea, ev, has_cmd)
+    assert "FIXED" in u and "reserved" in u.lower() and "train" in u.lower()
+    # NO operator cmd (has_cmd=False) -> the developer must declare the FULL pipeline (score NOT reserved)
+    u2 = dev._stages_user(idea, {}, False)
+    assert "FULL pipeline" in u2
