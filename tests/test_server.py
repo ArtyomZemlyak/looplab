@@ -168,6 +168,42 @@ def test_time_travel_seq(tmp_path):
     assert len(full["state"]["nodes"]) > 0
 
 
+def test_clear_node_trace_removes_only_that_nodes_spans(tmp_path):
+    """The 'clear trace' button: erase ONE node's spans from spans.jsonl (append-only, so a reset+
+    rebuild would otherwise stack fresh bands on the old attempt's) while leaving other nodes' spans
+    AND the event log intact; refused with 409 while a live engine holds the lock."""
+    from looplab.cli import _engine_singleton
+    _build_run(tmp_path)
+    rd = tmp_path / "demo"
+    # two nodes' worth of spans + one unscoped span (no node_id) that must survive
+    spans = [
+        {"span_id": "a", "kind": "operation", "name": "create_node", "attributes": {"node_id": 0}},
+        {"span_id": "b", "kind": "generation", "name": "gen", "attributes": {"node_id": 0}},
+        {"span_id": "c", "kind": "operation", "name": "create_node", "attributes": {"node_id": 1}},
+        {"span_id": "d", "kind": "generation", "name": "gen", "attributes": {}},           # unscoped
+    ]
+    (rd / "spans.jsonl").write_text("".join(json.dumps(s) + "\n" for s in spans), encoding="utf-8")
+    events_before = (rd / "events.jsonl").read_bytes()
+    client = TestClient(make_app(tmp_path))
+
+    # live engine -> refused, spans untouched
+    with _engine_singleton(rd) as ok:
+        assert ok
+        r = client.post("/api/runs/demo/nodes/0/clear_trace")
+        assert r.status_code == 409
+    assert len(list(iter_jsonl(rd / "spans.jsonl"))) == 4      # nothing removed while live
+
+    # not live -> node 0's two spans gone, node 1 + unscoped kept, event log untouched
+    r = client.post("/api/runs/demo/nodes/0/clear_trace")
+    assert r.status_code == 200 and r.json()["removed"] == 2 and r.json()["kept"] == 2
+    left = list(iter_jsonl(rd / "spans.jsonl"))
+    assert {s["span_id"] for s in left} == {"c", "d"}
+    assert (rd / "events.jsonl").read_bytes() == events_before
+
+    # idempotent: clearing again removes nothing
+    assert client.post("/api/runs/demo/nodes/0/clear_trace").json()["removed"] == 0
+
+
 def test_trace_tail_survives_a_huge_recent_span_line(tmp_path):
     """Mega-review 07-06: the live trace feed read a FIXED 256KB tail window of spans.jsonl. A single
     span line can be 100KB+ (a repo-Developer generation carries the whole prompt+output on it), so one

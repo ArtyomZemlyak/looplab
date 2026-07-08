@@ -468,6 +468,11 @@ export const resumeRun = (rid) => post(`/api/runs/${encodeURIComponent(rid)}/res
 // fresh run on the same run-id. Only offered on a FINISHED run (no live engine), so it's race-free.
 export const resetRun = (rid) => post(`/api/runs/${encodeURIComponent(rid)}/reset`, {})
 
+// Clear ONE node's trace: erase its spans from spans.jsonl so a reset+rebuild's fresh bands don't
+// stack on top of the old attempt's. Server refuses (409) while the engine is live (sole writer).
+export const clearNodeTrace = (rid, id) =>
+  post(`/api/runs/${encodeURIComponent(rid)}/nodes/${id}/clear_trace`, {})
+
 export const llmHealth = () => get('/api/llm/health')
 
 // G1 server auth: when the server runs with LOOPLAB_UI_TOKEN it injects the token into the served

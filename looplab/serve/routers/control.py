@@ -11,7 +11,7 @@ import anyio
 import orjson
 from fastapi import APIRouter, HTTPException, Request
 
-from looplab.core.atomicio import best_effort_fsync
+from looplab.core.atomicio import atomic_write_bytes, best_effort_fsync
 from looplab.core.config import Settings
 from looplab.events.eventstore import EventStore
 from looplab.events.replay import fold
@@ -156,6 +156,36 @@ def build_router(srv) -> APIRouter:
                 env = None
         _spawn_engine(["run", str(task_file), "--out", str(rd)], env=env, run_dir=rd)
         return {"ok": True}
+
+    @router.post("/api/runs/{run_id}/nodes/{nid}/clear_trace")
+    def clear_node_trace(run_id: str, nid: int):
+        """Erase ONE node's spans from spans.jsonl — the "clear this node's trace" button. spans.jsonl
+        is append-only, so after a node_reset the rebuild would otherwise STACK its fresh bands on top
+        of the old attempt's (build_conversation shows every trace tagged with the node). This removes
+        the node's spans so only the next build's trace remains. REFUSED while the engine is live — it
+        is the sole writer of spans.jsonl and rewriting the file under it would race/corrupt the trace;
+        stop the run first. Non-destructive to the event log (events.jsonl, the source of truth, is
+        untouched) — only the diagnostics trace is dropped."""
+        rd = _run_dir(run_id)
+        if _engine_alive(rd):
+            raise HTTPException(409, "run is live — stop it first (the engine is writing spans.jsonl)")
+        sp = rd / "spans.jsonl"
+        if not sp.exists():
+            return {"ok": True, "removed": 0, "kept": 0}
+        from looplab.events.eventstore import iter_jsonl
+        # A span belongs to the node when its node_id (stamped on EVERY span in the node's traces via
+        # tracing._node_ctx) matches — str-compared, since old logs may carry it as a string. iter_jsonl
+        # tolerates a torn final line (dropped); every surviving span is re-serialized compactly.
+        kept, removed = [], 0
+        for o in iter_jsonl(sp):
+            if str((o.get("attributes") or {}).get("node_id")) == str(nid):
+                removed += 1
+            else:
+                kept.append(o)
+        if removed:
+            # Atomic temp+rename so a crash mid-write can't truncate spans.jsonl to a partial trace.
+            atomic_write_bytes(sp, b"".join(orjson.dumps(o) + b"\n" for o in kept))
+        return {"ok": True, "removed": removed, "kept": len(kept)}
 
     @router.post("/api/start")
     async def start_run(request: Request):

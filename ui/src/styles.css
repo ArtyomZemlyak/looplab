@@ -1000,6 +1000,7 @@ textarea.text { min-height: 220px; font-family: ui-monospace, Consolas, monospac
 .trace-live-status { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--accent); margin-bottom: 8px; }
 .trace-live-status .tls-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--accent); box-shadow: 0 0 7px var(--accent); animation: breathe 1.4s infinite; flex: none; }
 .trace-nav { display: inline-flex; gap: 4px; }
+.trace-clear { display: inline-flex; gap: 4px; margin-right: 8px; align-items: center; }
 
 /* per-message trace (round-6): click "▸ trace" on an assistant reply to read its LLM I/O */
 .chat-trace-tog { font-size: 11px; color: var(--fg-mut); cursor: pointer; user-select: none; margin-top: 4px; }

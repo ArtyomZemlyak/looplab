@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useRef } from 'react'
-import { get, fmt, fmtInt, isSweep, spanDetail, nodeConversation, CONTROL } from './util.js'
+import { get, fmt, fmtInt, isSweep, spanDetail, nodeConversation, CONTROL, clearNodeTrace } from './util.js'
 import { Trajectory, ParallelCoords, Scatter, MetricLines } from './charts.jsx'
 import { groupAggregate } from './grouping.js'
 import { mergeSummary, nodeChip } from './report.js'
@@ -681,7 +681,7 @@ function ConvStage({ st, defaultOpen = true }) {
   </div>
 }
 
-function Conversation({ n, runId, working, allOpen = true }) {
+function Conversation({ n, runId, working, allOpen = true, reloadNonce = 0 }) {
   const [conv, setConv] = useState(null)
   useEffect(() => {
     let on = true
@@ -690,7 +690,7 @@ function Conversation({ n, runId, working, allOpen = true }) {
     load()
     const iv = working ? setInterval(load, 4000) : null   // live-refresh while the agent works this node
     return () => { on = false; if (iv) clearInterval(iv) }
-  }, [runId, n.id, working])
+  }, [runId, n.id, working, reloadNonce])   // reloadNonce bumps after a "clear trace" so the band list refreshes
   if (conv === null) return <div className="muted" style={{ fontSize: 12 }}>loading…</div>
   const stages = conv.stages || []
   if (!stages.length) return <div className="muted">No conversation captured for this node yet.</div>
@@ -705,6 +705,8 @@ function Conversation({ n, runId, working, allOpen = true }) {
 function Trace({ n, runId, live, working }) {
   const [view, setView] = useState('conversation')   // linear reading by default; raw tree on demand
   const [allOpen, setAllOpen] = useState(true)        // collapse/expand-all, lifted here for the sticky bar
+  const [nonce, setNonce] = useState(0)               // bumped after "clear trace" to reload the bands
+  const [clearing, setClearing] = useState('')        // '' | 'confirm' | 'busy' | error message
   const bodyRef = useRef(null)
   const spans = n.trace?.nodes || []
   const agent = n.agent_report
@@ -717,6 +719,30 @@ function Trace({ n, runId, live, working }) {
   const status = statusLabel && <div className="trace-live-status"><span className="tls-dot" />{statusLabel}
     <span className="muted" style={{ marginLeft: 6, fontSize: 11 }}>live — updates on its own</span></div>
   const scrollTo = (where) => { const c = bodyRef.current?.closest('.insp-body'); if (c) c.scrollTop = where === 'top' ? 0 : c.scrollHeight }
+  const doClear = async () => {
+    setClearing('busy')
+    try {
+      await clearNodeTrace(runId, n.id)
+      setNonce(x => x + 1)          // reload the Conversation bands (now empty until a rebuild re-traces)
+      setClearing('')
+    } catch (e) {
+      // 409 while the engine is live is the common case — surface the server's reason inline.
+      setClearing(/live/i.test(e.message) ? 'stop the run first' : ('clear failed: ' + e.message))
+      setTimeout(() => setClearing(''), 4000)
+    }
+  }
+  // "Clear trace" erases this node's spans (spans.jsonl is append-only, so a reset+rebuild would else
+  // STACK new bands on the old attempt's). Two-click confirm; disabled while THIS node is being worked.
+  const clearBtn = <span className="trace-clear">
+    {clearing === '' && <button className="seg" title="erase this node's captured trace (spans) — useful before re-running the node so the new trace replaces the old"
+      onClick={() => setClearing('confirm')} disabled={working}>✕ clear trace</button>}
+    {clearing === 'confirm' && <>
+      <button className="seg on" title="confirm: erase this node's spans" onClick={doClear}>✕ confirm clear</button>
+      <button className="seg" onClick={() => setClearing('')}>cancel</button></>}
+    {clearing === 'busy' && <span className="muted" style={{ fontSize: 11 }}>clearing…</span>}
+    {clearing && clearing !== 'confirm' && clearing !== 'busy' &&
+      <span className="muted" style={{ fontSize: 11, color: 'var(--fail)' }}>{clearing}</span>}
+  </span>
   const nav = <span className="trace-nav">
     <button className="seg" title="scroll to top" onClick={() => scrollTo('top')}>↑</button>
     <button className="seg" title="scroll to newest (bottom)" onClick={() => scrollTo('bottom')}>↓</button></span>
@@ -732,7 +758,7 @@ function Trace({ n, runId, live, working }) {
         title="The raw span tree with each generation's full re-sent message list">raw spans</button>
       {view === 'conversation' && <button className="seg" style={{ fontSize: 10 }} title="collapse or expand every stage"
         onClick={() => setAllOpen(o => !o)}>{allOpen ? '⊟ collapse all' : '⊞ expand all'}</button>}
-      <span style={{ flex: 1 }} />{nav}
+      <span style={{ flex: 1 }} />{clearBtn}{nav}
     </div>
   </div>
   if (!spans.length && !agent) {
@@ -741,11 +767,11 @@ function Trace({ n, runId, live, working }) {
     // flushed. So mount the live-polling Conversation (it refreshes every 4s) instead of a dead
     // placeholder: steps now appear as each generation/tool completes, not all at once at the end.
     if (working)
-      return <div className="trace" ref={bodyRef}>{head}<Conversation n={n} runId={runId} working={working} allOpen={allOpen} /></div>
+      return <div className="trace" ref={bodyRef}>{head}<Conversation n={n} runId={runId} working={working} allOpen={allOpen} reloadNonce={nonce} /></div>
     return <div className="trace" ref={bodyRef}>{head}<div className="muted">No execution spans for this node yet — toy/offline nodes have minimal spans, and a node still in progress fills its trace as it runs.</div></div>
   }
   if (view === 'conversation')
-    return <div className="trace" ref={bodyRef}>{head}<Conversation n={n} runId={runId} working={working} allOpen={allOpen} />
+    return <div className="trace" ref={bodyRef}>{head}<Conversation n={n} runId={runId} working={working} allOpen={allOpen} reloadNonce={nonce} />
       {agent && <AgentReport r={agent} />}</div>
   const { t0, total } = traceBounds(spans)
   // create_node already nests propose→implement; if an agent wrote the node, the report belongs
