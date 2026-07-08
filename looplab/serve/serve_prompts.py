@@ -25,40 +25,33 @@ def genesis_system(kinds: list, key_defaults: dict, cat_lines: str) -> str:
         '{"kind":"mlebench_real","competition":"<id>"} with the FULL slug exactly as on Kaggle — '
         "e.g. 'nomad2018-predict-transparent-conductors' (NOT the short 'nomad2018'), "
         "'spooky-author-identification'.\n"
-        "- REPO task (the agent optimizes an EXISTING code repo on this machine): author "
-        '{"kind":"repo","goal":"<what to optimize>","direction":"max"|"min",'
-        '"editable_path":"<absolute path to the repo the agent may edit>",'
-        '"edit_surface":["**/*.py"],'
-        '"eval":{"command":["python","train.py"],"cwd":".",'
-        '"metric":{"kind":"stdout_json","key":"<the key the command prints>"},'
-        '"setup":["pip","install","-r","requirements.txt"],"timeout":1800}}. '
-        "The `eval.command` is the OPERATOR's trusted way to RUN and score the repo (argv, no "
-        "shell); it must print the metric the loop reads (e.g. a final JSON line "
-        '{"metric": 0.93}). Three rules that are the USUAL mistakes: (1) `direction` is EXACTLY "max" '
-        'or "min" — never "maximize"/"minimize". (2) In `eval.metric`, `kind` is the READER '
-        "(stdout_json / stdout_regex / file_json / file_regex) — NOT the direction; NEVER put "
-        '"max"/"min" in metric.kind (the objective name goes in `key`). (3) When the agent must BUILD the eval '
-        "entrypoint (it doesn't exist yet — a training repo where agents write/modify the scripts), STILL "
-        'use `eval` with command=["python","<entrypoint>.py"] + {"metric":{"kind":"stdout_json","key":..}}: '
-        "the agent WRITES <entrypoint>.py so it runs the WHOLE experiment (TRAIN a fresh model, THEN test) "
-        "and prints the metric JSON. State in the goal that the entrypoint MUST actually run training each "
-        "node and score THAT model — NEVER read a pre-existing checkpoint or a static results file "
-        "(results_last.csv is a PRIOR run's output, not a score). Reserve `onboard:true` (+ "
-        "`onboard_command`) for the NARROW case where a training command ALREADY runs and you only need an "
-        "adapter to READ its metric — do NOT use onboard to BUILD a pipeline (with no command it degrades "
-        "to reading a static file). If the eval TRAINS a model, set `eval.timeout` GENEROUSLY (seconds) — "
-        "training runs minutes-to-hours but the default is only 600s, which SIGKILLs it mid-first-epoch "
-        "into an undertrained model; size it to the full schedule (often 7200-14400s). "
-        "DATASETS / MODEL WEIGHTS outside the editable repo MUST go in `data` as {\"<mount>\":\"<ABSOLUTE "
-        "path>\"} (they appear at ./<mount> in the eval workdir; a training repo with no `data` mounts "
-        "fails every node with file-not-found). Discover paths from the repo (README, configs, script "
-        "defaults) + the user's message and VERIFY they exist; if a required path is unknown, ASK in "
-        "`reply` — never omit or guess. "
-        "A repo task MUST carry EITHER `eval` OR `onboard:true` — one is "
-        "REQUIRED (a repo task with neither is rejected: nothing could score a node). If you are CONTINUING "
-        "a sibling run of the same repo, copy its `editable_path`, `edit_surface` and `data` verbatim — but "
-        "copy its `eval` only if that entrypoint lives IN the repo (else the agent rebuilds it). Copy any path / "
-        "command / metric-key the user gives VERBATIM; never "
+        "- REPO task (the agent optimizes an EXISTING code repo on this machine) — the task is "
+        "COMPOSABLE (NO `kind`; the engine infers it from the fields). Author "
+        '{"goal":"<what to optimize>","direction":"max"|"min",'
+        '"repo":"<absolute path to the codebase the agent may edit>",'
+        '"dataset":{"<mount>":"<absolute path>"},'
+        '"cmd":{"command":["python","test.py"],'
+        '"metric":{"reader":"stdout_json","key":"<the key the command prints>"},"timeout":10800}}. '
+        "`repo` is the editable codebase (the agent may edit ANY file within it; `protect:[...]` for "
+        "exceptions). `cmd` is the OPERATOR's trusted, non-rewritable way to RUN + score (argv, no shell) "
+        "— it must print the metric the loop reads (e.g. a final JSON line {\"metric\": 0.93}); the agent "
+        "builds any training pipeline BEFORE it but cannot change the scoring. Rules that are the USUAL "
+        'mistakes: (1) `direction` is EXACTLY "max" or "min" — never "maximize"/"minimize". (2) In '
+        "`cmd.metric`, `reader` is HOW to read the printed metric (stdout_json / stdout_regex / file_json / "
+        'file_regex) — NOT the direction; the objective name goes in `key`. Use reader:"auto" ONLY for the '
+        "narrow case where a training command ALREADY runs and you just need the agent to write the metric "
+        "reader. (3) State in the goal that each node must actually TRAIN a fresh model and score THAT model "
+        "— NEVER read a pre-existing checkpoint or a static results file (results_last.csv is a PRIOR run's "
+        "output, not a score). If `cmd` TRAINS, set its `timeout` GENEROUSLY (seconds) — training runs "
+        "minutes-to-hours but the default is 600s, which SIGKILLs it mid-first-epoch into an undertrained "
+        "model; size it to the full schedule (often 7200-14400s). "
+        "DATASETS / MODEL WEIGHTS outside the repo MUST go in `dataset` as {\"<mount>\":\"<ABSOLUTE path>\"} "
+        "(they appear at ./<mount> in the workdir; a training repo with no `dataset` mounts fails every "
+        "node with file-not-found). Discover paths from the repo (README, configs, script defaults) + the "
+        "user's message and VERIFY they exist; if a required path is unknown, ASK in `reply` — never omit "
+        "or guess. A repo task MUST carry a `cmd` (or reader:\"auto\") — nothing else could score a node. "
+        "If you are CONTINUING a sibling run of the same repo, copy its `repo`, `dataset` and `cmd` "
+        "verbatim. Copy any path / command / metric-key the user gives VERBATIM; never "
         "invent a path you weren't given (leave editable_path empty and ask instead). When the user "
         "points you at their OWN repo (gives a path), ALWAYS author this inline repo task with that "
         "editable_path — do NOT substitute a similarly-named catalogue file; the catalogue is only "
