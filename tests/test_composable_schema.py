@@ -68,6 +68,23 @@ def test_benchmark_and_dataset_only():
     assert n["kind"] == "dataset"
 
 
+def test_no_capability_field_is_rejected_not_quadratic():
+    # mega-review fix: a typo'd capability field (repo_path instead of repo) used to silently fall
+    # back to the quadratic toy and burn the run's budget on (x-3)^2. The old /api/start kind-guard's
+    # promise ("no silent default to quadratic") is now enforced in normalize_task itself.
+    with pytest.raises(ValueError, match="cannot infer the task"):
+        normalize_task({"goal": "tune my model", "direction": "max", "repo_path": "/home/me/proj"})
+    # an explicit toy task still works (kind or benchmark spelled out)
+    assert normalize_task({"kind": "quadratic", "direction": "min"})["kind"] == "quadratic"
+
+
+def test_string_cmd_is_rejected_with_actionable_error():
+    # mega-review fix: dict("python test.py") used to raise a cryptic 'dictionary update sequence'
+    # ValueError — an unhandled 500 on /api/start and a TUI crash. Now a clear, catchable message.
+    with pytest.raises(ValueError, match="argv list"):
+        normalize_task({"goal": "g", "direction": "max", "repo": "/r", "cmd": "python test.py"})
+
+
 def test_legacy_schema_passes_through_unchanged():
     legacy = {"kind": "repo", "editable_path": "/repo", "direction": "max",
               "eval": {"command": ["python", "t.py"], "metric": {"kind": "stdout_json", "key": "r"}}}

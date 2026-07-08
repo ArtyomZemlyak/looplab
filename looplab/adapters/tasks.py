@@ -97,7 +97,9 @@ def normalize_task(data: dict) -> dict:
 
     Returns a canonical dict the registered adapters validate (with an inferred `kind`). Idempotent
     and back-compatible: a legacy `{kind, eval, onboard, editable_path, metric.kind}` dict passes
-    through unchanged, so old snapshots / example files / tests keep working."""
+    through unchanged, so old snapshots / example files / tests keep working. Raises ValueError on
+    a task that cannot be a task — a non-argv `cmd`, or no recognizable capability field at all
+    (never a silent default to the quadratic toy)."""
     d = dict(data)
 
     # --- built-in benchmarks: an explicit selector for the internal synthetic tasks ---
@@ -135,7 +137,19 @@ def normalize_task(data: dict) -> dict:
     # --- cmd (how to run + score) is the new name for `eval` ---
     if "cmd" in d and "eval" not in d:
         cmd = d.pop("cmd")
-        d["eval"] = {"command": list(cmd)} if isinstance(cmd, list) else dict(cmd or {})
+        if isinstance(cmd, list):
+            d["eval"] = {"command": list(cmd)}
+        elif isinstance(cmd, dict):
+            d["eval"] = dict(cmd)
+        elif cmd:
+            # The natural authoring mistake is a shell STRING — dict("python test.py") would raise a
+            # cryptic 'dictionary update sequence' ValueError (a 500 on /api/start, a TUI crash).
+            # Reject it with an actionable message instead; the engine runs argv with NO shell.
+            raise ValueError(
+                f"`cmd` must be an argv list ([\"python\",\"test.py\"]) or a spec object "
+                f"{{command, metric, timeout}}, got {type(cmd).__name__}: {str(cmd)[:80]!r} — "
+                "split a shell string into argv items.")
+        # falsy cmd (None/""/{}) -> treated as absent; the repo-task gate below gives the real message
 
     # --- inside the eval/cmd spec: metric.reader alias + "auto" -> onboarding fold ---
     def _reader_to_kind(spec):
@@ -182,7 +196,15 @@ def normalize_task(data: dict) -> dict:
         elif d.get("data") or d.get("data_path"):
             d["kind"] = "dataset"
         else:
-            d["kind"] = "quadratic"       # nothing declared -> the offline toy default
+            # NO silent default to the quadratic toy (the guarantee the old /api/start kind-guard
+            # gave): a typo'd capability field (repo_path for repo, …) would otherwise validate as a
+            # ToyTask and burn the run's nodes/LLM budget optimizing (x-3)^2. An offline toy run says
+            # so explicitly (`kind`/`benchmark`: "quadratic").
+            raise ValueError(
+                "cannot infer the task: no capability field recognized. Give one of `repo` (an "
+                "editable codebase), `dataset`/`data` (data mounts), `cmd` (how to run + score), "
+                "`kaggle`/`competition` (a competition slug), `benchmark` (a built-in synthetic "
+                "task) — or an explicit legacy `kind`.")
 
     return d
 
@@ -193,7 +215,7 @@ def validate_task(data: dict) -> TaskAdapter:
     competition slug) — the SAME validation the engine runs at startup, so callers can reject a bad
     spec synchronously instead of spawning a detached engine that dies before writing any events."""
     data = normalize_task(data)                       # composable/legacy schema -> canonical + inferred kind
-    kind = data.get("kind", "quadratic")
+    kind = data["kind"]                               # normalize_task guarantees it (or raises)
     cls = _KINDS.get(kind)
     if cls is None:
         raise ValueError(f"unknown task kind: {kind!r} (known: {sorted(_KINDS)})")

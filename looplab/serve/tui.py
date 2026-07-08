@@ -262,7 +262,12 @@ def spec_ready(spec: Optional[dict]) -> Optional[str]:
     if not task:
         return "the boss hasn't picked a task yet"
     from looplab.adapters.tasks import normalize_task
-    task = normalize_task(task)               # composable (repo/dataset/cmd/kaggle) -> canonical + kind
+    try:
+        task = normalize_task(task)           # composable (repo/dataset/cmd/kaggle) -> canonical + kind
+    except ValueError as e:
+        # A half-assembled / malformed spec (a string `cmd`, no recognizable capability field) must
+        # read as "not launchable yet + why", never crash the genesis screen (mega-review fix).
+        return str(e)
     if task.get("kind") == "mlebench_real" and not (task.get("competition") or "").strip():
         return "set a Kaggle competition id"
     if task.get("kind") == "repo":

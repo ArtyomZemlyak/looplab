@@ -182,18 +182,19 @@ def build_router(srv) -> APIRouter:
         # field) fails HERE with a 400 instead of spawning a detached engine that dies (DEVNULL'd)
         # before writing any events, leaving a phantom never-started run.
         if isinstance(task, dict) and task:
-            from looplab.adapters.tasks import kinds, validate_task, normalize_task
-            # A COMPOSABLE task carries no `kind` — infer it from the fields (repo/dataset/cmd/kaggle)
-            # so the composable schema the boss now authors isn't 400'd before validation runs.
-            kind = normalize_task(task).get("kind")
-            if kind not in kinds():
-                raise HTTPException(400, f"unknown task kind: {kind!r} (known: {kinds()})")
+            from looplab.adapters.tasks import validate_task
+            # A COMPOSABLE task carries no `kind` — validate_task normalizes (inferring the kind from
+            # repo/dataset/cmd/kaggle) and validates in ONE guarded call, so every malformed spelling
+            # (a string `cmd`, an unknown kind, an uninferrable task) is a 400 with the validator's
+            # message — never an unhandled 500 from a pre-check outside the try (mega-review fix; a
+            # separate normalize_task pre-check also normalized the same dict twice).
             try:
                 adapter = await anyio.to_thread.run_sync(lambda: validate_task(task))
             except HTTPException:
                 raise
-            except Exception as e:  # noqa: BLE001 - kind-specific validation failed (e.g. bad competition)
+            except Exception as e:  # noqa: BLE001 - normalization/validation failed (e.g. bad competition)
                 raise HTTPException(400, f"invalid task: {e}")
+            kind = getattr(adapter, "kind", "")
             # Repo task: the editable repo must actually exist on THIS machine at submit time (the
             # model can't check that — a snapshot loads on any host). A relative/missing path would
             # otherwise only surface as a warning, then fail deep in materialize. Reject it now.
