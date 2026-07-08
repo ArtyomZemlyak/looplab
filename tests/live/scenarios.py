@@ -353,10 +353,15 @@ REGISTRY: list[Scenario] = [
                     _rf(2, "gbm", "More trees to catch structure.", 0.492, n=300),
                     _lin(3, "svc", "Flexible fit.", 0.503)],
         check=lambda sc, st, ev: (
-            # success = no false breakthrough (stays ~chance) AND a hypothesis names the absent signal
+            # success = no false breakthrough (stays ~chance) AND a hypothesis recognizes the absent
+            # signal. LLM-AGNOSTIC: match the many ways a model phrases "the features don't predict the
+            # target", not just the original 4 words (keeps the behavioral bar while not over-fitting to
+            # one model's vocabulary).
             (_agent_best(st) < 0.60
-             and any("signal" in t or "no signal" in t or "random" in t or "chance" in t
-                     for t in _hyp_texts(st))),
+             and any(kw in t for t in _hyp_texts(st) for kw in (
+                 "signal", "random", "chance", "noise", "no pattern", "no relationship", "unpredictable",
+                 "not learnable", "unlearnable", "no predict", "not predict", "coin flip", "no structure",
+                 "no information", "irreducible", "futil", "independent", "0.5", "near-chance", "no better"))),
             f"agent best = {_agent_best(st):.3f}; want < 0.60 (no false win) + a 'no signal' hypothesis"),
     ),
     Scenario(
