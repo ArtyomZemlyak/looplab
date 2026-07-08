@@ -49,6 +49,15 @@ _current_tracer: contextvars.ContextVar = contextvars.ContextVar("LOOPLAB_tracer
 # like the other contextvars, so it survives the worker-thread eval + anyio.to_thread offloads.
 _node_ctx: contextvars.ContextVar = contextvars.ContextVar("LOOPLAB_node", default=None)
 
+# Active PHASE (nearest enclosing operation span's name: propose / implement / repair / evaluate / …).
+# An operation span is written to spans.jsonl only on CLOSE, so while a sub-loop runs its live child
+# generation/tool spans reference a parent NOT yet on disk — the live trace view then can't band them
+# under their phase and mis-groups them (Developer calls shown under the Researcher until the node
+# finishes). Stamping the phase name onto each child span's attributes (like node_id) lets the view read
+# the phase from the child itself, no parent lookup needed, so live attribution is correct immediately.
+# Copied across task/thread spawns like the other contextvars.
+_phase_ctx: contextvars.ContextVar = contextvars.ContextVar("LOOPLAB_phase", default=None)
+
 def _init_otel():  # pragma: no cover - exercised only with the [otel] extra installed
     """Return an OpenTelemetry tracer if the SDK is installed, configuring an OTLP exporter
     from the standard OTEL_* env when an endpoint is set (so `OTEL_EXPORTER_OTLP_ENDPOINT=…`
@@ -334,6 +343,12 @@ class Tracer:
         if _nid_own is None and _node_ctx.get() is not None:
             attributes = {**attributes, "node_id": _node_ctx.get()}
         _tok_node = _node_ctx.set(attributes["node_id"]) if attributes.get("node_id") is not None else None
+        # Phase attribution (see _phase_ctx): a non-operation child (generation/tool) inherits the active
+        # phase so the trace view bands it correctly LIVE, before its parent operation span is flushed. An
+        # operation span sets the phase to ITS name for the block (so its own children inherit it).
+        if kind != "operation" and _phase_ctx.get() is not None and attributes.get("phase") is None:
+            attributes = {**attributes, "phase": _phase_ctx.get()}
+        _tok_phase = _phase_ctx.set(name) if kind == "operation" else None
         otel_cm = _OTEL.start_as_current_span(name) if _OTEL is not None else None
         otel_span = otel_cm.__enter__() if otel_cm is not None else None
         # IDs come from the real OTel span when bridged (so JSONL and the collector agree),
@@ -398,6 +413,8 @@ class Tracer:
             _current_tracer.reset(tok_tr)
             if _tok_node is not None:
                 _node_ctx.reset(_tok_node)
+            if _tok_phase is not None:
+                _phase_ctx.reset(_tok_phase)
             try:
                 self.exporter.export(rec)
             except Exception:  # noqa: BLE001 - spans are diagnostics: an export failure (disk full,

@@ -224,3 +224,29 @@ def test_confirm_events_carry_trace_id(tmp_path):
     events = list(EventStore(tmp_path / "run" / "events.jsonl").read_all())
     confirm_evs = [e for e in events if e.type == "confirm_eval"]
     assert confirm_evs and all(e.trace_id for e in confirm_evs)
+
+
+def test_live_developer_spans_band_under_implement_not_researcher(tmp_path):
+    """Regression for the trace-view bug: an operation span (implement) is written to spans.jsonl only on
+    CLOSE, so while the Developer runs, its live child generations reference a parent not yet on disk and
+    the per-node conversation mis-grouped them under the Researcher/create_node. Now each child carries a
+    `phase` attribute (tracing._phase_ctx), so build_conversation bands it under `implement` immediately."""
+    from types import SimpleNamespace
+    from looplab.serve.traceview import build_conversation
+    T = "trace1"
+    spans = [
+        {"span_id": "R", "parent_id": None, "trace_id": T, "name": "create_node", "kind": "operation",
+         "start": 0.0, "attributes": {"node_id": 0}},
+        {"span_id": "P", "parent_id": "R", "trace_id": T, "name": "propose", "kind": "operation",
+         "start": 1.0, "attributes": {"node_id": 0}},
+        {"span_id": "g1", "parent_id": "P", "trace_id": T, "name": "gen", "kind": "generation", "start": 1.5,
+         "attributes": {"node_id": 0, "phase": "propose", "input": [{"role": "user", "content": "x"}]}},
+        # Developer generation: parent is the implement span 'I', which is NOT in the list yet (still open).
+        {"span_id": "g2", "parent_id": "I", "trace_id": T, "name": "gen", "kind": "generation", "start": 3.0,
+         "attributes": {"node_id": 0, "phase": "implement", "input": [{"role": "user", "content": "y"}]}},
+    ]
+    conv = build_conversation(SimpleNamespace(run_id="r", task_id="t", nodes={}), spans, 0)
+    labels = [s["label"] for s in conv["stages"]]
+    assert "implement" in labels and "propose" in labels          # two distinct phases, not merged
+    impl = next(s for s in conv["stages"] if s["label"] == "implement")
+    assert impl["turns"]                                          # the Developer generation lives here

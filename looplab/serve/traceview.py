@@ -140,8 +140,13 @@ def _as_text(v) -> str:
 
 
 def _seg_label(gen_span: dict, by_id: dict) -> Optional[str]:
-    """The nearest ancestor OPERATION span's name — the sub-loop a generation belongs to
-    (propose / implement / repair / grade), so a request boundary can be labelled with its phase."""
+    """The sub-loop a generation belongs to (propose / implement / repair / grade), to label its request
+    boundary with its phase. Prefer the `phase` stamped on the span itself (tracing._phase_ctx) — correct
+    even LIVE, before the parent operation span is flushed to disk; fall back to walking to the nearest
+    ancestor operation span for older traces written before phase-stamping."""
+    ph = (gen_span.get("attributes") or {}).get("phase")
+    if ph:
+        return ph
     cur = by_id.get(gen_span.get("parent_id"))
     while cur is not None:
         if cur.get("kind") in (None, "operation"):
@@ -218,7 +223,17 @@ def build_conversation(state: RunState, spans: list[dict], node_id) -> dict:
                     if cur.get("kind") == "operation":
                         top_op = cur
                     cur = by_sid.get(cur.get("parent_id"))
-                return top_op or root
+                if top_op is not None:
+                    return top_op
+                # LIVE: the enclosing operation span (e.g. implement) isn't flushed to disk yet — it's
+                # written on close — so the walk can't find it and the child would fall back to the
+                # create_node root (Developer calls shown under the Researcher until the node finishes).
+                # The child carries its `phase` (tracing._phase_ctx); synthesize a stable stage from it so
+                # it bands under the right phase immediately. Post-hoc the real op span exists and wins.
+                ph = (s.get("attributes") or {}).get("phase")
+                if ph:
+                    return {"span_id": f"phase:{ph}", "name": ph, "start": s.get("start", 0.0)}
+                return root
 
             groups: dict = {}
             for s in ss_sorted:
