@@ -73,11 +73,103 @@ def kinds() -> list[str]:
     return list(_KINDS)
 
 
+# The metric READERS (how to read a printed metric). "auto" = the agent writes the reader adapter
+# (the old `onboard` mode). Shared by normalize + the EvalSpec.metric.reader validator.
+METRIC_READERS = {"stdout_json", "stdout_regex", "file_json", "file_regex", "host_score", "adapter", "auto"}
+
+
+def normalize_task(data: dict) -> dict:
+    """Front-end for the COMPOSABLE task schema — the single place old and new spellings converge.
+
+    A task is defined by WHICH capability fields it carries, not a `kind` enum:
+      • `repo`     -> an editable codebase (agent edits within it)        [alias: editable_path]
+      • `dataset`  -> read-only data mounts (path or {name: path})        [alias: data]
+      • `cmd`      -> how to run + score (a command/argv OR a full spec)  [alias: eval]
+      • `kaggle`   -> a Kaggle / MLE-bench competition slug               [-> kind=mlebench_real]
+      • `benchmark`-> a built-in synthetic task (quadratic/regression/…)  [-> kind=<name>]
+    and inside `cmd`/`eval`: `metric.reader` (alias of the old `metric.kind`); reader "auto" folds
+    to the onboarding path (the agent writes the metric adapter).
+
+    Returns a canonical dict the registered adapters validate (with an inferred `kind`). Idempotent
+    and back-compatible: a legacy `{kind, eval, onboard, editable_path, metric.kind}` dict passes
+    through unchanged, so old snapshots / example files / tests keep working."""
+    d = dict(data)
+
+    # --- built-in benchmarks: an explicit selector for the internal synthetic tasks ---
+    if d.get("benchmark") and not d.get("kind"):
+        d["kind"] = d.pop("benchmark")
+
+    # --- kaggle competition -> the mlebench_real adapter ---
+    if d.get("kaggle"):
+        d.setdefault("competition", d.get("kaggle"))
+        d.pop("kaggle", None)
+        d.setdefault("kind", "mlebench_real")
+
+    # --- repo (editable codebase): "do whatever WITHIN it" — default the surface to ALL files ---
+    if "repo" in d and not d.get("editable_path"):
+        d["editable_path"] = d.pop("repo")
+        d.setdefault("edit_surface", ["**/*"])   # composable-repo default: full freedom (protect=exceptions)
+
+    # --- dataset: read-only mounts. A bare path -> one mount named "dataset"; a dict -> merged ---
+    if "dataset" in d:
+        ds = d.pop("dataset")
+        mounts = dict(d.get("data") or {})
+        if isinstance(ds, str) and ds:
+            mounts.setdefault("dataset", ds)
+        elif isinstance(ds, dict):
+            mounts.update(ds)
+        if mounts:
+            d["data"] = mounts
+
+    # --- cmd (how to run + score) is the new name for `eval` ---
+    if "cmd" in d and "eval" not in d:
+        cmd = d.pop("cmd")
+        d["eval"] = {"command": list(cmd)} if isinstance(cmd, list) else dict(cmd or {})
+
+    # --- inside the eval/cmd spec: metric.reader alias + "auto" -> onboarding fold ---
+    ev = d.get("eval")
+    if isinstance(ev, dict):
+        ev = dict(ev)
+        m = ev.get("metric")
+        if isinstance(m, dict) and "reader" in m:
+            m = dict(m)
+            reader = m.pop("reader")
+            if reader == "auto":
+                # "auto" reader == the agent writes the metric adapter -> the onboarding path. The
+                # command becomes the onboard command; `eval` is left None until the onboarder ratifies.
+                d.setdefault("onboard", True)
+                if ev.get("command") and not d.get("onboard_command"):
+                    d["onboard_command"] = list(ev["command"])
+                if ev.get("timeout"):
+                    d.setdefault("onboard_timeout", float(ev["timeout"]))
+                d["eval"] = None
+                ev = None
+            else:
+                m.setdefault("kind", reader)
+                ev["metric"] = m
+        if ev is not None:
+            d["eval"] = ev
+
+    # --- infer the dispatch kind from the fields present (composable -> kind) ---
+    if not d.get("kind"):
+        if d.get("editable_path") or d.get("editables"):
+            d["kind"] = "repo"
+        elif d.get("eval") or d.get("onboard"):
+            d["kind"] = "repo"            # a bare run+score spec is a (path-less) repo-style task
+        elif d.get("data") or d.get("data_path"):
+            d["kind"] = "dataset"
+        else:
+            d["kind"] = "quadratic"       # nothing declared -> the offline toy default
+
+    return d
+
+
 def validate_task(data: dict) -> TaskAdapter:
     """Build + validate a task adapter from an in-memory dict (the inline-task / genesis path). Raises
     on an unknown kind OR a kind-specific validation failure (e.g. mlebench_real resolving an unknown
     competition slug) — the SAME validation the engine runs at startup, so callers can reject a bad
     spec synchronously instead of spawning a detached engine that dies before writing any events."""
+    data = normalize_task(data)                       # composable/legacy schema -> canonical + inferred kind
     kind = data.get("kind", "quadratic")
     cls = _KINDS.get(kind)
     if cls is None:
@@ -89,9 +181,9 @@ def validate_task(data: dict) -> TaskAdapter:
     # here (not on the RepoTask model) so unit tests can still construct a partial RepoTask.
     if kind == "repo" and getattr(adapter, "eval", None) is None and not getattr(adapter, "onboard", False):
         raise ValueError(
-            "RepoTask has no `eval` and onboard is off — every node would be scored with no real "
-            "evaluation. Either give an `eval` (a command + a metric to read), OR set `onboard: true` "
-            "(with backend=llm) so an onboarder builds the eval entrypoint first.")
+            "A repo task has no `cmd` and no auto-metric — every node would be scored with no real "
+            "evaluation. Either give a `cmd` (a command + a metric to read), OR set the metric "
+            "reader to \"auto\" (with backend=llm) so an onboarder builds the eval entrypoint first.")
     return adapter
 
 
