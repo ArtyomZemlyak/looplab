@@ -269,6 +269,7 @@ const STAGE = {
   // the change into atomic steps — both read-only, before the write-capable implement session(s).
   stages:       { icon: 'sliders', role: 'Developer · stages', desc: 'declare the eval pipeline (prep → train → …)', tone: '#5f9e8f' },
   plan:         { icon: 'doc', role: 'Developer · plan', desc: 'decompose into atomic steps', tone: '#7fae8f' },
+  'handoff-summary': { icon: 'doc', role: 'Handoff summary', desc: 'distill this phase for the next (fewer re-reads downstream)', tone: '#8fa8b8' },
   implement:    { icon: 'gear', role: 'Developer · implement', desc: 'write / edit the solution code', tone: '#6fae97' },
   repair:       { icon: 'bug', role: 'Developer · repair', desc: 'fix a failed parent', tone: '#b0936f' },
   inline_repair: { icon: 'bug', role: 'Developer · inline repair', desc: 'quick in-eval fix attempts', tone: '#b08a6f' },

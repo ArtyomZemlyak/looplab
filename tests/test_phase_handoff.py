@@ -194,6 +194,34 @@ def test_read_cache_is_shared_across_phases_in_a_scope():
     assert tools.reads == 1     # phase 2's identical read served from the shared node cache, not re-run
 
 
+def test_handoff_summary_is_traced_as_its_own_span():
+    # The summary call is wrapped in a `handoff-summary` operation span so it's a visible, labeled
+    # band in the UI trace (not an anonymous generation) — auditable, per the user's ask.
+    from looplab.core import tracing
+    from looplab.core.tracing import Tracer, JsonlSpanExporter
+    import tempfile
+    import os
+    import orjson
+
+    class _SummClient(_PhaseClient):
+        def complete_text(self, m):
+            return "THE BRIEF"
+    with tempfile.TemporaryDirectory() as d:
+        tr = Tracer(JsonlSpanExporter(os.path.join(d, "s.jsonl")), run_id="r")
+        tok = tracing._current_tracer.set(tr)
+        try:
+            with tracing.operation("stages"), handoff_scope(enabled=True):
+                _run_one(_SummClient(), [{"role": "system", "content": "S"},
+                                         {"role": "user", "content": "go"}], label="stages")
+        finally:
+            tracing._current_tracer.reset(tok)
+        recs = [orjson.loads(x) for x in open(os.path.join(d, "s.jsonl"), "rb").read().splitlines()]
+        names = [r["name"] for r in recs]
+        assert "handoff-summary" in names                       # the summary got its own span
+        hs = next(r for r in recs if r["name"] == "handoff-summary")
+        assert hs["attributes"].get("handoff_from") == "stages"  # tagged with the source phase
+
+
 def test_read_cache_is_per_loop_without_a_scope():
     # No scope → each phase gets its own loop-local cache → the identical read runs in BOTH phases.
     tools = _CountReadTools()

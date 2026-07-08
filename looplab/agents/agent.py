@@ -622,7 +622,11 @@ def run_phase(client, tools, messages, emit_spec, *, label: str, next_label: str
     result = drive_tool_loop(client, tools, messages, emit_spec,
                              finalize=finalize, fallback=fallback, **loop_kwargs)
     if handoff and ledger is not None:      # non-terminal phase in an active scope → contribute a brief
-        s = summarize_phase(client, messages, phase=label, next_phase=next_label)
+        # Wrap the summary call in its OWN operation span so it's a distinct, clearly-labeled band in
+        # the UI trace ("handoff-summary") instead of an anonymous complete_text generation buried in
+        # the phase — the summarization is visible/auditable, not a silent extra call.
+        with tracing.operation("handoff-summary", handoff_from=label, handoff_to=next_label):
+            s = summarize_phase(client, messages, phase=label, next_phase=next_label)
         if s:
             ledger.append(f"[{label}]\n{s}")
     return result
