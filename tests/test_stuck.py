@@ -290,3 +290,42 @@ def test_dedup_never_suppresses_mutating_tools():
                           finalize=lambda a: ("emit", a), fallback=lambda _m: ("fallback", None))
     assert out[0] == "emit"
     assert tools.executed == 3                 # every write ran (not deduped)
+
+
+class _ReadWriteReadClient:
+    """read a.py -> write a.py -> read a.py -> emit. The 2nd read must NOT be stubbed — the write
+    invalidated the dedup — so read_file executes TWICE."""
+    def __init__(self):
+        self.script = [
+            _tool_call("read_file", {"path": "a.py"}),
+            _tool_call("write_file", {"path": "a.py", "content": "new"}),
+            _tool_call("read_file", {"path": "a.py"}),
+            {"content": "", "tool_calls": [{"id": "e", "function": {"name": "emit", "arguments": "{}"}}]},
+        ]
+
+    def chat(self, messages, tools, tool_choice="auto"):
+        return self.script.pop(0)
+
+
+class _CountingRWTools:
+    def __init__(self):
+        self.reads = 0
+
+    def specs(self):
+        return [{"type": "function", "function": {
+            "name": n, "description": "", "parameters": {"type": "object", "properties": {}}}}
+            for n in ("read_file", "write_file")]
+
+    def execute(self, name, args):
+        if name == "read_file":
+            self.reads += 1
+        return "contents" if name == "read_file" else "written"
+
+
+def test_dedup_invalidated_by_write():
+    client = _ReadWriteReadClient()
+    tools = _CountingRWTools()
+    out = drive_tool_loop(client, tools, [{"role": "user", "content": "go"}], _EMIT,
+                          finalize=lambda a: ("emit", a), fallback=lambda _m: ("fallback", None))
+    assert out[0] == "emit"
+    assert tools.reads == 2      # the write between the two identical reads invalidated the cache

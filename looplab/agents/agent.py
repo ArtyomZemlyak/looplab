@@ -369,6 +369,11 @@ def drive_tool_loop(client, tools, messages: list, emit_spec: dict, *,
                     with tracing.tool(name, args) as _tool_obs:
                         result = tools.execute(name, args) if tools is not None else f"(unknown tool: {name})"
                         _tool_obs.output(result)
+                    if not _read_only and read_seen:
+                        # A write/edit/run may have CHANGED files on disk (the Developer edits then
+                        # re-reads its own code). Invalidate the read-dedup so a subsequent re-read returns
+                        # the FRESH content, never a stale "already read" stub.
+                        read_seen.clear()
                     # Cap once, up front, so the provenance hook receives EXACTLY what the tool message
                     # below will carry (a single expression, not two kept-in-sync copies).
                     result = str(result)[:4000]
