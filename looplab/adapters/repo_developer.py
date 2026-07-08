@@ -93,20 +93,9 @@ class RepoWriteTools:
             fn_spec("delete_file",
                      "Delete a file you previously wrote in this experiment (within your surface).",
                      {"path": {"type": "string"}}, ["path"]),
-            fn_spec("declare_stages",
-                     "Declare the PRECEDING pipeline stages that run BEFORE the operator's scoring "
-                     "command (e.g. a `data_prep` then a `train` stage). Each stage is "
-                     "{name, command:[argv...], timeout?, check?} and they run IN ORDER in the same "
-                     "workdir — artifacts persist, so `train` writes a checkpoint the scoring step "
-                     "reads. The operator's `cmd` is ALWAYS appended as the final, protected `score` "
-                     "stage: you CANNOT replace or rewrite how the run is scored, only add work before "
-                     "it. Put `%params%` inside a command to inject THIS node's hyperparameters as "
-                     "`--key value` (omit it to bake values yourself). Give a long-running `train` a "
-                     "generous `timeout` (seconds). This VALIDATES the manifest and reports errors "
-                     "back to you — use it INSTEAD of hand-writing looplab_stages.json.",
-                     {"stages": {"type": "array", "description":
-                                 "ordered preceding stages, each {name, command:[argv...], timeout?, check?}"}},
-                     ["stages"]),
+            # NB: the pipeline stages are declared in the Developer's dedicated STAGES phase (its
+            # `declare_stages` emit), which runs BEFORE this implement phase — NOT here — so the manifest
+            # (looplab_stages.json) is already written and this write toolset must not re-declare it.
         ]
 
     def execute(self, name: str, args: dict) -> str:
@@ -359,9 +348,9 @@ _REPO_DEV_SYSTEM_BODY = (
     "must print the metric as the LAST stdout line (a JSON object with the required key). CRITICAL: the "
     "eval command runs `<entrypoint>.py`, so THAT FILE MUST EXIST in the workspace after your edits — a "
     "fresh node starts WITHOUT it (unless the operator PROTECTED an existing scorer, which you must NOT "
-    "rewrite — then just declare a train stage before it). For TRAINING work PREFER declaring a separate "
-    "`train` stage with the declare_stages tool (below) — the entrypoint then only SCORES, so a fixed eval "
-    "re-runs without paying to re-train. If instead you keep one entrypoint, it must orchestrate train→test; "
+    "rewrite). For TRAINING work your STAGES phase already declared a separate "
+    "`train` stage (before this) so the entrypoint here only SCORES, and a fixed eval re-runs without "
+    "paying to re-train. If instead a single entrypoint is used, it must orchestrate train→test; "
     "editing only train.py leaves the eval with 'no such file: "
     "<entrypoint>.py'. CRITICAL for a TRAINING task: the entrypoint MUST actually TRAIN a model "
     "for THIS experiment (run the repo's train script with your config → produce a FRESH checkpoint) and "
@@ -382,10 +371,11 @@ _REPO_DEV_SYSTEM_BODY = (
     "drives selection, so report generously. Bake the chosen hyperparameters into the code. Stay within your "
     "editable surface; never write protected or absolute paths. When all files are written and "
     "the eval would succeed, call done.\n\n"
-    "TRAIN-THEN-SCORE PIPELINE — REQUIRED whenever the experiment TRAINS then evaluates: use the "
-    "`declare_stages` tool to declare the ordered stages that run BEFORE the operator's scoring command "
-    "(e.g. declare_stages(stages=[{name:'data_prep',command:['python','prep.py']}, "
-    "{name:'train',command:['python','train.py','%params%'],timeout:14400,check:true}]). The operator's "
+    "TRAIN-THEN-SCORE PIPELINE — the ordered stages were already declared in your dedicated STAGES phase "
+    "(the phase before this one) and written to `looplab_stages.json`; HERE you implement the CODE those "
+    "stages run (e.g. the train.py the `train` stage invokes, the prep.py a `data_prep` stage invokes, the "
+    "eval entrypoint the `score` step runs). For reference, a stage is "
+    "{name:'train',command:['python','train.py','%params%'],timeout:14400,check:true}; the operator's "
     "`cmd` is APPENDED automatically as the final, protected `score` stage — you CANNOT rewrite how the "
     "run is scored (that's the trust boundary), only add work before it. Stages run in ORDER in the SAME "
     "workdir (artifacts persist: `train` writes a checkpoint the `score` step reads). This is the ONLY "
