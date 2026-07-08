@@ -688,11 +688,15 @@ class LLMRepoDeveloper:
         # convergence backstop now let it read PROPERLY without exploring forever.)
         read_only = CompositeTools([EnvInspectTools()] + self._scout_tools(write))
         try:
+            # Full session budget — same contract as every other phase: the soft nudge at
+            # agent_emit_after (300) and the forced emit at agent_emit_force (500) ride in via
+            # loop_opts, and budget exhaustion salvages a forced emit. The old tight clamp
+            # (40 turns / 360s) starved the planner on a big repo the same way it starved the
+            # stages phase (read the repo for the whole budget, degrade to []).
             plan = drive_tool_loop(
                 self.client, read_only, messages, self._plan_emit_spec(),
                 finalize=lambda a: (a or {}).get("steps", []), fallback=lambda m: [],
-                **self._session_opts(max_turns=min(40, self._session_max_turns),
-                                     time_budget=min(360.0, self._session_time_budget_s)))
+                **self._session_opts())
         except Exception:  # noqa: BLE001 — a failed plan phase just degrades to a single session
             return []
         steps = []
@@ -840,11 +844,15 @@ class LLMRepoDeveloper:
                 write.files["looplab_stages.json"] = _json.dumps({"stages": clean}, indent=1)
             return clean or []
         try:
+            # Full session budget — the old tight clamp (30 turns / 300s) starved this phase on a
+            # big repo: it read for the whole budget, never reached declare_stages, and silently
+            # degraded to "no stages declared" (the node then evaluated as a bare single command —
+            # observed live). The soft nudge (agent_emit_after=300) / forced emit (agent_emit_force
+            # =500) convergence backstop + exhaustion salvage now bound it like every other phase.
             return drive_tool_loop(
                 self.client, read_only, messages, self._stages_emit_spec(),
                 finalize=_finalize, fallback=lambda m: [], validate=_validate,
-                **self._session_opts(max_turns=min(30, self._session_max_turns),
-                                     time_budget=min(300.0, self._session_time_budget_s))) or []
+                **self._session_opts()) or []
         except Exception:  # noqa: BLE001 — a failed stages phase degrades to the operator cmd alone
             return []
 
