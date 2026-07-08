@@ -290,7 +290,11 @@ class RunLauncherTools:
                 "checkpoint or a static results file (e.g. results_last.csv is a PRIOR run's output, not a "
                 "score). Reserve `onboard:true` (+ `onboard_command`) for the narrow case where a training "
                 "COMMAND already runs and you only need an adapter to READ its metric — do NOT use onboard "
-                "to BUILD a pipeline (with no command it degrades to reading a static file).",
+                "to BUILD a pipeline (with no command it degrades to reading a static file).\n"
+                "• If the eval TRAINS a model, set `eval.timeout` GENEROUSLY (seconds): training runs "
+                "minutes-to-hours but the default is only 600s, which SIGKILLs it mid-first-epoch and "
+                "silently yields an undertrained model. Size it to the full schedule (epochs × "
+                "minutes-per-epoch × 60 + scoring + margin — often 7200-14400s).",
                 {"run_id": {"type": "string", "description": "short kebab-case name you invent"},
                  "task": {"type": "object", "description": "inline task; repo needs eval-or-onboard, absolute editable_path, direction max|min, metric.kind a reader (not the direction)"},
                  "task_file": {"type": "string", "description": "a catalogue task path (alternative to task)"},
