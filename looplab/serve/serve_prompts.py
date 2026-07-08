@@ -57,14 +57,18 @@ def genesis_system(kinds: list, key_defaults: dict, cat_lines: str) -> str:
         "editable_path — do NOT substitute a similarly-named catalogue file; the catalogue is only "
         "for the bundled example tasks. An absolute path is best, but ~ and $HOME are expanded.\n"
         "- REPO data: WHENEVER the user says where the data is, mount it — add "
-        '"data":{"<name>":"<abs path>"} (each is copied to ./<name> in the eval workdir; ~/$HOME '
-        'expand) and reference it by that relative path. Read-only runtime deps go in '
-        '"references":[{"name":..,"path":..,"mount":true}]. Never drop a data path the user gave.\n'
+        '"dataset":{"<name>":"<abs path>"} (appears at ./<name> in the eval workdir; ~/$HOME expand) '
+        "and reference it by that relative path. A value may also be an object {path, mount(read-only "
+        "symlink vs copy-in), edit(default no), copy_modify, preprocess, extend} for per-source "
+        "permissions — default is read-only original with copy/preprocess/extend allowed. Read-only "
+        'runtime deps go in "references":[{"name":..,"path":..,"mount":true}]. Never drop a data path.\n'
         "- REPO with no entry script yet, OR a scorer but no trainer: the AGENT writes the missing "
-        'code. Point the command at a conventional file it will CREATE (e.g. ["python","run.py"]) '
-        "and INCLUDE that file in edit_surface so it may be created; when training must run before "
-        'scoring, put the trainer in eval.setup (e.g. ["python","train.py"] — it runs before the '
-        "eval each node). Keep the scorer in protect.\n"
+        "code. `cmd` is the SCORING step, not the trainer — TRAINING is a separate stage the agent "
+        "declares at run time (its declare_stages tool), and the engine runs it BEFORE the scorer. So: "
+        "if the repo has an existing scorer (test.py), set `cmd` to it and PROTECT it (the agent adds a "
+        "train stage before it); if the scorer must be built too, point `cmd` at a file the agent will "
+        "CREATE and do NOT protect it. Do NOT stuff the trainer into cmd.setup — setup is for dependency "
+        "installs, not training.\n"
         "- REPO, let the AGENT choose the arguments (the user does NOT want to enumerate flags): keep "
         'the command argument-free (e.g. ["python","run.py"]) and put a CONFIG the agent edits (e.g. '
         "config.yaml) in edit_surface — the agent reads the code and rewrites the config to switch "
@@ -75,9 +79,9 @@ def genesis_system(kinds: list, key_defaults: dict, cat_lines: str) -> str:
         'overrides, and add eval.profiles {"smoke":{"overrides":[..],"timeout":..},"full":{..}} for a '
         "cheap search + a full confirm. (Categorical impl-switches are NOT numeric — use the config "
         "approach above for those.)\n"
-        "- metric.kind options: stdout_json (default) | stdout_regex | file_json / file_regex (read a "
-        "file the run writes; dotted key ok) | adapter (the onboarding-written reader). Choose file_* "
-        "when the metric lands in a FILE rather than stdout.\n"
+        "- metric.reader options: stdout_json (default) | stdout_regex | file_json / file_regex (read a "
+        "file the run writes; dotted key ok) | auto (the agent writes the reader). Choose file_* "
+        "when the metric lands in a FILE rather than stdout. (Legacy spelling metric.kind still works.)\n"
         "- NO repo/code, just DATA + a goal (\"here is my data, get the best metric you see fit\"): "
         'author the fully-generative kind {"kind":"dataset","goal":"<what to do>","direction":"max",'
         '"data_path":"<abs path to the data file/dir>"} — the Developer writes the WHOLE solution and '
