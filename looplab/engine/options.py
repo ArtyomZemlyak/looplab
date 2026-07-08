@@ -111,6 +111,7 @@ class EngineOptions:
     research_verify: bool = True         # D8: verify memo claims against cited evidence
     workdir_audit: bool = True           # 4.4: flag unexpected writes in the eval workdir
     coverage_context: bool = True        # narrowing signal: coverage_snapshot at the strategist cadence
+    phase_handoff_summary: bool = True   # per-phase handoff briefs across a node build (propose→…→implement)
 
     @classmethod
     def from_settings(cls, s: "Settings") -> "EngineOptions":

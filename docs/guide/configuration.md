@@ -134,6 +134,7 @@ These are no-ops unless `backend=llm`.
 | `developer_plan_max_steps` | `LOOPLAB_DEVELOPER_PLAN_MAX_STEPS` | `8` | Cap on plan length (a runaway planner can't spawn 100 steps) |
 | `developer_session_max_turns` | `LOOPLAB_DEVELOPER_SESSION_MAX_TURNS` | `500` | Hard per-session tool-turn ceiling for the repo Developer (the one write-heavy agent that can run away even with stuck-detection on — varied writes/reads never trip the repeat signal). Bounds the plan phase, each step, and the single-session fallback |
 | `developer_session_time_budget_s` | `LOOPLAB_DEVELOPER_SESSION_TIME_BUDGET_S` | `1200` | Wall-clock ceiling per developer session (20 min); a model that never emits `done` fails cleanly with the code it wrote |
+| `phase_handoff_summary` | `LOOPLAB_PHASE_HANDOFF_SUMMARY` | `true` | Per-node phase coordination: (1) each exploration phase (Researcher·propose → Developer·stages → plan) ends with ONE call that distills its transcript into a brief injected into later phases — even across the role boundary — so they trust it instead of re-reading; (2) a **node-scoped read cache** shared across the phases, so a file one phase read isn't re-read (a deterministic tool-call cut, not just a prose nudge). Terminal phases (implement / repair) consume but don't summarize (no wasted call) |
 
 ### Per-role / per-stage models
 

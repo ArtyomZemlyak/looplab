@@ -99,6 +99,7 @@ ATTR_BY_FIELD = {
     "research_verify": "_research_verify",
     "workdir_audit": "_workdir_audit",
     "coverage_context": "_coverage_context",
+    "phase_handoff_summary": "_phase_handoff_summary",
 }
 
 

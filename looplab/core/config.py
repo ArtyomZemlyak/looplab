@@ -560,6 +560,13 @@ class Settings(BaseSettings):
     # model that never emits `done` fails cleanly with the code it wrote so far, instead of looping.
     developer_session_max_turns: int = 500
     developer_session_time_budget_s: float = 1200.0  # 20 min wall-clock per developer session
+    # Phase-handoff summaries. Each LLM phase in a node build (Researcher·propose → Developer·stages →
+    # plan → implement) ends with ONE extra LLM call that distills its transcript — the repo structure
+    # it mapped, files/data confirmed, decisions made — into a brief injected into the NEXT phase (even
+    # across the role boundary). The next phase TRUSTS that instead of re-reading the same files, which
+    # cuts the biggest source of tool-call thrash (stages/plan/implement each re-exploring the repo).
+    # One summary call per phase in exchange for many fewer read calls downstream. ON by default.
+    phase_handoff_summary: bool = True
     # Observability (ADR-17): capture each LLM call's full prompt + completion into the active
     # span (spans.jsonl) so the UI can show exactly what the model read and wrote per node.
     # Diagnostics only — `replay.fold` never reads spans. Default on for local single-user; set

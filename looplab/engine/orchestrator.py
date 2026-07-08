@@ -185,6 +185,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin):
         research_verify: bool = _UNSET,        # D8: verify memo claims against cited evidence
         workdir_audit: bool = _UNSET,          # 4.4: flag unexpected writes in the eval workdir
         coverage_context: bool = _UNSET,       # narrowing signal: coverage_snapshot at strategist cadence
+        phase_handoff_summary: bool = _UNSET,  # per-phase handoff briefs across a node build
         lesson_abstractor=None,              # Memora synergy: harmonic recall over cross-run lessons
     ):
         # Resolve each pure-config knob ONCE, up front — explicit kwarg > options field > default —
@@ -208,6 +209,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin):
         require_approval = _opt(require_approval, "require_approval")
         archive_resolution = _opt(archive_resolution, "archive_resolution")
         coverage_context = _opt(coverage_context, "coverage_context")
+        phase_handoff_summary = _opt(phase_handoff_summary, "phase_handoff_summary")
         eval_trust_mode = _opt(eval_trust_mode, "eval_trust_mode")
         trust_mode = _opt(trust_mode, "trust_mode")
         docker_image = _opt(docker_image, "docker_image")
@@ -369,6 +371,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin):
         self._research_verify = bool(research_verify)
         self._workdir_audit = bool(workdir_audit)
         self._coverage_context = bool(coverage_context)
+        self._phase_handoff_summary = bool(phase_handoff_summary)
         # Novelty stance (Strategist-owned dial): how hard the proposer / foresight ranker / novelty
         # gate push for NEW directions. "balanced" == today's behavior; the Strategist raises it to
         # "explore" when coverage shows narrowing, or "exploit" to converge. Set by _apply_strategy.
@@ -2003,7 +2006,13 @@ class Engine(ConfirmPhaseMixin, AblationMixin):
         state = fold(self.store.read_all())
         node_id = max(state.nodes, default=-1) + 1  # monotonic across the whole run -> unique
         kind = action["kind"]
-        with self.tracer.span("create_node", new_trace=True, node_id=node_id, operator=kind):
+        # Phase-handoff ledger for THIS node build: propose → stages → plan → implement each distill
+        # their transcript into a brief the next phase reads (see agents.agent.run_phase), so later
+        # phases trust what earlier ones explored instead of re-reading the repo. Node-scoped (fresh
+        # per build), and a no-op when the setting is off.
+        from looplab.agents.agent import handoff_scope
+        with self.tracer.span("create_node", new_trace=True, node_id=node_id, operator=kind), \
+                handoff_scope(enabled=self._phase_handoff_summary):
             # Announce the node the INSTANT we start building it — before the Researcher/Developer run —
             # so the UI shows it (and streams its live agent-trace) immediately, not only after the
             # minutes-long dev session ends with node_created. Transient marker (folds to st.building,

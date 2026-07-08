@@ -8,6 +8,8 @@ orchestrator is unchanged.
 """
 from __future__ import annotations
 
+import contextlib
+import contextvars
 import itertools
 import json
 import time
@@ -255,7 +257,10 @@ def drive_tool_loop(client, tools, messages: list, emit_spec: dict, *,
     emit_rejects = 0                    # bad emits bounced back for a re-emit (validate + emit_retries)
     tool_turns = 0                      # G: investigation turns, for the emit_after soft-convergence nudge
     emit_nudged = False
-    read_seen: dict = {}                 # G2: (tool,args) -> FIRST capped result, for read-dedup + stuck parity
+    # G2: (tool,args) -> FIRST capped result, for read-dedup + stuck parity. Prefer the NODE-scoped
+    # cache (shared across this node's phases via handoff_scope) so a file an earlier phase already read
+    # isn't re-read here; falls back to a loop-local dict when no scope is active (aux loops, tests).
+    read_seen: dict = _read_cache_ctx.get() if _read_cache_ctx.get() is not None else {}
     exhausted = False                    # ran out of turns/time (vs stalled/stuck/cancelled)
     turns = itertools.count() if max_turns is None or max_turns <= 0 else range(max_turns)
     for turn_idx in turns:
@@ -397,9 +402,10 @@ def drive_tool_loop(client, tools, messages: list, emit_spec: dict, *,
                 if _dk is not None and _dk in read_seen:
                     stuck_obs = read_seen[_dk]
                     _step(turn=turn_idx, tool=name, arg="(repeat suppressed)")
-                    result = (f"(already ran `{name}` with these exact args earlier this turn — result "
-                              f"unchanged, not re-sent. Use the earlier output; to learn more read a "
-                              f"DIFFERENT file/range, else call `{emit_name}` with your best idea.)")
+                    result = (f"(already ran `{name}` with these exact args earlier (this phase or an "
+                              f"earlier one of this node) — result unchanged, not re-sent. Use the "
+                              f"earlier output; to learn more read a DIFFERENT file/range, else call "
+                              f"`{emit_name}` with your best idea.)")
                     if on_tool_result is not None:
                         on_tool_result(name, args, result)
                 else:
@@ -542,6 +548,111 @@ def _summarizer(client):
         msg = client.chat(msgs_for(text), [], tool_choice="none")
         return str((msg or {}).get("content") or "").strip()
     return _summarize
+
+
+def _flatten_transcript(messages) -> str:
+    """Render a tool-loop's messages into a plain-text transcript for summarization: role-tagged
+    lines, tool calls named, tool results labeled. Drops the (huge, non-carryable) system prompt and
+    caps the total so one over-long phase can't blow the summary call's context."""
+    parts = []
+    for m in messages or []:
+        role = m.get("role")
+        if role == "system":
+            continue                       # the phase's own instructions aren't context to hand off
+        content = str(m.get("content") or "")
+        tcs = m.get("tool_calls") or []
+        if tcs:
+            names = ", ".join((tc.get("function") or {}).get("name", "") for tc in tcs)
+            content = (content + f" [tool calls: {names}]").strip()
+        if role == "tool":
+            content = f"[tool result] {content}"
+        if content:
+            parts.append(f"{role}: {content}")
+    return "\n".join(parts)[:60_000]
+
+
+# Node-scoped PHASE-HANDOFF ledger (contextvar, like tracing._node_ctx). The engine opens a
+# `handoff_scope()` around each node build; every LLM phase that runs through `run_phase` inside it
+# reads the accumulated briefs (so it trusts what earlier phases — even a different ROLE — already
+# explored) and appends its own. None = no active scope → run_phase is a plain drive_tool_loop
+# (unit tests, aux single-shot loops outside a node build). Isolated per node: each build gets a
+# fresh list, and a parallel build runs in its own contextvars context.
+_handoff_ctx: contextvars.ContextVar = contextvars.ContextVar("LOOPLAB_handoff", default=None)
+# Node-scoped READ CACHE (companion to the ledger): (tool,args)->first result for _DEDUP_SAFE readers,
+# shared across a node's phases. drive_tool_loop's own read-dedup is loop-local, so stages/plan/implement
+# each re-read the same files from scratch; hoisting the cache to the node scope makes a re-read of a
+# file an EARLIER phase already read return the cached content instead of a fresh tool round-trip — the
+# deterministic half of the handoff (the brief only *discourages* re-reading; this makes it cheap).
+_read_cache_ctx: contextvars.ContextVar = contextvars.ContextVar("LOOPLAB_readcache", default=None)
+
+
+@contextlib.contextmanager
+def handoff_scope(enabled: bool = True):
+    """Open the per-node phase-coordination scope: a handoff ledger (briefs flow phase→phase) AND a
+    shared read cache (a file read in one phase isn't re-read in the next). `enabled=False` is a no-op
+    (the master switch, `Settings.phase_handoff_summary`), so run_phase / drive_tool_loop behave exactly
+    as before — per-loop dedup, no briefs."""
+    if not enabled:
+        yield
+        return
+    tok, tok_rc = _handoff_ctx.set([]), _read_cache_ctx.set({})
+    try:
+        yield
+    finally:
+        _handoff_ctx.reset(tok)
+        _read_cache_ctx.reset(tok_rc)
+
+
+def run_phase(client, tools, messages, emit_spec, *, label: str, next_label: str = "the next phase",
+              handoff: bool = True, finalize, fallback, **loop_kwargs):
+    """`drive_tool_loop` + cross-phase handoff summaries. When a `handoff_scope` is active it (1)
+    injects the briefs accumulated by earlier phases of this node into `messages` — so this phase
+    (even a different ROLE) trusts what's already been explored instead of re-reading the repo/data —
+    then (2) after the loop, distills THIS phase's transcript into the ledger (one best-effort LLM
+    call) for the next phase. Pass `handoff=False` for a TERMINAL phase (nothing downstream reads its
+    brief — the single-session implement, the last plan step, a repair) so it doesn't spend a wasted
+    summary call. A drop-in for drive_tool_loop: with no active scope it just forwards."""
+    ledger = _handoff_ctx.get()
+    if ledger:                              # earlier phases produced briefs → inject them up front
+        ins = 1 if (messages and messages[0].get("role") == "system") else 0
+        messages.insert(ins, {"role": "user", "content": (
+            "CONTEXT FROM EARLIER PHASES of this node (a coding agent — possibly a different role — "
+            "already explored this; TRUST it and do NOT re-read the same files/dirs, read only what is "
+            "genuinely new):\n" + "\n\n".join(ledger))})
+    result = drive_tool_loop(client, tools, messages, emit_spec,
+                             finalize=finalize, fallback=fallback, **loop_kwargs)
+    if handoff and ledger is not None:      # non-terminal phase in an active scope → contribute a brief
+        s = summarize_phase(client, messages, phase=label, next_phase=next_label)
+        if s:
+            ledger.append(f"[{label}]\n{s}")
+    return result
+
+
+def summarize_phase(client, messages, *, phase: str, next_phase: str, min_chars: int = 2_000) -> str:
+    """ONE LLM call that distills a COMPLETED phase's transcript into a handoff brief for the NEXT
+    phase — so the next phase trusts what was already explored instead of re-reading the same repo /
+    data (the tool-call explosion this cuts). Best-effort: returns '' on any client error, and skips
+    the call entirely when there's too little to distill (a phase that barely read anything). The
+    caller injects the returned brief into the next phase's prompt."""
+    try:
+        blob = _flatten_transcript(messages)
+        if len(blob) < min_chars:          # nothing meaningful explored — a summary call would be waste
+            return ""
+        sys = (f"You are handing off from the '{phase}' phase to the '{next_phase}' phase of a coding "
+               "agent working on a repo. Distill the transcript below into a TIGHT brief the next phase "
+               "needs so it does NOT have to re-read what this phase already explored. Cover: the repo "
+               "structure + KEY files and their roles, the entry point / eval flow, data & model paths "
+               "CONFIRMED to exist, library APIs/versions already checked, and the concrete DECISIONS "
+               "made. Bullet points, facts only — omit anything the next phase can't act on.")
+        msgs = [{"role": "system", "content": sys}, {"role": "user", "content": blob}]
+        ct = getattr(client, "complete_text", None)
+        if callable(ct):
+            return str(ct(msgs) or "").strip()
+        return str((client.chat(msgs, [], tool_choice="none") or {}).get("content") or "").strip()
+    except BudgetExceeded:  # a hard budget stop must propagate — never masked by the optional summary
+        raise
+    except Exception:  # noqa: BLE001 — otherwise a handoff summary is best-effort; never crash the phase
+        return ""
 
 
 def loop_opts_from_settings(settings) -> dict:
@@ -702,8 +813,9 @@ class ToolUsingResearcher:
                 "loss, data, training) if that's the stronger move. Consult knowledge if useful, then emit."},
         ]
         try:
-            return drive_tool_loop(
+            return run_phase(
                 self.client, self.tools, messages, self._emit_spec(),
+                label="Researcher·propose", next_label="the Developer (stages → plan → implement)",
                 max_turns=self.max_turns, context_budget_chars=self.context_budget_chars,
                 time_budget_s=self.time_budget_s,
                 finalize=self._finalize, fallback=self._fallback,

@@ -669,7 +669,7 @@ class LLMRepoDeveloper:
         """Plan phase: a READ-ONLY stage — the developer inspects the real code/experiments (it CANNOT
         write here), and its only exit is `propose_plan` (the ordered atomic plan). Returns a list of
         {title, detail}; [] on empty/failure so the caller falls back to one session."""
-        from looplab.agents.agent import drive_tool_loop, CompositeTools
+        from looplab.agents.agent import run_phase, CompositeTools
         from looplab.tools.env_inspect import EnvInspectTools
         params = ", ".join(f"{k}={v}" for k, v in (idea.params or {}).items()) or "(choose sensible values)"
         plan_user = (
@@ -693,8 +693,9 @@ class LLMRepoDeveloper:
             # loop_opts, and budget exhaustion salvages a forced emit. The old tight clamp
             # (40 turns / 360s) starved the planner on a big repo the same way it starved the
             # stages phase (read the repo for the whole budget, degrade to []).
-            plan = drive_tool_loop(
+            plan = run_phase(
                 self.client, read_only, messages, self._plan_emit_spec(),
+                label="Developer·plan", next_label="the implement phase",
                 finalize=lambda a: (a or {}).get("steps", []), fallback=lambda m: [],
                 **self._session_opts())
         except Exception:  # noqa: BLE001 — a failed plan phase just degrades to a single session
@@ -713,7 +714,7 @@ class LLMRepoDeveloper:
         error never aborts the plan — later steps + the eval still run on whatever got written.
         `stage_note` restates the node's ACTUAL declared pipeline (or its absence) so a step session
         never assumes a train stage the stages phase didn't produce."""
-        from looplab.agents.agent import drive_tool_loop, CompositeTools
+        from looplab.agents.agent import run_phase, CompositeTools
         from looplab.tools.env_inspect import EnvInspectTools
         done_so_far = ", ".join(write.files) or "(none yet)"
         step_user = (
@@ -727,9 +728,13 @@ class LLMRepoDeveloper:
             "the rest. If this is the last step, make sure the eval entrypoint runs end-to-end.")
         messages = [{"role": "system", "content": system}, {"role": "user", "content": step_user}]
         try:
-            drive_tool_loop(self.client, CompositeTools([write, EnvInspectTools()] + self._scout_tools(write)),
-                            messages, self._emit_spec(), finalize=lambda a: (a or {}).get("summary", ""),
-                            fallback=lambda m: "", **self._session_opts())
+            # implement steps CONSUME the stages/plan briefs + share the node read-cache, but don't
+            # contribute (their writes add length faster than signal, and the last step is terminal) —
+            # so the ledger stays the 3 exploration briefs (propose/stages/plan), never K-step bloat.
+            run_phase(self.client, CompositeTools([write, EnvInspectTools()] + self._scout_tools(write)),
+                      messages, self._emit_spec(), label=f"Developer·implement step {idx}/{total}",
+                      handoff=False, finalize=lambda a: (a or {}).get("summary", ""),
+                      fallback=lambda m: "", **self._session_opts())
         except Exception as e:  # noqa: BLE001
             return f"(step {idx} error: {e})"
         return ""
@@ -823,7 +828,7 @@ class LLMRepoDeveloper:
         operator's cmd and emits `declare_stages` — the ordered pipeline (prep → train → …) that runs
         before the protected `score` step. Writes `looplab_stages.json`. Returns the clean stage list ([]
         on failure — the eval then falls back to just the operator cmd)."""
-        from looplab.agents.agent import drive_tool_loop, CompositeTools
+        from looplab.agents.agent import run_phase, CompositeTools
         from looplab.tools.env_inspect import EnvInspectTools
         from looplab.runtime.command_eval import validate_stages
         import json as _json
@@ -849,8 +854,9 @@ class LLMRepoDeveloper:
             # degraded to "no stages declared" (the node then evaluated as a bare single command —
             # observed live). The soft nudge (agent_emit_after=300) / forced emit (agent_emit_force
             # =500) convergence backstop + exhaustion salvage now bound it like every other phase.
-            return drive_tool_loop(
+            return run_phase(
                 self.client, read_only, messages, self._stages_emit_spec(),
+                label="Developer·stages", next_label="the plan & implement phases",
                 finalize=_finalize, fallback=lambda m: [], validate=_validate,
                 **self._session_opts()) or []
         except Exception:  # noqa: BLE001 — a failed stages phase degrades to the operator cmd alone
@@ -859,7 +865,7 @@ class LLMRepoDeveloper:
     def _run(self, idea: Idea, error: Optional[str] = None,
              base: Optional[dict] = None, base_note: str = "",
              base_deleted: Optional[list] = None) -> str:
-        from looplab.agents.agent import drive_tool_loop
+        from looplab.agents.agent import run_phase
         from looplab.core import tracing
         write = RepoWriteTools(self._surface, self._protected, self._prefixes, editables=self._editables)
         if base is not None or base_deleted is not None:
@@ -981,13 +987,19 @@ class LLMRepoDeveloper:
                         self._run_step(idea, step, i, len(steps), write, system,
                                        stage_note=stage_note)  # a step error can't abort the plan
                 else:
-                    drive_tool_loop(self.client, tools, messages, self._emit_spec(),
-                                    finalize=lambda a: (a or {}).get("summary", ""),
-                                    fallback=lambda m: "", **self._session_opts())
+                    # single-session implement is TERMINAL (evaluation reads no brief) → consume the
+                    # briefs + read-cache, but no wasted summary call (handoff=False).
+                    run_phase(self.client, tools, messages, self._emit_spec(),
+                              label="Developer·implement", handoff=False,
+                              finalize=lambda a: (a or {}).get("summary", ""),
+                              fallback=lambda m: "", **self._session_opts())
             else:
-                drive_tool_loop(self.client, tools, messages, self._emit_spec(),
-                                finalize=lambda a: (a or {}).get("summary", ""),
-                                fallback=lambda m: "", **self._session_opts())
+                # repair / toy single session — terminal, so no summary (and repair isn't in a scope
+                # anyway when it runs inline during eval; the debug-operator repair gets an empty ledger).
+                run_phase(self.client, tools, messages, self._emit_spec(),
+                          label=("Developer·repair" if error else "Developer·implement"), handoff=False,
+                          finalize=lambda a: (a or {}).get("summary", ""),
+                          fallback=lambda m: "", **self._session_opts())
         except Exception as e:  # noqa: BLE001 - never crash the engine on a developer hiccup
             self.last_files = dict(write.files)
             self.last_deleted = list(write.deleted)

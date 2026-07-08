@@ -164,6 +164,31 @@ preview. Two tools make this practical:
 - **`gpu_info`** reports the visible GPUs (count / names / memory via `torch.cuda`) — the `nvidia-smi`
   equivalent for an agent that has no shell, so the plan can size a model/batch to the real hardware.
 
+## Phase-handoff summaries
+
+Each LLM phase in a node build re-explores the same repo — the stages phase maps it, then plan reads
+it again, then implement reads it again. **`phase_handoff_summary`** (on by default) cuts that with two
+node-scoped mechanisms that share one `handoff_scope` the engine opens around each build:
+
+- **Handoff briefs.** When an *exploration* phase emits, ONE extra LLM call distills its whole
+  transcript — the repo structure it mapped, the files/data/APIs it confirmed, the decisions it made —
+  into a tight brief injected into the **next** phase's prompt, which is told to *trust it and not
+  re-read*. The brief flows across the whole build and **across the role boundary**:
+  `Researcher·propose → Developer·stages → plan → implement`. Only the three exploration phases
+  contribute (the ledger stays ≤3 briefs — no K-step bloat); terminal phases (a single-session
+  implement, each implement step, a repair) **consume** the briefs but don't summarize, so there's no
+  wasted call on the tail. The summary is best-effort (any error → the next phase just runs without it)
+  and skipped for a phase that barely read anything.
+- **A shared read cache.** The briefs only *discourage* re-reading; the read cache makes it *cheap*.
+  `drive_tool_loop`'s read-dedup is normally loop-local (it resets each phase), so hoisting it to the
+  node scope means a `read_file`/`grep`/`list_dir` an *earlier* phase already ran returns the cached
+  content instead of a fresh tool round-trip — the deterministic half of the win. A write in a later
+  phase invalidates it, exactly as the in-loop dedup does.
+
+Together they attack the biggest source of tool-call thrash (stages/plan/implement each re-reading the
+repo). A parallel node build gets its own scope; every phase runs through the shared `run_phase`
+wrapper, so with the setting off it's byte-identical to a plain `drive_tool_loop`.
+
 ## Agentic auxiliary steps
 
 Every remaining single-shot LLM step is now a **tool-using agent** (via the shared `agentic_text` /
