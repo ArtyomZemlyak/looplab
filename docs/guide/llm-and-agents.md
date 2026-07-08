@@ -128,13 +128,26 @@ this robust (all on by default):
 The built-in LLM Developer (writes code via your endpoint, no external fetch) remains the
 zero-dependency default coding path.
 
-## The Developer: read-only planning + env inspection
+## The Developer: three phases (stages → plan → implement)
 
-Before it writes anything, the repo Developer runs a **read-only PLAN stage**: it gets the read-only
-repo scouts plus the env inspector (`read_file`, `grep`, `find_files`, `list_dir`, `pkg_info`,
-`py_api`, `gpu_info`) — but **no write tools** — and its only output is an ordered plan. So it reads
-the real eval/entry script and the files it will change *before* deciding what to do, instead of
-planning blind off a truncated preview. Two tools make this practical:
+On a fresh (non-repair) repo node the Developer runs **three separately-traced phases**, so the context
+stays focused and the trace reads cleanly:
+
+1. **STAGES** (mandatory, first) — a **read-only** phase whose only exit is `declare_stages`. The
+   Developer studies the repo + the operator's `cmd` and declares the ordered eval pipeline (e.g.
+   `data_prep → train → …`) that runs BEFORE the operator's protected `score` step, baking this node's
+   hyperparameters into the train command. It writes `looplab_stages.json`. The **Developer** owns the
+   stages (it knows the repo), not the planner/Genesis. If `cmd` is present it's shown as immutable (the
+   final `score` stage is reserved for it — declare only the preceding stages); if absent, declare the
+   full pipeline including the scorer. Good practice: separate **prep / train / test** stages.
+2. **PLAN** — decomposes the code changes into ordered atomic steps (still read-only).
+3. **IMPLEMENT** — writes the code those stages run, one bounded session per step.
+
+A **repair** skips stages+plan and is one focused session. The first **two** phases are read-only: they
+get the repo scouts plus the env inspector (`read_file`, `grep`, `find_files`, `list_dir`, `pkg_info`,
+`py_api`, `gpu_info`) — but **no write tools** — so the Developer reads the real eval/entry script and
+the files it will change *before* deciding what to do, instead of planning blind off a truncated
+preview. Two tools make this practical:
 
 - **`read_file` paginates.** It takes `start_line` + `lines` to window a large file (like an editor's
   "go to line N, show M lines"), so the planner reads a file *once* and resumes from where it left off
