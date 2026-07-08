@@ -47,6 +47,19 @@ class EditableSpec(BaseModel):
     seed_mode: str = ""
 
 
+class DataSpec(BaseModel):
+    """One data input with PER-SOURCE permissions (composable data model). The ORIGINAL is read-only
+    by default (the agent may always read it and produce DERIVED data in its own workdir); the flags
+    relax or restrict that. A bare string path in `data`/`dataset` desugars to `DataSpec(path=…)` with
+    all defaults (everything allowed EXCEPT editing the original)."""
+    path: str
+    mount: bool = True         # (1) read-only symlink at ./<name> (default) | False = copy INTO the workdir
+    edit: bool = False         # (2) may the agent modify the source/copy IN PLACE? default False (protect original)
+    copy_modify: bool = True   # (3) may the agent copy it and modify the copy?
+    preprocess: bool = True    # (4) may the agent preprocess/augment/feature-engineer it into a training set?
+    extend: bool = True        # (5) may the agent extend / expand the data?
+
+
 class EvalSpec(BaseModel):
     """The operator's trusted evaluation (the agent does not author this)."""
     command: list[str]                       # argv, no shell; carries env activation
@@ -186,7 +199,19 @@ class RepoTask(BaseModel):
     # root repo) to let the agent edit across several repos in one experiment.
     editables: list[EditableSpec] = Field(default_factory=list)
     references: list[ReferenceSpec] = Field(default_factory=list)
-    data: dict[str, str] = Field(default_factory=dict)  # name -> abs path, copied into eval wd
+    # name -> data input. A value may be a bare abs-path string (all-default permissions) or a
+    # DataSpec {path, mount, edit, copy, preprocess, extend}. Mounted read-only at ./<name> unless
+    # its spec says otherwise. See DataSpec for the per-source permission semantics.
+    data: dict[str, DataSpec] = Field(default_factory=dict)
+
+    @field_validator("data", mode="before")
+    @classmethod
+    def _coerce_data(cls, v):
+        """Accept a bare path string per source (name -> "/abs/path") as shorthand for a DataSpec with
+        all defaults, alongside the full object form (name -> {path, mount, edit, …})."""
+        if isinstance(v, dict):
+            return {k: ({"path": val} if isinstance(val, str) else val) for k, val in v.items()}
+        return v
     eval: Optional[EvalSpec] = None            # operator-given eval; None when onboard=True
     # cli_overrides hyperparameter space (Phase 2): name -> (lo, hi). When set with
     # eval.params_style="cli_overrides", the Researcher tunes these and they become CLI
@@ -222,7 +247,8 @@ class RepoTask(BaseModel):
             e.path = exp(e.path)
         for r in self.references:
             r.path = exp(r.path)
-        self.data = {k: exp(v) for k, v in self.data.items()}
+        for spec in self.data.values():
+            spec.path = exp(spec.path)
         return self
 
     @field_validator("editables")
@@ -341,6 +367,13 @@ class RepoTask(BaseModel):
         for ed in self._editable_mounts():
             pre = "" if ed["name"] in (".", "") else ed["name"].rstrip("/") + "/"
             names += [self._normp(pre + p) for p in ed["protect"]]
+        # A data source the agent may NOT edit (the default) is protected against writes UNDER its
+        # mount, so the agent can't mutate the original through the ./<name> symlink. `edit:true`
+        # sources stay writable (the agent works on them in place).
+        for name, spec in self.data.items():
+            if not spec.edit:
+                nm = name.rstrip("/")
+                names += [self._normp(nm), self._normp(nm + "/**")]
         return names + self._eval_protected()
 
     def agent_brief(self) -> str:
@@ -363,8 +396,22 @@ class RepoTask(BaseModel):
         return (f"You are improving an existing experiment repository to {goal} the eval "
                 f"metric. Goal: {self.goal}\n"
                 f"You may ONLY edit files matching: {surf}. Do NOT modify (the operator "
-                f"runs the evaluation): {prot}. The eval is run as: `{cmd}`.{deps} Make one "
+                f"runs the evaluation): {prot}. The eval is run as: `{cmd}`.{deps}"
+                f"{self._data_brief()} Make one "
                 f"focused change to make the eval succeed and improve the metric, then stop.")
+
+    def _data_brief(self) -> str:
+        """Tell the agent what it may do with each mounted data source (per-source permissions)."""
+        if not self.data:
+            return ""
+        parts = []
+        for name, s in self.data.items():
+            where = f"./{name}" + (" (read-only mount)" if s.mount else " (a writable copy)")
+            allow = [w for w, on in (("edit-in-place", s.edit), ("copy+modify", s.copy_modify),
+                                     ("preprocess/augment", s.preprocess), ("extend", s.extend)) if on]
+            deny = "" if s.edit else " — do NOT edit the original; write any derived data elsewhere in the workdir"
+            parts.append(f"{where}: may {', '.join(allow) or 'read'}{deny}")
+        return " Data inputs: " + "; ".join(parts) + "."
 
     def repo_spec(self) -> dict:
         mounts = self._editable_mounts()
@@ -377,7 +424,7 @@ class RepoTask(BaseModel):
             "edit_surface": surface,                     # namespaced union over all repos
             "protected_names": self._protected_names(),
             "references": [r.model_dump() for r in self.references],
-            "data": dict(self.data),
+            "data": {name: spec.model_dump() for name, spec in self.data.items()},
             # Back-compat single-seed hint (first editable): consumers that still seed one dir.
             "editable_path": mounts[0]["path"] if mounts else "",
         }

@@ -66,9 +66,10 @@ def _artifact_roots(rd: Path) -> list[dict]:
                 dm = data.get("data")
                 if isinstance(dm, dict):
                     for name, p in dm.items():
-                        if isinstance(name, str) and isinstance(p, str) and p:
+                        pp = p.get("path") if isinstance(p, dict) else p   # DataSpec dict | bare path
+                        if isinstance(name, str) and isinstance(pp, str) and pp:
                             roots.append({"id": f"data:{name}", "label": f"data: {name}",
-                                          "base": Path(_art_expand(p))})
+                                          "base": Path(_art_expand(pp))})
         except Exception:  # noqa: BLE001 — best-effort discovery; any parse error → no extra roots
             pass
     out: list[dict] = []

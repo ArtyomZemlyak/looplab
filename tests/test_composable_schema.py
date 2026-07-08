@@ -33,6 +33,20 @@ def test_cmd_bare_list_and_dataset_bare_path():
     assert n["data"] == {"dataset": "/data/foo.csv"}          # bare path -> ./dataset mount
 
 
+def test_metric_reader_alias_applies_to_sub_readers():
+    # review fix: reader→kind must reach metrics/constraints/cross_check, not just the primary metric,
+    # else a `reader:`-spelled sub-reader silently defaults to stdout_json at eval time.
+    e = normalize_task({"repo": "/r", "direction": "max", "cmd": {
+        "command": ["python", "r.py"], "metric": {"reader": "stdout_json", "key": "s"},
+        "metrics": {"lat": {"reader": "file_json", "path": "m.json", "key": "lat"}},
+        "constraints": [{"reader": "file_json", "path": "m.json", "key": "lat", "max": 100}],
+        "cross_check": {"reader": "stdout_regex", "pattern": "acc=([0-9.]+)"}}})["eval"]
+    assert e["metric"]["kind"] == "stdout_json"
+    assert e["metrics"]["lat"]["kind"] == "file_json" and "reader" not in e["metrics"]["lat"]
+    assert e["constraints"][0]["kind"] == "file_json"
+    assert e["cross_check"]["kind"] == "stdout_regex"
+
+
 def test_metric_reader_auto_folds_to_onboard():
     n = normalize_task({"repo": "/repo", "direction": "max",
                         "cmd": {"command": ["python", "train.py"], "metric": {"reader": "auto"}}})
@@ -169,6 +183,24 @@ def test_build_command_no_double_inject_with_token_and_params_style():
     cmd, _ = build_command({"command": ["python", "t.py", "%params%"], "params_style": "cli_overrides"},
                            {"lr": 0.001})
     assert cmd == ["python", "t.py", "--lr", "0.001"]      # only the token form, not also lr=0.001
+
+
+def test_per_source_data_permissions(tmp_path):
+    repo = tmp_path / "r"; repo.mkdir()
+    src = tmp_path / "d"; src.mkdir()
+    t = validate_task({"goal": "g", "direction": "max", "repo": str(repo),
+                       "cmd": {"command": ["python", "t.py"], "metric": {"reader": "stdout_json", "key": "r"}},
+                       "dataset": {
+                           "raw": {"path": str(src), "mount": True, "edit": False},
+                           "work": {"path": str(src), "mount": False, "edit": True},
+                           "bare": str(src)}})   # bare path -> all defaults
+    assert t.data["raw"].mount and not t.data["raw"].edit
+    assert not t.data["work"].mount and t.data["work"].edit
+    assert t.data["bare"].mount and not t.data["bare"].edit and t.data["bare"].copy_modify   # defaults
+    prot = t.repo_spec()["protected_names"]
+    assert "raw" in prot and "raw/**" in prot and "bare/**" in prot   # non-edit sources protected
+    assert "work" not in prot and "work/**" not in prot              # edit=true source stays writable
+    assert "read-only mount" in t._data_brief() and "writable copy" in t._data_brief()
 
 
 def test_api_start_infers_kind_for_composable_task():

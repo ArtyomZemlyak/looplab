@@ -44,7 +44,7 @@ def test_editable_path_expands_user_and_env(monkeypatch):
                   references=[{"name": "ref", "path": "~/ref"}], data={"d": "~/data.csv"})
     assert norm(t2.editable_path) == norm(os.path.join(home, "proj"))
     assert norm(t2.references[0].path) == norm(os.path.join(home, "ref"))
-    assert norm(t2.data["d"]) == norm(os.path.join(home, "data.csv"))
+    assert norm(t2.data["d"].path) == norm(os.path.join(home, "data.csv"))   # data value is a DataSpec now
 
 
 def test_read_metric_stdout_and_regex():

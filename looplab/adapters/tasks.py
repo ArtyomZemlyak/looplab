@@ -133,26 +133,38 @@ def normalize_task(data: dict) -> dict:
         d["eval"] = {"command": list(cmd)} if isinstance(cmd, list) else dict(cmd or {})
 
     # --- inside the eval/cmd spec: metric.reader alias + "auto" -> onboarding fold ---
+    def _reader_to_kind(spec):
+        # A metric-reader dict may spell its reader as `reader` (composable) — map to the engine's
+        # `kind`. Applied to EVERY reader (primary metric, multi-objective `metrics`, `constraints`,
+        # `cross_check`), so a `reader:`-spelled sub-reader isn't silently read as stdout_json.
+        if isinstance(spec, dict) and "reader" in spec and "kind" not in spec:
+            spec = dict(spec)
+            spec["kind"] = spec.pop("reader")
+        return spec
+
     ev = d.get("eval")
     if isinstance(ev, dict):
         ev = dict(ev)
         m = ev.get("metric")
-        if isinstance(m, dict) and "reader" in m:
-            m = dict(m)
-            reader = m.pop("reader")
-            if reader == "auto":
-                # "auto" reader == the agent writes the metric adapter -> the onboarding path. The
-                # command becomes the onboard command; `eval` is left None until the onboarder ratifies.
-                d.setdefault("onboard", True)
-                if ev.get("command") and not d.get("onboard_command"):
-                    d["onboard_command"] = list(ev["command"])
-                if ev.get("timeout"):
-                    d.setdefault("onboard_timeout", float(ev["timeout"]))
-                d["eval"] = None
-                ev = None
-            else:
-                m.setdefault("kind", reader)
-                ev["metric"] = m
+        if isinstance(m, dict) and m.get("reader") == "auto":
+            # "auto" reader == the agent writes the metric adapter -> the onboarding path. The command
+            # becomes the onboard command; `eval` is left None until the onboarder ratifies.
+            d.setdefault("onboard", True)
+            if ev.get("command") and not d.get("onboard_command"):
+                d["onboard_command"] = list(ev["command"])
+            if ev.get("timeout"):
+                d.setdefault("onboard_timeout", float(ev["timeout"]))
+            d["eval"] = None
+            ev = None
+        else:
+            if isinstance(m, dict):
+                ev["metric"] = _reader_to_kind(m)
+            if isinstance(ev.get("metrics"), dict):          # multi-objective aux readers
+                ev["metrics"] = {k: _reader_to_kind(v) for k, v in ev["metrics"].items()}
+            if isinstance(ev.get("constraints"), list):      # constraint readers
+                ev["constraints"] = [_reader_to_kind(c) for c in ev["constraints"]]
+            if isinstance(ev.get("cross_check"), dict):      # drift cross-check reader
+                ev["cross_check"] = _reader_to_kind(ev["cross_check"])
         if ev is not None:
             d["eval"] = ev
 

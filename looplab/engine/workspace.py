@@ -108,7 +108,8 @@ class WorkspaceSeeder:
         # the fingerprint never walks a multi-GB dataset on every (re)start.
         for ed in self._e._repo_spec.get("editables", []):
             srcs[f"editable:{ed['name']}"] = _dir_fingerprint(ed["path"])
-        for name, src in self._e._repo_spec.get("data", {}).items():
+        for name, spec in self._e._repo_spec.get("data", {}).items():
+            src = spec["path"] if isinstance(spec, dict) else spec   # DataSpec dict | bare path
             srcs[f"data:{name}"] = _shallow_fingerprint(src)
         for ref in self._e._repo_spec.get("references", []):
             if ref.get("mount"):
@@ -140,9 +141,23 @@ class WorkspaceSeeder:
                 if ref.get("mount"):             # runtime dependency -> symlink read-only input
                     self._e._link_input(ref["path"], wd / ref["name"])
                     seeded.append(f"ref:{ref['name']}->link")
-            for name, src in self._e._repo_spec.get("data", {}).items():
-                self._e._link_input(src, wd / name)
-                seeded.append(f"data:{name}->link")
+            for name, spec in self._e._repo_spec.get("data", {}).items():
+                # A DataSpec {path, mount, edit, …}; a bare string path is back-compat (all defaults).
+                src = spec["path"] if isinstance(spec, dict) else spec
+                mount = spec.get("mount", True) if isinstance(spec, dict) else True
+                dst = wd / name
+                if mount:
+                    self._e._link_input(src, dst)          # default: read-only symlink mount at ./<name>
+                    seeded.append(f"data:{name}->link")
+                else:                                       # copy INTO the workdir (editable if edit=true)
+                    s = Path(src)
+                    if not (dst.is_symlink() or dst.exists()):
+                        if s.is_dir():
+                            shutil.copytree(s, dst, dirs_exist_ok=True, ignore=ignore)
+                        else:
+                            dst.parent.mkdir(parents=True, exist_ok=True)
+                            shutil.copy2(s, dst)
+                    seeded.append(f"data:{name}->copy")
             if _h is not None:
                 _h.set_many(materialized=", ".join(seeded))
             # Observability: surface WHAT got materialized into this node's workdir (the "data setup"

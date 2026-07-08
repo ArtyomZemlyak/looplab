@@ -317,11 +317,16 @@ def _missing_task_paths(task_dict: dict) -> list[tuple[str, str]]:
     for key in ("data_path", "editable_path"):
         if task_dict.get(key):
             candidates.append((key, task_dict[key]))
-    data = task_dict.get("data")
-    if isinstance(data, dict):
-        candidates += [(f"data.{k}", v) for k, v in data.items() if v]
-    elif isinstance(data, str) and data:
-        candidates.append(("data", data))
+    # `data`/`dataset` values may be a bare path or a DataSpec {path, mount, …}; check the path either way.
+    for dkey in ("data", "dataset"):
+        dv = task_dict.get(dkey)
+        if isinstance(dv, dict):
+            for k, v in dv.items():
+                p = v.get("path") if isinstance(v, dict) else v
+                if p:
+                    candidates.append((f"{dkey}.{k}", p))
+        elif isinstance(dv, str) and dv:
+            candidates.append((dkey, dv))
     for ref in (task_dict.get("references") or []):
         if isinstance(ref, dict) and ref.get("path"):
             candidates.append((f"references[{ref.get('name', '?')}]", ref["path"]))
