@@ -490,9 +490,12 @@ class Settings(BaseSettings):
     # ambient proxy — a picked-up proxy yields "connection refused"). Set true when the endpoint is
     # reachable ONLY via a corporate proxy or needs a custom CA bundle from the environment.
     llm_trust_env: bool = False
-    # H4: cap the growing agentic-researcher tool-call history (chars) by middle-truncating stale
-    # tool output, so a long trace doesn't blow the context window. 0 = off (unbounded).
-    context_budget_chars: int = 0
+    # H4/C2: compact the growing agentic tool-call history once it exceeds this many chars (auto_summary
+    # LLM-summarizes the stale middle; else middle-truncate). Sized to the model's real context window so
+    # files read earlier STAY in context instead of being compacted away and re-read: ~1,000,000 chars ≈
+    # 250k tokens (≈4 chars/token), matching the configured deepseek-v4-flash (≥200k tokens confirmed).
+    # The old 120k-char (~30k-token) default was ~8× too aggressive and drove a read-thrash loop. 0 = off.
+    context_budget_chars: int = 1_000_000
     # M5: the Researcher's always-on experiments digest budget (chars). 0 = AUTO — scales with the
     # run size (60 chars/node, bounded [1200, 6000]) instead of one flat cap for an 8-node toy run
     # and a 200-node benchmark run alike. Set a positive value to pin it.

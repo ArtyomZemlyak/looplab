@@ -118,7 +118,7 @@ These are no-ops unless `backend=llm`.
 | `llm_cache` | `LOOPLAB_LLM_CACHE` | `False` | Serve identical **deterministic** (temperature-0) LLM requests from an in-process content-addressed cache (cuts cost on retry/panel/verify); sampling calls (temp>0) are never cached. Off by default |
 | `compressor_model` | `LOOPLAB_COMPRESSOR_MODEL` | — | Model id for the history auto-summary compressor (blank = the shared chat model) |
 | `compressor_base_url` | `LOOPLAB_COMPRESSOR_BASE_URL` | — | Endpoint for the compressor model (blank = reuse llm_base_url) |
-| `context_budget_chars` | `LOOPLAB_CONTEXT_BUDGET_CHARS` | `0` | Cap on the agentic tool-call history (chars); 0 = unbounded |
+| `context_budget_chars` | `LOOPLAB_CONTEXT_BUDGET_CHARS` | `1000000` | Compact the agentic tool-call history once it exceeds this many chars (~250k tokens, sized to the model's context window so reads stay in context); 0 = off |
 | `agent_max_turns` | `LOOPLAB_AGENT_MAX_TURNS` | `0` | Max tool-loop turns before the emit is forced; 0 = unlimited (the agent loops until done) |
 | `agent_emit_after` | `LOOPLAB_AGENT_EMIT_AFTER` | `300` | Convergence nudge: after N tool turns, prompt the agent once to stop investigating and emit (0 = off) |
 | `agent_emit_force` | `LOOPLAB_AGENT_EMIT_FORCE` | `500` | Hard backstop: force the emit at N tool turns so a non-committing model can't burn the whole budget (0 = off) |
@@ -128,7 +128,7 @@ These are no-ops unless `backend=llm`.
 | `agent_stuck_alternate` | `LOOPLAB_AGENT_STUCK_ALTERNATE` | `4` | Ping-pong cycles between two calls that count as "stuck" (min 2) |
 | `agent_self_plan` | `LOOPLAB_AGENT_SELF_PLAN` | `true` | **C1** — expose a TodoWrite-style `update_plan` tool so a long-running agent keeps its own TODO, re-surfaced periodically |
 | `agent_plan_reinject_every` | `LOOPLAB_AGENT_PLAN_REINJECT_EVERY` | `5` | How often (tool-loop turns) to re-surface the agent's current plan |
-| `agent_auto_summary` | `LOOPLAB_AGENT_AUTO_SUMMARY` | `true` | **C2** — LLM-summarize the stale middle of the tool-loop history once it grows long (trigger = `context_budget_chars` if set, else a ~120k-char built-in high-water mark) |
+| `agent_auto_summary` | `LOOPLAB_AGENT_AUTO_SUMMARY` | `true` | **C2** — LLM-summarize the stale middle of the tool-loop history once it exceeds `context_budget_chars` (default ~1M chars ≈ 250k tokens; falls back to a ~120k-char high-water mark only if `context_budget_chars` is 0) |
 | `developer_plan_decompose` | `LOOPLAB_DEVELOPER_PLAN_DECOMPOSE` | `true` | **C4** — the repo Developer first proposes an ordered plan of ATOMIC steps; a multi-step plan is executed step-by-step, each a FRESH bounded session building on the files so far (syntax-validated per write). Stops a big feature from making a non-converging model run away (writing+exploring without ever emitting `done`). A 1-step plan == the old single pass |
 | `developer_plan_min_steps` | `LOOPLAB_DEVELOPER_PLAN_MIN_STEPS` | `2` | A proposed plan with ≥ this many steps runs step-by-step; fewer falls back to one session |
 | `developer_plan_max_steps` | `LOOPLAB_DEVELOPER_PLAN_MAX_STEPS` | `8` | Cap on plan length (a runaway planner can't spawn 100 steps) |
