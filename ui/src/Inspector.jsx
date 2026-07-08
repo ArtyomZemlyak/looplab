@@ -275,6 +275,7 @@ const STAGE = {
   inline_repair: { icon: 'bug', role: 'Developer · inline repair', desc: 'quick in-eval fix attempts', tone: '#b08a6f' },
   seed_workspace: { icon: 'gear', role: 'Workspace', desc: 'materialize node files into the eval workdir', tone: '#8b96a5' },
   evaluate:     { icon: 'target', role: 'Evaluate', desc: 'run the solution & score it', tone: '#a87da8' },
+  triage:       { icon: 'bug', role: 'Triage', desc: 'a failed node — decide repair / abandon / reject-idea', tone: '#b07a7a' },
   // declared eval-pipeline stages (looplab_stages.json): each runs as its own block in the node story
   train:        { icon: 'replay', role: 'Train', desc: 'declared pipeline stage: train a fresh model', tone: '#4e8f5d' },
   data_prep:    { icon: 'sliders', role: 'Data prep', desc: 'declared pipeline stage: prepare data/features', tone: '#7a9e5f' },

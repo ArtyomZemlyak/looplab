@@ -1869,7 +1869,13 @@ class Engine(ConfirmPhaseMixin, AblationMixin):
                     brief = _state_brief(state, None)
                 except Exception:  # noqa: BLE001 - a brief is advisory; never block on it
                     brief = ""
-                out = fn(node, tagged, attempt, state=state, brief=brief)
+                # Own span so the crash-triage LLM turns band as `triage`, NOT `evaluate`: triage runs
+                # INSIDE the engine's `evaluate` span, so without this its (often many, agentic) turns
+                # inherit phase=evaluate and inflate the "evaluate" band with failure-debugging that has
+                # nothing to do with scoring — the exact "why is there a big eval when it never scored?"
+                # confusion. (The repair itself already has its own `inline_repair` span.)
+                with self.tracer.span("triage", attempt=attempt, reason=reason):
+                    out = fn(node, tagged, attempt, state=state, brief=brief)
                 if isinstance(out, dict) and out.get("action") in ("repair", "abandon", "reject_idea"):
                     return {"action": out["action"], "rationale": str(out.get("rationale", ""))[:300]}
             except BudgetExceeded:      # the hard budget stop must propagate, not degrade to the rule

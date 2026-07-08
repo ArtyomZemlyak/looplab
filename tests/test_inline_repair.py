@@ -161,6 +161,35 @@ def test_inline_repair_attempt_bound(tmp_path):
     assert failed_n0 and failed_n0[0].data.get("reason") == "crash"
 
 
+# --------------------------------------------------------------------------- triage trace band
+def test_agent_triage_runs_under_its_own_span_not_evaluate(tmp_path):
+    """The crash-triage LLM decision must band as `triage`, NOT `evaluate`: it runs INSIDE the engine's
+    `evaluate` span, so without its own span its (often many, agentic) turns inherit phase=evaluate and
+    inflate the 'evaluate' band with failure-debugging that never scored anything (the 'why is there a
+    big eval when it never scored?' confusion)."""
+    from looplab.core import tracing
+    seen = {}
+
+    class _TriageR:
+        def propose(self, state, parent):
+            return Idea(operator="x", params={"x": 1.0, "y": 1.0})
+
+        def triage_crash(self, node, error, attempt, *, state=None, brief=""):
+            ph = tracing._phase_ctx.get()        # (name, span_id) of the innermost open operation
+            seen["phase"] = ph[0] if ph else None
+            return {"action": "repair", "rationale": "fix it"}
+
+    eng = Engine(tmp_path / "run", task=ToyTask.load(TASK), researcher=_TriageR(),
+                 developer=_MechCrashThenFixed(), sandbox=SubprocessSandbox(),
+                 policy=GreedyTree(n_seeds=1, max_nodes=2, debug_depth=1),
+                 auto_install_deps=False, inline_repair=True)
+    anyio.run(eng.run)
+    assert seen.get("phase") == "triage"         # triage_crash saw its OWN phase, not 'evaluate'
+    names = [json.loads(l).get("name") for l in
+             (tmp_path / "run" / "spans.jsonl").read_text().splitlines() if l.strip()]
+    assert "triage" in names                     # the span is on disk for the trace view
+
+
 # --------------------------------------------------------------------------- rule-based triage
 def test_rule_triage_repairs_mechanical_only():
     assert _rule_triage("crash", "ModuleNotFoundError: no module", 1, 1)["action"] == "repair"
