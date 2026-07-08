@@ -12,8 +12,8 @@
 LoopLab runs a closed research loop: a **Researcher** proposes ideas, a **Developer** writes the
 code, a sandbox runs it, an evaluator scores it, and the loop refines and **merges** the best
 candidates — repeating until the budget runs out. On a fresh repo node the Developer works in three
-phases — **stages → plan → implement** (declare the eval pipeline, decompose into atomic steps, then
-write the code). Every step is appended to an **event log that is the single source of truth**, so a
+phases — **stages → plan → implement** (declare the eval pipeline — skipped when the operator already
+declared `cmd.stages` — decompose into atomic steps, then write the code). Every step is appended to an **event log that is the single source of truth**, so a
 run is fully **reproducible and crash-resumable by replay**.
 
 It runs **fully offline with zero external services** (no API keys, no Docker) on a local task, and
@@ -129,7 +129,9 @@ model by setting `LOOPLAB_LLM_BASE_URL` / `LOOPLAB_LLM_MODEL` / `LOOPLAB_LLM_API
 
 ## Task types
 
-A task is a small JSON file with a `kind`. LoopLab ships nine adapters:
+A task is a small JSON file describing what you **have** — `repo` / `dataset` / `cmd` /
+`kaggle`/`competition` / `benchmark` — and the engine infers the adapter (an explicit legacy `kind`
+still works). The fields desugar to nine adapters:
 
 | `kind` | What it optimizes | Example |
 |---|---|---|

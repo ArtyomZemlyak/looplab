@@ -122,13 +122,18 @@ On a fresh (non-repair) implement of a repo node the Developer runs **three sepa
 phases**, each its own focused tool-loop so the context stays small and the trace reads cleanly
 (`Developer · stages → plan → implement`):
 
-1. **STAGES** (mandatory, **first**) — a **read-only** phase whose only exit is a `declare_stages`
+1. **STAGES** (mandatory, **first** — unless the operator pre-empts it, below) — a **read-only**
+   phase whose only exit is a `declare_stages`
    emit. The repo-savvy Developer studies the repo *and* the operator's `cmd`, then declares the
    ordered eval pipeline (`data_prep → train → …`) that runs **before** the operator's protected
    `score` step, baking **this node's** hyperparameters into the `train` command. It writes
-   `looplab_stages.json`. It is **always** run — the Developer owns the stages, **not** the
-   planner/Genesis. Good practice: separate stages for data/feature **preparation**, **training**
-   (a fresh model every node — never reuse a checkpoint), and **testing**.
+   `looplab_stages.json`. The Developer owns the stages, **not** the planner/Genesis — the phase is
+   skipped only when the **operator** pre-empts it: a valid `cmd.stages` pipeline (the engine uses
+   it verbatim; the Developer implements the code those stages run) or a protected
+   `looplab_stages.json` (the knob that disables Developer pipelines — skipping avoids burning an
+   LLM loop whose manifest would be dropped). Good practice: separate stages for data/feature
+   **preparation**, **training** (a fresh model every node — never reuse a checkpoint), and
+   **testing**.
 2. **PLAN** — the read-only atomic-step decomposition (`propose_plan`; **C4**,
    `developer_plan_decompose`), unchanged.
 3. **IMPLEMENT** — writes the code the stages run, one bounded session per plan step.
@@ -136,9 +141,11 @@ phases**, each its own focused tool-loop so the context stays small and the trac
 A **repair** (an error to fix) stays a single focused session — no stages, no plan.
 
 The **cmd-context rule** governs the stages phase: the operator's `cmd` is passed in as context. If
-it is **present**, it is shown as **immutable** and the final `score` stage is reserved for it — the
-Developer declares only the *preceding* stages. If it is **absent**, the Developer must declare the
-**full** pipeline, including the final scoring stage that prints the metric.
+it is **present**, it is shown as **immutable** — the Developer declares only the *preceding*
+stages. If it is **absent**, the Developer must declare the **full** pipeline, including a final
+stage that runs the evaluation and prints the metric. Either way the stage name `score` is
+**reserved** (it always denotes the engine-appended operator step) — with no `cmd`, name the
+scorer e.g. `evaluate`.
 
 ## Multi-stage eval pipeline
 

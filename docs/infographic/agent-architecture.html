@@ -85,7 +85,7 @@ stack(410,210,DY,[
 // a repair skips them for one focused session. Env inspector / auto-validate / best-of-N below
 // are the capabilities those phases use.
 stack(660,300,DY,[
- {id:"d_stages",h:78,t:"① Stages phase",tag:"1st",c:C.d,sub:["read-only · MANDATORY · emits declare_stages","…prep → train → before protected score (cmd)","cmd present → declare preceding · absent → full"]},
+ {id:"d_stages",h:92,t:"① Stages phase",tag:"1st",c:C.d,sub:["read-only · mandatory* · emits declare_stages","…prep → train → before protected score (cmd)","cmd present → declare preceding · absent → full","*skipped: op. cmd.stages / protected manifest"]},
  {id:"d_plan",h:66,t:"② Plan phase",tag:"C4",c:C.d,sub:["read-only · propose_plan → atomic steps","2–8 steps · developer_plan_decompose"]},
  {id:"d_impl",h:66,t:"③ Implement phase",tag:"D",c:C.d,sub:["write the code the stages run · per-step","repair = 1 session (no stages/plan)"]},
  {id:"i_env",h:82,t:"Env inspector",tag:"D",c:C.d,sub:["ground API in the REAL installed env","pkg_info · py_api · read/grep_installed · gpu_info","read-only inspector · ALL phases (write tools only in implement) · paginates"]},

@@ -15,7 +15,8 @@ the equivalent task file.
 > spellings below all still work (they're accepted as aliases), but the composable names are preferred.
 > Three things worth knowing for a **training** repo:
 > - **`cmd` is the SCORING step, not the trainer.** The Developer declares training (and any prep) as
->   separate stages in a **dedicated, mandatory STAGES phase** it runs *first* (before plan + implement);
+>   separate stages in a **dedicated STAGES phase** it runs *first* (before plan + implement; skipped
+>   only when you pre-empt it — declare `cmd.stages` yourself, or protect `looplab_stages.json`);
 >   the engine runs those stages, then appends your `cmd` as the final protected `score` stage over the
 >   freshly-trained model. Do **not** put training in `cmd.setup` (that's for dependency installs). If
 >   your repo has an existing scorer (`test.py`), pass it as `cmd` and `protect` it; if the scorer must be
@@ -134,13 +135,13 @@ operator fixes crashes. You provide a goal, the data, and a metric — no code.
   and a goal, the agent writes the whole solution and **chooses the metric itself** if you don't name
   one. Zero scaffolding.
   ```jsonc
-  { "kind": "dataset", "goal": "predict `target`; pick the metric you judge best",
+  { "goal": "predict `target`; pick the metric you judge best",
     "direction": "max", "data_path": "~/proj/data.csv" }
   ```
   Trade-off: the metric is **self-reported** (no private grader). For the anti-cheat guarantee use a
   `repo` task or a held-out grader instead.
 - **Real Kaggle problem** → [`mlebench_real`](tasks.md#mlebench_real): the official split + grader.
-  Just `{"kind":"mlebench_real","competition":"<slug>"}`; see the
+  Just `{"competition":"<slug>"}` (or `kaggle`); see the
   [MLE-bench runbook](../MLEBENCH.md) for data prep.
 - **A held-out metric you control** → [`code_regression`](tasks.md#code_regression) (LLM writes a
   numpy script that reads a materialized data asset, fits, cross-validates, prints the metric) or
@@ -179,8 +180,9 @@ the fields in your README/entry script.
 ### I have a test but no train → the agent writes it
 
 Common case: you have a `test.py`/`eval.py` that scores a model, but **no training script**. `cmd` is
-the SCORING step, not the trainer — **the Developer declares training as a stage in its dedicated,
-mandatory STAGES phase** (the first of its three phases: **stages → plan → implement**), which the
+the SCORING step, not the trainer — **the Developer declares training as a stage in its dedicated
+STAGES phase** (the first of its three phases: **stages → plan → implement**; skipped only when you
+declare `cmd.stages` yourself or protect `looplab_stages.json`), which the
 engine runs BEFORE your `cmd`. You do **not** put training in `cmd.setup` (that's for dependency
 installs). Just set `cmd` to your scorer and `protect` it:
 
@@ -223,7 +225,7 @@ command. The agent **writes a metric adapter** (`read_metric(workdir) -> float`)
 proposes the eval; a human **ratifies it once**, after which it's frozen and protected.
 
 ```jsonc
-{ "kind": "repo", "goal": "...", "direction": "max", "editable_path": "~/proj",
+{ "repo": "~/proj", "goal": "...", "direction": "max",
   "onboard": true, "onboard_command": ["python", "main.py"] }
 ```
 
@@ -312,7 +314,7 @@ So if the **agent's train stage and the scorer `cmd` need different arguments**,
 ```jsonc
 // One entrypoint the search tunes; it passes the right args to train and to test itself.
 {
-  "kind": "repo", "direction": "max", "editable_path": "~/proj",
+  "repo": "~/proj", "direction": "max",
   "params": {"lr": [1e-4, 1e-1], "epochs": [5, 50]},
   "eval": {
     "command": ["python", "run.py"],          // run.py: train(lr,epochs) → test(...), prints {"metric":…}
@@ -342,8 +344,7 @@ So keep the command **argument-free** and give the agent a tiny launcher it rewr
 
 ```jsonc
 {
-  "kind": "repo", "goal": "find the best config", "direction": "max",
-  "editable_path": "~/proj",
+  "repo": "~/proj", "goal": "find the best config", "direction": "max",
   "edit_surface": ["run.py"],                 // the agent OWNS this launcher
   "protect": ["train.py", "test.py"],          // your real scripts: the agent calls them, can't change them
   "eval": { "command": ["python", "run.py"], "metric": {"kind": "stdout_json", "key": "metric"} }
@@ -380,8 +381,7 @@ the experiment, and prints the metric. The agent owns the YAML; your runner and 
 
 ```jsonc
 {
-  "kind": "repo", "goal": "find the best config", "direction": "max",
-  "editable_path": "~/proj",
+  "repo": "~/proj", "goal": "find the best config", "direction": "max",
   "edit_surface": ["config.yaml"],            // the agent owns the config (add "src/**/*.py" to let it add new impls)
   "protect": ["run.py", "src/eval.py"],        // the runner + scorer are off-limits
   "eval": { "command": ["python", "run.py"], "metric": {"kind": "stdout_json", "key": "metric"} }

@@ -133,19 +133,28 @@ zero-dependency default coding path.
 On a fresh (non-repair) repo node the Developer runs **three separately-traced phases**, so the context
 stays focused and the trace reads cleanly:
 
-1. **STAGES** (mandatory, first) — a **read-only** phase whose only exit is `declare_stages`. The
-   Developer studies the repo + the operator's `cmd` and declares the ordered eval pipeline (e.g.
-   `data_prep → train → …`) that runs BEFORE the operator's protected `score` step, baking this node's
-   hyperparameters into the train command. It writes `looplab_stages.json`. The **Developer** owns the
-   stages (it knows the repo), not the planner/Genesis. If `cmd` is present it's shown as immutable (the
-   final `score` stage is reserved for it — declare only the preceding stages); if absent, declare the
-   full pipeline including the scorer. Good practice: separate **prep / train / test** stages.
+1. **STAGES** (mandatory, first — unless the operator pre-empts it) — a **read-only** phase whose only
+   exit is `declare_stages`. The Developer studies the repo + the operator's `cmd` and declares the
+   ordered eval pipeline (e.g. `data_prep → train → …`) that runs BEFORE the operator's protected
+   `score` step, baking this node's hyperparameters into the train command. It writes
+   `looplab_stages.json`. The **Developer** owns the stages (it knows the repo), not the
+   planner/Genesis. Two operator knobs skip the phase: a valid `cmd.stages` pipeline (the engine runs
+   it verbatim; the Developer implements the code those stages run) or a protected
+   `looplab_stages.json` (disables Developer pipelines — no point burning an LLM loop whose manifest
+   would be dropped). If `cmd` is present it's shown as immutable (declare only the preceding stages);
+   if absent, declare the full pipeline including a final evaluating stage. The name `score` is
+   **reserved either way** (it always denotes the engine-appended operator step). Good practice:
+   separate **prep / train / test** stages.
 2. **PLAN** — decomposes the code changes into ordered atomic steps (still read-only).
-3. **IMPLEMENT** — writes the code those stages run, one bounded session per step.
+3. **IMPLEMENT** — writes the code those stages run, one bounded session per step. The prompt states
+   the node's **actual** declared pipeline (or its absence), and the session carries `declare_stages`
+   only to **fix** a broken manifest (e.g. a repair whose root cause is a bad stage command/timeout) —
+   authoring stays in the STAGES phase.
 
 A **repair** skips stages+plan and is one focused session. The first **two** phases are read-only: they
 get the repo scouts plus the env inspector (`read_file`, `grep`, `find_files`, `list_dir`, `pkg_info`,
-`py_api`, `gpu_info`) — but **no write tools** — so the Developer reads the real eval/entry script and
+`py_api`, `read_installed`, `grep_installed`, `gpu_info`) — but **no write tools** — so the Developer
+reads the real eval/entry script and
 the files it will change *before* deciding what to do, instead of planning blind off a truncated
 preview. Two tools make this practical:
 

@@ -57,8 +57,10 @@ which capability fields are present (`looplab/adapters/tasks.py::normalize_task`
 
 **`cmd` is the run+score CONTRACT** — the command that runs and the reader that reads its metric. It is
 the *scoring* step, not the trainer: **the Developer declares training (and any prep) as separate stages
-in a dedicated, mandatory STAGES phase** — the first of its three phases (**stages → plan → implement**),
-run before it writes any code — which the engine runs BEFORE `cmd`. The cmd-context rule: if `cmd` is
+in a dedicated STAGES phase** — the first of its three phases (**stages → plan → implement**), run
+before it writes any code and skipped only when the operator pre-empts it (a declared `cmd.stages`
+pipeline, or a protected `looplab_stages.json`); the engine runs those stages BEFORE `cmd`. The
+cmd-context rule: if `cmd` is
 present it is **immutable**, so the Developer declares only the **preceding** stages (data-prep, train)
 and the operator's `cmd` is appended as the protected final `score` stage; if `cmd` is absent the STAGES
 phase declares the **full** pipeline including a final scoring stage; if `cmd` itself declares `stages`,
@@ -120,6 +122,10 @@ tuning and a per-source `dataset` permission object).
 ## The nine kinds (internal / legacy view)
 
 The composable fields above desugar to these adapter kinds; you can still set `kind` explicitly.
+`kind` is the **legacy** spelling (the `examples/*.json` catalogue files keep it, and it parses
+unchanged); the composable form is `benchmark` for the built-in synthetics and capability fields
+(`repo` / `dataset` / `cmd` / `kaggle`/`competition`) for everything else — the inline examples
+below use it.
 
 | `kind` | The agent's job | Metric source | Example |
 |---|---|---|---|
@@ -163,7 +169,7 @@ adapter. The loop converges on a sensible model complexity.
 
 ```jsonc
 {
-  "kind": "regression", "id": "poly_regression",
+  "benchmark": "regression", "id": "poly_regression",
   "goal": "select polynomial degree + ridge lambda minimizing 5-fold CV MSE (true degree 2)",
   "direction": "min",
   "n": 40, "true_degree": 2, "noise": 1.0, "seed": 1, "max_degree": 6, "cv_k": 5
@@ -184,7 +190,7 @@ Tune a classifier (e.g. logistic regression) for K-fold CV accuracy on generated
 
 ```jsonc
 {
-  "kind": "classification", "id": "blob_classification",
+  "benchmark": "classification", "id": "blob_classification",
   "goal": "tune a logistic-regression learner to maximize K-fold CV accuracy",
   "direction": "max",
   "n": 80, "sep": 1.5, "seed": 0, "cv_k": 5
@@ -203,7 +209,7 @@ Choose a forecaster's smoothing weight + seasonal period to minimize backtest er
 
 ```jsonc
 {
-  "kind": "timeseries", "id": "seasonal_forecast",
+  "benchmark": "timeseries", "id": "seasonal_forecast",
   "goal": "choose a forecaster's smoothing weight + seasonal period to minimize backtest MASE",
   "direction": "min",
   "n": 120, "period": 7, "trend": 0.05, "noise": 0.5, "seed": 0,
@@ -227,7 +233,7 @@ Requires `--backend llm`. When a generated script crashes, the self-repair opera
 
 ```jsonc
 {
-  "kind": "code_regression", "id": "code_poly_regression",
+  "benchmark": "code_regression", "id": "code_poly_regression",
   "goal": "write code (numpy) that fits a polynomial+ridge model to data.json minimizing 5-fold CV MSE; true degree 2",
   "direction": "min",
   "n": 40, "true_degree": 2, "noise": 1.0, "seed": 1, "max_degree": 6, "cv_k": 5
@@ -245,7 +251,7 @@ protected so the agent can't overwrite it.
 
 ```jsonc
 {
-  "kind": "mlebench", "id": "mlebench_blobs",
+  "benchmark": "mlebench", "id": "mlebench_blobs",
   "goal": "train a classifier on train.json and maximize held-out accuracy on test.json (private grader)",
   "direction": "max",
   "seed": 0, "n_train": 80, "n_test": 40, "n_features": 4, "sep": 2.0, "noise": 1.0, "max_k": 15
@@ -260,7 +266,7 @@ the engine provides the official `public/` split, the solution writes `submissio
 MLE-bench metric plus the official medal / above-median report.
 
 ```jsonc
-{ "kind": "mlebench_real", "competition": "spooky-author-identification" }
+{ "competition": "spooky-author-identification" }
 ```
 
 | Field | Description |
@@ -282,15 +288,15 @@ success is the **repo's own eval command + metric** — never a metric the agent
 
 ```jsonc
 {
-  "kind": "repo", "id": "repo_example",
+  "id": "repo_example",
   "goal": "tune config.json to maximize the eval metric (max at x=3)",
   "direction": "max",
-  "editable_path": "examples/repo_example",     // the repo the agent edits (worktree copy)
+  "repo": "examples/repo_example",               // the repo the agent edits (worktree copy)
   "edit_surface": ["*.json"],                    // … only files matching these globs
   "protect": ["ttrain.py"],                      // … never the eval entrypoint
-  "eval": {
+  "cmd": {
     "command": ["python", "ttrain.py"],
-    "metric": {"kind": "stdout_json", "key": "metric"},
+    "metric": {"reader": "stdout_json", "key": "metric"},
     "timeout": 60
   }
 }
@@ -315,8 +321,9 @@ The metric-source file and the files you list in `protect` cannot be overwritten
 on agent failure, a no-op developer leaves the repo unmodified.
 
 > **Have a test/eval but no training script?** Set `cmd` to the scorer (`["python","test.py"]`) and
-> `protect` it — the Developer declares a `train` **stage** in its dedicated, mandatory STAGES phase (the
-> first of its three phases: stages → plan → implement) that runs before the scorer, then the engine
+> `protect` it — the Developer declares a `train` **stage** in its dedicated STAGES phase (the first of
+> its three phases: stages → plan → implement; skipped only if you declare `cmd.stages` yourself or
+> protect `looplab_stages.json`) that runs before the scorer, then the engine
 > trains and your protected `cmd` scores the freshly-trained model. Do **not** run training via
 > `eval.setup` (that's for dependency installs and reruns every eval). See
 > **[Generating train & test code](generating-code.md)** for this and every other "let the agent write
@@ -330,12 +337,12 @@ cheap `smoke` during search and a `full` run on confirmation:
 
 ```jsonc
 {
-  "kind": "repo", "direction": "max", "editable_path": "examples/repo_example",
+  "repo": "examples/repo_example", "direction": "max",
   "protect": ["ttrain_cli.py"], "params": {"x": [-5.0, 5.0]},
-  "eval": {
+  "cmd": {
     "command": ["python", "ttrain_cli.py"],
     "params_style": "cli_overrides",
-    "metric": {"kind": "stdout_json", "key": "metric"},
+    "metric": {"reader": "stdout_json", "key": "metric"},
     "profiles": {
       "smoke": {"overrides": ["steps=10"],  "timeout": 60},
       "full":  {"overrides": ["steps=200"], "timeout": 120}
@@ -371,7 +378,7 @@ baseline that just reports the dataset row count, so the engine still runs witho
 
 ```jsonc
 {
-  "kind": "dataset", "id": "dataset_example",
+  "id": "dataset_example",
   "goal": "predict `target` from the features; pick the metric you judge most appropriate",
   "direction": "max",
   "data_path": "examples/dataset_example/data.csv",   // your data (file or dir); ~/$VARS expand → absolute
