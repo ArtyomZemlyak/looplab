@@ -62,7 +62,15 @@ class DataSpec(BaseModel):
 
 class EvalSpec(BaseModel):
     """The operator's trusted evaluation (the agent does not author this)."""
-    command: list[str]                       # argv, no shell; carries env activation
+    command: list[str] = Field(default_factory=list)   # argv, no shell; carries env activation
+    # Composable pipeline form (docs/guide/tasks.md): `cmd` may DECLARE the full ordered stage
+    # pipeline instead of (or alongside a legacy) single command — stages of
+    # {name, command:[argv...], timeout?, check?}. When set, these ARE the canonical pipeline
+    # (the Developer's looplab_stages.json is IGNORED — see Engine._resolve_stages) and the LAST
+    # stage's stdout carries the metric. Validated by the SAME shared rules as the Developer's
+    # declare_stages tool (runtime/command_eval.validate_stages); a stage named 'score' is allowed
+    # HERE — the operator owns scoring, the reservation only guards Developer manifests.
+    stages: list[dict] = Field(default_factory=list)
     cwd: str = "."                           # relative to the node eval workdir
     metric: dict = Field(default_factory=lambda: {"kind": "stdout_json", "key": "metric"})
     params_style: str = "none"               # none | cli_overrides
@@ -123,6 +131,28 @@ class EvalSpec(BaseModel):
     def _cross_check_not_adapter(cls, v):
         from looplab.runtime.command_eval import validate_cross_check
         return validate_cross_check(v)
+
+    @field_validator("stages")
+    @classmethod
+    def _stages_valid(cls, v):
+        # Reject a malformed operator pipeline at SUBMIT time with the shared stage rules — without
+        # this, a bad `cmd.stages` entry silently vanished (pydantic ignored the unknown key entirely
+        # before this field existed) and the Developer's manifest quietly took over the pipeline.
+        if not v:
+            return v
+        from looplab.runtime.command_eval import validate_stages
+        clean, err = validate_stages(v)          # no reserved names: the operator owns `score`
+        if err:
+            raise ValueError(f"cmd.stages invalid: {err}")
+        return clean
+
+    @model_validator(mode="after")
+    def _command_or_stages(self):
+        # The documented cmd shape is {"command" | "stages", ...}: one of the two must actually run.
+        if not self.command and not self.stages:
+            raise ValueError("cmd/eval needs a `command` (argv list) or a `stages` pipeline "
+                             "— nothing would run otherwise.")
+        return self
 
 
 class RepoResearcher:
@@ -388,7 +418,15 @@ class RepoTask(BaseModel):
             surf_globs += [pre + g for g in ed["surface"]]
         surf = ", ".join(surf_globs)
         prot = ", ".join(self._protected_names()) or "(none)"
-        cmd = " ".join(self.eval.command) if self.eval else "(proposed during onboarding)"
+        # A stages-only cmd (the composable pipeline form) has no single command line to show —
+        # render the declared stage chain instead of an empty ``.
+        if self.eval and self.eval.command:
+            cmd = " ".join(self.eval.command)
+        elif self.eval and self.eval.stages:
+            cmd = ("the operator-declared stage pipeline: "
+                   + " → ".join(str(s.get("name", "?")) for s in self.eval.stages))
+        else:
+            cmd = "(proposed during onboarding)"
         setup = " ".join(self.eval.setup) if (self.eval and self.eval.setup) else ""
         deps = (f" Dependencies are installed before each eval by `{setup}`, so to add a "
                 "package, edit the requirements file it reads (if it is in your allowed "

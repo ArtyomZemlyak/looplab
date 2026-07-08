@@ -128,40 +128,28 @@ class RepoWriteTools:
         but never rewrite the scoring. Returns a clear error string on any problem (nothing staged) so
         the tool loop gets actionable feedback instead of the silent malformed-manifest fallback."""
         import json
-        # SAME surface/protected gate as write_file: declaring a pipeline runs arbitrary preceding
-        # commands, so a restricted edit_surface must confine it too (else declare_stages would be a
-        # hole around the surface gate that write_file('looplab_stages.json') is subject to).
-        refusal = self._refusal("looplab_stages.json", "declare stages in")
-        if refusal:
-            return refusal
-        if not isinstance(stages, list) or not stages:
-            return "(refused: `stages` must be a non-empty array of {name, command:[argv...]} objects.)"
-        seen, clean = set(), []
-        for i, s in enumerate(stages):
-            if not isinstance(s, dict):
-                return f"(refused: stage {i} is not an object — expected {{name, command:[...]}}.)"
-            nm = str(s.get("name") or "").strip()
-            if not nm:
-                return f"(refused: stage {i} has no `name`.)"
-            if nm.lower() == "score":
-                return ("(refused: 'score' is reserved for the operator's final scoring stage. Name "
-                        "your PRECEDING stages e.g. data_prep, train — the cmd is appended after them.)")
-            if nm in seen:
-                return f"(refused: duplicate stage name {nm!r}.)"
-            seen.add(nm)
-            cmd = s.get("command")
-            if not isinstance(cmd, list) or not cmd or not all(isinstance(x, str) for x in cmd):
-                return (f"(refused: stage {nm!r} needs a `command` as a non-empty list of string argv "
-                        "items, e.g. [\"python\",\"train.py\",\"%params%\"].)")
-            st = {"name": nm, "command": cmd}
-            if "timeout" in s:
-                try:
-                    st["timeout"] = float(s["timeout"])
-                except (TypeError, ValueError):
-                    return f"(refused: stage {nm!r} `timeout` must be a number of seconds.)"
-            if s.get("check"):
-                st["check"] = True
-            clean.append(st)
+        # The manifest itself is TOOL-OWNED (validated here, engine-validated again at consume time):
+        # gate it on the PROTECT list only — an operator may explicitly protect 'looplab_stages.json'
+        # to disable Developer pipelines — NOT on the edit surface. The legacy default surface is
+        # ["**/*.py"], which no root .json file can ever match, so the old surface gate made this
+        # REQUIRED tool refuse on every legacy repo task (the prompt mandates it for training runs).
+        # The surface still governs the STAGE SCRIPTS the manifest points at (write_file), and the
+        # declared commands run under the same sandbox tier as the eval — declaring a stage grants
+        # nothing an in-surface .py edit (imported by the eval) couldn't already run.
+        reason = SurfacePolicy(None, self._protected, self._prefixes,
+                               protected_exact=True, check_escapes=False).check("looplab_stages.json")
+        if reason is not None:
+            return ("(refused: looplab_stages.json is protected — the operator owns the eval; "
+                    "you may not declare stages in it)")
+        # The shared stage rules (runtime/command_eval.validate_stages) — the SAME validator the
+        # engine's _resolve_stages runs at consume time, so a manifest this tool accepts is never
+        # silently re-filtered engine-side. The refusal strings stay byte-identical to the original
+        # inline loop (the model steers on them): validate_stages returns the bare reason, this site
+        # wraps it in its historical "(refused: …)" envelope.
+        from looplab.runtime.command_eval import validate_stages
+        clean, err = validate_stages(stages, reserved=("score",))
+        if err is not None:
+            return f"(refused: {err})"
         self.files["looplab_stages.json"] = json.dumps({"stages": clean}, indent=1)
         chain = " → ".join(s["name"] for s in clean) + " → score (operator cmd)"
         return f"declared {len(clean)} preceding stage(s): {chain}"

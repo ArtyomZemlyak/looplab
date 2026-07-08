@@ -222,6 +222,46 @@ def expand_params(argv: list, params: Optional[dict]) -> list:
     return out
 
 
+def validate_stages(stages, *, reserved: tuple = ()) -> tuple[Optional[list], Optional[str]]:
+    """Validate a stage list ({name, command:[argv...], timeout?, check?}) into its canonical clean
+    form: (clean, None) on success, (None, reason) on the first problem. This is the SINGLE
+    definition of "a valid stage", shared by the Developer's `declare_stages` tool (authoring time),
+    `EvalSpec.stages` (the operator's cmd pipeline, submit time) and the engine's `_resolve_stages`
+    (consume time) — so the two ends of the manifest handshake can't drift: a stage one side accepts
+    is never silently dropped or re-interpreted by the other. `reserved` names are refused — the
+    engine appends the operator's protected `score` stage to a DEVELOPER manifest, so the tool passes
+    ("score",); operator-declared stages reserve nothing (the operator owns scoring)."""
+    if not isinstance(stages, list) or not stages:
+        return None, "`stages` must be a non-empty array of {name, command:[argv...]} objects."
+    seen, clean = set(), []
+    for i, s in enumerate(stages):
+        if not isinstance(s, dict):
+            return None, f"stage {i} is not an object — expected {{name, command:[...]}}."
+        nm = str(s.get("name") or "").strip()
+        if not nm:
+            return None, f"stage {i} has no `name`."
+        if nm.lower() in reserved:
+            return None, ("'score' is reserved for the operator's final scoring stage. Name "
+                          "your PRECEDING stages e.g. data_prep, train — the cmd is appended after them.")
+        if nm in seen:
+            return None, f"duplicate stage name {nm!r}."
+        seen.add(nm)
+        cmd = s.get("command")
+        if not isinstance(cmd, list) or not cmd or not all(isinstance(x, str) for x in cmd):
+            return None, (f"stage {nm!r} needs a `command` as a non-empty list of string argv "
+                          "items, e.g. [\"python\",\"train.py\",\"%params%\"].")
+        st = {"name": nm, "command": list(cmd)}
+        if "timeout" in s:
+            try:
+                st["timeout"] = float(s["timeout"])
+            except (TypeError, ValueError):
+                return None, f"stage {nm!r} `timeout` must be a number of seconds."
+        if s.get("check"):
+            st["check"] = True
+        clean.append(st)
+    return clean, None
+
+
 def build_command(eval_spec: dict, params: Optional[dict] = None,
                   profile: Optional[str] = None) -> tuple[list[str], float]:
     """Build the eval argv + timeout from an eval_spec, an eval profile (smoke/full), and

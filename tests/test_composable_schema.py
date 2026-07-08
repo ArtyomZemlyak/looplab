@@ -155,15 +155,93 @@ def test_declare_stages_reports_errors(bad, needle):
     assert "looplab_stages.json" not in t.files            # nothing staged on error
 
 
-def test_declare_stages_honours_edit_surface_gate():
-    # review fix: a restricted surface must confine declare_stages too (else it's a hole around the
-    # surface gate). looplab_stages.json at root is outside a `model/**` surface -> refused.
+def test_declare_stages_works_under_restricted_surface():
+    # mega-review fix: the manifest is TOOL-owned and validated, so it is gated on the PROTECT list
+    # only — the legacy default surface ["**/*.py"] can never match a root .json, and a surface gate
+    # made the REQUIRED tool refuse on every legacy repo task (the stage pipeline never activated).
     from looplab.adapters.repo_developer import RepoWriteTools
-    t = RepoWriteTools(surface=["model/**"], protected=[],
-                       editables=[{"name": ".", "path": "/tmp", "surface": ["model/**"], "protect": []}])
+    t = RepoWriteTools(surface=["**/*.py"], protected=[],
+                       editables=[{"name": ".", "path": "/tmp", "surface": ["**/*.py"], "protect": []}])
     msg = t.execute("declare_stages", {"stages": [{"name": "train", "command": ["python", "t.py"]}]})
-    assert msg.startswith("(refused") and "surface" in msg
+    assert msg.startswith("declared 1")
+    assert "looplab_stages.json" in t.files
+
+
+def test_declare_stages_respects_protect_list():
+    # An operator may explicitly protect the manifest to disable Developer pipelines.
+    from looplab.adapters.repo_developer import RepoWriteTools
+    t = RepoWriteTools(surface=["**/*"], protected=["looplab_stages.json"],
+                       editables=[{"name": ".", "path": "/tmp", "surface": ["**/*"], "protect": []}])
+    msg = t.execute("declare_stages", {"stages": [{"name": "train", "command": ["python", "t.py"]}]})
+    assert msg.startswith("(refused") and "protected" in msg
     assert "looplab_stages.json" not in t.files
+
+
+# --------------------------------------------------------------------------- operator cmd.stages
+def test_cmd_stages_only_validates_and_is_canonical(tmp_path):
+    # mega-review fix: the documented {"stages": [...]} cmd form used to be REJECTED ('command Field
+    # required') and a command+stages cmd silently DROPPED the stages (EvalSpec had no such field).
+    repo = tmp_path / "r"; repo.mkdir()
+    t = validate_task({"goal": "g", "direction": "max", "repo": str(repo),
+                       "cmd": {"stages": [
+                           {"name": "train", "command": ["python", "train.py", "%params%"], "timeout": 7200},
+                           {"name": "score", "command": ["python", "score.py"]}],
+                           "metric": {"reader": "stdout_json", "key": "m"}}})
+    es = t.eval_spec()
+    assert [s["name"] for s in es["stages"]] == ["train", "score"]   # survives model_dump
+    assert es["stages"][0]["timeout"] == 7200.0
+
+
+def test_cmd_stages_reach_the_engine_pipeline(tmp_path):
+    # The operator's stages ARE the pipeline: _resolve_stages returns them (with %params% expanded)
+    # and IGNORES a Developer manifest on disk.
+    import json
+    from looplab.engine.orchestrator import Engine
+    es = {"stages": [{"name": "train", "command": ["python", "train.py", "%params%"]},
+                     {"name": "score", "command": ["python", "score.py"]}],
+          "command": [], "timeout": 600.0}
+    (tmp_path / "looplab_stages.json").write_text(
+        json.dumps({"stages": [{"name": "sneak", "command": ["python", "x.py"]}]}), encoding="utf-8")
+    stages = Engine._resolve_stages(object.__new__(Engine), str(tmp_path), es, {"lr": 0.1})
+    assert [s["name"] for s in stages] == ["train", "score"]         # dev manifest ignored
+    assert stages[0]["command"] == ["python", "train.py", "--lr", "0.1"]
+
+
+def test_engine_rejects_invalid_dev_manifest(tmp_path):
+    # mega-review fix: a hand-written manifest bypassing declare_stages used to be consumed
+    # unvalidated — a stage named 'score' would produce TWO score stages (score.log clobbered,
+    # stage-scoped re-runs confused) and a full-scorer stage double-ran the eval. The engine now
+    # runs the SAME shared validator and falls back to the single command.
+    import json
+    from looplab.engine.orchestrator import Engine
+    es = {"command": ["python", "score.py"], "timeout": 600.0}
+    (tmp_path / "looplab_stages.json").write_text(
+        json.dumps({"stages": [{"name": "score", "command": ["python", "fake_score.py"]}]}),
+        encoding="utf-8")
+    assert Engine._resolve_stages(object.__new__(Engine), str(tmp_path), es, {}) is None
+    (tmp_path / "looplab_stages.json").write_text(
+        json.dumps({"stages": [{"name": "a", "command": ["x"]}, {"name": "a", "command": ["y"]}]}),
+        encoding="utf-8")
+    assert Engine._resolve_stages(object.__new__(Engine), str(tmp_path), es, {}) is None
+
+
+def test_engine_accepts_valid_dev_manifest(tmp_path):
+    import json
+    from looplab.engine.orchestrator import Engine
+    es = {"command": ["python", "score.py"], "timeout": 600.0}
+    (tmp_path / "looplab_stages.json").write_text(
+        json.dumps({"stages": [{"name": "train", "command": ["python", "train.py"]}]}), encoding="utf-8")
+    stages = Engine._resolve_stages(object.__new__(Engine), str(tmp_path), es, {},
+                                    score_cmd=["python", "score.py"], score_timeout=60.0)
+    assert [s["name"] for s in stages] == ["train", "score"]
+    assert stages[-1] == {"name": "score", "command": ["python", "score.py"], "timeout": 60.0}
+
+
+def test_cmd_without_command_or_stages_is_rejected(tmp_path):
+    repo = tmp_path / "r"; repo.mkdir()
+    with pytest.raises(ValueError, match="command.*or.*stages|stages.*pipeline"):
+        validate_task({"goal": "g", "direction": "max", "repo": str(repo),
+                       "cmd": {"metric": {"reader": "stdout_json", "key": "m"}}})
 
 
 # --------------------------------------------------------------------------- review-fix regressions
