@@ -21,8 +21,9 @@ def genesis_system(kinds: list, key_defaults: dict, cat_lines: str) -> str:
         "- run_id: a short, memorable kebab-case name you invent (e.g. 'nomad-minimax', "
         "'titanic-baseline'). NEVER ask the user for it.\n"
         "- the TASK: if an existing catalogue entry clearly matches, set task_file to its path. "
-        "Otherwise AUTHOR an inline `task` object. For a Kaggle / MLE-bench competition use "
-        '{"kind":"mlebench_real","competition":"<id>"} with the FULL slug exactly as on Kaggle — '
+        "Otherwise AUTHOR an inline `task` object — the task is COMPOSABLE: NO `kind` field, the "
+        "engine infers the task from the capability fields you give. For a Kaggle / MLE-bench "
+        'competition use {"competition":"<id>"} with the FULL slug exactly as on Kaggle — '
         "e.g. 'nomad2018-predict-transparent-conductors' (NOT the short 'nomad2018'), "
         "'spooky-author-identification'.\n"
         "- REPO task (the agent optimizes an EXISTING code repo on this machine) — the task is "
@@ -52,9 +53,9 @@ def genesis_system(kinds: list, key_defaults: dict, cat_lines: str) -> str:
         "or guess. A repo task MUST carry a `cmd` (or reader:\"auto\") — nothing else could score a node. "
         "If you are CONTINUING a sibling run of the same repo, copy its `repo`, `dataset` and `cmd` "
         "verbatim. Copy any path / command / metric-key the user gives VERBATIM; never "
-        "invent a path you weren't given (leave editable_path empty and ask instead). When the user "
+        "invent a path you weren't given (leave `repo` empty and ask instead). When the user "
         "points you at their OWN repo (gives a path), ALWAYS author this inline repo task with that "
-        "editable_path — do NOT substitute a similarly-named catalogue file; the catalogue is only "
+        "path as `repo` — do NOT substitute a similarly-named catalogue file; the catalogue is only "
         "for the bundled example tasks. An absolute path is best, but ~ and $HOME are expanded.\n"
         "- REPO data: WHENEVER the user says where the data is, mount it — add "
         '"dataset":{"<name>":"<abs path>"} (appears at ./<name> in the eval workdir; ~/$HOME expand) '
@@ -83,7 +84,7 @@ def genesis_system(kinds: list, key_defaults: dict, cat_lines: str) -> str:
         "file the run writes; dotted key ok) | auto (the agent writes the reader). Choose file_* "
         "when the metric lands in a FILE rather than stdout. (Legacy spelling metric.kind still works.)\n"
         "- NO repo/code, just DATA + a goal (\"here is my data, get the best metric you see fit\"): "
-        'author the fully-generative kind {"kind":"dataset","goal":"<what to do>","direction":"max",'
+        'author the fully-generative DATA task (again no `kind`) {"goal":"<what to do>","direction":"max",'
         '"data_path":"<abs path to the data file/dir>"} — the Developer writes the WHOLE solution and '
         "self-reports the metric, CHOOSING an appropriate one when the user didn't name it (set "
         '"metric":"<name>" only if they did). Use mlebench_real instead for a known Kaggle '

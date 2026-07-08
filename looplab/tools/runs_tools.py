@@ -12,6 +12,7 @@ by the server (`_engine_alive`) to avoid a circular import and to reuse the one 
 """
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -341,9 +342,18 @@ class RunLauncherTools:
         if not rid:
             return "(propose_run needs a run_id)"
         task = args.get("task") if isinstance(args.get("task"), dict) else None
+        # a model sometimes passes `task` as a JSON STRING — parse it instead of bouncing with a
+        # misleading error (the old wording sent agents hunting for a legacy `kind` field)
+        if task is None and isinstance(args.get("task"), str) and args["task"].strip().startswith("{"):
+            try:
+                parsed = json.loads(args["task"])
+                task = parsed if isinstance(parsed, dict) else None
+            except Exception:  # noqa: BLE001 — fall through to the error below
+                task = None
         task_file = args.get("task_file") or None
         if not task and not task_file:
-            return "(propose_run needs an inline `task` object with a kind, or a `task_file`)"
+            return ("(propose_run needs an inline composable `task` OBJECT — goal + direction + the "
+                    "fields you have (repo / dataset / cmd / kaggle), NO `kind` — or a `task_file`)")
         # VALIDATE before proposing so the card the user sees is actually launchable — an invalid spec
         # (e.g. a repo task with no `eval` and no `onboard`) is bounced BACK to you to fix here, instead
         # of failing only when the user clicks Start (which spawns an engine that dies with no events).
@@ -360,7 +370,11 @@ class RunLauncherTools:
                 "settings": args.get("settings") if isinstance(args.get("settings"), dict) else {},
                 "rationale": str(args.get("rationale") or "")}
         self.proposals.append(spec)
-        what = (task.get("kind") if task else None) or task_file or "a task"
+        # describe the proposal by WHAT the composable task carries (there is no `kind` field)
+        what = task_file or (task and ("repo" if task.get("repo") else
+                                       "kaggle" if (task.get("kaggle") or task.get("competition")) else
+                                       "dataset" if (task.get("dataset") or task.get("data")) else
+                                       task.get("kind") or "task")) or "a task"
         return (f"(proposed run '{rid}' ({what}) — shown to the user as a launch card; they will start "
                 "it. Tell them what you proposed.)")
 

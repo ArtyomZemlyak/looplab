@@ -93,6 +93,7 @@ ATTR_BY_FIELD = {
     "holdout_top_k": "_holdout_top_k",
     "debug_depth": "_debug_depth",
     "operator_bandit": "_operator_bandit",
+    "novelty_mode": "_novelty_mode",
     "novelty_semantic": "_novelty_semantic",
     "novelty_semantic_threshold": "_novelty_semantic_threshold",
     "research_verify": "_research_verify",
