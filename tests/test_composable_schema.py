@@ -201,6 +201,16 @@ def test_per_source_data_permissions(tmp_path):
     assert "raw" in prot and "raw/**" in prot and "bare/**" in prot   # non-edit sources protected
     assert "work" not in prot and "work/**" not in prot              # edit=true source stays writable
     assert "read-only mount" in t._data_brief() and "writable copy" in t._data_brief()
+    # the protection must be ENFORCED by the in-house Developer's write gate (exact-match mode) — a
+    # `dir/**` protect entry has to guard the whole tree, not just the literal string.
+    from looplab.adapters.repo_developer import RepoWriteTools
+    rs = t.repo_spec()
+    wt = RepoWriteTools(surface=rs["edit_surface"], protected=rs["protected_names"],
+                        editables=[{"name": ".", "path": str(repo), "surface": rs["edit_surface"],
+                                    "protect": rs["protected_names"]}])
+    assert "protected" in wt.execute("write_file", {"path": "raw/x.csv", "content": "a"})       # non-edit refused
+    assert "protected" in wt.execute("write_file", {"path": "raw/sub/y.csv", "content": "a"})   # nested refused
+    assert "wrote" in wt.execute("write_file", {"path": "work/x.csv", "content": "a"})          # edit=true OK
 
 
 def test_api_start_infers_kind_for_composable_task():

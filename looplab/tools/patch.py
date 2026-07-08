@@ -154,7 +154,15 @@ class SurfacePolicy:
 
     def _is_protected(self, path: str) -> bool:
         if self.protected_exact:
-            return path in self.protected
+            if path in self.protected:
+                return True
+            # A `dir/**` protect entry guards the whole TREE under `dir` (a read-only mounted data
+            # source), which an exact string-membership test would miss — so a write to `dir/file`
+            # slipped through. Honor the directory-prefix form even in exact mode.
+            for g in self.protected:
+                if g.endswith("/**") and (path == g[:-3] or path.startswith(g[:-2])):
+                    return True
+            return False
         pc = _ci(path)
         return any(pc == g or _match(pc, g) for g in self.protected)
 
