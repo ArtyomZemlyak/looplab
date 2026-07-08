@@ -101,13 +101,17 @@ export default function GenesisChat({ onClose, onStarted, seed }) {
   const setMetricKey = (v) => setCmdField('metric', { reader: 'stdout_json', ..._cmdObj.metric, key: v })
   const setRepoPath = (v) => setSpec(s => { const { editable_path: _e, ...rest } = (s?.task || {}); return { ...s, task: { ...rest, repo: v } } })
   // Data mounts textarea: one "name /abs/path" per line -> {name: path}. Writes the composable `dataset`.
-  const setDataset = (str) => setSpec(s => { const { data: _d, ...rest } = (s?.task || {}); const mounts = {}; for (const ln of String(str).split('\n')) { const m = ln.trim().match(/^(\S+)\s+(.+)$/); if (m) mounts[m[1]] = m[2].trim() } return { ...s, task: { ...rest, dataset: mounts } } })
+  // A per-source PERMISSION object ({path, mount, edit, …} — a form the boss is prompted to author)
+  // round-trips as JSON after the name ('raw {"path":"/d","edit":false}'): stringifying it with `${p}`
+  // rendered '[object Object]' and ANY keystroke then wrote that literal back as the mount path,
+  // silently destroying the real path and every permission flag (mega-review fix).
+  const setDataset = (str) => setSpec(s => { const { data: _d, ...rest } = (s?.task || {}); const mounts = {}; for (const ln of String(str).split('\n')) { const m = ln.trim().match(/^(\S+)\s+(.+)$/); if (!m) continue; const v = m[2].trim(); if (v.startsWith('{')) { try { mounts[m[1]] = JSON.parse(v) } catch { mounts[m[1]] = v } } else { mounts[m[1]] = v } } return { ...s, task: { ...rest, dataset: mounts } } })
 
   const task = spec?.task || {}
   const repoPath = task.repo || task.editable_path || ''
   const cmdCommand = _cmdObj.command || []
   const dataMounts = task.dataset || task.data || {}
-  const dataText = Object.entries(dataMounts).map(([n, p]) => `${n} ${p}`).join('\n')
+  const dataText = Object.entries(dataMounts).map(([n, p]) => `${n} ${typeof p === 'string' ? p : JSON.stringify(p)}`).join('\n')
   // Infer the task type from which fields are present (composable), falling back to an explicit kind.
   const inferredKind = task.kind || (repoPath ? 'repo'
     : ((task.dataset || task.data || task.data_path) ? 'dataset'
@@ -214,7 +218,9 @@ export default function GenesisChat({ onClose, onStarted, seed }) {
               <div className="gen-help">{spec.task_file ? 'from the task catalogue' : (inferredKind ? '' : 'pick a type, then fill the fields below')}</div>
             </div>
             {!spec.task_file && inferredKind === 'mlebench_real' && <div className="gen-field"><div className="gen-lab">Kaggle competition</div>
-              <input className="text" value={task.kaggle || task.competition || ''} onChange={e => setTaskField('kaggle', e.target.value)} placeholder="kaggle-competition-id" />
+              {/* editing the slug must also DROP a boss-authored legacy `competition`: normalize_task
+                  gives `kaggle` precedence, but leaving the stale key in the task is asking for drift */}
+              <input className="text" value={task.kaggle || task.competition || ''} onChange={e => setSpec(s => { const { competition: _c, ...rest } = (s?.task || {}); return { ...s, task: { ...rest, kaggle: e.target.value } } })} placeholder="kaggle-competition-id" />
               <div className="gen-help">MLE-bench / Kaggle competition id (the full slug).</div></div>}
             {isDataset && !spec.task_file && <div className="gen-repo">
               <div className="gen-field"><div className="gen-lab">Goal</div>
@@ -234,7 +240,7 @@ export default function GenesisChat({ onClose, onStarted, seed }) {
                 <div className="gen-help">The codebase the agent may edit — an absolute path on this machine.</div></div>
               <div className="gen-field"><div className="gen-lab">Data mounts (optional)</div>
                 <textarea className="text" rows={2} value={dataText} onChange={e => setDataset(e.target.value)} placeholder={"dataset /abs/path/to/data\nmodel /abs/path/to/weights"} />
-                <div className="gen-help">Read-only datasets / model weights outside the repo — one <code>name /abs/path</code> per line (appear at ./name).</div></div>
+                <div className="gen-help">Read-only datasets / model weights outside the repo — one <code>name /abs/path</code> per line (appear at ./name). Per-source permissions: <code>name {'{'}"path":"/abs","edit":false{'}'}</code>.</div></div>
               <div className="gen-field"><div className="gen-lab">Run + score command (cmd)</div>
                 <input className="text" value={(cmdCommand || []).join(' ')} onChange={e => setCmdCommand(e.target.value)} placeholder="python test.py" />
                 <div className="gen-help">{_cmdObj.metric?.reader === 'auto' ? 'Auto reader: the agent writes the metric reader for this command.' : 'How LoopLab runs + scores the repo. It must print the metric (see steps below).'}</div></div>
