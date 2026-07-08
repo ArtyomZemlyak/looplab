@@ -141,8 +141,12 @@ it). Each stage gets its own span + `<name>.log` and a pass/fail (`stage_finishe
   checker (Researcher/Developer) before the next stage runs; a concern stops the pipeline early so a
   diverged train can't silently feed eval.
 
-The **last stage is the metric stage** — its stdout must print the metric JSON line. With no manifest,
-the single eval command is used exactly as before.
+The operator's `cmd` is the **authoritative, non-rewritable scoring stage** and its stdout is where the
+trusted metric reader reads. The agent's `declare_stages` supplies only the stages that run BEFORE it
+(`data_prep`, `train`, …); the engine appends `cmd` as the final protected `score` stage. When `cmd`
+itself declares `stages`, those are canonical (the agent implements the scripts, not the structure). With
+no stages at all, the single `cmd` command runs exactly as before. A `%params%` token in any command
+expands to the node's tuned hyperparameters.
 
 ## Evaluation rigor
 

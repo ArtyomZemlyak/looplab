@@ -10,6 +10,21 @@ The fastest way to set any of this up is **[Genesis](#preferred-let-genesis-auth
 first*), so reach for it before hand-writing JSON. Every case below shows both the Genesis path and
 the equivalent task file.
 
+> **New composable schema.** A task no longer needs a `kind` — describe what you HAVE (`repo`,
+> `dataset`, `cmd`, `kaggle`) and the engine infers the rest (see [Tasks → the composable schema](tasks.md#the-composable-schema-recommended)). The legacy `kind`/`editable_path`/`eval`/`onboard`/`metric.kind`
+> spellings below all still work (they're accepted as aliases), but the composable names are preferred.
+> Three things worth knowing for a **training** repo:
+> - **`cmd` is the SCORING step, not the trainer.** Training is a separate stage the agent declares at
+>   run time with its `declare_stages` tool; the engine runs the agent's `train` stage first, then your
+>   `cmd` scores the freshly-trained model. Do **not** put training in `cmd.setup` (that's for dependency
+>   installs). If your repo has an existing scorer (`test.py`), pass it as `cmd` and `protect` it; if the
+>   scorer must be built, point `cmd` at a file the agent will create and don't protect it.
+> - **Give a training `cmd.timeout` generously** (often `7200`–`14400`s) — the 600s default SIGKILLs a
+>   long train into an undertrained checkpoint.
+> - **`%params%`** in a command expands to the node's tuned hyperparameters (`--key value`); **per-source
+>   data permissions** — a `dataset` value may be `{path, mount, edit, copy_modify, preprocess, extend}`
+>   (default: read-only original, but the agent may copy/preprocess/extend it into a training set).
+
 > **On the command line**, Genesis runs headless too: `looplab run --goal "<what you want>"` lets the
 > LLM author the task from your words — it picks the kind *and* reads where your data lives (one path
 > or several, a file or a folder), so you needn't pass `--data`. Pin the kind with `--kind` and Genesis

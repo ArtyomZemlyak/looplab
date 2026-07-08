@@ -1,6 +1,11 @@
-"""TaskAdapter seam (ADR-2) + a loader that dispatches on the task `kind` field.
-Any object exposing `id`, `goal`, `direction`, and `build_roles()` is a valid task;
-optionally `columns()` enables the grounding/profiling pre-phase.
+"""TaskAdapter seam (ADR-2) + a loader for tasks.
+
+A task is COMPOSABLE: `normalize_task` infers the adapter from which capability fields are present
+(`repo`/`dataset`/`cmd`/`kaggle`/`benchmark`, with `metric.reader`) rather than a `kind` enum, and maps
+them onto the registered adapters — while still accepting the legacy `kind`/`eval`/`onboard`/
+`editable_path`/`metric.kind` spelling verbatim (so old snapshots/task files keep working). Any object
+exposing `id`, `goal`, `direction`, and `build_roles()` is a valid task; optionally `columns()` enables
+the grounding/profiling pre-phase.
 """
 from __future__ import annotations
 
