@@ -299,7 +299,10 @@ class RunLauncherTools:
                 "read a pre-existing checkpoint or a static results file (results_last.csv is a PRIOR run's "
                 "output, not a score). If `cmd` TRAINS, set its `timeout` GENEROUSLY (seconds): training "
                 "runs minutes-to-hours but the default is 600s, which SIGKILLs it mid-first-epoch into an "
-                "undertrained model — size it to the full schedule (often 7200-14400s).",
+                "undertrained model — size it to the full schedule (often 7200-14400s). Do NOT `protect` "
+                "a scoring entrypoint the agent must still BUILD (a protected file can't be created — the "
+                "eval then fails 'no such file'); only `protect` files that already EXIST and the operator "
+                "owns (e.g. the framework's test.py the agent must not tamper with).",
                 {"run_id": {"type": "string", "description": "short kebab-case name you invent"},
                  "task": {"type": "object", "description": "composable inline task: goal + direction + the fields you have (repo / dataset / cmd{command|stages,metric:{reader,key},timeout} / kaggle). No `kind`."},
                  "task_file": {"type": "string", "description": "a catalogue task path (alternative to task)"},
