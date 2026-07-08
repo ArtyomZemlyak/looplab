@@ -182,10 +182,10 @@ def build_router(srv) -> APIRouter:
         # field) fails HERE with a 400 instead of spawning a detached engine that dies (DEVNULL'd)
         # before writing any events, leaving a phantom never-started run.
         if isinstance(task, dict) and task:
-            from looplab.adapters.tasks import kinds, validate_task
-            kind = task.get("kind")
-            if not kind:
-                raise HTTPException(400, "inline task must declare a 'kind'")
+            from looplab.adapters.tasks import kinds, validate_task, normalize_task
+            # A COMPOSABLE task carries no `kind` — infer it from the fields (repo/dataset/cmd/kaggle)
+            # so the composable schema the boss now authors isn't 400'd before validation runs.
+            kind = normalize_task(task).get("kind")
             if kind not in kinds():
                 raise HTTPException(400, f"unknown task kind: {kind!r} (known: {kinds()})")
             try:

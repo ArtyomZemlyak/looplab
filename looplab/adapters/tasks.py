@@ -113,9 +113,13 @@ def normalize_task(data: dict) -> dict:
     # --- dataset: read-only mounts. A bare path -> one mount named "dataset"; a dict -> merged ---
     if "dataset" in d:
         ds = d.pop("dataset")
-        mounts = dict(d.get("data") or {})
+        existing = d.get("data")
+        mounts = dict(existing) if isinstance(existing, dict) else {}
         if isinstance(ds, str) and ds:
-            mounts.setdefault("dataset", ds)
+            name, i = "dataset", 2               # avoid clobbering an explicit `data` mount of the same name
+            while name in mounts:
+                name, i = f"dataset{i}", i + 1
+            mounts[name] = ds
         elif isinstance(ds, dict):
             mounts.update(ds)
         if mounts:

@@ -48,6 +48,10 @@ def _artifact_roots(rd: Path) -> list[dict]:
         try:
             data = json.loads(snap.read_text(encoding="utf-8"))
             if isinstance(data, dict):
+                # A composable snapshot stores `repo`/`dataset` (not editable_path/data); normalize so
+                # the file browser still exposes the repo + data mount roots for a composable run.
+                from looplab.adapters.tasks import normalize_task
+                data = normalize_task(data)
                 if data.get("editable_path"):
                     p = _art_expand(data["editable_path"])
                     roots.append({"id": "editable:.", "label": f"repo: {Path(p).name or p}", "base": Path(p)})

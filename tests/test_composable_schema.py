@@ -139,3 +139,41 @@ def test_declare_stages_reports_errors(bad, needle):
     msg = t.execute("declare_stages", {"stages": bad})
     assert msg.startswith("(refused") and needle in msg
     assert "looplab_stages.json" not in t.files            # nothing staged on error
+
+
+def test_declare_stages_honours_edit_surface_gate():
+    # review fix: a restricted surface must confine declare_stages too (else it's a hole around the
+    # surface gate). looplab_stages.json at root is outside a `model/**` surface -> refused.
+    from looplab.adapters.repo_developer import RepoWriteTools
+    t = RepoWriteTools(surface=["model/**"], protected=[],
+                       editables=[{"name": ".", "path": "/tmp", "surface": ["model/**"], "protect": []}])
+    msg = t.execute("declare_stages", {"stages": [{"name": "train", "command": ["python", "t.py"]}]})
+    assert msg.startswith("(refused") and "surface" in msg
+    assert "looplab_stages.json" not in t.files
+
+
+# --------------------------------------------------------------------------- review-fix regressions
+def test_dataset_bare_path_does_not_clobber_explicit_mount():
+    n = normalize_task({"repo": "/r", "direction": "max", "cmd": ["python", "x.py"],
+                        "data": {"dataset": "/A"}, "dataset": "/B"})
+    assert n["data"]["dataset"] == "/A" and n["data"]["dataset2"] == "/B"   # both kept, no clobber
+
+
+def test_dataset_with_string_data_does_not_crash():
+    n = normalize_task({"repo": "/r", "direction": "max", "cmd": ["python", "x.py"],
+                        "data": "ignored-str", "dataset": "/B"})
+    assert n["data"] == {"dataset": "/B"}                 # string `data` ignored, no crash
+
+
+def test_build_command_no_double_inject_with_token_and_params_style():
+    cmd, _ = build_command({"command": ["python", "t.py", "%params%"], "params_style": "cli_overrides"},
+                           {"lr": 0.001})
+    assert cmd == ["python", "t.py", "--lr", "0.001"]      # only the token form, not also lr=0.001
+
+
+def test_api_start_infers_kind_for_composable_task():
+    # review fix: /api/start used to 400 a kind-less task; it now infers the kind via normalize_task.
+    from looplab.adapters.tasks import normalize_task, kinds
+    kind = normalize_task({"goal": "g", "direction": "max", "repo": "/r",
+                           "cmd": ["python", "t.py"]}).get("kind")
+    assert kind == "repo" and kind in kinds()

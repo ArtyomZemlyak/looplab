@@ -128,6 +128,12 @@ class RepoWriteTools:
         but never rewrite the scoring. Returns a clear error string on any problem (nothing staged) so
         the tool loop gets actionable feedback instead of the silent malformed-manifest fallback."""
         import json
+        # SAME surface/protected gate as write_file: declaring a pipeline runs arbitrary preceding
+        # commands, so a restricted edit_surface must confine it too (else declare_stages would be a
+        # hole around the surface gate that write_file('looplab_stages.json') is subject to).
+        refusal = self._refusal("looplab_stages.json", "declare stages in")
+        if refusal:
+            return refusal
         if not isinstance(stages, list) or not stages:
             return "(refused: `stages` must be a non-empty array of {name, command:[argv...]} objects.)"
         seen, clean = set(), []

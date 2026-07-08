@@ -235,7 +235,9 @@ def build_command(eval_spec: dict, params: Optional[dict] = None,
       composable-schema way. Legacy `params_style == "cli_overrides"` still appends `key=value`
       tokens (Hydra-style) for old tasks that set it.
     """
-    cmd = expand_params(list(eval_spec["command"]), params)   # %params% token -> --key value
+    _argv = list(eval_spec["command"])
+    _had_token = "%params%" in _argv
+    cmd = expand_params(_argv, params)                        # %params% token -> --key value
     profiles = eval_spec.get("profiles") or {}
     # Resolve the profile. An explicitly-requested name that isn't defined uses NO overrides
     # (the base/full command) — never a cheaper fallback, so confirm("full") can't silently
@@ -244,8 +246,8 @@ def build_command(eval_spec: dict, params: Optional[dict] = None,
     overrides = list((prof or {}).get("overrides", []))
     # Explicit presence check (not `or`) so a configured timeout of 0 isn't read as missing.
     timeout = prof["timeout"] if (prof and "timeout" in prof) else eval_spec.get("timeout", 600.0)
-    if eval_spec.get("params_style") == "cli_overrides":      # legacy Hydra-style append (back-compat)
-        overrides += [f"{k}={_fmt(v)}" for k, v in (params or {}).items()]
+    if eval_spec.get("params_style") == "cli_overrides" and not _had_token:  # legacy Hydra append …
+        overrides += [f"{k}={_fmt(v)}" for k, v in (params or {}).items()]   # … skip if %params% already injected
     return cmd + overrides, timeout
 
 

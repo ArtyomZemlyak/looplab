@@ -2313,7 +2313,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin):
         # extracted to engine/workspace.py — see the delegator block after __init__
         return self.workspace.sandbox_cwd(workdir, cwd_spec)
 
-    def _resolve_stages(self, workdir, es, params=None):
+    def _resolve_stages(self, workdir, es, params=None, score_cmd=None, score_timeout=None):
         """Resolve the ordered eval pipeline, with the operator's `cmd` (es) AUTHORITATIVE and
         non-overridable (redesign: the agent can't rewrite how it's scored):
 
@@ -2324,8 +2324,11 @@ class Engine(ConfirmPhaseMixin, AblationMixin):
             `score` stage whose stdout the trusted metric reader reads. So the agent can add work
             BEFORE scoring but never replace the scoring itself.
 
-        `%params%` tokens in any stage command (and the appended cmd) expand to the node's params
-        (`--key value`). Returns None (classic single-command eval) when there are no stages."""
+        `score_cmd`/`score_timeout` (the profile- + params-resolved command/timeout from
+        `build_command`) drive the appended score stage, so the smoke/full eval PROFILE and its
+        timeout still apply in pipeline mode — not just the base command at the default timeout.
+        `%params%` tokens in any preceding stage command expand to the node's params. Returns None
+        (classic single-command eval) when there are no stages."""
         import json
         from looplab.runtime import command_eval
 
@@ -2354,9 +2357,12 @@ class Engine(ConfirmPhaseMixin, AblationMixin):
         if isinstance(dev, list) and dev:
             preceding = _clean(dev)
             if preceding:
-                final = {"name": "score",                # the operator's cmd — FINAL + protected
-                         "command": command_eval.expand_params(list(es.get("command") or []), params),
-                         "timeout": es.get("timeout", 600.0)}
+                # the operator's cmd is the FINAL + protected scoring stage; reuse the already
+                # profile-resolved command/timeout (build_command) so smoke/full still applies.
+                final = {"name": "score",
+                         "command": list(score_cmd) if score_cmd is not None
+                                    else command_eval.expand_params(list(es.get("command") or []), params),
+                         "timeout": score_timeout if score_timeout is not None else es.get("timeout", 600.0)}
                 return preceding + [final]
         return None
 
@@ -2411,7 +2417,8 @@ class Engine(ConfirmPhaseMixin, AblationMixin):
             params = node.idea.params if node is not None else {}
             cmd, timeout = command_eval.build_command(es, params, prof)
             root = str(Path(workdir).resolve())               # repo/workdir root
-            stages = self._resolve_stages(root, es, params)   # cmd-authoritative pipeline (+ %params% per stage)
+            stages = self._resolve_stages(root, es, params,   # cmd-authoritative pipeline (+ %params% per stage)
+                                          score_cmd=cmd, score_timeout=timeout)  # profile/timeout survive pipeline mode
             check_fn = (self._stage_check_fn(node)            # Phase 3: inter-stage verify (only if any stage asks)
                         if stages and any(s.get("check") for s in stages) else None)
             cwd = self._sandbox_cwd(workdir, es.get("cwd", "."))
