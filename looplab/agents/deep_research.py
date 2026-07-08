@@ -98,7 +98,7 @@ class DeepResearcher:
     external grounding (the memo is then formed from the results summary alone)."""
 
     def __init__(self, client, tools=None, parser: str = "tool_call", max_turns: int = 0,
-                 context_budget_chars: int = 0, time_budget_s: float = 0.0,
+                 context_budget_chars: int | None = None, time_budget_s: float = 0.0,
                  stuck_detection: bool = True, stuck_repeat: int = 4, stuck_alternate: int = 4,
                  auto_summary: bool = True, prompts=None):
         self.client = client
@@ -238,7 +238,7 @@ def make_deep_researcher(settings, *, client=None, task=None) -> Optional[DeepRe
                if getattr(settings, "prompt_dir", None) else None)
     return DeepResearcher(client, tools, parser=getattr(settings, "llm_parser", "tool_call"),
                           prompts=prompts,
-                          context_budget_chars=getattr(settings, "context_budget_chars", 0),
+                          context_budget_chars=getattr(settings, "context_budget_chars", None),
                           max_turns=getattr(settings, "agent_max_turns", 0),
                           time_budget_s=getattr(settings, "agent_time_budget_s", 0.0),
                           stuck_detection=bool(getattr(settings, "agent_stuck_detection", True)),

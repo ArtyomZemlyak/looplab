@@ -329,3 +329,116 @@ def test_dedup_invalidated_by_write():
                           finalize=lambda a: ("emit", a), fallback=lambda _m: ("fallback", None))
     assert out[0] == "emit"
     assert tools.reads == 2      # the write between the two identical reads invalidated the cache
+
+
+class _ScriptToolClient:
+    """Plays a scripted list of tool calls, then emits."""
+    def __init__(self, script):
+        self.script = [_tool_call(n, a) for n, a in script] + [
+            {"content": "", "tool_calls": [{"id": "e", "function": {"name": "emit", "arguments": "{}"}}]}]
+
+    def chat(self, messages, tools, tool_choice="auto"):
+        return self.script.pop(0)
+
+
+class _CountingNamedTools:
+    """Counts executions per tool name; every listed name is offered as a spec."""
+    def __init__(self, *names):
+        self.names, self.counts = names, {}
+
+    def specs(self):
+        return [{"type": "function", "function": {
+            "name": n, "description": "", "parameters": {"type": "object", "properties": {}}}}
+            for n in self.names]
+
+    def execute(self, name, args):
+        self.counts[name] = self.counts.get(name, 0) + 1
+        return f"{name}-result-{self.counts[name]}"
+
+
+def test_poll_tools_are_never_deduped():
+    # read_output is a CURSOR poll ("new output since your last read") — identical args every call by
+    # design. Dedup froze it to the first result and tripped the StuckDetector mid-training job
+    # (mega-review L1). Every poll must EXECUTE.
+    client = _ScriptToolClient([("read_output", {"task_id": "t1"})] * 3)
+    tools = _CountingNamedTools("read_output")
+    out = drive_tool_loop(client, tools, [{"role": "user", "content": "go"}], _EMIT,
+                          finalize=lambda a: ("emit", a), fallback=lambda _m: ("fallback", None))
+    assert out[0] == "emit"
+    assert tools.counts["read_output"] == 3
+
+
+def test_misnamed_mutators_invalidate_the_cache():
+    # revert_file / git_checkout contain none of the old blocklist substrings but DO change the
+    # working tree — a cached read served after them is stale state presented as current
+    # (mega-review L2). Each must clear the dedup cache.
+    for mutator in ("revert_file", "git_checkout", "reset_node"):
+        client = _ScriptToolClient([("read_file", {"path": "a.py"}), (mutator, {"path": "a.py"}),
+                                    ("read_file", {"path": "a.py"})])
+        tools = _CountingNamedTools("read_file", mutator)
+        out = drive_tool_loop(client, tools, [{"role": "user", "content": "go"}], _EMIT,
+                              finalize=lambda a: ("emit", a), fallback=lambda _m: ("fallback", None))
+        assert out[0] == "emit"
+        assert tools.counts["read_file"] == 2, f"{mutator} did not invalidate the read cache"
+
+
+def test_volatile_readers_do_not_invalidate_the_cache():
+    # git_status is read-only (mutates nothing): interleaving it must NOT wipe the dedup state —
+    # the repeated read_file stays suppressed (effectiveness guard, mega-review L7).
+    client = _ScriptToolClient([("read_file", {"path": "a.py"}), ("git_status", {}),
+                                ("read_file", {"path": "a.py"})])
+    tools = _CountingNamedTools("read_file", "git_status")
+    out = drive_tool_loop(client, tools, [{"role": "user", "content": "go"}], _EMIT,
+                          finalize=lambda a: ("emit", a), fallback=lambda _m: ("fallback", None))
+    assert out[0] == "emit"
+    assert tools.counts["read_file"] == 1                # still deduped across the volatile read
+
+
+def test_compaction_clears_the_dedup_cache(monkeypatch):
+    # Once compaction summarized away the original outputs, a dedup stub ("use the earlier output")
+    # points at content the model can never recover (mega-review L4) — the cache must reset when
+    # compaction actually fires so the re-read executes for real.
+    import looplab.core.context_budget as cb
+
+    def fake_compact(messages, max_chars, summarize, keep_last=3):
+        return messages[1:] if len(messages) >= 3 else messages   # "summarize" = drop the oldest
+
+    monkeypatch.setattr(cb, "compact_history", fake_compact)
+    client = _ScriptToolClient([("read_file", {"path": "a.py"}), ("read_file", {"path": "a.py"})])
+    tools = _CountingNamedTools("read_file")
+    out = drive_tool_loop(client, tools, [{"role": "user", "content": "go"}], _EMIT,
+                          auto_summary=True, context_budget_chars=10,
+                          finalize=lambda a: ("emit", a), fallback=lambda _m: ("fallback", None))
+    assert out[0] == "emit"
+    assert tools.counts["read_file"] == 2                # compaction fired between them -> cache reset
+
+
+def test_context_budget_zero_means_off(monkeypatch):
+    # The documented "0 = off": compaction must not run AT ALL (the old `or DEFAULT` fallback turned
+    # an explicit 0 into the 120k default — MORE aggressive than configured, mega-review L6).
+    import looplab.core.context_budget as cb
+
+    def boom(*_a, **_k):
+        raise AssertionError("compaction ran with context_budget_chars=0")
+
+    monkeypatch.setattr(cb, "compact_history", boom)
+    monkeypatch.setattr(cb, "truncate_history", boom)
+    client = _ScriptToolClient([("read_file", {"path": "a.py"})])
+    tools = _CountingNamedTools("read_file")
+    out = drive_tool_loop(client, tools, [{"role": "user", "content": "go"}], _EMIT,
+                          auto_summary=True, context_budget_chars=0,
+                          finalize=lambda a: ("emit", a), fallback=lambda _m: ("fallback", None))
+    assert out[0] == "emit"
+
+
+def test_loop_opts_plumb_context_budget():
+    # The configured budget must ride loop_opts_from_settings to EVERY loop (the Developer's implement
+    # session was still compacting at the 120k built-in — mega-review L5); a bare settings object
+    # without the field keeps the loop's own default (key absent -> None -> built-in).
+    class _S:
+        context_budget_chars = 123_456
+    assert loop_opts_from_settings(_S())["context_budget_chars"] == 123_456
+
+    class _Bare:
+        pass
+    assert "context_budget_chars" not in loop_opts_from_settings(_Bare())

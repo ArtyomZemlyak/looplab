@@ -485,7 +485,7 @@ class ToolUsingStrategist:
 
     def __init__(self, client, tools=None, n_seeds: int = 3, parser: str = "tool_call",
                  loop_opts: Optional[dict] = None, max_turns: int = 0,
-                 time_budget_s: float = 0.0, context_budget_chars: int = 0, prompts=None):
+                 time_budget_s: float = 0.0, context_budget_chars: int | None = None, prompts=None):
         self.client = client
         self.tools = tools          # CompositeTools of read-only providers (None = emit-only, like LLM)
         self.parser = parser
@@ -563,5 +563,5 @@ def make_strategist(settings, *, client=None, n_seeds: int = 3, tools=None) -> O
             loop_opts=loop_opts_from_settings(settings),
             max_turns=getattr(settings, "agent_max_turns", 0),
             time_budget_s=getattr(settings, "agent_time_budget_s", 0.0),
-            context_budget_chars=getattr(settings, "context_budget_chars", 0))
+            context_budget_chars=getattr(settings, "context_budget_chars", None))
     raise ValueError(f"unknown strategist_backend: {backend!r}")

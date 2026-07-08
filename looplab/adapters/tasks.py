@@ -630,7 +630,7 @@ def make_roles(task: TaskAdapter, settings, run_dir=None):
             space_hint=getattr(researcher, "space_hint", ""),
             bounds=getattr(researcher, "bounds", None),
             parser=settings.llm_parser, prompts=prompts,
-            context_budget_chars=getattr(settings, "context_budget_chars", 0),   # H4
+            context_budget_chars=getattr(settings, "context_budget_chars", None),   # H4
             max_turns=getattr(settings, "agent_max_turns", 0),                   # 0 = unlimited
             time_budget_s=getattr(settings, "agent_time_budget_s", 0.0),         # 0 = no cap
             loop_opts=loop_opts_from_settings(settings),     # B1 stuck + C1 self-plan + C2 summary

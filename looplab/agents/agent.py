@@ -89,6 +89,31 @@ def _force_emit(client, messages: list, emit_spec: dict) -> Optional[dict]:
 
 _PLAN_TOOL_NAME = "update_plan"
 
+# G2 read-dedup classification (exact tool names, not substrings — a substring blocklist classified
+# revert_file/git_checkout/reset_node as "read-only" and dedup-froze cursor-polls like read_output).
+# _DEDUP_SAFE: readers whose (name,args)->result is STABLE within one loop unless a tool from the
+# "everything else" class runs — safe to suppress an exact repeat AND to keep cached across turns.
+_DEDUP_SAFE = frozenset((
+    "read_file", "grep", "find_files", "list_dir",              # repo scouts / assistant fs readers
+    "repo_read", "repo_list", "repo_grep",                      # cross-run repo scouts
+    "read_note", "list_notes", "recall_notes", "kb_search",     # knowledge base
+    "pkg_info", "py_api", "read_installed", "grep_installed",   # env inspector (static packages)
+    "list_themes", "search_lessons",                            # lesson store (frozen within a loop)
+))
+# _READ_ONLY_VOLATILE: read-only but legitimately TIME-VARYING (polls, git state, live-run readers,
+# hardware) — never deduped (each call may see new data: dedup here broke background-job polling and
+# tripped the StuckDetector on evolving observations) and never invalidates the cache (mutates nothing).
+_READ_ONLY_VOLATILE = frozenset((
+    "read_output", "list_background",                           # background-command cursor polls
+    "git_status", "git_diff", "git_log",                        # working-tree state
+    "gpu_info",                                                 # hardware utilization varies
+    "list_runs", "list_all_runs", "read_run", "read_run_code", "read_run_experiment",
+    "read_run_logs", "read_run_trace", "list_experiments", "list_sibling_runs",
+    "read_sibling_code", "read_sibling_experiment", "read_code", "read_experiment",
+    "read_asset", "read_logs", "data_profile", "data_schema",
+    "find_analogous", "find_analogous_across_runs",
+))
+
 
 def _plan_spec() -> dict:
     """C1 (TodoWrite-style) self-plan tool: the agent records/updates its OWN working TODO so it
@@ -129,7 +154,7 @@ def _render_plan(args: dict) -> str:
 
 
 def drive_tool_loop(client, tools, messages: list, emit_spec: dict, *,
-                    max_turns: int = 0, context_budget_chars: int = 0,
+                    max_turns: int = 0, context_budget_chars: int | None = None,
                     time_budget_s: float = 0.0, finalize=None, fallback=None,
                     stuck_detection: bool = True,
                     stuck_repeat: int = 4, stuck_alternate: int = 4,
@@ -230,7 +255,7 @@ def drive_tool_loop(client, tools, messages: list, emit_spec: dict, *,
     emit_rejects = 0                    # bad emits bounced back for a re-emit (validate + emit_retries)
     tool_turns = 0                      # G: investigation turns, for the emit_after soft-convergence nudge
     emit_nudged = False
-    read_seen: dict = {}                 # G2: (tool,args) -> repeat count, for the read-dedup anti-thrash
+    read_seen: dict = {}                 # G2: (tool,args) -> FIRST capped result, for read-dedup + stuck parity
     turns = itertools.count() if max_turns is None or max_turns <= 0 else range(max_turns)
     for turn_idx in turns:
         if _cancelled():                # user hit stop -> finalize from what we have, promptly
@@ -241,13 +266,26 @@ def drive_tool_loop(client, tools, messages: list, emit_spec: dict, *,
         # `run_turn` keep a reference to this list to post-process the trace (stream the final answer
         # over it); a rebind would orphan their reference on a compacted turn and they'd re-answer
         # BLIND, missing every post-compaction tool result.
-        if auto_summary:                # C2: summarize the stale middle once the history grows long
-            from looplab.core.context_budget import DEFAULT_SUMMARY_CHARS, compact_history
-            messages[:] = compact_history(messages, context_budget_chars or DEFAULT_SUMMARY_CHARS,
-                                          summarize)
-        elif context_budget_chars:      # H4: else just middle-truncate stale tool output
-            from looplab.core.context_budget import truncate_history
-            messages[:] = truncate_history(messages, context_budget_chars)
+        # `context_budget_chars`: None = unset (fall back to the built-in default), 0 = compaction OFF
+        # (the documented "0 = off" — the old `or DEFAULT` fallback silently turned 0 into the 120k
+        # default, i.e. compaction ~8× MORE aggressive than the operator asked for), >0 = the budget.
+        _budget = context_budget_chars
+        if auto_summary and _budget is None:
+            from looplab.core.context_budget import DEFAULT_SUMMARY_CHARS
+            _budget = DEFAULT_SUMMARY_CHARS
+        if _budget:
+            _pre_compact_len = len(messages)
+            if auto_summary:            # C2: summarize the stale middle once the history grows long
+                from looplab.core.context_budget import compact_history
+                messages[:] = compact_history(messages, _budget, summarize)
+            else:                       # H4: else just middle-truncate stale tool output
+                from looplab.core.context_budget import truncate_history
+                messages[:] = truncate_history(messages, _budget)
+            if len(messages) < _pre_compact_len and read_seen:
+                # Compaction summarized away the very outputs the dedup stubs point at ("use the
+                # earlier output") — the model could never recover them. Forget the cache so the
+                # next re-read executes for real.
+                read_seen.clear()
         # C1: re-surface the agent's own plan periodically so a long loop can't drift off-goal. A
         # `user`-role reminder, not `system`: the plan is verbatim MODEL output (from update_plan
         # args), so a `system` reinjection would let content the model was steered into by injected
@@ -342,14 +380,14 @@ def drive_tool_loop(client, tools, messages: list, emit_spec: dict, *,
                 # G2: read-dedup anti-thrash. A model (esp. high-reasoning, on a big repo) re-issues the
                 # SAME read/list/grep dozens of times — live rubert node 0: 92% of 434 reads were re-reads of
                 # just 35 files, burning the whole turn budget re-ingesting identical content. Suppress an
-                # EXACT repeat of a NON-MUTATING call within this loop: return a short stub instead of
-                # re-executing + re-sending the same ≤4KB. Loop-local, so a fresh propose/node reads normally;
-                # never applied to emit/plan or any write/edit/run tool (those aren't idempotent).
-                _nl = name.lower()
-                _read_only = (name not in (emit_name, _PLAN_TOOL_NAME) and not any(
-                    m in _nl for m in ("write", "edit", "apply", "delete", "create", "run", "exec",
-                                       "patch", "stage", "commit", "remove", "emit", "propose")))
-                _dk = (name, json.dumps(args, sort_keys=True, default=str)) if _read_only else None
+                # EXACT repeat of a call from the _DEDUP_SAFE allowlist (stable file/kb/env readers ONLY —
+                # a substring blocklist misclassified revert_file/git_checkout as read-only and froze
+                # cursor-polls like read_output): return a short stub instead of re-executing + re-sending
+                # the same ≤4KB. Loop-local, so a fresh propose/node reads normally. Volatile read-only
+                # tools (polls, git state, run readers) are never deduped AND never invalidate; every
+                # other tool (writes, unknown/MCP names) conservatively clears the cache.
+                _dedupable = name in _DEDUP_SAFE
+                _dk = (name, json.dumps(args, sort_keys=True, default=str)) if _dedupable else None
                 # The observation the StuckDetector sees. On a dedup hit it's the FIRST (real) result, not
                 # the stub — so a genuinely-stuck model repeating one call still trips stuck at the SAME
                 # count (the stub is only what we send the model to save tokens; it must not offset B1).
@@ -372,10 +410,12 @@ def drive_tool_loop(client, tools, messages: list, emit_spec: dict, *,
                     with tracing.tool(name, args) as _tool_obs:
                         result = tools.execute(name, args) if tools is not None else f"(unknown tool: {name})"
                         _tool_obs.output(result)
-                    if not _read_only and read_seen:
-                        # A write/edit/run may have CHANGED files on disk (the Developer edits then
-                        # re-reads its own code). Invalidate the read-dedup so a subsequent re-read returns
-                        # the FRESH content, never a stale "already read" stub.
+                    if read_seen and not _dedupable and name not in _READ_ONLY_VOLATILE:
+                        # A write/edit/revert/checkout/… (or an unknown/MCP tool — assume the worst) may
+                        # have CHANGED files on disk (the Developer edits then re-reads its own code).
+                        # Invalidate the read-dedup so a subsequent re-read returns the FRESH content,
+                        # never a stale "already read" stub. Volatile READ-ONLY tools (git_status, polls)
+                        # mutate nothing, so they neither dedup nor invalidate.
                         read_seen.clear()
                     # Cap once, up front, so the provenance hook receives EXACTLY what the tool message
                     # below will carry (a single expression, not two kept-in-sync copies).
@@ -505,6 +545,13 @@ def loop_opts_from_settings(settings) -> dict:
         "emit_after": int(g(settings, "agent_emit_after", 300)),  # G: nudge to emit after N tool turns
         "emit_force": int(g(settings, "agent_emit_force", 500)),  # G: force the emit at this many turns
     }
+    # C2/H4: the configured context budget must reach EVERY loop, not just the Researcher — the
+    # 120k built-in fallback otherwise survives in the Developer's 500-turn implement session (the
+    # exact loop the budget raise targeted). Only set when configured, so a bare stub settings
+    # object keeps the loop's own unset (None -> built-in default) semantics; an explicit 0 = off.
+    cb = g(settings, "context_budget_chars", None)
+    if cb is not None:
+        opts["context_budget_chars"] = int(cb)
     # D11 compression model slot (open_deep_research's four-slot pattern): a dedicated CHEAP
     # summarizer for history compression, instead of paying the main model for it. Blank = the
     # loop's own client (byte-identical legacy behavior).
@@ -542,7 +589,7 @@ class ToolUsingResearcher:
     def __init__(self, client, tools, space_hint: str = "",
                  bounds: Optional[dict] = None, parser: str = "tool_call",
                  max_turns: int = 0, prompts: Optional[PromptStore] = None,
-                 context_budget_chars: int = 0, time_budget_s: float = 0.0,
+                 context_budget_chars: int | None = None, time_budget_s: float = 0.0,
                  loop_opts: Optional[dict] = None):
         self.client = client
         self.tools = tools          # object with .specs() and .execute(name, args)
