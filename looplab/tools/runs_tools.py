@@ -294,7 +294,14 @@ class RunLauncherTools:
                 "• If the eval TRAINS a model, set `eval.timeout` GENEROUSLY (seconds): training runs "
                 "minutes-to-hours but the default is only 600s, which SIGKILLs it mid-first-epoch and "
                 "silently yields an undertrained model. Size it to the full schedule (epochs × "
-                "minutes-per-epoch × 60 + scoring + margin — often 7200-14400s).",
+                "minutes-per-epoch × 60 + scoring + margin — often 7200-14400s).\n"
+                "• DATASETS / MODEL WEIGHTS that live OUTSIDE the editable repo (datasets, pretrained "
+                "checkpoints) MUST be added to `data` as {\"<mount>\": \"<ABSOLUTE path>\"} — they appear at "
+                "./<mount> in the eval workdir and the entrypoint reads them there. A repo that trains but "
+                "has NO `data` mounts fails every node with file-not-found. DISCOVER the paths by reading "
+                "the repo (README, configs, the train/test scripts' default args) and the user's message, "
+                "and VERIFY each exists on disk before mounting. If a required dataset/model path is not "
+                "stated and you cannot find it, ASK the user in `reply` — never omit it or guess.",
                 {"run_id": {"type": "string", "description": "short kebab-case name you invent"},
                  "task": {"type": "object", "description": "inline task; repo needs eval-or-onboard, absolute editable_path, direction max|min, metric.kind a reader (not the direction)"},
                  "task_file": {"type": "string", "description": "a catalogue task path (alternative to task)"},
