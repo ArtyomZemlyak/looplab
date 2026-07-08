@@ -268,6 +268,33 @@ def test_dataset_bare_path_does_not_clobber_explicit_mount():
     assert n["data"]["dataset"] == "/A" and n["data"]["dataset2"] == "/B"   # both kept, no clobber
 
 
+def test_dataset_dict_collision_with_data_is_rejected():
+    # mega-review fix: mounts.update(ds) silently overwrote an explicit `data` mount of the same
+    # name (the /A mount vanished and every node evaluated against /B with no error).
+    with pytest.raises(ValueError, match="BOTH `data` and `dataset`"):
+        normalize_task({"repo": "/r", "direction": "max", "cmd": ["python", "x.py"],
+                        "data": {"raw": "/A"}, "dataset": {"raw": {"path": "/B"}}})
+
+
+def test_kaggle_wins_over_stale_competition():
+    # mega-review fix: setdefault kept a stale boss-authored `competition`, so a user editing the
+    # Kaggle field launched a different competition than the form displayed.
+    n = normalize_task({"goal": "g", "direction": "max",
+                        "kaggle": "nomad2018-predict-transparent-conductors",
+                        "competition": "spooky-author-identification", "kind": "mlebench_real"})
+    assert n["competition"] == "nomad2018-predict-transparent-conductors"
+
+
+def test_dataset_kind_flattens_permission_objects(tmp_path):
+    # mega-review fix: the documented permission-object form for `dataset` values used to bounce
+    # off DatasetTask.data (dict[str,str]) with a pydantic type error for non-repo tasks; the
+    # permissions are repo machinery, so only the path survives for the dataset kind.
+    src = tmp_path / "train.csv"; src.write_text("a,b\n1,2\n", encoding="utf-8")
+    t = validate_task({"goal": "g", "direction": "max",
+                       "dataset": {"raw": {"path": str(src), "preprocess": True}}})
+    assert t.kind == "dataset" and t.data["raw"] == str(src)
+
+
 def test_dataset_with_string_data_does_not_crash():
     n = normalize_task({"repo": "/r", "direction": "max", "cmd": ["python", "x.py"],
                         "data": "ignored-str", "dataset": "/B"})

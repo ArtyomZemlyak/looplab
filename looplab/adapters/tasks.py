@@ -109,8 +109,10 @@ def normalize_task(data: dict) -> dict:
     # --- kaggle competition -> the mlebench_real adapter (accept the `kaggle` alias or a bare
     #     `competition`; either one, with no explicit kind, IS a competition task) ---
     if d.get("kaggle"):
-        d.setdefault("competition", d.get("kaggle"))
-        d.pop("kaggle", None)
+        # `kaggle` is the composable spelling and WINS over a stale `competition` riding along in the
+        # same dict (setdefault kept the old value, so a user editing the Kaggle field in a boss-
+        # authored spec launched the DISPLAYED slug's predecessor — the wrong competition).
+        d["competition"] = d.pop("kaggle")
     if d.get("competition") and not d.get("kind"):
         d["kind"] = "mlebench_real"
 
@@ -130,6 +132,15 @@ def normalize_task(data: dict) -> dict:
                 name, i = f"dataset{i}", i + 1
             mounts[name] = ds
         elif isinstance(ds, dict):
+            # A name spelled in BOTH `data` and `dataset` is a config error: mounts.update would
+            # silently shadow one path and every node would evaluate against the wrong source, far
+            # from the misconfiguration. (The bare-path branch above can rename because its name is
+            # invented; an explicit name collision has no right answer.)
+            clash = sorted(set(mounts) & set(ds))
+            if clash:
+                raise ValueError(
+                    f"data mount name(s) declared in BOTH `data` and `dataset`: {', '.join(clash)} — "
+                    "the same name would silently shadow one of the paths; rename or drop one side.")
             mounts.update(ds)
         if mounts:
             d["data"] = mounts
@@ -205,6 +216,14 @@ def normalize_task(data: dict) -> dict:
                 "editable codebase), `dataset`/`data` (data mounts), `cmd` (how to run + score), "
                 "`kaggle`/`competition` (a competition slug), `benchmark` (a built-in synthetic "
                 "task) — or an explicit legacy `kind`.")
+
+    # Per-source permission OBJECTS ({path, mount, edit, …}) are repo-task machinery — mount/edit
+    # drive the repo workspace seeding and the write gate. The dataset kind reads data by ABSOLUTE
+    # path with no mounts (DatasetTask.data is name -> path), so only the path survives here:
+    # flatten the documented object form instead of bouncing it with a pydantic type error.
+    if d["kind"] == "dataset" and isinstance(d.get("data"), dict):
+        d["data"] = {k: (v.get("path", "") if isinstance(v, dict) else v)
+                     for k, v in d["data"].items()}
 
     return d
 
