@@ -404,3 +404,30 @@ def test_regex_reader_accepts_pattern_in_key():
     assert read_metric("R@100: 0.83\n", "/tmp", m) == 0.83
     # a genuinely malformed regex spec must fail the node (None), not crash the run
     assert read_metric("x", "/tmp", {"kind": "stdout_regex"}) is None
+
+
+def test_stray_dotted_cmd_key_is_rejected_with_an_actionable_error():
+    # The docs describe fields in dotted shorthand (`cmd.setup`, `cmd.profiles`, …); a model — the
+    # assistant's propose_run especially — sometimes emits them LITERALLY as top-level keys instead of
+    # nesting. Silently dropping them lost the setup with no signal; normalize must REJECT with a
+    # message that tells the caller to nest it, so propose_run bounces it back and the assistant fixes
+    # itself. A correctly-nested `cmd.setup` still works.
+    import pytest
+    from looplab.adapters.tasks import normalize_task, validate_task
+    with pytest.raises(ValueError) as ei:
+        normalize_task({"goal": "g", "direction": "max", "repo": "examples/repo_example",
+                        "cmd": {"command": ["python", "e.py"],
+                                "metric": {"reader": "stdout_json", "key": "m"}},
+                        "cmd.setup": ["pip", "install", "-r", "requirements.txt"]})
+    msg = str(ei.value)
+    assert "cmd.setup" in msg and "setup" in msg and "cmd" in msg      # names the fix (nest it)
+    # the NESTED form is accepted and takes effect
+    t = normalize_task({"goal": "g", "direction": "max", "repo": "examples/repo_example",
+                        "cmd": {"command": ["python", "e.py"], "setup": ["pip", "install", "."],
+                                "metric": {"reader": "stdout_json", "key": "m"}}})
+    assert t["eval"]["setup"] == ["pip", "install", "."]
+    # and propose_run surfaces the raise to the assistant instead of proposing a broken task
+    with pytest.raises(ValueError):
+        validate_task({"goal": "g", "direction": "max", "repo": "examples/repo_example",
+                       "cmd": {"command": ["python", "e.py"], "metric": {"reader": "stdout_json", "key": "m"}},
+                       "cmd.setup": ["x"]})

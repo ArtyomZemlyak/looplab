@@ -145,6 +145,22 @@ def normalize_task(data: dict) -> dict:
         if mounts:
             d["data"] = mounts
 
+    # --- REJECT a stray dotted `cmd.<field>` / `eval.<field>` top-level key with an actionable error.
+    #     The docs describe fields in dotted shorthand (`cmd.setup`, `cmd.profiles`, …) meaning "the
+    #     field of cmd", and a model — the assistant's propose_run especially — sometimes emits them
+    #     LITERALLY as top-level keys instead of nesting. Silently dropping them (the old behavior) lost
+    #     the setup/profiles with no signal. Raising a clear message instead lets propose_run bounce it
+    #     BACK to the assistant, which re-emits with the field nested — the model self-corrects rather
+    #     than shipping a task whose setup never runs. ---
+    _stray = sorted(k for k in d if isinstance(k, str)
+                    and (k.startswith("cmd.") or k.startswith("eval.")) and len(k) > 4)
+    if _stray:
+        base, field = _stray[0].split(".", 1)
+        raise ValueError(
+            f"`{_stray[0]}` is not a valid field — write `{field}` INSIDE the `{base}` object, not as a "
+            f"top-level \"{_stray[0]}\" key. e.g. cmd:{{command:[…], metric:{{…}}, {field}:…}}. "
+            f"Stray dotted keys: {', '.join(_stray)}.")
+
     # --- cmd (how to run + score) is the new name for `eval` ---
     if "cmd" in d and "eval" not in d:
         cmd = d.pop("cmd")
