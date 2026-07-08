@@ -19,12 +19,51 @@ exporting them, and this module needs nothing from `repo_task` at import time (n
 """
 from __future__ import annotations
 
+import os
+import re
 from typing import Optional
 
 from looplab.core.models import Idea
 from looplab.core.parse import LLMClient
 from looplab.tools.edit_match import apply_search_replace
 from looplab.tools.patch import SurfacePolicy
+
+# Absolute paths to INPUT data files referenced in a stage command. Only clear INPUT-data extensions
+# (a checkpoint .ckpt/.pt an earlier stage WRITES is deliberately excluded, and relative paths resolve
+# to mounts at eval time so are left to the eval). Used to catch the #1 real failure: a train stage
+# pointing at a hallucinated argparse-default `.pck` that isn't on this machine.
+# The leading `/` must be a TRUE absolute-path boundary — the negative lookbehind rejects a `/` that is
+# part of a relative `./dir/...` or `a/b/...` (those resolve to mounts/workdir at eval time, not here).
+_INPUT_DATA_RE = re.compile(
+    r"(?<![\w./~])/[^\s\"',:]+\.(?:pck|parquet|csv|tsv|npy|npz|pkl|arrow|jsonl|feather|h5|hdf5)")
+
+
+def _missing_stage_input_paths(stages) -> list[str]:
+    """ABSOLUTE input-data paths referenced in stage commands that DON'T exist on disk — almost always
+    a hallucinated default (the recurring failure: a train stage's `--train_dataset /…/train.pck` that
+    was copied from the repo's argparse default and isn't here). Absolute paths are location-invariant,
+    so a declare-time existence check is sound; relative paths (mounts) and `%params%` are skipped."""
+    missing: list[str] = []
+    for s in (stages or []):
+        if not isinstance(s, dict):
+            continue
+        for tok in (s.get("command") or []):
+            if not isinstance(tok, str) or "%params%" in tok:
+                continue
+            for m in _INPUT_DATA_RE.findall(tok):
+                if not os.path.exists(m) and m not in missing:
+                    missing.append(m)
+    return missing
+
+
+def _missing_paths_feedback(missing: list[str]) -> str:
+    """The actionable bounce message shown to the Developer so it re-declares with a real path."""
+    return ("these data paths in your stage command(s) DO NOT EXIST on this machine: "
+            + ", ".join(missing[:5]) + ". Do NOT use the repo's DEFAULT argparse dataset paths — they "
+            "are the original author's and aren't here. `list_dir` the ACTUAL data (the task's mounted "
+            "dataset dir, e.g. ./<mount>, or the absolute dataset path the task/goal gives) and use a "
+            "path that EXISTS. (If a path is produced by an EARLIER stage, reference it relatively.)")
+
 
 class RepoWriteTools:
     """Write side of the in-house repo developer (the LLM authors/edits files via tools). Writes are
@@ -160,6 +199,9 @@ class RepoWriteTools:
         clean, err = validate_stages(stages, reserved=("score",))
         if err is not None:
             return f"(refused: {err})"
+        miss = _missing_stage_input_paths(clean)      # catch a hallucinated non-existent data path
+        if miss:
+            return f"(refused: {_missing_paths_feedback(miss)})"
         self.files["looplab_stages.json"] = json.dumps({"stages": clean}, indent=1)
         chain = " → ".join(s["name"] for s in clean) + " → score (operator cmd)"
         return f"declared {len(clean)} preceding stage(s): {chain}"
@@ -840,8 +882,12 @@ class LLMRepoDeveloper:
         read_only = CompositeTools([EnvInspectTools()] + self._scout_tools(write))
 
         def _validate(args):                      # bounce a malformed manifest back to the model
-            _, err = validate_stages((args or {}).get("stages"), reserved=reserved)
-            return err
+            stages = (args or {}).get("stages")
+            _, err = validate_stages(stages, reserved=reserved)
+            if err:
+                return err
+            miss = _missing_stage_input_paths(stages)   # a hallucinated non-existent data path → re-declare
+            return _missing_paths_feedback(miss) if miss else None
 
         def _finalize(args):
             clean, _ = validate_stages((args or {}).get("stages"), reserved=reserved)

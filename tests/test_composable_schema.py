@@ -172,6 +172,37 @@ def test_declare_stages_reports_errors(bad, needle):
     assert "looplab_stages.json" not in t.files            # nothing staged on error
 
 
+def test_declare_stages_rejects_a_nonexistent_absolute_data_path():
+    # The #1 real failure: the Developer copies the repo's argparse-default `--train_dataset
+    # /…/train.pck` that isn't on this machine. declare_stages must BOUNCE it (with a "ls the real
+    # data" message) so the Developer re-declares with a path that exists — the run doesn't ship a
+    # train stage doomed to FileNotFoundError.
+    t = _writetools()
+    msg = t.execute("declare_stages", {"stages": [
+        {"name": "train", "command": ["python", "train.py",
+                                       "--train_dataset", "/definitely/not/here/smkt/train.pck"]}]})
+    assert msg.startswith("(refused") and "DO NOT EXIST" in msg and "/definitely/not/here/smkt/train.pck" in msg
+    assert "looplab_stages.json" not in t.files                # nothing staged
+
+    # a val path embedded in a JSON-string arg is caught too
+    msg2 = t.execute("declare_stages", {"stages": [
+        {"name": "train", "command": ["python", "train.py",
+                                       "--val_datasets", '{"val": "/nope/val.parquet"}']}]})
+    assert "DO NOT EXIST" in msg2 and "/nope/val.parquet" in msg2
+
+    # RELATIVE paths (resolve to mounts at eval time) and %params% are NOT flagged; an EXISTING
+    # absolute path is fine — here /tmp exists so a real file under it passes.
+    import os
+    p = os.path.join("/tmp", "ll_exists.pck"); open(p, "wb").close()
+    try:
+        ok = t.execute("declare_stages", {"stages": [
+            {"name": "prep", "command": ["python", "prep.py", "--out", "./data/train.pck"]},
+            {"name": "train", "command": ["python", "train.py", "--train_dataset", p, "--lr", "%params%"]}]})
+        assert ok.startswith("declared")
+    finally:
+        os.remove(p)
+
+
 def test_declare_stages_works_under_restricted_surface():
     # mega-review fix: the manifest is TOOL-owned and validated, so it is gated on the PROTECT list
     # only — the legacy default surface ["**/*.py"] can never match a root .json, and a surface gate
