@@ -1,12 +1,11 @@
-"""Live RepoTask integration over Ollama (auto-skips without it). Covers the live paths the
-offline suite can't: the LLM hyperparameter Researcher over a real framework (P2), live
-onboarding where the Developer WRITES the metric adapter (P3), and the agentic Researcher
-reading the editable repo via RepoTools (#3)."""
+"""Live RepoTask integration. LLM-AGNOSTIC (runs against whatever LLM the environment configures —
+Ollama, an OpenAI-compatible endpoint, …). Covers the live paths the offline suite can't: the LLM
+hyperparameter Researcher over a real framework (P2), live onboarding where the Developer WRITES the
+metric adapter (P3), and the agentic Researcher reading the editable repo via RepoTools (#3)."""
 from __future__ import annotations
 
-import json
+import os
 import sys
-import urllib.request
 from pathlib import Path
 
 import anyio
@@ -19,31 +18,21 @@ from looplab.search.policy import GreedyTree
 from looplab.adapters.repo_task import EvalSpec, RepoTask
 from looplab.runtime.sandbox import SubprocessSandbox
 from looplab.adapters.tasks import make_roles
+from tests.live.scenarios import live_llm_reachable
 
-MODEL = "qwen3:8b"
 FIXTURE = Path(__file__).resolve().parent / "fixtures" / "repo_fixture"
 _M = {"kind": "stdout_json", "key": "metric"}
 
-
-def _ollama_has(model: str) -> bool:
-    try:
-        with urllib.request.urlopen("http://127.0.0.1:11434/api/tags", timeout=3) as r:
-            tags = json.loads(r.read())
-        return any(model in m.get("name", "") for m in tags.get("models", []))
-    except Exception:
-        return False
-
-
-# `live` marker: selection only (`-m "not live"`); the skipif stays the enforcement gate.
-pytestmark = [pytest.mark.live,
-              pytest.mark.skipif(not _ollama_has(MODEL),
-                                 reason=f"Ollama with {MODEL} not reachable")]
+# `live` marker: selection only (`-m "not live"`); the skipif is the enforcement gate. Universal across
+# LLMs: opt in with LOOPLAB_LIVE_SCENARIOS=1 and any reachable configured LLM (not a hardcoded model).
+pytestmark = [pytest.mark.live, pytest.mark.skipif(
+    not (os.environ.get("LOOPLAB_LIVE_SCENARIOS") and live_llm_reachable()),
+    reason="set LOOPLAB_LIVE_SCENARIOS=1 with a reachable configured LLM to run the live repo tests")]
 
 
 def _llm() -> Settings:
-    s = Settings()
+    s = Settings()                  # the CONFIGURED LLM (llm_model / llm_base_url), whatever it is
     s.backend = "llm"
-    s.llm_model = MODEL
     return s
 
 

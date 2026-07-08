@@ -1,10 +1,9 @@
-"""Live LLM integration (I2 go-live). Auto-skips unless a local Ollama with the
-target model is reachable, so the default suite stays offline. When the model is
-present, this drives the *real* loop with the LLM as the Researcher."""
+"""Live LLM integration (I2 go-live). LLM-AGNOSTIC: it drives the *real* loop with whatever LLM the
+environment configures (Settings.llm_model / llm_base_url — Ollama, an OpenAI-compatible endpoint, …),
+gated by the SAME opt-in as the live scenarios so all live tests share one universal gate."""
 from __future__ import annotations
 
-import json
-import urllib.request
+import os
 
 import anyio
 import pytest
@@ -14,31 +13,20 @@ from looplab.engine.orchestrator import Engine
 from looplab.search.policy import GreedyTree
 from looplab.runtime.sandbox import SubprocessSandbox
 from looplab.adapters.tasks import load_task, make_roles
+from tests.live.scenarios import live_llm_reachable
 
-MODEL = "qwen3:8b"
-
-
-def _ollama_has(model: str) -> bool:
-    try:
-        with urllib.request.urlopen("http://127.0.0.1:11434/api/tags", timeout=3) as r:
-            tags = json.loads(r.read())
-        return any(model in m.get("name", "") for m in tags.get("models", []))
-    except Exception:
-        return False
-
-
-# `live` marker: selection only (`-m "not live"`); the skipif stays the enforcement gate.
-pytestmark = [pytest.mark.live,
-              pytest.mark.skipif(not _ollama_has(MODEL),
-                                 reason=f"Ollama with {MODEL} not reachable")]
+# `live` marker: selection only (`-m "not live"`); the skipif is the enforcement gate. Universal across
+# LLMs: opt in with LOOPLAB_LIVE_SCENARIOS=1 and any reachable configured LLM (not a hardcoded model).
+pytestmark = [pytest.mark.live, pytest.mark.skipif(
+    not (os.environ.get("LOOPLAB_LIVE_SCENARIOS") and live_llm_reachable()),
+    reason="set LOOPLAB_LIVE_SCENARIOS=1 with a reachable configured LLM to run the live LLM tests")]
 
 ROOT = __import__("pathlib").Path(__file__).resolve().parents[1]
 
 
 def _llm_settings():
-    s = Settings()
+    s = Settings()                  # the CONFIGURED LLM (llm_model / llm_base_url), whatever it is
     s.backend = "llm"
-    s.llm_model = MODEL
     return s
 
 
