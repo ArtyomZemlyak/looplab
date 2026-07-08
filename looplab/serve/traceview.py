@@ -189,7 +189,18 @@ def _thread_turns(spans_sorted: list[dict], by_id: dict) -> list[dict]:
                           "input": _cap_str(_as_text(a.get("input"))),
                           "output": _cap_str(_as_text(a.get("output"))),
                           "status": s.get("status"), "seconds": s.get("duration_s")})
-        # operation spans carry structure only — skipped in the linear reading view.
+        elif kind == "operation" and a.get("stage"):
+            # An eval PIPELINE stage (train / score — command_eval opens one op span per stage):
+            # no LLM turns inside, but the reader wants it as a block in the node's life story
+            # ("… Developer · implement, Train, Evaluate …"). Rendered via the tool turn shape.
+            rc, to = a.get("exit_code"), a.get("timed_out")
+            status = "timeout" if to else ("ok" if not rc else f"exit {rc}")
+            secs = s.get("duration_s")
+            turns.append({"type": "tool", "name": str(a.get("stage")),
+                          "input": "",
+                          "output": f"{status}" + (f" · {round(float(secs), 1)}s" if secs else ""),
+                          "status": s.get("status"), "seconds": secs})
+        # other operation spans carry structure only — skipped in the linear reading view.
     return turns
 
 
@@ -204,73 +215,77 @@ def build_conversation(state: RunState, spans: list[dict], node_id) -> dict:
     stages: list[dict] = []
     for tid, ss in by_trace.items():
         ss_sorted = sorted(ss, key=lambda x: x.get("start", 0.0))
-        root = next((s for s in ss_sorted if s.get("parent_id") is None), ss_sorted[0] if ss_sorted else None)
-        nid = _node_id_of(root) if root else None
+        # The REAL root may be absent LIVE: an operation span is written only on CLOSE, and
+        # `create_node` closes at node END — so for the whole life of a node its trace has no root on
+        # disk. The old code then fell back to the first span (a generation), missed the create_node
+        # split branch entirely, and rendered the ENTIRE node as ONE flat band labeled "generation"
+        # whose turns kept appending across role changes (the "Developer writes into the previous
+        # Researcher block" bug). Grouping below never needs the root, only its ABSENCE handled.
+        root = next((s for s in ss_sorted if s.get("parent_id") is None), None)
+        first = root or (ss_sorted[0] if ss_sorted else None)
+        nid = _node_id_of(first) if first else None
         if nid is None or str(nid) != str(node_id):
             continue
-        # `create_node` is just a WRAPPER ("Author node") the reader doesn't care about — split it into
-        # its real sub-stages (propose / implement / repair) so each is its own band. Every OTHER trace
-        # (evaluate, foresight_rank, strategy_consult, …) is already one meaningful stage. Group each
-        # generation/tool under the TOP-LEVEL sub-operation it lives in (falling back to create_node
-        # itself when a generation sits directly under the root — so nothing is ever dropped).
-        if (root or {}).get("name") == "create_node" and root:
-            by_sid = {s.get("span_id"): s for s in ss_sorted}
-            root_sid = root["span_id"]
+        # Split EVERY trace into its sub-loop bands (propose / stages / plan / implement / repair /
+        # inline_repair / …) so the conversation reads as ordered role blocks. Wrapper roots
+        # (`create_node` = "Author node", `seed_workspace` around an inline repair) are structure the
+        # reader doesn't care about; a trace that IS one meaningful stage (foresight_rank, lessons)
+        # naturally yields a single band with that label.
+        by_sid = {s.get("span_id"): s for s in ss_sorted}
+        root_sid = root["span_id"] if root else None
 
-            def _stage_of(s):
-                # The `phase` stamped on the span (tracing._phase_ctx) names the sub-loop it ran in
-                # (propose / stages / plan / implement / repair) — correct even when the phase's op span
-                # is NESTED (the Developer's `stages`/`plan` spans sit under the orchestrator's
-                # `implement` span) or not yet flushed to disk (LIVE — op spans are written only on
-                # close, so the walk can't find them and Developer calls banded under the Researcher
-                # until the node ended). Post-hoc the REAL op span still wins (878e0f8's contract):
-                # walk to the NEAREST ancestor op matching the stamp and key the band by ITS span_id —
-                # two same-phase sub-loops in one node (a ValidatingDeveloper retry re-runs
-                # stages→plan→implement) stay SEPARATE chronological bands instead of merging attempt
-                # 2's stages turns into attempt 1's band out of order. Only when no such ancestor is
-                # on disk yet (live) is a stage synthesized from the bare phase name.
-                ph = (s.get("attributes") or {}).get("phase")
-                cur, top_op, ph_op = by_sid.get(s.get("parent_id")), None, None
-                while cur is not None and cur.get("span_id") != root_sid:
-                    if cur.get("kind") == "operation":
-                        top_op = cur
-                        if ph_op is None and ph and cur.get("name") == ph:
-                            ph_op = cur       # nearest ancestor op matching the stamp: the real sub-loop
-                    cur = by_sid.get(cur.get("parent_id"))
-                if ph_op is not None:
-                    return ph_op
-                if ph:
-                    return {"span_id": f"phase:{ph}", "name": ph, "start": s.get("start", 0.0)}
-                return top_op or root
+        def _stage_of(s):
+            # Band identity, best evidence first:
+            #   1. `phase_span` (tracing stamp): the innermost open operation's SPAN ID — exact
+            #      sub-loop identity, live and post-hoc, two same-phase retries stay separate.
+            #   2. an eval pipeline stage op (train/score — carries `stage`): its own band.
+            #   3. pre-phase_span traces: nearest ancestor op matching the `phase` name (post-hoc),
+            #      else a band synthesized from the bare phase name (live, op not flushed yet).
+            #   4. no phase at all (old traces): the top-level sub-op under the root, else the root.
+            a = s.get("attributes") or {}
+            ph, ph_sid = a.get("phase"), a.get("phase_span")
+            if ph_sid:
+                op = by_sid.get(ph_sid)
+                return op if op is not None else {"span_id": ph_sid, "name": ph,
+                                                  "start": s.get("start", 0.0)}
+            if s.get("kind") == "operation" and a.get("stage"):
+                return s
+            cur, top_op, ph_op = by_sid.get(s.get("parent_id")), None, None
+            while cur is not None and cur.get("span_id") != root_sid:
+                if cur.get("kind") == "operation":
+                    top_op = cur
+                    if ph_op is None and ph and cur.get("name") == ph:
+                        ph_op = cur       # nearest ancestor op matching the stamp: the real sub-loop
+                cur = by_sid.get(cur.get("parent_id"))
+            if ph_op is not None:
+                return ph_op
+            if ph:
+                return {"span_id": f"phase:{ph}", "name": ph, "start": s.get("start", 0.0)}
+            return top_op or root or {"span_id": f"trace:{tid}",
+                                      "name": (first or {}).get("name"),
+                                      "start": s.get("start", 0.0)}
 
-            groups: dict = {}
-            for s in ss_sorted:
-                if s.get("span_id") == root_sid:
-                    continue
-                stg = _stage_of(s)
-                groups.setdefault(stg.get("span_id"), {"span": stg, "spans": []})["spans"].append(s)
-            # Order + timestamp bands by their first CHILD's start, not the op span's: the Developer's
-            # stages/plan phases run INSIDE the orchestrator's `implement` span, so implement OPENS
-            # first even though its own turns come last — sorting by op-span start would show the
-            # implement band before the stages band whose turns actually happened first.
-            def _first_turn_start(g):
-                # content spans only: a NESTED op span (stages/plan under implement) rides in its
-                # parent's group and would drag the parent band's start back to before its own band
-                return min((s.get("start", 0.0) for s in g["spans"] if s.get("kind") != "operation"),
-                           default=g["span"].get("start", 0.0))
-            for g in sorted(groups.values(), key=_first_turn_start):
-                grp = sorted(g["spans"], key=lambda x: x.get("start", 0.0))
-                turns = _thread_turns(grp, by_id)
-                if turns:
-                    stages.append({"trace_id": tid, "label": g["span"].get("name"),
-                                   "start": _first_turn_start(g),
-                                   "rollup": _rollup(grp), "turns": turns})
-            continue
-        turns = _thread_turns(ss_sorted, by_id)
-        if turns:
-            stages.append({"trace_id": tid, "label": (root or {}).get("name"),
-                           "start": (root or {}).get("start", 0.0),
-                           "rollup": _rollup(ss), "turns": turns})
+        groups: dict = {}
+        for s in ss_sorted:
+            if root_sid is not None and s.get("span_id") == root_sid:
+                continue
+            stg = _stage_of(s)
+            groups.setdefault(stg.get("span_id"), {"span": stg, "spans": []})["spans"].append(s)
+        # Order + timestamp bands by their first CONTENT span's start, not the op span's: the
+        # Developer's stages/plan phases run INSIDE the orchestrator's `implement` span, so implement
+        # OPENS first even though its own turns come last — sorting by op-span start would show the
+        # implement band before the stages band whose turns actually happened first. (A NESTED op
+        # span rides in its parent's group and would likewise drag the parent band's start back.)
+        def _first_turn_start(g):
+            return min((s.get("start", 0.0) for s in g["spans"] if s.get("kind") != "operation"),
+                       default=g["span"].get("start", 0.0))
+        for g in sorted(groups.values(), key=_first_turn_start):
+            grp = sorted(g["spans"], key=lambda x: x.get("start", 0.0))
+            turns = _thread_turns(grp, by_id)
+            if turns:
+                stages.append({"trace_id": tid, "label": g["span"].get("name"),
+                               "start": _first_turn_start(g),
+                               "rollup": _rollup(grp), "turns": turns})
     stages.sort(key=lambda x: x.get("start", 0.0))
     return {"run_id": state.run_id, "task_id": state.task_id, "node_id": str(node_id), "stages": stages}
 

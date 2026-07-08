@@ -272,6 +272,76 @@ def test_conversation_bands_all_phases_in_order():
     assert [s["label"] for s in conv["stages"]] == ["propose", "stages", "plan", "implement"]
 
 
+def test_live_trace_with_no_root_bands_by_phase_never_flat_generation():
+    """THE reported live bug: create_node closes only at node END, so for the node's whole life its
+    trace has NO root on disk. The old code fell back to the first span (a generation) as root, never
+    took the split branch, and rendered the entire node as ONE flat band labeled 'generation' whose
+    turns kept appending across role changes (Developer writing into the previous Researcher block).
+    A rootless trace must band by the phase stamps, chronologically."""
+    from types import SimpleNamespace
+    from looplab.serve.traceview import build_conversation
+
+    def gen(sid, phase, start):
+        return {"span_id": sid, "parent_id": "UNWRITTEN", "trace_id": "t", "name": "generation",
+                "kind": "generation", "start": start,
+                "attributes": {"node_id": 0, "phase": phase,
+                               "input": [{"role": "user", "content": "x"}]}}
+    spans = [gen("g1", "propose", 1.0), gen("g2", "stages", 2.0), gen("g3", "implement", 3.0)]
+    conv = build_conversation(SimpleNamespace(run_id="r", task_id="t", nodes={}), spans, 0)
+    assert [s["label"] for s in conv["stages"]] == ["propose", "stages", "implement"]
+    assert "generation" not in [s["label"] for s in conv["stages"]]
+
+
+def test_live_same_phase_retries_separate_bands_via_phase_span():
+    """Two same-phase sub-loops LIVE (a retry re-runs the stages phase before any op span is on
+    disk): the phase NAME alone can't tell them apart, but the stamped `phase_span` (the op's span
+    id) can — each retry is its own chronological band."""
+    from types import SimpleNamespace
+    from looplab.serve.traceview import build_conversation
+
+    def gen(sid, ph_sid, start):
+        return {"span_id": sid, "parent_id": ph_sid, "trace_id": "t", "name": "generation",
+                "kind": "generation", "start": start,
+                "attributes": {"node_id": 0, "phase": "stages", "phase_span": ph_sid,
+                               "input": [{"role": "user", "content": "x"}]}}
+    spans = [gen("g1", "S1", 1.0), gen("g2", "S2", 5.0)]
+    conv = build_conversation(SimpleNamespace(run_id="r", task_id="t", nodes={}), spans, 0)
+    assert [s["label"] for s in conv["stages"]] == ["stages", "stages"]      # two bands, not merged
+
+
+def test_eval_pipeline_stage_ops_become_train_score_blocks():
+    """The eval pipeline's per-stage op spans (train / score) surface as their own blocks in the
+    node story ('… Developer · implement, Train, Evaluate·score') with a status/duration turn."""
+    from types import SimpleNamespace
+    from looplab.serve.traceview import build_conversation
+    spans = [{"span_id": "E", "parent_id": None, "trace_id": "t", "name": "evaluate",
+              "kind": "operation", "start": 0.0, "attributes": {"node_id": 0}},
+             {"span_id": "T", "parent_id": "E", "trace_id": "t", "name": "train", "kind": "operation",
+              "start": 1.0, "duration_s": 120.0,
+              "attributes": {"node_id": 0, "stage": "train", "exit_code": 0}},
+             {"span_id": "S", "parent_id": "E", "trace_id": "t", "name": "score", "kind": "operation",
+              "start": 130.0, "duration_s": 5.0,
+              "attributes": {"node_id": 0, "stage": "score", "exit_code": 0}}]
+    conv = build_conversation(SimpleNamespace(run_id="r", task_id="t", nodes={}), spans, 0)
+    assert [s["label"] for s in conv["stages"]] == ["train", "score"]
+    t = conv["stages"][0]["turns"][0]
+    assert t["name"] == "train" and "ok" in t["output"]
+
+
+def test_span_children_carry_phase_span_of_the_op(tmp_path):
+    """tracing stamps (phase, phase_span=the op's span id) on non-op children — the live view's
+    exact sub-loop identity."""
+    tr = Tracer(JsonlSpanExporter(tmp_path / "s.jsonl"), run_id="r")
+    with tr.span("implement", new_trace=True):
+        with tr.span("generation", kind="generation"):
+            pass
+    recs = [orjson.loads(x) for x in (tmp_path / "s.jsonl").read_bytes().splitlines()]
+    gen = next(r for r in recs if r["kind"] == "generation")
+    op = next(r for r in recs if r["kind"] == "operation")
+    assert gen["attributes"]["phase"] == "implement"
+    assert gen["attributes"]["phase_span"] == op["span_id"]
+
+
 def test_finished_trace_same_phase_retries_stay_separate_bands():
     """Post-hoc the REAL op span wins over the bare phase name (878e0f8's contract): a
     ValidatingDeveloper retry re-runs stages→plan→implement inside ONE node, so two `stages` op spans

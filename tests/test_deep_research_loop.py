@@ -123,8 +123,8 @@ def test_malformed_tool_args_degrade_to_empty_dict():
 
 
 def test_turn_budget_exhaustion_forces_memo_fallback():
-    """Out of turns without an emit -> the `_forced` fallback builds the memo from the accumulated
-    history (parse_structured over messages + the historical 'Emit the memo now.' instruction)."""
+    """Out of turns without an emit -> the loop's salvage pass forces ONE structured emit from the
+    accumulated history (instead of discarding the whole investigation to the caller's fallback)."""
     tools = _FakeTools(result="partial evidence")
     client = _ForcingClient(
         [_tool_call("search", {"query": "q"})],         # one tool turn, then the budget is gone
@@ -133,7 +133,8 @@ def test_turn_budget_exhaustion_forces_memo_fallback():
     assert memo.summary == "forced memo" and memo.findings == ["from history"]
     assert memo.sources == [{"title": "search(q)", "url": "", "snippet": "partial evidence"}]
     forced_msgs = client.forced_calls[-1]
-    assert forced_msgs[-1] == {"role": "user", "content": "Emit the memo now."}
+    assert forced_msgs[-1]["role"] == "user"
+    assert "Out of turn/time budget" in forced_msgs[-1]["content"]
     # the trace it synthesized from still holds the executed tool round
     assert any(m.get("role") == "tool" and m.get("content") == "partial evidence"
                for m in forced_msgs)

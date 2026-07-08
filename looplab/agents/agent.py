@@ -256,12 +256,14 @@ def drive_tool_loop(client, tools, messages: list, emit_spec: dict, *,
     tool_turns = 0                      # G: investigation turns, for the emit_after soft-convergence nudge
     emit_nudged = False
     read_seen: dict = {}                 # G2: (tool,args) -> FIRST capped result, for read-dedup + stuck parity
+    exhausted = False                    # ran out of turns/time (vs stalled/stuck/cancelled)
     turns = itertools.count() if max_turns is None or max_turns <= 0 else range(max_turns)
     for turn_idx in turns:
         if _cancelled():                # user hit stop -> finalize from what we have, promptly
             break
         if time_budget_s and (time.monotonic() - started) > time_budget_s:
-            break                       # out of wall-clock budget -> finalize from what we have
+            exhausted = True
+            break                       # out of wall-clock budget -> salvage an emit below
         # Compaction happens IN PLACE (slice-assign, same list object): callers like the assistant's
         # `run_turn` keep a reference to this list to post-process the trace (stream the final answer
         # over it); a rebind would orphan their reference on a compacted turn and they'd re-answer
@@ -456,6 +458,19 @@ def drive_tool_loop(client, tools, messages: list, emit_spec: dict, *,
             if forced is not None:
                 return finalize(forced)
             break
+    else:
+        exhausted = True                # every turn used without an emit
+    if exhausted and not _cancelled():
+        # Budget exhaustion (turns or wall-clock) used to fall STRAIGHT to fallback, discarding the
+        # whole investigation — the Developer's STAGES phase read a big repo for its full 30-turn
+        # budget, never got to `declare_stages`, and silently degraded to "no stages declared".
+        # Salvage ONE forced structured emit from everything gathered; only then fall back.
+        messages.append({"role": "user",
+                         "content": f"Out of turn/time budget. Call `{emit_name}` NOW with your "
+                                    "best answer from everything you have gathered."})
+        forced = _force_emit(client, messages, emit_spec)
+        if forced is not None:
+            return finalize(forced)
     return fallback(messages)
 
 

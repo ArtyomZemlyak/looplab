@@ -361,9 +361,13 @@ class Tracer:
         # Phase attribution (see _phase_ctx): a non-operation child (generation/tool) inherits the active
         # phase so the trace view bands it correctly LIVE, before its parent operation span is flushed. An
         # operation span sets the phase to ITS name for the block (so its own children inherit it).
-        if kind != "operation" and _phase_ctx.get() is not None and attributes.get("phase") is None:
-            attributes = {**attributes, "phase": _phase_ctx.get()}
-        _tok_phase = _phase_ctx.set(name) if kind == "operation" else None
+        # `phase_span` carries the op's SPAN ID alongside the name: the name alone can't distinguish two
+        # same-phase sub-loops in one node (a ValidatingDeveloper retry re-runs stages→plan→implement),
+        # so a live view keyed on the bare name merged attempt 2's turns into attempt 1's band.
+        _ph = _phase_ctx.get()          # (name, span_id) of the innermost open operation, or None
+        if kind != "operation" and _ph is not None and attributes.get("phase") is None:
+            attributes = {**attributes, "phase": _ph[0], "phase_span": _ph[1]}
+        _tok_phase = None
         # The context tokens above are reset only in the `finally` below — guard the one OTel call
         # between them so a broken bridged provider can't raise past them and leak a stale
         # node_id/phase onto every later span in this task (spans are diagnostics: degrade, not raise).
@@ -390,6 +394,8 @@ class Tracer:
         if trace_id is None:
             trace_id = parent["trace_id"] if (parent and not new_trace) else _hex(16)
             span_id = _hex(8)
+        if kind == "operation":        # ids are final only here — children stamp (name, THIS span's id)
+            _tok_phase = _phase_ctx.set((name, span_id))
         parent_id = parent["span_id"] if parent else None
         # kind ∈ {operation, generation, tool, retrieval}: the Langfuse-style observation type, so the
         # UI can render generations (LLM calls) and tools distinctly from plain operation spans.

@@ -264,25 +264,33 @@ function traceBounds(spans) {
 const STAGE = {
   onboard:      { icon: 'flag', role: 'Onboarding', desc: 'task setup & eval spec', tone: '#8a7bb0' },
   create_node:  { icon: 'trending', role: 'Author node', desc: 'propose an idea, then build the solution', tone: '#6f8bb0' },
-  propose:      { icon: 'search', role: 'Researcher', desc: 'propose the next idea', tone: '#6fa3b0' },
+  propose:      { icon: 'search', role: 'Researcher · propose', desc: 'propose the next idea', tone: '#6fa3b0' },
   // the Developer's own sub-phases (repo tasks): STAGES declares the eval pipeline, PLAN decomposes
   // the change into atomic steps — both read-only, before the write-capable implement session(s).
   stages:       { icon: 'sliders', role: 'Developer · stages', desc: 'declare the eval pipeline (prep → train → …)', tone: '#5f9e8f' },
   plan:         { icon: 'doc', role: 'Developer · plan', desc: 'decompose into atomic steps', tone: '#7fae8f' },
-  implement:    { icon: 'gear', role: 'Developer', desc: 'write / edit the solution code', tone: '#6fae97' },
+  implement:    { icon: 'gear', role: 'Developer · implement', desc: 'write / edit the solution code', tone: '#6fae97' },
   repair:       { icon: 'bug', role: 'Developer · repair', desc: 'fix a failed parent', tone: '#b0936f' },
-  evaluate:     { icon: 'target', role: 'Evaluation', desc: 'run the solution & score it', tone: '#a87da8' },
+  inline_repair: { icon: 'bug', role: 'Developer · inline repair', desc: 'quick in-eval fix attempts', tone: '#b08a6f' },
+  seed_workspace: { icon: 'gear', role: 'Workspace', desc: 'materialize node files into the eval workdir', tone: '#8b96a5' },
+  evaluate:     { icon: 'target', role: 'Evaluate', desc: 'run the solution & score it', tone: '#a87da8' },
+  // declared eval-pipeline stages (looplab_stages.json): each runs as its own block in the node story
+  train:        { icon: 'replay', role: 'Train', desc: 'declared pipeline stage: train a fresh model', tone: '#4e8f5d' },
+  data_prep:    { icon: 'sliders', role: 'Data prep', desc: 'declared pipeline stage: prepare data/features', tone: '#7a9e5f' },
+  score:        { icon: 'target', role: 'Evaluate · score', desc: "operator's protected scoring stage", tone: '#a87da8' },
   confirm_seed: { icon: 'replay', role: 'Confirmation', desc: 'multi-seed robustness check', tone: '#9aa06f' },
   ablate:       { icon: 'sliders', role: 'Ablation', desc: 'sensitivity probe', tone: '#6f8bb0' },
   // sub-operation traces the engine wraps in their own named span — give each a distinct hue so the
   // conversation reads as coloured bands (foresight vs strategy vs research vs merge) at a glance.
-  foresight_rank: { icon: 'bulb', role: 'Foresight', desc: 'predict payoff / rank open hypotheses', tone: '#c2a24e' },
-  foresight:      { icon: 'bulb', role: 'Foresight', desc: 'predict payoff / rank open hypotheses', tone: '#c2a24e' },
+  foresight_rank: { icon: 'bulb', role: 'Researcher · foresight', desc: 'predict payoff / rank open hypotheses', tone: '#c2a24e' },
+  foresight:      { icon: 'bulb', role: 'Researcher · foresight', desc: 'predict payoff / rank open hypotheses', tone: '#c2a24e' },
   strategy_consult: { icon: 'trending', role: 'Strategist', desc: 'pick policy / operators / fidelity', tone: '#b0729e' },
   strategy_decision: { icon: 'trending', role: 'Strategist', desc: 'pick policy / operators / fidelity', tone: '#b0729e' },
   hypothesis_merge: { icon: 'confluence', role: 'Hypothesis merge', desc: 'fold paraphrase hypotheses', tone: '#5fa0a8' },
   deep_research:  { icon: 'search', role: 'Deep research', desc: 'read the literature first', tone: '#6fb0a3' },
   lessons:        { icon: 'doc', role: 'Lessons', desc: 'reflect / distil cross-run lessons', tone: '#9a8fb0' },
+  lessons_distill: { icon: 'doc', role: 'Lessons', desc: 'reflect / distil cross-run lessons', tone: '#9a8fb0' },
+  lessons_refresh: { icon: 'doc', role: 'Lessons', desc: 'reflect / distil cross-run lessons', tone: '#9a8fb0' },
   novelty:        { icon: 'gitbranch', role: 'Novelty gate', desc: 'dedup near-duplicate proposals', tone: '#a89a6f' },
 }
 const stageMeta = (name) => STAGE[name] || { icon: 'dot', role: name, desc: '', tone: 'var(--accent)' }
