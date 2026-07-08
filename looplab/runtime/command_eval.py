@@ -315,19 +315,32 @@ def _drift(primary: Optional[float], cross: Optional[float], tol: float) -> bool
 
 
 def make_docker_wrap(mount_root: str, image: str, network: str = "none",
-                     mem: Optional[str] = None, runtime: Optional[str] = None):
+                     mem: Optional[str] = None, runtime: Optional[str] = None,
+                     binds: Optional[list] = None):
     """untrusted tier (ADR-13, Phase 4): return a `wrap(argv, host_cwd) -> argv` that runs the
     command inside `docker run` with the run workspace bind-mounted at /work and the network
     off by default — a real isolation boundary for executing an arbitrary framework. The bind
     mount means files the container writes (metrics, logs) appear on the host, so metric
     reading still happens on host paths afterward. Fails LOUDLY if the docker CLI is absent
-    rather than silently running unsandboxed (mirrors sandbox.DockerSandbox)."""
+    rather than silently running unsandboxed (mirrors sandbox.DockerSandbox).
+
+    `binds`: extra (host_path, read_only) mounts, bound at the SAME absolute path inside the
+    container. Symlink-mounted data/reference sources need this — the /work bind carries only the
+    symlink, which would otherwise dangle in the container — and binding a non-editable source
+    `:ro` is the MOUNT-LAYER enforcement of the per-source `edit:false` permission: code running
+    in the sandbox physically cannot write the operator's original, matching the write-tool gate
+    (mega-review fix; the write gate alone couldn't stop a declared train stage from mutating the
+    original through ./<name>)."""
     import shutil as _sh
     if not _sh.which("docker"):
         raise RuntimeError(
             "trust_mode='untrusted' needs the docker CLI to sandbox the eval, but it was not "
             "found on PATH. Install Docker or use trust_mode='trusted_local'.")
     root = Path(mount_root).resolve()
+    extra: list[str] = []
+    for p, ro in (binds or []):
+        ap = Path(p).resolve().as_posix()
+        extra += ["-v", f"{ap}:{ap}:ro" if ro else f"{ap}:{ap}"]
 
     def wrap(argv: list[str], host_cwd: str) -> list[str]:
         rel = os.path.relpath(Path(host_cwd).resolve(), root).replace(os.sep, "/")
@@ -337,7 +350,7 @@ def make_docker_wrap(mount_root: str, image: str, network: str = "none",
         rt = ["--runtime", runtime] if runtime else []   # B4+ gVisor/Kata true-isolation tier
         base = ["docker", "run", "--rm", "--network", network, *rt,
                 "--pids-limit", "1024",       # fork-bomb guard (review C1: no pids limit before)
-                "-v", f"{root.as_posix()}:/work", "-w", cdir]
+                "-v", f"{root.as_posix()}:/work", *extra, "-w", cdir]
         if mem:
             base += ["--memory", mem]
         return base + [image] + list(argv)

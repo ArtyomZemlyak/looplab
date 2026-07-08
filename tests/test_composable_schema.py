@@ -315,13 +315,17 @@ def test_per_source_data_permissions(tmp_path):
                        "dataset": {
                            "raw": {"path": str(src), "mount": True, "edit": False},
                            "work": {"path": str(src), "mount": False, "edit": True},
+                           "copy": {"path": str(src), "mount": False},   # copy-in, edit default False
                            "bare": str(src)}})   # bare path -> all defaults
     assert t.data["raw"].mount and not t.data["raw"].edit
     assert not t.data["work"].mount and t.data["work"].edit
     assert t.data["bare"].mount and not t.data["bare"].edit and t.data["bare"].copy_modify   # defaults
     prot = t.repo_spec()["protected_names"]
-    assert "raw" in prot and "raw/**" in prot and "bare/**" in prot   # non-edit sources protected
+    assert "raw" in prot and "raw/**" in prot and "bare/**" in prot   # non-edit MOUNTED sources protected
     assert "work" not in prot and "work/**" not in prot              # edit=true source stays writable
+    # mega-review fix: a mount:false source is a PHYSICAL per-node copy the brief calls "a writable
+    # copy" — protecting it made copy-in mode unusable (every write under ./copy was refused).
+    assert "copy" not in prot and "copy/**" not in prot
     assert "read-only mount" in t._data_brief() and "writable copy" in t._data_brief()
     # the protection must be ENFORCED by the in-house Developer's write gate (exact-match mode) — a
     # `dir/**` protect entry has to guard the whole tree, not just the literal string.
@@ -333,6 +337,30 @@ def test_per_source_data_permissions(tmp_path):
     assert "protected" in wt.execute("write_file", {"path": "raw/x.csv", "content": "a"})       # non-edit refused
     assert "protected" in wt.execute("write_file", {"path": "raw/sub/y.csv", "content": "a"})   # nested refused
     assert "wrote" in wt.execute("write_file", {"path": "work/x.csv", "content": "a"})          # edit=true OK
+
+
+def test_docker_wrap_binds_data_sources_read_only(tmp_path):
+    # mega-review fix: edit:false is now enforced at the MOUNT layer for sandboxed evals — a
+    # symlink-mounted source rides along as a same-path bind (:ro unless edit:true); without it the
+    # /work bind left the symlink dangling AND any train stage could write the original.
+    import shutil
+    from looplab.engine.orchestrator import Engine
+    from looplab.runtime.command_eval import make_docker_wrap
+    e = object.__new__(Engine)
+    e._repo_spec = {"data": {"raw": {"path": "/data/raw", "mount": True, "edit": False},
+                             "rw": {"path": "/data/rw", "mount": True, "edit": True},
+                             "cp": {"path": "/data/cp", "mount": False, "edit": False},
+                             "legacy": "/data/legacy"},
+                    "references": [{"name": "lib", "path": "/refs/lib", "mount": True},
+                                   {"name": "ctx", "path": "/refs/ctx", "mount": False}]}
+    binds = e._data_binds()
+    assert ("/data/raw", True) in binds and ("/data/rw", False) in binds
+    assert ("/data/legacy", True) in binds and ("/refs/lib", True) in binds
+    assert all(p not in ("/data/cp", "/refs/ctx") for p, _ in binds)   # copy-in / context-only: no bind
+    if shutil.which("docker"):                       # argv assembly (docker CLI present only)
+        wrap = make_docker_wrap(str(tmp_path), "img", binds=binds)
+        argv = wrap(["python", "x.py"], str(tmp_path))
+        assert "-v" in argv and "/data/raw:/data/raw:ro" in argv and "/data/rw:/data/rw" in argv
 
 
 def test_api_start_infers_kind_for_composable_task():

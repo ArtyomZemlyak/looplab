@@ -54,10 +54,15 @@ class DataSpec(BaseModel):
     all defaults (everything allowed EXCEPT editing the original)."""
     path: str
     mount: bool = True         # (1) read-only symlink at ./<name> (default) | False = copy INTO the workdir
-    edit: bool = False         # (2) may the agent modify the source/copy IN PLACE? default False (protect original)
-    copy_modify: bool = True   # (3) may the agent copy it and modify the copy?
-    preprocess: bool = True    # (4) may the agent preprocess/augment/feature-engineer it into a training set?
-    extend: bool = True        # (5) may the agent extend / expand the data?
+    edit: bool = False         # (2) may the agent modify the ORIGINAL in place (through its mount)?
+    #                              default False (protect original). A mount:false copy is always
+    #                              node-local and writable — edits there can't reach the original.
+    copy_modify: bool = True   # (3) may the agent copy it and modify the copy?          (advisory)
+    preprocess: bool = True    # (4) may it preprocess/augment it into a training set?    (advisory)
+    extend: bool = True        # (5) may it extend / expand the data?                     (advisory)
+    # (3)-(5) are ADVISORY: they shape the agent brief's allow-list (_data_brief) but no gate
+    # enforces them mechanically — only `mount` and `edit` have enforced semantics (the write gate
+    # + the untrusted tier's read-only binds). Documented in docs/guide/tasks.md.
 
 
 class EvalSpec(BaseModel):
@@ -399,9 +404,12 @@ class RepoTask(BaseModel):
             names += [self._normp(pre + p) for p in ed["protect"]]
         # A data source the agent may NOT edit (the default) is protected against writes UNDER its
         # mount, so the agent can't mutate the original through the ./<name> symlink. `edit:true`
-        # sources stay writable (the agent works on them in place).
+        # sources stay writable (the agent works on them in place). A `mount:false` source is a
+        # PHYSICAL per-node copy whose writes can't reach the original — protecting it contradicted
+        # the agent brief's "a writable copy: may copy+modify, preprocess, extend" and made copy-in
+        # mode unusable (every write under ./<name> was refused), so only mounted originals guard.
         for name, spec in self.data.items():
-            if not spec.edit:
+            if not spec.edit and spec.mount:
                 nm = name.rstrip("/")
                 names += [self._normp(nm), self._normp(nm + "/**")]
         return names + self._eval_protected()
@@ -447,7 +455,10 @@ class RepoTask(BaseModel):
             where = f"./{name}" + (" (read-only mount)" if s.mount else " (a writable copy)")
             allow = [w for w, on in (("edit-in-place", s.edit), ("copy+modify", s.copy_modify),
                                      ("preprocess/augment", s.preprocess), ("extend", s.extend)) if on]
-            deny = "" if s.edit else " — do NOT edit the original; write any derived data elsewhere in the workdir"
+            # The "don't edit" warning applies only to a MOUNTED original: a mount:false copy is
+            # node-local and writable (matching _protected_names, which no longer guards copies).
+            deny = ("" if (s.edit or not s.mount)
+                    else " — do NOT edit the original; write any derived data elsewhere in the workdir")
             parts.append(f"{where}: may {', '.join(allow) or 'read'}{deny}")
         return " Data inputs: " + "; ".join(parts) + "."
 
