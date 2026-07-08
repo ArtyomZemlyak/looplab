@@ -314,9 +314,15 @@ def _missing_task_paths(task_dict: dict) -> list[tuple[str, str]]:
     if not isinstance(task_dict, dict):
         return []
     candidates: list[tuple[str, object]] = []
-    for key in ("data_path", "editable_path"):
+    # `repo` is the composable alias of editable_path — the preflight runs on the RAW task dict
+    # (normalize_task only renames it inside validate_task's copy), so a typo'd composable repo
+    # path used to skip this warning entirely and die deep in workspace seeding instead.
+    for key in ("data_path", "editable_path", "repo"):
         if task_dict.get(key):
             candidates.append((key, task_dict[key]))
+    for ed in (task_dict.get("editables") or []):
+        if isinstance(ed, dict) and ed.get("path"):
+            candidates.append((f"editables[{ed.get('name', '?')}]", ed["path"]))
     # `data`/`dataset` values may be a bare path or a DataSpec {path, mount, …}; check the path either way.
     for dkey in ("data", "dataset"):
         dv = task_dict.get(dkey)

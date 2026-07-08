@@ -206,6 +206,10 @@ def normalize_task(data: dict) -> dict:
             d["kind"] = "repo"            # a bare run+score spec is a (path-less) repo-style task
         elif d.get("data") or d.get("data_path"):
             d["kind"] = "dataset"
+        elif d.get("bounds"):
+            # the classic kind-less TOY file (examples/toy_task.json predates `kind`): a numeric
+            # `bounds` space with no repo/data/cmd IS the toy capability — keep those loading.
+            d["kind"] = "quadratic"
         else:
             # NO silent default to the quadratic toy (the guarantee the old /api/start kind-guard
             # gave): a typo'd capability field (repo_path for repo, …) would otherwise validate as a

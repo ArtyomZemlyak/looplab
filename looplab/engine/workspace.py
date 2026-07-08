@@ -150,13 +150,7 @@ class WorkspaceSeeder:
                     self._e._link_input(src, dst)          # default: read-only symlink mount at ./<name>
                     seeded.append(f"data:{name}->link")
                 else:                                       # copy INTO the workdir (editable if edit=true)
-                    s = Path(src)
-                    if not (dst.is_symlink() or dst.exists()):
-                        if s.is_dir():
-                            shutil.copytree(s, dst, dirs_exist_ok=True, ignore=ignore)
-                        else:
-                            dst.parent.mkdir(parents=True, exist_ok=True)
-                            shutil.copy2(s, dst)
+                    self.copy_input(src, dst, ignore)
                     seeded.append(f"data:{name}->copy")
             if _h is not None:
                 _h.set_many(materialized=", ".join(seeded))
@@ -216,9 +210,9 @@ class WorkspaceSeeder:
         """Mount a large, read-only task input (dataset / reference repo) into the node workdir as a
         SYMLINK rather than a deep copy: these are immutable inputs the eval reads, not the agent's
         edit target, so per-node copies just burn wall-clock + disk (acute on an S3-backed FUSE
-        mount). Idempotent (resume / re-seed); falls back to a copy if the symlink can't be made."""
+        mount). Idempotent (resume / re-seed); falls back to a copy (`copy_input`) if the symlink
+        can't be made."""
         import os as _os
-        import shutil
         src = Path(src); dst = Path(dst)
         if dst.is_symlink() or dst.exists():
             return
@@ -228,8 +222,34 @@ class WorkspaceSeeder:
             return
         except OSError:
             pass
+        self.copy_input(src, dst)
+
+    def copy_input(self, src, dst, ignore=None) -> None:
+        """The ONE copy-in path for data/reference sources (the `mount:false` branch of
+        `seed_workspace` and `link_input`'s no-symlink fallback used to duplicate it with subtle
+        divergence). Idempotent. For a directory, try a CoW clone first (`cp --reflink=always`):
+        on a reflink-capable fs (btrfs/XFS) a per-node "copy" of a multi-GB dataset costs ~zero
+        bytes and milliseconds — and edits stay node-local (copy-on-write), so the editable-copy
+        semantics are preserved. Without CoW an N-node run pays N full byte copies (mega-review:
+        20 GB × 50 nodes ≈ 1 TB), which remains the documented cost of `mount:false` on ext4.
+        `--reflink=always` fails FAST on a non-CoW fs / cross-device copy → full copytree fallback
+        with the usual ignore patterns (the verbatim clone skips them — data trees don't carry
+        .git/.venv; the pruning is a code-tree concern)."""
+        import shutil
+        import subprocess
+        import sys as _sys
+        src = Path(src); dst = Path(dst)
+        if dst.is_symlink() or dst.exists():
+            return
+        dst.parent.mkdir(parents=True, exist_ok=True)
         if src.is_dir():
-            shutil.copytree(src, dst, dirs_exist_ok=True)
+            if _sys.platform != "win32" and shutil.which("cp"):
+                r = subprocess.run(["cp", "-R", "--reflink=always", "--", str(src), str(dst)],
+                                   capture_output=True)
+                if r.returncode == 0:
+                    return
+                shutil.rmtree(dst, ignore_errors=True)   # a partial clone must not survive the fallback
+            shutil.copytree(src, dst, dirs_exist_ok=True, ignore=ignore)
         elif src.is_file():
             shutil.copy2(src, dst)
 

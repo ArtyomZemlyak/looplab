@@ -78,18 +78,19 @@ def _ci(s: str) -> str:
     return s.replace("\\", "/").lower()   # case-insensitive, forward-slash (cross-platform)
 
 
-def _match(path: str, glob: str) -> bool:
+def _match(path: str, glob: str, _fn=fnmatch.fnmatch) -> bool:
     """fnmatch, but treat a leading `**/` as 'zero OR more directories' so a surface like
     `**/*.py` also matches a ROOT-level file (`train.py`) — plain fnmatch requires the literal
-    slash and would silently reject root files."""
-    if fnmatch.fnmatch(path, glob):
+    slash and would silently reject root files. `_fn=fnmatch.fnmatchcase` gives the case-
+    SENSITIVE twin (exact-protect mode; the default callers pre-fold case via `_ci`)."""
+    if _fn(path, glob):
         return True
-    if glob.startswith("**/") and fnmatch.fnmatch(path, glob[3:]):
+    if glob.startswith("**/") and _fn(path, glob[3:]):
         return True
     # A `**/` segment anywhere means 'zero OR more directories' (e.g. a namespaced
     # `model/**/*.py` must also match the ROOT file `model/train.py`). plain fnmatch has no
     # `**` semantics, so collapse one `**/` and retry.
-    return "**/" in glob and fnmatch.fnmatch(path, glob.replace("**/", "", 1))
+    return "**/" in glob and _fn(path, glob.replace("**/", "", 1))
 
 
 def _in_surface(p: str, allow: list[str], prefixes: list[str]) -> bool:
@@ -156,11 +157,18 @@ class SurfacePolicy:
         if self.protected_exact:
             if path in self.protected:
                 return True
-            # A `dir/**` protect entry guards the whole TREE under `dir` (a read-only mounted data
-            # source), which an exact string-membership test would miss — so a write to `dir/file`
-            # slipped through. Honor the directory-prefix form even in exact mode.
+            # Exact mode's protect entries are MOSTLY pre-normalized literal names, but glob forms
+            # legitimately reach it too: the `dir/**` tree guard RepoTask emits for a read-only data
+            # mount, AND operator-authored protect globs like `*.ckpt` (the SAME protected_names list
+            # feeds the diff gate, which glob-matches them) — an exact membership test silently
+            # ignored those, so the two enforcement sites disagreed about what is protected and a
+            # write the diff gate would reject sailed through here. Glob entries match with the
+            # shared `_match` semantics but case-SENSITIVELY (fnmatchcase), preserving exact mode's
+            # documented case contract; plain names keep the O(1) set-membership fast path above.
             for g in self.protected:
-                if g.endswith("/**") and (path == g[:-3] or path.startswith(g[:-2])):
+                if g.endswith("/**") and path == g[:-3]:
+                    return True    # the mount dir itself (`dir/**` needs ≥1 char after the slash)
+                if any(ch in g for ch in "*?[") and _match(path, g, _fn=fnmatch.fnmatchcase):
                     return True
             return False
         pc = _ci(path)
