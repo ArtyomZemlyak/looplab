@@ -270,3 +270,31 @@ def test_conversation_bands_all_phases_in_order():
              gen("g3", "plan", 3.0), gen("g4", "implement", 4.0)]
     conv = build_conversation(SimpleNamespace(run_id="r", task_id="t", nodes={}), spans, 0)
     assert [s["label"] for s in conv["stages"]] == ["propose", "stages", "plan", "implement"]
+
+
+def test_finished_trace_same_phase_retries_stay_separate_bands():
+    """Post-hoc the REAL op span wins over the bare phase name (878e0f8's contract): a
+    ValidatingDeveloper retry re-runs stages→plan→implement inside ONE node, so two `stages` op spans
+    exist. Keying bands by the op SPAN (not the phase string) keeps attempt 2's stages turns as their
+    own chronological band instead of merging them into attempt 1's band out of order."""
+    from types import SimpleNamespace
+    from looplab.serve.traceview import build_conversation
+    T = "t"
+
+    def op(sid, name, start, parent="R"):
+        return {"span_id": sid, "parent_id": parent, "trace_id": T, "name": name, "kind": "operation",
+                "start": start, "attributes": {"node_id": 0}}
+
+    def gen(sid, parent, phase, start):
+        return {"span_id": sid, "parent_id": parent, "trace_id": T, "name": "gen", "kind": "generation",
+                "start": start, "attributes": {"node_id": 0, "phase": phase,
+                                               "input": [{"role": "user", "content": "x"}]}}
+    spans = [{"span_id": "R", "parent_id": None, "trace_id": T, "name": "create_node",
+              "kind": "operation", "start": 0.0, "attributes": {"node_id": 0}},
+             op("I", "implement", 1.0),
+             op("S1", "stages", 1.1, parent="I"), gen("g1", "S1", "stages", 1.2),
+             gen("g2", "I", "implement", 2.0),                     # attempt 1's implement turn
+             op("S2", "stages", 3.0, parent="I"), gen("g3", "S2", "stages", 3.1)]   # attempt 2
+    conv = build_conversation(SimpleNamespace(run_id="r", task_id="t", nodes={}), spans, 0)
+    labels = [s["label"] for s in conv["stages"]]
+    assert labels == ["stages", "implement", "stages"]     # two SEPARATE stages bands, chronological

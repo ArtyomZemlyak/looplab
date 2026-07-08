@@ -265,6 +265,10 @@ const STAGE = {
   onboard:      { icon: 'flag', role: 'Onboarding', desc: 'task setup & eval spec', tone: '#8a7bb0' },
   create_node:  { icon: 'trending', role: 'Author node', desc: 'propose an idea, then build the solution', tone: '#6f8bb0' },
   propose:      { icon: 'search', role: 'Researcher', desc: 'propose the next idea', tone: '#6fa3b0' },
+  // the Developer's own sub-phases (repo tasks): STAGES declares the eval pipeline, PLAN decomposes
+  // the change into atomic steps — both read-only, before the write-capable implement session(s).
+  stages:       { icon: 'sliders', role: 'Developer · stages', desc: 'declare the eval pipeline (prep → train → …)', tone: '#5f9e8f' },
+  plan:         { icon: 'doc', role: 'Developer · plan', desc: 'decompose into atomic steps', tone: '#7fae8f' },
   implement:    { icon: 'gear', role: 'Developer', desc: 'write / edit the solution code', tone: '#6fae97' },
   repair:       { icon: 'bug', role: 'Developer · repair', desc: 'fix a failed parent', tone: '#b0936f' },
   evaluate:     { icon: 'target', role: 'Evaluation', desc: 'run the solution & score it', tone: '#a87da8' },

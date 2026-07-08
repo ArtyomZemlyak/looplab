@@ -364,8 +364,16 @@ class Tracer:
         if kind != "operation" and _phase_ctx.get() is not None and attributes.get("phase") is None:
             attributes = {**attributes, "phase": _phase_ctx.get()}
         _tok_phase = _phase_ctx.set(name) if kind == "operation" else None
-        otel_cm = _OTEL.start_as_current_span(name) if _OTEL is not None else None
-        otel_span = otel_cm.__enter__() if otel_cm is not None else None
+        # The context tokens above are reset only in the `finally` below — guard the one OTel call
+        # between them so a broken bridged provider can't raise past them and leak a stale
+        # node_id/phase onto every later span in this task (spans are diagnostics: degrade, not raise).
+        otel_cm = otel_span = None
+        if _OTEL is not None:
+            try:
+                otel_cm = _OTEL.start_as_current_span(name)
+                otel_span = otel_cm.__enter__()
+            except Exception:  # noqa: BLE001
+                otel_cm = otel_span = None
         # IDs come from the real OTel span when bridged (so JSONL and the collector agree),
         # else we generate OTel-shaped ids ourselves (16-byte trace / 8-byte span, hex).
         trace_id = span_id = None

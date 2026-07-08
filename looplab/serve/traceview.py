@@ -218,21 +218,29 @@ def build_conversation(state: RunState, spans: list[dict], node_id) -> dict:
             root_sid = root["span_id"]
 
             def _stage_of(s):
-                # Prefer the phase stamped on the span (tracing._phase_ctx): the sub-loop it ran in
-                # (propose / stages / plan / implement / repair). This bands a generation by its REAL
-                # phase even when the phase's operation span is NESTED (the Developer's `stages`/`plan`
-                # spans sit under the orchestrator's `implement` span) or not yet flushed to disk (LIVE —
-                # the op span is written only on close, so the walk below can't find it and would fall back
-                # to the create_node root, showing Developer calls under the Researcher until the node
-                # ends). Fall back to the nearest-ancestor operation for spans written before phase-stamping.
+                # The `phase` stamped on the span (tracing._phase_ctx) names the sub-loop it ran in
+                # (propose / stages / plan / implement / repair) — correct even when the phase's op span
+                # is NESTED (the Developer's `stages`/`plan` spans sit under the orchestrator's
+                # `implement` span) or not yet flushed to disk (LIVE — op spans are written only on
+                # close, so the walk can't find them and Developer calls banded under the Researcher
+                # until the node ended). Post-hoc the REAL op span still wins (878e0f8's contract):
+                # walk to the NEAREST ancestor op matching the stamp and key the band by ITS span_id —
+                # two same-phase sub-loops in one node (a ValidatingDeveloper retry re-runs
+                # stages→plan→implement) stay SEPARATE chronological bands instead of merging attempt
+                # 2's stages turns into attempt 1's band out of order. Only when no such ancestor is
+                # on disk yet (live) is a stage synthesized from the bare phase name.
                 ph = (s.get("attributes") or {}).get("phase")
-                if ph:
-                    return {"span_id": f"phase:{ph}", "name": ph, "start": s.get("start", 0.0)}
-                cur, top_op = by_sid.get(s.get("parent_id")), None
+                cur, top_op, ph_op = by_sid.get(s.get("parent_id")), None, None
                 while cur is not None and cur.get("span_id") != root_sid:
                     if cur.get("kind") == "operation":
                         top_op = cur
+                        if ph_op is None and ph and cur.get("name") == ph:
+                            ph_op = cur       # nearest ancestor op matching the stamp: the real sub-loop
                     cur = by_sid.get(cur.get("parent_id"))
+                if ph_op is not None:
+                    return ph_op
+                if ph:
+                    return {"span_id": f"phase:{ph}", "name": ph, "start": s.get("start", 0.0)}
                 return top_op or root
 
             groups: dict = {}
@@ -241,12 +249,21 @@ def build_conversation(state: RunState, spans: list[dict], node_id) -> dict:
                     continue
                 stg = _stage_of(s)
                 groups.setdefault(stg.get("span_id"), {"span": stg, "spans": []})["spans"].append(s)
-            for g in sorted(groups.values(), key=lambda x: x["span"].get("start", 0.0)):
+            # Order + timestamp bands by their first CHILD's start, not the op span's: the Developer's
+            # stages/plan phases run INSIDE the orchestrator's `implement` span, so implement OPENS
+            # first even though its own turns come last — sorting by op-span start would show the
+            # implement band before the stages band whose turns actually happened first.
+            def _first_turn_start(g):
+                # content spans only: a NESTED op span (stages/plan under implement) rides in its
+                # parent's group and would drag the parent band's start back to before its own band
+                return min((s.get("start", 0.0) for s in g["spans"] if s.get("kind") != "operation"),
+                           default=g["span"].get("start", 0.0))
+            for g in sorted(groups.values(), key=_first_turn_start):
                 grp = sorted(g["spans"], key=lambda x: x.get("start", 0.0))
                 turns = _thread_turns(grp, by_id)
                 if turns:
                     stages.append({"trace_id": tid, "label": g["span"].get("name"),
-                                   "start": g["span"].get("start", 0.0),
+                                   "start": _first_turn_start(g),
                                    "rollup": _rollup(grp), "turns": turns})
             continue
         turns = _thread_turns(ss_sorted, by_id)

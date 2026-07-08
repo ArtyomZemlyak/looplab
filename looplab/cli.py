@@ -848,12 +848,22 @@ def timings(run_dir: Path = typer.Argument(...),
             return f"op:{nm}" if nm else "op"
         return k or "other"
 
-    per_node: dict = defaultdict(lambda: defaultdict(lambda: [0.0, 0]))
+    spans = []
     for line in sp_path.read_text(encoding="utf-8", errors="replace").splitlines():
         try:
-            sp = _json.loads(line)
+            spans.append(_json.loads(line))
         except ValueError:
             continue
+    # An operation span's recorded duration INCLUDES every nested span (create_node ⊃ implement ⊃
+    # stages/plan ⊃ the generations inside them), so summing raw durations counted the nested
+    # phases twice or thrice and skewed every percentage. Charge each op its SELF time only
+    # (duration minus its DIRECT children); leaf generations/tools keep their full duration.
+    child_sum: dict = defaultdict(float)
+    for sp in spans:
+        if sp.get("parent_id"):
+            child_sum[sp["parent_id"]] += float(sp.get("duration_s") or 0.0)
+    per_node: dict = defaultdict(lambda: defaultdict(lambda: [0.0, 0]))
+    for sp in spans:
         nid = (sp.get("attributes") or {}).get("node_id")
         try:
             nid = int(nid)
@@ -861,8 +871,11 @@ def timings(run_dir: Path = typer.Argument(...),
             continue
         if node is not None and nid != node:
             continue
+        dur = float(sp.get("duration_s") or 0.0)
+        if sp.get("kind") == "operation":
+            dur = max(0.0, dur - child_sum.get(sp.get("span_id") or "", 0.0))
         cell = per_node[nid][_cat(sp)]
-        cell[0] += float(sp.get("duration_s") or 0.0)
+        cell[0] += dur
         cell[1] += 1
 
     for nid in sorted(per_node):
