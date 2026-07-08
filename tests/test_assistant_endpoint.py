@@ -127,8 +127,11 @@ def test_run_turn_write_declined(tmp_path):
 
 
 def test_run_turn_propose_run(tmp_path):
+    # propose_run validates the task before proposing (so an unrunnable card is bounced) — a dataset
+    # task's data path must EXIST, so point it at a real file under tmp_path.
+    data = tmp_path / "train.csv"; data.write_text("a,b,y\n1,2,0\n")
     spec = {"run_id": "titanic-baseline", "task": {"kind": "dataset", "goal": "predict survival",
-            "direction": "max", "data_path": "/d/train.csv"}, "settings": {"max_nodes": 20}}
+            "direction": "max", "data_path": str(data)}, "settings": {"max_nodes": 20}}
     client = _FakeChatClient([_call("propose_run", spec), _final("Proposed a titanic run.")])
     res = run_turn(client, tmp_path, [], "start a titanic run", "plan")
     assert res["ok"] and res["proposals"]

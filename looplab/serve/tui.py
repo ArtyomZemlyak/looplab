@@ -259,16 +259,18 @@ def spec_ready(spec: Optional[dict]) -> Optional[str]:
     task = spec.get("task") or {}
     if spec.get("task_file"):
         return None
-    if not task.get("kind"):
+    if not task:
         return "the boss hasn't picked a task yet"
+    from looplab.adapters.tasks import normalize_task
+    task = normalize_task(task)               # composable (repo/dataset/cmd/kaggle) -> canonical + kind
     if task.get("kind") == "mlebench_real" and not (task.get("competition") or "").strip():
-        return "set a Kaggle competition id for the MLE-bench task"
+        return "set a Kaggle competition id"
     if task.get("kind") == "repo":
-        if not (task.get("editable_path") or "").strip():
-            return "a repo task needs an editable repo path"
+        if not (task.get("editable_path") or task.get("editables")):
+            return "a repo task needs a `repo` path"
         has_cmd = isinstance(task.get("eval"), dict) and task["eval"].get("command")
         if not (has_cmd or task.get("onboard")):
-            return "a repo task needs an eval command (or onboard mode)"
+            return "a repo task needs a `cmd` (or metric reader \"auto\")"
     return None
 
 

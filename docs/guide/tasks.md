@@ -19,7 +19,54 @@ Every task shares these:
 | `direction` | `min` \| `max` | Whether lower or higher metric is better |
 | `seed` | int | Random seed for reproducible data generation |
 
-## The nine kinds
+## The composable schema (recommended)
+
+You don't have to pick a `kind` — describe **what you have**, and the engine infers the task from
+which capability fields are present (`looplab/adapters/tasks.py::normalize_task`):
+
+| Field | Meaning |
+|---|---|
+| `repo` | Absolute path to an **editable codebase** — the agent may edit any file within it (`protect: [...]` for exceptions; default edit surface is everything). |
+| `dataset` | **Read-only** data / model weights that live outside the repo, as `{ "<mount>": "<abs path>" }` (a bare path mounts as `./dataset`). They appear at `./<mount>` in the workdir. |
+| `cmd` | **How to run + score** one experiment — either a bare argv `["python","test.py"]` or an object `{ "command"\|"stages", "metric": {"reader","key"}, "timeout" }`. This is the operator's **authoritative, non-rewritable** scorer. |
+| `kaggle` | A Kaggle / MLE-bench competition slug (the official grader scores a submission — no `cmd` needed). |
+| `benchmark` | A built-in synthetic task (`quadratic`, `regression`, …) for testing the loop. |
+
+`metric.reader` is **how to read** the printed metric — `stdout_json` / `stdout_regex` /
+`file_json` / `file_regex`, or `"auto"` to have the agent write the reader. The optimization
+**direction** is the task's `direction`, never the reader.
+
+```jsonc
+{
+  "goal": "maximize test recall@100 of a rubert-tiny-lite retriever",
+  "direction": "max",
+  "repo": "/home/me/dense-retrieval",
+  "dataset": {
+    "dataset_rubertlite": "/home/me/data/datasets/rubertlite",
+    "embedder_rubertlite": "/home/me/data/embedder/rubert-tiny-lite"
+  },
+  "cmd": {
+    "command": ["python", "test_looplab.py"],
+    "metric": {"reader": "stdout_json", "key": "recall@100"},
+    "timeout": 14400
+  }
+}
+```
+
+**How it's scored is the trust boundary.** The agent builds whatever training code the experiment
+needs inside `repo`, but it cannot rewrite `cmd`: if `cmd` is a single command, the Developer may
+only declare **preceding** stages (data-prep, train — via the `declare_stages` tool, see
+[generating code](generating-code.md)) and the operator's `cmd` is appended as the protected final
+`score` stage; if `cmd` itself declares `stages`, those are canonical. Put `%params%` in any command
+to inject the node's hyperparameters as `--key value`.
+
+Every legacy spelling still works — `{"kind":"repo","editable_path":...,"eval":{...,"metric":{"kind":...}},"onboard":...}`
+parses unchanged, so old task files and snapshots keep running (`examples/repo_task.json` is the
+legacy form; `examples/repo_composable_task.json` the composable form).
+
+## The nine kinds (internal / legacy view)
+
+The composable fields above desugar to these adapter kinds; you can still set `kind` explicitly.
 
 | `kind` | The agent's job | Metric source | Example |
 |---|---|---|---|
