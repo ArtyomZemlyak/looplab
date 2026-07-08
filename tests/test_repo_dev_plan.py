@@ -123,3 +123,20 @@ def test_stages_phase_treats_onboard_command_as_the_cmd():
     dev = LLMRepoDeveloper(object(), t)
     ev, has_cmd = dev._cmd_context()
     assert has_cmd and ev.get("command") == [_sys.executable, "ttrain.py"]
+
+
+def test_operator_declared_stages_skip_the_stages_phase(monkeypatch):
+    """When the OPERATOR already declared a full eval.stages pipeline, the engine uses it verbatim (a
+    Developer manifest would be ignored by _resolve_stages) — so the mandatory STAGES phase is SKIPPED
+    (no wasted declare_stages loop, no misleading 'cmd is appended' contract). Plan + implement still run."""
+    rec: list = []
+    _install_fake_loop(monkeypatch, [{"title": "A", "detail": "a"}, {"title": "B", "detail": "b"}], rec)
+    t = RepoTask(id="r", goal="g", direction="max", editable_path=str(FIXTURE), edit_surface=["*.py"], protect=[],
+                 eval=EvalSpec(stages=[{"name": "train", "command": ["python", "train.py"]},
+                                       {"name": "score", "command": ["python", "test.py"]}], metric=_M))
+    from looplab.adapters.repo_task import LLMRepoDeveloper
+    dev = LLMRepoDeveloper(object(), t, plan_decompose=True, plan_min_steps=2)
+    dev.implement(Idea(operator="draft", params={}, rationale="x"))
+    names = [r[0] for r in rec]
+    assert "declare_stages" not in names                 # STAGES phase skipped (operator owns the pipeline)
+    assert names == ["propose_plan", "done", "done"]     # plan + implement still run

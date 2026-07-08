@@ -651,7 +651,7 @@ class LLMRepoDeveloper:
                             "required": ["title"]}}},
                         ["steps"])
 
-    def _propose_plan(self, system: str, idea: Idea) -> list:
+    def _propose_plan(self, system: str, idea: Idea, write=None) -> list:
         """Plan phase: a READ-ONLY stage — the developer inspects the real code/experiments (it CANNOT
         write here), and its only exit is `propose_plan` (the ordered atomic plan). Returns a list of
         {title, detail}; [] on empty/failure so the caller falls back to one session."""
@@ -672,7 +672,7 @@ class LLMRepoDeveloper:
         # output is the plan. (This used to be tools=None to force convergence, which made the planner
         # work BLIND off the truncated preview; the read_file pagination fix + emit_after/emit_force
         # convergence backstop now let it read PROPERLY without exploring forever.)
-        read_only = CompositeTools([EnvInspectTools()] + self._scout_tools(None))
+        read_only = CompositeTools([EnvInspectTools()] + self._scout_tools(write))
         try:
             plan = drive_tool_loop(
                 self.client, read_only, messages, self._plan_emit_spec(),
@@ -805,10 +805,11 @@ class LLMRepoDeveloper:
         from looplab.runtime.command_eval import validate_stages
         import json as _json
         ev, has_cmd = self._cmd_context()
-        reserved = ("score",) if has_cmd else ()
+        reserved = ("score",)   # `score` is ALWAYS the engine-appended final stage — consume-side reserves it too
         messages = [{"role": "system", "content": system},
                     {"role": "user", "content": self._stages_user(idea, ev, has_cmd)}]
-        read_only = CompositeTools([EnvInspectTools()] + self._scout_tools(None))
+        # scouts read the LIVE overlay (the parent solution on improve/merge), not the pristine repo
+        read_only = CompositeTools([EnvInspectTools()] + self._scout_tools(write))
 
         def _validate(args):                      # bounce a malformed manifest back to the model
             _, err = validate_stages((args or {}).get("stages"), reserved=reserved)
@@ -892,17 +893,22 @@ class LLMRepoDeveloper:
         # A REPAIR (error set) OR a bare / __new__-constructed dev (unit tests, no `_editables`) skips
         # straight to a single bounded session — repair is already narrow; the toy dev has no repo to stage.
         is_fresh_repo = error is None and getattr(self, "_editables", None)
+        # Skip the STAGES phase when the OPERATOR already declared a full `eval.stages` pipeline: the engine
+        # uses that verbatim (a Developer manifest would be IGNORED by _resolve_stages), so the phase would
+        # be wasted cost and its "cmd is appended" contract a lie.
+        operator_stages = bool(is_fresh_repo and (self._cmd_context()[0].get("stages")))
         try:
             if is_fresh_repo:
                 # STAGES + PLAN are the Developer's own sub-phases (each its own trace band, via the phase
                 # stamped on their generations). IMPLEMENT runs under the orchestrator's "implement" span
                 # (so its generations band there, and non-repo developers keep that band unchanged).
-                with tracing.operation("stages"):
-                    self._declare_stages_phase(idea, write, system)
+                if not operator_stages:
+                    with tracing.operation("stages"):
+                        self._declare_stages_phase(idea, write, system)
                 steps = []
                 if getattr(self, "_plan_decompose", False):
                     with tracing.operation("plan"):
-                        steps = self._propose_plan(system, idea)
+                        steps = self._propose_plan(system, idea, write)
                 if len(steps) >= getattr(self, "_plan_min_steps", 2):
                     for i, step in enumerate(steps, 1):
                         self._run_step(idea, step, i, len(steps), write, system)  # a step error can't abort the plan
