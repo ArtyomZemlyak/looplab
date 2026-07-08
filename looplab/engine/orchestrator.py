@@ -2313,27 +2313,52 @@ class Engine(ConfirmPhaseMixin, AblationMixin):
         # extracted to engine/workspace.py — see the delegator block after __init__
         return self.workspace.sandbox_cwd(workdir, cwd_spec)
 
-    def _resolve_stages(self, workdir, es):
-        """Multi-stage eval manifest (Phase 1): the Developer's `looplab_stages.json` in the workdir wins,
-        else the task's recommended default (`es["stages"]`). Shape: {"stages": [{name, command, timeout?,
-        check?}, …]} (or a bare list). The LAST stage is the metric stage — its stdout is read for the
-        metric. Returns None (classic single-command eval) when no valid manifest is present."""
+    def _resolve_stages(self, workdir, es, params=None):
+        """Resolve the ordered eval pipeline, with the operator's `cmd` (es) AUTHORITATIVE and
+        non-overridable (redesign: the agent can't rewrite how it's scored):
+
+          • cmd DECLARES stages (`es["stages"]`) → those ARE the pipeline, canonical. The Developer
+            only implements the scripts each stage calls; a `looplab_stages.json` is IGNORED.
+          • cmd is a SINGLE command → the Developer's `looplab_stages.json` supplies the PRECEDING
+            stages (data_prep / train / …); the operator's cmd is appended as the final, protected
+            `score` stage whose stdout the trusted metric reader reads. So the agent can add work
+            BEFORE scoring but never replace the scoring itself.
+
+        `%params%` tokens in any stage command (and the appended cmd) expand to the node's params
+        (`--key value`). Returns None (classic single-command eval) when there are no stages."""
         import json
-        stages = None
+        from looplab.runtime import command_eval
+
+        def _clean(stages):
+            out = []
+            for s in stages:
+                if isinstance(s, dict) and isinstance(s.get("command"), list) and s.get("command"):
+                    s = dict(s)
+                    s["command"] = command_eval.expand_params(s["command"], params)
+                    out.append(s)
+            return out
+
+        task_stages = es.get("stages")
+        if isinstance(task_stages, list) and task_stages:
+            return _clean(task_stages) or None      # cmd declares stages → canonical, dev file ignored
+
+        # single-command cmd: read the Developer's PRECEDING stages, append the protected cmd stage
+        dev = None
         mf = Path(workdir) / "looplab_stages.json"
         if mf.exists():
             try:
                 data = json.loads(mf.read_text(encoding="utf-8"))
-                stages = data.get("stages") if isinstance(data, dict) else data
+                dev = data.get("stages") if isinstance(data, dict) else data
             except Exception:  # noqa: BLE001 — a malformed manifest just falls back to the single command
-                stages = None
-        if not stages:
-            stages = es.get("stages")
-        if not isinstance(stages, list) or not stages:
-            return None
-        clean = [s for s in stages if isinstance(s, dict)
-                 and isinstance(s.get("command"), list) and s.get("command")]
-        return clean or None
+                dev = None
+        if isinstance(dev, list) and dev:
+            preceding = _clean(dev)
+            if preceding:
+                final = {"name": "score",                # the operator's cmd — FINAL + protected
+                         "command": command_eval.expand_params(list(es.get("command") or []), params),
+                         "timeout": es.get("timeout", 600.0)}
+                return preceding + [final]
+        return None
 
     def _stage_check_fn(self, node):
         """Phase 3 inter-stage verify: a callback (stage_name, log_tail) -> concern|None that asks an LLM
@@ -2386,7 +2411,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin):
             params = node.idea.params if node is not None else {}
             cmd, timeout = command_eval.build_command(es, params, prof)
             root = str(Path(workdir).resolve())               # repo/workdir root
-            stages = self._resolve_stages(root, es)           # multi-stage pipeline (Developer file / task default)
+            stages = self._resolve_stages(root, es, params)   # cmd-authoritative pipeline (+ %params% per stage)
             check_fn = (self._stage_check_fn(node)            # Phase 3: inter-stage verify (only if any stage asks)
                         if stages and any(s.get("check") for s in stages) else None)
             cwd = self._sandbox_cwd(workdir, es.get("cwd", "."))

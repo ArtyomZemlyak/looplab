@@ -202,19 +202,40 @@ def _fmt(v) -> str:
     return str(int(f)) if f == int(f) else repr(f)
 
 
+def expand_params(argv: list, params: Optional[dict]) -> list:
+    """Substitute a standalone `%params%` token in an argv list with the node's params rendered as
+    `--key value` items (integral floats as ints). This is the EXPLICIT, opt-in way hyperparameters
+    reach a command or a pipeline stage: the Developer/operator writes `%params%` exactly where the
+    flags belong. No `%params%` token -> the argv is returned unchanged (params are baked into the
+    code by the Developer, or the run doesn't tune params). Passing no params just drops a stray
+    token. Used for both the single `cmd` and each stage command."""
+    if "%params%" not in argv:
+        return list(argv)
+    out = []
+    for a in argv:
+        if a == "%params%":
+            for k, v in (params or {}).items():
+                out.append(f"--{k}")
+                out.append(_fmt(v))
+        else:
+            out.append(a)
+    return out
+
+
 def build_command(eval_spec: dict, params: Optional[dict] = None,
                   profile: Optional[str] = None) -> tuple[list[str], float]:
     """Build the eval argv + timeout from an eval_spec, an eval profile (smoke/full), and
-    the Researcher's params (RepoTask Phase 2). Returns (command, timeout).
+    the node's params. Returns (command, timeout).
 
     - profiles: named override sets, e.g. {"smoke": {"overrides": ["max_steps=20"],
       "timeout": 60}}. `profile=None` (search default) resolves to "smoke"; an explicitly
       REQUESTED name that isn't defined uses NO overrides (the base/full command), never a
       cheaper fallback — so confirm("full") can't silently run the smoke eval.
-    - params_style == "cli_overrides": the proposed params are appended as `key=value`
-      tokens (Hydra-style), so hyperparameters drive an existing framework with no code edit.
+    - params reach the command via a `%params%` token (see `expand_params`) — the explicit,
+      composable-schema way. Legacy `params_style == "cli_overrides"` still appends `key=value`
+      tokens (Hydra-style) for old tasks that set it.
     """
-    cmd = list(eval_spec["command"])
+    cmd = expand_params(list(eval_spec["command"]), params)   # %params% token -> --key value
     profiles = eval_spec.get("profiles") or {}
     # Resolve the profile. An explicitly-requested name that isn't defined uses NO overrides
     # (the base/full command) — never a cheaper fallback, so confirm("full") can't silently
@@ -223,7 +244,7 @@ def build_command(eval_spec: dict, params: Optional[dict] = None,
     overrides = list((prof or {}).get("overrides", []))
     # Explicit presence check (not `or`) so a configured timeout of 0 isn't read as missing.
     timeout = prof["timeout"] if (prof and "timeout" in prof) else eval_spec.get("timeout", 600.0)
-    if eval_spec.get("params_style") == "cli_overrides":
+    if eval_spec.get("params_style") == "cli_overrides":      # legacy Hydra-style append (back-compat)
         overrides += [f"{k}={_fmt(v)}" for k, v in (params or {}).items()]
     return cmd + overrides, timeout
 
