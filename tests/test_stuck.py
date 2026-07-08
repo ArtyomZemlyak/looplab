@@ -217,3 +217,76 @@ def test_config_enables_plan_and_summary_by_default():
     assert s.agent_self_plan is True
     assert s.agent_auto_summary is True
     assert s.agent_stuck_detection is True
+
+
+# --------------------------------------------------------------------------- G2 read-dedup anti-thrash
+class _RepeatThenEmitClient:
+    """Issues the SAME read call `repeats` times (redundant re-reads), then emits."""
+    def __init__(self, repeats):
+        self.repeats = repeats
+        self.calls = 0
+
+    def chat(self, messages, tools, tool_choice="auto"):
+        self.calls += 1
+        if self.calls <= self.repeats:
+            return _tool_call("read_file", {"path": "a.py"})
+        return {"content": "", "tool_calls": [{"id": "e", "function": {"name": "emit", "arguments": "{}"}}]}
+
+
+class _CountingReadTools:
+    def __init__(self):
+        self.executed = 0
+
+    def specs(self):
+        return [{"type": "function", "function": {
+            "name": "read_file", "description": "", "parameters": {"type": "object", "properties": {}}}}]
+
+    def execute(self, name, args):
+        self.executed += 1
+        return "file contents"
+
+
+def test_read_dedup_suppresses_identical_reads():
+    # 3 identical read_file calls, then emit. The dedup must execute the read ONCE and stub the repeats
+    # (below the stuck threshold, so termination is via emit, isolating the dedup behavior).
+    client = _RepeatThenEmitClient(repeats=3)
+    tools = _CountingReadTools()
+    out = drive_tool_loop(client, tools, [{"role": "user", "content": "go"}], _EMIT,
+                          finalize=lambda a: ("emit", a), fallback=lambda _m: ("fallback", None))
+    assert out[0] == "emit"
+    assert tools.executed == 1                # the 2 repeats were suppressed, not re-executed
+
+
+class _RepeatMutatingClient:
+    def __init__(self, repeats):
+        self.repeats = repeats
+        self.calls = 0
+
+    def chat(self, messages, tools, tool_choice="auto"):
+        self.calls += 1
+        if self.calls <= self.repeats:
+            return _tool_call("write_file", {"path": "a.py", "content": "x"})
+        return {"content": "", "tool_calls": [{"id": "e", "function": {"name": "emit", "arguments": "{}"}}]}
+
+
+class _CountingWriteTools:
+    def __init__(self):
+        self.executed = 0
+
+    def specs(self):
+        return [{"type": "function", "function": {
+            "name": "write_file", "description": "", "parameters": {"type": "object", "properties": {}}}}]
+
+    def execute(self, name, args):
+        self.executed += 1
+        return "written"
+
+
+def test_dedup_never_suppresses_mutating_tools():
+    # A write/edit/run tool is NOT idempotent — an identical repeat must still execute, never be stubbed.
+    client = _RepeatMutatingClient(repeats=3)
+    tools = _CountingWriteTools()
+    out = drive_tool_loop(client, tools, [{"role": "user", "content": "go"}], _EMIT,
+                          finalize=lambda a: ("emit", a), fallback=lambda _m: ("fallback", None))
+    assert out[0] == "emit"
+    assert tools.executed == 3                 # every write ran (not deduped)

@@ -388,3 +388,19 @@ def test_api_start_infers_kind_for_composable_task():
     kind = normalize_task({"goal": "g", "direction": "max", "repo": "/r",
                            "cmd": ["python", "t.py"]}).get("kind")
     assert kind == "repo" and kind in kinds()
+
+
+def test_regex_reader_accepts_pattern_in_key():
+    # An LLM/operator authoring the composable metric naturally puts the regex in `key` (the field
+    # stdout_json uses). normalize must promote it to `pattern` so stdout_regex/file_regex don't crash
+    # the eval with KeyError('pattern').
+    from looplab.adapters.tasks import normalize_task
+    from looplab.runtime.command_eval import read_metric
+    t = normalize_task({"goal": "g", "direction": "max", "repo": "examples/repo_example",
+                        "cmd": {"command": ["python", "e.py"],
+                                "metric": {"reader": "stdout_regex", "key": "R@100: ([0-9.]+)"}}})
+    m = t["eval"]["metric"]
+    assert m["kind"] == "stdout_regex" and m["pattern"] == "R@100: ([0-9.]+)" and "key" not in m
+    assert read_metric("R@100: 0.83\n", "/tmp", m) == 0.83
+    # a genuinely malformed regex spec must fail the node (None), not crash the run
+    assert read_metric("x", "/tmp", {"kind": "stdout_regex"}) is None

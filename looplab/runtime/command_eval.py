@@ -59,16 +59,21 @@ def read_metric(stdout: str, workdir: str, spec: dict, wrap=None) -> Optional[fl
     if kind == "stdout_json":
         return json_line_metric(stdout, spec.get("key", "metric"))
     if kind == "stdout_regex":
-        return _regex_metric(stdout, spec["pattern"], int(spec.get("group", 1)))
+        pat = spec.get("pattern") or spec.get("key")   # key = tolerant fallback (composable authoring)
+        return _regex_metric(stdout, pat, int(spec.get("group", 1))) if pat else None
     if kind in ("file_json", "file_regex"):
-        p = Path(workdir) / spec["path"]
+        fp = spec.get("path")
+        if not fp:
+            return None                                 # malformed spec must fail the NODE, not crash the run
+        p = Path(workdir) / fp
         if not p.is_file():
             return None
         # utf-8-sig strips a UTF-8 BOM (common on Windows-written metric files) that would
         # otherwise make json.loads fail / regex miss the first line.
         text = p.read_text(encoding="utf-8-sig", errors="replace")
         if kind == "file_regex":
-            return _regex_metric(text, spec["pattern"], int(spec.get("group", 1)))
+            pat = spec.get("pattern") or spec.get("key")
+            return _regex_metric(text, pat, int(spec.get("group", 1))) if pat else None
         try:
             return _to_float(_dig(json.loads(text), spec.get("key", "metric")))
         except json.JSONDecodeError:

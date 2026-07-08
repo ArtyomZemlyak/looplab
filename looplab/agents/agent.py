@@ -230,6 +230,7 @@ def drive_tool_loop(client, tools, messages: list, emit_spec: dict, *,
     emit_rejects = 0                    # bad emits bounced back for a re-emit (validate + emit_retries)
     tool_turns = 0                      # G: investigation turns, for the emit_after soft-convergence nudge
     emit_nudged = False
+    read_seen: dict = {}                 # G2: (tool,args) -> repeat count, for the read-dedup anti-thrash
     turns = itertools.count() if max_turns is None or max_turns <= 0 else range(max_turns)
     for turn_idx in turns:
         if _cancelled():                # user hit stop -> finalize from what we have, promptly
@@ -337,20 +338,42 @@ def drive_tool_loop(client, tools, messages: list, emit_spec: dict, *,
                 current_plan = _render_plan(args) or current_plan
                 result = "plan updated"
             else:
-                # Surface what the agent is about to do BEFORE the (possibly slow) tool runs, so a
-                # live progress view advances turn-by-turn instead of jumping only at the end.
-                _step(turn=turn_idx, tool=name,
-                      arg=next((str(v) for v in (args or {}).values() if v), ""))
-                # First-class TOOL observation (Langfuse-style): input=args, output=result, nested
-                # under the active operation span next to the generations that decided the call.
-                with tracing.tool(name, args) as _tool_obs:
-                    result = tools.execute(name, args) if tools is not None else f"(unknown tool: {name})"
-                    _tool_obs.output(result)
-                # Cap once, up front, so the provenance hook receives EXACTLY what the tool message
-                # below will carry (a single expression, not two kept-in-sync copies).
-                result = str(result)[:4000]
-                if on_tool_result is not None:      # provenance hook: exceptions propagate
-                    on_tool_result(name, args, result)
+                # G2: read-dedup anti-thrash. A model (esp. high-reasoning, on a big repo) re-issues the
+                # SAME read/list/grep dozens of times — live rubert node 0: 92% of 434 reads were re-reads of
+                # just 35 files, burning the whole turn budget re-ingesting identical content. Suppress an
+                # EXACT repeat of a NON-MUTATING call within this loop: return a short stub instead of
+                # re-executing + re-sending the same ≤4KB. Loop-local, so a fresh propose/node reads normally;
+                # never applied to emit/plan or any write/edit/run tool (those aren't idempotent).
+                _nl = name.lower()
+                _read_only = (name not in (emit_name, _PLAN_TOOL_NAME) and not any(
+                    m in _nl for m in ("write", "edit", "apply", "delete", "create", "run", "exec",
+                                       "patch", "stage", "commit", "remove", "emit", "propose")))
+                _dk = (name, json.dumps(args, sort_keys=True, default=str)) if _read_only else None
+                if _dk is not None and _dk in read_seen:
+                    read_seen[_dk] += 1
+                    _step(turn=turn_idx, tool=name, arg="(repeat suppressed)")
+                    result = (f"(already ran `{name}` with these exact args earlier this turn — result "
+                              f"unchanged, not re-sent. Use the earlier output; to learn more read a "
+                              f"DIFFERENT file/range, else call `{emit_name}` with your best idea.)")
+                    if on_tool_result is not None:
+                        on_tool_result(name, args, result)
+                else:
+                    if _dk is not None:
+                        read_seen[_dk] = 0
+                    # Surface what the agent is about to do BEFORE the (possibly slow) tool runs, so a
+                    # live progress view advances turn-by-turn instead of jumping only at the end.
+                    _step(turn=turn_idx, tool=name,
+                          arg=next((str(v) for v in (args or {}).values() if v), ""))
+                    # First-class TOOL observation (Langfuse-style): input=args, output=result, nested
+                    # under the active operation span next to the generations that decided the call.
+                    with tracing.tool(name, args) as _tool_obs:
+                        result = tools.execute(name, args) if tools is not None else f"(unknown tool: {name})"
+                        _tool_obs.output(result)
+                    # Cap once, up front, so the provenance hook receives EXACTLY what the tool message
+                    # below will carry (a single expression, not two kept-in-sync copies).
+                    result = str(result)[:4000]
+                    if on_tool_result is not None:      # provenance hook: exceptions propagate
+                        on_tool_result(name, args, result)
             result = str(result)[:4000]
             messages.append({"role": "tool", "tool_call_id": tc.get("id", ""),
                              "name": name, "content": result})

@@ -170,6 +170,14 @@ def normalize_task(data: dict) -> dict:
         if isinstance(spec, dict) and "reader" in spec and "kind" not in spec:
             spec = dict(spec)
             spec["kind"] = spec.pop("reader")
+        # A regex reader needs its regex in `pattern`; an LLM/operator authoring the composable metric
+        # naturally puts it in `key` (the field stdout_json/file_json use). Promote key->pattern for regex
+        # readers so `{"reader":"stdout_regex","key":"RECALL@100: (...)"}` works instead of crashing the
+        # eval with KeyError('pattern').
+        if isinstance(spec, dict) and spec.get("kind") in ("stdout_regex", "file_regex") \
+                and "pattern" not in spec and spec.get("key"):
+            spec = dict(spec)
+            spec["pattern"] = spec.pop("key")
         return spec
 
     ev = d.get("eval")
