@@ -207,11 +207,15 @@ def normalize_task(data: dict) -> dict:
             # A string `command` here would `list(...)` into a per-CHARACTER argv (['p','y','t',…]).
             # The non-auto path is guarded by EvalSpec validation, but this onboard fold sets eval=None
             # and bypasses it — so reject a shell string exactly like the top-level `cmd` branch does.
+            # A non-empty string raises; a whitespace-only/empty string is treated as ABSENT (else it
+            # would slip past the `.strip()` check yet still be truthy at `if _cmd`, becoming list(' ')).
             _cmd = ev.get("command")
-            if isinstance(_cmd, str) and _cmd.strip():
-                raise ValueError(
-                    "`cmd.command` must be an argv list ([\"python\",\"test.py\"]), not a shell string: "
-                    f"{_cmd[:80]!r} — split it into argv items.")
+            if isinstance(_cmd, str):
+                if _cmd.strip():
+                    raise ValueError(
+                        "`cmd.command` must be an argv list ([\"python\",\"test.py\"]), not a shell string: "
+                        f"{_cmd[:80]!r} — split it into argv items.")
+                _cmd = None
             if _cmd and not d.get("onboard_command"):
                 d["onboard_command"] = list(_cmd)
             if ev.get("timeout"):

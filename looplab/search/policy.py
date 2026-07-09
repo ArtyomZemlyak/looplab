@@ -396,14 +396,16 @@ class MCTSPolicy:
             if not metrics:
                 continue
             value = best_of(metrics)
-            # min-direction reward must be MONOTONE DECREASING in `value` (lower metric = better).
-            # `1/(1+value)` gives that for the common non-negative min metric (MSE/error/loss) — but
-            # `abs(value)` INVERTS the order for signed metrics (a value of -5 is better than +0.5, yet
-            # abs maps -5 -> 0.167 < +0.5 -> 0.667). Keep the bounded (0,1] map for value>=0 (unchanged),
-            # and extend it monotonically past 0 with `1-value` (>1) so a negative-and-better subtree
-            # correctly outranks a positive-and-worse one. Continuous at 0 (both branches = 1.0).
+            # min-direction reward must be MONOTONE DECREASING in `value` (lower metric = better) AND
+            # BOUNDED, so the UCB exploration term (c≈1.4, calibrated for a ~(0,1] reward) is never
+            # swamped. `1/(1+value)` gives a bounded (0,1] map for the common non-negative min metric
+            # (MSE/error/loss); `abs(value)` INVERTED the order for signed metrics and an earlier `1-value`
+            # fix made the reward UNBOUNDED for negative metrics (log-likelihood ≈ -400 → reward ≈ 400,
+            # dwarfing exploration → pure greedy). Extend past 0 with `2 - 1/(1-value)` instead: monotone
+            # decreasing across all reals, continuous at 0 (both branches = 1.0), and bounded in (1, 2) for
+            # value<0 — so large-magnitude negatives compress just like large positives do, symmetrically.
             if state.direction == "min":
-                reward = (1.0 / (1.0 + value)) if value >= 0 else (1.0 - value)
+                reward = (1.0 / (1.0 + value)) if value >= 0 else (2.0 - 1.0 / (1.0 - value))
             else:
                 reward = value
             # Visits = real (feasible, evaluated) trials in the subtree, not failed/infeasible

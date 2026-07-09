@@ -132,6 +132,23 @@ def test_consolidate_merges_duplicates_and_counts_evidence():
     assert len(out) == 1 and out[0]["evidence_count"] == 2
 
 
+def test_consolidate_dedups_evidence_by_run_id():
+    # A single run that re-reflects (a reopened + budget-extended run re-enters finalize and re-appends
+    # its own lessons) must NOT inflate evidence_count: the same run agreeing with itself counts ONCE.
+    rows = [
+        {"statement": "Deeper trees help", "outcome": "supported", "task_id": "t", "run_id": "R"},
+        {"statement": "deeper trees help", "outcome": "supported", "task_id": "t", "run_id": "R"},
+    ]
+    assert consolidate_lessons(rows)[0]["evidence_count"] == 1        # same run twice -> 1
+    # two DISTINCT runs still accumulate genuine cross-run support
+    rows2 = rows + [{"statement": "Deeper trees help", "outcome": "supported", "task_id": "t", "run_id": "S"}]
+    assert consolidate_lessons(rows2)[0]["evidence_count"] == 2       # {R, S} -> 2
+    # a pre-consolidated row (evidence_count>1) keeps its stored weight even sharing a run_id
+    rows3 = [{"statement": "X", "outcome": "supported", "task_id": "t", "run_id": "R", "evidence_count": 3},
+             {"statement": "X", "outcome": "supported", "task_id": "t", "run_id": "R"}]
+    assert consolidate_lessons(rows3)[0]["evidence_count"] == 3       # 3 (folded) + deduped fresh R (0) = 3
+
+
 def test_consolidate_newest_verdict_wins():
     rows = [
         {"statement": "Deeper trees help", "outcome": "supported", "task_id": "t"},

@@ -334,7 +334,8 @@ class RunLauncherTools:
                 "{path, mount(read-only symlink vs copy-in), edit, copy_modify, preprocess, extend} — "
                 "default is read-only with copy/preprocess/extend allowed, so the agent can derive/augment "
                 "a training set but not touch the original. To let it MODIFY the data, set mount:false (a "
-                "writable per-node copy); a mounted original is read-only, so mount:true+edit:true is rejected.",
+                "writable per-node copy); a mounted original is read-only, so mount:true+edit:true is "
+                "auto-converted to a writable copy.",
                 {"run_id": {"type": "string", "description": "short kebab-case name you invent"},
                  "task": {"type": "object", "description": "composable inline task: goal + direction + the fields you have (repo / dataset / cmd{command|stages,metric:{reader,key},timeout} / kaggle). No `kind`."},
                  "task_file": {"type": "string", "description": "a catalogue task path (alternative to task)"},

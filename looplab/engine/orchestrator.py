@@ -12,6 +12,7 @@ from __future__ import annotations
 import functools
 import hashlib
 import os
+import re
 import sys
 import time
 from pathlib import Path
@@ -2435,35 +2436,107 @@ class Engine(ConfirmPhaseMixin, AblationMixin):
             return []
 
     @staticmethod
-    def _stage_reachable_files(stages: list, workdir) -> set:
-        """The repo-relative files an earlier stage's run REACHES: each command's `.py` script args plus
-        their ONE-HOP imports resolved to a repo-relative module file. Used to decide whether a repair's
-        edits could have changed what an earlier (to-be-reused) stage produced. One hop is deliberate:
-        full transitive closure buys little against dynamic/subprocess imports and costs a lot; the
-        inter-stage `check` gate is the second line of defense (see `_stage_check_fn`)."""
-        import re as _re
+    def _imported_modules(kw: str, rest: str) -> list:
+        """The module names an `import`/`from … import …` clause references. `kw` is the keyword and
+        `rest` the text after it. Handles `import a, b as c` (a, b), `from pkg import x, y` (pkg AND the
+        possible submodules pkg.x / pkg.y), and relative imports (`from .sub import x` → .sub, .sub.x)."""
+        rest = rest.split("#", 1)[0].strip()
+        mods: list = []
+        if kw == "import":
+            for part in rest.split(","):
+                name = part.strip().split(" as ")[0].strip()
+                if re.match(r"^\.*[\w.]+$", name):
+                    mods.append(name)
+            return mods
+        m = re.match(r"^(\.*[\w.]*)\s+import\s+(.+)$", rest)      # from X import a, b, (c)
+        if not m:
+            return mods
+        base = m.group(1)
+        if base:
+            mods.append(base)
+        names = m.group(2).replace("(", " ").replace(")", " ")
+        for nm in names.split(","):
+            nm = nm.strip().split(" as ")[0].strip()
+            if nm and nm != "*" and re.match(r"^\w+$", nm) and base:
+                mods.append(base + nm if base.endswith(".") else f"{base}.{nm}")
+        return mods
+
+    @staticmethod
+    def _module_file_candidates(mod: str, script_rel: str) -> list:
+        """Repo-relative file paths a dotted import `mod` could resolve to, tried against BOTH the
+        workdir root AND the importing script's OWN directory (Python puts the script dir on sys.path, so
+        a subdir script's sibling import resolves there). A leading-dot relative import anchors at the
+        script's package dir only. Emits the module file AND the package `__init__.py` at every depth
+        (importing a.b.c also runs a/__init__.py and a/b/__init__.py) — an over-approximation that only
+        ever ADDS reachable files, keeping the reuse predicate conservative."""
+        script_dir = script_rel.rsplit("/", 1)[0] if "/" in script_rel else ""
+        rel = mod
+        if mod.startswith("."):                                  # relative: strip dots, anchor at script dir
+            rel = mod.lstrip(".")
+            bases = [script_dir]
+        else:
+            bases = ["", script_dir] if script_dir else [""]
+        parts = [p for p in rel.split(".") if p]
+        out: list = []
+        for base in dict.fromkeys(bases):                        # de-dup, preserve order
+            cur = base
+            for part in parts:
+                cur = f"{cur}/{part}" if cur else part
+                out.append(f"{cur}.py")
+                out.append(f"{cur}/__init__.py")
+        return out
+
+    @staticmethod
+    def _stage_reachable_files(stages: list, workdir):
+        """Repo-relative files the earlier stages' runs REACH — each command's local `.py` script plus
+        the TRANSITIVE closure of its workdir-local imports (module files + package `__init__`s, resolved
+        against the workdir root AND each script's own directory). Used to decide whether a repair's edits
+        could have changed what an earlier (to-be-reused) stage produced.
+
+        Returns None (OPAQUE → treat as UNSAFE, refuse reuse) when a stage runs something we can't
+        statically bound: a command with no local `.py` script token (`python -m pkg`, a shell wrapper, a
+        bare binary) or a `.py` path outside the workdir. Fail-closed by construction — a spuriously
+        'reachable' file only forces a re-train, but a MISSED dependency would silently score a stale
+        checkpoint (the invariant `_safe_reuse_start` exists to protect)."""
         wd = Path(workdir)
-        imp_re = _re.compile(r"^[ \t]*(?:from|import)[ \t]+([A-Za-z_][\w.]*)", _re.M)
+        imp_re = re.compile(r"^[ \t]*(from|import)[ \t]+(.+?)[ \t]*$", re.M)
         out: set = set()
+        pending: list = []
         for s in (stages or []):
-            for tok in (s.get("command") or []):
+            cmd = s.get("command") or []
+            scripts: list = []
+            for tok in cmd:
                 if not isinstance(tok, str) or not tok.endswith(".py"):
                     continue
-                rel = tok[2:] if tok.startswith("./") else tok
-                out.add(rel)
-                p = wd / rel
-                if not p.exists():
-                    continue
-                try:
-                    src = p.read_text(encoding="utf-8", errors="replace")
-                except Exception:  # noqa: BLE001
-                    continue
-                for m in imp_re.finditer(src):
-                    top = m.group(1).split(".")[0]
-                    if (wd / f"{top}.py").exists():
-                        out.add(f"{top}.py")
-                    if (wd / top / "__init__.py").exists():
-                        out.add(f"{top}/__init__.py")
+                rel = tok
+                while rel.startswith("./"):
+                    rel = rel[2:]
+                if os.path.isabs(rel):                           # only trackable if it lives under the workdir
+                    try:
+                        rel = str(Path(rel).resolve().relative_to(wd.resolve()))
+                    except Exception:  # noqa: BLE001 — an out-of-tree script we can't bound → opaque
+                        return None
+                scripts.append(rel)
+            if cmd and not scripts:                              # runs SOMETHING but exposes no local .py → opaque
+                return None
+            pending.extend(scripts)
+        while pending:
+            rel = pending.pop()
+            if rel in out:
+                continue
+            out.add(rel)
+            p = wd / rel
+            if not p.exists():
+                continue
+            try:
+                src = p.read_text(encoding="utf-8", errors="replace")
+            except Exception:  # noqa: BLE001
+                continue
+            for m in imp_re.finditer(src):
+                for mod in Engine._imported_modules(m.group(1), m.group(2)):
+                    for cand in Engine._module_file_candidates(mod, rel):
+                        if cand not in out and (wd / cand).exists():
+                            pending.append(cand)
         return out
 
     def _safe_reuse_start(self, stages: list, failed_stage, changed_files, workdir):
@@ -2472,11 +2545,13 @@ class Engine(ConfirmPhaseMixin, AblationMixin):
         safe default that preserves the 'each node trains a FRESH model' invariant).
 
         SAFE-OR-RETRAIN: reuse the earlier stages' artifacts ONLY when the repair's changed files are
-        DISJOINT from those stages' reachable files (their scripts + one-hop imports). If a change could
-        have altered what an earlier stage produces (train.py / loss.py / model.py it imports), we must
-        re-train — reusing a stale checkpoint would score a model that doesn't reflect the current code.
-        A false negative just re-trains (no worse than today); a false positive would be a silent stale
-        score, so the predicate is conservative by construction."""
+        DISJOINT from those stages' reachable files (their scripts + transitive imports). If a change
+        could have altered what an earlier stage produces (train.py / loss.py / model.py it imports, or
+        the stage MANIFEST that carries the argv), we must re-train — reusing a stale checkpoint would
+        score a model that doesn't reflect the current code. Opaque earlier stages (no resolvable script:
+        `python -m`, a shell wrapper) also force a re-train. A false negative just re-trains (no worse
+        than a full re-run); a false positive is a silent stale score, so the predicate is conservative
+        by construction and fail-closed on anything it can't statically bound."""
         if not stages or not failed_stage:
             return None
         names = [str(s.get("name")) for s in stages]
@@ -2485,8 +2560,14 @@ class Engine(ConfirmPhaseMixin, AblationMixin):
         fi = names.index(failed_stage)
         if fi == 0:                                   # nothing before it to reuse
             return None
-        reachable = self._stage_reachable_files(stages[:fi], workdir)
         changed = {(f[2:] if isinstance(f, str) and f.startswith("./") else f) for f in (changed_files or [])}
+        # A change to the stage MANIFEST rewrites the pipeline's argv (e.g. train hyperparams), so the
+        # completed checkpoint no longer matches the declared command — never reuse across it.
+        if any(str(c).rsplit("/", 1)[-1] == "looplab_stages.json" for c in changed):
+            return None
+        reachable = self._stage_reachable_files(stages[:fi], workdir)
+        if reachable is None:                         # an OPAQUE earlier stage (python -m/shell) → re-train
+            return None
         if changed & reachable:                       # a change could affect an earlier stage → re-train
             return None
         return failed_stage
@@ -2878,6 +2959,11 @@ class Engine(ConfirmPhaseMixin, AblationMixin):
                     triage_outcome = ("reject_idea", triage.get("rationale", ""))
                     break
                 # action == "repair": fix the code in place and re-eval (no new node, no budget spent).
+                # Snapshot the PRE-repair file set now (node is still the pre-repair fold) so we can
+                # compute the repair's REAL change set below — `developer.last_files` is the node's whole
+                # cumulative solution for the repo developer (repair_from preloads every node file), so a
+                # raw key set would always intersect the train stage and defeat checkpoint reuse.
+                prev_files = dict(getattr(node, "files", {}) or {})
                 with self.tracer.span("inline_repair", node_id=node_id, attempt=attempt + 1):
                     new_code = self._repair(
                         node, self._repair_error_context(reason, err, state=state, node=node))
@@ -2904,19 +2990,29 @@ class Engine(ConfirmPhaseMixin, AblationMixin):
                 # a full re-run — bounded by inline_repair_retrain_cap so a repair that keeps rewriting
                 # training code can't burn many full trains (the anti-stuck guard is signature-, not
                 # cost-based). The workdir persists across attempts, so a reused checkpoint is valid.
+                # The repair's REAL change set = files whose content actually differs from the pre-repair
+                # node (last_files is cumulative — see prev_files above), plus any deletions.
+                changed = {f for f, c in repaired_files.items() if prev_files.get(f) != c}
+                changed |= set(repaired_deleted)
                 _stages = self._resolved_stages(node, workdir)
-                next_start = self._safe_reuse_start(
-                    _stages, res.failed_stage,
-                    set(repaired_files) | set(repaired_deleted), workdir)
-                if _stages and next_start is None:      # this repair forces a full (expensive) re-train
-                    full_retrains += 1
+                next_start = self._safe_reuse_start(_stages, res.failed_stage, changed, workdir)
+                # Count a full re-train against the cap ONLY when completed EARLIER-stage work is being
+                # discarded: a LATER stage failed (fi > 0) yet reuse was refused because the repair could
+                # have changed an earlier stage. A first-stage failure (nothing to reuse) or a single-
+                # command eval is an ordinary retry, bounded by attempts/stuck like any other — NOT the
+                # retrain cap (mirrors config.py: "only a repair that changes an EARLIER stage's code
+                # forces a full re-train ... counted"). Check BEFORE incrementing so cap=N runs exactly N.
+                _names = [str(s.get("name")) for s in (_stages or [])]
+                _fi = _names.index(res.failed_stage) if res.failed_stage in _names else -1
+                if _fi > 0 and next_start is None:      # this repair forces a full (expensive) re-train
                     if (self._inline_repair_retrain_cap
                             and full_retrains >= self._inline_repair_retrain_cap):
                         triage_outcome = ("abandon",
-                            f"repair keeps changing training code — {full_retrains} full re-train(s); "
-                            "abandoning in-node repair to avoid burning compute (a budgeted inter-node "
-                            "debug node can still pick it up)")
+                            f"repair keeps changing earlier-stage (training) code — {full_retrains} full "
+                            "re-train(s) already spent; abandoning in-node repair to avoid burning compute "
+                            "(a budgeted inter-node debug node can still pick it up)")
                         break
+                    full_retrains += 1
                 # loop -> re-run the eval with the corrected code (reusing earlier stages when safe)
             sp.set_many(eval_seconds=total_eval, exit_code=res.exit_code, timed_out=res.timed_out,
                         metric=res.metric, ok=ok, repair_attempts=attempt)

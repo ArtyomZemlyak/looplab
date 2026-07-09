@@ -86,9 +86,9 @@ independent flags. **Default: everything allowed EXCEPT editing the original.**
 "dataset": {
   "raw":  { "path": "/data/train",
             "mount": true,        // (1) read-only symlink at ./raw (default) | false = copy INTO the workdir
-            "edit": false,        // (2) modify the data in place? default false. edit:true REQUIRES
+            "edit": false,        // (2) modify the data in place? default false. edit:true implies
                                   //     mount:false — a mount is read-only to the agent, so
-                                  //     mount:true + edit:true is REJECTED at submit time
+                                  //     mount:true + edit:true is COERCED to a writable copy
             "copy_modify": true,  // (3) copy it and modify the copy
             "preprocess": true,   // (4) preprocess / augment / feature-engineer into a training set
             "extend": true },     // (5) extend / expand the data
@@ -105,10 +105,11 @@ independent flags. **Default: everything allowed EXCEPT editing the original.**
   eval *runs* (a declared `train` stage, a subprocess) physically cannot mutate the original. The
   agent's own build-time writes under `./name` would escape the workdir and be dropped anyway, so the
   gate refuses them **visibly** instead of letting the edit silently no-op. Because of that,
-  `mount:true` + `edit:true` is **rejected at submit time** (a mounted original can't be agent-edited);
-  the error tells the boss to use `mount:false` for editable data. The `trusted_local` tier runs on the
-  host, where only the write/diff gates apply — treat a read-only mount there as a guard against the
-  *agent's edits*, not a hard sandbox.
+  `mount:true` + `edit:true` is **coerced to `mount:false`** (a writable per-node copy — what `edit:true`
+  actually wants) rather than rejected, so a mounted original can't be silently edited AND pre-existing
+  runs whose snapshot carried the combo still load. The `trusted_local` tier runs on the host, where only
+  the write/diff gates apply — treat a read-only mount there as a guard against the *agent's edits*, not a
+  hard sandbox.
 - A **`mount:false`** source is a physical per-node **copy** inside the workdir: writes cannot reach the
   original, so the copy is writable (the brief calls it "a writable copy") — this is how you give the
   agent data it may preprocess/modify. On a CoW filesystem (btrfs/XFS) the per-node copy is a reflink

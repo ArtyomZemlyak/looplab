@@ -62,10 +62,42 @@ def test_reflection_is_idempotent_across_reopen(tmp_path):
     meta_path = mem / "meta_notes.jsonl"
     meta_before = meta_path.read_text() if meta_path.exists() else ""
     assert lessons_before.strip()                              # first pass really wrote lessons
-    # simulate the reopen re-finalize: reflect again over the same (already-reflected) log
+    # simulate the reopen re-finalize at the SAME node count: reflect again over the already-reflected
+    # log → skipped (nothing new), so no duplicate lessons/meta-note and no re-spent LLM.
     eng._write_reflection_note(fold(eng.store.read_all()))
     assert (mem / "lessons.jsonl").read_text() == lessons_before   # no duplicate lessons appended
     assert (meta_path.read_text() if meta_path.exists() else "") == meta_before  # no duplicate meta-note
+
+
+def test_reflection_reruns_when_a_reopened_run_grows(tmp_path):
+    """A reopened + budget-extended run that adds nodes (and may find a BETTER winner) MUST re-reflect —
+    else cross-run memory keeps the stale first-finalize conclusion forever. The gate is node-count-aware:
+    it skips only when a prior reflection already covered at least this many nodes."""
+    from looplab.events.replay import fold
+    from looplab.core.models import Idea, Node, NodeStatus
+    mem = tmp_path / "mem"
+    task = ToyTask.load(TASK)
+    r, d = task.build_roles()
+    eng = Engine(tmp_path / "r1", task=task, researcher=r, developer=d,
+                 sandbox=SubprocessSandbox(), policy=GreedyTree(n_seeds=2, max_nodes=4),
+                 reflection_priors=True, memory_dir=str(mem))
+    anyio.run(eng.run)
+    lessons_before = (mem / "lessons.jsonl").read_text()
+    meta_before = (mem / "meta_notes.jsonl").read_text().count("\n")
+    # simulate the extension: a folded state with MORE nodes than the first reflection covered
+    grown = fold(eng.store.read_all())
+    base = max(grown.nodes) + 1
+    for i in range(base, base + 3):
+        grown.nodes[i] = Node(id=i, operator="improve", idea=Idea(operator="improve"),
+                              metric=0.01, status=NodeStatus.evaluated, feasible=True)
+    eng._write_reflection_note(grown)
+    # the append-only meta-note grew → reflection genuinely re-ran on the grown run …
+    assert (mem / "meta_notes.jsonl").read_text().count("\n") > meta_before
+    # … yet the run_id de-dup keeps consolidated lessons from inflating (re-reflecting itself counts once)
+    from looplab.engine.memory import consolidate_lessons
+    import orjson as _orjson
+    rows = [_orjson.loads(x) for x in (mem / "lessons.jsonl").read_text().splitlines() if x.strip()]
+    assert all(int(o.get("evidence_count", 1)) <= 1 for o in consolidate_lessons(rows))  # single run stays 1
 
 
 def _write_lessons(mem: Path, rows):

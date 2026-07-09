@@ -227,6 +227,12 @@ def fold(events: Iterable[Event]) -> RunState:
                        "exit_code": d.get("exit_code"), "seconds": d.get("seconds")}
                 for i, s in enumerate(n.stages):
                     if s.get("name") == rec["name"]:
+                        # A "reused" marker means a re-eval SKIPPED this stage (an earlier attempt already
+                        # ran it) — it must NOT clobber that attempt's REAL completion record (its true
+                        # exit_code/seconds), else the node reads as if it trained in 0s. Keep the
+                        # informative record. Order-tolerant: a real record still replaces a prior reused.
+                        if rec["status"] == "reused" and s.get("status") not in (None, "reused"):
+                            break
                         n.stages[i] = rec
                         break
                 else:

@@ -749,7 +749,13 @@ class ToolUsingResearcher:
         self.time_budget_s = time_budget_s  # 0 = no wall-clock cap (Settings.agent_time_budget_s)
         self.prompts = prompts
         self.context_budget_chars = context_budget_chars   # H4: cap the growing tool-call history
-        self.loop_opts = loop_opts or {}    # B1/C1/C2 tool-loop options (loop_opts_from_settings)
+        # Collapse the two sources of context_budget_chars to ONE, here, once. loop_opts_from_settings
+        # injects it into loop_opts AND it arrives as an explicit ctor kwarg; passing BOTH to run_phase
+        # would hand it the keyword twice -> TypeError, caught by propose()'s broad except -> silent
+        # fallback (the agentic Researcher DEAD in the default config, where the budget is always set).
+        # Merging in __init__ makes the collision impossible by construction for every call site.
+        self.loop_opts = dict(loop_opts or {})   # B1/C1/C2 tool-loop options (loop_opts_from_settings)
+        self.loop_opts.setdefault("context_budget_chars", context_budget_chars)
 
     def _emit_spec(self) -> dict:
         return {"type": "function", "function": {
@@ -836,19 +842,14 @@ class ToolUsingResearcher:
                 "loss, data, training) if that's the stronger move. Consult knowledge if useful, then emit."},
         ]
         try:
-            # context_budget_chars can arrive via BOTH loop_opts (loop_opts_from_settings injects it so
-            # every loop — including the Developer's implement session — gets the configured budget) AND
-            # the explicit ctor kwarg. Collapse to ONE source, else run_phase() gets the keyword twice ->
-            # TypeError, caught below -> silent fallback: the agentic Researcher would be DEAD in the
-            # DEFAULT config (context_budget_chars is 1_000_000, so loop_opts always carries it).
-            opts = dict(self.loop_opts)
-            opts.setdefault("context_budget_chars", self.context_budget_chars)
+            # context_budget_chars is folded into self.loop_opts once in __init__ (see there) — pass the
+            # merged opts straight through, no per-call re-merge, no double-keyword collision.
             return run_phase(
                 self.client, self.tools, messages, self._emit_spec(),
                 label="Researcher·propose", next_label="the Developer (stages → plan → implement)",
                 max_turns=self.max_turns, time_budget_s=self.time_budget_s,
                 finalize=self._finalize, fallback=self._fallback,
-                validate=self._validate_emit, **opts)
+                validate=self._validate_emit, **self.loop_opts)
         except BudgetExceeded:      # hard budget stop -> propagate and end the run
             raise
         except Exception:  # noqa: BLE001 - a transport/endpoint failure (LLMError after retries) on

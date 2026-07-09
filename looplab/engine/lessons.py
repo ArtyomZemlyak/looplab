@@ -153,15 +153,18 @@ class LessonMemory:
         each stamped with a task fingerprint (M2) so a later SIMILAR task can retrieve them."""
         if not (self._e._reflection_priors and self._e.memory_dir):
             return
-        # Run-end reflection must run at MOST ONCE per run: it appends to cross-run memory
-        # (meta_notes.jsonl + lessons.jsonl) and re-spends LLM calls (the causal note + M3 lessons).
-        # A reopened run (EV_RESUME + EV_BUDGET_EXTEND) re-finishes and re-enters finalize, so without
-        # this gate a second pass would double-append a run's hypothesis/failure lessons — which
-        # `consolidate_lessons` groups by (statement, task_id) and sums, inflating `evidence_count` so
-        # one run reads as "verified on 2 runs". `reflection_note` is the end-of-reflection marker
-        # (a diagnostic sidecar the fold ignores), emitted unconditionally at the tail of this method;
-        # its presence means we already reflected. Mirrors the M6 comparative-pair ledger's own guard.
-        if any(e.type == EV_REFLECTION_NOTE for e in self._e.store.read_all()):
+        # Run-end reflection re-spends LLM calls and appends to cross-run memory, so it must not run
+        # redundantly. But a REOPENED run (EV_RESUME + EV_BUDGET_EXTEND) that added nodes and found a
+        # BETTER winner MUST re-reflect — else cross-run memory keeps the stale first-finalize conclusion
+        # forever (the extension's winner/hypotheses never distilled). So gate on NODE COUNT, not mere
+        # presence: skip only when a prior reflection already covered at least this many nodes (a plain
+        # re-finalize with nothing new). A grown re-reflection re-appends the run's lessons, but that no
+        # longer inflates `evidence_count` — `consolidate_lessons` now counts DISTINCT run_ids, so a run
+        # re-appending its own lesson still counts once. `reflection_note` (a diagnostic sidecar the fold
+        # ignores) carries `at_nodes`; the highest prior value is the coverage watermark.
+        _reflected_at = [int(e.data.get("at_nodes", 0) or 0)
+                         for e in self._e.store.read_all() if e.type == EV_REFLECTION_NOTE]
+        if _reflected_at and len(final.nodes) <= max(_reflected_at):
             return
         best = final.best()
         base = Path(self._e.memory_dir)
@@ -247,6 +250,7 @@ class LessonMemory:
         # cross-run files. One summary event makes "what this run concluded & wrote to memory" visible.
         self._e.store.append(EV_REFLECTION_NOTE, {
             "task_id": final.task_id, "fingerprint": fp, "note": note,
+            "at_nodes": len(final.nodes),      # coverage watermark: re-reflect only if a reopen grows past it
             "n_lessons": len(lessons), "n_skills": len(skills),
             "lessons": [{"statement": lz.get("statement", ""), "outcome": lz.get("outcome", "")}
                         if isinstance(lz, dict) else {"statement": str(lz), "outcome": ""}

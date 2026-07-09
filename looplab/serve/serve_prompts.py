@@ -63,7 +63,7 @@ def genesis_system(kinds: list, key_defaults: dict, cat_lines: str) -> str:
         "symlink vs copy-in), edit, copy_modify, preprocess, extend} for per-source permissions — "
         "default is read-only original with copy/preprocess/extend allowed. To let the agent MODIFY the "
         "data, set mount:false (a writable per-node copy); a mounted original is read-only, so "
-        "mount:true+edit:true is rejected. Read-only "
+        "mount:true+edit:true is auto-converted to a writable copy. Read-only "
         'runtime deps go in "references":[{"name":..,"path":..,"mount":true}]. Never drop a data path.\n'
         "- REPO with no entry script yet, OR a scorer but no trainer: `cmd` is a CONTRACT (the command "
         "that runs + reads the metric) and is the SCORING step, not the trainer — TRAINING is a separate "
