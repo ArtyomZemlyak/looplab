@@ -293,7 +293,13 @@ def build_conversation(state: RunState, spans: list[dict], node_id) -> dict:
         for g in sorted(groups.values(), key=_first_turn_start):
             grp = sorted(g["spans"], key=lambda x: x.get("start", 0.0))
             turns = _thread_turns(grp, by_id)
-            if turns:
+            # Keep a stage band that is still RUNNING even though it has no turns yet: a live training
+            # subprocess emits only the `stage_started` anchor (its own turn is suppressed as noise) and
+            # its stage op flushes on close — so without this the Train/Evaluate band would be dropped as
+            # "empty" for the whole run and only appear once the stage finished. The UI renders the live
+            # stage log inside the (turnless) band.
+            running_stage = any(s.get("name") == "stage_started" for s in grp)
+            if turns or running_stage:
                 stages.append({"trace_id": tid, "label": g["span"].get("name"),
                                "start": _first_turn_start(g),
                                "rollup": _rollup(grp), "turns": turns})
