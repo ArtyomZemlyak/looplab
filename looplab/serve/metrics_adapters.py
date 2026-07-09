@@ -12,7 +12,15 @@ from __future__ import annotations
 
 import glob
 import os
+import re
 from typing import Protocol
+
+# A logging framework that RE-RUNS training in the SAME node workdir (an inline-repair retrain, or any
+# re-score) writes a NEW sibling run dir and leaves the old one on disk — PyTorch-Lightning names them
+# `version_0`, `version_1`, … (the `v_num` in its logs). Reading EVERY version and merging their scalars
+# interleaves the stale and fresh curves (both start at step 0), so after a retrain the plot never looks
+# updated. Collapse version-style siblings to the NEWEST run (highest N, mtime tie-break) per parent.
+_VERSION_RE = re.compile(r"^(?:version|run|lightning_logs)[_-]?(\d+)$", re.IGNORECASE)
 
 
 class MetricsAdapter(Protocol):
@@ -31,16 +39,31 @@ class TensorBoardAdapter:
         except Exception:  # noqa: BLE001 - tensorboard optional; no data if absent
             return {}
         out: dict[str, list[dict]] = {}
-        seen: set[str] = set()
         try:
             evs = glob.glob(os.path.join(node_dir, "**", "events.out.tfevents.*"), recursive=True)
         except OSError:
             evs = []
+        # Pick which event dirs to actually read: keep every non-versioned dir (distinct purposes like
+        # train/ vs val/ must all survive), but for version-style siblings under one parent keep ONLY the
+        # newest run — so a repair-retrain's fresh curve replaces the stale one instead of interleaving.
+        newest: dict[str, tuple] = {}   # parent-of-versions -> (rank, dir)
+        keep: set[str] = set()
         for ev in evs:
             d = os.path.dirname(ev)
-            if d in seen:
-                continue
-            seen.add(d)
+            mv = _VERSION_RE.match(os.path.basename(d))
+            if mv:
+                grp = os.path.dirname(d)
+                try:
+                    mt = os.path.getmtime(ev)
+                except OSError:
+                    mt = 0.0
+                rank = (int(mv.group(1)), mt)
+                if grp not in newest or rank > newest[grp][0]:
+                    newest[grp] = (rank, d)
+            else:
+                keep.add(d)
+        keep.update(d for _, d in newest.values())
+        for d in sorted(keep):
             try:
                 ea = EventAccumulator(d, size_guidance={"scalars": 100_000})
                 ea.Reload()

@@ -196,7 +196,9 @@ def _thread_turns(spans_sorted: list[dict], by_id: dict) -> list[dict]:
             rc, to = a.get("exit_code"), a.get("timed_out")
             # `not rc` was truthy for BOTH exit 0 and a MISSING code — a stage span closed by an
             # exception before its exit_code was recorded (status "ERROR", rc None) then rendered "ok".
-            if to:
+            if a.get("reused"):
+                status = "reused"        # skipped on a repair re-eval; its earlier artifact is kept
+            elif to:
                 status = "timeout"
             elif rc is None:
                 status = "error" if s.get("status") == "ERROR" else "?"

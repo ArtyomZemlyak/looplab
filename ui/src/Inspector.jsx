@@ -13,7 +13,7 @@ import Markdown from './markdown.jsx'
 // READ-ONLY (Workstream C): every node action — confirm/ablate/fork/promote/note — is done from the
 // chat (add the node via its ＋#id chip, or use a /command), so there's no per-node button toolbar.
 // Tab order (user preference): Overview → Trace → Training → Code → Metrics → Trust → Cost.
-const TABS = ['Overview', 'Trace', 'Training', 'Code', 'Metrics', 'Trust', 'Cost']
+const TABS = ['Overview', 'Trace', 'Code', 'Metrics', 'Trust', 'Cost']
 
 // The ONE per-node write action (Workstream-C exception): re-run THIS node in place — no new node —
 // from a chosen stage. It's a recovery/fix control (natural to trigger from the failed node itself),
@@ -103,8 +103,7 @@ export default function Inspector({ runId, nodeId, state, live, tab, setTab, onT
         {activeTab === 'Trials' && <Trials n={n} detail={detail} state={state} />}
         {activeTab === 'Trace' && <Trace n={n} runId={runId} live={live} working={nodeWorking} />}
         {activeTab === 'Code' && <Code n={n} />}
-        {activeTab === 'Metrics' && <Metrics n={n} detail={detail} state={state} />}
-        {activeTab === 'Training' && <Training runId={runId} nodeId={nodeId} n={n} />}
+        {activeTab === 'Metrics' && <Metrics n={n} detail={detail} state={state} runId={runId} />}
         {activeTab === 'Trust' && <Trust n={n} drifts={nodeDrifts} />}
         {activeTab === 'Cost' && <Cost state={state} />}
       </div>
@@ -113,54 +112,6 @@ export default function Inspector({ runId, nodeId, state, live, tab, setTab, onT
 }
 
 function KV({ k, v }) { return <><div className="k">{k}</div><div className="v">{v}</div></> }
-
-// "Training" tab: the node's LIVE training/eval logs (streamed eval.log) + online metric curves for
-// EVERY metric the training framework logged (loss, each recall@k, lr, grad norms, …) — read from the
-// node's TensorBoard events via the metrics adapters. Polls while open so it updates as training runs.
-function Training({ runId, nodeId, n }) {
-  const [logs, setLogs] = useState({ eval: '', setup: '', run_setup: '' })
-  const [metrics, setMetrics] = useState({})
-  const [tick, setTick] = useState(0)
-  const [follow, setFollow] = useState(true)
-  const preRef = useRef(null)
-  const done = ['evaluated', 'failed', 'confirmed'].includes(n?.status)
-  useEffect(() => {
-    if (nodeId == null) return
-    let on = true
-    const load = () => {
-      get(`/api/runs/${runId}/nodes/${nodeId}/logs`).then(d => on && setLogs(d || {})).catch(() => {})
-      get(`/api/runs/${runId}/nodes/${nodeId}/metrics`).then(d => on && setMetrics((d && d.metrics) || {})).catch(() => {})
-    }
-    load()
-    // Poll faster while the node is still running; slow to a light refresh once it's terminal.
-    const iv = setInterval(() => { load(); setTick(x => x + 1) }, done ? 15000 : 3000)
-    return () => { on = false; clearInterval(iv) }
-  }, [runId, nodeId, done])
-  useEffect(() => { if (follow && preRef.current) preRef.current.scrollTop = preRef.current.scrollHeight }, [logs.eval, tick, follow])
-
-  const evalLog = logs.eval || ''
-  return (
-    <div className="training-tab">
-      <div className="section-title">Metric curves <span className="muted" style={{ fontWeight: 400 }}>· live, all logged metrics</span></div>
-      <MetricLines series={metrics} />
-      <div className="section-title" style={{ marginTop: 14 }}>
-        Training / eval log
-        <span className="muted" style={{ fontWeight: 400, marginLeft: 8 }}>{done ? 'finished' : 'live'}</span>
-        <label className="muted" style={{ fontWeight: 400, marginLeft: 10, fontSize: 12 }}>
-          <input type="checkbox" checked={follow} onChange={e => setFollow(e.target.checked)} /> follow
-        </label>
-      </div>
-      <pre ref={preRef} className="training-log" style={{
-        maxHeight: 360, overflow: 'auto', background: '#0b0e14', border: '1px solid #20252f',
-        borderRadius: 6, padding: 8, fontSize: 11.5, lineHeight: 1.4, whiteSpace: 'pre-wrap', wordBreak: 'break-word'
-      }}>{evalLog || (done ? '(no eval log)' : 'waiting for the eval to start…')}</pre>
-      {logs.run_setup ? <>
-        <div className="section-title" style={{ marginTop: 12 }}>Run setup (deps, once)</div>
-        <pre className="training-log muted" style={{ maxHeight: 120, overflow: 'auto', background: '#0b0e14', border: '1px solid #20252f', borderRadius: 6, padding: 8, fontSize: 11 }}>{logs.run_setup.slice(-4000)}</pre>
-      </> : null}
-    </div>
-  )
-}
 
 // Summary for a COLLAPSED group's super-node (semantic zoom): aggregate + drill back to members.
 export function GroupSummary({ groupKey, memberIds, state, onSelectNode, onClose }) {
@@ -660,7 +611,21 @@ function ConvTool({ t }) {
   </div>
 }
 
-function ConvStage({ st, defaultOpen = true }) {
+// The live stdout/stderr of a stage's subprocess (training epochs, eval scoring), rendered INSIDE its
+// trace band. Auto-scrolls to the newest line while the stage is live so a running train tails itself.
+function StageLog({ text, live }) {
+  const ref = useRef(null)
+  const shown = text.length > 40000 ? text.slice(-40000) : text
+  useEffect(() => { if (live && ref.current) ref.current.scrollTop = ref.current.scrollHeight }, [text, live])
+  return <div style={{ margin: '4px 0 2px' }}>
+    <div className="muted" style={{ fontSize: 10, marginBottom: 2 }}>📄 stage log{live ? ' · live' : ''}</div>
+    <pre ref={ref} className="training-log" style={{
+      maxHeight: 320, overflow: 'auto', background: '#0b0e14', border: '1px solid #20252f', borderRadius: 6,
+      padding: 8, fontSize: 11, lineHeight: 1.4, whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>{shown}</pre>
+  </div>
+}
+
+function ConvStage({ st, defaultOpen = true, log = '', live = false }) {
   const m = stageMeta(st.label)
   const [open, setOpen] = useState(defaultOpen)
   const roll = st.rollup || {}
@@ -687,16 +652,23 @@ function ConvStage({ st, defaultOpen = true }) {
     {open && <div className="conv-turns">
       {(st.turns || []).map((t, j) => t.type === 'request' ? <ConvRequest key={j} t={t} />
         : t.type === 'tool' ? <ConvTool key={j} t={t} /> : <ConvGen key={j} t={t} />)}
+      {log ? <StageLog text={log} live={live} /> : null}
     </div>}
   </div>
 }
 
 function Conversation({ n, runId, working, allOpen = true, reloadNonce = 0 }) {
   const [conv, setConv] = useState(null)
+  const [logs, setLogs] = useState({})   // {eval, stages:{train,score,…}} — the live stage/eval logs
   useEffect(() => {
     let on = true
     setConv(null)   // node changed → clear before the first load (poll ticks below don't clear, so no flash)
-    const load = () => nodeConversation(runId, n.id).then(d => on && setConv(d || { stages: [] })).catch(() => on && setConv({ stages: [] }))
+    const load = () => {
+      nodeConversation(runId, n.id).then(d => on && setConv(d || { stages: [] })).catch(() => on && setConv({ stages: [] }))
+      // Stage/eval logs ride ALONGSIDE the trace now (moved out of the old Training tab): each stage
+      // band renders its own live log inside it, so opening "Train" shows the training output in place.
+      get(`/api/runs/${runId}/nodes/${n.id}/logs`).then(d => on && setLogs(d || {})).catch(() => {})
+    }
     load()
     const iv = working ? setInterval(load, 4000) : null   // live-refresh while the agent works this node
     return () => { on = false; if (iv) clearInterval(iv) }
@@ -704,17 +676,37 @@ function Conversation({ n, runId, working, allOpen = true, reloadNonce = 0 }) {
   if (conv === null) return <div className="muted" style={{ fontSize: 12 }}>loading…</div>
   const stages = conv.stages || []
   if (!stages.length) return <div className="muted">No conversation captured for this node yet.</div>
+  // The live log for a stage band: a multi-stage eval logs per stage (stages[label]); a single-command
+  // eval logs to eval.log ("evaluate"/"command"); the dep-install step to setup.log. Anything else
+  // (propose/implement/…) has no subprocess log.
+  const logFor = (label) => (logs.stages && logs.stages[label])
+    || ({ setup: logs.setup, evaluate: logs.eval, command: logs.eval, score: logs.eval }[label]) || ''
   // `allOpen` is owned by the sticky Trace header (so collapse-all lives in the pinned bar). It's folded
   // into each band's key so a collapse/expand-all click remounts them at the new default; a live poll
   // (allOpen unchanged) keeps the key stable, so per-band toggles survive the 4s refresh.
   return <div className="conv">
-    {stages.map((st, i) => <ConvStage key={`${st.trace_id || ''}:${st.label || ''}:${st.start || i}:${allOpen}`} st={st} defaultOpen={allOpen} />)}
+    {stages.map((st, i) => <ConvStage key={`${st.trace_id || ''}:${st.label || ''}:${st.start || i}:${allOpen}`}
+                                      st={st} defaultOpen={allOpen} log={logFor(st.label)} live={working} />)}
+    {logs.run_setup ? <RunSetupLog text={logs.run_setup} /> : null}
+  </div>
+}
+
+// The run-level, one-time dependency install (shared by every node) — moved out of the old Training
+// tab; a collapsed footnote under the trace so a setup failure is still inspectable without its own tab.
+function RunSetupLog({ text }) {
+  const [open, setOpen] = useState(false)
+  return <div className="stage" style={{ borderLeft: '3px solid var(--muted, #555)', marginTop: 4 }}>
+    <div className="stage-h" onClick={() => setOpen(o => !o)} style={{ cursor: 'pointer' }}>
+      <span className="stage-caret" style={{ opacity: 0.6, fontSize: 10, width: 10, display: 'inline-block' }}>{open ? '▾' : '▸'}</span>
+      <b className="muted">Run setup <span style={{ fontWeight: 400 }}>· deps install (run-level, once)</span></b>
+    </div>
+    {open && <div className="conv-turns"><StageLog text={text} live={false} /></div>}
   </div>
 }
 
 function Trace({ n, runId, live, working }) {
   const [view, setView] = useState('conversation')   // linear reading by default; raw tree on demand
-  const [allOpen, setAllOpen] = useState(true)        // collapse/expand-all, lifted here for the sticky bar
+  const [allOpen, setAllOpen] = useState(false)       // bands COLLAPSED by default (expand one to read it)
   const [nonce, setNonce] = useState(0)               // bumped after "clear trace" to reload the bands
   const [clearing, setClearing] = useState('')        // '' | 'confirm' | 'busy' | error message
   const bodyRef = useRef(null)
@@ -839,7 +831,25 @@ function Code({ n }) {
   </>
 }
 
-function Metrics({ n, detail, state }) {
+// Live online metric curves (loss, recall@k, lr, grad norms, …) read from the node's TensorBoard
+// events via the metrics adapters. Polls while the node is still running so the curves fill in as
+// training progresses; keyed on n.status so a repair-retrain (pending→failed→pending) re-arms the poll.
+function MetricCurves({ runId, nodeId, status }) {
+  const [metrics, setMetrics] = useState({})
+  const done = ['evaluated', 'failed', 'confirmed'].includes(status)
+  useEffect(() => {
+    if (nodeId == null) return
+    let on = true
+    const load = () => get(`/api/runs/${runId}/nodes/${nodeId}/metrics`)
+      .then(d => on && setMetrics((d && d.metrics) || {})).catch(() => {})
+    load()
+    const iv = setInterval(load, done ? 15000 : 3000)
+    return () => { on = false; clearInterval(iv) }
+  }, [runId, nodeId, done])
+  return <MetricLines series={metrics} />
+}
+
+function Metrics({ n, detail, state, runId }) {
   const seeds = detail?.confirm_seeds_detail || {}
   const vals = Object.entries(seeds).map(([s, v]) => ({ s: Number(s), v })).filter(x => x.v != null).sort((a, b) => a.s - b.s)
   // Every metric reported anywhere in the run (the objective ★ + all auto-captured extras), shown for
@@ -866,6 +876,9 @@ function Metrics({ n, detail, state }) {
       <table className="tbl"><thead><tr><th>seed</th><th>metric</th></tr></thead>
         <tbody>{vals.map(x => <tr key={x.s}><td>{x.s}</td><td>{fmt(x.v)}</td></tr>)}</tbody></table>
     </>}
+    <div className="section-h" style={{ marginTop: 12 }}>Metric curves
+      <span className="muted" style={{ fontWeight: 400, marginLeft: 6 }}>· live, every logged scalar — collapsible by group</span></div>
+    <MetricCurves runId={runId} nodeId={n.id} status={n.status} />
   </>
 }
 

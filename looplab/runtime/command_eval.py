@@ -464,6 +464,12 @@ def run_command_eval(command: list[str], cwd: str, timeout: float, metric: dict,
             _sname = str(_stg.get("name") or f"stage{_i}")
             _scmd = list(_stg.get("command") or [])
             if _i < _run_from:
+                # Reused: an earlier repair attempt already ran this stage and its on-disk artifacts
+                # (e.g. the train checkpoint) are kept, so it does NOT re-run. Still emit a zero-work
+                # marker span so the trace SHOWS the stage on this re-eval (labeled "reused") instead of
+                # the band silently vanishing — otherwise the user sees no Train span after a repair.
+                with _sp(_sname, kind="operation", stage=_sname, reused=True):
+                    pass
                 stage_results.append({"name": _sname, "status": "reused", "exit_code": 0, "seconds": 0.0})
                 continue
             _sto = float(_stg.get("timeout", timeout))

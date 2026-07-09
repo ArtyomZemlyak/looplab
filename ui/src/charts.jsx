@@ -345,9 +345,32 @@ export function MultiTrajectory({ runs, width = 760, height = 240 }) {
 export function MetricLines({ series, cols = 2 }) {
   const tags = Object.keys(series || {}).filter(t => (series[t] || []).length > 0).sort()
   if (!tags.length) return <Empty>no metric curves logged yet — they appear once training starts writing TensorBoard events</Empty>
+  // Group by the tag prefix before the first '/' (TensorBoard convention: train/loss, val/recall@100,
+  // …); a tag with no slash falls into "other". Each group is an independent COLLAPSIBLE section so a
+  // run that logs dozens of scalars isn't one endless wall of charts.
+  const groups = {}
+  for (const t of tags) {
+    const i = t.indexOf('/')
+    const g = i > 0 ? t.slice(0, i) : 'other'
+    ;(groups[g] || (groups[g] = [])).push(t)
+  }
+  const names = Object.keys(groups).sort()
+  return <div>{names.map(g => <MetricGroup key={g} name={g} tags={groups[g]} series={series} cols={cols} />)}</div>
+}
+
+function MetricGroup({ name, tags, series, cols }) {
+  const [open, setOpen] = React.useState(true)
   return (
-    <div style={{ display: 'grid', gridTemplateColumns: `repeat(${cols}, minmax(0,1fr))`, gap: 10 }}>
-      {tags.map(t => <MiniLine key={t} label={t} pts={series[t]} />)}
+    <div style={{ marginBottom: 8 }}>
+      <div onClick={() => setOpen(o => !o)}
+           style={{ cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 6, padding: '4px 2px',
+                    fontSize: 12, fontWeight: 600, userSelect: 'none' }}>
+        <span style={{ opacity: 0.6, fontSize: 10, width: 10, display: 'inline-block' }}>{open ? '▾' : '▸'}</span>
+        {name} <span className="muted" style={{ fontWeight: 400 }}>· {tags.length} metric{tags.length === 1 ? '' : 's'}</span>
+      </div>
+      {open && <div style={{ display: 'grid', gridTemplateColumns: `repeat(${cols}, minmax(0,1fr))`, gap: 10 }}>
+        {tags.map(t => <MiniLine key={t} label={t} pts={series[t]} />)}
+      </div>}
     </div>
   )
 }
