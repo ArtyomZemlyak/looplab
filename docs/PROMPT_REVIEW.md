@@ -1,6 +1,7 @@
 # LoopLab — Agent-Prompt & Daily-Diff Mega-Review (2026-07-09)
 
-**Scope.** (a) Every commit of 2026-07-09 (`0fee408…8a53520`, 15 commits, 51 files, +1509/−179);
+**Scope.** (a) Every commit of 2026-07-09 (`2786b88…8a53520`, 20 commits; the reviewed diff range
+was `2786b88~1..8a53520`, 51 files, +1509/−179);
 (b) every LLM-facing prompt string in the codebase — `agents/` (roles, tool-loop, strategist,
 unified, cli, deep-research), `search/` (foresight, best-of-N, hybrid-merge), `engine/`
 (orchestrator hint prose, lessons, genesis), `serve/` (genesis boss, command boss, chat, assistant,
@@ -12,6 +13,11 @@ plus the PromptStore plumbing. Each finding below was verified against the consu
 **Method.** Five parallel reviewers (today's diff; agents/ prompts; search+engine prompts;
 serve/ prompts; adapters/tools prompts), findings adversarially re-verified, duplicates merged.
 The four highest-severity findings were independently re-confirmed by a second reader.
+A **second, fully adversarial verification round** then re-derived every finding from code with
+instructions to refute it (four independent skeptic verifiers; D1–D4 and P2 reproduced
+mechanically by executing the real helpers/classes with synthetic inputs). Outcome: **0 findings
+refuted**; 2 downgraded (P5, P11 major→minor), 2 nuanced (P4, D11), several severity notes
+folded in below. See §F for the verification log.
 
 **Verdict in one paragraph.** Today's diff is high quality — invariants hold, docs/diagram were
 updated in the same change, suite green (1466 passed / 23 skipped) — but the new inline-repair
@@ -44,16 +50,18 @@ worst case.
 | D8 | minor | `core/llm.py:782` | (a) pool-wide socket shutdown kills healthy siblings under `max_parallel>1` (known, BACKLOG §5); (b) `self._sdk._client` is dereferenced **outside** the try — a client shape without `_client` turns a timeout into an AttributeError. |
 | D9 | nit | `repo_developer.py:40-43` | `_OUTPUT_HINT_RE` substring-matches `--dropout/--timeout/--layout` → the following token is excused as a pipeline output; missing-input bounce weakened (fails open to a loud eval error). |
 | D10 | nit | `ui/src/Inspector.jsx:71-77` | Live poll only for the numerically-latest pending node — under `max_parallel>1` an older mid-eval node's Trace freezes. |
-| D11 | nit | `events/replay.py:236-247` | Unkeyed (legacy) `confirm_eval` duplicates still double-count seconds; a legit re-eval of the same (node, seed) has its seconds dropped while its metric still overwrites. |
+| D11 | nit (defensive-only) | `events/replay.py:236-247` | Unkeyed (legacy) `confirm_eval` duplicates still double-count seconds; a re-eval of the same (node, seed) has its seconds dropped while its metric still overwrites. *Verification: no producer at HEAD can emit either shape (both confirm emitters memo-skip seen seeds; `confirm_eval` has always carried node_id+seed) — guard-incompleteness note, not a live defect.* |
 | D12 | nit | `orchestrator.py:2351` | `not spec.get('edit', False)` in `_data_binds` is dead after the DataSpec coercion — the all-mounts-read-only invariant now rests solely on the validator; a hand-rolled `repo_spec` dict would silently get a writable bind. |
 | D13 | minor | tests | The reuse feature's **loop wiring is untested** (only the static helpers are unit-tested): nothing asserts `next_start` actually reaches `run_command_eval` on re-eval, that the retrain-cap abandon fires, or `node_logs` for `cmd.stages` runs. |
+| D14 | minor (adjacent, **pre-existing** — found during verification, not introduced today) | `events/replay.py:187-197` + `trust/confirm_phase.py:101-104,133-136` | `EV_NODE_RESET` clears `confirmed_mean/std/seeds` and holdout but never clears `st.confirm_seed_results[node_id]` — a reset (even re-developed) node's later confirm memo-skips every seed and re-emits `node_confirmed` from the **pre-reset** seed metrics for post-reset code. |
 
 Prompt-text changes today were limited and consistent: `runs_tools.py:281-286` (goal-is-the-only-
 task-text block), `runs_tools.py:331-338` + `serve_prompts.py:60-70` (mount/edit coercion wording
 — matches the shipped coercing validator), and best-of-N now feeding real goal/direction into the
-foresight ranker (bug fix). Note the `1af12a2` commit message says "reject mount:true+edit:true"
-while the shipped code and all prompts say **coerce** — the code/prompts are self-consistent; only
-the commit message is misleading.
+foresight ranker (bug fix). Note on `1af12a2` "reject mount:true+edit:true": that message was
+accurate *for its own commit* (it shipped `raise ValueError`); `2d1b9bf` flipped reject→coerce the
+same day. At HEAD the code and all prompts consistently say **coerce** — relevant only when
+bisecting.
 
 ---
 
@@ -96,24 +104,33 @@ registry, so any hint not in it silently dies at the wrapper.*
 **P3 · The 4000-char tool-result cap silently destroys the pagination contract.**
 `drive_tool_loop` head-truncates every tool result at 4000 chars with **no marker**
 (`agent.py:448,454`), while `reposcout.read_file` promises ~16KB pages with a resume pointer
-appended at the END (`reposcout.py:122-135, 261-269`) and `env_inspect.read_installed` promises
-12KB (`env_inspect.py:23,95-103`). Any page > 4000 chars loses its tail *and* the pointer; the
+appended at the END (`reposcout.py:122-135, 261-269`), and `env_inspect.read_installed` defaults to 300 lines
+(internal cap 12KB, `env_inspect.py:23,95-103`) with **no resume pointer at all**. Any page
+> 4000 chars loses its tail *and* the pointer; the dedup cache even stores the truncated result
+(`agent.py:450`), so a re-read returns a stub of the truncated page. The
 prompt's "read a file ONCE, don't re-read" makes the model act on code it never saw.
 `_base.py:39` warns providers to clip under the cap; `runs_tools` obeys (`_TRACE_CHARS=3600`),
 reposcout/env_inspect don't. *Fix: page size ≤ ~3800 with the resume pointer inside the cap.*
 
-**P4 · "Copy the hypothesis statement EXACTLY" is unsatisfiable beyond 200 chars.** The board
-renders statements truncated to 200 chars (`roles.py:243`) while instructing verbatim copying
-(`:244-246`); evidence links by exact-normalized hash (`models.py:173-182`). Deep-research
-directions are registered untruncated and routinely longer (`orchestrator.py:1337-1341`) → the
-copied (truncated) statement mints a NEW hypothesis and the board card stays open forever.
-*Fix: link by id, or raise the render cap to the hash-normalization cap.*
+**P4 · "Copy the hypothesis statement EXACTLY" is unsatisfiable beyond 200 chars.** *(major,
+NUANCED on verification.)* The board renders statements truncated to 200 chars (`roles.py:243`)
+while instructing verbatim copying (`:244-246`); evidence links by exact-normalized hash
+(`models.py:173-182` — normalization rescues whitespace/case, not truncation). Deep-research
+directions are registered untruncated with no length cap (`orchestrator.py:1337-1341`) → the
+copied (truncated) statement mints a NEW hypothesis. *Verification nuance: the agentic board
+consolidation `_maybe_merge_hypotheses` (`orchestrator.py:1362-1399`) is a designed partial
+recovery that can later alias-merge the truncated duplicate — but it is cadence-gated (open
+board ≥4) and LLM-dependent, so evidence still fails to link at proposal time.* *Fix: link by
+id, or raise the render cap to the hash-normalization cap.*
 
-**P5 · The default Researcher is taught a tool it doesn't have.** `tool_researcher_system`
-teaches `read_file(start_line/lines)` pagination (`agent.py:731-733`), but the Researcher's
-toolset (`tasks.py:400-451, 633-680`) has no `read_file` (paginating readers are `repo_read` on
-repo tasks, and `read_file` only in RepoScoutTools — genesis/assistant/repo-Developer). A
-compliant model burns turns on `"(unknown tool: read_file)"`.
+**P5 · The default Researcher is taught a tool it doesn't have.** *(downgraded major→minor on
+verification.)* `tool_researcher_system` teaches `read_file(start_line/lines)` pagination
+(`agent.py:731-733`), but the Researcher's toolset (`tasks.py:400-451, 633-680`) has no
+`read_file` (paginating readers are `repo_read` on repo tasks, and `read_file` only in
+RepoScoutTools — genesis/assistant/repo-Developer). A compliant model gets
+`"(unknown tool: read_file)"`. *Downgrade rationale: the model also receives the real tool
+schemas per request, and on repo tasks `repo_read` offers identical pagination — typical cost
+is one bounced turn.*
 
 **P6 · Sweep + `eval_timeout` guidance never reaches the DEFAULT Researcher, and the sweep
 promise is false for two of three Developer backends.** The instructions live only in
@@ -145,7 +162,10 @@ Developer, Strategist)". Not appended for: `ToolUsingResearcher` (the default Re
 `stop/pause` → `EV_PAUSE` (freeze) from `finalize/abort` → `EV_RUN_ABORT` (wrap-up: report,
 lessons, cost — `boss.py:120-128`). "Finish the run and write the report" therefore produces a
 freeze; the wrap-up path is unreachable through the taught vocabulary (and `pause` vs `stop`
-are taught as distinct but map to the same event).
+are taught as distinct but map to the same event). *Verification notes: the `finalize` word in
+`boss.py:35` is a Python comment, not a pydantic field description — the emit schema does NOT
+teach it either; scope limiter: the wrap-up stays reachable outside the boss (Dock Finalize
+button, AssistantBar `/finalize`).*
 
 **P10 · Web genesis can launch generative tasks on `backend="toy"`.** The genesis prompt and
 `key_defaults` never mention `backend` (`serve_prompts.py:102-106`, `routers/genesis.py:142-143`);
@@ -154,10 +174,13 @@ are taught as distinct but map to the same event).
 launched from the UI (without a deployment-level backend override) gets `NoOpRepoDeveloper` and
 every node silently evaluates the unchanged baseline.
 
-**P11 · The repair prompt lists the wrong node's files.** `_REPO_DEV_REPAIR_BLOCK`'s "Files you
-already wrote: {already}" is filled from `self.last_files` — "whatever node it BUILT LAST —
-almost never the node being repaired" per the module's own comment (`repo_developer.py:553-559,
-1006-1008` vs `:969-976`; `repair_from` seeds the true base at `:1126-1134`). *Fix: fill from
+**P11 · The repair prompt lists the wrong node's files.** *(downgraded major→minor on
+verification.)* `_REPO_DEV_REPAIR_BLOCK`'s "Files you already wrote: {already}" is filled from
+`self.last_files` — "whatever node it BUILT LAST — almost never the node being repaired" per the
+module's own comment (`repo_developer.py:553-559, 1006-1008` vs `:969-976`; `repair_from` seeds
+the true base at `:1126-1134`). *Downgrade rationale: on that same primary path the prompt also
+renders the failing node's true files verbatim via the PARENT SOLUTION block (`:994-1005`), so
+the wrong line is a contradiction beside correct context, not missing context.* *Fix: fill from
 `write.files`.*
 
 **P12 · `declare_stages` succeeds-but-is-ignored in repair sessions on operator-stages tasks.**
@@ -224,7 +247,10 @@ follows the bounce, gets "(path not allowed…)" repeatedly, and burns the phase
   `trust/reward_hack.py:17` flags as suspicious (no allowlist).
 - Genesis forced-emit fallback demands "a concrete `kind`" while the genesis system prompt says
   (twice) composable tasks have NO `kind` (`routers/genesis.py:208-211` vs
-  `serve_prompts.py:24-30`); works only via the legacy-kind shim.
+  `serve_prompts.py:24-30`); works only via the legacy-kind shim. *Verification bonus:
+  `_GenesisSpec`'s docstring — which pydantic embeds as the emit tool's schema description
+  (`genesis.py:28-33`) — also shows a kind-ful example, so the schema itself contradicts the
+  prompt.*
 - Terminology drift between the two task-authoring prompts (genesis vs `propose_run`):
   `competition` vs `kaggle`; "objective name in `key`" vs "give `pattern` … NOT `key`"; legacy
   `params_style:"cli_overrides"` vs composable `%params%` — every pair works only via
@@ -376,6 +402,44 @@ describes real knobs that all validate; audit events for prompts exist (`agent_v
   contract (28-51).
 - `core/hardware.py` — environment brief + attention points (74-126). `trust/verify.py` —
   `_RUBRIC` (81).
+
+---
+
+## F. Second-round adversarial verification log (2026-07-09, same day)
+
+Every finding above was re-derived from code by four independent skeptic verifiers instructed
+to refute it (line numbers re-located, prompts re-read in full context, default-config wiring
+re-traced from `config.py`/`cli.py`/`tasks.py`). Where feasible the claim was reproduced
+mechanically: **D1–D4** were driven through the real `_safe_reuse_start` /
+`_stage_reachable_files` / `_imported_modules` helpers with synthetic workdirs (all four
+fail-opens reproduce; single-line-import and file-present controls correctly refuse), and
+**P2** was reproduced by wiring the real `UnifiedAgent` + `ForesightPanelResearcher` around
+fakes (inner researcher sees `_hyp_order=None` while a registered hint gets through;
+`track_hypotheses=False` is likewise shadowed).
+
+**Score:** 0 refuted · 2 downgraded (P5, P11 major→minor) · 2 nuanced (P4 — designed partial
+recovery via `_maybe_merge_hypotheses`; D11 — fold semantics real but no producer at HEAD can
+emit the triggering shapes) · everything else confirmed at the stated severity. The five
+"Verified clean" spot checks (boss verbs ∈ CONTROL_EVENTS, trials JSON ↔ parser,
+`P<n> [GOOD|BAD]` ↔ parser, mount/edit prompt currency, `LOOPLAB_EVAL_SEED`) all hold.
+
+Corrections folded into the text above: the diff range label (20 commits, `2786b88…8a53520`);
+the `1af12a2` commit-message note (accurate for its own commit, superseded by `2d1b9bf`);
+P3's env_inspect characterization (no pointer at all — worse than cited) + the truncated-stub
+dedup cache; P9's schema/comment analysis and non-boss escape hatches; P11's PARENT-block
+context; D7a being a deliberate behavior change with a stale docstring; new adjacent
+pre-existing finding **D14** (stale confirm-seed memo across `node_reset`).
+
+Additional low-severity notes from verification, on record: `Idea.space` rejection surfaces as
+a recoverable `_validate_emit` bounce (pydantic error returned to the model), not a crash;
+`operator`-overwrite line refs are `orchestrator.py:2045/2079/2095/2106/2171` + `ablation.py:67-72`;
+the "unprompted" `eval_profile`/`reason` fields ARE visible as bare names in emit schemas (just
+untaught); a novelty-gate re-propose is the one (rare) same-scope consumer of the otherwise
+wasted researcher handoff brief; `_attention_points` is also missing from `CliAgentDeveloper`;
+a host-exported `LOOPLAB_EVAL_SEED` would leak into search evals (sandbox inherits non-secret
+host env — outside any prompt claim, noted for completeness).
+
+---
 
 *Companion docs: [BACKLOG.md](BACKLOG.md) §5 (the same day's engine-side mega-review),
 [CODE_REVIEW.md](CODE_REVIEW.md).*
