@@ -132,8 +132,9 @@ class RepoScoutTools:
                      "requirements. Read a WINDOW with start_line + lines (like an editor's 'go to line "
                      "N, show M lines'); omit both to read page 1. A page with more file below it ENDS "
                      "with the marker '… (more below — continue with start_line=N)' — continue from "
-                     "exactly that N; a reply WITHOUT that marker IS the end of the file. Never re-read "
-                     "from the top.",
+                     "exactly that N (a single line longer than one page is cut mid-line — the marker "
+                     "says so and resumes at the NEXT line); a reply WITHOUT that marker IS the end of "
+                     "the file. Never re-read from the top.",
                      {"path": {"type": "string", "description": "File path (absolute or ~-relative)."},
                       "start_line": {"type": "integer",
                                      "description": "1-based line to start from (default 1/top). Use the "
@@ -256,10 +257,12 @@ class RepoScoutTools:
         as fit; stringy '180'/'40' coerce. When more remains (line window ran into the char cap, or no
         `lines` given and the file is bigger than one page) the reply ENDS with the resume marker naming
         the exact start_line to continue from; a reply without the marker IS the end of the file — that
-        asymmetry is the tool's documented contract, so the marker text must stay stable and must always
-        fit UNDER the agent loop's RESULT_CAP (see _MAX_READ). (Before this, read_file ignored
-        start_line entirely and always returned the first 16KB — agents re-read the same file head
-        13-21× and burned their whole budget, per the node 56/59/61/62 traces.)"""
+        asymmetry is the tool's documented contract, so EVERY continuing page (the mid-line case
+        included) must end with the same '… (more below — continue with start_line=N)' stem, the marker
+        text must stay stable, and it must always fit UNDER the agent loop's RESULT_CAP (see _MAX_READ).
+        (Before this, read_file ignored start_line entirely and always returned the first 16KB — agents
+        re-read the same file head 13-21× and burned their whole budget, per the node 56/59/61/62
+        traces.)"""
         def _int(v):
             try:
                 return int(v) if v else 0
@@ -282,6 +285,12 @@ class RepoScoutTools:
                 # NEXT line — the marker says so honestly (the line's tail past the cap is skipped).
                 shown = 1
                 mid_line = True
+            else:
+                # Drop the partial trailing fragment (chars past the last complete line): the header
+                # and the resume marker count WHOLE lines, and the next page re-serves that line in
+                # full from start_line — keeping the fragment would double-serve its head and show a
+                # half-line the stated range doesn't cover.
+                body = body[: body.rfind("\n")]
             more = True
         else:                                          # the full line-window was returned
             shown = len(window)
@@ -290,8 +299,11 @@ class RepoScoutTools:
         # range and disagree with the resume marker when the char cap cut the window short.
         head = f"(lines {start + 1}-{start + shown} of {n})\n" if (start > 0 or want) else ""
         if mid_line:
-            tail = (f"\n… (line {start + 1} longer than one page — truncated mid-line; "
-                    f"continue with start_line={start + 2})")
+            # The explanation PRECEDES the canonical stem — the marker must still END with the
+            # documented '… (more below — continue with start_line=N)' so "a reply without the
+            # marker IS the end" stays true for a stem-matching reader.
+            tail = (f"\n… (line {start + 1} is longer than one page — its remainder is NOT reachable "
+                    f"by line windows) … (more below — continue with start_line={start + 2})")
         elif more:
             tail = f"\n… (more below — continue with start_line={start + shown + 1})"
         else:

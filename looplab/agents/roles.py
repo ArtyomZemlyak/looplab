@@ -86,8 +86,6 @@ def _researcher_system(offer_sweep: bool = True) -> str:
             "Respond ONLY with the requested structured fields.")
 
 
-# Back-compat handle (grep target / PromptStore default shape): the full sweep-offering prompt.
-_RESEARCHER_SYSTEM = _researcher_system(True)
 # Appended to the Researcher system prompt when hypothesis tracking is on (P1, default on). Split out
 # so the knob can drop it cleanly (the `hypothesis` field then simply stays unset).
 _HYPOTHESIS_INSTRUCTION = (
@@ -175,6 +173,24 @@ Both researchers honor the same cues: `LLMResearcher.propose` and `ToolUsingRese
 fold the same `(_complexity_hint, _sweep_hint, _novelty_feedback, _novelty_hint)` cue set into
 their prompts (`_digest_cap` is consumed separately as a numeric cap; `_hyp_order` orders the
 open-hypothesis board inside `_state_brief`)."""
+
+
+def forward_hints(src, dst) -> None:
+    """Mirror the engine-set ephemeral hints from a wrapper onto its delegate — the ONE owner of
+    the `(*RESEARCHER_HINT_ATTRS, "track_hypotheses")` forwarding rule every wrapper shares.
+
+    P2 delivery contract (see RESEARCHER_HINT_ATTRS above): the engine setattrs hints on the
+    OUTERMOST active researcher — which may be any of the forwarding wrappers — so each wrapper
+    mirrors the registry (plus the non-hint `track_hypotheses` knob, likewise poked onto the
+    outermost object; an explicit OFF must not be shadowed) onto its delegate before delegating
+    propose(). hasattr-guarded: an attr the engine never set is left untouched on `dst`. Without
+    this, a wrapper silently dropped every engine hint on its delegation path. Callers:
+    `UnifiedAgent.propose`, `ForesightPanelResearcher._forward_hints`,
+    `SurrogateResearcher.propose`, and serve's `PanelResearcher.propose` — one helper, so the
+    rule can't drift per-wrapper (tests/test_hint_forwarding.py wires the real chains)."""
+    for attr in (*RESEARCHER_HINT_ATTRS, "track_hypotheses"):
+        if hasattr(src, attr):
+            setattr(dst, attr, getattr(src, attr))
 
 
 def collect_hint_cues(obj, attrs) -> str:

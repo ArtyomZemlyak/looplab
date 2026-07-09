@@ -31,11 +31,22 @@ _MAX_TIMEOUT = 600.0
 # Per-STREAM tail budgets for run_command's reply. The agent loop caps the COMBINED result at
 # RESULT_CAP (head-keep), so giving each stream ~RESULT_CAP alone let a verbose stdout push the whole
 # stderr section — the traceback, i.e. the reason the command failed — past the cap, where the loop
-# silently dropped it. Split the cap between the streams instead, stderr getting the larger share
-# (the exception line lives there), leaving headroom for the exit-code head + section labels +
-# truncation notes so head + both tails always fit under RESULT_CAP.
+# silently dropped it. The MINIMUM guarantees below hold even when both streams are long; when one
+# stream is short, `_stream_tails` reallocates its unused budget to the other (a stderr-only failure
+# gets ~the whole cap for its traceback, not half — the fixed 50/50 split truncated exactly the
+# frames the repair needed). Headroom (-400) covers the exit-code head + section labels + notes.
 _STDOUT_TAIL = RESULT_CAP // 2 - 200
 _STDERR_TAIL = RESULT_CAP // 2 - 100
+
+
+def _stream_tails(out: str, err: str) -> tuple[int, int]:
+    """Per-call tail budgets: each stream is guaranteed its minimum share, and whatever one stream
+    leaves unused flows to the other (stderr first — the exception lives there). Sum always fits
+    under RESULT_CAP with the -400 label/head headroom."""
+    avail = RESULT_CAP - 400
+    err_take = min(len(err), avail - min(len(out), _STDOUT_TAIL))
+    out_take = min(len(out), avail - err_take)
+    return out_take, err_take
 
 # Only these host GIT_* vars are passed through to a `git` child (see exec_argv): the multi-var config
 # (which `_run_argv` would partially scrub because GIT_CONFIG_KEY_* contains "KEY") + commit identity.
@@ -127,8 +138,9 @@ class ShellTools:
             fn_spec("run_command",
                      "Run a command as an ARGV LIST (no shell) inside the allowed roots — e.g. "
                      '["python","-m","pytest","-q","tests/test_patch.py"]. Returns exit code + '
-                     f"stdout/stderr, each as a TAIL (stdout ~last {_STDOUT_TAIL} chars, stderr ~last "
-                     f"{_STDERR_TAIL} — earlier output is "
+                     f"stdout/stderr, each as a TAIL (at least ~{_STDOUT_TAIL}/{_STDERR_TAIL} chars "
+                     f"stdout/stderr; a short stream donates its unused budget to the other, up to "
+                     f"~{RESULT_CAP - 400} total — earlier output is "
                      "dropped, with a truncation note). Pass argv, NOT a shell string. A foreground "
                      f"command is KILLED at `timeout` seconds (default {int(self.timeout)}, hard max "
                      f"{int(_MAX_TIMEOUT)}); set "
@@ -147,7 +159,10 @@ class ShellTools:
                      "Read NEW output from a background command since your last read, plus its "
                      "running/exited status. One bounded chunk per poll: a reply ending with "
                      "'(more output pending — poll read_output again)' means the log has more — the "
-                     "next call continues exactly where this reply ended (nothing is skipped). Use "
+                     "next call continues exactly where this reply ended (nothing is skipped). "
+                     "Exception: if the unread backlog exceeds ~256KB, the OLDEST unread output is "
+                     "dropped and the chunk STARTS with an explicit "
+                     "'…(N bytes of older output skipped — full log: <path>)…' note. Use "
                      "the task_id from a background run_command.",
                      {"task_id": {"type": "string"}}, ["task_id"]),
             fn_spec("list_background",
@@ -239,8 +254,9 @@ class ShellTools:
             self.applied.append(action)
         head = f"exit={rc}" + (" (TIMEOUT)" if timed_out else "")
         parts = [head]
+        out_take, err_take = _stream_tails(out or "", err or "")
         if out and out.strip():
-            parts.append("stdout:\n" + _tail(out, _STDOUT_TAIL))
+            parts.append("stdout:\n" + _tail(out, out_take))
         if err and err.strip():
-            parts.append("stderr:\n" + _tail(err, _STDERR_TAIL))
+            parts.append("stderr:\n" + _tail(err, err_take))
         return "\n".join(parts)

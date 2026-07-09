@@ -179,6 +179,24 @@ def test_consolidate_noted_never_retires_a_verdict():
     assert out2[0]["outcome"] == "noted" and out2[0]["evidence_count"] == 2
 
 
+def test_consolidate_legacy_and_unknown_outcomes_are_inert():
+    # `_verdict_base` closes the legacy hole: a row with NO `outcome` at all (written before the
+    # field existed) and an UNRECOGNIZED outcome string are both inert exactly like "noted" —
+    # neither is a re-adjudication of the claim, so a NEWER one must not become the merged verdict
+    # and zero the supported row's accumulated evidence.
+    rows = [
+        {"statement": "Deeper trees help", "outcome": "supported", "task_id": "t", "run_id": "R",
+         "evidence_count": 2},
+        {"statement": "deeper trees help", "task_id": "t", "run_id": "S"},             # legacy: no outcome
+        {"statement": "deeper trees  help", "outcome": "inconclusive", "task_id": "t",  # unknown string
+         "run_id": "U"},
+    ]
+    out = consolidate_lessons(rows)
+    assert len(out) == 1
+    assert out[0]["outcome"] == "supported"       # the verdict survives the newer inert rows
+    assert out[0]["evidence_count"] == 2          # …with its evidence; inert rows add no support
+
+
 def test_agentic_merge_base_skips_noted(monkeypatch):
     # The paraphrase-merge pass applies the same rule: the newest NON-noted member carries the
     # verdict/fields for the merged row (a newer "noted" paraphrase must not retire "supported").
@@ -196,6 +214,24 @@ def test_agentic_merge_base_skips_noted(monkeypatch):
     assert len(out) == 1
     assert out[0]["outcome"] == "supported" and out[0]["statement"] == "increase the LR"
     assert out[0]["evidence_count"] == 2          # only members AGREEING with the verdict add support
+
+
+def test_agentic_merge_legacy_outcomeless_row_is_inert(monkeypatch):
+    # The paraphrase pass shares `_verdict_base` too: a NEWER legacy member without `outcome` must
+    # not carry the merged row (pre-fix, the `outcome != "noted"` scan let it win and drop the
+    # "supported" verdict + its evidence).
+    import looplab.search.hybrid_merge as hm
+    from looplab.engine.memory import _agentic_merge_lessons
+    rows = [
+        {"statement": "raise the learning rate", "outcome": "supported", "task_id": "t",
+         "evidence_count": 2},
+        {"statement": "increase the learning rate", "task_id": "t", "evidence_count": 1},
+    ]
+    monkeypatch.setattr(hm, "consolidate",
+                        lambda texts, client, **kw: [{"members": [0, 1], "merged": "increase the LR"}])
+    out = _agentic_merge_lessons(rows, client=object())
+    assert len(out) == 1
+    assert out[0]["outcome"] == "supported" and out[0]["evidence_count"] == 2
 
 
 def test_filter_contradicted_quarantines_reversed_claims():

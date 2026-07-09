@@ -107,6 +107,9 @@ def test_py_api_truncates_with_an_explicit_note(monkeypatch):
     out = _t().execute("py_api", {"target": "fake_huge_api_mod.Big"})
     assert len(out) <= 4000                                   # fits the loop's RESULT_CAP
     assert "output truncated" in out                          # honest marker, not a silent cut
+    # H5: the cut is routed through _clamp, so it lands on a LINE boundary — the members line the
+    # budget bisected is dropped whole, not shown as a half-line the model would mistake for all.
+    assert "public members" not in out
 
 
 def test_read_installed_prefix_counts_inside_the_page_budget(tmp_path, monkeypatch):
@@ -125,6 +128,25 @@ def test_read_installed_prefix_counts_inside_the_page_budget(tmp_path, monkeypat
     assert out.startswith("# ") and "bigmod_deep_path.py" in out
     assert len(out) <= 4000                                   # prefix + page ≤ RESULT_CAP
     assert re.search(r"continue with start_line=\d+\)$", out)  # resume marker survived intact
+
+
+def test_read_installed_overlong_origin_prefix_keeps_the_filename_tail(tmp_path, monkeypatch):
+    """H5: the '# <origin> ' prefix is itself capped ('…' + the path's last 190 chars — the filename
+    end is the informative part), so the max(400, …) page-budget floor can never push prefix+page
+    past the loop's RESULT_CAP."""
+    import re
+    deep = tmp_path
+    for i in range(24):                                       # a ~1200-char origin path
+        deep = deep / f"very_long_directory_segment_number_{i:02d}_padding"
+    deep.mkdir(parents=True)
+    (deep / "tailmod_prefix_cap.py").write_text(
+        "".join(f"v{i} = {i}  # padding\n" for i in range(800)), encoding="utf-8")
+    monkeypatch.syspath_prepend(str(deep))
+    out = _t().execute("read_installed", {"module": "tailmod_prefix_cap"})
+    assert out.startswith("# …") and "tailmod_prefix_cap.py" in out    # elided head, filename tail kept
+    assert "very_long_directory_segment_number_00" not in out          # the path's head is gone
+    assert len(out) <= 4000                                            # prefix + page ≤ RESULT_CAP
+    assert re.search(r"continue with start_line=\d+\)$", out)          # resume marker survived intact
 
 
 def test_read_installed_null_lines_falls_back_to_max_lines():

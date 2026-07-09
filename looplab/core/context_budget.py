@@ -11,6 +11,14 @@ from __future__ import annotations
 # long agent run gets its stale middle summarized before it can crowd the context window.
 DEFAULT_SUMMARY_CHARS = 120_000
 
+# The agent loop's per-TOOL-RESULT cap (chars): drive_tool_loop bounds every tool reply at this many
+# chars with an explicit truncation marker. Canonical home is CORE (not tools/) so that runtime/ —
+# which sits BELOW tools in the layering (tools imports runtime, not vice versa) — can derive its
+# chunk budgets from it without a latent tools→runtime import cycle; `tools/_base.py` re-exports it
+# for the providers, which must derive their page/tail budgets FROM it (cap minus their own
+# header/marker overhead) instead of hard-coding free-standing ~4000s.
+RESULT_CAP = 4000
+
 
 def _msg_chars(m: dict) -> int:
     """Size of a message for budgeting: its `content` PLUS any `tool_calls` name+arguments. A

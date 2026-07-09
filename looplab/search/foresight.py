@@ -33,7 +33,7 @@ from typing import Optional
 
 from pydantic import BaseModel, Field
 
-from looplab.agents.roles import RESEARCHER_HINT_ATTRS
+from looplab.agents.roles import forward_hints
 from looplab.core.parse import parse_structured
 from looplab.core.prompts import render
 
@@ -259,8 +259,11 @@ class ForesightPanelResearcher:
         self.bounds = bounds if bounds is not None else getattr(base, "bounds", None)
         # The panel must reflect the base's configured structured-output parser (mirroring the
         # `prompts` propagation below) so chain-walkers like `engine/lessons.py::_merge_prompt_opts`
-        # see the real value — a hardcoded "tool_call" default here shadowed the run's parser.
-        self.parser = parser if parser is not None else getattr(base, "parser", "tool_call")
+        # see the real value — a hardcoded "tool_call" default here shadowed the run's parser. No
+        # bake-in for a parser-less base either (inherit None, not "tool_call"): the downstream
+        # readers — rank()/rank_agentic here, hybrid_merge, lessons — all default a falsy parser to
+        # "tool_call" themselves, and a baked literal would shadow a parser found DEEPER in the chain.
+        self.parser = parser if parser is not None else getattr(base, "parser", None)
         self.prompts = prompts if prompts is not None else getattr(base, "prompts", None)
         # When `tools` is wired, ranking runs in AGENTIC mode (a drive_tool_loop that can pull actual
         # experiment/data evidence before deciding); else it's the one-shot predictor. Optional.
@@ -314,14 +317,11 @@ class ForesightPanelResearcher:
     def _forward_hints(self) -> None:
         """Mirror the engine-set steering hints onto the base Researcher so the panel stays
         transparent to novelty-gate feedback / complexity / sweep cues (the engine setattrs them on
-        THIS wrapper — the active researcher — after construction). `track_hypotheses` rides along
-        exactly as in `UnifiedAgent.propose`: not a hint, but likewise poked onto the outermost
-        wrapper (P2 — an explicit OFF must not be shadowed here). NB `hasattr`/`getattr` on self
-        fall through `__getattr__` to the base, so an attr the engine never set forwards the base's
-        own value back onto it — a no-op by construction."""
-        for attr in (*RESEARCHER_HINT_ATTRS, "track_hypotheses"):
-            if hasattr(self, attr):
-                setattr(self.base, attr, getattr(self, attr))
+        THIS wrapper — the active researcher — after construction). P2: `roles.forward_hints` owns
+        the registry + `track_hypotheses` rule. NB `hasattr`/`getattr` on self fall through
+        `__getattr__` to the base, so an attr the engine never set forwards the base's own value
+        back onto it — a no-op by construction."""
+        forward_hints(self, self.base)
 
     def _prioritize_board(self, state, parent) -> None:
         """FOREAGENT prioritization of the OPEN-hypothesis board. Untested beliefs arrive in batches

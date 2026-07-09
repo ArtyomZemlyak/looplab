@@ -115,11 +115,17 @@ def build_router(srv) -> APIRouter:
         # funnel every launch goes through), so this card-level injection is DISPLAY-ONLY sugar: the
         # operator sees the inferred `backend=llm` on the editable spec card and can override it
         # BEFORE confirming, instead of the default appearing silently at launch. Delegating to the
-        # SAME shared predicate (which is best-effort by construction — its excepts are narrowed to
-        # the task read/normalize, anything else propagates) means the card can never disagree with
-        # what /api/start actually spawns, and task_file (catalogue) cards are covered too.
-        if _defaults_backend_llm(task or None, task_file, settings, srv.settings.load_ui_settings()):
-            settings["backend"] = "llm"
+        # SAME shared predicate means the card can never disagree with what /api/start actually
+        # spawns, and task_file (catalogue) cards are covered too. Broad best-effort guard: the card
+        # must RENDER even when this hint fails (the predicate's excepts are narrowed to the task
+        # read/normalize — anything else, e.g. a broken settings store, would otherwise 500 the whole
+        # plan); a missing hint just means the default appears at launch, where /api/start keeps the
+        # narrow-except semantics as the authoritative gate.
+        try:
+            if _defaults_backend_llm(task, task_file, settings, srv.settings.load_ui_settings()):
+                settings["backend"] = "llm"
+        except Exception:  # noqa: BLE001 - display-only sugar; /api/start re-applies the real rule
+            pass
         steps = [str(s).strip() for s in (spec.setup_steps or []) if str(s).strip()][:12] \
             or list(draft.get("setup_steps") or [])
         return {"run_id": run_id, "task": task, "task_file": task_file,

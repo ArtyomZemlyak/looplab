@@ -47,13 +47,25 @@ def test_engine_call_site_protected_grader_without_asset_stays_strict():
     code = "from grader import score"
     protected_names = {"grader.py"}          # repo_spec protect list — "hands off", NOT a sanction
     assets: dict = {}                        # the task ships no grader → import is not the contract
+
+    def call_site(assets):                   # the exact orchestrator expression (normalized match)
+        return any(str(a).replace("\\", "/").lower() == "grader.py" for a in (assets or ()))
+
     protected = set(protected_names) | set(assets)                    # the call-site union
     sigs = detect_reward_hacks(code, metric=0.9, direction="max", protected_names=protected,
-                               grader_import_ok=("grader.py" in set(assets or ())))
+                               grader_import_ok=call_site(assets))
     assert any(s["signal"] == "grader_access" for s in sigs)          # import tell still fires
     # …and when the task genuinely MATERIALIZES grader.py (an asset), the import stays sanctioned
     assets = {"grader.py": "def score(preds): ..."}
     protected = set(protected_names) | set(assets)
     sigs = detect_reward_hacks(code, metric=0.9, direction="max", protected_names=protected,
-                               grader_import_ok=("grader.py" in set(assets or ())))
+                               grader_import_ok=call_site(assets))
+    assert not any(s["signal"] == "grader_access" for s in sigs)
+    # G2: the asset KEY is matched NORMALIZED (case + path separators), exactly as the detector
+    # normalizes `protected_names` — the inference the explicit flag replaced got that for free,
+    # so a task shipping the asset as 'Grader.py' must keep sanctioning the import.
+    assets = {"Grader.py": "def score(preds): ..."}
+    protected = set(protected_names) | set(assets)
+    sigs = detect_reward_hacks(code, metric=0.9, direction="max", protected_names=protected,
+                               grader_import_ok=call_site(assets))
     assert not any(s["signal"] == "grader_access" for s in sigs)

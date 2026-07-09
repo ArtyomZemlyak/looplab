@@ -233,7 +233,7 @@ stripped). A missing file falls back to the built-in default.
 
 | Key | Who uses it |
 |---|---|
-| `researcher_system` | The plain (non-tool) LLM Researcher's system prompt |
+| `researcher_system` | The plain (non-tool) LLM Researcher — the CORE persona only: the sweep/`eval_timeout` capability suffix and the operator note are appended by code after the render (gated on the active backend's capabilities), so an override supplies just the core body |
 | `developer_system` | The LLM Developer (both `implement` and `repair`) |
 | `developer_repair_prefix` | Short prefix prepended to `developer_system` on repair calls |
 | `tool_researcher_system` | The tool-using Researcher — the default agentic Researcher |
@@ -245,6 +245,10 @@ stripped). A missing file falls back to the built-in default.
 | `bestofn_judge_system` | The best-of-N judge (picks the best of N candidate implementations) |
 | `merge_system` | The hybrid-merge adjudicator (lesson & hypothesis-board consolidation); `$kind` and `$detail` vars |
 | `deep_research_system` | The Deep-Research stage agent |
+
+Migration note: a `researcher_system.md` override copied from the old full default should drop the
+trailing sweep/`eval_timeout` capability text and the operator note — the code now appends those
+fragments itself, so keeping them in the override would duplicate the prose.
 
 ```bash
 looplab run examples/regression_task.json --backend llm \

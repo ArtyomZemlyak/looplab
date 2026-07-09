@@ -84,6 +84,17 @@ def test_generative_kinds_membership():
     assert "quadratic" not in GENERATIVE_KINDS
 
 
+def test_default_backend_rule():
+    # The ONE kind→backend rule shared by cli.py and the web /api/start funnel (review I4): "llm"
+    # only for a generative kind with no explicit choice; None everywhere else (leave the default).
+    from looplab.engine.genesis import default_backend
+    assert default_backend("repo", chosen=False) == "llm"
+    assert default_backend("dataset", chosen=False) == "llm"
+    assert default_backend("repo", chosen=True) is None      # an explicit choice always wins
+    assert default_backend("quadratic", chosen=False) is None
+    assert default_backend(None, chosen=False) is None       # no kind → nothing to infer from
+
+
 def test_author_pins_kind_even_if_model_drifts():
     # The user pinned kind=repo; even if the model emits a different kind, the pin wins, and the
     # prompt instructs it to stay within the pinned kind.

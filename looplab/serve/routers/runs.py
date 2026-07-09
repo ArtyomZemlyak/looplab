@@ -25,28 +25,36 @@ from looplab.serve.artifacts import (
 from looplab.serve.engine_proc import _engine_alive
 from looplab.serve.protocol import POLL_SECONDS, SSE_DONE, SSE_STATE
 
-# Snapshot-derived OPERATOR stage names, memoized per run DIRECTORY: task.snapshot.json is written
-# ONCE by `run` (under the engine-singleton lock, before the loop) and is immutable for the run's
-# lifetime, so the normalize+validate work runs at most once per run per server process instead of
-# on every node_logs poll. Keyed by the absolute run dir, not the bare run_id — distinct run roots
-# (tests, multi-root deploys) reuse ids like "demo" with different snapshots. The DEVELOPER-manifest
+# Snapshot-derived OPERATOR stage names, memoized per run DIRECTORY + snapshot VERSION: keyed on
+# (run dir, task.snapshot.json mtime_ns, size), so the normalize+validate work runs once per snapshot
+# version per server process instead of on every node_logs poll (the extra stat syscall per call is
+# negligible next to the parse it saves). The stat-derived key makes a rewritten/replaced snapshot
+# SELF-INVALIDATE — the memo must not outlive the run: a DELETE + same-id relaunch, or a CLI re-entry
+# of the run dir rewriting task.snapshot.json, changes the pipeline this panel must render. Keyed by
+# the absolute run dir, not the bare run_id — distinct run roots (tests, multi-root deploys) reuse
+# ids like "demo" with different snapshots. Values are TUPLES, not lists: a caller that forgets to
+# copy before mutating raises instead of silently corrupting the cache. The DEVELOPER-manifest
 # fallback in node_logs deliberately stays per-poll: looplab_stages.json is written mid-node by the
 # Developer's STAGES phase, so it can appear between polls and differs node to node.
-_OP_STAGE_NAMES: dict[str, list] = {}
+_OP_STAGE_NAMES: dict[tuple[str, int, int], tuple] = {}
 
 
-def _operator_stage_names(rd: Path) -> list:
+def _operator_stage_names(rd: Path) -> tuple:
     """Names of the OPERATOR-declared `cmd.stages` pipeline from the run's verbatim
-    task.snapshot.json, vetted the way the ENGINE consumes them — [] when the task declares none
-    (single-command eval) or the declared list doesn't survive validation. Memoized (see
-    `_OP_STAGE_NAMES` above); callers copy before mutating."""
-    key = str(rd)
-    if key in _OP_STAGE_NAMES:
-        return _OP_STAGE_NAMES[key]
+    task.snapshot.json, vetted the way the ENGINE consumes them — () when the task declares none
+    (single-command eval) or the declared list doesn't survive validation. Memoized on the snapshot's
+    stat identity (see `_OP_STAGE_NAMES` above); returns an immutable tuple — callers list() it
+    before mutating."""
     snap_path = rd / "task.snapshot.json"
-    if not snap_path.exists():
-        return []   # engine still starting (snapshot not written yet) — don't memoize a transient miss
-    names: list[str] = []
+    try:
+        stt = snap_path.stat()
+    except OSError:
+        return ()   # engine still starting (snapshot not written yet) — don't memoize a transient miss
+    key = (str(rd), stt.st_mtime_ns, stt.st_size)
+    cached = _OP_STAGE_NAMES.get(key)
+    if cached is not None:
+        return cached
+    names: tuple = ()
     try:
         from looplab.adapters.tasks import normalize_task
         from looplab.runtime.command_eval import validate_stages
@@ -60,9 +68,13 @@ def _operator_stage_names(rd: Path) -> list:
             # miss the manifest stages it actually did run.
             clean, err = validate_stages(es["stages"])
             if err is None:
-                names = [str(s["name"]) for s in clean]
+                names = tuple(str(s["name"]) for s in clean)
     except Exception:  # noqa: BLE001 - no/foreign/kind-less snapshot -> fall back to the manifest
-        names = []
+        names = ()
+    # Prune this run dir's entries for OLDER snapshot versions before inserting, so the dict stays
+    # bounded per run (a rewrite would otherwise leave one dead entry behind per version).
+    for stale in [k for k in _OP_STAGE_NAMES if k[0] == key[0]]:
+        del _OP_STAGE_NAMES[stale]
     _OP_STAGE_NAMES[key] = names
     return names
 
@@ -252,10 +264,10 @@ def build_router(srv) -> APIRouter:
         # canonical pipeline (Engine._resolve_stages ignores the Developer's manifest) and no `score`
         # stage is appended — the LAST operator stage prints the metric. Their names come from the
         # run's verbatim task.snapshot.json (normalize_task maps composable `cmd` → `eval`,
-        # validate_stages vets the list the same way the engine does), memoized per run since the
-        # snapshot never changes — so live logs surface for operator cmd.stages pipelines too, the
-        # very mode the per-stage logs fix targeted (mega-review D7). Copy: the fallback below
-        # appends "score", which must never leak into the cached list.
+        # validate_stages vets the list the same way the engine does), memoized on the snapshot's
+        # stat identity (a rewrite self-invalidates) — so live logs surface for operator cmd.stages
+        # pipelines too, the very mode the per-stage logs fix targeted (mega-review D7). list() the
+        # cached tuple: the fallback below appends "score", which must never leak into the cache.
         stage_names: list[str] = list(_operator_stage_names(rd))
         if not stage_names:
             # Single-command cmd (or an INVALID operator stage list — engine parity: it too ignores

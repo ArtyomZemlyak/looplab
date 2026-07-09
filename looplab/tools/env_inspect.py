@@ -104,7 +104,9 @@ class EnvInspectTools:
                     "(e.g. 'lightning.pytorch.trainer.trainer'). Returns ONE page of at most ~3600 "
                     "chars of its .py source; window with start_line + lines. A page with more source "
                     "below it ENDS with '… (more below — continue with start_line=N)' — continue from "
-                    "exactly that N; a reply WITHOUT that marker IS the end of the file. Read-only.",
+                    "exactly that N (a single line longer than one page is cut mid-line — the marker "
+                    "says so and resumes at the NEXT line); a reply WITHOUT that marker IS the end of "
+                    "the file. Read-only.",
                     {"module": {"type": "string", "description": "dotted module path"},
                      "start_line": {"type": "integer", "description": "1-based first line (optional; "
                                     "use the N from the previous page's 'continue with' marker)"},
@@ -230,12 +232,11 @@ class EnvInspectTools:
             members = [n for n, _ in inspect.getmembers(obj) if not n.startswith("_")]
             if members:
                 out.append("public members: " + ", ".join(members[:60]))
-        text = "\n".join(out)
-        if len(text) > _CAP:
-            # Honest truncation (mirrors _clamp): a bare [:_CAP] cut the tail SILENTLY, so the model
-            # couldn't tell a complete listing from an amputated one. The note fits under RESULT_CAP.
-            text = text[:_CAP] + "\n(output truncated — inspect a narrower target, e.g. one method)"
-        return text
+        # Honest truncation via the SHARED _clamp (its own note text): a bare [:_CAP] cut the tail
+        # SILENTLY and mid-line, so the model couldn't tell a complete listing from an amputated one.
+        # _clamp cuts at a line boundary; note + text fit under RESULT_CAP.
+        return self._clamp("\n".join(out), budget=_CAP,
+                           note="(output truncated — inspect a narrower target, e.g. one method)")
 
     # ------------------------------------------------------------ read_installed
     def _read_installed(self, module: str, start_line, lines) -> str:
@@ -261,7 +262,11 @@ class EnvInspectTools:
         # page budget: a deep site-packages path otherwise pushed prefix+page past RESULT_CAP and
         # the loop cut the resume marker off the tail.
         from looplab.tools.reposcout import _MAX_READ, RepoScoutTools
-        prefix = f"# {spec.origin} "
+        # Cap the origin prefix itself: a pathological path could otherwise leave the page budget at
+        # the max(400, …) floor and push prefix+page past RESULT_CAP anyway. Keep the path's TAIL —
+        # the filename end is the informative part — with an ellipsis marking the elided head.
+        origin = spec.origin if len(spec.origin) <= 200 else "…" + spec.origin[-190:]
+        prefix = f"# {origin} "
         return prefix + RepoScoutTools._paginate(data, start_line, lines,
                                                  max_chars=max(400, _MAX_READ - len(prefix)))
 
@@ -324,16 +329,19 @@ class EnvInspectTools:
             else f"(grep_installed: '{query}' not found under {package})"
 
     @staticmethod
-    def _clamp(text: str, budget: int = RESULT_CAP - 400) -> str:
-        """Fit a grep result under the agent loop's RESULT_CAP ourselves, with an HONEST marker:
-        long site-packages paths make even 20 hits overflow the cap, where the loop would drop the
-        tail (and any '(capped at …)' note) silently. Cut at a line boundary so no half-hit shows.
-        The -400 headroom keeps clamped-text + marker under the loop cap."""
+    def _clamp(text: str, budget: int = RESULT_CAP - 400,
+               note: str = "(output clamped — narrow `package` to a submodule or lower max_hits)") -> str:
+        """Fit a tool result under the agent loop's RESULT_CAP ourselves, with an HONEST marker:
+        long site-packages paths make even 20 grep hits overflow the cap, where the loop would drop
+        the tail (and any '(capped at …)' note) silently. Cut at a line boundary so no half-hit /
+        half-line shows. The -400 headroom keeps clamped-text + marker under the loop cap. `note`
+        parameterizes the marker text so py_api reuses the same line-boundary cut with its own
+        advice (the grep wording is the default — its callers stay byte-identical)."""
         if len(text) <= budget:
             return text
         cut = text[:budget]
         cut = cut[: cut.rfind("\n")] if "\n" in cut else cut
-        return cut + "\n(output clamped — narrow `package` to a submodule or lower max_hits)"
+        return cut + "\n" + note
 
 
 def _resolve(dotted: str):

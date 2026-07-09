@@ -380,8 +380,9 @@ def test_cursor_polls_and_mixed_tools_all_execute():
 # ---------------------------------------------------------------- repeat note (B1 round-robin gap)
 def test_third_identical_call_gets_repeat_note_but_still_executes():
     # The read-dedup removal left 3+-call round-robins invisible to the StuckDetector (1-/2-cycles
-    # only). From the 3rd EXACT (tool, args) repeat the tool message carries a one-line note — but
-    # the call still fully executes and returns fresh, complete content (no cache, no suppression).
+    # only). From the 3rd EXACT (tool, args) repeat whose result is byte-identical to the previous
+    # one, the tool message carries a one-line note — but the call still fully executes and returns
+    # fresh, complete content (no cache, no suppression).
     client = _RepeatThenEmitClient(repeats=4)
     tools = _CountingReadTools()
     messages = [{"role": "user", "content": "go"}]
@@ -393,6 +394,41 @@ def test_third_identical_call_gets_repeat_note_but_still_executes():
     assert reads[0] == "file contents" and reads[1] == "file contents"   # 1st/2nd: untouched
     assert reads[2].startswith("file contents") and "has now run 3×" in reads[2]
     assert reads[3].startswith("file contents") and "has now run 4×" in reads[3]
+    # The note only ever claims what is true: it names the IDENTICAL result explicitly.
+    assert "IDENTICAL result" in reads[2] and "IDENTICAL result" in reads[3]
+
+
+def test_repeat_note_never_fires_when_results_change():
+    # A cursor tool (read_output) legitimately repeats the SAME args and returns NEW output each
+    # poll — the old call-count-keyed note ("the result is identical unless a write changed it")
+    # was FALSE there and contradicted the tool's own pending marker. The note is keyed on the
+    # RESULT too: a changing result resets the streak, so it never fires here.
+    client = _ScriptToolClient([("read_output", {"task_id": "t1"})] * 5)
+    tools = _CountingNamedTools("read_output")             # returns "read_output-result-<n>": changes
+    messages = [{"role": "user", "content": "go"}]
+    out = drive_tool_loop(client, tools, messages, _EMIT, stuck_repeat=99,
+                          finalize=lambda a: ("emit", a), fallback=lambda _m: ("fallback", None))
+    assert out[0] == "emit"
+    assert tools.counts["read_output"] == 5                # every poll executed for real
+    assert not any("has now run" in m["content"] for m in messages if m.get("role") == "tool")
+
+
+def test_repeat_note_counts_the_identical_streak_not_total_calls():
+    # Results A B B B: the 4th call is the 3rd IDENTICAL run in a row, so the note must say 3×
+    # (the identical-result streak) — "run 4×" would claim four identical results, which is false.
+    class _ChangeOnceTools(_CountingReadTools):
+        def execute(self, name, args):
+            self.executed += 1
+            return "A" if self.executed == 1 else "B"
+    client = _RepeatThenEmitClient(repeats=4)
+    tools = _ChangeOnceTools()
+    messages = [{"role": "user", "content": "go"}]
+    drive_tool_loop(client, tools, messages, _EMIT, stuck_repeat=99,
+                    finalize=lambda a: ("emit", a), fallback=lambda _m: ("fallback", None))
+    reads = [m["content"] for m in messages if m.get("role") == "tool"]
+    assert "has now run" not in reads[0] and "has now run" not in reads[1]
+    assert "has now run" not in reads[2]                   # B-streak is only 2 at the 3rd call
+    assert "has now run 3×" in reads[3]                    # 3rd identical B — streak, not total (4)
 
 
 def test_repeat_note_keyed_on_exact_args_and_fresh_per_loop():

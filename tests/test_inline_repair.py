@@ -490,6 +490,53 @@ def test_loop_prior_deletion_does_not_block_reuse(tmp_path, monkeypatch):
     assert st.nodes[0].status is NodeStatus.evaluated and st.nodes[0].metric == 1.0
 
 
+def _poke_sibling_state_before_repair(eng, dev, sibling_deleted):
+    """Simulate the max_parallel>1 interleave: a SIBLING node's build overwrites the SHARED
+    developer's `last_deleted` between this node's implement and its repair. Triage runs
+    immediately before the engine snapshots the pre-repair deletion baseline, so poking the
+    developer there plants the stale sibling state exactly where the pre-fix code read it."""
+    orig = eng._triage_crash
+
+    def wrapped(*a, **kw):
+        dev.last_deleted = list(sibling_deleted)
+        return orig(*a, **kw)
+
+    eng._triage_crash = wrapped
+
+
+def test_loop_stale_sibling_deletion_state_does_not_leak_into_baseline(tmp_path, monkeypatch):
+    """G1: the pre-repair deletion BASELINE must be read off the NODE (`node.deleted`), never the
+    shared developer — at snapshot time `developer.last_deleted` belongs to whatever node it built
+    LAST. Here the node's OWN implement deleted helper.py (so it is in node.deleted and in the
+    cumulative post-repair set) while the shared dev carries a sibling's unrelated deletion: the
+    node's own OLD deletion must not read as a fresh delta, so a score-only repair still reuses
+    train. Pre-fix, the sibling baseline made helper.py look freshly deleted -> spurious re-train."""
+    captured, results = [], [_fail_score("ModuleNotFoundError: No module named 'alpha'"), _ok_eval()]
+    dev = _StagedDev(fixes=[{"looplab_eval.py": "print('score v1')\n"}],
+                     implement_deleted=["helper.py"])
+    eng = _staged_engine(tmp_path / "run", _staged_src(tmp_path), dev, monkeypatch, captured, results)
+    _poke_sibling_state_before_repair(eng, dev, ["other_nodes_file.py"])
+    anyio.run(eng.run)
+    assert dev.repair_calls == 1
+    assert captured == [None, "score"]      # own implement deletion is baseline, not a fresh delta
+    st = fold(_events(tmp_path / "run"))
+    assert st.nodes[0].status is NodeStatus.evaluated and st.nodes[0].metric == 1.0
+
+
+def test_loop_repair_deletion_matching_stale_sibling_state_still_fails_closed(tmp_path, monkeypatch):
+    """G1 fail-open corner: THIS repair genuinely deletes helper.py, and the stale sibling state
+    ALSO happens to name helper.py. Pre-fix the sibling entry masked the real deletion from the
+    delta (prev baseline was read off the shared dev), so train's checkpoint was reused across a
+    vanished module; with the node-side baseline (node.deleted is empty — this node never deleted
+    anything before) it stays a fresh delta and forces the full re-run."""
+    captured, results = [], [_fail_score("ModuleNotFoundError: No module named 'alpha'"), _ok_eval()]
+    dev = _StagedDev(fixes=[{"looplab_eval.py": "print('score v1')\n"}], deleted=["helper.py"])
+    eng = _staged_engine(tmp_path / "run", _staged_src(tmp_path), dev, monkeypatch, captured, results)
+    _poke_sibling_state_before_repair(eng, dev, ["helper.py", "other_nodes_file.py"])
+    anyio.run(eng.run)
+    assert captured == [None, None]         # the real deletion still forces a full pipeline re-run
+
+
 def test_loop_non_py_change_forces_full_rerun(tmp_path, monkeypatch):
     """D2 at loop level: a repair that edits a non-.py input (config.yaml) alongside the score fix
     is invisible to import reachability — the next eval must be a full re-run."""

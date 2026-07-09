@@ -4,8 +4,8 @@ and authors the inline spec, so the user never has to name a task type.
 This is the headless counterpart of the Web UI's "New run" Genesis chat
 (`serve/routers/genesis.py /api/genesis`): same idea — a model reads your words (and any data/repo
 path you mention) and decides *what kind of task this is* — exposed for `looplab run --goal "..."`
-with no `--kind`. Both paths share `GENERATIVE_KINDS` below to default `backend=llm` when the
-authored task needs a code-writing agent and no backend was chosen explicitly.
+with no `--kind`. Both paths share `default_backend` (over `GENERATIVE_KINDS`) below to default
+`backend=llm` when the authored task needs a code-writing agent and no backend was chosen explicitly.
 
 On `kind` itself: it is **not** removed. It is the dispatch key that selects one of nine
 ``TaskAdapter`` semantics (each a different eval / grader / trust / data model — e.g. a self-reported
@@ -93,6 +93,19 @@ REPO_AUTONOMY_GUIDE = (
 # Genesis infers one of these and the user didn't choose a backend, the run defaults to backend=llm —
 # the offline-optimizable kinds (quadratic/classification/regression/timeseries) stay on their default.
 GENERATIVE_KINDS = frozenset({"dataset", "code_regression", "mlebench", "mlebench_real", "repo"})
+
+
+def default_backend(kind: Optional[str], *, chosen: bool) -> Optional[str]:
+    """The ONE kind→backend defaulting rule, shared by every launch surface — cli.py's genesis path
+    and the web UI's /api/start + genesis card (`serve/routers/control.py::_defaults_backend_llm`) —
+    so the rule can't drift into per-surface copies. Returns "llm" when `kind` is generative and the
+    user chose no backend; None means "leave the configured default". Each caller keeps only its own
+    surface-specific `chosen` detection (CLI flag/file/env/.env vs merged launch settings + saved UI
+    defaults). Why it matters: Settings.backend defaults to "toy", which on a repo/dataset task gives
+    NoOpRepoDeveloper — every node silently re-evaluates the unchanged baseline (no error, just a
+    flat run) — so a generative kind with no explicit choice must default to the code-writing
+    backend."""
+    return "llm" if (not chosen and kind in GENERATIVE_KINDS) else None
 
 
 class _TaskPlan(BaseModel):

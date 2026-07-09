@@ -2507,7 +2507,10 @@ class Engine(ConfirmPhaseMixin, AblationMixin):
         statically bound: a command with no local `.py` script token (`python -m pkg`, a shell wrapper, a
         bare binary) or a `.py` path outside the workdir. Fail-closed by construction — a spuriously
         'reachable' file only forces a re-train, but a MISSED dependency would silently score a stale
-        checkpoint (the invariant `_safe_reuse_start` exists to protect)."""
+        checkpoint (the invariant `_safe_reuse_start` exists to protect).
+
+        Interim heuristic, superseded long-term by the per-stage ARTIFACT DECLARATION design
+        (docs/BACKLOG.md §6 'Deferred design work') — prefer extending that design over adding cases here."""
         wd = Path(workdir)
         imp_re = re.compile(r"^[ \t]*(from|import)[ \t]+(.+?)[ \t]*$", re.M)
         # Parenthesized MULTI-LINE imports (`from pkg import (\n  a,\n  b,\n)`) span lines, so the
@@ -2587,7 +2590,10 @@ class Engine(ConfirmPhaseMixin, AblationMixin):
             against different bases, so the intersection proves nothing).
         A false negative just re-trains (no worse than a full re-run); a false positive is a silent
         stale score, so the predicate is conservative by construction and fail-closed on anything it
-        can't statically bound."""
+        can't statically bound.
+
+        Interim heuristic, superseded long-term by the per-stage ARTIFACT DECLARATION design
+        (docs/BACKLOG.md §6 'Deferred design work') — prefer extending that design over adding cases here."""
         if not stages or not failed_stage:
             return None
         names = [str(s.get("name")) for s in stages]
@@ -3018,10 +3024,15 @@ class Engine(ConfirmPhaseMixin, AblationMixin):
                 # compute the repair's REAL change set below — `developer.last_files` is the node's whole
                 # cumulative solution for the repo developer (repair_from preloads every node file), so a
                 # raw key set would always intersect the train stage and defeat checkpoint reuse.
-                # `last_deleted` is cumulative the same way (repair_from seeds it from node.deleted),
-                # so snapshot it too — only THIS repair's deletion DELTA may veto checkpoint reuse.
+                # Deletions get the same NODE-side baseline: post-repair `last_deleted` is cumulative
+                # (repair_from seeds it from node.deleted), so only THIS repair's deletion DELTA may
+                # veto checkpoint reuse — and like `prev_files`, the baseline must be read off the
+                # NODE, not the shared developer: at this instant `developer.last_deleted` belongs to
+                # whatever node it built LAST (see the `_repair` docstring), so a sibling's stale
+                # deletions would mask a real repair deletion from the fail-closed reuse guard (or
+                # veto reuse for a deletion this node never made).
                 prev_files = dict(getattr(node, "files", {}) or {})
-                prev_deleted = set(getattr(self.developer, "last_deleted", []) or [])
+                prev_deleted = set(getattr(node, "deleted", []) or [])
                 with self.tracer.span("inline_repair", node_id=node_id, attempt=attempt + 1):
                     new_code = self._repair(
                         node, self._repair_error_context(reason, err, state=state, node=node))
@@ -3144,7 +3155,12 @@ class Engine(ConfirmPhaseMixin, AblationMixin):
                         sigs += detect_reward_hacks(
                             scan_src, res.metric, state.direction,
                             protected_names=protected, stdout=res.stdout,
-                            grader_import_ok=("grader.py" in set(self._assets or ())))
+                            # Match the asset key NORMALIZED (path separators + case), exactly like
+                            # the detector normalizes `protected_names` — the inference this call
+                            # replaced got that normalization for free, so 'Grader.py' or a
+                            # backslashed key must keep sanctioning the import here too.
+                            grader_import_ok=any(str(a).replace("\\", "/").lower() == "grader.py"
+                                                 for a in (self._assets or ())))
                         # 4.3: also apply the hardened exploit ruleset grown by `looplab harden`
                         # (hacker-fixer-solver) — each previously-discovered exploit stays guarded.
                         if self._exploit_suite is not None:

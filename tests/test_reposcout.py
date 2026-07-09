@@ -176,9 +176,44 @@ def test_read_file_single_overlong_line_still_progresses(tmp_path):
     t = RepoScoutTools(roots=[str(r)], default_root=str(r))
     p1 = t.execute("read_file", {"path": "wide.py"})
     assert len(p1) <= 4000                               # still fits the loop's RESULT_CAP
-    assert "truncated mid-line" in p1 and "line 1 longer than one page" in p1
+    assert "line 1 is longer than one page" in p1 and "NOT reachable by line windows" in p1
     m = re.search(r"continue with start_line=(\d+)\)$", p1)
     assert m and int(m.group(1)) == 2                    # progress: the NEXT line, not the same one
     p2 = t.execute("read_file", {"path": "wide.py", "start_line": 2})
     assert p2 != p1                                      # page 2 differs — no identical-page loop
     assert "after0" in p2 and "after4" in p2 and "more below" not in p2
+
+
+def test_mid_line_marker_ends_with_the_canonical_stem(tmp_path):
+    """H4a: the mid-line marker must keep the documented '… (more below — continue with
+    start_line=N)' STEM (the explanation precedes it), so "a reply WITHOUT the marker IS the end"
+    stays true for a reader matching the canonical stem — the mid-line case included."""
+    import re
+    r = tmp_path / "repo"
+    r.mkdir()
+    (r / "wide.py").write_text("X = '" + "a" * 5000 + "'\nY = 1\n", encoding="utf-8")
+    t = RepoScoutTools(roots=[str(r)], default_root=str(r))
+    p1 = t.execute("read_file", {"path": "wide.py"})
+    assert re.search(r"… \(more below — continue with start_line=2\)$", p1), p1[-120:]
+
+
+def test_char_cap_cut_drops_the_partial_trailing_line(tmp_path):
+    """H4b: when the char cap cuts a multi-line window mid-line, the partial fragment past the last
+    complete line is DROPPED — header, body, and marker then agree on whole lines, and the next page
+    re-serves that line in full (no half-line shown, nothing double-served)."""
+    import re
+    r = tmp_path / "repo"
+    r.mkdir()
+    (r / "long.py").write_text("".join(f"line {i}: " + "y" * 90 + "\n" for i in range(200)),
+                               encoding="utf-8")
+    t = RepoScoutTools(roots=[str(r)], default_root=str(r))
+    out = t.execute("read_file", {"path": "long.py", "start_line": 1, "lines": 150})
+    hm = re.match(r"\(lines 1-(\d+) of 200\)", out)
+    mm = re.search(r"continue with start_line=(\d+)\)$", out)
+    assert hm and mm, out[:120]
+    shown_to = int(hm.group(1))
+    assert shown_to < 150                                     # the char cap really cut the window
+    assert f"line {shown_to - 1}: " in out                    # last complete line survives (0-based)
+    assert f"\nline {shown_to}:" not in out                   # the next line's fragment is dropped
+    nxt = t.execute("read_file", {"path": "long.py", "start_line": int(mm.group(1)), "lines": 2})
+    assert f"line {shown_to}: " + "y" * 90 in nxt             # re-served IN FULL on the next page

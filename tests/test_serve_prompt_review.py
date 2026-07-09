@@ -4,7 +4,8 @@ now hoisted (F4) into /api/start — the funnel EVERY launch goes through (genes
 propose_run cards, direct API callers) — with the genesis-card injection kept as display-only sugar;
 D7 — /nodes/{nid}/logs surfaces per-stage logs for OPERATOR `cmd.stages` pipelines (not just the
 Developer's looplab_stages.json manifest), with (F9) the snapshot's stage list validated the way
-the engine consumes it (invalid → manifest fallback) and memoized per run dir; and the
+the engine consumes it (invalid → manifest fallback) and memoized on the snapshot's stat identity
+(a rewritten task.snapshot.json self-invalidates — the memo must not outlive the run); and the
 `_boss_context` advisory-vs-action split — the action-less /chat channel is told to RECOMMEND,
 only the /command action-router is told to ACT.
 """
@@ -73,6 +74,25 @@ def test_genesis_non_generative_task_gets_no_backend(tmp_path, monkeypatch):
     assert "backend" not in r["spec"]["settings"]           # quadratic stays on its default
 
 
+def test_genesis_card_renders_when_backend_hint_raises(tmp_path, monkeypatch):
+    """The card-level backend injection is DISPLAY-ONLY sugar: if the shared predicate raises for
+    any reason (here: forced RuntimeError), the genesis card must still render — a launch-time hint
+    failure must never 500 the whole plan (review I2; /api/start stays the authoritative gate)."""
+    task = {"goal": "maximize recall", "direction": "max", "repo": str(tmp_path / "repo"),
+            "cmd": {"command": ["python", "test.py"],
+                    "metric": {"reader": "stdout_json", "key": "recall"}}}
+    _genesis_spec(monkeypatch, task)
+
+    def _boom(*a, **k):
+        raise RuntimeError("hint exploded")
+    monkeypatch.setattr("looplab.serve.routers.genesis._defaults_backend_llm", _boom)
+    client = TestClient(make_app(tmp_path))
+    r = client.post("/api/genesis", json={"instruction": "optimize my repo"}).json()
+    assert r["ok"] is True                                  # the card rendered despite the hint crash
+    assert r["spec"]["task"] == task
+    assert "backend" not in r["spec"]["settings"]           # just no hint; /api/start re-applies it
+
+
 # ---- F4: /api/start owns the generative backend=llm launch default ------------------------------
 def _start_env(tmp_path, monkeypatch):
     """TestClient + the fake-spawned engine's env: /api/start passes per-run settings to the spawned
@@ -135,6 +155,28 @@ def test_start_defaults_backend_llm_for_generative_task_file(tmp_path, monkeypat
     tf = tmp_path / "mytask.json"
     tf.write_text(json.dumps(_repo_task(tmp_path)), encoding="utf-8")
     r = client.post("/api/start", json={"run_id": "genfile", "task_file": str(tf)})
+    assert r.status_code == 200
+    assert spawned["env"]["LOOPLAB_BACKEND"] == "llm"
+
+
+def test_start_task_file_read_parity_yaml_and_bom(tmp_path, monkeypatch):
+    """READ PARITY (review I3): the predicate reads the task file with the SAME loader the spawned
+    engine uses (appconfig.load_document) — a YAML unified config (`task:` block) and a BOM'd JSON,
+    both of which the engine happily runs, must ALSO get the backend default (a raw json.loads
+    silently skipped them, launching NoOpRepoDeveloper runs from valid files)."""
+    import yaml
+    client, spawned = _start_env(tmp_path, monkeypatch)
+    task = _repo_task(tmp_path)
+    # a YAML unified config: the task lives under the `task:` block, next to a settings: block
+    yf = tmp_path / "mytask.yaml"
+    yf.write_text(yaml.safe_dump({"task": task, "settings": {"max_nodes": 3}}), encoding="utf-8")
+    r = client.post("/api/start", json={"run_id": "genyaml", "task_file": str(yf)})
+    assert r.status_code == 200
+    assert spawned["env"]["LOOPLAB_BACKEND"] == "llm"
+    # a BOM'd JSON task file (Windows editors): utf-8-sig read succeeds where json.loads chokes
+    bf = tmp_path / "bomtask.json"
+    bf.write_text(json.dumps(task), encoding="utf-8-sig")
+    r = client.post("/api/start", json={"run_id": "genbom", "task_file": str(bf)})
     assert r.status_code == 200
     assert spawned["env"]["LOOPLAB_BACKEND"] == "llm"
 
@@ -206,10 +248,14 @@ def test_node_logs_invalid_operator_stages_fall_back_to_manifest(tmp_path):
     assert list(body["stages"]) == ["prep", "score"]        # manifest + protected score, no `train`
 
 
-def test_node_logs_snapshot_stage_names_memoized(tmp_path):
-    """The snapshot-derived stage list is memoized per run dir (F9b): task.snapshot.json is written
-    once and is immutable for the run's lifetime, so a later poll must serve the FIRST parse even if
-    the file changes on disk under the server (only the per-node manifest fallback stays per-poll)."""
+def test_node_logs_snapshot_rewrite_invalidates_stage_memo(tmp_path):
+    """The stage memo is keyed on the snapshot's stat identity (run dir + mtime_ns + size), so a
+    REWRITTEN task.snapshot.json — a DELETE + same-run-id relaunch, or a CLI re-entry of the run dir
+    rewriting the snapshot — self-invalidates and the NEW pipeline is served; the memo must not
+    outlive the run it was parsed from (F9b, review I1). The cached value is a TUPLE (a caller that
+    forgets to copy before mutating raises instead of corrupting the cache) and old versions of the
+    same run dir are pruned on insert (the dict stays bounded per run)."""
+    from looplab.serve.routers.runs import _OP_STAGE_NAMES
     rd, nd = _stage_run(tmp_path, {
         "stages": [{"name": "data_prep", "command": ["python", "prep.py"]},
                    {"name": "train", "command": ["python", "train.py"]}],
@@ -218,14 +264,18 @@ def test_node_logs_snapshot_stage_names_memoized(tmp_path):
     (nd / "train.log").write_text("loss=0.1\n")
     client = TestClient(make_app(tmp_path))
     assert list(client.get("/api/runs/demo/nodes/0/logs").json()["stages"]) == ["data_prep", "train"]
-    # rewrite the snapshot (never happens in a real run) — the memo hit keeps the original pipeline
+    entries = {k: v for k, v in _OP_STAGE_NAMES.items() if k[0] == str(rd)}
+    assert list(entries.values()) == [("data_prep", "train")]      # tuple cached, not a list
+    # rewrite the snapshot (same-id relaunch / CLI re-entry) — the new pipeline must be served
     (rd / "task.snapshot.json").write_text(json.dumps(
         {"goal": "g", "direction": "max", "repo": str(tmp_path / "repo"),
          "cmd": {"stages": [{"name": "other", "command": ["python", "o.py"]}],
                  "metric": {"reader": "stdout_json", "key": "recall"}}}), encoding="utf-8")
-    (nd / "other.log").write_text("must not appear\n")
+    (nd / "other.log").write_text("fresh pipeline\n")
     body = client.get("/api/runs/demo/nodes/0/logs").json()
-    assert list(body["stages"]) == ["data_prep", "train"] and "other" not in body["stages"]
+    assert list(body["stages"]) == ["other"] and "train" not in body["stages"]
+    # the stale entry for the old snapshot version was pruned — one bounded entry per run dir
+    assert [v for k, v in _OP_STAGE_NAMES.items() if k[0] == str(rd)] == [("other",)]
 
 
 def test_node_logs_manifest_fallback_stays_per_poll(tmp_path):

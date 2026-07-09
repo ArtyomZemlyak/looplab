@@ -4,7 +4,12 @@ A long command (a full pytest, a training run, a build) shouldn't block the chat
 the process detached, streaming its combined stdout+stderr to a log file; `read()` returns only the
 NEW output since the last read (a byte cursor) plus the live/exit status, so a later turn can poll it.
 One bounded chunk per read (backpressure): the cursor advances ONLY by what was returned, so output
-past the budget is delivered by the NEXT poll instead of being consumed and truncated away. The
+past the budget is delivered by the NEXT poll instead of being consumed and truncated away. Each poll
+is an INCREMENTAL seek-read (open, seek(cursor), read one chunk) — never a whole-log `read_bytes()`,
+whose per-poll cost grew with the log. The unread backlog is BOUNDED: when a chatty child outruns the
+polls by more than `_BACKLOG_CAP` bytes, the cursor jumps forward and the chunk STARTS with an explicit
+'…(N bytes of older output skipped — full log: <path>)…' note (honest truncation — the model is told
+what was dropped and where the full log lives) instead of doomed catch-up polls over megabytes. The
 manager is process-global so tasks survive across turns within the server.
 
 Env is scrubbed of secret-looking vars (same rule as sandbox._run_argv) so a background process can't
@@ -21,7 +26,8 @@ import threading
 from pathlib import Path
 
 from looplab.runtime.sandbox import SECRET_ENV
-from looplab.tools._base import RESULT_CAP   # the agent loop's per-result cap (tools/_base.py)
+from looplab.core.context_budget import RESULT_CAP   # the agent loop's per-result cap (core home —
+# runtime must not import tools/: tools sits ABOVE runtime and already imports back into it)
 
 # Per-poll chunk budget. The old 8000 was DOUBLE the loop's result cap: the loop cut the reply's tail
 # while the cursor had already advanced past the WHOLE log — mid-log output was consumed and
@@ -29,6 +35,12 @@ from looplab.tools._base import RESULT_CAP   # the agent loop's per-result cap (
 # under the cap (headroom for the shell tool's status head + '(more output pending)' note) and let
 # the cursor backpressure deliver the rest on the next poll.
 _MAX_READ = RESULT_CAP - 400
+
+# Unread-backlog bound. Without one, a chatty child (a verbose training loop) outruns the ~4KB polls
+# without limit and the model faces megabytes of doomed catch-up reads. When the backlog exceeds this,
+# `read()` advances the cursor to the last _BACKLOG_CAP bytes and PREPENDS an explicit skip note
+# (honest truncation: say what was dropped and where the full log lives — never drop silently).
+_BACKLOG_CAP = 262_144
 
 
 def _child_env(argv) -> dict:
@@ -83,29 +95,49 @@ class BackgroundManager:
     def read(self, tid: str) -> dict:
         with self._lock:
             t = self._tasks.get(tid)
-        if not t:
-            return {"ok": False, "error": f"no such background task {tid!r}"}
-        try:
-            data = t["log"].read_bytes()
-        except OSError:
-            data = b""
-        new = data[t["cursor"]:]
-        chunk = new[:_MAX_READ]
-        if len(chunk) < len(new):
-            # Don't split a multi-byte UTF-8 char at the budget edge: back up over the (≤3)
-            # continuation bytes and the lead byte so the next poll re-reads the whole char (both
-            # halves would otherwise decode to U+FFFD). Bounded strip — arbitrary binary output can't
-            # walk the chunk empty and stall the cursor.
-            for _ in range(3):
-                if chunk and (chunk[-1] & 0xC0) == 0x80:
+            if not t:
+                return {"ok": False, "error": f"no such background task {tid!r}"}
+            # The WHOLE cursor-read → chunk-slice → cursor-advance sequence runs under the lock: two
+            # concurrent polls that both read the cursor, then both `cursor += len(chunk)`, would
+            # jointly advance it past a chunk only ONE of them returned — output permanently skipped
+            # (the pre-incremental absolute assignment was race-benign; `+=` is not). The file read
+            # itself is bounded (one seek + ≤ _MAX_READ+4 bytes), so holding the lock across it is fine.
+            skip_note = ""
+            try:
+                size = os.stat(t["log"]).st_size
+            except OSError:
+                size = t["cursor"]
+            if size - t["cursor"] > _BACKLOG_CAP:
+                # Bounded backlog: jump the cursor to the newest _BACKLOG_CAP bytes and SAY SO in the
+                # chunk (honest truncation) — the older output stays recoverable in the log file.
+                skipped = size - t["cursor"] - _BACKLOG_CAP
+                t["cursor"] = size - _BACKLOG_CAP
+                skip_note = f"…({skipped} bytes of older output skipped — full log: {t['log']})…\n"
+            try:
+                # Incremental seek-read: only the next chunk, never the whole log. +4 bytes of slack
+                # so a chunk that exactly fills the budget is distinguishable from one that was cut
+                # (the UTF-8 boundary strip below keys on `len(chunk) < len(new)`).
+                with open(t["log"], "rb") as lf:
+                    lf.seek(t["cursor"])
+                    new = lf.read(_MAX_READ + 4)
+            except OSError:
+                new = b""
+            chunk = new[:_MAX_READ]
+            if len(chunk) < len(new):
+                # Don't split a multi-byte UTF-8 char at the budget edge: back up over the (≤3)
+                # continuation bytes and the lead byte so the next poll re-reads the whole char (both
+                # halves would otherwise decode to U+FFFD). Bounded strip — arbitrary binary output can't
+                # walk the chunk empty and stall the cursor.
+                for _ in range(3):
+                    if chunk and (chunk[-1] & 0xC0) == 0x80:
+                        chunk = chunk[:-1]
+                if chunk and chunk[-1] >= 0xC0:
                     chunk = chunk[:-1]
-            if chunk and chunk[-1] >= 0xC0:
-                chunk = chunk[:-1]
-        # Advance the cursor ONLY by what we return (backpressure): the next poll continues exactly
-        # where this reply ended, so nothing past the budget is consumed-then-truncated away.
-        t["cursor"] += len(chunk)
-        pending = len(new) - len(chunk)
-        text = chunk.decode("utf-8", "replace")
+            # Advance the cursor ONLY by what we return (backpressure): the next poll continues exactly
+            # where this reply ended, so nothing past the budget is consumed-then-truncated away.
+            t["cursor"] += len(chunk)
+            pending = max(0, size - t["cursor"])
+            text = skip_note + chunk.decode("utf-8", "replace")
         self._reap(t)
         rc = t["proc"].poll()
         return {"ok": True, "task_id": tid, "cmd": t["cmd"],

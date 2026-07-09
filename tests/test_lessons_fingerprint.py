@@ -166,6 +166,39 @@ def test_merge_prompt_opts_unwraps_researcher_chain():
     assert LessonMemory(Bare())._merge_prompt_opts() == (None, "tool_call")
 
 
+def test_merge_prompt_opts_reads_through_panel_and_unified_facade():
+    # H7: the serve PanelResearcher and the UnifiedAgent facade now expose read-through
+    # `parser`/`prompts` (panel also `client`), so a panel(unified(inner)) chain — where the walker
+    # sees only the OUTERMOST object — still yields the inner researcher's configured values instead
+    # of silently falling back to the (None, "tool_call") defaults.
+    from looplab.agents.unified_agent import UnifiedAgent
+    from looplab.engine.lessons import LessonMemory
+    from looplab.serve.panel import PanelResearcher
+
+    class Inner:
+        parser = "json"
+        prompts = None
+        client = None
+        bounds = None
+        space_hint = ""
+
+        def propose(self, state, parent):
+            return None
+
+    class Dev:
+        def implement(self, idea):
+            return "code"
+
+    unified = UnifiedAgent(researcher=Inner(), developer=Dev(), prompts="STORE")
+    outer = PanelResearcher(unified, k=2)
+
+    class Eng:
+        researcher = outer
+        developer = None
+
+    assert LessonMemory(Eng())._merge_prompt_opts() == ("STORE", "json")
+
+
 def test_consolidate_lessons_threads_prompts_and_parser(monkeypatch):
     # The parser/prompts kwargs must survive consolidate_lessons -> _agentic_merge_lessons ->
     # hybrid_merge.consolidate (where they configure the agent adjudication call).

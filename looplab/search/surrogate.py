@@ -14,8 +14,26 @@ import math
 import random
 from typing import Optional
 
-from looplab.agents.roles import RESEARCHER_HINT_ATTRS
+from looplab.agents.roles import forward_hints
 from looplab.core.models import Idea, Node, RunState
+
+
+def _fallback_telemetry(name: str) -> property:
+    """A read/write property delegating a predictive-telemetry attr to `self.fallback`. The engine's
+    `_emit_role_telemetry` getattrs these off the OUTERMOST researcher — which `_ensure_surrogate`
+    can make THIS wrapper mid-run, over a `ForesightPanelResearcher` fallback — and a missing attr
+    here silently dropped the panel's `hypothesis_ranked` / `foresight_selected` audit events. The
+    setter delegates too: the engine CONSUMES a pick by setattr-ing None back onto the same handle.
+    Deliberately per-attr properties, NOT a generic `__getattr__`: the cli/engine foresight wiring
+    probes `getattr(researcher, "client", None)` and must keep falling through to None on a bare
+    surrogate wrapper (a catch-all delegate would surface the fallback's client and flip that gate)."""
+    def _get(self):
+        return getattr(self.fallback, name, None)
+
+    def _set(self, value):
+        if self.fallback is not None:
+            setattr(self.fallback, name, value)
+    return property(_get, _set)
 
 
 class SurrogateResearcher:
@@ -33,6 +51,12 @@ class SurrogateResearcher:
     @property
     def space_hint(self) -> str:
         return getattr(self.fallback, "space_hint", "")
+
+    # Outbound predictive telemetry reads (and consume-writes) through to the wrapped fallback —
+    # see _fallback_telemetry for why these are explicit properties and not a generic __getattr__.
+    last_hyp_priority = _fallback_telemetry("last_hyp_priority")
+    last_foresight = _fallback_telemetry("last_foresight")
+    last_foresight_pick = _fallback_telemetry("last_foresight_pick")
 
     def _history(self, state: RunState) -> list[tuple[dict, float]]:
         hist = []
@@ -59,15 +83,11 @@ class SurrogateResearcher:
         return pred, nearest
 
     def propose(self, state: RunState, parent: Optional[Node]) -> Idea:
-        # P2 delivery contract (roles.py::RESEARCHER_HINT_ATTRS): the engine setattrs ephemeral
-        # hints on the OUTERMOST active researcher — which may be THIS wrapper — so mirror the
-        # registry (plus the non-hint `track_hypotheses` knob) onto the fallback before any
-        # delegation, the same hasattr-guarded pattern as `UnifiedAgent.propose`. Without this the
-        # surrogate wrapper silently dropped every engine hint on the bootstrap/non-numeric path.
+        # P2 delivery contract: the engine setattrs ephemeral hints on the OUTERMOST active
+        # researcher — which may be THIS wrapper — so mirror them onto the fallback before any
+        # delegation (roles.forward_hints owns the registry + `track_hypotheses` rule).
         if self.fallback is not None:
-            for attr in (*RESEARCHER_HINT_ATTRS, "track_hypotheses"):
-                if hasattr(self, attr):
-                    setattr(self.fallback, attr, getattr(self, attr))
+            forward_hints(self, self.fallback)
         hist = self._history(state)
         if not self.bounds or len(hist) < self.warmup:
             if self.fallback is not None:                 # bootstrap / non-numeric -> delegate

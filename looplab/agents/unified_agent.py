@@ -20,7 +20,7 @@ from __future__ import annotations
 from typing import Optional
 
 from looplab.agents.agent import drive_tool_loop
-from looplab.agents.roles import RESEARCHER_HINT_ATTRS, WrapsDeveloper
+from looplab.agents.roles import WrapsDeveloper, forward_hints
 from looplab.core.llm import BudgetExceeded
 from looplab.core.models import Idea, Node, RunState
 from looplab.core.prompts import render
@@ -82,13 +82,19 @@ class UnifiedAgent(WrapsDeveloper):
         self.last_deleted: list = []
 
     # ----------------------------------------------------------- Researcher
+    @property
+    def parser(self):
+        # Read-through to the internal researcher's configured structured-output parser (mirroring
+        # the `prompts` wiring above): chain-walkers like engine/lessons.py::_merge_prompt_opts
+        # getattr `parser` off the ACTIVE researcher — this facade in unified mode — and a missing
+        # attr here silently fell back to the "tool_call" default, shadowing the run's llm_parser.
+        return getattr(self.researcher, "parser", None)
+
     def propose(self, state: RunState, parent: Optional[Node]) -> Idea:
         # The engine sets ephemeral hints via `setattr(self.researcher, ...)` where self.researcher
-        # is THIS agent; forward them to the internal researcher that actually reads them.
-        # `track_hypotheses` rides along: not an engine hint, but likewise poked onto the facade.
-        for attr in (*RESEARCHER_HINT_ATTRS, "track_hypotheses"):
-            if hasattr(self, attr):
-                setattr(self.researcher, attr, getattr(self, attr))
+        # is THIS agent; forward them (P2 — roles.forward_hints owns the rule) to the internal
+        # researcher that actually reads them.
+        forward_hints(self, self.researcher)
         return self.researcher.propose(state, parent)
 
     # ----------------------------------------------------------- Developer

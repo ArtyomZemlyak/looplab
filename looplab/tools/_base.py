@@ -21,8 +21,9 @@ from typing import Optional, Protocol
 # marker. Providers must derive their own page/tail budgets FROM this constant (cap minus their
 # header/marker overhead) instead of hard-coding free-standing ~4000s — so the loop cap and every
 # provider budget move together, and a provider's own honest truncation (not the loop's blunt cut)
-# is what decides which content is dropped.
-RESULT_CAP = 4000
+# is what decides which content is dropped. Canonical home: core/context_budget.py (runtime/ sits
+# BELOW tools/ in the layering and needs it too); re-exported here for the providers.
+from looplab.core.context_budget import RESULT_CAP  # noqa: F401  (re-export, see comment above)
 
 
 def fn_spec(name: str, description: str, props: dict, required: Optional[list] = None) -> dict:

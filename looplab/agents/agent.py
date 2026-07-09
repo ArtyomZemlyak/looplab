@@ -98,22 +98,24 @@ _PLAN_TOOL_NAME = "update_plan"
 # budget move together. When it actually truncates, an EXPLICIT marker replaces the tail (P3,
 # docs/PROMPT_REVIEW.md): the silent head-cut destroyed every paginating tool's resume pointer and
 # left the model acting on code it never saw. `{n}` = exact number of characters cut.
-# `_RESULT_CAP` stays as the module-level alias tests/readers reference.
-_RESULT_CAP = RESULT_CAP
 _TRUNC_NOTE = ("\n…[truncated by the tool-result cap — {n} chars omitted; "
                "re-request a narrower range]")
 
-# Appended to the 3rd+ EXACT repeat of a (tool, canonical-args) call within ONE loop invocation.
-# The G2 read-dedup removal (P3 — see the always-execute comment in drive_tool_loop) left a B1 gap:
-# a 3+-call read ROUND-ROBIN (A B C A B C …) never trips the StuckDetector, which only catches 1-
-# and 2-cycles. No caching, no suppression — the repeated call still fully executes and returns
-# fresh, complete content (the operator's always-re-read decision stands); we only TELL the model
-# it is repeating itself so it can stop on its own. `{k}` = how many times this exact call has run.
-_REPEAT_NOTE = ("\n(note: this exact call has now run {k}× this phase — the result is identical "
-                "unless a write changed it)")
+# Appended to the 3rd+ consecutive IDENTICAL-RESULT repeat of an exact (tool, canonical-args) call
+# within ONE loop invocation. The G2 read-dedup removal (P3 — see the always-execute comment in
+# drive_tool_loop) left a B1 gap: a 3+-call read ROUND-ROBIN (A B C A B C …) never trips the
+# StuckDetector, which only catches 1- and 2-cycles. No caching, no suppression — the repeated call
+# still fully executes and returns fresh, complete content (the operator's always-re-read decision
+# stands); we only TELL the model it is repeating itself so it can stop on its own. Keyed on the
+# RESULT too, not just the call: a cursor tool (read_output) legitimately repeats the same args and
+# returns NEW output each poll — a call-count-only note ('the result is identical unless a write
+# changed it') was FALSE there and contradicted the tool's own '(more output pending)' marker. Now
+# the note fires only when the new result is byte-identical to the previous one for that call, so
+# it is always true. `{k}` = length of the identical-result streak.
+_REPEAT_NOTE = ("\n(note: this exact call has now run {k}× this phase with an IDENTICAL result)")
 
 
-def _cap_tool_result(result: str, cap: int = _RESULT_CAP) -> str:
+def _cap_tool_result(result: str, cap: int = RESULT_CAP) -> str:
     """Bound a tool result to `cap` chars, appending `_TRUNC_NOTE` (inside the cap) when it actually
     truncates — so the model KNOWS the reply is partial and can re-request a narrower range instead
     of trusting a silently amputated page. Idempotent: an already-capped string passes through, so
@@ -260,12 +262,14 @@ def drive_tool_loop(client, tools, messages: list, emit_spec: dict, *,
     if stuck_detection:                 # a FRESH detector per call — never share state across loops
         from looplab.agents.stuck import StuckDetector
         stuck = StuckDetector(repeat_threshold=stuck_repeat, alternate_threshold=stuck_alternate)
-    # STATELESS per-loop repeat ledger (see _REPEAT_NOTE): exact (tool, canonical-args) call counts
-    # for THIS invocation only — a fresh dict per call, like the StuckDetector, so nothing leaks
-    # across loops or phases. `_canonical` is the detector's own args canonicalizer, reused so the
-    # two repeat notions can't drift.
+    # STATELESS per-loop repeat ledger (see _REPEAT_NOTE): for each exact (tool, canonical-args)
+    # call, the previous CAPPED result and the length of the current identical-result streak — for
+    # THIS invocation only, a fresh dict per call, like the StuckDetector, so nothing leaks across
+    # loops or phases. `_canonical` is the detector's own args canonicalizer, reused so the two
+    # repeat notions can't drift. The full previous result string is kept (not a hash): it is
+    # already capped at RESULT_CAP, and byte-identity must be exact — no collision caveat.
     from looplab.agents.stuck import _canonical
-    repeat_counts: dict[str, int] = {}
+    repeat_state: dict[str, tuple[str, int]] = {}
     tool_specs = ((tools.specs() if tools is not None else []) + [emit_spec])
     if self_plan:
         tool_specs = tool_specs + [_plan_spec()]
@@ -416,13 +420,17 @@ def drive_tool_loop(client, tools, messages: list, emit_spec: dict, *,
                 # bites (P3) — so the provenance hook receives EXACTLY what the tool message below
                 # will carry (a single expression, not two kept-in-sync copies).
                 result = _cap_tool_result(str(result))
-                # Tag the 3rd+ exact repeat of this (tool, canonical-args) call (see _REPEAT_NOTE:
-                # the round-robin gap the StuckDetector's 1-/2-cycle window can't cover). The note
-                # rides OUTSIDE the cap so it can never be truncated away.
+                # Tag the 3rd+ IDENTICAL-RESULT repeat of this (tool, canonical-args) call (see
+                # _REPEAT_NOTE: the round-robin gap the StuckDetector's 1-/2-cycle window can't
+                # cover; a changed result — a cursor poll's new chunk, a post-write re-read —
+                # resets the streak and never gets the note). The note rides OUTSIDE the cap so it
+                # can never be truncated away.
                 sig = f"{name}({_canonical(args)})"
-                repeat_counts[sig] = repeat_counts.get(sig, 0) + 1
-                if repeat_counts[sig] >= 3:
-                    repeat_note = _REPEAT_NOTE.format(k=repeat_counts[sig])
+                prev, streak = repeat_state.get(sig, (None, 0))
+                streak = streak + 1 if result == prev else 1
+                repeat_state[sig] = (result, streak)
+                if streak >= 3:
+                    repeat_note = _REPEAT_NOTE.format(k=streak)
                 if on_tool_result is not None:      # provenance hook: exceptions propagate
                     on_tool_result(name, args, result + repeat_note)
             result = _cap_tool_result(str(result))   # idempotent final bound (cancel/plan stubs too)

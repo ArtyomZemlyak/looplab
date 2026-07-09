@@ -308,6 +308,27 @@ def test_propose_prioritizes_board_and_ranks_ideas():
     assert out.hypothesis == "h a"                    # idea ranking still picks the predicted best
 
 
+def test_surrogate_wrapper_reads_through_foresight_telemetry():
+    # H8: `_ensure_surrogate` can make SurrogateResearcher the OUTERMOST researcher mid-run, over a
+    # ForesightPanelResearcher fallback. The engine's `_emit_role_telemetry` getattrs the predictive
+    # telemetry off (and consume-setattrs None back onto) that outermost handle — the read/write
+    # properties must delegate BOTH ways to the fallback, while `client` keeps falling through to
+    # None (no generic __getattr__: the cli foresight gate probes it on a bare surrogate wrapper).
+    from looplab.search.surrogate import SurrogateResearcher
+
+    panel = ForesightPanelResearcher(_SeqResearcher([Idea(operator="draft")], _RankClient([0])), k=2)
+    outer = SurrogateResearcher({}, fallback=panel)
+    panel.last_hyp_priority = {"order": ["a"], "n": 1}
+    panel.last_foresight = {"kind": "idea", "chosen": 0}
+    assert outer.last_hyp_priority == {"order": ["a"], "n": 1}     # reads reach the panel's telemetry
+    assert outer.last_foresight == {"kind": "idea", "chosen": 0}
+    assert outer.last_foresight_pick is None                       # absent on the fallback -> None
+    outer.last_hyp_priority = None                                 # the engine's consume path
+    outer.last_foresight = None
+    assert panel.last_hyp_priority is None and panel.last_foresight is None
+    assert getattr(outer, "client", None) is None                  # the cli gate still falls through
+
+
 # --------------------------------------------------------------------------- #
 # fold: hypothesis_ranked -> RunState.hypothesis_ranking + Hypothesis.priority
 # --------------------------------------------------------------------------- #
