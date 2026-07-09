@@ -94,7 +94,7 @@ stack(660,300,DY,[
 ]);
 // EVALUATE
 stack(1000,320,DY,[
- {id:"e_box",h:66,t:"Sandbox tiers",tag:"□",c:C.ev,sub:["trusted_local subprocess | untrusted Docker --network none","data mounts bound :ro unless edit:true"]},
+ {id:"e_box",h:66,t:"Sandbox tiers",tag:"□",c:C.ev,sub:["trusted_local subprocess | untrusted Docker --network none","data mounts bound :ro (editable data must be a mount:false copy)"]},
  {id:"e_stg",h:72,t:"Stage pipeline",tag:"□",c:C.ev,sub:["stages phase / cmd.stages → …prep → train → protected score (cmd)","one shared validator · %params% per stage · stage-scoped re-run"]},
  {id:"e_seed",h:60,t:"Seeds & holdout",tag:"□",c:C.ev,sub:["search seed 0 · n_seeds 3 · holdout 25% reserved (Knuth hash)"]},
  {id:"e_ir",h:82,t:"Inline repair",tag:"□",c:C.ev,sub:["reasons crash/timeout/oom","abandon at 4 identical errors (norm. signature)"]},
@@ -153,7 +153,7 @@ const TY=1360;
 box("mA",40,TY,300,72,"A · Hypothesis board","in-run",C.mem,["state.hypotheses — derived each fold"]);
 box("mB",356,TY,300,72,"B · Experiment memory","in-run",C.mem,["state.nodes + digest (the search tree)"]);
 box("mC",672,TY,320,72,"C · Cross-run lessons","cross-run",C.mem,["~/.looplab/memory/lessons.jsonl"]);
-box("mD",1008,TY,330,72,"D · Knowledge base · Memora","cross-run",C.mem,["~/.looplab/knowledge · cases.jsonl · abstraction+anchors"]);
+box("mD",1008,TY,330,72,"D · Knowledge base · Memora","cross-run",C.mem,["~/.looplab/knowledge · memory/cases.jsonl · abstraction+anchors"]);
 box("mE",1354,TY,300,72,"E · Skills & meta-notes","cross-run",C.mem,["memory/skills · meta_notes.jsonl"]);
 box("sim",1670,TY,470,72,"Three kinds of ‘same’","",C.sig,["exact hash → hypotheses · embedding → novelty 0.92 / Memora 0.86","hybrid+agent → lessons & board merges"]);
 

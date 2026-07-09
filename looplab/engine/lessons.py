@@ -153,6 +153,16 @@ class LessonMemory:
         each stamped with a task fingerprint (M2) so a later SIMILAR task can retrieve them."""
         if not (self._e._reflection_priors and self._e.memory_dir):
             return
+        # Run-end reflection must run at MOST ONCE per run: it appends to cross-run memory
+        # (meta_notes.jsonl + lessons.jsonl) and re-spends LLM calls (the causal note + M3 lessons).
+        # A reopened run (EV_RESUME + EV_BUDGET_EXTEND) re-finishes and re-enters finalize, so without
+        # this gate a second pass would double-append a run's hypothesis/failure lessons — which
+        # `consolidate_lessons` groups by (statement, task_id) and sums, inflating `evidence_count` so
+        # one run reads as "verified on 2 runs". `reflection_note` is the end-of-reflection marker
+        # (a diagnostic sidecar the fold ignores), emitted unconditionally at the tail of this method;
+        # its presence means we already reflected. Mirrors the M6 comparative-pair ledger's own guard.
+        if any(e.type == EV_REFLECTION_NOTE for e in self._e.store.read_all()):
+            return
         best = final.best()
         base = Path(self._e.memory_dir)
         base.mkdir(parents=True, exist_ok=True)

@@ -390,10 +390,13 @@ class SubprocessSandbox:
         rc, out, err, to = _run_argv(
             [self.python, "solution.py"],  # by name, relative to cwd -> no path doubling
             str(wd), timeout, env, self.max_output_bytes, cancel)
+        # Discard metric/trials/extras from a TIMED-OUT run: a process killed at the deadline may have
+        # printed a partial/misleading metric line before hanging. Matches DockerSandbox.run and
+        # command_eval.run_command_eval, which both null these out on timeout.
         return RunResult(exit_code=rc, stdout=out, stderr=err,
-                         metric=_parse_metric(out), timed_out=to,
-                         extra_metrics=(json_line_extras(out) or None) if not to else None,
-                         trials=json_line_trials(out))
+                         metric=(None if to else _parse_metric(out)), timed_out=to,
+                         extra_metrics=(None if to else (json_line_extras(out) or None)),
+                         trials=(None if to else json_line_trials(out)))
 
 
 class DockerSandbox:

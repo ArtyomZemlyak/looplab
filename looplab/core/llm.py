@@ -46,7 +46,11 @@ from looplab.core.errors import BudgetExceeded, LLMError  # noqa: F401
 from looplab.core.parse import split_think  # noqa: F401  (also a re-export)
 
 # Named retry/backoff constants (previously inline magic numbers).
-BACKOFF_CAP_S = 30.0                 # ceiling on any single exponential-backoff sleep
+BACKOFF_CAP_S = 30.0                 # ceiling on any single SELF-CHOSEN exponential-backoff sleep
+# A SERVER-supplied Retry-After is a directive, not our own backoff, so it gets its own (larger)
+# ceiling: honor a legit `Retry-After: 60` instead of silently cutting it to the 30s backoff cap,
+# while still bounding a pathological far-future HTTP-date.
+RETRY_AFTER_CAP_S = 120.0
 STREAM_STALL_DEGRADE_AFTER = 2       # stream stalls before this client goes non-streaming for good
 # Default first-byte (response-headers) window, seconds. The single source: config.py's
 # `Settings.llm_header_timeout` imports this constant as its field default.
@@ -944,7 +948,10 @@ class OpenAICompatibleClient:
             except (openai.RateLimitError, openai.InternalServerError) as e:   # 429 / 5xx
                 if attempt < self._max_retries:
                     ra = _retry_after_seconds(_retry_after_of(e))
-                    time.sleep(min(ra if ra is not None else _backoff(attempt), BACKOFF_CAP_S))
+                    # Honor a server Retry-After up to RETRY_AFTER_CAP_S (a directive); otherwise use
+                    # our own exponential backoff (already ≤ BACKOFF_CAP_S). Capping `ra` at the 30s
+                    # backoff ceiling would re-issue too early and re-trip the same 429.
+                    time.sleep(min(ra, RETRY_AFTER_CAP_S) if ra is not None else _backoff(attempt))
                     continue
                 raise LLMError(f"LLM request to {self.base_url} failed: {e}") from e
             except openai.APIConnectionError as e:

@@ -194,7 +194,14 @@ def _thread_turns(spans_sorted: list[dict], by_id: dict) -> list[dict]:
             # no LLM turns inside, but the reader wants it as a block in the node's life story
             # ("… Developer · implement, Train, Evaluate …"). Rendered via the tool turn shape.
             rc, to = a.get("exit_code"), a.get("timed_out")
-            status = "timeout" if to else ("ok" if not rc else f"exit {rc}")
+            # `not rc` was truthy for BOTH exit 0 and a MISSING code — a stage span closed by an
+            # exception before its exit_code was recorded (status "ERROR", rc None) then rendered "ok".
+            if to:
+                status = "timeout"
+            elif rc is None:
+                status = "error" if s.get("status") == "ERROR" else "?"
+            else:
+                status = "ok" if rc == 0 else f"exit {rc}"
             secs = s.get("duration_s")
             turns.append({"type": "tool", "name": str(a.get("stage")),
                           "input": "",

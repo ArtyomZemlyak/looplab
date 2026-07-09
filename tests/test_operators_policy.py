@@ -131,3 +131,17 @@ def test_mcts_ignores_infeasible_descendant_metric():
     # node 0's only high score is its infeasible child (99) — it must NOT be valued by it, so the
     # feasible node 2 (metric 2 > 1) is the better-valued expansion target.
     assert act and act[0]["kind"] == "improve" and act[0]["parent_id"] == 2
+
+
+def test_mcts_reward_monotone_for_signed_min_metrics():
+    # min-direction reward must stay monotone in the metric even when values are NEGATIVE: a subtree
+    # whose best is -5 (excellent for a min task) must outrank one whose best is +0.5 (poor). The old
+    # `1/(1+abs(value))` inverted this — abs mapped -5 -> 0.167 BELOW +0.5 -> 0.667.
+    st = RunState(direction="min")
+    poor = Node(id=0, operator="draft", idea=Idea(operator="draft"), metric=0.5,
+                status=NodeStatus.evaluated, feasible=True)
+    great = Node(id=1, operator="draft", idea=Idea(operator="draft"), metric=-5.0,
+                 status=NodeStatus.evaluated, feasible=True)
+    st.nodes = {0: poor, 1: great}
+    act = MCTSPolicy(n_seeds=2, max_nodes=10).next_actions(st)
+    assert act and act[0]["kind"] == "improve" and act[0]["parent_id"] == 1

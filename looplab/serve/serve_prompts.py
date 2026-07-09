@@ -60,8 +60,10 @@ def genesis_system(kinds: list, key_defaults: dict, cat_lines: str) -> str:
         "- REPO data: WHENEVER the user says where the data is, mount it — add "
         '"dataset":{"<name>":"<abs path>"} (appears at ./<name> in the eval workdir; ~/$HOME expand) '
         "and reference it by that relative path. A value may also be an object {path, mount(read-only "
-        "symlink vs copy-in), edit(default no), copy_modify, preprocess, extend} for per-source "
-        "permissions — default is read-only original with copy/preprocess/extend allowed. Read-only "
+        "symlink vs copy-in), edit, copy_modify, preprocess, extend} for per-source permissions — "
+        "default is read-only original with copy/preprocess/extend allowed. To let the agent MODIFY the "
+        "data, set mount:false (a writable per-node copy); a mounted original is read-only, so "
+        "mount:true+edit:true is rejected. Read-only "
         'runtime deps go in "references":[{"name":..,"path":..,"mount":true}]. Never drop a data path.\n'
         "- REPO with no entry script yet, OR a scorer but no trainer: `cmd` is a CONTRACT (the command "
         "that runs + reads the metric) and is the SCORING step, not the trainer — TRAINING is a separate "

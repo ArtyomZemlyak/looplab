@@ -203,6 +203,23 @@ def test_declare_stages_rejects_a_nonexistent_absolute_data_path():
         os.remove(p)
 
 
+def test_declare_stages_allows_a_pipeline_produced_intermediate_path():
+    # A valid data_prep->train pipeline: prep WRITES /scratch/prep/train.npy (--out), train READS it.
+    # Neither exists at declare time, but the read must NOT be flagged "missing" — it's produced by an
+    # earlier stage. Only genuinely-hallucinated EXTERNAL inputs (never produced) are bounced.
+    t = _writetools()
+    ok = t.execute("declare_stages", {"stages": [
+        {"name": "prep", "command": ["python", "prep.py", "--out", "/scratch/prep/train.npy"]},
+        {"name": "train", "command": ["python", "train.py", "--data", "/scratch/prep/train.npy"]}]})
+    assert ok.startswith("declared")
+    assert "looplab_stages.json" in t.files
+    # …but a stage reading a NON-produced, non-existent absolute path is still bounced.
+    t2 = _writetools()
+    bad = t2.execute("declare_stages", {"stages": [
+        {"name": "train", "command": ["python", "train.py", "--data", "/scratch/prep/train.npy"]}]})
+    assert bad.startswith("(refused") and "/scratch/prep/train.npy" in bad
+
+
 def test_declare_stages_works_under_restricted_surface():
     # mega-review fix: the manifest is TOOL-owned and validated, so it is gated on the PROTECT list
     # only — the legacy default surface ["**/*.py"] can never match a root .json, and a surface gate
@@ -387,6 +404,24 @@ def test_per_source_data_permissions(tmp_path):
     assert "protected" in wt.execute("write_file", {"path": "raw/x.csv", "content": "a"})       # non-edit refused
     assert "protected" in wt.execute("write_file", {"path": "raw/sub/y.csv", "content": "a"})   # nested refused
     assert "wrote" in wt.execute("write_file", {"path": "work/x.csv", "content": "a"})          # edit=true OK
+
+
+def test_mount_true_plus_edit_true_is_rejected(tmp_path):
+    # A mounted original is a read-only symlink: the agent's build-time writes to ./name escape the
+    # workdir and are dropped, so mount:true + edit:true would silently no-op. Reject it at
+    # construction so the boss re-authors with mount:false (a writable copy) for editable data.
+    from looplab.adapters.repo_task import DataSpec
+    with pytest.raises(Exception, match="mount.*edit|read-only mount|writable per-node"):
+        DataSpec(path="/d", mount=True, edit=True)
+    # the two valid intents still construct fine
+    assert DataSpec(path="/d", mount=True, edit=False).mount is True     # read-only mount
+    assert DataSpec(path="/d", mount=False, edit=True).edit is True      # writable per-node copy
+    # a whole task carrying the bad combo is rejected too (surfaces in validate_task / the New-Run flow)
+    repo = tmp_path / "r"; repo.mkdir()
+    with pytest.raises(Exception, match="mount.*edit|read-only mount|writable per-node"):
+        validate_task({"goal": "g", "direction": "max", "repo": str(repo),
+                       "cmd": {"command": ["python", "t.py"], "metric": {"reader": "stdout_json", "key": "r"}},
+                       "dataset": {"d": {"path": str(tmp_path), "mount": True, "edit": True}}})
 
 
 def test_docker_wrap_binds_data_sources_read_only(tmp_path):

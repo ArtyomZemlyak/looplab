@@ -204,8 +204,16 @@ def normalize_task(data: dict) -> dict:
             # "auto" reader == the agent writes the metric adapter -> the onboarding path. The command
             # becomes the onboard command; `eval` is left None until the onboarder ratifies.
             d.setdefault("onboard", True)
-            if ev.get("command") and not d.get("onboard_command"):
-                d["onboard_command"] = list(ev["command"])
+            # A string `command` here would `list(...)` into a per-CHARACTER argv (['p','y','t',…]).
+            # The non-auto path is guarded by EvalSpec validation, but this onboard fold sets eval=None
+            # and bypasses it — so reject a shell string exactly like the top-level `cmd` branch does.
+            _cmd = ev.get("command")
+            if isinstance(_cmd, str) and _cmd.strip():
+                raise ValueError(
+                    "`cmd.command` must be an argv list ([\"python\",\"test.py\"]), not a shell string: "
+                    f"{_cmd[:80]!r} — split it into argv items.")
+            if _cmd and not d.get("onboard_command"):
+                d["onboard_command"] = list(_cmd)
             if ev.get("timeout"):
                 d.setdefault("onboard_timeout", float(ev["timeout"]))
             d["eval"] = None
@@ -659,7 +667,9 @@ def make_roles(task: TaskAdapter, settings, run_dir=None):
         developer = BestOfNDeveloper(developer, n=settings.best_of_n,
                                      listwise=getattr(settings, "best_of_n_listwise", True),
                                      parser=getattr(settings, "llm_parser", "tool_call"),
-                                     foresight=getattr(settings, "foresight", True))
+                                     foresight=getattr(settings, "foresight", True),
+                                     direction=getattr(task, "direction", "min"),
+                                     goal=getattr(task, "goal", ""))
     # H3 per-role model presets: point the Researcher / Developer at their own model/endpoint when
     # configured (e.g. Developer on a strong coding model, Researcher on a fast breadth model).
     if settings.researcher_model or settings.researcher_base_url:

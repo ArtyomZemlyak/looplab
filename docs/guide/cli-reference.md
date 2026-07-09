@@ -136,6 +136,28 @@ The original run's settings are restored from `config.snapshot.json`, so run-onl
 
 ---
 
+## `stop`
+
+Freeze a run **without** finalizing it — no end-of-run report, lessons, or cost roll-up. A live
+engine breaks on its next loop iteration; the run stays resumable (`looplab resume`) or you can
+`finalize` it later.
+
+```bash
+looplab stop RUN_DIR
+```
+
+## `finalize`
+
+Stop a run **and** run the end-of-run wrap-up (report, cross-run lessons/case, cost roll-up,
+`tree.html`). Works whether the run is live or already `stop`ped, and is idempotent. If no engine is
+driving the run, `finalize` re-enters the loop itself to produce the wrap-up.
+
+```bash
+looplab finalize RUN_DIR
+```
+
+---
+
 ## `inspect`
 
 Print the resolved config snapshot and the run's best result.

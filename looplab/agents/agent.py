@@ -261,6 +261,11 @@ def drive_tool_loop(client, tools, messages: list, emit_spec: dict, *,
     # cache (shared across this node's phases via handoff_scope) so a file an earlier phase already read
     # isn't re-read here; falls back to a loop-local dict when no scope is active (aux loops, tests).
     read_seen: dict = _read_cache_ctx.get() if _read_cache_ctx.get() is not None else {}
+    # Keys populated by THIS loop (this phase). A hit on a key NOT in here is a CROSS-phase hit: the
+    # first result lives in an earlier phase's discarded `messages`, so the terse "use the earlier
+    # output" stub would point at something this phase can't see — we re-serve the cached content
+    # instead (see the hit branch below). A same-loop repeat keeps the token-saving stub.
+    local_dedup_keys: set = set()
     exhausted = False                    # ran out of turns/time (vs stalled/stuck/cancelled)
     turns = itertools.count() if max_turns is None or max_turns <= 0 else range(max_turns)
     for turn_idx in turns:
@@ -293,6 +298,7 @@ def drive_tool_loop(client, tools, messages: list, emit_spec: dict, *,
                 # earlier output") — the model could never recover them. Forget the cache so the
                 # next re-read executes for real.
                 read_seen.clear()
+                local_dedup_keys.clear()
         # C1: re-surface the agent's own plan periodically so a long loop can't drift off-goal. A
         # `user`-role reminder, not `system`: the plan is verbatim MODEL output (from update_plan
         # args), so a `system` reinjection would let content the model was steered into by injected
@@ -401,11 +407,22 @@ def drive_tool_loop(client, tools, messages: list, emit_spec: dict, *,
                 stuck_obs = None
                 if _dk is not None and _dk in read_seen:
                     stuck_obs = read_seen[_dk]
-                    _step(turn=turn_idx, tool=name, arg="(repeat suppressed)")
-                    result = (f"(already ran `{name}` with these exact args earlier (this phase or an "
-                              f"earlier one of this node) — result unchanged, not re-sent. Use the "
-                              f"earlier output; to learn more read a DIFFERENT file/range, else call "
-                              f"`{emit_name}` with your best idea.)")
+                    if _dk in local_dedup_keys:
+                        # SAME phase: the first result is still in `messages`, so a terse stub saves
+                        # tokens and the model can reuse the output it already has.
+                        _step(turn=turn_idx, tool=name, arg="(repeat suppressed)")
+                        result = (f"(already ran `{name}` with these exact args earlier this phase — "
+                                  f"result unchanged, not re-sent. Use the earlier output; to learn "
+                                  f"more read a DIFFERENT file/range, else call `{emit_name}`.)")
+                    else:
+                        # CROSS-phase hit (node-scoped cache): an EARLIER phase read this, but its
+                        # output is NOT in this phase's fresh `messages` (only the lossy handoff brief
+                        # is). Re-serve the cached CONTENT verbatim — otherwise the phase that was told
+                        # to read a file (e.g. implement editing what plan read) would edit blind. The
+                        # content is already in hand, so this costs nothing and re-reads no file.
+                        _step(turn=turn_idx, tool=name, arg="(cached from an earlier phase)")
+                        result = read_seen[_dk]
+                        local_dedup_keys.add(_dk)   # now present in THIS phase too -> stub on re-repeat
                     if on_tool_result is not None:
                         on_tool_result(name, args, result)
                 else:
@@ -425,11 +442,13 @@ def drive_tool_loop(client, tools, messages: list, emit_spec: dict, *,
                         # never a stale "already read" stub. Volatile READ-ONLY tools (git_status, polls)
                         # mutate nothing, so they neither dedup nor invalidate.
                         read_seen.clear()
+                        local_dedup_keys.clear()
                     # Cap once, up front, so the provenance hook receives EXACTLY what the tool message
                     # below will carry (a single expression, not two kept-in-sync copies).
                     result = str(result)[:4000]
                     if _dk is not None:               # remember the first result for dedup + stuck parity
                         read_seen[_dk] = result
+                        local_dedup_keys.add(_dk)     # populated by THIS phase -> a repeat here gets the stub
                     if on_tool_result is not None:      # provenance hook: exceptions propagate
                         on_tool_result(name, args, result)
             result = str(result)[:4000]
@@ -817,13 +836,19 @@ class ToolUsingResearcher:
                 "loss, data, training) if that's the stronger move. Consult knowledge if useful, then emit."},
         ]
         try:
+            # context_budget_chars can arrive via BOTH loop_opts (loop_opts_from_settings injects it so
+            # every loop — including the Developer's implement session — gets the configured budget) AND
+            # the explicit ctor kwarg. Collapse to ONE source, else run_phase() gets the keyword twice ->
+            # TypeError, caught below -> silent fallback: the agentic Researcher would be DEAD in the
+            # DEFAULT config (context_budget_chars is 1_000_000, so loop_opts always carries it).
+            opts = dict(self.loop_opts)
+            opts.setdefault("context_budget_chars", self.context_budget_chars)
             return run_phase(
                 self.client, self.tools, messages, self._emit_spec(),
                 label="Researcher·propose", next_label="the Developer (stages → plan → implement)",
-                max_turns=self.max_turns, context_budget_chars=self.context_budget_chars,
-                time_budget_s=self.time_budget_s,
+                max_turns=self.max_turns, time_budget_s=self.time_budget_s,
                 finalize=self._finalize, fallback=self._fallback,
-                validate=self._validate_emit, **self.loop_opts)
+                validate=self._validate_emit, **opts)
         except BudgetExceeded:      # hard budget stop -> propagate and end the run
             raise
         except Exception:  # noqa: BLE001 - a transport/endpoint failure (LLMError after retries) on
