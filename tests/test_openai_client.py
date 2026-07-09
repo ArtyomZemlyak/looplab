@@ -65,6 +65,36 @@ def test_text_fallback_strips_think(base_url):
     assert idea.operator == "draft" and idea.params == {"x": 1.0}
 
 
+def test_shutdown_pool_sockets_shuts_the_inflight_connection_socket():
+    # A wedged non-stream call leaves a worker thread blocked in recv() on the ACTIVE pool connection;
+    # _shutdown_pool_sockets socket.shutdown()s it so that recv returns and the thread EXITS (no
+    # lingering-daemon accumulation). Model the httpcore pool graph over a real socketpair and assert
+    # the live socket is shut (the peer's recv then sees EOF).
+    import socket as _socket
+    from looplab.core.llm import _shutdown_pool_sockets
+    s1, s2 = _socket.socketpair()
+    try:
+        ns = type("NS", (), {"get_extra_info": lambda self, k: (s1 if k == "socket" else None)})()
+        conn = type("C", (), {"_connection": type("I", (), {"_network_stream": ns})()})()
+        client = type("Cl", (), {"_transport": type("T", (), {"_pool": type("P", (), {"connections": [conn]})()})()})()
+        assert _shutdown_pool_sockets(client) == 1           # found + shut the one live socket
+        assert s2.recv(10) == b""                            # s1 was SHUT_RDWR → peer sees EOF
+    finally:
+        s1.close(); s2.close()
+
+
+def test_shutdown_pool_sockets_foreign_client_is_a_noop():
+    # A foreign/mock client (no ._transport._pool) or an empty pool → 0, never raises.
+    from looplab.core.llm import _shutdown_pool_sockets
+    assert _shutdown_pool_sockets(object()) == 0
+    import httpx as _hx
+    empty = _hx.Client(trust_env=False)
+    try:
+        assert _shutdown_pool_sockets(empty) == 0            # no requests made → no live connections
+    finally:
+        empty.close()
+
+
 # --- transport resilience (openai SDK): built on a mocked `_sdk_chat` seam. The live path drives
 # the openai SDK over httpx, so a stall/timeout/refused surfaces as an openai exception, not a
 # urllib one; these assert the retry / reasoning-drop / fail-fast / stall-degrade POLICY around it.

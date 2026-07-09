@@ -69,6 +69,34 @@ def _raw_socket(resp):
     return getattr(getattr(fp, "raw", None), "_sock", None) or getattr(fp, "_sock", None)
 
 
+def _shutdown_pool_sockets(http_client) -> int:
+    """socket.shutdown(SHUT_RDWR) every live connection socket in an httpx sync client's pool, and
+    return how many were shut. This forces a recv() WEDGED in the kernel — a trickling/half-dead
+    endpoint that httpx's read timeout can't catch (a byte keeps resetting the timer) — to return an
+    error, so a worker thread blocked inside `chat.completions.create` UNBLOCKS and EXITS instead of
+    lingering forever (over a long run those daemons accumulate). `client.close()` alone can't do this:
+    it never touches an in-flight connection's socket. Best-effort over httpcore internals (pool →
+    HTTPConnection._connection._network_stream → socket), mirroring the stream path's socket.shutdown()."""
+    import socket as _socket
+    try:
+        pool = http_client._transport._pool
+        conns = list(getattr(pool, "connections", []) or [])
+    except Exception:  # noqa: BLE001 — foreign/mock client or a changed httpcore layout: nothing to do
+        return 0
+    n = 0
+    for conn in conns:
+        try:
+            inner = getattr(conn, "_connection", None)
+            ns = getattr(inner, "_network_stream", None) or getattr(conn, "_network_stream", None)
+            sock = ns.get_extra_info("socket") if ns is not None else None
+            if sock is not None:
+                sock.shutdown(_socket.SHUT_RDWR)   # unblocks a recv() stuck in the kernel
+                n += 1
+        except Exception:  # noqa: BLE001 — an already-closed/foreign socket just skips
+            pass
+    return n
+
+
 # Substrings that mark an HTTP 400 as "this endpoint rejects our REASONING toggle" (e.g. a
 # litellm-proxied model returning UnsupportedParamsError for `reasoning_effort`) rather than a
 # genuine bad request — shared by `_post` and `complete_text_stream`.
@@ -730,12 +758,12 @@ class OpenAICompatibleClient:
         a proxy that TRICKLES the response body (a byte resets the read timer while the payload never
         completes — the keepalive pathology the stream idle-guard exists for, but there's no SSE loop
         to guard here). Run the blocking call in a worker thread; if it overruns the read+connect
-        budget, ABORT: close the httpx client (drops the pooled connection) + rebuild it, and raise
-        APITimeoutError so `_post` retries/degrades instead of hanging. This reliably unblocks the
-        CALLER (the wall-clock join is the guarantee); the worker thread may LINGER if the endpoint is
-        wedged mid-`recv`, because close() — unlike the stream path's socket.shutdown() — can't force a
-        kernel read to return (see `_stream_raw_socket`). It's daemon + bounded (~one per `_post` retry,
-        reclaimed when the server/OS finally drops the socket), so the run proceeds regardless."""
+        budget, ABORT: `socket.shutdown()` the in-flight connection (forces a recv() wedged in the
+        kernel to return — close() alone can't), close + rebuild the httpx client, and raise
+        APITimeoutError so `_post` retries/degrades instead of hanging. The wall-clock join guarantees
+        the CALLER unblocks, and the socket-shutdown guarantees the WORKER thread exits too (no lingering
+        daemons accumulating across a long run on a flaky endpoint — the pre-shutdown behaviour that
+        leaked ~one thread per wedged call)."""
         box: dict = {}
 
         def _call():
@@ -748,11 +776,15 @@ class OpenAICompatibleClient:
         th.start()
         th.join(self.timeout + self.header_timeout + 10)
         if th.is_alive():
+            # Force the wedged recv() to return so the worker thread EXITS (doesn't linger): shutdown the
+            # in-flight connection's socket BEFORE close() — close() can't interrupt a kernel read, only
+            # socket.shutdown() can. Then close()+rebuild the client for the next call.
+            _shutdown_pool_sockets(self._sdk._client)
             try:
                 self._sdk._client.close()
             except Exception:  # noqa: BLE001
                 pass
-            th.join(5)
+            th.join(5)     # after the shutdown the recv errors out, so the daemon is reaped here
             self._sdk = self._new_sdk()
             raise openai.APITimeoutError(request=httpx.Request("POST", self.base_url))
         if "exc" in box:
