@@ -2198,6 +2198,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin):
         with self.tracer.span("create_node", new_trace=True, node_id=node.id, operator=node.operator):
             self.store.append(EV_NODE_BUILDING,
                               {"node_id": node.id, "operator": node.operator, "parent_ids": parents})
+            self._bind_developer(state, parent)   # D-context: run tools see the live DAG on a re-run too
             # "propose" re-proposes (draft/improve/debug); a merge node has no single proposable idea
             # (it's an ensemble of parents), so a propose-reset there degrades to re-implement.
             if stage == "propose" and node.operator != "merge":
@@ -2271,6 +2272,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin):
                     # An injected experiment usually BUILDS ON its parent (a human picked it as the
                     # base) — hand the parent's solution to a parent-aware developer.
                     _pnode = state.nodes.get(parents[0]) if parents else None
+                    self._bind_developer(state, _pnode)   # D-context: run tools see the live DAG
                     code = self._implement(idea, _pnode)
             self._emit_node_created(
                 node_id=node_id,
