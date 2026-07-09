@@ -53,7 +53,29 @@ def fingerprint_similarity(a: list[str], b: list[str]) -> float:
 
 # Outcomes that CONFLICT with a positive lesson: if the SAME statement was later tested and
 # didn't hold (or was abandoned), the earlier "supported" must not be injected any more.
+# NOT here (deliberately): `_NEUTRAL` ("noted") — the neutral outcome an untagged reflection line
+# gets in `parse_credit_lessons`. It is neither positive nor negative, so it must never quarantine
+# a "supported" duplicate nor add support to one (an unknown/legacy outcome behaves the same way:
+# not "supported" and not in this set == inert). The WRITE path honors the same neutrality via
+# `_verdict_base` (the shared base-row rule for `consolidate_lessons` / `_agentic_merge_lessons`).
 _NEGATIVE = {"tested", "abandoned", "failed", "refuted"}
+_NEUTRAL = "noted"
+# The full verdict vocabulary a row can carry; anything outside it never wins a duplicate group.
+_VERDICTS = _NEGATIVE | {"supported"}
+
+
+def _verdict_base(rows_newest_last: list[dict]) -> dict:
+    """The ONE write-path rule for which row of a duplicate/paraphrase group carries the group's
+    verdict: the NEWEST row whose outcome is a KNOWN VERDICT (`_VERDICTS`), falling back to the
+    newest row when no verdict-carrying row exists. Everything else is INERT — `_NEUTRAL` ("noted",
+    the untagged-reflection outcome), a missing/empty outcome (a legacy row written before the
+    field existed), or an unrecognized string — because none of them is evidence the claim was
+    re-adjudicated: letting such a newer row win would retire a real verdict and zero its
+    accumulated evidence. A group with no verdict at all keeps its newest row (only-noted stays
+    "noted"). Shared by BOTH `consolidate_lessons` (exact-key pass) and `_agentic_merge_lessons`
+    (paraphrase pass) so the two passes can never drift apart."""
+    return next((o for o in reversed(rows_newest_last)
+                 if str(o.get("outcome") or "") in _VERDICTS), rows_newest_last[-1])
 
 
 def normalize_statement(s: str) -> str:
@@ -61,13 +83,16 @@ def normalize_statement(s: str) -> str:
     return " ".join(str(s or "").split()).lower()[:160]
 
 
-def consolidate_lessons(lessons: list[dict], *, client=None, embed=None) -> list[dict]:
+def consolidate_lessons(lessons: list[dict], *, client=None, embed=None,
+                        parser: str = "tool_call", prompts=None) -> list[dict]:
     """Merge near-duplicate lessons and resolve contradictions — the write-path hygiene pass.
     Input: lessons in FILE ORDER (oldest first). For each (normalized statement, task_id) group:
-    the NEWEST entry wins (its outcome is the current verdict — forgetting the stale one), and it
-    absorbs the group's support as `evidence_count`. A newer NEGATIVE verdict silently retires an
-    older positive duplicate (contradiction resolution), and vice versa — last observation is the
-    truth, prior observations only add confidence when they AGREE.
+    the NEWEST VERDICT-CARRYING entry wins (its outcome is the current verdict — forgetting the
+    stale one), and it absorbs the group's support as `evidence_count`. A newer NEGATIVE verdict
+    silently retires an older positive duplicate (contradiction resolution), and vice versa —
+    last observation is the truth, prior observations only add confidence when they AGREE.
+    "noted" is neutral here exactly as on the read path (see `_verdict_base`): a newer "noted"
+    duplicate never overrides an existing verdict; a group of only-noted rows keeps "noted".
 
     The exact-normalized pass above is the deterministic BASE. When a `client` is supplied, a second
     HYBRID + AGENT pass then merges PARAPHRASE-level duplicates the exact key misses ('raise the LR' vs
@@ -86,7 +111,9 @@ def consolidate_lessons(lessons: list[dict], *, client=None, embed=None) -> list
     out: list[dict] = []
     for key in order:
         grp = groups[key]
-        newest = grp[-1]
+        # The verdict-carrying base row — see `_verdict_base` for the shared rule (neutral/legacy/
+        # unknown outcomes are inert). Deterministic: a pure file-order scan.
+        newest = _verdict_base(grp)
         merged = dict(newest)
         # Accumulate ACROSS runs: sum the stored evidence_count of every group member that AGREES
         # with the current (newest) verdict, so a lesson re-confirmed by N runs ends at ~N — not
@@ -115,13 +142,15 @@ def consolidate_lessons(lessons: list[dict], *, client=None, embed=None) -> list
         out.append(merged)
     if client is None or len(out) < 2:
         return out
-    return _agentic_merge_lessons(out, client=client, embed=embed)
+    return _agentic_merge_lessons(out, client=client, embed=embed, parser=parser, prompts=prompts)
 
 
-def _agentic_merge_lessons(rows: list[dict], *, client, embed=None) -> list[dict]:
+def _agentic_merge_lessons(rows: list[dict], *, client, embed=None,
+                           parser: str = "tool_call", prompts=None) -> list[dict]:
     """Second-pass paraphrase merge (hybrid retrieval + agent decision), per task_id, over already
     exact-deduped lesson rows. Best-effort: any failure returns `rows` unchanged. Order-preserving by
-    each merged group's earliest row."""
+    each merged group's earliest row. `parser`/`prompts` reach the agent adjudication call (the
+    run's structured-output parser + any merge_system.md PromptStore override)."""
     from looplab.search.hybrid_merge import consolidate
     by_task: dict[object, list[int]] = {}
     for i, o in enumerate(rows):
@@ -133,9 +162,12 @@ def _agentic_merge_lessons(rows: list[dict], *, client, embed=None) -> list[dict
                 keep.append((idxs[0], rows[idxs[0]]))
                 continue
             texts = [str(rows[i].get("statement", "")) for i in idxs]
-            for g in consolidate(texts, client, kind="research lessons", embed=embed):
+            for g in consolidate(texts, client, kind="research lessons", embed=embed,
+                                 parser=parser, prompts=prompts):
                 members = [idxs[j] for j in g["members"]]      # back to original rows indices
-                base = rows[members[-1]]                        # newest wins for non-statement fields
+                # Newest wins for non-statement fields — same base rule as the exact pass above
+                # (see `_verdict_base`): the newest KNOWN-verdict member carries the verdict.
+                base = _verdict_base([rows[m] for m in members])
                 row = dict(base)
                 if len(members) > 1:
                     row["statement"] = g["merged"]
@@ -334,8 +366,15 @@ def parse_credit_lessons(text: str, n_pairs: int) -> list[tuple[int, str, str]]:
         body = re.sub(r"\[(good|bad)\]", "", body, flags=re.I).strip(" :-–")
         if len(body) < 8:
             continue
+        # An UNTAGGED line gets the NEUTRAL outcome `_NEUTRAL` ("noted") — the model didn't say
+        # which way the evidence points, so the lesson must neither corroborate nor contradict
+        # anything. The old default was "tested", which is in `_NEGATIVE`: one tag-noncompliant
+        # reflection line could quarantine a matching "supported" lesson at read time
+        # (filter_contradicted). "noted" is excluded from both sides by construction (not
+        # "supported", not in _NEGATIVE); rows already stored with the old value keep their
+        # (negative) meaning — no migration, readers tolerate both.
         out.append((idx if 0 <= idx < n_pairs else -1, body,
-                    "failed" if bad else ("supported" if good else "tested")))
+                    "failed" if bad else ("supported" if good else _NEUTRAL)))
         if len(out) >= max(3, n_pairs):
             break
     return out

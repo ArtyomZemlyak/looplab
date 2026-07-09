@@ -308,6 +308,27 @@ def test_propose_prioritizes_board_and_ranks_ideas():
     assert out.hypothesis == "h a"                    # idea ranking still picks the predicted best
 
 
+def test_surrogate_wrapper_reads_through_foresight_telemetry():
+    # H8: `_ensure_surrogate` can make SurrogateResearcher the OUTERMOST researcher mid-run, over a
+    # ForesightPanelResearcher fallback. The engine's `_emit_role_telemetry` getattrs the predictive
+    # telemetry off (and consume-setattrs None back onto) that outermost handle — the read/write
+    # properties must delegate BOTH ways to the fallback, while `client` keeps falling through to
+    # None (no generic __getattr__: the cli foresight gate probes it on a bare surrogate wrapper).
+    from looplab.search.surrogate import SurrogateResearcher
+
+    panel = ForesightPanelResearcher(_SeqResearcher([Idea(operator="draft")], _RankClient([0])), k=2)
+    outer = SurrogateResearcher({}, fallback=panel)
+    panel.last_hyp_priority = {"order": ["a"], "n": 1}
+    panel.last_foresight = {"kind": "idea", "chosen": 0}
+    assert outer.last_hyp_priority == {"order": ["a"], "n": 1}     # reads reach the panel's telemetry
+    assert outer.last_foresight == {"kind": "idea", "chosen": 0}
+    assert outer.last_foresight_pick is None                       # absent on the fallback -> None
+    outer.last_hyp_priority = None                                 # the engine's consume path
+    outer.last_foresight = None
+    assert panel.last_hyp_priority is None and panel.last_foresight is None
+    assert getattr(outer, "client", None) is None                  # the cli gate still falls through
+
+
 # --------------------------------------------------------------------------- #
 # fold: hypothesis_ranked -> RunState.hypothesis_ranking + Hypothesis.priority
 # --------------------------------------------------------------------------- #
@@ -452,6 +473,55 @@ def test_foresight_delegates_developer_surface_for_unified_agent():
     import pytest
     with pytest.raises(AttributeError):            # missing attr -> AttributeError, not recursion
         _ = fp.no_such_attr_here
+
+
+# --------------------------------------------------------------------------- #
+# prompt minors: reason asked for; hypothesis-board reframing suffix
+# --------------------------------------------------------------------------- #
+
+class _RecordingRankClient(_RankClient):
+    """_RankClient that also captures the messages of the FIRST ranking call."""
+    def __init__(self, order, confidence=0.7):
+        super().__init__(order, confidence)
+        self.messages = None
+
+    def complete_tool(self, messages, json_schema):
+        if self.messages is None:
+            self.messages = [dict(m) for m in messages]
+        return super().complete_tool(messages, json_schema)
+
+
+def test_system_prompt_asks_for_reason():
+    # Telemetry stamps `reason` onto hypothesis_ranked/foresight_selected as "the model's analysis
+    # trace" — the prompt must actually ask for it (it was an unprompted schema field before).
+    from looplab.search.foresight import _SYSTEM
+    assert "`reason`" in _SYSTEM
+
+
+def test_rank_kind_hypothesis_appends_board_reframing():
+    c = _RecordingRankClient([1, 0])
+    rank(c, "r", ["a", "b"], kind="hypothesis")
+    sys = c.messages[0]["content"]
+    assert "untested HYPOTHESES" in sys and "EXPECTED PAYOFF" in sys
+    c2 = _RecordingRankClient([1, 0])
+    rank(c2, "r", ["a", "b"])                          # default (idea/code) framing: no suffix
+    assert "untested HYPOTHESES" not in c2.messages[0]["content"]
+
+
+def test_prioritize_board_uses_hypothesis_framing():
+    st = _state_with_open_hyps(["h zero", "h one"])
+    client = _RecordingRankClient([1, 0])
+    panel = ForesightPanelResearcher(_SeqResearcher([Idea(operator="draft")], client), k=2)
+    panel._prioritize_board(st, None)
+    assert "untested HYPOTHESES" in client.messages[0]["content"]
+
+
+def test_rank_and_agentic_share_the_user_message():
+    # `rank` now renders its user turn through `_rank_user_msg` (the byte-duplicate twin is gone).
+    from looplab.search.foresight import _rank_user_msg
+    c = _RecordingRankClient([1, 0])
+    rank(c, "some report", ["cand a", "cand b"], goal="g", direction="max")
+    assert c.messages[1]["content"] == _rank_user_msg("some report", ["cand a", "cand b"], "g", "max")
 
 
 def test_rank_agentic_falls_back_to_one_shot_without_tools(monkeypatch):

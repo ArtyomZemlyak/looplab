@@ -33,14 +33,15 @@ from typing import Optional
 
 from pydantic import BaseModel, Field
 
-from looplab.agents.roles import RESEARCHER_HINT_ATTRS
+from looplab.agents.roles import forward_hints
 from looplab.core.parse import parse_structured
 from looplab.core.prompts import render
 
 _REPORT_CAP = 2000     # per-source char bound for the priming "Verified Data Analysis Report"
 _ITEM_CAP = 2000       # max chars rendered per candidate
 _MAX_ITEMS = 20        # cap on candidates presented together in one predictive call (prompt-size bound;
-                       # beyond it `rank` appends the remainder in input order rather than scoring them)
+                       # items beyond it are TRUNCATED before the call — never scored, never in `order`
+                       # (a caller indexing its own longer list simply never sees those indices ranked)
 
 
 class _Ranking(BaseModel):
@@ -56,8 +57,17 @@ _SYSTEM = (
     "experienced researcher does. Reason from the Verified Data Analysis Report and the prior results "
     "about likely correctness, data-fit, overfitting / leakage risk, and the expected metric; do NOT "
     "assume anything you cannot infer from what you are given. Call `emit` with `order` = the "
-    "candidate indices from BEST to WORST (0-based) and `confidence` in [0,1] = how sure you are "
-    "(well-calibrated: low when the candidates look equivalent).")
+    "candidate indices from BEST to WORST (0-based), `confidence` in [0,1] = how sure you are "
+    "(well-calibrated: low when the candidates look equivalent), and `reason` = one short line on "
+    "why this order (it is recorded as your analysis trace).")
+
+# Appended AFTER the `foresight_system` render for the BOARD-prioritization path (untested belief
+# statements, not code): the code-flavored correctness/leakage framing above doesn't apply there,
+# so reframe the ask as expected-payoff ranking. Post-render, so a PromptStore override keeps it.
+_HYP_BOARD_SUFFIX = (
+    " These candidates are untested HYPOTHESES — belief statements with no results yet, not code: "
+    "rank them by EXPECTED PAYOFF (which belief, tested next, is most likely to improve the "
+    "objective), not by code correctness or leakage risk.")
 
 
 def verified_report(*, brief: str = "", data_profile: Optional[dict] = None, memory: str = "",
@@ -80,25 +90,28 @@ def verified_report(*, brief: str = "", data_profile: Optional[dict] = None, mem
     return "\n\n".join(parts)[: cap * 2]
 
 
+def _rank_system(prompts, kind: str) -> str:
+    """The predictor's system prompt: the (overridable) `foresight_system` body, plus the
+    board-reframing suffix when the candidates are HYPOTHESES rather than code/ideas."""
+    return (render(prompts, "foresight_system", _SYSTEM)
+            + (_HYP_BOARD_SUFFIX if kind == "hypothesis" else ""))
+
+
 def rank(client, report: str, items: list[str], *, goal: str = "", direction: str = "min",
-         parser: str = "tool_call", prompts=None) -> Optional[tuple[list[int], float, str]]:
+         parser: str = "tool_call", prompts=None, kind: str = "idea"
+         ) -> Optional[tuple[list[int], float, str]]:
     """Predict a best->worst ordering over `items` (already-rendered candidate strings) with ONE LLM
     call. Returns `(order, confidence, reason)` where `order` is DISTINCT valid indices best-first (a
     partial order is tolerated — any index the model omitted is appended in input order) and `reason`
     is the model's one-line justification (the analysis trace, "" if none), or None on any failure /
-    abstention. Never raises — the predictor is advisory and fails open."""
+    abstention. `kind="hypothesis"` reframes the system prompt for the board-prioritize path (see
+    `_HYP_BOARD_SUFFIX`). Never raises — the predictor is advisory and fails open."""
     if client is None or len(items) < 2:
         return None
     items = items[:_MAX_ITEMS]
     try:
-        blocks = "\n\n".join(f"--- CANDIDATE {i} ---\n{c[:_ITEM_CAP]}" for i, c in enumerate(items))
-        rep = (report or "").strip()
-        user = ((("VERIFIED DATA ANALYSIS REPORT\n" + rep + "\n\n") if rep else "")
-                + f"Goal: {goal or '(unspecified)'} | optimize direction: {direction}.\n\n"
-                + blocks + "\n\n"
-                + f"Predict the best->worst order of candidates 0..{len(items) - 1} and your confidence.")
-        msgs = [{"role": "system", "content": render(prompts, "foresight_system", _SYSTEM)},
-                {"role": "user", "content": user}]
+        msgs = [{"role": "system", "content": _rank_system(prompts, kind)},
+                {"role": "user", "content": _rank_user_msg(report, items, goal, direction)}]
         out = parse_structured(client, msgs, _Ranking, parser or "tool_call")
     except Exception:  # noqa: BLE001 — advisory predictor: fall back on ANY error (parse/transport)
         return None
@@ -124,6 +137,8 @@ def _sanitize_ranking(out, n: int) -> Optional[tuple[list[int], float, str]]:
 
 
 def _rank_user_msg(report: str, items: list[str], goal: str, direction: str) -> str:
+    """The ONE user-message template shared by `rank` and `rank_agentic` (they used to carry
+    byte-identical inline twins that could desync silently)."""
     blocks = "\n\n".join(f"--- CANDIDATE {i} ---\n{c[:_ITEM_CAP]}" for i, c in enumerate(items))
     rep = (report or "").strip()
     return ((("VERIFIED DATA ANALYSIS REPORT\n" + rep + "\n\n") if rep else "")
@@ -133,7 +148,7 @@ def _rank_user_msg(report: str, items: list[str], goal: str, direction: str) -> 
 
 
 def rank_agentic(client, tools, report: str, items: list[str], *, goal: str = "", direction: str = "min",
-                 parser: str = "tool_call", prompts=None, max_turns: int = 4
+                 parser: str = "tool_call", prompts=None, max_turns: int = 4, kind: str = "idea"
                  ) -> Optional[tuple[list[int], float, str]]:
     """AGENTIC variant of `rank`: the world-model runs a TOOL-USING loop (`drive_tool_loop`) so it can
     PULL specific evidence — actual experiment results, data facts — via `tools` before committing to
@@ -143,14 +158,17 @@ def rank_agentic(client, tools, report: str, items: list[str], *, goal: str = ""
     if client is None or len(items) < 2:
         return None
     if tools is None:
-        return rank(client, report, items, goal=goal, direction=direction, parser=parser, prompts=prompts)
+        return rank(client, report, items, goal=goal, direction=direction, parser=parser,
+                    prompts=prompts, kind=kind)
     items = items[:_MAX_ITEMS]
     try:
         from looplab.agents.agent import drive_tool_loop
         emit_spec = {"type": "function", "function": {
-            "name": "emit", "description": "Emit the predicted best->worst order + confidence.",
+            "name": "emit",
+            "description": ("Emit the predicted best->worst order + confidence; also set `reason`: "
+                            "one short line on why this order (recorded as your analysis trace)."),
             "parameters": _Ranking.model_json_schema()}}
-        msgs = [{"role": "system", "content": render(prompts, "foresight_system", _SYSTEM)
+        msgs = [{"role": "system", "content": _rank_system(prompts, kind)
                  + " You MAY consult tools to check actual results before deciding; then call `emit`."},
                 {"role": "user", "content": _rank_user_msg(report, items, goal, direction)}]
         box: dict = {}
@@ -167,10 +185,11 @@ def rank_agentic(client, tools, report: str, items: list[str], *, goal: str = ""
                         nudge_prompt="Now call `emit` with the order.",
                         stuck_prompt="Stop ({reason}). Call `emit` with the order now.")
         got = _sanitize_ranking(box.get("out"), len(items))
-        return got if got is not None else rank(client, report, items, goal=goal,
-                                                direction=direction, parser=parser, prompts=prompts)
+        return got if got is not None else rank(client, report, items, goal=goal, direction=direction,
+                                                parser=parser, prompts=prompts, kind=kind)
     except Exception:  # noqa: BLE001 — agentic path is best-effort; fall back to the one-shot predictor
-        return rank(client, report, items, goal=goal, direction=direction, parser=parser, prompts=prompts)
+        return rank(client, report, items, goal=goal, direction=direction, parser=parser,
+                    prompts=prompts, kind=kind)
 
 
 def _idea_text(idea) -> str:
@@ -233,12 +252,18 @@ class ForesightPanelResearcher:
     """
 
     def __init__(self, base, k: int = 2, *, client=None, bounds=None,
-                 parser: str = "tool_call", prompts=None, tools=None):
+                 parser: Optional[str] = None, prompts=None, tools=None):
         self.base = base
         self.k = max(1, k)
         self.client = client if client is not None else getattr(base, "client", None)
         self.bounds = bounds if bounds is not None else getattr(base, "bounds", None)
-        self.parser = parser
+        # The panel must reflect the base's configured structured-output parser (mirroring the
+        # `prompts` propagation below) so chain-walkers like `engine/lessons.py::_merge_prompt_opts`
+        # see the real value — a hardcoded "tool_call" default here shadowed the run's parser. No
+        # bake-in for a parser-less base either (inherit None, not "tool_call"): the downstream
+        # readers — rank()/rank_agentic here, hybrid_merge, lessons — all default a falsy parser to
+        # "tool_call" themselves, and a baked literal would shadow a parser found DEEPER in the chain.
+        self.parser = parser if parser is not None else getattr(base, "parser", None)
         self.prompts = prompts if prompts is not None else getattr(base, "prompts", None)
         # When `tools` is wired, ranking runs in AGENTIC mode (a drive_tool_loop that can pull actual
         # experiment/data evidence before deciding); else it's the one-shot predictor. Optional.
@@ -262,13 +287,16 @@ class ForesightPanelResearcher:
         tr = tracing._current_tracer.get()
         span_name = "hyp_prioritize" if kind == "board" else "foresight_rank"
         cm = tr.span(span_name, new_trace=True) if tr is not None else contextlib.nullcontext()
+        # The rankers' prompt-side `kind` vocabulary: the board path ranks untested BELIEF statements
+        # ("hypothesis" — gets the reframing suffix); the idea path keeps the default framing.
+        rank_kind = "hypothesis" if kind == "board" else "idea"
         with cm:
             self._last_rank_ids = tracing.current_ids() if tr is not None else (None, None)
             if self.tools is not None:
                 return rank_agentic(self.client, self.tools, report, items, goal=goal, direction=direction,
-                                    parser=self.parser, prompts=self.prompts)
+                                    parser=self.parser, prompts=self.prompts, kind=rank_kind)
             return rank(self.client, report, items, goal=goal, direction=direction,
-                        parser=self.parser, prompts=self.prompts)
+                        parser=self.parser, prompts=self.prompts, kind=rank_kind)
 
     def __getattr__(self, name):
         """Delegate every attribute NOT defined here (implement / repair / choose_action / assets /
@@ -289,10 +317,11 @@ class ForesightPanelResearcher:
     def _forward_hints(self) -> None:
         """Mirror the engine-set steering hints onto the base Researcher so the panel stays
         transparent to novelty-gate feedback / complexity / sweep cues (the engine setattrs them on
-        THIS wrapper — the active researcher — after construction)."""
-        for attr in RESEARCHER_HINT_ATTRS:
-            if hasattr(self, attr):
-                setattr(self.base, attr, getattr(self, attr))
+        THIS wrapper — the active researcher — after construction). P2: `roles.forward_hints` owns
+        the registry + `track_hypotheses` rule. NB `hasattr`/`getattr` on self fall through
+        `__getattr__` to the base, so an attr the engine never set forwards the base's own value
+        back onto it — a no-op by construction."""
+        forward_hints(self, self.base)
 
     def _prioritize_board(self, state, parent) -> None:
         """FOREAGENT prioritization of the OPEN-hypothesis board. Untested beliefs arrive in batches
@@ -330,9 +359,11 @@ class ForesightPanelResearcher:
             "_trace_id": _tid, "_span_id": _sid}   # stamped onto the hypothesis_ranked event by the engine
 
     def propose(self, state, parent):
+        # Forward hints FIRST, even on the no-client pass-through: the engine setattrs them on THIS
+        # wrapper (the active researcher), so skipping the mirror would shadow them (P2).
+        self._forward_hints()
         if self.client is None:
             return self.base.propose(state, parent)     # transparent pass-through
-        self._forward_hints()
         if self.tools is not None and hasattr(self.tools, "bind_state"):
             self.tools.bind_state(state)                 # let the agentic ranker read the live run
         self._prioritize_board(state, parent)            # rank the open-hypothesis board, steer the base

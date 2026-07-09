@@ -52,7 +52,7 @@ function stack(x,w,y0,items,gap){gap=gap==null?12:gap;let y=y0;for(const it of i
 function edge(f,fs,t,ts,o){E.push([f,fs,t,ts,o||{}]);}
 
 /* ============ SETUP row ============ */
-box("genesis",40,44,300,58,"Genesis","⌘",C.mut,["author task from a plain goal (LLM)","composable: repo · dataset · cmd · kaggle (kind inferred)"]);
+box("genesis",40,44,300,72,"Genesis","⌘",C.mut,["author task from a plain goal (LLM)","composable: repo · dataset · cmd · kaggle (kind inferred)","generative kind → backend=llm (CLI + web /api/start)"]);
 box("onboard",370,44,360,58,"Onboarding · repo","□",C.ev,["agent proposes → human ratifies eval spec","ratify_freeze | autonomous | ratify_freeze_drift"]);
 box("boss",1740,44,360,58,"Boss / Assistant · UI","⌘",C.s,["steer: inject · hypothesis · approve · stop/finalize/resume","UI writes control intents; engine writes events"]);
 

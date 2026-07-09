@@ -62,3 +62,97 @@ def test_execute_never_raises_on_bad_args():
     # empty/garbage args must return a string, never raise (the tool loop must not crash)
     for name in ("pkg_info", "py_api", "read_installed", "grep_installed"):
         assert isinstance(_t().execute(name, {}), str)
+
+
+def test_read_installed_page_fits_the_loop_cap_and_carries_the_resume_marker():
+    """P3: read_installed used to return up to a 12KB / 300-line page with NO resume pointer — the
+    agent loop's 4000-char cap silently amputated the tail. Now it paginates like read_file: one
+    bounded page ending with '… (more below — continue with start_line=N)' when more source remains,
+    and a final page with NO marker (marker absence == end of file)."""
+    import re
+    out = _t().execute("read_installed", {"module": "argparse"})     # a big stdlib module (~90KB)
+    assert len(out) <= 3900, f"page too big for the loop cap: {len(out)}"
+    m = re.search(r"continue with start_line=(\d+)\)$", out)
+    assert m, f"a continuing page must END with the marker; tail was: {out[-80:]!r}"
+    nxt = _t().execute("read_installed", {"module": "argparse", "start_line": int(m.group(1))})
+    assert len(nxt) <= 3900 and "(lines " in nxt                     # windowed continuation
+
+
+def test_read_installed_lines_param_and_max_lines_alias():
+    # `lines` is the documented window name (consistent with read_file/repo_read); the old
+    # `max_lines` spelling stays accepted so older transcripts/models don't break.
+    a = _t().execute("read_installed", {"module": "json.decoder", "start_line": 3, "lines": 5})
+    b = _t().execute("read_installed", {"module": "json.decoder", "start_line": 3, "max_lines": 5})
+    assert a == b and "(lines 3-7 of" in a
+
+
+def test_grep_installed_output_is_clamped_under_the_loop_cap():
+    # Long site-packages paths make even the default 20 hits overflow the loop's 4000-char cap,
+    # which would drop the tail (and any "(capped …)" note) SILENTLY — the tool clamps itself.
+    out = _t().execute("grep_installed", {"query": "def ", "package": "json", "max_hits": 100})
+    assert len(out) <= 3700
+
+
+def test_py_api_truncates_with_an_explicit_note(monkeypatch):
+    """F15a: a huge py_api result used to be cut by a bare [:_CAP] — SILENT amputation the model
+    couldn't distinguish from a complete listing. Now the cut carries an honest note (mirroring
+    _clamp) and still fits under the loop's RESULT_CAP."""
+    import sys
+    import types
+    mod = types.ModuleType("fake_huge_api_mod")
+    # 60 long member names (~4.3KB joined) + a 2KB docstring guarantee the result overflows _CAP.
+    attrs = {f"member_{i:03d}_" + "m" * 60: i for i in range(60)}
+    mod.Big = type("Big", (), dict(attrs, __doc__="d" * 2000))
+    monkeypatch.setitem(sys.modules, "fake_huge_api_mod", mod)
+    out = _t().execute("py_api", {"target": "fake_huge_api_mod.Big"})
+    assert len(out) <= 4000                                   # fits the loop's RESULT_CAP
+    assert "output truncated" in out                          # honest marker, not a silent cut
+    # H5: the cut is routed through _clamp, so it lands on a LINE boundary — the members line the
+    # budget bisected is dropped whole, not shown as a half-line the model would mistake for all.
+    assert "public members" not in out
+
+
+def test_read_installed_prefix_counts_inside_the_page_budget(tmp_path, monkeypatch):
+    """F15b: the '# <origin> ' prefix is part of the tool result, so a DEEP module path used to push
+    prefix+page past the loop cap — where the loop cut the resume marker off the tail. The page
+    budget is reduced by the prefix, so prefix + page + marker fit under RESULT_CAP together."""
+    import re
+    deep = tmp_path
+    for i in range(12):                                       # a ~500-char origin path
+        deep = deep / f"a_very_long_directory_name_segment_{i:02d}"
+    deep.mkdir(parents=True)
+    (deep / "bigmod_deep_path.py").write_text(
+        "".join(f"var_{i} = {i}  # padding line\n" for i in range(1000)), encoding="utf-8")
+    monkeypatch.syspath_prepend(str(deep))                    # also invalidates importlib caches
+    out = _t().execute("read_installed", {"module": "bigmod_deep_path"})
+    assert out.startswith("# ") and "bigmod_deep_path.py" in out
+    assert len(out) <= 4000                                   # prefix + page ≤ RESULT_CAP
+    assert re.search(r"continue with start_line=\d+\)$", out)  # resume marker survived intact
+
+
+def test_read_installed_overlong_origin_prefix_keeps_the_filename_tail(tmp_path, monkeypatch):
+    """H5: the '# <origin> ' prefix is itself capped ('…' + the path's last 190 chars — the filename
+    end is the informative part), so the max(400, …) page-budget floor can never push prefix+page
+    past the loop's RESULT_CAP."""
+    import re
+    deep = tmp_path
+    for i in range(24):                                       # a ~1200-char origin path
+        deep = deep / f"very_long_directory_segment_number_{i:02d}_padding"
+    deep.mkdir(parents=True)
+    (deep / "tailmod_prefix_cap.py").write_text(
+        "".join(f"v{i} = {i}  # padding\n" for i in range(800)), encoding="utf-8")
+    monkeypatch.syspath_prepend(str(deep))
+    out = _t().execute("read_installed", {"module": "tailmod_prefix_cap"})
+    assert out.startswith("# …") and "tailmod_prefix_cap.py" in out    # elided head, filename tail kept
+    assert "very_long_directory_segment_number_00" not in out          # the path's head is gone
+    assert len(out) <= 4000                                            # prefix + page ≤ RESULT_CAP
+    assert re.search(r"continue with start_line=\d+\)$", out)          # resume marker survived intact
+
+
+def test_read_installed_null_lines_falls_back_to_max_lines():
+    """F15c: a present-but-null `lines` (models emit {"lines": null, "max_lines": 5}) used to mask
+    `max_lines` via .get(default=…) — the fallback needs an explicit None-coalesce."""
+    a = _t().execute("read_installed", {"module": "json.decoder", "start_line": 3,
+                                        "lines": None, "max_lines": 5})
+    b = _t().execute("read_installed", {"module": "json.decoder", "start_line": 3, "lines": 5})
+    assert a == b and "(lines 3-7 of" in a

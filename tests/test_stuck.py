@@ -245,9 +245,12 @@ def test_agentic_researcher_no_context_budget_kwarg_collision(monkeypatch):
     assert seen["cb"] == 1_000_000          # budget passed through exactly once
 
 
-# --------------------------------------------------------------------------- G2 read-dedup anti-thrash
+# --------------------------------------------------------------- P3: every tool call always executes
+# The G2 read-dedup cache (stub an exact repeated read) was REMOVED by explicit operator decision
+# ("always read what is asked" — docs/PROMPT_REVIEW.md P3): the stub pointed at content the model
+# could no longer see, and the cached copy could go stale. The StuckDetector is the loop-safety net.
 class _RepeatThenEmitClient:
-    """Issues the SAME read call `repeats` times (redundant re-reads), then emits."""
+    """Issues the SAME read call `repeats` times (identical re-reads), then emits."""
     def __init__(self, repeats):
         self.repeats = repeats
         self.calls = 0
@@ -260,8 +263,9 @@ class _RepeatThenEmitClient:
 
 
 class _CountingReadTools:
-    def __init__(self):
+    def __init__(self, content="file contents"):
         self.executed = 0
+        self.content = content
 
     def specs(self):
         return [{"type": "function", "function": {
@@ -269,92 +273,71 @@ class _CountingReadTools:
 
     def execute(self, name, args):
         self.executed += 1
-        return "file contents"
+        return self.content
 
 
-def test_read_dedup_suppresses_identical_reads():
-    # 3 identical read_file calls, then emit. The dedup must execute the read ONCE and stub the repeats
-    # (below the stuck threshold, so termination is via emit, isolating the dedup behavior).
-    client = _RepeatThenEmitClient(repeats=3)
+def test_repeated_identical_reads_always_execute_and_return_full_content():
+    # 2 identical read_file calls, then emit (below the stuck threshold of 4, so termination is via
+    # emit). BOTH must execute for real and BOTH tool messages must carry the full content — no
+    # "(already ran …)" stub, no cache.
+    client = _RepeatThenEmitClient(repeats=2)
     tools = _CountingReadTools()
-    out = drive_tool_loop(client, tools, [{"role": "user", "content": "go"}], _EMIT,
+    messages = [{"role": "user", "content": "go"}]
+    out = drive_tool_loop(client, tools, messages, _EMIT,
                           finalize=lambda a: ("emit", a), fallback=lambda _m: ("fallback", None))
     assert out[0] == "emit"
-    assert tools.executed == 1                # the 2 repeats were suppressed, not re-executed
+    assert tools.executed == 2                # every read ran — repeats are never suppressed
+    reads = [m for m in messages if m.get("role") == "tool"]
+    assert [m["content"] for m in reads] == ["file contents", "file contents"]
+    assert not any("already ran" in m["content"] for m in reads)
 
 
-class _RepeatMutatingClient:
-    def __init__(self, repeats):
-        self.repeats = repeats
-        self.calls = 0
-
-    def chat(self, messages, tools, tool_choice="auto"):
-        self.calls += 1
-        if self.calls <= self.repeats:
-            return _tool_call("write_file", {"path": "a.py", "content": "x"})
-        return {"content": "", "tool_calls": [{"id": "e", "function": {"name": "emit", "arguments": "{}"}}]}
-
-
-class _CountingWriteTools:
-    def __init__(self):
-        self.executed = 0
-
-    def specs(self):
-        return [{"type": "function", "function": {
-            "name": "write_file", "description": "", "parameters": {"type": "object", "properties": {}}}}]
-
-    def execute(self, name, args):
-        self.executed += 1
-        return "written"
+def test_genuinely_stuck_repeats_still_trip_the_stuck_guard():
+    # With the dedup gone, the StuckDetector is the only anti-thrash net: a model that re-issues the
+    # SAME read (same args, same result) forever must still terminate via the stuck guard.
+    class _Forever:
+        calls = 0
+        def chat(self, messages, tools, tool_choice="auto"):
+            self.calls += 1
+            return _tool_call("read_file", {"path": "a.py"})
+    client = _Forever()
+    out = drive_tool_loop(client, _CountingReadTools(), [{"role": "user", "content": "go"}], _EMIT,
+                          stuck_repeat=4,
+                          finalize=lambda a: ("emit", a), fallback=lambda _m: ("fallback", None))
+    assert out == ("fallback", None)
+    assert client.calls <= 6                  # bounded by the detector, not by turn budget
 
 
-def test_dedup_never_suppresses_mutating_tools():
-    # A write/edit/run tool is NOT idempotent — an identical repeat must still execute, never be stubbed.
-    client = _RepeatMutatingClient(repeats=3)
-    tools = _CountingWriteTools()
-    out = drive_tool_loop(client, tools, [{"role": "user", "content": "go"}], _EMIT,
+# ------------------------------------------------------------------ P3: explicit truncation marker
+def test_oversized_tool_result_gets_truncation_marker():
+    # A result over the 4000-char cap must arrive truncated WITH an explicit marker (so the model
+    # knows the reply is partial and can re-request a narrower range), and the provenance hook must
+    # receive exactly the same capped string as the tool message.
+    client = _RepeatThenEmitClient(repeats=1)
+    tools = _CountingReadTools(content="X" * 9000)
+    messages = [{"role": "user", "content": "go"}]
+    seen: list = []
+    out = drive_tool_loop(client, tools, messages, _EMIT,
+                          on_tool_result=lambda n, a, r: seen.append(r),
                           finalize=lambda a: ("emit", a), fallback=lambda _m: ("fallback", None))
     assert out[0] == "emit"
-    assert tools.executed == 3                 # every write ran (not deduped)
+    got = next(m["content"] for m in messages if m.get("role") == "tool")
+    assert len(got) <= 4000
+    assert got.startswith("X" * 100)                       # the head survives
+    assert "truncated by the tool-result cap" in got and got.endswith("re-request a narrower range]")
+    omitted = int(got.split("— ")[1].split(" chars")[0])
+    assert omitted == 9000 - got.index("\n…[")             # exact count of characters cut
+    assert seen == [got]                                   # hook got the marked string verbatim
 
 
-class _ReadWriteReadClient:
-    """read a.py -> write a.py -> read a.py -> emit. The 2nd read must NOT be stubbed — the write
-    invalidated the dedup — so read_file executes TWICE."""
-    def __init__(self):
-        self.script = [
-            _tool_call("read_file", {"path": "a.py"}),
-            _tool_call("write_file", {"path": "a.py", "content": "new"}),
-            _tool_call("read_file", {"path": "a.py"}),
-            {"content": "", "tool_calls": [{"id": "e", "function": {"name": "emit", "arguments": "{}"}}]},
-        ]
-
-    def chat(self, messages, tools, tool_choice="auto"):
-        return self.script.pop(0)
-
-
-class _CountingRWTools:
-    def __init__(self):
-        self.reads = 0
-
-    def specs(self):
-        return [{"type": "function", "function": {
-            "name": n, "description": "", "parameters": {"type": "object", "properties": {}}}}
-            for n in ("read_file", "write_file")]
-
-    def execute(self, name, args):
-        if name == "read_file":
-            self.reads += 1
-        return "contents" if name == "read_file" else "written"
-
-
-def test_dedup_invalidated_by_write():
-    client = _ReadWriteReadClient()
-    tools = _CountingRWTools()
-    out = drive_tool_loop(client, tools, [{"role": "user", "content": "go"}], _EMIT,
-                          finalize=lambda a: ("emit", a), fallback=lambda _m: ("fallback", None))
-    assert out[0] == "emit"
-    assert tools.reads == 2      # the write between the two identical reads invalidated the cache
+def test_result_at_or_under_cap_is_untouched():
+    client = _RepeatThenEmitClient(repeats=1)
+    tools = _CountingReadTools(content="Y" * 4000)         # exactly at the cap
+    messages = [{"role": "user", "content": "go"}]
+    drive_tool_loop(client, tools, messages, _EMIT,
+                    finalize=lambda a: ("emit", a), fallback=lambda _m: ("fallback", None))
+    got = next(m["content"] for m in messages if m.get("role") == "tool")
+    assert got == "Y" * 4000                               # no marker when nothing was cut
 
 
 class _ScriptToolClient:
@@ -382,10 +365,10 @@ class _CountingNamedTools:
         return f"{name}-result-{self.counts[name]}"
 
 
-def test_poll_tools_are_never_deduped():
+def test_cursor_polls_and_mixed_tools_all_execute():
     # read_output is a CURSOR poll ("new output since your last read") — identical args every call by
-    # design. Dedup froze it to the first result and tripped the StuckDetector mid-training job
-    # (mega-review L1). Every poll must EXECUTE.
+    # design. With every tool call executing unconditionally (P3), polls, writes and misnamed
+    # mutators all just run; nothing is stubbed or cache-invalidated.
     client = _ScriptToolClient([("read_output", {"task_id": "t1"})] * 3)
     tools = _CountingNamedTools("read_output")
     out = drive_tool_loop(client, tools, [{"role": "user", "content": "go"}], _EMIT,
@@ -394,49 +377,92 @@ def test_poll_tools_are_never_deduped():
     assert tools.counts["read_output"] == 3
 
 
-def test_misnamed_mutators_invalidate_the_cache():
-    # revert_file / git_checkout contain none of the old blocklist substrings but DO change the
-    # working tree — a cached read served after them is stale state presented as current
-    # (mega-review L2). Each must clear the dedup cache.
-    for mutator in ("revert_file", "git_checkout", "reset_node"):
-        client = _ScriptToolClient([("read_file", {"path": "a.py"}), (mutator, {"path": "a.py"}),
-                                    ("read_file", {"path": "a.py"})])
-        tools = _CountingNamedTools("read_file", mutator)
-        out = drive_tool_loop(client, tools, [{"role": "user", "content": "go"}], _EMIT,
-                              finalize=lambda a: ("emit", a), fallback=lambda _m: ("fallback", None))
-        assert out[0] == "emit"
-        assert tools.counts["read_file"] == 2, f"{mutator} did not invalidate the read cache"
-
-
-def test_volatile_readers_do_not_invalidate_the_cache():
-    # git_status is read-only (mutates nothing): interleaving it must NOT wipe the dedup state —
-    # the repeated read_file stays suppressed (effectiveness guard, mega-review L7).
-    client = _ScriptToolClient([("read_file", {"path": "a.py"}), ("git_status", {}),
-                                ("read_file", {"path": "a.py"})])
-    tools = _CountingNamedTools("read_file", "git_status")
-    out = drive_tool_loop(client, tools, [{"role": "user", "content": "go"}], _EMIT,
+# ---------------------------------------------------------------- repeat note (B1 round-robin gap)
+def test_third_identical_call_gets_repeat_note_but_still_executes():
+    # The read-dedup removal left 3+-call round-robins invisible to the StuckDetector (1-/2-cycles
+    # only). From the 3rd EXACT (tool, args) repeat whose result is byte-identical to the previous
+    # one, the tool message carries a one-line note — but the call still fully executes and returns
+    # fresh, complete content (no cache, no suppression).
+    client = _RepeatThenEmitClient(repeats=4)
+    tools = _CountingReadTools()
+    messages = [{"role": "user", "content": "go"}]
+    out = drive_tool_loop(client, tools, messages, _EMIT, stuck_repeat=99,
                           finalize=lambda a: ("emit", a), fallback=lambda _m: ("fallback", None))
     assert out[0] == "emit"
-    assert tools.counts["read_file"] == 1                # still deduped across the volatile read
+    assert tools.executed == 4                             # every repeat ran for real
+    reads = [m["content"] for m in messages if m.get("role") == "tool"]
+    assert reads[0] == "file contents" and reads[1] == "file contents"   # 1st/2nd: untouched
+    assert reads[2].startswith("file contents") and "has now run 3×" in reads[2]
+    assert reads[3].startswith("file contents") and "has now run 4×" in reads[3]
+    # The note only ever claims what is true: it names the IDENTICAL result explicitly.
+    assert "IDENTICAL result" in reads[2] and "IDENTICAL result" in reads[3]
 
 
-def test_compaction_clears_the_dedup_cache(monkeypatch):
-    # Once compaction summarized away the original outputs, a dedup stub ("use the earlier output")
-    # points at content the model can never recover (mega-review L4) — the cache must reset when
-    # compaction actually fires so the re-read executes for real.
-    import looplab.core.context_budget as cb
+def test_repeat_note_never_fires_when_results_change():
+    # A cursor tool (read_output) legitimately repeats the SAME args and returns NEW output each
+    # poll — the old call-count-keyed note ("the result is identical unless a write changed it")
+    # was FALSE there and contradicted the tool's own pending marker. The note is keyed on the
+    # RESULT too: a changing result resets the streak, so it never fires here.
+    client = _ScriptToolClient([("read_output", {"task_id": "t1"})] * 5)
+    tools = _CountingNamedTools("read_output")             # returns "read_output-result-<n>": changes
+    messages = [{"role": "user", "content": "go"}]
+    out = drive_tool_loop(client, tools, messages, _EMIT, stuck_repeat=99,
+                          finalize=lambda a: ("emit", a), fallback=lambda _m: ("fallback", None))
+    assert out[0] == "emit"
+    assert tools.counts["read_output"] == 5                # every poll executed for real
+    assert not any("has now run" in m["content"] for m in messages if m.get("role") == "tool")
 
-    def fake_compact(messages, max_chars, summarize, keep_last=3):
-        return messages[1:] if len(messages) >= 3 else messages   # "summarize" = drop the oldest
 
-    monkeypatch.setattr(cb, "compact_history", fake_compact)
-    client = _ScriptToolClient([("read_file", {"path": "a.py"}), ("read_file", {"path": "a.py"})])
+def test_repeat_note_counts_the_identical_streak_not_total_calls():
+    # Results A B B B: the 4th call is the 3rd IDENTICAL run in a row, so the note must say 3×
+    # (the identical-result streak) — "run 4×" would claim four identical results, which is false.
+    class _ChangeOnceTools(_CountingReadTools):
+        def execute(self, name, args):
+            self.executed += 1
+            return "A" if self.executed == 1 else "B"
+    client = _RepeatThenEmitClient(repeats=4)
+    tools = _ChangeOnceTools()
+    messages = [{"role": "user", "content": "go"}]
+    drive_tool_loop(client, tools, messages, _EMIT, stuck_repeat=99,
+                    finalize=lambda a: ("emit", a), fallback=lambda _m: ("fallback", None))
+    reads = [m["content"] for m in messages if m.get("role") == "tool"]
+    assert "has now run" not in reads[0] and "has now run" not in reads[1]
+    assert "has now run" not in reads[2]                   # B-streak is only 2 at the 3rd call
+    assert "has now run 3×" in reads[3]                    # 3rd identical B — streak, not total (4)
+
+
+def test_repeat_note_keyed_on_exact_args_and_fresh_per_loop():
+    # DIFFERENT args never accumulate toward the note (an A B A B alternation stays clean) …
+    client = _ScriptToolClient([("read_file", {"path": "a.py"}), ("read_file", {"path": "b.py"}),
+                                ("read_file", {"path": "a.py"}), ("read_file", {"path": "b.py"})])
     tools = _CountingNamedTools("read_file")
-    out = drive_tool_loop(client, tools, [{"role": "user", "content": "go"}], _EMIT,
-                          auto_summary=True, context_budget_chars=10,
+    messages = [{"role": "user", "content": "go"}]
+    drive_tool_loop(client, tools, messages, _EMIT,
+                    finalize=lambda a: ("emit", a), fallback=lambda _m: ("fallback", None))
+    assert not any("has now run" in m["content"] for m in messages if m.get("role") == "tool")
+    # … and the counter is STATELESS across invocations: a fresh loop starts a fresh ledger.
+    client2 = _ScriptToolClient([("read_file", {"path": "a.py"}), ("read_file", {"path": "a.py"})])
+    messages2 = [{"role": "user", "content": "go"}]
+    drive_tool_loop(client2, tools, messages2, _EMIT,
+                    finalize=lambda a: ("emit", a), fallback=lambda _m: ("fallback", None))
+    assert not any("has now run" in m["content"] for m in messages2 if m.get("role") == "tool")
+
+
+def test_repeat_note_does_not_blind_the_stuck_detector():
+    # The note text increments per repeat — pushing IT into the detector would make every repeat
+    # look like a new observation and disable B1. The raw result is what gets pushed, so a model
+    # that repeats the same call forever still terminates via the stuck guard.
+    class _Forever:
+        calls = 0
+        def chat(self, messages, tools, tool_choice="auto"):
+            self.calls += 1
+            return _tool_call("read_file", {"path": "a.py"})
+    client = _Forever()
+    out = drive_tool_loop(client, _CountingReadTools(), [{"role": "user", "content": "go"}], _EMIT,
+                          stuck_repeat=4,
                           finalize=lambda a: ("emit", a), fallback=lambda _m: ("fallback", None))
-    assert out[0] == "emit"
-    assert tools.counts["read_file"] == 2                # compaction fired between them -> cache reset
+    assert out == ("fallback", None)
+    assert client.calls <= 6                               # bounded by the detector, note or not
 
 
 def test_context_budget_zero_means_off(monkeypatch):

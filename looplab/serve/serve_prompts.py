@@ -23,7 +23,8 @@ def genesis_system(kinds: list, key_defaults: dict, cat_lines: str) -> str:
         "- the TASK: if an existing catalogue entry clearly matches, set task_file to its path. "
         "Otherwise AUTHOR an inline `task` object — the task is COMPOSABLE: NO `kind` field, the "
         "engine infers the task from the capability fields you give. For a Kaggle / MLE-bench "
-        'competition use {"competition":"<id>"} with the FULL slug exactly as on Kaggle — '
+        'competition use {"competition":"<id>"} (`kaggle` is an accepted alias) with the FULL slug '
+        "exactly as on Kaggle — "
         "e.g. 'nomad2018-predict-transparent-conductors' (NOT the short 'nomad2018'), "
         "'spooky-author-identification'.\n"
         "- REPO task (the agent optimizes an EXISTING code repo on this machine) — the task is "
@@ -39,7 +40,9 @@ def genesis_system(kinds: list, key_defaults: dict, cat_lines: str) -> str:
         "builds any training pipeline BEFORE it but cannot change the scoring. Rules that are the USUAL "
         'mistakes: (1) `direction` is EXACTLY "max" or "min" — never "maximize"/"minimize". (2) In '
         "`cmd.metric`, `reader` is HOW to read the printed metric (stdout_json / stdout_regex / file_json / "
-        'file_regex) — NOT the direction; the objective name goes in `key`. Use reader:"auto" ONLY for the '
+        "file_regex) — NOT the direction; for the *_json readers the objective name goes in `key`, for the "
+        "*_regex readers the regex goes in `pattern` (group 1 captures the number; a regex left in `key` "
+        'is auto-promoted to `pattern`). Use reader:"auto" ONLY for the '
         "narrow case where a training command ALREADY runs and you just need the agent to write the metric "
         "reader. (3) State in the goal that each node must actually TRAIN a fresh model and score THAT model "
         "— NEVER read a pre-existing checkpoint or a static results file (results_last.csv is a PRIOR run's "
@@ -72,6 +75,11 @@ def genesis_system(kinds: list, key_defaults: dict, cat_lines: str) -> str:
         "the repo has an existing scorer (test.py) the agent must not change, set `cmd` to it and add that "
         "file to `protect`; if the scorer must be built, point `cmd` at a file the agent will CREATE and "
         "leave it editable. Do NOT stuff the trainer into cmd.setup — setup is for dependency installs.\n"
+        "- REPO with an operator-owned PIPELINE: `cmd` may declare `stages` INSTEAD of a single `command` "
+        "— an ordered, non-rewritable pipeline the engine runs verbatim (the LAST stage prints the "
+        'metric), e.g. "cmd":{"stages":[{"name":"train","command":["python","train.py"],"timeout":7200},'
+        '{"name":"score","command":["python","test.py"]}],"metric":{"reader":"stdout_json",'
+        '"key":"metric"}}.\n'
         "- REPO, let the AGENT choose the arguments (the user does NOT want to enumerate flags): keep "
         'the command argument-free (e.g. ["python","run.py"]) and put a CONFIG the agent edits (e.g. '
         "config.yaml) in edit_surface — the agent reads the code and rewrites the config to switch "
@@ -79,7 +87,9 @@ def genesis_system(kinds: list, key_defaults: dict, cat_lines: str) -> str:
         "an editable config/launcher, not by appending flags to the command.\n"
         "- REPO pure hyperparameter tuning with NO code edits: set eval.params_style:\"cli_overrides\" "
         'plus task "params":{"<name>":[lo,hi]} (NUMERIC bounds) so proposals become key=value CLI '
-        'overrides, and add eval.profiles {"smoke":{"overrides":[..],"timeout":..},"full":{..}} for a '
+        "overrides (composable alternative: put a `%params%` token in the command where the flags belong "
+        "— it expands to the node's params as --key value), and add eval.profiles "
+        '{"smoke":{"overrides":[..],"timeout":..},"full":{..}} for a '
         "cheap search + a full confirm. (Categorical impl-switches are NOT numeric — use the config "
         "approach above for those.)\n"
         "- metric.reader options: stdout_json (default) | stdout_regex | file_json / file_regex (read a "
@@ -140,9 +150,11 @@ COMMAND_SYSTEM = (
     "concrete experiment — emit several inject steps for several experiments; deep_research to "
     "read the literature first; note(node_id, text) to annotate a node; confirm(node_id), "
     "ablate(node_id), fork(node_id), promote(node_id); "
-    "reset(node_id, stage one of propose/implement/eval) RE-RUNS an existing node IN PLACE — no new "
+    "reset(node_id, stage) RE-RUNS an existing node IN PLACE — no new "
     "node — from that stage: eval=keep code, just re-score (an infra/key blip); implement=keep the "
-    "Researcher's idea, re-run only the Developer (its code crashed); propose=full redo. Prefer reset "
+    "Researcher's idea, re-run only the Developer (its code crashed); propose=full redo; any "
+    "eval-PIPELINE stage name (train / data_prep / …) restarts the pipeline from that stage, reusing "
+    "earlier stages' artifacts. Prefer reset "
     "over a fresh node when FIXING a specific failed/crashed node; "
     "strategy(policy,fidelity) pins the "
     "search policy/fidelity and OVERRIDES the autonomous strategist for the rest of the run "
@@ -152,7 +164,11 @@ COMMAND_SYSTEM = (
     "import(source_run, source_node) to SEED a winning experiment from a SIBLING run of this "
     "task into this run (use list_sibling_runs / read_sibling_experiment first to find one — the "
     "imported node records where it came from); "
-    "approve(node_id), ratify, pause, resume, stop. Use the node in context when no id is given. "
+    "approve(node_id), ratify; "
+    "finalize STOPS the run AND wraps it up (final report, cross-run lessons, cost roll-up) — use it "
+    "when they want the run finished PROPERLY; stop FREEZES the run in place with NO wrap-up "
+    "(`pause` is a synonym — both map to the same freeze), resumable later; resume restarts a "
+    "stopped/stalled run. Use the node in context when no id is given. "
     "Give each step a one-line `rationale`.\n\n")
 
 
@@ -166,7 +182,7 @@ CHAT_SYSTEM = (
     "you'd be curious to try and why.\n"
     "Format with Markdown so it's easy to read: short paragraphs, **bold** for the key point, "
     "bullet lists for options, and ```python fenced blocks for any code or params. When you "
-    "actually recommend an experiment, name the operator (improve/draft/debug), give the exact "
+    "actually recommend an experiment, name the operator (improve/draft/debug/merge), give the exact "
     "params, and a one-line why — but don't force every reply into that shape; sometimes the "
     "right answer is just an explanation or a question.\n\n"
     "Here is the run you're discussing:\n")

@@ -24,6 +24,7 @@ from typing import Optional, Protocol, TypedDict
 
 from pydantic import BaseModel, Field
 
+from looplab.agents.roles import _attention_points
 from looplab.core.llm import BudgetExceeded
 from looplab.core.models import NodeStatus, RunState
 from looplab.core.prompts import PromptStore, render
@@ -455,7 +456,10 @@ class LLMStrategist:
     def decide(self, state: RunState, ctx: StrategyContext) -> Optional[Strategy]:
         from looplab.core.parse import ParseError, parse_structured
         messages = [
-            {"role": "system", "content": render(self.prompts, "strategist_system", _STRATEGIST_SYSTEM)},
+            # P8: the Strategist decides timeouts/parallelism/fidelity, so the hardware attention
+            # points reach it too — appended after the render(), like every other planning role.
+            {"role": "system", "content": render(self.prompts, "strategist_system", _STRATEGIST_SYSTEM)
+                               + "\n\n" + _attention_points()},
             {"role": "user", "content": _strategist_brief(state, ctx)},
         ]
         try:
@@ -511,8 +515,10 @@ class ToolUsingStrategist:
         if self.tools is not None and hasattr(self.tools, "bind_state"):
             self.tools.bind_state(state)        # let the run-aware tools read the current search
         messages = [
+            # P8: hardware attention points, after the render() like the plain LLMStrategist above.
             {"role": "system",
-             "content": render(self.prompts, "tool_strategist_system", _TOOL_STRATEGIST_SYSTEM)},
+             "content": render(self.prompts, "tool_strategist_system", _TOOL_STRATEGIST_SYSTEM)
+                        + "\n\n" + _attention_points()},
             {"role": "user", "content": _strategist_brief(state, ctx)
                 + "\nInvestigate with the tools if useful, then emit the strategy."},
         ]

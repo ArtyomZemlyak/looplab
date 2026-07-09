@@ -35,7 +35,7 @@ class _Action(BaseModel):
     action: str = "advise"   # advise|confirm|ablate|fork|promote|reset|hint|note|strategy|budget|deep_research|inject|import|approve|ratify|stop|finalize|resume
     node_id: Optional[int] = None
     text: str = ""           # hint text / note text / free rationale
-    stage: str = ""          # reset: propose|implement|eval — which stage to re-run the node FROM
+    stage: str = ""          # reset: propose|implement|eval OR an eval-PIPELINE stage name (train/…) to re-run FROM
     operator: str = "improve"
     params: dict = {}
     policy: str = ""
@@ -208,7 +208,9 @@ def build_router(srv) -> APIRouter:
         msgs = body.get("messages") or []
         nid = body.get("node_id")
         st = fold(_events(rd))
-        sys_prompt = CHAT_SYSTEM + _boss_context(st, nid, rd)
+        # advisory=True: /chat has no actions channel, so the RUN STATUS block must recommend,
+        # not command ("you MUST act: resume") — else the model claims actions it can't take.
+        sys_prompt = CHAT_SYSTEM + _boss_context(st, nid, rd, advisory=True)
         try:
             client = srv.make_llm_client(_llm_settings(rd))
             # Offload to a thread — an `async def` handler must not run the blocking completion on the
@@ -376,8 +378,10 @@ def build_router(srv) -> APIRouter:
                 if plan.reply:                   # the boss chose to only talk back — show its reply
                     return {"ok": True, "reply": plan.reply, "tokens": tok}
             try:
+                # advisory=True: this fallback only talks back (no plan/actions emitted), so the RUN
+                # STATUS block recommends rather than commands — same reasoning as /chat above.
                 advise_sys = ("You are an ML research collaborator embedded in an experiment loop. Answer "
-                              "concisely, grounded on the run.\n" + _boss_context(st, nid, rd))
+                              "concisely, grounded on the run.\n" + _boss_context(st, nid, rd, advisory=True))
                 advise_msgs = msgs + ([{"role": "user", "content": instruction}] if instruction else [])
                 text = client.complete_text([{"role": "system", "content": advise_sys}, *advise_msgs])
                 # Carry the LLM I/O back so the chat row can expand into a langfuse-style trace card. We

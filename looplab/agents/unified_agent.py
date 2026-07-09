@@ -20,7 +20,7 @@ from __future__ import annotations
 from typing import Optional
 
 from looplab.agents.agent import drive_tool_loop
-from looplab.agents.roles import RESEARCHER_HINT_ATTRS, WrapsDeveloper
+from looplab.agents.roles import WrapsDeveloper, forward_hints
 from looplab.core.llm import BudgetExceeded
 from looplab.core.models import Idea, Node, RunState
 from looplab.core.prompts import render
@@ -82,13 +82,19 @@ class UnifiedAgent(WrapsDeveloper):
         self.last_deleted: list = []
 
     # ----------------------------------------------------------- Researcher
+    @property
+    def parser(self):
+        # Read-through to the internal researcher's configured structured-output parser (mirroring
+        # the `prompts` wiring above): chain-walkers like engine/lessons.py::_merge_prompt_opts
+        # getattr `parser` off the ACTIVE researcher — this facade in unified mode — and a missing
+        # attr here silently fell back to the "tool_call" default, shadowing the run's llm_parser.
+        return getattr(self.researcher, "parser", None)
+
     def propose(self, state: RunState, parent: Optional[Node]) -> Idea:
         # The engine sets ephemeral hints via `setattr(self.researcher, ...)` where self.researcher
-        # is THIS agent; forward them to the internal researcher that actually reads them.
-        # `track_hypotheses` rides along: not an engine hint, but likewise poked onto the facade.
-        for attr in (*RESEARCHER_HINT_ATTRS, "track_hypotheses"):
-            if hasattr(self, attr):
-                setattr(self.researcher, attr, getattr(self, attr))
+        # is THIS agent; forward them (P2 — roles.forward_hints owns the rule) to the internal
+        # researcher that actually reads them.
+        forward_hints(self, self.researcher)
         return self.researcher.propose(state, parent)
 
     # ----------------------------------------------------------- Developer
@@ -146,17 +152,31 @@ class UnifiedAgent(WrapsDeveloper):
         n = len(legal)
         if n == 0:
             return {"index": -1, "rationale": "no legal actions"}
+
+        def _parents(a: dict) -> tuple:
+            # P30 (docs/PROMPT_REVIEW.md): merge actions carry `parent_ids` (a list, policy.py);
+            # everything else `parent_id`. One accessor for both the menu and the matcher.
+            pids = a.get("parent_ids")
+            if pids:
+                return tuple(pids)
+            return (a["parent_id"],) if a.get("parent_id") is not None else ()
+
         default_idx = 0
         if recommended is not None:
             for i, a in enumerate(legal):
-                if a.get("kind") == recommended.get("kind") and \
-                        a.get("parent_id") == recommended.get("parent_id"):
+                # Match merges by their parent SET too — kind + parent_id alone matched the FIRST
+                # merge in the list regardless of which pair the policy actually recommended.
+                if a.get("kind") == recommended.get("kind") and _parents(a) == _parents(recommended):
                     default_idx = i
                     break
         if self._pilot_client is None:        # pilot model not wired -> take the policy recommendation
             return {"index": default_idx, "rationale": "policy recommendation (no pilot model)"}
+        # Single-parent actions render exactly as before (" parent=N"); merges now show what they
+        # merge (" parents=N,M") instead of a bare "[i] merge" the pilot had to choose blind.
         menu = "\n".join(
-            f"  [{i}] {a.get('kind')}" + (f" parent={a['parent_id']}" if a.get("parent_id") is not None else "")
+            f"  [{i}] {a.get('kind')}"
+            + (f" parent={_parents(a)[0]}" if len(_parents(a)) == 1 else "")
+            + (" parents=" + ",".join(str(p) for p in _parents(a)) if len(_parents(a)) > 1 else "")
             for i, a in enumerate(legal))
         rec = ("\nPolicy recommends index "
                f"{default_idx}: {legal[default_idx].get('kind')}.") if recommended is not None else ""

@@ -27,24 +27,65 @@ def _attention_points() -> str:
     except Exception:  # noqa: BLE001
         return ""
 
-_RESEARCHER_SYSTEM = ("You are an ML researcher proposing the next experiment as "
-                      "parameters to try. Also set `theme`: a short, reusable lower-case slug "
-                      "(e.g. \"loss-fn\", \"architecture\", \"regularization\", \"learning-rate\") "
-                      "that groups this experiment with related ones — reuse the SAME slug across "
-                      "experiments that explore the same idea. "
-                      "Optionally, when a hyperparameter is cheap to vary and the task data loads "
-                      "fast, you MAY propose a SWEEP instead of a single point: set `space` to a "
-                      "small discrete grid {name: [values, ...]} (keep the total grid small, "
-                      "<= ~12 points). The Developer then evaluates every grid point in ONE process "
-                      "(loading the data once), so a sweep is far cheaper than the same points run "
-                      "as separate nodes. Leave `space` empty for an ordinary single-config "
-                      "experiment; fixed/shared hyperparameters still go in `params`. "
-                      "If THIS experiment is genuinely compute-heavy and needs more wall-clock than a "
-                      "light model — a neural network (CNN/RNN/transformer), a large ensemble, many CV "
-                      "folds/seeds, or a big grid — set `eval_timeout` to a realistic per-run budget in "
-                      "SECONDS (e.g. 300-1800). Leave it null for ordinary/light experiments so they use "
-                      "the run default. "
-                      "Respond ONLY with the requested structured fields.")
+_RESEARCHER_CORE = ("You are an ML researcher proposing the next experiment as "
+                    "parameters to try. Also set `theme`: a short, reusable lower-case slug "
+                    "(e.g. \"loss-fn\", \"architecture\", \"regularization\", \"learning-rate\") "
+                    "that groups this experiment with related ones — reuse the SAME slug across "
+                    "experiments that explore the same idea. ")
+# P6/P21 (docs/PROMPT_REVIEW.md): the intra-node sweep OFFER, shared VERBATIM by both researchers
+# (`LLMResearcher` here and agent.py's `ToolUsingResearcher`) via `_researcher_capability_suffix`,
+# and GATED on capability: only the in-house `LLMDeveloper` honors `idea.space` —
+# `CliAgentDeveloper` and `LLMRepoDeveloper` never read it — so `make_roles` sets
+# `offer_sweep=False` on those backends and this fragment is dropped rather than promising a
+# sweep nobody will run (the engine would stretch the node by sweep_timeout_mult while waiting
+# for a `trials` line that never comes).
+_SWEEP_OFFER = ("Optionally, when a hyperparameter is cheap to vary and the task data loads "
+                "fast, you MAY propose a SWEEP instead of a single point: set `space` to a "
+                "small discrete grid {name: [values, ...]} (keep the total grid small, "
+                "<= ~12 points; grid values must be NUMERIC — the schema rejects strings). "
+                "The Developer then evaluates every grid point in ONE process "
+                "(loading the data once), so a sweep is far cheaper than the same points run "
+                "as separate nodes. Leave `space` empty for an ordinary single-config "
+                "experiment; fixed/shared hyperparameters still go in `params`. ")
+# P6: the per-experiment `eval_timeout` ask, shared by both researchers. Scoped HONESTLY: the
+# engine consumes `idea.eval_timeout` only on the sandbox (script-solution) eval branch;
+# repo/command-eval stages take their timeouts from the stage manifest / the task's cmd spec.
+_EVAL_TIMEOUT_GUIDANCE = (
+    "If THIS experiment is genuinely compute-heavy and needs more wall-clock than a "
+    "light model — a neural network (CNN/RNN/transformer), a large ensemble, many CV "
+    "folds/seeds, or a big grid — set `eval_timeout` to a realistic per-run budget in "
+    "SECONDS (e.g. 300-1800). Leave it null for ordinary/light experiments so they use "
+    "the run default. (`eval_timeout` applies to script-solution tasks run in the sandbox; "
+    "on repo/command tasks the per-stage timeouts come from the stage manifest / the "
+    "task's cmd, so leave it null there.) ")
+# P14: the schema requires `operator` but the engine's policy overwrites it unconditionally
+# (orchestrator's node-creation sites) — say so, in BOTH researcher prompts, so the model
+# doesn't strategize around a dead field.
+_OPERATOR_NOTE = ("The `operator` field is informational (an audit label): the engine's search "
+                  "policy decides the node's actual operator. ")
+
+
+def _researcher_capability_suffix(offer_sweep: bool) -> str:
+    """P6: capability prose SHARED by both researchers (`LLMResearcher` here and agent.py's
+    `ToolUsingResearcher`) so the two role variants can't drift apart again: the sweep offer
+    (only when the active Developer implements `idea.space` — `make_roles` decides, see
+    `_SWEEP_OFFER`) + the `eval_timeout` ask."""
+    return (_SWEEP_OFFER if offer_sweep else "") + _EVAL_TIMEOUT_GUIDANCE
+
+
+def _researcher_system(offer_sweep: bool = True) -> str:
+    """Assemble the plain researcher's FULL system prompt (core + capability suffix + operator
+    note + emit instruction) — a back-compat/reference assembly. The `researcher_system`
+    PromptStore default is `_RESEARCHER_CORE` ALONE: `LLMResearcher.propose` appends the
+    capability fragments AFTER the render() (the same pattern as agent.py's
+    `ToolUsingResearcher`), so the composed prompt stays byte-equal to this helper while a
+    `researcher_system.md` override can never bypass the code-owned `offer_sweep` gate. With
+    `offer_sweep=True` this matches the historical `_RESEARCHER_SYSTEM` modulo the verified
+    prompt fixes (P21 numeric-grid note, P6 eval_timeout scoping, P14 operator note)."""
+    return (_RESEARCHER_CORE + _researcher_capability_suffix(offer_sweep) + _OPERATOR_NOTE +
+            "Respond ONLY with the requested structured fields.")
+
+
 # Appended to the Researcher system prompt when hypothesis tracking is on (P1, default on). Split out
 # so the knob can drop it cleanly (the `hypothesis` field then simply stays unset).
 _HYPOTHESIS_INSTRUCTION = (
@@ -86,12 +127,14 @@ _SWEEP_CONTRACT = (
     "\nThis is an INTRA-NODE SWEEP: evaluate EVERY point of the given grid in ONE process — load "
     "the data ONCE and reuse it across all grid points. Report ALL results by printing, as the "
     "FINAL stdout line, a JSON object: {\"trials\": [{\"params\": {..}, \"metric\": <float>, "
-    "\"seconds\": <float>, \"extra_metrics\": {..}}, ...]} — one entry per grid point. The easiest "
-    "way is `from looplab.sweep import run_sweep` and call run_sweep(space, train_fn) where "
-    "train_fn(params, seed) returns the metric (it prints the required line for you); but you may "
-    "use Optuna/GridSearchCV/joblib instead as long as you emit that exact JSON line. If the task "
-    "is host-graded (it asks you to write predictions/submission), write them for the SINGLE BEST "
-    "grid point so the host can grade it.")
+    "\"seconds\": <float>, \"extra_metrics\": {..}}, ...]} — one entry per grid point. IF the "
+    "`looplab` package is importable in the eval environment, the easiest way is "
+    "`from looplab.sweep import run_sweep` and call run_sweep(space, train_fn) where "
+    "train_fn(params, seed) returns the metric (it prints the required line for you); if it is "
+    "NOT importable (a bare sandbox image), write the loop yourself — load the data ONCE, then "
+    "iterate the grid — or use Optuna/GridSearchCV, always printing that exact final JSON "
+    "`trials` line. If the task is host-graded (it asks you to write predictions/submission), "
+    "write them for the SINGLE BEST grid point so the host can grade it.")
 
 
 class Researcher(Protocol):
@@ -103,19 +146,51 @@ class Developer(Protocol):
 
 
 RESEARCHER_HINT_ATTRS: tuple[str, ...] = (
-    "_digest_cap", "_complexity_hint", "_sweep_hint", "_novelty_feedback", "_novelty_hint")
-"""Ephemeral hint attributes the engine communicates to the ACTIVE Researcher via
-`setattr` (orchestrator.py: `_digest_cap` ~388, `_complexity_hint`/`_sweep_hint`/
-`_novelty_hint` in `_set_complexity_hint`, `_novelty_feedback` in the novelty gate).
-Readers consume them with `getattr(self, name, default)`: `LLMResearcher.propose`
-(below) reads all the text cues; `UnifiedAgent.propose` forwards them to its internal
-researcher. Keep this tuple in sync with the orchestrator's setattr sites.
+    "_digest_cap", "_complexity_hint", "_sweep_hint", "_novelty_feedback", "_novelty_hint",
+    "_novelty_stance", "_hyp_order")
+"""Ephemeral hint attributes communicated to the ACTIVE Researcher via `setattr` and consumed
+with `getattr(obj, name, default)`. Writers: the engine (orchestrator.py — `_digest_cap` in
+`__init__`, `_complexity_hint`/`_sweep_hint` in `_set_complexity_hint`, `_novelty_hint` +
+`_novelty_stance` in `_stamp_novelty_hint`, `_novelty_feedback` in the novelty gate) and the
+foresight panel (search/foresight.py `_prioritize_board` sets `_hyp_order` — the predicted
+best-first board order — on its wrapped researcher). Readers: `LLMResearcher.propose` (below)
+and agent.py's `ToolUsingResearcher.propose` read the text cues and thread `_hyp_order` into
+`_state_brief`; the foresight ranker reads `_novelty_stance` (the stance VALUE behind the
+`_novelty_hint` prose).
 
-Both researchers now honor the same cues: `LLMResearcher.propose` and agent.py's
-`ToolUsingResearcher.propose` fold the same `(_complexity_hint, _sweep_hint,
-_novelty_feedback, _novelty_hint)` cue set into their prompts, so the strategist's
-`prefer_sweep` nudge and `novelty_stance` directive reach the agentic path too
-(`_digest_cap` is consumed separately as a numeric cap)."""
+THIS TUPLE IS THE DELIVERY CONTRACT (P2, docs/PROMPT_REVIEW.md): the engine setattrs hints on
+the OUTERMOST active researcher, and EVERY wrapper that delegates propose() mirrors ONLY this
+registry (plus the non-hint `track_hypotheses` knob) onto its delegate. The forwarding wrappers:
+the foresight panel (`search/foresight.py::ForesightPanelResearcher._forward_hints`), the
+`UnifiedAgent` facade (`agents/unified_agent.py::UnifiedAgent.propose`), the surrogate wrapper
+(`search/surrogate.py::SurrogateResearcher.propose`), and the empirical panel
+(`serve/panel.py::PanelResearcher.propose`). An attribute missing here silently dies at the
+first wrapper — exactly how board prioritization was dead in the default config. Keep it in
+sync with every `setattr(self.researcher, "...")` / `setattr(self.base, "...")` site;
+tests/test_hint_forwarding.py scans those sites AND wires the real wrapper chains to enforce it.
+
+Both researchers honor the same cues: `LLMResearcher.propose` and `ToolUsingResearcher.propose`
+fold the same `(_complexity_hint, _sweep_hint, _novelty_feedback, _novelty_hint)` cue set into
+their prompts (`_digest_cap` is consumed separately as a numeric cap; `_hyp_order` orders the
+open-hypothesis board inside `_state_brief`)."""
+
+
+def forward_hints(src, dst) -> None:
+    """Mirror the engine-set ephemeral hints from a wrapper onto its delegate — the ONE owner of
+    the `(*RESEARCHER_HINT_ATTRS, "track_hypotheses")` forwarding rule every wrapper shares.
+
+    P2 delivery contract (see RESEARCHER_HINT_ATTRS above): the engine setattrs hints on the
+    OUTERMOST active researcher — which may be any of the forwarding wrappers — so each wrapper
+    mirrors the registry (plus the non-hint `track_hypotheses` knob, likewise poked onto the
+    outermost object; an explicit OFF must not be shadowed) onto its delegate before delegating
+    propose(). hasattr-guarded: an attr the engine never set is left untouched on `dst`. Without
+    this, a wrapper silently dropped every engine hint on its delegation path. Callers:
+    `UnifiedAgent.propose`, `ForesightPanelResearcher._forward_hints`,
+    `SurrogateResearcher.propose`, and serve's `PanelResearcher.propose` — one helper, so the
+    rule can't drift per-wrapper (tests/test_hint_forwarding.py wires the real chains)."""
+    for attr in (*RESEARCHER_HINT_ATTRS, "track_hypotheses"):
+        if hasattr(src, attr):
+            setattr(dst, attr, getattr(src, attr))
 
 
 def collect_hint_cues(obj, attrs) -> str:
@@ -256,13 +331,17 @@ class LLMResearcher:
 
     def __init__(self, client: LLMClient, space_hint: str = "",
                  bounds: Optional[dict] = None, parser: str = "tool_call",
-                 prompts: Optional[PromptStore] = None, track_hypotheses: bool = True):
+                 prompts: Optional[PromptStore] = None, track_hypotheses: bool = True,
+                 offer_sweep: bool = True):
         self.client = client
         self.space_hint = space_hint
         self.bounds = bounds
         self.parser = parser
         self.prompts = prompts
         self.track_hypotheses = track_hypotheses   # P1: ask for the per-experiment hypothesis (default on)
+        # P6: offer the intra-node sweep only when the active Developer implements `idea.space`
+        # (make_roles sets this post-construction; default True keeps direct constructions as-is).
+        self.offer_sweep = offer_sweep
 
     def propose(self, state: RunState, parent: Optional[Node]) -> Idea:
         # Operator steering (Phase 5 `hint` control events): fold them into the prompt so a live
@@ -283,7 +362,18 @@ class LLMResearcher:
         hyp_sys = _hypothesis_system_suffix(self.track_hypotheses)
         messages = [
             {"role": "system",
-             "content": render(self.prompts, "researcher_system", _RESEARCHER_SYSTEM) + hyp_sys
+             # P6: the capability suffix (sweep offer — gated on the active Developer — +
+             # eval_timeout), the operator note, and the emit instruction are appended AFTER the
+             # render() — the SAME code-owned pattern as agent.py's ToolUsingResearcher. A
+             # `researcher_system.md` PromptStore override replaces only the CORE persona, so an
+             # override can never desync the capability prose from what the backend actually
+             # implements (pre-fix the suffix was baked INSIDE the render default and an override
+             # bypassed the offer_sweep gate). The assembled default is byte-equal to
+             # `_researcher_system(offer_sweep)`.
+             "content": render(self.prompts, "researcher_system", _RESEARCHER_CORE)
+                        + _researcher_capability_suffix(getattr(self, "offer_sweep", True))
+                        + _OPERATOR_NOTE
+                        + "Respond ONLY with the requested structured fields." + hyp_sys
                         + "\n\n" + _attention_points()},
             {"role": "user", "content": _state_brief(state, parent,
                                                      digest_cap=getattr(self, "_digest_cap", 0),
@@ -292,7 +382,10 @@ class LLMResearcher:
                                         hint_block + cues +
                                         "\nPropose the next Idea (operator, params, rationale"
                                         + (", hypothesis" if self.track_hypotheses else "") +
-                                        "; optionally a `space` grid for a sweep). The "
+                                        # P6: don't re-offer the sweep in the user turn when the
+                                        # active Developer can't run one (system prompt gates too).
+                                        ("; optionally a `space` grid for a sweep"
+                                         if getattr(self, "offer_sweep", True) else "") + "). The "
                                         "`rationale` is your conclusion the operator reads: in 1-3 "
                                         "sentences state WHY this experiment next and WHAT you expect "
                                         "it to learn/improve given the results so far — not a "
@@ -354,8 +447,12 @@ class LLMDeveloper:
             [{"role": "system", "content": system}, {"role": "user", "content": user}]))
 
     def repair(self, idea: Idea, code: str, error: str) -> str:
+        # P8: the hardware/operational cues reach repair too (a timeout/oom repair NEEDS the real
+        # GPU/CPU picture to size the cheaper retry) — appended after the render() calls, same as
+        # the implement path.
         system = (render(self.prompts, "developer_repair_prefix", "You are an expert Python debugger. ") +
-                  render(self.prompts, "developer_system", _DEVELOPER_SYSTEM) + self.brief)
+                  render(self.prompts, "developer_system", _DEVELOPER_SYSTEM) + self.brief
+                  + "\n\n" + _attention_points())
         user = ("The script below failed. Return a corrected, complete script that runs "
                 "and prints the required JSON metric line.\n\n--- SCRIPT ---\n" + code +
                 "\n\n--- ERROR (stderr tail) ---\n" + error)
@@ -558,7 +655,7 @@ class ValidatingDeveloper(WrapsDeveloper):
             attempt.rationale = (
                 idea.rationale +
                 f"\n[validator] the previous attempt was rejected: {report.feedback()}. "
-                "Edit solution.py to fix this.").strip()
+                "Fix this in your changed files (the solution script / the repo files you edited).").strip()
         if self.fallback is not None:              # exhausted retries -> known-good path
             fb = (fallback_call or (lambda: self.fallback.implement(idea)))()
             # In repo mode the fallback is the baseline (no-op) developer — running the

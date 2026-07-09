@@ -16,6 +16,15 @@ from __future__ import annotations
 
 from typing import Optional, Protocol
 
+# The agent loop's hard per-result bound: `drive_tool_loop` (agents/agent.py) caps EVERY tool result
+# at this many chars before it reaches the model, replacing the tail with an explicit truncation
+# marker. Providers must derive their own page/tail budgets FROM this constant (cap minus their
+# header/marker overhead) instead of hard-coding free-standing ~4000s — so the loop cap and every
+# provider budget move together, and a provider's own honest truncation (not the loop's blunt cut)
+# is what decides which content is dropped. Canonical home: core/context_budget.py (runtime/ sits
+# BELOW tools/ in the layering and needs it too); re-exported here for the providers.
+from looplab.core.context_budget import RESULT_CAP  # noqa: F401  (re-export, see comment above)
+
 
 def fn_spec(name: str, description: str, props: dict, required: Optional[list] = None) -> dict:
     """Build one OpenAI-format function/tool schema. Shared by every tool provider so the
@@ -37,15 +46,18 @@ class ToolProvider(Protocol):
       Soft-fail rule: `execute` returns an error message string, it never raises — a junk
       tool call from the model must not crash the run. Long output is additionally
       truncated by the agent layer (~4000 chars), so providers should tail/clip smartly.
-    - `bind_state(state)` (optional) — run-aware providers (e.g. `RunTools`) implement this
-      so the agent loop can point them at the current `RunState` each turn. Providers that
-      don't need run state simply omit it (`CompositeTools` forwards it only where present),
-      hence the no-op default here.
+    - `bind_state(state, parent=None)` (optional) — run-aware providers (e.g. `RunTools`)
+      implement this so the agent loop can point them at the current `RunState` (and the
+      node's parent, when the loop knows one) each turn. The loop CALLS it with BOTH
+      arguments — `bind_state(state, parent)` (`agents/agent.py`) — so a provider must
+      accept the second one (default it to None), or it raises TypeError at dispatch.
+      Providers that don't need run state simply omit the hook (`CompositeTools` forwards
+      it only where present), hence the no-op default here.
     """
 
     def specs(self) -> list[dict]: ...
 
     def execute(self, name: str, args: dict) -> str: ...
 
-    def bind_state(self, state) -> None:  # optional hook — default is a no-op
+    def bind_state(self, state, parent=None) -> None:  # optional hook — default is a no-op
         return None

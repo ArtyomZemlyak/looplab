@@ -156,7 +156,7 @@ def test_handoff_false_skips_the_summary_call():
         assert calls == []                    # and spent no summary LLM call
 
 
-# --------------------------------------------------------------------------- shared read cache
+# ------------------------------------------------------------- reads always execute across phases
 class _CountReadTools:
     def __init__(self):
         self.reads = 0
@@ -179,27 +179,15 @@ class _ReadThenEmit:
         return _tool_call("read_file", {"p": "a.py"}) if self.n == 1 else _emit_call()
 
     def complete_text(self, m):
-        return ""     # keep the ledger empty so this test isolates the read cache
+        return ""     # keep the ledger empty so this test isolates the read behavior
 
 
-def test_read_cache_is_shared_across_phases_in_a_scope():
+def test_reads_reexecute_across_phases_in_a_scope():
+    # The node-scoped shared READ CACHE was removed with the loop's read-dedup (P3,
+    # docs/PROMPT_REVIEW.md — operator decision: "always read what is asked"): a later phase's
+    # identical read must EXECUTE for real and return fresh content, scope or no scope. The
+    # handoff BRIEF (tests above) is the only cross-phase carry-over now.
     tools = _CountReadTools()
-    with handoff_scope(enabled=True):
-        run_phase(_ReadThenEmit(), tools,
-                  [{"role": "system", "content": "S1"}, {"role": "user", "content": "p1"}],
-                  _EMIT, label="stages", finalize=lambda a: ("e", a), fallback=lambda m: ("f", None))
-        run_phase(_ReadThenEmit(), tools,
-                  [{"role": "system", "content": "S2"}, {"role": "user", "content": "p2"}],
-                  _EMIT, label="plan", finalize=lambda a: ("e", a), fallback=lambda m: ("f", None))
-    assert tools.reads == 1     # phase 2's identical read served from the shared node cache, not re-run
-
-
-def test_cross_phase_read_reserves_content_not_stub():
-    # A file an EARLIER phase read is a dedup HIT in a later phase (the tool is NOT re-run), but that
-    # output lives in the earlier phase's discarded messages — only the lossy brief carries over. So
-    # the later phase must get the cached CONTENT re-served, not a "use the earlier output" stub it
-    # cannot act on (else e.g. the implement phase edits a file it was told to read, blind).
-    tools = _CountReadTools()   # execute() returns "file contents"
     seen: list = []
     with handoff_scope(enabled=True):
         run_phase(_ReadThenEmit(), tools,
@@ -209,8 +197,8 @@ def test_cross_phase_read_reserves_content_not_stub():
                   [{"role": "system", "content": "S2"}, {"role": "user", "content": "p2"}],
                   _EMIT, label="plan", finalize=lambda a: ("e", a), fallback=lambda m: ("f", None),
                   on_tool_result=lambda n, a, r: seen.append(r))
-    assert tools.reads == 1            # still de-duplicated: the tool did NOT re-run
-    assert seen == ["file contents"]   # …but phase 2 received the real content, not the stub
+    assert tools.reads == 2            # phase 2's identical read re-ran (no shared cache)
+    assert seen == ["file contents"]   # and it received the real, fresh content
 
 
 def test_handoff_summary_is_traced_as_its_own_span():
@@ -241,8 +229,8 @@ def test_handoff_summary_is_traced_as_its_own_span():
         assert hs["attributes"].get("handoff_from") == "stages"  # tagged with the source phase
 
 
-def test_read_cache_is_per_loop_without_a_scope():
-    # No scope → each phase gets its own loop-local cache → the identical read runs in BOTH phases.
+def test_reads_reexecute_without_a_scope_too():
+    # No scope: same P3 behavior — the identical read runs in BOTH phases (no cache anywhere).
     tools = _CountReadTools()
     for tag in ("p1", "p2"):
         run_phase(_ReadThenEmit(), tools,

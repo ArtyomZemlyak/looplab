@@ -35,6 +35,140 @@ def test_background_manager_reads_incrementally(tmp_path):
     assert "a" not in r2["new_output"]                 # cursor advanced — only NEW output
 
 
+def test_background_read_backpressure_nothing_lost(tmp_path):
+    """F7: read() used to advance the cursor past the WHOLE log and then tail-truncate the text —
+    output beyond the budget was consumed and unrecoverable. Now each poll returns one bounded chunk
+    and advances the cursor ONLY by what it returned, so sequential polls are complementary."""
+    from looplab.runtime.bg_tasks import _MAX_READ, BackgroundManager as _BM
+    mgr = _BM()
+    payload = "".join(f"<{i:04d}>" for i in range(1667))          # ~10KB of unique markers
+    tid = mgr.start([sys.executable, "-c", f"import sys; sys.stdout.write({payload!r})"],
+                    str(tmp_path))
+    for _ in range(200):                                          # wait for the writer to finish
+        if mgr._tasks[tid]["proc"].poll() is not None:
+            break
+        time.sleep(0.05)
+    r1 = mgr.read(tid)
+    r2 = mgr.read(tid)
+    assert len(r1["new_output"]) <= _MAX_READ and len(r2["new_output"]) <= _MAX_READ
+    assert r1["pending"] > 0                                      # first poll left output pending
+    assert r2["new_output"] and r2["new_output"] != r1["new_output"]
+    chunks, r = [r1["new_output"], r2["new_output"]], r2
+    while r["pending"]:
+        r = mgr.read(tid)
+        chunks.append(r["new_output"])
+    assert "".join(chunks) == payload                             # complementary chunks — nothing lost
+
+
+def _drain(mgr, tid):
+    """Poll to completion, returning the chunks in cursor order."""
+    chunks = []
+    r = mgr.read(tid)
+    chunks.append(r["new_output"])
+    while r["pending"]:
+        r = mgr.read(tid)
+        chunks.append(r["new_output"])
+    return chunks
+
+
+def _start_finished(mgr, tmp_path):
+    """A background task whose child has already exited (so tests can append to its log directly)."""
+    tid = mgr.start([sys.executable, "-c", "pass"], str(tmp_path))
+    for _ in range(200):
+        if mgr._tasks[tid]["proc"].poll() is not None:
+            break
+        time.sleep(0.05)
+    return tid
+
+
+def test_background_concurrent_polls_lose_nothing(tmp_path):
+    """H1: read() must hold the lock across cursor-read → slice → cursor-advance. Two concurrent
+    polls that both read the cursor and both `+=` it would jointly advance it past a chunk only one
+    of them returned — a permanently SKIPPED chunk. Chunks are unique ordered markers, so the drained
+    union must reassemble the exact payload."""
+    import threading
+    mgr = BackgroundManager()
+    tid = _start_finished(mgr, tmp_path)
+    payload = "".join(f"<{i:05d}>" for i in range(4000))          # ~28KB of unique ordered markers
+    with open(mgr._tasks[tid]["log"], "ab") as f:
+        f.write(payload.encode())
+    got, lock = [], threading.Lock()
+
+    def _poll():
+        while True:
+            r = mgr.read(tid)
+            with lock:
+                if r["new_output"]:
+                    got.append(r["new_output"])
+            if not r["pending"]:
+                return
+
+    threads = [threading.Thread(target=_poll) for _ in range(2)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=30)
+    # Chunks may be COLLECTED out of order across the two threads; each is a contiguous unique
+    # slice, so reassemble by payload position — any lost/duplicated chunk breaks the equality.
+    assert "".join(sorted(got, key=payload.index)) == payload
+
+
+def test_background_read_is_seek_based_and_matches_the_old_chunking(tmp_path):
+    """H2a: the incremental seek-read returns exactly the same complementary chunks the whole-log
+    read produced for a small log (same budget, same cursor semantics)."""
+    from looplab.runtime.bg_tasks import _MAX_READ
+    mgr = BackgroundManager()
+    tid = _start_finished(mgr, tmp_path)
+    payload = "".join(f"<{i:04d}>" for i in range(1667))          # ~10KB of unique markers
+    with open(mgr._tasks[tid]["log"], "ab") as f:
+        f.write(payload.encode())
+    chunks = _drain(mgr, tid)
+    assert all(len(c) <= _MAX_READ for c in chunks)
+    assert len(chunks) >= 2 and "".join(chunks) == payload        # complementary — nothing lost
+
+
+def test_background_backlog_over_cap_is_skipped_with_an_explicit_note(tmp_path):
+    """H2b: an unread backlog beyond _BACKLOG_CAP is not drained by doomed catch-up polls — the
+    cursor jumps to the newest _BACKLOG_CAP bytes and the chunk STARTS with an explicit
+    '…(N bytes of older output skipped — full log: …)…' note (honest truncation); within the cap
+    nothing is silently lost."""
+    from looplab.runtime.bg_tasks import _BACKLOG_CAP
+    mgr = BackgroundManager()
+    tid = _start_finished(mgr, tmp_path)
+    payload = "".join(f"<{i:07d}>" for i in range(40_000))        # 360KB >> the 256KB backlog cap
+    log = mgr._tasks[tid]["log"]
+    with open(log, "ab") as f:
+        f.write(payload.encode())
+    chunks = _drain(mgr, tid)
+    skipped = len(payload) - _BACKLOG_CAP
+    note = f"…({skipped} bytes of older output skipped — full log: {log})…\n"
+    assert chunks[0].startswith(note)                             # the drop is announced, with count+path
+    recovered = chunks[0][len(note):] + "".join(chunks[1:])
+    assert recovered == payload[-_BACKLOG_CAP:]                   # the newest cap-worth arrives intact
+    assert not any("skipped" in c for c in chunks[1:])            # the note fires once, on the jump poll
+
+
+def test_shell_read_output_reports_more_pending(tmp_path):
+    """The shell-level read_output reply stays under the loop cap and says when more is pending, so
+    the model polls again instead of assuming it saw everything."""
+    from looplab.runtime.bg_tasks import MANAGER
+    from looplab.tools._base import RESULT_CAP
+    s = ShellTools([tmp_path], mode="auto")
+    code = "import sys; sys.stdout.write(''.join('<%05d>' % i for i in range(2000)))"   # 14KB, positional
+    r = s.execute("run_command", {"command": [sys.executable, "-c", code], "background": True})
+    tid = r.split("task ")[1].split(" ")[0]
+    for _ in range(200):
+        if any(t["task_id"] == tid and t["status"] == "exited" for t in MANAGER.list()):
+            break
+        time.sleep(0.05)
+    out1 = s.execute("read_output", {"task_id": tid})
+    assert len(out1) <= RESULT_CAP
+    assert "more output pending — poll read_output again" in out1
+    assert "<00000>" in out1 and "<00600>" not in out1            # first chunk = the log's HEAD only
+    out2 = s.execute("read_output", {"task_id": tid})
+    assert "<00600>" in out2 and "<00000>" not in out2            # the next poll CONTINUES the log
+
+
 def test_shell_background_tool(tmp_path):
     s = ShellTools([tmp_path], mode="auto")
     r = s.execute("run_command", {"command": [sys.executable, "-c", "print('hi')"], "background": True})

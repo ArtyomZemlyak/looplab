@@ -51,6 +51,23 @@ def test_delete_node_takes_subtree_and_heals_best(tmp_path):
     assert (rd / "events.jsonl.bak-del1").exists()                  # recoverable backup
 
 
+def test_reset_node_spec_accepts_any_stage_name(tmp_path):
+    """F-reset-enum: prompts/executor/HTTP route accept ANY eval-pipeline stage name (train,
+    data_prep, …), so the spec must not hard-code an enum — and the tool must actually queue a
+    non-classic stage."""
+    rd = tmp_path / "r5"
+    _run(rd)
+    t = RunControlTools(tmp_path, alive_fn=lambda _rd: False, mode="auto")
+    spec = next(s for s in t.specs() if s["function"]["name"] == "reset_node")
+    stage = spec["function"]["parameters"]["properties"]["stage"]
+    assert "enum" not in stage                                  # no hard-coded stage list
+    assert "eval-pipeline stage" in stage["description"]        # accepted values described instead
+    out = t.execute("reset_node", {"run_id": "r5", "node_id": 1, "stage": "train"})
+    assert "re-run from train" in out
+    ev = [e for e in EventStore(rd / "events.jsonl").read_all() if e.type == "node_reset"]
+    assert ev and ev[-1].data["from_stage"] == "train"
+
+
 def test_destructive_refuses_live_engine(tmp_path):
     _run(tmp_path / "r4")
     t = RunControlTools(tmp_path, alive_fn=lambda _rd: True, mode="auto")   # engine "live"

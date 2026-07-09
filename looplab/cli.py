@@ -492,8 +492,12 @@ def run(
         task_dict = result.task
         # A generative kind (the agent writes/edits code) implies an LLM-driven run; default the
         # backend to llm when the user didn't pick one. Offline-optimizable kinds keep their default.
-        if not backend_chosen and result.kind in _genesis.GENERATIVE_KINDS:
-            settings.backend = "llm"
+        # The kind→backend rule lives in `engine/genesis.py::default_backend` (shared with the web
+        # UI's /api/start funnel, `serve/routers/control.py::_defaults_backend_llm`) — only the
+        # CLI-surface `backend_chosen` detection above stays here.
+        genesis_backend = _genesis.default_backend(result.kind, chosen=backend_chosen)
+        if genesis_backend is not None:
+            settings.backend = genesis_backend
         typer.echo(f"Genesis -> kind={result.kind}: {result.rationale or result.reply}".rstrip())
     # A goal described in words but no kind, with Genesis off: do NOT silently fall back to the
     # quadratic toy optimizer (validate_task's default) — that would run nonsense on a real goal and

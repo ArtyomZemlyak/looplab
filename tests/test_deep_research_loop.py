@@ -101,8 +101,12 @@ def test_tool_then_stall_then_nudge_then_emit_message_parity():
     # Final turn: system, user, assistant(tool_calls), tool result, prose, historical nudge.
     final = client.turns[2]
     assert [m["role"] for m in final] == ["system", "user", "assistant", "tool", "assistant", "user"]
-    assert final[3] == {"role": "tool", "tool_call_id": "c1", "name": "search",
-                        "content": "R" * 4000}          # 4000-char tool-result cap preserved
+    # 4000-char tool-result cap preserved — now WITH the explicit truncation marker (P3,
+    # docs/PROMPT_REVIEW.md) instead of a silent head-cut.
+    from looplab.agents.agent import _cap_tool_result
+    capped = _cap_tool_result("R" * 5000)
+    assert len(capped) <= 4000 and capped.endswith("re-request a narrower range]")
+    assert final[3] == {"role": "tool", "tool_call_id": "c1", "name": "search", "content": capped}
     assert final[4] == {"role": "assistant", "content": "let me think in prose"}
     assert final[5] == {"role": "user", "content": "Now call `emit` with your memo."}
 

@@ -187,6 +187,12 @@ def fold(events: Iterable[Event]) -> RunState:
                 n.confirmed_mean = None
                 n.confirmed_std = None
                 n.confirmed_seeds = None
+                # The PER-SEED confirm memo must reset with the node too: the confirm phase memo-skips
+                # every seed already in `confirm_seed_results`, so a stale entry would re-emit
+                # node_confirmed from PRE-reset seed metrics for the post-reset code without running a
+                # single seed. (The force-confirm gate `confirmed_forced` deliberately stays — it pairs
+                # a force_confirm REQUEST with its confirm_done, and a reset is not a new request.)
+                st.confirm_seed_results.pop(n.id, None)
                 n.failed_stage = None
                 # Finish-time scores computed on the NOW-discarded code must not survive the reset, or a
                 # holdout-gated best pick / generalization-gap audit keeps using a stale number the node

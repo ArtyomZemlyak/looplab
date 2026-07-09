@@ -1386,8 +1386,18 @@ class Engine(ConfirmPhaseMixin, AblationMixin):
             # Own trace so each hypothesis_merged event (appended INSIDE) is stamped with THIS merge's
             # trace_id — the UI can then show only the merge's own retrieval+decision trace under it.
             with self._op_span("hypothesis_merge"):   # no node_id — see strategist_consult (avoids leaking into a node's trace)
+                # merge_system.md override + configured structured-output parser live on the ROLES
+                # (tasks.py wires them), not the engine — resolve both via the lessons helper that
+                # already walks the researcher→inner→fallback→developer chain (one lookup path,
+                # not a shallow re-derivation that misses wrapped roles). getattr guard: some
+                # tests build Engine via __new__ (no `lessons`); (None, "tool_call") are exactly
+                # the defaults `agent_merge` assumes when nothing is wired.
+                _lm = getattr(self, "lessons", None)
+                _prompts, _parser = (_lm._merge_prompt_opts() if _lm is not None
+                                     else (None, "tool_call"))
                 for g in consolidate(texts, client, kind="research hypotheses",
-                                     embed=self._embedder, goal=state.goal):
+                                     embed=self._embedder, goal=state.goal,
+                                     prompts=_prompts, parser=_parser):
                     if len(g["members"]) < 2:
                         continue
                     ids = [open_hyps[i].id for i in g["members"]]
@@ -2497,9 +2507,19 @@ class Engine(ConfirmPhaseMixin, AblationMixin):
         statically bound: a command with no local `.py` script token (`python -m pkg`, a shell wrapper, a
         bare binary) or a `.py` path outside the workdir. Fail-closed by construction — a spuriously
         'reachable' file only forces a re-train, but a MISSED dependency would silently score a stale
-        checkpoint (the invariant `_safe_reuse_start` exists to protect)."""
+        checkpoint (the invariant `_safe_reuse_start` exists to protect).
+
+        Interim heuristic, superseded long-term by the per-stage ARTIFACT DECLARATION design
+        (docs/BACKLOG.md §6 'Deferred design work') — prefer extending that design over adding cases here."""
         wd = Path(workdir)
         imp_re = re.compile(r"^[ \t]*(from|import)[ \t]+(.+?)[ \t]*$", re.M)
+        # Parenthesized MULTI-LINE imports (`from pkg import (\n  a,\n  b,\n)`) span lines, so the
+        # line-anchored pattern above only sees `from pkg import (` — it credits pkg/__init__.py but
+        # MISSES the pkg/a.py / pkg/b.py submodule files, letting a repair to those escape the
+        # closure. This companion pattern captures the whole group (a char class matches newlines
+        # without re.S); `#` comments are stripped from the whole source BEFORE either scan runs
+        # (see below), so a ')' inside a trailing comment can't end the group early.
+        paren_re = re.compile(r"^[ \t]*from[ \t]+(\.*[\w.]*)[ \t]+import[ \t]*\(([^)]*)\)", re.M)
         out: set = set()
         pending: list = []
         for s in (stages or []):
@@ -2532,14 +2552,27 @@ class Engine(ConfirmPhaseMixin, AblationMixin):
                 src = p.read_text(encoding="utf-8", errors="replace")
             except Exception:  # noqa: BLE001
                 continue
-            for m in imp_re.finditer(src):
-                for mod in Engine._imported_modules(m.group(1), m.group(2)):
+            # Strip `#` comments BEFORE both import scans: the paren pattern's `[^)]*` group stops
+            # at the FIRST ')', so a ')' inside a trailing comment (`vit,  # backbone (legacy)`)
+            # would end the group early and silently drop every name after it from the closure.
+            # The blunt regex also eats '#' inside string literals — that can only ADD spurious
+            # 'reachable' candidates, which is fail-closed-safe here (a false positive merely
+            # forces a re-train; it's a MISSED dependency that would score a stale checkpoint).
+            src = re.sub(r"#[^\n]*", "", src)
+            def _credit(mods):
+                for mod in mods:
                     for cand in Engine._module_file_candidates(mod, rel):
                         if cand not in out and (wd / cand).exists():
                             pending.append(cand)
+            for m in imp_re.finditer(src):
+                _credit(Engine._imported_modules(m.group(1), m.group(2)))
+            for m in paren_re.finditer(src):
+                inner = " ".join(m.group(2).splitlines())    # comments already gone (see above)
+                _credit(Engine._imported_modules("from", f"{m.group(1)} import ({inner})"))
         return out
 
-    def _safe_reuse_start(self, stages: list, failed_stage, changed_files, workdir):
+    def _safe_reuse_start(self, stages: list, failed_stage, changed_files, workdir,
+                          deleted=None, cwd=None):
         """The stage to RESTART from so a repaired node reuses the completed EARLIER stages (e.g. skip
         re-`train` when only the `score` script was fixed) — or None to re-run the FULL pipeline (the
         safe default that preserves the 'each node trains a FRESH model' invariant).
@@ -2548,10 +2581,19 @@ class Engine(ConfirmPhaseMixin, AblationMixin):
         DISJOINT from those stages' reachable files (their scripts + transitive imports). If a change
         could have altered what an earlier stage produces (train.py / loss.py / model.py it imports, or
         the stage MANIFEST that carries the argv), we must re-train — reusing a stale checkpoint would
-        score a model that doesn't reflect the current code. Opaque earlier stages (no resolvable script:
-        `python -m`, a shell wrapper) also force a re-train. A false negative just re-trains (no worse
-        than a full re-run); a false positive is a silent stale score, so the predicate is conservative
-        by construction and fail-closed on anything it can't statically bound."""
+        score a model that doesn't reflect the current code. Beyond the disjointness test, reuse is
+        REFUSED outright whenever the predicate cannot PROVE the earlier stages' inputs are unchanged:
+          • an OPAQUE earlier stage (no resolvable local script: `python -m`, a shell wrapper);
+          • the repair DELETED any file (`deleted`) — the closure can't see vanished modules;
+          • any changed file is not a `.py` (config/data inputs are invisible to import reachability);
+          • the eval runs under a non-default `cwd` (changed-file keys and stage-script paths resolve
+            against different bases, so the intersection proves nothing).
+        A false negative just re-trains (no worse than a full re-run); a false positive is a silent
+        stale score, so the predicate is conservative by construction and fail-closed on anything it
+        can't statically bound.
+
+        Interim heuristic, superseded long-term by the per-stage ARTIFACT DECLARATION design
+        (docs/BACKLOG.md §6 'Deferred design work') — prefer extending that design over adding cases here."""
         if not stages or not failed_stage:
             return None
         names = [str(s.get("name")) for s in stages]
@@ -2560,10 +2602,29 @@ class Engine(ConfirmPhaseMixin, AblationMixin):
         fi = names.index(failed_stage)
         if fi == 0:                                   # nothing before it to reuse
             return None
+        # DELETIONS are un-boundable: _write_node_files unlinks them BEFORE this predicate runs, so
+        # the reachability closure (walked over files still on disk) can never rediscover an import
+        # of the vanished module — `changed ∩ reachable` would be trivially disjoint even when an
+        # earlier stage trained THROUGH the deleted file. Any deletion forces a full re-run.
+        if deleted:
+            return None
+        # A non-default eval `cwd` re-bases the stage scripts: the reachable set resolves script
+        # paths against the WORKDIR root, but the repair's changed-file keys are workdir-relative —
+        # under a subdir cwd the same file appears as `sub/train.py` on one side and `train.py` on
+        # the other, so disjointness proves nothing. Fail closed rather than guess the remapping.
+        if cwd not in (None, "", "."):
+            return None
         changed = {(f[2:] if isinstance(f, str) and f.startswith("./") else f) for f in (changed_files or [])}
         # A change to the stage MANIFEST rewrites the pipeline's argv (e.g. train hyperparams), so the
         # completed checkpoint no longer matches the declared command — never reuse across it.
         if any(str(c).rsplit("/", 1)[-1] == "looplab_stages.json" for c in changed):
+            return None
+        # Reachability only bounds PYTHON imports: a changed non-.py file (config.yaml, a params
+        # file, a writable data copy the train stage reads) can alter what an earlier stage produced
+        # without ever appearing in the import closure. Its effect can't be proven absent, so any
+        # non-.py change forces a full re-run (the manifest case above is the named instance of the
+        # same blind spot; this catches every other one).
+        if any(not str(c).endswith(".py") for c in changed):
             return None
         reachable = self._stage_reachable_files(stages[:fi], workdir)
         if reachable is None:                         # an OPAQUE earlier stage (python -m/shell) → re-train
@@ -2963,7 +3024,15 @@ class Engine(ConfirmPhaseMixin, AblationMixin):
                 # compute the repair's REAL change set below — `developer.last_files` is the node's whole
                 # cumulative solution for the repo developer (repair_from preloads every node file), so a
                 # raw key set would always intersect the train stage and defeat checkpoint reuse.
+                # Deletions get the same NODE-side baseline: post-repair `last_deleted` is cumulative
+                # (repair_from seeds it from node.deleted), so only THIS repair's deletion DELTA may
+                # veto checkpoint reuse — and like `prev_files`, the baseline must be read off the
+                # NODE, not the shared developer: at this instant `developer.last_deleted` belongs to
+                # whatever node it built LAST (see the `_repair` docstring), so a sibling's stale
+                # deletions would mask a real repair deletion from the fail-closed reuse guard (or
+                # veto reuse for a deletion this node never made).
                 prev_files = dict(getattr(node, "files", {}) or {})
+                prev_deleted = set(getattr(node, "deleted", []) or [])
                 with self.tracer.span("inline_repair", node_id=node_id, attempt=attempt + 1):
                     new_code = self._repair(
                         node, self._repair_error_context(reason, err, state=state, node=node))
@@ -2991,20 +3060,42 @@ class Engine(ConfirmPhaseMixin, AblationMixin):
                 # training code can't burn many full trains (the anti-stuck guard is signature-, not
                 # cost-based). The workdir persists across attempts, so a reused checkpoint is valid.
                 # The repair's REAL change set = files whose content actually differs from the pre-repair
-                # node (last_files is cumulative — see prev_files above), plus any deletions.
+                # node (last_files is cumulative — see prev_files above), plus THIS repair's deletions.
                 changed = {f for f, c in repaired_files.items() if prev_files.get(f) != c}
-                changed |= set(repaired_deleted)
+                # Deletions likewise get the delta, not the cumulative set: a deletion that predates
+                # the completed train stage cannot invalidate its checkpoint — the stage already ran
+                # (and passed) without that file on disk. Blocking on the cumulative `repaired_deleted`
+                # (seeded from node.deleted at repair_from) would permanently disable stage reuse for
+                # any node whose implement ever deleted a file; only THIS repair's deletions can
+                # invalidate the checkpoint, so only they enter the reuse decision.
+                new_deleted = [d for d in repaired_deleted if d not in prev_deleted]
+                changed |= set(new_deleted)
                 _stages = self._resolved_stages(node, workdir)
-                next_start = self._safe_reuse_start(_stages, res.failed_stage, changed, workdir)
+                # `deleted` and the eval spec's `cwd` ride along so the predicate can fail closed on
+                # its blind spots: a deletion is invisible to the reachability closure (the file was
+                # unlinked by _write_node_files above), and a non-default cwd re-bases the stage
+                # scripts so the changed-vs-reachable intersection would prove nothing.
+                next_start = self._safe_reuse_start(
+                    _stages, res.failed_stage, changed, workdir,
+                    deleted=new_deleted,
+                    cwd=(self._eval_spec or {}).get("cwd") if isinstance(self._eval_spec, dict) else None)
                 # Count a full re-train against the cap ONLY when completed EARLIER-stage work is being
-                # discarded: a LATER stage failed (fi > 0) yet reuse was refused because the repair could
+                # discarded: a LATER stage failed yet reuse was refused because the repair could
                 # have changed an earlier stage. A first-stage failure (nothing to reuse) or a single-
                 # command eval is an ordinary retry, bounded by attempts/stuck like any other — NOT the
                 # retrain cap (mirrors config.py: "only a repair that changes an EARLIER stage's code
                 # forces a full re-train ... counted"). Check BEFORE incrementing so cap=N runs exactly N.
-                _names = [str(s.get("name")) for s in (_stages or [])]
-                _fi = _names.index(res.failed_stage) if res.failed_stage in _names else -1
-                if _fi > 0 and next_start is None:      # this repair forces a full (expensive) re-train
+                # First-vs-later is judged from the PRE-repair `res.stages` (one record per stage that
+                # ran, in order, the failed stage always LAST) — never from the failed stage's index in
+                # the POST-repair `_stages`: a repair that renames/drops the failed stage (or a
+                # _resolved_stages exception fallback to []) loses that index (-1) for FIRST- and
+                # LATER-stage failures alike. A renamed LATER stage still discards completed
+                # earlier-stage work on the forced full re-run, so it keeps consuming the cap (the
+                # point of counting the renamed case at all — leaving it uncounted let a
+                # stage-renaming repair burn unlimited full trains); a renamed FIRST stage never had
+                # earlier work to discard, so it must stay an ordinary retry.
+                was_first = len(res.stages or []) <= 1
+                if res.failed_stage and not was_first and next_start is None:   # forces a full (expensive) re-train
                     if (self._inline_repair_retrain_cap
                             and full_retrains >= self._inline_repair_retrain_cap):
                         triage_outcome = ("abandon",
@@ -3054,8 +3145,22 @@ class Engine(ConfirmPhaseMixin, AblationMixin):
                     if self.reward_hack_detect:
                         from looplab.trust.reward_hack import detect_reward_hacks
                         protected = set(self._repo_spec.get("protected_names", [])) | set(self._assets)
-                        sigs += detect_reward_hacks(scan_src, res.metric, state.direction,
-                                                    protected_names=protected, stdout=res.stdout)
+                        # The grader-IMPORT waiver keys on the task genuinely MATERIALIZING
+                        # grader.py (an ASSET → calling `grader.score(...)` is the documented
+                        # grading contract, e.g. the in-workdir mlebench brief). Pass it explicitly
+                        # instead of letting the detector infer it from `protected`: that union also
+                        # carries the operator's protect list, and a merely-PROTECTED grader.py
+                        # (protect=["grader.py"], no asset) means "hands off", not "import me" —
+                        # inference from the union would wrongly waive the import tells for it.
+                        sigs += detect_reward_hacks(
+                            scan_src, res.metric, state.direction,
+                            protected_names=protected, stdout=res.stdout,
+                            # Match the asset key NORMALIZED (path separators + case), exactly like
+                            # the detector normalizes `protected_names` — the inference this call
+                            # replaced got that normalization for free, so 'Grader.py' or a
+                            # backslashed key must keep sanctioning the import here too.
+                            grader_import_ok=any(str(a).replace("\\", "/").lower() == "grader.py"
+                                                 for a in (self._assets or ())))
                         # 4.3: also apply the hardened exploit ruleset grown by `looplab harden`
                         # (hacker-fixer-solver) — each previously-discovered exploit stays guarded.
                         if self._exploit_suite is not None:

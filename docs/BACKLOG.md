@@ -379,3 +379,47 @@ reused-stage fold record). What remains open or was dismissed:
   holes, and (b) the CLI-agent backend's `last_files` is a git-diff delta all
   along — so the reachability fix was needed regardless. (Both the delta and the
   reachability were fixed.)
+
+## 6. Prompt/agent mega-review follow-ups (2026-07-09)
+
+The same-day agent-prompt & delivery mega-review ([PROMPT_REVIEW.md](PROMPT_REVIEW.md)) was
+largely fixed on branch `claude/agent-prompts-review-dn5fbe` (hint-registry forwarding,
+skip-training contradiction, truncation markers/page sizes, `merge_system` reachability +
+lesson/hypothesis wording split, neutral untagged-reflection outcome, `_sdk._client` timeout
+guard, sanctioned mlebench grader import, PromptStore key table in the docs). Items
+deliberately deferred, with rationale:
+
+### Deferred design work
+- ⬜ **Per-stage ARTIFACT DECLARATION + technical verification (M–L).** User-requested direction
+  that supersedes the D1–D4 static-analysis line long-term: each pipeline stage DECLARES the
+  artifact paths it produces (checkpoints, processed data, predictions); after a stage the
+  engine VERIFIES existence/freshness of the declared artifacts, and checkpoint-reuse keys on
+  the declared artifacts instead of the import-closure heuristics (`_safe_reuse_start` +
+  `_stage_reachable_files`), which are fail-open by construction for anything they cannot see
+  (deleted modules, non-`.py` inputs, non-default `cmd.cwd`). The declaration can ride the
+  existing stage manifest (`looplab_stages.json` / operator `cmd.stages`); needs a design pass
+  for freshness semantics (mtime vs content hash), for agent-declared vs operator-declared
+  pipelines, and for what "verification failed" does mid-loop (bounce the stage vs fail the
+  node). Retires the whole D1–D4 defect class instead of patching its holes one by one.
+- ⬜ **D5 · per-attempt stage-event accounting (S).** After an in-loop checkpoint-reuse re-eval,
+  the node's only folded stage record is `train={reused, 0s}` — the attempt that actually spent
+  the training wall-clock is never recorded for that node (the fold's guard only protects
+  records that exist). Accounting/UI only, metrics and replay are unaffected; fix is an
+  attempt-indexed stage record (or a per-attempt `stage_completed` event) plus a readmodel that
+  sums attempts.
+
+### Deferred cleanup
+- ⬜ **Tool-consolidation follow-through (S–M).** Dedup the paginated file-reader family —
+  reposcout `read_file`, knowledge-tools `repo_read`, env_inspect `read_installed` — into one
+  reader contract (same arg names, same resume-pointer shape) once loop-side pagination
+  settles: the P3 fix pinned page sizes under the 4000-char loop cap per tool; unifying first
+  would have churned three prompts mid-review. Blocked on: pick ONE page-size constant the
+  `_base.py` provider contract exports, then collapse the three implementations.
+- ⬜ **Reward-hack vs hardened-suite residual (S).** The mlebench grader-import false positive
+  was FIXED in the detector (`trust/reward_hack.py` waives only the IMPORT tells when the task
+  ships `grader.py` as an asset — the asset set reaches it via `protected_names`; key access
+  stays flagged), but a persisted `looplab harden` exploit suite still carries the seed
+  `import_grader` regex (`trust/harden.py::_SEED_EXPLOITS`) and independently re-flags the
+  sanctioned import on such tasks. Teach `ExploitSuite.scan` the same sanction (skip
+  grader-import patterns when the task ships the grader), or tag seed exploits with the
+  contexts they apply to.

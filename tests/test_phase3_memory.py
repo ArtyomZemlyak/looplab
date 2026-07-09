@@ -160,6 +160,80 @@ def test_consolidate_newest_verdict_wins():
     assert out[0]["evidence_count"] == 1              # the old CONFLICTING one adds no support
 
 
+def test_consolidate_noted_never_retires_a_verdict():
+    # WRITE-path neutrality of "noted" (matching the read-path test below): a newer untagged
+    # reflection ("noted") must NOT become the merged verdict and zero the evidence of a real
+    # "supported" row — pre-fix, newest-wins let one tag-noncompliant line retire the verdict.
+    rows = [
+        {"statement": "Deeper trees help", "outcome": "supported", "task_id": "t", "run_id": "R"},
+        {"statement": "deeper trees help", "outcome": "noted", "task_id": "t", "run_id": "S"},
+    ]
+    out = consolidate_lessons(rows)
+    assert len(out) == 1
+    assert out[0]["outcome"] == "supported"       # the verdict survives the newer neutral duplicate
+    assert out[0]["evidence_count"] == 1          # its evidence is kept, not zeroed
+    # a group of ONLY noted rows keeps "noted" (there is no verdict to protect)
+    only = [{"statement": "wider nets help", "outcome": "noted", "task_id": "t", "run_id": "R"},
+            {"statement": "wider nets  help", "outcome": "noted", "task_id": "t", "run_id": "S"}]
+    out2 = consolidate_lessons(only)
+    assert out2[0]["outcome"] == "noted" and out2[0]["evidence_count"] == 2
+
+
+def test_consolidate_legacy_and_unknown_outcomes_are_inert():
+    # `_verdict_base` closes the legacy hole: a row with NO `outcome` at all (written before the
+    # field existed) and an UNRECOGNIZED outcome string are both inert exactly like "noted" —
+    # neither is a re-adjudication of the claim, so a NEWER one must not become the merged verdict
+    # and zero the supported row's accumulated evidence.
+    rows = [
+        {"statement": "Deeper trees help", "outcome": "supported", "task_id": "t", "run_id": "R",
+         "evidence_count": 2},
+        {"statement": "deeper trees help", "task_id": "t", "run_id": "S"},             # legacy: no outcome
+        {"statement": "deeper trees  help", "outcome": "inconclusive", "task_id": "t",  # unknown string
+         "run_id": "U"},
+    ]
+    out = consolidate_lessons(rows)
+    assert len(out) == 1
+    assert out[0]["outcome"] == "supported"       # the verdict survives the newer inert rows
+    assert out[0]["evidence_count"] == 2          # …with its evidence; inert rows add no support
+
+
+def test_agentic_merge_base_skips_noted(monkeypatch):
+    # The paraphrase-merge pass applies the same rule: the newest NON-noted member carries the
+    # verdict/fields for the merged row (a newer "noted" paraphrase must not retire "supported").
+    import looplab.search.hybrid_merge as hm
+    from looplab.engine.memory import _agentic_merge_lessons
+    rows = [
+        {"statement": "raise the learning rate", "outcome": "supported", "task_id": "t",
+         "evidence_count": 2},
+        {"statement": "increase the learning rate", "outcome": "noted", "task_id": "t",
+         "evidence_count": 1},
+    ]
+    monkeypatch.setattr(hm, "consolidate",
+                        lambda texts, client, **kw: [{"members": [0, 1], "merged": "increase the LR"}])
+    out = _agentic_merge_lessons(rows, client=object())
+    assert len(out) == 1
+    assert out[0]["outcome"] == "supported" and out[0]["statement"] == "increase the LR"
+    assert out[0]["evidence_count"] == 2          # only members AGREEING with the verdict add support
+
+
+def test_agentic_merge_legacy_outcomeless_row_is_inert(monkeypatch):
+    # The paraphrase pass shares `_verdict_base` too: a NEWER legacy member without `outcome` must
+    # not carry the merged row (pre-fix, the `outcome != "noted"` scan let it win and drop the
+    # "supported" verdict + its evidence).
+    import looplab.search.hybrid_merge as hm
+    from looplab.engine.memory import _agentic_merge_lessons
+    rows = [
+        {"statement": "raise the learning rate", "outcome": "supported", "task_id": "t",
+         "evidence_count": 2},
+        {"statement": "increase the learning rate", "task_id": "t", "evidence_count": 1},
+    ]
+    monkeypatch.setattr(hm, "consolidate",
+                        lambda texts, client, **kw: [{"members": [0, 1], "merged": "increase the LR"}])
+    out = _agentic_merge_lessons(rows, client=object())
+    assert len(out) == 1
+    assert out[0]["outcome"] == "supported" and out[0]["evidence_count"] == 2
+
+
 def test_filter_contradicted_quarantines_reversed_claims():
     scored = [
         (0.9, 0, {"statement": "Deeper trees help", "outcome": "supported"}),
@@ -171,6 +245,19 @@ def test_filter_contradicted_quarantines_reversed_claims():
     assert ("Deeper trees help", "supported") not in stmts   # old positive quarantined
     assert ("deeper trees help", "tested") in stmts          # newer negative stays
     assert ("More data helps", "supported") in stmts
+
+
+def test_filter_contradicted_neutral_noted_never_quarantines():
+    # "noted" (an UNTAGGED reflection line, parse_credit_lessons) is neutral by design: a newer
+    # "noted" duplicate must NOT quarantine an older "supported" claim (pre-fix, untagged lines
+    # defaulted to "tested" ∈ _NEGATIVE and could), and a newer "supported" keeps the noted row too.
+    scored = [
+        (0.9, 0, {"statement": "Deeper trees help", "outcome": "supported"}),
+        (0.9, 5, {"statement": "deeper trees help", "outcome": "noted"}),    # newer but NEUTRAL
+    ]
+    stmts = [(o["statement"], o["outcome"]) for _, _, o in filter_contradicted(scored)]
+    assert ("Deeper trees help", "supported") in stmts       # NOT quarantined by the neutral row
+    assert ("deeper trees help", "noted") in stmts
 
 
 # --------------------------------------------------------------------------- #

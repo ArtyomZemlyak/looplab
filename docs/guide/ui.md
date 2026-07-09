@@ -50,7 +50,13 @@ Then open the printed URL. The server serves the **built** React bundle from `ui
   **adaptation checklist** (how to make the repo LoopLab-ready: expose a JSON metric, pin deps, choose
   the edit surface, protect the grader). For a repo it's a real **agent**: it first *reads your repo
   on disk* (README, the eval/entry script, requirements, results files) through read-only scout tools
-  so the command, metric, and steps are grounded in your actual code — not guessed. Tweak any field,
+  so the command, metric, and steps are grounded in your actual code — not guessed. When the task
+  needs a code-writing agent (repo / dataset / Kaggle — the generative kinds), the **launch itself**
+  defaults `backend=llm` — the rule lives in `/api/start`, the funnel every launch goes through
+  (genesis cards, assistant-proposed runs, direct API calls), matching `looplab run --goal` — so a
+  UI-launched run never silently falls back to the offline toy developer; the genesis card shows the
+  inferred backend up front so you can change it before launching, and a backend you set explicitly
+  (in the card, the Settings page, or `LOOPLAB_BACKEND`) always wins. Tweak any field,
   then launch. See **[Generating train & test code](generating-code.md)** for the full Genesis flow
   and every "let the agent write the code" case (from-scratch, repo edit, test-without-train,
   onboarding) plus how to point at your data.
@@ -59,7 +65,9 @@ Then open the printed URL. The server serves the **built** React bundle from `ui
 - **Reset a node in place** — the node inspector's **↻ Reset** button (or `reset(node_id, stage)` in
   chat) re-runs an EXISTING node from a chosen stage instead of spawning a new one: `eval` re-scores it
   (keep the idea + code — for an infra/API-key blip), `implement` re-runs only the Developer (keep the
-  Researcher's idea — for crashed code), `propose` is a full redo. Same node id, no proliferation;
+  Researcher's idea — for crashed code), `propose` is a full redo. Any eval-**pipeline** stage name
+  (`train`, `data_prep`, …) is also accepted — it restarts the node's pipeline from that stage,
+  reusing earlier stages' artifacts. Same node id, no proliferation;
   applied on the next resume (`node_reset` control event).
 - **Chat / boss** — an agentic run chat turns one message into a plan of ordered actions, with each
   action narrated in a durable feed (`chat.jsonl`).

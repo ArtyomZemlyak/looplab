@@ -19,13 +19,14 @@ from typing import Callable, Optional
 from looplab.events import digest
 from looplab.core.models import RunState
 from looplab.tools.run_tools import RunTools
-from looplab.tools._base import fn_spec
+from looplab.tools._base import RESULT_CAP, fn_spec
 from looplab.tools._runcache import RunStateCache
 
-# A trace is a whole conversation, but the shared tool loop HEAD-truncates every tool result to 4000
-# chars (agent.drive_tool_loop), so a larger budget would be silently cut there (losing the tail with
-# no marker). Stay under that cap so our own truncation + the "narrow with `stage`" hint engage first.
-_TRACE_CHARS = 3600
+# A trace is a whole conversation, but the shared tool loop HEAD-truncates every tool result to
+# RESULT_CAP chars (agent.drive_tool_loop), so a larger budget would be silently cut there (losing
+# the tail with no marker). Stay under that cap (-400 headroom for the header + our truncation hint)
+# so our own truncation + the "narrow with `stage`" hint engage first.
+_TRACE_CHARS = RESULT_CAP - 400
 
 
 def _render_conversation(convo: dict, run_id, nid, stage: Optional[str], max_chars: int) -> str:
@@ -117,9 +118,10 @@ class RunsTools:
                  "trials": {"type": "string", "description": "how many sweep trials: a number, or 'all'"}},
                 ["run_id", "node_id"]),
             fn_spec("read_run_logs",
-                "Read one experiment's EXECUTION LOGS: the captured stdout tail from training/eval and "
-                "the FULL error/stderr (not the short failure summary). Use to see what a node printed "
-                "while training, or why it failed, in full. Use run_id + node_id from read_run.",
+                "Read one experiment's EXECUTION LOGS: the captured stdout/stderr TAILS as recorded "
+                "in the event log (bounded, not the raw full stream — the tail end holds the error "
+                "and the final metric line). Far more than the short failure summary. Use to see what "
+                "a node printed while training, or why it failed. Use run_id + node_id from read_run.",
                 {"run_id": {"type": "string"}, "node_id": {"type": "integer"}},
                 ["run_id", "node_id"]),
             fn_spec("read_run_trace",
@@ -425,7 +427,11 @@ class RunControlTools:
                 "code), 'implement' re-runs only the Developer (keep the idea), 'propose' is a full redo. "
                 "Applied on the next resume.",
                 {"run_id": {"type": "string"}, "node_id": {"type": "integer"},
-                 "stage": {"type": "string", "enum": ["propose", "implement", "eval"]}},
+                 # No enum: the executor + HTTP route accept ANY pipeline stage name, and an enum here
+                 # would make the model refuse legitimate stage resets (train, data_prep, …).
+                 "stage": {"type": "string",
+                           "description": "propose | implement | eval, or any eval-pipeline stage "
+                           "name (train, data_prep, …) to re-run the pipeline from that stage"}},
                 ["run_id", "node_id"]),
             fn_spec("delete_node",
                 "DELETE a node AND its descendants from a run (removes their events, spans and workdirs; "

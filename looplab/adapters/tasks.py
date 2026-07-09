@@ -571,12 +571,18 @@ def make_roles(task: TaskAdapter, settings, run_dir=None):
     # Compute the guard BEFORE either developer branch so the in-house editor isn't wired for a
     # param-search run (which would inject agent-authored code into every eval and perturb the metric).
     _param_search = bool(getattr(task, "params", None)) and callable(getattr(task, "repo_spec", None))
+    # P25 (docs/PROMPT_REVIEW.md): does a run_phase-BASED Developer follow the Researcher? Only the
+    # in-house LLMRepoDeveloper runs stages→plan→implement phases inside the node's handoff scope
+    # and READS the Researcher's handoff brief; CliAgentDeveloper and the single-shot LLMDeveloper
+    # never do, so the Researcher skips the per-node summary LLM call for them (handoff=False).
+    _handoff_dev = False
     if (settings.developer_backend not in PRESETS
             and not _param_search
             and callable(getattr(task, "repo_spec", None))
             and task.repo_spec().get("editables")):
         from looplab.adapters.repo_task import LLMRepoDeveloper
         from looplab.agents.agent import loop_opts_from_settings as _loop_opts
+        _handoff_dev = True
         developer = LLMRepoDeveloper(  # C4: plan decomposition + hard per-session backstop
             client, task, parser=settings.llm_parser, loop_opts=_loop_opts(settings),
             plan_decompose=getattr(settings, "developer_plan_decompose", True),
@@ -647,6 +653,17 @@ def make_roles(task: TaskAdapter, settings, run_dir=None):
     if rs and rs.get("editables") and not _param_search:
         from looplab.tools.knowledge_tools import RepoTools
         providers.append(RepoTools(rs["editables"]))
+    # P6/P21 (docs/PROMPT_REVIEW.md): offer the intra-node sweep ONLY when the active Developer
+    # actually implements `idea.space` — the in-house LLMDeveloper on script-solution (non-repo)
+    # tasks. CliAgentDeveloper (external CLI presets) and LLMRepoDeveloper never read `idea.space`:
+    # a sweep proposed there yields a node the engine stretches by sweep_timeout_mult while waiting
+    # for a `trials` line that never comes. Repo/command-eval tasks (anything with a repo_spec,
+    # incl. the cli_overrides param-search mode) score via the task cmd, so they never sweep either.
+    _offer_sweep = settings.developer_backend not in PRESETS and not callable(rs_fn)
+    try:
+        researcher.offer_sweep = _offer_sweep     # plain LLMResearcher path (ctor default is True)
+    except Exception:  # noqa: BLE001 — duck-typed researchers without settable attrs are fine
+        pass
     # `researcher_tools` is the master switch for the tool-using Researcher: an explicit opt-out yields
     # a PLAIN LLMResearcher even when other tool sources (knowledge_dir — now on by default — cross-run,
     # skills) are configured, so the flag's meaning stays "no tool loop", not just "no run-introspection".
@@ -662,6 +679,8 @@ def make_roles(task: TaskAdapter, settings, run_dir=None):
             max_turns=getattr(settings, "agent_max_turns", 0),                   # 0 = unlimited
             time_budget_s=getattr(settings, "agent_time_budget_s", 0.0),         # 0 = no cap
             loop_opts=loop_opts_from_settings(settings),     # B1 stuck + C1 self-plan + C2 summary
+            offer_sweep=_offer_sweep,      # P6/P21: sweep offer only where idea.space is honored
+            handoff=_handoff_dev,          # P25: summary call only for the run_phase repo Developer
         )
     # C2 best-of-N: wrap the in-house LLM developer to generate N candidates and keep the best by an
     # execution-free reward. Skipped for external coding agents (cost rule) and the no-edit param mode.

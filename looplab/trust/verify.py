@@ -3,8 +3,9 @@ SYNTHESIS claims only ~57.9% accurate (vs ~85% for per-analysis statements) — 
 verification must be decoupled (Aletheia: "essential for identifying flaws the model initially
 overlooked"). This module checks a ResearchMemo's claims against their CITED evidence:
 
-1. `check_claims` — deterministic layer, no model: does every claim cite evidence at all, do the
-   cited node ids exist, and do metric numbers quoted in the statement match the cited nodes?
+1. `check_claims` — deterministic layer, no model: does every claim cite evidence at all, and do
+   the cited node ids exist? (It deliberately does NOT match numbers quoted in the statement
+   against node metrics — see the NOTE on `check_claims`; numeric correctness is the LLM layer's.)
 2. `verify_memo` — adds a single rubric-prompt LLM pass over the claims that survived layer 1
    (one call, one rubric — more consistent than an ensemble of judges, per Anthropic's
    multi-agent research evaluation), grading each claim supported/unsupported/unclear against

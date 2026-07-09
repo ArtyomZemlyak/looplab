@@ -25,6 +25,59 @@ from looplab.serve.artifacts import (
 from looplab.serve.engine_proc import _engine_alive
 from looplab.serve.protocol import POLL_SECONDS, SSE_DONE, SSE_STATE
 
+# Snapshot-derived OPERATOR stage names, memoized per run DIRECTORY + snapshot VERSION: keyed on
+# (run dir, task.snapshot.json mtime_ns, size), so the normalize+validate work runs once per snapshot
+# version per server process instead of on every node_logs poll (the extra stat syscall per call is
+# negligible next to the parse it saves). The stat-derived key makes a rewritten/replaced snapshot
+# SELF-INVALIDATE — the memo must not outlive the run: a DELETE + same-id relaunch, or a CLI re-entry
+# of the run dir rewriting task.snapshot.json, changes the pipeline this panel must render. Keyed by
+# the absolute run dir, not the bare run_id — distinct run roots (tests, multi-root deploys) reuse
+# ids like "demo" with different snapshots. Values are TUPLES, not lists: a caller that forgets to
+# copy before mutating raises instead of silently corrupting the cache. The DEVELOPER-manifest
+# fallback in node_logs deliberately stays per-poll: looplab_stages.json is written mid-node by the
+# Developer's STAGES phase, so it can appear between polls and differs node to node.
+_OP_STAGE_NAMES: dict[tuple[str, int, int], tuple] = {}
+
+
+def _operator_stage_names(rd: Path) -> tuple:
+    """Names of the OPERATOR-declared `cmd.stages` pipeline from the run's verbatim
+    task.snapshot.json, vetted the way the ENGINE consumes them — () when the task declares none
+    (single-command eval) or the declared list doesn't survive validation. Memoized on the snapshot's
+    stat identity (see `_OP_STAGE_NAMES` above); returns an immutable tuple — callers list() it
+    before mutating."""
+    snap_path = rd / "task.snapshot.json"
+    try:
+        stt = snap_path.stat()
+    except OSError:
+        return ()   # engine still starting (snapshot not written yet) — don't memoize a transient miss
+    key = (str(rd), stt.st_mtime_ns, stt.st_size)
+    cached = _OP_STAGE_NAMES.get(key)
+    if cached is not None:
+        return cached
+    names: tuple = ()
+    try:
+        from looplab.adapters.tasks import normalize_task
+        from looplab.runtime.command_eval import validate_stages
+        snap = json.loads(snap_path.read_text("utf-8"))
+        es = (normalize_task(snap) if isinstance(snap, dict) else {}).get("eval") or {}
+        if es.get("stages"):
+            # ENGINE PARITY (Engine._resolve_stages): the engine re-runs the shared validator over
+            # the snapshot's stages (an old/hand-edited snapshot bypasses pydantic) and on ANY error
+            # falls back to the Developer-manifest + protected-`score` path — mirror it exactly, or
+            # this panel would render phantom stage bands for a pipeline the engine never ran AND
+            # miss the manifest stages it actually did run.
+            clean, err = validate_stages(es["stages"])
+            if err is None:
+                names = tuple(str(s["name"]) for s in clean)
+    except Exception:  # noqa: BLE001 - no/foreign/kind-less snapshot -> fall back to the manifest
+        names = ()
+    # Prune this run dir's entries for OLDER snapshot versions before inserting, so the dict stays
+    # bounded per run (a rewrite would otherwise leave one dead entry behind per version).
+    for stale in [k for k in _OP_STAGE_NAMES if k[0] == key[0]]:
+        del _OP_STAGE_NAMES[stale]
+    _OP_STAGE_NAMES[key] = names
+    return names
+
 
 def build_router(srv) -> APIRouter:
     router = APIRouter()
@@ -183,10 +236,9 @@ def build_router(srv) -> APIRouter:
 
         A SINGLE-command eval tees to `eval.log`; a MULTI-STAGE eval (data_prep → train → score) tees
         each stage to its OWN `<stage>.log` (command_eval `_log(f"{name}.log")`) and never writes
-        `eval.log`. Surfacing only `eval.log` left the live "Training / eval log" panel BLANK for the
-        whole of a multi-stage training run while `train.log` filled on disk — so also return every
-        non-setup `*.log` as ordered `stages`, and fall `eval` back to them when there's no single
-        eval.log (keeps the old single-`<pre>` UI showing the live training output)."""
+        `eval.log`. So `eval` carries ONLY eval.log's tail (empty for a multi-stage node — deliberately
+        NO fallback duplication into it), and the per-stage tails come back as the ordered `stages`
+        map, which the UI's log panel renders per stage."""
         rd = _run_dir(run_id)
         nd = _node_dir(rd, nid)
         # Clamp the client-controlled tail so a hostile/large value can't force an unbounded read; and
@@ -204,19 +256,32 @@ def build_router(srv) -> APIRouter:
                 return ""
             return b.decode("utf-8", "replace")
         # Per-stage logs — a multi-stage eval tees each stage to `<name>.log`. Bound the set to the
-        # node's DECLARED stages (its `looplab_stages.json` manifest) plus the engine's reserved,
-        # operator-appended `score` stage, in pipeline order. NOT a bare `*.log` glob: that would
-        # surface any stray log the training code writes to its cwd (a framework's own debug.log) as a
-        # phantom stage band, and let an unbounded file count inflate the response. Each `<name>.log` is
+        # node's DECLARED stages, in pipeline order. NOT a bare `*.log` glob: that would surface any
+        # stray log the training code writes to its cwd (a framework's own debug.log) as a phantom
+        # stage band, and let an unbounded file count inflate the response. Each `<name>.log` is
         # tailed independently (a missing/racing one just yields "").
-        stage_names: list[str] = []
-        try:
-            man = json.loads((nd / "looplab_stages.json").read_text("utf-8"))
-            stage_names = [str(s["name"]) for s in (man.get("stages") or []) if s.get("name")]
-        except (OSError, ValueError, TypeError):
-            pass
-        if "score" not in stage_names:      # the engine appends a protected `score` stage post-manifest
-            stage_names.append("score")
+        # OPERATOR-declared stages first: when the task's `cmd` carries VALID `stages`, those ARE the
+        # canonical pipeline (Engine._resolve_stages ignores the Developer's manifest) and no `score`
+        # stage is appended — the LAST operator stage prints the metric. Their names come from the
+        # run's verbatim task.snapshot.json (normalize_task maps composable `cmd` → `eval`,
+        # validate_stages vets the list the same way the engine does), memoized on the snapshot's
+        # stat identity (a rewrite self-invalidates) — so live logs surface for operator cmd.stages
+        # pipelines too, the very mode the per-stage logs fix targeted (mega-review D7). list() the
+        # cached tuple: the fallback below appends "score", which must never leak into the cache.
+        stage_names: list[str] = list(_operator_stage_names(rd))
+        if not stage_names:
+            # Single-command cmd (or an INVALID operator stage list — engine parity: it too ignores
+            # a bad list and takes this path): the Developer's `looplab_stages.json` manifest
+            # declares the PRECEDING stages, and the engine appends the protected, operator-owned
+            # `score` stage after them. Re-read EVERY poll, never memoized — the manifest is written
+            # mid-node by the STAGES phase, so it can appear between polls and differs per node.
+            try:
+                man = json.loads((nd / "looplab_stages.json").read_text("utf-8"))
+                stage_names = [str(s["name"]) for s in (man.get("stages") or []) if s.get("name")]
+            except (OSError, ValueError, TypeError):
+                pass
+            if "score" not in stage_names:  # the engine appends a protected `score` stage post-manifest
+                stage_names.append("score")
         stages = {name: body for name in stage_names if (body := _tail(f"{name}.log"))}
         return {"eval": _tail("eval.log"), "stages": stages, "setup": _tail("setup.log"),
                 "run_setup": (rd / "run_setup.log").read_text("utf-8", "replace")

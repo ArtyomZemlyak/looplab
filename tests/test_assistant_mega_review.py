@@ -146,8 +146,8 @@ def test_compaction_is_in_place_for_the_caller():
             return "X" * 2000
 
     emit = {"type": "function", "function": {"name": "emit", "parameters": {}}}
-    # DISTINCT args per read so the read-dedup (which stubs an EXACT repeat) doesn't collapse them — this
-    # test exercises history COMPACTION, which needs the 3 big reads to actually accumulate.
+    # DISTINCT args per read so the StuckDetector never fires (the read-dedup that used to stub exact
+    # repeats is gone) — this test exercises history COMPACTION, which needs 3 big reads to accumulate.
     fake = _Fake([_call("read", {"f": 1}, "c1"), _call("read", {"f": 2}, "c2"), _call("read", {"f": 3}, "c3"),
                   _call("emit", {"reply": "ok"}, "c4")])
     msgs = [{"role": "system", "content": "sys"}, {"role": "user", "content": "go"}]

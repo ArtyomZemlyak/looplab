@@ -23,14 +23,20 @@ from __future__ import annotations
 from pathlib import Path
 
 from looplab.core import _pathsafe
-from looplab.tools._base import fn_spec   # shared OpenAI function-schema builder (one schema shape)
+from looplab.tools._base import RESULT_CAP, fn_spec   # shared schema builder + the loop's result cap
 
 # Path/secret guards now live in _pathsafe (shared with the write/shell/git providers so every tool
 # enforces the same rules). Re-exported under the historical private names for back-compat.
 _looks_secret = _pathsafe.looks_secret
 _readable = _pathsafe.readable
 
-_MAX_READ = 16000          # bytes returned from one read_file
+# The agent loop hard-caps EVERY tool result at RESULT_CAP chars (agents/agent.py drive_tool_loop),
+# and anything longer loses its TAIL there — including a resume pointer appended at the end. So one
+# read_file page (window header + body + resume marker) must fit comfortably UNDER that cap, or the
+# pagination contract silently breaks and the model acts on code it never saw (mega-review P3; the
+# old 16KB page lost both its tail and its pointer at the cap). Derived, not hard-coded: the -400
+# headroom covers the window header + resume marker so page+header+marker ≤ RESULT_CAP.
+_MAX_READ = RESULT_CAP - 400   # chars of file content returned per read_file page
 _MAX_ENTRIES = 200         # entries per list_dir / find_files
 
 
@@ -115,26 +121,31 @@ class RepoScoutTools:
     def specs(self) -> list[dict]:
         return [
             fn_spec("list_dir",
-                     "List files and subdirectories under a directory on this machine (read-only). "
-                     "Use to explore a repo's structure.",
+                     "List files and subdirectories under a directory on this machine (read-only; the "
+                     "first 200 entries — an overflow ends with an '… (+K more)' line). Use to explore "
+                     "a repo's structure.",
                      {"path": {"type": "string", "description": "Directory path (absolute or ~-relative)."}},
                      ["path"]),
             fn_spec("read_file",
-                     "Read a text file on this machine (read-only, up to ~16KB per call). Use for README, "
-                     "the train/eval entry script (e.g. test.py), configs, requirements. Read a WINDOW "
-                     "with start_line + lines (like an editor's 'go to line N, show M lines'); omit both "
-                     "to read from the top. For a file larger than one page the reply ends with the exact "
-                     "start_line to resume from — do NOT re-read from the top.",
+                     "Read a text file on this machine (read-only). Returns ONE page of at most ~3600 "
+                     "chars. Use for README, the train/eval entry script (e.g. test.py), configs, "
+                     "requirements. Read a WINDOW with start_line + lines (like an editor's 'go to line "
+                     "N, show M lines'); omit both to read page 1. A page with more file below it ENDS "
+                     "with the marker '… (more below — continue with start_line=N)' — continue from "
+                     "exactly that N (a single line longer than one page is cut mid-line — the marker "
+                     "says so and resumes at the NEXT line); a reply WITHOUT that marker IS the end of "
+                     "the file. Never re-read from the top.",
                      {"path": {"type": "string", "description": "File path (absolute or ~-relative)."},
                       "start_line": {"type": "integer",
                                      "description": "1-based line to start from (default 1/top). Use the "
-                                     "'read MORE with start_line=N' value from a truncated reply to continue."},
+                                     "N from the previous page's 'continue with start_line=N' marker."},
                       "lines": {"type": "integer",
                                 "description": "How many lines to return from start_line (a bounded window). "
-                                "Omit for as many as fit in ~16KB."}},
+                                "Omit for as many as fit in one ~3600-char page."}},
                      ["path"]),
             fn_spec("find_files",
-                     "Recursively find files matching a glob under a directory (read-only).",
+                     "Recursively find files matching a glob under a directory (read-only; capped at "
+                     "200 matches — narrow the pattern if the list ends without your file).",
                      {"root": {"type": "string"},
                       "pattern": {"type": "string", "description": "glob, e.g. **/*.py or **/README*"}},
                      ["root"]),
@@ -239,13 +250,19 @@ class RepoScoutTools:
         return self._paginate(data, start_line, lines)
 
     @staticmethod
-    def _paginate(data: str, start_line=0, lines=0) -> str:
-        """Return a WINDOW of `data`: `lines` lines starting at 1-based `start_line`, capped at _MAX_READ
-        chars. start_line 0/None/'' = from the top; `lines` 0/None = as many as fit; stringy '180'/'40'
-        coerce. When more remains (line window ran into the char cap, or no `lines` given and the file is
-        bigger than one page) the reply names the exact start_line to RESUME from. (Before this, read_file
-        ignored start_line entirely and always returned the first 16KB — agents re-read the same file head
-        13-21× and burned their whole budget, per the node 56/59/61/62 traces.)"""
+    def _paginate(data: str, start_line=0, lines=0, max_chars: int = _MAX_READ) -> str:
+        """Return a WINDOW of `data`: `lines` lines starting at 1-based `start_line`, capped at
+        `max_chars` chars (default _MAX_READ; env_inspect passes a reduced budget so its origin-path
+        prefix still fits the loop cap). start_line 0/None/'' = from the top; `lines` 0/None = as many
+        as fit; stringy '180'/'40' coerce. When more remains (line window ran into the char cap, or no
+        `lines` given and the file is bigger than one page) the reply ENDS with the resume marker naming
+        the exact start_line to continue from; a reply without the marker IS the end of the file — that
+        asymmetry is the tool's documented contract, so EVERY continuing page (the mid-line case
+        included) must end with the same '… (more below — continue with start_line=N)' stem, the marker
+        text must stay stable, and it must always fit UNDER the agent loop's RESULT_CAP (see _MAX_READ).
+        (Before this, read_file ignored start_line entirely and always returned the first 16KB — agents
+        re-read the same file head 13-21× and burned their whole budget, per the node 56/59/61/62
+        traces.)"""
         def _int(v):
             try:
                 return int(v) if v else 0
@@ -256,16 +273,41 @@ class RepoScoutTools:
         all_lines = data.splitlines(keepends=True)
         n = len(all_lines)
         window = all_lines[start: (start + want) if want else n]
-        head = f"(lines {start + 1}-{start + len(window)} of {n})\n" if (start > 0 or want) else ""
         body = "".join(window)
-        if len(body) > _MAX_READ:                      # window ran into the char cap — truncate mid-window
-            body = body[:_MAX_READ]
+        mid_line = False
+        if len(body) > max_chars:                      # window ran into the char cap — truncate mid-window
+            body = body[:max_chars]
             shown = body.count("\n")                   # whole lines that survived the cut
+            if shown == 0:
+                # A single line longer than one page: zero whole lines survived, so the generic marker
+                # would point at the SAME start_line and the model would loop on identical pages forever
+                # (reproduced). Guarantee progress: count the truncated line as shown and resume at the
+                # NEXT line — the marker says so honestly (the line's tail past the cap is skipped).
+                shown = 1
+                mid_line = True
+            else:
+                # Drop the partial trailing fragment (chars past the last complete line): the header
+                # and the resume marker count WHOLE lines, and the next page re-serves that line in
+                # full from start_line — keeping the fragment would double-serve its head and show a
+                # half-line the stated range doesn't cover.
+                body = body[: body.rfind("\n")]
             more = True
         else:                                          # the full line-window was returned
             shown = len(window)
             more = (start + shown) < n                 # anything after the window?
-        tail = f"\n… (more below — read on with start_line={start + shown + 1})" if more else ""
+        # Header AFTER the cap, from the actual `shown` count — the pre-cap window would overstate the
+        # range and disagree with the resume marker when the char cap cut the window short.
+        head = f"(lines {start + 1}-{start + shown} of {n})\n" if (start > 0 or want) else ""
+        if mid_line:
+            # The explanation PRECEDES the canonical stem — the marker must still END with the
+            # documented '… (more below — continue with start_line=N)' so "a reply without the
+            # marker IS the end" stays true for a stem-matching reader.
+            tail = (f"\n… (line {start + 1} is longer than one page — its remainder is NOT reachable "
+                    f"by line windows) … (more below — continue with start_line={start + 2})")
+        elif more:
+            tail = f"\n… (more below — continue with start_line={start + shown + 1})"
+        else:
+            tail = ""
         return head + body + tail
 
     def _find_files(self, root: str, pattern: str) -> str:

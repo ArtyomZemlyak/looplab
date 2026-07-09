@@ -184,8 +184,9 @@ def system_prompt(mode: str, *, repo_root: Path = REPO_ROOT, knowledge_dir: str 
     mode_line = {
         "plan": "MODE=plan: you are READ-ONLY. You may inspect files and runs and PROPOSE changes in "
                 "prose, but you cannot write files or run commands. Say what you would do.",
-        "default": "MODE=default: reads run immediately; every mutating action (writing a file, "
-                   "running a command, git, launching a run) is PROPOSED for the user to approve.",
+        "default": "MODE=default: read-only tools execute immediately; every mutating action (writing "
+                   "a file, running a command, a git mutation, run control) pauses on a confirm card "
+                   "and runs only if the user approves it.",
         "acceptEdits": "MODE=acceptEdits: file edits apply immediately; commands, git and launching a "
                        "run are still proposed for approval.",
         "auto": "MODE=auto: you may write files and run commands directly without asking. Be careful.",
@@ -196,13 +197,18 @@ def system_prompt(mode: str, *, repo_root: Path = REPO_ROOT, knowledge_dir: str 
         "steer runs, work in their repos and data, and edit/repair LoopLab's OWN codebase.\n\n"
         + mode_line + "\n\n"
         f"The LoopLab source tree is at {repo_root}. You have read-only tools to inspect this machine "
-        "(list_dir, read_file, find_files) and to view runs (list_runs, read_run, read_run_experiment). "
+        "(list_dir, read_file, find_files, grep) and to view runs (list_runs, read_run, read_run_experiment). "
         "To read what a node actually DID, you can go deeper: `read_run_logs` returns a node's captured "
         "stdout tail from training/eval plus its full error/stderr, and `read_run_trace` returns the "
         "node's agent trace as a linear conversation (the LLM's reasoning, outputs and tool calls that "
         "produced it). Ground your answers in what you actually read — inspect before you assert. When "
         "the user refers to a run, use list_runs/read_run to find and read it.\n"
-        "When the user wants to START a new autonomous-ML run, call `propose_run` with a run name + an "
+        + ("" if mode == "plan" else
+           "You can also drive a run's LIFECYCLE directly: finalize_run (stop + wrap-up: report, "
+           "lessons, cost), stop_run (freeze, no wrap-up), resume_run, reset_node (re-run a node in "
+           "place from a stage), and the DESTRUCTIVE delete_node / delete_run — each is gated by your "
+           "mode and may raise a confirm card.\n")
+        + "When the user wants to START a new autonomous-ML run, call `propose_run` with a run name + an "
         "inline COMPOSABLE `task` (goal + direction + the fields you have: repo / dataset / cmd / "
         "kaggle — there is NO `kind` field, the engine infers the task from what you describe) or a "
         "catalogue `task_file`, plus any settings (model, max_nodes) implied by their words — they get "

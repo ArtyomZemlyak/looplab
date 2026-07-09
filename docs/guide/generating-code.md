@@ -208,7 +208,11 @@ stdout. A crashed node is repaired IN PLACE (inline repair) and re-evaluated: wh
 anything it imports), the completed `train` checkpoint is **reused** and only `score` re-runs — no
 re-train. If the repair changed the training code (`train.py`/`loss.py`/`model.py`/…), the node
 re-trains from scratch (a stale checkpoint must never be scored — each node scores the model it
-actually trained this run); `inline_repair_retrain_cap` bounds how many full re-trains a repair loop
+actually trained this run). The reuse check is strictly fail-closed: it must *prove* the earlier
+stages' inputs are unchanged, so a repair that **deletes** any file, changes any **non-`.py`** file
+(a config/params/data file — invisible to import reachability), or runs under a non-default
+`cmd.cwd` also forces a full re-run, as does an opaque stage (`python -m`, a shell wrapper).
+`inline_repair_retrain_cap` bounds how many full re-trains a repair loop
 may burn before abandoning to the inter-node debug operator. Notes:
 
 - Give `cmd.timeout` room for the whole schedule (often `7200`–`14400`s) — the 600s default SIGKILLs a

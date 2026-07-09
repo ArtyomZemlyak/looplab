@@ -47,9 +47,12 @@ class RepoTools:
             fn_spec("repo_list", f"List source files in an editable repo ({names}).",
                      {"repo": {"type": "string"}, "glob": {"type": "string"}}, []),
             fn_spec("repo_read", "Read a file from an editable repo, given a <repo>/<path> "
-                     "(or just <path> for the root repo). PAGINATES: pass start_line (+ optional lines) to "
-                     "window a large file; a truncated reply names the start_line to resume from — do NOT "
-                     "re-read from the top.",
+                     "(or just <path> for the root repo). Returns ONE page of at most ~3600 chars; "
+                     "window with start_line (+ optional lines). A page with more file below it ENDS "
+                     "with '… (more below — continue with start_line=N)' — continue from exactly that "
+                     "N (a single line longer than one page is cut mid-line — the marker says so and "
+                     "resumes at the NEXT line); a reply WITHOUT that marker IS the end of the file. "
+                     "Never re-read from the top.",
                      {"path": {"type": "string"},
                       "start_line": {"type": "integer", "description": "1-based line to start from (default top)"},
                       "lines": {"type": "integer", "description": "how many lines to return (optional window)"}},

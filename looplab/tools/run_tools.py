@@ -16,7 +16,7 @@ from typing import Optional
 
 from looplab.events import digest
 from looplab.core.models import NodeStatus, RunState
-from looplab.tools._base import fn_spec
+from looplab.tools._base import RESULT_CAP, fn_spec
 from looplab.tools._runcache import RunStateCache
 
 
@@ -45,11 +45,11 @@ class RunTools:
     """Read-only view over the live search DAG (the bound `RunState`)."""
 
     # Logs get a bigger error budget than read_experiment's 300-char slice — but the shared tool loop
-    # HEAD-truncates every tool result to 4000 chars (agent.drive_tool_loop), so a larger budget here
-    # is not just wasted, it's harmful: content past ~4000 (the error tail — a traceback's exception
-    # line lives at the BOTTOM) would be silently cut. Stay under that cap with headroom for the header
-    # + section markers, so our own tail-preserving clip is what actually decides what's dropped.
-    _LOG_CHARS = 3600
+    # HEAD-truncates every tool result to RESULT_CAP chars (agent.drive_tool_loop), so a larger budget
+    # here is not just wasted, it's harmful: content past the cap (the error tail — a traceback's
+    # exception line lives at the BOTTOM) would be silently cut. Stay under that cap with headroom for
+    # the header + section markers, so our own tail-preserving clip is what decides what's dropped.
+    _LOG_CHARS = RESULT_CAP - 400
 
     def __init__(self, max_chars: int = 3500):
         self.max_chars = max_chars
@@ -83,9 +83,11 @@ class RunTools:
                 "Read the solution code of one experiment (so you can build on or avoid it).",
                 {"node_id": {"type": "integer"}}, ["node_id"]),
             fn_spec("read_logs",
-                "Read one experiment's EXECUTION LOGS — the captured stdout tail from training/eval "
-                "and the FULL error/stderr (not the 300-char summary). Use to see why a node failed, "
-                "or what it printed while training, in full.",
+                "Read one experiment's EXECUTION LOGS — the captured stdout/stderr TAILS as recorded "
+                "in the event log (bounded, not the raw full stream; the END — where a traceback's "
+                "error and the final metric line live — is preserved). Far more than the 300-char "
+                "failure summary read_experiment shows. Use to see why a node failed, or what it "
+                "printed while training.",
                 {"node_id": {"type": "integer"}}, ["node_id"]),
             fn_spec("find_analogous",
                 "Find experiments most similar to a given one (or to a set of params) by parameter "
@@ -219,8 +221,10 @@ class RunTools:
 
     def _logs(self, st: RunState, nid: int) -> str:
         """The node's execution logs: the captured stdout tail (what it printed while training/eval)
-        and the FULL error/stderr — not the 300-char failure summary `read_experiment` shows. Logs are
-        the whole point of this tool, so they get a larger budget (`_LOG_CHARS`) than a normal read."""
+        and the stderr/error tail — bounded (a chain of tails: 64KB capture → event tail → this clip),
+        NOT the raw full stream, but far more than the 300-char failure summary `read_experiment`
+        shows. Logs are the whole point of this tool, so they get a larger budget (`_LOG_CHARS`) than
+        a normal read."""
         n = st.nodes.get(nid)
         if n is None:
             return f"(no experiment #{nid})"
