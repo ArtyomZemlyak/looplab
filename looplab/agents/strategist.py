@@ -522,11 +522,16 @@ class ToolUsingStrategist:
             return self._rule.decide(state, ctx)   # no emit -> deterministic baseline
 
         try:
+            # De-dup context_budget_chars: loop_opts_from_settings injects it into loop_opts AND it
+            # arrives via the explicit ctor kwarg, so passing both would hand drive_tool_loop the
+            # keyword twice -> TypeError, caught below -> silent degrade to the RULE baseline in the
+            # DEFAULT config (context_budget_chars defaults to 1_000_000, so loop_opts always has it).
+            opts = dict(self.loop_opts)
+            opts.setdefault("context_budget_chars", self.context_budget_chars)
             return drive_tool_loop(
                 self.client, self.tools, messages, self._emit_spec(),
                 max_turns=self.max_turns, time_budget_s=self.time_budget_s,
-                context_budget_chars=self.context_budget_chars,
-                finalize=_finalize, fallback=_fallback, **self.loop_opts)
+                finalize=_finalize, fallback=_fallback, **opts)
         except BudgetExceeded:      # a hard budget stop must end the run, not degrade to the rule
             raise
         except Exception:  # noqa: BLE001 — the model/endpoint can't drive tools at all -> rule baseline

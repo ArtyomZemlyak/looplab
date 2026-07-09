@@ -194,6 +194,25 @@ def test_read_cache_is_shared_across_phases_in_a_scope():
     assert tools.reads == 1     # phase 2's identical read served from the shared node cache, not re-run
 
 
+def test_cross_phase_read_reserves_content_not_stub():
+    # A file an EARLIER phase read is a dedup HIT in a later phase (the tool is NOT re-run), but that
+    # output lives in the earlier phase's discarded messages — only the lossy brief carries over. So
+    # the later phase must get the cached CONTENT re-served, not a "use the earlier output" stub it
+    # cannot act on (else e.g. the implement phase edits a file it was told to read, blind).
+    tools = _CountReadTools()   # execute() returns "file contents"
+    seen: list = []
+    with handoff_scope(enabled=True):
+        run_phase(_ReadThenEmit(), tools,
+                  [{"role": "system", "content": "S1"}, {"role": "user", "content": "p1"}],
+                  _EMIT, label="stages", finalize=lambda a: ("e", a), fallback=lambda m: ("f", None))
+        run_phase(_ReadThenEmit(), tools,
+                  [{"role": "system", "content": "S2"}, {"role": "user", "content": "p2"}],
+                  _EMIT, label="plan", finalize=lambda a: ("e", a), fallback=lambda m: ("f", None),
+                  on_tool_result=lambda n, a, r: seen.append(r))
+    assert tools.reads == 1            # still de-duplicated: the tool did NOT re-run
+    assert seen == ["file contents"]   # …but phase 2 received the real content, not the stub
+
+
 def test_handoff_summary_is_traced_as_its_own_span():
     # The summary call is wrapped in a `handoff-summary` operation span so it's a visible, labeled
     # band in the UI trace (not an anonymous generation) — auditable, per the user's ask.

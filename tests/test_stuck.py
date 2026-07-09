@@ -219,6 +219,32 @@ def test_config_enables_plan_and_summary_by_default():
     assert s.agent_stuck_detection is True
 
 
+def test_agentic_researcher_no_context_budget_kwarg_collision(monkeypatch):
+    # loop_opts_from_settings injects context_budget_chars (Settings default 1_000_000, so ALWAYS
+    # present). ToolUsingResearcher.propose must not ALSO pass it explicitly, or run_phase() gets the
+    # keyword twice -> TypeError, caught by the broad except -> silent fallback: the agentic Researcher
+    # would be DEAD in the DEFAULT config. Guard both wiring paths (also ToolUsingStrategist.decide).
+    from looplab.core.config import Settings
+    from looplab.core.models import Idea, RunState
+    from looplab.agents import agent as agent_mod
+    from looplab.agents.agent import ToolUsingResearcher, loop_opts_from_settings
+
+    seen = {}
+
+    def _fake_run_phase(*a, **kw):
+        seen["cb"] = kw.get("context_budget_chars", "MISSING")
+        return Idea(operator="draft", rationale="REACHED")
+
+    monkeypatch.setattr(agent_mod, "run_phase", _fake_run_phase)
+    r = ToolUsingResearcher(client=object(), tools=None,
+                            context_budget_chars=Settings().context_budget_chars,
+                            loop_opts=loop_opts_from_settings(Settings()))
+    r._fallback = lambda m: Idea(operator="draft", rationale="FALLBACK")
+    out = r.propose(RunState(goal="g", direction="min"), None)
+    assert out.rationale == "REACHED"       # reached run_phase, not the TypeError -> fallback
+    assert seen["cb"] == 1_000_000          # budget passed through exactly once
+
+
 # --------------------------------------------------------------------------- G2 read-dedup anti-thrash
 class _RepeatThenEmitClient:
     """Issues the SAME read call `repeats` times (redundant re-reads), then emits."""
