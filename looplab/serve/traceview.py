@@ -165,6 +165,8 @@ def _thread_turns(spans_sorted: list[dict], by_id: dict) -> list[dict]:
     for s in spans_sorted:
         kind = s.get("kind")
         a = s.get("attributes") or {}
+        if s.get("name") == "stage_started":
+            continue          # a zero-work live-band anchor (command_eval) — not a real turn to show
         if kind == "generation":
             inp = a.get("input") if isinstance(a.get("input"), list) else []
             n = len(inp)

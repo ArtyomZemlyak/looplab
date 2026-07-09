@@ -19,8 +19,10 @@ from typing import Protocol
 # re-score) writes a NEW sibling run dir and leaves the old one on disk — PyTorch-Lightning names them
 # `version_0`, `version_1`, … (the `v_num` in its logs). Reading EVERY version and merging their scalars
 # interleaves the stale and fresh curves (both start at step 0), so after a retrain the plot never looks
-# updated. Collapse version-style siblings to the NEWEST run (highest N, mtime tie-break) per parent.
-_VERSION_RE = re.compile(r"^(?:version|run|lightning_logs)[_-]?(\d+)$", re.IGNORECASE)
+# updated. Collapse `version_N` siblings to the NEWEST run (highest N, mtime tie-break) per parent. Kept
+# deliberately narrow to Lightning's `version_N` — a broader `run_N` would risk collapsing the distinct
+# runs of an intra-node sweep, which are NOT re-runs of one model.
+_VERSION_RE = re.compile(r"^version[_-]?(\d+)$", re.IGNORECASE)
 
 
 class MetricsAdapter(Protocol):

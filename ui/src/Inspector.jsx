@@ -69,7 +69,12 @@ export default function Inspector({ runId, nodeId, state, live, tab, setTab, onT
   //     tab froze after "Developer implement" for the whole training run.
   const nodeStatus = state?.nodes?.[nodeId]?.status
   const engineActive = !!live && live.engine_running !== false && !live.finished && nodeId != null
-  const nodeWorking = engineActive && (live.building?.node_id === nodeId || nodeStatus === 'pending')
+  // The node being EVALUATED right now is the LATEST pending one — the loop creates a node then scores
+  // it before creating the next. Gate the pending pulse on that (+ not paused), so an older queued or
+  // injected pending node doesn't poll-spin every 4s or mislabel itself as "training".
+  const latestId = Math.max(-1, ...Object.keys(state?.nodes || {}).map(Number))
+  const evaluatingThis = nodeStatus === 'pending' && !live?.paused && Number(nodeId) === latestId
+  const nodeWorking = engineActive && (live.building?.node_id === nodeId || evaluatingThis)
   useEffect(() => {
     if (!nodeWorking) return
     const iv = setInterval(() => {
@@ -616,7 +621,12 @@ function ConvTool({ t }) {
 function StageLog({ text, live }) {
   const ref = useRef(null)
   const shown = text.length > 40000 ? text.slice(-40000) : text
-  useEffect(() => { if (live && ref.current) ref.current.scrollTop = ref.current.scrollHeight }, [text, live])
+  // Auto-tail while live, but ONLY if the user is already parked near the bottom — otherwise scrolling
+  // up to read an earlier epoch would be yanked back down on every 4s poll (no follow-toggle here).
+  useEffect(() => {
+    const el = ref.current
+    if (live && el && el.scrollHeight - el.scrollTop - el.clientHeight < 40) el.scrollTop = el.scrollHeight
+  }, [text, live])
   return <div style={{ margin: '4px 0 2px' }}>
     <div className="muted" style={{ fontSize: 10, marginBottom: 2 }}>📄 stage log{live ? ' · live' : ''}</div>
     <pre ref={ref} className="training-log" style={{
@@ -663,6 +673,7 @@ function Conversation({ n, runId, working, allOpen = true, reloadNonce = 0 }) {
   useEffect(() => {
     let on = true
     setConv(null)   // node changed → clear before the first load (poll ticks below don't clear, so no flash)
+    setLogs({})     // …likewise the logs, else B's stage bands briefly render A's log text
     const load = () => {
       nodeConversation(runId, n.id).then(d => on && setConv(d || { stages: [] })).catch(() => on && setConv({ stages: [] }))
       // Stage/eval logs ride ALONGSIDE the trace now (moved out of the old Training tab): each stage
@@ -680,7 +691,7 @@ function Conversation({ n, runId, working, allOpen = true, reloadNonce = 0 }) {
   // eval logs to eval.log ("evaluate"/"command"); the dep-install step to setup.log. Anything else
   // (propose/implement/…) has no subprocess log.
   const logFor = (label) => (logs.stages && logs.stages[label])
-    || ({ setup: logs.setup, evaluate: logs.eval, command: logs.eval, score: logs.eval }[label]) || ''
+    || ({ setup: logs.setup, evaluate: logs.eval, command: logs.eval }[label]) || ''
   // `allOpen` is owned by the sticky Trace header (so collapse-all lives in the pinned bar). It's folded
   // into each band's key so a collapse/expand-all click remounts them at the new default; a live poll
   // (allOpen unchanged) keeps the key stable, so per-band toggles survive the 4s refresh.
@@ -840,6 +851,7 @@ function MetricCurves({ runId, nodeId, status }) {
   useEffect(() => {
     if (nodeId == null) return
     let on = true
+    setMetrics({})    // node changed → drop the previous node's curves before the first fetch resolves
     const load = () => get(`/api/runs/${runId}/nodes/${nodeId}/metrics`)
       .then(d => on && setMetrics((d && d.metrics) || {})).catch(() => {})
     load()

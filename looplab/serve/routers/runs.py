@@ -203,20 +203,22 @@ def build_router(srv) -> APIRouter:
             except OSError:
                 return ""
             return b.decode("utf-8", "replace")
-        # Per-stage logs, ordered by mtime (≈ pipeline order: train before score); eval.log/setup.log
-        # are surfaced under their own keys, not as "stages".
-        stages: dict[str, str] = {}
+        # Per-stage logs — a multi-stage eval tees each stage to `<name>.log`. Bound the set to the
+        # node's DECLARED stages (its `looplab_stages.json` manifest) plus the engine's reserved,
+        # operator-appended `score` stage, in pipeline order. NOT a bare `*.log` glob: that would
+        # surface any stray log the training code writes to its cwd (a framework's own debug.log) as a
+        # phantom stage band, and let an unbounded file count inflate the response. Each `<name>.log` is
+        # tailed independently (a missing/racing one just yields "").
+        stage_names: list[str] = []
         try:
-            for p in sorted(nd.glob("*.log"), key=lambda q: q.stat().st_mtime):
-                if p.name in ("eval.log", "setup.log", "run_setup.log"):
-                    continue
-                stages[p.stem] = _tail(p.name)
-        except OSError:
+            man = json.loads((nd / "looplab_stages.json").read_text("utf-8"))
+            stage_names = [str(s["name"]) for s in (man.get("stages") or []) if s.get("name")]
+        except (OSError, ValueError, TypeError):
             pass
-        eval_tail = _tail("eval.log")
-        if not eval_tail and stages:      # multi-stage run: show the stage logs so the panel isn't blank
-            eval_tail = "\n\n".join(f"=== {name}.log ===\n{body}" for name, body in stages.items())
-        return {"eval": eval_tail, "stages": stages, "setup": _tail("setup.log"),
+        if "score" not in stage_names:      # the engine appends a protected `score` stage post-manifest
+            stage_names.append("score")
+        stages = {name: body for name in stage_names if (body := _tail(f"{name}.log"))}
+        return {"eval": _tail("eval.log"), "stages": stages, "setup": _tail("setup.log"),
                 "run_setup": (rd / "run_setup.log").read_text("utf-8", "replace")
                              if (rd / "run_setup.log").exists() else ""}
 

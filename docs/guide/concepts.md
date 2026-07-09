@@ -289,7 +289,8 @@ only — `replay` never reads them.
 **Per-operation traces.** A node's own work (propose → implement → repair, then evaluate/training)
 is one trace, shown under the node. But every OTHER LLM sub-operation runs in its **own** named trace
 (`new_trace`) — `strategist_consult`, `hypothesis_merge`, `deep_research`, `report`, `lessons_distill`/
-`lessons_refresh`, and the `foresight_rank` behind `hypothesis_ranked`/`foresight_selected`. The event
+`lessons_refresh`, and the two Researcher ranking steps — `hyp_prioritize` behind `hypothesis_ranked`
+(board prioritization) and `foresight_rank` behind `foresight_selected` (idea predict-before-execute). The event
 that operation emits is **stamped with that trace's id** (the event store reads the active span's ids
 on append; a telemetry event whose op-span already closed carries the captured id explicitly), so the
 UI expands that event's row to ONLY that operation's trace — never the whole node's Researcher+Developer

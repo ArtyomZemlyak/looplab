@@ -881,10 +881,10 @@ def test_budget_extend_nodes_resumes_and_grows(tmp_path):
     assert len(st1.nodes) <= n0 + 3      # but never beyond the extended budget
 
 
-def test_node_logs_surfaces_multi_stage_stage_logs(tmp_path):
-    # A MULTI-STAGE eval tees to per-stage logs (train.log / score.log), never eval.log — so the live
-    # "Training / eval log" panel must surface those, not a blank eval.log (bug: log-follow blank the
-    # whole training run). `stages` carries each; `eval` falls back to them when there's no eval.log.
+def test_node_logs_surfaces_declared_stage_logs_only(tmp_path):
+    # A MULTI-STAGE eval tees to per-stage logs (train.log / score.log), never eval.log — surface each
+    # under `stages`. The set is bounded to the node's DECLARED stages (looplab_stages.json) + the
+    # reserved `score` stage, so a stray log the training code writes (debug.log) is NOT a phantom stage.
     rd = tmp_path / "demo"
     rd.mkdir()
     s = EventStore(rd / "events.jsonl")
@@ -892,14 +892,16 @@ def test_node_logs_surfaces_multi_stage_stage_logs(tmp_path):
     s.append("node_building", {"node_id": 0, "operator": "draft", "parent_ids": []})
     nd = rd / "nodes" / "node_0"
     nd.mkdir(parents=True)
+    (nd / "looplab_stages.json").write_text('{"stages": [{"name": "train"}]}')
     (nd / "train.log").write_text("Epoch 0 loss=1.0\nEpoch 1 loss=0.5\n")
-    (nd / "score.log").write_text("recall@100: 0.8\n")
+    (nd / "score.log").write_text("recall@100: 0.8\n")     # score is the reserved operator stage
+    (nd / "debug.log").write_text("noise the training code wrote to its cwd\n")
     client = TestClient(make_app(tmp_path))
     body = client.get("/api/runs/demo/nodes/0/logs").json()
-    assert set(body["stages"]) == {"train", "score"}          # both stage logs surfaced
+    assert list(body["stages"]) == ["train", "score"]         # declared order (manifest, then score)
+    assert "debug" not in body["stages"]                      # stray log is NOT a phantom stage
     assert "Epoch 1 loss=0.5" in body["stages"]["train"]
-    # no eval.log → the single-`<pre>` `eval` field falls back to the labeled stage logs, not blank
-    assert "=== train.log ===" in body["eval"] and "recall@100: 0.8" in body["eval"]
+    assert body["eval"] == ""                                 # no eval.log → empty (no fallback dup)
 
 
 def test_node_logs_single_command_uses_eval_log(tmp_path):
