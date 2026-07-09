@@ -874,7 +874,7 @@ class LLMRepoDeveloper:
             "the rest. If this is the last step, make sure the eval entrypoint runs end-to-end.")
         messages = [{"role": "system", "content": system}, {"role": "user", "content": step_user}]
         try:
-            # implement steps CONSUME the stages/plan briefs + share the node read-cache, but don't
+            # implement steps CONSUME the stages/plan briefs, but don't
             # contribute (their writes add length faster than signal, and the last step is terminal) —
             # so the ledger stays the 3 exploration briefs (propose/stages/plan), never K-step bloat.
             run_phase(self.client, CompositeTools([write, EnvInspectTools()] + self._scout_tools(write)),

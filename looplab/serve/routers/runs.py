@@ -25,6 +25,47 @@ from looplab.serve.artifacts import (
 from looplab.serve.engine_proc import _engine_alive
 from looplab.serve.protocol import POLL_SECONDS, SSE_DONE, SSE_STATE
 
+# Snapshot-derived OPERATOR stage names, memoized per run DIRECTORY: task.snapshot.json is written
+# ONCE by `run` (under the engine-singleton lock, before the loop) and is immutable for the run's
+# lifetime, so the normalize+validate work runs at most once per run per server process instead of
+# on every node_logs poll. Keyed by the absolute run dir, not the bare run_id — distinct run roots
+# (tests, multi-root deploys) reuse ids like "demo" with different snapshots. The DEVELOPER-manifest
+# fallback in node_logs deliberately stays per-poll: looplab_stages.json is written mid-node by the
+# Developer's STAGES phase, so it can appear between polls and differs node to node.
+_OP_STAGE_NAMES: dict[str, list] = {}
+
+
+def _operator_stage_names(rd: Path) -> list:
+    """Names of the OPERATOR-declared `cmd.stages` pipeline from the run's verbatim
+    task.snapshot.json, vetted the way the ENGINE consumes them — [] when the task declares none
+    (single-command eval) or the declared list doesn't survive validation. Memoized (see
+    `_OP_STAGE_NAMES` above); callers copy before mutating."""
+    key = str(rd)
+    if key in _OP_STAGE_NAMES:
+        return _OP_STAGE_NAMES[key]
+    snap_path = rd / "task.snapshot.json"
+    if not snap_path.exists():
+        return []   # engine still starting (snapshot not written yet) — don't memoize a transient miss
+    names: list[str] = []
+    try:
+        from looplab.adapters.tasks import normalize_task
+        from looplab.runtime.command_eval import validate_stages
+        snap = json.loads(snap_path.read_text("utf-8"))
+        es = (normalize_task(snap) if isinstance(snap, dict) else {}).get("eval") or {}
+        if es.get("stages"):
+            # ENGINE PARITY (Engine._resolve_stages): the engine re-runs the shared validator over
+            # the snapshot's stages (an old/hand-edited snapshot bypasses pydantic) and on ANY error
+            # falls back to the Developer-manifest + protected-`score` path — mirror it exactly, or
+            # this panel would render phantom stage bands for a pipeline the engine never ran AND
+            # miss the manifest stages it actually did run.
+            clean, err = validate_stages(es["stages"])
+            if err is None:
+                names = [str(s["name"]) for s in clean]
+    except Exception:  # noqa: BLE001 - no/foreign/kind-less snapshot -> fall back to the manifest
+        names = []
+    _OP_STAGE_NAMES[key] = names
+    return names
+
 
 def build_router(srv) -> APIRouter:
     router = APIRouter()
@@ -207,24 +248,21 @@ def build_router(srv) -> APIRouter:
         # stray log the training code writes to its cwd (a framework's own debug.log) as a phantom
         # stage band, and let an unbounded file count inflate the response. Each `<name>.log` is
         # tailed independently (a missing/racing one just yields "").
-        # OPERATOR-declared stages first: when the task's `cmd` carries `stages`, those ARE the
+        # OPERATOR-declared stages first: when the task's `cmd` carries VALID `stages`, those ARE the
         # canonical pipeline (Engine._resolve_stages ignores the Developer's manifest) and no `score`
         # stage is appended — the LAST operator stage prints the metric. Their names come from the
-        # run's verbatim task.snapshot.json (normalize_task maps composable `cmd` → `eval`), so live
-        # logs surface for operator cmd.stages pipelines too — the very mode the per-stage logs fix
-        # targeted (mega-review D7).
-        stage_names: list[str] = []
-        try:
-            from looplab.adapters.tasks import normalize_task
-            snap = json.loads((rd / "task.snapshot.json").read_text("utf-8"))
-            es = (normalize_task(snap) if isinstance(snap, dict) else {}).get("eval") or {}
-            stage_names = [str(s["name"]) for s in (es.get("stages") or [])
-                           if isinstance(s, dict) and s.get("name")]
-        except Exception:  # noqa: BLE001 - no/foreign/kind-less snapshot -> fall back to the manifest
-            pass
+        # run's verbatim task.snapshot.json (normalize_task maps composable `cmd` → `eval`,
+        # validate_stages vets the list the same way the engine does), memoized per run since the
+        # snapshot never changes — so live logs surface for operator cmd.stages pipelines too, the
+        # very mode the per-stage logs fix targeted (mega-review D7). Copy: the fallback below
+        # appends "score", which must never leak into the cached list.
+        stage_names: list[str] = list(_operator_stage_names(rd))
         if not stage_names:
-            # Single-command cmd: the Developer's `looplab_stages.json` manifest declares the PRECEDING
-            # stages, and the engine appends the protected, operator-owned `score` stage after them.
+            # Single-command cmd (or an INVALID operator stage list — engine parity: it too ignores
+            # a bad list and takes this path): the Developer's `looplab_stages.json` manifest
+            # declares the PRECEDING stages, and the engine appends the protected, operator-owned
+            # `score` stage after them. Re-read EVERY poll, never memoized — the manifest is written
+            # mid-node by the STAGES phase, so it can appear between polls and differs per node.
             try:
                 man = json.loads((nd / "looplab_stages.json").read_text("utf-8"))
                 stage_names = [str(s["name"]) for s in (man.get("stages") or []) if s.get("name")]

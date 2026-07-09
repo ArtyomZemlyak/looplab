@@ -3,7 +3,9 @@
 A long command (a full pytest, a training run, a build) shouldn't block the chat turn. `start()` spawns
 the process detached, streaming its combined stdout+stderr to a log file; `read()` returns only the
 NEW output since the last read (a byte cursor) plus the live/exit status, so a later turn can poll it.
-The manager is process-global so tasks survive across turns within the server.
+One bounded chunk per read (backpressure): the cursor advances ONLY by what was returned, so output
+past the budget is delivered by the NEXT poll instead of being consumed and truncated away. The
+manager is process-global so tasks survive across turns within the server.
 
 Env is scrubbed of secret-looking vars (same rule as sandbox._run_argv) so a background process can't
 leak the LLM key etc. into its log.
@@ -19,8 +21,14 @@ import threading
 from pathlib import Path
 
 from looplab.runtime.sandbox import SECRET_ENV
+from looplab.tools._base import RESULT_CAP   # the agent loop's per-result cap (tools/_base.py)
 
-_MAX_READ = 8000
+# Per-poll chunk budget. The old 8000 was DOUBLE the loop's result cap: the loop cut the reply's tail
+# while the cursor had already advanced past the WHOLE log — mid-log output was consumed and
+# unrecoverable, with a truncation marker advising a 'narrower range' this tool doesn't have. Stay
+# under the cap (headroom for the shell tool's status head + '(more output pending)' note) and let
+# the cursor backpressure deliver the rest on the next poll.
+_MAX_READ = RESULT_CAP - 400
 
 
 def _child_env(argv) -> dict:
@@ -82,14 +90,27 @@ class BackgroundManager:
         except OSError:
             data = b""
         new = data[t["cursor"]:]
-        t["cursor"] = len(data)
-        text = new.decode("utf-8", "replace")
-        if len(text) > _MAX_READ:
-            text = "…(truncated)…\n" + text[-_MAX_READ:]
+        chunk = new[:_MAX_READ]
+        if len(chunk) < len(new):
+            # Don't split a multi-byte UTF-8 char at the budget edge: back up over the (≤3)
+            # continuation bytes and the lead byte so the next poll re-reads the whole char (both
+            # halves would otherwise decode to U+FFFD). Bounded strip — arbitrary binary output can't
+            # walk the chunk empty and stall the cursor.
+            for _ in range(3):
+                if chunk and (chunk[-1] & 0xC0) == 0x80:
+                    chunk = chunk[:-1]
+            if chunk and chunk[-1] >= 0xC0:
+                chunk = chunk[:-1]
+        # Advance the cursor ONLY by what we return (backpressure): the next poll continues exactly
+        # where this reply ended, so nothing past the budget is consumed-then-truncated away.
+        t["cursor"] += len(chunk)
+        pending = len(new) - len(chunk)
+        text = chunk.decode("utf-8", "replace")
         self._reap(t)
         rc = t["proc"].poll()
         return {"ok": True, "task_id": tid, "cmd": t["cmd"],
-                "status": "running" if rc is None else "exited", "exit_code": rc, "new_output": text}
+                "status": "running" if rc is None else "exited", "exit_code": rc,
+                "new_output": text, "pending": pending}
 
     def list(self) -> list:
         with self._lock:

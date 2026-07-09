@@ -1,8 +1,12 @@
 """Serve-side fixes from the agent-prompt mega-review (docs/PROMPT_REVIEW.md):
-P10 — web genesis defaults backend=llm for a generative task (CLI parity with cli.py's genesis);
+P10 — web genesis defaults backend=llm for a generative task (CLI parity with cli.py's genesis),
+now hoisted (F4) into /api/start — the funnel EVERY launch goes through (genesis cards, assistant
+propose_run cards, direct API callers) — with the genesis-card injection kept as display-only sugar;
 D7 — /nodes/{nid}/logs surfaces per-stage logs for OPERATOR `cmd.stages` pipelines (not just the
-Developer's looplab_stages.json manifest); and the `_boss_context` advisory-vs-action split — the
-action-less /chat channel is told to RECOMMEND, only the /command action-router is told to ACT.
+Developer's looplab_stages.json manifest), with (F9) the snapshot's stage list validated the way
+the engine consumes it (invalid → manifest fallback) and memoized per run dir; and the
+`_boss_context` advisory-vs-action split — the action-less /chat channel is told to RECOMMEND,
+only the /command action-router is told to ACT.
 """
 from __future__ import annotations
 
@@ -69,6 +73,72 @@ def test_genesis_non_generative_task_gets_no_backend(tmp_path, monkeypatch):
     assert "backend" not in r["spec"]["settings"]           # quadratic stays on its default
 
 
+# ---- F4: /api/start owns the generative backend=llm launch default ------------------------------
+def _start_env(tmp_path, monkeypatch):
+    """TestClient + the fake-spawned engine's env: /api/start passes per-run settings to the spawned
+    engine as LOOPLAB_* env, so the backend default is observable on the captured Popen kwargs."""
+    spawned = {}
+
+    def fake_popen(cmd, **kw):
+        spawned["cmd"] = cmd
+        spawned["env"] = kw.get("env", {})
+        return type("P", (), {})()
+    monkeypatch.setattr("looplab.serve.engine_proc.subprocess.Popen", fake_popen)
+    return TestClient(make_app(tmp_path)), spawned
+
+
+def _repo_task(tmp_path) -> dict:
+    """A minimal composable (kind-less) repo task that VALIDATES: /api/start runs validate_task on
+    inline tasks, and a repo task's editable_path must exist on this machine."""
+    repo = tmp_path / "repo"
+    repo.mkdir(exist_ok=True)
+    (repo / "test.py").write_text("print('{}')\n", encoding="utf-8")
+    return {"goal": "maximize recall", "direction": "max", "repo": str(repo),
+            "cmd": {"command": ["python", "test.py"],
+                    "metric": {"reader": "stdout_json", "key": "recall"}}}
+
+
+def test_start_defaults_backend_llm_for_inline_generative_task(tmp_path, monkeypatch):
+    """An inline generative task launched with NO backend anywhere must spawn with LOOPLAB_BACKEND=llm
+    (F4: the default lives in the /api/start funnel, so assistant/direct launches — which never pass
+    through the genesis card — get it too, instead of NoOpRepoDeveloper silently no-oping)."""
+    client, spawned = _start_env(tmp_path, monkeypatch)
+    r = client.post("/api/start", json={"run_id": "gen", "task": _repo_task(tmp_path)})
+    assert r.status_code == 200
+    assert spawned["env"]["LOOPLAB_BACKEND"] == "llm"
+
+
+def test_start_respects_explicit_backend(tmp_path, monkeypatch):
+    """An explicit backend in the launch settings wins verbatim — the default only fills the gap,
+    mirroring cli.py's `backend_chosen` guard."""
+    client, spawned = _start_env(tmp_path, monkeypatch)
+    r = client.post("/api/start", json={"run_id": "gen", "task": _repo_task(tmp_path),
+                                        "settings": {"backend": "cli_agent"}})
+    assert r.status_code == 200
+    assert spawned["env"]["LOOPLAB_BACKEND"] == "cli_agent"
+
+
+def test_start_non_generative_task_gets_no_backend(tmp_path, monkeypatch):
+    """A non-generative (offline-optimizable) inline task spawns with NO backend env — it stays on
+    Settings' own default."""
+    client, spawned = _start_env(tmp_path, monkeypatch)
+    task = {"benchmark": "quadratic", "goal": "min (x-3)^2", "direction": "min"}
+    r = client.post("/api/start", json={"run_id": "toy", "task": task})
+    assert r.status_code == 200
+    assert "LOOPLAB_BACKEND" not in (spawned["env"] or {})
+
+
+def test_start_defaults_backend_llm_for_generative_task_file(tmp_path, monkeypatch):
+    """The task_file path (a catalogue/genesis task_file card — no inline task dict) gets the same
+    default: the file's JSON is read and normalized best-effort inside the shared predicate."""
+    client, spawned = _start_env(tmp_path, monkeypatch)
+    tf = tmp_path / "mytask.json"
+    tf.write_text(json.dumps(_repo_task(tmp_path)), encoding="utf-8")
+    r = client.post("/api/start", json={"run_id": "genfile", "task_file": str(tf)})
+    assert r.status_code == 200
+    assert spawned["env"]["LOOPLAB_BACKEND"] == "llm"
+
+
 # ---- D7: node_logs for OPERATOR cmd.stages pipelines --------------------------------------------
 def test_node_logs_surfaces_operator_cmd_stages(tmp_path):
     """An operator-declared `cmd.stages` pipeline writes NO looplab_stages.json (the engine ignores
@@ -99,6 +169,79 @@ def test_node_logs_surfaces_operator_cmd_stages(tmp_path):
     assert "Epoch 1 loss=0.5" in body["stages"]["train"]
     assert "debug" not in body["stages"] and "score" not in body["stages"]
     assert body["eval"] == ""                       # multi-stage → no eval.log, no fallback dup
+
+
+# ---- F9: node_logs stage resolution matches the engine + memoizes the snapshot parse ------------
+def _stage_run(tmp_path, cmd: dict):
+    """A run dir with a started node and a verbatim composable task.snapshot.json carrying `cmd`."""
+    rd = tmp_path / "demo"
+    rd.mkdir()
+    s = EventStore(rd / "events.jsonl")
+    s.append("run_started", {"run_id": "demo", "task_id": "t", "goal": "g", "direction": "max"})
+    s.append("node_building", {"node_id": 0, "operator": "draft", "parent_ids": []})
+    (rd / "task.snapshot.json").write_text(json.dumps(
+        {"goal": "g", "direction": "max", "repo": str(tmp_path / "repo"), "cmd": cmd}),
+        encoding="utf-8")
+    nd = rd / "nodes" / "node_0"
+    nd.mkdir(parents=True)
+    return rd, nd
+
+
+def test_node_logs_invalid_operator_stages_fall_back_to_manifest(tmp_path):
+    """ENGINE PARITY (Engine._resolve_stages): an invalid `cmd.stages` list (here: a duplicate stage
+    name) is IGNORED by the engine, which falls back to the Developer's looplab_stages.json manifest
+    + the protected `score` stage — node_logs must run the SAME shared validator and name the same
+    stages, or the panel would render phantom bands for a pipeline the engine never ran (F9a)."""
+    rd, nd = _stage_run(tmp_path, {
+        "stages": [{"name": "train", "command": ["python", "a.py"]},
+                   {"name": "train", "command": ["python", "b.py"]}],   # duplicate name → invalid
+        "metric": {"reader": "stdout_json", "key": "recall"}})
+    (nd / "looplab_stages.json").write_text(json.dumps(
+        {"stages": [{"name": "prep", "command": ["python", "prep.py"]}]}), encoding="utf-8")
+    (nd / "prep.log").write_text("prepped\n")
+    (nd / "score.log").write_text("recall: 0.9\n")
+    (nd / "train.log").write_text("phantom — the invalid stage list must not surface this\n")
+    client = TestClient(make_app(tmp_path))
+    body = client.get("/api/runs/demo/nodes/0/logs").json()
+    assert list(body["stages"]) == ["prep", "score"]        # manifest + protected score, no `train`
+
+
+def test_node_logs_snapshot_stage_names_memoized(tmp_path):
+    """The snapshot-derived stage list is memoized per run dir (F9b): task.snapshot.json is written
+    once and is immutable for the run's lifetime, so a later poll must serve the FIRST parse even if
+    the file changes on disk under the server (only the per-node manifest fallback stays per-poll)."""
+    rd, nd = _stage_run(tmp_path, {
+        "stages": [{"name": "data_prep", "command": ["python", "prep.py"]},
+                   {"name": "train", "command": ["python", "train.py"]}],
+        "metric": {"reader": "stdout_json", "key": "recall"}})
+    (nd / "data_prep.log").write_text("shards\n")
+    (nd / "train.log").write_text("loss=0.1\n")
+    client = TestClient(make_app(tmp_path))
+    assert list(client.get("/api/runs/demo/nodes/0/logs").json()["stages"]) == ["data_prep", "train"]
+    # rewrite the snapshot (never happens in a real run) — the memo hit keeps the original pipeline
+    (rd / "task.snapshot.json").write_text(json.dumps(
+        {"goal": "g", "direction": "max", "repo": str(tmp_path / "repo"),
+         "cmd": {"stages": [{"name": "other", "command": ["python", "o.py"]}],
+                 "metric": {"reader": "stdout_json", "key": "recall"}}}), encoding="utf-8")
+    (nd / "other.log").write_text("must not appear\n")
+    body = client.get("/api/runs/demo/nodes/0/logs").json()
+    assert list(body["stages"]) == ["data_prep", "train"] and "other" not in body["stages"]
+
+
+def test_node_logs_manifest_fallback_stays_per_poll(tmp_path):
+    """The Developer manifest can appear MID-NODE (the STAGES phase writes it between polls), so the
+    manifest+score fallback is re-read every poll — memoizing it would freeze the log panel on the
+    pre-manifest view for the rest of the run (F9b's deliberate non-memoization)."""
+    rd, nd = _stage_run(tmp_path, {"command": ["python", "test.py"],
+                                   "metric": {"reader": "stdout_json", "key": "recall"}})
+    client = TestClient(make_app(tmp_path))
+    assert client.get("/api/runs/demo/nodes/0/logs").json()["stages"] == {}   # nothing logged yet
+    # the STAGES phase lands mid-node: manifest + a train log appear between polls
+    (nd / "looplab_stages.json").write_text(json.dumps(
+        {"stages": [{"name": "train", "command": ["python", "train.py"]}]}), encoding="utf-8")
+    (nd / "train.log").write_text("Epoch 1\n")
+    (nd / "score.log").write_text("recall: 0.7\n")
+    assert list(client.get("/api/runs/demo/nodes/0/logs").json()["stages"]) == ["train", "score"]
 
 
 # ---- _boss_context: advisory wording on /chat, imperative on /command ---------------------------

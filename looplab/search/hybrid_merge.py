@@ -197,6 +197,10 @@ def agent_merge(client, items: list[str], *, kind: str = "items", goal: str = ""
                   if "lesson" in (kind or "").lower() else
                   "every specific detail — thresholds, numbers, caveats —")
         sysmsg = render(prompts, "merge_system", _MERGE_SYSTEM, kind=kind, detail=detail)
+        # Back-compat: the pre-$var contract substituted a literal `{kind}` AFTER the render, so
+        # existing merge_system.md overrides written with `{kind}` placeholders must keep working.
+        # A no-op on the new $kind default (already substituted by render above).
+        sysmsg = sysmsg.replace("{kind}", kind)
         user = ((f"Goal context: {goal}\n\n" if goal else "")
                 + f"Candidate {kind} (decide which indices are the SAME):\n" + blocks)
         msgs = [{"role": "system", "content": sysmsg}, {"role": "user", "content": user}]

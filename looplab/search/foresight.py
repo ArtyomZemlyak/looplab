@@ -252,12 +252,15 @@ class ForesightPanelResearcher:
     """
 
     def __init__(self, base, k: int = 2, *, client=None, bounds=None,
-                 parser: str = "tool_call", prompts=None, tools=None):
+                 parser: Optional[str] = None, prompts=None, tools=None):
         self.base = base
         self.k = max(1, k)
         self.client = client if client is not None else getattr(base, "client", None)
         self.bounds = bounds if bounds is not None else getattr(base, "bounds", None)
-        self.parser = parser
+        # The panel must reflect the base's configured structured-output parser (mirroring the
+        # `prompts` propagation below) so chain-walkers like `engine/lessons.py::_merge_prompt_opts`
+        # see the real value — a hardcoded "tool_call" default here shadowed the run's parser.
+        self.parser = parser if parser is not None else getattr(base, "parser", "tool_call")
         self.prompts = prompts if prompts is not None else getattr(base, "prompts", None)
         # When `tools` is wired, ranking runs in AGENTIC mode (a drive_tool_loop that can pull actual
         # experiment/data evidence before deciding); else it's the one-shot predictor. Optional.

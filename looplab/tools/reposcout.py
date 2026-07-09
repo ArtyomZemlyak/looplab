@@ -23,19 +23,20 @@ from __future__ import annotations
 from pathlib import Path
 
 from looplab.core import _pathsafe
-from looplab.tools._base import fn_spec   # shared OpenAI function-schema builder (one schema shape)
+from looplab.tools._base import RESULT_CAP, fn_spec   # shared schema builder + the loop's result cap
 
 # Path/secret guards now live in _pathsafe (shared with the write/shell/git providers so every tool
 # enforces the same rules). Re-exported under the historical private names for back-compat.
 _looks_secret = _pathsafe.looks_secret
 _readable = _pathsafe.readable
 
-# The agent loop hard-caps EVERY tool result at 4000 chars (agents/agent.py drive_tool_loop), and
-# anything longer loses its TAIL there — including a resume pointer appended at the end. So one
+# The agent loop hard-caps EVERY tool result at RESULT_CAP chars (agents/agent.py drive_tool_loop),
+# and anything longer loses its TAIL there — including a resume pointer appended at the end. So one
 # read_file page (window header + body + resume marker) must fit comfortably UNDER that cap, or the
 # pagination contract silently breaks and the model acts on code it never saw (mega-review P3; the
-# old 16KB page lost both its tail and its pointer at the cap).
-_MAX_READ = 3600           # chars of file content returned per read_file page
+# old 16KB page lost both its tail and its pointer at the cap). Derived, not hard-coded: the -400
+# headroom covers the window header + resume marker so page+header+marker ≤ RESULT_CAP.
+_MAX_READ = RESULT_CAP - 400   # chars of file content returned per read_file page
 _MAX_ENTRIES = 200         # entries per list_dir / find_files
 
 
@@ -248,16 +249,17 @@ class RepoScoutTools:
         return self._paginate(data, start_line, lines)
 
     @staticmethod
-    def _paginate(data: str, start_line=0, lines=0) -> str:
-        """Return a WINDOW of `data`: `lines` lines starting at 1-based `start_line`, capped at _MAX_READ
-        chars. start_line 0/None/'' = from the top; `lines` 0/None = as many as fit; stringy '180'/'40'
-        coerce. When more remains (line window ran into the char cap, or no `lines` given and the file is
-        bigger than one page) the reply ENDS with the resume marker naming the exact start_line to
-        continue from; a reply without the marker IS the end of the file — that asymmetry is the tool's
-        documented contract, so the marker text must stay stable and must always fit UNDER the agent
-        loop's 4000-char result cap (see _MAX_READ). (Before this, read_file ignored start_line entirely
-        and always returned the first 16KB — agents re-read the same file head 13-21× and burned their
-        whole budget, per the node 56/59/61/62 traces.)"""
+    def _paginate(data: str, start_line=0, lines=0, max_chars: int = _MAX_READ) -> str:
+        """Return a WINDOW of `data`: `lines` lines starting at 1-based `start_line`, capped at
+        `max_chars` chars (default _MAX_READ; env_inspect passes a reduced budget so its origin-path
+        prefix still fits the loop cap). start_line 0/None/'' = from the top; `lines` 0/None = as many
+        as fit; stringy '180'/'40' coerce. When more remains (line window ran into the char cap, or no
+        `lines` given and the file is bigger than one page) the reply ENDS with the resume marker naming
+        the exact start_line to continue from; a reply without the marker IS the end of the file — that
+        asymmetry is the tool's documented contract, so the marker text must stay stable and must always
+        fit UNDER the agent loop's RESULT_CAP (see _MAX_READ). (Before this, read_file ignored
+        start_line entirely and always returned the first 16KB — agents re-read the same file head
+        13-21× and burned their whole budget, per the node 56/59/61/62 traces.)"""
         def _int(v):
             try:
                 return int(v) if v else 0
@@ -268,16 +270,32 @@ class RepoScoutTools:
         all_lines = data.splitlines(keepends=True)
         n = len(all_lines)
         window = all_lines[start: (start + want) if want else n]
-        head = f"(lines {start + 1}-{start + len(window)} of {n})\n" if (start > 0 or want) else ""
         body = "".join(window)
-        if len(body) > _MAX_READ:                      # window ran into the char cap — truncate mid-window
-            body = body[:_MAX_READ]
+        mid_line = False
+        if len(body) > max_chars:                      # window ran into the char cap — truncate mid-window
+            body = body[:max_chars]
             shown = body.count("\n")                   # whole lines that survived the cut
+            if shown == 0:
+                # A single line longer than one page: zero whole lines survived, so the generic marker
+                # would point at the SAME start_line and the model would loop on identical pages forever
+                # (reproduced). Guarantee progress: count the truncated line as shown and resume at the
+                # NEXT line — the marker says so honestly (the line's tail past the cap is skipped).
+                shown = 1
+                mid_line = True
             more = True
         else:                                          # the full line-window was returned
             shown = len(window)
             more = (start + shown) < n                 # anything after the window?
-        tail = f"\n… (more below — continue with start_line={start + shown + 1})" if more else ""
+        # Header AFTER the cap, from the actual `shown` count — the pre-cap window would overstate the
+        # range and disagree with the resume marker when the char cap cut the window short.
+        head = f"(lines {start + 1}-{start + shown} of {n})\n" if (start > 0 or want) else ""
+        if mid_line:
+            tail = (f"\n… (line {start + 1} longer than one page — truncated mid-line; "
+                    f"continue with start_line={start + 2})")
+        elif more:
+            tail = f"\n… (more below — continue with start_line={start + shown + 1})"
+        else:
+            tail = ""
         return head + body + tail
 
     def _find_files(self, root: str, pattern: str) -> str:

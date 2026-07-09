@@ -324,8 +324,12 @@ def test_stage_reachable_files_parenthesized_multiline_import(tmp_path):
     # D4: `from pkg import (\n  vit,\n  mlp,\n)` spans lines — the line-anchored import scan only
     # saw `from pkg import (` and credited pkg/__init__.py while MISSING pkg/vit.py / pkg/mlp.py,
     # so a repair to a submodule escaped the closure and a stale checkpoint was reused.
+    # The ')' inside vit's trailing comment is deliberate: the paren pattern's `[^)]*` group stops
+    # at the FIRST ')', so before comments were stripped from the source it truncated the captured
+    # name list right there and DROPPED mlp — a repair to pkg/mlp.py escaped the closure.
     (tmp_path / "train.py").write_text(
-        "from pkg import (\n    vit,  # backbone\n    mlp,\n)\nprint('train')\n", encoding="utf-8")
+        "from pkg import (\n    vit,  # backbone (legacy)\n    mlp,\n)\nprint('train')\n",
+        encoding="utf-8")
     (tmp_path / "pkg").mkdir()
     (tmp_path / "pkg" / "__init__.py").write_text("", encoding="utf-8")
     (tmp_path / "pkg" / "vit.py").write_text("v = 1\n", encoding="utf-8")
@@ -403,23 +407,26 @@ def _ok_eval():
 
 class _StagedDev:
     """Repo-style developer: implement() makes no edits (the seeded tree IS the solution);
-    each repair() ships the next entry of `fixes` as its cumulative last_files (+ deletions)."""
-    def __init__(self, fixes, deleted=None):
+    each repair() ships the next entry of `fixes` as its cumulative last_files (+ deletions).
+    `implement_deleted` are deletions made at IMPLEMENT time — like the real repo developer's
+    `last_deleted`, they stay in the CUMULATIVE deletion set every later repair reports too."""
+    def __init__(self, fixes, deleted=None, implement_deleted=None):
         self.fixes = list(fixes)
         self.deleted = list(deleted or [])
+        self.implement_deleted = list(implement_deleted or [])
         self.last_files: dict = {}
         self.last_deleted: list = []
         self.repair_calls = 0
 
     def implement(self, idea):
-        self.last_files, self.last_deleted = {}, []
+        self.last_files, self.last_deleted = {}, list(self.implement_deleted)
         return ""
 
     def repair(self, idea, code, error):
         self.repair_calls += 1
         if self.fixes:
             self.last_files = dict(self.fixes.pop(0))
-        self.last_deleted = list(self.deleted)
+        self.last_deleted = list(self.implement_deleted) + list(self.deleted)
         return ""
 
 
@@ -467,6 +474,22 @@ def test_loop_deletion_forces_full_rerun(tmp_path, monkeypatch):
     assert captured == [None, None]              # deletion -> fail closed -> full pipeline re-run
 
 
+def test_loop_prior_deletion_does_not_block_reuse(tmp_path, monkeypatch):
+    """F2: `last_deleted` is CUMULATIVE (seeded from node.deleted at repair_from), so a file the
+    IMPLEMENT step deleted — before the train stage ever completed — must not veto reuse forever:
+    a deletion that predates the completed train stage cannot invalidate its checkpoint. Only THIS
+    repair's deletion DELTA may fail closed; a score-only repair still reuses train."""
+    captured, results = [], [_fail_score("ModuleNotFoundError: No module named 'alpha'"), _ok_eval()]
+    dev = _StagedDev(fixes=[{"looplab_eval.py": "print('score v1')\n"}],
+                     implement_deleted=["helper.py"])
+    eng = _staged_engine(tmp_path / "run", _staged_src(tmp_path), dev, monkeypatch, captured, results)
+    anyio.run(eng.run)
+    assert dev.repair_calls == 1
+    assert captured == [None, "score"]           # the pre-existing deletion did not force a re-train
+    st = fold(_events(tmp_path / "run"))
+    assert st.nodes[0].status is NodeStatus.evaluated and st.nodes[0].metric == 1.0
+
+
 def test_loop_non_py_change_forces_full_rerun(tmp_path, monkeypatch):
     """D2 at loop level: a repair that edits a non-.py input (config.yaml) alongside the score fix
     is invisible to import reachability — the next eval must be a full re-run."""
@@ -504,6 +527,71 @@ def test_loop_retrain_cap_abandons_after_cap(tmp_path, monkeypatch):
     anyio.run(eng.run)
     # eval1 (full) + exactly ONE capped full re-train; the second train-touching repair abandons
     # BEFORE another eval, so the results queue of 2 is fully consumed and no 3rd call happens.
+    assert captured == [None, None]
+    assert dev.repair_calls == 2
+    evs = _events(tmp_path / "run")
+    failed = [e for e in evs if e.type == "node_failed" and e.data.get("node_id") == 0]
+    assert failed and failed[0].data.get("triage_action") == "abandon"
+    assert "full re-train" in failed[0].data.get("triage_rationale", "")
+
+
+def _fail_stage(name, stderr, earlier=()):
+    """A staged eval that failed at `name`; `earlier` stages completed before it. Mirrors the real
+    RunResult contract the cap check relies on: one record per PRE-failure stage in order, the
+    failed stage always the LAST record."""
+    from looplab.runtime.sandbox import RunResult
+    return RunResult(exit_code=1, stdout="", stderr=stderr, metric=None, timed_out=False,
+                     failed_stage=name,
+                     stages=[{"name": e, "status": "ok", "exit_code": 0, "seconds": 0.1}
+                             for e in earlier]
+                     + [{"name": name, "status": "fail", "exit_code": 1, "seconds": 0.1}])
+
+
+def test_loop_renamed_first_stage_repair_does_not_consume_retrain_cap(tmp_path, monkeypatch):
+    """F3: a FIRST-stage (train) failure whose repair renames the stage in the manifest loses the
+    failed stage's index in the POST-repair pipeline (-1) — but there was no completed earlier-
+    stage work to discard, so it must NOT consume the retrain cap (judged from the pre-repair
+    res.stages, where the failed stage is the ONLY record). Pre-fix this was over-counted and
+    abandoned at the cap; now the node keeps repairing and evaluates."""
+    captured = []
+    # Different mechanical errors so the anti-stuck signature guard never fires first; each failure
+    # names the CURRENT (renamed) first stage, as the real pipeline would report it.
+    results = [_fail_stage("train", "ModuleNotFoundError: No module named 'alpha'"),
+               _fail_stage("fit", "TypeError: unexpected keyword argument 'beta'"),
+               _ok_eval()]
+    _m1 = json.dumps({"stages": [{"name": "fit", "command": ["python", "train.py"]}]})
+    _m2 = json.dumps({"stages": [{"name": "fit2", "command": ["python", "train.py"]}]})
+    dev = _StagedDev(fixes=[{"looplab_stages.json": _m1}, {"looplab_stages.json": _m2}])
+    eng = _staged_engine(tmp_path / "run", _staged_src(tmp_path), dev, monkeypatch, captured, results,
+                         inline_repair_attempts=5, inline_repair_retrain_cap=1)
+    anyio.run(eng.run)
+    assert dev.repair_calls == 2                 # both renaming repairs ran; neither hit the cap
+    assert captured == [None, None, None]        # full re-runs (nothing earlier to reuse), no abandon
+    st = fold(_events(tmp_path / "run"))
+    assert st.nodes[0].status is NodeStatus.evaluated and st.nodes[0].metric == 1.0
+
+
+def test_loop_renamed_later_stage_repair_still_consumes_retrain_cap(tmp_path, monkeypatch):
+    """F3 counterpart: a LATER-stage failure whose repair renames/drops the failed stage still
+    discards the completed earlier stage's work on the forced full re-run, so it MUST keep
+    consuming the retrain cap — the reason the renamed/-1 case was widened into the count."""
+    captured = []
+    results = [_fail_stage("train", "ModuleNotFoundError: No module named 'alpha'", earlier=("prep",)),
+               _fail_stage("fit", "TypeError: unexpected keyword argument 'beta'", earlier=("prep",))]
+
+    def _manifest(train_name):
+        return json.dumps({"stages": [{"name": "prep", "command": ["python", "helper.py"]},
+                                      {"name": train_name, "command": ["python", "train.py"]}]})
+
+    src = _staged_src(tmp_path)
+    (src / "looplab_stages.json").write_text(_manifest("train"), encoding="utf-8")
+    dev = _StagedDev(fixes=[{"looplab_stages.json": _manifest("fit")},
+                            {"looplab_stages.json": _manifest("fit2")}])
+    eng = _staged_engine(tmp_path / "run", src, dev, monkeypatch, captured, results,
+                         inline_repair_attempts=5, inline_repair_retrain_cap=1)
+    anyio.run(eng.run)
+    # eval1 (full) + exactly ONE capped full re-run; the second renaming repair abandons BEFORE
+    # another eval — completed `prep` work was being discarded both times.
     assert captured == [None, None]
     assert dev.repair_calls == 2
     evs = _events(tmp_path / "run")

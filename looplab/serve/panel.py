@@ -11,6 +11,7 @@ from __future__ import annotations
 import math
 from typing import Optional
 
+from looplab.agents.roles import RESEARCHER_HINT_ATTRS
 from looplab.core.models import Idea, Node, RunState
 
 
@@ -49,6 +50,14 @@ class PanelResearcher:
         return getattr(self.base, "space_hint", "")
 
     def propose(self, state: RunState, parent: Optional[Node]) -> Idea:
+        # P2 delivery contract (roles.py::RESEARCHER_HINT_ATTRS): the engine setattrs ephemeral
+        # hints on the OUTERMOST active researcher — which may be THIS wrapper — so mirror the
+        # registry (plus the non-hint `track_hypotheses` knob) onto the base before the K-way
+        # fan-out, the same hasattr-guarded pattern as `UnifiedAgent.propose`. Without this the
+        # panel silently dropped every engine hint.
+        for attr in (*RESEARCHER_HINT_ATTRS, "track_hypotheses"):
+            if hasattr(self, attr):
+                setattr(self.base, attr, getattr(self, attr))
         ideas = [self.base.propose(state, parent) for _ in range(self.k)]
         if self.k == 1:
             return ideas[0]

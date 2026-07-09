@@ -143,3 +143,42 @@ def test_read_file_explicit_window_reports_range(tmp_path):
     assert "continue with start_line=7" in out                  # window ended before EOF -> marker
     tail = t.execute("read_file", {"path": "f.py", "start_line": 7})
     assert "l9" in tail and "more below" not in tail            # EOF page carries NO marker
+
+
+def test_read_file_header_agrees_with_marker_when_the_char_cap_cuts_the_window(tmp_path):
+    """F13: the `(lines A-B of N)` header used to be computed from the PRE-cap line window, so a
+    window that ran into the char cap claimed a range it never showed. The header is now computed
+    from the actual post-cap `shown` count, so header end + 1 == the resume marker's start_line."""
+    import re
+    r = tmp_path / "repo"
+    r.mkdir()
+    (r / "long.py").write_text("".join(f"line {i}: " + "y" * 90 + "\n" for i in range(200)),
+                               encoding="utf-8")
+    t = RepoScoutTools(roots=[str(r)], default_root=str(r))
+    out = t.execute("read_file", {"path": "long.py", "start_line": 1, "lines": 150})  # ~15KB asked
+    hm = re.match(r"\(lines 1-(\d+) of 200\)", out)
+    mm = re.search(r"continue with start_line=(\d+)\)$", out)
+    assert hm and mm, out[:120]
+    shown_to = int(hm.group(1))
+    assert shown_to < 150                                # the char cap really cut the line window
+    assert int(mm.group(1)) == shown_to + 1              # header and resume marker agree
+
+
+def test_read_file_single_overlong_line_still_progresses(tmp_path):
+    """F5: a single line longer than one page yielded shown=0 and a resume marker pointing at the
+    SAME start_line — an infinite identical-page loop. The page must keep the truncated line's head,
+    say honestly that it was cut mid-line, and resume at the NEXT line so pagination progresses."""
+    import re
+    r = tmp_path / "repo"
+    r.mkdir()
+    body = "X = '" + "a" * 5000 + "'\n" + "".join(f"after{i} = {i}\n" for i in range(5))
+    (r / "wide.py").write_text(body, encoding="utf-8")
+    t = RepoScoutTools(roots=[str(r)], default_root=str(r))
+    p1 = t.execute("read_file", {"path": "wide.py"})
+    assert len(p1) <= 4000                               # still fits the loop's RESULT_CAP
+    assert "truncated mid-line" in p1 and "line 1 longer than one page" in p1
+    m = re.search(r"continue with start_line=(\d+)\)$", p1)
+    assert m and int(m.group(1)) == 2                    # progress: the NEXT line, not the same one
+    p2 = t.execute("read_file", {"path": "wide.py", "start_line": 2})
+    assert p2 != p1                                      # page 2 differs — no identical-page loop
+    assert "after0" in p2 and "after4" in p2 and "more below" not in p2

@@ -36,3 +36,24 @@ def test_reward_hack_sanctions_grader_import_when_task_ships_grader():
     # … and without the grader asset (host_graded / repo tasks) the import tells still fire
     assert any(s["signal"] == "grader_access"
                for s in detect_reward_hacks(ok, metric=0.9, direction="max"))
+
+
+def test_engine_call_site_protected_grader_without_asset_stays_strict():
+    """F12: the ENGINE passes `grader_import_ok` explicitly from its ASSET set — an operator-
+    PROTECTED grader.py (protect=["grader.py"], no asset) must NOT waive the import tells. The
+    detector's None-inference keys on `protected_names`, but the engine hands it the
+    protected∪assets UNION, so a protect-list grader.py would wrongly read as a sanction there.
+    Mirrors the exact call-site expressions (see orchestrator.py's detect_reward_hacks call)."""
+    code = "from grader import score"
+    protected_names = {"grader.py"}          # repo_spec protect list — "hands off", NOT a sanction
+    assets: dict = {}                        # the task ships no grader → import is not the contract
+    protected = set(protected_names) | set(assets)                    # the call-site union
+    sigs = detect_reward_hacks(code, metric=0.9, direction="max", protected_names=protected,
+                               grader_import_ok=("grader.py" in set(assets or ())))
+    assert any(s["signal"] == "grader_access" for s in sigs)          # import tell still fires
+    # …and when the task genuinely MATERIALIZES grader.py (an asset), the import stays sanctioned
+    assets = {"grader.py": "def score(preds): ..."}
+    protected = set(protected_names) | set(assets)
+    sigs = detect_reward_hacks(code, metric=0.9, direction="max", protected_names=protected,
+                               grader_import_ok=("grader.py" in set(assets or ())))
+    assert not any(s["signal"] == "grader_access" for s in sigs)

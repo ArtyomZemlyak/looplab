@@ -22,11 +22,20 @@ from pathlib import Path
 from typing import Callable, Optional
 
 from looplab.core import _pathsafe
-from looplab.tools._base import fn_spec
+from looplab.tools._base import RESULT_CAP, fn_spec
 from looplab.tools.perm_modes import decide, default_approver
 
 _MAX_OUTPUT = 64_000
 _MAX_TIMEOUT = 600.0
+
+# Per-STREAM tail budgets for run_command's reply. The agent loop caps the COMBINED result at
+# RESULT_CAP (head-keep), so giving each stream ~RESULT_CAP alone let a verbose stdout push the whole
+# stderr section — the traceback, i.e. the reason the command failed — past the cap, where the loop
+# silently dropped it. Split the cap between the streams instead, stderr getting the larger share
+# (the exception line lives there), leaving headroom for the exit-code head + section labels +
+# truncation notes so head + both tails always fit under RESULT_CAP.
+_STDOUT_TAIL = RESULT_CAP // 2 - 200
+_STDERR_TAIL = RESULT_CAP // 2 - 100
 
 # Only these host GIT_* vars are passed through to a `git` child (see exec_argv): the multi-var config
 # (which `_run_argv` would partially scrub because GIT_CONFIG_KEY_* contains "KEY") + commit identity.
@@ -86,7 +95,7 @@ def git_config_env() -> dict:
     return out
 
 
-def _tail(s: str, n: int = 4000) -> str:
+def _tail(s: str, n: int) -> str:
     s = s or ""
     return s if len(s) <= n else "…(truncated)…\n" + s[-n:]
 
@@ -118,7 +127,8 @@ class ShellTools:
             fn_spec("run_command",
                      "Run a command as an ARGV LIST (no shell) inside the allowed roots — e.g. "
                      '["python","-m","pytest","-q","tests/test_patch.py"]. Returns exit code + '
-                     "stdout/stderr, each as a TAIL (roughly the last 4000 chars — earlier output is "
+                     f"stdout/stderr, each as a TAIL (stdout ~last {_STDOUT_TAIL} chars, stderr ~last "
+                     f"{_STDERR_TAIL} — earlier output is "
                      "dropped, with a truncation note). Pass argv, NOT a shell string. A foreground "
                      f"command is KILLED at `timeout` seconds (default {int(self.timeout)}, hard max "
                      f"{int(_MAX_TIMEOUT)}); set "
@@ -135,7 +145,10 @@ class ShellTools:
                      {"path": {"type": "string", "description": "a test file/dir (default: all)"}}, []),
             fn_spec("read_output",
                      "Read NEW output from a background command since your last read, plus its "
-                     "running/exited status. Use the task_id from a background run_command.",
+                     "running/exited status. One bounded chunk per poll: a reply ending with "
+                     "'(more output pending — poll read_output again)' means the log has more — the "
+                     "next call continues exactly where this reply ended (nothing is skipped). Use "
+                     "the task_id from a background run_command.",
                      {"task_id": {"type": "string"}}, ["task_id"]),
             fn_spec("list_background",
                      "List background commands started this session with their status.", {}, []),
@@ -157,7 +170,11 @@ class ShellTools:
                 if not r.get("ok"):
                     return f"({r.get('error')})"
                 head = f"[{r['task_id']}] {r['status']}" + (f" exit={r['exit_code']}" if r["exit_code"] is not None else "")
-                return head + ("\n" + r["new_output"] if r["new_output"].strip() else " (no new output)")
+                body = ("\n" + r["new_output"]) if r["new_output"].strip() else " (no new output)"
+                # Backpressure marker: the manager returned one bounded chunk and left the cursor at
+                # its end, so the model knows to poll again instead of assuming it saw everything.
+                more = "\n(more output pending — poll read_output again)" if r.get("pending") else ""
+                return head + body + more
             if name == "list_background":
                 from looplab.runtime.bg_tasks import MANAGER
                 rows = MANAGER.list()
@@ -223,7 +240,7 @@ class ShellTools:
         head = f"exit={rc}" + (" (TIMEOUT)" if timed_out else "")
         parts = [head]
         if out and out.strip():
-            parts.append("stdout:\n" + _tail(out))
+            parts.append("stdout:\n" + _tail(out, _STDOUT_TAIL))
         if err and err.strip():
-            parts.append("stderr:\n" + _tail(err))
+            parts.append("stderr:\n" + _tail(err, _STDERR_TAIL))
         return "\n".join(parts)

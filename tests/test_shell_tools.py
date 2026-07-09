@@ -39,6 +39,23 @@ def test_ask_allow_and_deny(tmp_path):
         "run_command", {"command": [sys.executable, "-c", "print(1)"]})
 
 
+def test_long_stdout_does_not_crowd_out_stderr(tmp_path):
+    """F11: the agent loop caps the COMBINED result at RESULT_CAP (head-keep), so a verbose stdout
+    used to push the whole stderr section — the traceback, i.e. WHY the command failed — past the
+    cap where the loop silently dropped it. Per-stream tail budgets keep BOTH sections in one result
+    that fits under the cap."""
+    from looplab.tools._base import RESULT_CAP
+    code = ("import sys\n"
+            "sys.stdout.write('o' * 20000)\n"
+            "sys.stderr.write('e' * 5000 + ' THE_REAL_ERROR')\n"
+            "sys.exit(3)\n")
+    r = ShellTools([tmp_path], mode="auto").execute(
+        "run_command", {"command": [sys.executable, "-c", code]})
+    assert "exit=3" in r and "stdout:" in r and "stderr:" in r   # both sections present
+    assert "THE_REAL_ERROR" in r                # the stderr TAIL (where the exception line lives) survives
+    assert len(r) <= RESULT_CAP                 # the combined message fits the loop cap — nothing cut
+
+
 def test_secret_env_not_leaked(tmp_path, monkeypatch):
     # A secret-named env var must not reach the child's stdout (sandbox._run_argv scrubs it).
     monkeypatch.setenv("MY_API_KEY", "supersecret-xyz")

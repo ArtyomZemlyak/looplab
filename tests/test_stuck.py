@@ -377,6 +377,58 @@ def test_cursor_polls_and_mixed_tools_all_execute():
     assert tools.counts["read_output"] == 3
 
 
+# ---------------------------------------------------------------- repeat note (B1 round-robin gap)
+def test_third_identical_call_gets_repeat_note_but_still_executes():
+    # The read-dedup removal left 3+-call round-robins invisible to the StuckDetector (1-/2-cycles
+    # only). From the 3rd EXACT (tool, args) repeat the tool message carries a one-line note — but
+    # the call still fully executes and returns fresh, complete content (no cache, no suppression).
+    client = _RepeatThenEmitClient(repeats=4)
+    tools = _CountingReadTools()
+    messages = [{"role": "user", "content": "go"}]
+    out = drive_tool_loop(client, tools, messages, _EMIT, stuck_repeat=99,
+                          finalize=lambda a: ("emit", a), fallback=lambda _m: ("fallback", None))
+    assert out[0] == "emit"
+    assert tools.executed == 4                             # every repeat ran for real
+    reads = [m["content"] for m in messages if m.get("role") == "tool"]
+    assert reads[0] == "file contents" and reads[1] == "file contents"   # 1st/2nd: untouched
+    assert reads[2].startswith("file contents") and "has now run 3×" in reads[2]
+    assert reads[3].startswith("file contents") and "has now run 4×" in reads[3]
+
+
+def test_repeat_note_keyed_on_exact_args_and_fresh_per_loop():
+    # DIFFERENT args never accumulate toward the note (an A B A B alternation stays clean) …
+    client = _ScriptToolClient([("read_file", {"path": "a.py"}), ("read_file", {"path": "b.py"}),
+                                ("read_file", {"path": "a.py"}), ("read_file", {"path": "b.py"})])
+    tools = _CountingNamedTools("read_file")
+    messages = [{"role": "user", "content": "go"}]
+    drive_tool_loop(client, tools, messages, _EMIT,
+                    finalize=lambda a: ("emit", a), fallback=lambda _m: ("fallback", None))
+    assert not any("has now run" in m["content"] for m in messages if m.get("role") == "tool")
+    # … and the counter is STATELESS across invocations: a fresh loop starts a fresh ledger.
+    client2 = _ScriptToolClient([("read_file", {"path": "a.py"}), ("read_file", {"path": "a.py"})])
+    messages2 = [{"role": "user", "content": "go"}]
+    drive_tool_loop(client2, tools, messages2, _EMIT,
+                    finalize=lambda a: ("emit", a), fallback=lambda _m: ("fallback", None))
+    assert not any("has now run" in m["content"] for m in messages2 if m.get("role") == "tool")
+
+
+def test_repeat_note_does_not_blind_the_stuck_detector():
+    # The note text increments per repeat — pushing IT into the detector would make every repeat
+    # look like a new observation and disable B1. The raw result is what gets pushed, so a model
+    # that repeats the same call forever still terminates via the stuck guard.
+    class _Forever:
+        calls = 0
+        def chat(self, messages, tools, tool_choice="auto"):
+            self.calls += 1
+            return _tool_call("read_file", {"path": "a.py"})
+    client = _Forever()
+    out = drive_tool_loop(client, _CountingReadTools(), [{"role": "user", "content": "go"}], _EMIT,
+                          stuck_repeat=4,
+                          finalize=lambda a: ("emit", a), fallback=lambda _m: ("fallback", None))
+    assert out == ("fallback", None)
+    assert client.calls <= 6                               # bounded by the detector, note or not
+
+
 def test_context_budget_zero_means_off(monkeypatch):
     # The documented "0 = off": compaction must not run AT ALL (the old `or DEFAULT` fallback turned
     # an explicit 0 into the 120k default — MORE aggressive than configured, mega-review L6).

@@ -74,10 +74,14 @@ def _researcher_capability_suffix(offer_sweep: bool) -> str:
 
 
 def _researcher_system(offer_sweep: bool = True) -> str:
-    """Assemble the plain researcher's system prompt (the `researcher_system` PromptStore
-    default). With `offer_sweep=True` this matches the historical `_RESEARCHER_SYSTEM` modulo
-    the verified prompt fixes (P21 numeric-grid note, P6 eval_timeout scoping, P14 operator
-    note)."""
+    """Assemble the plain researcher's FULL system prompt (core + capability suffix + operator
+    note + emit instruction) — a back-compat/reference assembly. The `researcher_system`
+    PromptStore default is `_RESEARCHER_CORE` ALONE: `LLMResearcher.propose` appends the
+    capability fragments AFTER the render() (the same pattern as agent.py's
+    `ToolUsingResearcher`), so the composed prompt stays byte-equal to this helper while a
+    `researcher_system.md` override can never bypass the code-owned `offer_sweep` gate. With
+    `offer_sweep=True` this matches the historical `_RESEARCHER_SYSTEM` modulo the verified
+    prompt fixes (P21 numeric-grid note, P6 eval_timeout scoping, P14 operator note)."""
     return (_RESEARCHER_CORE + _researcher_capability_suffix(offer_sweep) + _OPERATOR_NOTE +
             "Respond ONLY with the requested structured fields.")
 
@@ -156,13 +160,16 @@ and agent.py's `ToolUsingResearcher.propose` read the text cues and thread `_hyp
 `_state_brief`; the foresight ranker reads `_novelty_stance` (the stance VALUE behind the
 `_novelty_hint` prose).
 
-THIS TUPLE IS THE DELIVERY CONTRACT (P2, docs/PROMPT_REVIEW.md): a hint travels through up to
-three wrappers (foresight panel → `UnifiedAgent` facade → inner researcher) and every wrapper
-forwards ONLY this registry (plus the non-hint `track_hypotheses` knob), so an attribute missing
-here silently dies at the first wrapper — exactly how board prioritization was dead in the
-default config. Keep it in sync with every `setattr(self.researcher, "...")` /
-`setattr(self.base, "...")` site; tests/test_hint_forwarding.py scans those sites AND wires the
-real wrapper chain to enforce it.
+THIS TUPLE IS THE DELIVERY CONTRACT (P2, docs/PROMPT_REVIEW.md): the engine setattrs hints on
+the OUTERMOST active researcher, and EVERY wrapper that delegates propose() mirrors ONLY this
+registry (plus the non-hint `track_hypotheses` knob) onto its delegate. The forwarding wrappers:
+the foresight panel (`search/foresight.py::ForesightPanelResearcher._forward_hints`), the
+`UnifiedAgent` facade (`agents/unified_agent.py::UnifiedAgent.propose`), the surrogate wrapper
+(`search/surrogate.py::SurrogateResearcher.propose`), and the empirical panel
+(`serve/panel.py::PanelResearcher.propose`). An attribute missing here silently dies at the
+first wrapper — exactly how board prioritization was dead in the default config. Keep it in
+sync with every `setattr(self.researcher, "...")` / `setattr(self.base, "...")` site;
+tests/test_hint_forwarding.py scans those sites AND wires the real wrapper chains to enforce it.
 
 Both researchers honor the same cues: `LLMResearcher.propose` and `ToolUsingResearcher.propose`
 fold the same `(_complexity_hint, _sweep_hint, _novelty_feedback, _novelty_hint)` cue set into
@@ -339,11 +346,18 @@ class LLMResearcher:
         hyp_sys = _hypothesis_system_suffix(self.track_hypotheses)
         messages = [
             {"role": "system",
-             # The inline default composes per-capability (P6: the sweep offer only when the active
-             # Developer can run one); a `researcher_system.md` PromptStore override still replaces
-             # the whole body, exactly as before.
-             "content": render(self.prompts, "researcher_system",
-                               _researcher_system(getattr(self, "offer_sweep", True))) + hyp_sys
+             # P6: the capability suffix (sweep offer — gated on the active Developer — +
+             # eval_timeout), the operator note, and the emit instruction are appended AFTER the
+             # render() — the SAME code-owned pattern as agent.py's ToolUsingResearcher. A
+             # `researcher_system.md` PromptStore override replaces only the CORE persona, so an
+             # override can never desync the capability prose from what the backend actually
+             # implements (pre-fix the suffix was baked INSIDE the render default and an override
+             # bypassed the offer_sweep gate). The assembled default is byte-equal to
+             # `_researcher_system(offer_sweep)`.
+             "content": render(self.prompts, "researcher_system", _RESEARCHER_CORE)
+                        + _researcher_capability_suffix(getattr(self, "offer_sweep", True))
+                        + _OPERATOR_NOTE
+                        + "Respond ONLY with the requested structured fields." + hyp_sys
                         + "\n\n" + _attention_points()},
             {"role": "user", "content": _state_brief(state, parent,
                                                      digest_cap=getattr(self, "_digest_cap", 0),

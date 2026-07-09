@@ -18,13 +18,14 @@ import inspect
 import io
 from contextlib import redirect_stderr, redirect_stdout
 
-from looplab.tools._base import fn_spec
+from looplab.tools._base import RESULT_CAP, fn_spec
 
-# Per-result char cap. The agent loop hard-caps every tool result at 4000 chars (agents/agent.py
-# drive_tool_loop) and drops the TAIL past it — so a bigger provider-side cap isn't generous, it
-# silently loses the end of the result (mega-review P3). Stay under the loop cap so OUR truncation
-# (which the descriptions state honestly) is the one that decides.
-_CAP = 3800
+# Per-result char cap. The agent loop hard-caps every tool result at RESULT_CAP chars
+# (agents/agent.py drive_tool_loop) and drops the TAIL past it — so a bigger provider-side cap isn't
+# generous, it silently loses the end of the result (mega-review P3). Stay under the loop cap so OUR
+# truncation (which the descriptions state honestly) is the one that decides. Derived from the shared
+# constant: -200 leaves room for our own truncation note under the loop cap.
+_CAP = RESULT_CAP - 200
 
 
 def _top(name: str) -> str:
@@ -93,7 +94,8 @@ class EnvInspectTools:
                     "docstring, and — for a class — public members, or — for an Enum — its VALID VALUES "
                     "(exactly what you need to pick a legal `precision`/`strategy`/etc.). Give a dotted "
                     "path to the object, e.g. 'lightning.pytorch.Trainer' or "
-                    "'torch.optim.AdamW'.",
+                    "'torch.optim.AdamW'. Long output is truncated with an explicit note — inspect a "
+                    "narrower target (e.g. one method) for the rest.",
                     {"target": {"type": "string", "description": "dotted path to a class/function/enum"}},
                     ["target"]),
             fn_spec("read_installed",
@@ -136,10 +138,15 @@ class EnvInspectTools:
                 return self._py_api(str(args.get("target", "")))
             if name == "read_installed":
                 # `lines` is the documented window param (consistent with read_file/repo_read);
-                # `max_lines` stays accepted — older transcripts/models still pass it.
+                # `max_lines` stays accepted — older transcripts/models still pass it. Explicit
+                # None-coalesce (not .get(default=…)): a model that sends `"lines": null` alongside
+                # `max_lines` must fall through to max_lines, but a present-but-null key would
+                # satisfy .get() and mask it.
+                lines = args.get("lines")
+                if lines is None:
+                    lines = args.get("max_lines")
                 return self._read_installed(str(args.get("module", "")),
-                                            args.get("start_line"),
-                                            args.get("lines", args.get("max_lines")))
+                                            args.get("start_line"), lines)
             if name == "grep_installed":
                 return self._grep_installed(str(args.get("query", "")), str(args.get("package", "")),
                                             args.get("max_hits"))
@@ -223,7 +230,12 @@ class EnvInspectTools:
             members = [n for n, _ in inspect.getmembers(obj) if not n.startswith("_")]
             if members:
                 out.append("public members: " + ", ".join(members[:60]))
-        return "\n".join(out)[:_CAP]
+        text = "\n".join(out)
+        if len(text) > _CAP:
+            # Honest truncation (mirrors _clamp): a bare [:_CAP] cut the tail SILENTLY, so the model
+            # couldn't tell a complete listing from an amputated one. The note fits under RESULT_CAP.
+            text = text[:_CAP] + "\n(output truncated — inspect a narrower target, e.g. one method)"
+        return text
 
     # ------------------------------------------------------------ read_installed
     def _read_installed(self, module: str, start_line, lines) -> str:
@@ -242,12 +254,16 @@ class EnvInspectTools:
         except OSError as e:
             return f"(read_installed: read error: {e})"
         # Paginate exactly like the repo scout's read_file (SHARED window logic => one marker
-        # contract across all the source readers): each page fits the agent loop's 4000-char result
-        # cap WITH the resume marker, and a reply ending without the marker IS the end of the file.
+        # contract across all the source readers): each page fits the agent loop's RESULT_CAP
+        # WITH the resume marker, and a reply ending without the marker IS the end of the file.
         # (The old 300-line default page had NO resume pointer at all and its _CAP tail-truncation
-        # could eat the end silently — mega-review P3.)
-        from looplab.tools.reposcout import RepoScoutTools
-        return f"# {spec.origin} " + RepoScoutTools._paginate(data, start_line, lines)
+        # could eat the end silently — mega-review P3.) The origin-path prefix counts INSIDE the
+        # page budget: a deep site-packages path otherwise pushed prefix+page past RESULT_CAP and
+        # the loop cut the resume marker off the tail.
+        from looplab.tools.reposcout import _MAX_READ, RepoScoutTools
+        prefix = f"# {spec.origin} "
+        return prefix + RepoScoutTools._paginate(data, start_line, lines,
+                                                 max_chars=max(400, _MAX_READ - len(prefix)))
 
     # ------------------------------------------------------------ grep_installed
     def _grep_installed(self, query: str, package: str, max_hits) -> str:
@@ -308,10 +324,11 @@ class EnvInspectTools:
             else f"(grep_installed: '{query}' not found under {package})"
 
     @staticmethod
-    def _clamp(text: str, budget: int = 3600) -> str:
-        """Fit a grep result under the agent loop's 4000-char cap ourselves, with an HONEST marker:
+    def _clamp(text: str, budget: int = RESULT_CAP - 400) -> str:
+        """Fit a grep result under the agent loop's RESULT_CAP ourselves, with an HONEST marker:
         long site-packages paths make even 20 hits overflow the cap, where the loop would drop the
-        tail (and any '(capped at …)' note) silently. Cut at a line boundary so no half-hit shows."""
+        tail (and any '(capped at …)' note) silently. Cut at a line boundary so no half-hit shows.
+        The -400 headroom keeps clamped-text + marker under the loop cap."""
         if len(text) <= budget:
             return text
         cut = text[:budget]

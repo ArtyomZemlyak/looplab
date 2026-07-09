@@ -11,7 +11,9 @@ in the default config. Two guards:
      tuple-driven setattr loops) and assert every underscore-prefixed hint name is registered.
   2. DYNAMIC: wire the REAL ForesightPanelResearcher(UnifiedAgent(...)) chain around a recording
      inner researcher, set every registry attr + `track_hypotheses` on the OUTERMOST object
-     (engine-style), call propose, and assert the INNER researcher observed every one.
+     (engine-style), call propose, and assert the INNER researcher observed every one. The same
+     delivery check runs against the OTHER forwarding wrappers the registry docstring enumerates
+     (SurrogateResearcher, serve's PanelResearcher).
 
 Offline (fake clients only).
 """
@@ -136,6 +138,36 @@ def test_hints_reach_the_inner_researcher_through_both_wrappers():
     # _RankClient ordered [1, 0] -> best-first board ids [ids[1], ids[0]] must reach the inner reader.
     assert inner.seen["_hyp_order"] == [ids[1], ids[0]], \
         "_hyp_order did not survive the ForesightPanel -> UnifiedAgent -> inner researcher chain"
+
+
+def _assert_registry_delivery(outer, inner):
+    """Engine-style delivery check (mirrors the dynamic test above): set every registry attr +
+    `track_hypotheses` on the OUTERMOST wrapper, propose, and assert the recording inner
+    researcher observed every one."""
+    sentinels = {a: f"SENTINEL::{a}" for a in RESEARCHER_HINT_ATTRS}
+    for a, v in sentinels.items():
+        setattr(outer, a, v)
+    setattr(outer, "track_hypotheses", False)     # an explicit OFF must not be shadowed (P2)
+    outer.propose(RunState(goal="g", direction="min"), None)
+    assert inner.seen is not None, "inner propose never ran"
+    for a, v in sentinels.items():
+        assert inner.seen[a] == v, f"hint {a!r} was shadowed by the wrapper (P2 regression)"
+    assert inner.seen["track_hypotheses"] is False, "track_hypotheses=False was shadowed (P2)"
+
+
+def test_surrogate_wrapper_forwards_hints_to_its_fallback():
+    # The engine setattrs hints on the OUTERMOST wrapper — which can be SurrogateResearcher (it
+    # wraps the LLM researcher as its bootstrap fallback). Empty bounds force the delegate path.
+    from looplab.search.surrogate import SurrogateResearcher
+    inner = _RecordingResearcher()
+    _assert_registry_delivery(SurrogateResearcher({}, fallback=inner), inner)
+
+
+def test_serve_panel_wrapper_forwards_hints_to_its_base():
+    # Same for the empirical PanelResearcher: hints must reach the base before the K-way fan-out.
+    from looplab.serve.panel import PanelResearcher
+    inner = _RecordingResearcher()
+    _assert_registry_delivery(PanelResearcher(inner, k=2), inner)
 
 
 def test_foresight_forwards_hints_even_without_a_client():

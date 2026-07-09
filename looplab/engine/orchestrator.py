@@ -1386,14 +1386,18 @@ class Engine(ConfirmPhaseMixin, AblationMixin):
             # Own trace so each hypothesis_merged event (appended INSIDE) is stamped with THIS merge's
             # trace_id — the UI can then show only the merge's own retrieval+decision trace under it.
             with self._op_span("hypothesis_merge"):   # no node_id — see strategist_consult (avoids leaking into a node's trace)
+                # merge_system.md override + configured structured-output parser live on the ROLES
+                # (tasks.py wires them), not the engine — resolve both via the lessons helper that
+                # already walks the researcher→inner→fallback→developer chain (one lookup path,
+                # not a shallow re-derivation that misses wrapped roles). getattr guard: some
+                # tests build Engine via __new__ (no `lessons`); (None, "tool_call") are exactly
+                # the defaults `agent_merge` assumes when nothing is wired.
+                _lm = getattr(self, "lessons", None)
+                _prompts, _parser = (_lm._merge_prompt_opts() if _lm is not None
+                                     else (None, "tool_call"))
                 for g in consolidate(texts, client, kind="research hypotheses",
                                      embed=self._embedder, goal=state.goal,
-                                     # merge_system.md override + configured parser live on the
-                                     # researcher role (tasks.py wires them), not the engine;
-                                     # best-effort double-getattr — bare/toy researchers have neither
-                                     prompts=getattr(getattr(self, "researcher", None), "prompts", None),
-                                     parser=getattr(getattr(self, "researcher", None), "parser",
-                                                    None) or "tool_call"):
+                                     prompts=_prompts, parser=_parser):
                     if len(g["members"]) < 2:
                         continue
                     ids = [open_hyps[i].id for i in g["members"]]
@@ -2510,7 +2514,8 @@ class Engine(ConfirmPhaseMixin, AblationMixin):
         # line-anchored pattern above only sees `from pkg import (` — it credits pkg/__init__.py but
         # MISSES the pkg/a.py / pkg/b.py submodule files, letting a repair to those escape the
         # closure. This companion pattern captures the whole group (a char class matches newlines
-        # without re.S); per-line comments are stripped before the shared clause parser splits it.
+        # without re.S); `#` comments are stripped from the whole source BEFORE either scan runs
+        # (see below), so a ')' inside a trailing comment can't end the group early.
         paren_re = re.compile(r"^[ \t]*from[ \t]+(\.*[\w.]*)[ \t]+import[ \t]*\(([^)]*)\)", re.M)
         out: set = set()
         pending: list = []
@@ -2544,6 +2549,13 @@ class Engine(ConfirmPhaseMixin, AblationMixin):
                 src = p.read_text(encoding="utf-8", errors="replace")
             except Exception:  # noqa: BLE001
                 continue
+            # Strip `#` comments BEFORE both import scans: the paren pattern's `[^)]*` group stops
+            # at the FIRST ')', so a ')' inside a trailing comment (`vit,  # backbone (legacy)`)
+            # would end the group early and silently drop every name after it from the closure.
+            # The blunt regex also eats '#' inside string literals — that can only ADD spurious
+            # 'reachable' candidates, which is fail-closed-safe here (a false positive merely
+            # forces a re-train; it's a MISSED dependency that would score a stale checkpoint).
+            src = re.sub(r"#[^\n]*", "", src)
             def _credit(mods):
                 for mod in mods:
                     for cand in Engine._module_file_candidates(mod, rel):
@@ -2552,7 +2564,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin):
             for m in imp_re.finditer(src):
                 _credit(Engine._imported_modules(m.group(1), m.group(2)))
             for m in paren_re.finditer(src):
-                inner = " ".join(l.split("#", 1)[0] for l in m.group(2).splitlines())
+                inner = " ".join(m.group(2).splitlines())    # comments already gone (see above)
                 _credit(Engine._imported_modules("from", f"{m.group(1)} import ({inner})"))
         return out
 
@@ -3006,7 +3018,10 @@ class Engine(ConfirmPhaseMixin, AblationMixin):
                 # compute the repair's REAL change set below — `developer.last_files` is the node's whole
                 # cumulative solution for the repo developer (repair_from preloads every node file), so a
                 # raw key set would always intersect the train stage and defeat checkpoint reuse.
+                # `last_deleted` is cumulative the same way (repair_from seeds it from node.deleted),
+                # so snapshot it too — only THIS repair's deletion DELTA may veto checkpoint reuse.
                 prev_files = dict(getattr(node, "files", {}) or {})
+                prev_deleted = set(getattr(self.developer, "last_deleted", []) or [])
                 with self.tracer.span("inline_repair", node_id=node_id, attempt=attempt + 1):
                     new_code = self._repair(
                         node, self._repair_error_context(reason, err, state=state, node=node))
@@ -3034,9 +3049,16 @@ class Engine(ConfirmPhaseMixin, AblationMixin):
                 # training code can't burn many full trains (the anti-stuck guard is signature-, not
                 # cost-based). The workdir persists across attempts, so a reused checkpoint is valid.
                 # The repair's REAL change set = files whose content actually differs from the pre-repair
-                # node (last_files is cumulative — see prev_files above), plus any deletions.
+                # node (last_files is cumulative — see prev_files above), plus THIS repair's deletions.
                 changed = {f for f, c in repaired_files.items() if prev_files.get(f) != c}
-                changed |= set(repaired_deleted)
+                # Deletions likewise get the delta, not the cumulative set: a deletion that predates
+                # the completed train stage cannot invalidate its checkpoint — the stage already ran
+                # (and passed) without that file on disk. Blocking on the cumulative `repaired_deleted`
+                # (seeded from node.deleted at repair_from) would permanently disable stage reuse for
+                # any node whose implement ever deleted a file; only THIS repair's deletions can
+                # invalidate the checkpoint, so only they enter the reuse decision.
+                new_deleted = [d for d in repaired_deleted if d not in prev_deleted]
+                changed |= set(new_deleted)
                 _stages = self._resolved_stages(node, workdir)
                 # `deleted` and the eval spec's `cwd` ride along so the predicate can fail closed on
                 # its blind spots: a deletion is invisible to the reachability closure (the file was
@@ -3044,21 +3066,25 @@ class Engine(ConfirmPhaseMixin, AblationMixin):
                 # scripts so the changed-vs-reachable intersection would prove nothing.
                 next_start = self._safe_reuse_start(
                     _stages, res.failed_stage, changed, workdir,
-                    deleted=repaired_deleted,
+                    deleted=new_deleted,
                     cwd=(self._eval_spec or {}).get("cwd") if isinstance(self._eval_spec, dict) else None)
                 # Count a full re-train against the cap ONLY when completed EARLIER-stage work is being
-                # discarded: a LATER stage failed (fi > 0) yet reuse was refused because the repair could
+                # discarded: a LATER stage failed yet reuse was refused because the repair could
                 # have changed an earlier stage. A first-stage failure (nothing to reuse) or a single-
                 # command eval is an ordinary retry, bounded by attempts/stuck like any other — NOT the
                 # retrain cap (mirrors config.py: "only a repair that changes an EARLIER stage's code
                 # forces a full re-train ... counted"). Check BEFORE incrementing so cap=N runs exactly N.
-                # _fi == -1 with a REAL failed stage means the POST-repair pipeline no longer contains it
-                # (the repair renamed/dropped the stage, or _resolved_stages fell back to []) — the next
-                # eval is still a FULL re-run discarding completed earlier-stage work, so it consumes the
-                # cap too; leaving it uncounted let a stage-renaming repair burn unlimited full trains.
-                _names = [str(s.get("name")) for s in (_stages or [])]
-                _fi = _names.index(res.failed_stage) if res.failed_stage in _names else -1
-                if res.failed_stage and _fi != 0 and next_start is None:   # forces a full (expensive) re-train
+                # First-vs-later is judged from the PRE-repair `res.stages` (one record per stage that
+                # ran, in order, the failed stage always LAST) — never from the failed stage's index in
+                # the POST-repair `_stages`: a repair that renames/drops the failed stage (or a
+                # _resolved_stages exception fallback to []) loses that index (-1) for FIRST- and
+                # LATER-stage failures alike. A renamed LATER stage still discards completed
+                # earlier-stage work on the forced full re-run, so it keeps consuming the cap (the
+                # point of counting the renamed case at all — leaving it uncounted let a
+                # stage-renaming repair burn unlimited full trains); a renamed FIRST stage never had
+                # earlier work to discard, so it must stay an ordinary retry.
+                was_first = len(res.stages or []) <= 1
+                if res.failed_stage and not was_first and next_start is None:   # forces a full (expensive) re-train
                     if (self._inline_repair_retrain_cap
                             and full_retrains >= self._inline_repair_retrain_cap):
                         triage_outcome = ("abandon",
@@ -3108,8 +3134,17 @@ class Engine(ConfirmPhaseMixin, AblationMixin):
                     if self.reward_hack_detect:
                         from looplab.trust.reward_hack import detect_reward_hacks
                         protected = set(self._repo_spec.get("protected_names", [])) | set(self._assets)
-                        sigs += detect_reward_hacks(scan_src, res.metric, state.direction,
-                                                    protected_names=protected, stdout=res.stdout)
+                        # The grader-IMPORT waiver keys on the task genuinely MATERIALIZING
+                        # grader.py (an ASSET → calling `grader.score(...)` is the documented
+                        # grading contract, e.g. the in-workdir mlebench brief). Pass it explicitly
+                        # instead of letting the detector infer it from `protected`: that union also
+                        # carries the operator's protect list, and a merely-PROTECTED grader.py
+                        # (protect=["grader.py"], no asset) means "hands off", not "import me" —
+                        # inference from the union would wrongly waive the import tells for it.
+                        sigs += detect_reward_hacks(
+                            scan_src, res.metric, state.direction,
+                            protected_names=protected, stdout=res.stdout,
+                            grader_import_ok=("grader.py" in set(self._assets or ())))
                         # 4.3: also apply the hardened exploit ruleset grown by `looplab harden`
                         # (hacker-fixer-solver) — each previously-discovered exploit stays guarded.
                         if self._exploit_suite is not None:

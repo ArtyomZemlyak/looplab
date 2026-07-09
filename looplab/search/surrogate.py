@@ -14,6 +14,7 @@ import math
 import random
 from typing import Optional
 
+from looplab.agents.roles import RESEARCHER_HINT_ATTRS
 from looplab.core.models import Idea, Node, RunState
 
 
@@ -58,6 +59,15 @@ class SurrogateResearcher:
         return pred, nearest
 
     def propose(self, state: RunState, parent: Optional[Node]) -> Idea:
+        # P2 delivery contract (roles.py::RESEARCHER_HINT_ATTRS): the engine setattrs ephemeral
+        # hints on the OUTERMOST active researcher — which may be THIS wrapper — so mirror the
+        # registry (plus the non-hint `track_hypotheses` knob) onto the fallback before any
+        # delegation, the same hasattr-guarded pattern as `UnifiedAgent.propose`. Without this the
+        # surrogate wrapper silently dropped every engine hint on the bootstrap/non-numeric path.
+        if self.fallback is not None:
+            for attr in (*RESEARCHER_HINT_ATTRS, "track_hypotheses"):
+                if hasattr(self, attr):
+                    setattr(self.fallback, attr, getattr(self, attr))
         hist = self._history(state)
         if not self.bounds or len(hist) < self.warmup:
             if self.fallback is not None:                 # bootstrap / non-numeric -> delegate

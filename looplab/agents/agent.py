@@ -23,6 +23,7 @@ from looplab.core.prompts import PromptStore, render
 from looplab.agents.roles import (
     _OPERATOR_NOTE, _attention_points, _clamp_fill, _hypothesis_system_suffix,
     _researcher_capability_suffix, _state_brief, collect_hint_cues)
+from looplab.tools._base import RESULT_CAP
 
 
 # The "your idea space is the WHOLE experiment / the Developer owns HOW" guidance, as worded for
@@ -93,12 +94,23 @@ def _force_emit(client, messages: list, emit_spec: dict) -> Optional[dict]:
 _PLAN_TOOL_NAME = "update_plan"
 
 # The hard per-result size bound every tool observation passes through before it reaches the
-# model. When it actually truncates, an EXPLICIT marker replaces the tail (P3, docs/PROMPT_REVIEW.md):
-# the silent head-cut destroyed every paginating tool's resume pointer and left the model acting on
-# code it never saw. `{n}` = exact number of characters cut.
-_RESULT_CAP = 4000
+# model — the SHARED `tools._base.RESULT_CAP`, so the loop cap and every provider's own page/tail
+# budget move together. When it actually truncates, an EXPLICIT marker replaces the tail (P3,
+# docs/PROMPT_REVIEW.md): the silent head-cut destroyed every paginating tool's resume pointer and
+# left the model acting on code it never saw. `{n}` = exact number of characters cut.
+# `_RESULT_CAP` stays as the module-level alias tests/readers reference.
+_RESULT_CAP = RESULT_CAP
 _TRUNC_NOTE = ("\n…[truncated by the tool-result cap — {n} chars omitted; "
                "re-request a narrower range]")
+
+# Appended to the 3rd+ EXACT repeat of a (tool, canonical-args) call within ONE loop invocation.
+# The G2 read-dedup removal (P3 — see the always-execute comment in drive_tool_loop) left a B1 gap:
+# a 3+-call read ROUND-ROBIN (A B C A B C …) never trips the StuckDetector, which only catches 1-
+# and 2-cycles. No caching, no suppression — the repeated call still fully executes and returns
+# fresh, complete content (the operator's always-re-read decision stands); we only TELL the model
+# it is repeating itself so it can stop on its own. `{k}` = how many times this exact call has run.
+_REPEAT_NOTE = ("\n(note: this exact call has now run {k}× this phase — the result is identical "
+                "unless a write changed it)")
 
 
 def _cap_tool_result(result: str, cap: int = _RESULT_CAP) -> str:
@@ -197,7 +209,8 @@ def drive_tool_loop(client, tools, messages: list, emit_spec: dict, *,
         raises is swallowed (transparency must not change behaviour).
       - `on_tool_result(name, args, result)` (optional): a per-tool-call DATA hook invoked after a
         retrieval tool actually EXECUTES, with the parsed args and the 4000-char-capped result
-        string (exactly what the tool message will carry, truncation marker included) — so a caller
+        string (exactly what the tool message will carry, truncation marker and any repeat note
+        included) — so a caller
         can record provenance
         (the DeepResearcher's consulted-sources ledger) without re-implementing the loop. Not
         called for the emit, the `update_plan` tool, or a cancel-stubbed call. Unlike
@@ -247,6 +260,12 @@ def drive_tool_loop(client, tools, messages: list, emit_spec: dict, *,
     if stuck_detection:                 # a FRESH detector per call — never share state across loops
         from looplab.agents.stuck import StuckDetector
         stuck = StuckDetector(repeat_threshold=stuck_repeat, alternate_threshold=stuck_alternate)
+    # STATELESS per-loop repeat ledger (see _REPEAT_NOTE): exact (tool, canonical-args) call counts
+    # for THIS invocation only — a fresh dict per call, like the StuckDetector, so nothing leaks
+    # across loops or phases. `_canonical` is the detector's own args canonicalizer, reused so the
+    # two repeat notions can't drift.
+    from looplab.agents.stuck import _canonical
+    repeat_counts: dict[str, int] = {}
     tool_specs = ((tools.specs() if tools is not None else []) + [emit_spec])
     if self_plan:
         tool_specs = tool_specs + [_plan_spec()]
@@ -329,6 +348,7 @@ def drive_tool_loop(client, tools, messages: list, emit_spec: dict, *,
                          "tool_calls": calls})
         stuck_reason = None
         for tc in calls:
+            repeat_note = ""            # per-call: set only when an executed call is a 3rd+ repeat
             fn = tc.get("function", {})
             name = fn.get("name", "")
             raw = fn.get("arguments") or "{}"
@@ -381,7 +401,8 @@ def drive_tool_loop(client, tools, messages: list, emit_spec: dict, *,
                 # at content the model could no longer see after compaction/phase handoff, and the
                 # cached copy silently went stale — always read what is asked. The StuckDetector
                 # below is the loop-safety net now: a model that thrashes on the SAME call with the
-                # SAME result trips B1 and the loop force-emits instead of spinning.
+                # SAME result trips B1 and the loop force-emits instead of spinning; the repeat
+                # note below covers the 3+-call round-robins B1's 1-/2-cycle window can't see.
                 # Surface what the agent is about to do BEFORE the (possibly slow) tool runs, so a
                 # live progress view advances turn-by-turn instead of jumping only at the end.
                 _step(turn=turn_idx, tool=name,
@@ -395,12 +416,21 @@ def drive_tool_loop(client, tools, messages: list, emit_spec: dict, *,
                 # bites (P3) — so the provenance hook receives EXACTLY what the tool message below
                 # will carry (a single expression, not two kept-in-sync copies).
                 result = _cap_tool_result(str(result))
+                # Tag the 3rd+ exact repeat of this (tool, canonical-args) call (see _REPEAT_NOTE:
+                # the round-robin gap the StuckDetector's 1-/2-cycle window can't cover). The note
+                # rides OUTSIDE the cap so it can never be truncated away.
+                sig = f"{name}({_canonical(args)})"
+                repeat_counts[sig] = repeat_counts.get(sig, 0) + 1
+                if repeat_counts[sig] >= 3:
+                    repeat_note = _REPEAT_NOTE.format(k=repeat_counts[sig])
                 if on_tool_result is not None:      # provenance hook: exceptions propagate
-                    on_tool_result(name, args, result)
+                    on_tool_result(name, args, result + repeat_note)
             result = _cap_tool_result(str(result))   # idempotent final bound (cancel/plan stubs too)
             messages.append({"role": "tool", "tool_call_id": tc.get("id", ""),
-                             "name": name, "content": result})
-            if stuck is not None:       # B1: flag no-progress on the cheapest signal (a repeat)
+                             "name": name, "content": result + repeat_note})
+            if stuck is not None:       # B1: flag no-progress on the cheapest signal (a repeat).
+                # Push the UN-noted result: the note's incrementing count would otherwise make every
+                # repeat look like a NEW observation and blind the identical-pair check.
                 stuck_reason = stuck.push(name, args, result) or stuck_reason
         # G: soft convergence. A model that keeps issuing DIFFERENT tool calls never trips the
         # StuckDetector (it keys on repeats) and, with max_turns unlimited, investigates until the budget
@@ -793,8 +823,9 @@ class ToolUsingResearcher:
             {"role": "system",
              # P6/P8: the shared capability suffix (sweep offer — gated — + eval_timeout) and the
              # hardware attention points reach the DEFAULT researcher too, appended AFTER the
-             # render() so a `tool_researcher_system.md` override keeps them (same pattern as
-             # LLMResearcher / LLMDeveloper).
+             # render() so a `tool_researcher_system.md` override keeps them AND the code-owned
+             # offer_sweep gate keeps deciding the sweep offer — the pattern now truly shared with
+             # LLMResearcher (whose researcher_system default is likewise core-only) / LLMDeveloper.
              "content": render(self.prompts, "tool_researcher_system", self._SYSTEM)
                         + "\n" + _researcher_capability_suffix(getattr(self, "offer_sweep", True))
                         + self.space_hint + hyp

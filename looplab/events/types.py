@@ -97,7 +97,8 @@ EV_RUN_ABORT = "run_abort"
 EV_PAUSE = "pause"
 EV_RESUME = "resume"
 EV_NODE_ABORT = "node_abort"
-EV_NODE_RESET = "node_reset"      # re-run an EXISTING node in place from a stage (propose|implement|eval)
+EV_NODE_RESET = "node_reset"      # re-run an EXISTING node in place from a stage (propose|implement|
+#                                   eval, or any eval-pipeline stage name — train, data_prep, …)
 EV_STAGE_FINISHED = "stage_finished"   # one stage of a multi-stage eval pipeline finished (name, status)
 EV_BUDGET_EXTEND = "budget_extend"
 EV_HINT = "hint"

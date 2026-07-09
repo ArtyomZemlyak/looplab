@@ -22,6 +22,46 @@ from looplab.serve.protocol import CONTROL_EVENTS, GENESIS_CHAT_SEQ_BASE
 from looplab.serve.settings_store import _ALLOWED_FIELDS, _SECRET_FIELDS
 
 
+def _defaults_backend_llm(task_spec: Optional[dict], task_file: Optional[str],
+                          settings: dict, ui_settings: dict) -> bool:
+    """True when a launch should default `backend="llm"`: the task normalizes to a GENERATIVE kind
+    (the agent writes/edits code) and nobody chose a backend. CLI parity (mega-review P10):
+    `looplab run --goal` already defaults backend=llm for these kinds (cli.py's `backend_chosen`
+    rule), but Settings.backend defaults to "toy" — a repo/dataset run launched over HTTP without
+    this got NoOpRepoDeveloper and every node silently re-evaluated the unchanged baseline (no
+    error, just a flat run). Shared by /api/start (authoritative — the one funnel every launch goes
+    through) and the genesis card (display-only, so the operator can see/override it pre-launch).
+    "Chosen" = a `backend` key already in the merged launch/card `settings`, or one the deployment
+    set — a UI-saved value, LOOPLAB_BACKEND env, or a `.env` line all land in
+    `Settings(**ui).model_fields_set`, the same test cli.py's `backend_chosen` uses (and
+    `_spawn_engine` overlays our env ON TOP of os.environ, so injecting would clobber it)."""
+    if "backend" in settings:
+        return False
+    if not (isinstance(task_spec, dict) and task_spec):
+        if not task_file:
+            return False
+        try:            # a catalogue/snapshot launch: the task lives only in the file — read it
+            task_spec = json.loads(Path(task_file).read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return False                # unreadable/foreign task file → no default; fails downstream
+        if not isinstance(task_spec, dict):
+            return False
+    from looplab.adapters.tasks import normalize_task
+    from looplab.engine.genesis import GENERATIVE_KINDS
+    # Best-effort, NARROW: only the task normalization may soft-fail here — an unnormalizable spec
+    # is validate_task's 400 (or the engine's own startup error), never this default's concern.
+    try:
+        kind = normalize_task(dict(task_spec)).get("kind")
+    except (KeyError, TypeError, ValueError):
+        return False
+    if kind not in GENERATIVE_KINDS:
+        return False
+    try:
+        return "backend" not in getattr(Settings(**(ui_settings or {})), "model_fields_set", set())
+    except ValueError:  # pydantic ValidationError ⊂ ValueError — bad saved/env settings fail later,
+        return False    # in the spawned engine's own Settings(); don't inject on top of them
+
+
 def build_router(srv) -> APIRouter:
     router = APIRouter()
     _run_dir, _events, root = srv.run_dir, srv.events, srv.root
@@ -264,6 +304,17 @@ def build_router(srv) -> APIRouter:
         # Everything reaches the engine as LOOPLAB_* env on the spawned process, so ANY Settings
         # field is configurable from the UI without growing the CLI surface (Settings() reads env).
         settings = {**srv.settings.load_ui_settings(), **(body.get("settings") or {})}
+        # F4 (CLI parity, mega-review P10): /api/start is the ONE launch funnel — genesis cards, the
+        # assistant's propose_run cards, and direct API callers all land here — so the generative-kind
+        # backend default is applied HERE, not per-card. Without it a repo/dataset task launched with
+        # the default Settings.backend="toy" gets NoOpRepoDeveloper: every node silently re-evaluates
+        # the unchanged baseline (no error, a flat run). cli.py's genesis path already defaults
+        # backend=llm for GENERATIVE_KINDS; this closes the HTTP gap for ALL launches (the genesis
+        # card's own injection is display-only sugar over this same rule).
+        if "backend" not in settings and _defaults_backend_llm(
+                task if isinstance(task, dict) else None, task_file, settings,
+                srv.settings.load_ui_settings()):
+            settings["backend"] = "llm"
         # Drop fields that equal what the chosen profile resolves to anyway: the launch dialog
         # echoes back EVERY resolved field, and passing them all as explicit LOOPLAB_* env would
         # defeat `_apply_profile`'s "explicit key wins" check in the child — selecting a profile

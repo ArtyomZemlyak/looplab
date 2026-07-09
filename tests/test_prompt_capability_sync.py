@@ -67,6 +67,40 @@ def test_plain_researcher_user_turn_sweep_clause_gated():
     assert "`space` grid" not in off
 
 
+def test_plain_researcher_default_matches_reference_assembly():
+    # F14: the researcher_system PromptStore default is now the CORE alone, with the capability
+    # fragments appended in code AFTER the render — the ASSEMBLED default must stay byte-equal to
+    # the reference `_researcher_system(...)` so the effective prompt didn't change.
+    from looplab.agents.roles import _researcher_system
+    for offer in (True, False):
+        sys = _plain_prompt(offer_sweep=offer)[0]["content"]
+        assert sys.startswith(_researcher_system(offer))
+
+
+def test_plain_researcher_override_keeps_code_owned_capability_gate(tmp_path):
+    # F14: a researcher_system.md override replaces only the CORE persona; the capability suffix
+    # (sweep offer — still gated by offer_sweep — + eval_timeout) and the operator note are
+    # appended in code AFTER the render on BOTH researcher variants, so an override can never
+    # desync the capability prose from what the active Developer actually implements.
+    from looplab.core.prompts import PromptStore
+    (tmp_path / "researcher_system.md").write_text("OVERRIDDEN CORE.", encoding="utf-8")
+    store = PromptStore(str(tmp_path))
+
+    def _sys(offer_sweep):
+        c = _ToolEmitClient()
+        LLMResearcher(c, prompts=store, offer_sweep=offer_sweep).propose(
+            RunState(goal="g", direction="min"), None)
+        return c.messages[0]["content"]
+
+    on = _sys(True)
+    assert on.startswith("OVERRIDDEN CORE.")                              # the core IS replaced
+    assert _SWEEP_OFFER in on and _EVAL_TIMEOUT_GUIDANCE in on
+    assert _OPERATOR_NOTE in on
+    off = _sys(False)
+    assert off.startswith("OVERRIDDEN CORE.")
+    assert _SWEEP_OFFER not in off and _EVAL_TIMEOUT_GUIDANCE in off      # gate stays code-owned
+
+
 # ------------------------------------------- P5/P6/P8/P14/P25: the tool-using researcher's prompt
 def _tool_researcher_call(monkeypatch, **ctor):
     from looplab.agents import agent as agent_mod

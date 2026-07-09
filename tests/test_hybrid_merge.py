@@ -127,3 +127,20 @@ def test_merge_system_promptstore_override_uses_dollar_vars(monkeypatch, tmp_pat
                 prompts=PromptStore(str(tmp_path)))
     assert captured["sys"].startswith("Adjudicate these research lessons. Preserve ")
     assert "$kind" not in captured["sys"] and "$detail" not in captured["sys"]
+
+
+def test_merge_system_legacy_brace_kind_override_still_substituted(monkeypatch, tmp_path):
+    # Back-compat: the pre-$var contract substituted a literal `{kind}` AFTER the render, so an
+    # existing merge_system.md override written with `{kind}` must keep rendering the real kind.
+    from looplab.core.prompts import PromptStore
+    (tmp_path / "merge_system.md").write_text("Adjudicate these {kind}.", encoding="utf-8")
+    captured = {}
+
+    def fake(client, msgs, schema, parser):
+        captured["sys"] = msgs[0]["content"]
+        return schema(groups=[])
+
+    monkeypatch.setattr(hm, "parse_structured", fake)
+    agent_merge(object(), ["aa", "ab"], kind="research lessons",
+                prompts=PromptStore(str(tmp_path)))
+    assert captured["sys"] == "Adjudicate these research lessons."

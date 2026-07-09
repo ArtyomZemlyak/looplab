@@ -159,8 +159,10 @@ the files it will change *before* deciding what to do, instead of planning blind
 preview. Two tools make this practical:
 
 - **`read_file` paginates.** It takes `start_line` + `lines` to window a large file (like an editor's
-  "go to line N, show M lines"), so the planner reads a file *once* and resumes from where it left off
-  rather than only ever seeing the first 16 KB.
+  "go to line N, show M lines"); each reply is one page of at most ~3,600 characters of content that —
+  when more of the file remains — ends with a `… (more below — continue with start_line=N)` resume
+  marker, so the planner reads a file *once*, page by page from exactly where it left off, and a long
+  file is never silently truncated mid-read.
 - **`gpu_info`** reports the visible GPUs (count / names / memory via `torch.cuda`) — the `nvidia-smi`
   equivalent for an agent that has no shell, so the plan can size a model/batch to the real hardware.
 

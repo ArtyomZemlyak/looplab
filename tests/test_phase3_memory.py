@@ -160,6 +160,44 @@ def test_consolidate_newest_verdict_wins():
     assert out[0]["evidence_count"] == 1              # the old CONFLICTING one adds no support
 
 
+def test_consolidate_noted_never_retires_a_verdict():
+    # WRITE-path neutrality of "noted" (matching the read-path test below): a newer untagged
+    # reflection ("noted") must NOT become the merged verdict and zero the evidence of a real
+    # "supported" row — pre-fix, newest-wins let one tag-noncompliant line retire the verdict.
+    rows = [
+        {"statement": "Deeper trees help", "outcome": "supported", "task_id": "t", "run_id": "R"},
+        {"statement": "deeper trees help", "outcome": "noted", "task_id": "t", "run_id": "S"},
+    ]
+    out = consolidate_lessons(rows)
+    assert len(out) == 1
+    assert out[0]["outcome"] == "supported"       # the verdict survives the newer neutral duplicate
+    assert out[0]["evidence_count"] == 1          # its evidence is kept, not zeroed
+    # a group of ONLY noted rows keeps "noted" (there is no verdict to protect)
+    only = [{"statement": "wider nets help", "outcome": "noted", "task_id": "t", "run_id": "R"},
+            {"statement": "wider nets  help", "outcome": "noted", "task_id": "t", "run_id": "S"}]
+    out2 = consolidate_lessons(only)
+    assert out2[0]["outcome"] == "noted" and out2[0]["evidence_count"] == 2
+
+
+def test_agentic_merge_base_skips_noted(monkeypatch):
+    # The paraphrase-merge pass applies the same rule: the newest NON-noted member carries the
+    # verdict/fields for the merged row (a newer "noted" paraphrase must not retire "supported").
+    import looplab.search.hybrid_merge as hm
+    from looplab.engine.memory import _agentic_merge_lessons
+    rows = [
+        {"statement": "raise the learning rate", "outcome": "supported", "task_id": "t",
+         "evidence_count": 2},
+        {"statement": "increase the learning rate", "outcome": "noted", "task_id": "t",
+         "evidence_count": 1},
+    ]
+    monkeypatch.setattr(hm, "consolidate",
+                        lambda texts, client, **kw: [{"members": [0, 1], "merged": "increase the LR"}])
+    out = _agentic_merge_lessons(rows, client=object())
+    assert len(out) == 1
+    assert out[0]["outcome"] == "supported" and out[0]["statement"] == "increase the LR"
+    assert out[0]["evidence_count"] == 2          # only members AGREEING with the verdict add support
+
+
 def test_filter_contradicted_quarantines_reversed_claims():
     scored = [
         (0.9, 0, {"statement": "Deeper trees help", "outcome": "supported"}),

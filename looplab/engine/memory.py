@@ -56,7 +56,10 @@ def fingerprint_similarity(a: list[str], b: list[str]) -> float:
 # NOT here (deliberately): "noted" — the neutral outcome an untagged reflection line gets in
 # `parse_credit_lessons`. It is neither positive nor negative, so it must never quarantine a
 # "supported" duplicate nor add support to one (an unknown/legacy outcome behaves the same way:
-# not "supported" and not in this set == inert).
+# not "supported" and not in this set == inert). The WRITE path honors the same neutrality:
+# `consolidate_lessons` / `_agentic_merge_lessons` pick the newest NON-noted row as a group's
+# verdict-carrying base, so a newer "noted" duplicate never retires a real verdict and zeroes
+# its evidence (a group of only-noted rows keeps "noted").
 _NEGATIVE = {"tested", "abandoned", "failed", "refuted"}
 
 
@@ -69,10 +72,12 @@ def consolidate_lessons(lessons: list[dict], *, client=None, embed=None,
                         parser: str = "tool_call", prompts=None) -> list[dict]:
     """Merge near-duplicate lessons and resolve contradictions — the write-path hygiene pass.
     Input: lessons in FILE ORDER (oldest first). For each (normalized statement, task_id) group:
-    the NEWEST entry wins (its outcome is the current verdict — forgetting the stale one), and it
-    absorbs the group's support as `evidence_count`. A newer NEGATIVE verdict silently retires an
-    older positive duplicate (contradiction resolution), and vice versa — last observation is the
-    truth, prior observations only add confidence when they AGREE.
+    the NEWEST VERDICT-CARRYING entry wins (its outcome is the current verdict — forgetting the
+    stale one), and it absorbs the group's support as `evidence_count`. A newer NEGATIVE verdict
+    silently retires an older positive duplicate (contradiction resolution), and vice versa —
+    last observation is the truth, prior observations only add confidence when they AGREE.
+    "noted" is neutral here exactly as on the read path (see `_NEGATIVE`): a newer "noted"
+    duplicate never overrides an existing verdict; a group of only-noted rows keeps "noted".
 
     The exact-normalized pass above is the deterministic BASE. When a `client` is supplied, a second
     HYBRID + AGENT pass then merges PARAPHRASE-level duplicates the exact key misses ('raise the LR' vs
@@ -91,7 +96,11 @@ def consolidate_lessons(lessons: list[dict], *, client=None, embed=None,
     out: list[dict] = []
     for key in order:
         grp = groups[key]
-        newest = grp[-1]
+        # The verdict-carrying base row: newest-wins, but "noted" is NEUTRAL on the write path too —
+        # a newer untagged reflection ("noted", `parse_credit_lessons`) must never retire a real
+        # verdict and zero its evidence, so the base is the newest NON-noted row when one exists
+        # (a group of only-noted rows keeps "noted"). Deterministic: a pure file-order scan.
+        newest = next((o for o in reversed(grp) if o.get("outcome") != "noted"), grp[-1])
         merged = dict(newest)
         # Accumulate ACROSS runs: sum the stored evidence_count of every group member that AGREES
         # with the current (newest) verdict, so a lesson re-confirmed by N runs ends at ~N — not
@@ -143,7 +152,11 @@ def _agentic_merge_lessons(rows: list[dict], *, client, embed=None,
             for g in consolidate(texts, client, kind="research lessons", embed=embed,
                                  parser=parser, prompts=prompts):
                 members = [idxs[j] for j in g["members"]]      # back to original rows indices
-                base = rows[members[-1]]                        # newest wins for non-statement fields
+                # Newest wins for non-statement fields — with the same "noted"-neutral base rule as
+                # the exact pass above: the newest NON-noted member carries the verdict (a newer
+                # noted paraphrase must not retire it); an only-noted group stays "noted".
+                base = next((rows[m] for m in reversed(members)
+                             if rows[m].get("outcome") != "noted"), rows[members[-1]])
                 row = dict(base)
                 if len(members) > 1:
                     row["statement"] = g["merged"]

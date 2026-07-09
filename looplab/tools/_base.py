@@ -16,6 +16,14 @@ from __future__ import annotations
 
 from typing import Optional, Protocol
 
+# The agent loop's hard per-result bound: `drive_tool_loop` (agents/agent.py) caps EVERY tool result
+# at this many chars before it reaches the model, replacing the tail with an explicit truncation
+# marker. Providers must derive their own page/tail budgets FROM this constant (cap minus their
+# header/marker overhead) instead of hard-coding free-standing ~4000s — so the loop cap and every
+# provider budget move together, and a provider's own honest truncation (not the loop's blunt cut)
+# is what decides which content is dropped.
+RESULT_CAP = 4000
+
 
 def fn_spec(name: str, description: str, props: dict, required: Optional[list] = None) -> dict:
     """Build one OpenAI-format function/tool schema. Shared by every tool provider so the
