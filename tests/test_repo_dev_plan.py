@@ -241,3 +241,65 @@ def test_operator_declared_stages_skip_the_stages_phase(monkeypatch):
     names = [r[0] for r in rec]
     assert "declare_stages" not in names                 # STAGES phase skipped (operator owns the pipeline)
     assert names == ["propose_plan", "done", "done"]     # plan + implement still run
+
+
+def test_repair_prompt_lists_the_seeded_working_set_not_last_files(monkeypatch):
+    """P11: the repair block's 'Files in this node's working set' must be filled from the files
+    ACTUALLY seeded for THIS repair (`write.files`, pre-loaded by repair_from from the failing
+    node), never from the shared developer's `last_files` (whatever node it built LAST)."""
+    from looplab.core.models import Node
+    rec: list = []
+    cap: list = []
+    _install_fake_loop(monkeypatch, [], rec, capture=cap)
+    dev = _dev(plan_decompose=False)
+    dev.last_files = {"other.py": "WRONG = 1"}                    # the last-BUILT node's files
+    node = Node(id=5, operator="improve", idea=Idea(operator="improve", params={}),
+                files={"solution.py": "RIGHT = 1"})
+    dev.repair_from(Idea(operator="improve", params={}, rationale="fix"), node, "boom")
+    user = cap[0]["messages"][1]["content"]
+    assert "working set: solution.py" in user                     # the node's OWN files
+    assert "other.py" not in user                                 # not the wrong node's
+
+
+def test_repair_prompt_restates_the_manifest_pipeline(monkeypatch):
+    """P33: repair sessions are told the node's ACTUAL pipeline when it is knowable — here from the
+    Developer manifest riding in the failing node's own files."""
+    import json as _json
+    from looplab.core.models import Node
+    rec: list = []
+    cap: list = []
+    _install_fake_loop(monkeypatch, [], rec, capture=cap)
+    dev = _dev(plan_decompose=False)
+    manifest = _json.dumps({"stages": [{"name": "data_prep", "command": ["python", "p.py"]},
+                                       {"name": "train", "command": ["python", "t.py"]}]})
+    node = Node(id=5, operator="improve", idea=Idea(operator="improve", params={}),
+                files={"solution.py": "X = 1", "looplab_stages.json": manifest})
+    dev.repair_from(Idea(operator="improve", params={}, rationale="fix"), node, "boom")
+    user = cap[0]["messages"][1]["content"]
+    assert "PIPELINE for this node" in user
+    assert "data_prep → train → score (operator cmd)" in user
+
+
+def test_repair_on_operator_stages_task_notes_pipeline_and_refuses_declare_stages(monkeypatch):
+    """P12 wiring: on a task whose pipeline is OPERATOR-declared (`cmd.stages`), a repair session's
+    prompt restates that pipeline as immutable AND its declare_stages tool refuses (the engine
+    ignores the Developer manifest — 'fixing' a stage via it would loop the identical failure)."""
+    from looplab.core.models import Node
+    rec: list = []
+    cap: list = []
+    _install_fake_loop(monkeypatch, [], rec, capture=cap)
+    t = RepoTask(id="r", goal="g", direction="max", editable_path=str(FIXTURE),
+                 edit_surface=["*.py"], protect=[],
+                 eval=EvalSpec(stages=[{"name": "train", "command": ["python", "train.py"]},
+                                       {"name": "score", "command": ["python", "test.py"]}],
+                               metric=_M))
+    from looplab.adapters.repo_task import LLMRepoDeveloper
+    dev = LLMRepoDeveloper(object(), t, plan_decompose=False)
+    node = Node(id=5, operator="improve", idea=Idea(operator="improve", params={}),
+                files={"solution.py": "X = 1"})
+    dev.repair_from(Idea(operator="improve", params={}, rationale="fix"), node, "boom")
+    user = cap[0]["messages"][1]["content"]
+    assert "OPERATOR-declared, runs verbatim" in user and "train → score" in user
+    msg = cap[0]["tools"].execute(
+        "declare_stages", {"stages": [{"name": "train", "command": ["python", "t.py"]}]})
+    assert msg.startswith("(refused") and "OPERATOR-declared" in msg

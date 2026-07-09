@@ -21,6 +21,10 @@ Integrity & trust model (`trusted_local`):
     isn't file-isolated on this tier. That's an accepted `trusted_local` caveat (the
     threat is overfitting/honest error, not an adversarial solver). Closing it fully
     needs out-of-process grading or the `untrusted` (isolated) sandbox tier — tracked.
+  - The reward-hack detector (`trust/reward_hack.py`) treats the MANDATED
+    `from grader import score` as task-sanctioned here — shipping `grader.py` as an
+    asset is the declaration (it reaches the detector via the engine's protected/asset
+    set) — while key ACCESS (`grader._Y`, `_Y`) stays flagged.
 
 Reuses the engine with zero loop changes: it's just a `TaskAdapter` with `assets()` (the
 data + grader), a `brief` (the I/O contract), and a hyperparameter to optimize (`k`).

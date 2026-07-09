@@ -154,8 +154,12 @@ def test_parse_credit_lessons():
     assert out[1][0] == 1 and out[1][2] == "failed"
     assert out[2][0] == -1                                        # P9 > n_pairs -> unattributed
     assert all(o[1] != "short" for o in out)                      # too-short line dropped
+    # Untagged -> NEUTRAL "noted", never the negative "tested": a tag-noncompliant reflection
+    # line must not be able to quarantine a matching "supported" lesson (outcome not in _NEGATIVE).
     untagged = parse_credit_lessons("an untagged generalizable observation about step size", 1)
-    assert untagged == [(-1, "an untagged generalizable observation about step size", "tested")]
+    assert untagged == [(-1, "an untagged generalizable observation about step size", "noted")]
+    from looplab.engine.memory import _NEGATIVE
+    assert "noted" not in _NEGATIVE and untagged[0][2] != "supported"
 
 
 # --------------------------------------------------------------------------- #
@@ -255,7 +259,7 @@ def test_run_end_writes_comparative_rows_and_records_spent_pairs(tmp_path):
     assert comp, "run-end reflection must include credit-assigned pair lessons"
     for r in comp:
         assert r.get("fingerprint") and len(r.get("evidence") or []) == 2
-        assert r.get("outcome") in ("supported", "failed", "tested")
+        assert r.get("outcome") in ("supported", "failed", "noted")
     # run-end spends are event-recorded too, so a REOPENED run can't re-distill these pairs
     final = fold(eng.store.read_all())
     end_events = [d for d in final.lessons_distilled if d.get("trigger") == "run_end"]

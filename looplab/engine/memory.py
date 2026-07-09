@@ -53,6 +53,10 @@ def fingerprint_similarity(a: list[str], b: list[str]) -> float:
 
 # Outcomes that CONFLICT with a positive lesson: if the SAME statement was later tested and
 # didn't hold (or was abandoned), the earlier "supported" must not be injected any more.
+# NOT here (deliberately): "noted" — the neutral outcome an untagged reflection line gets in
+# `parse_credit_lessons`. It is neither positive nor negative, so it must never quarantine a
+# "supported" duplicate nor add support to one (an unknown/legacy outcome behaves the same way:
+# not "supported" and not in this set == inert).
 _NEGATIVE = {"tested", "abandoned", "failed", "refuted"}
 
 
@@ -61,7 +65,8 @@ def normalize_statement(s: str) -> str:
     return " ".join(str(s or "").split()).lower()[:160]
 
 
-def consolidate_lessons(lessons: list[dict], *, client=None, embed=None) -> list[dict]:
+def consolidate_lessons(lessons: list[dict], *, client=None, embed=None,
+                        parser: str = "tool_call", prompts=None) -> list[dict]:
     """Merge near-duplicate lessons and resolve contradictions — the write-path hygiene pass.
     Input: lessons in FILE ORDER (oldest first). For each (normalized statement, task_id) group:
     the NEWEST entry wins (its outcome is the current verdict — forgetting the stale one), and it
@@ -115,13 +120,15 @@ def consolidate_lessons(lessons: list[dict], *, client=None, embed=None) -> list
         out.append(merged)
     if client is None or len(out) < 2:
         return out
-    return _agentic_merge_lessons(out, client=client, embed=embed)
+    return _agentic_merge_lessons(out, client=client, embed=embed, parser=parser, prompts=prompts)
 
 
-def _agentic_merge_lessons(rows: list[dict], *, client, embed=None) -> list[dict]:
+def _agentic_merge_lessons(rows: list[dict], *, client, embed=None,
+                           parser: str = "tool_call", prompts=None) -> list[dict]:
     """Second-pass paraphrase merge (hybrid retrieval + agent decision), per task_id, over already
     exact-deduped lesson rows. Best-effort: any failure returns `rows` unchanged. Order-preserving by
-    each merged group's earliest row."""
+    each merged group's earliest row. `parser`/`prompts` reach the agent adjudication call (the
+    run's structured-output parser + any merge_system.md PromptStore override)."""
     from looplab.search.hybrid_merge import consolidate
     by_task: dict[object, list[int]] = {}
     for i, o in enumerate(rows):
@@ -133,7 +140,8 @@ def _agentic_merge_lessons(rows: list[dict], *, client, embed=None) -> list[dict
                 keep.append((idxs[0], rows[idxs[0]]))
                 continue
             texts = [str(rows[i].get("statement", "")) for i in idxs]
-            for g in consolidate(texts, client, kind="research lessons", embed=embed):
+            for g in consolidate(texts, client, kind="research lessons", embed=embed,
+                                 parser=parser, prompts=prompts):
                 members = [idxs[j] for j in g["members"]]      # back to original rows indices
                 base = rows[members[-1]]                        # newest wins for non-statement fields
                 row = dict(base)
@@ -334,8 +342,14 @@ def parse_credit_lessons(text: str, n_pairs: int) -> list[tuple[int, str, str]]:
         body = re.sub(r"\[(good|bad)\]", "", body, flags=re.I).strip(" :-–")
         if len(body) < 8:
             continue
+        # An UNTAGGED line gets the NEUTRAL outcome "noted" — the model didn't say which way the
+        # evidence points, so the lesson must neither corroborate nor contradict anything. The old
+        # default was "tested", which is in `_NEGATIVE`: one tag-noncompliant reflection line could
+        # quarantine a matching "supported" lesson at read time (filter_contradicted). "noted" is
+        # excluded from both sides by construction (not "supported", not in _NEGATIVE); rows already
+        # stored with the old value keep their (negative) meaning — no migration, readers tolerate both.
         out.append((idx if 0 <= idx < n_pairs else -1, body,
-                    "failed" if bad else ("supported" if good else "tested")))
+                    "failed" if bad else ("supported" if good else "noted")))
         if len(out) >= max(3, n_pairs):
             break
     return out

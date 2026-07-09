@@ -156,15 +156,19 @@ class _MergePlan(BaseModel):
     groups: list[_MergeGroup] = Field(default_factory=list)
 
 
+# PromptStore-templated ($var, ADR-8) so a custom merge_system.md can use $kind and $detail.
+# $detail is the kind-aware synthesis rule (see agent_merge): the SAME/DIFFERENT discrimination
+# examples stay shared — a different value/mechanism must never merge regardless of kind — but what
+# the synthesized sentence must PRESERVE differs between hypotheses and lessons.
 _MERGE_SYSTEM = (
-    "You are a meticulous research librarian. You are shown a small set of candidate {kind} that a "
+    "You are a meticulous research librarian. You are shown a small set of candidate $kind that a "
     "retriever flagged as POSSIBLY duplicates. Decide which are TRULY the same underlying "
     "idea/claim/lesson and which are genuinely DIFFERENT — a paraphrase ('use a higher learning rate' "
     "vs 'increase the LR') is the SAME; a different value or mechanism ('LR 2e-3' vs 'LR 3e-3', "
     "'dropout' vs 'weight decay') is DIFFERENT and must NOT be merged. For each group of ≥2 that are "
     "the same, call `emit` with `groups`: each has `members` (the 0-based indices that are the same) "
-    "and `merged` (ONE clear sentence that preserves every specific detail — thresholds, numbers, "
-    "caveats — from the merged items). Do NOT include singletons; anything you omit is kept as-is. "
+    "and `merged` (ONE clear sentence that preserves $detail from the merged items). Do NOT include "
+    "singletons; anything you omit is kept as-is. "
     "When in doubt, DON'T merge (a wrong merge loses information).")
 
 
@@ -184,7 +188,15 @@ def agent_merge(client, items: list[str], *, kind: str = "items", goal: str = ""
         from looplab.core.prompts import render
         from looplab.agents.agent import agentic_struct
         blocks = "\n".join(f"[{i}] {c[:600]}" for i, c in enumerate(items))
-        sysmsg = render(prompts, "merge_system", _MERGE_SYSTEM).replace("{kind}", kind)
+        # Kind-aware synthesis rule: hypothesis statements legitimately carry decisive values
+        # (thresholds, LRs) a merge must keep, but LESSON statements are deliberately number-free —
+        # engine.lessons prompts for GENERALIZABLE findings ("NOT these exact numbers") — so telling
+        # the merger to preserve numbers there would fight the reflection contract and re-inject
+        # per-run specifics into cross-run memory. The hypothesis wording is the pre-existing text.
+        detail = ("caveats and scope qualifiers (lesson statements are deliberately number-free)"
+                  if "lesson" in (kind or "").lower() else
+                  "every specific detail — thresholds, numbers, caveats —")
+        sysmsg = render(prompts, "merge_system", _MERGE_SYSTEM, kind=kind, detail=detail)
         user = ((f"Goal context: {goal}\n\n" if goal else "")
                 + f"Candidate {kind} (decide which indices are the SAME):\n" + blocks)
         msgs = [{"role": "system", "content": sysmsg}, {"role": "user", "content": user}]
@@ -219,10 +231,13 @@ def agent_merge(client, items: list[str], *, kind: str = "items", goal: str = ""
 
 def consolidate(texts: list[str], client=None, *, kind: str = "items",
                 embed: Optional[Callable[[str], Vector]] = None, cluster_k: int = 6,
-                goal: str = "") -> list[dict]:
+                goal: str = "", parser: str = "tool_call", prompts=None) -> list[dict]:
     """One-call hybrid + agent consolidation over `texts`. Hybrid-cluster candidate near-duplicates
     (recall), then the agent adjudicates each multi-item cluster (precision + synthesis). Returns
     groups `[{"members": [orig_idx, ...], "merged": <text>}]` covering EVERY index exactly once.
+    `parser`/`prompts` are forwarded to `agent_merge` so the run's configured structured-output
+    parser and a `merge_system.md` PromptStore override actually reach the adjudication call
+    (pre-fix, this wrapper silently dropped both and every production caller went through it).
 
     No client (or <2 texts) -> every item is its own singleton: we NEVER merge on the blind retrieval
     signal alone — the agent is the decider — so an offline/degraded run loses nothing. Callers keep
@@ -235,7 +250,8 @@ def consolidate(texts: list[str], client=None, *, kind: str = "items",
         if len(cl) < 2:
             out.append({"members": list(cl), "merged": texts[cl[0]]})
             continue
-        for g in agent_merge(client, [texts[i] for i in cl], kind=kind, goal=goal):
+        for g in agent_merge(client, [texts[i] for i in cl], kind=kind, goal=goal,
+                             parser=parser, prompts=prompts):
             out.append({"members": [cl[j] for j in g["members"]], "merged": g["merged"]})
     out.sort(key=lambda grp: grp["members"][0])
     return out

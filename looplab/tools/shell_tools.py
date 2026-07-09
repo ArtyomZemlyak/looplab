@@ -118,12 +118,16 @@ class ShellTools:
             fn_spec("run_command",
                      "Run a command as an ARGV LIST (no shell) inside the allowed roots — e.g. "
                      '["python","-m","pytest","-q","tests/test_patch.py"]. Returns exit code + '
-                     "stdout/stderr. Pass argv, NOT a shell string. Set background=true for a LONG "
-                     "command (full test run, training, build): it returns a task_id immediately; poll "
-                     "read_output(task_id) for progress.",
+                     "stdout/stderr, each as a TAIL (roughly the last 4000 chars — earlier output is "
+                     "dropped, with a truncation note). Pass argv, NOT a shell string. A foreground "
+                     f"command is KILLED at `timeout` seconds (default {int(self.timeout)}, hard max "
+                     f"{int(_MAX_TIMEOUT)}); set "
+                     "background=true for anything longer (full test run, training, build): it returns "
+                     "a task_id immediately; poll read_output(task_id) for progress.",
                      {"command": {"type": "array", "items": {"type": "string"}},
                       "cwd": {"type": "string", "description": "working dir (default: repo root)"},
-                      "timeout": {"type": "number"},
+                      "timeout": {"type": "number", "description": "seconds before the command is "
+                                  f"killed (default {int(self.timeout)}, max {int(_MAX_TIMEOUT)})"},
                       "background": {"type": "boolean"}}, ["command"]),
             fn_spec("run_tests",
                      "Run the test suite (or a subset) with pytest -q. Convenience wrapper over "

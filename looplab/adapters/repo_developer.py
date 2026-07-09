@@ -101,12 +101,17 @@ def _missing_stage_input_paths(stages) -> list[str]:
 
 
 def _missing_paths_feedback(missing: list[str]) -> str:
-    """The actionable bounce message shown to the Developer so it re-declares with a real path."""
+    """The actionable bounce message shown to the Developer so it re-declares with a real path.
+    Deliberately does NOT tell it to list/inspect the data itself: its scout tools reach ONLY the
+    editable repo (mounted inputs materialize in per-node EVAL workdirs it cannot see from here), so
+    the old "`list_dir` the actual data" advice just burned the phase's retries on "(path not
+    allowed…)" refusals (P13). The authoritative source for a data path is the task/goal/data brief."""
     return ("these data paths in your stage command(s) DO NOT EXIST on this machine: "
             + ", ".join(missing[:5]) + ". Do NOT use the repo's DEFAULT argparse dataset paths — they "
-            "are the original author's and aren't here. `list_dir` the ACTUAL data (the task's mounted "
-            "dataset dir, e.g. ./<mount>, or the absolute dataset path the task/goal gives) and use a "
-            "path that EXISTS. (If a path is produced by an EARLIER stage, reference it relatively.)")
+            "are the original author's and aren't here. Take the dataset path from the task/goal/data "
+            "brief VERBATIM (mounted inputs appear at ./<name> in the EVAL workdir at run time — your "
+            "scout tools cannot list them here) and use it in the stage command, spelled exactly as "
+            "given. (If a path is produced by an EARLIER stage, reference it relatively.)")
 
 
 class RepoWriteTools:
@@ -116,12 +121,23 @@ class RepoWriteTools:
     just like an external coding agent's diff. The SAME gates are enforced here so the model gets
     immediate feedback (a refused write) instead of having the edit silently dropped downstream."""
 
-    def __init__(self, surface, protected, prefixes=None, editables=None):
+    def __init__(self, surface, protected, prefixes=None, editables=None,
+                 operator_stages: bool = False, data_mounts=None):
         self.files: dict[str, str] = {}
         self.deleted: list[str] = []
         self._surface = list(surface or [])
         self._protected = set(protected or [])
         self._prefixes = list(prefixes or [])
+        # The OPERATOR declared this task's pipeline via `cmd.stages`: the engine runs it verbatim
+        # and IGNORES any Developer manifest (_resolve_stages prefers a valid operator list), so
+        # declare_stages must REFUSE instead of "succeeding" into a file nobody reads — a repair that
+        # "fixed" a stage timeout via the manifest otherwise loops the identical failure to abandon
+        # (mega-review P12).
+        self._operator_stages = bool(operator_stages)
+        # Names of read-only DATA MOUNTS (they sit in the protect list defensively — see
+        # RepoTask._protected_names) so a refused write can name the REAL reason: "read-only data
+        # mount, write derived data elsewhere" rather than the misleading "the operator owns the eval".
+        self._data_mounts = [str(n).rstrip("/") for n in (data_mounts or []) if n]
         # Editable repo roots ({name,path}...) so edit_file can patch a file the node hasn't staged
         # yet: current content = staged overlay first, else the original file on disk.
         self._roots = [(e.get("name") or "", e.get("path")) for e in (editables or []) if e.get("path")]
@@ -196,7 +212,10 @@ class RepoWriteTools:
                      "FULL corrected ordered list of preceding stages (the operator's protected `score` "
                      "step stays appended after them). `%params%` in a command injects this node's "
                      "hyperparameters; give a long `train` a generous `timeout` (seconds). It VALIDATES "
-                     "the manifest and reports errors back. Do not use it to re-plan working stages.",
+                     "the manifest and reports errors back. Do not use it to re-plan working stages."
+                     + (" NOTE: THIS task's pipeline is OPERATOR-declared (`cmd.stages`) and runs "
+                        "verbatim — this tool will refuse; fix the failing stage's script instead."
+                        if self._operator_stages else ""),
                      {"stages": {"type": "array", "description":
                                  "ordered preceding stages, each {name, command:[argv...], timeout?, check?}"}},
                      ["stages"]),
@@ -221,6 +240,14 @@ class RepoWriteTools:
         but never rewrite the scoring. Returns a clear error string on any problem (nothing staged) so
         the tool loop gets actionable feedback instead of the silent malformed-manifest fallback."""
         import json
+        # OPERATOR-declared `cmd.stages` pipelines run VERBATIM: the engine's _resolve_stages takes a
+        # valid operator list and never reads the Developer manifest, so "declaring" one here would
+        # succeed into a file nobody consumes and the repaired node would re-run the identical
+        # pipeline until abandon (P12). Refuse with the real route to a fix.
+        if self._operator_stages:
+            return ("(refused: this task's pipeline is OPERATOR-declared (`cmd.stages`) and runs "
+                    "verbatim; the manifest cannot change it — fix the failing stage's script/code "
+                    "instead)")
         # The manifest itself is TOOL-OWNED (validated here, engine-validated again at consume time):
         # gate it on the PROTECT list only — an operator may explicitly protect 'looplab_stages.json'
         # to disable Developer pipelines — NOT on the edit surface. The legacy default surface is
@@ -263,6 +290,14 @@ class RepoWriteTools:
         reason = SurfacePolicy(self._surface, self._protected, self._prefixes,
                                protected_exact=True, check_escapes=False).check(p)
         if reason == SurfacePolicy.PROTECTED:
+            # Two distinct situations land in PROTECTED: the operator's eval/scorer files, and a
+            # read-only DATA MOUNT (protected defensively so the write refuses VISIBLY — see
+            # RepoTask._protected_names). Name the real reason so the model takes the right next
+            # step: leave the scorer alone vs write derived data to a different path.
+            for nm in self._data_mounts:
+                if p == nm or p.startswith(nm + "/"):
+                    return (f"(refused: {p} is a read-only data mount; you may not {verb} the "
+                            "original — write derived/processed data to a different path)")
             return f"(refused: {p} is protected — the operator owns the eval; you may not {verb} it)"
         if reason is not None:
             return f"(refused: {p} is outside your editable surface: {', '.join(self._surface)})"
@@ -407,11 +442,19 @@ def _xlsx_to_markdown(path: str, *, max_rows: int = 120, cap: int = 9000) -> Opt
 
 
 # --- LLMRepoDeveloper prompt text, hoisted from the inline literals in `_run` --------------------
-# Prompt strings are contracts: every constant below is byte-identical to the original inline
+# Prompt strings are contracts: these constants started byte-identical to the original inline
 # text — only the seams where runtime values were concatenated (the brief, the attention points,
 # recipes/results/source sections, the parent/repair details) became constant boundaries. The
 # `{note}`/`{already}` placeholders are `.format`-filled at the exact spots the old f-strings
 # interpolated; neither template contains any other brace.
+# 2026-07-09 (docs/PROMPT_REVIEW.md P1, operator-approved): the checkpoint/training contract was
+# REWORKED. The old text simultaneously ordered "train UNCONDITIONALLY / never self-skip" and (in
+# the DEFINITION-OF-DONE bullets) "if a valid checkpoint already exists, SKIP training and reuse
+# it" — real runs obeyed the latter, picked up a FOREIGN experiment's checkpoint, and looped
+# forever scoring it. The contract is now situation-based ARTIFACT rules (one experiment → one
+# precisely-addressed artifact chain; warm-start only when the idea names the artifact) and the
+# assembled prompt must contain NO instruction anywhere to skip training when a checkpoint exists —
+# expensive-step reuse is exclusively the ENGINE's job via the stage manifest.
 _REPO_DEV_SYSTEM_INTRO = (
     "You improve an existing experiment repository by WRITING code with the write_file and edit_file "
     "tools (edit_file for changes to existing files, write_file for new ones). You OWN the "
@@ -450,7 +493,8 @@ _REPO_DEV_SYSTEM_BODY = (
     "if you get 'not valid Python — line N: …', fix that line immediately; a rejected edit was NOT "
     "staged. To CHANGE an existing file, use edit_file with a minimal SEARCH/REPLACE hunk "
     "(strongly preferred — never re-write a whole existing file). Author the eval entrypoint "
-    "the eval command runs (it does not exist yet) by "
+    "the eval command runs — if the repo does not already ship it (CHECK before rewriting: a seeded "
+    "repo's existing, unprotected script may only need edits) — by "
     "calling write_file with a REPO-RELATIVE path and the FULL file content. The entrypoint "
     "must print the metric as the LAST stdout line (a JSON object with the required key). CRITICAL: the "
     "eval command runs `<entrypoint>.py`, so THAT FILE MUST EXIST in the workspace after your edits — a "
@@ -461,15 +505,14 @@ _REPO_DEV_SYSTEM_BODY = (
     "editing only train.py leaves the eval with 'no such file: "
     "<entrypoint>.py'. CRITICAL for a TRAINING task: the entrypoint MUST actually TRAIN a model "
     "for THIS experiment (run the repo's train script with your config → produce a FRESH checkpoint) and "
-    "THEN score that model. NEVER shortcut by loading a pre-existing/best checkpoint, or by reading a "
+    "THEN score that model. Do not shortcut by loading a pre-existing/best checkpoint, or by reading a "
     "static results file (a prior run's results_last.csv / *.ckpt is NOT this node's score) — a node that "
-    "doesn't train can't test your idea and silently fakes the parent's number. Do NOT add "
-    "'skip training if a checkpoint already exists' idempotency: an improve node INHERITS the parent's "
-    "checkpoint dir and an interrupted run leaves a partial checkpoint, so skip-if-exists silently reuses "
-    "an undertrained / parent model and freezes the metric. Your training code must train UNCONDITIONALLY "
-    "when it runs (never self-skip based on a checkpoint file) — reusing a good checkpoint to re-run ONLY "
-    "the eval after a fix is the ENGINE's job via the multi-stage pipeline below (separate train/eval "
-    "stages), NOT a check inside your script. Ensure the FULL schedule completes (all requested epochs — "
+    "doesn't train can't test your idea and silently fakes the parent's number. The ARTIFACT rules under "
+    "DEFINITION OF DONE below say exactly what your stages may load (only what THIS experiment's own "
+    "pipeline produces — or an artifact the idea EXPLICITLY names as a warm-start) and why the training "
+    "stage must never self-skip on an existing checkpoint; re-running only the cheap stage after a fix is "
+    "the ENGINE's job via the multi-stage pipeline below, NOT a check inside your "
+    "script. Ensure the FULL schedule completes (all requested epochs — "
     "the best-val checkpoint of a full run, not an epoch-0/1 checkpoint from a training that never "
     "finished). ALSO include any related "
     "metrics you compute in that SAME JSON "
@@ -479,8 +522,8 @@ _REPO_DEV_SYSTEM_BODY = (
     "editable surface; never write protected or absolute paths. When all files are written and "
     "the eval would succeed, call done.\n\n"
     "TRAIN-THEN-SCORE PIPELINE — the ordered stages are declared in your dedicated STAGES phase and "
-    "written to `looplab_stages.json` (the task message states this node's ACTUAL pipeline — trust it, "
-    "not an assumption); HERE you implement the CODE those "
+    "written to `looplab_stages.json` (when the task message states this node's ACTUAL pipeline, trust "
+    "it over any assumption); HERE you implement the CODE those "
     "stages run (e.g. the train.py the `train` stage invokes, the prep.py a `data_prep` stage invokes, the "
     "eval entrypoint the `score` step runs). For reference, a stage is "
     "{name:'train',command:['python','train.py','%params%'],timeout:14400,check:true}; the operator's "
@@ -494,8 +537,8 @@ _REPO_DEV_SYSTEM_BODY = (
     "train into an undertrained checkpoint). Put `%params%` inside a stage command to inject THIS node's "
     "hyperparameters as `--key value`, or bake the values into the code yourself. Do NOT hand-roll a "
     "single monolithic entrypoint with a 'skip training if a checkpoint already exists' check: the engine "
-    "can't see stage boundaries there, so it can't re-run just the scoring, and that check silently reuses "
-    "a PARENT node's / half-finished run's checkpoint (freezing an undertrained model). `declare_stages` "
+    "can't see stage boundaries there, so it can't re-run just the scoring — and the ARTIFACT rules below "
+    "explain why such a check silently freezes the metric. `declare_stages` "
     "validates your manifest and reports errors back to you. Without stages, your single entrypoint (the "
     "operator's cmd) runs as one command.\n\n"
     "For a ROUTINE hyperparameter experiment, prefer ORCHESTRATING the repo's EXISTING scripts "
@@ -520,17 +563,28 @@ _REPO_DEV_SYSTEM_BODY = (
     "the workdir. When a script already computes + reports the metric (e.g. in a produced "
     "checkpoint filename or a results file), read it from there rather than re-deriving it.\n\n"
     "DEFINITION OF DONE for this node: ONE clean experiment run (exit 0, no errors) that prints "
-    "the required metric as the last stdout JSON line. Structure the entrypoint as SEPARATE, "
-    "IDEMPOTENT STAGES so a failure in a cheap late stage never repeats an expensive early one:\n"
-    "  • TRAIN stage: run the training to a STABLE output path in the workdir (e.g. ./ckpt). At "
-    "its start, if a valid checkpoint already exists there, SKIP training and reuse it.\n"
-    "  • TEST/METRIC stage: load that checkpoint, evaluate, and print the metric. This stage must "
-    "be runnable on its OWN against an existing checkpoint — WITHOUT retraining.\n"
-    "The eval is re-run in this SAME workdir after each fix (outputs persist), so when a later "
-    "stage (metric parse, conversion, evaluation) fails, your fix + re-run reuses the already-"
-    "trained checkpoint and finishes in seconds. NEVER discard a completed training over a "
-    "trivial downstream bug, and never silently emit a fake/zero metric to hide an error — fail "
-    "loudly (non-zero exit) so the failing stage can be repaired.\n"
+    "the required metric as the last stdout JSON line.\n"
+    "ARTIFACTS — one experiment, one precisely-addressed artifact chain:\n"
+    "  • Every artifact this experiment produces (checkpoint, processed dataset, predictions) is "
+    "written to a STABLE, EXPERIMENT-LOCAL path inside the eval workdir (e.g. ./ckpt/model.pt) "
+    "that your stages declare and share; the TEST/METRIC stage loads EXACTLY the artifact path "
+    "the TRAIN stage writes — never a glob over 'whatever *.ckpt is lying around' — and must be "
+    "runnable on its OWN against that declared artifact, WITHOUT retraining.\n"
+    "  • NEVER load a checkpoint/artifact this experiment's pipeline did not produce: the repo "
+    "may ship pretrained weights, and earlier/other experiments' outputs can sit nearby; scoring "
+    "one of those silently reports someone else's number. (Only exception: the experiment idea "
+    "EXPLICITLY says to warm-start/fine-tune from a NAMED artifact — then load exactly that "
+    "named path.)\n"
+    "  • Multi-phase training (pretrain → finetune → RL) is fine: each phase is its own stage "
+    "writing its OWN artifact path, and the next phase declares which one it consumes.\n"
+    "  • Your training stage must not self-skip on 'a checkpoint already exists': the workdir "
+    "can contain a partial checkpoint from an interrupted run or a foreign experiment's "
+    "artifact, and a skip-if-exists check silently reuses it and freezes the metric (this exact "
+    "failure has happened — runs looped scoring a foreign checkpoint). Re-running only the cheap "
+    "stage after a fix is the ENGINE's job: it reuses YOUR completed train stage via the stage "
+    "manifest, so a downstream bug never costs a retrain.\n"
+    "Never silently emit a fake/zero metric to hide an error — fail loudly (non-zero exit) so "
+    "the failing stage can be repaired.\n"
     "LOGGING: keep the training framework's logger (e.g. PyTorch Lightning's TensorBoardLogger) "
     "ENABLED and log SEVERAL metrics (the target metric AND related ones — loss, other recalls, "
     "lr), not just the objective; point its log dir at a STABLE path under the workdir so the "
@@ -552,10 +606,12 @@ _REPO_DEV_PARENT_BLOCK = (
     "re-write whole files that only need a small change.\n\n")
 _REPO_DEV_REPAIR_BLOCK = (
     "\n\nThe PREVIOUS attempt FAILED — fix ONLY the stage that failed (see the error) with "
-    "MINIMAL edit_file hunks on the offending file(s) (re-write a file only if it is beyond patching). This runs in the SAME workdir, so "
-    "any checkpoint/output an earlier stage already produced is STILL THERE: make the "
-    "code reuse it (skip retraining) and go straight to the failing step. Do not start "
-    "over from scratch. Files you already wrote: {already}.\n"
+    "MINIMAL edit_file hunks on the offending file(s) (re-write a file only if it is beyond patching). "
+    "The re-run happens in the SAME workdir; when the node has pipeline stages, the ENGINE decides "
+    "what to re-run and reuses a completed train stage's artifact where that is safe — do NOT add "
+    "'skip if a checkpoint exists' logic to the code yourself (a partial or foreign artifact would "
+    "silently freeze the metric); just repair the failing step. Do not start "
+    "over from scratch. Files in this node's working set: {already}.\n"
     "--- eval error (stderr/stdout tail) ---\n")
 
 
@@ -592,6 +648,10 @@ class LLMRepoDeveloper:
         self._protected = rs["protected_names"]
         self._editables = rs["editables"]
         self._prefixes = [e["name"] for e in self._editables if e["name"] not in (".", "")]
+        # Read-only data-mount names (a subset of protected_names, protected defensively) so the
+        # write tools can explain a mount refusal honestly — see RepoWriteTools.__init__.
+        self._data_mounts = [n for n, s in (rs.get("data") or {}).items()
+                             if isinstance(s, dict) and s.get("mount")]
         self.last_files: dict[str, str] = {}
         self.last_deleted: list[str] = []
 
@@ -882,6 +942,43 @@ class LLMRepoDeveloper:
         has_cmd = bool(ev.get("command") or ev.get("stages"))
         return ev, has_cmd
 
+    def _operator_stage_list(self) -> list:
+        """The validated OPERATOR-declared `cmd.stages` pipeline, or []. Gated on the SAME shared
+        validation the engine's _resolve_stages applies at consume time (NOT truthiness): a VALID
+        operator list is taken verbatim there and any Developer manifest is IGNORED, while an invalid
+        one falls through to the Developer manifest — so 'operator stages exist' here means exactly
+        'the engine will run them and ignore looplab_stages.json'. Soft-fails to [] for a bare/
+        __new__-constructed dev (unit tests) that carries no task."""
+        try:
+            ev = self._cmd_context()[0]
+        except Exception:  # noqa: BLE001 — no task/eval_spec (toy & unit-test devs) => no operator stages
+            return []
+        if not ev.get("stages"):
+            return []
+        from looplab.runtime.command_eval import validate_stages
+        return validate_stages(ev["stages"])[0] or []
+
+    def _repair_stage_note(self, op_stages: list, write) -> str:
+        """Restate the node's ACTUAL pipeline for a REPAIR session, when it is knowable (P33): the
+        system prompt tells the model to trust the task message's pipeline, so a repair message must
+        actually carry one where the info exists — operator stages from the eval spec, else the
+        Developer manifest riding in the seeded working set. Empty when neither is known (the system
+        clause is conditional: 'when the task message states…')."""
+        if op_stages:
+            chain = " → ".join(str(s.get("name")) for s in op_stages)
+            return (f"\nPIPELINE for this node (OPERATOR-declared, runs verbatim): {chain}. "
+                    "The stage manifest cannot change it — fix the failing stage's script instead.")
+        import json as _json
+        try:
+            stages = (_json.loads(write.files.get("looplab_stages.json", "")) or {}).get("stages") or []
+        except (ValueError, TypeError, AttributeError):
+            stages = []
+        chain = " → ".join(str(s.get("name")) for s in stages if isinstance(s, dict))
+        if chain:
+            return (f"\nPIPELINE for this node (from its staged looplab_stages.json): {chain} → "
+                    "score (operator cmd).")
+        return ""
+
     def _stages_user(self, idea: Idea, ev: dict, has_cmd: bool) -> str:
         import json as _json
         params = ", ".join(f"{k}={v}" for k, v in (idea.params or {}).items()) or "(bake sensible values)"
@@ -904,8 +1001,9 @@ class LLMRepoDeveloper:
             f"{params}.\n\nThis is the STAGES phase (first). {contract}\n\n"
             "READ the repo to ground the stages in the ACTUAL entry scripts/args (read_file paginates — "
             "read a file ONCE; grep, find_files, list_dir, pkg_info, py_api). GOOD PRACTICE: separate "
-            "stages for data/feature PREPARATION, TRAINING (fresh model every node — never reuse a "
-            "checkpoint), and TESTING; bake this node's hyperparameters into the `train` command (or use "
+            "stages for data/feature PREPARATION, TRAINING (a fresh model every node — the pipeline must "
+            "not point at another experiment's checkpoint), and TESTING; bake this node's "
+            "hyperparameters into the `train` command (or use "
             "`%params%`). Give training a generous timeout. Then call `declare_stages` once. You are NOT "
             "writing code yet — the plan + implement phases come next.")
 
@@ -965,7 +1063,12 @@ class LLMRepoDeveloper:
              base_deleted: Optional[list] = None) -> str:
         from looplab.agents.agent import run_phase
         from looplab.core import tracing
-        write = RepoWriteTools(self._surface, self._protected, self._prefixes, editables=self._editables)
+        # Resolved ONCE for the whole node: operator `cmd.stages` make declare_stages refuse (P12)
+        # and drive the stage notes below; data-mount names make mount refusals honest.
+        op_stages = self._operator_stage_list()
+        write = RepoWriteTools(self._surface, self._protected, self._prefixes, editables=self._editables,
+                               operator_stages=bool(op_stages),
+                               data_mounts=getattr(self, "_data_mounts", None))
         if base is not None or base_deleted is not None:
             # An EXPLICIT base is the node's OWN solution — the parent's (improve/refine via
             # implement_from) or the failing node's (repair via repair_from). Pre-load it so untouched
@@ -1004,7 +1107,14 @@ class LLMRepoDeveloper:
             user += (_REPO_DEV_PARENT_BLOCK.format(note=(f"; {base_note}" if base_note else ""))
                      + "\n\n".join(parts))
         if error:
-            already = ", ".join(self.last_files) or "(none)"
+            # {already} lists the files ACTUALLY seeded for THIS repair — `write.files` (repair_from
+            # pre-loads the failing node's own files there; the legacy no-base fallback copies
+            # last_files into it too), NOT self.last_files, which holds whatever node this shared
+            # developer instance built LAST (P11: the prompt named the wrong node's files).
+            already = ", ".join(write.files) or "(none)"
+            # A repair session gets the node's ACTUAL pipeline restated when knowable (P33) — the
+            # system prompt's "trust the task message's pipeline" clause is conditional on it.
+            user += self._repair_stage_note(op_stages, write)
             user += _REPO_DEV_REPAIR_BLOCK.format(already=already) + error[:4000]
         # A fresh implement (not a repair) on a real repo runs THREE explicit, separately-traced phases —
         # each its own focused tool-loop + emit so the context stays small and the trace reads cleanly
@@ -1028,14 +1138,12 @@ class LLMRepoDeveloper:
                 # Skip the STAGES phase when the OPERATOR already declared an `eval.stages` pipeline the
                 # engine will actually USE: _resolve_stages takes a VALID operator list verbatim (a
                 # Developer manifest would be IGNORED) but falls through to the Developer manifest on an
-                # invalid one — so gate on the SAME shared validation, not truthiness. Protecting
+                # invalid one — `_operator_stage_list` gates on that SAME shared validation, not
+                # truthiness. Protecting
                 # `looplab_stages.json` is the operator knob that disables Developer pipelines entirely:
                 # skip the phase (its manifest could never materialize) instead of burning a full LLM
                 # loop whose output workspace-materialization silently drops.
-                ev0 = self._cmd_context()[0]
-                if ev0.get("stages"):
-                    from looplab.runtime.command_eval import validate_stages
-                    operator_stages = validate_stages(ev0["stages"])[0] or []
+                operator_stages = op_stages
                 manifest_protected = SurfacePolicy(
                     None, self._protected, self._prefixes, protected_exact=True,
                     check_escapes=False).check("looplab_stages.json") is not None

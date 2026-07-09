@@ -80,26 +80,42 @@ def _node_context(st, nid: Optional[int], full: "Path") -> str:
     return "\n".join(lines)
 
 
-def _boss_context(st, nid: Optional[int], full: "Path") -> str:
+def _boss_context(st, nid: Optional[int], full: "Path", *, advisory: bool = False) -> str:
     """Richer grounding for the BOSS (action-router + advisory chat): the node brief PLUS the
     experiments digest (top / weakest / failures / themes — the working set) PLUS the latest
     agent-authored report. So the boss decides WITH context (what's been tried, what's winning,
     what failed) instead of just the single best node — and can still reach for the run-tools
-    when even this isn't enough."""
+    when even this isn't enough.
+
+    `advisory=True` renders the RUN STATUS block for the action-LESS channels (/chat and /command's
+    advisory fallback): same facts, but phrased as recommendations for the operator — the
+    action-router's imperative "you MUST act: `resume`" wording would otherwise invite a chat reply
+    that claims to have resumed a run it has no actions channel to touch (mega-review)."""
     from looplab.events.digest import experiments_digest
     # Run liveness UP FRONT: without it the boss can't tell a stalled run (engine died without
     # finishing — e.g. its only node crashed / never started) from a healthy one, so it tends to
     # only chat. A stalled run almost always needs the boss to ACT (resume + fix), not advise.
     if st.finished:
-        status = ("RUN STATUS: finished. Raise the node budget — budget(nodes=N) — before asking "
-                  "for more experiments, else there's no room to run them.")
+        status = (("RUN STATUS: finished. More experiments need the node budget raised first — "
+                   "recommend the operator extend it; there's no room to run them until then.")
+                  if advisory else
+                  ("RUN STATUS: finished. Raise the node budget — budget(nodes=N) — before asking "
+                   "for more experiments, else there's no room to run them."))
     elif _engine_alive(full):
-        status = "RUN STATUS: live — the engine is running and applies your actions between nodes."
+        status = (("RUN STATUS: live — the engine is running and applies control actions between "
+                   "nodes.")
+                  if advisory else
+                  "RUN STATUS: live — the engine is running and applies your actions between nodes.")
     else:
-        status = ("RUN STATUS: STALLED — the engine is NOT running and the run hasn't finished (a "
-                  "node likely crashed or never started). To make progress you MUST act: `resume` to "
-                  "restart the loop, and if a node is failing add a debug/inject step to fix it — "
-                  "don't just advise.")
+        status = (("RUN STATUS: STALLED — the engine is NOT running and the run hasn't finished (a "
+                   "node likely crashed or never started). You have NO actions channel here — "
+                   "RECOMMEND the operator resume the run (and debug/fix the failing node); never "
+                   "claim you resumed it yourself.")
+                  if advisory else
+                  ("RUN STATUS: STALLED — the engine is NOT running and the run hasn't finished (a "
+                   "node likely crashed or never started). To make progress you MUST act: `resume` to "
+                   "restart the loop, and if a node is failing add a debug/inject step to fix it — "
+                   "don't just advise."))
     parts = [status]
     try:
         from looplab.core.hardware import operational_attention_points

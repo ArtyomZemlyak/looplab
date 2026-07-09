@@ -779,7 +779,10 @@ class OpenAICompatibleClient:
             # Force the wedged recv() to return so the worker thread EXITS (doesn't linger): shutdown the
             # in-flight connection's socket BEFORE close() — close() can't interrupt a kernel read, only
             # socket.shutdown() can. Then close()+rebuild the client for the next call.
-            _shutdown_pool_sockets(self._sdk._client)
+            # getattr guard (D8b): an SDK shape WITHOUT `_client` (a mock in tests, a foreign SDK)
+            # must still reach the intended APITimeoutError below — a bare `self._sdk._client` here
+            # turned the timeout into an AttributeError (`_shutdown_pool_sockets` no-ops on None).
+            _shutdown_pool_sockets(getattr(self._sdk, "_client", None))
             try:
                 self._sdk._client.close()
             except Exception:  # noqa: BLE001

@@ -140,6 +140,52 @@ def test_similar_task_retrieves_lessons_including_negatives(tmp_path):
     assert "unrelated classifier" not in prior                 # dissimilar task filtered out (M2)
 
 
+def test_merge_prompt_opts_unwraps_researcher_chain():
+    # I18: the merge_system PromptStore override + configured parser live on the ROLES (tasks.py
+    # wires researcher.prompts; LLMResearcher carries `parser`) — the lesson-hygiene pass must
+    # find them through the same researcher→inner→fallback→developer chain reflect_client walks.
+    from looplab.engine.lessons import LessonMemory
+
+    class Inner:
+        prompts = "STORE"
+        parser = "json"
+
+    class Wrapper:                       # e.g. a ForesightPanel/Surrogate wrapper without prompts
+        inner = Inner()
+
+    class Eng:
+        researcher = Wrapper()
+        developer = None
+
+    assert LessonMemory(Eng())._merge_prompt_opts() == ("STORE", "json")
+
+    class Bare:                          # toy backends: nothing wired -> the historical defaults
+        researcher = None
+        developer = None
+
+    assert LessonMemory(Bare())._merge_prompt_opts() == (None, "tool_call")
+
+
+def test_consolidate_lessons_threads_prompts_and_parser(monkeypatch):
+    # The parser/prompts kwargs must survive consolidate_lessons -> _agentic_merge_lessons ->
+    # hybrid_merge.consolidate (where they configure the agent adjudication call).
+    import looplab.search.hybrid_merge as hm
+    from looplab.engine.memory import consolidate_lessons
+    seen = {}
+
+    def fake_consolidate(texts, client, *, kind="items", embed=None, cluster_k=6, goal="",
+                         parser="tool_call", prompts=None):
+        seen["parser"], seen["prompts"] = parser, prompts
+        return [{"members": [i], "merged": t} for i, t in enumerate(texts)]
+
+    monkeypatch.setattr(hm, "consolidate", fake_consolidate)
+    rows = [{"statement": "a lesson about tree depth", "outcome": "supported", "task_id": "t"},
+            {"statement": "an entirely different finding", "outcome": "supported", "task_id": "t"}]
+    sentinel = object()
+    consolidate_lessons(rows, client=object(), parser="json", prompts=sentinel)
+    assert seen == {"parser": "json", "prompts": sentinel}
+
+
 def test_settings_defaults_enable_phase3_and_4():
     # Product default (via Settings): hypotheses + cross-run memory are ON out of the box.
     from looplab.core.config import Settings

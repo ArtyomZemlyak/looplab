@@ -173,6 +173,19 @@ def test_filter_contradicted_quarantines_reversed_claims():
     assert ("More data helps", "supported") in stmts
 
 
+def test_filter_contradicted_neutral_noted_never_quarantines():
+    # "noted" (an UNTAGGED reflection line, parse_credit_lessons) is neutral by design: a newer
+    # "noted" duplicate must NOT quarantine an older "supported" claim (pre-fix, untagged lines
+    # defaulted to "tested" ∈ _NEGATIVE and could), and a newer "supported" keeps the noted row too.
+    scored = [
+        (0.9, 0, {"statement": "Deeper trees help", "outcome": "supported"}),
+        (0.9, 5, {"statement": "deeper trees help", "outcome": "noted"}),    # newer but NEUTRAL
+    ]
+    stmts = [(o["statement"], o["outcome"]) for _, _, o in filter_contradicted(scored)]
+    assert ("Deeper trees help", "supported") in stmts       # NOT quarantined by the neutral row
+    assert ("deeper trees help", "noted") in stmts
+
+
 # --------------------------------------------------------------------------- #
 # M4 auto-skills
 # --------------------------------------------------------------------------- #

@@ -117,9 +117,10 @@ class RunsTools:
                  "trials": {"type": "string", "description": "how many sweep trials: a number, or 'all'"}},
                 ["run_id", "node_id"]),
             fn_spec("read_run_logs",
-                "Read one experiment's EXECUTION LOGS: the captured stdout tail from training/eval and "
-                "the FULL error/stderr (not the short failure summary). Use to see what a node printed "
-                "while training, or why it failed, in full. Use run_id + node_id from read_run.",
+                "Read one experiment's EXECUTION LOGS: the captured stdout/stderr TAILS as recorded "
+                "in the event log (bounded, not the raw full stream — the tail end holds the error "
+                "and the final metric line). Far more than the short failure summary. Use to see what "
+                "a node printed while training, or why it failed. Use run_id + node_id from read_run.",
                 {"run_id": {"type": "string"}, "node_id": {"type": "integer"}},
                 ["run_id", "node_id"]),
             fn_spec("read_run_trace",

@@ -351,7 +351,11 @@ class LessonMemory:
                 # an evidence_count, retire contradicted verdicts (newest wins), THEN bound size. The
                 # Researcher client + embedder enable the hybrid+agent paraphrase-merge pass (run end
                 # only — hygiene=False mid-run skips it, so the shared file isn't rewritten every node).
-                self._e._consolidate_lessons_file(path, self._e._reflect_client(), self._e._embedder)
+                # prompts/parser travel WITH the client so a merge_system.md override and the run's
+                # configured structured-output parser reach the merge's adjudication call (I18/ADR-8).
+                prompts, parser = self._merge_prompt_opts()
+                self._e._consolidate_lessons_file(path, self._e._reflect_client(), self._e._embedder,
+                                                  parser=parser, prompts=prompts)
                 self._e._compact_lessons(path)
 
     def comparative_lessons(self, state: RunState, fp: list, exclude=()) -> tuple[list, list]:
@@ -553,6 +557,20 @@ class LessonMemory:
                 return c
         return None
 
+    def _merge_prompt_opts(self) -> tuple:
+        """(prompts, parser) for the hybrid+agent lesson merge. The PromptStore and the configured
+        structured-output parser live on the ROLES, not the engine (tasks.py wires
+        `researcher.prompts` from `prompt_dir`; LLMResearcher carries `parser` from
+        `settings.llm_parser`) — so unwrap the same researcher→inner→fallback→developer chain
+        `reflect_client` walks. (None, "tool_call") when nothing is wired (toy backends) — exactly
+        the defaults `agent_merge` assumed before these were threaded."""
+        r = getattr(self._e, "researcher", None)
+        chain = (r, getattr(r, "inner", None), getattr(r, "fallback", None),
+                 getattr(self._e, "developer", None))
+        prompts = next((p for o in chain if (p := getattr(o, "prompts", None)) is not None), None)
+        parser = next((p for o in chain if (p := getattr(o, "parser", None))), "tool_call")
+        return prompts, parser
+
     def causal_meta_note(self, final: RunState, best) -> Optional[str]:
         """LLM-distilled 'WHY the winner won' — a reusable causal note (the meta-note's real purpose,
         distinct from the case's raw config). Returns None on no-client / any error → caller falls back
@@ -582,11 +600,13 @@ class LessonMemory:
             return None
 
     @staticmethod
-    def consolidate_lessons_file(path: Path, client=None, embed=None) -> None:
+    def consolidate_lessons_file(path: Path, client=None, embed=None,
+                                 parser: str = "tool_call", prompts=None) -> None:
         """D2: rewrite lessons.jsonl through `consolidate_lessons` — duplicate claims merge into
         an evidence_count and a contradicted verdict is retired (the newest observation wins). When a
         `client` is wired, a hybrid-retrieval + agent pass ALSO merges paraphrase-level duplicates the
-        exact key misses. Atomic rewrite; best-effort (a hygiene failure must never fail the run)."""
+        exact key misses (`parser`/`prompts` configure that pass's structured-output parser and
+        merge_system override). Atomic rewrite; best-effort (a hygiene failure must never fail the run)."""
         try:
             from looplab.engine.memory import consolidate_lessons
             rows = []
@@ -597,7 +617,8 @@ class LessonMemory:
                     continue
                 if isinstance(o, dict):
                     rows.append(o)
-            merged = consolidate_lessons(rows, client=client, embed=embed)
+            merged = consolidate_lessons(rows, client=client, embed=embed,
+                                         parser=parser, prompts=prompts)
             if len(merged) < len(rows):
                 from looplab.core.atomicio import atomic_write_text
                 atomic_write_text(path, "".join(orjson.dumps(o).decode() + "\n" for o in merged))

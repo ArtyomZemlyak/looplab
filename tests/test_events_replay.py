@@ -169,6 +169,37 @@ def test_fold_reused_stage_marker_does_not_clobber_real_record():
     assert train2["status"] == "ok" and train2["seconds"] == 7200.0
 
 
+# D14 — node_reset must clear the per-seed confirm memo along with confirmed_mean/std/seeds: the
+# confirm phase memo-skips every seed already in confirm_seed_results, so a stale post-reset entry
+# would re-emit node_confirmed from PRE-reset seed metrics for the post-reset code without running
+# a single seed.
+def test_fold_node_reset_clears_confirm_seed_memo():
+    from looplab.core.models import Event
+    base = [Event(type="run_started", data={"run_id": "r", "task_id": "t", "direction": "min"}),
+            Event(type="node_created", data={"node_id": 0, "parent_ids": [], "operator": "draft",
+                                             "idea": {"operator": "draft", "params": {}}, "code": "c"}),
+            Event(type="node_created", data={"node_id": 1, "parent_ids": [], "operator": "draft",
+                                             "idea": {"operator": "draft", "params": {}}, "code": "c"}),
+            Event(type="node_evaluated", data={"node_id": 0, "metric": 1.0, "eval_seconds": 1.0}),
+            Event(type="confirm_eval", data={"node_id": 0, "seed": 1, "eval_seconds": 2.0, "metric": 0.4}),
+            Event(type="confirm_eval", data={"node_id": 1, "seed": 1, "eval_seconds": 2.0, "metric": 0.9}),
+            Event(type="node_confirmed", data={"node_id": 0, "mean": 0.4, "std": 0.0, "seeds": 1})]
+    st = fold(base)
+    assert st.confirm_seed_results[0] == {1: 0.4}
+    reset = Event(type="node_reset", data={"node_id": 0, "from_stage": "eval"})
+    st2 = fold(base + [reset])
+    assert 0 not in st2.confirm_seed_results        # memo gone: a later confirm re-runs the seeds
+    assert st2.nodes[0].confirmed_mean is None
+    assert st2.confirm_seed_results[1] == {1: 0.9}  # another node's memo is untouched
+    # a POST-reset confirm_eval repopulates the memo, and its cost is counted again (the seed
+    # genuinely re-ran) — order-tolerant and deterministic across re-folds.
+    post = Event(type="confirm_eval", data={"node_id": 0, "seed": 1, "eval_seconds": 3.0, "metric": 0.7})
+    st3 = fold(base + [reset, post])
+    assert st3.confirm_seed_results[0] == {1: 0.7}
+    assert st3.total_eval_seconds == 1.0 + 2.0 + 2.0 + 3.0
+    assert fold(base + [reset, post]).model_dump() == st3.model_dump()   # determinism
+
+
 # confirm-seed eval cost is first-occurrence accounted (like node terminals): a duplicated/
 # double-folded confirm_eval must not inflate total_eval_seconds or make the budget order-sensitive.
 def test_fold_confirm_eval_cost_deduped_on_duplicate():

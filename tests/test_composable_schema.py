@@ -286,6 +286,41 @@ def test_declare_stages_respects_protect_list():
     assert "looplab_stages.json" not in t.files
 
 
+def test_declare_stages_refuses_when_operator_declared_the_pipeline():
+    # P12: on a task with operator `cmd.stages` the engine runs the operator pipeline VERBATIM and
+    # ignores the Developer manifest — "declaring" one must refuse loudly with the real route to a
+    # fix (edit the stage's script), not succeed into a file nobody reads (the repaired node would
+    # otherwise re-run the identical pipeline until abandon).
+    from looplab.adapters.repo_developer import RepoWriteTools
+    t = RepoWriteTools(surface=["**/*"], protected=[], operator_stages=True,
+                       editables=[{"name": ".", "path": "/tmp", "surface": ["**/*"], "protect": []}])
+    msg = t.execute("declare_stages", {"stages": [{"name": "train", "command": ["python", "t.py"]}]})
+    assert msg.startswith("(refused") and "OPERATOR-declared" in msg and "script" in msg
+    assert "looplab_stages.json" not in t.files
+    # ...and the tool's own description warns up front, so the model needn't burn a call to learn it
+    spec = next(s for s in t.specs() if s["function"]["name"] == "declare_stages")
+    assert "refuse" in spec["function"]["description"]
+    # a task WITHOUT operator stages keeps the plain description (no scary false warning)
+    t2 = RepoWriteTools(surface=["**/*"], protected=[],
+                        editables=[{"name": ".", "path": "/tmp", "surface": ["**/*"], "protect": []}])
+    spec2 = next(s for s in t2.specs() if s["function"]["name"] == "declare_stages")
+    assert "OPERATOR-declared" not in spec2["function"]["description"]
+
+
+def test_write_refusal_distinguishes_data_mount_from_eval_protection():
+    # The protect list guards BOTH the operator's eval files and read-only data mounts (defensively —
+    # see RepoTask._protected_names); the refusal must name the REAL reason so the model takes the
+    # right next step (write derived data elsewhere vs leave the scorer alone).
+    from looplab.adapters.repo_developer import RepoWriteTools
+    t = RepoWriteTools(surface=["**/*"], protected=["dataset", "dataset/**", "grader.py"],
+                       data_mounts=["dataset"],
+                       editables=[{"name": ".", "path": "/tmp", "surface": ["**/*"], "protect": []}])
+    mount = t.execute("write_file", {"path": "dataset/x.csv", "content": "a,b\n"})
+    assert "read-only data mount" in mount and "derived" in mount
+    evalp = t.execute("write_file", {"path": "grader.py", "content": "x = 1\n"})
+    assert "operator owns the eval" in evalp
+
+
 # --------------------------------------------------------------------------- operator cmd.stages
 def test_cmd_stages_only_validates_and_is_canonical(tmp_path):
     # mega-review fix: the documented {"stages": [...]} cmd form used to be REJECTED ('command Field

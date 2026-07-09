@@ -21,7 +21,8 @@ from looplab.core.models import Idea, Node, RunState
 from looplab.core.parse import ParseError, parse_structured
 from looplab.core.prompts import PromptStore, render
 from looplab.agents.roles import (
-    _clamp_fill, _hypothesis_system_suffix, _state_brief, collect_hint_cues)
+    _OPERATOR_NOTE, _attention_points, _clamp_fill, _hypothesis_system_suffix,
+    _researcher_capability_suffix, _state_brief, collect_hint_cues)
 
 
 # The "your idea space is the WHOLE experiment / the Developer owns HOW" guidance, as worded for
@@ -91,30 +92,30 @@ def _force_emit(client, messages: list, emit_spec: dict) -> Optional[dict]:
 
 _PLAN_TOOL_NAME = "update_plan"
 
-# G2 read-dedup classification (exact tool names, not substrings — a substring blocklist classified
-# revert_file/git_checkout/reset_node as "read-only" and dedup-froze cursor-polls like read_output).
-# _DEDUP_SAFE: readers whose (name,args)->result is STABLE within one loop unless a tool from the
-# "everything else" class runs — safe to suppress an exact repeat AND to keep cached across turns.
-_DEDUP_SAFE = frozenset((
-    "read_file", "grep", "find_files", "list_dir",              # repo scouts / assistant fs readers
-    "repo_read", "repo_list", "repo_grep",                      # cross-run repo scouts
-    "read_note", "list_notes", "recall_notes", "kb_search",     # knowledge base
-    "pkg_info", "py_api", "read_installed", "grep_installed",   # env inspector (static packages)
-    "list_themes", "search_lessons",                            # lesson store (frozen within a loop)
-))
-# _READ_ONLY_VOLATILE: read-only but legitimately TIME-VARYING (polls, git state, live-run readers,
-# hardware) — never deduped (each call may see new data: dedup here broke background-job polling and
-# tripped the StuckDetector on evolving observations) and never invalidates the cache (mutates nothing).
-_READ_ONLY_VOLATILE = frozenset((
-    "read_output", "list_background",                           # background-command cursor polls
-    "git_status", "git_diff", "git_log",                        # working-tree state
-    "gpu_info",                                                 # hardware utilization varies
-    "list_runs", "list_all_runs", "read_run", "read_run_code", "read_run_experiment",
-    "read_run_logs", "read_run_trace", "list_experiments", "list_sibling_runs",
-    "read_sibling_code", "read_sibling_experiment", "read_code", "read_experiment",
-    "read_asset", "read_logs", "data_profile", "data_schema",
-    "find_analogous", "find_analogous_across_runs",
-))
+# The hard per-result size bound every tool observation passes through before it reaches the
+# model. When it actually truncates, an EXPLICIT marker replaces the tail (P3, docs/PROMPT_REVIEW.md):
+# the silent head-cut destroyed every paginating tool's resume pointer and left the model acting on
+# code it never saw. `{n}` = exact number of characters cut.
+_RESULT_CAP = 4000
+_TRUNC_NOTE = ("\n…[truncated by the tool-result cap — {n} chars omitted; "
+               "re-request a narrower range]")
+
+
+def _cap_tool_result(result: str, cap: int = _RESULT_CAP) -> str:
+    """Bound a tool result to `cap` chars, appending `_TRUNC_NOTE` (inside the cap) when it actually
+    truncates — so the model KNOWS the reply is partial and can re-request a narrower range instead
+    of trusting a silently amputated page. Idempotent: an already-capped string passes through, so
+    the loop can apply it as a final belt-and-braces bound too. The tiny fixed-point loop settles the
+    marker's own length (the omitted-count digits shift the split by a char or two)."""
+    if len(result) <= cap:
+        return result
+    keep = cap
+    while True:
+        note = _TRUNC_NOTE.format(n=len(result) - keep)
+        new_keep = max(0, cap - len(note))
+        if new_keep == keep:
+            return result[:keep] + note
+        keep = new_keep
 
 
 def _plan_spec() -> dict:
@@ -196,7 +197,8 @@ def drive_tool_loop(client, tools, messages: list, emit_spec: dict, *,
         raises is swallowed (transparency must not change behaviour).
       - `on_tool_result(name, args, result)` (optional): a per-tool-call DATA hook invoked after a
         retrieval tool actually EXECUTES, with the parsed args and the 4000-char-capped result
-        string (exactly what the tool message will carry) — so a caller can record provenance
+        string (exactly what the tool message will carry, truncation marker included) — so a caller
+        can record provenance
         (the DeepResearcher's consulted-sources ledger) without re-implementing the loop. Not
         called for the emit, the `update_plan` tool, or a cancel-stubbed call. Unlike
         `on_step`/`on_text` this is data collection, not transparency, so exceptions PROPAGATE
@@ -257,15 +259,6 @@ def drive_tool_loop(client, tools, messages: list, emit_spec: dict, *,
     emit_rejects = 0                    # bad emits bounced back for a re-emit (validate + emit_retries)
     tool_turns = 0                      # G: investigation turns, for the emit_after soft-convergence nudge
     emit_nudged = False
-    # G2: (tool,args) -> FIRST capped result, for read-dedup + stuck parity. Prefer the NODE-scoped
-    # cache (shared across this node's phases via handoff_scope) so a file an earlier phase already read
-    # isn't re-read here; falls back to a loop-local dict when no scope is active (aux loops, tests).
-    read_seen: dict = _read_cache_ctx.get() if _read_cache_ctx.get() is not None else {}
-    # Keys populated by THIS loop (this phase). A hit on a key NOT in here is a CROSS-phase hit: the
-    # first result lives in an earlier phase's discarded `messages`, so the terse "use the earlier
-    # output" stub would point at something this phase can't see — we re-serve the cached content
-    # instead (see the hit branch below). A same-loop repeat keeps the token-saving stub.
-    local_dedup_keys: set = set()
     exhausted = False                    # ran out of turns/time (vs stalled/stuck/cancelled)
     turns = itertools.count() if max_turns is None or max_turns <= 0 else range(max_turns)
     for turn_idx in turns:
@@ -286,19 +279,12 @@ def drive_tool_loop(client, tools, messages: list, emit_spec: dict, *,
             from looplab.core.context_budget import DEFAULT_SUMMARY_CHARS
             _budget = DEFAULT_SUMMARY_CHARS
         if _budget:
-            _pre_compact_len = len(messages)
             if auto_summary:            # C2: summarize the stale middle once the history grows long
                 from looplab.core.context_budget import compact_history
                 messages[:] = compact_history(messages, _budget, summarize)
             else:                       # H4: else just middle-truncate stale tool output
                 from looplab.core.context_budget import truncate_history
                 messages[:] = truncate_history(messages, _budget)
-            if len(messages) < _pre_compact_len and read_seen:
-                # Compaction summarized away the very outputs the dedup stubs point at ("use the
-                # earlier output") — the model could never recover them. Forget the cache so the
-                # next re-read executes for real.
-                read_seen.clear()
-                local_dedup_keys.clear()
         # C1: re-surface the agent's own plan periodically so a long loop can't drift off-goal. A
         # `user`-role reminder, not `system`: the plan is verbatim MODEL output (from update_plan
         # args), so a `system` reinjection would let content the model was steered into by injected
@@ -357,7 +343,6 @@ def drive_tool_loop(client, tools, messages: list, emit_spec: dict, *,
                 # Valid-but-non-object JSON ("[0]", "\"x\"", "3") would otherwise reach finalize()/
                 # tools.execute() and blow up on .get(); a junk model must never crash the run.
                 args = {}
-            stuck_obs = None      # what StuckDetector sees this turn (dedup hit overrides with the 1st result)
             if name == emit_name:
                 # Bounce a malformed emit BACK to the model with the concrete error instead of silently
                 # accepting a degraded/empty idea (the "fallback (agent parse failed)" no-op nodes that
@@ -390,76 +375,39 @@ def drive_tool_loop(client, tools, messages: list, emit_spec: dict, *,
                 current_plan = _render_plan(args) or current_plan
                 result = "plan updated"
             else:
-                # G2: read-dedup anti-thrash. A model (esp. high-reasoning, on a big repo) re-issues the
-                # SAME read/list/grep dozens of times — live rubert node 0: 92% of 434 reads were re-reads of
-                # just 35 files, burning the whole turn budget re-ingesting identical content. Suppress an
-                # EXACT repeat of a call from the _DEDUP_SAFE allowlist (stable file/kb/env readers ONLY —
-                # a substring blocklist misclassified revert_file/git_checkout as read-only and froze
-                # cursor-polls like read_output): return a short stub instead of re-executing + re-sending
-                # the same ≤4KB. Loop-local, so a fresh propose/node reads normally. Volatile read-only
-                # tools (polls, git state, run readers) are never deduped AND never invalidate; every
-                # other tool (writes, unknown/MCP names) conservatively clears the cache.
-                _dedupable = name in _DEDUP_SAFE
-                _dk = (name, json.dumps(args, sort_keys=True, default=str)) if _dedupable else None
-                # The observation the StuckDetector sees. On a dedup hit it's the FIRST (real) result, not
-                # the stub — so a genuinely-stuck model repeating one call still trips stuck at the SAME
-                # count (the stub is only what we send the model to save tokens; it must not offset B1).
-                stuck_obs = None
-                if _dk is not None and _dk in read_seen:
-                    stuck_obs = read_seen[_dk]
-                    if _dk in local_dedup_keys:
-                        # SAME phase: the first result is still in `messages`, so a terse stub saves
-                        # tokens and the model can reuse the output it already has.
-                        _step(turn=turn_idx, tool=name, arg="(repeat suppressed)")
-                        result = (f"(already ran `{name}` with these exact args earlier this phase — "
-                                  f"result unchanged, not re-sent. Use the earlier output; to learn "
-                                  f"more read a DIFFERENT file/range, else call `{emit_name}`.)")
-                    else:
-                        # CROSS-phase hit (node-scoped cache): an EARLIER phase read this, but its
-                        # output is NOT in this phase's fresh `messages` (only the lossy handoff brief
-                        # is). Re-serve the cached CONTENT verbatim — otherwise the phase that was told
-                        # to read a file (e.g. implement editing what plan read) would edit blind. The
-                        # content is already in hand, so this costs nothing and re-reads no file.
-                        _step(turn=turn_idx, tool=name, arg="(cached from an earlier phase)")
-                        result = read_seen[_dk]
-                        local_dedup_keys.add(_dk)   # now present in THIS phase too -> stub on re-repeat
-                    if on_tool_result is not None:
-                        on_tool_result(name, args, result)
-                else:
-                    # Surface what the agent is about to do BEFORE the (possibly slow) tool runs, so a
-                    # live progress view advances turn-by-turn instead of jumping only at the end.
-                    _step(turn=turn_idx, tool=name,
-                          arg=next((str(v) for v in (args or {}).values() if v), ""))
-                    # First-class TOOL observation (Langfuse-style): input=args, output=result, nested
-                    # under the active operation span next to the generations that decided the call.
-                    with tracing.tool(name, args) as _tool_obs:
-                        result = tools.execute(name, args) if tools is not None else f"(unknown tool: {name})"
-                        _tool_obs.output(result)
-                    if read_seen and not _dedupable and name not in _READ_ONLY_VOLATILE:
-                        # A write/edit/revert/checkout/… (or an unknown/MCP tool — assume the worst) may
-                        # have CHANGED files on disk (the Developer edits then re-reads its own code).
-                        # Invalidate the read-dedup so a subsequent re-read returns the FRESH content,
-                        # never a stale "already read" stub. Volatile READ-ONLY tools (git_status, polls)
-                        # mutate nothing, so they neither dedup nor invalidate.
-                        read_seen.clear()
-                        local_dedup_keys.clear()
-                    # Cap once, up front, so the provenance hook receives EXACTLY what the tool message
-                    # below will carry (a single expression, not two kept-in-sync copies).
-                    result = str(result)[:4000]
-                    if _dk is not None:               # remember the first result for dedup + stuck parity
-                        read_seen[_dk] = result
-                        local_dedup_keys.add(_dk)     # populated by THIS phase -> a repeat here gets the stub
-                    if on_tool_result is not None:      # provenance hook: exceptions propagate
-                        on_tool_result(name, args, result)
-            result = str(result)[:4000]
+                # Every tool call ALWAYS executes and returns fresh content. The G2 read-dedup cache
+                # that used to stub an exact repeat ("already ran … use the earlier output") was
+                # REMOVED by explicit operator decision (P3, docs/PROMPT_REVIEW.md): the stub pointed
+                # at content the model could no longer see after compaction/phase handoff, and the
+                # cached copy silently went stale — always read what is asked. The StuckDetector
+                # below is the loop-safety net now: a model that thrashes on the SAME call with the
+                # SAME result trips B1 and the loop force-emits instead of spinning.
+                # Surface what the agent is about to do BEFORE the (possibly slow) tool runs, so a
+                # live progress view advances turn-by-turn instead of jumping only at the end.
+                _step(turn=turn_idx, tool=name,
+                      arg=next((str(v) for v in (args or {}).values() if v), ""))
+                # First-class TOOL observation (Langfuse-style): input=args, output=result, nested
+                # under the active operation span next to the generations that decided the call.
+                with tracing.tool(name, args) as _tool_obs:
+                    result = tools.execute(name, args) if tools is not None else f"(unknown tool: {name})"
+                    _tool_obs.output(result)
+                # Cap once, up front — appending an explicit truncation marker when the cap actually
+                # bites (P3) — so the provenance hook receives EXACTLY what the tool message below
+                # will carry (a single expression, not two kept-in-sync copies).
+                result = _cap_tool_result(str(result))
+                if on_tool_result is not None:      # provenance hook: exceptions propagate
+                    on_tool_result(name, args, result)
+            result = _cap_tool_result(str(result))   # idempotent final bound (cancel/plan stubs too)
             messages.append({"role": "tool", "tool_call_id": tc.get("id", ""),
                              "name": name, "content": result})
             if stuck is not None:       # B1: flag no-progress on the cheapest signal (a repeat)
-                stuck_reason = stuck.push(name, args, stuck_obs if stuck_obs is not None else result) or stuck_reason
+                stuck_reason = stuck.push(name, args, result) or stuck_reason
         # G: soft convergence. A model that keeps issuing DIFFERENT tool calls never trips the
         # StuckDetector (it keys on repeats) and, with max_turns unlimited, investigates until the budget
         # runs out (live GLM node 63: one idea's worth of intent, then ~200 more reads). Nudge it to
         # nudge at `emit_after` tool turns; FORCE the emit at `emit_force` if it still hasn't committed.
+        # The nudge wording is ROLE-NEUTRAL: this loop also drives the strategist/pilot/triage emits
+        # (via loop_opts_from_settings), where "your best idea / next node" would be nonsense.
         if (emit_after or emit_force) and tools is not None:
             tool_turns += 1
             if emit_force and tool_turns >= emit_force:
@@ -470,8 +418,8 @@ def drive_tool_loop(client, tools, messages: list, emit_spec: dict, *,
                 emit_nudged = True
                 messages.append({"role": "user",
                                  "content": f"You have investigated enough ({tool_turns} tool turns). STOP "
-                                            f"exploring and call `{emit_name}` NOW with your best idea — "
-                                            "you can refine on the next node."})
+                                            f"exploring and call `{emit_name}` NOW with your best final "
+                                            "output."})
         if stuck_reason:
             # No progress — stop gracefully WITH a result instead of spinning forever. Nudge once,
             # then force the structured emit; if the client can't force it, fall through to fallback.
@@ -597,29 +545,24 @@ def _flatten_transcript(messages) -> str:
 # (unit tests, aux single-shot loops outside a node build). Isolated per node: each build gets a
 # fresh list, and a parallel build runs in its own contextvars context.
 _handoff_ctx: contextvars.ContextVar = contextvars.ContextVar("LOOPLAB_handoff", default=None)
-# Node-scoped READ CACHE (companion to the ledger): (tool,args)->first result for _DEDUP_SAFE readers,
-# shared across a node's phases. drive_tool_loop's own read-dedup is loop-local, so stages/plan/implement
-# each re-read the same files from scratch; hoisting the cache to the node scope makes a re-read of a
-# file an EARLIER phase already read return the cached content instead of a fresh tool round-trip — the
-# deterministic half of the handoff (the brief only *discourages* re-reading; this makes it cheap).
-_read_cache_ctx: contextvars.ContextVar = contextvars.ContextVar("LOOPLAB_readcache", default=None)
+# NOTE: the node-scoped READ CACHE that used to accompany this ledger (a (tool,args)->result map
+# shared across a node's phases) was removed with the loop's read-dedup (P3, docs/PROMPT_REVIEW.md):
+# every read now executes for real, in every phase — the brief above only *discourages* re-reading.
 
 
 @contextlib.contextmanager
 def handoff_scope(enabled: bool = True):
-    """Open the per-node phase-coordination scope: a handoff ledger (briefs flow phase→phase) AND a
-    shared read cache (a file read in one phase isn't re-read in the next). `enabled=False` is a no-op
-    (the master switch, `Settings.phase_handoff_summary`), so run_phase / drive_tool_loop behave exactly
-    as before — per-loop dedup, no briefs."""
+    """Open the per-node phase-coordination scope: a handoff ledger (briefs flow phase→phase).
+    `enabled=False` is a no-op (the master switch, `Settings.phase_handoff_summary`), so run_phase /
+    drive_tool_loop behave exactly as before — no briefs."""
     if not enabled:
         yield
         return
-    tok, tok_rc = _handoff_ctx.set([]), _read_cache_ctx.set({})
+    tok = _handoff_ctx.set([])
     try:
         yield
     finally:
         _handoff_ctx.reset(tok)
-        _read_cache_ctx.reset(tok_rc)
 
 
 def run_phase(client, tools, messages, emit_spec, *, label: str, next_label: str = "the next phase",
@@ -723,23 +666,32 @@ class ToolUsingResearcher:
     contract: malformed emits are sanitized, and parse/transport failures degrade to a safe
     bounds-filled Idea instead of crashing the run."""
 
+    # P5 (docs/PROMPT_REVIEW.md): name only tools this role may actually have — the default
+    # Researcher toolset has NO `read_file` (that's a RepoScoutTools name); its paginating reader
+    # is `repo_read`, present on repo tasks only — and reconcile "you HAVE it" with the loop's
+    # explicit truncation marker (a marked reply is PARTIAL, so the next range is new content).
     _SYSTEM = ("You are an ML researcher driving experiments to improve the objective. Investigate "
                "PROPERLY, then call `emit` exactly once with your final Idea — that ends your turn.\n"
                "Work FOCUSED, not scattered: pick the most promising direction/hypothesis from the state "
                "brief and RESEARCH THAT — read the relevant code and prior experiments fully enough to "
                "propose a correct, grounded experiment (a half-baked idea from shallow reading wastes a "
-               "whole node). But read EFFICIENTLY: read_file paginates (start_line/lines) — read a file "
-               "ONCE, end to end if needed, and do NOT re-read a file/grep you already ran; if a read "
-               "returned content, you HAVE it. When you understand the change you want and can name its "
-               "params, STOP and emit (operator, params, rationale, and a short reusable `theme` slug "
-               "grouping related experiments, e.g. \"loss-fn\"); you refine on the NEXT node.\n"
+               "whole node). But read EFFICIENTLY: read a file ONCE, end to end if needed, and do NOT "
+               "re-read a file/grep you already ran — if a read returned content, you HAVE it. Use the "
+               "file-reading tools you actually have (on repo tasks `repo_read` paginates); paginated "
+               "readers end a truncated reply with a resume marker — if a reply ends with a truncation "
+               "marker, request the NEXT range instead of re-reading from the start. When you understand "
+               "the change you want and can name its params, STOP and emit (operator, params, rationale, "
+               "and a short reusable `theme` slug grouping related experiments, e.g. \"loss-fn\"); you "
+               "refine on the NEXT node.\n"
+               + _OPERATOR_NOTE + "\n"
                + _IDEA_SPACE_TOOL)
 
     def __init__(self, client, tools, space_hint: str = "",
                  bounds: Optional[dict] = None, parser: str = "tool_call",
                  max_turns: int = 0, prompts: Optional[PromptStore] = None,
                  context_budget_chars: int | None = None, time_budget_s: float = 0.0,
-                 loop_opts: Optional[dict] = None):
+                 loop_opts: Optional[dict] = None, offer_sweep: bool = True,
+                 handoff: bool = True):
         self.client = client
         self.tools = tools          # object with .specs() and .execute(name, args)
         self.space_hint = space_hint
@@ -749,6 +701,13 @@ class ToolUsingResearcher:
         self.time_budget_s = time_budget_s  # 0 = no wall-clock cap (Settings.agent_time_budget_s)
         self.prompts = prompts
         self.context_budget_chars = context_budget_chars   # H4: cap the growing tool-call history
+        # P6: include the sweep offer only when the active Developer implements `idea.space`
+        # (make_roles decides; default True keeps direct constructions byte-compatible).
+        self.offer_sweep = offer_sweep
+        # P25: contribute the propose→develop handoff brief only when a run_phase-based Developer
+        # (the in-house repo developer's stages/plan/implement phases) will actually READ it;
+        # False skips the per-node summary LLM call nobody consumes on single-shot developers.
+        self.handoff = handoff
         # Collapse the two sources of context_budget_chars to ONE, here, once. loop_opts_from_settings
         # injects it into loop_opts AND it arrives as an explicit ctor kwarg; passing BOTH to run_phase
         # would hand it the keyword twice -> TypeError, caught by propose()'s broad except -> silent
@@ -832,8 +791,14 @@ class ToolUsingResearcher:
         hyp = _hypothesis_system_suffix(getattr(self, "track_hypotheses", True))
         messages = [
             {"role": "system",
+             # P6/P8: the shared capability suffix (sweep offer — gated — + eval_timeout) and the
+             # hardware attention points reach the DEFAULT researcher too, appended AFTER the
+             # render() so a `tool_researcher_system.md` override keeps them (same pattern as
+             # LLMResearcher / LLMDeveloper).
              "content": render(self.prompts, "tool_researcher_system", self._SYSTEM)
-                        + self.space_hint + hyp},
+                        + "\n" + _researcher_capability_suffix(getattr(self, "offer_sweep", True))
+                        + self.space_hint + hyp
+                        + "\n\n" + _attention_points()},
             {"role": "user", "content": _state_brief(state, parent,
                                                      digest_cap=getattr(self, "_digest_cap", 0),
                                                      hyp_order=getattr(self, "_hyp_order", None))
@@ -844,9 +809,16 @@ class ToolUsingResearcher:
         try:
             # context_budget_chars is folded into self.loop_opts once in __init__ (see there) — pass the
             # merged opts straight through, no per-call re-merge, no double-keyword collision.
+            # P25: `handoff` is True only when a run_phase-based (repo) Developer follows — its
+            # stages/plan/implement phases read the brief; the single-shot developers never do,
+            # so no summary call is spent there and the label names the developer that ACTUALLY runs.
             return run_phase(
                 self.client, self.tools, messages, self._emit_spec(),
-                label="Researcher·propose", next_label="the Developer (stages → plan → implement)",
+                label="Researcher·propose",
+                next_label=("the Developer (stages → plan → implement)"
+                            if getattr(self, "handoff", True)
+                            else "the Developer (single-shot implement)"),
+                handoff=getattr(self, "handoff", True),
                 max_turns=self.max_turns, time_budget_s=self.time_budget_s,
                 finalize=self._finalize, fallback=self._fallback,
                 validate=self._validate_emit, **self.loop_opts)

@@ -67,7 +67,8 @@ before launching, and:
 - reads **where your data lives** straight from the goal — one path or several, a file or a folder —
   and authors the data mounts, so you don't need `--data` (it remains an optional shortcut);
 - defaults the backend to `llm` for a generative kind (`dataset`/`repo`/`mlebench_real`/…); offline
-  kinds (`quadratic`/…) keep their default and still run with no model.
+  kinds (`quadratic`/…) keep their default and still run with no model. (The Web UI's genesis card
+  applies the same default — an explicit backend, wherever set, always wins.)
 
 Genesis needs a reachable model (it reasons about your goal). Add `--no-genesis` to build the task
 from `--kind`/`--set` alone (offline), or run a complete file with no `--goal`.

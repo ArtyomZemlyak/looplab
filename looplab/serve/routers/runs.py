@@ -183,10 +183,9 @@ def build_router(srv) -> APIRouter:
 
         A SINGLE-command eval tees to `eval.log`; a MULTI-STAGE eval (data_prep → train → score) tees
         each stage to its OWN `<stage>.log` (command_eval `_log(f"{name}.log")`) and never writes
-        `eval.log`. Surfacing only `eval.log` left the live "Training / eval log" panel BLANK for the
-        whole of a multi-stage training run while `train.log` filled on disk — so also return every
-        non-setup `*.log` as ordered `stages`, and fall `eval` back to them when there's no single
-        eval.log (keeps the old single-`<pre>` UI showing the live training output)."""
+        `eval.log`. So `eval` carries ONLY eval.log's tail (empty for a multi-stage node — deliberately
+        NO fallback duplication into it), and the per-stage tails come back as the ordered `stages`
+        map, which the UI's log panel renders per stage."""
         rd = _run_dir(run_id)
         nd = _node_dir(rd, nid)
         # Clamp the client-controlled tail so a hostile/large value can't force an unbounded read; and
@@ -204,19 +203,35 @@ def build_router(srv) -> APIRouter:
                 return ""
             return b.decode("utf-8", "replace")
         # Per-stage logs — a multi-stage eval tees each stage to `<name>.log`. Bound the set to the
-        # node's DECLARED stages (its `looplab_stages.json` manifest) plus the engine's reserved,
-        # operator-appended `score` stage, in pipeline order. NOT a bare `*.log` glob: that would
-        # surface any stray log the training code writes to its cwd (a framework's own debug.log) as a
-        # phantom stage band, and let an unbounded file count inflate the response. Each `<name>.log` is
+        # node's DECLARED stages, in pipeline order. NOT a bare `*.log` glob: that would surface any
+        # stray log the training code writes to its cwd (a framework's own debug.log) as a phantom
+        # stage band, and let an unbounded file count inflate the response. Each `<name>.log` is
         # tailed independently (a missing/racing one just yields "").
+        # OPERATOR-declared stages first: when the task's `cmd` carries `stages`, those ARE the
+        # canonical pipeline (Engine._resolve_stages ignores the Developer's manifest) and no `score`
+        # stage is appended — the LAST operator stage prints the metric. Their names come from the
+        # run's verbatim task.snapshot.json (normalize_task maps composable `cmd` → `eval`), so live
+        # logs surface for operator cmd.stages pipelines too — the very mode the per-stage logs fix
+        # targeted (mega-review D7).
         stage_names: list[str] = []
         try:
-            man = json.loads((nd / "looplab_stages.json").read_text("utf-8"))
-            stage_names = [str(s["name"]) for s in (man.get("stages") or []) if s.get("name")]
-        except (OSError, ValueError, TypeError):
+            from looplab.adapters.tasks import normalize_task
+            snap = json.loads((rd / "task.snapshot.json").read_text("utf-8"))
+            es = (normalize_task(snap) if isinstance(snap, dict) else {}).get("eval") or {}
+            stage_names = [str(s["name"]) for s in (es.get("stages") or [])
+                           if isinstance(s, dict) and s.get("name")]
+        except Exception:  # noqa: BLE001 - no/foreign/kind-less snapshot -> fall back to the manifest
             pass
-        if "score" not in stage_names:      # the engine appends a protected `score` stage post-manifest
-            stage_names.append("score")
+        if not stage_names:
+            # Single-command cmd: the Developer's `looplab_stages.json` manifest declares the PRECEDING
+            # stages, and the engine appends the protected, operator-owned `score` stage after them.
+            try:
+                man = json.loads((nd / "looplab_stages.json").read_text("utf-8"))
+                stage_names = [str(s["name"]) for s in (man.get("stages") or []) if s.get("name")]
+            except (OSError, ValueError, TypeError):
+                pass
+            if "score" not in stage_names:  # the engine appends a protected `score` stage post-manifest
+                stage_names.append("score")
         stages = {name: body for name in stage_names if (body := _tail(f"{name}.log"))}
         return {"eval": _tail("eval.log"), "stages": stages, "setup": _tail("setup.log"),
                 "run_setup": (rd / "run_setup.log").read_text("utf-8", "replace")

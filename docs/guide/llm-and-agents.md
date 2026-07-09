@@ -167,27 +167,25 @@ preview. Two tools make this practical:
 ## Phase-handoff summaries
 
 Each LLM phase in a node build re-explores the same repo — the stages phase maps it, then plan reads
-it again, then implement reads it again. **`phase_handoff_summary`** (on by default) cuts that with two
-node-scoped mechanisms that share one `handoff_scope` the engine opens around each build:
+it again, then implement reads it again. **`phase_handoff_summary`** (on by default) cuts that with
+**handoff briefs**, one `handoff_scope` the engine opens around each build: when an *exploration*
+phase emits, ONE extra LLM call distills its whole transcript — the repo structure it mapped, the
+files/data/APIs it confirmed, the decisions it made — into a tight brief injected into the **next**
+phase's prompt, which is told to *trust it and not re-read*. The brief flows across the whole build
+and **across the role boundary**: `Researcher·propose → Developer·stages → plan → implement`. Only
+the exploration phases contribute (the ledger stays ≤3 briefs — no K-step bloat); terminal phases (a
+single-session implement, each implement step, a repair) **consume** the briefs but don't summarize,
+so there's no wasted call on the tail. The summary is best-effort (any error → the next phase just
+runs without it), skipped for a phase that barely read anything, and produced by the Researcher's
+propose phase only when the in-house repo Developer follows it (a single-shot developer never reads
+the ledger, so the call would be wasted).
 
-- **Handoff briefs.** When an *exploration* phase emits, ONE extra LLM call distills its whole
-  transcript — the repo structure it mapped, the files/data/APIs it confirmed, the decisions it made —
-  into a tight brief injected into the **next** phase's prompt, which is told to *trust it and not
-  re-read*. The brief flows across the whole build and **across the role boundary**:
-  `Researcher·propose → Developer·stages → plan → implement`. Only the three exploration phases
-  contribute (the ledger stays ≤3 briefs — no K-step bloat); terminal phases (a single-session
-  implement, each implement step, a repair) **consume** the briefs but don't summarize, so there's no
-  wasted call on the tail. The summary is best-effort (any error → the next phase just runs without it)
-  and skipped for a phase that barely read anything.
-- **A shared read cache.** The briefs only *discourage* re-reading; the read cache makes it *cheap*.
-  `drive_tool_loop`'s read-dedup is normally loop-local (it resets each phase), so hoisting it to the
-  node scope means a `read_file`/`grep`/`list_dir` an *earlier* phase already ran returns the cached
-  content instead of a fresh tool round-trip — the deterministic half of the win. A write in a later
-  phase invalidates it, exactly as the in-loop dedup does.
-
-Together they attack the biggest source of tool-call thrash (stages/plan/implement each re-reading the
-repo). A parallel node build gets its own scope; every phase runs through the shared `run_phase`
-wrapper, so with the setting off it's byte-identical to a plain `drive_tool_loop`.
+There is deliberately **no read cache**: every read tool call executes and returns fresh content
+(a result that exceeds the ~4000-char tool-result cap is truncated with an explicit
+`…[truncated by the tool-result cap …]` marker so the agent knows to re-request a narrower range);
+the `StuckDetector` remains the safety net against true repeat loops. A parallel node build gets its own
+scope; every phase runs through the shared `run_phase` wrapper, so with the setting off it's
+byte-identical to a plain `drive_tool_loop`.
 
 ## Agentic auxiliary steps
 
@@ -223,6 +221,28 @@ Give the agentic Researcher extra context and tools:
 | `all_runs_tools` | (on) Read-only tools over EVERY run on the machine, across ALL tasks — read any experiment's code + result to reuse it |
 | `literature_search` | An arXiv search tool (network-optional) |
 | `web_search` | Web search/fetch for the Deep-Research stage (network-optional) |
+
+### Prompt override keys (`prompt_dir`)
+
+Every built-in system prompt below can be replaced by dropping a `<key>.md` file into `prompt_dir`.
+Files are **hot-reloaded** — re-read on every use, so you can tune a prompt mid-run without a
+restart — and rendered with `string.Template` **`$var`** substitution (leading YAML frontmatter is
+stripped). A missing file falls back to the built-in default.
+
+| Key | Who uses it |
+|---|---|
+| `researcher_system` | The plain (non-tool) LLM Researcher's system prompt |
+| `developer_system` | The LLM Developer (both `implement` and `repair`) |
+| `developer_repair_prefix` | Short prefix prepended to `developer_system` on repair calls |
+| `tool_researcher_system` | The tool-using Researcher — the default agentic Researcher |
+| `strategist_system` | The plain LLM Strategist (meta-control decisions) |
+| `tool_strategist_system` | The agent (tool-using) Strategist |
+| `pilot_system` | The unified agent's action pilot (chooses the next macro action) |
+| `triage_system` | The unified agent's crash triage (retry / repair / abandon) |
+| `foresight_system` | The foresight ranker (predict-before-execute idea/hypothesis prioritization) |
+| `bestofn_judge_system` | The best-of-N judge (picks the best of N candidate implementations) |
+| `merge_system` | The hybrid-merge adjudicator (lesson & hypothesis-board consolidation); `$kind` and `$detail` vars |
+| `deep_research_system` | The Deep-Research stage agent |
 
 ```bash
 looplab run examples/regression_task.json --backend llm \

@@ -206,11 +206,12 @@ def build_router(srv) -> APIRouter:
             raise HTTPException(409, f"run {run_id!r} already exists — pick another id")
         task_file = body.get("task_file")
         task = body.get("task")
-        # Inline task (the genesis flow authors one): require an explicit kind, then VALIDATE it the
-        # same way the engine will (validate_task → model_validate) BEFORE materializing anything — so a
-        # bad spec (unknown kind, mlebench_real with an unknown/empty competition, a missing required
-        # field) fails HERE with a 400 instead of spawning a detached engine that dies (DEVNULL'd)
-        # before writing any events, leaving a phantom never-started run.
+        # Inline task (the genesis flow authors one): a COMPOSABLE spec needs no `kind` — the capability
+        # fields (repo/dataset/cmd/kaggle) infer it. VALIDATE it the same way the engine will
+        # (validate_task → normalize + model_validate) BEFORE materializing anything — so a bad spec
+        # (unknown kind, mlebench_real with an unknown/empty competition, a missing required field, an
+        # uninferrable kind-less dict) fails HERE with a 400 instead of spawning a detached engine that
+        # dies (DEVNULL'd) before writing any events, leaving a phantom never-started run.
         if isinstance(task, dict) and task:
             from looplab.adapters.tasks import validate_task
             # A COMPOSABLE task carries no `kind` — validate_task normalizes (inferring the kind from

@@ -37,15 +37,18 @@ class ToolProvider(Protocol):
       Soft-fail rule: `execute` returns an error message string, it never raises — a junk
       tool call from the model must not crash the run. Long output is additionally
       truncated by the agent layer (~4000 chars), so providers should tail/clip smartly.
-    - `bind_state(state)` (optional) — run-aware providers (e.g. `RunTools`) implement this
-      so the agent loop can point them at the current `RunState` each turn. Providers that
-      don't need run state simply omit it (`CompositeTools` forwards it only where present),
-      hence the no-op default here.
+    - `bind_state(state, parent=None)` (optional) — run-aware providers (e.g. `RunTools`)
+      implement this so the agent loop can point them at the current `RunState` (and the
+      node's parent, when the loop knows one) each turn. The loop CALLS it with BOTH
+      arguments — `bind_state(state, parent)` (`agents/agent.py`) — so a provider must
+      accept the second one (default it to None), or it raises TypeError at dispatch.
+      Providers that don't need run state simply omit the hook (`CompositeTools` forwards
+      it only where present), hence the no-op default here.
     """
 
     def specs(self) -> list[dict]: ...
 
     def execute(self, name: str, args: dict) -> str: ...
 
-    def bind_state(self, state) -> None:  # optional hook — default is a no-op
+    def bind_state(self, state, parent=None) -> None:  # optional hook — default is a no-op
         return None

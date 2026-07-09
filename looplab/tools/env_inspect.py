@@ -20,7 +20,11 @@ from contextlib import redirect_stderr, redirect_stdout
 
 from looplab.tools._base import fn_spec
 
-_CAP = 12000        # per-result char cap (a big module's source is truncated, not dumped whole)
+# Per-result char cap. The agent loop hard-caps every tool result at 4000 chars (agents/agent.py
+# drive_tool_loop) and drops the TAIL past it — so a bigger provider-side cap isn't generous, it
+# silently loses the end of the result (mega-review P3). Stay under the loop cap so OUR truncation
+# (which the descriptions state honestly) is the one that decides.
+_CAP = 3800
 
 
 def _top(name: str) -> str:
@@ -95,16 +99,22 @@ class EnvInspectTools:
             fn_spec("read_installed",
                     "Read the SOURCE CODE of an installed module (so you can see exactly what an API "
                     "does / what args a script's argparse defines). Give a dotted module path "
-                    "(e.g. 'lightning.pytorch.trainer.trainer') — its .py source is returned "
-                    "(truncated). Read-only.",
+                    "(e.g. 'lightning.pytorch.trainer.trainer'). Returns ONE page of at most ~3600 "
+                    "chars of its .py source; window with start_line + lines. A page with more source "
+                    "below it ENDS with '… (more below — continue with start_line=N)' — continue from "
+                    "exactly that N; a reply WITHOUT that marker IS the end of the file. Read-only.",
                     {"module": {"type": "string", "description": "dotted module path"},
-                     "start_line": {"type": "integer", "description": "1-based first line (optional)"},
-                     "max_lines": {"type": "integer", "description": "how many lines (optional, default 300)"}},
+                     "start_line": {"type": "integer", "description": "1-based first line (optional; "
+                                    "use the N from the previous page's 'continue with' marker)"},
+                     "lines": {"type": "integer", "description": "how many lines to return (optional "
+                               "window; omit for as many as fit in one page)"}},
                     ["module"]),
             fn_spec("grep_installed",
                     "Search the SOURCE of an installed package for a string/symbol — find where an arg "
                     "is parsed, where a value is validated, what the allowed options are. Returns "
-                    "matching file:line snippets across the package. Read-only.",
+                    "matching file:line snippets across the package (default 20 hits; total output is "
+                    "clamped to fit one tool result — narrow `package` to a submodule for more depth). "
+                    "Read-only.",
                     {"query": {"type": "string", "description": "literal substring to find"},
                      "package": {"type": "string", "description": "package/module to search under, "
                                  "e.g. 'lightning'"},
@@ -125,8 +135,11 @@ class EnvInspectTools:
             if name == "py_api":
                 return self._py_api(str(args.get("target", "")))
             if name == "read_installed":
+                # `lines` is the documented window param (consistent with read_file/repo_read);
+                # `max_lines` stays accepted — older transcripts/models still pass it.
                 return self._read_installed(str(args.get("module", "")),
-                                            args.get("start_line"), args.get("max_lines"))
+                                            args.get("start_line"),
+                                            args.get("lines", args.get("max_lines")))
             if name == "grep_installed":
                 return self._grep_installed(str(args.get("query", "")), str(args.get("package", "")),
                                             args.get("max_hits"))
@@ -213,7 +226,7 @@ class EnvInspectTools:
         return "\n".join(out)[:_CAP]
 
     # ------------------------------------------------------------ read_installed
-    def _read_installed(self, module: str, start_line, max_lines) -> str:
+    def _read_installed(self, module: str, start_line, lines) -> str:
         module = module.strip()
         if not module:
             return "(read_installed: give a dotted module path)"
@@ -225,15 +238,16 @@ class EnvInspectTools:
             return f"(read_installed: {module} has no readable .py source at {getattr(spec, 'origin', None)})"
         try:
             with open(spec.origin, encoding="utf-8", errors="replace") as f:
-                lines = f.readlines()
+                data = f.read()
         except OSError as e:
             return f"(read_installed: read error: {e})"
-        s = int(start_line) - 1 if start_line else 0
-        s = max(0, s)
-        n = int(max_lines) if max_lines else 300
-        chunk = "".join(lines[s:s + n])
-        head = f"# {spec.origin} (lines {s + 1}..{s + min(n, len(lines) - s)} of {len(lines)})\n"
-        return (head + chunk)[:_CAP]
+        # Paginate exactly like the repo scout's read_file (SHARED window logic => one marker
+        # contract across all the source readers): each page fits the agent loop's 4000-char result
+        # cap WITH the resume marker, and a reply ending without the marker IS the end of the file.
+        # (The old 300-line default page had NO resume pointer at all and its _CAP tail-truncation
+        # could eat the end silently — mega-review P3.)
+        from looplab.tools.reposcout import RepoScoutTools
+        return f"# {spec.origin} " + RepoScoutTools._paginate(data, start_line, lines)
 
     # ------------------------------------------------------------ grep_installed
     def _grep_installed(self, query: str, package: str, max_hits) -> str:
@@ -265,7 +279,7 @@ class EnvInspectTools:
         # is the .py itself — grep JUST that file. Falling back to its DIRECTORY would be site-packages,
         # so os.walk would scan every OTHER installed package and mis-attribute hits (verified).
         single = spec.origin if (not roots and spec.origin and spec.origin.endswith(".py")) else None
-        cap = int(max_hits) if max_hits else 20
+        cap = max(1, min(int(max_hits) if max_hits else 20, 100))   # a model-supplied cap can't blow the budget
         scanned = 0
         _FILE_BUDGET = 4000     # bound the walk so a not-found query on a huge pkg (torch) can't
         #                         crawl thousands of files — report the truncation, don't lie "absent"
@@ -277,8 +291,8 @@ class EnvInspectTools:
                     if not fn.endswith(".py"):
                         continue
                     if scanned >= _FILE_BUDGET:
-                        return ("\n".join(hits) + f"\n(stopped after scanning {scanned} files; "
-                                "narrow `package` to a submodule to search deeper)")
+                        return self._clamp("\n".join(hits) + f"\n(stopped after scanning {scanned} "
+                                           "files; narrow `package` to a submodule to search deeper)")
                     scanned += 1
                     fp = os.path.join(dirpath, fn)
                     try:
@@ -287,10 +301,22 @@ class EnvInspectTools:
                                 if query in line:
                                     hits.append(f"{fp}:{i}: {line.strip()[:160]}")
                                     if len(hits) >= cap:
-                                        return "\n".join(hits) + f"\n(capped at {cap} hits)"
+                                        return self._clamp("\n".join(hits) + f"\n(capped at {cap} hits)")
                     except OSError:
                         continue
-        return "\n".join(hits) if hits else f"(grep_installed: '{query}' not found under {package})"
+        return self._clamp("\n".join(hits)) if hits \
+            else f"(grep_installed: '{query}' not found under {package})"
+
+    @staticmethod
+    def _clamp(text: str, budget: int = 3600) -> str:
+        """Fit a grep result under the agent loop's 4000-char cap ourselves, with an HONEST marker:
+        long site-packages paths make even 20 hits overflow the cap, where the loop would drop the
+        tail (and any '(capped at …)' note) silently. Cut at a line boundary so no half-hit shows."""
+        if len(text) <= budget:
+            return text
+        cut = text[:budget]
+        cut = cut[: cut.rfind("\n")] if "\n" in cut else cut
+        return cut + "\n(output clamped — narrow `package` to a submodule or lower max_hits)"
 
 
 def _resolve(dotted: str):

@@ -1,9 +1,11 @@
 """Genesis on the CLI: turn a plain-text goal into a runnable task — the LLM picks the task `kind`
 and authors the inline spec, so the user never has to name a task type.
 
-This is the headless counterpart of the Web UI's "New run" Genesis chat (`server.py /api/genesis`):
-same idea — a model reads your words (and any data/repo path you mention) and decides *what kind of
-task this is* — exposed for `looplab run --goal "..."` with no `--kind`.
+This is the headless counterpart of the Web UI's "New run" Genesis chat
+(`serve/routers/genesis.py /api/genesis`): same idea — a model reads your words (and any data/repo
+path you mention) and decides *what kind of task this is* — exposed for `looplab run --goal "..."`
+with no `--kind`. Both paths share `GENERATIVE_KINDS` below to default `backend=llm` when the
+authored task needs a code-writing agent and no backend was chosen explicitly.
 
 On `kind` itself: it is **not** removed. It is the dispatch key that selects one of nine
 ``TaskAdapter`` semantics (each a different eval / grader / trust / data model — e.g. a self-reported

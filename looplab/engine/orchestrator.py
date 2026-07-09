@@ -1387,7 +1387,13 @@ class Engine(ConfirmPhaseMixin, AblationMixin):
             # trace_id — the UI can then show only the merge's own retrieval+decision trace under it.
             with self._op_span("hypothesis_merge"):   # no node_id — see strategist_consult (avoids leaking into a node's trace)
                 for g in consolidate(texts, client, kind="research hypotheses",
-                                     embed=self._embedder, goal=state.goal):
+                                     embed=self._embedder, goal=state.goal,
+                                     # merge_system.md override + configured parser live on the
+                                     # researcher role (tasks.py wires them), not the engine;
+                                     # best-effort double-getattr — bare/toy researchers have neither
+                                     prompts=getattr(getattr(self, "researcher", None), "prompts", None),
+                                     parser=getattr(getattr(self, "researcher", None), "parser",
+                                                    None) or "tool_call"):
                     if len(g["members"]) < 2:
                         continue
                     ids = [open_hyps[i].id for i in g["members"]]
@@ -2500,6 +2506,12 @@ class Engine(ConfirmPhaseMixin, AblationMixin):
         checkpoint (the invariant `_safe_reuse_start` exists to protect)."""
         wd = Path(workdir)
         imp_re = re.compile(r"^[ \t]*(from|import)[ \t]+(.+?)[ \t]*$", re.M)
+        # Parenthesized MULTI-LINE imports (`from pkg import (\n  a,\n  b,\n)`) span lines, so the
+        # line-anchored pattern above only sees `from pkg import (` — it credits pkg/__init__.py but
+        # MISSES the pkg/a.py / pkg/b.py submodule files, letting a repair to those escape the
+        # closure. This companion pattern captures the whole group (a char class matches newlines
+        # without re.S); per-line comments are stripped before the shared clause parser splits it.
+        paren_re = re.compile(r"^[ \t]*from[ \t]+(\.*[\w.]*)[ \t]+import[ \t]*\(([^)]*)\)", re.M)
         out: set = set()
         pending: list = []
         for s in (stages or []):
@@ -2532,14 +2544,20 @@ class Engine(ConfirmPhaseMixin, AblationMixin):
                 src = p.read_text(encoding="utf-8", errors="replace")
             except Exception:  # noqa: BLE001
                 continue
-            for m in imp_re.finditer(src):
-                for mod in Engine._imported_modules(m.group(1), m.group(2)):
+            def _credit(mods):
+                for mod in mods:
                     for cand in Engine._module_file_candidates(mod, rel):
                         if cand not in out and (wd / cand).exists():
                             pending.append(cand)
+            for m in imp_re.finditer(src):
+                _credit(Engine._imported_modules(m.group(1), m.group(2)))
+            for m in paren_re.finditer(src):
+                inner = " ".join(l.split("#", 1)[0] for l in m.group(2).splitlines())
+                _credit(Engine._imported_modules("from", f"{m.group(1)} import ({inner})"))
         return out
 
-    def _safe_reuse_start(self, stages: list, failed_stage, changed_files, workdir):
+    def _safe_reuse_start(self, stages: list, failed_stage, changed_files, workdir,
+                          deleted=None, cwd=None):
         """The stage to RESTART from so a repaired node reuses the completed EARLIER stages (e.g. skip
         re-`train` when only the `score` script was fixed) — or None to re-run the FULL pipeline (the
         safe default that preserves the 'each node trains a FRESH model' invariant).
@@ -2548,10 +2566,16 @@ class Engine(ConfirmPhaseMixin, AblationMixin):
         DISJOINT from those stages' reachable files (their scripts + transitive imports). If a change
         could have altered what an earlier stage produces (train.py / loss.py / model.py it imports, or
         the stage MANIFEST that carries the argv), we must re-train — reusing a stale checkpoint would
-        score a model that doesn't reflect the current code. Opaque earlier stages (no resolvable script:
-        `python -m`, a shell wrapper) also force a re-train. A false negative just re-trains (no worse
-        than a full re-run); a false positive is a silent stale score, so the predicate is conservative
-        by construction and fail-closed on anything it can't statically bound."""
+        score a model that doesn't reflect the current code. Beyond the disjointness test, reuse is
+        REFUSED outright whenever the predicate cannot PROVE the earlier stages' inputs are unchanged:
+          • an OPAQUE earlier stage (no resolvable local script: `python -m`, a shell wrapper);
+          • the repair DELETED any file (`deleted`) — the closure can't see vanished modules;
+          • any changed file is not a `.py` (config/data inputs are invisible to import reachability);
+          • the eval runs under a non-default `cwd` (changed-file keys and stage-script paths resolve
+            against different bases, so the intersection proves nothing).
+        A false negative just re-trains (no worse than a full re-run); a false positive is a silent
+        stale score, so the predicate is conservative by construction and fail-closed on anything it
+        can't statically bound."""
         if not stages or not failed_stage:
             return None
         names = [str(s.get("name")) for s in stages]
@@ -2560,10 +2584,29 @@ class Engine(ConfirmPhaseMixin, AblationMixin):
         fi = names.index(failed_stage)
         if fi == 0:                                   # nothing before it to reuse
             return None
+        # DELETIONS are un-boundable: _write_node_files unlinks them BEFORE this predicate runs, so
+        # the reachability closure (walked over files still on disk) can never rediscover an import
+        # of the vanished module — `changed ∩ reachable` would be trivially disjoint even when an
+        # earlier stage trained THROUGH the deleted file. Any deletion forces a full re-run.
+        if deleted:
+            return None
+        # A non-default eval `cwd` re-bases the stage scripts: the reachable set resolves script
+        # paths against the WORKDIR root, but the repair's changed-file keys are workdir-relative —
+        # under a subdir cwd the same file appears as `sub/train.py` on one side and `train.py` on
+        # the other, so disjointness proves nothing. Fail closed rather than guess the remapping.
+        if cwd not in (None, "", "."):
+            return None
         changed = {(f[2:] if isinstance(f, str) and f.startswith("./") else f) for f in (changed_files or [])}
         # A change to the stage MANIFEST rewrites the pipeline's argv (e.g. train hyperparams), so the
         # completed checkpoint no longer matches the declared command — never reuse across it.
         if any(str(c).rsplit("/", 1)[-1] == "looplab_stages.json" for c in changed):
+            return None
+        # Reachability only bounds PYTHON imports: a changed non-.py file (config.yaml, a params
+        # file, a writable data copy the train stage reads) can alter what an earlier stage produced
+        # without ever appearing in the import closure. Its effect can't be proven absent, so any
+        # non-.py change forces a full re-run (the manifest case above is the named instance of the
+        # same blind spot; this catches every other one).
+        if any(not str(c).endswith(".py") for c in changed):
             return None
         reachable = self._stage_reachable_files(stages[:fi], workdir)
         if reachable is None:                         # an OPAQUE earlier stage (python -m/shell) → re-train
@@ -2995,16 +3038,27 @@ class Engine(ConfirmPhaseMixin, AblationMixin):
                 changed = {f for f, c in repaired_files.items() if prev_files.get(f) != c}
                 changed |= set(repaired_deleted)
                 _stages = self._resolved_stages(node, workdir)
-                next_start = self._safe_reuse_start(_stages, res.failed_stage, changed, workdir)
+                # `deleted` and the eval spec's `cwd` ride along so the predicate can fail closed on
+                # its blind spots: a deletion is invisible to the reachability closure (the file was
+                # unlinked by _write_node_files above), and a non-default cwd re-bases the stage
+                # scripts so the changed-vs-reachable intersection would prove nothing.
+                next_start = self._safe_reuse_start(
+                    _stages, res.failed_stage, changed, workdir,
+                    deleted=repaired_deleted,
+                    cwd=(self._eval_spec or {}).get("cwd") if isinstance(self._eval_spec, dict) else None)
                 # Count a full re-train against the cap ONLY when completed EARLIER-stage work is being
                 # discarded: a LATER stage failed (fi > 0) yet reuse was refused because the repair could
                 # have changed an earlier stage. A first-stage failure (nothing to reuse) or a single-
                 # command eval is an ordinary retry, bounded by attempts/stuck like any other — NOT the
                 # retrain cap (mirrors config.py: "only a repair that changes an EARLIER stage's code
                 # forces a full re-train ... counted"). Check BEFORE incrementing so cap=N runs exactly N.
+                # _fi == -1 with a REAL failed stage means the POST-repair pipeline no longer contains it
+                # (the repair renamed/dropped the stage, or _resolved_stages fell back to []) — the next
+                # eval is still a FULL re-run discarding completed earlier-stage work, so it consumes the
+                # cap too; leaving it uncounted let a stage-renaming repair burn unlimited full trains.
                 _names = [str(s.get("name")) for s in (_stages or [])]
                 _fi = _names.index(res.failed_stage) if res.failed_stage in _names else -1
-                if _fi > 0 and next_start is None:      # this repair forces a full (expensive) re-train
+                if res.failed_stage and _fi != 0 and next_start is None:   # forces a full (expensive) re-train
                     if (self._inline_repair_retrain_cap
                             and full_retrains >= self._inline_repair_retrain_cap):
                         triage_outcome = ("abandon",

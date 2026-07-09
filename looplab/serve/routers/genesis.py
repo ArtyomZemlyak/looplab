@@ -28,11 +28,13 @@ class _GenesisSpec(BaseModel):
     """The BOSS's proposed plan for a brand-new run, bootstrapped from a one-line goal (there is no run
     yet, so this is the pre-run counterpart of the per-message _Plan). The UI shows it as an editable spec card and
     only launches on confirm — creating a run spends real tokens, so we propose-then-go, never silently
-    auto-start. The task is EITHER an inline `task` object (e.g. {"kind":"mlebench_real","competition":
-    "..."}) OR a path to an existing catalogue `task_file`; `settings` carries only the engine overrides
+    auto-start. The task is EITHER an inline COMPOSABLE `task` object — NO `kind`, just the capability
+    fields (e.g. {"goal":"...","direction":"max","repo":"/abs/path","cmd":{"command":["python","test.py"],
+    "metric":{"reader":"stdout_json","key":"metric"}}}, or a bare {"competition":"<slug>"} for Kaggle) —
+    OR a path to an existing catalogue `task_file`; `settings` carries only the engine overrides
     the goal implies (model, node budget, policy…), the rest fall back to the UI defaults."""
     run_id: str = ""          # invented kebab-case run name (we slugify + de-dup server-side)
-    task: dict = {}           # inline task JSON (kind + params) when authoring a fresh task
+    task: dict = {}           # inline COMPOSABLE task JSON (no `kind`) when authoring a fresh task
     task_file: str = ""       # OR a path from the catalogue (preferred when one matches)
     settings: dict = {}       # engine overrides only (llm_model, max_nodes, n_seeds, policy, …)
     rationale: str = ""       # one-line why-this-plan
@@ -107,6 +109,24 @@ def build_router(srv) -> APIRouter:
         merged_settings = {**(draft.get("settings") or {}), **(spec.settings or {})}
         settings = {k: v for k, v in merged_settings.items()
                     if k in _ALLOWED_FIELDS and k not in _SECRET_FIELDS and v is not None}
+        # CLI parity (mega-review P10): `looplab run --goal` defaults backend=llm for a GENERATIVE kind
+        # (cli.py's genesis path), but this serve flow never did — Settings.backend defaults to "toy",
+        # so a repo/dataset task launched from the UI card got NoOpRepoDeveloper and every node silently
+        # re-evaluated the unchanged baseline. Mirror the CLI: infer the kind (composable tasks carry
+        # none) and default backend=llm, unless the boss/draft chose a backend explicitly or the
+        # deployment did (a UI-saved or env LOOPLAB_BACKEND lands in Settings.model_fields_set — the
+        # same "backend_chosen" test cli.py uses). Injected into the CARD's settings, so the operator
+        # sees and can still override it before launch.
+        if task and "backend" not in settings:
+            try:
+                from looplab.adapters.tasks import normalize_task
+                from looplab.engine.genesis import GENERATIVE_KINDS
+                chosen = "backend" in getattr(Settings(**srv.settings.load_ui_settings()),
+                                              "model_fields_set", set())
+                if not chosen and normalize_task(dict(task)).get("kind") in GENERATIVE_KINDS:
+                    settings["backend"] = "llm"
+            except Exception:  # noqa: BLE001 - an unnormalizable task fails later, at /api/start validation
+                pass
         steps = [str(s).strip() for s in (spec.setup_steps or []) if str(s).strip()][:12] \
             or list(draft.get("setup_steps") or [])
         return {"run_id": run_id, "task": task, "task_file": task_file,
@@ -177,11 +197,11 @@ def build_router(srv) -> APIRouter:
             tools = RepoScoutTools([Path.home(), root, root.parent])
             tool_sys = sys_prompt + (
                 "\n\nYou have READ-ONLY tools to inspect this machine: list_dir(path), read_file(path), "
-                "find_files(root, pattern). When the user points you at a repo (an editable_path or a path "
+                "find_files(root, pattern), grep(pattern, root). When the user points you at a repo (an editable_path or a path "
                 "they mention), ACTUALLY use them BEFORE emitting: list the repo, read its README for the "
                 "train/run command, read the eval/entry script (e.g. test.py) to see how the metric is "
                 "printed AND what arguments / config file it accepts, note results/requirements/data and "
-                "config files — then ground the eval command, metric kind+key, edit_surface, any data mount "
+                "config files — then ground the eval command, metric reader + key/pattern, edit_surface, any data mount "
                 "and (if it's argument- or config-driven) the params_style/config choice in what you read. "
                 "If there is NO entry/train script yet, say so and plan for the agent to write it (command "
                 "-> a file inside edit_surface). Don't just SAY you'll look — look, then call `emit` once.")
@@ -206,8 +226,9 @@ def build_router(srv) -> APIRouter:
                 try:
                     box["c"] = parse_structured(client, msgs + [{"role": "user",
                                 "content": "Now emit the final plan. Either set task_file to a "
-                                "catalogue entry, OR author a complete inline `task` with a concrete "
-                                "`kind` (repo / dataset / mlebench_real / …) — never leave the task "
+                                "catalogue entry, OR author a complete inline COMPOSABLE `task` — "
+                                "goal + direction + the capability fields you have (repo / dataset / "
+                                "cmd / competition), NO `kind` — never leave the task "
                                 "empty. Write a clear two-to-three-sentence `reply`."}], _GenesisSpec,
                                 defaults.get("llm_parser", "tool_call"))
                 except Exception:  # noqa: BLE001 - even a forced emit failed -> blank (usable) card

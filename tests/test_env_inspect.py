@@ -62,3 +62,32 @@ def test_execute_never_raises_on_bad_args():
     # empty/garbage args must return a string, never raise (the tool loop must not crash)
     for name in ("pkg_info", "py_api", "read_installed", "grep_installed"):
         assert isinstance(_t().execute(name, {}), str)
+
+
+def test_read_installed_page_fits_the_loop_cap_and_carries_the_resume_marker():
+    """P3: read_installed used to return up to a 12KB / 300-line page with NO resume pointer — the
+    agent loop's 4000-char cap silently amputated the tail. Now it paginates like read_file: one
+    bounded page ending with '… (more below — continue with start_line=N)' when more source remains,
+    and a final page with NO marker (marker absence == end of file)."""
+    import re
+    out = _t().execute("read_installed", {"module": "argparse"})     # a big stdlib module (~90KB)
+    assert len(out) <= 3900, f"page too big for the loop cap: {len(out)}"
+    m = re.search(r"continue with start_line=(\d+)\)$", out)
+    assert m, f"a continuing page must END with the marker; tail was: {out[-80:]!r}"
+    nxt = _t().execute("read_installed", {"module": "argparse", "start_line": int(m.group(1))})
+    assert len(nxt) <= 3900 and "(lines " in nxt                     # windowed continuation
+
+
+def test_read_installed_lines_param_and_max_lines_alias():
+    # `lines` is the documented window name (consistent with read_file/repo_read); the old
+    # `max_lines` spelling stays accepted so older transcripts/models don't break.
+    a = _t().execute("read_installed", {"module": "json.decoder", "start_line": 3, "lines": 5})
+    b = _t().execute("read_installed", {"module": "json.decoder", "start_line": 3, "max_lines": 5})
+    assert a == b and "(lines 3-7 of" in a
+
+
+def test_grep_installed_output_is_clamped_under_the_loop_cap():
+    # Long site-packages paths make even the default 20 hits overflow the loop's 4000-char cap,
+    # which would drop the tail (and any "(capped …)" note) SILENTLY — the tool clamps itself.
+    out = _t().execute("grep_installed", {"query": "def ", "package": "json", "max_hits": 100})
+    assert len(out) <= 3700

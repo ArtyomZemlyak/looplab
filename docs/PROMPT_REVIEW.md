@@ -19,6 +19,10 @@ mechanically by executing the real helpers/classes with synthetic inputs). Outco
 refuted**; 2 downgraded (P5, P11 major→minor), 2 nuanced (P4, D11), several severity notes
 folded in below. See §F for the verification log.
 
+**Fix pass (same day, same branch):** a five-workstream implementation round then FIXED nearly
+every finding — see §G for the disposition table. Findings below are kept in their as-found form
+as the review record; §G is the current status.
+
 **Verdict in one paragraph.** Today's diff is high quality — invariants hold, docs/diagram were
 updated in the same change, suite green (1466 passed / 23 skipped) — but the new inline-repair
 checkpoint-reuse predicate is fail-open in four shapes its docstring claims are impossible.
@@ -441,5 +445,58 @@ host env — outside any prompt claim, noted for completeness).
 
 ---
 
-*Companion docs: [BACKLOG.md](BACKLOG.md) §5 (the same day's engine-side mega-review),
-[CODE_REVIEW.md](CODE_REVIEW.md).*
+## G. Fix-pass disposition (2026-07-09, same branch)
+
+All fixes landed with the full suite green (1518 passed / 23 skipped) and `mkdocs --strict` clean.
+User-directed design decisions incorporated: the DoD "SKIP training if a checkpoint exists" bullet
+was DELETED and replaced with situation-based ARTIFACT rules (one experiment = one precisely-
+addressed artifact chain; per-phase artifacts for multi-phase training; foreign artifacts banned
+with an explicit named-warm-start exception — motivated by real incidents of runs looping on a
+foreign checkpoint); the tool-loop read-dedup cache was REMOVED entirely (every read executes
+fresh; the 4000-char cap now appends an explicit truncation marker; StuckDetector is the loop
+safety net); reader tools were made honest and cap-fitting (~3600-char pages, resume marker inside
+the cap, consistent `start_line`/`lines` windows).
+
+- **FIXED — engine**: D1–D4 (`_safe_reuse_start` fail-closed on deletions / non-`.py` changes /
+  non-default `cmd.cwd`; multi-line-import parser extension), D6 (retrain cap counts `_fi == -1`),
+  D13 (5 loop-wiring tests + 4 unit tests), D14 (`node_reset` clears the confirm-seed memo).
+- **FIXED — hints/wiring**: P2 (`_hyp_order` + `_novelty_stance` in the registry; foresight
+  wrapper forwards `track_hypotheses`; AST guard test + dynamic two-wrapper delivery test).
+- **FIXED — researcher/developer prompts**: P1 (new ARTIFACTS contract; hardware cue rewritten;
+  ban paragraphs reconciled — no skip-training instruction remains anywhere in the assembled
+  prompt), P3 (marker + honest pagination), P4→minor (statement render), P5 (real tool names),
+  P6/P7/P21 (sweep offer gated by backend, eval_timeout scoped, numeric-grid note, importability-
+  conditional `run_sweep`), P8 (attention points reach ToolUsingResearcher, both Strategists,
+  `LLMDeveloper.repair`), P14 (operator documented as audit-only), P25 (handoff gated + honest
+  next_label), P30 (pilot sees merge `parent_ids`), foresight minors (shared user msg, `reason`
+  requested, hypothesis-board reframing suffix, `_MAX_ITEMS` comment), role-neutral loop nudges.
+- **FIXED — repo developer/tools**: P11 (`{already}` from the seeded working set), P12
+  (`declare_stages` refuses under operator stages), P13 (bounce reworded), P33 (repair stage
+  note), refusal wording split (eval-protected vs read-only data mount), conditional entrypoint
+  claim, `bind_state(state, parent=None)` contract, `read_logs` "FULL" claim dropped,
+  reposcout/env_inspect/knowledge readers paginate ≤ the cap with markers, shell timeout policy
+  documented.
+- **FIXED — serve**: P9 (finalize taught; pause/stop synonymy stated), P10 (web genesis injects
+  `backend=llm` for generative tasks, CLI parity), P18 (no-kind fallback + `_GenesisSpec` schema
+  example), P19 (`cmd.stages` authoring taught), P20 (reset teaches pipeline stage names), P37
+  (CHAT merge, grep in tool lists, assistant mode line + lifecycle verbs), `_boss_context`
+  advisory/action split, control.py stale comments, D7 (`node_logs` docstring + operator
+  `cmd.stages` stage logs from the task snapshot).
+- **FIXED — misc**: merge_system override + parser now reach `agent_merge` from both callers
+  (`$kind`/`$detail` templating; kind-aware detail wording resolves the lesson number-policy
+  collision), untagged reflection lines → neutral "noted" (never quarantines), D8b
+  (`getattr` guard in llm.py), trust/verify docstring, ValidatingDeveloper backend-neutral
+  feedback, reward-hack grader-import sanction inferred from the shipped grader asset,
+  PromptStore key table documented, docs synced (handoff/read-cache, configuration rows, UI
+  genesis default, infographic genesis line).
+- **DEFERRED (recorded in BACKLOG §6)**: per-stage artifact declaration + technical verification
+  (the long-term replacement for import-closure reuse analysis), D5 per-attempt stage-event
+  accounting, tool-family consolidation (read_file/repo_read/read_installed one-reader contract;
+  sibling/all-runs tool merge), hardened-suite `import_grader` residual.
+- **NOT FIXED (accepted)**: D8a pool-wide socket shutdown (pre-existing, deferred in BACKLOG §5),
+  D10 latest-node-only live poll (UI trade-off), D11/D12 defensive-only notes.
+
+---
+
+*Companion docs: [BACKLOG.md](BACKLOG.md) §5 (the same day's engine-side mega-review) + §6
+(this review's deferred follow-ups), [CODE_REVIEW.md](CODE_REVIEW.md).*

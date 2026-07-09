@@ -105,3 +105,41 @@ def test_read_is_allowlist_no_false_positive_on_token(tmp_path):
     assert "tokenize text" in t.execute("read_file", {"path": str(r / "tokenizer.py")})
     assert "exists, not read" in t.execute("read_file", {"path": str(r / "model.bin")})
     assert "build:" in t.execute("read_file", {"path": str(r / "Makefile")})   # safe extensionless name
+
+
+def test_read_file_page_fits_the_loop_cap_and_ends_with_the_resume_marker(tmp_path):
+    """P3: the agent loop hard-caps every tool result at 4000 chars and cuts the TAIL — so one
+    read_file page (header + body + marker) must fit UNDER that with the resume marker intact, and
+    following the marker's start_line must walk the whole file to a final page WITHOUT a marker
+    (marker absence == end of file, the documented contract)."""
+    import re
+    r = tmp_path / "repo"
+    r.mkdir()
+    body = "\n".join(f"line {i}: " + "x" * 90 for i in range(400)) + "\n"     # ~40KB, 400 lines
+    (r / "big.py").write_text(body, encoding="utf-8")
+    t = RepoScoutTools(roots=[str(r)], default_root=str(r))
+    page = t.execute("read_file", {"path": "big.py"})
+    assert len(page) <= 3900, f"page too big for the loop cap: {len(page)}"
+    m = re.search(r"continue with start_line=(\d+)\)$", page)
+    assert m, f"a continuing page must END with the resume marker; tail was: {page[-80:]!r}"
+    assert "line 0:" in page                                    # page 1 really starts at the top
+    hops = 0
+    while m:
+        hops += 1
+        assert hops < 50, "pagination did not terminate"
+        page = t.execute("read_file", {"path": "big.py", "start_line": int(m.group(1))})
+        assert len(page) <= 3900
+        m = re.search(r"continue with start_line=(\d+)\)$", page)
+    assert "line 399:" in page          # the true tail is reachable; the final page has no marker
+
+
+def test_read_file_explicit_window_reports_range(tmp_path):
+    r = tmp_path / "repo"
+    r.mkdir()
+    (r / "f.py").write_text("".join(f"l{i}\n" for i in range(10)), encoding="utf-8")
+    t = RepoScoutTools(roots=[str(r)], default_root=str(r))
+    out = t.execute("read_file", {"path": "f.py", "start_line": 3, "lines": 4})
+    assert out.startswith("(lines 3-6 of 10)") and "l2\n" in out and "l5" in out and "l6" not in out
+    assert "continue with start_line=7" in out                  # window ended before EOF -> marker
+    tail = t.execute("read_file", {"path": "f.py", "start_line": 7})
+    assert "l9" in tail and "more below" not in tail            # EOF page carries NO marker

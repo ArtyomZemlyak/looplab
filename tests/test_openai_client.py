@@ -762,6 +762,23 @@ def test_nonstream_bounded_aborts_a_trickled_body(monkeypatch):
     assert closed["n"] == 1 and rebuilt["n"] == 1
 
 
+def test_nonstream_bounded_timeout_without_sdk_client_attr(monkeypatch):
+    """D8b regression: an SDK shape WITHOUT `_client` (a scripted mock, a foreign SDK) must still
+    surface the intended APITimeoutError on the wall-clock abort — the best-effort socket cleanup
+    used to dereference `self._sdk._client` bare and turned the timeout into an AttributeError."""
+    import time as _t
+    import looplab.core.llm as llm
+    c = llm.OpenAICompatibleClient("m", base_url="http://x/v1", api_key="k", stream=False,
+                                   timeout=0.5, header_timeout=0.5)
+
+    class _Comp:
+        def create(self, **k): _t.sleep(30)
+    c._sdk = type("S", (), {"chat": type("Ch", (), {"completions": _Comp()})()})()   # no `_client`
+    monkeypatch.setattr(c, "_new_sdk", lambda: c._sdk)
+    with pytest.raises(_openai.APITimeoutError):
+        c._nonstream_bounded({"model": "m", "messages": []})
+
+
 def test_nonstream_bounded_passes_a_fast_response():
     import looplab.core.llm as llm
     c = llm.OpenAICompatibleClient("m", base_url="http://x/v1", api_key="k", stream=False)

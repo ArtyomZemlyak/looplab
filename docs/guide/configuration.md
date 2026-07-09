@@ -134,7 +134,7 @@ These are no-ops unless `backend=llm`.
 | `developer_plan_max_steps` | `LOOPLAB_DEVELOPER_PLAN_MAX_STEPS` | `8` | Cap on plan length (a runaway planner can't spawn 100 steps) |
 | `developer_session_max_turns` | `LOOPLAB_DEVELOPER_SESSION_MAX_TURNS` | `500` | Hard per-session tool-turn ceiling for the repo Developer (the one write-heavy agent that can run away even with stuck-detection on — varied writes/reads never trip the repeat signal). Bounds the plan phase, each step, and the single-session fallback |
 | `developer_session_time_budget_s` | `LOOPLAB_DEVELOPER_SESSION_TIME_BUDGET_S` | `1200` | Wall-clock ceiling per developer session (20 min); a model that never emits `done` fails cleanly with the code it wrote |
-| `phase_handoff_summary` | `LOOPLAB_PHASE_HANDOFF_SUMMARY` | `true` | Per-node phase coordination: (1) each exploration phase (Researcher·propose → Developer·stages → plan) ends with ONE call that distills its transcript into a brief injected into later phases — even across the role boundary — so they trust it instead of re-reading; (2) a **node-scoped read cache** shared across the phases, so a file one phase read isn't re-read (a deterministic tool-call cut, not just a prose nudge). Terminal phases (implement / repair) consume but don't summarize (no wasted call) |
+| `phase_handoff_summary` | `LOOPLAB_PHASE_HANDOFF_SUMMARY` | `true` | Per-node phase coordination: each exploration phase (Researcher·propose → Developer·stages → plan) ends with ONE call that distills its transcript into a brief injected into later phases — even across the role boundary — so they trust it instead of re-reading. Terminal phases (implement / repair) consume but don't summarize (no wasted call); the propose brief is produced only when the in-house repo Developer follows. There is no read cache — every read executes fresh (oversized results carry an explicit truncation marker) |
 
 ### Per-role / per-stage models
 
@@ -260,7 +260,7 @@ See [Concepts → Trust & sandbox](concepts.md#trust-the-sandbox) for what each 
 | `memora_anchors` | `LOOPLAB_MEMORA_ANCHORS` | `6` | Max cue anchors kept per memory |
 | `memora_consolidate_threshold` | `LOOPLAB_MEMORA_CONSOLIDATE_THRESHOLD` | `0.86` | Cosine at/above which a new memory is consolidated into an existing entry |
 | `skills_dir` | `LOOPLAB_SKILLS_DIR` | — | Dir of `SKILL.md` files the Researcher can list/load |
-| `prompt_dir` | `LOOPLAB_PROMPT_DIR` | — | Dir of editable, hot-reloaded role-prompt `.md` files |
+| `prompt_dir` | `LOOPLAB_PROMPT_DIR` | — | Dir of editable, hot-reloaded role-prompt `.md` files — see the [override-key table](llm-and-agents.md#prompt-override-keys-prompt_dir) for every `<key>.md` and who consumes it |
 | `researcher_tools` | `LOOPLAB_RESEARCHER_TOOLS` | `true` | Let the Researcher read its own experiments + task data mid-loop |
 | `cross_run_tools` | `LOOPLAB_CROSS_RUN_TOOLS` | `true` | Read-only tools over sibling runs (same task, same run-root) |
 | `all_runs_tools` | `LOOPLAB_ALL_RUNS_TOOLS` | `true` | Read-only tools (`list_all_runs`, `read_run_code`, `read_run_experiment`) over EVERY run on the machine, across ALL tasks — read/reuse any past experiment's code + result |
