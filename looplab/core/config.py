@@ -598,6 +598,14 @@ class Settings(BaseSettings):
     # `cross_run_tools` (same-task only); the agent decides when a foreign run is relevant. Advisory;
     # never changes best-selection. Needs the run's own dir wired through (no-op for unit-built roles).
     all_runs_tools: bool = True
+    # Developer run-introspection (ON by default): give the in-house repo Developer the SAME read-only
+    # run tools the Researcher has — read its OWN experiments (list_experiments/read_experiment/
+    # read_code/read_logs/find_analogous) and, gated by `cross_run_tools`/`all_runs_tools`, SIBLING and
+    # ANY run on the machine (read_run_code/read_run_experiment). So the Developer can look up how a
+    # prior/merged/failed node was implemented, what it scored, and why it broke — instead of only
+    # knowing the past via the Researcher's rationale. Not injected into the prompt; the agent decides
+    # when to read. Advisory; never changes best-selection. Off = the legacy repo-scouts-only Developer.
+    developer_run_tools: bool = True
     # Agentic retrieval (ADR-16): if set, the LLM Researcher gets grep/kb_search/read
     # tools over this directory of markdown notes and chooses when to use them.
     knowledge_dir: str | None = Field(default_factory=lambda: str(_LL_HOME / "knowledge"))

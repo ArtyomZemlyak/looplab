@@ -164,6 +164,19 @@ preview. Two tools make this practical:
 - **`gpu_info`** reports the visible GPUs (count / names / memory via `torch.cuda`) — the `nvidia-smi`
   equivalent for an agent that has no shell, so the plan can size a model/batch to the real hardware.
 
+### Reading the search history (`developer_run_tools`, on by default)
+
+Every phase (stages, plan, implement, repair) also carries the **same read-only run-introspection tools
+the Researcher has**, so the Developer never has to reconstruct the past from the idea's rationale
+alone. Over **this** run: `list_experiments`, `read_experiment`, `read_code`, `read_logs`,
+`find_analogous`; and — gated by `cross_run_tools` / `all_runs_tools` — `list_all_runs`,
+`read_run_code`, `read_run_experiment` over sibling and any run on the machine. `read_code` returns the
+**final evaluated** code of a node and **flags a failed node** as the version that broke (pair it with
+`read_logs` for the traceback). Use them when the idea builds on a prior node, when a **merge** lists
+several parents (read each parent's code), or on a **repair** (read the failing node's logs). Nothing is
+dumped into the prompt — the tools are pulled on demand; set `developer_run_tools=false` for the legacy
+repo-scouts-only Developer.
+
 ## Phase-handoff summaries
 
 Each LLM phase in a node build re-explores the same repo — the stages phase maps it, then plan reads

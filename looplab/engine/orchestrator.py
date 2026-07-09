@@ -52,7 +52,7 @@ from looplab.engine.triage import (_MAX_DEP_ROUNDS, _MECHANICAL_MARKERS,  # noqa
                                    _dir_fingerprint, _failure_reason, _holdout_indices,
                                    _normalize_error_sig, _rule_triage, _shallow_fingerprint)
 from looplab.core.llm import BudgetExceeded
-from looplab.core.models import Idea, NodeStatus, RunState
+from looplab.core.models import Idea, Node, NodeStatus, RunState
 from looplab.search.coverage import coverage_signal
 from looplab.search.operators import merge_idea
 from looplab.search.policy import SearchPolicy, available_policies, make_policy
@@ -1996,6 +1996,30 @@ class Engine(ConfirmPhaseMixin, AblationMixin):
             return rf(node.idea, node, err)
         return self.developer.repair(node.idea, node.code, err)
 
+    def _bind_developer(self, state: RunState, parent: Optional[Node] = None) -> None:
+        """D-context: expose the LIVE search DAG to the Developer's read-only run-introspection tools
+        (RunTools/SiblingRunTools/AllRunsTools) before it implements/repairs, so read_experiment /
+        read_code / read_logs see the CURRENT nodes. Walks the wrapper chain (ValidatingDeveloper /
+        BestOfNDeveloper / UnifiedAgent), like `_set_role_client`, so the bind reaches the inner
+        LLMRepoDeveloper. A no-op for developers without `bind_state` (toy / external CLI agent)."""
+        seen: set[int] = set()
+        stack = [self.developer]
+        while stack:
+            obj = stack.pop()
+            if obj is None or id(obj) in seen:
+                continue
+            seen.add(id(obj))
+            binder = getattr(obj, "bind_state", None)
+            if callable(binder):
+                try:
+                    binder(state, parent)
+                except Exception:  # noqa: BLE001 — an advisory bind must never break node creation
+                    pass
+            for attr in ("inner", "fallback", "developer", "_wrapped"):
+                child = getattr(obj, attr, None)
+                if child is not None and child is not obj:
+                    stack.append(child)
+
     def _emit_node_created(self, *, node_id: int, parent_ids: list, operator: str, idea: dict,
                            code: str, files: dict, deleted=_OMIT, research_origin=_OMIT,
                            source=_OMIT, origin=_OMIT) -> None:
@@ -2032,6 +2056,10 @@ class Engine(ConfirmPhaseMixin, AblationMixin):
             # NOT st.nodes), so node-id allocation + resume are untouched; node_created supersedes it.
             _bparents = (list(action["parent_ids"]) if action.get("parent_ids")
                          else ([action["parent_id"]] if action.get("parent_id") is not None else []))
+            # D-context: bind the live DAG to the Developer's read-only run tools before it runs, so it
+            # can read prior/merged/failed nodes' code+logs (parent is best-effort — used only for the
+            # cross-run task filter). No-op for developers without run tools.
+            self._bind_developer(state, state.nodes.get(_bparents[0]) if _bparents else None)
             self.store.append(EV_NODE_BUILDING,
                               {"node_id": node_id, "operator": kind, "parent_ids": _bparents})
             if kind == "draft":
@@ -2878,6 +2906,8 @@ class Engine(ConfirmPhaseMixin, AblationMixin):
                     triage_outcome = ("reject_idea", triage.get("rationale", ""))
                     break
                 # action == "repair": fix the code in place and re-eval (no new node, no budget spent).
+                # D-context: bind the live DAG so the repair session can read this + prior nodes' logs/code.
+                self._bind_developer(state, node)
                 with self.tracer.span("inline_repair", node_id=node_id, attempt=attempt + 1):
                     new_code = self._repair(
                         node, self._repair_error_context(reason, err, state=state, node=node))

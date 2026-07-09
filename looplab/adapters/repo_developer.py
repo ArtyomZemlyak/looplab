@@ -547,6 +547,23 @@ _REPO_DEV_REPAIR_BLOCK = (
     "code reuse it (skip retraining) and go straight to the failing step. Do not start "
     "over from scratch. Files you already wrote: {already}.\n"
     "--- eval error (stderr/stdout tail) ---\n")
+# D-context (Settings.developer_run_tools): appended to the Developer's system prompt ONLY when the
+# read-only run-introspection tools are actually wired (LLMRepoDeveloper._run_tools_prompt). It tells
+# the Developer the past is READABLE on demand — it is deliberately NOT dumped into the prompt.
+_REPO_DEV_RUN_TOOLS = (
+    "\n\nPAST EXPERIMENTS — you have READ-ONLY access to this search's history. Use it whenever the "
+    "idea builds on, merges, or repairs a prior node, so you reuse what worked and avoid what broke "
+    "instead of working blind:\n"
+    "  • list_experiments(sort=best|worst|recent) — what's been tried and how it scored.\n"
+    "  • read_experiment(node_id) — one node's params / metric / rationale / failure / sweep trials.\n"
+    "  • read_code(node_id) — the FINAL evaluated code of a node (a FAILED node's is flagged as the "
+    "version that broke).\n"
+    "  • read_logs(node_id) — that node's stdout tail + FULL error/stderr (why it failed / what it "
+    "printed while running).\n"
+    "  • find_analogous(node_id or params) — nearby configs and how they did.\n"
+    "When the idea names a node — an IMPROVE parent, the MERGED parents it lists, or the failing node on "
+    "a REPAIR — read that node's code + logs FIRST. Read only what's relevant; do NOT enumerate the "
+    "whole history.")
 
 
 class LLMRepoDeveloper:
@@ -565,7 +582,9 @@ class LLMRepoDeveloper:
     def __init__(self, client: LLMClient, task, *, parser: str = "tool_call",
                  loop_opts: Optional[dict] = None, plan_decompose: bool = True,
                  plan_min_steps: int = 2, plan_max_steps: int = 8,
-                 session_max_turns: int = 500, session_time_budget_s: float = 1200.0):
+                 session_max_turns: int = 500, session_time_budget_s: float = 1200.0,
+                 run_dir=None, run_tools: bool = False, cross_run_tools: bool = False,
+                 all_runs_tools: bool = False):
         self.client = client
         self.task = task
         self.parser = parser
@@ -584,6 +603,69 @@ class LLMRepoDeveloper:
         self._prefixes = [e["name"] for e in self._editables if e["name"] not in (".", "")]
         self.last_files: dict[str, str] = {}
         self.last_deleted: list[str] = []
+        # D-context (Settings.developer_run_tools): read-only run-introspection for the Developer — its
+        # OWN experiments/code/logs (RunTools) and, gated, SIBLING/ANY run on the machine. `run_dir` is
+        # the live run's dir (None for unit/factory builds → only the own-run reader, and only once the
+        # engine has bound a live RunState via `bind_state`). See `_run_intro_tools`.
+        self._run_dir = run_dir
+        self._run_tools = bool(run_tools)
+        self._cross_run_tools = bool(cross_run_tools)
+        self._all_runs_tools = bool(all_runs_tools)
+        self._bound_state = None      # the live search DAG the engine binds before each implement/repair
+        self._bound_parent = None
+
+    def bind_state(self, state, parent=None) -> None:
+        """Engine hook (called before each implement/implement_from/repair — see
+        `orchestrator._bind_developer`): expose the LIVE search DAG to the Developer's read-only
+        run-introspection tools. Stored only; the per-phase toolset binds fresh providers to it
+        (`_run_intro_tools`). A safe no-op shape for any caller that never binds (unit/factory)."""
+        self._bound_state = state
+        self._bound_parent = parent
+
+    def _run_intro_tools(self) -> list:
+        """Read-only RUN-INTROSPECTION providers for the Developer: the search's OWN experiments/code/
+        logs (RunTools) and — gated on `cross_run_tools`/`all_runs_tools` — SIBLING and ANY run on the
+        machine, so the Developer can look up how a prior/merged/failed node was implemented, what it
+        scored, and why it broke, instead of only knowing the past via the Researcher's rationale. The
+        SAME providers/reader the Researcher uses (identical output format). Bound to the live RunState
+        the engine set; returns [] when disabled or unbound (unit/factory builds) so the toolset
+        degrades to the repo scouts + env inspector only (byte-parity)."""
+        # getattr defaults: a `__new__`-built dev (unit tests bypass __init__) has none of these — it
+        # must degrade to "no run tools", the SAME idiom the rest of this class uses for optional attrs.
+        state = getattr(self, "_bound_state", None)
+        if not getattr(self, "_run_tools", False) or state is None:
+            return []
+        from looplab.tools.run_tools import RunTools
+        provs = [RunTools()]                                   # own experiments + code + logs + themes
+        run_dir = getattr(self, "_run_dir", None)
+        if run_dir is not None:
+            from pathlib import Path as _P
+            root, self_id = _P(run_dir).parent, _P(run_dir).name
+            if getattr(self, "_cross_run_tools", False):
+                from looplab.tools.run_tools import SiblingRunTools
+                provs.append(SiblingRunTools(root, self_id))   # other runs of the SAME task
+            if getattr(self, "_all_runs_tools", False):
+                from looplab.tools.run_tools import AllRunsTools
+                provs.append(AllRunsTools(root, self_id))      # ANY run, any task
+        for p in provs:                                        # let read_* see the current DAG
+            p.bind_state(state, getattr(self, "_bound_parent", None))
+        return provs
+
+    def _run_tools_prompt(self) -> str:
+        """The system-prompt paragraph telling the Developer it MAY read the search's history — emitted
+        ONLY when the run tools are actually wired (bound + enabled), so the model is never told about
+        tools it can't call. Kept OUT of the always-on context deliberately: the past is pulled on
+        demand, not dumped into every prompt."""
+        if not getattr(self, "_run_tools", False) or getattr(self, "_bound_state", None) is None:
+            return ""
+        block = _REPO_DEV_RUN_TOOLS
+        if getattr(self, "_run_dir", None) is not None and (
+                getattr(self, "_cross_run_tools", False) or getattr(self, "_all_runs_tools", False)):
+            block += (
+                "\n  • list_all_runs / read_run_experiment(run_id, node_id) / read_run_code(run_id, "
+                "node_id) — read the result + code of an experiment in ANY other run on this machine "
+                "(e.g. a similar run the researcher points you to). Use a run_id from list_all_runs.")
+        return block
 
     # Files most useful to PRELOAD verbatim so the agent authors the entrypoint without fumbling with
     # a (truncating) read tool. Order = priority; the rest of the surface is appended within budget.
@@ -762,7 +844,7 @@ class LLMRepoDeveloper:
         # output is the plan. (This used to be tools=None to force convergence, which made the planner
         # work BLIND off the truncated preview; the read_file pagination fix + emit_after/emit_force
         # convergence backstop now let it read PROPERLY without exploring forever.)
-        read_only = CompositeTools([EnvInspectTools()] + self._scout_tools(write))
+        read_only = CompositeTools([EnvInspectTools()] + self._scout_tools(write) + self._run_intro_tools())
         try:
             # Full session budget — same contract as every other phase: the soft nudge at
             # agent_emit_after (300) and the forced emit at agent_emit_force (500) ride in via
@@ -807,7 +889,7 @@ class LLMRepoDeveloper:
             # implement steps CONSUME the stages/plan briefs + share the node read-cache, but don't
             # contribute (their writes add length faster than signal, and the last step is terminal) —
             # so the ledger stays the 3 exploration briefs (propose/stages/plan), never K-step bloat.
-            run_phase(self.client, CompositeTools([write, EnvInspectTools()] + self._scout_tools(write)),
+            run_phase(self.client, CompositeTools([write, EnvInspectTools()] + self._scout_tools(write) + self._run_intro_tools()),
                       messages, self._emit_spec(), label=f"Developer·implement step {idx}/{total}",
                       handoff=False, finalize=lambda a: (a or {}).get("summary", ""),
                       fallback=lambda m: "", **self._session_opts())
@@ -913,7 +995,7 @@ class LLMRepoDeveloper:
         messages = [{"role": "system", "content": system},
                     {"role": "user", "content": self._stages_user(idea, ev, has_cmd)}]
         # scouts read the LIVE overlay (the parent solution on improve/merge), not the pristine repo
-        read_only = CompositeTools([EnvInspectTools()] + self._scout_tools(write))
+        read_only = CompositeTools([EnvInspectTools()] + self._scout_tools(write) + self._run_intro_tools())
 
         def _validate(args):                      # bounce a malformed manifest back to the model
             stages = (args or {}).get("stages")
@@ -971,6 +1053,7 @@ class LLMRepoDeveloper:
         system = (
             _REPO_DEV_SYSTEM_INTRO + self.brief + "\n\n"
             + _REPO_DEV_SYSTEM_BODY
+            + self._run_tools_prompt()
             + operational_attention_points() + "\n\n"
             + _REPO_DEV_COMMANDS_HEADER + self._recipes() + "\n\n"
             + ((_REPO_DEV_RESULTS_HEADER + _results + "\n\n")
@@ -1058,7 +1141,7 @@ class LLMRepoDeveloper:
             # Compose the write/edit tools with read-only ENVIRONMENT INTROSPECTION (pkg_info / py_api /
             # read_installed / grep_installed) so the Developer grounds generated code in the ACTUAL
             # installed API/version instead of guessing (the precision='16-mixed'-on-Lightning-1.5 class).
-            tools = CompositeTools([write, EnvInspectTools()] + self._scout_tools(write))
+            tools = CompositeTools([write, EnvInspectTools()] + self._scout_tools(write) + self._run_intro_tools())
             if is_fresh_repo:
                 # PLAN is the Developer's second sub-phase (its own trace band). IMPLEMENT runs under
                 # the orchestrator's "implement" span (so its generations band there, and non-repo

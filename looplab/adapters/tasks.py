@@ -579,7 +579,13 @@ def make_roles(task: TaskAdapter, settings, run_dir=None):
             plan_min_steps=getattr(settings, "developer_plan_min_steps", 2),
             plan_max_steps=getattr(settings, "developer_plan_max_steps", 8),
             session_max_turns=getattr(settings, "developer_session_max_turns", 500),
-            session_time_budget_s=getattr(settings, "developer_session_time_budget_s", 1200.0))
+            session_time_budget_s=getattr(settings, "developer_session_time_budget_s", 1200.0),
+            # D-context: the SAME read-only run tools the Researcher gets (own run + gated sibling/all).
+            # `run_dir` is None for the developer-only factory rebuild + unit builds → own-run reader only.
+            run_dir=run_dir,
+            run_tools=getattr(settings, "developer_run_tools", True),
+            cross_run_tools=getattr(settings, "cross_run_tools", True),
+            all_runs_tools=getattr(settings, "all_runs_tools", True))
 
     # External coding-agent Developer (ADR-7): an external CLI agent writes/repairs the
     # solution code, reusing the task's brief. Tool-agnostic via cli_agent presets.

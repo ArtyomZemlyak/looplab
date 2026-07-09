@@ -214,8 +214,18 @@ class RunTools:
             return f"(no experiment #{nid})"
         if not n.code and not n.files:
             return f"(experiment #{nid} has no code recorded)"
+        # Surface the OUTCOME up front so a reader (especially the Developer reusing/merging a prior
+        # node) never mistakes a FAILED node's code for a working reference: `n.code`/`n.files` is the
+        # exact code that was evaluated, so on a failure it is the version that BROKE — read_logs(#id)
+        # carries the stderr/traceback for it.
+        if n.status is NodeStatus.failed:
+            banner = (f"# ⚠ experiment #{nid} FAILED ({n.error_reason or 'error'}) — the code below is the "
+                      f"version that FAILED; call read_logs({nid}) for the error/stderr before reusing it.\n")
+        else:
+            banner = (f"# experiment #{nid} — metric={digest.fmt_num(digest.node_metric(n))} "
+                      "(this is the final evaluated code)\n")
         files = (f"\nother files: {list(n.files)}" if n.files else "")
-        return f"# solution.py of experiment #{nid}\n{n.code[:self.max_chars]}{files}"
+        return f"{banner}# solution.py of experiment #{nid}\n{n.code[:self.max_chars]}{files}"
 
     def _logs(self, st: RunState, nid: int) -> str:
         """The node's execution logs: the captured stdout tail (what it printed while training/eval)

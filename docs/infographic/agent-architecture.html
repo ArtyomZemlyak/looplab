@@ -82,13 +82,14 @@ stack(410,210,DY,[
  {id:"n_num",h:78,t:"Numeric dedup",tag:"0.05",c:C.ev,sub:["L2 < 0.05 → deterministic nudge","seed=id×1009+7 · scale=max(|p|,1)×0.1"]},
 ]);
 // DEVELOPER — three separately-traced phases on a fresh repo node (stages → plan → implement);
-// a repair skips them for one focused session. Env inspector / auto-validate / best-of-N below
-// are the capabilities those phases use.
+// a repair skips them for one focused session. Env inspector / run introspection / auto-validate /
+// best-of-N below are the capabilities those phases use.
 stack(660,300,DY,[
  {id:"d_stages",h:92,t:"① Stages phase",tag:"1st",c:C.d,sub:["read-only · mandatory* · emits declare_stages","…prep → train → before protected score (cmd)","cmd present → declare preceding · absent → full","*skipped: op. cmd.stages / protected manifest"]},
  {id:"d_plan",h:66,t:"② Plan phase",tag:"C4",c:C.d,sub:["read-only · propose_plan → atomic steps","2–8 steps · developer_plan_decompose"]},
  {id:"d_impl",h:66,t:"③ Implement phase",tag:"D",c:C.d,sub:["write the code the stages run · per-step","repair = 1 session (no stages/plan)"]},
  {id:"i_env",h:82,t:"Env inspector",tag:"D",c:C.d,sub:["ground API in the REAL installed env","pkg_info · py_api · read/grep_installed · gpu_info","read-only inspector · ALL phases (write tools only in implement) · paginates"]},
+ {id:"i_run",h:82,t:"Run introspection",tag:"D",c:C.d,sub:["read-only — SAME readers as PROPOSE, over ALL phases","read_experiment·read_code·read_logs·find_analogous (own run)","+ list_all_runs·read_run_code·read_run_experiment (any run · gated)","developer_run_tools · failed nodes flagged · pulled on demand, not injected"]},
  {id:"i_val",h:58,t:"Auto-validate",tag:"gate",c:C.d,sub:["compile after every edit → error flies back"]},
  {id:"i_bon",h:78,t:"Best-of-N",tag:"off",c:C.d,sub:["N impls · score∈[−1,3.5] (compile+1/valid+2/metric+.5)","tie: foresight → listwise LLM pick"]},
 ]);
@@ -179,6 +180,7 @@ edge("implement","b","d_stages","t",{c:C.d,thin:1});
 edge("d_stages","b","d_plan","t",{c:C.d,thin:1});   // ordered phases: stages → plan → implement
 edge("d_plan","b","d_impl","t",{c:C.d,thin:1});
 edge("d_impl","b","i_env","t",{c:C.d,thin:1});
+edge("i_env","b","i_run","t",{c:C.d,thin:1});   // Developer's read-only run introspection (D-context)
 edge("evaluate","b","e_box","t",{c:C.ev,thin:1});
 edge("score","b","t_rh","t",{c:C.trust,thin:1});
 edge("refine","b","r_gt","t",{c:C.r,thin:1});
