@@ -203,6 +203,23 @@ def test_declare_stages_rejects_a_nonexistent_absolute_data_path():
         os.remove(p)
 
 
+def test_declare_stages_allows_a_pipeline_produced_intermediate_path():
+    # A valid data_prep->train pipeline: prep WRITES /scratch/prep/train.npy (--out), train READS it.
+    # Neither exists at declare time, but the read must NOT be flagged "missing" — it's produced by an
+    # earlier stage. Only genuinely-hallucinated EXTERNAL inputs (never produced) are bounced.
+    t = _writetools()
+    ok = t.execute("declare_stages", {"stages": [
+        {"name": "prep", "command": ["python", "prep.py", "--out", "/scratch/prep/train.npy"]},
+        {"name": "train", "command": ["python", "train.py", "--data", "/scratch/prep/train.npy"]}]})
+    assert ok.startswith("declared")
+    assert "looplab_stages.json" in t.files
+    # …but a stage reading a NON-produced, non-existent absolute path is still bounced.
+    t2 = _writetools()
+    bad = t2.execute("declare_stages", {"stages": [
+        {"name": "train", "command": ["python", "train.py", "--data", "/scratch/prep/train.npy"]}]})
+    assert bad.startswith("(refused") and "/scratch/prep/train.npy" in bad
+
+
 def test_declare_stages_works_under_restricted_surface():
     # mega-review fix: the manifest is TOOL-owned and validated, so it is gated on the PROTECT list
     # only — the legacy default surface ["**/*.py"] can never match a root .json, and a surface gate

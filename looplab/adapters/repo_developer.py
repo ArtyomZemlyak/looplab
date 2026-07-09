@@ -37,12 +37,44 @@ from looplab.tools.patch import SurfacePolicy
 _INPUT_DATA_RE = re.compile(
     r"(?<![\w./~])/[^\s\"',:]+\.(?:pck|parquet|csv|tsv|npy|npz|pkl|arrow|jsonl|feather|h5|hdf5)")
 
+# Flags whose following token (or `=`-joined value) is an OUTPUT path a stage WRITES — a pipeline
+# intermediate that legitimately does not exist yet at declare time (data_prep writes it, train reads it).
+_OUTPUT_FLAGS = frozenset({
+    "-o", "--out", "--output", "--outdir", "--out-dir", "--out_dir", "--output-dir", "--output_dir",
+    "--out-path", "--out_path", "--output-path", "--output_path", "--save", "--save-to", "--save_to",
+    "--save-dir", "--save_dir", "--savedir", "--dest", "--destination", "--export", "--write-to"})
+
+
+def _stage_produced_paths(stages) -> set[str]:
+    """ABSOLUTE data paths the pipeline itself WRITES — the token right after an output flag, or a
+    `--out=PATH` form. These are intermediates a LATER stage reads, so they must not be flagged as
+    "missing input" at declare time just because an EARLIER stage hasn't run yet."""
+    produced: set[str] = set()
+    for s in (stages or []):
+        if not isinstance(s, dict):
+            continue
+        cmd = s.get("command") or []
+        for i, tok in enumerate(cmd):
+            if not isinstance(tok, str):
+                continue
+            val = None
+            if tok in _OUTPUT_FLAGS and i + 1 < len(cmd) and isinstance(cmd[i + 1], str):
+                val = cmd[i + 1]                                    # `--out PATH`
+            elif "=" in tok and tok.split("=", 1)[0] in _OUTPUT_FLAGS:
+                val = tok.split("=", 1)[1]                          # `--out=PATH`
+            if val:
+                produced.update(_INPUT_DATA_RE.findall(val))
+    return produced
+
 
 def _missing_stage_input_paths(stages) -> list[str]:
     """ABSOLUTE input-data paths referenced in stage commands that DON'T exist on disk — almost always
     a hallucinated default (the recurring failure: a train stage's `--train_dataset /…/train.pck` that
     was copied from the repo's argparse default and isn't here). Absolute paths are location-invariant,
-    so a declare-time existence check is sound; relative paths (mounts) and `%params%` are skipped."""
+    so a declare-time existence check is sound; relative paths (mounts) and `%params%` are skipped.
+    Paths the pipeline PRODUCES (an `--out …` of any stage) are excluded — a valid data_prep→train
+    pipeline's intermediate legitimately doesn't exist yet at declare time."""
+    produced = _stage_produced_paths(stages)
     missing: list[str] = []
     for s in (stages or []):
         if not isinstance(s, dict):
@@ -51,7 +83,9 @@ def _missing_stage_input_paths(stages) -> list[str]:
             if not isinstance(tok, str) or "%params%" in tok:
                 continue
             for m in _INPUT_DATA_RE.findall(tok):
-                if not os.path.exists(m) and m not in missing:
+                if m in produced or m in missing:
+                    continue
+                if not os.path.exists(m):
                     missing.append(m)
     return missing
 
@@ -891,9 +925,14 @@ class LLMRepoDeveloper:
 
         def _finalize(args):
             clean, _ = validate_stages((args or {}).get("stages"), reserved=reserved)
-            if clean:
+            # Mirror `_validate`'s missing-path guard: the force-emit / exhaustion paths call finalize
+            # WITHOUT re-running validate, so without this a manifest referencing a hallucinated,
+            # non-produced input path would be PERSISTED after the model's retries were exhausted and
+            # ship a FileNotFoundError pipeline. Degrade to the operator cmd (return []) instead.
+            if clean and not _missing_stage_input_paths(clean):
                 write.files["looplab_stages.json"] = _json.dumps({"stages": clean}, indent=1)
-            return clean or []
+                return clean
+            return []
         try:
             # Full session budget — the old tight clamp (30 turns / 300s) starved this phase on a
             # big repo: it read for the whole budget, never reached declare_stages, and silently
