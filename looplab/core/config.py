@@ -593,10 +593,11 @@ class Settings(BaseSettings):
     # own dir wired through (no-op for unit-built roles). Off = the legacy single-run view only.
     cross_run_tools: bool = True
     # Read-only access to EVERY run on this machine ACROSS ALL TASKS (not just same-task siblings):
-    # the Developer/Researcher get list_all_runs + read_run_code + read_run_experiment so they can read
-    # the code + result of ANY past experiment anywhere and reuse an approach. Broader than
-    # `cross_run_tools` (same-task only); the agent decides when a foreign run is relevant. Advisory;
-    # never changes best-selection. Needs the run's own dir wired through (no-op for unit-built roles).
+    # the Researcher (and the Developer, when `developer_run_tools` is on) get list_all_runs +
+    # read_run_code + read_run_experiment so they can read the code + result of ANY past experiment
+    # anywhere and reuse an approach. Broader than `cross_run_tools` (same-task only); the agent decides
+    # when a foreign run is relevant. Advisory; never changes best-selection. Needs the run's own dir
+    # wired through (no-op for unit-built roles).
     all_runs_tools: bool = True
     # Developer run-introspection (ON by default): give the in-house repo Developer the SAME read-only
     # run tools the Researcher has — read its OWN experiments (list_experiments/read_experiment/
