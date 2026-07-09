@@ -232,8 +232,16 @@ def fold(events: Iterable[Event]) -> RunState:
                 else:
                     n.stages.append(rec)
         elif t == EV_CONFIRM_EVAL:
-            st.total_eval_seconds += d.get("eval_seconds") or 0.0   # confirm-seed eval cost
-            if "node_id" in d and "seed" in d:                       # per-seed resume memo (#0)
+            # First-occurrence eval-cost accounting: `confirm_eval` is the one eval-cost contributor
+            # without the node-terminal first-terminal guard (events/types.py), so a duplicated/
+            # double-folded confirm_eval would inflate `total_eval_seconds` and make the budget
+            # order-sensitive. Count the seconds only for the FIRST (node_id, seed) we see — the
+            # per-seed memo below already keys on that pair — so a re-fold stays idempotent.
+            keyed = "node_id" in d and "seed" in d
+            first = not (keyed and d["seed"] in st.confirm_seed_results.get(d["node_id"], {}))
+            if first:
+                st.total_eval_seconds += d.get("eval_seconds") or 0.0   # confirm-seed eval cost
+            if keyed:                                                # per-seed resume memo (#0)
                 st.confirm_seed_results.setdefault(d["node_id"], {})[d["seed"]] = d.get("metric")
         elif t == EV_NODE_CONFIRMED:
             n = st.nodes.get(d.get("node_id"))

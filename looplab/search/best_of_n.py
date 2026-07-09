@@ -91,10 +91,15 @@ class BestOfNDeveloper(WrapsDeveloper):
     Forwarding (brief/client/prompts/is_code_generating/last_report) comes from `WrapsDeveloper`."""
 
     def __init__(self, inner, n: int = 3, listwise: bool = True, parser: str = "tool_call",
-                 foresight: bool = True):
+                 foresight: bool = True, direction: str = "min", goal: str = ""):
         self.inner = inner
         self.n = max(1, n)
         self.listwise = listwise
+        # Run objective, threaded into the FOREAGENT ranker so its predict-before-execute world model
+        # optimizes for the RIGHT direction. `foresight.rank` defaults to direction="min"; without this
+        # a max-direction task (accuracy/AUC/F1) would be told to prefer the LOWEST-predicted candidate.
+        self.direction = direction or "min"
+        self.goal = goal or ""
         # FOREAGENT predict-before-execute (search/foresight.py): rank the statically-runnable
         # candidates with the LLM world model — a real predictor, not just the D10 tie-break — before
         # spending an eval. ON by default; a no-op without a client or with <2 distinct candidates.
@@ -146,7 +151,8 @@ class BestOfNDeveloper(WrapsDeveloper):
             # the winning index.
             from looplab.search.foresight import rank, verified_report
             r = rank(self.client, verified_report(brief=getattr(self, "brief", "") or ""),
-                     [c[0] for c in top], parser=self.parser, prompts=self.prompts)
+                     [c[0] for c in top], goal=self.goal, direction=self.direction,
+                     parser=self.parser, prompts=self.prompts)
             if r is not None:
                 order, conf, reason = r
                 chosen = top[order[0]]

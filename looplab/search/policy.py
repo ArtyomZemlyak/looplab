@@ -396,7 +396,16 @@ class MCTSPolicy:
             if not metrics:
                 continue
             value = best_of(metrics)
-            reward = 1.0 / (1.0 + abs(value)) if state.direction == "min" else value
+            # min-direction reward must be MONOTONE DECREASING in `value` (lower metric = better).
+            # `1/(1+value)` gives that for the common non-negative min metric (MSE/error/loss) — but
+            # `abs(value)` INVERTS the order for signed metrics (a value of -5 is better than +0.5, yet
+            # abs maps -5 -> 0.167 < +0.5 -> 0.667). Keep the bounded (0,1] map for value>=0 (unchanged),
+            # and extend it monotonically past 0 with `1-value` (>1) so a negative-and-better subtree
+            # correctly outranks a positive-and-worse one. Continuous at 0 (both branches = 1.0).
+            if state.direction == "min":
+                reward = (1.0 / (1.0 + value)) if value >= 0 else (1.0 - value)
+            else:
+                reward = value
             # Visits = real (feasible, evaluated) trials in the subtree, not failed/infeasible
             # nodes, so the UCB exploration term reflects actual exploration (#76).
             visits = sum(1 for i in tree if state.nodes[i].status is NodeStatus.evaluated

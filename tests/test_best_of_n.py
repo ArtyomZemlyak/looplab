@@ -58,3 +58,28 @@ def test_make_roles_wraps_best_of_n():
     task = load_task(root / "examples" / "code_regression_task.json")
     _r, dev = make_roles(task, Settings(backend="llm", best_of_n=3, unified_agent=False))
     assert isinstance(dev, BestOfNDeveloper) and dev.n == 3
+    # the run objective is threaded so the FOREAGENT ranker optimizes for the RIGHT direction
+    assert dev.direction == task.direction and dev.goal == task.goal
+
+
+_GOOD2 = "import json\n# distinct variant\nprint(json.dumps({'metric': 0.2}))\n"
+
+
+def test_best_of_n_threads_direction_into_foresight(monkeypatch):
+    """The predict-before-execute ranker must be told the run's REAL direction — a max-direction task
+    (accuracy/AUC) told the default 'min' would rank the worst-predicted candidate first."""
+    seen = {}
+
+    def _fake_rank(client, report, items, *, goal="", direction="min", parser="tool_call", prompts=None):
+        seen["direction"] = direction
+        seen["goal"] = goal
+        return ([0] + list(range(1, len(items))), 0.9, "stub")   # pick candidate 0, valid order
+
+    monkeypatch.setattr("looplab.search.foresight.rank", _fake_rank)
+    # two DISTINCT top-scoring candidates so the >1-distinct foresight gate actually fires
+    inner = _VaryingDev([_GOOD, _GOOD2])
+    inner.client = object()                       # `dev.client` reads through the wrapper to here (non-None)
+    dev = BestOfNDeveloper(inner, n=2, foresight=True, direction="max", goal="maximize AUC")
+    assert dev.client is not None                 # foresight branch is reachable
+    dev.implement(Idea(operator="draft"))
+    assert seen == {"direction": "max", "goal": "maximize AUC"}

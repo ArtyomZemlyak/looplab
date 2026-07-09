@@ -45,6 +45,29 @@ def test_run_writes_lessons_with_fingerprint(tmp_path):
     assert all(x.get("fingerprint") for x in rows)          # every lesson is fingerprinted (M2)
 
 
+def test_reflection_is_idempotent_across_reopen(tmp_path):
+    """Run-end reflection must run at most ONCE per run. A reopened run (resume + budget_extend)
+    re-enters finalize; a second `write_reflection_note` must NOT re-append the run's lessons — they
+    consolidate by (statement, task_id) and a duplicate would inflate `evidence_count` so one run
+    reads as 'verified on 2 runs' — nor duplicate the meta-note, nor re-spend the reflection LLM."""
+    from looplab.events.replay import fold
+    mem = tmp_path / "mem"
+    task = ToyTask.load(TASK)
+    r, d = task.build_roles()
+    eng = Engine(tmp_path / "r1", task=task, researcher=r, developer=d,
+                 sandbox=SubprocessSandbox(), policy=GreedyTree(n_seeds=2, max_nodes=4),
+                 reflection_priors=True, memory_dir=str(mem))
+    anyio.run(eng.run)
+    lessons_before = (mem / "lessons.jsonl").read_text()
+    meta_path = mem / "meta_notes.jsonl"
+    meta_before = meta_path.read_text() if meta_path.exists() else ""
+    assert lessons_before.strip()                              # first pass really wrote lessons
+    # simulate the reopen re-finalize: reflect again over the same (already-reflected) log
+    eng._write_reflection_note(fold(eng.store.read_all()))
+    assert (mem / "lessons.jsonl").read_text() == lessons_before   # no duplicate lessons appended
+    assert (meta_path.read_text() if meta_path.exists() else "") == meta_before  # no duplicate meta-note
+
+
 def _write_lessons(mem: Path, rows):
     mem.mkdir(parents=True, exist_ok=True)
     (mem / "lessons.jsonl").write_text("\n".join(orjson.dumps(x).decode() for x in rows) + "\n")

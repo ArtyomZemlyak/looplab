@@ -148,6 +148,23 @@ def test_fold_confirm_seed_results():
     assert st.confirm_seed_results == {3: {0: 0.5, 1: None}}
 
 
+# confirm-seed eval cost is first-occurrence accounted (like node terminals): a duplicated/
+# double-folded confirm_eval must not inflate total_eval_seconds or make the budget order-sensitive.
+def test_fold_confirm_eval_cost_deduped_on_duplicate():
+    from looplab.core.models import Event
+    base = [Event(type="run_started", data={"run_id": "r", "task_id": "t"}),
+            Event(type="confirm_eval", data={"node_id": 3, "seed": 0, "eval_seconds": 5.0, "metric": 0.5})]
+    once = fold(base)
+    dup = fold(base + [Event(type="confirm_eval",
+                             data={"node_id": 3, "seed": 0, "eval_seconds": 5.0, "metric": 0.5})])
+    assert once.total_eval_seconds == 5.0
+    assert dup.total_eval_seconds == 5.0                      # counted once, not 10.0
+    # distinct seeds still each contribute their cost
+    two = fold(base + [Event(type="confirm_eval",
+                             data={"node_id": 3, "seed": 1, "eval_seconds": 4.0, "metric": 0.6})])
+    assert two.total_eval_seconds == 9.0
+
+
 # #17/#18 — event seq advances only after a durable write; a non-dict line stops the reader
 def test_eventstore_seq_and_nondict_guard(tmp_path):
     from looplab.events.eventstore import EventStore, iter_jsonl

@@ -1053,7 +1053,11 @@ class Engine(ConfirmPhaseMixin, AblationMixin):
         n = len(state.nodes)
         if n == 0:
             return False
-        return n == self.n_seeds or n % self.strategist_every == 0
+        # `strategist_every` is `ge=1` via Settings, but the Engine kwarg / EngineOptions accept 0, and
+        # this cadence is reused for coverage snapshots even with NO strategist wired
+        # (`_maybe_snapshot_coverage`) — so guard the modulo like the deep-research cadence does, or
+        # `Engine(strategist_every=0, coverage_context=True)` raises ZeroDivisionError mid-loop.
+        return n == self.n_seeds or (self.strategist_every > 0 and n % self.strategist_every == 0)
 
     def _record_strategy(self, strat: dict, state: RunState,
                          ctx: Optional[StrategyContext] = None) -> None:
