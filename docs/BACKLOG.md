@@ -310,3 +310,72 @@ green — 1165 passed / 22 skipped):
     knob only if a task needs to override).
 
 **§4 is now fully addressed** (every item shipped or explicitly resolved-as-kept).
+
+---
+
+## 5. Mega-review follow-ups (2026-07-09) — deferred / disputed
+
+A xhigh-effort mega-review of that day's changes (range `01c5feb…1841018` +
+`ef48e63`, mostly the inline-repair checkpoint-reuse feature `e12c43c`) surfaced
+15 findings. **13 were fixed** on branch `claude/todays-changes-review-xhqom4`
+(reuse-predicate correctness incl. cumulative-`last_files` delta + fail-closed
+reachability + manifest guard, retrain-cap off-by-one + first-stage counting,
+`mount:true+edit:true` coercion for snapshot back-compat, `_finalize` loud-fail,
+order-aware missing-input check, single-file writable-copy surface, whitespace
+command, bounded MCTS reward, node-count reflection gate + `run_id` de-dup,
+reused-stage fold record). What remains open or was dismissed:
+
+### Deferred correctness (needs a design decision)
+- ⬜ **P2 · `_shutdown_pool_sockets` blast radius (M).** On a bounded non-stream
+  timeout, `core/llm.py::_nonstream_bounded` `socket.shutdown()`s **every**
+  connection in the SHARED httpx pool, so under `max_parallel>1` (or after a
+  stream-stall degrade to non-stream) a healthy sibling request on another
+  connection is killed mid-read — it burns a retry, and a collaterally-killed
+  *stream* counts toward `_stream_stalls`, which after `STREAM_STALL_DEGRADE_AFTER=2`
+  **permanently** degrades the client to non-streaming. *Verified PLAUSIBLE; NOT a
+  regression of this range* — pre-change `close()` already dropped in-flight
+  connections; the shutdown only makes the collateral kill immediate. Left
+  unfixed because a correct fix needs per-request connection isolation, and both
+  options have costs: a dedicated per-call httpx client adds a TLS handshake on
+  the (common, in `llm_stream=False`) non-stream path; a custom httpcore
+  transport that registers each request's socket is the clean fix but a bigger
+  change. **Recommendation:** custom transport tracking `request→socket`, or shut
+  only the wedged call's connection. → `core/llm.py:72,756`.
+
+### Deferred cleanup (quality, not correctness — review flagged, left for a focused pass)
+- ⬜ **P2 · one owner for the resolved stage pipeline (S–M).** `_resolved_stages`
+  (orchestrator.py) re-implements `_run_eval`'s profile→`build_command`→
+  `_resolve_stages` derivation as a parallel copy (they already differ: `_run_eval`
+  honors an explicit `profile` arg, `_resolved_stages` doesn't). Have
+  `run_command_eval` return the resolved stage list on `RunResult` (it already
+  returns `failed_stage`), so the repair loop inspects exactly what ran.
+- ⬜ **P2 · unify the launch-readiness gate (S–M).** "Is this task launchable" now
+  lives in 3 parallel copies — `EvalSpec._command_or_stages` (backend truth),
+  `serve/tui.py::spec_ready`, `ui/src/GenesisChat.jsx` — and this range was itself
+  the drift repair (both frontends had to learn stages-only cmd + dataset mounts).
+  Expose one server-side `validate_task` dry-run (e.g. `/api/validate`) both
+  frontends call, instead of re-deriving the rules in Python + JS.
+- ⬜ **P3 · factor the shared socket-shutdown idiom (S).** `core/llm.py` has 3
+  copies of the `try: sock.shutdown(SHUT_RDWR) except: pass` "only shutdown()
+  interrupts a kernel recv" idiom (`_raw_socket`, `_stream_raw_socket`, the new
+  pool walker) and 3 socket extractors over private httpcore internals — an
+  httpx/httpcore upgrade must be chased through each. Factor one `_shutdown_sock`
+  + keep the `get_extra_info('socket')` extraction in one place. *(Ties the P2
+  above — a custom transport would subsume it.)*
+- ⬜ **P3 · factor the RunResult timeout-nulling (S).** The "null metric/extras/
+  trials on timeout" `RunResult(...)` construction is copy-pasted across
+  `SubprocessSandbox.run`, `DockerSandbox.run`, and `command_eval.run_command_eval`
+  (this range fixed a drift where Subprocess didn't null) — extract one factory.
+
+### Investigated and dismissed (on record so they aren't re-raised)
+- ✅ **REFUTED · "blanket `except` in `_resolved_stages` disables the retrain
+  cap".** A deterministic resolution error would crash `_run_eval` (same
+  derivation, no try/except) *before* the repair loop consults the counter, so it
+  can't recur every attempt; the exception path is a minor robustness wart (log
+  it), not an unbounded-retrain bypass. → `orchestrator.py::_resolved_stages`.
+- ✅ **REFUTED · "cumulative-`last_files` masks the reachability holes so they're
+  harmless".** True for the in-house developer's *raw key set*, but (a) the
+  now-fixed real-delta change set makes the changed set small, re-exposing the
+  holes, and (b) the CLI-agent backend's `last_files` is a git-diff delta all
+  along — so the reachability fix was needed regardless. (Both the delta and the
+  reachability were fixed.)
