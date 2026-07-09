@@ -203,9 +203,13 @@ installs). Just set `cmd` to your scorer and `protect` it:
 Each iteration the Developer's STAGES phase declares a `train` stage (baking this node's
 hyperparameters into it), then its implement phase writes the `train.py` that stage runs; the engine
 runs `train` → appends your protected `cmd` as the final `score` stage → reads the metric from its
-stdout. A fixed scoring bug re-runs **only** `score` (the trained checkpoint is reused). If `train`
-crashes, its stderr is fed back to the agent to repair (a repair is one focused session — no stages or
-plan phase). Notes:
+stdout. A crashed node is repaired IN PLACE (inline repair) and re-evaluated: when the fix touched
+**only** the failed stage's code (e.g. a broken `score`/eval script that didn't change `train.py` or
+anything it imports), the completed `train` checkpoint is **reused** and only `score` re-runs — no
+re-train. If the repair changed the training code (`train.py`/`loss.py`/`model.py`/…), the node
+re-trains from scratch (a stale checkpoint must never be scored — each node scores the model it
+actually trained this run); `inline_repair_retrain_cap` bounds how many full re-trains a repair loop
+may burn before abandoning to the inter-node debug operator. Notes:
 
 - Give `cmd.timeout` room for the whole schedule (often `7200`–`14400`s) — the 600s default SIGKILLs a
   long train into an undertrained checkpoint.

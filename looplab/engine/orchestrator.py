@@ -163,6 +163,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin):
         inline_repair_attempts: int = _UNSET,     # max in-place repair retries per node (0 = UNLIMITED)
         inline_repair_stuck_repeat: int = _UNSET, # abandon when the SAME error repeats this many times in a row
         inline_repair_reasons: tuple = _UNSET,  # reasons eligible for inline repair
+        inline_repair_retrain_cap: int = _UNSET,  # max FULL pipeline re-runs (re-trains) before abandon
         auto_install_deps: bool = _UNSET,      # pip-install a missing KNOWN lib + re-run (trusted_local only)
         dep_install_timeout: float = _UNSET,  # per-package install wall-clock budget (seconds)
         dep_installer=None,                  # Optional[Callable] install hook (test seam; default = deps.install)
@@ -251,6 +252,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin):
         inline_repair_attempts = _opt(inline_repair_attempts, "inline_repair_attempts")
         inline_repair_stuck_repeat = _opt(inline_repair_stuck_repeat, "inline_repair_stuck_repeat")
         inline_repair_reasons = _opt(inline_repair_reasons, "inline_repair_reasons")
+        inline_repair_retrain_cap = _opt(inline_repair_retrain_cap, "inline_repair_retrain_cap")
         auto_install_deps = _opt(auto_install_deps, "auto_install_deps")
         dep_install_timeout = _opt(dep_install_timeout, "dep_install_timeout")
         agent_control = _opt(agent_control, "agent_control")
@@ -316,6 +318,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin):
         self._inline_repair_attempts = max(0, int(inline_repair_attempts))   # 0 = unlimited
         self._inline_repair_stuck_repeat = max(2, int(inline_repair_stuck_repeat))
         self._inline_repair_reasons = tuple(inline_repair_reasons or ("crash",))
+        self._inline_repair_retrain_cap = max(0, int(inline_repair_retrain_cap))
         # Environment self-prep (deps.py): auto-install a missing KNOWN library and re-run, instead
         # of letting the crash-triage agent reject the idea. Trusted_local tier ONLY — the Docker
         # tiers run --network none and must not mutate a shared image. `_dep_attempted` records every
@@ -2408,6 +2411,82 @@ class Engine(ConfirmPhaseMixin, AblationMixin):
                 return _expand(preceding) + [final]
         return None
 
+    def _resolved_stages(self, node, workdir) -> list:
+        """Re-resolve the eval pipeline the way `_run_eval` does — used by the inline-repair reuse
+        predicate to inspect the stages' COMMANDS (which script each runs). [] for a single-command
+        eval (no reuse question). Deterministic given (node, workdir, eval_spec)."""
+        if not self._eval_spec:
+            return []
+        from looplab.runtime import command_eval
+        es = self._eval_spec
+        prof = (node.idea.eval_profile if node is not None else None)
+        if prof is None and self._strategy_fidelity in ("smoke", "full"):
+            prof = self._strategy_fidelity
+        params = node.idea.params if node is not None else {}
+        try:
+            cmd, timeout = command_eval.build_command(es, params, prof)
+            return self._resolve_stages(str(Path(workdir).resolve()), es, params,
+                                        score_cmd=cmd, score_timeout=timeout) or []
+        except Exception:  # noqa: BLE001 — a resolution hiccup must not crash the repair loop; no reuse
+            return []
+
+    @staticmethod
+    def _stage_reachable_files(stages: list, workdir) -> set:
+        """The repo-relative files an earlier stage's run REACHES: each command's `.py` script args plus
+        their ONE-HOP imports resolved to a repo-relative module file. Used to decide whether a repair's
+        edits could have changed what an earlier (to-be-reused) stage produced. One hop is deliberate:
+        full transitive closure buys little against dynamic/subprocess imports and costs a lot; the
+        inter-stage `check` gate is the second line of defense (see `_stage_check_fn`)."""
+        import re as _re
+        wd = Path(workdir)
+        imp_re = _re.compile(r"^[ \t]*(?:from|import)[ \t]+([A-Za-z_][\w.]*)", _re.M)
+        out: set = set()
+        for s in (stages or []):
+            for tok in (s.get("command") or []):
+                if not isinstance(tok, str) or not tok.endswith(".py"):
+                    continue
+                rel = tok[2:] if tok.startswith("./") else tok
+                out.add(rel)
+                p = wd / rel
+                if not p.exists():
+                    continue
+                try:
+                    src = p.read_text(encoding="utf-8", errors="replace")
+                except Exception:  # noqa: BLE001
+                    continue
+                for m in imp_re.finditer(src):
+                    top = m.group(1).split(".")[0]
+                    if (wd / f"{top}.py").exists():
+                        out.add(f"{top}.py")
+                    if (wd / top / "__init__.py").exists():
+                        out.add(f"{top}/__init__.py")
+        return out
+
+    def _safe_reuse_start(self, stages: list, failed_stage, changed_files, workdir):
+        """The stage to RESTART from so a repaired node reuses the completed EARLIER stages (e.g. skip
+        re-`train` when only the `score` script was fixed) — or None to re-run the FULL pipeline (the
+        safe default that preserves the 'each node trains a FRESH model' invariant).
+
+        SAFE-OR-RETRAIN: reuse the earlier stages' artifacts ONLY when the repair's changed files are
+        DISJOINT from those stages' reachable files (their scripts + one-hop imports). If a change could
+        have altered what an earlier stage produces (train.py / loss.py / model.py it imports), we must
+        re-train — reusing a stale checkpoint would score a model that doesn't reflect the current code.
+        A false negative just re-trains (no worse than today); a false positive would be a silent stale
+        score, so the predicate is conservative by construction."""
+        if not stages or not failed_stage:
+            return None
+        names = [str(s.get("name")) for s in stages]
+        if failed_stage not in names:
+            return None
+        fi = names.index(failed_stage)
+        if fi == 0:                                   # nothing before it to reuse
+            return None
+        reachable = self._stage_reachable_files(stages[:fi], workdir)
+        changed = {(f[2:] if isinstance(f, str) and f.startswith("./") else f) for f in (changed_files or [])}
+        if changed & reachable:                       # a change could affect an earlier stage → re-train
+            return None
+        return failed_stage
+
     def _stage_check_fn(self, node):
         """Phase 3 inter-stage verify: a callback (stage_name, log_tail) -> concern|None that asks an LLM
         whether a `check`-flagged stage plausibly succeeded (train actually trained + saved a checkpoint,
@@ -2438,14 +2517,20 @@ class Engine(ConfirmPhaseMixin, AblationMixin):
 
         return _check
 
-    def _run_eval(self, node, workdir, env=None, profile=None, cancel=None):
+    def _run_eval(self, node, workdir, env=None, profile=None, cancel=None, start_stage=_UNSET):
         """Eval dispatcher: RepoTask runs the operator's command + reads its metric;
         otherwise the classic solution.py sandbox path. Both return a `RunResult`, so all
         downstream metric/exit/timeout checks are identical.
 
         Phase 2: the command is built with an eval profile (smoke/full — `profile` arg, else
         the Researcher's `idea.eval_profile`) and, when params_style=cli_overrides, the
-        node's params as `key=value` overrides."""
+        node's params as `key=value` overrides.
+
+        `start_stage`: which pipeline stage to run FROM (earlier stages reused). Default `_UNSET`
+        derives it from `node.rerun_stage` (the operator node_reset seam). The inline-repair loop
+        passes an EXPLICIT value (a stage name to reuse-into, or None for a full re-run) computed by
+        its safe-reuse predicate — passing explicitly avoids the transient `rerun_stage` being reset
+        by the loop's re-fold."""
         if self._eval_spec:
             from looplab.runtime import command_eval
             es = self._eval_spec
@@ -2488,7 +2573,8 @@ class Engine(ConfirmPhaseMixin, AblationMixin):
                 cancel=cancel,                                # operator mid-eval node_abort
                 log_dir=root,                                 # live setup.log/eval.log in the node workdir
                 stages=stages,                                # multi-stage pipeline (Phase 1); None = single command
-                start_stage=(node.rerun_stage if node is not None else None),  # Phase 2: re-run from a stage
+                start_stage=((node.rerun_stage if node is not None else None)
+                             if start_stage is _UNSET else start_stage),  # Phase 2: re-run from a stage
                 check_fn=check_fn)                            # Phase 3: optional inter-stage agentic verify
         else:
             # Intra-node sweep nodes run a whole grid in one process, so they need ~N× the
@@ -2680,6 +2766,13 @@ class Engine(ConfirmPhaseMixin, AblationMixin):
             err = ""
             reason = "crash"
             stuck_sig = None; stuck_n = 0    # anti-stuck: consecutive identical-error signatures
+            # Multi-stage reuse across repair attempts: `next_start` is the stage to run FROM on the next
+            # eval — _UNSET on the first eval (derives node.rerun_stage), then set by the safe-reuse
+            # predicate after each repair (a stage name = reuse the completed earlier stages, e.g. skip
+            # re-train when only the score script was fixed; None = a full re-run). `full_retrains` counts
+            # the EXPENSIVE full re-runs a repair forced, bounded by inline_repair_retrain_cap.
+            next_start = _UNSET
+            full_retrains = 0
             while True:
                 _t0 = time.time()
                 # Mid-eval per-node intervention (v2): a watcher polls the log while the eval runs in a
@@ -2706,7 +2799,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin):
                                 return
                     _tg.start_soon(_watch)
                     res = await anyio.to_thread.run_sync(
-                        self._run_eval, node, str(workdir), None, None, cancel
+                        self._run_eval, node, str(workdir), None, None, cancel, next_start
                     )
                     cancel.set()                  # eval finished on its own …
                     _tg.cancel_scope.cancel()     # … stop the watcher now (no poll-interval latency)
@@ -2801,7 +2894,26 @@ class Engine(ConfirmPhaseMixin, AblationMixin):
                         "rationale": str(triage.get("rationale", ""))[:300]})
                 node = fold(self.store.read_all()).nodes[node_id]   # node.code now == repaired code
                 self._write_node_files(node, workdir)               # re-materialize before re-eval
-                # loop -> re-run the eval with the corrected code
+                # Choose the NEXT eval's start stage: REUSE the completed earlier stages (the train
+                # checkpoint is still on disk — _write_node_files overlays, never wipes) when the repair
+                # provably didn't touch them, so a fixed score/eval script doesn't pay to re-train. Else
+                # a full re-run — bounded by inline_repair_retrain_cap so a repair that keeps rewriting
+                # training code can't burn many full trains (the anti-stuck guard is signature-, not
+                # cost-based). The workdir persists across attempts, so a reused checkpoint is valid.
+                _stages = self._resolved_stages(node, workdir)
+                next_start = self._safe_reuse_start(
+                    _stages, res.failed_stage,
+                    set(repaired_files) | set(repaired_deleted), workdir)
+                if _stages and next_start is None:      # this repair forces a full (expensive) re-train
+                    full_retrains += 1
+                    if (self._inline_repair_retrain_cap
+                            and full_retrains >= self._inline_repair_retrain_cap):
+                        triage_outcome = ("abandon",
+                            f"repair keeps changing training code — {full_retrains} full re-train(s); "
+                            "abandoning in-node repair to avoid burning compute (a budgeted inter-node "
+                            "debug node can still pick it up)")
+                        break
+                # loop -> re-run the eval with the corrected code (reusing earlier stages when safe)
             sp.set_many(eval_seconds=total_eval, exit_code=res.exit_code, timed_out=res.timed_out,
                         metric=res.metric, ok=ok, repair_attempts=attempt)
             if res.violations:

@@ -100,6 +100,7 @@ ATTR_BY_FIELD = {
     "workdir_audit": "_workdir_audit",
     "coverage_context": "_coverage_context",
     "phase_handoff_summary": "_phase_handoff_summary",
+    "inline_repair_retrain_cap": "_inline_repair_retrain_cap",
 }
 
 

@@ -190,6 +190,53 @@ def test_agent_triage_runs_under_its_own_span_not_evaluate(tmp_path):
     assert "triage" in names                     # the span is on disk for the trace view
 
 
+# --------------------------------------------------------------------------- safe stage reuse (P2)
+def _mk_repo(tmp_path):
+    """A workdir with a train stage script that imports loss.py, and a separate score script."""
+    (tmp_path / "train.py").write_text("import loss\nimport torch\nprint('train')\n", encoding="utf-8")
+    (tmp_path / "loss.py").write_text("x = 1\n", encoding="utf-8")
+    (tmp_path / "looplab_eval.py").write_text("import pickle\nprint('score')\n", encoding="utf-8")
+    return tmp_path
+
+
+_STAGES = [{"name": "train", "command": ["python", "train.py", "--bs", "8192"]},
+           {"name": "score", "command": ["python", "looplab_eval.py"]}]
+
+
+def test_stage_reachable_files_scripts_plus_one_hop_imports(tmp_path):
+    _mk_repo(tmp_path)
+    reach = Engine._stage_reachable_files([_STAGES[0]], tmp_path)   # the train stage only
+    assert "train.py" in reach          # its own script
+    assert "loss.py" in reach           # one-hop import of train.py
+    assert "looplab_eval.py" not in reach   # belongs to a later stage, not reachable from train
+
+
+def test_safe_reuse_reuses_when_repair_touched_only_the_failed_stage_script(tmp_path):
+    _mk_repo(tmp_path)
+    e = Engine.__new__(Engine)                       # bare instance — the method uses only static helpers
+    # the observed case: score crashed, repair fixed ONLY looplab_eval.py → reuse train, restart at score
+    assert e._safe_reuse_start(_STAGES, "score", {"looplab_eval.py"}, tmp_path) == "score"
+
+
+def test_safe_reuse_retrains_when_repair_touched_train_or_its_imports(tmp_path):
+    _mk_repo(tmp_path)
+    e = Engine.__new__(Engine)
+    # editing the train script → must re-train (fresh model), never reuse a stale checkpoint
+    assert e._safe_reuse_start(_STAGES, "score", {"train.py"}, tmp_path) is None
+    # editing a file IMPORTED by the train script (loss.py) → also re-train (one-hop closure)
+    assert e._safe_reuse_start(_STAGES, "score", {"loss.py"}, tmp_path) is None
+    # editing BOTH the eval and a train input → the train input forces a re-train
+    assert e._safe_reuse_start(_STAGES, "score", {"looplab_eval.py", "loss.py"}, tmp_path) is None
+
+
+def test_safe_reuse_none_when_first_stage_failed_or_no_stages(tmp_path):
+    _mk_repo(tmp_path)
+    e = Engine.__new__(Engine)
+    assert e._safe_reuse_start(_STAGES, "train", {"train.py"}, tmp_path) is None   # nothing before it
+    assert e._safe_reuse_start([], "score", {"x.py"}, tmp_path) is None            # single-command eval
+    assert e._safe_reuse_start(_STAGES, None, {"x.py"}, tmp_path) is None          # no failed stage
+
+
 # --------------------------------------------------------------------------- rule-based triage
 def test_rule_triage_repairs_mechanical_only():
     assert _rule_triage("crash", "ModuleNotFoundError: no module", 1, 1)["action"] == "repair"

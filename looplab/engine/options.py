@@ -94,6 +94,7 @@ class EngineOptions:
     inline_repair_attempts: int = 0      # max in-place repair retries per node (0 = UNLIMITED)
     inline_repair_stuck_repeat: int = 4  # abandon when the SAME error repeats this many times in a row
     inline_repair_reasons: tuple = ("crash", "timeout", "oom")  # reasons eligible for inline repair
+    inline_repair_retrain_cap: int = 2   # max FULL pipeline re-runs (re-trains) before abandoning
     auto_install_deps: bool = True       # pip-install a missing KNOWN lib + re-run (trusted_local only)
     dep_install_timeout: float = 900.0   # per-package install wall-clock budget (seconds)
     agent_control: Optional[dict] = None  # per-setting allow-list of roles that may change it

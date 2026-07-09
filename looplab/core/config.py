@@ -177,6 +177,15 @@ class Settings(BaseSettings):
     # lighter model, a smaller batch, subsampling) instead of letting the node die unrecovered. Env
     # override expects a JSON array.
     inline_repair_reasons: tuple[str, ...] = ("crash", "timeout", "oom")
+    # Cost ceiling for in-node repair of a MULTI-STAGE eval: the max number of FULL pipeline re-runs
+    # (i.e. re-trains from the first stage) the inline-repair loop may do before abandoning to the
+    # inter-node debug operator. A late-stage failure (a broken `score`/eval script that didn't touch
+    # `train`) REUSES the completed train checkpoint and re-runs only from the failed stage — that is
+    # CHEAP and NOT counted here; only a repair that changes an EARLIER stage's code (train.py/loss.py/…)
+    # forces a full re-train, which each costs the whole training time. Without this bound, a repair that
+    # keeps changing training code could burn many full trains (the anti-stuck guard is error-signature
+    # based, not cost based). 0 = unlimited (legacy behavior). Single-command evals ignore it.
+    inline_repair_retrain_cap: int = Field(default=2, ge=0)
     # Environment self-prep: when a solution crashes purely because a KNOWN library isn't installed
     # (ModuleNotFoundError), the engine pip-installs it into the eval interpreter and re-runs — so a
     # torch/XGBoost/CatBoost idea (e.g. a GRU model) actually runs on a fresh box instead of being
