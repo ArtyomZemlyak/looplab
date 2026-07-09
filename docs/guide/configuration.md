@@ -113,7 +113,7 @@ These are no-ops unless `backend=llm`.
 | `llm_reasoning_extra` | `LOOPLAB_LLM_REASONING_EXTRA` | `{}` | Raw fields merged into the request body (escape hatch) |
 | `llm_stream` | `LOOPLAB_LLM_STREAM` | `True` | Stream the response (SSE) and reassemble it — bounds a stalled generation via an idle-guard watchdog; off = one blocking request |
 | `llm_timeout` | `LOOPLAB_LLM_TIMEOUT` | `180.0` | Per-request inter-token idle limit (s): a stream with no new token for this long is aborted + retried |
-| `llm_header_timeout` | `LOOPLAB_LLM_HEADER_TIMEOUT` | `45.0` | First-byte / connection-establish deadline (s) before a request is treated as stalled |
+| `llm_header_timeout` | `LOOPLAB_LLM_HEADER_TIMEOUT` | `45.0` | First-byte (response-headers) window (s) for **streaming attempts only** before a request is treated as stalled; clamped to `llm_timeout`. Non-stream attempts are not bounded by it |
 | `llm_trust_env` | `LOOPLAB_LLM_TRUST_ENV` | `False` | Honor HTTP(S)_PROXY / NO_PROXY env for the LLM client. Default false = a direct connection (the internal endpoint needs no proxy) |
 | `llm_cache` | `LOOPLAB_LLM_CACHE` | `False` | Serve identical **deterministic** (temperature-0) LLM requests from an in-process content-addressed cache (cuts cost on retry/panel/verify); sampling calls (temp>0) are never cached. Off by default |
 | `compressor_model` | `LOOPLAB_COMPRESSOR_MODEL` | — | Model id for the history auto-summary compressor (blank = the shared chat model) |
@@ -141,12 +141,12 @@ These are no-ops unless `backend=llm`.
 Run the Researcher and Developer on different models or endpoints (e.g. a coder model for the
 Developer, a fast model for breadth). Blank values fall back to the shared `llm_*`.
 
-| Setting | Env | Description |
-|---|---|---|
-| `researcher_model` / `developer_model` | `LOOPLAB_RESEARCHER_MODEL` / `LOOPLAB_DEVELOPER_MODEL` | Per-role model id |
-| `researcher_base_url` / `developer_base_url` | `LOOPLAB_RESEARCHER_BASE_URL` / `LOOPLAB_DEVELOPER_BASE_URL` | Per-role endpoint |
-| `agent_stage_models` | `LOOPLAB_AGENT_STAGE_MODELS` | Unified-agent per-stage model map (`propose`/`implement`/`repair`/`strategy`/`pilot`) |
-| `agent_stage_base_urls` | `LOOPLAB_AGENT_STAGE_BASE_URLS` | Unified-agent per-stage endpoint map |
+| Setting | Env | Default | Description |
+|---|---|---|---|
+| `researcher_model` / `developer_model` | `LOOPLAB_RESEARCHER_MODEL` / `LOOPLAB_DEVELOPER_MODEL` | — / — | Per-role model id (blank = shared `llm_model`) |
+| `researcher_base_url` / `developer_base_url` | `LOOPLAB_RESEARCHER_BASE_URL` / `LOOPLAB_DEVELOPER_BASE_URL` | — / — | Per-role endpoint (blank = shared `llm_base_url`) |
+| `agent_stage_models` | `LOOPLAB_AGENT_STAGE_MODELS` | `{}` | Unified-agent per-stage model map (`propose`/`implement`/`repair`/`strategy`/`pilot`) |
+| `agent_stage_base_urls` | `LOOPLAB_AGENT_STAGE_BASE_URLS` | `{}` | Unified-agent per-stage endpoint map |
 
 See [LLM & coding agents](llm-and-agents.md) for full guidance.
 
@@ -280,7 +280,7 @@ See [Concepts → Trust & sandbox](concepts.md#trust-the-sandbox) for what each 
 |---|---|---|---|
 | `report_every` | `LOOPLAB_REPORT_EVERY` | `3` | Regenerate the agent-authored run report every N created nodes (0 = off) |
 | `trace_llm_io` | `LOOPLAB_TRACE_LLM_IO` | `true` | Capture each LLM call's prompt + completion into `spans.jsonl` |
-| `digest_char_cap` | `LOOPLAB_DIGEST_CHAR_CAP` | `0` | Cap (chars) on the in-run experiment digest injected into prompts (0 = built-in default) |
+| `digest_char_cap` | `LOOPLAB_DIGEST_CHAR_CAP` | `0` | Cap (chars) on the in-run experiment digest injected into prompts (0 = AUTO — scales with run size at ~60 chars/node, bounded to [1200, 6000]) |
 
 ## External-agent governance
 
