@@ -71,11 +71,14 @@ def append_dev_lessons(memory_dir, lessons: list[dict], *, consolidate: bool = T
     with _interprocess_lock(Path(str(path) + ".lock")):
         if consolidate:
             from looplab.engine.memory import consolidate_lessons
+            from looplab.core.atomicio import atomic_write_text
             merged = consolidate_lessons(_load(path) + list(lessons))   # lexical group+sum, no LLM
-            path.write_text("".join(orjson.dumps(lz).decode() + "\n" for lz in merged),
-                            encoding="utf-8")
+            # ATOMIC whole-file rewrite (temp + os.replace), like the researcher store's hygiene pass
+            # (engine/lessons.py) — a plain write_text truncates first, so a SIGKILL mid-write (budget/
+            # OOM/sandbox teardown) between truncate and flush would lose the WHOLE accumulated store.
+            atomic_write_text(str(path), "".join(orjson.dumps(lz).decode() + "\n" for lz in merged))
         else:
-            with open(path, "a", encoding="utf-8") as f:
+            with open(path, "a", encoding="utf-8") as f:                # append is already crash-safe
                 f.write("".join(orjson.dumps(lz).decode() + "\n" for lz in lessons))
     return len(lessons)
 
@@ -99,7 +102,7 @@ def dev_lesson_preview(memory_dir, task_id: str = "", fingerprint: Optional[list
         stored = o.get("fingerprint")
         stored = [t for t in stored if not str(t).startswith("param:")] if isinstance(stored, list) else []
         sim = 1.0 if (task_id and o.get("task_id") == task_id) else fingerprint_similarity(fp, stored)
-        if sim >= 0.34 or not fp:                 # related task, exact task, or no fp to filter on
+        if sim >= 0.34:                           # exact task (sim 1.0) or a fingerprint-similar one
             scored.append((sim, idx, o))
     if not scored:
         return ""
@@ -121,8 +124,11 @@ def dev_lesson_preview(memory_dir, task_id: str = "", fingerprint: Optional[list
             break
     if not lines:
         return ""
+    # Only `search_dev_lessons` is named here: the preview rides the SHARED system prompt (all phases),
+    # but the `remember_dev_lesson` WRITE tool is bound only in the implement/repair phases — its own
+    # description advertises it there, so naming it here would point the read-only phases at an unbound tool.
     return ("\n\nDEVELOPER MEMORY — implementation lessons from past runs (preview; "
-            "`search_dev_lessons` for detail, `remember_dev_lesson` to add one):\n" + "\n".join(lines))
+            "`search_dev_lessons` reads more):\n" + "\n".join(lines))
 
 
 class DevMemoryTools:

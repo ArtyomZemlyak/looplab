@@ -561,9 +561,10 @@ _REPO_DEV_RUN_TOOLS = (
     "  • read_logs(node_id) — that node's stdout tail + FULL error/stderr (why it failed / what it "
     "printed while running).\n"
     "  • find_analogous(node_id or params) — nearby configs and how they did.\n"
-    "When the idea names a node — an IMPROVE parent, the MERGED parents it lists, or the failing node on "
-    "a REPAIR — read that node's code + logs FIRST. Read only what's relevant; do NOT enumerate the "
-    "whole history.")
+    "When the idea names a node — an IMPROVE parent, or the MERGED parents it lists — read that node's "
+    "code + logs FIRST. On a REPAIR the failing code + error are already inlined below; use the tools to "
+    "check how a RELATED prior node handled the same thing. Read only what's relevant; do NOT enumerate "
+    "the whole history.")
 
 
 class LLMRepoDeveloper:
@@ -623,7 +624,11 @@ class LLMRepoDeveloper:
         """Engine hook (called before each implement/implement_from/repair — see
         `orchestrator._bind_developer`): expose the LIVE search DAG to the Developer's read-only
         run-introspection tools. Stored only; the per-phase toolset binds fresh providers to it
-        (`_run_intro_tools`). A safe no-op shape for any caller that never binds (unit/factory)."""
+        (`_run_intro_tools`). A safe no-op shape for any caller that never binds (unit/factory).
+
+        `parent` is ADVISORY: RunTools stores it but no read path consumes it, and the write-tool
+        identifiers (task_id/run_id/fingerprint) are all RUN-level, so a concurrent bind for another
+        node under max_parallel>1 (the Developer instance is shared) can't misattribute anything."""
         self._bound_state = state
         self._bound_parent = parent
 
@@ -664,12 +669,20 @@ class LLMRepoDeveloper:
         if not getattr(self, "_run_tools", False) or getattr(self, "_bound_state", None) is None:
             return ""
         block = _REPO_DEV_RUN_TOOLS
-        if getattr(self, "_run_dir", None) is not None and (
-                getattr(self, "_cross_run_tools", False) or getattr(self, "_all_runs_tools", False)):
+        run_dir = getattr(self, "_run_dir", None)
+        # Advertise ONLY the cross-run tools that are actually bound (see `_run_intro_tools`): AllRunsTools
+        # (list_all_runs/read_run_*) gates on `all_runs_tools`; SiblingRunTools (list_sibling_runs/
+        # read_sibling_*) gates on `cross_run_tools`. They expose DIFFERENT tool names, so naming the
+        # all-runs tools under a cross_run-only config would point the model at unbound tools.
+        if run_dir is not None and getattr(self, "_all_runs_tools", False):
             block += (
                 "\n  • list_all_runs / read_run_experiment(run_id, node_id) / read_run_code(run_id, "
                 "node_id) — read the result + code of an experiment in ANY other run on this machine "
                 "(e.g. a similar run the researcher points you to). Use a run_id from list_all_runs.")
+        if run_dir is not None and getattr(self, "_cross_run_tools", False):
+            block += (
+                "\n  • list_sibling_runs / read_sibling_experiment(run_id, node_id) / read_sibling_code("
+                "run_id, node_id) — the same, restricted to OTHER runs of THIS task.")
         return block
 
     def _task_fp(self) -> list:

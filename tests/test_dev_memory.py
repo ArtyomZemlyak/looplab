@@ -195,3 +195,36 @@ def test_engine_distillation_off_without_memory(tmp_path):
     LessonMemory(eng).write_dev_lessons(_failed_run())
     assert not (tmp_path / DEV_LESSONS_FILE).exists()      # nothing written, no event
     assert eng.store.events == []
+
+
+def test_engine_distillation_llm_path(tmp_path, monkeypatch):
+    """The LLM branch: a wired client → agentic_text returns [GOOD]/[BAD] lines → they parse into
+    technique/pitfall dev lessons (source=distilled). Monkeypatch agentic_text so the tool loop isn't
+    actually driven — this tests the parse + outcome mapping, the error-prone part."""
+    import looplab.agents.agent as agent_mod
+    from looplab.engine.lessons import LessonMemory
+    monkeypatch.setattr(agent_mod, "agentic_text",
+                        lambda *a, **k: "[GOOD] orchestrate the repo's own train.py via subprocess\n"
+                                        "[BAD] don't pass the --gpus flag as a string")
+    eng = _FakeEngine(str(tmp_path), client=object())     # non-None client → LLM path
+    LessonMemory(eng).write_dev_lessons(_failed_run())
+    rows = _load(tmp_path / DEV_LESSONS_FILE)
+    assert any(r["outcome"] == "technique" for r in rows)      # [GOOD] → technique
+    assert any(r["outcome"] == "pitfall" for r in rows)        # [BAD]  → pitfall
+    assert rows and all(r["source"] == "distilled" for r in rows)
+
+
+def test_preview_matches_similar_fingerprint_not_dissimilar(tmp_path):
+    """The cross-task branch: a DIFFERENT task_id but a SIMILAR fingerprint (Jaccard ≥ 0.34) surfaces;
+    a dissimilar-fingerprint lesson does not — the reason each lesson carries a fingerprint."""
+    mem = str(tmp_path)
+    cur_fp = ["kind:repo", "dir:max", "goal:accuracy", "goal:image"]
+    append_dev_lessons(mem, [
+        {"task_id": "otherA", "fingerprint": ["kind:repo", "dir:max", "goal:accuracy", "goal:texture"],
+         "statement": "similar-task lesson: patch the loss in model.py", "outcome": "technique",
+         "run_id": "r1", "evidence": []},          # shares 3/union5 = 0.6 with cur_fp → surfaces
+        {"task_id": "otherB", "fingerprint": ["kind:toy", "dir:min", "goal:speed"],
+         "statement": "dissimilar-task lesson", "outcome": "technique", "run_id": "r1", "evidence": []}])
+    prev = dev_lesson_preview(mem, task_id="mine", fingerprint=cur_fp)   # different task_id from both
+    assert "similar-task lesson" in prev
+    assert "dissimilar-task lesson" not in prev

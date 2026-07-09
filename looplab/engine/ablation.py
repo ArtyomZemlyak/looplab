@@ -70,6 +70,7 @@ class AblationMixin:
             new_params[top] = proposal.params[top]
         idea = Idea(operator="refine_block", params=new_params,
                     rationale=f"ablation: refine highest-impact '{top}' (impacts={impacts})")
+        self._bind_developer(state, parent)   # D-context: run tools see the live DAG on ablation refine
         code = self._implement(idea, parent)
         node_id = max(fold(self.store.read_all()).nodes, default=-1) + 1
         self._emit_node_created(
@@ -146,6 +147,7 @@ class AblationMixin:
         idea = Idea(operator="refine_block", params=dict(parent.idea.params),
                     rationale=("code-block ablation: refine the highest-impact pipeline block "
                                f"#{top} and keep the rest. Block:\n{top_src}"))
+        self._bind_developer(state, parent)   # D-context: run tools see the live DAG on ablation refine
         new_code = self._implement(idea, parent)
         node_id = max(fold(self.store.read_all()).nodes, default=-1) + 1
         self._emit_node_created(

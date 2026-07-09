@@ -98,6 +98,34 @@ def test_run_tools_prompt_mentions_the_readers():
     assert "list_all_runs" in block                    # the cross-run sentence is appended
 
 
+def test_run_tools_prompt_advertises_only_bound_cross_run_tools():
+    """The prompt must name ONLY the cross-run tools actually bound per gate: SiblingRunTools
+    (list_sibling_runs/read_sibling_*) under cross_run_tools, AllRunsTools (list_all_runs/read_run_*)
+    under all_runs_tools — they have different names, so a cross-only config must not point the model
+    at the unbound all-runs tools."""
+    cross_only = _bare_dev(run_dir="/runs/runA", cross=True, allr=False)
+    cross_only.bind_state(_st(), None)
+    b = cross_only._run_tools_prompt()
+    assert "list_sibling_runs" in b and "read_sibling_code" in b
+    assert "list_all_runs" not in b
+    all_only = _bare_dev(run_dir="/runs/runA", cross=False, allr=True)
+    all_only.bind_state(_st(), None)
+    b2 = all_only._run_tools_prompt()
+    assert "list_all_runs" in b2 and "read_run_code" in b2
+    assert "list_sibling_runs" not in b2
+
+
+def test_read_code_banner_for_unevaluated_node():
+    """A pending/building node's code is not mislabeled 'final evaluated code'."""
+    st = _st()
+    st.nodes[5] = Node(id=5, operator="draft", code="print('wip')",
+                       idea=Idea(operator="draft", params={}), status=NodeStatus.pending)
+    rt = RunTools()
+    rt.bind_state(st, None)
+    out = rt.execute("read_code", {"node_id": 5})
+    assert "not yet evaluated" in out and "final evaluated code" not in out
+
+
 # --------------------------------------------------------------------- end-to-end session
 class _DoneClient:
     """Scripted client: records the tool specs it was offered, then immediately calls `done`."""

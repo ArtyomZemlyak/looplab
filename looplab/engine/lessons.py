@@ -343,7 +343,9 @@ class LessonMemory:
         from looplab.engine.memory import parse_credit_lessons
         res = []
         for _, stmt, outcome in parse_credit_lessons(out, 0)[:3]:
-            res.append({"task_id": final.task_id, "fingerprint": fp, "kind": kind, "statement": stmt,
+            # Cap the statement like the self-author write tool ([:400]) so a runaway LLM line can't
+            # bloat the shared store (the preview truncates anyway; this keeps the file itself tidy).
+            res.append({"task_id": final.task_id, "fingerprint": fp, "kind": kind, "statement": stmt[:400],
                         "outcome": "pitfall" if outcome == "failed" else "technique",
                         "confidence": 0.6, "run_id": final.run_id, "evidence": [], "source": "distilled"})
         return res

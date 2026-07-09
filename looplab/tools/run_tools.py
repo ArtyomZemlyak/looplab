@@ -221,9 +221,11 @@ class RunTools:
         if n.status is NodeStatus.failed:
             banner = (f"# ⚠ experiment #{nid} FAILED ({n.error_reason or 'error'}) — the code below is the "
                       f"version that FAILED; call read_logs({nid}) for the error/stderr before reusing it.\n")
-        else:
+        elif n.status is NodeStatus.evaluated:
             banner = (f"# experiment #{nid} — metric={digest.fmt_num(digest.node_metric(n))} "
-                      "(this is the final evaluated code)\n")
+                      "(final evaluated code)\n")
+        else:   # pending / building / running — code exists but hasn't been scored yet
+            banner = f"# experiment #{nid} — status={n.status.value}; code not yet evaluated\n"
         files = (f"\nother files: {list(n.files)}" if n.files else "")
         return f"{banner}# solution.py of experiment #{nid}\n{n.code[:self.max_chars]}{files}"
 
