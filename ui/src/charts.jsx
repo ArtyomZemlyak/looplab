@@ -359,7 +359,7 @@ export function MetricLines({ series, cols = 2 }) {
 }
 
 function MetricGroup({ name, tags, series, cols }) {
-  const [open, setOpen] = React.useState(true)
+  const [open, setOpen] = React.useState(false)   // groups COLLAPSED by default (expand one to see its curves)
   return (
     <div style={{ marginBottom: 8 }}>
       <div onClick={() => setOpen(o => !o)}
