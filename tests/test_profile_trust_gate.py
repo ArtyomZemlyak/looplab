@@ -43,7 +43,11 @@ def test_default_profile_leaves_machinery_off():
 def test_thorough_profile_turns_machinery_on():
     s = Settings(profile="thorough")
     assert (s.confirm_top_k, s.confirm_seeds) == (3, 3)
-    assert s.novelty_gate and s.reward_hack_detect and s.code_leakage_detect and s.critic_check
+    assert s.reward_hack_detect and s.code_leakage_detect and s.critic_check
+    # novelty_gate stays OFF even in `thorough`: duplicate-detection is the agentic Researcher's
+    # job (reads past experiments + find_analogous_across_runs), not an algorithmic auto-reject —
+    # see the PROFILES["thorough"] comment in config.py for the live-node-61 misfire that motivated it.
+    assert s.novelty_gate is False
     assert s.trust_gate == "gate"
     assert s.ablate_every == 3 and s.complexity_cue and s.budget_aware and s.failure_reflection
     # every value the profile sets must be a real, reachable field
@@ -55,7 +59,7 @@ def test_explicit_setting_beats_profile():
     s = Settings(profile="thorough", confirm_top_k=1, trust_gate="block")
     assert s.confirm_top_k == 1          # explicit wins
     assert s.trust_gate == "block"       # explicit wins
-    assert s.novelty_gate is True        # untouched profile field still applies
+    assert s.reward_hack_detect is True  # untouched profile field still applies
 
 
 def test_env_beats_profile(monkeypatch):

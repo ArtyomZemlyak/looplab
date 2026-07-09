@@ -203,7 +203,9 @@ def test_settings_phase2_defaults():
     from looplab.core.config import PROFILES, Settings
     s = Settings()
     assert s.failure_reflection is True
-    assert s.novelty_semantic is True
+    # novelty_semantic ships OFF: novelty is the agentic Researcher's call (reads prior
+    # experiments via tools), not an embedding auto-reject — see config.py's field comment.
+    assert s.novelty_semantic is False
     assert s.debug_depth == 2
     assert s.operator_bandit is False
     assert PROFILES["thorough"]["operator_bandit"] is True
