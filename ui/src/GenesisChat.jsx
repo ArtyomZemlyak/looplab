@@ -121,9 +121,14 @@ export default function GenesisChat({ onClose, onStarted, seed }) {
   // launchable when there's a name + a task; a competition needs its slug, a repo task needs a `repo`
   // path + a way to score it (a cmd command, metric reader "auto", or onboard). The backend validates
   // too, but gate here for a clean UX (no doomed launch).
+  const cmdStages = _cmdObj.stages || []
   const repoReady = !isRepo || (repoPath.trim() &&
-    ((Array.isArray(cmdCommand) && cmdCommand.length) || task.onboard || _cmdObj.metric?.reader === 'auto'))
-  const datasetReady = !isDataset || !!task.data_path?.trim()
+    ((Array.isArray(cmdCommand) && cmdCommand.length) || (Array.isArray(cmdStages) && cmdStages.length)
+     || task.onboard || _cmdObj.metric?.reader === 'auto'))
+  // A composable dataset spec may carry its paths in `dataset`/`data` (mounts) OR `data_path` (single
+  // path) — the backend (DatasetTask) accepts any; the gate must not demand `data_path` alone.
+  const _hasData = (v) => typeof v === 'string' ? !!v.trim() : !!(v && Object.keys(v).length)
+  const datasetReady = !isDataset || !!(task.data_path?.trim() || _hasData(task.dataset) || _hasData(task.data))
   const taskReady = spec?.task_file || (inferredKind &&
     (inferredKind !== 'mlebench_real' || (task.kaggle || task.competition)?.trim()) && repoReady && datasetReady)
   const ready = spec && spec.run_id?.trim() && taskReady

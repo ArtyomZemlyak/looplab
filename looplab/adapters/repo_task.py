@@ -469,11 +469,13 @@ class RepoTask(BaseModel):
         for ed in mounts:
             pre = "" if ed["name"] in (".", "") else ed["name"].rstrip("/") + "/"
             surface += [pre + g for g in ed["surface"]]
-        # An `edit:true` data source must be EDITABLE regardless of the repo's edit_surface, so add its
-        # tree to the surface (otherwise a narrow surface like ["src/**"] would refuse writes to it even
-        # though the operator granted edit). Non-edit sources are protected instead (see _protected_names).
+        # A WRITABLE data source must be editable regardless of the repo's edit_surface, else a narrow
+        # surface like ["src/**"] refuses writes the brief promised. Writable == `edit:true` (mutate the
+        # mounted original in place) OR `mount:false` (a per-node COPY the agent may "copy+modify,
+        # preprocess, extend"). This is the exact COMPLEMENT of `_protected_names` (which guards only the
+        # read-only mounted original, `not edit and mount`), so every source is either surfaced or protected.
         for name, spec in self.data.items():
-            if spec.edit:
+            if spec.edit or not spec.mount:
                 surface.append(name.rstrip("/") + "/**")
         return {
             "editables": mounts,                         # Phase 4: every editable repo + mount

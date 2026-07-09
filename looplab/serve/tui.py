@@ -273,9 +273,12 @@ def spec_ready(spec: Optional[dict]) -> Optional[str]:
     if task.get("kind") == "repo":
         if not (task.get("editable_path") or task.get("editables")):
             return "a repo task needs a `repo` path"
-        has_cmd = isinstance(task.get("eval"), dict) and task["eval"].get("command")
+        # EvalSpec accepts a `command` OR a `stages` pipeline (see EvalSpec._command_or_stages), so an
+        # operator stages-only `cmd:{stages:[…]}` is launchable — the gate must not demand `command`.
+        _eval = task.get("eval")
+        has_cmd = isinstance(_eval, dict) and (_eval.get("command") or _eval.get("stages"))
         if not (has_cmd or task.get("onboard")):
-            return "a repo task needs a `cmd` (or metric reader \"auto\")"
+            return "a repo task needs a `cmd` (a command or a stages pipeline, or metric reader \"auto\")"
     return None
 
 
