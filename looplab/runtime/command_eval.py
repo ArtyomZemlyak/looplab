@@ -471,6 +471,14 @@ def run_command_eval(command: list[str], cwd: str, timeout: float, metric: dict,
                 continue
             _t0 = time.monotonic()
             with _sp(_sname, kind="operation", sandboxed=bool(wrap), stage=_sname) as _sh:
+                # Live-band anchor: a training subprocess emits NO child LLM/tool spans, and this stage's
+                # operation span is written to spans.jsonl only on CLOSE (tracing.Tracer.span), so without
+                # a live child the trace view shows nothing for the whole ~hour of training and the
+                # "Train"/"Evaluate" block appears only at the end. A zero-work child span carries the
+                # phase stamp (see tracing._phase_ctx), which the live view bands under this stage the
+                # instant it opens — the intended live mechanism, just given something to anchor on.
+                with _sp("stage_started", kind="tool", stage=_sname):
+                    pass
                 rc, out, err, to = run_argv(_w(_bound(_scmd, _sto), str(wd)), wd,
                                             _sto + grace, env, max_output_bytes, cancel,
                                             log_path=_log(f"{_sname}.log"))
@@ -501,6 +509,10 @@ def run_command_eval(command: list[str], cwd: str, timeout: float, metric: dict,
         # all stages passed -> the LAST stage's `out`/`rc`/`to` flow into read_metric below.
     else:
         with _sp("command", sandboxed=bool(wrap)) as _h:
+            # Live-band anchor (see the multi-stage branch): flush a child the instant the single eval
+            # command starts, so the "Evaluate" block shows live instead of only when the command ends.
+            with _sp("stage_started", kind="tool", phase="evaluate"):
+                pass
             rc, out, err, to = run_argv(_w(_bound(command, timeout), str(wd)), wd,
                                          timeout + grace, env, max_output_bytes, cancel,
                                          log_path=_log("eval.log"))

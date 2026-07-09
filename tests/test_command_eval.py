@@ -72,3 +72,31 @@ def test_docker_timed_out_covers_124_and_137():
     from looplab.runtime.sandbox import docker_timed_out
     assert docker_timed_out(124) and docker_timed_out(137)
     assert not docker_timed_out(0) and not docker_timed_out(1) and not docker_timed_out(2)
+
+
+def test_stage_start_emits_a_live_band_anchor(tmp_path):
+    # A long training stage emits no child spans and its own operation span flushes only on CLOSE, so
+    # a live trace would stay blank the whole run. run_command_eval flushes a `stage_started` child the
+    # instant each stage begins, carrying that stage's phase stamp, so the live view can band
+    # "Train"/"Evaluate · score" immediately. Assert the anchors are on disk, one per stage, stamped.
+    import orjson
+
+    from looplab.core.tracing import JsonlSpanExporter, Tracer
+
+    (tmp_path / "train.py").write_text("print('trained')\n", encoding="utf-8")
+    (tmp_path / "score.py").write_text(
+        'import json; print(json.dumps({"metric": 0.9}))\n', encoding="utf-8")
+    spans = tmp_path / "spans.jsonl"
+    tr = Tracer(JsonlSpanExporter(str(spans)), run_id="r")
+    stages = [{"name": "train", "command": [sys.executable, "train.py"]},
+              {"name": "score", "command": [sys.executable, "score.py"]}]
+    with tr.span("evaluate", new_trace=True, node_id=7):
+        res = run_command_eval([sys.executable, "score.py"], str(tmp_path), 60, _M,
+                               tracer=tr, log_dir=str(tmp_path), stages=stages)
+    assert res.metric == 0.9
+    recs = [orjson.loads(x) for x in spans.read_bytes().splitlines()]
+    anchors = [r for r in recs if r["name"] == "stage_started"]
+    assert {r["attributes"].get("stage") for r in anchors} == {"train", "score"}   # one per stage
+    by_stage = {r["attributes"]["stage"]: r for r in anchors}
+    assert by_stage["train"]["attributes"].get("phase") == "train"     # phase-stamped -> bands "Train"
+    assert all(r["attributes"].get("node_id") == 7 for r in anchors)   # attributed to the node

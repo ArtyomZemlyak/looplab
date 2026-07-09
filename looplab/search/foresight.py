@@ -246,15 +246,22 @@ class ForesightPanelResearcher:
         self.last_foresight: Optional[dict] = None       # telemetry: last idea ranking + confidence
         self.last_hyp_priority: Optional[dict] = None     # telemetry: last board prioritization
 
-    def _rank(self, report: str, items: list[str], *, goal: str, direction: str):
+    def _rank(self, report: str, items: list[str], *, goal: str, direction: str, kind: str = "idea"):
         """Dispatch to the agentic ranker when tools are wired, else the one-shot predictor. Runs in its
         OWN named trace so the ranking's LLM spans are isolated from the node's propose/implement trace —
         the captured (trace_id, span_id) rides on the telemetry dict and stamps the hypothesis_ranked /
-        foresight_selected event, scoping its trace in the UI to JUST the ranking."""
+        foresight_selected event, scoping its trace in the UI to JUST the ranking.
+
+        `kind` names the span so the two DISTINCT ranking steps don't collapse into look-alike bands:
+        board prioritization (`kind="board"`, runs BEFORE propose — picks which open hypothesis to
+        pursue) traces as `hyp_prioritize`; idea predict-before-execute (`kind="idea"`, runs AFTER
+        propose — scores the chosen proposal) traces as `foresight_rank`. Without this the UI showed
+        two identical "Researcher · foresight" bands and the first read as a superfluous duplicate."""
         import contextlib
         from looplab.core import tracing
         tr = tracing._current_tracer.get()
-        cm = tr.span("foresight_rank", new_trace=True) if tr is not None else contextlib.nullcontext()
+        span_name = "hyp_prioritize" if kind == "board" else "foresight_rank"
+        cm = tr.span(span_name, new_trace=True) if tr is not None else contextlib.nullcontext()
         with cm:
             self._last_rank_ids = tracing.current_ids() if tr is not None else (None, None)
             if self.tools is not None:
@@ -306,7 +313,7 @@ class ForesightPanelResearcher:
         r = self._rank(
                  verified_report(data_profile=state.data_profile, memory=_memory_brief(state, parent)),
                  ["Hypothesis: " + h.statement for h in hyps],
-                 goal=state.goal, direction=state.direction)
+                 goal=state.goal, direction=state.direction, kind="board")
         if r is None:
             setattr(self.base, "_hyp_order", None)
             return

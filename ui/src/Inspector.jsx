@@ -59,13 +59,17 @@ export default function Inspector({ runId, nodeId, state, live, tab, setTab, onT
     return () => { on = false }
   }, [runId, nodeId, state?.nodes?.[nodeId]?.status])
   // Live-refresh the node detail (it carries n.trace spans + the agent report) while the run is ACTIVELY
-  // working this node — so the Trace tab fills in WITHOUT the user toggling tabs. Only while an LLM is
-  // plausibly working it (building / still pending), engine alive; stops at terminal or engine death.
-  // "Working" = an LLM is ACTUALLY authoring this node RIGHT NOW (building = propose+implement, or a
-  // repair). NOT during training: a `pending` node is being EVALUATED (the sandbox trains it, no LLM),
-  // so no live pulse/poll there — that's the "тренировка уже не надо" case.
-  const nodeWorking = !!live && live.engine_running !== false && !live.finished
-    && nodeId != null && live.building?.node_id === nodeId
+  // working this node — so the Trace tab fills in WITHOUT the user toggling tabs. Two windows, both
+  // engine-alive & not-finished (stops at terminal / engine death):
+  //   • building  — an LLM is authoring the node (propose + implement, or a repair).
+  //   • pending   — the sandbox is EVALUATING it (data_prep → train → score). Training used to show
+  //     nothing live (no child LLM spans, and the stage op flushes only on close); command_eval now
+  //     emits a `stage_started` anchor per stage so the Train/Evaluate band fills in DURING the run.
+  //     A pending node's status doesn't change until it's scored, so without polling here the Trace
+  //     tab froze after "Developer implement" for the whole training run.
+  const nodeStatus = state?.nodes?.[nodeId]?.status
+  const engineActive = !!live && live.engine_running !== false && !live.finished && nodeId != null
+  const nodeWorking = engineActive && (live.building?.node_id === nodeId || nodeStatus === 'pending')
   useEffect(() => {
     if (!nodeWorking) return
     const iv = setInterval(() => {
@@ -284,8 +288,12 @@ const STAGE = {
   ablate:       { icon: 'sliders', role: 'Ablation', desc: 'sensitivity probe', tone: '#6f8bb0' },
   // sub-operation traces the engine wraps in their own named span — give each a distinct hue so the
   // conversation reads as coloured bands (foresight vs strategy vs research vs merge) at a glance.
-  foresight_rank: { icon: 'bulb', role: 'Researcher · foresight', desc: 'predict payoff / rank open hypotheses', tone: '#c2a24e' },
-  foresight:      { icon: 'bulb', role: 'Researcher · foresight', desc: 'predict payoff / rank open hypotheses', tone: '#c2a24e' },
+  // Two DISTINCT Researcher ranking steps — kept apart so the first doesn't read as a duplicate of
+  // the second: `hyp_prioritize` runs BEFORE propose (pick which open hypothesis to pursue),
+  // `foresight_rank` runs AFTER propose (predict the chosen proposal's payoff, best-of-N pick).
+  hyp_prioritize: { icon: 'bulb', role: 'Researcher · prioritize', desc: 'rank the open-hypothesis board', tone: '#c2a24e' },
+  foresight_rank: { icon: 'bulb', role: 'Researcher · foresight', desc: 'predict payoff of the chosen idea', tone: '#c2a24e' },
+  foresight:      { icon: 'bulb', role: 'Researcher · foresight', desc: 'predict payoff of the chosen idea', tone: '#c2a24e' },
   strategy_consult: { icon: 'trending', role: 'Strategist', desc: 'pick policy / operators / fidelity', tone: '#b0729e' },
   strategy_decision: { icon: 'trending', role: 'Strategist', desc: 'pick policy / operators / fidelity', tone: '#b0729e' },
   hypothesis_merge: { icon: 'confluence', role: 'Hypothesis merge', desc: 'fold paraphrase hypotheses', tone: '#5fa0a8' },
@@ -712,12 +720,16 @@ function Trace({ n, runId, live, working }) {
   const bodyRef = useRef(null)
   const spans = n.trace?.nodes || []
   const agent = n.agent_report
-  // Live status: what an LLM is doing on this node RIGHT NOW — only while it's actually working the node
-  // (writing code / repairing), never during the training eval (the user doesn't want a pulse then).
-  const _op = (working && live?.building?.node_id === n.id) ? (live.building.operator || '') : ''
-  const statusLabel = working
-    ? (/repair|debug/.test(_op) ? '🔧 repairing…' : /merge/.test(_op) ? '🔀 merging…' : '✍️ writing code…')
-    : null
+  // Live status: what the node is doing RIGHT NOW. Two live states: an LLM authoring the code
+  // (building → writing / repairing / merging), or the sandbox running its eval pipeline (pending →
+  // training / scoring). `_op` is only set in the building case (the eval has no operator), so it
+  // cleanly disambiguates the two.
+  const building = working && live?.building?.node_id === n.id
+  const _op = building ? (live.building.operator || '') : ''
+  const statusLabel = !working ? null
+    : building
+      ? (/repair|debug/.test(_op) ? '🔧 repairing…' : /merge/.test(_op) ? '🔀 merging…' : '✍️ writing code…')
+      : '🏋️ training / evaluating…'
   const status = statusLabel && <div className="trace-live-status"><span className="tls-dot" />{statusLabel}
     <span className="muted" style={{ marginLeft: 6, fontSize: 11 }}>live — updates on its own</span></div>
   const scrollTo = (where) => { const c = bodyRef.current?.closest('.insp-body'); if (c) c.scrollTop = where === 'top' ? 0 : c.scrollHeight }

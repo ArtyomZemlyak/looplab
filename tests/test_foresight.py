@@ -236,6 +236,38 @@ def test_prioritize_board_orders_open_hypotheses():
     assert [c["id"] for c in lp["ranked"]] == base._hyp_order   # id->statement pairs for the UI
 
 
+def test_board_and_idea_ranks_trace_under_distinct_spans():
+    # The two Researcher ranking steps must NOT collapse into look-alike trace bands: board
+    # prioritization (BEFORE propose) traces as `hyp_prioritize`; idea predict-before-execute
+    # (AFTER propose) as `foresight_rank`. Guards the UI fix where the first foresight otherwise
+    # read as a superfluous duplicate of the second. Spans export on close, so board (which
+    # finishes first) is written before idea — the index order encodes the sequence.
+    import os
+    import tempfile
+
+    import orjson
+
+    from looplab.core import tracing
+    from looplab.core.tracing import JsonlSpanExporter, Tracer
+
+    st = _state_with_open_hyps(["h zero", "h one"])
+    a = Idea(operator="improve", params={"x": 1.0}, hypothesis="A")
+    b = Idea(operator="improve", params={"x": 2.0}, hypothesis="B")
+    panel = ForesightPanelResearcher(_SeqResearcher([a, b], _RankClient([1, 0])), k=2)
+    with tempfile.TemporaryDirectory() as d:
+        tr = Tracer(JsonlSpanExporter(os.path.join(d, "s.jsonl")), run_id="r")
+        tok = tracing._current_tracer.set(tr)
+        try:
+            panel.propose(st, None)          # board prioritize THEN idea foresight, one trace each
+        finally:
+            tracing._current_tracer.reset(tok)
+        names = [orjson.loads(x)["name"]
+                 for x in open(os.path.join(d, "s.jsonl"), "rb").read().splitlines()]
+    assert "hyp_prioritize" in names                                  # board step: its own name
+    assert "foresight_rank" in names                                  # idea step: the foresight name
+    assert names.index("hyp_prioritize") < names.index("foresight_rank")   # board precedes idea
+
+
 def test_prioritize_board_noop_below_two():
     st = _state_with_open_hyps(["only one"])
     panel = ForesightPanelResearcher(_SeqResearcher([Idea(operator="draft")], _RankClient([0])), k=2)

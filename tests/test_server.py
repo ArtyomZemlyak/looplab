@@ -879,3 +879,38 @@ def test_budget_extend_nodes_resumes_and_grows(tmp_path):
     assert st1.finished
     assert len(st1.nodes) > n0           # it genuinely proposed + ran more experiments
     assert len(st1.nodes) <= n0 + 3      # but never beyond the extended budget
+
+
+def test_node_logs_surfaces_multi_stage_stage_logs(tmp_path):
+    # A MULTI-STAGE eval tees to per-stage logs (train.log / score.log), never eval.log — so the live
+    # "Training / eval log" panel must surface those, not a blank eval.log (bug: log-follow blank the
+    # whole training run). `stages` carries each; `eval` falls back to them when there's no eval.log.
+    rd = tmp_path / "demo"
+    rd.mkdir()
+    s = EventStore(rd / "events.jsonl")
+    s.append("run_started", {"run_id": "demo", "task_id": "t", "goal": "g", "direction": "min"})
+    s.append("node_building", {"node_id": 0, "operator": "draft", "parent_ids": []})
+    nd = rd / "nodes" / "node_0"
+    nd.mkdir(parents=True)
+    (nd / "train.log").write_text("Epoch 0 loss=1.0\nEpoch 1 loss=0.5\n")
+    (nd / "score.log").write_text("recall@100: 0.8\n")
+    client = TestClient(make_app(tmp_path))
+    body = client.get("/api/runs/demo/nodes/0/logs").json()
+    assert set(body["stages"]) == {"train", "score"}          # both stage logs surfaced
+    assert "Epoch 1 loss=0.5" in body["stages"]["train"]
+    # no eval.log → the single-`<pre>` `eval` field falls back to the labeled stage logs, not blank
+    assert "=== train.log ===" in body["eval"] and "recall@100: 0.8" in body["eval"]
+
+
+def test_node_logs_single_command_uses_eval_log(tmp_path):
+    # The single-command path still writes eval.log and must win over the (empty) stage set.
+    rd = tmp_path / "demo"
+    rd.mkdir()
+    s = EventStore(rd / "events.jsonl")
+    s.append("run_started", {"run_id": "demo", "task_id": "t", "goal": "g", "direction": "min"})
+    nd = rd / "nodes" / "node_0"
+    nd.mkdir(parents=True)
+    (nd / "eval.log").write_text("metric: 0.42\n")
+    client = TestClient(make_app(tmp_path))
+    body = client.get("/api/runs/demo/nodes/0/logs").json()
+    assert body["eval"].strip() == "metric: 0.42" and body["stages"] == {}

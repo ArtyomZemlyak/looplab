@@ -178,8 +178,15 @@ def build_router(srv) -> APIRouter:
     @router.get("/api/runs/{run_id}/nodes/{nid}/logs")
     def node_logs(run_id: str, nid: int, tail: int = 200_000):
         """Live training/eval logs for a node — the streamed stdout/stderr of its eval + setup
-        subprocesses (eval.log / setup.log in the node workdir). `tail` caps bytes returned (from the
-        end) so the UI can poll cheaply. Empty strings when a log doesn't exist yet."""
+        subprocesses. `tail` caps bytes returned (from the end) so the UI can poll cheaply. Empty
+        strings when a log doesn't exist yet.
+
+        A SINGLE-command eval tees to `eval.log`; a MULTI-STAGE eval (data_prep → train → score) tees
+        each stage to its OWN `<stage>.log` (command_eval `_log(f"{name}.log")`) and never writes
+        `eval.log`. Surfacing only `eval.log` left the live "Training / eval log" panel BLANK for the
+        whole of a multi-stage training run while `train.log` filled on disk — so also return every
+        non-setup `*.log` as ordered `stages`, and fall `eval` back to them when there's no single
+        eval.log (keeps the old single-`<pre>` UI showing the live training output)."""
         rd = _run_dir(run_id)
         nd = _node_dir(rd, nid)
         # Clamp the client-controlled tail so a hostile/large value can't force an unbounded read; and
@@ -196,7 +203,20 @@ def build_router(srv) -> APIRouter:
             except OSError:
                 return ""
             return b.decode("utf-8", "replace")
-        return {"eval": _tail("eval.log"), "setup": _tail("setup.log"),
+        # Per-stage logs, ordered by mtime (≈ pipeline order: train before score); eval.log/setup.log
+        # are surfaced under their own keys, not as "stages".
+        stages: dict[str, str] = {}
+        try:
+            for p in sorted(nd.glob("*.log"), key=lambda q: q.stat().st_mtime):
+                if p.name in ("eval.log", "setup.log", "run_setup.log"):
+                    continue
+                stages[p.stem] = _tail(p.name)
+        except OSError:
+            pass
+        eval_tail = _tail("eval.log")
+        if not eval_tail and stages:      # multi-stage run: show the stage logs so the panel isn't blank
+            eval_tail = "\n\n".join(f"=== {name}.log ===\n{body}" for name, body in stages.items())
+        return {"eval": eval_tail, "stages": stages, "setup": _tail("setup.log"),
                 "run_setup": (rd / "run_setup.log").read_text("utf-8", "replace")
                              if (rd / "run_setup.log").exists() else ""}
 
