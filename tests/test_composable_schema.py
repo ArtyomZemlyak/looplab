@@ -220,6 +220,50 @@ def test_declare_stages_allows_a_pipeline_produced_intermediate_path():
     assert bad.startswith("(refused") and "/scratch/prep/train.npy" in bad
 
 
+def test_auto_reader_whitespace_command_is_treated_as_absent():
+    # A whitespace-only `cmd.command` under the auto reader must NOT become a per-character argv: it slips
+    # past the `.strip()` shell-string check but was still truthy at `if _cmd`, so `list("  ")` produced
+    # [' ', ' ']. It must be treated as ABSENT (no onboard_command), like an empty string.
+    from looplab.adapters.tasks import normalize_task
+    d = normalize_task({"goal": "g", "direction": "max", "repo": "/repo",
+                        "cmd": {"command": "  ", "metric": {"reader": "auto"}}})
+    assert "onboard_command" not in d or not d.get("onboard_command")
+    # a REAL shell string still raises (actionable message), not silently char-split
+    with pytest.raises(ValueError, match="argv list"):
+        normalize_task({"goal": "g", "direction": "max", "repo": "/repo",
+                        "cmd": {"command": "python test.py", "metric": {"reader": "auto"}}})
+    # a proper argv list is preserved
+    d2 = normalize_task({"goal": "g", "direction": "max", "repo": "/repo",
+                         "cmd": {"command": ["python", "t.py"], "metric": {"reader": "auto"}}})
+    assert d2["onboard_command"] == ["python", "t.py"]
+
+
+def test_declare_stages_flags_read_before_write_ordering():
+    # The produced-path exclusion is stage-ORDER-aware: a path only a LATER stage writes must NOT excuse
+    # an EARLIER stage that reads it — that pipeline is a guaranteed FileNotFoundError (train runs first).
+    t = _writetools()
+    bad = t.execute("declare_stages", {"stages": [
+        {"name": "train", "command": ["python", "train.py", "--data", "/scratch/x.npy"]},
+        {"name": "export", "command": ["python", "export.py", "--out", "/scratch/x.npy"]}]})
+    assert bad.startswith("(refused") and "/scratch/x.npy" in bad
+
+
+def test_declare_stages_excuses_directory_output_and_unlisted_flag_spellings():
+    # A produced intermediate is recognized by ANY output-flag spelling (not a hardcoded list): a
+    # DIRECTORY output (`--outdir /scratch/prep`) covers a later read under it, and unlisted spellings
+    # (`--export-dir`) are matched by the de-dashed "out/export/save/dest/dump/writ" hint.
+    t = _writetools()
+    ok = t.execute("declare_stages", {"stages": [
+        {"name": "prep", "command": ["python", "prep.py", "--outdir", "/scratch/prep"]},
+        {"name": "train", "command": ["python", "train.py", "--data", "/scratch/prep/train.npy"]}]})
+    assert ok.startswith("declared")
+    t2 = _writetools()
+    ok2 = t2.execute("declare_stages", {"stages": [
+        {"name": "prep", "command": ["python", "prep.py", "--export-dir", "/scratch/e"]},
+        {"name": "train", "command": ["python", "train.py", "--data", "/scratch/e/feats.parquet"]}]})
+    assert ok2.startswith("declared")
+
+
 def test_declare_stages_works_under_restricted_surface():
     # mega-review fix: the manifest is TOOL-owned and validated, so it is gated on the PROTECT list
     # only — the legacy default surface ["**/*.py"] can never match a root .json, and a surface gate
@@ -406,22 +450,45 @@ def test_per_source_data_permissions(tmp_path):
     assert "wrote" in wt.execute("write_file", {"path": "work/x.csv", "content": "a"})          # edit=true OK
 
 
-def test_mount_true_plus_edit_true_is_rejected(tmp_path):
+def test_single_file_writable_copy_is_surfaced_under_a_narrow_surface(tmp_path):
+    # A mount:false source that is a single FILE materializes at ./<name> (not ./<name>/…). The surface
+    # must carry the BARE name too — `name/**` alone never matches the file path, so under a narrow
+    # edit_surface the "writable copy" the brief promises would be refused.
+    repo = tmp_path / "r"; repo.mkdir()
+    f = tmp_path / "train.csv"; f.write_text("a,b\n", encoding="utf-8")
+    t = validate_task({"goal": "g", "direction": "max", "repo": str(repo), "edit_surface": ["src/**"],
+                       "cmd": {"command": ["python", "t.py"], "metric": {"reader": "stdout_json", "key": "r"}},
+                       "dataset": {"train.csv": {"path": str(f), "mount": False}}})
+    surf = t.repo_spec()["edit_surface"]
+    assert "train.csv" in surf and "train.csv/**" in surf     # both the bare file and the tree glob
+    from looplab.adapters.repo_developer import RepoWriteTools
+    rs = t.repo_spec()
+    wt = RepoWriteTools(surface=rs["edit_surface"], protected=rs["protected_names"],
+                        editables=[{"name": ".", "path": str(repo), "surface": rs["edit_surface"],
+                                    "protect": rs["protected_names"]}])
+    assert "wrote" in wt.execute("write_file", {"path": "train.csv", "content": "x"})   # the file copy is writable
+    assert "surface" in wt.execute("write_file", {"path": "other.py", "content": "x"})  # narrow surface still holds
+
+
+def test_mount_true_plus_edit_true_is_coerced_to_a_writable_copy(tmp_path):
     # A mounted original is a read-only symlink: the agent's build-time writes to ./name escape the
-    # workdir and are dropped, so mount:true + edit:true would silently no-op. Reject it at
-    # construction so the boss re-authors with mount:false (a writable copy) for editable data.
+    # workdir and are dropped, so mount:true + edit:true would silently no-op. COERCE it to mount:false
+    # (a writable per-node copy — what edit:true wants) rather than reject, so pre-existing runs whose
+    # task.snapshot.json legally carried the combo still `resume`/`finalize` instead of failing to load.
     from looplab.adapters.repo_task import DataSpec
-    with pytest.raises(Exception, match="mount.*edit|read-only mount|writable per-node"):
-        DataSpec(path="/d", mount=True, edit=True)
-    # the two valid intents still construct fine
+    coerced = DataSpec(path="/d", mount=True, edit=True)
+    assert coerced.mount is False and coerced.edit is True               # -> a writable per-node copy
+    # `{edit:true}` with mount defaulting to True hits the same coercion
+    assert DataSpec(path="/d", edit=True).mount is False
+    # the two valid intents still construct unchanged
     assert DataSpec(path="/d", mount=True, edit=False).mount is True     # read-only mount
     assert DataSpec(path="/d", mount=False, edit=True).edit is True      # writable per-node copy
-    # a whole task carrying the bad combo is rejected too (surfaces in validate_task / the New-Run flow)
+    # a whole task carrying the combo loads (coerced), and the source becomes an agent-writable copy
     repo = tmp_path / "r"; repo.mkdir()
-    with pytest.raises(Exception, match="mount.*edit|read-only mount|writable per-node"):
-        validate_task({"goal": "g", "direction": "max", "repo": str(repo),
-                       "cmd": {"command": ["python", "t.py"], "metric": {"reader": "stdout_json", "key": "r"}},
-                       "dataset": {"d": {"path": str(tmp_path), "mount": True, "edit": True}}})
+    adapter = validate_task({"goal": "g", "direction": "max", "repo": str(repo),
+                             "cmd": {"command": ["python", "t.py"], "metric": {"reader": "stdout_json", "key": "r"}},
+                             "dataset": {"d": {"path": str(tmp_path), "mount": True, "edit": True}}})
+    assert adapter.data["d"].mount is False and adapter.data["d"].edit is True
 
 
 def test_docker_wrap_binds_data_sources_read_only(tmp_path):

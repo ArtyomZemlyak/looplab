@@ -66,19 +66,17 @@ class DataSpec(BaseModel):
 
     @model_validator(mode="after")
     def _mount_edit_consistent(self):
-        # `edit:true` means "the agent modifies the ORIGINAL in place", but a mount:true source is a
-        # read-only SYMLINK to the original: the agent's build-time writes to ./<name> resolve OUTSIDE
-        # the workdir and are dropped by the materializer (they'd escape the sandbox), so the edit would
-        # silently no-op — the recurring footgun. Reject the combination at task-construction time so the
-        # boss/assistant authors it correctly (the error surfaces in validate_task / the New-Run flow):
-        # use `mount:false` for a writable per-node COPY the agent may modify, or `edit:false` for a
-        # read-only mount. The write gate ALSO protects mounts defensively (see _protected_names).
+        # `edit:true` means "the agent modifies the data", but a mount:true source is a read-only SYMLINK
+        # to the original: the agent's build-time writes to ./<name> resolve OUTSIDE the workdir and are
+        # dropped by the materializer (they'd escape the sandbox), so the edit would silently no-op — the
+        # recurring footgun. COERCE the combination to `mount:false` (a writable per-node COPY, which is
+        # exactly what edit:true wants) rather than REJECT it: rejecting broke `resume`/`finalize` of
+        # pre-existing runs whose verbatim task.snapshot.json legally carried mount:true+edit:true (it was
+        # valid AND documented before) — coercion preserves the "agent may modify the data" intent and
+        # loads every historical snapshot. (mount defaults True, so `{edit:true}` alone hits this too.)
+        # The write gate protects genuine (edit:false) mounts defensively — see _protected_names.
         if self.mount and self.edit:
-            raise ValueError(
-                "a data source can't be both `mount: true` and `edit: true`: the agent can't edit a "
-                "read-only mounted original in place (its writes are dropped at the sandbox boundary). "
-                "Set `mount: false` to give the agent a writable per-node COPY, or `edit: false` to "
-                "keep it a read-only mount.")
+            self.mount = False
         return self
 
 
@@ -420,10 +418,10 @@ class RepoTask(BaseModel):
         for ed in self._editable_mounts():
             pre = "" if ed["name"] in (".", "") else ed["name"].rstrip("/") + "/"
             names += [self._normp(pre + p) for p in ed["protect"]]
-        # Defense-in-depth (the DataSpec validator already rejects mount:true+edit:true): a MOUNTED
-        # source is a read-only symlink to the original, so the agent's build-time writes under ./<name>
-        # can't reach it anyway (the materializer drops workdir escapes) — protect it so the write TOOL
-        # refuses VISIBLY instead of silently no-opping. A `mount:false` source is a PHYSICAL per-node
+        # Defense-in-depth (the DataSpec validator already coerces mount:true+edit:true → mount:false): a
+        # MOUNTED source is a read-only symlink to the original, so the agent's build-time writes under
+        # ./<name> can't reach it anyway (the materializer drops workdir escapes) — protect it so the write
+        # TOOL refuses VISIBLY instead of silently no-opping. A `mount:false` source is a PHYSICAL per-node
         # copy the brief calls "a writable copy" (copy+modify/preprocess/extend) — protecting it made
         # copy-in mode unusable (every write under ./<name> was refused), so only mounts guard.
         for name, spec in self.data.items():
@@ -474,8 +472,10 @@ class RepoTask(BaseModel):
             allow = [w for w, on in (("edit-in-place", s.edit), ("copy+modify", s.copy_modify),
                                      ("preprocess/augment", s.preprocess), ("extend", s.extend)) if on]
             # The "don't edit" warning applies only to a MOUNTED original: a mount:false copy is
-            # node-local and writable (matching _protected_names, which no longer guards copies).
-            deny = ("" if (s.edit or not s.mount)
+            # node-local and writable (matching _protected_names, which no longer guards copies). A
+            # mounted source is always edit:false (mount+edit is coerced to a copy), so `not s.mount`
+            # alone decides — a writable copy needs no warning.
+            deny = ("" if not s.mount
                     else " — do NOT edit the original; write any derived data elsewhere in the workdir")
             parts.append(f"{where}: may {', '.join(allow) or 'read'}{deny}")
         return " Data inputs: " + "; ".join(parts) + "."
@@ -491,9 +491,13 @@ class RepoTask(BaseModel):
         # `mount:false` per-node COPY (the agent may "copy+modify, preprocess, extend" it); a mounted
         # source is a read-only symlink the agent can't write. This is the exact COMPLEMENT of
         # `_protected_names` (which guards every mount), so each source is either surfaced or protected.
+        # Surface BOTH the bare name and the `/**` tree: a single-FILE copy materializes at ./<name>
+        # (not ./<name>/…), and the surface matcher has no "dir/** matches dir" special case (that lives
+        # on the protect side only), so `name/**` alone would refuse writes to a file-typed copy.
         for name, spec in self.data.items():
             if not spec.mount:
-                surface.append(name.rstrip("/") + "/**")
+                nm = name.rstrip("/")
+                surface += [nm, nm + "/**"]
         return {
             "editables": mounts,                         # Phase 4: every editable repo + mount
             "edit_surface": surface,                     # namespaced union over all repos

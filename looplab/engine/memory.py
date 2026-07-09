@@ -91,9 +91,27 @@ def consolidate_lessons(lessons: list[dict], *, client=None, embed=None) -> list
         # Accumulate ACROSS runs: sum the stored evidence_count of every group member that AGREES
         # with the current (newest) verdict, so a lesson re-confirmed by N runs ends at ~N — not
         # capped at 2. A prior consolidated row already carries its accumulated count; a fresh
-        # append carries 1. (Members with a conflicting verdict don't add support.)
-        merged["evidence_count"] = sum(int(o.get("evidence_count", 1) or 1) for o in grp
-                                       if o.get("outcome") == newest.get("outcome"))
+        # append carries 1. (Members with a conflicting verdict don't add support.) De-dup by run_id
+        # among the fresh single-evidence rows: a run that re-reflects (a reopened + budget-extended
+        # run re-enters finalize and re-appends its own lessons) must count ONCE, not inflate the
+        # count. Pre-consolidated rows (evidence_count>1) already fold multiple runs, so they always
+        # add their stored weight; only raw ev==1 rows sharing a run_id collapse.
+        total = 0
+        seen_runs: set = set()
+        for o in grp:
+            if o.get("outcome") != newest.get("outcome"):
+                continue
+            ev = int(o.get("evidence_count", 1) or 1)
+            rid = o.get("run_id")
+            # Skip a FRESH single-evidence row whose run already contributed (a run re-reflecting itself).
+            # A pre-consolidated row (ev>1) folds multiple runs, so it always adds its stored weight and
+            # marks its representative run as seen — a later fresh re-append of that same run then dedups.
+            if rid is not None and rid in seen_runs and ev == 1:
+                continue
+            total += ev
+            if rid is not None:
+                seen_runs.add(rid)
+        merged["evidence_count"] = total
         out.append(merged)
     if client is None or len(out) < 2:
         return out

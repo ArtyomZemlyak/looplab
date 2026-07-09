@@ -97,7 +97,7 @@ stack(1000,320,DY,[
  {id:"e_box",h:66,t:"Sandbox tiers",tag:"□",c:C.ev,sub:["trusted_local subprocess | untrusted Docker --network none","data mounts bound :ro (editable data must be a mount:false copy)"]},
  {id:"e_stg",h:72,t:"Stage pipeline",tag:"□",c:C.ev,sub:["stages phase / cmd.stages → …prep → train → protected score (cmd)","one shared validator · %params% per stage · stage-scoped re-run"]},
  {id:"e_seed",h:60,t:"Seeds & holdout",tag:"□",c:C.ev,sub:["search seed 0 · n_seeds 3 · holdout 25% reserved (Knuth hash)"]},
- {id:"e_ir",h:82,t:"Inline repair",tag:"□",c:C.ev,sub:["reasons crash/timeout/oom","abandon at 4 identical errors (norm. signature)"]},
+ {id:"e_ir",h:92,t:"Inline repair",tag:"□",c:C.ev,sub:["reasons crash/timeout/oom","abandon at 4 identical errors (norm. signature)","late-stage fix reuses train ckpt · abandon at 2 full re-trains"]},
  {id:"e_dep",h:72,t:"Auto-install deps",tag:"□",c:C.ev,sub:["allow-list ~55 · ≤6 rounds/node","stop after 2 pip timeouts (no egress)"]},
  {id:"e_dr",h:82,t:"Deep repair",tag:"D",c:C.d,sub:["timeout→cut compute · oom→cut memory","+ lineage prior fixes · taxonomy"]},
 ]);

@@ -237,6 +237,56 @@ def test_safe_reuse_none_when_first_stage_failed_or_no_stages(tmp_path):
     assert e._safe_reuse_start(_STAGES, None, {"x.py"}, tmp_path) is None          # no failed stage
 
 
+def test_stage_reachable_files_opaque_stage_forbids_reuse(tmp_path):
+    # A stage that runs SOMETHING with no local .py script (`python -m pkg`, a shell wrapper) is OPAQUE:
+    # we can't bound which files it reads, so its checkpoint must NEVER be reused — even if the repair's
+    # changed set looks disjoint. Fail-closed: _stage_reachable_files returns None and reuse is refused.
+    _mk_repo(tmp_path)
+    (tmp_path / "trainer").mkdir()
+    (tmp_path / "trainer" / "__init__.py").write_text("", encoding="utf-8")
+    (tmp_path / "trainer" / "__main__.py").write_text("import loss\n", encoding="utf-8")
+    m_stage = [{"name": "train", "command": ["python", "-m", "trainer"]},
+               {"name": "score", "command": ["python", "looplab_eval.py"]}]
+    assert Engine._stage_reachable_files([m_stage[0]], tmp_path) is None        # opaque -> sentinel
+    e = Engine.__new__(Engine)
+    # even a disjoint-looking change (only the score script) must NOT reuse across an opaque train stage
+    assert e._safe_reuse_start(m_stage, "score", {"looplab_eval.py"}, tmp_path) is None
+    sh_stage = [{"name": "train", "command": ["bash", "train.sh"]},
+                {"name": "score", "command": ["python", "looplab_eval.py"]}]
+    assert Engine._stage_reachable_files([sh_stage[0]], tmp_path) is None       # shell wrapper -> opaque
+
+
+def test_stage_reachable_files_transitive_and_subdir_imports(tmp_path):
+    # The reachable set must follow TRANSITIVE + dotted + subdir-sibling imports, else a repair that
+    # edits a training dependency two hops down (or in a package submodule) escapes and a stale
+    # checkpoint is reused. train.py -> from pkg import a ; pkg/a.py -> import deep ; src/train2.py -> import sib
+    (tmp_path / "train.py").write_text("from pkg import a\nimport model, extra\n", encoding="utf-8")
+    (tmp_path / "pkg").mkdir()
+    (tmp_path / "pkg" / "__init__.py").write_text("", encoding="utf-8")
+    (tmp_path / "pkg" / "a.py").write_text("import deep\n", encoding="utf-8")
+    (tmp_path / "deep.py").write_text("x = 1\n", encoding="utf-8")
+    (tmp_path / "model.py").write_text("m = 1\n", encoding="utf-8")
+    (tmp_path / "extra.py").write_text("e = 1\n", encoding="utf-8")
+    reach = Engine._stage_reachable_files([{"name": "train", "command": ["python", "train.py"]}], tmp_path)
+    assert {"train.py", "pkg/a.py", "deep.py", "model.py", "extra.py"} <= reach   # transitive + 2nd of `import a, b`
+    assert "pkg/__init__.py" in reach                                             # package init on the path
+    # subdir script whose sibling import resolves via the script's own dir (sys.path[0])
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "train.py").write_text("import sib\n", encoding="utf-8")
+    (tmp_path / "src" / "sib.py").write_text("s = 1\n", encoding="utf-8")
+    reach2 = Engine._stage_reachable_files([{"name": "t", "command": ["python", "src/train.py"]}], tmp_path)
+    assert "src/sib.py" in reach2
+
+
+def test_safe_reuse_refused_when_the_stage_manifest_changed(tmp_path):
+    # A repair that rewrites looplab_stages.json alters the pipeline's argv (e.g. train hyperparams), so
+    # the completed checkpoint no longer matches the declared command — reuse must be refused even though
+    # the manifest isn't a stage SCRIPT and so wouldn't appear in any reachable set.
+    _mk_repo(tmp_path)
+    e = Engine.__new__(Engine)
+    assert e._safe_reuse_start(_STAGES, "score", {"looplab_eval.py", "looplab_stages.json"}, tmp_path) is None
+
+
 # --------------------------------------------------------------------------- rule-based triage
 def test_rule_triage_repairs_mechanical_only():
     assert _rule_triage("crash", "ModuleNotFoundError: no module", 1, 1)["action"] == "repair"

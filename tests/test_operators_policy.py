@@ -145,3 +145,21 @@ def test_mcts_reward_monotone_for_signed_min_metrics():
     st.nodes = {0: poor, 1: great}
     act = MCTSPolicy(n_seeds=2, max_nodes=10).next_actions(st)
     assert act and act[0]["kind"] == "improve" and act[0]["parent_id"] == 1
+
+
+def test_mcts_reward_stays_bounded_for_large_negative_metrics():
+    # The negative-branch reward must be BOUNDED, else it swamps the UCB exploration term (c≈1.4) and the
+    # policy degenerates to pure greedy on negative-metric tasks (log-likelihood ≈ -400 → old `1-value`
+    # gave reward ≈ 400). With the bounded `2 - 1/(1-value)` map two subtrees near -400 map to nearly
+    # identical rewards, so their UCB scores are within exploration reach (the old map differed by ~4).
+    st = RunState(direction="min")
+    a = Node(id=0, operator="draft", idea=Idea(operator="draft"), metric=-402.0,
+             status=NodeStatus.evaluated, feasible=True)
+    b = Node(id=1, operator="draft", idea=Idea(operator="draft"), metric=-398.0,
+             status=NodeStatus.evaluated, feasible=True)
+    st.nodes = {0: a, 1: b}
+    act = MCTSPolicy(n_seeds=2, max_nodes=10).next_actions(st)
+    scores = act[0]["_scores"]
+    # bounded+compressed: the two large-negative subtrees are within a whisker of each other (old
+    # unbounded `1-value` would have put them ~4.0 apart, forcing pure exploitation of the -402 subtree).
+    assert abs(scores[0] - scores[1]) < 0.1

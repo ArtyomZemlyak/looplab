@@ -491,10 +491,15 @@ class ToolUsingStrategist:
         self.parser = parser
         self.prompts = prompts      # hot-reloadable PromptStore (I18, ADR-8); None = inline default
         self._rule = RuleStrategist(n_seeds=n_seeds)
-        self.loop_opts = loop_opts or {}
         self.max_turns = max_turns
         self.time_budget_s = time_budget_s
         self.context_budget_chars = context_budget_chars
+        # Collapse the two sources of context_budget_chars once, here (see ToolUsingResearcher.__init__):
+        # loop_opts_from_settings injects it AND it arrives as a ctor kwarg — passing both to
+        # drive_tool_loop would raise TypeError, caught below as a "can't drive tools" degrade to the RULE
+        # baseline in the default config. Merging in __init__ makes the collision impossible per call.
+        self.loop_opts = dict(loop_opts or {})
+        self.loop_opts.setdefault("context_budget_chars", context_budget_chars)
 
     def _emit_spec(self) -> dict:
         return {"type": "function", "function": {
@@ -522,16 +527,12 @@ class ToolUsingStrategist:
             return self._rule.decide(state, ctx)   # no emit -> deterministic baseline
 
         try:
-            # De-dup context_budget_chars: loop_opts_from_settings injects it into loop_opts AND it
-            # arrives via the explicit ctor kwarg, so passing both would hand drive_tool_loop the
-            # keyword twice -> TypeError, caught below -> silent degrade to the RULE baseline in the
-            # DEFAULT config (context_budget_chars defaults to 1_000_000, so loop_opts always has it).
-            opts = dict(self.loop_opts)
-            opts.setdefault("context_budget_chars", self.context_budget_chars)
+            # context_budget_chars is folded into self.loop_opts once in __init__ (see there) — pass the
+            # merged opts straight through, no per-call re-merge, no double-keyword collision.
             return drive_tool_loop(
                 self.client, self.tools, messages, self._emit_spec(),
                 max_turns=self.max_turns, time_budget_s=self.time_budget_s,
-                finalize=_finalize, fallback=_fallback, **opts)
+                finalize=_finalize, fallback=_fallback, **self.loop_opts)
         except BudgetExceeded:      # a hard budget stop must end the run, not degrade to the rule
             raise
         except Exception:  # noqa: BLE001 — the model/endpoint can't drive tools at all -> rule baseline

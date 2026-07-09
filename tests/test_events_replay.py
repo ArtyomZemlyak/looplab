@@ -148,6 +148,27 @@ def test_fold_confirm_seed_results():
     assert st.confirm_seed_results == {3: {0: 0.5, 1: None}}
 
 
+# A "reused" stage marker (a re-eval that SKIPPED a stage the inline-repair reuse kept) must NOT clobber
+# the REAL completion record from the attempt that actually ran the stage — else the node reads as if it
+# trained in 0s. Keep the informative record; order-tolerant (a real record still supersedes a reused).
+def test_fold_reused_stage_marker_does_not_clobber_real_record():
+    from looplab.core.models import Event
+    base = [Event(type="run_started", data={"run_id": "r", "task_id": "t", "direction": "min"}),
+            Event(type="node_created", data={"node_id": 0, "parent_ids": [], "operator": "draft",
+                                             "idea": {"operator": "draft", "params": {}}}),
+            Event(type="stage_finished", data={"node_id": 0, "name": "train", "status": "ok",
+                                               "exit_code": 0, "seconds": 7200.0})]
+    reused = Event(type="stage_finished", data={"node_id": 0, "name": "train", "status": "reused",
+                                                "exit_code": 0, "seconds": 0.0})
+    st = fold(base + [reused])
+    train = next(s for s in st.nodes[0].stages if s["name"] == "train")
+    assert train["status"] == "ok" and train["seconds"] == 7200.0   # real record kept, not the 0s reused one
+    # order-tolerant: a real record arriving AFTER a reused marker still wins
+    st2 = fold([base[0], base[1], reused, base[2]])
+    train2 = next(s for s in st2.nodes[0].stages if s["name"] == "train")
+    assert train2["status"] == "ok" and train2["seconds"] == 7200.0
+
+
 # confirm-seed eval cost is first-occurrence accounted (like node terminals): a duplicated/
 # double-folded confirm_eval must not inflate total_eval_seconds or make the budget order-sensitive.
 def test_fold_confirm_eval_cost_deduped_on_duplicate():

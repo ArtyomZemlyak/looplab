@@ -37,34 +37,37 @@ from looplab.tools.patch import SurfacePolicy
 _INPUT_DATA_RE = re.compile(
     r"(?<![\w./~])/[^\s\"',:]+\.(?:pck|parquet|csv|tsv|npy|npz|pkl|arrow|jsonl|feather|h5|hdf5)")
 
-# Flags whose following token (or `=`-joined value) is an OUTPUT path a stage WRITES — a pipeline
-# intermediate that legitimately does not exist yet at declare time (data_prep writes it, train reads it).
-_OUTPUT_FLAGS = frozenset({
-    "-o", "--out", "--output", "--outdir", "--out-dir", "--out_dir", "--output-dir", "--output_dir",
-    "--out-path", "--out_path", "--output-path", "--output_path", "--save", "--save-to", "--save_to",
-    "--save-dir", "--save_dir", "--savedir", "--dest", "--destination", "--export", "--write-to"})
+# A flag names an OUTPUT (a path the stage WRITES) when it contains one of these hints — matched on the
+# de-dashed flag so ANY spelling works (`--outdir`, `--export-dir`, `--save_to`, `--dest`, `--dump`,
+# `--write-to`), replacing the old hardcoded list that missed `--outdir`/`--export-dir`/`--dump`.
+_OUTPUT_HINT_RE = re.compile(r"(out|save|dest|export|dump|writ)", re.I)
 
 
-def _stage_produced_paths(stages) -> set[str]:
-    """ABSOLUTE data paths the pipeline itself WRITES — the token right after an output flag, or a
-    `--out=PATH` form. These are intermediates a LATER stage reads, so they must not be flagged as
-    "missing input" at declare time just because an EARLIER stage hasn't run yet."""
-    produced: set[str] = set()
-    for s in (stages or []):
-        if not isinstance(s, dict):
+def _stage_output_values(cmd) -> list[str]:
+    """Path values a single stage WRITES: the token after an output-ish flag, or the RHS of
+    `--outflag=VAL`. These are pipeline intermediates a LATER stage reads (and are this stage's OWN
+    outputs, not its inputs), so they must not be flagged as "missing input" at declare time."""
+    out: list[str] = []
+    for i, tok in enumerate(cmd):
+        if not isinstance(tok, str):
             continue
-        cmd = s.get("command") or []
-        for i, tok in enumerate(cmd):
-            if not isinstance(tok, str):
-                continue
-            val = None
-            if tok in _OUTPUT_FLAGS and i + 1 < len(cmd) and isinstance(cmd[i + 1], str):
-                val = cmd[i + 1]                                    # `--out PATH`
-            elif "=" in tok and tok.split("=", 1)[0] in _OUTPUT_FLAGS:
-                val = tok.split("=", 1)[1]                          # `--out=PATH`
-            if val:
-                produced.update(_INPUT_DATA_RE.findall(val))
-    return produced
+        if tok.startswith("-") and "=" in tok:
+            flag, val = tok.split("=", 1)
+            if _OUTPUT_HINT_RE.search(flag.lstrip("-")):
+                out.append(val)
+        elif tok.startswith("-") and _OUTPUT_HINT_RE.search(tok.lstrip("-")) \
+                and i + 1 < len(cmd) and isinstance(cmd[i + 1], str):
+            out.append(cmd[i + 1])
+    return out
+
+
+def _covered_by(m: str, produced: list) -> bool:
+    """True when absolute path `m` equals, or lives under, a path some stage PRODUCES (exact match, or
+    `m` under a produced DIRECTORY like `--outdir /x/prep` covering `/x/prep/train.npy`)."""
+    for v in produced:
+        if v == m or m.startswith(v.rstrip("/") + "/"):
+            return True
+    return False
 
 
 def _missing_stage_input_paths(stages) -> list[str]:
@@ -72,21 +75,28 @@ def _missing_stage_input_paths(stages) -> list[str]:
     a hallucinated default (the recurring failure: a train stage's `--train_dataset /…/train.pck` that
     was copied from the repo's argparse default and isn't here). Absolute paths are location-invariant,
     so a declare-time existence check is sound; relative paths (mounts) and `%params%` are skipped.
-    Paths the pipeline PRODUCES (an `--out …` of any stage) are excluded — a valid data_prep→train
-    pipeline's intermediate legitimately doesn't exist yet at declare time."""
-    produced = _stage_produced_paths(stages)
+    A path an EARLIER stage PRODUCES (or a parent dir of one), or this stage's OWN output, is excluded —
+    a valid data_prep→train pipeline's intermediate legitimately doesn't exist yet at declare time. The
+    check is stage-ORDER-aware: only outputs of stages at-or-before the reader count, so a read-before-
+    write ordering (train reads what a LATER export writes) is still flagged as the FileNotFoundError
+    it is."""
     missing: list[str] = []
+    produced: list = []                     # output paths of stages processed so far (order-aware)
     for s in (stages or []):
         if not isinstance(s, dict):
             continue
-        for tok in (s.get("command") or []):
-            if not isinstance(tok, str) or "%params%" in tok:
+        cmd = [t for t in (s.get("command") or []) if isinstance(t, str)]
+        own_outputs = _stage_output_values(cmd)
+        known = produced + own_outputs      # this stage's own outputs are not its inputs
+        for tok in cmd:
+            if "%params%" in tok:
                 continue
             for m in _INPUT_DATA_RE.findall(tok):
-                if m in produced or m in missing:
+                if m in missing or _covered_by(m, known):
                     continue
                 if not os.path.exists(m):
                     missing.append(m)
+        produced.extend(own_outputs)        # available to every stage that FOLLOWS
     return missing
 
 
@@ -925,11 +935,14 @@ class LLMRepoDeveloper:
 
         def _finalize(args):
             clean, _ = validate_stages((args or {}).get("stages"), reserved=reserved)
-            # Mirror `_validate`'s missing-path guard: the force-emit / exhaustion paths call finalize
-            # WITHOUT re-running validate, so without this a manifest referencing a hallucinated,
-            # non-produced input path would be PERSISTED after the model's retries were exhausted and
-            # ship a FileNotFoundError pipeline. Degrade to the operator cmd (return []) instead.
-            if clean and not _missing_stage_input_paths(clean):
+            # PERSIST a well-formed manifest even if a path still looks missing. The missing-path guard
+            # is a RETRYABLE bounce on the `_validate` path (where the model can re-declare a real path);
+            # by the time finalize runs the retries are spent. Dropping to [] here would silently degrade
+            # the node to the operator's score cmd ALONE — which, on a repo carrying a committed baseline
+            # checkpoint, "succeeds" scoring a model this node never trained (a silent stale/forged
+            # metric, the worst outcome for the search). A stage pipeline that FileNotFoundErrors at eval
+            # is instead LOUD and recoverable — inline repair can fix the path. So ship it, don't hide it.
+            if clean:
                 write.files["looplab_stages.json"] = _json.dumps({"stages": clean}, indent=1)
                 return clean
             return []
