@@ -530,9 +530,10 @@ function KbNote({ note }) {
 }
 
 export function MemoryPanel({ onClose }) {
-  // Everything the run has LEARNED, in one place: distilled lessons, solved-task cases, meta-notes, and
-  // the agentic knowledge-base markdown notes (best configs / recipes the agents save + later retrieve).
-  const [mem, setMem] = useState({ dir: null, cases: [], lessons: [], notes: [] })
+  // Everything the run has LEARNED, in one place: the Researcher's distilled lessons, the DEVELOPER's
+  // separate implementation lessons, solved-task cases, meta-notes, and the agentic knowledge-base
+  // markdown notes (best configs / recipes the agents save + later retrieve).
+  const [mem, setMem] = useState({ dir: null, cases: [], lessons: [], dev_lessons: [], notes: [] })
   const [kb, setKb] = useState({ dir: null, files: [] })   // /api/knowledge → {dir, files:[{name,text}]}
   const [tab, setTab] = useState('lessons')
   useEffect(() => {
@@ -540,7 +541,9 @@ export function MemoryPanel({ onClose }) {
     get('/api/knowledge').then(setKb).catch(() => {})
   }, [])
   const kbFiles = kb.files || []
-  const tabs = [['lessons', 'Lessons', mem.lessons.length], ['cases', 'Cases', mem.cases.length],
+  const devLessons = mem.dev_lessons || []
+  const tabs = [['lessons', 'Lessons', mem.lessons.length], ['dev_lessons', 'Dev lessons', devLessons.length],
+    ['cases', 'Cases', mem.cases.length],
     ['notes', 'Notes', mem.notes.length], ['knowledge', 'Knowledge', kbFiles.length]]
   return (
     <Panel title="Memory & knowledge — what the runs have learned" sub={mem.dir || 'no memory dir'} onClose={onClose} wide>
@@ -561,6 +564,19 @@ export function MemoryPanel({ onClose }) {
             </div>
           </div>)
         : <div className="muted">No lessons yet — they accrue as runs finish (reflection distils them into memory).</div>)}
+      {tab === 'dev_lessons' && (devLessons.length
+        ? <><div className="muted" style={{ fontSize: 11, marginBottom: 6 }}>Implementation lessons — HOW to build on this kind of repo (the Developer self-authors + reads these; distinct from the Researcher's lessons).</div>
+          {devLessons.map((l, i) => <div key={i} className="mem-card">
+            <div>{l.statement}</div>
+            <div className="mem-meta" style={{ marginTop: 4, display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' }}>
+              {l.outcome && <span className="chip xs">{l.outcome}</span>}
+              {l.source && <span className="chip xs">{l.source}</span>}
+              {l.confidence != null && <span className="muted" style={{ fontSize: 11 }}>conf {Math.round(l.confidence * 100)}%</span>}
+              {l.evidence_count ? <span className="muted" style={{ fontSize: 11 }}>· seen {l.evidence_count}×</span> : null}
+              {l.task_id && <span className="muted" style={{ fontSize: 11 }}>· {l.task_id}</span>}
+            </div>
+          </div>)}</>
+        : <div className="muted">No developer lessons yet — the Developer writes them via remember_dev_lesson and the engine distils a few at run end.</div>)}
       {tab === 'cases' && (mem.cases.length
         ? <table className="tbl"><thead><tr><th>task</th><th>goal</th><th>metric</th><th>params</th></tr></thead><tbody>
           {mem.cases.map((c, i) => <tr key={i}><td>{c.task_id}</td><td className="muted">{c.goal}</td><td>{fmt(c.metric)}</td><td className="muted">{JSON.stringify(c.params)}</td></tr>)}</tbody></table>

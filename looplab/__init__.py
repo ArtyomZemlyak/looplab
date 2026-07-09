@@ -62,6 +62,7 @@ _LAYOUT = {
     "dataset_task": "adapters",
     "deep_research": "agents",
     "deps": "runtime",
+    "dev_memory": "tools",
     "digest": "events",
     "edit_match": "tools",
     "env_inspect": "tools",

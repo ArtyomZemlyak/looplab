@@ -584,7 +584,7 @@ class LLMRepoDeveloper:
                  plan_min_steps: int = 2, plan_max_steps: int = 8,
                  session_max_turns: int = 500, session_time_budget_s: float = 1200.0,
                  run_dir=None, run_tools: bool = False, cross_run_tools: bool = False,
-                 all_runs_tools: bool = False):
+                 all_runs_tools: bool = False, memory_dir=None, developer_memory: bool = False):
         self.client = client
         self.task = task
         self.parser = parser
@@ -613,6 +613,11 @@ class LLMRepoDeveloper:
         self._all_runs_tools = bool(all_runs_tools)
         self._bound_state = None      # the live search DAG the engine binds before each implement/repair
         self._bound_parent = None
+        # Developer MEMORY (Settings.developer_memory): a SEPARATE cross-run store of IMPLEMENTATION
+        # lessons (dataset/framework/build gotchas + techniques) the Developer self-authors and reads —
+        # distinct from the Researcher's lessons. See tools/dev_memory.py and `_dev_memory_tools`.
+        self._memory_dir = memory_dir
+        self._developer_memory = bool(developer_memory)
 
     def bind_state(self, state, parent=None) -> None:
         """Engine hook (called before each implement/implement_from/repair — see
@@ -666,6 +671,49 @@ class LLMRepoDeveloper:
                 "node_id) — read the result + code of an experiment in ANY other run on this machine "
                 "(e.g. a similar run the researcher points you to). Use a run_id from list_all_runs.")
         return block
+
+    def _task_fp(self) -> list:
+        """The current task's cross-run FINGERPRINT (M2) — so a dev lesson this run writes is retrievable
+        by a later SIMILAR task, and the preview matches related tasks (not only the exact task_id).
+        Built from the same kind/direction/goal/metric the Researcher fingerprint uses; no param names
+        (the Developer doesn't own the config)."""
+        from looplab.engine.memory import task_fingerprint
+        t = getattr(self, "task", None)
+        st = getattr(self, "_bound_state", None)
+        direction = getattr(st, "direction", None) or getattr(t, "direction", "") or "min"
+        goal = getattr(st, "goal", "") or getattr(t, "goal", "") or ""
+        return task_fingerprint(getattr(t, "kind", "") or "", direction, goal,
+                                metric=str(getattr(t, "metric", "") or ""), param_names=[])
+
+    def _dev_memory_tools(self, write: bool = False) -> list:
+        """Developer-memory providers: the READ side (`search_dev_lessons`/`list_dev_lessons`) in every
+        phase, plus the self-author WRITE side (`remember_dev_lesson`) only in the code-writing phases
+        (`write=True`) — the read-only stages/plan phases don't need it. Returns [] when disabled or no
+        `memory_dir` (unit/factory builds), so the toolset degrades cleanly."""
+        if not getattr(self, "_developer_memory", False):
+            return []
+        mem = getattr(self, "_memory_dir", None)
+        if not mem:
+            return []
+        from looplab.tools.dev_memory import DevMemoryTools, DevMemoryWriteTools
+        provs: list = [DevMemoryTools(mem)]
+        if write:
+            st = getattr(self, "_bound_state", None)
+            provs.append(DevMemoryWriteTools(
+                mem, task_id=getattr(st, "task_id", "") or "", run_id=getattr(st, "run_id", "") or "",
+                fingerprint=self._task_fp(), kind=getattr(getattr(self, "task", None), "kind", "") or ""))
+        return provs
+
+    def _dev_lessons_preview(self) -> str:
+        """The compact top-5 preview of task-relevant developer lessons, spliced into the system prompt
+        (the full text stays behind `search_dev_lessons` — we don't dump the store into the prompt).
+        Empty when disabled/absent/no match."""
+        if not getattr(self, "_developer_memory", False) or not getattr(self, "_memory_dir", None):
+            return ""
+        from looplab.tools.dev_memory import dev_lesson_preview
+        st = getattr(self, "_bound_state", None)
+        return dev_lesson_preview(self._memory_dir, task_id=getattr(st, "task_id", "") or "",
+                                  fingerprint=self._task_fp())
 
     # Files most useful to PRELOAD verbatim so the agent authors the entrypoint without fumbling with
     # a (truncating) read tool. Order = priority; the rest of the surface is appended within budget.
@@ -844,7 +892,8 @@ class LLMRepoDeveloper:
         # output is the plan. (This used to be tools=None to force convergence, which made the planner
         # work BLIND off the truncated preview; the read_file pagination fix + emit_after/emit_force
         # convergence backstop now let it read PROPERLY without exploring forever.)
-        read_only = CompositeTools([EnvInspectTools()] + self._scout_tools(write) + self._run_intro_tools())
+        read_only = CompositeTools([EnvInspectTools()] + self._scout_tools(write) + self._run_intro_tools()
+                                       + self._dev_memory_tools(write=False))
         try:
             # Full session budget — same contract as every other phase: the soft nudge at
             # agent_emit_after (300) and the forced emit at agent_emit_force (500) ride in via
@@ -889,7 +938,8 @@ class LLMRepoDeveloper:
             # implement steps CONSUME the stages/plan briefs + share the node read-cache, but don't
             # contribute (their writes add length faster than signal, and the last step is terminal) —
             # so the ledger stays the 3 exploration briefs (propose/stages/plan), never K-step bloat.
-            run_phase(self.client, CompositeTools([write, EnvInspectTools()] + self._scout_tools(write) + self._run_intro_tools()),
+            run_phase(self.client, CompositeTools([write, EnvInspectTools()] + self._scout_tools(write) + self._run_intro_tools()
+                                             + self._dev_memory_tools(write=True)),
                       messages, self._emit_spec(), label=f"Developer·implement step {idx}/{total}",
                       handoff=False, finalize=lambda a: (a or {}).get("summary", ""),
                       fallback=lambda m: "", **self._session_opts())
@@ -995,7 +1045,8 @@ class LLMRepoDeveloper:
         messages = [{"role": "system", "content": system},
                     {"role": "user", "content": self._stages_user(idea, ev, has_cmd)}]
         # scouts read the LIVE overlay (the parent solution on improve/merge), not the pristine repo
-        read_only = CompositeTools([EnvInspectTools()] + self._scout_tools(write) + self._run_intro_tools())
+        read_only = CompositeTools([EnvInspectTools()] + self._scout_tools(write) + self._run_intro_tools()
+                                       + self._dev_memory_tools(write=False))
 
         def _validate(args):                      # bounce a malformed manifest back to the model
             stages = (args or {}).get("stages")
@@ -1054,6 +1105,7 @@ class LLMRepoDeveloper:
             _REPO_DEV_SYSTEM_INTRO + self.brief + "\n\n"
             + _REPO_DEV_SYSTEM_BODY
             + self._run_tools_prompt()
+            + self._dev_lessons_preview()
             + operational_attention_points() + "\n\n"
             + _REPO_DEV_COMMANDS_HEADER + self._recipes() + "\n\n"
             + ((_REPO_DEV_RESULTS_HEADER + _results + "\n\n")
@@ -1141,7 +1193,8 @@ class LLMRepoDeveloper:
             # Compose the write/edit tools with read-only ENVIRONMENT INTROSPECTION (pkg_info / py_api /
             # read_installed / grep_installed) so the Developer grounds generated code in the ACTUAL
             # installed API/version instead of guessing (the precision='16-mixed'-on-Lightning-1.5 class).
-            tools = CompositeTools([write, EnvInspectTools()] + self._scout_tools(write) + self._run_intro_tools())
+            tools = CompositeTools([write, EnvInspectTools()] + self._scout_tools(write) + self._run_intro_tools()
+                                             + self._dev_memory_tools(write=True))
             if is_fresh_repo:
                 # PLAN is the Developer's second sub-phase (its own trace band). IMPLEMENT runs under
                 # the orchestrator's "implement" span (so its generations band there, and non-repo

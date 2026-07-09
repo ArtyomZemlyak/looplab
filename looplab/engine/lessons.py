@@ -22,7 +22,8 @@ import orjson
 from looplab.core.models import NodeStatus, RunState
 from looplab.engine.memory import JsonlCaseLibrary
 from looplab.events.replay import fold
-from looplab.events.types import EV_LESSONS_DISTILLED, EV_LESSONS_REFRESHED, EV_REFLECTION_NOTE
+from looplab.events.types import (EV_DEV_LESSONS_DISTILLED, EV_LESSONS_DISTILLED,
+                                  EV_LESSONS_REFRESHED, EV_REFLECTION_NOTE)
 
 if TYPE_CHECKING:  # engine type hint only — no runtime import of the orchestrator
     from looplab.engine.orchestrator import Engine
@@ -252,6 +253,100 @@ class LessonMemory:
                         if isinstance(lz, dict) else {"statement": str(lz), "outcome": ""}
                         for lz in lessons[:12]],
             "skills": skills[:8]})
+
+    def write_dev_lessons(self, final: RunState) -> None:
+        """D-memory run-end distillation: extract a few generalizable IMPLEMENTATION lessons from THIS
+        run's build/repair history (crash classes, what a repair changed, an approach that worked) and
+        append them to `<memory_dir>/dev_lessons.jsonl` — so a future run building on a SIMILAR repo
+        reuses them. Distinct from `write_reflection_note` (which records WHICH experiment to run); this
+        records HOW to build one. Gated ONCE per run by `EV_DEV_LESSONS_DISTILLED` (a reopened run must
+        not double-append — `consolidate_lessons` would fold the dup into an inflated evidence_count).
+        Best-effort; never raises."""
+        if not (getattr(self._e, "_developer_memory", False) and self._e.memory_dir):
+            return
+        if any(e.type == EV_DEV_LESSONS_DISTILLED for e in self._e.store.read_all()):
+            return
+        fp = self._e._task_fingerprint(final, final.best())
+        lessons = self._distill_dev_lessons(final, fp)
+        n = 0
+        try:
+            from looplab.tools.dev_memory import append_dev_lessons
+            n = append_dev_lessons(self._e.memory_dir, lessons)
+        except Exception:  # noqa: BLE001 — a memory write must never abort finalization
+            n = 0
+        # Sidecar audit (fold ignores it) + the once-per-run gate — emitted even when n==0 so a resume
+        # doesn't re-distill (mirrors EV_REFLECTION_NOTE).
+        self._e.store.append(EV_DEV_LESSONS_DISTILLED, {
+            "task_id": final.task_id, "fingerprint": fp, "n_lessons": n,
+            "lessons": [{"statement": lz.get("statement", ""), "outcome": lz.get("outcome", "")}
+                        for lz in lessons[:12]]})
+
+    def _distill_dev_lessons(self, final: RunState, fp: list) -> list:
+        """Build the IMPLEMENTATION lessons for `write_dev_lessons`: LLM-generalized from the build/
+        repair history when a client is wired, else a deterministic fallback (the dominant crash class
+        as a pitfall) so an offline run still records something transferable. [] when there's nothing to
+        say (e.g. a clean toy run with no failures and no client)."""
+        kind = getattr(self._e.task, "kind", "") or ""
+        llm = self._llm_dev_lessons(final, fp, kind)
+        if llm:
+            return llm
+        # Deterministic fallback: the dominant CODE-failure class → a pitfall to guard against.
+        reasons: dict[str, int] = {}
+        for n in final.nodes.values():
+            if n.status is NodeStatus.failed and n.error_reason:
+                reasons[n.error_reason] = reasons.get(n.error_reason, 0) + 1
+        if not reasons:
+            return []
+        top = max(reasons, key=reasons.get)
+        return [{"task_id": final.task_id, "fingerprint": fp, "kind": kind,
+                 "statement": f"when building this kind of task, guard against '{top}' failures "
+                              f"({reasons[top]} node(s) hit it this run)",
+                 "outcome": "pitfall", "confidence": 0.4, "run_id": final.run_id,
+                 "evidence": [], "source": "distilled"}]
+
+    def _llm_dev_lessons(self, final: RunState, fp: list, kind: str) -> list:
+        """LLM reflection over the run's build/repair history → 1-3 GENERALIZABLE implementation lessons
+        (transferable coding gotchas/techniques, not this run's numbers). Grounded in the real nodes via
+        the read-only run tools. [] on no-client / nothing to reflect / error."""
+        client = self._e._reflect_client()
+        if client is None:
+            return []
+        fails = [n for n in final.nodes.values() if n.status is NodeStatus.failed][:5]
+        repaired = [n for n in final.nodes.values()
+                    if n.operator == "debug" and n.status is NodeStatus.evaluated][:5]
+        rev = (final.direction != "min")
+        ok = sorted((n for n in final.evaluated_nodes() if n.metric is not None),
+                    key=lambda n: n.metric, reverse=rev)[:3]
+        if not (fails or repaired or ok):
+            return []
+        rows = [f"#{n.id} FAILED ({n.error_reason}): {(n.error or '')[:180]}" for n in fails]
+        rows += [f"#{n.id} repaired → ok: {' '.join((n.idea.rationale or '').split())[:160]}"
+                 for n in repaired]
+        rows += [f"#{n.id} worked (metric={n.metric:.4g})" for n in ok]
+        prompt = (
+            "Distil reusable IMPLEMENTATION lessons for a coding agent that BUILDS ML experiments on "
+            f"repositories of kind '{kind or 'ml-repo'}'. Use the read tools (read_code/read_logs/"
+            "read_experiment) to inspect the nodes below if useful, then write 1-3 GENERALIZABLE coding "
+            "lessons — dataset-loading traps, framework/version API quirks, build/train pitfalls, an "
+            "orchestration that worked — NOT this run's exact numbers. Tag each [GOOD] (a technique to "
+            "reuse) or [BAD] (a pitfall to avoid). One per line, no preamble.\n"
+            f"Task: {final.goal}\nBuild / repair history:\n" + "\n".join(rows))
+        try:
+            from looplab.agents.agent import agentic_text
+            out = agentic_text(client, self._reflect_tools(final),
+                               [{"role": "user", "content": prompt}],
+                               loop_opts=self._reflect_loop_opts(),
+                               answer_desc="1-3 generalizable implementation lessons, one per line, "
+                                           "each tagged [GOOD]/[BAD]") or ""
+        except Exception:  # noqa: BLE001 — best-effort
+            return []
+        from looplab.engine.memory import parse_credit_lessons
+        res = []
+        for _, stmt, outcome in parse_credit_lessons(out, 0)[:3]:
+            res.append({"task_id": final.task_id, "fingerprint": fp, "kind": kind, "statement": stmt,
+                        "outcome": "pitfall" if outcome == "failed" else "technique",
+                        "confidence": 0.6, "run_id": final.run_id, "evidence": [], "source": "distilled"})
+        return res
 
     def _reflect_tools(self, state: RunState):
         """Read-only run-introspection tools so reflection / distillation READS the real experiments

@@ -84,6 +84,7 @@ class EngineOptions:
     novelty_epsilon: float = 0.05
     reflection_priors: bool = False      # E4/M2/M3: cross-run priors + lessons (needs memory_dir)
     comparative_lessons: bool = False    # M6: credit-assigned pair lessons (needs reflection_priors)
+    developer_memory: bool = False       # D-memory: run-end distill of implementation lessons (needs memory_dir)
     lessons_every: int = 0               # M6: mid-run distill cadence in nodes (0 = run-end only)
     lessons_refresh_every: int = 0       # M6: mid-run shared-store re-read cadence (0 = start only)
     track_hypotheses: bool = True        # P1: register deep-research directions as hypotheses

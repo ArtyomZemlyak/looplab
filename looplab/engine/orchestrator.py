@@ -153,6 +153,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin):
         novelty_epsilon: float = _UNSET,
         reflection_priors: bool = _UNSET,    # E4/M2/M3: cross-run priors + lessons (needs memory_dir)
         comparative_lessons: bool = _UNSET,  # M6: credit-assigned pair lessons (needs reflection_priors)
+        developer_memory: bool = _UNSET,     # D-memory: run-end distill of implementation lessons (needs memory_dir)
         lessons_every: int = _UNSET,             # M6: mid-run distill cadence in nodes (0 = run-end only)
         lessons_refresh_every: int = _UNSET,     # M6: mid-run shared-store re-read cadence (0 = start only)
         track_hypotheses: bool = _UNSET,      # P1: register deep-research directions as hypotheses
@@ -242,6 +243,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin):
         novelty_epsilon = _opt(novelty_epsilon, "novelty_epsilon")
         reflection_priors = _opt(reflection_priors, "reflection_priors")
         comparative_lessons = _opt(comparative_lessons, "comparative_lessons")
+        developer_memory = _opt(developer_memory, "developer_memory")
         lessons_every = _opt(lessons_every, "lessons_every")
         lessons_refresh_every = _opt(lessons_refresh_every, "lessons_refresh_every")
         track_hypotheses = _opt(track_hypotheses, "track_hypotheses")
@@ -385,6 +387,9 @@ class Engine(ConfirmPhaseMixin, AblationMixin):
         self._lesson_abstractor = lesson_abstractor
         self._exploit_suite = None   # 4.3 hardened ruleset; loaded once memory_dir is set (below)
         self._reflection_priors = reflection_priors
+        # D-memory: run-end distillation of implementation lessons into <memory_dir>/dev_lessons.jsonl
+        # (the Developer also self-authors + reads them mid-run via its tools). Needs memory_dir.
+        self._developer_memory = developer_memory
         # M6 comparative lessons: credit-assigned pair distillation (run-end and, when the
         # cadences are set, mid-run into/from the SHARED cross-run store — the live-share seam).
         self._comparative_lessons_on = comparative_lessons
@@ -1551,6 +1556,9 @@ class Engine(ConfirmPhaseMixin, AblationMixin):
 
     def _write_reflection_note(self, final: RunState) -> None:
         return self.lessons.write_reflection_note(final)
+
+    def _write_dev_lessons(self, final: RunState) -> None:
+        return self.lessons.write_dev_lessons(final)
 
     def _reflect_lessons(self, final: RunState, best, fp: list) -> list:
         return self.lessons.reflect_lessons(final, best, fp)

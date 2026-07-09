@@ -165,7 +165,7 @@ def build_router(srv) -> APIRouter:
         # `/api/{kind}` catch-all below, else it's swallowed as an unknown kind (→ 404, the reason the
         # Memory panel was silently empty). `cases` stays populated for back-compat.
         s = Settings()
-        out = {"dir": None, "cases": [], "lessons": [], "notes": []}
+        out = {"dir": None, "cases": [], "lessons": [], "dev_lessons": [], "notes": []}
         if not s.memory_dir:
             return out
         md = Path(s.memory_dir)
@@ -173,7 +173,9 @@ def build_router(srv) -> APIRouter:
         for f in sorted(md.glob("*.jsonl")) if md.exists() else []:
             rows = list(iter_jsonl(f))
             nm = f.name.lower()
-            if "lesson" in nm:
+            if "dev_lesson" in nm:                   # DEVELOPER memory — checked BEFORE the generic
+                out["dev_lessons"].extend(rows)      # "lesson" bucket (dev_lessons.jsonl also matches it)
+            elif "lesson" in nm:
                 out["lessons"].extend(rows)
             elif "note" in nm or "meta" in nm:
                 out["notes"].extend(rows)

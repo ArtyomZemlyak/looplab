@@ -90,6 +90,7 @@ stack(660,300,DY,[
  {id:"d_impl",h:66,t:"③ Implement phase",tag:"D",c:C.d,sub:["write the code the stages run · per-step","repair = 1 session (no stages/plan)"]},
  {id:"i_env",h:82,t:"Env inspector",tag:"D",c:C.d,sub:["ground API in the REAL installed env","pkg_info · py_api · read/grep_installed · gpu_info","read-only inspector · ALL phases (write tools only in implement) · paginates"]},
  {id:"i_run",h:82,t:"Run introspection",tag:"D",c:C.d,sub:["read-only — SAME readers as PROPOSE, over ALL phases","read_experiment·read_code·read_logs·find_analogous (own run)","+ list_all_runs·read_run_code·read_run_experiment (any run · gated)","developer_run_tools · failed nodes flagged · pulled on demand, not injected"]},
+ {id:"i_mem",h:82,t:"Developer memory",tag:"D",c:C.mem,sub:["SEPARATE store: dev_lessons.jsonl — implementation gotchas + techniques","search_dev_lessons · remember_dev_lesson (self-author)","top-5 fingerprint-matched preview injected · rest on demand"]},
  {id:"i_val",h:58,t:"Auto-validate",tag:"gate",c:C.d,sub:["compile after every edit → error flies back"]},
  {id:"i_bon",h:78,t:"Best-of-N",tag:"off",c:C.d,sub:["N impls · score∈[−1,3.5] (compile+1/valid+2/metric+.5)","tie: foresight → listwise LLM pick"]},
 ]);
@@ -156,7 +157,8 @@ box("mB",356,TY,300,72,"B · Experiment memory","in-run",C.mem,["state.nodes + d
 box("mC",672,TY,320,72,"C · Cross-run lessons","cross-run",C.mem,["~/.looplab/memory/lessons.jsonl"]);
 box("mD",1008,TY,330,72,"D · Knowledge base · Memora","cross-run",C.mem,["~/.looplab/knowledge · memory/cases.jsonl · abstraction+anchors"]);
 box("mE",1354,TY,300,72,"E · Skills & meta-notes","cross-run",C.mem,["memory/skills · meta_notes.jsonl"]);
-box("sim",1670,TY,470,72,"Three kinds of ‘same’","",C.sig,["exact hash → hypotheses · embedding → novelty 0.92 / Memora 0.86","hybrid+agent → lessons & board merges"]);
+box("mF",1670,TY,330,72,"F · Developer lessons","cross-run",C.mem,["memory/dev_lessons.jsonl — HOW to build (impl. gotchas + techniques)","self-author + run-end distill · fingerprint-matched · distinct from C"]);
+box("sim",2020,TY,470,72,"Three kinds of ‘same’","",C.sig,["exact hash → hypotheses · embedding → novelty 0.92 / Memora 0.86","hybrid+agent → lessons & board merges"]);
 
 /* ============ EVENT SPINE (row y≈1480) ============ */
 box("spine",40,1480,2100,84,"THE EVENT SPINE","",C.sig,["any block → append 1 domain event → events.jsonl → replay.fold → RunState","single writer · deterministic fold → exact replay · every event stamped trace_id/span_id → spans.jsonl (+OTLP)"]);
@@ -181,6 +183,8 @@ edge("d_stages","b","d_plan","t",{c:C.d,thin:1});   // ordered phases: stages �
 edge("d_plan","b","d_impl","t",{c:C.d,thin:1});
 edge("d_impl","b","i_env","t",{c:C.d,thin:1});
 edge("i_env","b","i_run","t",{c:C.d,thin:1});   // Developer's read-only run introspection (D-context)
+edge("i_run","b","i_mem","t",{c:C.mem,thin:1}); // Developer's own memory (D-memory)
+edge("i_mem","b","mF","t",{c:C.mem,dash:1,thin:1,label:"self-author + distill"});
 edge("evaluate","b","e_box","t",{c:C.ev,thin:1});
 edge("score","b","t_rh","t",{c:C.trust,thin:1});
 edge("refine","b","r_gt","t",{c:C.r,thin:1});

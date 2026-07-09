@@ -41,6 +41,7 @@ def finalize_run(engine: "Engine", *, entry_finished: bool, start_time: float) -
         emit_llm_cost(engine)                               # LLM cost/tokens roll-up (UI)
         engine._store_case(fold(engine.store.read_all()))       # cross-run memory (I19)
         engine._write_reflection_note(fold(engine.store.read_all()))   # E4 cross-run meta-review prior
+        engine._write_dev_lessons(fold(engine.store.read_all()))   # D-memory: implementation lessons
 
     # The SQLite read-model is a DERIVED, rebuildable cache that nothing in-process reads (the UI
     # folds events.jsonl / reads trace.json). On a FUSE/S3 run dir (JupyterHub geesefs) sqlite's

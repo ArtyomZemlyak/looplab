@@ -121,6 +121,7 @@ EV_TRUST_GATE_CHANGED = "trust_gate_changed"   # server config edit; folded last
 #     (forward compat); they exist for the live activity feed / audit trail only). ---
 EV_FORESIGHT_SELECTED = "foresight_selected"   # predict-before-execute pick among K ideas / N code candidates
 EV_REFLECTION_NOTE = "reflection_note"          # run-end LLM distillation: causal note + lessons + auto-skills
+EV_DEV_LESSONS_DISTILLED = "dev_lessons_distilled"   # run-end DEVELOPER-memory distillation + once-per-run gate
 EV_SETUP_STARTED = "setup_started"
 EV_SETUP_STEP = "setup_step"
 EV_SETUP_FINISHED = "setup_finished"

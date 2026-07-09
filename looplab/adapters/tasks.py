@@ -585,7 +585,11 @@ def make_roles(task: TaskAdapter, settings, run_dir=None):
             run_dir=run_dir,
             run_tools=getattr(settings, "developer_run_tools", True),
             cross_run_tools=getattr(settings, "cross_run_tools", True),
-            all_runs_tools=getattr(settings, "all_runs_tools", True))
+            all_runs_tools=getattr(settings, "all_runs_tools", True),
+            # D-memory: a separate cross-run store of implementation lessons the Developer
+            # self-authors + reads (distinct from the Researcher's lessons). Needs memory_dir.
+            memory_dir=getattr(settings, "memory_dir", None),
+            developer_memory=getattr(settings, "developer_memory", True))
 
     # External coding-agent Developer (ADR-7): an external CLI agent writes/repairs the
     # solution code, reusing the task's brief. Tool-agnostic via cli_agent presets.

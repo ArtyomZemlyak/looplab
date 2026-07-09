@@ -606,6 +606,14 @@ class Settings(BaseSettings):
     # knowing the past via the Researcher's rationale. Not injected into the prompt; the agent decides
     # when to read. Advisory; never changes best-selection. Off = the legacy repo-scouts-only Developer.
     developer_run_tools: bool = True
+    # Developer MEMORY (ON by default, needs `memory_dir`): a SEPARATE cross-run store of IMPLEMENTATION
+    # lessons for the Developer — dataset/framework gotchas, build/train pitfalls, "how to realise X in
+    # this repo" — kept distinct from the Researcher's `lessons.jsonl` (which is about WHICH experiment to
+    # run). Lives at `<memory_dir>/dev_lessons.jsonl`. The Developer (1) SELF-AUTHORS notes mid-session via
+    # `remember_dev_lesson`, (2) can `search_dev_lessons`/`list_dev_lessons` on demand, and (3) sees a
+    # compact top-5 PREVIEW (one line each) injected up front; the engine also distills a few
+    # implementation lessons at run end. Advisory; never changes best-selection.
+    developer_memory: bool = True
     # Agentic retrieval (ADR-16): if set, the LLM Researcher gets grep/kb_search/read
     # tools over this directory of markdown notes and chooses when to use them.
     knowledge_dir: str | None = Field(default_factory=lambda: str(_LL_HOME / "knowledge"))
