@@ -94,7 +94,7 @@ stack(660,300,DY,[
 ]);
 // EVALUATE
 stack(1000,320,DY,[
- {id:"e_box",h:66,t:"Sandbox tiers",tag:"□",c:C.ev,sub:["trusted_local subprocess | untrusted Docker --network none","data mounts bound :ro unless edit:true"]},
+ {id:"e_box",h:66,t:"Sandbox tiers",tag:"□",c:C.ev,sub:["trusted_local subprocess | untrusted Docker --network none","data mounts bound :ro (editable data must be a mount:false copy)"]},
  {id:"e_stg",h:72,t:"Stage pipeline",tag:"□",c:C.ev,sub:["stages phase / cmd.stages → …prep → train → protected score (cmd)","one shared validator · %params% per stage · stage-scoped re-run"]},
  {id:"e_seed",h:60,t:"Seeds & holdout",tag:"□",c:C.ev,sub:["search seed 0 · n_seeds 3 · holdout 25% reserved (Knuth hash)"]},
  {id:"e_ir",h:82,t:"Inline repair",tag:"□",c:C.ev,sub:["reasons crash/timeout/oom","abandon at 4 identical errors (norm. signature)"]},

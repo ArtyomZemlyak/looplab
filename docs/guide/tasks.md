@@ -86,7 +86,9 @@ independent flags. **Default: everything allowed EXCEPT editing the original.**
 "dataset": {
   "raw":  { "path": "/data/train",
             "mount": true,        // (1) read-only symlink at ./raw (default) | false = copy INTO the workdir
-            "edit": false,        // (2) edit the ORIGINAL in place? default false (protect the source)
+            "edit": false,        // (2) modify the data in place? default false. edit:true REQUIRES
+                                  //     mount:false — a mount is read-only to the agent, so
+                                  //     mount:true + edit:true is REJECTED at submit time
             "copy_modify": true,  // (3) copy it and modify the copy
             "preprocess": true,   // (4) preprocess / augment / feature-engineer into a training set
             "extend": true },     // (5) extend / expand the data
@@ -97,16 +99,20 @@ independent flags. **Default: everything allowed EXCEPT editing the original.**
 **What is mechanically enforced.** `mount` and `edit` have enforced semantics; flags (3)–(5) are
 **advisory** — they shape the allow-list in the agent's brief but no gate checks them.
 
-- A **mounted** source with `edit:false` (the default) is protected against writes under its mount
-  (`name` + `name/**`) in the Developer's write gate and the external agent's diff gate, and — under the
+- A **mounted** source is a read-only symlink at `./name`: it is protected against writes (`name` +
+  `name/**`) in the Developer's write gate and the external agent's diff gate, and — under the
   `untrusted`/`hostile` tiers — is bind-mounted into the eval container **read-only**, so even code the
   eval *runs* (a declared `train` stage, a subprocess) physically cannot mutate the original. The
-  `trusted_local` tier runs on the host, where only the write/diff gates apply — treat `edit:false`
-  there as a guard against the *agent's edits*, not a hard sandbox.
+  agent's own build-time writes under `./name` would escape the workdir and be dropped anyway, so the
+  gate refuses them **visibly** instead of letting the edit silently no-op. Because of that,
+  `mount:true` + `edit:true` is **rejected at submit time** (a mounted original can't be agent-edited);
+  the error tells the boss to use `mount:false` for editable data. The `trusted_local` tier runs on the
+  host, where only the write/diff gates apply — treat a read-only mount there as a guard against the
+  *agent's edits*, not a hard sandbox.
 - A **`mount:false`** source is a physical per-node **copy** inside the workdir: writes cannot reach the
-  original, so the copy is writable regardless of `edit` (the brief calls it "a writable copy"). On a
-  CoW filesystem (btrfs/XFS) the per-node copy is a reflink clone (~free); on ext4 it is a full byte
-  copy per node — budget disk accordingly for a large dataset.
+  original, so the copy is writable (the brief calls it "a writable copy") — this is how you give the
+  agent data it may preprocess/modify. On a CoW filesystem (btrfs/XFS) the per-node copy is a reflink
+  clone (~free); on ext4 it is a full byte copy per node — budget disk accordingly for a large dataset.
 - Declaring the same mount name in **both** `data` and `dataset` is rejected at submit time (one path
   would silently shadow the other). A `kaggle` slug **overwrites** a legacy `competition` value riding
   along in the same dict.

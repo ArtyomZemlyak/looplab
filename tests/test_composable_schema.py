@@ -406,6 +406,24 @@ def test_per_source_data_permissions(tmp_path):
     assert "wrote" in wt.execute("write_file", {"path": "work/x.csv", "content": "a"})          # edit=true OK
 
 
+def test_mount_true_plus_edit_true_is_rejected(tmp_path):
+    # A mounted original is a read-only symlink: the agent's build-time writes to ./name escape the
+    # workdir and are dropped, so mount:true + edit:true would silently no-op. Reject it at
+    # construction so the boss re-authors with mount:false (a writable copy) for editable data.
+    from looplab.adapters.repo_task import DataSpec
+    with pytest.raises(Exception, match="mount.*edit|read-only mount|writable per-node"):
+        DataSpec(path="/d", mount=True, edit=True)
+    # the two valid intents still construct fine
+    assert DataSpec(path="/d", mount=True, edit=False).mount is True     # read-only mount
+    assert DataSpec(path="/d", mount=False, edit=True).edit is True      # writable per-node copy
+    # a whole task carrying the bad combo is rejected too (surfaces in validate_task / the New-Run flow)
+    repo = tmp_path / "r"; repo.mkdir()
+    with pytest.raises(Exception, match="mount.*edit|read-only mount|writable per-node"):
+        validate_task({"goal": "g", "direction": "max", "repo": str(repo),
+                       "cmd": {"command": ["python", "t.py"], "metric": {"reader": "stdout_json", "key": "r"}},
+                       "dataset": {"d": {"path": str(tmp_path), "mount": True, "edit": True}}})
+
+
 def test_docker_wrap_binds_data_sources_read_only(tmp_path):
     # mega-review fix: edit:false is now enforced at the MOUNT layer for sandboxed evals — a
     # symlink-mounted source rides along as a same-path bind (:ro unless edit:true); without it the

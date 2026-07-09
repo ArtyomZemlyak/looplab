@@ -64,6 +64,23 @@ class DataSpec(BaseModel):
     # enforces them mechanically — only `mount` and `edit` have enforced semantics (the write gate
     # + the untrusted tier's read-only binds). Documented in docs/guide/tasks.md.
 
+    @model_validator(mode="after")
+    def _mount_edit_consistent(self):
+        # `edit:true` means "the agent modifies the ORIGINAL in place", but a mount:true source is a
+        # read-only SYMLINK to the original: the agent's build-time writes to ./<name> resolve OUTSIDE
+        # the workdir and are dropped by the materializer (they'd escape the sandbox), so the edit would
+        # silently no-op — the recurring footgun. Reject the combination at task-construction time so the
+        # boss/assistant authors it correctly (the error surfaces in validate_task / the New-Run flow):
+        # use `mount:false` for a writable per-node COPY the agent may modify, or `edit:false` for a
+        # read-only mount. The write gate ALSO protects mounts defensively (see _protected_names).
+        if self.mount and self.edit:
+            raise ValueError(
+                "a data source can't be both `mount: true` and `edit: true`: the agent can't edit a "
+                "read-only mounted original in place (its writes are dropped at the sandbox boundary). "
+                "Set `mount: false` to give the agent a writable per-node COPY, or `edit: false` to "
+                "keep it a read-only mount.")
+        return self
+
 
 class EvalSpec(BaseModel):
     """The operator's trusted evaluation (the agent does not author this)."""
@@ -403,14 +420,14 @@ class RepoTask(BaseModel):
         for ed in self._editable_mounts():
             pre = "" if ed["name"] in (".", "") else ed["name"].rstrip("/") + "/"
             names += [self._normp(pre + p) for p in ed["protect"]]
-        # A data source the agent may NOT edit (the default) is protected against writes UNDER its
-        # mount, so the agent can't mutate the original through the ./<name> symlink. `edit:true`
-        # sources stay writable (the agent works on them in place). A `mount:false` source is a
-        # PHYSICAL per-node copy whose writes can't reach the original — protecting it contradicted
-        # the agent brief's "a writable copy: may copy+modify, preprocess, extend" and made copy-in
-        # mode unusable (every write under ./<name> was refused), so only mounted originals guard.
+        # Defense-in-depth (the DataSpec validator already rejects mount:true+edit:true): a MOUNTED
+        # source is a read-only symlink to the original, so the agent's build-time writes under ./<name>
+        # can't reach it anyway (the materializer drops workdir escapes) — protect it so the write TOOL
+        # refuses VISIBLY instead of silently no-opping. A `mount:false` source is a PHYSICAL per-node
+        # copy the brief calls "a writable copy" (copy+modify/preprocess/extend) — protecting it made
+        # copy-in mode unusable (every write under ./<name> was refused), so only mounts guard.
         for name, spec in self.data.items():
-            if not spec.edit and spec.mount:
+            if spec.mount:
                 nm = name.rstrip("/")
                 names += [self._normp(nm), self._normp(nm + "/**")]
         return names + self._eval_protected()
@@ -470,12 +487,12 @@ class RepoTask(BaseModel):
             pre = "" if ed["name"] in (".", "") else ed["name"].rstrip("/") + "/"
             surface += [pre + g for g in ed["surface"]]
         # A WRITABLE data source must be editable regardless of the repo's edit_surface, else a narrow
-        # surface like ["src/**"] refuses writes the brief promised. Writable == `edit:true` (mutate the
-        # mounted original in place) OR `mount:false` (a per-node COPY the agent may "copy+modify,
-        # preprocess, extend"). This is the exact COMPLEMENT of `_protected_names` (which guards only the
-        # read-only mounted original, `not edit and mount`), so every source is either surfaced or protected.
+        # surface like ["src/**"] refuses writes the brief promised. The only agent-writable data is a
+        # `mount:false` per-node COPY (the agent may "copy+modify, preprocess, extend" it); a mounted
+        # source is a read-only symlink the agent can't write. This is the exact COMPLEMENT of
+        # `_protected_names` (which guards every mount), so each source is either surfaced or protected.
         for name, spec in self.data.items():
-            if spec.edit or not spec.mount:
+            if not spec.mount:
                 surface.append(name.rstrip("/") + "/**")
         return {
             "editables": mounts,                         # Phase 4: every editable repo + mount
