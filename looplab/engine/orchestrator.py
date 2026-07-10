@@ -925,6 +925,13 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         # no-op when the cadences are 0.
         state = self._maybe_distill_lessons(state)
         state = self._maybe_refresh_lessons(state)
+
+        # Reconciliation (memory ↔ corrected outcomes): when a node_reset re-eval FLIPS a node's
+        # outcome (a false-failure re-scored to evaluated, a demoted champion), this run's DISTILLED
+        # lessons grounded in that node go stale — fold-derived memory self-corrects but the LLM-written
+        # lesson file does not. Retire + re-derive those lessons from the corrected state. Cheap
+        # {node->sig}-hash gate: no-op unless a signature actually moved; LLM only on a genuine drift.
+        state = self._maybe_reconcile_lessons(state)
         return state
 
     def _skip_if_aborted(self, a: dict, cur: RunState) -> bool:
@@ -1207,6 +1214,12 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
     def _maybe_refresh_lessons(self, state: RunState) -> RunState:
         with self._op_span("lessons_refresh"):
             return self.lessons.maybe_refresh_lessons(state)
+
+    def _maybe_reconcile_lessons(self, state: RunState) -> RunState:
+        # Own op-trace: reconcile appends lessons_reconciled / lessons_distilled via the SAME store,
+        # so those events are scoped to this span in the UI.
+        with self._op_span("lessons_reconcile"):
+            return self.lessons.reconcile_lessons(state)
 
     def _distill_skill_body(self, final: RunState, h, ev: list) -> str:
         return self.lessons.distill_skill_body(final, h, ev)
