@@ -13,6 +13,13 @@ duplication · layering/architecture · god-file decomposition · agent-friendli
 dead-code/cruft/naming · config/events/model surface. Findings were de-duplicated and merged
 below (several show up on multiple axes — those are the highest-value).
 
+**Verification pass (same day).** Every claim was then adversarially fact-checked against the
+code (every cited `file:line` re-read), and a separate gap-hunt swept the areas the six axes
+did not cover (package-root modules, the React UI, tests, prompts, concurrency, packaging/CI).
+Corrections are integrated in place; §6 lists what the verification changed and added, so a
+reader can see which items were amended. Line-number evidence survived verification almost
+untouched; the substantive corrections are flagged inline with **[VERIFIED-AMENDED]**.
+
 **Non-negotiable invariants every item below preserves** (from `CLAUDE.md` / engine
 invariants): engine is the sole writer of domain events; exactly one terminal event per node;
 every side effect gated on a domain event (resume-by-replay idempotent); state observed only
@@ -35,27 +42,31 @@ documented, `core`/`events` layering is strictly downward and clean, and there a
 So the mega-refactor is **not** a rescue — it is consolidation. Five themes, in value order:
 
 1. **De-duplicate the drift-prone clusters** (k-NN/IDW prediction ×3, numeric-param filter ×6,
-   lenient-JSONL read ×8, atomic-JSONL write ×4, "robust metric" ×11). All land in
-   dependency-light homes (`events/digest.py`, `events/eventstore.py`, a `Node` property) with
-   zero behavior change. **Highest ROI, lowest risk.**
+   lenient-JSONL read ×8, atomic-JSONL write ×3+2, "robust metric" ×12 in-package + 5 out).
+   All land in dependency-light homes (`events/digest.py`, `events/eventstore.py`, a `Node`
+   property) with zero behavior change — with ONE verified exception: `lessons.py:444` is an
+   **append**, not a rewrite, and must stay out of the atomic-rewrite helper (§P1.4).
+   **Highest ROI, lowest risk.**
 2. **Un-tangle the middle band by moving two mis-filed modules** — pure read-model exporters
    (`traceview.py`/`htmlview.py`) belong in `events/`, and `make_llm_client` belongs in
    `core/llm.py`. These two moves alone delete the documented `engine→serve` lazy leaks and the
    sole `agents→adapters` edge.
-3. **Continue the proven mixin decomposition of `orchestrator.py`** (still 2800 LoC / ~130
-   methods). A safe zero-`fold` tier (`eval_stages` → `crash_repair` → `eval_dispatch` →
-   `audit`) removes ~665 LoC with *no test edits* beyond `_LAYOUT`.
+3. **Continue the proven mixin decomposition of `orchestrator.py`** (still 2800 LoC / 98 `def`s,
+   87 at method level). A safe zero-`fold` tier (`eval_stages` → `crash_repair` → `eval_dispatch`
+   → `audit`) removes ~665 LoC with *no test edits* beyond `_LAYOUT`.
 4. **Convert today's silent seams into red tests** — the duck-typed `TaskAdapter` hooks and
    Developer/Researcher output attrs (`last_files`, `choose_action`, `assets()`), the
    `Settings`↔`EngineOptions` dual-default drift, and docs/diagram sync. This *is* the
    "better for agents" goal, expressed as machine-checked contracts.
-5. **Refactor `fold()` from a 497-line/61-branch mega-function into an ordered dispatch table**
-   of pure per-event handlers — same single left-fold, isolated logic, golden-log-gated.
+5. **Refactor `fold()` from a 497-line mega-function (62 if/elif arms, one arm handling two
+   event types) into an ordered dispatch table** of pure per-event handlers — same single
+   left-fold, isolated logic, golden-log-gated.
 
 **Two things to fix that are latent traps, not cosmetics:** the one real violation of engine
 invariant #1 (a *background* task appends `EV_RESEARCH_COMPLETED`, safe only by prose comment —
-§4.1), and the `novelty_semantic` default that diverges *opposite* to the documented rationale
-(§4.4).
+§4.1), and the `novelty_semantic` default that diverges *opposite* to the documented rationale —
+and, verified, is **already live**, not dormant: a direct `Engine(novelty_gate=True)` caller gets
+semantic dedup today while the identical product config does not (§4.4).
 
 ---
 
@@ -78,6 +89,25 @@ These came back healthy and are called out so the work doesn't chase ghosts:
   `search/hybrid_merge.py` (RRF), `core/llm._backoff`, `runtime/command_eval`,
   `events/eventstore.iter_jsonl`, `core/prompts.render`, `agents/roles.forward_hints`,
   `serve/protocol` SSE constants.
+- **[ADDED by gap-hunt] Concurrency & locking discipline is sound.** `_write_lock` (anyio)
+  consistently wraps every append from concurrent tasks (confirm_phase/holdout/ablation/
+  orchestrator); threading locks (`_dep_lock`, `_run_setup_lock`) are only taken inside
+  `anyio.to_thread.run_sync` workers (no event-loop blocking); `EventStore.append` layers
+  `_append_lock` + interprocess lock; `engine.lock` probe-and-release handles FUSE/NFS
+  fail-open; assistant shared dicts are `_perm_lock`-guarded. The single real gap is P4.1.
+  One rule for P3 movers: keep the `to_thread`/`_write_lock` pairing with moved code.
+- **[ADDED by gap-hunt] Logging/tracing is consistent.** One `logging.getLogger` in the whole
+  tree (`serve/server.py:41`); engine diagnostics go exclusively through `core/tracing.py`
+  spans; prints are confined to cli/tui/sweep stdout contracts.
+- **[ADDED by gap-hunt] Small modules are clean.** `agents/cli_agent.py`,
+  `serve/settings_store.py`, `serve/engine_proc.py` (PID-recycle-guarded reaper),
+  `runtime/jupyter.py`/`notebook.py`, `tools/skills.py` — no dup/dead/misplacement.
+- **[ADDED by gap-hunt] Prompt keys and defaults are currently in sync** (no typos, no divergent
+  defaults) — the P4.7 registry is preventive, not corrective.
+- **CI/docs nits (gap-hunt):** docs deps are duplicated between `docs/requirements.txt` (what CI
+  installs) and pyproject's `[docs]` extra — drift risk; and `tests.yml` runs plain
+  `python -m pytest` on GH runners where Docker IS present, so docker-marked tests DO run in CI
+  despite the workflow comment saying otherwise — align the comment or add `-m "not docker"`.
 
 ---
 
@@ -106,11 +136,15 @@ but P1 and P2 are parallelizable.
   at `llm.py:137`) — and with it the now-orphaned `import http.client` (`llm.py:35`).
 - `runtime/deps.py:132` `PrepResult` dataclass — never constructed; `install()` returns
   `InstallResult` instead.
-- `core/hardware.py:129` `path_size_note` — ~30-line public helper, zero references. *(VERIFY:
-  no external importer of `looplab.hardware`.)*
+- `core/hardware.py:129` `path_size_note` — ~30-line public helper, zero references (verified:
+  no importer of flat `looplab.hardware` either). **[VERIFIED-AMENDED]** co-delete its only
+  private dependency `_human_bytes` (`hardware.py:163`), which orphans with it.
 - `runtime/sandbox.py:33` `_SECRET_ENV = SECRET_ENV` and `sandbox.py:122`
   `_json_line_metric = json_line_metric` — back-compat aliases with zero importers (the
   `_json_line_extras`/`_json_line_trials` siblings ARE used by tests — keep those).
+  **[VERIFIED-AMENDED]** in the same change fix the two comments that reference the dead alias
+  (`sandbox.py:121` falsely claims tests use `_json_line_metric`; `sandbox.py:164` names it)
+  and reword `docs/BACKLOG.md:48`, which points at `_SECRET_ENV` in prose (→ `SECRET_ENV`).
 - *Safety:* leave the real monkeypatch seams untouched — `sandbox._run_argv` (test_security),
   `vectorstore._cosine` (novelty gate), `agent.agentic_struct`/`drive_tool_loop`.
 
@@ -125,9 +159,11 @@ but P1 and P2 are parallelizable.
   greping `orchestrator.py` for `_confirm_phase`/`_maybe_consult_strategist`/`_run_ablation`
   knows where they live. Note the implicit contract: a mixin reads `Engine.__init__` attributes
   freely, so renaming an attr silently breaks a mixin on an untaken path.
-- Add two convention bullets: new tool providers must accept `bind_state(self, state, parent=None)`
-  (`tools/_base.py:56` — else `TypeError` at dispatch); `search/foresight.py:357` is a
-  *transparent* `__getattr__` proxy (don't "add" a method there expecting it to shadow the base).
+- Add two convention bullets: **[VERIFIED-AMENDED]** the `bind_state` hook on tool providers is
+  *optional* (`tools/_base.py:49-55` — providers that don't need run state simply omit it), but a
+  provider that DOES implement it must accept the second `parent` argument or it raises
+  `TypeError` at dispatch; and `search/foresight.py:357` is a *transparent* `__getattr__` proxy
+  (don't "add" a method there expecting it to shadow the base).
 
 **P0.3 Fix lying comments / stale layout docs:**
 - `tools/reposcout.py:29` — `_looks_secret`/`_readable` are annotated "re-exported for
@@ -135,6 +171,13 @@ but P1 and P2 are parallelizable.
 - `docs/04-file-layout.md` already carries a "⚠ design vs shipped" banner (the accurate doc is
   `docs/guide/concepts.md`) — optionally add inline "not shipped" markers to the superseded
   `commands.jsonl`/`store/objects/` sections so a mid-doc skim can't mislead.
+
+**P0.4 [ADDED by gap-hunt] Delete the dead React component pair.** `ui/src/GenesisChat.jsx`
+(292 LoC, zero importers — genesis now flows through the assistant/boss routes) +
+`ui/src/StartRun.jsx` (141 LoC, imported only by GenesisChat). Their `util.js` helpers orphan
+with them (`genesis`/`genesisAwait`/`genesisJob`, `util.js:574-599`); note `jobAwait`
+(`util.js:601`) already duplicates `genesisAwait` by its own comment — keep `jobAwait`, delete
+the genesis trio. *(Verified by full-tree grep.)*
 
 ---
 
@@ -144,13 +187,18 @@ Ordered by repetition count × drift risk. Homes chosen to respect layering
 (`core` importable everywhere; `events` imports only `core`).
 
 **P1.1 [HIGH] k-NN inverse-distance-weighted prediction — reimplemented 3×.**
-`search/surrogate.py:76`, `serve/panel.py:18`, `runtime/proxy.py:47` each re-implement "filter
-numeric params → L2 over shared keys → k nearest → zero-distance short-circuit else IDW-average",
-each handling the zero-distance edge slightly differently (the exact silent-drift a shared helper
-kills). → `knn_idw_predict(target, history, *, k, keys=None) -> (pred, nearest)` in
-`events/digest.py` (next to `param_distance`). *Safety:* callers want different return shapes;
-the helper must reproduce the zero-distance branch verbatim and let callers drop the 2nd element;
-verify surrogate's exploration-bonus still sees the true nearest distance.
+`search/surrogate.py:76`, `serve/panel.py:18`, `runtime/proxy.py:42-65` each re-implement "filter
+numeric params → L2 over shared keys → k nearest → zero-distance short-circuit else IDW-average".
+**[VERIFIED-AMENDED]** the zero-distance handling is textually different but *semantically
+identical* in all three; the REAL divergences a shared helper must expose as parameters are
+(a) **neighbour eligibility** — surrogate requires full bounds dimensionality
+(`surrogate.py:70-74`), panel requires the neighbour to contain all target keys
+(`panel.py:28`), proxy intersects keys *per neighbour* (`proxy.py:53`) so different neighbours
+score in different subspaces; and (b) proxy's numeric-**string** coercion (P1.2) changes its
+distances too. → `knn_idw_predict(target, history, *, k, eligibility=..., keys=None) ->
+(pred, nearest)` in `events/digest.py` (next to `param_distance`). *Safety:* callers want
+different return shapes; keep each caller's eligibility semantics verbatim; verify surrogate's
+exploration-bonus still sees the true nearest distance.
 
 **P1.2 [HIGH] Numeric-param filter — reimplemented 5-6×** (couples with P1.1).
 `{k: float(v) for k,v in params.items() if isinstance(v,(int,float))}` inline at
@@ -161,27 +209,43 @@ verify surrogate's exploration-bonus still sees the true nearest distance.
 helper and leave proxy's coercion only if a test needs string params (grep first).
 
 **P1.3 [HIGH] Lenient JSONL reader — reimplemented ~8×.**
-The "`for line in text.splitlines(): try: orjson.loads(line) except: continue`" (skip-bad-line)
+The "`for line in text.splitlines(): try: loads(line) except: continue`" (skip-bad-line)
 loop at `engine/lessons.py:112,126,646,901`, `engine/memory.py:459`,
 `tools/knowledge_tools.py:210`, `tools/memory_tools.py:60`, `trust/harden.py:63`. →
 `read_jsonl_lenient(path) -> Iterator[dict]` in `events/eventstore.py`. *Safety:* must **not**
 fold into `iter_jsonl` (which *stops* at the first bad line for event-log durability); these
 readers *skip-and-continue*. `lessons.py:646` appends `None` for bad lines to keep row indices
 aligned for a later rewrite — that site needs an index-preserving variant (`keep_bad=True`).
+**[VERIFIED-AMENDED]** 4 of the 8 sites use stdlib `json.loads` (memory, knowledge_tools,
+memory_tools, harden) and 4 use `orjson` — stdlib accepts `NaN`/`Infinity` literals that orjson
+rejects, so the shared helper must pick ONE parser and state it (recommend orjson + explicit
+note; scan existing stores for NaN literals before switching the 4 stdlib sites).
 
-**P1.4 [MED-HIGH] Atomic JSONL full-rewrite — reimplemented 4×** (read/write couple with P1.3).
-`atomic_write_text(path, "".join(orjson.dumps(o).decode()+"\n" for o in rows))` at
-`engine/lessons.py:444,705,912` and the bytes twin at `serve/routers/control.py:237`. →
-`write_jsonl_atomic(path, rows)` in `events/eventstore.py`. *Safety:* keep trailing newline +
-`orjson` (byte-identical output); leave the caller's liveness guard on the `spans.jsonl` rewrite.
+**P1.4 [MED-HIGH] Atomic JSONL full-rewrite — reimplemented 3× (+2 stdlib variants)**
+(read/write couple with P1.3). **[VERIFIED-AMENDED — the original ×4 census contained one
+genuinely UNSAFE consolidation]:** `engine/lessons.py:444` is **not** an atomic rewrite — it is
+an **append** (`open(path, "a")` under an interprocess lock, lines 445-447) to the *shared*
+cross-run lessons store; folding it into a whole-file-rewrite helper would silently drop rows
+written by concurrent runs. It may share only the line-serializer. The genuine rewrite sites:
+`engine/lessons.py:705,912`, the bytes twin at `serve/routers/control.py:237`, plus two
+stdlib-json variants the census missed — `engine/memory.py:471-472` (`_flush`) and
+`trust/harden.py:73-74` (not byte-identical if moved onto orjson — same parser decision as
+P1.3). → `write_jsonl_atomic(path, rows)` in `events/eventstore.py`. *Safety:* keep trailing
+newline; leave the caller's liveness guard on the `spans.jsonl` rewrite; NEVER route an
+append-mode site through it.
 
-**P1.5 [HIGH] "Robust metric" expression — copy-pasted 11×.**
+**P1.5 [HIGH] "Robust metric" expression — copy-pasted 12× in-package (+5 out-of-package).**
 `confirmed_mean if confirmed_mean is not None else metric` at `events/replay.py:599,609`,
-`events/digest.py:41,51`, `engine/holdout.py:148`, `engine/lessons.py:942`,
-`events/mlflow_export.py:50`, `serve/routers/runs.py:495`, `serve/htmlview.py:91`,
-`cli.py:361,780`. → `Node.robust_metric` computed `@property` on `core/models.py`; repoint all 11
-+ `digest.node_metric`. *Safety:* pure deterministic property; `_select_best`'s ranking key stays
-byte-identical. Keep holdout precedence explicit where it layers on top — do **not** fold holdout
+`events/digest.py:41,51` (the `:51` site IS `digest.node_metric`), `engine/holdout.py:148`,
+`engine/lessons.py:942`, `events/mlflow_export.py:50`, `serve/routers/runs.py:495`,
+`serve/htmlview.py:91`, `cli.py:361,780`, **[VERIFIED-AMENDED]** plus `looplab/bench.py:48` —
+the capability-regression harness you'd use to VALIDATE this refactor, so a missed repoint
+there drifts silently — and 5 more copies in repo-root `tools/e2e_report.py:85,103,109,115,202`
+(outside the package; repoint or explicitly scope out). → `Node.robust_metric` plain
+`@property` on `core/models.py` (verified safe: pydantic v2 `BaseModel`, no field/attr
+collision, plain properties are excluded from `model_dump` — no serialization change).
+*Safety:* pure deterministic property; `_select_best`'s ranking key stays byte-identical. Keep
+holdout precedence explicit where it layers on top (`replay.py:638`) — do **not** fold holdout
 into this property.
 
 **P1.6 [MED] Duplicated permission-mode table.** `serve/assistant.py:35` re-declares `MODES`,
@@ -208,7 +272,11 @@ the mandatory `finally` restore (the load-bearing comment at `novelty.py:201-204
 - Router state hydration `st = fold(_events(rd))` ×~15 → a `srv.state(run_id)` helper (must NOT
   cache across requests — invariant #4).
 - `nvidia-smi` CSV parse ×3 (`hardware.py:29/181`, `routers/misc.py:142`) → `query_nvidia_smi(fields)`.
-- `cli.py:874` `timings` hand-rolls span loading → call `serve/traceview.load_spans`.
+- `cli.py:874` `timings` hand-rolls span loading. **[VERIFIED-AMENDED]** a straight swap to
+  `traceview.load_spans` is NOT behavior-preserving: cli's loop *skips* bad span lines and
+  continues; `load_spans` uses `iter_jsonl`, which *stops at the first bad line* — on a
+  mid-corrupt `spans.jsonl` the swap silently truncates every later span. Either accept the
+  stop-at-tail semantics deliberately (document it) or give `load_spans` a `lenient=` flag.
 
 ---
 
@@ -219,14 +287,25 @@ The `core`/`events` layers are verified strictly downward. All the tangle is in 
 and survive only as lazy imports — the classic latent-cycle tell.
 
 **P2.1 [HIGH] Move pure read-model exporters `serve/traceview.py` + `serve/htmlview.py` →
-`events/`.** Both import *only* `core.models` (no fastapi), yet the engine hard-depends on them:
+`events/`.** htmlview imports only `html` + `core.models`; traceview imports stdlib +
+`core.models` + (lazily) `events.eventstore.iter_jsonl` — which *supports* the move (becomes
+intra-package). Neither touches fastapi/serve. Yet the engine hard-depends on them:
 `engine/finalize.py:60` lazily imports `render_html`/`build_trace_view`/`load_spans`, and
 `tools/runs_tools.py:248` reaches up too. They are `(RunState, spans) → trace.json/tree.html`
 *projections* — exactly `events/`'s documented job. Moving them makes `finalize.py`/`runs_tools.py`
 import *downward* (legal, top-level, no lazy hack) and drops the headless-run dependency on the
-`[ui]` extra. Update `_LAYOUT` (`traceview`/`htmlview`: `serve`→`events`); `routers/runs.py`
-re-imports the new path. *Safety:* pure `RunState`→string, never `store.append`; `trace.json`/
-`tree.html` are rewritten-each-finalize idempotent caches. Byte-identical behavior.
+`[ui]` extra. *Safety:* pure `RunState`→string, never `store.append`; `trace.json`/`tree.html`
+are rewritten-each-finalize idempotent caches. Byte-identical behavior.
+**[VERIFIED-AMENDED] the full importer inventory the move must handle** (no monkeypatch on
+either module — verified): `_LAYOUT` rows `traceview`/`htmlview`: `serve`→`events` (rescues the
+flat `looplab.traceview` used by `tools/e2e_report.py:15`); `engine/finalize.py:60-61`;
+`tools/runs_tools.py:248`; `serve/routers/runs.py:304,402,459,476` — the `:476` site imports
+**private** `_tree`/`_cap_span_io`, which must move along; and the `_LAYOUT` shim does NOT
+rescue the canonical `looplab.serve.traceview` path, which `tests/test_tracing.py` (8 sites)
+and `tests/test_conversation_split.py:8` import directly → either update those test imports or
+keep a 2-line `serve/traceview.py` re-export stub (stub is a *different module object* — fine
+here only because nothing monkeypatches it). Also update the stale `CLAUDE.md:53` parenthetical
+about finalize's lazy serve import in the same change.
 
 **P2.2 [HIGH] Move `make_llm_client` `adapters/tasks.py:320` → `core/llm.py`.** Its body depends
 only on `core` (`OpenAICompatibleClient`, `reasoning_body`, `CostAccountant`), yet living in
@@ -246,14 +325,24 @@ the re-export.
 - Goal: no lazy import should be load-bearing purely for cycle-breaking.
 
 **P2.4 [LOW-MED] `engine/signal_delivery.py` registry references 5 subpackages as strings** and is
-only called by its test. Consider relocating to a neutral `looplab/_signals.py` (or `core`) so
-cross-layer wiring knowledge isn't parked in `engine` and the enforcement test doesn't need `[ui]`
-to resolve the `serve.llm_context` entry. Strings-only at import time — no behavior change.
+only called by its test. **[VERIFIED-AMENDED]** the originally proposed `looplab/_signals.py`
+destination FAILS `test_no_stray_modules_at_package_root` (root allows only
+`__init__/cli/bench/sweep`) — relocate to `core/signals.py` (+ `_LAYOUT` row) or leave in
+`engine/` with a docstring note. Strings-only at import time — no behavior change either way.
 
 **P2.5 [MED] Rename the one-letter-apart twin.** `tools/run_tools.py` (live run + siblings) vs
-`tools/runs_tools.py` (every run on the machine), ~700 lines each, near-identical ADR-7 docstrings
-— the single most likely wrong-file edit. → rename `runs_tools.py`→`all_runs_tools.py`, class
-`RunsTools`→`AllRunsTools`; `_LAYOUT` + `test_package_layout` keep the flat-import shim honest.
+`tools/runs_tools.py` (every run on the machine), 717/700 lines, near-identical ADR-7 docstrings
+— the single most likely wrong-file edit. **[VERIFIED-AMENDED — the original mechanics were
+wrong twice]:** (a) the proposed class name `AllRunsTools` **already exists** at
+`tools/run_tools.py:467` (used by `adapters/tasks.py:430` and `tests/test_cross_run.py`) —
+reusing it would create two identically-named classes in the two twin files, aggravating the
+exact hazard this item fixes. Pick `machine_runs_tools.py` / `MachineRunsTools`. (b) the
+`_LAYOUT` shim **cannot express a rename** (`_CompatFinder` builds the canonical path from the
+SAME flat name), so the plan is: rename the file, swap the `_LAYOUT` key
+(`runs_tools`→`machine_runs_tools`), and update the 4 canonical importers
+(`serve/assistant.py:243,284`, `tests/test_run_control_tools.py:10`,
+`tests/test_run_logs_trace.py:16`). The old *flat* alias `looplab.runs_tools` simply disappears
+— verified zero importers, so nothing breaks.
 
 *(Defensible blur, leave as-is: the task-specific developer personas in `adapters/repo_developer.py`
 import only downward and cohere with `repo_task.py` — cohesion beats purity there.)*
@@ -264,8 +353,20 @@ import only downward and cohere with `repo_task.py` — cohesion beats purity th
 
 The proven pattern: a method cluster moved **verbatim** into a `*Mixin` in a new `engine/` module;
 `self` stays the Engine; zero call-site churn. Both `Engine._method` (class/bare-instance test
-calls) and `eng._method` (instance monkeypatch) keep resolving. **Every new `engine/<mod>.py`
-needs a `_LAYOUT` entry** or `test_package_layout` fails immediately.
+calls) and `eng._method` (instance monkeypatch) keep resolving. **[VERIFIED-AMENDED] the
+`_LAYOUT` rule is wider than engine/:** `test_no_module_missing_from_layout` iterates ALL TEN
+subpackages, so *every* new `.py` placed directly in any of core/events/runtime/tools/agents/
+search/trust/engine/adapters/serve needs a `_LAYOUT` row — that includes P1.8's
+`adapters/_toy_base.py` and every P5.2 module. (Files in *nested* packages like
+`serve/routers/` are exempt — the glob is non-recursive.) A companion trap:
+`test_no_stray_modules_at_package_root` pins the package root to `{__init__, cli, bench,
+sweep}` — no new root-level module can be added without touching that test.
+
+**Prep step (cheap insurance, do BEFORE any extraction):** the toy `_engine(run_dir, **kw)`
+builder is copy-pasted in ≥19 test files (`test_control.py:27`, `test_strategist.py:164`,
+`test_inline_repair.py:66`, `test_end_to_end.py:26`, …) — exactly the files whose monkeypatch
+targets P3 touches. Hoist one shared builder into `tests/conftest.py` first, so any
+patch-target fallout is fixed in one place.
 
 **The one real trap:** the module-global `fold` monkeypatch seam.
 `tests/test_creation_runaway_guard.py:46` does `monkeypatch.setattr(orch, "fold", …)` and relies
@@ -309,7 +410,8 @@ shared by the strategy/research mixins), `_cadence_due` (`@staticmethod` shared 
 delegator blocks (workspace/lessons/holdout/novelty — they ARE the seam keeping `eng._method` +
 instance monkeypatch alive after extraction).
 
-**Net:** safe tier → 2800 → ~2135; + evaluate → ~1785; + node_build split → ~1450.
+**Net [VERIFIED-AMENDED arithmetic]:** safe tier → 2800 → ~2135; + evaluate → ~1785;
++ node_build *split* form (~150) → ~1635; + node_build *full* form (~390) → ~1395.
 
 *Per step:* add the `_LAYOUT` row, run `pytest tests/test_package_layout.py`, then the cluster's
 named test(s), then the full suite.
@@ -337,12 +439,12 @@ the memo back to the main loop as a return value — true single-writer.)
 but probed with `getattr` at the engine (`orchestrator.py:455/457/463/489/491/788/2787`). Rename a
 hook on one side → the run silently stages/scores nothing, suite stays green. → add a
 `TASK_OPTIONAL_HOOKS` tuple in `tasks.py` + a parametrized test asserting the engine's getattr
-call-sites and the tuple agree (grep both sides in one test); promote the informal contract to a
-`@runtime_checkable Protocol` where cheap. *Safety:* pure typing/accessor refactor; same reads,
-same events.
+call-sites and the tuple agree (grep both sides in one test). **[VERIFIED-AMENDED]** the
+Protocol is *already* `@runtime_checkable` (`tasks.py:28`) — the registry+test is the whole
+remaining gap. *Safety:* pure typing/accessor refactor; same reads, same events.
 
 **P4.3 [MED-HIGH] Guard the Developer/Researcher output attrs.** `last_files`
-(`orchestrator.py:1618/1674/1750/2547` + `ablation.py`/`roles.py`), `choose_action`
+(`orchestrator.py:1618/1674/1750/2567` + `ablation.py`/`roles.py`), `choose_action`
 (`orchestrator.py:1282` — rename silently reverts the pilot to static policy), `assets()`
 (`orchestrator.py:456`) all fall back silently and each test sets them on its *own* fake, so a
 coordinated rename leaves the suite green. → add
@@ -352,15 +454,30 @@ asserting every shipped Developer/Researcher subclass exposes them (mirroring
 names.
 
 **P4.4 [MED] Guard the `Settings`↔`EngineOptions` dual defaults.** `engine/options.py:44`
-re-declares 68 Settings fields; **15 deliberately differ** (product-opinionated vs library-conservative).
+re-declares 68 Settings fields; **[VERIFIED-AMENDED] 16 deliberately differ** (not 15:
+agent_control, agent_drives_actions, comparative_lessons, concurrent_research, debug_depth,
+deep_repair, deep_research_every, failure_reflection, lessons_every, lessons_refresh_every,
+memory_dir, merge_mode, novelty_semantic, reflection_priors, report_every, unified_agent).
 `test_engine_options.py` locks only the Engine-side relationship — nothing asserts the intended
 Settings-vs-Engine gap, so a Settings default change silently shifts it. → add a test snapshotting
 the *set of divergent fields* as a frozen `{field: (settings_default, engine_default)}` table, so
 any future default change forces a deliberate update. **And fix `novelty_semantic`
 (`config.py:267`=False vs `options.py:109`=True) — it diverges *opposite* to the documented
 rationale** (every other divergence is product≥library aggressiveness; this one is inverted).
-Behavior-neutral today (semantic dedup only fires when `novelty_gate` is on, and both gate defaults
-are False), but a latent trap if the two ever decouple. Set `options.py:109`=False to match.
+**[VERIFIED-AMENDED] the divergence is LIVE today, not dormant:** semantic dedup is unreachable
+while `novelty_mode="llm"` (both defaults), but a direct `Engine(novelty_gate=True)` call forces
+`mode="algo"` (`orchestrator.py:351`) and picks up `novelty_semantic=True` from EngineOptions —
+so a bare-Engine caller enabling the gate gets embedding dedup while the identical product
+config (Settings: `novelty_semantic=False`) does not. Flipping `options.py:109` to False is
+therefore a *deliberate library-default change*, not a no-op — `options.py:17` pins engine
+defaults to the legacy signature defaults, so audit the novelty tests when changing it.
+
+**Related, verified good news for the F3 `**knobs` collapse (§5 index):** `Engine.__init__` has
+exactly **68** `_UNSET` knobs and `EngineOptions` exactly **68** fields — a perfect 1:1 name
+match (the earlier "77 vs 68" figure was wrong; 77 is the *event-constant* count). The knob
+block is keyword-only (`*` after `run_dir`) and all 119 test call sites pass keywords — so
+validating `**knobs` against EngineOptions field names breaks zero call sites; only the ~16
+object seams (task/roles/sandbox/policy/options + factory hooks) stay explicit parameters.
 
 **P4.5 [MED] Automate the docs/diagram-sync rule.** CLAUDE.md declares stale docs "a bug" and
 requires a `configuration.md` row per `Settings` field + the infographic in the same change, but
@@ -376,13 +493,35 @@ an immutable `ResearcherHints` value object passed as `propose(..., hints=…)` 
 `apply_hints(hints)` on a `HintSink` protocol every wrapper forwards. *Safety:* hints are ephemeral
 prompt cues, never events — replay determinism unaffected. (Larger change; schedule last in P4.)
 
+**P4.7 [ADDED by gap-hunt — MED] Prompt-key registry.** 13 `render(prompts, key, default)` keys
+are bare literals across 8 files (developer_system, developer_repair_prefix, researcher_system,
+tool_researcher_system, strategist_system, tool_strategist_system, pilot_system, triage_system,
+deep_research_system, foresight_system, merge_system, bestofn_judge_system, …). Verified clean
+today (no typos, no divergent defaults), but a typo'd override *filename*
+(`prompts/developer_sytem.md`) silently no-ops — the exact failure mode the repo already fixed
+for event types. → `PROMPT_KEYS` registry + source-scan test (mirror `test_event_types`). Also:
+the repo Developer/Onboarder prompts (`adapters/repo_developer.py:458/464`, composed `:1088`)
+**bypass the PromptStore entirely** while every `agents/` persona routes through it — an
+override that works for the toy Developer silently does nothing for the repo one. Route them
+through `render()` with the current constants as defaults (byte-identical behavior), or
+document the exclusion. *Prompt TEXT stays untouched — this is plumbing only.*
+
+**P4.8 [ADDED by gap-hunt — MED] String-referenced entry points need a resolution test.**
+`pyproject.toml` declares `[project.entry-points."jupyter_serverproxy_servers"] looplab =
+"looplab.runtime.jupyter:setup_looplab"` and TWO console scripts (`looplab` AND the `LoopLab`
+alias → `looplab.cli:app`). No test resolves these dotted paths, so moving/renaming
+`runtime/jupyter.py`, `setup_looplab`, or `cli.app` breaks deploys silently. → a trivial test
+importing each declared entry point (also protects the P5.2 cli split).
+
 ---
 
 ### P5 — `fold()` dispatch table + remaining god-files
 
-**P5.1 [MED, high-leverage] Refactor `fold()` from a 497-line/61-branch mega-function into an
+**P5.1 [MED, high-leverage] Refactor `fold()` from a 497-line mega-function into an
 ordered pure-handler dispatch table.** `events/replay.py:68-565` is one `for e in events` loop
-with a 61-way `if/elif t == EV_*` chain over shared mutable `st` — the single highest-blast-radius
+with 62 `if/elif` arms over shared mutable `st` (61 single-type `elif t ==` arms + the opening
+`if`, plus one arm handling two types — `elif t in (EV_RESUME, EV_RUN_REOPENED)` at `:444`,
+which becomes the same handler under two dict keys) — the single highest-blast-radius
 function in the system. → `HANDLERS: dict[str, Callable[[RunState, Event], None]]`, one verbatim
 handler per event type; loop becomes `HANDLERS.get(t, _ignore)(st, e)`. **Determinism preserved
 exactly:** events consumed in log order, each handler is the current branch body (pure `st`
@@ -396,16 +535,24 @@ like `building`). **Gate the change with a golden-log replay test** (fold old lo
 
 **P5.2 Other large files — natural seams** (each preserves monkeypatch/import compat via re-export
 back into the original module, exactly like `engine/triage.py` re-exports into orchestrator):
-- **`core/llm.py` (1357)** → `llm/streaming.py` (SSE/stream machinery), `llm/transient.py`
-  (retry/backoff/error classification), `llm/toolcall.py` (native tool-call parsing); keep the 3
+- **`core/llm.py` (1357)** → **[VERIFIED-AMENDED: must be flat siblings, not a nested package]**
+  `core/llm_streaming.py` (SSE/stream machinery), `core/llm_transient.py` (retry/backoff/error
+  classification), `core/llm_toolcall.py` (native tool-call parsing), each with its own `_LAYOUT`
+  row — a nested `core/llm/` package is blocked by `_LAYOUT["llm"]="core"` requiring `core/llm.py`
+  to exist *as a file* (`test_every_layout_entry_exists_at_its_canonical_path`). Keep the 3
   client classes in `llm.py` importing the helpers back. *Grep tests for
   `monkeypatch.setattr("looplab.core.llm._X")` before any move; re-import moved names into `llm.py`.*
 - **`adapters/repo_developer.py` (1323)** → split the write-tool provider `RepoWriteTools`
   (+ `_stage_output_values`/`_xlsx_to_markdown`) into `adapters/repo_write_tools.py`, leaving the
   `LLMRepoDeveloper`/`LLMOnboarder` personas (~570/~750 split along tool-vs-persona).
-- **`cli.py` (1037)** → command groups `cli_run` / `cli_export` / `cli_inspect` / `cli_ui`;
-  `cli.py` stays the entrypoint wiring them (console-script `looplab` intact). Verify no test
-  imports a private `cli._helper`.
+- **`cli.py` (1037)** → command groups. **[VERIFIED-AMENDED, three traps]:** (a) new root-level
+  modules (`cli_run.py`, …) FAIL `test_no_stray_modules_at_package_root` — convert `cli.py` to a
+  `looplab/cli/` *package* instead (`looplab.cli:app` keeps resolving for BOTH console scripts,
+  `looplab` and the `LoopLab` alias; nested package files are exempt from `_LAYOUT`); (b)
+  `looplab/bench.py:23` lazily imports **private** `cli._engine` ("lazy to avoid an import
+  cycle" — its own comment): put `_engine` in the run-command module and let bench import it
+  top-level, or promote it to a public engine-builder — this also retires one more load-bearing
+  lazy import (P2.3's class); (c) verify no test imports a private `cli._helper`.
 - **`serve/tui.py` (971)** → `tui_api.py` (`Api` client) + `tui_format.py` (the unit-tested pure
   formatters), leaving `Tui`+`main`. *Grep `test_tui.py` — it exercises the formatters directly;
   re-export or repoint.*
@@ -419,6 +566,16 @@ back into the original module, exactly like `engine/triage.py` re-exports into o
   `append_lessons`/`store_case`/static file-maintenance + `__init__` in `lessons.py`. *The Engine
   delegators reference `LessonMemory.spent_pairs`/`consolidate_lessons_file`/`compact_lessons` as
   `staticmethod` class refs — mixin inheritance preserves those.*
+- **`ui/src/` (ADDED by gap-hunt — the UI was outside the six axes' scope).** Largest files:
+  `panels.jsx` 1106, `Inspector.jsx` 1017, `AssistantBar.jsx` 689, `util.js` 687, `Dock.jsx` 647.
+  `util.js` is a grab-bag → split into api-client / formatters / DAG-layout (`layoutWithGroups`,
+  ~180 LoC) / CONTROL action map. Eight hand-rolled `setInterval` polls with inconsistent
+  periods (`AssistantBar:138`, `Dock:192,500`, `Inspector:80,684,858`, `RunList:168`,
+  `panels:639`); only RunList has a `document.hidden` guard → one shared `usePoll` hook.
+  Server-side twin: `serve/routers/genesis.py:268-300` hand-rolls the spawn+inline-wait that
+  `srv.jobs.run_as_job` already encapsulates (used by assistant/boss/reports) → add a progress
+  hook to `run_as_job` and unify. Good news: `hooks.js` SSE and the `util.js` fetch wrappers are
+  already single-sourced — the UI is under-factored at the panel layer, not a duplication swamp.
 
 **P5.3 [LOW] Model hygiene** (do only if P5 touches models anyway):
 - `RunState` (~60 flat fields) and `Node` — do **not** nest into sub-models (readers spell
@@ -451,13 +608,24 @@ back into the original module, exactly like `engine/triage.py` re-exports into o
 - **Keep docs + the process diagram in sync in the SAME change** (CLAUDE.md rule): the settings
   table in `docs/guide/configuration.md` and the data-driven `docs/infographic/agent-architecture.html`.
 - **Never touch prompt strings or the `Idea` validators as part of a "cleanup".**
+- **[ADDED by gap-hunt] `looplab/sweep.py` is a frozen generated-code contract — do not move,
+  rename, or change its surface.** Its import path (`from looplab.sweep import run_sweep`) is
+  baked into the Developer prompt (`agents/roles.py:126-138`, `_SWEEP_CONTRACT`); its
+  `{"trials": [...]}` final-stdout line is parsed by `runtime/sandbox.py` (`json_line_trials`)
+  and `runtime/command_eval.py:578`; it honors the `LOOPLAB_EVAL_SEED` env contract the confirm
+  phase varies; and generated solution code in HISTORICAL runs imports it — a move breaks
+  resume/re-run of old runs. Public API + trials-line format + env contract are frozen.
+- **[ADDED by gap-hunt] External string-referenced entry points are part of the frozen surface**
+  until P4.8's resolution test lands: `looplab.runtime.jupyter:setup_looplab`
+  (jupyter_serverproxy), `looplab.cli:app` (BOTH the `looplab` and `LoopLab` console scripts).
 
 ## 5. Cross-axis finding index (traceability)
 
 - **Duplication:** P1.1–P1.8.
 - **Layering/architecture:** P2.1 (F1), P2.2 (F2), P2.3 (F5/F10), P2.4 (F9), P4.1 (F4), P4.2/P4.3
   (F7), P4.6 (F6), P5.1 (F8), P3+P4.4 (F3 — knob triplication → `**knobs` validated by
-  `EngineOptions`, deleting ~150 redundant signature lines + the dual-default-sync obligation).
+  `EngineOptions`, deleting ~150 redundant signature lines + the dual-default-sync obligation;
+  verified 68/68 exact knob↔field parity and keyword-only signature — zero call-site breakage).
 - **God-file decomposition:** P3 (orchestrator, full detail), P5.2 (llm/repo_developer/cli/tui/
   agent/lessons).
 - **Agent-friendliness:** P0.2/P0.3 (CLAUDE.md + comments), P2.5 (`runs_tools` rename), P4.2/P4.3
@@ -466,3 +634,48 @@ back into the original module, exactly like `engine/triage.py` re-exports into o
   P0.3 (layout docs).
 - **Config/events/model surface:** P1.5 (`robust_metric`), P4.4 (dual defaults + `novelty_semantic`),
   P5.1 (`fold`), P5.3 (model hygiene). Verified-clean set in §1.
+- **Verification pass:** P0.4, P4.7, P4.8, the `[ADDED by gap-hunt]` §1/§4 entries, and every
+  `[VERIFIED-AMENDED]` marker.
+
+---
+
+## 6. Verification pass — what the adversarial fact-check changed
+
+Two independent verifiers re-checked the document the same day: one re-read **every cited
+`file:line`** (80 tool calls; line evidence proved exceptionally accurate — every orchestrator/
+replay/test line checked was exact), the other swept the areas the six axes never covered.
+Outcome, so a reader knows the document's error profile:
+
+**Corrections that changed a recommendation (all now integrated in place):**
+1. **P1.4** — `lessons.py:444` is an append-under-interprocess-lock to the SHARED lessons store,
+   not an atomic rewrite; routing it through `write_jsonl_atomic` would lose concurrent runs'
+   rows. The one genuinely unsafe recommendation in the original draft.
+2. **P2.5** — the `_LAYOUT` shim cannot express renames, and the proposed `AllRunsTools` name
+   collides with an existing class in the twin file. New plan: `MachineRunsTools` + explicit
+   importer updates.
+3. **P2.1** — importer inventory was incomplete: 2 test files import the canonical
+   `looplab.serve.traceview` path (the shim only rescues flat names), and `routers/runs.py:476`
+   pulls private `_tree`/`_cap_span_io`.
+4. **P1.1** — the real cross-site divergence is neighbour-*eligibility* semantics (3 different
+   filters), not the zero-distance edge (semantically identical in all three).
+5. **P4.4** — 16 divergent defaults, not 15; and the `novelty_semantic` fix is a deliberate
+   library-default change (live for `Engine(novelty_gate=True)` callers), not a no-op.
+6. **Layout-test traps** — `_LAYOUT` coverage spans ALL ten subpackages (not just engine/); the
+   package root is pinned to `{__init__, cli, bench, sweep}`; `core/llm/` cannot become a nested
+   package. These re-shaped P2.4 and the P5.2 cli/llm split plans.
+7. **Numbers** — knobs are 68/68 (1:1, keyword-only; strengthens F3), orchestrator has 98 defs
+   (not ~130), fold has 62 arms (one dual-type), P1.3 uses two different JSON parsers across its
+   8 sites, P1.5 had 6 more copies (`bench.py:48` + `tools/e2e_report.py` ×5), P1.8's
+   `load_spans` swap changes skip-vs-stop semantics, P0.2's `bind_state` is optional-but-strict,
+   P4.2's Protocol is already `@runtime_checkable`.
+
+**Additions from the gap-hunt (areas outside the six axes):** the `sweep.py` frozen contract and
+string entry points (§4), dead UI components (P0.4), UI structure (P5.2 last bullet), the
+prompt-key registry + repo-developer PromptStore bypass (P4.7), entry-point resolution test
+(P4.8), the shared `_engine` test-builder prep before P3, and the §1 clean verdicts
+(concurrency/locking, logging, small modules, prompt-key sync, CI nits).
+
+**Net assessment:** the plan survives verification intact — no phase was invalidated. The
+corrections tighten execution details (what to exclude, which importers to update, which tests
+gate which move); the additions extend scope to the UI, tests, prompts-plumbing, and packaging
+surfaces the original review never looked at.
