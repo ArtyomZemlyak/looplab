@@ -117,10 +117,13 @@ EV_HYPOTHESIS_UPDATED = "hypothesis_updated"
 EV_HYPOTHESIS_MERGED = "hypothesis_merged"     # engine-written: fold alias hypotheses into a canonical
 EV_RUN_REOPENED = "run_reopened"
 EV_TRUST_GATE_CHANGED = "trust_gate_changed"   # server config edit; folded last-write-wins
+# Predict-before-execute pick among K ideas / N code candidates. FOLDED into RunState.foresight_selected
+# (audit-only, never touches selection) so the world model can be primed with its own calibration track
+# record — signal-delivery §1. Kept here (above the "NOT folded" divider) because the fold now reads it.
+EV_FORESIGHT_SELECTED = "foresight_selected"
 
 # --- DIAGNOSTIC / SIDECAR events (deliberately NOT folded — `replay.fold` ignores them
 #     (forward compat); they exist for the live activity feed / audit trail only). ---
-EV_FORESIGHT_SELECTED = "foresight_selected"   # predict-before-execute pick among K ideas / N code candidates
 EV_REFLECTION_NOTE = "reflection_note"          # run-end LLM distillation: causal note + lessons + auto-skills
 EV_SETUP_STARTED = "setup_started"
 EV_SETUP_STEP = "setup_step"
