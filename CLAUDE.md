@@ -10,7 +10,7 @@ by replaying it. Design docs live in `docs/` (see `docs/02-architecture.md`, ADR
 
 ```bash
 pip install -e ".[dev,ui]"        # dev deps; [ui] needed for server/assistant/TUI tests (fastapi)
-python -m pytest                  # full suite (~1150 tests, a few minutes; addopts already has -q)
+python -m pytest                  # full suite (~1.7k tests, a few minutes; addopts already has -q)
 python -m pytest tests/test_events_replay.py           # targeted run — always do this first
 python -m pytest -o addopts="" -q ...                  # if you need to override the default -q
 python -m pytest -m "not docker"  # skip Docker-daemon tests
@@ -48,15 +48,16 @@ in its inline `<script>`); edit the data, not hand-placed SVG.
 | `looplab/agents/` | LLM personas: plain roles (`roles.py`), tool-loop roles (`agent.py::drive_tool_loop`), external CLI backend (`cli_agent.py`), facade (`unified_agent.py`) |
 | `looplab/search/` | search policies (`policy.py` — action kinds/meta-key constants live here), `operators.py`, best-of-N, surrogate, archive, `foresight.py` (hypothesis prioritization / predict-before-execute), `hybrid_merge.py` (grep+BM25+vector RRF retrieval + agent-decided merge, shared by lesson & hypothesis-board consolidation) |
 | `looplab/trust/` | gates that keep results honest: leakage, reward-hack, CV, redaction, confirmation |
-| `looplab/engine/` | **the orchestrator loop** (`orchestrator.py`, the largest file) + cross-run memory; see invariants below |
+| `looplab/engine/` | **the orchestrator loop** + cross-run memory; see invariants below. The `Engine` class spans SIX files: `orchestrator.py` (the largest file: `__init__`, the `run` spine, eval/node lifecycle) + five verbatim-move mixins it inherits — `confirm_phase.py` (ConfirmPhaseMixin), `ablation.py` (AblationMixin), `novelty.py` (NoveltyGateMixin), `strategy.py` (StrategyCadenceMixin — *when* to consult the Strategist; the Strategist agent itself is `agents/strategist.py`), `research_cadence.py` (ResearchCadenceMixin). In a mixin `self` IS the Engine and reads `Engine.__init__` attributes freely — grep all six files before renaming an engine attribute or hunting a method |
 | `looplab/adapters/` | task types (toy → dataset → repo → MLE-bench); the TaskAdapter contract is documented in `adapters/tasks.py` |
-| `looplab/serve/` | FastAPI server (`server.py` — routes live inside `make_app`), TUI, assistant; not imported at engine import time (`engine/finalize.py` lazily imports the htmlview/traceview projections at run end) |
+| `looplab/serve/` | FastAPI server (`server.py` is a thin composition root; routes live in `serve/routers/*` — control/runs/genesis/assistant/boss/org/reports/misc), TUI, assistant; not imported at engine import time (`engine/finalize.py` lazily imports the htmlview/traceview projections at run end) |
 | `ui/` | React control plane (built artifacts served by `serve/server.py`) |
 
 ## Engine invariants (violating these breaks replay/resume)
 
 1. **The engine is the sole writer of domain events.** Background tasks return values; only the
-   main task appends. UI/CLI append only *control intents* (allow-listed in `serve/server.py`).
+   main task appends. UI/CLI append only *control intents* (allow-listed in
+   `serve/protocol.py::CONTROL_EVENTS`, enforced by `serve/routers/control.py`).
 2. **Exactly one terminal event per node** (`node_evaluated` | `node_failed`). The fold is
    idempotent on duplicate terminals (first terminal wins).
 3. **Every side effect must be gated on a domain event** so resume-by-replay is idempotent
@@ -87,7 +88,12 @@ in its inline `<script>`); edit the data, not hand-placed SVG.
 - **Duck-typed seams**: the engine reads optional attributes off tasks/roles (`assets()`,
   `last_files`, `choose_action`, hint attrs listed in `agents/roles.py::RESEARCHER_HINT_ATTRS`).
   The TaskAdapter hooks are documented in `adapters/tasks.py`. Renames here break the engine
-  silently — grep both sides before renaming any such attribute.
+  silently — grep both sides before renaming any such attribute. Note `search/foresight.py`'s
+  panel is a *transparent* `__getattr__` proxy over the wrapped agent: an attribute you "add" to
+  the panel does NOT shadow the base's, and a typo'd read silently resolves to the base object.
+- **Tool providers**: the `bind_state` hook is OPTIONAL (`tools/_base.py` — providers that don't
+  need run state simply omit it), but a provider that DOES implement it must accept the second
+  `parent` argument (`bind_state(self, state, parent=None)`) or it raises `TypeError` at dispatch.
 - **Tests isolate the environment** (`tests/conftest.py`): dotenv loading is disabled and
   `LOOPLAB_MEMORY_DIR`/`LOOPLAB_KNOWLEDGE_DIR` point at tmp dirs. Engine tests construct
   `Engine(...)` directly (~100 call sites) — keep its keyword API stable.

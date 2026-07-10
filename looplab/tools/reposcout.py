@@ -26,7 +26,8 @@ from looplab.core import _pathsafe
 from looplab.tools._base import RESULT_CAP, fn_spec   # shared schema builder + the loop's result cap
 
 # Path/secret guards now live in _pathsafe (shared with the write/shell/git providers so every tool
-# enforces the same rules). Re-exported under the historical private names for back-compat.
+# enforces the same rules). Bound under the historical private names because this module's own call
+# sites still use them (no external importer — these are NOT a back-compat re-export contract).
 _looks_secret = _pathsafe.looks_secret
 _readable = _pathsafe.readable
 

@@ -567,38 +567,14 @@ export const saveSecret = (key, value) => send('/api/settings/secret', 'PUT', { 
 // Per-run settings: edit a specific run's config.snapshot.json so the next RESUME picks up the
 // change (only changed fields are sent). Blocked server-side while the run's engine is live.
 export const saveRunConfig = (rid, settings) => send(`/api/runs/${encodeURIComponent(rid)}/config`, 'PUT', { settings })
-export const listTasks = () => get('/api/tasks')
 export const startRun = (body) => post('/api/start', body)
-// chat-first run creation: the pre-run BOSS turns a goal into an editable spec {run_id, task|task_file,
-// settings, rationale} + a conversational reply. `draft` carries the current card on refine turns.
-export const genesis = ({ messages = [], instruction = '', draft = null }) =>
-  post('/api/genesis', { messages, instruction, draft })
-// Genesis runs an agentic, multi-turn loop server-side: a fast model returns the plan inline from the
-// POST above; a slow one returns {status:'running', job_id} which we poll here until done (so a long
-// agentic plan can't 504 behind a proxy). Generous overall cap — the agent decides how many turns it
-// needs. Transient poll errors are tolerated (keep polling).
-export const genesisJob = (jobId) => get(`/api/genesis/${encodeURIComponent(jobId)}`)
-export async function genesisAwait(resp, { intervalMs = 1500, timeoutMs = 300000, onProgress } = {}) {
-  if (!resp || resp.status !== 'running' || !resp.job_id) return resp   // fast-path: already the plan
-  const deadline = Date.now() + timeoutMs
-  while (Date.now() < deadline) {
-    await new Promise(r => setTimeout(r, intervalMs))
-    let j
-    try { j = await genesisJob(resp.job_id) } catch { continue }        // transient — keep polling
-    if (j.status === 'running' && j.progress && onProgress) onProgress(j.progress)  // live scout step
-    if (j.status === 'done') return j
-    if (j.status === 'unknown') return { ok: false, error: 'planning expired — send the goal again' }
-  }
-  return { ok: false, error: 'planning timed out' }
-}
-export const research = (topic, save = false) => post('/api/research', { topic, save })
 
 // cross-run aggregate reports over a scope (project | task | supertask). GET returns the stored report
 // + staleness ({exists, content, generated_at, run_ids, stale, added, current_run_count}); generate
 // (re)synthesizes on demand via an agent with access to every run in the scope.
 const _scopeUrl = (type, id) => `/api/scope-report/${encodeURIComponent(type)}/${encodeURIComponent(id)}`
 export const getScopeReport = (type, id) => get(_scopeUrl(type, id))
-// Generic background-job poll (mirrors genesisAwait): the server hands back {status:'running', job_id}
+// Generic background-job poll: the server hands back {status:'running', job_id}
 // for slow work so it can't 504 behind a proxy. Returns the final result dict; tolerates transient
 // poll errors. `resp` that's already a result (fast inline path) is returned unchanged.
 const _job = (jobId) => get(`/api/jobs/${encodeURIComponent(jobId)}`)

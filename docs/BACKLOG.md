@@ -45,7 +45,7 @@ it builds on). B6 parked per user decision.
   metric + `metrics` + `constraints` + drift `cross_check`); protected-name normalization (`_normp`);
   Docker `--pids-limit 1024` on both untrusted paths. *(commit 9722226)*
 - ✅ **C2 (partial)** — child process no longer inherits host secrets: `sandbox._run_argv` filters
-  `_SECRET_ENV`-matching vars out of the child env ([sandbox.py:112](../looplab/runtime/sandbox.py)).
+  `SECRET_ENV`-matching vars out of the child env ([sandbox.py:112](../looplab/runtime/sandbox.py)).
 - ✅ **C3 (partial)** — CORS narrowed from `*` to a localhost allow-list (`LOOPLAB_UI_CORS` override);
   SPA fallback `GET /{path:path}` now resolve-guards against traversal ([server.py:739](../looplab/serve/server.py)).
 - ✅ **C4 (partial)** — `replay.fold` is idempotent for terminal node events (duplicate

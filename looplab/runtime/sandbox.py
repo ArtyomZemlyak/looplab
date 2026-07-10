@@ -30,7 +30,6 @@ from typing import Optional, Protocol
 # code can't read (and persist into the event log) the operator's keys/tokens. Name-based, so it
 # never touches PATH/SYSTEMROOT/TEMP etc. that a process legitimately needs.
 SECRET_ENV = re.compile(r"(KEY|SECRET|TOKEN|PASSWORD|PASSWD|CREDENTIAL|API_KEY)", re.IGNORECASE)
-_SECRET_ENV = SECRET_ENV   # back-compat alias (pre-rename importers)
 
 
 def docker_timed_out(rc: int) -> bool:
@@ -118,10 +117,6 @@ def json_line_metric(text: str, key: str = "metric") -> Optional[float]:
     return None
 
 
-# Back-compat alias (pre-rename importers/tests use `_json_line_metric`).
-_json_line_metric = json_line_metric
-
-
 def _parse_metric(stdout: str) -> Optional[float]:
     # Kept (not folded into its callers): the sandboxes' readable name for "read the solution's
     # self-reported metric", and imported directly by tests (test_review_fixes_2).
@@ -161,7 +156,7 @@ _json_line_extras = json_line_extras
 
 def json_line_trials(text: str) -> Optional[list]:
     """Last stdout line that is a JSON object with a "trials" key holding a list (intra-node
-    sweep). Scans bottom-up like `_json_line_metric`, so trailing chatter after the sweep's
+    sweep). Scans bottom-up like `json_line_metric`, so trailing chatter after the sweep's
     summary line is tolerated. Returns the raw list of trial dicts, or None if absent."""
     for line in reversed(text.splitlines()):
         line = line.strip()

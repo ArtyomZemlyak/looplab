@@ -22,7 +22,7 @@ from __future__ import annotations
 import re
 import subprocess
 import sys
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Optional
 
 # "No module named 'X'" / 'X.Y' — the canonical ModuleNotFoundError / ImportError text. Captures
@@ -127,16 +127,6 @@ class InstallResult:
     returncode: int
     output: str = ""          # combined stdout+stderr tail (audit; never the engine's secrets)
     timed_out: bool = False
-
-
-@dataclass
-class PrepResult:
-    """Outcome of one env-prep pass over a crash: which pip packages installed, which failed."""
-    installed: list[str] = field(default_factory=list)
-    failed: list[str] = field(default_factory=list)
-
-    def __bool__(self) -> bool:        # truthy iff something was installed (engine re-runs the eval)
-        return bool(self.installed)
 
 
 # Stop auto-installing after pip TIMES OUT repeatedly: on a no-/restricted-egress JupyterHub pod pip

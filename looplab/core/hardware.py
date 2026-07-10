@@ -126,48 +126,6 @@ def operational_attention_points(*, include_env: bool = True) -> str:
         "prefer the cheap/safe option and surface the question.")
 
 
-def path_size_note(path: str, *, timeout: float = 8.0) -> str:
-    """A bounded, best-effort size note for a path — so a prompt can warn against copying a huge
-    tree without ever hanging on a multi-GB/geesefs dir. Returns a short human string; on a slow
-    filesystem the measurement is abandoned and reported as 'very large (measurement timed out)'.
-    For a git working tree, also notes tracked vs untracked so 'seed only code' is an obvious call."""
-    from pathlib import Path as _P
-    p = _P(os.path.expanduser(str(path)))
-    if not p.exists():
-        return f"{path}: (missing)"
-    try:
-        out = subprocess.run(["du", "-sb", str(p)], capture_output=True, text=True, timeout=timeout)
-        if out.returncode == 0 and out.stdout.strip():
-            nbytes = int(out.stdout.split()[0])
-            human = _human_bytes(nbytes)
-        else:
-            human = "?"
-    except subprocess.TimeoutExpired:
-        return f"{path}: very large (measurement timed out — treat as huge)"
-    except (OSError, ValueError, subprocess.SubprocessError):
-        human = "?"
-    note = f"{path}: {human}"
-    # git-tracked footprint (fast) so 'code is tiny, artifacts are huge' is visible.
-    try:
-        g = subprocess.run(["git", "-C", str(p if p.is_dir() else p.parent), "ls-files", "-z"],
-                           capture_output=True, text=True, timeout=timeout)
-        if g.returncode == 0:
-            ntracked = sum(1 for x in g.stdout.split("\0") if x)
-            if ntracked:
-                note += f" ({ntracked} git-tracked files; untracked content is NOT source)"
-    except (OSError, subprocess.SubprocessError):
-        pass
-    return note
-
-
-def _human_bytes(n: float) -> str:
-    for unit in ("B", "KB", "MB", "GB"):
-        if n < 1024:
-            return f"{n:.0f}{unit}" if unit == "B" else f"{n:.1f}{unit}"
-        n /= 1024
-    return f"{n:.1f}TB"
-
-
 def detect_gpu() -> str | None:
     """The first GPU's name via `nvidia-smi`, or None if none/undetectable. Cached for the process.
     Deliberately NO torch dependency — torch may not be installed yet (it's auto-installed on demand),

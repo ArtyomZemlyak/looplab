@@ -29,10 +29,9 @@ except ModuleNotFoundError:  # pragma: no cover - deps are declared; guard is fo
     httpx = None   # type: ignore[assignment]
     openai = None  # type: ignore[assignment]
 
-# Legacy urllib-transport helpers (still imported by a few direct unit tests) — the LIVE path now
-# goes through the openai SDK (see OpenAICompatibleClient._sdk_chat). Kept import-safe until the
-# dead helpers are removed.
-import http.client  # noqa: F401
+# Legacy urllib-transport imports (still monkeypatched THROUGH this module by direct unit tests,
+# e.g. `llm.urllib.request.urlopen`) — the LIVE path now goes through the openai SDK
+# (see OpenAICompatibleClient._sdk_chat). `ssl` is also used by the SDK-path error classifier.
 import ssl  # noqa: F401
 import urllib.error  # noqa: F401
 import urllib.request  # noqa: F401
@@ -272,23 +271,6 @@ def _reasoning_of(msg: dict) -> str:
     """The dedicated reasoning field of an OpenAI-shaped assistant message: `reasoning` (OpenRouter/
     Ollama) or `reasoning_content` (newer OpenAI/SGLang), whichever is present. '' when absent."""
     return msg.get("reasoning") or msg.get("reasoning_content") or ""
-
-
-def _is_transient(e: BaseException) -> bool:
-    """True for a TRANSIENT network failure worth retrying — a socket timeout, a reset/aborted
-    connection, or a mid-read TLS EOF (UNEXPECTED_EOF_WHILE_READING: the peer hung up mid-response,
-    common over a busy hosted gateway like OpenRouter). FALSE for steady-state failures that should
-    fail FAST: a refused connection (endpoint down), a DNS error (bad host), or a TLS CERT error
-    (misconfig). urllib wraps the real cause in `URLError.reason`, so check that too. (`socket.timeout`
-    is an alias of `TimeoutError` since Python 3.10.)"""
-    for x in (e, getattr(e, "reason", None)):
-        if x is None:
-            continue
-        if isinstance(x, (TimeoutError, ConnectionResetError, ConnectionAbortedError)):
-            return True
-        if isinstance(x, ssl.SSLError) and not isinstance(x, ssl.SSLCertVerificationError):
-            return True   # dropped TLS read (e.g. UNEXPECTED_EOF), NOT a cert problem
-    return isinstance(e, (http.client.IncompleteRead, http.client.RemoteDisconnected))
 
 
 def _parse_chat_body(raw: Optional[str]) -> Optional[dict]:

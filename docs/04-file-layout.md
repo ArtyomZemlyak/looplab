@@ -42,6 +42,8 @@ Your five concerns map to distinct file classes. Labels used throughout:
 
 ## 3. Recommended layout — ONE experiment run
 
+> **Not shipped as designed** — see the banner at the top; the shipped run-dir contract is [guide/concepts.md](guide/concepts.md).
+
 ```
 runs/2026-06-20T142530__resnet50-lr3e4__a1b2c3/
 ├── README.md                  [HC]  hypothesis + "how to reproduce"; frontmatter mirrors key metrics  (write FIRST)
@@ -76,6 +78,8 @@ runs/2026-06-20T142530__resnet50-lr3e4__a1b2c3/
 
 ## 4. Large binary artifacts — content-addressed store + pointer manifest
 
+> **Not shipped as designed** — see the banner at the top; the shipped run-dir contract is [guide/concepts.md](guide/concepts.md).
+
 Keep big binaries **out of git and out of the human-readable tree**:
 - **Content-addressed store**: blobs named by **SHA-256**, sharded by 2-char prefix (`store/objects/4d/7a2146…`) → automatic dedup + immutability (Git/git-lfs/DVC pattern).
 - **Materialize into the run** via **reflink → hardlink → symlink → copy** fallback (DVC `cache.type`). ⚠️ Windows without Developer Mode loses symlink dedup (falls back to copy) — plan for it (you're on Windows 11).
@@ -93,6 +97,8 @@ This makes weights/data reviewable in `git diff` (the pointer) without dragging 
 ---
 
 ## 5. Recommended layout — overall PROJECT
+
+> **Not shipped as designed** — see the banner at the top; the shipped run-dir contract is [guide/concepts.md](guide/concepts.md).
 
 ```
 project/
