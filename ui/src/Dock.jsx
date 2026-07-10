@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { get, fmt, workingId, CONTROL, resumeRun, resetRun } from './util.js'
+import { usePoll } from './hooks.js'
 import Markdown from './markdown.jsx'
 import { NodeTrace } from './Inspector.jsx'
 import { OpIcon } from './icons.jsx'
@@ -183,15 +184,9 @@ function LiveTrace({ runId, active }) {
   const [tail, setTail] = useState([])
   const [open, setOpen] = useState(false)
   const bodyRef = useRef(null)
-  useEffect(() => {
-    if (!active || !open) return
-    let alive = true
-    const tick = () => get(`/api/runs/${runId}/trace/tail?limit=40`)
-      .then(r => { if (alive) setTail(r.tail || []) }).catch(() => {})
-    tick()
-    const iv = setInterval(tick, 3000)
-    return () => { alive = false; clearInterval(iv) }
-  }, [runId, active, open])
+  usePoll((alive) => get(`/api/runs/${runId}/trace/tail?limit=40`)
+    .then(r => { if (alive()) setTail(r.tail || []) }).catch(() => {}),
+    3000, [runId, active, open], { enabled: active && open })
   useEffect(() => { if (open && bodyRef.current) bodyRef.current.scrollTop = bodyRef.current.scrollHeight }, [tail, open])
   return (
     <div className={'live-trace' + (open ? ' open' : '')}>
@@ -493,13 +488,8 @@ export default function Dock({ runId, live, liveSeq, viewSeq, setViewSeq, onFocu
   // moment building ends (node_created clears `building`), and the fetch above does the final refresh.
   const buildingId = live && !live.finished && live.engine_running !== false && live.building
     ? live.building.node_id : null
-  useEffect(() => {
-    if (buildingId == null) return
-    const tick = () => get(`/api/runs/${runId}/trace`).then(setTrace).catch(() => {})
-    tick()
-    const iv = setInterval(tick, 4000)
-    return () => clearInterval(iv)
-  }, [runId, buildingId])
+  usePoll(() => get(`/api/runs/${runId}/trace`).then(setTrace).catch(() => {}),
+    4000, [runId, buildingId], { enabled: buildingId != null })
   const atLive = viewSeq == null || viewSeq >= liveSeq
 
   // The live frontier: the highest-id node still pending while the run runs — its proposal card stays

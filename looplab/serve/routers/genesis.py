@@ -7,9 +7,6 @@ from __future__ import annotations
 import json
 import os
 import re
-import secrets
-import threading
-import time
 from pathlib import Path
 from typing import Optional
 
@@ -264,42 +261,33 @@ def build_router(srv) -> APIRouter:
             return {"ok": True, "spec": _normalize_genesis(spec, draft),
                     "reply": spec.reply or "Here's a plan — tweak the card and launch."}
 
-        job_id = secrets.token_hex(8)
-        srv.jobs.put(job_id, status=JOB_RUNNING, result=None, ts=time.time())
+        def _compute(set_progress) -> dict:
+            def _on_step(ev: dict) -> None:
+                # Turn a raw tool event into a short human line so the UI can show what the boss is doing
+                # instead of an opaque spinner (the "it just thinks for ages" complaint is opacity, not
+                # latency — we add NO budget/cap here). Best-effort; this only annotates the running job.
+                tool = (ev or {}).get("tool", "")
+                arg = str((ev or {}).get("arg", ""))
+                short = arg.rsplit("/", 1)[-1] if arg else ""
+                label = ({"read_file": f"reading {short}", "list_dir": f"listing {short or 'the repo'}",
+                          "find_files": f"searching {short or 'files'}"}.get(tool)
+                         or (f"{tool} {short}".strip() if tool else "scouting the repo"))
+                set_progress({"label": label, "step": int((ev or {}).get("turn", 0)) + 1})
 
-        def _on_step(ev: dict) -> None:
-            # Turn a raw tool event into a short human line so the UI can show what the boss is doing
-            # instead of an opaque spinner (the "it just thinks for ages" complaint is opacity, not
-            # latency — we add NO budget/cap here). Best-effort; this only annotates the running job.
-            tool = (ev or {}).get("tool", "")
-            arg = str((ev or {}).get("arg", ""))
-            short = arg.rsplit("/", 1)[-1] if arg else ""
-            label = ({"read_file": f"reading {short}", "list_dir": f"listing {short or 'the repo'}",
-                      "find_files": f"searching {short or 'files'}"}.get(tool)
-                     or (f"{tool} {short}".strip() if tool else "scouting the repo"))
-            srv.jobs.put(job_id, progress={"label": label, "step": int((ev or {}).get("turn", 0)) + 1})
-
-        def _worker():
-            # Guard the WHOLE worker: an exception outside _compute_plan's own try (e.g. a parse
-            # returning None → AttributeError in normalize) must still flip the job to done, or the
+            # Guard the WHOLE plan: an exception outside _compute_plan's own try (e.g. a parse
+            # returning None → AttributeError in normalize) must still produce a done result, or the
             # poll endpoint reports "running" forever and the UI waits out its full timeout blind.
             try:
-                res = _compute_plan(_on_step)
+                return _compute_plan(_on_step)
             except Exception as e:  # noqa: BLE001 - surface as a job error, never a wedged job
-                res = {"ok": False, "error": f"planning failed: {e}"}
-            srv.jobs.put(job_id, status=JOB_DONE, result=res, ts=time.time())
-        threading.Thread(target=_worker, daemon=True).start()
+                return {"ok": False, "error": f"planning failed: {e}"}
 
-        # Adaptive fast-path: poll the job for a few seconds WITHOUT blocking the event loop. A quick
-        # model finishes here and the spec is returned in THIS request (no polling round-trips, no added
-        # latency for a normal environment); a slow one returns a job_id the UI polls (no 504).
-        deadline = time.monotonic() + _GENESIS_INLINE_WAIT
-        while time.monotonic() < deadline:
-            j = srv.jobs.get(job_id)
-            if j and j.get("status") == JOB_DONE:
-                return j["result"]
-            await anyio.sleep(0.2)
-        return {"status": JOB_RUNNING, "job_id": job_id}
+        # Adaptive fast-path — the shared srv.jobs.run_as_job spawn+inline-wait (same funnel as the
+        # assistant/boss/report routes): a quick model finishes inside the inline wait and the spec is
+        # returned in THIS request (no polling round-trips, no added latency for a normal environment);
+        # a slow one returns a job_id the UI polls (no 504). `with_progress` threads the scout-step
+        # annotations into the job record the /api/genesis/{job_id} poll surfaces.
+        return await srv.jobs.run_as_job(_compute, inline_wait=_GENESIS_INLINE_WAIT, with_progress=True)
 
     @router.get("/api/genesis/{job_id}")
     def genesis_job(job_id: str):

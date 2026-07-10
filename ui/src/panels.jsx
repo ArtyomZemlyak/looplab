@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { get, putText, post, fmt, fmtInt, fmtBytes, CONTROL, gpuStat, saveRunConfig, resumeRun, apiPrefix, operatorMeta } from './util.js'
+import { usePoll } from './hooks.js'
 import { Bars, ParallelCoords, Scatter, MultiTrajectory } from './charts.jsx'
 import { hyperImportance } from './report.js'
 import Markdown from './markdown.jsx'
@@ -633,12 +634,7 @@ export function RegistryPanel({ state, onClose }) {
 // utilization / VRAM / power during a real training run without leaving the browser.
 export function GpuPanel({ onClose }) {
   const [data, setData] = useState(null)
-  useEffect(() => {
-    let on = true
-    const tick = () => gpuStat().then(d => on && setData(d)).catch(() => on && setData({ available: false }))
-    tick(); const t = setInterval(tick, 2000)
-    return () => { on = false; clearInterval(t) }
-  }, [])
+  usePoll((alive) => gpuStat().then(d => alive() && setData(d)).catch(() => alive() && setData({ available: false })), 2000, [])
   const bar = (v, max, hot) => <div className="bar" style={{ height: 8 }}>
     <div className={'fill' + (hot ? ' hot' : '')} style={{ width: Math.min(100, max ? v / max * 100 : 0) + '%' }} /></div>
   return (
