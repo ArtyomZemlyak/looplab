@@ -21,7 +21,8 @@ _PKG = Path(__file__).resolve().parents[1] / "looplab"
 # Where the duck-typed probes live (the docstring in adapters/tasks.py names the consumers).
 _CONSUMER_FILES = [
     *(_PKG / "engine").glob("*.py"),
-    _PKG / "cli.py",
+    *(_PKG / "cli").glob("*.py"),   # cli became a package (docs/15 §P5.2) — scan every command module
+
     _PKG / "adapters" / "tasks.py",
     _PKG / "adapters" / "repo_task.py",
     _PKG / "adapters" / "repo_developer.py",

@@ -15,12 +15,17 @@ import orjson
 
 from looplab.core.config import Settings
 from looplab.adapters.tasks import load_task
+# Top-level on purpose (this was a lazy in-function import "to avoid an import cycle"): the cycle is
+# gone — the CLI's `bench` command imports looplab.bench lazily inside its own body
+# (looplab/cli/export_cmds.py), so nothing in the looplab.cli package imports this module at import
+# time, in either direction. Importing the shared engine builder here retires that load-bearing lazy
+# import (docs/15 §P5.2b).
+from looplab.cli import _engine
 
 
 def run_benchmark(task_files, settings: Settings, out_dir) -> list[dict]:
     """Run each task to completion and return a capability summary per task. Writes
     `<out_dir>/benchmark.json` with the full report."""
-    from looplab.cli import _engine   # lazy to avoid an import cycle (cli imports bench in its command)
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     results: list[dict] = []
