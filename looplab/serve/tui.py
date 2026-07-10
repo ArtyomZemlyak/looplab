@@ -250,8 +250,9 @@ def spec_lines(spec: Optional[dict]) -> list[str]:
 
 
 def spec_ready(spec: Optional[dict]) -> Optional[str]:
-    """None when the spec is launchable, else a short reason it isn't (mirrors GenesisChat's gate, so
-    the TUI never fires a doomed /api/start). Keeps the launch button honest."""
+    """None when the spec is launchable, else a short reason it isn't (mirrors the backend truth,
+    `EvalSpec._command_or_stages`, so the TUI never fires a doomed /api/start — see the BACKLOG
+    "unify the launch-readiness gate" item). Keeps the launch button honest."""
     if not spec:
         return "no plan yet — describe a goal first"
     if not (spec.get("run_id") or "").strip():
@@ -286,7 +287,8 @@ _SLUG_RE = re.compile(r"[^a-z0-9]+")
 
 
 def slug(s: str) -> str:
-    """run-id normaliser — the Python twin of GenesisChat's strict slug() (lowercase kebab, ≤40)."""
+    """run-id normaliser (lowercase kebab, ≤40) — must stay in step with the server's own
+    slugify+de-dup in serve/routers/genesis.py::_normalize_genesis."""
     return _SLUG_RE.sub("-", str(s or "").lower()).strip("-")[:40]
 
 
@@ -672,7 +674,7 @@ class Tui:
             self.console.print(Panel(reply, title="boss", border_style="cyan", expand=True))
             new_spec = (r or {}).get("spec")
             # Only adopt a REAL spec — the offline soft-fail returns ok:false with a blank spec, which
-            # must not wipe a good draft the user already has (mirrors GenesisChat).
+            # must not wipe a good draft the user already has.
             if (r or {}).get("ok") is not False and new_spec and (
                     new_spec.get("run_id") or new_spec.get("task_file") or (new_spec.get("task") or {}).get("kind")):
                 spec = new_spec

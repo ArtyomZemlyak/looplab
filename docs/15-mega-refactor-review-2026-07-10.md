@@ -175,9 +175,13 @@ but P1 and P2 are parallelizable.
 **P0.4 [ADDED by gap-hunt] Delete the dead React component pair.** `ui/src/GenesisChat.jsx`
 (292 LoC, zero importers — genesis now flows through the assistant/boss routes) +
 `ui/src/StartRun.jsx` (141 LoC, imported only by GenesisChat). Their `util.js` helpers orphan
-with them (`genesis`/`genesisAwait`/`genesisJob`, `util.js:574-599`); note `jobAwait`
-(`util.js:601`) already duplicates `genesisAwait` by its own comment — keep `jobAwait`, delete
-the genesis trio. *(Verified by full-tree grep.)*
+with them (`genesis`/`genesisAwait`/`genesisJob`, `util.js:574-599`, plus `listTasks`/`research`
+— StartRun was their only caller); note `jobAwait` (`util.js:601`) already duplicates
+`genesisAwait` by its own comment — keep `jobAwait`, delete the genesis trio. *(Verified by
+full-tree grep.)* **Deferred follow-up found by the P0 review:** with the `research()` client
+gone, `POST /api/research` (`serve/routers/genesis.py:54`) is unreachable from every shipped
+client and has zero test coverage — decide later whether to remove the route + its
+`serve_prompts.py` prompt or add coverage (removing public API surface was out of P0 scope).
 
 ---
 

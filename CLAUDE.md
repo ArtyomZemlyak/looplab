@@ -48,7 +48,7 @@ in its inline `<script>`); edit the data, not hand-placed SVG.
 | `looplab/agents/` | LLM personas: plain roles (`roles.py`), tool-loop roles (`agent.py::drive_tool_loop`), external CLI backend (`cli_agent.py`), facade (`unified_agent.py`) |
 | `looplab/search/` | search policies (`policy.py` — action kinds/meta-key constants live here), `operators.py`, best-of-N, surrogate, archive, `foresight.py` (hypothesis prioritization / predict-before-execute), `hybrid_merge.py` (grep+BM25+vector RRF retrieval + agent-decided merge, shared by lesson & hypothesis-board consolidation) |
 | `looplab/trust/` | gates that keep results honest: leakage, reward-hack, CV, redaction, confirmation |
-| `looplab/engine/` | **the orchestrator loop** + cross-run memory; see invariants below. The `Engine` class spans SIX files: `orchestrator.py` (the largest file: `__init__`, the `run` spine, eval/node lifecycle) + five verbatim-move mixins it inherits — `confirm_phase.py` (ConfirmPhaseMixin), `ablation.py` (AblationMixin), `novelty.py` (NoveltyGateMixin), `strategy.py` (StrategyCadenceMixin — *when* to consult the Strategist; the Strategist agent itself is `agents/strategist.py`), `research_cadence.py` (ResearchCadenceMixin). In a mixin `self` IS the Engine and reads `Engine.__init__` attributes freely — grep all six files before renaming an engine attribute or hunting a method |
+| `looplab/engine/` | **the orchestrator loop** + cross-run memory; see invariants below. The `Engine` class spans SIX files: `orchestrator.py` (the largest) + five mixins — `confirm_phase.py`, `ablation.py`, `novelty.py`, `strategy.py` (cadence; the Strategist agent is `agents/strategist.py`), `research_cadence.py`. In a mixin `self` IS the Engine — grep all six files before renaming an engine attribute or hunting a method |
 | `looplab/adapters/` | task types (toy → dataset → repo → MLE-bench); the TaskAdapter contract is documented in `adapters/tasks.py` |
 | `looplab/serve/` | FastAPI server (`server.py` is a thin composition root; routes live in `serve/routers/*` — control/runs/genesis/assistant/boss/org/reports/misc), TUI, assistant; not imported at engine import time (`engine/finalize.py` lazily imports the htmlview/traceview projections at run end) |
 | `ui/` | React control plane (built artifacts served by `serve/server.py`) |
@@ -89,8 +89,10 @@ in its inline `<script>`); edit the data, not hand-placed SVG.
   `last_files`, `choose_action`, hint attrs listed in `agents/roles.py::RESEARCHER_HINT_ATTRS`).
   The TaskAdapter hooks are documented in `adapters/tasks.py`. Renames here break the engine
   silently — grep both sides before renaming any such attribute. Note `search/foresight.py`'s
-  panel is a *transparent* `__getattr__` proxy over the wrapped agent: an attribute you "add" to
-  the panel does NOT shadow the base's, and a typo'd read silently resolves to the base object.
+  panel is a `__getattr__` proxy over the wrapped agent: a typo'd read silently resolves to the
+  base object, and an attribute SET on the panel shadows reads *through the panel* but does NOT
+  reach the base's own `self.<attr>` reads until `forward_hints` mirrors it — set hints on the
+  outermost wrapper and let the registry forward them, never on `base` directly.
 - **Tool providers**: the `bind_state` hook is OPTIONAL (`tools/_base.py` — providers that don't
   need run state simply omit it), but a provider that DOES implement it must accept the second
   `parent` argument (`bind_state(self, state, parent=None)`) or it raises `TypeError` at dispatch.

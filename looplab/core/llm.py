@@ -29,11 +29,10 @@ except ModuleNotFoundError:  # pragma: no cover - deps are declared; guard is fo
     httpx = None   # type: ignore[assignment]
     openai = None  # type: ignore[assignment]
 
-# Legacy urllib-transport imports (still monkeypatched THROUGH this module by direct unit tests,
-# e.g. `llm.urllib.request.urlopen`) — the LIVE path now goes through the openai SDK
-# (see OpenAICompatibleClient._sdk_chat). `ssl` is also used by the SDK-path error classifier.
+# `urllib.request` is monkeypatched THROUGH this module by direct unit tests
+# (`llm.urllib.request.urlopen`); the LIVE path goes through the openai SDK
+# (see OpenAICompatibleClient._sdk_chat). `ssl` is used by the SDK-path error classifier.
 import ssl  # noqa: F401
-import urllib.error  # noqa: F401
 import urllib.request  # noqa: F401
 
 from looplab.core import tracing
@@ -932,8 +931,8 @@ class OpenAICompatibleClient:
             self._last_usage = cached.get("usage") or {}
             return copy.deepcopy(cached)
         # A network blip / HTTP error / non-JSON body must surface as a clean LLMError, not an
-        # unhandled URLError/HTTPError/JSONDecodeError that aborts the whole run — the role layer
-        # already retries + falls back on LLMError. (urllib.error was imported but unused before.)
+        # unhandled transport exception that aborts the whole run — the role layer
+        # already retries + falls back on LLMError.
         # Rate-limit/transient resilience: a 429 (or 5xx) is retried with backoff (honoring a
         # Retry-After header when given) BEFORE surfacing — free/shared endpoints (e.g. OpenRouter
         # free tier) rate-limit bursts, and a single 429 shouldn't crash the whole run.
@@ -1012,8 +1011,9 @@ class OpenAICompatibleClient:
                 # HTTP 200 read cleanly, but the body can still be unusable: a hosted gateway
                 # sometimes returns an empty / whitespace / SSE-keepalive-only body (OpenRouter sends
                 # ': OPENROUTER PROCESSING' heartbeats while a model is queued and can finish with no
-                # JSON payload), or a stream that carried no content/tool-call. (A mid-read socket drop
-                # is caught above as IncompleteRead.) Treat an empty/unparseable 200 like a transient
+                # JSON payload), or a stream that carried no content/tool-call. (A mid-read socket
+                # drop surfaces on the SDK path as a connection error caught above.)
+                # Treat an empty/unparseable 200 like a transient
                 # network failure — retry with backoff — rather than crash the run on a gateway hiccup.
                 # `parsed` was computed in the try (streamed-and-reassembled, or _parse_chat_body).
                 # A parsed dict is accepted (an `{"error": ...}` envelope has no `choices` and fails

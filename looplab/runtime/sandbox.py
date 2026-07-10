@@ -119,7 +119,7 @@ def json_line_metric(text: str, key: str = "metric") -> Optional[float]:
 
 def _parse_metric(stdout: str) -> Optional[float]:
     # Kept (not folded into its callers): the sandboxes' readable name for "read the solution's
-    # self-reported metric", and imported directly by tests (test_review_fixes_2).
+    # self-reported metric", and imported directly by tests (test_sandbox_gate).
     return json_line_metric(stdout, "metric")
 
 
