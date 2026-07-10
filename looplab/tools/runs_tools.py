@@ -562,8 +562,7 @@ class RunControlTools:
         import math
         from looplab.events.eventstore import EventStore
         from looplab.events.replay import fold
-        from looplab.events.types import (EV_BUDGET_EXTEND, EV_HINT, EV_RUN_REOPENED,
-                                          EV_TRUST_GATE_CHANGED)
+        from looplab.events.types import EV_BUDGET_EXTEND, EV_HINT, EV_TRUST_GATE_CHANGED
         store = EventStore(rd / "events.jsonl")
         if name == "extend_budget":
             data: dict = {}
@@ -579,18 +578,20 @@ class RunControlTools:
                     return f"({k} must be a finite number — nan/inf would disable the budget)"
             if not data:
                 return "(extend_budget needs at least one of add_nodes / max_seconds / max_eval_seconds)"
+            if data.get("add_nodes", 1) <= 0:      # a negative/zero delta SHRINKS the budget, not extends
+                return "(add_nodes must be a positive count of MORE experiment nodes)"
             blocked = self._gate(name, rid, f"extend budget of {rid}: {data}")
             if blocked:
                 return blocked
-            # REOPEN a finished run FIRST, else the added budget re-finishes on the spot (`finished`
-            # stays set). EV_RUN_REOPENED folds like RESUME (clears finished/paused); a no-op if live.
-            reopened = ""
-            if fold(store.read_all()).finished:
-                store.append(EV_RUN_REOPENED, {})
-                reopened = " (reopened the finished run)"
             store.append(EV_BUDGET_EXTEND, data)
-            return (f"(budget extended for {rid}: {data}{reopened} — takes effect while the engine "
-                    "runs; if none is attached, start it from the UI Resume.)")
+            # Deliberately do NOT reopen a finished run here: clearing `finished` with no engine
+            # attached leaves it in limbo — not running, and reset_run refuses a non-finished run. The
+            # budget is recorded now and takes effect the moment the run is resumed (resume_run / UI
+            # Resume clears `finished`), so a finished run stays cleanly resettable until then.
+            finished = fold(store.read_all()).finished
+            tail = (" — the run has FINISHED; resume it (resume_run / UI Resume) to use the new budget."
+                    if finished else " — takes effect while the engine runs.")
+            return f"(budget extended for {rid}: {data}{tail})"
         if name == "set_directive":
             text = " ".join(str(args.get("text") or "").split())
             if not text:
@@ -607,7 +608,20 @@ class RunControlTools:
             blocked = self._gate(name, rid, f"set trust_gate={tg} for {rid}")
             if blocked:
                 return blocked
-            store.append(EV_TRUST_GATE_CHANGED, {"trust_gate": tg})
+            store.append(EV_TRUST_GATE_CHANGED, {"trust_gate": tg, "source": "assistant"})
+            # Mirror the UI PUT /config path: the fold already applies the event, but also update
+            # config.snapshot.json so a later RESUME re-enters with the new gate and the settings panel
+            # doesn't show a stale value (the two mutation paths must not drift). Best-effort.
+            snap = rd / "config.snapshot.json"
+            if snap.exists():
+                try:
+                    import json as _json
+                    from looplab.core.atomicio import atomic_write_text
+                    cfg = _json.loads(snap.read_text(encoding="utf-8"))
+                    cfg["trust_gate"] = tg
+                    atomic_write_text(snap, _json.dumps(cfg, indent=2))
+                except (OSError, ValueError):
+                    pass
             return f"(trust_gate set to {tg} for {rid})"
         return f"(unknown settings tool: {name})"
 

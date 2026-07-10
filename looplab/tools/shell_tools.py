@@ -201,6 +201,10 @@ class ShellTools:
                 rows = MANAGER.list()
                 return "\n".join(f"{t['task_id']} {t['status']} · {t['cmd'][:70]}" for t in rows) or "(none)"
             if name == "kill_background":
+                # SIGTERM-ing a process group is a side effect, not a read (unlike read_output/
+                # list_background) — deny it in read-only plan mode, matching run_command's gate.
+                if decide(self.mode, "shell") == "deny":
+                    return "(kill_background is disabled in plan mode. Switch to default/acceptEdits/auto.)"
                 from looplab.runtime.bg_tasks import MANAGER
                 r = MANAGER.kill(str(args.get("task_id") or ""))
                 return f"[{r['task_id']}] killed" if r.get("ok") else f"({r.get('error')})"

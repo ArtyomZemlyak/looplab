@@ -22,9 +22,11 @@ class DiversityArchive:
         better = (lambda a, b: a < b) if state.direction == "min" else (lambda a, b: a > b)
         elites: dict[tuple, Node] = {}
         for n in state.evaluated_nodes():
-            # skip constraint-violating (and null-metric) nodes, matching every policy pool: an
-            # infeasible node must not become the recorded niche elite (run-end provenance) or inflate
-            # the coverage niche count. (None<float would also crash the `better` compare.)
+            # skip constraint-violating (and null-metric) nodes: an infeasible node must not become the
+            # recorded niche elite (run-end provenance) or inflate the coverage count. (None<float would
+            # also crash the `better` compare.) NOTE: this is the run-end DIVERSITY/AUDIT view, so it
+            # deliberately KEEPS trust-gate-flagged-but-feasible nodes (they stay `feasible` for exactly
+            # this diversity/audit picture) — unlike the breeding pools, which use breedable_nodes().
             if n.metric is None or not n.feasible:
                 continue
             niche = self._niche(n.idea.params)

@@ -107,23 +107,29 @@ def test_extend_budget_appends_budget_extend(tmp_path):
     assert st.budget_overrides.get("max_eval_seconds") == 1200.0
 
 
-def test_extend_budget_reopens_a_finished_run(tmp_path):
+def test_extend_budget_records_but_does_not_reopen_a_finished_run(tmp_path):
+    # Reopening a finished run with no engine attached would leave it in limbo (not running, and
+    # reset_run refuses a non-finished run). So the budget is RECORDED and the run stays finished/
+    # resettable until an explicit resume applies it.
     rd = tmp_path / "b2"
     _run(rd).append("run_finished", {})
     assert fold(EventStore(rd / "events.jsonl").read_all()).finished is True
     out = _tools(tmp_path).execute("extend_budget", {"run_id": "b2", "add_nodes": 3})
-    assert "reopened the finished run" in out
+    assert "FINISHED" in out and "resume" in out.lower()
     types = [e.type for e in EventStore(rd / "events.jsonl").read_all()]
-    assert "run_reopened" in types and "budget_extend" in types
+    assert "run_reopened" not in types and "budget_extend" in types
     st = fold(EventStore(rd / "events.jsonl").read_all())
-    assert st.finished is False and st.budget_overrides.get("add_nodes") == 3
+    assert st.finished is True and st.budget_overrides.get("add_nodes") == 3   # stays finished
 
 
-def test_extend_budget_rejects_nonfinite_and_empty(tmp_path):
+def test_extend_budget_rejects_nonfinite_negative_and_empty(tmp_path):
     _run(tmp_path / "b3")
     t = _tools(tmp_path)
     assert "finite" in t.execute("extend_budget", {"run_id": "b3", "max_seconds": float("inf")})
     assert "at least one" in t.execute("extend_budget", {"run_id": "b3"})
+    # a negative add_nodes would SHRINK the budget (base + add_nodes) — reject it
+    assert "positive" in t.execute("extend_budget", {"run_id": "b3", "add_nodes": -50})
+    assert "positive" in t.execute("extend_budget", {"run_id": "b3", "add_nodes": 0})
 
 
 def test_set_directive_appends_hint(tmp_path):

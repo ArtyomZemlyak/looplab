@@ -106,7 +106,7 @@ stack(1360,360,DY,[
  {id:"t_rh",h:74,t:"Reward-hack",tag:"✓",c:C.trust,sub:["grader/answer-key access · write to frozen file","metric at 0.0/1.0 floor/ceiling"]},
  {id:"t_lk",h:74,t:"Leakage",tag:"✓",c:C.trust,sub:["train↔test · target |r|≥0.98 · temporal","code: fit-on-test / fit-before-split"]},
  {id:"t_cr",h:58,t:"Critic + CV",tag:"advisory",c:C.trust,sub:["stub · hardcoded metric · params ignored · mean/std/SE"]},
- {id:"t_gate",h:86,t:"Trust gate",tag:"select",c:C.trust,sub:["audit = surface only","gate = can’t be best (stays breedable)","block = also feasible=False"]},
+ {id:"t_gate",h:86,t:"Trust gate",tag:"select",c:C.trust,sub:["audit = surface only","gate = can’t be best AND not bred/confirmed (feasible for diversity)","block = also feasible=False"]},
  {id:"t_conf",h:82,t:"Confirm",tag:"off",c:C.ev,sub:["default OFF · top-K on disjoint seeds [base=1…)","robust=best mean; demote by ≥1 SE (variance gate)"]},
  {id:"t_ho",h:64,t:"Holdout-select",tag:"top-3",c:C.ev,sub:["re-rank top-3 on reserved 25% · no retrain"]},
  {id:"t_best",h:64,t:"Best-selection order",tag:"",c:C.ev,sub:["feasible→non-flagged→metric→confirmed→holdout→(metric,id)"]},

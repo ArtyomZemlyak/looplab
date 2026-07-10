@@ -40,11 +40,13 @@ class ProxyScorer:
         return out
 
     def score(self, state: RunState, node: Node) -> Optional[float]:
-        """Inverse-distance-weighted k-NN prediction of `node`'s metric over evaluated feasible
-        neighbours. Returns None when there's no numeric signal to predict from (proxy abstains)."""
+        """Inverse-distance-weighted k-NN prediction of `node`'s metric over evaluated BREEDABLE
+        neighbours. Returns None when there's no numeric signal to predict from (proxy abstains).
+        `breedable_nodes` (not feasible_nodes) drops trust-gate cheaters so their inflated metric
+        can't pull the prediction toward the cheated params (§2.2); a no-op under audit."""
         target = self._numeric(node.idea.params)
         neighbours = []
-        for n in state.feasible_nodes():
+        for n in state.breedable_nodes():
             if n.id == node.id or n.metric is None:
                 continue
             p = self._numeric(n.idea.params)
@@ -68,8 +70,10 @@ class ProxyScorer:
         be in the doomed bottom fraction. Deterministic; never skips when it would be the best."""
         if self.kill_fraction <= 0.0:
             return False
+        # breedable (not feasible): a trust-gate cheater's inflated metric must not raise the kill
+        # threshold and get honest candidates skipped as "doomed bottom fraction" (§2.2); no-op on audit.
         metrics = sorted(
-            (n.metric for n in state.feasible_nodes() if n.metric is not None),
+            (n.metric for n in state.breedable_nodes() if n.metric is not None),
             reverse=(state.direction == "max"))   # best-first
         if len(metrics) < self.warmup:
             return False

@@ -513,8 +513,13 @@ def build_unified_agent(task: TaskAdapter, settings, run_dir=None):
     maybe_override("repair", developer)   # repair shares the developer object
 
     # Strategy stage: mirror cli._engine's strategist wiring exactly (off => None => no strategy
-    # events => byte-parity with split mode when agent_drives_actions is also off).
-    strat_client = (client_for(stage_models.get("strategy"), stage_urls.get("strategy"))
+    # events => byte-parity with split mode when agent_drives_actions is also off) — INCLUDING
+    # strategist_temperature (built directly, not via client_for, so the per-role temp isn't a silent
+    # no-op in the default unified mode; the strategy stage rarely overrides model/url, so skipping the
+    # (model,url) cache costs at most one extra client).
+    strat_client = (make_llm_client(settings, model=stage_models.get("strategy"),
+                                    base_url=stage_urls.get("strategy"),
+                                    temperature=settings.strategist_temperature)
                     if settings.strategist_backend in ("llm", "agent") else None)
     strat_tools = (build_strategist_tools(task, split, run_dir)
                    if strat_client is not None and settings.strategist_backend == "agent" else None)

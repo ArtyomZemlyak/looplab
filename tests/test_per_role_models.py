@@ -68,3 +68,15 @@ def test_temperature_only_override_with_a_per_role_model():
                  developer_model="coder", developer_temperature=0.0)
     _r, developer = make_roles(task, s)
     assert _client_model(developer) == "coder" and _client_temp(developer) == 0.0
+
+
+def test_strategist_temperature_threaded_in_unified_mode():
+    # mega-review (2 votes): the DEFAULT unified path built its strategy client via client_for(), which
+    # ignored strategist_temperature — the knob was a silent no-op. It must be honored now.
+    from looplab.adapters.tasks import build_unified_agent
+    task = load_task(ROOT / "examples" / "code_regression_task.json")
+    s = Settings(backend="llm", llm_temperature=0.6, unified_agent=True,
+                 strategist_backend="llm", strategist_temperature=0.15)
+    agent = build_unified_agent(task, s)
+    assert getattr(agent.strategist, "client", None) is not None
+    assert agent.strategist.client.temperature == 0.15
