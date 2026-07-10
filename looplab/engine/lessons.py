@@ -24,6 +24,13 @@ from looplab.engine.memory import JsonlCaseLibrary
 from looplab.events.replay import fold
 from looplab.events.types import EV_LESSONS_DISTILLED, EV_LESSONS_REFRESHED, EV_REFLECTION_NOTE
 
+# Which ROLE a cross-run lesson is for, so the two contexts stay separate (the Researcher gets only
+# R&D / "what technique to try" lessons, the Developer only its own "what code change fixed a crash"
+# lessons). Stamped on the record at distillation; `load_reflection_priors(role=...)` filters on it.
+# An UNTAGGED (legacy) lesson is SHARED — both roles see it — so old stores keep working unchanged.
+LESSON_ROLE_RESEARCHER = "researcher"
+LESSON_ROLE_DEVELOPER = "developer"
+
 if TYPE_CHECKING:  # engine type hint only — no runtime import of the orchestrator
     from looplab.engine.orchestrator import Engine
 
@@ -35,24 +42,31 @@ class LessonMemory:
     def __init__(self, engine: "Engine") -> None:
         self._e = engine
         self.seen_stamp = None   # (size, mtime_ns) of the store at the last read
-        self.prior_note_text = ""   # E4: cross-run meta-review prior, loaded at run start
+        self.prior_note_text = ""   # E4: cross-run RESEARCHER prior (R&D lessons), loaded at run start
+        self.dev_prior_note_text = ""   # §role-split: cross-run DEVELOPER prior (code-fix lessons)
 
-    def load_reflection_priors(self, exclude_run_id: Optional[str] = None) -> str:
-        """E4 + M2/M3: build the cross-run prior injected into the proposal prompt. Two parts:
+    def load_reflection_priors(self, exclude_run_id: Optional[str] = None,
+                               role: Optional[str] = None) -> str:
+        """E4 + M2/M3: build the cross-run prior injected into a role's prompt. Two parts:
         (1) exact-task "what won" notes (meta_notes.jsonl — unchanged E4 warm-start), and
         (2) LESSONS retrieved by task-FINGERPRINT similarity (M2), so a *similar but new* task also
         benefits — including NEGATIVE lessons (what was tested/abandoned/failed, M3) so the search
         doesn't re-tread a known dead end. Empty unless enabled + present. `exclude_run_id` drops
         lessons THIS run wrote (M6 mid-run distillation / resume): a run must not read its own
-        output back as another run's experience — those results are already in its digest."""
+        output back as another run's experience — those results are already in its digest.
+
+        `role` (§role-split): return only the lessons FOR that role — the Researcher gets R&D
+        "what technique to try" lessons, the Developer only its own "what code change fixed a crash"
+        lessons, so the two contexts stay separate. An UNTAGGED (legacy) lesson is shared. The
+        research-flavoured meta-notes (part 1) are skipped for the Developer. role=None -> everything."""
         if not (self._e._reflection_priors and self._e.memory_dir):
             return ""
         base = Path(self._e.memory_dir)
         out = ""
-        # (1) exact-task meta notes (E4)
+        # (1) exact-task meta notes (E4) — research-flavoured "what won" config, skipped for the Developer
         notes: list[str] = []
         npath = base / "meta_notes.jsonl"
-        if npath.exists():
+        if npath.exists() and role != LESSON_ROLE_DEVELOPER:
             for line in npath.read_text(encoding="utf-8").splitlines():
                 try:
                     o = orjson.loads(line)
@@ -83,6 +97,10 @@ class LessonMemory:
                     continue
                 if exclude_run_id and o.get("run_id") == exclude_run_id:
                     continue                     # M6: never echo this run's own lessons back
+                lrole = o.get("role")
+                if role is not None and lrole is not None and lrole != role:
+                    continue                     # §role-split: a lesson EXPLICITLY for the OTHER role
+                    #                              stays out of this role's context (untagged = shared)
                 all_lessons.append((idx, o))
                 stored_fp = o.get("fingerprint")
                 stored_fp = ([t for t in stored_fp if not str(t).startswith("param:")]
@@ -127,7 +145,10 @@ class LessonMemory:
                 if len(picked) >= 5:
                     break
             if picked:
-                out += "\nLessons from related runs (what did/didn't work): " + "; ".join(picked)
+                label = ("Implementation lessons from related runs (code fixes that did/didn't work)"
+                         if role == LESSON_ROLE_DEVELOPER
+                         else "Lessons from related runs (what did/didn't work)")
+                out += "\n" + label + ": " + "; ".join(picked)
         return out
 
     def empty_state_for_fp(self) -> RunState:
@@ -215,7 +236,8 @@ class LessonMemory:
                     "kind": getattr(self._e.task, "kind", ""), "statement": h.statement,
                     "outcome": h.status, "delta": h.best_delta,
                     "confidence": 0.7 if h.status == "supported" else 0.5,
-                    "run_id": final.run_id, "evidence": list(h.evidence)[:8]})
+                    "run_id": final.run_id, "evidence": list(h.evidence)[:8],
+                    "role": LESSON_ROLE_RESEARCHER})   # a hypothesis is an R&D finding
         # dominant failure theme (so a repeat run is warned off the same crash class)
         reasons: dict[str, int] = {}
         for n in final.nodes.values():
@@ -295,7 +317,7 @@ class LessonMemory:
                      "statement": (f"op '{best.operator}' with params {best.idea.params} "
                                    f"reached {best.metric:.4g}"),
                      "outcome": "supported", "delta": None, "confidence": 0.7,
-                     "run_id": final.run_id, "evidence": [best.id]}]
+                     "run_id": final.run_id, "evidence": [best.id], "role": LESSON_ROLE_RESEARCHER}]
         client = self._e._reflect_client()
         if client is None or best is None:
             return _winner_lesson()
@@ -319,10 +341,11 @@ class LessonMemory:
         except Exception:   # noqa: BLE001 - best-effort
             return _winner_lesson()
         from looplab.engine.memory import parse_credit_lessons
+        # Generalizable technique/strategy takeaways → the RESEARCHER's context (what to try next).
         res = [{"task_id": final.task_id, "fingerprint": fp,
                 "kind": getattr(self._e.task, "kind", ""), "statement": stmt,
                 "outcome": outcome, "delta": None, "confidence": 0.6,
-                "run_id": final.run_id, "evidence": []}
+                "run_id": final.run_id, "evidence": [], "role": LESSON_ROLE_RESEARCHER}
                for _, stmt, outcome in parse_credit_lessons(out, 0)[:3]]
         return res or _winner_lesson()      # LLM gave nothing usable → keep the winner record
 
@@ -374,11 +397,18 @@ class LessonMemory:
             # `evidence` [child, parent] IS the credited pair (no separate `pair` field to drift).
             # pr=None = the LLM line carried no usable P<n> marker: record the lesson UNATTRIBUTED
             # rather than stamping it with an arbitrary pair's nodes/delta (wrong provenance).
-            return {"task_id": state.task_id, "fingerprint": fp,
-                    "kind": getattr(self._e.task, "kind", ""), "statement": statement,
-                    "outcome": outcome, "delta": pr.get("delta") if pr else None,
-                    "confidence": conf, "run_id": state.run_id,
-                    "evidence": [pr["a"], pr["b"]] if pr else [], "source": "comparative"}
+            # ROLE-split: a DEBUG pair's lesson is "what code change fixed this crash" → the DEVELOPER's
+            # context; an improve/regress pair credits a param/technique change → the RESEARCHER's. An
+            # unattributed line (pr=None) stays untagged/shared. (§role-split lessons)
+            d = {"task_id": state.task_id, "fingerprint": fp,
+                 "kind": getattr(self._e.task, "kind", ""), "statement": statement,
+                 "outcome": outcome, "delta": pr.get("delta") if pr else None,
+                 "confidence": conf, "run_id": state.run_id,
+                 "evidence": [pr["a"], pr["b"]] if pr else [], "source": "comparative"}
+            if pr is not None:
+                d["role"] = (LESSON_ROLE_DEVELOPER if pr.get("kind") == "debug"
+                             else LESSON_ROLE_RESEARCHER)
+            return d
 
         def _fallback() -> list:
             out = []
@@ -507,7 +537,11 @@ class LessonMemory:
             return fold(self._e.store.read_all())
         self.seen_stamp = stamp
         before = self.prior_note_text
-        self.prior_note_text = self._e._load_reflection_priors(exclude_run_id=state.run_id or None)
+        rid = state.run_id or None
+        self.prior_note_text = self._e._load_reflection_priors(exclude_run_id=rid,
+                                                               role=LESSON_ROLE_RESEARCHER)
+        self.dev_prior_note_text = self._e._load_reflection_priors(exclude_run_id=rid,
+                                                                   role=LESSON_ROLE_DEVELOPER)
         self._e.store.append(EV_LESSONS_REFRESHED, {
             "at_node": n, "chars": len(self.prior_note_text),
             "changed": self.prior_note_text != before})

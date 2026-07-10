@@ -535,6 +535,7 @@ export function MemoryPanel({ onClose }) {
   const [mem, setMem] = useState({ dir: null, cases: [], lessons: [], notes: [] })
   const [kb, setKb] = useState({ dir: null, files: [] })   // /api/knowledge → {dir, files:[{name,text}]}
   const [tab, setTab] = useState('lessons')
+  const [lessonRole, setLessonRole] = useState('all')      // §role-split: Researcher vs Developer lessons
   useEffect(() => {
     get('/api/memory').then(setMem).catch(() => {})
     get('/api/knowledge').then(setKb).catch(() => {})
@@ -548,26 +549,38 @@ export function MemoryPanel({ onClose }) {
         {tabs.map(([k, label, n]) => <button key={k} className={'seg' + (tab === k ? ' on' : '')}
           onClick={() => setTab(k)}>{label} <span className="muted">{n}</span></button>)}
       </div>
-      {/* Why there's no Researcher-vs-Developer split: all cross-run memory is the Researcher's / shared —
-          the Developer works per-run and persists nothing across runs, so there is no Developer store. */}
+      {/* Cross-run memory reused to guide future runs. LESSONS are split by role (§role-split): the
+          Researcher gets R&D lessons, the Developer only its own code-fix lessons; untagged = shared. */}
       <div className="muted" style={{ fontSize: 11, marginBottom: 10, lineHeight: 1.5 }}>
-        Cross-run memory the <b>Researcher</b> accumulates and reuses to propose better experiments
-        (distilled lessons · solved-task cases · meta-notes · the shared knowledge base). The Developer
-        works <b>per-run</b> and keeps no persistent memory, so there is no separate Developer store.
+        Cross-run memory reused to guide future runs. <b>Lessons are split by role</b>: the
+        <b> Researcher</b> gets R&D / “what technique to try” lessons; the <b>Developer</b> gets only its
+        own “what code change fixed a crash” lessons (untagged/legacy lessons are shared). Cases, notes
+        and the knowledge base are shared cross-run memory.
       </div>
-      {tab === 'lessons' && (mem.lessons.length
-        ? mem.lessons.map((l, i) => <div key={i} className="mem-card">
-            <div>{l.statement}</div>
-            <div className="mem-meta" style={{ marginTop: 4, display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' }}>
-              {l.kind && <span className="chip xs">{l.kind}</span>}
-              {l.outcome && <span className="chip xs">{l.outcome}</span>}
-              {l.delta != null && <span className={'chip xs' + (l.delta > 0 ? ' ok' : '')}>Δ{fmt(l.delta)}</span>}
-              {l.confidence != null && <span className="muted" style={{ fontSize: 11 }}>conf {Math.round(l.confidence * 100)}%</span>}
-              {l.evidence_count ? <span className="muted" style={{ fontSize: 11 }}>· {l.evidence_count} evidence</span> : null}
-              {l.task_id && <span className="muted" style={{ fontSize: 11 }}>· {l.task_id}</span>}
-            </div>
-          </div>)
-        : <div className="muted">No lessons yet — they accrue as runs finish (reflection distils them into memory).</div>)}
+      {tab === 'lessons' && <div className="conv-toggle" style={{ marginBottom: 8 }}>
+        {[['all', 'All'], ['researcher', 'Researcher'], ['developer', 'Developer']].map(([r, label]) =>
+          <button key={r} className={'seg' + (lessonRole === r ? ' on' : '')}
+            onClick={() => setLessonRole(r)}>{label}</button>)}
+      </div>}
+      {tab === 'lessons' && (() => {
+        // Researcher/Developer filters ALSO include untagged (shared) lessons — mirrors the backend
+        // routing where an untagged lesson reaches both roles.
+        const shown = mem.lessons.filter(l => lessonRole === 'all' || !l.role || l.role === lessonRole)
+        return shown.length
+          ? shown.map((l, i) => <div key={i} className="mem-card">
+              <div>{l.statement}</div>
+              <div className="mem-meta" style={{ marginTop: 4, display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' }}>
+                <span className="chip xs">{l.role || 'shared'}</span>
+                {l.kind && <span className="chip xs">{l.kind}</span>}
+                {l.outcome && <span className="chip xs">{l.outcome}</span>}
+                {l.delta != null && <span className={'chip xs' + (l.delta > 0 ? ' ok' : '')}>Δ{fmt(l.delta)}</span>}
+                {l.confidence != null && <span className="muted" style={{ fontSize: 11 }}>conf {Math.round(l.confidence * 100)}%</span>}
+                {l.evidence_count ? <span className="muted" style={{ fontSize: 11 }}>· {l.evidence_count} evidence</span> : null}
+                {l.task_id && <span className="muted" style={{ fontSize: 11 }}>· {l.task_id}</span>}
+              </div>
+            </div>)
+          : <div className="muted">No {lessonRole === 'all' ? '' : lessonRole + ' '}lessons yet — they accrue as runs finish (reflection distils them into memory).</div>
+      })()}
       {tab === 'cases' && (mem.cases.length
         ? <table className="tbl"><thead><tr><th>task</th><th>goal</th><th>metric</th><th>params</th></tr></thead><tbody>
           {mem.cases.map((c, i) => <tr key={i}><td>{c.task_id}</td><td className="muted">{c.goal}</td><td>{fmt(c.metric)}</td><td className="muted">{JSON.stringify(c.params)}</td></tr>)}</tbody></table>

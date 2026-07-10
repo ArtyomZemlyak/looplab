@@ -325,5 +325,52 @@ def test_reflection_writes_consolidated_lessons_and_skill(tmp_path):
     assert lessons and all("run_id" in lz for lz in lessons)          # D2 provenance
     hyp = [lz for lz in lessons if "deeper trees" in lz["statement"]]
     assert hyp and hyp[0].get("evidence")                             # node ids recorded
+    assert hyp[0].get("role") == "researcher"                        # §role-split: a hypothesis is R&D
     skills = list((mem / "skills").glob("auto-*.md"))
     assert skills, "supported hypothesis with positive delta should distill an auto-skill"
+
+
+def test_lessons_route_by_role(tmp_path):
+    # §role-split: the Researcher's prior gets only R&D (+legacy) lessons; the Developer's only its own
+    # code-fix (+legacy) lessons — the two contexts stay separate. Untagged (legacy) lessons are shared.
+    from looplab.engine.orchestrator import Engine
+    from looplab.engine.lessons import LESSON_ROLE_DEVELOPER, LESSON_ROLE_RESEARCHER
+    from looplab.runtime.sandbox import SubprocessSandbox
+    from looplab.search.policy import GreedyTree
+
+    class _T:
+        id = "role-task"; goal = "g"; direction = "max"; kind = "dataset"
+        def model_dump(self, mode="json"): return {"id": self.id}
+
+    class _R:
+        def propose(self, state, parent): return Idea(operator="draft", params={"x": 1.0})
+
+    class _D:
+        def implement(self, idea): return "import json; print(json.dumps({'metric': 0.5}))"
+
+    mem = tmp_path / "memory"
+    mem.mkdir()
+    rows = [
+        {"task_id": "role-task", "fingerprint": [], "statement": "deeper trees help",
+         "outcome": "supported", "run_id": "r1", "role": LESSON_ROLE_RESEARCHER},
+        {"task_id": "role-task", "fingerprint": [], "statement": "guard empty input fixed the crash",
+         "outcome": "supported", "run_id": "r1", "role": LESSON_ROLE_DEVELOPER},
+        {"task_id": "role-task", "fingerprint": [], "statement": "a legacy shared lesson",
+         "outcome": "supported", "run_id": "r1"},                      # untagged -> shared
+    ]
+    (mem / "lessons.jsonl").write_text("".join(json.dumps(o) + "\n" for o in rows))
+    eng = Engine(tmp_path / "run", task=_T(), researcher=_R(), developer=_D(),
+                 sandbox=SubprocessSandbox(), policy=GreedyTree(n_seeds=1, max_nodes=1),
+                 memory_dir=str(mem), reflection_priors=True)
+    res = eng._load_reflection_priors(role=LESSON_ROLE_RESEARCHER)
+    assert "deeper trees" in res and "legacy shared" in res           # researcher + shared
+    assert "guard empty input" not in res                            # NOT the developer's
+    dev = eng._load_reflection_priors(role=LESSON_ROLE_DEVELOPER)
+    assert "guard empty input" in dev and "legacy shared" in dev      # developer + shared
+    assert "deeper trees" not in dev                                 # NOT the researcher's
+    # and the developer lessons ride the idea handed to the Developer (via _directed_idea), never the
+    # researcher's — while the Researcher's proposal prior carries the R&D ones (hint += _prior_note_text)
+    from looplab.core.models import RunState
+    eng._dev_prior_note_text = dev
+    di = eng._directed_idea(Idea(operator="draft", params={}, rationale="base"), RunState())
+    assert "guard empty input" in di.rationale and "deeper trees" not in di.rationale

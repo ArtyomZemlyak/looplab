@@ -826,7 +826,14 @@ class Engine(ConfirmPhaseMixin, AblationMixin):
         # they were another run's experience — its own results are already in the digest. The stamp
         # is taken BEFORE the read (a write landing in between is re-read next refresh — safe).
         self._lessons_seen_stamp = self._lessons_store_stamp()
-        self._prior_note_text = self._load_reflection_priors(exclude_run_id=_entry.run_id or None)
+        # §role-split: the RESEARCHER prior carries only R&D lessons; the DEVELOPER prior only its own
+        # code-fix lessons (routed into the idea handed to the Developer via `_directed_idea`).
+        from looplab.engine.lessons import LESSON_ROLE_DEVELOPER, LESSON_ROLE_RESEARCHER
+        _rid = _entry.run_id or None
+        self._prior_note_text = self._load_reflection_priors(exclude_run_id=_rid,
+                                                             role=LESSON_ROLE_RESEARCHER)
+        self._dev_prior_note_text = self._load_reflection_priors(exclude_run_id=_rid,
+                                                                 role=LESSON_ROLE_DEVELOPER)
         return entry_finished
 
     def _apply_control_overrides(self, state: RunState) -> tuple[Optional[float], Optional[float]]:
@@ -1585,8 +1592,17 @@ class Engine(ConfirmPhaseMixin, AblationMixin):
     def _prior_note_text(self, value: str) -> None:
         self.lessons.prior_note_text = value
 
-    def _load_reflection_priors(self, exclude_run_id: Optional[str] = None) -> str:
-        return self.lessons.load_reflection_priors(exclude_run_id=exclude_run_id)
+    @property
+    def _dev_prior_note_text(self) -> str:
+        return self.lessons.dev_prior_note_text
+
+    @_dev_prior_note_text.setter
+    def _dev_prior_note_text(self, value: str) -> None:
+        self.lessons.dev_prior_note_text = value
+
+    def _load_reflection_priors(self, exclude_run_id: Optional[str] = None,
+                                role: Optional[str] = None) -> str:
+        return self.lessons.load_reflection_priors(exclude_run_id=exclude_run_id, role=role)
 
     def _empty_state_for_fp(self) -> RunState:
         return self.lessons.empty_state_for_fp()
@@ -2055,13 +2071,19 @@ class Engine(ConfirmPhaseMixin, AblationMixin):
         every Developer backend renders — so it reaches the innermost developer through ANY wrapper
         chain (the copy rides the data, not a forwarded attribute that a wrapper could drop). The
         ORIGINAL idea, recorded in `node_created`, is untouched, so the audit rationale stays the
-        Researcher's own. No pending directives -> the idea is returned unchanged (identity)."""
+        Researcher's own. Nothing to add -> the idea is returned unchanged (identity).
+
+        Also carries the DEVELOPER's own cross-run code-fix lessons (§role-split): the Developer only
+        ever sees ITS lessons ("a node failing with X was fixed by …" on similar tasks) — never the
+        Researcher's R&D lessons, which ride the proposal prompt instead. Most useful on the repair
+        path (`_repair` routes through here), where "what fixed this crash class" is exactly relevant."""
         from looplab.agents.hints import render_hint_directives
-        block = render_hint_directives(state.pending_hints)
-        if not block:
+        blocks = [b for b in (render_hint_directives(state.pending_hints),
+                              getattr(self, "_dev_prior_note_text", "").strip()) if b]
+        if not blocks:
             return idea
         di = idea.model_copy(deep=True)
-        di.rationale = ((di.rationale or "") + "\n" + block).strip()
+        di.rationale = ((di.rationale or "") + "\n" + "\n".join(blocks)).strip()
         return di
 
     def _repair(self, node, err: str, state: Optional[RunState] = None) -> str:
