@@ -70,7 +70,7 @@ const DY=300;
 // PROPOSE — the read funnel (reads flow UP into propose)
 stack(40,330,DY,[
  {id:"f_meta",h:66,t:"① Meta-notes",tag:"×3",c:C.mem,sub:["exact task_id · last 3","causal ‘why the winner won’ (≤700c)"]},
- {id:"f_less",h:92,t:"② Cross-run lessons",tag:"×5",c:C.mem,sub:["fingerprint Jaccard ≥ 0.34 (exact=1.0)","harmonic expand k=8 / min 0.15","rank (−sim, −(conf×min3,ev), −recency)","quarantine → dedup → top 5"]},
+ {id:"f_less",h:108,t:"② Cross-run lessons",tag:"Rsch ×5",c:C.mem,sub:["§role-split: Researcher-role + shared only (dev's ride the idea)","fingerprint Jaccard ≥ 0.34 (exact=1.0)","harmonic expand k=8 / min 0.15","rank (−sim, −(conf×min3,ev), −recency)","quarantine → dedup → top 5"]},
  {id:"f_dig",h:80,t:"③ Experiment digest",tag:"in-run",c:C.mem,sub:["cap = min(6000, max(1200, 60×nodes))","strong×5 · sweep×10 · weak×3 · themes · ablation×5"]},
  {id:"f_sib",h:66,t:"④ Siblings · lineage · board",tag:"",c:C.mem,sub:["siblings×5 · lineage×5 (by |Δ|)","open hypotheses ×5 (foresight order)"]},
  {id:"f_kb",h:56,t:"⑤ KB / Memora",tag:"k=3",c:C.mem,sub:["kb_search 3 + anchor-expand 3 · case 3"]},
@@ -135,9 +135,9 @@ box("kanban",1070,HY-8,640,90,"Hypothesis board · kanban","A",C.r,["derived on 
 const WY=1080;
 box("w_order",40,WY,260,72,"Write order","fin",C.mem,["budget → diversity → llm-cost","→ store_case → reflection_note"]);
 box("w_case",320,WY,290,72,"KB case","cases.jsonl",C.mem,["task_id·goal·dir·params·metric·rationale","upsert-if-better · Memora consolidate 0.86"]);
-box("w_reflect",630,WY,300,72,"Lessons: reflect","R",C.mem,["LLM: 1–3 generalizable [GOOD]/[BAD]","from top5 + fail3 · conf 0.6"]);
-box("w_hyp",950,WY,300,72,"Lessons: hyp + failure","",C.mem,["per hypothesis: conf 0.7 sup / 0.5 · evidence[:8]","failure-theme lesson conf 0.4"]);
-box("w_comp",1270,WY,300,72,"Comparative (M6)","≤3",C.mem,["credit-assign which change won (pairs≤3)","conf 0.65/0.5 · mid-run every 4 nodes"]);
+box("w_reflect",630,WY,300,72,"Lessons: reflect","R",C.mem,["LLM: 1–3 generalizable [GOOD]/[BAD]","from top5 + fail3 · conf 0.6 · role: researcher"]);
+box("w_hyp",950,WY,300,72,"Lessons: hyp + failure","",C.mem,["per hypothesis: conf 0.7 sup / 0.5 · evidence[:8]","failure conf 0.4 · hyp→researcher · fail→shared"]);
+box("w_comp",1270,WY,300,72,"Comparative (M6)","≤3",C.mem,["credit-assign which change won (pairs≤3)","conf 0.65/0.5 · every 4 nodes · debug→dev / improve→rsch"]);
 box("w_meta",1590,WY,260,72,"Meta-note","R",C.mem,["causal ‘why won’ ≤700c","→ meta_notes.jsonl"]);
 box("w_skill",1870,WY,290,72,"Auto-skill","R",C.mem,["supported hyp & Δ>0 → SKILL.md","candidate→promoted when fp sim < 0.6"]);
 
@@ -170,7 +170,7 @@ box("sd_triage",sx(2),SY,SW,92,"Triage why → Researcher","ctx",C.r,["crash-tri
 box("sd_fore", sx(3),SY,SW,92,"Foresight track record","L4",C.r,["did past picks beat the parent?","primes the world model (memory brief)"]);
 box("sd_memo", sx(4),SY,SW,92,"Deep-research memo","pull",C.dr,["1-line takeaway in the state brief","read_research_memo tool for depth"]);
 box("sd_ops", sx(5),SY,SW,92,"Op. yields → Strategist","ctx",C.s,["gain/eval-sec per operator","tunes the operator mix from evidence"]);
-box("sd_dir", sx(6),SY,SW,92,"Directives → Developer","push",C.d,["folded into the idea → steers CODE","+ pilot · triage · strategist briefs"]);
+box("sd_dir", sx(6),SY,SW,92,"Directives → Developer","push",C.d,["folded into the idea → steers CODE (+ pilot·triage·strategist)","§role-split: also the Developer's own cross-run code-fix lessons"]);
 box("sd_run", sx(7),SY,SW,92,"Run states → Boss","ctx",C.s,["paused·awaiting·trust-flag·stuck-build","ATTENTION block for human action"]);
 
 /* ================= EDGES ================= */

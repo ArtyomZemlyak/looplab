@@ -827,13 +827,12 @@ class Engine(ConfirmPhaseMixin, AblationMixin):
         # is taken BEFORE the read (a write landing in between is re-read next refresh — safe).
         self._lessons_seen_stamp = self._lessons_store_stamp()
         # §role-split: the RESEARCHER prior carries only R&D lessons; the DEVELOPER prior only its own
-        # code-fix lessons (routed into the idea handed to the Developer via `_directed_idea`).
-        from looplab.engine.lessons import LESSON_ROLE_DEVELOPER, LESSON_ROLE_RESEARCHER
+        # code-fix lessons (routed into the idea handed to the Developer via `_directed_idea`). One
+        # scan builds both — the two role pools share every untagged lesson, so re-reading/re-embedding
+        # the store per role is wasted work.
         _rid = _entry.run_id or None
-        self._prior_note_text = self._load_reflection_priors(exclude_run_id=_rid,
-                                                             role=LESSON_ROLE_RESEARCHER)
-        self._dev_prior_note_text = self._load_reflection_priors(exclude_run_id=_rid,
-                                                                 role=LESSON_ROLE_DEVELOPER)
+        self._prior_note_text, self._dev_prior_note_text = \
+            self._load_reflection_priors_both(exclude_run_id=_rid)
         return entry_finished
 
     def _apply_control_overrides(self, state: RunState) -> tuple[Optional[float], Optional[float]]:
@@ -1604,6 +1603,9 @@ class Engine(ConfirmPhaseMixin, AblationMixin):
                                 role: Optional[str] = None) -> str:
         return self.lessons.load_reflection_priors(exclude_run_id=exclude_run_id, role=role)
 
+    def _load_reflection_priors_both(self, exclude_run_id: Optional[str] = None) -> tuple[str, str]:
+        return self.lessons.load_reflection_priors_both(exclude_run_id=exclude_run_id)
+
     def _empty_state_for_fp(self) -> RunState:
         return self.lessons.empty_state_for_fp()
 
@@ -2079,7 +2081,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin):
         path (`_repair` routes through here), where "what fixed this crash class" is exactly relevant."""
         from looplab.agents.hints import render_hint_directives
         blocks = [b for b in (render_hint_directives(state.pending_hints),
-                              getattr(self, "_dev_prior_note_text", "").strip()) if b]
+                              self._dev_prior_note_text.strip()) if b]
         if not blocks:
             return idea
         di = idea.model_copy(deep=True)

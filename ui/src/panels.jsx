@@ -549,14 +549,15 @@ export function MemoryPanel({ onClose }) {
         {tabs.map(([k, label, n]) => <button key={k} className={'seg' + (tab === k ? ' on' : '')}
           onClick={() => setTab(k)}>{label} <span className="muted">{n}</span></button>)}
       </div>
-      {/* Cross-run memory reused to guide future runs. LESSONS are split by role (§role-split): the
-          Researcher gets R&D lessons, the Developer only its own code-fix lessons; untagged = shared. */}
+      {/* General orientation shown on every tab; the role-split detail (§role-split) is lessons-only. */}
       <div className="muted" style={{ fontSize: 11, marginBottom: 10, lineHeight: 1.5 }}>
-        Cross-run memory reused to guide future runs. <b>Lessons are split by role</b>: the
-        <b> Researcher</b> gets R&D / “what technique to try” lessons; the <b>Developer</b> gets only its
-        own “what code change fixed a crash” lessons (untagged/legacy lessons are shared). Cases, notes
-        and the knowledge base are shared cross-run memory.
+        Cross-run memory reused to guide future runs. Cases, notes and the knowledge base are shared;
+        {' '}<b>lessons are split by role</b>.
       </div>
+      {tab === 'lessons' && <div className="muted" style={{ fontSize: 11, marginBottom: 10, lineHeight: 1.5 }}>
+        The <b>Researcher</b> gets R&D / “what technique to try” lessons; the <b>Developer</b> gets only
+        its own “what code change fixed a crash” lessons (untagged/legacy lessons are shared).
+      </div>}
       {tab === 'lessons' && <div className="conv-toggle" style={{ marginBottom: 8 }}>
         {[['all', 'All'], ['researcher', 'Researcher'], ['developer', 'Developer']].map(([r, label]) =>
           <button key={r} className={'seg' + (lessonRole === r ? ' on' : '')}

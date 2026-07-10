@@ -103,7 +103,12 @@ def consolidate_lessons(lessons: list[dict], *, client=None, embed=None,
     groups: dict[tuple, list[dict]] = {}
     order: list[tuple] = []
     for o in lessons:
-        key = (normalize_statement(o.get("statement", "")), o.get("task_id"))
+        # §role-split: role is part of the identity. A Researcher lesson and a Developer lesson with
+        # the same statement on the same task are DIFFERENT rows (they route to different contexts) —
+        # merging them would collapse both into the newest row's role and silently drop the other
+        # role's copy. Same-role duplicates still merge; an untagged (shared) row stays its own group,
+        # so a newer tagged same-statement row can never flip it role-restricted.
+        key = (normalize_statement(o.get("statement", "")), o.get("task_id"), o.get("role"))
         if key not in groups:
             groups[key] = []
             order.append(key)
@@ -152,9 +157,13 @@ def _agentic_merge_lessons(rows: list[dict], *, client, embed=None,
     each merged group's earliest row. `parser`/`prompts` reach the agent adjudication call (the
     run's structured-output parser + any merge_system.md PromptStore override)."""
     from looplab.search.hybrid_merge import consolidate
+    # Cluster paraphrases within a (task, role) bucket — NOT across roles: the agent must never fold a
+    # Researcher lesson into a Developer one (or vice versa), which `_verdict_base` below would then
+    # collapse to a single role, breaking the §role-split routing. Untagged (shared) rows form their
+    # own bucket and stay shared.
     by_task: dict[object, list[int]] = {}
     for i, o in enumerate(rows):
-        by_task.setdefault(o.get("task_id"), []).append(i)
+        by_task.setdefault((o.get("task_id"), o.get("role")), []).append(i)
     keep: list[tuple[int, dict]] = []                          # (earliest original index, row)
     try:
         for _tid, idxs in by_task.items():
