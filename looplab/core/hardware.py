@@ -141,7 +141,8 @@ def detect_gpu() -> str | None:
         return _GPU_CACHE[1]
     name: str | None = None
     try:
-        # nounits=False: name-only query, and the name itself may contain a comma-free unit word.
+        # nounits=False: matches the pre-extraction call (`--format=csv,noheader` — a name-only
+        # query has no unit columns to strip).
         rows = query_nvidia_smi("name", nounits=False)
         if rows and rows[0] and rows[0][0]:
             name = ",".join(rows[0]).strip() or None   # a GPU name may contain a comma — rejoin

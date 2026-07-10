@@ -73,7 +73,7 @@ def _defaults_backend_llm(task_spec: Optional[dict], task_file: Optional[str],
 
 def build_router(srv) -> APIRouter:
     router = APIRouter()
-    _run_dir, _events, root = srv.run_dir, srv.events, srv.root
+    _run_dir, root = srv.run_dir, srv.root
 
     # ------------------------------------------------------------------ control
     @router.post("/api/runs/{run_id}/control")
@@ -124,9 +124,7 @@ def build_router(srv) -> APIRouter:
             # to replay `deleted` because a sibling shares this task's pristine repo base (same task_id).
             data["files"] = dict(snode.files)
             data["deleted"] = list(snode.deleted)
-            data["origin"] = {"run_id": sr, "node_id": sn,
-                              "metric": snode.confirmed_mean if snode.confirmed_mean is not None
-                              else snode.metric}
+            data["origin"] = {"run_id": sr, "node_id": sn, "metric": snode.robust_metric}
         # Fresh EventStore per write (single-writer discipline): it rescans last seq before append.
         ev = EventStore(rd / "events.jsonl").append(etype, data)
         return {"ok": True, "seq": ev.seq, "type": etype}

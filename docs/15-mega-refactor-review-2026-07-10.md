@@ -202,7 +202,10 @@ score in different subspaces; and (b) proxy's numeric-**string** coercion (P1.2)
 distances too. → `knn_idw_predict(target, history, *, k, eligibility=..., keys=None) ->
 (pred, nearest)` in `events/digest.py` (next to `param_distance`). *Safety:* callers want
 different return shapes; keep each caller's eligibility semantics verbatim; verify surrogate's
-exploration-bonus still sees the true nearest distance.
+exploration-bonus still sees the true nearest distance. **[RESOLVED at implementation with a
+simpler shape]:** shipped as `knn_idw(pairs, k)` over pre-computed `(distance, value)` pairs —
+eligibility/distance stay AT the callers verbatim (safer than an `eligibility=` parameter), and
+the exact-match scan covers the whole top-k (a NaN distance must not hide a genuine zero).
 
 **P1.2 [HIGH] Numeric-param filter — reimplemented 5-6×** (couples with P1.1).
 `{k: float(v) for k,v in params.items() if isinstance(v,(int,float))}` inline at
@@ -222,8 +225,9 @@ readers *skip-and-continue*. `lessons.py:646` appends `None` for bad lines to ke
 aligned for a later rewrite — that site needs an index-preserving variant (`keep_bad=True`).
 **[VERIFIED-AMENDED]** 4 of the 8 sites use stdlib `json.loads` (memory, knowledge_tools,
 memory_tools, harden) and 4 use `orjson` — stdlib accepts `NaN`/`Infinity` literals that orjson
-rejects, so the shared helper must pick ONE parser and state it (recommend orjson + explicit
-note; scan existing stores for NaN literals before switching the 4 stdlib sites).
+rejects. **[RESOLVED at implementation]:** shipped with a `loads=` parameter preserving each
+store's writing parser exactly (safer than forcing one parser), plus `keep_bad=` (raw-line-index
+alignment) and `dicts_only=`/`errors=` for the two sites with historical shapes.
 
 **P1.4 [MED-HIGH] Atomic JSONL full-rewrite — reimplemented 3× (+2 stdlib variants)**
 (read/write couple with P1.3). **[VERIFIED-AMENDED — the original ×4 census contained one
@@ -272,9 +276,10 @@ the mandatory `finally` restore (the load-bearing comment at `novelty.py:201-204
   bodies share only a trivial one-line shape whose hint/bounds are per-task prompt contracts. A
   shared base would be parameterization indirection with nothing left to drift, while risking the
   deterministic-seed contract. Do NOT merge the embedded `_*_TEMPLATE` strings either.
-- Scalar coercion `_to_float`/`_f`/`_int`/`_num` (`sandbox.py:95`, `routers/misc.py:136`,
-  `hardware.py:39`, `repo_developer.py:409`) → `to_float`/`to_int` in `core/` (keep sandbox's
-  `isfinite` NaN/Inf rejection in the shared `to_float`).
+- Scalar coercion `_to_float`/`_f`/`_int` (`sandbox.py:95`, `routers/misc.py:136`,
+  `hardware.py:39`) → `to_float`/`to_int` in `core/parse.py` (sandbox's `isfinite` rejection is
+  the `finite=True` flag). **[RESOLVED at implementation]:** `repo_developer.py:409` `_num` was
+  mischaracterized by the census — it is an is-numeric bool PREDICATE, not a coercion; left as-is.
 - Router state hydration `st = fold(_events(rd))` ×~15 → a `srv.state(run_id)` helper (must NOT
   cache across requests — invariant #4).
 - `nvidia-smi` CSV parse ×3 (`hardware.py:29/181`, `routers/misc.py:142`) → `query_nvidia_smi(fields)`.

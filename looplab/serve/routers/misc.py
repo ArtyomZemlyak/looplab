@@ -17,7 +17,7 @@ from typing import Optional
 from fastapi import APIRouter, HTTPException, Request
 
 from looplab.core.config import Settings
-from looplab.events.eventstore import iter_jsonl
+from looplab.events.eventstore import read_jsonl_lenient
 from looplab.serve.settings_store import _ALLOWED_FIELDS, _SECRET_ENV, _SECRET_FIELDS
 
 
@@ -164,7 +164,11 @@ def build_router(srv) -> APIRouter:
         md = Path(s.memory_dir)
         out["dir"] = str(md)
         for f in sorted(md.glob("*.jsonl")) if md.exists() else []:
-            rows = list(iter_jsonl(f))
+            # These are MUTABLE stores (rewritten/compacted in place), so skip-and-continue: one
+            # damaged line must not hide the rest of the Memory panel (iter_jsonl would stop there).
+            # cases.jsonl is stdlib-json-written (NaN literals possible); lessons/notes are orjson —
+            # stdlib json parses BOTH (a superset), so one parser is safe on this read-only panel.
+            rows = read_jsonl_lenient(f, loads=json.loads)
             nm = f.name.lower()
             if "lesson" in nm:
                 out["lessons"].extend(rows)

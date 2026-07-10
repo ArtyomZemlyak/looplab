@@ -142,7 +142,7 @@ def _plan_to_actions(plan: "_Plan", st) -> list[dict]:
 
 def build_router(srv) -> APIRouter:
     router = APIRouter()
-    _run_dir, _events = srv.run_dir, srv.events
+    _run_dir = srv.run_dir
     _llm_settings = srv.llm_settings
 
     # ---- persisted chat transcript (the human↔boss conversation, saved WITH the run) --------------

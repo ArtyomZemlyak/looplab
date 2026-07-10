@@ -38,7 +38,7 @@ def _prior_learnings_index(reports_dir: Path) -> str:
 
 def build_router(srv) -> APIRouter:
     router = APIRouter()
-    _run_dir, _events, _phase, root = srv.run_dir, srv.events, srv.phase, srv.root
+    _run_dir, _phase, root = srv.run_dir, srv.phase, srv.root
     projects = srv.projects
     _reports_dir = srv.reports_dir
 

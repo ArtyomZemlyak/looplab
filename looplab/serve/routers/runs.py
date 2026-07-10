@@ -80,7 +80,7 @@ def _operator_stage_names(rd: Path) -> tuple:
 
 def build_router(srv) -> APIRouter:
     router = APIRouter()
-    _run_dir, _events, _phase = srv.run_dir, srv.events, srv.phase
+    _run_dir, _phase = srv.run_dir, srv.phase
     _state_payload = srv.state_payload
 
     # ------------------------------------------------------------------ runs list
