@@ -69,14 +69,16 @@ def code_leakage_scan(code: str) -> dict:
         # y_val)])` is the standard LightGBM/XGBoost call, NOT leakage — but the literal substring
         # `val` inside `eval_set` made it read as fit-on-validation and hard-gated every early-stopping
         # solution (signal-delivery §1: a false leakage flag now also misleads the agent). So we WAIVE
-        # only a benign `val` INSIDE the monitor kwarg — but a monitor on the TEST set
-        # (`eval_set=[(X_test, y_test)]`) is a genuine leak and must still fire, so the stripped-off
-        # segment is still scanned for `test`/`x_test`. A plain `.fit(X_val, y_val)` has no such kwarg
-        # so its `val` stays flagged.
-        parts = re.split(r"\b(?:eval_set|validation_data|eval_names)\s*=", arg, maxsplit=1)
-        head, monitor = parts[0], (parts[1] if len(parts) > 1 else "")
-        if ("test" in head or "x_test" in head or "val" in head        # val outside a monitor kwarg = leak
-                or "test" in monitor or "x_test" in monitor):          # test INSIDE the monitor = leak
+        # only a benign `val` in the fit ARGS, but a monitor on the TEST set is a genuine leak and must
+        # still fire. `head` = the fit args BEFORE the monitor kwarg (a plain `.fit(X_val,y_val)` has no
+        # kwarg → its `val` stays flagged). The TEST-monitor check scans the FULL LINE, not `arg`:
+        # `_FIT_RE`'s `([^)]*)` truncates at the first `)`, so a test tuple in a SECOND eval_set entry
+        # (`eval_set=[(X_val,y_val),(X_test,y_test)]`) never reaches `arg` — the line-level scan sees it.
+        head = re.split(r"\b(?:eval_set|validation_data|eval_names)\s*=", arg, maxsplit=1)[0]
+        test_monitor = re.search(
+            r"\b(?:eval_set|validation_data|eval_names)\s*=[^=]*\b(?:x_test|y_test)\b", line.lower())
+        if ("test" in head or "x_test" in head or "val" in head        # val/test in the fit args = leak
+                or test_monitor):                                       # test INSIDE the monitor = leak
             flags.append({"signal": "fit_on_test", "line": i + 1, "code": line.strip()[:90]})
         elif split_at is not None and i < split_at and "train" not in arg:
             # a fit/fit_transform on (apparently full) data BEFORE the split leaks test statistics

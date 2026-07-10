@@ -12,6 +12,11 @@ from looplab.core.config import Settings
 from looplab.serve.engine_proc import _engine_alive
 from looplab.serve.settings_store import SettingsStore
 
+# A build older than this (seconds) is surfaced to the boss/assistant as possibly STUCK. Generous by
+# design: a normal repo build (stages → plan → 8 implement steps) can legitimately run many minutes,
+# so only a much longer wall-clock is worth a human's attention.
+_STUCK_BUILD_SECONDS = 1200.0
+
 
 def _client_tokens(client) -> Optional[dict]:
     """Best-effort token usage for ONE chat request. `make_llm_client` mints a fresh client per
@@ -107,10 +112,22 @@ def _attention_states(st) -> str:
     if isinstance(lk, dict) and lk.get("leak"):
         lines.append("- DATA LEAKAGE: the grounding leakage scan flagged the task inputs — the metric "
                      "may be inflated.")
+    # A mid-build node is surfaced ONLY when the build has been running a long time — a build is set
+    # the INSTANT it starts, so flagging every `st.building` would fire on essentially every query
+    # during normal active work (noise, not an action item). We use the `started` event timestamp
+    # (epoch seconds) to distinguish a genuinely STUCK build; a missing/zero ts skips the check.
     b = getattr(st, "building", None)
     if isinstance(b, dict) and b.get("node_id") is not None and not st.finished:
-        lines.append(f"- BUILDING: node {b.get('node_id')} is mid-build (Researcher/Developer "
-                     "running); if this persists the build may be stuck.")
+        started = b.get("started") or 0.0
+        try:
+            import time
+            stuck_s = time.time() - float(started)
+        except (TypeError, ValueError):
+            stuck_s = 0.0
+        if started and stuck_s > _STUCK_BUILD_SECONDS:
+            lines.append(f"- STUCK BUILD: node {b.get('node_id')} has been building for "
+                         f"{int(stuck_s // 60)} min (Researcher/Developer not yet done) — it may be "
+                         "stuck; consider checking its live trace.")
     if not lines:
         return ""
     return "ATTENTION — run states that may need action:\n" + "\n".join(lines)

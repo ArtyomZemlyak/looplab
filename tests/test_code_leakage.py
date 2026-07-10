@@ -39,3 +39,24 @@ def test_empty_code():
 def test_pearson_ragged_columns_still_correlate():
     # a near-perfect proxy that is one row short must NOT silently read as 0.0 (which hides the leak)
     assert abs(_pearson([1.0, 2.0, 3.0, 4.0], [1.0, 2.0, 3.0])) > 0.99
+
+
+# --- eval_set early-stopping: waive a benign val monitor, but still catch a TEST monitor -----------
+# (regression for the max-effort review: _FIT_RE truncates at the first ')', so a test tuple in a
+# SECOND eval_set entry must be caught by a line-level scan, not the truncated fit-arg capture.)
+
+def test_eval_set_val_monitor_is_not_a_leak():
+    r = code_leakage_scan("model.fit(X_train, y_train, eval_set=[(X_val, y_val)])")
+    assert not r["leak"], r
+
+
+def test_eval_set_test_monitor_is_a_leak():
+    for code in ("model.fit(X_train, y_train, eval_set=[(X_test, y_test)])",
+                 "model.fit(X_train, y_train, eval_set=[(X_val, y_val), (X_test, y_test)])",
+                 "model.fit(X_train, y_train, validation_data=(X_test, y_test))"):
+        r = code_leakage_scan(code)
+        assert r["leak"] and any(f["signal"] == "fit_on_test" for f in r["flags"]), code
+
+
+def test_plain_fit_on_val_still_flags():
+    assert code_leakage_scan("scaler.fit(X_val)")["leak"]

@@ -2037,15 +2037,19 @@ class Engine(ConfirmPhaseMixin, AblationMixin):
         di.rationale = ((di.rationale or "") + "\n" + block).strip()
         return di
 
-    def _repair(self, node, err: str) -> str:
+    def _repair(self, node, err: str, state: Optional[RunState] = None) -> str:
         """Route a repair through `repair_from(idea, node, error)` when the Developer supports it, so
         the fix is seeded from the FAILING NODE's OWN files — not the shared developer's `last_files`,
         which holds whatever node it built last (a batch builds every node before any eval, so
-        `last_files` is almost never the node being repaired). Falls back to `repair(idea, code, err)`."""
+        `last_files` is almost never the node being repaired). Falls back to `repair(idea, code, err)`.
+
+        §1: when `state` is given, standing operator directives are folded into the idea so the REPAIRED
+        code honors them too (consistency with the four build sites); without it the raw idea is used."""
+        idea = self._directed_idea(node.idea, state) if state is not None else node.idea
         rf = getattr(self.developer, "repair_from", None)
         if callable(rf):
-            return rf(node.idea, node, err)
-        return self.developer.repair(node.idea, node.code, err)
+            return rf(idea, node, err)
+        return self.developer.repair(idea, node.code, err)
 
     def _emit_node_created(self, *, node_id: int, parent_ids: list, operator: str, idea: dict,
                            code: str, files: dict, deleted=_OMIT, research_origin=_OMIT,
@@ -2134,7 +2138,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin):
                     err = self._repair_error_context(parent.error_reason, parent.error,
                                                      state=state, node=parent)
                     with self.tracer.span("repair", parent_id=parent.id):
-                        code = self._repair(parent, err)   # seed from parent's OWN files (repair_from)
+                        code = self._repair(parent, err, state)   # seed from parent's OWN files (repair_from)
                 else:
                     # Signal-delivery (§1): the debug re-propose now gets the SAME cross-run priors +
                     # failure-reflection + fault-localization + trust cues as draft/improve — exactly
@@ -2228,7 +2232,9 @@ class Engine(ConfirmPhaseMixin, AblationMixin):
             else:                                   # "implement" (or merge): keep the idea, re-develop
                 idea = node.idea
             with self.tracer.span("implement"):
-                code = self._implement(idea, parent)
+                # §1: a reset RE-BUILDS the node from scratch, so standing operator directives must
+                # steer its code too — same as the four _create_node build sites.
+                code = self._implement(self._directed_idea(idea, state), parent)
             self._emit_node_created(
                 node_id=node.id, parent_ids=parents, operator=idea.operator,
                 idea=idea.model_dump(mode="json"), code=code,
@@ -3081,7 +3087,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin):
                 prev_deleted = set(getattr(node, "deleted", []) or [])
                 with self.tracer.span("inline_repair", node_id=node_id, attempt=attempt + 1):
                     new_code = self._repair(
-                        node, self._repair_error_context(reason, err, state=state, node=node))
+                        node, self._repair_error_context(reason, err, state=state, node=node), state)
                 # Snapshot the developer's per-call audit state IMMEDIATELY, before any `await`: under
                 # max_parallel>1 the developer instance is SHARED across concurrent _evaluate tasks,
                 # and `async with self._write_lock` below is a checkpoint — a sibling task's repair()

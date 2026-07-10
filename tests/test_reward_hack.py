@@ -69,3 +69,28 @@ def test_engine_call_site_protected_grader_without_asset_stays_strict():
     sigs = detect_reward_hacks(code, metric=0.9, direction="max", protected_names=protected,
                                grader_import_ok=call_site(assets))
     assert not any(s["signal"] == "grader_access" for s in sigs)
+
+
+# --- solutions.csv: a submission WRITE is not a read, a genuine READ (even alongside a write) is ----
+# (regression for the max-effort review: the old write-suppression under-matched idiomatic writes
+# like open(os.path.join(...), 'w') AND, being whole-file, masked a real answer-key read that
+# co-occurred with a submission write — the actual cheat pattern.)
+
+def _flags_read(code: str) -> bool:
+    return any(s["signal"] == "grader_access"
+               for s in detect_reward_hacks(code, metric=0.9, direction="max"))
+
+
+def test_solutions_csv_submission_writes_are_not_flagged():
+    for code in ('df.to_csv("solution.csv")',
+                 'df.to_csv(os.path.join(outdir, "solution.csv"))',
+                 'open(os.path.join(outdir, "solution.csv"), "w").write(x)',
+                 'open("solution.csv", mode="w")'):
+        assert not _flags_read(code), code
+
+
+def test_solutions_csv_answer_key_read_is_flagged():
+    assert _flags_read('y = pd.read_csv("solutions.csv")')
+    # the real cheat pattern: read the answer key AND write a submission of the same name — the read
+    # must still fire (the prior whole-file write-suppression masked it).
+    assert _flags_read('key = pd.read_csv("solutions.csv")\nout.to_csv("solution.csv")')
