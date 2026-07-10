@@ -405,16 +405,22 @@ class LLMResearcher:
                                            "tests (reuse wording across experiments that test the same "
                                            "belief)." if self.track_hypotheses else "")},
         ]
-        # Small models occasionally emit unparseable output; retry, then fall back to a
-        # safe default so one bad response never crashes the run.
+        # Small models occasionally emit unparseable output (the common case: a non-numeric `params`
+        # value, which `Idea.params: dict[str, float]` rejects). Retry — but fold the parse error back
+        # into the prompt first, so the retry ISN'T byte-identical (which deterministically re-fails);
+        # then fall back to a safe default so one bad response never crashes the run.
         idea: Optional[Idea] = None
         last: Optional[Exception] = None
-        for _ in range(2):
+        for _attempt in range(2):
             try:
                 idea = parse_structured(self.client, messages, Idea, self.parser)
                 break
             except ParseError as e:
                 last = e
+                messages = messages + [{"role": "user", "content":
+                    f"Your last response could not be parsed ({str(e)[:180]}). Emit the Idea again with "
+                    "NUMERIC `params` only (put any non-numeric/structural change in `rationale`), a "
+                    "valid `operator`, and a `rationale`."}]
         if idea is None:
             idea = Idea(operator="draft", params={}, rationale=f"fallback (parse failed: {last})")
         return _clamp_fill(idea, self.bounds)

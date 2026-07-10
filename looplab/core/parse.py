@@ -23,6 +23,10 @@ _THINK = re.compile(r"<think>.*?</think>", re.DOTALL | re.IGNORECASE)
 _THINK_INNER = re.compile(r"<think>(.*?)</think>", re.DOTALL | re.IGNORECASE)
 _FENCE_PY = re.compile(r"```(?:python|py)\s*(.*?)```", re.DOTALL | re.IGNORECASE)
 _FENCE_ANY = re.compile(r"```\s*(.*?)```", re.DOTALL)
+# An UNCLOSED opening fence (the reply was truncated at max tokens, finish_reason="length"): salvage
+# from the opening fence to the end so a truncated Developer reply doesn't return the literal
+# "```python" header as "code" (a guaranteed SyntaxError node + a wasted sandbox eval + repair cycle).
+_FENCE_OPEN = re.compile(r"```(?:python|py)?[^\S\n]*\n(.*)\Z", re.DOTALL | re.IGNORECASE)
 
 
 def strip_think(text: str) -> str:
@@ -46,7 +50,13 @@ def extract_code(text: str) -> str:
     fence, else the stripped remainder."""
     text = strip_think(text)
     m = _FENCE_PY.search(text) or _FENCE_ANY.search(text)
-    return (m.group(1) if m else text).strip()
+    if m:
+        return m.group(1).strip()
+    # No CLOSED fence — salvage an UNCLOSED one (truncated reply) rather than returning the whole
+    # reply incl. the "```python" header line (which fails to compile). Only fires when a closed fence
+    # didn't match, so it never overrides a real block.
+    mo = _FENCE_OPEN.search(text)
+    return (mo.group(1) if mo else text).strip()
 
 
 class LLMClient(Protocol):

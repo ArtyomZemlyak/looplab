@@ -135,3 +135,14 @@ def test_parse_structured_infinite_int_raises_parse_error_not_overflow():
 
     with pytest.raises(ParseError):
         parse_structured(_Fake(), [{"role": "user", "content": "x"}], M, "tool_call")
+
+
+def test_extract_code_salvages_unclosed_fence():
+    # a Developer reply truncated at max tokens leaves an UNCLOSED fence; we must return the code, not
+    # the literal ```python header (which is a guaranteed SyntaxError node).
+    from looplab.core.parse import extract_code
+    out = extract_code("Here is the solution:\n```python\nimport os\ndef train():\n    pass")
+    assert out.startswith("import os") and "```" not in out
+    assert extract_code("```\nx = 2").strip() == "x = 2"
+    # a properly closed fence is unaffected
+    assert extract_code("```python\ny = 3\n```").strip() == "y = 3"
