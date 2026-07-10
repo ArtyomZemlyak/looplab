@@ -1712,7 +1712,9 @@ class Engine(ConfirmPhaseMixin, AblationMixin):
         outcome = (f"it FAILED ({dup.error_reason})" if dup.status is NodeStatus.failed
                    else f"it scored {dup.metric}")
         self.store.append(EV_NOVELTY_REJECTED, {
-            "node_id": len(state.nodes), "near_node": dup.id, "kind": "llm",
+            # the PROSPECTIVE id this proposal would get — allocated as max+1, NOT len(): on a gapped
+            # log (a dropped/malformed node_created) len() points at the wrong slot (audit only).
+            "node_id": max(state.nodes, default=-1) + 1, "near_node": dup.id, "kind": "llm",
             "reason": str(v.reason)[:200], "stance": self._novelty_stance,
             "action": "reproposed" if callable(repropose) else "kept"})
         if callable(repropose):
@@ -1770,7 +1772,8 @@ class Engine(ConfirmPhaseMixin, AblationMixin):
                            if dup.status is NodeStatus.failed
                            else f"it scored {dup.metric}")
                 self.store.append(EV_NOVELTY_REJECTED, {
-                    "node_id": len(state.nodes), "near_node": dup.id, "kind": "semantic",
+                    # prospective id = max+1, not len() (gap-safe; audit only) — see the llm gate above.
+                    "node_id": max(state.nodes, default=-1) + 1, "near_node": dup.id, "kind": "semantic",
                     "similarity": round(sim, 4), "stance": self._novelty_stance,
                     "action": "reproposed" if callable(repropose) else "kept"})
                 if callable(repropose):
@@ -1806,7 +1809,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin):
                 mind, nearest = d, n.id
         if mind >= self._novelty_epsilon:
             return idea
-        nid = len(state.nodes)
+        nid = max(state.nodes, default=-1) + 1       # the PROSPECTIVE id (max+1, not len — gap-safe)
         rng = _random.Random(nid * 1009 + 7)        # deterministic per node-slot
         nudged = dict(idea.params)
         for k in params:

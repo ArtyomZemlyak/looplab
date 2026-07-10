@@ -121,46 +121,53 @@ def fold(events: Iterable[Event]) -> RunState:
                 # Idempotent (C4): only a node's FIRST terminal event contributes its eval time, so
                 # a duplicate node_evaluated/node_failed (corrupt log / double-fold) can't inflate
                 # total_eval_seconds or make the budget order-dependent.
+                # Invariant #2 "first terminal wins" applies to the WHOLE node, not just eval-seconds:
+                # gate every field mutation on `first_terminal` so a CONFLICTING second terminal
+                # (node_evaluated then node_failed, from a corrupt / double-appended log) can't flip the
+                # node's metric/status/feasibility last-wins. A `node_reset` returns status to pending,
+                # so a legitimate re-evaluation still applies (it IS the first terminal after the reset).
                 first_terminal = n.status is NodeStatus.pending
-                n.metric = d.get("metric")              # missing -> None (feasible_nodes filters it)
-                n.status = NodeStatus.evaluated
-                n.rerun_stage = None                    # any stage-scoped re-run has now landed
-                n.stdout_tail = d.get("stdout_tail", "")
-                n.eval_seconds = d.get("eval_seconds")
-                n.extra_metrics = d.get("extra_metrics", {}) or {}
-                n.violations = d.get("violations", []) or []
-                n.feasible = not n.violations           # #5: constraint-violating -> infeasible
-                # Intra-node sweep: per-trial results (audit/UI only; node.metric is already the
-                # best trial, set by the engine). Coerce defensively per trial so one malformed
-                # entry in a hand-edited/bring-your-own-script log can't crash the whole fold.
-                trials = []
-                for t_d in (d.get("trials", []) or []):
-                    try:
-                        trials.append(Trial(**t_d))
-                    except Exception:
-                        continue
-                n.trials = trials
                 if first_terminal:
+                    n.metric = d.get("metric")          # missing -> None (feasible_nodes filters it)
+                    n.status = NodeStatus.evaluated
+                    n.rerun_stage = None                # any stage-scoped re-run has now landed
+                    n.stdout_tail = d.get("stdout_tail", "")
+                    n.eval_seconds = d.get("eval_seconds")
+                    n.extra_metrics = d.get("extra_metrics", {}) or {}
+                    n.violations = d.get("violations", []) or []
+                    n.feasible = not n.violations       # #5: constraint-violating -> infeasible
+                    # Intra-node sweep: per-trial results (audit/UI only; node.metric is already the
+                    # best trial, set by the engine). Coerce defensively per trial so one malformed
+                    # entry in a hand-edited/bring-your-own-script log can't crash the whole fold.
+                    trials = []
+                    for t_d in (d.get("trials", []) or []):
+                        try:
+                            trials.append(Trial(**t_d))
+                        except Exception:
+                            continue
+                    n.trials = trials
                     st.total_eval_seconds += d.get("eval_seconds") or 0.0
         elif t == EV_NODE_FAILED:
             if st.building and st.building.get("node_id") == d.get("node_id"):
                 st.building = None
             n = st.nodes.get(d.get("node_id"))
             if n is not None:
+                # First-terminal-wins for the whole node (see node_evaluated above): a conflicting
+                # second terminal from a corrupt log must not flip an already-evaluated node to failed.
                 first_terminal = n.status is NodeStatus.pending
-                n.status = NodeStatus.failed
-                n.error = d.get("error", "")
-                n.error_reason = d.get("reason", "")
-                # Crash-triage verdict, when the LLM triage ran (signal-delivery §1): fold it onto the
-                # node so the failure-reflection hint / digest can hand it to the next proposal.
-                # Additive + reader-defaulted: absent on old logs / rule-triaged nodes -> stays "".
-                if d.get("triage_rationale"):
-                    n.triage_rationale = str(d.get("triage_rationale"))
-                n.eval_seconds = d.get("eval_seconds")
-                n.rerun_stage = None                    # any stage-scoped re-run has now landed
-                if d.get("failed_stage"):
-                    n.failed_stage = d.get("failed_stage")   # Phase 1: which pipeline stage broke
                 if first_terminal:
+                    n.status = NodeStatus.failed
+                    n.error = d.get("error", "")
+                    n.error_reason = d.get("reason", "")
+                    # Crash-triage verdict, when the LLM triage ran (signal-delivery §1): fold it onto
+                    # the node so the failure-reflection hint / digest can hand it to the next proposal.
+                    # Additive + reader-defaulted: absent on old logs / rule-triaged nodes -> stays "".
+                    if d.get("triage_rationale"):
+                        n.triage_rationale = str(d.get("triage_rationale"))
+                    n.eval_seconds = d.get("eval_seconds")
+                    n.rerun_stage = None                # any stage-scoped re-run has now landed
+                    if d.get("failed_stage"):
+                        n.failed_stage = d.get("failed_stage")   # Phase 1: which pipeline stage broke
                     st.total_eval_seconds += d.get("eval_seconds") or 0.0
         elif t == EV_NODE_REPAIRED:
             # In-node inline repair (hybrid crash repair): a NON-terminal event that replaces the
@@ -450,9 +457,17 @@ def fold(events: Iterable[Event]) -> RunState:
             # reopened, proposes more experiments instead of immediately re-finishing.
             # max_seconds/max_eval_seconds (budgets) + timeout/max_parallel (resource retune, gated by
             # the governance matrix at apply time) are ABSOLUTE new values (last write wins).
-            for _k in ("max_seconds", "max_eval_seconds", "timeout", "max_parallel"):
+            # COERCE to number in the fold: a UI form / TUI can post a STRING ("600"), and the engine
+            # compares these numerically (`total_eval_seconds >= max_es`), so an un-coerced string would
+            # raise TypeError in the main loop — and because the event replays, EVERY resume re-crashes
+            # (a permanent poison event). A non-numeric value is skipped, not stored.
+            for _k, _cast in (("max_seconds", float), ("max_eval_seconds", float),
+                              ("timeout", float), ("max_parallel", int)):
                 if d.get(_k) is not None:
-                    st.budget_overrides[_k] = d[_k]
+                    try:
+                        st.budget_overrides[_k] = _cast(d[_k])
+                    except (TypeError, ValueError):
+                        pass
             if d.get("add_nodes") is not None:
                 try:
                     st.budget_overrides["add_nodes"] = int(st.budget_overrides.get("add_nodes", 0)) + int(d["add_nodes"])

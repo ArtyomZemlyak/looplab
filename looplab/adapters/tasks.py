@@ -38,8 +38,9 @@ class TaskAdapter(Protocol):
       roles; called by `make_roles` (this module) when backend="llm". `core/hardware.py`
       (`task_runtime_caps`) inspects its signature: accepting `runtime_caps` opts the task into
       the torch/GPU capability brief.
-    - `assets() -> list[str]` — task data filenames staged into each eval workdir; consumed by
-      `engine/orchestrator.py` (staging + protected from edits).
+    - `assets() -> dict[str, str]` — {filename: content} staged into each eval workdir; consumed by
+      `engine/orchestrator.py` (staging + protected from edits). (Every implementation returns a dict
+      and the engine indexes it as one — the contract of record is the dict, not the old `list[str]`.)
     - `columns() -> dict` — tabular schema/profile; consumed by `engine/orchestrator.py` (I1
       grounding pre-phase) and `tools/run_tools.py` (`DataTools`).
     - `leakage_inputs() -> dict` — split/timestamp info for the leakage audit; consumed by
@@ -162,6 +163,13 @@ def normalize_task(data: dict) -> dict:
             f"Stray dotted keys: {', '.join(_stray)}.")
 
     # --- cmd (how to run + score) is the new name for `eval` ---
+    # Both present is an authoring conflict: mapping `cmd`->`eval` only "when eval is absent" would
+    # SILENTLY drop the composable `cmd` in favor of a stale legacy `eval` (pydantic ignores the
+    # leftover unknown `cmd` key) — the exact silent-loss the data/dataset clash check guards against.
+    if "cmd" in d and "eval" in d:
+        raise ValueError(
+            "give EITHER `cmd` (the current name) OR `eval` (the legacy alias) — not both; they are "
+            "the same field and specifying both is ambiguous. Keep `cmd` and drop `eval`.")
     if "cmd" in d and "eval" not in d:
         cmd = d.pop("cmd")
         if isinstance(cmd, list):
