@@ -167,6 +167,12 @@ class ShellTools:
                      {"task_id": {"type": "string"}}, ["task_id"]),
             fn_spec("list_background",
                      "List background commands started this session with their status.", {}, []),
+            fn_spec("kill_background",
+                     "Stop a still-running background command (SIGTERM to its process group). Use the "
+                     "task_id from a background run_command — e.g. to abandon a wedged test run or a "
+                     "training you no longer need. A finished/unknown task_id returns a graceful note. "
+                     "(Background commands are also auto-reaped after ~2h.)",
+                     {"task_id": {"type": "string"}}, ["task_id"]),
         ]
 
     def execute(self, name: str, args: dict) -> str:
@@ -194,6 +200,10 @@ class ShellTools:
                 from looplab.runtime.bg_tasks import MANAGER
                 rows = MANAGER.list()
                 return "\n".join(f"{t['task_id']} {t['status']} · {t['cmd'][:70]}" for t in rows) or "(none)"
+            if name == "kill_background":
+                from looplab.runtime.bg_tasks import MANAGER
+                r = MANAGER.kill(str(args.get("task_id") or ""))
+                return f"[{r['task_id']}] killed" if r.get("ok") else f"({r.get('error')})"
             return f"(unknown tool: {name})"
         except Exception as e:  # noqa: BLE001 - never crash the loop
             return f"(error: {e})"

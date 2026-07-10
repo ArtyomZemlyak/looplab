@@ -23,6 +23,7 @@ import signal
 import subprocess
 import tempfile
 import threading
+import time
 from pathlib import Path
 
 from looplab.runtime.sandbox import SECRET_ENV
@@ -42,6 +43,16 @@ _MAX_READ = RESULT_CAP - 400
 # (honest truncation: say what was dropped and where the full log lives — never drop silently).
 _BACKLOG_CAP = 262_144
 
+# Wall-clock lifetime bound for a background command. The assistant's background shell is for BOUNDED
+# helpers (a full test run, a build, a short training) — the engine's real ML training goes through the
+# sandbox eval path with its own timeout, not here — so a generous 2h cap can't abort legitimate work,
+# but it reaps a hung/runaway child that would otherwise leak a process (+ its growing log) for the life
+# of the server. Enforced LAZILY on read()/list() (no watchdog thread).
+_BG_MAX_SECONDS = 7200.0
+# Bound retained FINISHED tasks (and their tmp log files): a long server session would else accumulate
+# one log per background command forever. Running tasks are never evicted.
+_MAX_FINISHED = 32
+
 
 def _child_env(argv) -> dict:
     base = {k: v for k, v in os.environ.items() if not SECRET_ENV.search(k)}
@@ -53,9 +64,11 @@ def _child_env(argv) -> dict:
 
 
 class BackgroundManager:
-    def __init__(self):
+    def __init__(self, max_seconds: float = _BG_MAX_SECONDS, max_finished: int = _MAX_FINISHED):
         self._tasks: dict = {}
         self._lock = threading.Lock()
+        self._max_seconds = max_seconds
+        self._max_finished = max_finished
 
     def start(self, argv, cwd: str, wrap=None) -> str:
         run_argv = wrap(argv, cwd) if wrap else list(argv)
@@ -78,7 +91,10 @@ class BackgroundManager:
             raise
         with self._lock:
             self._tasks[tid] = {"proc": proc, "log": log, "fh": f, "cursor": 0,
-                                "cmd": " ".join(argv), "cwd": cwd}
+                                "cmd": " ".join(argv), "cwd": cwd,
+                                "deadline": (time.monotonic() + self._max_seconds
+                                             if self._max_seconds else None)}
+        self._evict_finished()   # bound retained finished tasks + their log files
         return tid
 
     @staticmethod
@@ -91,6 +107,45 @@ class BackgroundManager:
             except OSError:
                 pass
             t["closed"] = True
+
+    @staticmethod
+    def _enforce_deadline(t) -> None:
+        """Reap a background task that outlived its wall-clock budget (SIGTERM to the process group,
+        like `kill`). Lazy — called on read()/list(), no watchdog thread. Idempotent; a None deadline
+        (timeout disabled) is a no-op. Operates on the handle `t` directly (never re-enters the lock)."""
+        dl = t.get("deadline")
+        if dl is None or t.get("timed_out") or t["proc"].poll() is not None:
+            return
+        if time.monotonic() > dl:
+            try:
+                if os.name != "nt":
+                    os.killpg(os.getpgid(t["proc"].pid), signal.SIGTERM)
+                else:
+                    t["proc"].terminate()
+            except (OSError, ProcessLookupError):
+                pass
+            t["timed_out"] = True
+
+    def _evict_finished(self) -> None:
+        """Drop the OLDEST finished tasks (insertion order) once more than `max_finished` are retained,
+        unlinking their tmp log files. Running tasks are never evicted; a later read() of an evicted id
+        just returns 'no such background task' (graceful), same as any unknown id."""
+        if not self._max_finished:
+            return
+        with self._lock:
+            finished = [tid for tid, t in self._tasks.items() if t["proc"].poll() is not None]
+            for tid in finished[:-self._max_finished] if len(finished) > self._max_finished else []:
+                t = self._tasks.pop(tid, None)
+                if t is None:
+                    continue
+                try:
+                    t["fh"].close()
+                except OSError:
+                    pass
+                try:
+                    Path(t["log"]).unlink()
+                except OSError:
+                    pass
 
     def read(self, tid: str) -> dict:
         with self._lock:
@@ -138,21 +193,24 @@ class BackgroundManager:
             t["cursor"] += len(chunk)
             pending = max(0, size - t["cursor"])
             text = skip_note + chunk.decode("utf-8", "replace")
+        self._enforce_deadline(t)   # reap a task past its wall-clock budget before reporting status
         self._reap(t)
         rc = t["proc"].poll()
         return {"ok": True, "task_id": tid, "cmd": t["cmd"],
                 "status": "running" if rc is None else "exited", "exit_code": rc,
-                "new_output": text, "pending": pending}
+                "new_output": text, "pending": pending, "timed_out": t.get("timed_out", False)}
 
     def list(self) -> list:
         with self._lock:
             items = list(self._tasks.items())
         out = []
         for tid, t in items:
+            self._enforce_deadline(t)
             self._reap(t)
             rc = t["proc"].poll()
             out.append({"task_id": tid, "cmd": t["cmd"],
-                        "status": "running" if rc is None else "exited", "exit_code": rc})
+                        "status": "running" if rc is None else "exited", "exit_code": rc,
+                        "timed_out": t.get("timed_out", False)})
         return out
 
     def kill(self, tid: str) -> dict:

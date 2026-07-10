@@ -207,3 +207,61 @@ def test_background_closes_handle_after_exit(tmp_path):
         time.sleep(0.05)
     assert mgr._tasks[tid].get("closed") is True
     assert mgr._tasks[tid]["fh"].closed
+
+
+def test_kill_background_stops_a_running_task(tmp_path):
+    mgr = BackgroundManager()
+    tid = mgr.start([sys.executable, "-c", "import time; time.sleep(30)"], str(tmp_path))
+    assert mgr.read(tid)["status"] == "running"
+    r = mgr.kill(tid)
+    assert r["ok"] and r["status"] == "killed"
+    for _ in range(100):                       # SIGTERM is async — poll to the terminal state
+        if mgr.read(tid)["status"] == "exited":
+            break
+        time.sleep(0.05)
+    assert mgr.read(tid)["status"] == "exited"
+    assert mgr.kill("nope")["ok"] is False     # unknown id degrades gracefully
+
+
+def test_shell_kill_background_tool(tmp_path):
+    s = ShellTools([tmp_path], mode="auto")
+    r = s.execute("run_command",
+                  {"command": [sys.executable, "-c", "import time; time.sleep(30)"], "background": True})
+    tid = r.split("task ")[1].split(" ")[0]
+    assert "killed" in s.execute("kill_background", {"task_id": tid})
+    assert "(" in s.execute("kill_background", {"task_id": "nope"})   # graceful note, no crash
+
+
+def test_background_timeout_reaps_a_hung_task(tmp_path):
+    # a wall-clock budget past which a hung/runaway child is SIGTERM'd (lazily, on read/list) so it
+    # can't leak a process for the life of the server.
+    mgr = BackgroundManager(max_seconds=0.05)
+    tid = mgr.start([sys.executable, "-c", "import time; time.sleep(30)"], str(tmp_path))
+    time.sleep(0.2)                            # let the deadline pass
+    r = mgr.read(tid)
+    assert r["timed_out"] is True
+    for _ in range(100):
+        if mgr.read(tid)["status"] == "exited":
+            break
+        time.sleep(0.05)
+    assert mgr.read(tid)["status"] == "exited"
+
+
+def test_background_evicts_oldest_finished_logs(tmp_path):
+    mgr = BackgroundManager(max_finished=2)
+    tids, logs = [], []
+    for _ in range(4):
+        tid = mgr.start([sys.executable, "-c", "pass"], str(tmp_path))
+        tids.append(tid)
+        logs.append(mgr._tasks[tid]["log"])
+        for _ in range(100):                   # wait for it to finish before the next start's evict
+            t = mgr._tasks.get(tid)
+            if t is None or t["proc"].poll() is not None:
+                break
+            time.sleep(0.02)
+    # 4 finished tasks, cap 2 → the oldest is evicted from the registry AND its tmp log unlinked.
+    assert tids[0] not in mgr._tasks
+    assert not logs[0].exists()
+    assert tids[3] in mgr._tasks                # the newest is always retained
+    retained = [t for t in mgr._tasks.values() if t["proc"].poll() is not None]
+    assert len(retained) <= 3                   # bounded (≤ max_finished + the just-started one)
