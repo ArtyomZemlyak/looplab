@@ -55,7 +55,7 @@ Score, …); the **hypothesis kanban**, **cross-run memory** (write → hygiene 
 | Foresight (hypothesis prioritization, predict-before-execute) | `search/foresight.py` |
 | Hybrid retrieval + agent-decided merge (lessons & hypothesis board) | `search/hybrid_merge.py` |
 | Search policies · operators | `search/policy.py`, `search/operators.py` |
-| Repo Developer: env-inspector + auto-validate | `tools/env_inspect.py`, `adapters/repo_developer.py` |
+| Repo Developer: env-inspector + auto-validate | `tools/env_inspect.py`, `adapters/repo_write_tools.py` (re-exported via `repo_developer.py`) |
 | Sandbox seam (subprocess / Docker) | `runtime/sandbox.py` |
 | Variance gate · multi-seed confirmation · CV · leakage · reward-hack | `trust/gate.py`, `trust/confirm.py`, `trust/cv.py`, `trust/leakage.py`, `trust/reward_hack.py` |
 | Cross-run memory · retrieval · harmonic index | `engine/memory.py`, `engine/lessons.py`, `tools/memora.py` |

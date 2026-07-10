@@ -26,7 +26,9 @@ The suite runs fully offline in ~1-2 minutes; live-LLM tests auto-skip (opt in w
 surrounding code (~100-col lines, heavy why-comments) and do not reformat.
 Docs are built with `mkdocs build --strict` in CI — broken doc links fail the deploy.
 `looplab build-ui` builds the React UI (`npm ci && npm run build` in `ui/`); `looplab ui`
-auto-builds when the dist is missing.
+auto-builds when the dist is missing. `looplab/cli/` is a PACKAGE (command groups in
+`run_cmds`/`export_cmds`/`inspect_cmds`/`ui_cmds`; the Typer app + patchable builders live in
+its `__init__`; `python -m looplab.cli` works via `__main__.py`).
 
 **Keep the docs and the process diagram in sync with the code — in the SAME change.** When you
 change a default, a cadence/threshold, an event type, or add/rename a subsystem, update: (1) the
@@ -41,11 +43,11 @@ in its inline `<script>`); edit the data, not hand-placed SVG.
 
 | Path | Contents |
 |---|---|
-| `looplab/core/` | foundation: domain models, `Settings` (config.py = schema, appconfig.py = loader), LLM client (`llm.py`), parsing, tracing, shared errors |
+| `looplab/core/` | foundation: domain models, `Settings` (config.py = schema, appconfig.py = loader), LLM client (`llm.py` + its `llm_streaming`/`llm_toolcall`/`llm_transient` siblings — every split name re-exported through `llm.py`), parsing, tracing, shared errors |
 | `looplab/events/` | event store, `types.py` (event-type registry), `replay.py::fold` (event log → `RunState`), digest, readmodel, exporters + the pure UI projections (`traceview.py`, `htmlview.py`) |
 | `looplab/runtime/` | sandboxes (subprocess/Docker tiers), command evaluation, dep install, background tasks |
 | `looplab/tools/` | agent-facing tools; `_base.py` documents the ToolProvider contract; `env_inspect.py` (repo Developer's read-only env inspector: pkg version/API/source), `vectorstore.py` + `memora.py` (embeddings + harmonic index) |
-| `looplab/agents/` | LLM personas: plain roles (`roles.py`), tool-loop roles (`agent.py::drive_tool_loop`), external CLI backend (`cli_agent.py`), facade (`unified_agent.py`) |
+| `looplab/agents/` | LLM personas: plain roles (`roles.py`), the tool-loop machinery (`tool_loop.py::drive_tool_loop`/`agentic_*`; `agent.py` keeps `run_phase` + `ToolUsingResearcher` and re-exports the rest — patch seams resolve through `agent.py`), external CLI backend (`cli_agent.py`), facade (`unified_agent.py`) |
 | `looplab/search/` | search policies (`policy.py` — action kinds/meta-key constants live here), `operators.py`, best-of-N, surrogate, archive, `foresight.py` (hypothesis prioritization / predict-before-execute), `hybrid_merge.py` (grep+BM25+vector RRF retrieval + agent-decided merge, shared by lesson & hypothesis-board consolidation) |
 | `looplab/trust/` | gates that keep results honest: leakage, reward-hack, CV, redaction, confirmation |
 | `looplab/engine/` | **the orchestrator loop** + cross-run memory; see invariants below. The `Engine` class spans THIRTEEN files: `orchestrator.py` (`__init__`, the `run` spine, node creation — the module-global `fold` seam lives here) + twelve mixins — `confirm_phase.py`, `ablation.py`, `novelty.py`, `strategy.py` (cadence; the Strategist agent is `agents/strategist.py`), `research_cadence.py`, `eval_stages.py`, `crash_repair.py`, `eval_dispatch.py`, `audit.py`, `evaluate.py`, `node_build.py`, `proposal_cues.py`. In a mixin `self` IS the Engine — grep the engine package before renaming an engine attribute or hunting a method |

@@ -26,6 +26,7 @@ _CONSUMER_FILES = [
     _PKG / "adapters" / "tasks.py",
     _PKG / "adapters" / "repo_task.py",
     _PKG / "adapters" / "repo_developer.py",
+    _PKG / "adapters" / "repo_write_tools.py",
     _PKG / "tools" / "run_tools.py",
     _PKG / "core" / "hardware.py",
     _PKG / "runtime" / "command_eval.py",

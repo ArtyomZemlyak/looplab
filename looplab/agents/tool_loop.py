@@ -492,6 +492,11 @@ def drive_tool_loop(client, tools, messages: list, emit_spec: dict, *,
     return fallback(messages)
 
 
+# SEAM NOTE: agentic_text/agentic_struct call `drive_tool_loop` through THIS module's globals.
+# Pre-split (one module) a patch on `looplab.agents.agent.drive_tool_loop` intercepted them; now
+# it does not — patch `looplab.agents.tool_loop.drive_tool_loop` to intercept these two. Every
+# existing test patches seams that still resolve (run_phase stayed in agent.py for exactly this
+# reason — see its why-comment).
 def agentic_text(client, tools, messages, *, loop_opts=None, fallback=None,
                  answer_desc="your final answer") -> str:
     """`client.complete_text(messages)` upgraded to AGENTIC: the model MAY first call the provided

@@ -20,7 +20,13 @@ from looplab.adapters.tasks import load_task
 # (looplab/cli/export_cmds.py), so nothing in the looplab.cli package imports this module at import
 # time, in either direction. Importing the shared engine builder here retires that load-bearing lazy
 # import (docs/15 §P5.2b).
-from looplab.cli import _engine
+def _engine(*args, **kwargs):
+    """Late-binding shim: resolve `looplab.cli._engine` at CALL time, matching the cli package's
+    own command-module shims — so a test patching `cli._engine` (to stub the engine for an
+    offline bench) is seen here too. A top-level `from ... import _engine` froze the original
+    object and silently bypassed that seam."""
+    from looplab import cli
+    return cli._engine(*args, **kwargs)
 
 
 def run_benchmark(task_files, settings: Settings, out_dir) -> list[dict]:
