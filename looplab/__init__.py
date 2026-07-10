@@ -121,6 +121,7 @@ _LAYOUT = {
     "repo_developer": "adapters",
     "repo_task": "adapters",
     "report": "serve",
+    "research_cadence": "engine",
     "reposcout": "tools",
     "retrieval": "tools",
     "reward_hack": "trust",
