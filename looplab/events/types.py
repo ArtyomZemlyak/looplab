@@ -41,7 +41,10 @@ How to add an event type:
 from __future__ import annotations
 
 # --- DOMAIN events (folded into RunState by `replay.fold`; the engine is the sole writer,
-#     except `spec_approved`/`approval_granted` which the CLI/UI may also ratify). ---
+#     except a few UI/CLI-writable ratification/config events: `spec_approved`/`approval_granted`
+#     (ratify), `trust_gate_changed` (PUT /config), and `report_generated` (report_refresh) — all
+#     fold-safe last-write-wins/audit-only. Route any new server append through an allow-listed
+#     helper rather than adding another exception here). ---
 EV_RUN_STARTED = "run_started"
 # Emitted at the START of building a node — BEFORE the Researcher/Developer run — so the UI can show the
 # node the instant work begins on it (its live agent-trace streams in) instead of only after the minutes-

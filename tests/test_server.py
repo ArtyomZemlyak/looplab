@@ -92,6 +92,18 @@ def test_artifacts_token_gated(tmp_path, monkeypatch):
                       headers=h).json()["content"] == "hi\n"
 
 
+def test_assistant_session_transcript_is_token_gated(tmp_path, monkeypatch):
+    """An assistant session transcript returns `raw` (the full model-facing instruction incl. attached
+    file contents), so it must be gated like a raw-file read when LOOPLAB_UI_TOKEN is set."""
+    monkeypatch.setenv("LOOPLAB_UI_TOKEN", "sekret")
+    _build_run(tmp_path)
+    client = TestClient(make_app(tmp_path))
+    # the session-transcript GET requires the token (not a 200 open read)
+    assert client.get("/api/assistant/sessions/whatever").status_code == 401
+    # a folded-projection GET still stays open
+    assert client.get("/api/runs/demo/state").status_code == 200
+
+
 def test_runs_list_state_and_node_detail(tmp_path):
     st = _build_run(tmp_path)
     client = TestClient(make_app(tmp_path))

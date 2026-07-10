@@ -123,8 +123,13 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
             # secrets — a checked-in .env, credentials, a log that printed a key), so gate those GETs
             # too. Every OTHER GET only returns folded projections (events/state), never raw files, so
             # they stay open exactly as before.
+            # An assistant SESSION transcript returns `raw` — the full model-facing instruction,
+            # including attached file contents ($HOME files the user pasted) + the UI-context preamble
+            # — so it is as sensitive as a raw-file read and must be gated too. (The `/shared/{sid}`
+            # route STRIPS raw and stays open for sharing; only the session-transcript GET is gated.)
             sensitive_get = (request.method == "GET"
-                             and (p.endswith("/artifact") or p.endswith("/artifacts")))
+                             and (p.endswith("/artifact") or p.endswith("/artifacts")
+                                  or "/assistant/sessions" in p))
             mutating = request.method in ("POST", "PUT", "PATCH", "DELETE")
             if ((mutating or sensitive_get) and p.startswith("/api/")
                     and request.headers.get("X-LoopLab-Token") != ui_token):
