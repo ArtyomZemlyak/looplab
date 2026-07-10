@@ -4,9 +4,10 @@ Covers:
 - `profile=thorough` turns the built quality/trust machinery ON, and any explicit setting
   (init-kwarg or LOOPLAB_* env) beats the profile (config-first);
 - an unknown profile / bad trust_gate is rejected;
-- the pure fold applies the trust gate to best-selection (audit=legacy, gate=exclude-from-win,
-  block=also-infeasible), gates ONLY hard cheating/leakage signals (critic stays advisory), is
-  order-independent, and an old log with no trust_gate folds to legacy behavior;
+- the pure fold applies the trust gate to best-selection (audit=legacy, gate=exclude-from-win
+  AND-from-breeding but still feasible for diversity, block=also-infeasible), gates ONLY hard
+  cheating/leakage signals (critic stays advisory), is order-independent, and an old log with no
+  trust_gate folds to legacy behavior;
 - a real toy run records `trust_gate` in `run_started` so replay/resume enforce the same gate.
 All offline (no LLM, no network)."""
 from __future__ import annotations
@@ -107,10 +108,15 @@ def test_audit_lets_flagged_node_win():
     assert s.trust_gate == "audit" and s.best_node_id == 2
 
 
-def test_gate_excludes_flagged_from_winning_but_keeps_it_breedable():
+def test_gate_excludes_flagged_from_winning_and_breeding_but_keeps_it_feasible():
     s = fold(_mk(_base("gate") + [_HACK]))
     assert s.best_node_id == 1
-    assert s.nodes[2].feasible is True          # still in the tree; may be repaired/improved
+    # §2.2 "don't improve cheaters": the flagged node stays FEASIBLE (kept in the tree for
+    # diversity/audit) but is barred from BREEDING — out of breedable_nodes(), in feasible_nodes().
+    assert s.nodes[2].feasible is True
+    assert 2 in s.breed_excluded
+    assert 2 in [n.id for n in s.feasible_nodes()]      # diversity/archive still see it
+    assert 2 not in [n.id for n in s.breedable_nodes()]  # the policies never breed/confirm from it
 
 
 def test_block_also_marks_flagged_infeasible():
@@ -118,6 +124,13 @@ def test_block_also_marks_flagged_infeasible():
     assert s.best_node_id == 1
     assert s.nodes[2].feasible is False
     assert [n.id for n in s.feasible_nodes()] == [1]
+    assert 2 in s.breed_excluded and [n.id for n in s.breedable_nodes()] == [1]
+
+
+def test_audit_breedable_equals_feasible():
+    s = fold(_mk(_base("audit") + [_HACK]))
+    assert not s.breed_excluded          # audit flags nothing -> no-op
+    assert [n.id for n in s.breedable_nodes()] == [n.id for n in s.feasible_nodes()]
 
 
 def test_critic_only_signal_stays_advisory_even_under_gate():

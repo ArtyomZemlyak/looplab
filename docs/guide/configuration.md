@@ -244,7 +244,7 @@ default grants resource/search-shape knobs to the agents and keeps infra (`llm_*
 | `code_leakage_detect` | `LOOPLAB_CODE_LEAKAGE_DETECT` | `false` | Static code-leakage scan (fit-before-split, fit-on-test) |
 | `critic_check` | `LOOPLAB_CRITIC_CHECK` | `false` | Execution-free critic of each solution (always advisory) |
 | `workdir_audit` | `LOOPLAB_WORKDIR_AUDIT` | `true` | Audit each node's workdir for tamper signals (writes to frozen/grader files) feeding the reward-hack monitor |
-| `trust_gate` | `LOOPLAB_TRUST_GATE` | `audit` | What a reward-hack / leakage flag does to selection: `audit` (surface only) · `gate` (a flagged node can't be selected best) · `block` (also mark it infeasible so the policy won't breed from it). Critic stays advisory in every mode |
+| `trust_gate` | `LOOPLAB_TRUST_GATE` | `audit` | What a reward-hack / leakage flag does to the search: `audit` (surface only) · `gate` (a flagged node can't be selected best **and isn't bred/confirmed from**, but stays *feasible* so it still counts for diversity/audit) · `block` (also mark it fully infeasible). Critic stays advisory in every mode |
 | `eval_trust_mode` | `LOOPLAB_EVAL_TRUST_MODE` | `ratify_freeze` | Trust policy for an agent-authored eval spec (onboarding): `ratify_freeze` / `autonomous` / `ratify_freeze_drift` |
 | `require_approval` | `LOOPLAB_REQUIRE_APPROVAL` | `false` | HITL: pause for `approve` before finishing |
 

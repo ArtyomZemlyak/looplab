@@ -137,7 +137,7 @@ def weighted_parent(state: RunState, feasible=None) -> Optional[int]:
     instead of hammering the single global best (weighted parent sampling beat both
     hill-climbing and random selection in ShinkaEvolve's ablation). Deterministic: pure
     argmax with id tie-break."""
-    pool = feasible if feasible is not None else state.feasible_nodes()
+    pool = feasible if feasible is not None else state.breedable_nodes()
     if not pool:
         return None
     ranked = rank_by_metric(state, pool)
@@ -230,7 +230,7 @@ class GreedyTree:
         if best is None:
             return [{"kind": KIND_DRAFT}]
 
-        evaluated = state.feasible_nodes()   # never breed from constraint-violating nodes (#5)
+        evaluated = state.breedable_nodes()   # never breed from constraint-violating nodes (#5)
         n_improve = sum(1 for n in state.nodes.values() if n.operator == "improve")
         n_merge = sum(1 for n in state.nodes.values() if n.operator == "merge")
         n_refine = sum(1 for n in state.nodes.values() if n.operator == "refine_block")
@@ -316,7 +316,7 @@ class EvolutionaryPolicy:
             k = min(self.pop - total, self.max_nodes - total)
             return [{"kind": KIND_DRAFT} for _ in range(k)]
 
-        evaluated = rank_by_metric(state, state.feasible_nodes())   # elites must be feasible (#5)
+        evaluated = rank_by_metric(state, state.breedable_nodes())   # elites must be feasible (#5)
         if not evaluated:
             return [{"kind": KIND_DRAFT}]
         elites = evaluated[: self.elite]
@@ -370,7 +370,7 @@ class MCTSPolicy:
         if total < self.n_seeds:
             k = min(self.n_seeds - total, self.max_nodes - total)
             return [{"kind": KIND_DRAFT} for _ in range(k)]
-        evaluated = state.feasible_nodes()   # improve only feasible candidates (#5)
+        evaluated = state.breedable_nodes()   # improve only feasible candidates (#5)
         if not evaluated:
             return [{"kind": KIND_DRAFT}]
 
@@ -396,8 +396,12 @@ class MCTSPolicy:
         scores: dict[int, float] = {}   # per-candidate UCB1 (surfaced as a `policy_decision` event)
         for node in sorted(evaluated, key=lambda n: n.id):
             tree = subtree(node.id)
+            # Value the subtree by its feasible descendants' metrics, EXCLUDING gate-flagged (cheating)
+            # nodes: their inflated metric must not make an ancestor's subtree look good and pull MCTS
+            # exploration toward a cheating lineage (§2.2, matching breedable_nodes for direct targets).
             metrics = [state.nodes[i].metric for i in tree
-                       if state.nodes[i].metric is not None and state.nodes[i].feasible]  # #5
+                       if state.nodes[i].metric is not None and state.nodes[i].feasible
+                       and i not in state.breed_excluded]  # #5
             if not metrics:
                 continue
             value = best_of(metrics)
@@ -477,7 +481,7 @@ class ASHAPolicy:
             return [{"kind": KIND_DRAFT} for _ in range(k)]
 
         gen = self._generation(state)
-        feasible = {n.id for n in state.feasible_nodes()}
+        feasible = {n.id for n in state.breedable_nodes()}
         if not feasible:
             return [{"kind": KIND_DRAFT}]
         # "expanded" = has a child that is still LIVE (evaluated or pending). A FAILED child leaves the
@@ -528,7 +532,7 @@ class ASHAPolicy:
         if b is None:
             return [{"kind": KIND_DRAFT}]
         return [{"kind": KIND_IMPROVE, "parent_id": b.id,
-                 META_SCORES: _metric_scores(state.feasible_nodes()), META_CHOSEN: b.id,
+                 META_SCORES: _metric_scores(state.breedable_nodes()), META_CHOSEN: b.id,
                  META_REASON: "exploit best (rungs collapsed)"}]
 
 
@@ -556,7 +560,7 @@ def legal_actions(state: RunState, policy: SearchPolicy, *, max_nodes: int) -> l
     if total < n_seeds:
         return [{"kind": KIND_DRAFT}]
     actions: list[dict] = [{"kind": KIND_DRAFT}]
-    feasible = rank_by_metric(state, state.feasible_nodes())
+    feasible = rank_by_metric(state, state.breedable_nodes())
     actions.extend({"kind": KIND_IMPROVE, "parent_id": n.id} for n in feasible)
     dbg = debug_action(state, getattr(policy, "debug_depth", 1))
     if dbg:

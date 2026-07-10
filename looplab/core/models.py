@@ -281,6 +281,11 @@ class RunState(BaseModel):
     # never affects id allocation (max(nodes)+1) or resume. None when no node is mid-build.
     building: Optional[dict] = None
     best_node_id: Optional[int] = None
+    # Node ids the trust gate bars the search from BREEDING (improve/merge/ablate/confirm target) —
+    # the hard-flagged (cheating/leaking) set under trust_gate=gate/block, stamped by the fold's
+    # `_apply_trust_gate` post-pass. Under `gate` these stay `feasible` (kept in the tree for
+    # diversity/audit) but are excluded from `breedable_nodes()`; empty under `audit` / old logs.
+    breed_excluded: set[int] = Field(default_factory=set)
     finished: bool = False
     data_profile: Optional[dict] = None   # set by the grounding pre-phase (I16)
     leakage: Optional[dict] = None        # set by the grounding leakage scan (I9)
@@ -432,6 +437,17 @@ class RunState(BaseModel):
         sorted against real metrics nor selected as best, and would raise TypeError in the policies'
         metric-keyed sorts."""
         return [n for n in self.evaluated_nodes() if n.feasible and n.metric is not None]
+
+    def breedable_nodes(self) -> list[Node]:
+        """Feasible nodes the search may BREED FROM or CONFIRM (improve/merge/ablate/promote/confirm
+        target). Under `trust_gate=gate` a hard-flagged (cheating/leaking) node stays feasible — kept
+        in the tree for diversity/audit and barred from WINNING elsewhere — but is NOT bred from, so
+        the search never sinks budget improving a cheating lineage or displaces an honest node from
+        the confirm top-k (T2, §2.2). Under `block` it is already infeasible (out of feasible_nodes).
+        `audit` / no flags -> identical to feasible_nodes(); the fast path keeps it a no-op there."""
+        if not self.breed_excluded:
+            return self.feasible_nodes()
+        return [n for n in self.feasible_nodes() if n.id not in self.breed_excluded]
 
     def pending_nodes(self) -> list[Node]:
         return sorted(

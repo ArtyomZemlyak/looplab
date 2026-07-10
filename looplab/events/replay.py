@@ -571,8 +571,11 @@ def _apply_trust_gate(st: RunState) -> set:
     Order-independent: computed from the folded `reward_hacks` after the full pass (see
     `flagged_node_ids`). Returns the flagged node-id set for `_select_best`."""
     flagged = flagged_node_ids(st)
-    # "block" additionally bars the policy from breeding a flagged node forward (feasible=False also
-    # removes it from `feasible_nodes()` used by the search policies), not just from winning.
+    # Bar the flagged set from BREEDING/confirm targets (§2.2): under `gate` the node stays feasible
+    # (kept in the tree for diversity/audit, barred only from winning) but `breedable_nodes()` skips it
+    # so the search doesn't sink budget improving a cheating lineage. `block` ALSO makes it infeasible
+    # (feasible=False removes it from feasible_nodes() entirely), the stricter mode.
+    st.breed_excluded = set(flagged)
     if st.trust_gate == "block":
         for nid in flagged:
             nb = st.nodes.get(nid)

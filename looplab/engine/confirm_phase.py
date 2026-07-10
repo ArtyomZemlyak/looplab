@@ -71,9 +71,10 @@ class ConfirmPhaseMixin:
         Resume-safe: nodes already confirmed (from an earlier crashed attempt) are
         reused, and a `best_confirmed` event is ALWAYS emitted to mark completion — so a
         confirm pass where every seed run fails can't loop forever."""
-        # Only confirm FEASIBLE leaders (#5): spending the expensive full-profile seed budget
-        # on a constraint-violating node is wasted, and it must never be promoted to best.
-        evaluated = sorted(state.feasible_nodes(), key=lambda n: (n.metric, n.id),
+        # Only confirm BREEDABLE leaders (#5, §2.2): spending the expensive full-profile seed budget on
+        # a constraint-violating OR trust-gated node is wasted — a gate-flagged cheater can never be
+        # promoted to best, so it must not take a confirm slot from an honest node either.
+        evaluated = sorted(state.breedable_nodes(), key=lambda n: (n.metric, n.id),
                            reverse=(state.direction == "max"))
         topk = evaluated[: self.confirm_top_k]
         if not topk:
