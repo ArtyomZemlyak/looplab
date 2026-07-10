@@ -91,7 +91,7 @@ SIGNALS: tuple[SignalRoute, ...] = (
         channel="context",
         inject="looplab.agents.strategist:_fmt_operator_yields",
         consumer="Strategist (_strategist_brief)",
-        call_sites=(("looplab/engine/orchestrator.py", "operator_yields(state)"),
+        call_sites=(("looplab/engine/strategy.py", "operator_yields(state)"),  # _strategy_ctx: StrategyCadenceMixin
                     ("looplab/agents/strategist.py", "_fmt_operator_yields(ctx.operator_yields)"))),
     SignalRoute(
         name="operator_directives",

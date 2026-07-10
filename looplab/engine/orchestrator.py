@@ -25,22 +25,24 @@ from looplab.tools.agents_md import generate_agents_md
 from looplab.events.eventstore import EventStore
 from looplab.events.types import (
     EV_AGENT_DECISION, EV_AGENT_VALIDATED, EV_APPROVAL_REQUESTED,
-    EV_COVERAGE_SNAPSHOT, EV_DATA_LEAKAGE,
+    EV_DATA_LEAKAGE,
     EV_DATA_PROFILED, EV_DATA_PROVENANCE, EV_DEPS_INSTALLED,
     EV_DRIFT_UNAVAILABLE, EV_FORK_DONE, EV_HINT, EV_HOST_GRADING,
     EV_FORESIGHT_SELECTED,
     EV_HYPOTHESIS_ADDED, EV_HYPOTHESIS_MERGED, EV_HYPOTHESIS_RANKED, EV_INJECT_DONE, EV_INJECT_FAILED,
     EV_NODE_ABORT, EV_NODE_BUILDING, EV_NODE_CREATED,
-    EV_NODE_EVALUATED, EV_NODE_FAILED, EV_NODE_REPAIRED, EV_NOVELTY_REJECTED, EV_PAUSE,
+    EV_NODE_EVALUATED, EV_NODE_FAILED, EV_NODE_REPAIRED, EV_PAUSE,
     EV_POLICY_DECISION, EV_PROXY_SCORED, EV_REPORT_GENERATED,
     EV_RESEARCH_COMPLETED, EV_REWARD_HACK_SUSPECTED, EV_RUN_FINISHED,
     EV_RUN_SETUP_FINISHED, EV_RUN_SETUP_STARTED, EV_RUN_STARTED, EV_RUNG_PROMOTED,
     EV_SETUP_FINISHED, EV_SETUP_STARTED, EV_SETUP_STEP, EV_SPEC_APPROVAL_REQUESTED,
-    EV_SPEC_APPROVED, EV_SPEC_DRIFT, EV_SPEC_PROPOSED, EV_STAGE_FINISHED, EV_STRATEGY_DECISION,
+    EV_SPEC_APPROVED, EV_SPEC_DRIFT, EV_SPEC_PROPOSED, EV_STAGE_FINISHED,
     EV_WORKSPACE_CHANGED)
 from looplab.trust.leakage import target_leakage, temporal_leakage, train_test_contamination
 from looplab.engine.ablation import AblationMixin
 from looplab.engine.confirm_phase import ConfirmPhaseMixin
+from looplab.engine.novelty import NoveltyGateMixin
+from looplab.engine.strategy import StrategyCadenceMixin
 from looplab.engine.finalize import finalize_run
 from looplab.engine.holdout import HoldoutGrader
 from looplab.engine.lessons import LessonMemory
@@ -54,18 +56,11 @@ from looplab.engine.triage import (_MAX_DEP_ROUNDS, _MECHANICAL_MARKERS,  # noqa
                                    _normalize_error_sig, _rule_triage, _shallow_fingerprint)
 from looplab.core.llm import BudgetExceeded
 from looplab.core.models import Idea, NodeStatus, RunState
-from looplab.search.coverage import coverage_signal
 from looplab.search.operators import merge_idea
-from looplab.search.policy import SearchPolicy, available_policies, make_policy, operator_yields
-from looplab.agents.strategist import (
-    NOVELTY_STANCES,
-    StrategyContext,
-    failure_rate,
-    improves_since_best,
-    is_numeric_space,
-    run_phase,
-    validate_strategy,
-)
+from looplab.search.policy import SearchPolicy
+# The strategist-cadence cluster (StrategyContext / make_policy / validate_strategy / coverage_signal
+# / run_phase / operator_yields / NOVELTY_STANCES …) moved to engine/strategy.py (StrategyCadenceMixin),
+# which imports those symbols from their canonical sources — so they are no longer imported here.
 from looplab.core.profile import profile_dataset
 from looplab.events.replay import fold
 from looplab.agents.roles import Developer, Researcher
@@ -87,7 +82,7 @@ _OMIT = object()
 # The confirm phase (engine/confirm_phase.py) and ablation (engine/ablation.py) clusters are
 # MIXINS — pure file-level moves inherited unchanged, so every `self._confirm_phase(...)` /
 # `self._ablate(...)` call site (and every test poking those names on Engine) is untouched.
-class Engine(ConfirmPhaseMixin, AblationMixin):
+class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadenceMixin):
     def __init__(
         self,
         run_dir: str | os.PathLike,
@@ -1013,195 +1008,13 @@ class Engine(ConfirmPhaseMixin, AblationMixin):
                     tg.start_soon(self._evaluate, a["node_id"], limiter, max_es)
                     started += 1
 
-    # -------------------------------------------------- strategist cadence (A7)
-    @staticmethod
-    def _strategy_core(s: Optional[dict]) -> dict:
-        """The decision-relevant subset of a Strategy (ignores rationale/source) — used to detect a
-        REAL change so the engine doesn't re-record/re-apply an identical strategy every iteration."""
-        if not s:
-            return {}
-        return {k: s.get(k) for k in ("policy", "policy_params", "developer", "operators", "fidelity", "novelty_stance", "request_research")}
-
-    def _available_developers(self) -> list[str]:
-        from looplab.agents.cli_agent import PRESETS
-        names = ["default", "llm", *PRESETS]
-        return names if self.developer_factory is not None else names[:1]
-
-    def _strategy_ctx(self, state: RunState) -> StrategyContext:
-        max_es = state.budget_overrides.get("max_eval_seconds", self.max_eval_seconds)
-        rem = (max_es - state.total_eval_seconds) if max_es is not None else None
-        defaults = {"policy": self._policy_name, "operators": {"ablate_every": self._ablate_every}}
-        if max_es:
-            defaults["_budget_frac"] = max(0.0, (rem or 0.0) / max_es)
-        # Mean per-node eval cost so far — the cost signal the Strategist uses to bias toward an
-        # intra-node sweep (amortizing data load / warm-up pays off when each eval is expensive).
-        ev = [n.eval_seconds for n in state.nodes.values() if n.eval_seconds]
-        avg_es = (sum(ev) / len(ev)) if ev else None
-        return StrategyContext(
-            node_count=len(state.nodes),
-            phase=run_phase(state, self.n_seeds),
-            eval_budget_remaining=rem,
-            failure_rate=failure_rate(state),
-            improves_since_best=improves_since_best(state),
-            is_numeric_space=is_numeric_space(state),
-            avg_eval_seconds=avg_es,
-            node_budget_frac=(len(state.nodes) / self.policy.max_nodes
-                              if getattr(self.policy, "max_nodes", 0) else 0.0),  # P2 endgame reserve
-            current_policy=self._policy_name,   # D3: lets the rule switch BACK to greedy post-stall
-            available_policies=available_policies(),
-            available_developers=self._available_developers(),
-            defaults=defaults,
-            coverage=self._coverage_for_ctx(state),
-            # Signal-delivery (§1): the folded per-operator yield so the Strategist tunes operator
-            # cadences from the run's own evidence, not priors. Computed on the (rare) consult
-            # cadence only — O(nodes) is fine here, not on the per-proposal path.
-            operator_yields=operator_yields(state),
-        )
-
-    def _coverage_for_ctx(self, state: RunState) -> dict:
-        """The breadth read-model for the Strategist's decision context. On the cadence path the
-        snapshot `_maybe_snapshot_coverage` just recorded (it runs FIRST in `_run_cadences`) already
-        sits in `state` at this node-count — reuse it instead of recomputing the O(nodes) signal
-        twice; an off-cadence pin_drift consult (no snapshot at this n) computes fresh. Empty when
-        coverage_context is off."""
-        if not self._coverage_context:
-            return {}
-        snaps = state.coverage_snapshots
-        if snaps and snaps[-1].get("at_node") == len(state.nodes):
-            return {k: v for k, v in snaps[-1].items() if k != "at_node"}
-        return coverage_signal(state, resolution=self.archive_resolution)
-
-    def _should_consult(self, state: RunState) -> bool:
-        """Bounded, deterministic cadence: only at a creation decision point (no pending evals),
-        at the seed boundary or every `strategist_every` created nodes."""
-        if state.pending_nodes():
-            return False
-        n = len(state.nodes)
-        if n == 0:
-            return False
-        # `strategist_every` is `ge=1` via Settings, but the Engine kwarg / EngineOptions accept 0, and
-        # this cadence is reused for coverage snapshots even with NO strategist wired
-        # (`_maybe_snapshot_coverage`) — so guard the modulo like the deep-research cadence does, or
-        # `Engine(strategist_every=0, coverage_context=True)` raises ZeroDivisionError mid-loop.
-        return n == self.n_seeds or (self.strategist_every > 0 and n % self.strategist_every == 0)
-
-    def _record_strategy(self, strat: dict, state: RunState,
-                         ctx: Optional[StrategyContext] = None) -> None:
-        self.store.append(EV_STRATEGY_DECISION, {
-            "strategy": strat,
-            "at_node": len(state.nodes),
-            "ctx": (ctx.model_dump(include={"phase", "eval_budget_remaining", "failure_rate"})
-                    if ctx is not None else None),
-        })
-        self._apply_strategy(strat)
-
-    def _ensure_surrogate(self) -> None:
-        """Wrap the Researcher in a SurrogateResearcher if it isn't already (idempotent). Used when a
-        mid-run strategy switch turns BOHB on: BOHB is ASHA's racing schedule PLUS the surrogate
-        proposer, and the proposer is only wired at startup for policy=bohb/surrogate_proposer — so a
-        Strategist switching to bohb would otherwise run bare ASHA. Needs numeric bounds; if the
-        Researcher (or its inner/fallback) exposes none, this is a no-op (bohb degrades to ASHA)."""
-        from looplab.search.surrogate import SurrogateResearcher
-        # Unified mode: re-wrapping `self.researcher` here would desync it from `self.developer`
-        # (the same agent object) — the cli already skips the startup surrogate wrap for the same
-        # reason (R1). A mid-run switch to bohb degrades to bare ASHA, which is acceptable.
-        if self.unified_agent or isinstance(self.researcher, SurrogateResearcher):
-            return
-        bounds = (getattr(self.researcher, "bounds", None)
-                  or getattr(getattr(self.researcher, "inner", None), "bounds", None)
-                  or getattr(getattr(self.researcher, "fallback", None), "bounds", None))
-        if bounds:
-            self.researcher = SurrogateResearcher(bounds, fallback=self.researcher,
-                                                  explore=self._surrogate_explore)
-
-    def _apply_strategy(self, strat: dict) -> None:
-        """Rebuild the live search machinery from a Strategy (pure wiring, no events). Policies share
-        the action vocabulary and are pure, so swapping between loop iterations is safe; the Developer
-        is swapped only between sequential _create_node calls."""
-        if strat.get("novelty_stance") in NOVELTY_STANCES:
-            self._novelty_stance = strat["novelty_stance"]   # Strategist's novelty dial (slice 2)
-        ops = strat.get("operators") or {}
-        if "ablate_every" in ops:
-            self._ablate_every = int(ops["ablate_every"])
-        if "merge_mode" in ops:
-            self._merge_mode = ops["merge_mode"]
-        if "complexity_cue" in ops:
-            self._complexity_cue = bool(ops["complexity_cue"])
-        if "ablate_code_blocks" in ops:
-            self._ablate_code_blocks = bool(ops["ablate_code_blocks"])
-        if "prefer_sweep" in ops:
-            self._prefer_sweep = bool(ops["prefer_sweep"])
-        # Resource budgets the Strategist may retune live (gated by the governance matrix). self.timeout
-        # is read fresh per eval and self.max_parallel rebuilds the CapacityLimiter each batch, so a
-        # mid-run change takes effect on the next node without any rewiring.
-        if "timeout" in strat and self._agent_may("strategist", "timeout"):
-            try:
-                self.timeout = max(0.1, float(strat["timeout"]))
-            except (TypeError, ValueError):
-                pass
-        if "max_parallel" in strat and self._agent_may("strategist", "max_parallel"):
-            try:
-                self.max_parallel = max(1, int(strat["max_parallel"]))
-            except (TypeError, ValueError):
-                pass
-        pol = strat.get("policy")
-        if pol:
-            try:
-                # Strip the names make_policy takes as explicit kwargs: a policy_params entry like
-                # {"n_seeds": 4} would otherwise raise "multiple values for keyword argument",
-                # silently dropping the whole switch (recorded decision diverging from live policy).
-                pp = {k: v for k, v in (strat.get("policy_params") or {}).items()
-                      if k not in ("n_seeds", "max_nodes", "ablate_every",
-                                   "debug_depth", "operator_bandit")}
-                self.policy = make_policy(pol, n_seeds=self.n_seeds, max_nodes=self.max_nodes,
-                                          ablate_every=self._ablate_every,
-                                          debug_depth=self._debug_depth,
-                                          operator_bandit=self._operator_bandit, **pp)
-                self._base_max_nodes = getattr(self.policy, "max_nodes", self.max_nodes)  # new base for the live override
-                # A3 BOHB = ASHA racing + the surrogate proposer. make_policy only builds the racing
-                # half; wire the surrogate now so a mid-run switch to bohb isn't bare ASHA.
-                if pol == "bohb":
-                    self._ensure_surrogate()
-                self._policy_name = pol
-            except (ValueError, TypeError):
-                pass    # keep the current policy on a bad spec (validate_strategy already whitelisted)
-        fid = strat.get("fidelity")
-        if fid in ("smoke", "full"):
-            self._strategy_fidelity = fid
-        elif fid == "adaptive":
-            self._strategy_fidelity = None
-        dev = strat.get("developer")
-        # Unified mode: researcher IS developer (one agent). A live developer-backend swap would
-        # replace `self.developer` with a different object, desyncing it from `self.researcher` (and
-        # the factory, still seeing unified_agent=True, would build a whole new agent). The unified
-        # agent owns its own implement stage — skip the swap rather than fracture the identity (R1).
-        if dev and self.developer_factory is not None and dev != self._developer_name \
-                and not self.unified_agent:
-            try:
-                self.developer = self.developer_factory(dev)
-                self._developer_name = dev
-            except Exception:  # noqa: BLE001 — a bad backend swap must never abort the run
-                pass
-
-    @staticmethod
-    def _already_covered_at(state: RunState, n: int) -> bool:
-        return any((c or {}).get("at_node") == n for c in state.coverage_snapshots)
-
-    def _maybe_snapshot_coverage(self, state: RunState) -> RunState:
-        """Record a `coverage_snapshot` (breadth read-model) at the strategist cadence, then re-fold.
-        Recorded even when NO Strategist is wired, so the run's narrowing curve is always queryable
-        over the log / replayable historically (fold -> coverage_signal). Audit-only — it never
-        affects node selection; folded only so the at_node gate makes a resume idempotent (each
-        node-count decision point is reached once across the run's lifetime). No-op when
-        coverage_context is off, off-cadence, mid-eval, or already snapshotted at this node-count."""
-        n = len(state.nodes)
-        if (not self._coverage_context or not self._should_consult(state)
-                or self._already_covered_at(state, n)):
-            return state
-        self.store.append(EV_COVERAGE_SNAPSHOT, {
-            "at_node": n, **coverage_signal(state, resolution=self.archive_resolution)})
-        return fold(self.store.read_all())
-
+    # ------------------------------- strategist cadence (extracted to engine/strategy.py)
+    # The A7 strategist-consultation + coverage-snapshot cluster (`_strategy_core`,
+    # `_available_developers`, `_strategy_ctx`, `_coverage_for_ctx`, `_should_consult`,
+    # `_record_strategy`, `_ensure_surrogate`, `_apply_strategy`, `_already_covered_at`,
+    # `_maybe_snapshot_coverage`, `_maybe_consult_strategist`) lives in looplab/engine/strategy.py
+    # (StrategyCadenceMixin — inherited, zero call-site churn). `_op_span` STAYS here: it is a
+    # generic new-trace span helper shared by the research / hypothesis-merge / lessons clusters too.
     def _op_span(self, name: str, **attrs):
         """A named NEW-trace span for a sub-operation (strategist consult, hypothesis merge …) so the
         event appended inside it is auto-stamped with THIS op's trace_id (eventstore reads current_ids),
@@ -1210,63 +1023,6 @@ class Engine(ConfirmPhaseMixin, AblationMixin):
         import contextlib
         tr = getattr(self, "tracer", None)
         return tr.span(name, new_trace=True, **attrs) if tr is not None else contextlib.nullcontext()
-
-    def _maybe_consult_strategist(self, state: RunState) -> RunState:
-        """Operator/boss pin first (HITL parity), then the bounded-cadence Strategist consult.
-        Records a `strategy_decision` and re-folds only when the strategy actually changes.
-
-        An operator/boss `set_strategy` pin owns ONLY the fields it names (policy / policy_params /
-        fidelity); those stay in force for the rest of the run (until re-pinned), while the
-        autonomous Strategist keeps tuning everything else. The pin is MERGED onto the live strategy
-        (not reset to the bare pin) and re-asserted only when a pinned field actually drifts — that,
-        plus overlaying the pinned fields onto the Strategist's own decision below, is what stops the
-        pin and the Strategist from thrashing (the old "reset to bare pin on any divergence"
-        oscillated the policy every consult and dropped the Strategist's fidelity/operators)."""
-        pin = state.pending_strategy or {}
-        raw_pin = {k: pin[k] for k in ("policy", "policy_params", "fidelity")
-                   if pin.get(k) is not None}
-        consulting = self.strategist is not None and self._should_consult(state)
-        active_core = self._strategy_core(state.active_strategy)
-        # Cheap pre-check (no ctx/validate): a pin "drifts" if a raw pinned field differs from what's
-        # active. For an INVALID pin this is a false alarm (it can never become active), so we still
-        # validate below before acting on it.
-        pin_drift = bool(raw_pin) and any(active_core.get(k) != v for k, v in raw_pin.items())
-        if not pin_drift and not consulting:
-            return state
-        ctx = self._strategy_ctx(state)
-        # Validate the pin against the SAME whitelist the engine applies, keeping only the pinned
-        # fields that survive. The boss `strategy` action carries free-text policy/fidelity (server
-        # `_Action.policy/fidelity`, unvalidated), so an out-of-whitelist value would otherwise be
-        # overlaid RAW onto the recorded strategy below — diverging from the live policy that
-        # make_policy silently rejects — and, never matching active_strategy, re-assert (and starve
-        # the autonomous Strategist + spam the log) on every consult. Dropping it here makes an
-        # invalid pin a harmless no-op.
-        vpin = validate_strategy({**raw_pin, "source": "operator"}, ctx) if raw_pin else None
-        pin_fields = {k: vpin[k] for k in raw_pin if vpin and k in vpin}
-        # 1. Re-assert the pin only if a VALID pinned field isn't currently in force (merge onto active).
-        if pin_fields and any(active_core.get(k) != v for k, v in pin_fields.items()):
-            strat = validate_strategy({**(state.active_strategy or {}), **pin_fields,
-                                       "source": "operator"}, ctx)
-            if strat:
-                strat.setdefault("rationale", "operator-pinned strategy")
-                self._record_strategy(strat, state, ctx)
-                return fold(self.store.read_all())
-        # 2. Bounded-cadence Strategist consult — but the pin wins over it for the pinned fields.
-        # Its own trace (new_trace) so the strategy_decision event — appended INSIDE via _record_strategy
-        # — is stamped with THIS operation's trace_id (eventstore auto-stamps current_ids()), letting the
-        # UI show only the strategist's own reasoning trace under that event, not the whole node's trace.
-        if consulting:
-            # No node_id on the op span: stamping it would file the strategist's LLM generations under
-            # the NEXT node (id == len(nodes)) in /trace, polluting that node's Trace tab. The event still
-            # gets THIS span's trace_id (current_ids), which is how the UI scopes it via by_trace.
-            with self._op_span("strategist_consult"):
-                strat = validate_strategy(self.strategist.decide(state, ctx), ctx)
-                if strat:
-                    strat.update(pin_fields)   # pinned (validated) policy/fidelity are non-negotiable
-                    if self._strategy_core(strat) != self._strategy_core(state.active_strategy):
-                        self._record_strategy(strat, state, ctx)
-                        return fold(self.store.read_all())
-        return state
 
     # ---------------------------------------------------- research cadence (P2)
     def _maybe_deep_research(self, state: RunState) -> RunState:
@@ -1661,210 +1417,10 @@ class Engine(ConfirmPhaseMixin, AblationMixin):
         multiple and silently skip the whole window."""
         return every > 0 and n > 0 and n - last >= every
 
-    # -------------------------------------------------------- novelty gate (E1/T5)
-    @staticmethod
-    def _idea_text(idea) -> str:
-        """The semantic identity of a proposal: what it claims to try + why."""
-        return " ".join(filter(None, [getattr(idea, "rationale", "") or "",
-                                      getattr(idea, "hypothesis", "") or ""])).strip()
-
-    def _idea_vec(self, text: str):
-        # Key on the TEXT (not a node_id): the embedding is a pure function of the text, and a
-        # `node_reset` re-creates the SAME id with a NEW idea — a node_id-keyed cache then returned the
-        # OLD vector and the semantic-novelty gate compared future proposals against a stale idea. The
-        # cache is in-memory only (never persisted/replayed), so a per-process `hash(text)` key is safe.
-        key = hash(text)
-        v = self._idea_vecs.get(key)
-        if v is None:
-            v = self._embedder(text)
-            self._idea_vecs[key] = v
-        return v
-
-    def _semantic_duplicate(self, state: RunState, idea: Idea):
-        """T5: nearest existing node by idea-TEXT embedding similarity, or None. Only meaningful
-        for proposals with real text (LLM ideas); short/empty rationales (toy backends) skip."""
-        text = self._idea_text(idea)
-        if len(text) < 20:
-            return None, 0.0
-        from looplab.tools.vectorstore import _cosine
-        v = self._embedder(text)
-        best_n, best_s = None, 0.0
-        for n in state.nodes.values():
-            nt = self._idea_text(n.idea)
-            if len(nt) < 20:
-                continue
-            try:
-                s = _cosine(v, self._idea_vec(nt))
-            except Exception:  # noqa: BLE001 — an embedder hiccup must never block proposing
-                continue
-            if s > best_s:
-                best_n, best_s = n, s
-        if best_n is not None and best_s >= self._novelty_semantic_threshold:
-            return best_n, best_s
-        return None, best_s
-
-    def _llm_novelty_gate(self, state: RunState, idea: Idea, repropose=None) -> Idea:
-        """novelty_mode="llm": an LLM (not an embedding/param-distance heuristic) judges whether the
-        proposed idea near-duplicates an already-tried experiment — READING the real experiments via
-        tools when unsure — and, if it does and a `repropose` callable is given, asks the Researcher once
-        more for a meaningfully different idea (surfacing the duplicate's outcome). Loop-safe + best-
-        effort: any failure just returns the original idea. Emits the same `novelty_rejected` audit
-        event (kind="llm") the algorithmic gate does."""
-        if not state.nodes:
-            return idea
-        try:
-            client = self._reflect_client()
-        except Exception:  # noqa: BLE001
-            client = None
-        if client is None:
-            return idea
-        from pydantic import BaseModel
-        from looplab.agents.agent import agentic_struct, CompositeTools
-        from looplab.tools.run_tools import RunTools
-
-        class _NoveltyVerdict(BaseModel):
-            is_duplicate: bool = False
-            near_node_id: Optional[int] = None
-            reason: str = ""
-
-        brief = "; ".join(f"#{n.id} {n.operator}: {self._idea_text(n.idea)[:80]}"
-                          for n in list(state.nodes.values())[-25:])
-        msgs = [{"role": "system",
-                 "content": "You judge experiment NOVELTY for an ML research loop. Decide if a PROPOSED "
-                            "idea is a near-duplicate of an experiment already tried in THIS run. Read the "
-                            "actual experiments (read_experiment / read_code) when unsure. A rewording or a "
-                            "trivially-close variant of a tried idea is a DUPLICATE; a genuinely different "
-                            "approach, component, loss, data or direction is NOVEL. Prefer NOVEL unless "
-                            "clearly a repeat."},
-                {"role": "user",
-                 "content": f"PROPOSED idea: {self._idea_text(idea)}\n\nAlready tried: {brief}\n\n"
-                            "Emit is_duplicate, near_node_id (the tried experiment it duplicates, or null), "
-                            "and a one-line reason."}]
-        try:
-            rt = RunTools()
-            rt.bind_state(state, None)
-            v = agentic_struct(client, CompositeTools([rt]), msgs, _NoveltyVerdict,
-                               loop_opts={"max_turns": 12})
-        except Exception:  # noqa: BLE001
-            return idea
-        if not (v and getattr(v, "is_duplicate", False)
-                and isinstance(v.near_node_id, int) and v.near_node_id in state.nodes):
-            return idea
-        dup = state.nodes[v.near_node_id]
-        outcome = (f"it FAILED ({dup.error_reason})" if dup.status is NodeStatus.failed
-                   else f"it scored {dup.metric}")
-        self.store.append(EV_NOVELTY_REJECTED, {
-            # the PROSPECTIVE id this proposal would get — allocated as max+1, NOT len(): on a gapped
-            # log (a dropped/malformed node_created) len() points at the wrong slot (audit only).
-            "node_id": max(state.nodes, default=-1) + 1, "near_node": dup.id, "kind": "llm",
-            "reason": str(v.reason)[:200], "stance": self._novelty_stance,
-            "action": "reproposed" if callable(repropose) else "kept"})
-        if callable(repropose):
-            hint = (f"\nNOVELTY GATE (LLM): your proposal near-duplicates experiment #{dup.id} — "
-                    f"{outcome} ({str(v.reason)[:160]}). Propose something MEANINGFULLY DIFFERENT "
-                    "(another approach, component or direction), not a rewording.")
-            prev = getattr(self.researcher, "_novelty_feedback", "")
-            setattr(self.researcher, "_novelty_feedback", hint)
-            try:
-                idea2 = repropose()
-                if idea2 is not None:
-                    idea = idea2
-            except BudgetExceeded:
-                raise
-            except Exception:  # noqa: BLE001
-                pass
-            finally:
-                setattr(self.researcher, "_novelty_feedback", prev)
-        return idea
-
-    def _apply_novelty_gate(self, state: RunState, idea: Idea, repropose=None) -> Idea:
-        """E1+T5: novelty/dedup gate over fresh proposals, BEFORE any compute is spent.
-        Two layers:
-        (1) SEMANTIC (T5, ShinkaEvolve `novelty rejection before evaluation`): if the idea TEXT is a
-            near-duplicate of an existing node's, reject it — and when a `repropose` callable is
-            given, ask the Researcher ONCE more with the duplicate (and its outcome, especially a
-            FAILURE) surfaced, so the search learns "you already tried X, it scored Y because Z"
-            instead of paying another eval for the same idea.
-        (2) NUMERIC (E1 legacy): params within `novelty_epsilon` (normalized L2) of an existing
-            node are deterministically nudged off the duplicate.
-        Loop-safe (always returns a usable idea) and replay-safe (the final idea lands in
-        node_created; the gate is not re-run on replay). Runs when `novelty_gate` is on OR the
-        Strategist's novelty stance is "explore" (slice 5): the stance can engage a soft dedup +
-        one informed re-propose even when the static gate is off, so novelty pressure follows the
-        meta-controller. "balanced"/"exploit" (and gate off) leave this a no-op — exactly as before."""
-        mode = getattr(self, "_novelty_mode", "llm")
-        # "llm" -> an LLM adjudicates duplication by READING the real experiments (not an embedding/
-        # distance heuristic), then re-proposes if it's a dup.
-        if mode == "llm":
-            return self._llm_novelty_gate(state, idea, repropose)
-        # The deterministic "algo" gate below runs when mode is "algo" OR the Strategist's novelty stance
-        # is "explore" (the stance can engage a cheap soft dedup + one informed re-propose even when the
-        # mode is otherwise off). "off" without explore leaves this a no-op — the Researcher's own
-        # read-the-history judgment stands.
-        if not (mode == "algo" or self._novelty_stance == "explore"):
-            return idea
-        import random as _random
-
-        from looplab.events.digest import param_distance
-
-        if self._novelty_semantic:
-            dup, sim = self._semantic_duplicate(state, idea)
-            if dup is not None:
-                outcome = (f"it FAILED ({dup.error_reason}: {(dup.error or '')[:80]})"
-                           if dup.status is NodeStatus.failed
-                           else f"it scored {dup.metric}")
-                self.store.append(EV_NOVELTY_REJECTED, {
-                    # prospective id = max+1, not len() (gap-safe; audit only) — see the llm gate above.
-                    "node_id": max(state.nodes, default=-1) + 1, "near_node": dup.id, "kind": "semantic",
-                    "similarity": round(sim, 4), "stance": self._novelty_stance,
-                    "action": "reproposed" if callable(repropose) else "kept"})
-                if callable(repropose):
-                    hint = (f"\nNOVELTY GATE: your proposal is a near-duplicate of experiment "
-                            f"#{dup.id} ('{self._idea_text(dup.idea)[:160]}') — {outcome}. "
-                            "Propose something MEANINGFULLY DIFFERENT (another approach, "
-                            "component or direction), not a rewording.")
-                    prev = getattr(self.researcher, "_novelty_feedback", "")
-                    setattr(self.researcher, "_novelty_feedback", hint)
-                    try:
-                        idea2 = repropose()
-                        if idea2 is not None:
-                            idea = idea2
-                    except BudgetExceeded:      # the hard budget stop must end the run, not be swallowed
-                        raise
-                    except Exception:  # noqa: BLE001 — a repropose failure keeps the original idea
-                        pass
-                    finally:
-                        # ALWAYS restore, even if repropose() raised: otherwise this transient
-                        # "you are duplicating #N" directive leaks into EVERY later proposal in the
-                        # run — including drafts in unrelated regions — permanently mis-steering the
-                        # researcher away from a direction the operator never banned.
-                        setattr(self.researcher, "_novelty_feedback", prev)
-
-        params = {k: float(v) for k, v in idea.params.items() if isinstance(v, (int, float))}
-        if not params:
-            return idea
-
-        nearest, mind = None, float("inf")
-        for n in state.nodes.values():
-            d = param_distance(params, n.idea.params)
-            if d < mind:
-                mind, nearest = d, n.id
-        if mind >= self._novelty_epsilon:
-            return idea
-        nid = max(state.nodes, default=-1) + 1       # the PROSPECTIVE id (max+1, not len — gap-safe)
-        rng = _random.Random(nid * 1009 + 7)        # deterministic per node-slot
-        nudged = dict(idea.params)
-        for k in params:
-            scale = max(abs(params[k]), 1.0) * 0.1
-            nudged[k] = round(params[k] + rng.uniform(-1.0, 1.0) * scale, 4)
-        self.store.append(EV_NOVELTY_REJECTED, {
-            "node_id": nid, "near_node": nearest, "distance": round(mind, 4),
-            "stance": self._novelty_stance,
-            "original": idea.params, "nudged": nudged})
-        out = idea.model_copy()
-        out.params = nudged
-        out.rationale = (idea.rationale + " [novelty-gate: nudged off a near-duplicate]").strip()
-        return out
+    # -------------------------------------------------- novelty gate (extracted to engine/novelty.py)
+    # The E1/T5 novelty/dedup gate cluster (`_idea_text`, `_idea_vec`, `_semantic_duplicate`,
+    # `_llm_novelty_gate`, `_apply_novelty_gate`) lives in looplab/engine/novelty.py
+    # (NoveltyGateMixin — inherited, zero call-site churn).
 
     # ------------------------------------------------------------- node creation
     def _ensemble_idea(self, parents) -> Idea:

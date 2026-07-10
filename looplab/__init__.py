@@ -100,6 +100,7 @@ _LAYOUT = {
     "mlflow_export": "events",
     "models": "core",
     "notebook": "runtime",
+    "novelty": "engine",
     "operators": "search",
     "options": "engine",
     "orchestrator": "engine",
@@ -135,6 +136,7 @@ _LAYOUT = {
     "signal_delivery": "engine",   # §1 signal-delivery registry (docs/14-agent-framework-mega-review)
     "skills": "tools",
     "strategist": "agents",
+    "strategy": "engine",   # engine strategist-cadence mixin ("strategist" is taken by agents/strategist.py)
     "stuck": "agents",
     "surrogate": "search",
     "tasks": "adapters",
