@@ -198,21 +198,32 @@ def test_every_researcher_wrapper_forwards_hints():
     from pathlib import Path
 
     pkg = Path(__file__).resolve().parents[1] / "looplab"
+
+    def _delegates_propose(fn) -> bool:
+        # ANY `self.<attr>.propose(...)` / `self.<attr>().propose(...)` call — handle-name
+        # agnostic, so a future wrapper spelling its wrapped agent `self._base`/`self.role`/…
+        # is covered the day it is written (the needle-list version was not).
+        for node in ast.walk(fn):
+            if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                    and node.func.attr == "propose"):
+                inner = node.func.value
+                while isinstance(inner, (ast.Attribute, ast.Call)):
+                    inner = inner.func if isinstance(inner, ast.Call) else inner.value
+                if isinstance(inner, ast.Name) and inner.id == "self":
+                    return True
+        return False
+
     offenders = []
     for f in pkg.rglob("*.py"):
         # utf-8-sig: several tracked files carry a BOM, which plain utf-8 turns into a SyntaxError
         tree = ast.parse(f.read_text(encoding="utf-8-sig", errors="replace"))
         for cls in [n for n in ast.walk(tree) if isinstance(n, ast.ClassDef)]:
-            methods = {m.name: m for m in cls.body if isinstance(m, ast.FunctionDef)}
+            methods = {m.name: m for m in cls.body
+                       if isinstance(m, (ast.FunctionDef, ast.AsyncFunctionDef))}
             if "propose" not in methods:
                 continue
-            src = ast.unparse(methods["propose"])
-            # a WRAPPER's propose delegates to a wrapped researcher handle:
-            delegates = any(h in src for h in
-                            ("self.base.propose(", "self.fallback.propose(",
-                             "self.inner.propose(", "self.researcher.propose(",
-                             "self._wrapped.propose("))
-            if delegates and "forward_hints(" not in src:
+            if (_delegates_propose(methods["propose"])
+                    and "forward_hints(" not in ast.unparse(methods["propose"])):
                 offenders.append(f"{f.relative_to(pkg)}::{cls.name}")
     assert not offenders, (
         f"researcher wrapper(s) {offenders} delegate propose() WITHOUT forward_hints — engine "

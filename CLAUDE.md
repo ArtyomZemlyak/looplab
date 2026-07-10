@@ -56,8 +56,11 @@ in its inline `<script>`); edit the data, not hand-placed SVG.
 ## Engine invariants (violating these breaks replay/resume)
 
 1. **The engine is the sole writer of domain events.** Background tasks return values; only the
-   main task appends. UI/CLI append only *control intents* (allow-listed in
-   `serve/protocol.py::CONTROL_EVENTS`, enforced by `serve/routers/control.py`).
+   main task appends — with ONE typed exception: the concurrent-research task may append the
+   selection-neutral types in `events/types.py::BACKGROUND_APPENDABLE` (asserted at the append
+   sites; `tests/test_background_appendable.py` proves splice-position neutrality). UI/CLI append
+   only *control intents* (allow-listed in `serve/protocol.py::CONTROL_EVENTS`, enforced by
+   `serve/routers/control.py`).
 2. **Exactly one terminal event per node** (`node_evaluated` | `node_failed`). The fold is
    idempotent on duplicate terminals (first terminal wins).
 3. **Every side effect must be gated on a domain event** so resume-by-replay is idempotent
@@ -85,10 +88,13 @@ in its inline `<script>`); edit the data, not hand-placed SVG.
 - **Prompt strings are contracts.** Changes to prompt text alter agent behavior — never "clean up"
   prompt wording as part of a refactor. Several prompts are routed through the PromptStore
   (`render(prompts, key, default)`); grep for `render(` to find overridable prompts.
-- **Duck-typed seams**: the engine reads optional attributes off tasks/roles (`assets()`,
-  `last_files`, `choose_action`, hint attrs listed in `agents/roles.py::RESEARCHER_HINT_ATTRS`).
-  The TaskAdapter hooks are documented in `adapters/tasks.py`. Renames here break the engine
-  silently — grep both sides before renaming any such attribute. Note `search/foresight.py`'s
+- **Duck-typed seams are REGISTRY-GUARDED** — a rename that used to break silently is now a red
+  test. The registries (each with a two-way source-scan test): TaskAdapter hooks
+  `adapters/tasks.py::TASK_OPTIONAL_HOOKS`; role outputs `agents/roles.py::DEVELOPER_OUTPUT_ATTRS`
+  / `RESEARCHER_ACTION_ATTRS`; hint attrs `agents/roles.py::RESEARCHER_HINT_ATTRS`; prompt keys
+  `core/prompts.py::PROMPT_KEYS`; delivered signals `engine/signal_delivery.py::SIGNALS`;
+  background-appendable events `events/types.py::BACKGROUND_APPENDABLE`. Adding/renaming any such
+  seam means updating the registry in the SAME change. Note `search/foresight.py`'s
   panel is a `__getattr__` proxy over the wrapped agent: a typo'd read silently resolves to the
   base object, and an attribute SET on the panel shadows reads *through the panel* but does NOT
   reach the base's own `self.<attr>` reads until `forward_hints` mirrors it — set hints on the

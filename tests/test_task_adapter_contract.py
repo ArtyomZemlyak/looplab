@@ -24,13 +24,18 @@ _CONSUMER_FILES = [
     _PKG / "cli.py",
     _PKG / "adapters" / "tasks.py",
     _PKG / "adapters" / "repo_task.py",
+    _PKG / "adapters" / "repo_developer.py",
     _PKG / "tools" / "run_tools.py",
     _PKG / "core" / "hardware.py",
     _PKG / "runtime" / "command_eval.py",
 ]
 
 _REQUIRED = {"id", "goal", "direction", "build_roles"}
-_PROBE = re.compile(r'getattr\((?:self\.)?task,\s*"([a-z_]+)"')
+# Plain DATA FIELDS of the composable task model (not optional behaviour hooks): probed by the
+# lessons fingerprinting with defaults for legacy snapshots — legitimate reads, not hook seams.
+_DATA_FIELDS = {"kind", "metric", "goal"}
+# `(?:self\.)?(?:_e\.)?` covers the engine-delegate spelling `self._e.task` (lessons mixins).
+_PROBE = re.compile(r'getattr\((?:self\.)?(?:_e\.)?task,\s*"([a-z_]+)"')
 
 
 def _all_probes() -> dict[str, set[str]]:
@@ -45,7 +50,7 @@ def _all_probes() -> dict[str, set[str]]:
 
 def test_every_task_probe_names_a_registered_hook():
     unknown = {n: fs for n, fs in _all_probes().items()
-               if n not in TASK_OPTIONAL_HOOKS and n not in _REQUIRED}
+               if n not in TASK_OPTIONAL_HOOKS and n not in _REQUIRED and n not in _DATA_FIELDS}
     assert not unknown, (
         f"getattr(task, ...) probes for unregistered hook(s) {unknown} — either a typo'd probe "
         "(silently returns None forever) or a new hook missing from "

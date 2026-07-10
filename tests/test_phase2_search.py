@@ -194,7 +194,9 @@ def test_semantic_duplicate_detected_and_reproposed(tmp_path):
 
 
 def test_semantic_gate_skips_short_toy_rationales(tmp_path):
-    eng = _mk_engine(tmp_path)
+    # explicit: this test exercises the semantic gate's short-rationale skip (see the
+    # sibling above for the default-flip rationale)
+    eng = _mk_engine(tmp_path, novelty_semantic=True)
     st = RunState(direction="max")
     st.nodes = {0: _node(0, metric=0.4, rationale="x")}
     idea = Idea(operator="improve", params={"x": 99.0}, rationale="y")

@@ -94,7 +94,9 @@ class ResearchCadenceMixin:
     # exception to engine invariant #1 ("only the main task appends"). The assertions make a
     # future selection-affecting append here fail fast instead of racing the event order.
     def _record_deep_research(self, memo, *, trigger: str, manual: bool) -> None:
-        """Append the memo to the event log (engine = sole writer; called only from the main task)."""
+        """Append the memo to the event log. Called from BOTH the main-task cadence AND the
+        concurrent research task — see the note above; every append here must stay in
+        BACKGROUND_APPENDABLE."""
         memo_d = memo.model_dump(mode="json")
         # D8 · decoupled Verifier: check the memo's claims against their CITED evidence before the
         # memo is recorded — synthesis is the documented weak link (Kosmos: 57.9% accurate).

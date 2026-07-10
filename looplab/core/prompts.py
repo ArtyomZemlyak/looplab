@@ -47,8 +47,11 @@ PROMPT_KEYS: tuple[str, ...] = (
     "repo_developer_system_intro", "repo_developer_system_body",
     "strategist_system", "tool_strategist_system",
     "pilot_system", "triage_system",
-    "deep_research_system", "foresight_system", "merge_system",
+    "deep_research_system", "foresight_system", "merge_system", "bestofn_judge_system",
 )
+# NOT registered (documented exclusion): the LLMOnboarder's system prompt
+# (adapters/repo_developer.py::_SYS) — the onboarder is built pre-run via task.make_onboarder()
+# with no PromptStore handle wired; route it through render() when that wiring exists.
 
 
 def render(store: Optional[PromptStore], name: str, default: str, **vars) -> str:

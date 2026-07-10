@@ -73,7 +73,10 @@ class TaskAdapter(Protocol):
 # the historical "the run silently stages/scores nothing" failure — is now a test failure.
 TASK_OPTIONAL_HOOKS: tuple[str, ...] = (
     "llm_roles", "assets", "columns", "leakage_inputs", "host_grader", "data_samples",
-    "repo_spec", "agent_brief", "eval_spec", "make_onboarder", "params")
+    "repo_spec", "agent_brief", "eval_spec", "make_onboarder", "params",
+    # RepoTask-specific field probed by the repo Developer's onboarding flow
+    # (adapters/repo_developer.py) — registered so a one-sided rename goes red like any hook.
+    "onboard_command")
 
 
 _KINDS = {"quadratic": ToyTask, "regression": RegressionTask,

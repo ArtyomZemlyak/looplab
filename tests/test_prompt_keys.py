@@ -13,7 +13,9 @@ from pathlib import Path
 from looplab.core.prompts import PROMPT_KEYS
 
 _PKG = Path(__file__).resolve().parents[1] / "looplab"
-_CALL = re.compile(r'render\([^,\n]+,\s*"([a-z_]+)"')
+# \s* after the paren crosses newlines: best_of_n spells `render(\n    prompts, "key", …)` —
+# the original same-line-only pattern was blind to it (the P4 review's own HIGH finding).
+_CALL = re.compile(r'render\(\s*[\w.]+\s*,\s*"([a-z_]+)"')
 
 
 def _call_keys() -> dict[str, set[str]]:

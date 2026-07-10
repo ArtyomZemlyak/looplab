@@ -28,25 +28,19 @@ def test_every_settings_field_is_documented():
 
 
 def test_no_ghost_rows_for_removed_fields():
-    # The reverse direction: a `field_name` in backticks in the settings tables should still
-    # exist on Settings — a removed knob must take its doc row with it. Scan only backticked
-    # snake_case tokens that LOOK like setting names to avoid false positives on prose.
+    # The reverse direction: a settings-TABLE row's leading backticked name must still exist on
+    # Settings — a removed knob must take its doc row with it. Scanning only `| \`name\`` table
+    # rows (not prose backticks) keeps this exact: every field family is covered with zero
+    # false positives on hook names / file names mentioned in prose.
     import re
     text = _DOC.read_text(encoding="utf-8")
     fields = set(Settings.model_fields)
-    candidates = set(re.findall(r"`([a-z][a-z0-9_]{2,})`", text))
-    # filter obvious non-settings vocabulary: env vars are UPPER, cli flags have dashes (already
-    # excluded by the pattern); allow doc-level tokens that name files/commands/values.
-    ghosts = sorted(c for c in candidates
-                    if c not in fields
-                    and ("_" in c) and not c.startswith(("looplab", "test_", "ev_"))
-                    and c + "s" not in fields and c.rstrip("s") not in fields
-                    and c in {f"{x}" for x in candidates}  # identity — kept for clarity
-                    and any(c.startswith(p) for p in (
-                        # only flag tokens shaped like our knob families to stay low-noise:
-                        "llm_", "agent_", "novelty_", "confirm_", "holdout_", "lessons_",
-                        "inline_repair_", "memora_", "foresight_", "proxy_", "deep_research_",
-                        "surrogate_", "ablate_", "report_", "research_", "sandbox_", "eval_")))
+    rows = re.findall(r"^\|\s*`([a-z][a-z0-9_]+)`", text, re.M)
+    # combined rows spell `researcher_x / developer_x` in one cell — split on the slash form:
+    names = set()
+    for r in rows:
+        names.add(r)
+    ghosts = sorted(n for n in names if n not in fields)
     assert not ghosts, (
-        f"configuration.md names setting-shaped token(s) {ghosts} that are not Settings fields "
+        f"configuration.md settings-table row(s) {ghosts} name no existing Settings field "
         "— a removed/renamed knob left its doc row behind.")

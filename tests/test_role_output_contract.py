@@ -75,5 +75,14 @@ def test_foresight_panel_forwards_the_registry_attrs():
 
     panel = ForesightPanelResearcher.__new__(ForesightPanelResearcher)
     panel.__dict__["base"] = _Base()
-    for attr in ("last_files", "last_deleted", "choose_action"):
-        assert getattr(panel, attr) is getattr(panel.base, attr) or callable(getattr(panel, attr))
+    # Registry-driven + identity-asserted (no `or callable` escape hatch): the __getattr__
+    # proxy must return the BASE's object for every registered attr it doesn't define itself.
+    for attr in (*DEVELOPER_OUTPUT_ATTRS, *RESEARCHER_ACTION_ATTRS):
+        setattr(_Base, attr, getattr(_Base, attr, object()))
+        # `==`, not `is`: a bound method is re-created per getattr; equality means same
+        # function + same instance, which IS the delegation guarantee we're asserting.
+        assert getattr(panel, attr) == getattr(panel.base, attr), attr
+    # NOTE (documented reality, not enforced): SurrogateResearcher/PanelResearcher deliberately
+    # do NOT proxy `choose_action` — the surrogate IS the chooser in its regime, so the pilot
+    # reverting to the static policy behind those wrappers is by design (surrogate.py's
+    # per-attr-properties rationale). Changing that is a behavior decision, not a rename guard.

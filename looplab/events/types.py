@@ -151,7 +151,9 @@ ALL_EVENT_TYPES: frozenset[str] = frozenset(
 # append. Membership requires BOTH properties, and `tests/test_background_appendable.py` proves
 # them: (a) SELECTION-NEUTRAL — the fold never reads the event for node selection, so a
 # thread-schedule-dependent position in events.jsonl cannot change which node wins; (b) the fold
-# handles it ORDER-TOLERANTLY (counters/sidecars only). `research_cadence._record_deep_research`
+# handles it ORDER-TOLERANTLY. (EV_HINT does mutate `pending_hints`, so a background hint racing
+# an operator `replace` hint can change which STEERING text survives a resume — accepted:
+# steering is transient advice; selection is what replay must pin.) `research_cadence._record_deep_research`
 # asserts its appends against this set, so a future selection-affecting append from the
 # concurrent-research task is an AssertionError in every test that exercises it, not a
 # nondeterministic replay.
