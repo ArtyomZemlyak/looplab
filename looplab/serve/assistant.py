@@ -206,8 +206,10 @@ def system_prompt(mode: str, *, repo_root: Path = REPO_ROOT, knowledge_dir: str 
         + ("" if mode == "plan" else
            "You can also drive a run's LIFECYCLE directly: finalize_run (stop + wrap-up: report, "
            "lessons, cost), stop_run (freeze, no wrap-up), resume_run, reset_node (re-run a node in "
-           "place from a stage), and the DESTRUCTIVE delete_node / delete_run — each is gated by your "
-           "mode and may raise a confirm card.\n")
+           "place from a stage), and the DESTRUCTIVE delete_node / delete_run. And you can adjust a "
+           "LIVE run's settings: extend_budget (more nodes/time — REOPENS a finished run so the budget "
+           "is used), set_directive (a standing steer for the agents, e.g. 'use only sklearn'), and "
+           "set_trust_gate (audit/gate/block). Each is gated by your mode and may raise a confirm card.\n")
         + "When the user wants to START a new autonomous-ML run, call `propose_run` with a run name + an "
         "inline COMPOSABLE `task` (goal + direction + the fields you have: repo / dataset / cmd / "
         "kaggle — there is NO `kind` field, the engine infers the task from what you describe) or a "

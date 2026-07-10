@@ -88,3 +88,67 @@ def test_delete_refuses_fresh_write_even_when_flock_says_dead(tmp_path):
     t = RunControlTools(tmp_path, alive_fn=lambda _rd: False, mode="auto")   # flock lies: "dead"
     assert "LIVE" in t.execute("delete_node", {"run_id": "r5", "node_id": 1})
     assert not (tmp_path / "r5" / "events.jsonl.bak-del1").exists()          # never rewrote the log
+
+
+# --- live settings tools (the assistant CAN change certain run settings) --------------------------
+
+def _tools(tmp_path):
+    return RunControlTools(tmp_path, alive_fn=lambda _rd: False, mode="auto")
+
+
+def test_extend_budget_appends_budget_extend(tmp_path):
+    rd = tmp_path / "b1"
+    _run(rd)
+    out = _tools(tmp_path).execute("extend_budget", {"run_id": "b1", "add_nodes": 5,
+                                                     "max_eval_seconds": 1200})
+    assert "budget extended" in out
+    st = fold(EventStore(rd / "events.jsonl").read_all())
+    assert st.budget_overrides.get("add_nodes") == 5
+    assert st.budget_overrides.get("max_eval_seconds") == 1200.0
+
+
+def test_extend_budget_reopens_a_finished_run(tmp_path):
+    rd = tmp_path / "b2"
+    _run(rd).append("run_finished", {})
+    assert fold(EventStore(rd / "events.jsonl").read_all()).finished is True
+    out = _tools(tmp_path).execute("extend_budget", {"run_id": "b2", "add_nodes": 3})
+    assert "reopened the finished run" in out
+    types = [e.type for e in EventStore(rd / "events.jsonl").read_all()]
+    assert "run_reopened" in types and "budget_extend" in types
+    st = fold(EventStore(rd / "events.jsonl").read_all())
+    assert st.finished is False and st.budget_overrides.get("add_nodes") == 3
+
+
+def test_extend_budget_rejects_nonfinite_and_empty(tmp_path):
+    _run(tmp_path / "b3")
+    t = _tools(tmp_path)
+    assert "finite" in t.execute("extend_budget", {"run_id": "b3", "max_seconds": float("inf")})
+    assert "at least one" in t.execute("extend_budget", {"run_id": "b3"})
+
+
+def test_set_directive_appends_hint(tmp_path):
+    rd = tmp_path / "d1"
+    _run(rd)
+    out = _tools(tmp_path).execute("set_directive", {"run_id": "d1", "text": "use only sklearn"})
+    assert "directive recorded" in out
+    st = fold(EventStore(rd / "events.jsonl").read_all())
+    assert st.pending_hints and st.pending_hints[-1]["text"] == "use only sklearn"
+
+
+def test_set_trust_gate_applies(tmp_path):
+    rd = tmp_path / "g1"
+    _run(rd)
+    t = _tools(tmp_path)
+    assert "must be audit" in t.execute("set_trust_gate", {"run_id": "g1", "trust_gate": "nonsense"})
+    out = t.execute("set_trust_gate", {"run_id": "g1", "trust_gate": "block"})
+    assert "trust_gate set to block" in out
+    assert fold(EventStore(rd / "events.jsonl").read_all()).trust_gate == "block"
+
+
+def test_settings_tools_denied_in_plan_mode(tmp_path):
+    _run(tmp_path / "p1")
+    t = RunControlTools(tmp_path, mode="plan")
+    for name, args in (("extend_budget", {"run_id": "p1", "add_nodes": 1}),
+                       ("set_directive", {"run_id": "p1", "text": "x"}),
+                       ("set_trust_gate", {"run_id": "p1", "trust_gate": "gate"})):
+        assert "plan mode" in t.execute(name, args)

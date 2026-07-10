@@ -443,6 +443,30 @@ class RunControlTools:
                 "DELETE an entire run and all its artifacts. DESTRUCTIVE + irreversible. Refuses while "
                 "the engine is live — stop the run first.",
                 {"run_id": {"type": "string"}}, ["run_id"]),
+            fn_spec("extend_budget",
+                "Give a run MORE budget (and REOPEN it if it already finished, so the new budget is "
+                "actually used). Set any of: add_nodes (N more experiment nodes), max_seconds (new "
+                "wall-clock ceiling), max_eval_seconds (new cumulative-eval ceiling). Takes effect "
+                "while the engine runs; if none is attached, start it from the UI Resume.",
+                {"run_id": {"type": "string"},
+                 "add_nodes": {"type": "integer", "description": "additive: N more experiment nodes"},
+                 "max_seconds": {"type": "number", "description": "new whole-run wall-clock ceiling (s)"},
+                 "max_eval_seconds": {"type": "number", "description": "new cumulative in-eval ceiling (s)"}},
+                ["run_id"]),
+            fn_spec("set_directive",
+                "Give the run's agents a standing DIRECTIVE that steers the next proposals + code "
+                "(e.g. 'use only sklearn', 'prefer lighter models', 'stop trying deep nets'). "
+                "replace=true rewrites the single directive instead of accumulating.",
+                {"run_id": {"type": "string"}, "text": {"type": "string"},
+                 "replace": {"type": "boolean", "description": "replace all prior directives (default: append)"}},
+                ["run_id", "text"]),
+            fn_spec("set_trust_gate",
+                "Change what a reward-hack / leakage flag does to the run: audit (surface only) · "
+                "gate (a flagged node can't win and isn't bred from) · block (also fully infeasible). "
+                "Applies immediately (last-write-wins) on the next fold.",
+                {"run_id": {"type": "string"},
+                 "trust_gate": {"type": "string", "enum": ["audit", "gate", "block"]}},
+                ["run_id", "trust_gate"]),
         ]
 
     # ------------------------------------------------------------------ helpers
@@ -504,6 +528,8 @@ class RunControlTools:
                 return self._control(name, rid, rd)
             if name == "reset_node":
                 return self._reset_node(rid, rd, args)
+            if name in ("extend_budget", "set_directive", "set_trust_gate"):
+                return self._settings(name, rid, rd, args)
             if name == "delete_node":
                 return self._delete_node(rid, rd, args)
             if name == "delete_run":
@@ -527,6 +553,63 @@ class RunControlTools:
         tail = (" — takes effect while the engine is running; if it isn't, start it from the UI."
                 if name != "resume_run" else " — start it from the UI Resume if no engine is attached.")
         return f"({name.split('_')[0]} recorded for {rid}{tail})"
+
+    def _settings(self, name: str, rid: str, rd: Path, args: dict) -> str:
+        """Change an allow-listed LIVE run setting by appending the matching control/config event the UI
+        writes (budget extension, a standing directive, or the trust gate). Gated exactly like the other
+        mutations. The engine reads these on its next loop fold; a settled run needs a UI Resume to
+        re-attach an engine (same caveat as resume_run)."""
+        import math
+        from looplab.events.eventstore import EventStore
+        from looplab.events.replay import fold
+        from looplab.events.types import (EV_BUDGET_EXTEND, EV_HINT, EV_RUN_REOPENED,
+                                          EV_TRUST_GATE_CHANGED)
+        store = EventStore(rd / "events.jsonl")
+        if name == "extend_budget":
+            data: dict = {}
+            for k in ("add_nodes", "max_seconds", "max_eval_seconds"):
+                v = args.get(k)
+                if v is None:
+                    continue
+                try:
+                    data[k] = int(v) if k == "add_nodes" else float(v)
+                except (TypeError, ValueError):
+                    return f"({k} must be a number)"
+                if k != "add_nodes" and not math.isfinite(data[k]):
+                    return f"({k} must be a finite number — nan/inf would disable the budget)"
+            if not data:
+                return "(extend_budget needs at least one of add_nodes / max_seconds / max_eval_seconds)"
+            blocked = self._gate(name, rid, f"extend budget of {rid}: {data}")
+            if blocked:
+                return blocked
+            # REOPEN a finished run FIRST, else the added budget re-finishes on the spot (`finished`
+            # stays set). EV_RUN_REOPENED folds like RESUME (clears finished/paused); a no-op if live.
+            reopened = ""
+            if fold(store.read_all()).finished:
+                store.append(EV_RUN_REOPENED, {})
+                reopened = " (reopened the finished run)"
+            store.append(EV_BUDGET_EXTEND, data)
+            return (f"(budget extended for {rid}: {data}{reopened} — takes effect while the engine "
+                    "runs; if none is attached, start it from the UI Resume.)")
+        if name == "set_directive":
+            text = " ".join(str(args.get("text") or "").split())
+            if not text:
+                return "(set_directive needs a non-empty text)"
+            blocked = self._gate(name, rid, f"directive for {rid}: {text[:60]}")
+            if blocked:
+                return blocked
+            store.append(EV_HINT, {"text": text, "replace": bool(args.get("replace"))})
+            return f"(directive recorded for {rid}: {text[:80]!r})"
+        if name == "set_trust_gate":
+            tg = str(args.get("trust_gate") or "").strip().lower()
+            if tg not in ("audit", "gate", "block"):
+                return "(trust_gate must be audit | gate | block)"
+            blocked = self._gate(name, rid, f"set trust_gate={tg} for {rid}")
+            if blocked:
+                return blocked
+            store.append(EV_TRUST_GATE_CHANGED, {"trust_gate": tg})
+            return f"(trust_gate set to {tg} for {rid})"
+        return f"(unknown settings tool: {name})"
 
     def _reset_node(self, rid: str, rd: Path, args: dict) -> str:
         from looplab.events.eventstore import EventStore
