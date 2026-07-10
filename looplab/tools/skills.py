@@ -36,19 +36,27 @@ def _parse_skill(path: Path) -> Skill:
 
 
 class SkillLibrary:
-    def __init__(self, skills_dir: str):
-        self.dir = Path(skills_dir)
+    def __init__(self, skills_dir):
+        # Accept one dir (str/Path) OR several (list/tuple): hand-written and M4 auto-distilled skills
+        # live in different dirs but must share ONE library — two separate SkillTools providers both
+        # register list_skills/use_skill and the second shadows the first (the hand-written one becomes
+        # unreachable). A single library over both dirs makes every skill visible. Earlier dirs win on
+        # a name clash (hand-written overrides an auto-distilled skill of the same name).
+        dirs = [skills_dir] if isinstance(skills_dir, (str, Path)) else list(skills_dir or [])
+        self.dirs = [Path(d) for d in dirs]
+        self.dir = self.dirs[0] if self.dirs else Path(".")   # back-compat single-dir accessor
         self.skills: dict[str, Skill] = {}
-        paths = list(self.dir.glob("**/SKILL.md")) + list(self.dir.glob("*.md"))
-        for p in sorted(set(paths)):
-            s = _parse_skill(p)
-            self.skills[s.name] = s
+        for d in reversed(self.dirs):     # reversed so an EARLIER dir's skill overwrites (wins)
+            paths = list(d.glob("**/SKILL.md")) + list(d.glob("*.md"))
+            for p in sorted(set(paths)):
+                s = _parse_skill(p)
+                self.skills[s.name] = s
 
 
 class SkillTools:
     """Tool provider for the agentic Researcher: list_skills / use_skill."""
 
-    def __init__(self, skills_dir: str):
+    def __init__(self, skills_dir):
         self.lib = SkillLibrary(skills_dir)
 
     def specs(self) -> list[dict]:
@@ -66,10 +74,16 @@ class SkillTools:
         ]
 
     def execute(self, name: str, args: dict) -> str:
-        if name == "list_skills":
-            return "\n".join(f"{s.name}: {s.description}"
-                             for s in self.lib.skills.values()) or "(no skills)"
-        if name == "use_skill":
-            s = self.lib.skills.get(args.get("name", ""))
-            return s.body if s else f"(no such skill: {args.get('name')})"
-        return f"(unknown tool: {name})"
+        # ToolProvider contract: never raise (a junk arg — e.g. an unhashable `name` — must read as a
+        # tool error, not propagate out of the agent loop and discard the phase).
+        try:
+            args = args or {}
+            if name == "list_skills":
+                return "\n".join(f"{s.name}: {s.description}"
+                                 for s in self.lib.skills.values()) or "(no skills)"
+            if name == "use_skill":
+                s = self.lib.skills.get(str(args.get("name", "")))
+                return s.body if s else f"(no such skill: {args.get('name')})"
+            return f"(unknown tool: {name})"
+        except Exception as e:  # noqa: BLE001
+            return f"(tool error: {e})"

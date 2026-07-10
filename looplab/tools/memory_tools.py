@@ -70,11 +70,23 @@ class MemoryTools:
         return out
 
     def execute(self, name: str, args: dict) -> str:
+        # ToolProvider contract (_base.py): execute NEVER raises — a junk arg from a small model
+        # (e.g. limit="ten") must read as a tool error, not propagate out of drive_tool_loop (which
+        # doesn't guard tools.execute) and discard the whole agent phase.
+        try:
+            return self._execute(name, args)
+        except Exception as e:  # noqa: BLE001
+            return f"(tool error: {e})"
+
+    def _execute(self, name: str, args: dict) -> str:
         if not self.dir:
             return "(no cross-run memory configured)"
         args = args or {}
         q = str(args.get("query") or "")
-        lim = max(1, int(args.get("limit") or 6))
+        try:
+            lim = max(1, int(args.get("limit") or 6))
+        except (TypeError, ValueError):
+            lim = 6
         qt = _toks(q)
         if name == "search_lessons":
             rows = self._load("lessons.jsonl")

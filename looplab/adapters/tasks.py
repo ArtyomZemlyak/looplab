@@ -442,16 +442,19 @@ def _shared_providers(task: TaskAdapter, settings, run_dir=None, *, core_only: b
     if getattr(settings, "memory_dir", None):              # agentic pull of lessons + meta-notes (else injection-only)
         from looplab.tools.memory_tools import MemoryTools
         providers.append(MemoryTools(settings.memory_dir))
+    # Skills: hand-written (skills_dir) + M4 auto-distilled (<memory_dir>/skills) in ONE SkillTools
+    # over BOTH dirs — two separate providers would each register list_skills/use_skill and the second
+    # shadows the first (the hand-written library becomes unreachable). Hand-written wins a name clash.
+    _skill_dirs: list[str] = []
     if getattr(settings, "skills_dir", None):
-        from looplab.tools.skills import SkillTools
-        providers.append(SkillTools(settings.skills_dir))
-    # M4 auto-distilled skills: techniques distilled from prior winning runs live under
-    # <memory_dir>/skills (provenance: auto). Loaded alongside any hand-written skills_dir.
+        _skill_dirs.append(str(settings.skills_dir))
     if getattr(settings, "memory_dir", None):
         _auto = Path(settings.memory_dir) / "skills"
         if _auto.is_dir():
-            from looplab.tools.skills import SkillTools
-            providers.append(SkillTools(str(_auto)))
+            _skill_dirs.append(str(_auto))
+    if _skill_dirs:
+        from looplab.tools.skills import SkillTools
+        providers.append(SkillTools(_skill_dirs))
     if getattr(settings, "literature_search", False):       # E3 arXiv grounding (network-optional)
         from looplab.tools.literature import LiteratureTools
         providers.append(LiteratureTools(enabled=True))

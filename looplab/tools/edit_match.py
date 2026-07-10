@@ -43,12 +43,18 @@ def apply_search_replace(current: str, search: str, replace: str,
             #                                     swallow the next real line)
             cur_lines = cur.splitlines(keepends=True)
             tail = "".join(cur_lines[pre_lines + s_len:])
-            last_had_nl = cur_lines[pre_lines + s_len - 1].endswith("\n")
-            rep = replace
-            if rep and last_had_nl and not rep.endswith("\n"):
-                rep += "\n"                     # keep the file's line structure
-            elif rep and not last_had_nl and rep.endswith("\n"):
-                rep = rep[:-1]                  # match-at-EOF without trailing newline: keep it so
+            # Preserve the file's line endings: `cur_lines` (keepends) carry the real EOL, but `rep`
+            # arrives from the agent as LF. Splicing an LF `rep` into a CRLF file leaves MIXED endings
+            # (later exact-match edits + `git apply` then mis-match). Normalize `rep` to the matched
+            # span's EOL before splicing.
+            _last = cur_lines[pre_lines + s_len - 1]
+            eol = "\r\n" if _last.endswith("\r\n") else "\n"
+            last_had_nl = _last.endswith("\n")   # (\r\n also ends with \n)
+            rep = replace.replace("\r\n", "\n").replace("\n", eol) if eol != "\n" else replace
+            if rep and last_had_nl and not rep.endswith(eol):
+                rep += eol                      # keep the file's line structure
+            elif rep and not last_had_nl and rep.endswith(eol):
+                rep = rep[:-len(eol)]           # match-at-EOF without trailing newline: keep it so
             # empty `replace` = deletion of the matched lines; no stray blank line
             new = "".join(cur_lines[:pre_lines]) + rep + tail
             return new, f"edited {p} (whitespace-tolerant match, 1 hunk applied)"

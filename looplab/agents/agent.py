@@ -50,12 +50,21 @@ class CompositeTools:
     def __init__(self, providers: list):
         self.providers = providers
         self._route: dict[str, object] = {}
+        # De-dup by function name (FIRST provider wins): two providers registering the same tool name
+        # otherwise (a) sent DUPLICATE specs to the endpoint — some OpenAI-compatible backends 400 on
+        # that — and (b) routed execute() last-wins, silently shadowing the first provider. Dedup makes
+        # the toolset well-formed and the shadowing deterministic (and surfaceable).
+        self._specs: list[dict] = []
         for p in providers:
             for spec in p.specs():
-                self._route[spec["function"]["name"]] = p
+                fname = (spec.get("function") or {}).get("name")
+                if not fname or fname in self._route:
+                    continue
+                self._route[fname] = p
+                self._specs.append(spec)
 
     def specs(self) -> list[dict]:
-        return [s for p in self.providers for s in p.specs()]
+        return list(self._specs)
 
     def execute(self, name: str, args: dict) -> str:
         p = self._route.get(name)

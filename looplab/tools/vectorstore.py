@@ -174,7 +174,13 @@ class InMemoryVectorStore:
 
     def search(self, index: str, query: Vector, k: int) -> list[Hit]:
         store = self._idx.get(index, {})
-        hits = [Hit(it.id, cosine(query, it.vector), it.payload) for it in store.values()]
+        # Drop non-positive scores: `cosine` returns 0.0 on a DIMENSION MISMATCH (a query embedded at a
+        # different dim than the stored vectors — e.g. the embedding endpoint died mid-run and queries
+        # fell back to hash_embed), so without this filter search would return k ARBITRARY notes at
+        # score 0 tie-broken by id, presented to the model as relevant. An orthogonal (0-similarity)
+        # hit is likewise not a real match.
+        hits = [h for h in (Hit(it.id, cosine(query, it.vector), it.payload)
+                            for it in store.values()) if h.score > 0.0]
         hits.sort(key=lambda h: (-h.score, h.id))
         return hits[:k]
 
