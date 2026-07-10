@@ -319,7 +319,8 @@ def _agent_model(backend: str, model: str) -> str:
 
 def make_llm_client(settings, *, model: str | None = None,
                     base_url: str | None = None,
-                    timeout: float | None = None) -> OpenAICompatibleClient:
+                    timeout: float | None = None,
+                    temperature: float | None = None) -> OpenAICompatibleClient:
     key = settings.llm_api_key.get_secret_value() if settings.llm_api_key else "local"
     mdl = model or settings.llm_model
     from looplab.core.llm import reasoning_body
@@ -332,7 +333,8 @@ def make_llm_client(settings, *, model: str | None = None,
              else float(getattr(settings, "llm_timeout", 180.0) or 180.0)}
     return OpenAICompatibleClient(
         model=mdl, base_url=base_url or settings.llm_base_url, api_key=key,
-        temperature=settings.llm_temperature, accountant=CostAccountant(),
+        temperature=(temperature if temperature is not None else settings.llm_temperature),
+        accountant=CostAccountant(),
         guided_json=getattr(settings, "llm_guided_json", False),   # H1 constrained decoding
         reasoning=reasoning,                                        # provider-aware thinking toggle
         stream=getattr(settings, "llm_stream", True),              # inter-token idle-timeout via SSE
@@ -705,12 +707,18 @@ def make_roles(task: TaskAdapter, settings, run_dir=None):
                                      direction=getattr(task, "direction", "min"),
                                      goal=getattr(task, "goal", ""),
                                      min_confidence=getattr(settings, "foresight_min_confidence", 0.0))
-    # H3 per-role model presets: point the Researcher / Developer at their own model/endpoint when
-    # configured (e.g. Developer on a strong coding model, Researcher on a fast breadth model).
-    if settings.researcher_model or settings.researcher_base_url:
+    # H3 per-role model presets + §4.1 per-role temperature: point the Researcher / Developer at their
+    # own model/endpoint AND/OR sampling temperature when configured (e.g. Developer on a strong coding
+    # model at a low temp, Researcher on a fast breadth model at a higher temp). A temperature-only
+    # override still rebuilds the client (else it would silently no-op); model/base_url stay shared.
+    if (settings.researcher_model or settings.researcher_base_url
+            or settings.researcher_temperature is not None):
         _set_role_client(researcher, make_llm_client(
-            settings, model=settings.researcher_model, base_url=settings.researcher_base_url))
-    if settings.developer_model or settings.developer_base_url:
+            settings, model=settings.researcher_model, base_url=settings.researcher_base_url,
+            temperature=settings.researcher_temperature))
+    if (settings.developer_model or settings.developer_base_url
+            or settings.developer_temperature is not None):
         _set_role_client(developer, make_llm_client(
-            settings, model=settings.developer_model, base_url=settings.developer_base_url))
+            settings, model=settings.developer_model, base_url=settings.developer_base_url,
+            temperature=settings.developer_temperature))
     return researcher, developer

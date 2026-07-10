@@ -235,7 +235,7 @@ def _engine(run_dir: Path, task: TaskAdapter, settings: Settings,
         # path unchanged (the engine still records/replays `strategy_decision`).
         strategist = researcher
     else:
-        strat_client = (make_llm_client(settings)
+        strat_client = (make_llm_client(settings, temperature=settings.strategist_temperature)
                         if settings.backend == "llm" and settings.strategist_backend in ("llm", "agent")
                         else None)
         from looplab.adapters.tasks import build_strategist_tools
@@ -249,7 +249,9 @@ def _engine(run_dir: Path, task: TaskAdapter, settings: Settings,
     # Deep-Research stage (Phase 2): reachable only with an LLM backend. Reuses the run's LLM client;
     # tools (arXiv/web/knowledge) are wired from config inside make_deep_researcher. None when off.
     from looplab.agents.deep_research import make_deep_researcher
-    deep_researcher = (make_deep_researcher(settings, client=make_llm_client(settings), task=task)
+    # Deep-Research is researcher-flavored (breadth-seeking ideation), so it honors researcher_temperature.
+    deep_researcher = (make_deep_researcher(
+        settings, client=make_llm_client(settings, temperature=settings.researcher_temperature), task=task)
                        if settings.backend == "llm" else None)
     # Agent-authored run report (Workstream A): reachable only with an LLM backend; reuses the run's
     # LLM client. None in toy mode -> the UI shows the deterministic report only.

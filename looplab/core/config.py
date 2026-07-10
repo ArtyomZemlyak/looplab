@@ -462,6 +462,13 @@ class Settings(BaseSettings):
     developer_model: str | None = None
     researcher_base_url: str | None = None
     developer_base_url: str | None = None
+    # Per-role sampling temperature (§4.1): the Researcher wants breadth (higher temp = more diverse
+    # ideas), the Developer wants determinism (lower temp = fewer syntax slips), the Strategist a
+    # steady hand. Each overrides the shared `llm_temperature` for that role only; None = use the
+    # shared value (byte-identical to before). Flat + nullable, mirroring the per-role model fields.
+    researcher_temperature: float | None = None
+    developer_temperature: float | None = None
+    strategist_temperature: float | None = None
     # Unified self-driving agent: one LLM identity that plays Researcher + Developer (+ Strategist)
     # across pipeline stages, choosing its own model/toolset per stage. ON by default — the agent
     # drives the loop (incl. crash triage: repair/abandon/reject_idea) and, via
