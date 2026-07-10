@@ -733,6 +733,34 @@ prompt-key registry + repo-developer PromptStore bypass (P4.7), entry-point reso
 (P4.8), the shared `_engine` test-builder prep before P3, and the §1 clean verdicts
 (concurrency/locking, logging, small modules, prompt-key sync, CI nits).
 
+## 7. Implementation ledger (2026-07-10, all phases executed)
+
+Every phase landed on `claude/framework-agent-review-e49sp6`, each followed by an
+adversarial ultra-review whose findings were fixed in a paired commit:
+- **P0** `0255efe`+`e493f19` — deletions, CLAUDE.md truth, dead UI components.
+- **P1** `4229615`+`e864052`+`cdea797` — the dedup helpers (knn_idw, numeric_params,
+  read_jsonl_lenient/write_jsonl_atomic, Node.robust_metric ×18, perm-modes,
+  _repropose_with_feedback, scanners/coercions/srv.state/query_nvidia_smi).
+- **P2** `f6e5b0a`+`ccf1457` — projections→events/, make_llm_client→core, gitenv→core,
+  MachineRunsTools rename, documented validate_task exception.
+- **P3** `6705170`+`b01afa8` — seven more verbatim mixins; orchestrator 2800→1514; the
+  shared `_UNSET` sentinel moved to options.py (caught by test_inline_repair).
+- **P4** `aac0154`+`42bb274` — six registries/guards (BACKGROUND_APPENDABLE,
+  TASK_OPTIONAL_HOOKS, DEVELOPER_OUTPUT_ATTRS/RESEARCHER_ACTION_ATTRS, divergence table,
+  config-docs sync, PROMPT_KEYS, entry-point resolution, wrapper-enumeration guard); P4.6
+  resolved structurally (setattr channel kept, four-ways guarded).
+- **P5** `abc3632` (fold→63-handler dispatch, golden-log gated — the gate caught a real
+  transformation bug mid-work), `86e3480` (F3 **knobs collapse; orchestrator ~1455),
+  `83f7e62` (P5.3 banners), `eecd3ea`+`3e89272` (P5.2 splits: llm→3 siblings, agent→
+  tool_loop with the run_phase seam analysis, lessons→3 mixins, repo_write_tools, cli→
+  package with __main__, tui→api/format, UI api/format/layout + usePoll + run_as_job).
+  Note: `eecd3ea` briefly carried the staged `cli.py` deletion ahead of the package commit
+  (a cross-agent staging sweep); the branch tip is complete and green.
+
+Final state: full suite 1685 passed / 23 skipped; offline smoke + replay byte-identical
+across every phase (BEST node 7, metric=4.48271); UI builds; both console scripts + the
+jupyter entry point resolve; the golden-log replay gate is now a permanent fixture.
+
 **Net assessment:** the plan survives verification intact — no phase was invalidated. The
 corrections tighten execution details (what to exclude, which importers to update, which tests
 gate which move); the additions extend scope to the UI, tests, prompts-plumbing, and packaging
