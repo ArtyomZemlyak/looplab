@@ -516,6 +516,42 @@ green. The suite ends at **1600 passed / 23 skipped / 1 docker deselected**; the
 - **Full MLEBench asset→mount refactor** (batch 8) — only the >512MB OOM guard was added; large
   competitions still need a real data mount, which is a task-adapter feature.
 
+## 10. Second code-review of the whole branch (2026-07-10)
+
+A max-effort review of the branch's ~2.3k-line code delta (P1 + the eight batches) — 10 independent
+finder angles (5 correctness + reuse/simplification/efficiency/altitude/conventions) followed by
+manual source verification — surfaced **13 fixes**, several of them regressions the batches
+themselves introduced. Suite **1608 passed / 23 skipped**; offline smoke + `looplab replay`
+reproduce. The confirmed defects, most-severe first:
+
+- **Confirm phase was silently disabled on eval-bounded runs.** Batch 3's per-node budget break fired
+  on the FIRST leader (the search normally consumes the whole eval budget), confirming zero nodes yet
+  still emitting `best_confirmed` → `confirmed_done` True — so the run's final robustness gate never
+  ran AND a budget-extending resume skipped it, keeping the un-demoted seed-lucky leader. Fix: always
+  confirm the top `min(2, len(topk))` leaders (bounded overrun); budget break only for the tail. Fold
+  once + accrue wall-clock (was O(topk×events) re-folding the whole log per node — the efficiency find).
+- **Two trust-detector recall regressions** (empirically confirmed). `open("solutions.csv").read()`
+  slipped the reader-only `_SOL_CSV_READ` (now open-reads fire, submission writes stay excused); the
+  eval_set TEST-monitor tell missed suffixed names (`X_test_scaled`) because `\bx_test\b`'s boundary
+  fails on the trailing `_` (now matches the `test` substring inside the monitor).
+- **Hard-signal predicate drift.** `trust_reflection._sigs` stripped every `critic:` while the gate
+  promotes `critic:hardcoded_metric`, so a node flagged only by it rendered "node N ()". Extracted one
+  shared `is_hard_signal` used by both classifier and display.
+- **Foresight over-confidence.** The scoreboard dropped crashed picks from the denominator, inflating
+  the hit rate; a crash now counts as a miss (the strongest one).
+- **Operator directives bypassed ablation.** `_directed_idea` reached every build site except the two
+  ablation refine_block builds; threaded both and registered the call site so the source-scan enforces it.
+- **`budget_extend` accepted `nan`/`inf`** (float() passes) → budget disabled forever across resume;
+  now rejects non-finite. **Regex metric** lost an early print before a long trailing log (tail-only
+  200k cap) → head fallback. **ASHA** re-promoted a deterministically-crashing lineage forever →
+  retire after 2 failed promotions. **Sandbox** `--memory 4g` was hardcoded (OOM'd model training) →
+  new `sandbox_memory`/`sandbox_cpus` settings + doc sync.
+
+Plus cleanups (dead param/guard, `_reload` de-dup, single `stat()`) and a regression test per
+correctness fix. Deliberately kept: `perfect_metric == 0.0` (deliberate; signed objectives), the
+512MB mlebench fail-loud guard (correct vs a silent OOM), and the reward-hack/leakage heuristic limits
+(the runtime `_audit_workdir_writes` remains the authoritative write defense).
+
 ---
 
 *Companion docs: [PROMPT_REVIEW.md](PROMPT_REVIEW.md) (the 2026-07-09 prompt/delivery review this
