@@ -104,3 +104,14 @@ def test_perfect_metric_not_flagged_for_signed_min_objective():
                    for s in detect_reward_hacks("x = 1", metric=-5.0, direction="min"))
     assert any(s["signal"] == "perfect_metric"
                for s in detect_reward_hacks("x = 1", metric=0.0, direction="min"))
+
+
+def test_protected_write_catches_common_idioms():
+    prot = {"grader.py"}
+    for code in ('open("grader.py","w")', 'open("grader.py", mode="w")',
+                 'Path("grader.py").write_text(x)', 'df.to_csv("grader.py")'):
+        assert any(s["signal"] == "protected_write"
+                   for s in detect_reward_hacks(code, 0.5, "min", protected_names=prot)), code
+    # an unrelated output write is not a protected write
+    assert not any(s["signal"] == "protected_write"
+                   for s in detect_reward_hacks('open("out.csv","w")', 0.5, "min", protected_names=prot))
