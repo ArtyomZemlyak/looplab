@@ -190,7 +190,7 @@ class GreedyTree:
         self.max_nodes = max_nodes
         self.debug_depth = debug_depth
         self.enable_merge = enable_merge
-        self.merge_every = merge_every
+        self.merge_every = max(1, merge_every)   # 0 would ZeroDivision in `n_improve // merge_every`
         self.max_merges = max_merges
         self.ablate_every = ablate_every  # 0 = off (I7 ablation-driven refinement)
         # P4: replace the FIXED merge/ablate cadences with a deterministic UCB over operator
@@ -348,7 +348,7 @@ class MCTSPolicy:
                  debug_depth: int = 1):
         self.n_seeds = n_seeds
         self.max_nodes = max_nodes
-        self.c = c
+        self.c = max(0.0, float(c))   # >= 0: a negative c flips UCB exploration into a penalty
         self.debug_depth = debug_depth
 
     def next_actions(self, state: RunState) -> list[dict]:
@@ -475,9 +475,13 @@ class ASHAPolicy:
         feasible = {n.id for n in state.feasible_nodes()}
         if not feasible:
             return [{"kind": KIND_DRAFT}]
+        # "expanded" = has a child that is still LIVE (evaluated or pending) — a FAILED child leaves
+        # the survivor re-promotable, else a survivor whose only promotion child crashed is retired
+        # forever and its (possibly best) lineage is abandoned.
         has_child: set[int] = set()
         for n in state.nodes.values():
-            has_child.update(n.parent_ids)
+            if n.status is not NodeStatus.failed:
+                has_child.update(n.parent_ids)
 
         # Promote from the LOWEST rung that still has an unexpanded survivor (asynchronous: don't
         # wait for a whole rung to finish before promoting from a lower one).
@@ -493,8 +497,9 @@ class ASHAPolicy:
                 members, key=lambda i: (state.nodes[i].metric, i),
                 reverse=(state.direction == "max"))[:keep]
             unexpanded = [i for i in survivors if i not in has_child]
-            if len(survivors) <= 1:
-                continue            # rung collapsed to a single leader: nothing left to halve here
+            if len(members) <= 1:
+                continue            # a 1-member rung genuinely has nothing to halve. A 2-member rung
+                # keeping 1 survivor (ceil(2/η)=1) IS a real halving decision, so it still promotes.
             if unexpanded:
                 chosen = sorted(unexpanded)[0]
                 scores = {i: round(state.nodes[i].metric, 4) for i in members
@@ -566,7 +571,10 @@ def _make_evolutionary(*, n_seeds: int, max_nodes: int, ablate_every: int, depth
 
 def _make_mcts(*, n_seeds: int, max_nodes: int, ablate_every: int, depth: int,
                params: dict) -> SearchPolicy:
-    c = float(params.get("c", 1.4))
+    # Clamp the exploration constant >= 0: a Strategist-supplied negative `c` (validate_strategy
+    # accepts any scalar) would flip the UCB exploration term into a PENALTY on under-visited
+    # subtrees — a silently degenerate hyper-greedy policy recorded as a legitimate strategy.
+    c = max(0.0, float(params.get("c", 1.4)))
     return MCTSPolicy(n_seeds=n_seeds, max_nodes=max_nodes, c=c, debug_depth=depth)
 
 

@@ -163,3 +163,23 @@ def test_mcts_reward_stays_bounded_for_large_negative_metrics():
     # bounded+compressed: the two large-negative subtrees are within a whisker of each other (old
     # unbounded `1-value` would have put them ~4.0 apart, forcing pure exploitation of the -402 subtree).
     assert abs(scores[0] - scores[1]) < 0.1
+
+
+# --- Batch-5 search corner-case regressions -------------------------------------------------------
+
+def test_greedytree_merge_every_zero_no_zerodivision():
+    from looplab.search.policy import GreedyTree
+    assert GreedyTree(merge_every=0).merge_every == 1   # 0 would ZeroDivision in n_improve // merge_every
+
+
+def test_mcts_negative_c_clamped_to_zero():
+    from looplab.search.policy import MCTSPolicy
+    assert MCTSPolicy(c=-5).c == 0.0                    # a negative c flips UCB exploration into a penalty
+
+
+def test_hybrid_cluster_has_a_similarity_floor():
+    from looplab.search.hybrid_merge import cluster_near_duplicates
+    unrelated = ["gradient boosting tabular", "convolutional images", "arima forecast",
+                 "reinforcement agent", "random forest", "transformer attention"]
+    clusters = cluster_near_duplicates(unrelated, k=3)
+    assert len(clusters) >= len(unrelated) - 1          # not collapsed into one giant cluster

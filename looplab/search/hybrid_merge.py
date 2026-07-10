@@ -90,10 +90,15 @@ class HybridRetriever:
         self._vecs = [self._embed(c) for c in self.corpus]
 
     def candidates(self, query: str, k: int = 8, *, rrf_k: int = 60,
-                   exclude: Optional[int] = None) -> list[tuple[int, float]]:
+                   exclude: Optional[int] = None, min_signals: int = 1) -> list[tuple[int, float]]:
         """Top-k (corpus_index, fused_score), best first. `rrf_k` is the standard RRF damping constant
         (60 in the original paper). `exclude` drops one index (e.g. the query's own row when the query
-        IS a corpus member). Fused score is unitless — use it only to RANK, not threshold."""
+        IS a corpus member). Fused score is unitless — use it only to RANK, not threshold.
+
+        `min_signals` (default 1) requires the item to appear in at least that many of the 3 signal
+        rankings (lexical / BM25 / vector) before it's a candidate — a precision floor for clustering:
+        with `hash_embed`, vector cosine is > 0 for essentially EVERY pair, so `min_signals=1` links
+        almost everything into one giant cluster; requiring ≥2 signals demands real agreement."""
         if not self.corpus:
             return []
         qt = _tokens(query)
@@ -107,7 +112,10 @@ class HybridRetriever:
         for i in range(len(self.corpus)):
             if i == exclude:
                 continue
-            score = sum(1.0 / (rrf_k + r[i]) for r in ranks if i in r)
+            present = [r for r in ranks if i in r]
+            if len(present) < min_signals:
+                continue
+            score = sum(1.0 / (rrf_k + r[i]) for r in present)
             if score > 0:
                 fused[i] = score
         return sorted(fused.items(), key=lambda kv: (-kv[1], kv[0]))[:k]
@@ -126,7 +134,9 @@ def cluster_near_duplicates(texts: list[str], *, embed: Optional[Callable[[str],
     # Adjacency: i ~ j if j is in i's top-k hybrid neighbours OR vice versa (symmetrize for stability).
     adj: dict[int, set[int]] = {i: set() for i in range(n)}
     for i in range(n):
-        for j, _s in r.candidates(texts[i], k=k, exclude=i):
+        # require agreement across ≥2 signals (see `min_signals`): a single noisy hash_embed cosine
+        # would otherwise chain every item into one cluster (verified: 8 unrelated texts -> one group).
+        for j, _s in r.candidates(texts[i], k=k, exclude=i, min_signals=2):
             adj[i].add(j)
             adj[j].add(i)
     seen: set[int] = set()

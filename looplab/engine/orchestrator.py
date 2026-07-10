@@ -658,6 +658,10 @@ class Engine(ConfirmPhaseMixin, AblationMixin):
             ablates = [a for a in actions if a["kind"] == "ablate"]
             if ablates:
                 for a in ablates:
+                    if "_scores" in a:   # surface "why this node" for ablates too (was dropped: this
+                        self.store.append(EV_POLICY_DECISION,   # branch continues before the create loop)
+                                          {"scores": a["_scores"], "chosen": a.get("_chosen"),
+                                           "reason": a.get("_reason")})
                     await self._ablate(a["parent_id"])
                 continue
 
