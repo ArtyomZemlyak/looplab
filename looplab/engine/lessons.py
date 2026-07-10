@@ -22,7 +22,8 @@ import orjson
 from looplab.core.models import NodeStatus, RunState
 from looplab.engine.memory import JsonlCaseLibrary
 from looplab.events.replay import fold
-from looplab.events.types import EV_LESSONS_DISTILLED, EV_LESSONS_REFRESHED, EV_REFLECTION_NOTE
+from looplab.events.types import (EV_LESSONS_DISTILLED, EV_LESSONS_RECONCILED,
+                                  EV_LESSONS_REFRESHED, EV_REFLECTION_NOTE)
 
 # Which ROLE a cross-run lesson is for, so the two contexts stay separate (the Researcher gets only
 # R&D / "what technique to try" lessons, the Developer only its own "what code change fixed a crash"
@@ -61,6 +62,12 @@ class LessonMemory:
         self.seen_stamp = None   # (size, mtime_ns) of the store at the last read
         self.prior_note_text = ""   # E4: cross-run RESEARCHER prior (R&D lessons), loaded at run start
         self.dev_prior_note_text = ""   # §role-split: cross-run DEVELOPER prior (code-fix lessons)
+        # Reconcile gate: a hash of {node_id -> outcome-signature} at the last reconcile scan. Recomputed
+        # each cadence pass (cheap, no I/O); when it CHANGES (a node reached / left / flipped a terminal —
+        # in particular a node_reset re-eval that altered a metric or status), we re-read the lesson file
+        # and re-derive any of THIS run's lessons whose evidence sig moved. None on start → first pass
+        # always scans (verifies the store against the folded state after a restart/resume).
+        self._reconcile_sig_hash = None
 
     def load_reflection_priors(self, exclude_run_id: Optional[str] = None,
                                role: Optional[str] = None) -> str:
@@ -359,7 +366,8 @@ class LessonMemory:
                      "statement": (f"op '{best.operator}' with params {best.idea.params} "
                                    f"reached {best.metric:.4g}"),
                      "outcome": "supported", "delta": None, "confidence": 0.7,
-                     "run_id": final.run_id, "evidence": [best.id], "role": LESSON_ROLE_RESEARCHER}]
+                     "run_id": final.run_id, "evidence": [best.id], "role": LESSON_ROLE_RESEARCHER,
+                     "evidence_sig": self._evidence_sig_map(final, [best.id])}]
         client = self._e._reflect_client()
         # `_winner_lesson` is the OFFLINE/toy safety net ONLY (no LLM at all). In a real run — an LLM
         # IS wired — lessons are ALWAYS LLM-authored: on error or empty output we write NOTHING rather
@@ -372,6 +380,14 @@ class LessonMemory:
         bad = [n for n in final.nodes.values() if n.status is NodeStatus.failed][:3]
         rows = [f"#{n.id} {n.operator} metric={n.metric:.4g} params={n.idea.params}" for n in ok]
         fails = [f"#{n.id} {n.operator} failed: {n.error_reason}" for n in bad]
+        # PROVENANCE for reconciliation: the concrete nodes this whole-run reflection is grounded in
+        # (the winning rows + the failure rows fed into the prompt). Stamped on every lesson below so a
+        # later re-eval that FLIPS any of these outcomes (a false-failure re-scored to evaluated, a
+        # champion demoted) is detected by `reconcile_lessons` and the batch is re-derived from the
+        # corrected state. Coarse on purpose: a whole-run generalization can't be attributed per-node, so
+        # ANY fed-node change invalidates the batch (one LLM re-reflection — cheap, correct).
+        ev_ids = [n.id for n in ok] + [n.id for n in bad]
+        ev_sig = self._evidence_sig_map(final, ev_ids)
         # The full experimental record — every RESOLVED hypothesis with its outcome + Δ — so the LLM can
         # CONSOLIDATE many trials of the SAME theme (e.g. every temperature experiment) into ONE lesson,
         # instead of the old one-verbatim-hypothesis-per-lesson dump that filled the store with near-dupes.
@@ -404,7 +420,8 @@ class LessonMemory:
         res = [{"task_id": final.task_id, "fingerprint": fp,
                 "kind": getattr(self._e.task, "kind", ""), "statement": stmt,
                 "outcome": outcome, "delta": None, "confidence": 0.6,
-                "run_id": final.run_id, "evidence": [], "role": LESSON_ROLE_RESEARCHER}
+                "run_id": final.run_id, "evidence": list(ev_ids), "evidence_sig": ev_sig,
+                "role": LESSON_ROLE_RESEARCHER}
                for _, stmt, outcome in parse_credit_lessons(out, 0)[:8]]
         return res      # LLM gave nothing usable → [] (a real run never writes a templated lesson)
 
@@ -459,11 +476,13 @@ class LessonMemory:
             # ROLE-split: a DEBUG pair's lesson is "what code change fixed this crash" → the DEVELOPER's
             # context; an improve/regress pair credits a param/technique change → the RESEARCHER's. An
             # unattributed line (pr=None) stays untagged/shared. (§role-split lessons)
+            ev = [pr["a"], pr["b"]] if pr else []
             d = {"task_id": state.task_id, "fingerprint": fp,
                  "kind": getattr(self._e.task, "kind", ""), "statement": statement,
                  "outcome": outcome, "delta": pr.get("delta") if pr else None,
                  "confidence": conf, "run_id": state.run_id,
-                 "evidence": [pr["a"], pr["b"]] if pr else [], "source": "comparative"}
+                 "evidence": ev, "evidence_sig": self._evidence_sig_map(state, ev),
+                 "source": "comparative"}
             if pr is not None:
                 d["role"] = (LESSON_ROLE_DEVELOPER if pr.get("kind") == "debug"
                              else LESSON_ROLE_RESEARCHER)
@@ -532,6 +551,178 @@ class LessonMemory:
         events (incl. the run-end one, so a reopened run never re-distills)."""
         return [tuple(p) for d in (state.lessons_distilled or [])
                 for p in (d.get("pairs") or [])]
+
+    # ------------------------------------------------------------ reconciliation (node re-eval → memory)
+    @staticmethod
+    def _coerce_id(k):
+        """evidence_sig keys round-trip through JSON as strings; node ids are ints. Coerce back so
+        `state.nodes.get()` hits (leave non-numeric keys alone — forward-compat)."""
+        try:
+            return int(k)
+        except (TypeError, ValueError):
+            return k
+
+    @staticmethod
+    def _node_sig(node) -> Optional[str]:
+        """A compact OUTCOME signature for a node — what its terminal looks like right now. A lesson
+        grounded in a node is 'in sync' iff its stored sig still equals this. Captures status + the
+        metric (ROUNDED, so float jitter never trips a re-derive) or the failure reason. None when the
+        node is pending/absent: there is no terminal to ground a lesson on, so a lesson citing it is
+        treated as 'not yet resolved' (wait), never as drifted."""
+        if node is None:
+            return None
+        status = getattr(node.status, "value", None) or str(node.status)
+        if status == "pending":
+            return None
+        m = getattr(node, "metric", None)
+        if m is not None:
+            return f"{status}:{round(float(m), 4)}"
+        reason = getattr(node, "error_reason", "") or ""
+        return f"{status}:{reason}" if reason else status
+
+    def _evidence_sig_map(self, state: RunState, node_ids) -> dict:
+        """{str(node_id) -> current outcome sig} for a lesson's grounding nodes, stamped at write time.
+        `reconcile_lessons` recomputes it from the live state and re-derives on any diff. Skips ids with
+        no terminal (None) — a lesson isn't grounded in a pending node."""
+        out: dict = {}
+        for nid in node_ids or []:
+            sig = self._node_sig(state.nodes.get(nid))
+            if sig is not None:
+                out[str(nid)] = sig
+        return out
+
+    def _lesson_evidence_stale(self, state: RunState, o: dict) -> bool:
+        """True iff a lesson's grounding nodes no longer match what it was distilled from — a re-eval
+        FLIPPED an outcome it depends on. Uses the stored `evidence_sig` (exact) when present; a node
+        that is now pending/absent (sig None) is 'not yet resolved', NOT drift (wait for its re-eval).
+        For LEGACY rows (no sig) falls back to an outcome-CONTRADICTION check (claims success but a cited
+        node is now failed, or vice-versa) so a pre-upgrade false-failure correction is still caught."""
+        ev = o.get("evidence") or []
+        if not ev:
+            return False
+        sig = o.get("evidence_sig")
+        if isinstance(sig, dict) and sig:
+            return any((cur := self._node_sig(state.nodes.get(self._coerce_id(k)))) is not None
+                       and cur != v for k, v in sig.items())
+        # Legacy (pre-sig): can't diff exactly — fire only on a HARD contradiction of the recorded
+        # outcome (the exact case this mechanism exists for: a success/failure verdict reversed).
+        out = str(o.get("outcome") or "").lower()
+        sigs = [self._node_sig(state.nodes.get(n)) or "" for n in ev]
+        now_failed = any(s.startswith("failed") for s in sigs)
+        now_ok = any(s.startswith("evaluated") for s in sigs)
+        if out in ("supported", "tested", "good") and now_failed and not now_ok:
+            return True
+        if out in ("failed", "bad") and now_ok and not now_failed:
+            return True
+        return False
+
+    def reconcile_lessons(self, state: RunState) -> RunState:
+        """Memory reconciliation on a CHANGED OUTCOME (the node_reset / re-eval seam). Fold-derived
+        memory (hypotheses/champion/leaderboard) self-corrects every fold, but DISTILLED lessons are
+        written to the cross-run file and go stale when a node's outcome later flips — a false-failure
+        re-scored to evaluated, a demoted champion. This re-aligns THIS run's lessons with the folded
+        state: every lesson whose grounding-node signature moved is RETIRED and RE-DERIVED from the
+        corrected state (same conclusion → an identical lesson reappears = no-op; different → the stale
+        row is replaced — the 'find the old one by its evidence node id and rewrite it' the design asks
+        for). Cheap gate: a hash of the run's {node -> sig}; the file is touched only when a signature
+        actually moved and the LLM only when a lesson is genuinely stale. Best-effort — a reconcile
+        failure never fails the run. No-op offline (can't re-derive) or when reflection memory is off."""
+        if not (self._e._reflection_priors and self._e.memory_dir):
+            return state
+        # Change-gate: only scan when some node's outcome sig moved since the last look. A node_reset
+        # re-eval that alters a metric/status flips the hash; plain forward progress (a new terminal)
+        # flips it too — harmless, the scan then finds nothing stale. None on start → the first pass
+        # always scans, so a resume/restart verifies the store against the folded state once.
+        sig_items = tuple(sorted((nid, self._node_sig(n)) for nid, n in state.nodes.items()))
+        h = hash(sig_items)
+        if h == self._reconcile_sig_hash:
+            return state
+        self._reconcile_sig_hash = h
+        path = Path(self._e.memory_dir) / "lessons.jsonl"
+        if not path.exists():
+            return state
+        try:
+            rows: list = []
+            for line in path.read_text(encoding="utf-8").splitlines():
+                try:
+                    rows.append(orjson.loads(line))
+                except Exception:  # noqa: BLE001
+                    rows.append(None)
+        except OSError:
+            return state
+        # Which of THIS run's lessons drifted? Reflect-type (whole-run generalization) vs comparative
+        # (per-pair). A comparative row is keyed by its [child, parent] evidence pair.
+        stale_idx: set[int] = set()
+        stale_pairs: list[tuple] = []
+        reflect_stale = False
+        for idx, o in enumerate(rows):
+            if not isinstance(o, dict) or o.get("run_id") != state.run_id:
+                continue
+            if not self._lesson_evidence_stale(state, o):
+                continue
+            stale_idx.add(idx)
+            if o.get("source") == "comparative" and len(o.get("evidence") or []) == 2:
+                stale_pairs.append(tuple(o["evidence"]))
+            else:
+                reflect_stale = True
+        if not stale_idx:
+            return state
+        # Lessons are LLM-only; re-derivation needs the client. Offline → leave the stale rows (a
+        # templated stand-in is exactly what this module refuses to write) and try again when wired.
+        client = self._e._reflect_client()
+        if client is None:
+            self._reconcile_sig_hash = None   # not truly reconciled — re-check once a client appears
+            return state
+        try:
+            fp = self._e._task_fingerprint(state, state.best())
+            fresh_reflect = self._e._reflect_lessons(state, state.best(), fp) if reflect_stale else []
+            # A reflect (whole-run) lesson drifting invalidates the WHOLE reflect batch for this run —
+            # the generalization spans all its fed nodes — so replace EVERY reflect row of this run, not
+            # just the one that drifted (retiring one would leave near-dup siblings to merge against the
+            # fresh batch). BUT only when re-derivation actually produced lessons: an empty/failed LLM
+            # re-derivation must NOT nuke existing memory — in that case we still drop the specifically
+            # drifted rows (already in `stale_idx`; they're wrong) but keep the non-drifted siblings.
+            if reflect_stale and fresh_reflect:
+                for idx, o in enumerate(rows):
+                    if (isinstance(o, dict) and o.get("run_id") == state.run_id
+                            and o.get("source") != "comparative"):
+                        stale_idx.add(idx)
+            comp: list = []
+            pairs_used: list = []
+            if stale_pairs and self._e._comparative_lessons_on:
+                # Un-spend the drifted pairs so `select_comparison_pairs` can re-pick them, then re-derive.
+                _stale = {tuple(p) for p in stale_pairs}
+                exclude = [p for p in self._e._spent_pairs(state) if tuple(p) not in _stale]
+                comp, pairs_used = self._e._comparative_lessons(state, fp, exclude=exclude)
+            fresh = fresh_reflect + comp
+            # Rewrite: drop the stale rows, keep the rest, append the fresh re-derivations — under the
+            # SAME interprocess lock append_lessons uses (a concurrent run's O_APPEND between our read
+            # and rewrite would otherwise be clobbered). Then the D2 hygiene pass consolidates/compacts.
+            from looplab.events.eventstore import _interprocess_lock
+            from looplab.core.atomicio import atomic_write_text
+            kept = [o for i, o in enumerate(rows) if isinstance(o, dict) and i not in stale_idx]
+            with _interprocess_lock(Path(str(path) + ".lock")):
+                atomic_write_text(path, "".join(orjson.dumps(o).decode() + "\n"
+                                                for o in kept + fresh))
+                prompts, parser = self._merge_prompt_opts()
+                self._e._consolidate_lessons_file(path, client, self._e._embedder,
+                                                  parser=parser, prompts=prompts)
+                self._e._compact_lessons(path)
+        except Exception:  # noqa: BLE001 — reconciliation is best-effort; never fail the run for it
+            return state
+        # Ledger consistency: the re-derived pairs are (re-)spent so run-end reflection won't double
+        # them — recorded as a lessons_distilled(reconcile) exactly like the mid-run cadence.
+        if pairs_used:
+            self._e.store.append(EV_LESSONS_DISTILLED, {
+                "at_node": len(state.nodes), "trigger": "reconcile", "count": len(comp),
+                "pairs": [[pr["a"], pr["b"]] for pr in pairs_used],
+                "lessons": [{"statement": lz["statement"], "outcome": lz["outcome"],
+                             "evidence": lz.get("evidence")} for lz in comp]})
+        # Audit sidecar (fold ignores it): what drifted and what replaced it.
+        self._e.store.append(EV_LESSONS_RECONCILED, {
+            "at_node": len(state.nodes), "n_retired": len(stale_idx), "n_added": len(fresh),
+            "reflect": reflect_stale, "pairs": [list(p) for p in stale_pairs]})
+        return fold(self._e.store.read_all())
 
     def maybe_distill_lessons(self, state: RunState) -> RunState:
         """M6 write side (doc 13 §7 items 2+5): every `lessons_every` NEW nodes, distill

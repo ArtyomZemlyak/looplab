@@ -128,6 +128,8 @@ EV_FORESIGHT_SELECTED = "foresight_selected"
 # --- DIAGNOSTIC / SIDECAR events (deliberately NOT folded — `replay.fold` ignores them
 #     (forward compat); they exist for the live activity feed / audit trail only). ---
 EV_REFLECTION_NOTE = "reflection_note"          # run-end LLM distillation: causal note + lessons + auto-skills
+EV_LESSONS_RECONCILED = "lessons_reconciled"    # a node re-eval changed an outcome → this run's lessons
+#                                                 citing it were retired + re-derived from the corrected state
 EV_SETUP_STARTED = "setup_started"
 EV_SETUP_STEP = "setup_step"
 EV_SETUP_FINISHED = "setup_finished"

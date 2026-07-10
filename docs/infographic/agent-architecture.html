@@ -135,7 +135,7 @@ box("kanban",1070,HY-8,640,90,"Hypothesis board · kanban","A",C.r,["derived on 
 const WY=1080;
 box("w_order",40,WY,260,72,"Write order","fin",C.mem,["budget → diversity → llm-cost","→ store_case → reflection_note"]);
 box("w_case",320,WY,290,72,"KB case","cases.jsonl",C.mem,["task_id·goal·dir·params·metric·rationale","upsert-if-better · Memora consolidate 0.86"]);
-box("w_reflect",630,WY,300,72,"Lessons: reflect (LLM)","R",C.mem,["consolidate run: nodes + resolved hyps + fail themes","→ 1 lesson/theme · conf 0.6 · ≤8 · role: researcher"]);
+box("w_reflect",630,WY,300,72,"Lessons: reflect (LLM)","R",C.mem,["consolidate run: nodes + resolved hyps + fail themes","→ 1 lesson/theme · conf 0.6 · role: researcher · evidence_sig"]);
 box("w_hyp",950,WY,300,72,"Lessons: offline only","",C.mem,["no-LLM/toy: winner record + param-diff pairs","real run: LLM-authored only — no templated/verbatim dump"]);
 box("w_comp",1270,WY,300,72,"Comparative (M6)","≤3",C.mem,["credit-assign which change won (pairs≤3)","conf 0.65/0.5 · every 4 nodes · debug→dev / improve→rsch"]);
 box("w_meta",1590,WY,260,72,"Meta-note","R",C.mem,["causal ‘why won’ ≤700c","→ meta_notes.jsonl"]);
@@ -147,6 +147,7 @@ box("g_ex",40,GY,320,66,"Dedup pass1 · exact","",C.mem,["group (normalize[:160]
 box("g_ag",380,GY,320,66,"Dedup pass2 · agentic","R",C.mem,["per task_id HybridRetriever RRF","Researcher merges paraphrases + synthesizes"]);
 box("g_ct",720,GY,300,66,"Contradiction quarantine","read",C.mem,["drop old supported vs newer negative","never drop the newest verdict"]);
 box("g_cp",1040,GY,320,66,"Compact + fingerprint","",C.mem,["lessons 4000→keep 2000","fp = kind·dir·metric·goal-kw·params"]);
+box("g_rec",1380,GY,340,66,"Reconcile on re-eval","R",C.mem,["node_reset flips outcome → retire + re-derive stale","{node→sig} gate · evidence_sig · lessons_reconciled"]);
 
 /* ============ MEMORY TIERS (row y≈1360) ============ */
 const TY=1360;
@@ -219,6 +220,7 @@ edge("w_reflect","b","g_ex","t",{c:C.mem,thin:1,label:"hygiene"});
 edge("g_ex","r","g_ag","l",{c:C.mem,thin:1});
 edge("g_ag","r","g_ct","l",{c:C.mem,thin:1});
 edge("g_ct","r","g_cp","l",{c:C.mem,thin:1});
+edge("g_cp","r","g_rec","l",{c:C.mem,thin:1});
 edge("g_ex","b","mC","t",{c:C.mem,thin:1});
 edge("w_case","b","mD","t",{c:C.mem,thin:1,arc:60});
 edge("w_skill","b","mE","t",{c:C.mem,thin:1,arc:60});
