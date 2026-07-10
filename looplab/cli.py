@@ -577,6 +577,17 @@ def resume(
         typer.echo(f"no run found at {run_dir} (no events.jsonl). "
                    f"`resume` continues a run started by `looplab run`; use `run` to start one.")
         raise typer.Exit(2)
+    # Surface a MID-FILE log corruption before re-entering the loop: iter_jsonl stops at the first bad
+    # line, so a byte flipped mid-log (FUSE/NFS/S3 only) would silently replay just the prefix and drop
+    # a valid tail. Warn the operator (the run still resumes from the recoverable prefix); a torn TAIL
+    # (the normal crash-mid-append case) is not flagged.
+    from looplab.events.eventstore import log_divergence
+    _div = log_divergence(run_dir / "events.jsonl")
+    if _div:
+        typer.echo(f"WARNING: events.jsonl looks corrupted at line {_div['corrupt_line']} — "
+                   f"{_div['dropped_lines']} later record(s) will be DROPPED on replay "
+                   f"(only the first {_div['good_records']} fold). Back up the log before resuming if "
+                   f"that tail matters.", err=True)
     # Fall back to the verbatim task snapshot `run` wrote into the run dir, so a run can be resumed
     # from the dir alone (the UI relies on this to continue a finished run without ui_meta.json).
     snap = run_dir / "task.snapshot.json"

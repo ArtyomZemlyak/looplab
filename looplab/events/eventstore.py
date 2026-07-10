@@ -11,7 +11,7 @@ import threading
 import time
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any, Iterator, Optional
 
 import orjson
 
@@ -78,6 +78,39 @@ def iter_jsonl(path: str | os.PathLike) -> Iterator[dict]:
             if not isinstance(obj, dict):
                 break  # a valid-JSON but non-object line is corruption, not a record
             yield obj
+
+
+def log_divergence(path: str | os.PathLike) -> Optional[dict]:
+    """Detect a MID-FILE corruption, distinct from the normal torn tail. `iter_jsonl` STOPS at the
+    first bad line, so a byte flipped in the MIDDLE of an append-only log — impossible with a single
+    local writer, but seen on FUSE / NFS / S3 mounts — silently truncates the replay to the prefix,
+    dropping a valid tail with no signal. Returns `{good_records, corrupt_line, dropped_lines}` when a
+    COMPLETE (newline-terminated) corrupt line is followed by MORE complete lines (the divergence),
+    else None (a bad LAST line is just a torn tail — expected, not a divergence). Diagnostic only: the
+    fold stays pure; callers (resume / run load) surface this so a truncating corruption isn't silent."""
+    p = Path(path)
+    if not p.exists():
+        return None
+    lines = p.read_bytes().split(b"\n")
+    # A file ending in "\n" leaves a trailing "" element (all lines complete); otherwise the last
+    # element is the torn/partial final line. Either way, only the elements BEFORE the last are
+    # newline-terminated ("complete") records that iter_jsonl would consume.
+    complete = lines[:-1]
+    for i, line in enumerate(complete):
+        s = line.strip()
+        if not s:
+            continue
+        try:
+            ok = isinstance(orjson.loads(s), dict)
+        except orjson.JSONDecodeError:
+            ok = False
+        if not ok:
+            dropped = sum(1 for later in complete[i + 1:] if later.strip())
+            if dropped:                       # a valid tail exists AFTER the corrupt complete line
+                return {"good_records": sum(1 for e in complete[:i] if e.strip()),
+                        "corrupt_line": i + 1, "dropped_lines": dropped}
+            return None                       # corrupt line is effectively the tail — not a divergence
+    return None
 
 
 def _parse_jsonl_region(buf: bytes) -> tuple[list[tuple[dict, int]], int]:

@@ -106,6 +106,30 @@ def test_fold_idempotent_to_duplicate_terminal_events(tmp_path):
     assert st.total_eval_seconds == 2.0          # counted once, not 4.0
 
 
+def test_log_divergence_detects_mid_file_corruption(tmp_path):
+    from looplab.events.eventstore import log_divergence
+    p = tmp_path / "events.jsonl"
+    # 2 good records, a COMPLETE corrupt line, then a valid tail record — iter_jsonl would silently
+    # drop the tail (break at the corrupt line); log_divergence must flag it.
+    p.write_bytes(b'{"seq":0,"type":"a"}\n{"seq":1,"type":"b"}\n{corrupt json\n{"seq":2,"type":"c"}\n')
+    assert log_divergence(p) == {"good_records": 2, "corrupt_line": 3, "dropped_lines": 1}
+
+
+def test_log_divergence_ignores_a_torn_tail(tmp_path):
+    from looplab.events.eventstore import log_divergence
+    p = tmp_path / "events.jsonl"
+    # a torn/partial FINAL line (no trailing newline) is the normal crash-mid-append case, not a
+    # mid-file divergence — must return None.
+    p.write_bytes(b'{"seq":0,"type":"a"}\n{"seq":1,"type":"partial')
+    assert log_divergence(p) is None
+    # a corrupt LAST complete line with nothing valid after it is also just a tail, not a divergence
+    p.write_bytes(b'{"seq":0,"type":"a"}\n{corrupt\n')
+    assert log_divergence(p) is None
+    # a wholly clean log: None
+    p.write_bytes(b'{"seq":0,"type":"a"}\n{"seq":1,"type":"b"}\n')
+    assert log_divergence(p) is None
+
+
 def test_eventstore_heals_torn_final_line(tmp_path):
     p = tmp_path / "events.jsonl"
     es = EventStore(p)
