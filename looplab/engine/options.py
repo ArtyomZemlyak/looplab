@@ -113,7 +113,12 @@ class EngineOptions:
     # rebuild policies with the same run-wide settings.
     debug_depth: int = 1                 # T10: debug-lineage bound for every policy
     operator_bandit: bool = False        # P4: deterministic UCB over operator yields (GreedyTree)
-    novelty_semantic: bool = True        # T5: embedding-similarity idea dedup (needs novelty_gate)
+    # T5 embedding-similarity dedup inside the "algo" gate. False matches the Settings default
+    # and the documented rationale (novelty is the agentic Researcher's job by default): the old
+    # True made a direct `Engine(novelty_gate=True)` behave differently from the identical
+    # product config — the one inversion in the deliberate Settings-vs-Engine divergence table
+    # (tests/test_options_divergence.py). Deliberate library-default change (docs/15 §P4.4).
+    novelty_semantic: bool = False
     novelty_semantic_threshold: float = 0.92
     digest_char_cap: int = 0             # M5: digest prompt budget; 0 = auto-scale with run size
     research_verify: bool = True         # D8: verify memo claims against cited evidence

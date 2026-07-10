@@ -169,7 +169,10 @@ def _mk_engine(tmp_path, **kw):
 
 
 def test_semantic_duplicate_detected_and_reproposed(tmp_path):
-    eng = _mk_engine(tmp_path)
+    # novelty_semantic explicitly ON: this test exercises the semantic-dedup MECHANISM. The
+    # library default flipped to False (matching Settings + the documented rationale) in the
+    # P4.4 divergence realignment — relying on the old default was the audited breakage.
+    eng = _mk_engine(tmp_path, novelty_semantic=True)
     st = RunState(direction="max")
     dup = _node(0, metric=0.4, status=NodeStatus.failed,
                 rationale="try gradient boosting with deep trees and early stopping")

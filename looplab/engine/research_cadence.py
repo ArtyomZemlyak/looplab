@@ -19,7 +19,8 @@ from __future__ import annotations
 from looplab.core.models import RunState
 from looplab.events.replay import fold
 from looplab.events.types import (EV_HINT, EV_HYPOTHESIS_ADDED, EV_HYPOTHESIS_MERGED,
-                                  EV_REPORT_GENERATED, EV_RESEARCH_COMPLETED)
+                                  EV_REPORT_GENERATED, EV_RESEARCH_COMPLETED,
+                                  BACKGROUND_APPENDABLE)
 
 
 class ResearchCadenceMixin:
@@ -88,6 +89,10 @@ class ResearchCadenceMixin:
             return ResearchMemo(at_node=len(state.nodes), trigger=trigger,
                                 summary=f"(deep research failed: {exc})")
 
+    # Every append below must stay in events.types.BACKGROUND_APPENDABLE: this method is invoked
+    # from the CONCURRENT research task (`orchestrator._spawn_research`), the one enforced
+    # exception to engine invariant #1 ("only the main task appends"). The assertions make a
+    # future selection-affecting append here fail fast instead of racing the event order.
     def _record_deep_research(self, memo, *, trigger: str, manual: bool) -> None:
         """Append the memo to the event log (engine = sole writer; called only from the main task)."""
         memo_d = memo.model_dump(mode="json")
@@ -106,12 +111,14 @@ class ResearchCadenceMixin:
                     memo_d["verification"] = ver
             except Exception:  # noqa: BLE001 — verification must never block the memo
                 pass
+        assert EV_RESEARCH_COMPLETED in BACKGROUND_APPENDABLE   # see the method-level note
         self.store.append(EV_RESEARCH_COMPLETED, {
             "memo": memo_d,
             "at_node": memo.at_node, "trigger": trigger, "served_manual": manual})
         # Steer the next proposals: surface the memo's directions as a standing operator hint (the
         # same channel the Researcher already reads), so deep research actually informs planning.
         if memo.recommended_directions:
+            assert EV_HINT in BACKGROUND_APPENDABLE             # see the method-level note
             self.store.append(EV_HINT, {
                 "text": "deep-research directions: " + "; ".join(memo.recommended_directions[:5]),
                 "source": "deep_research"})

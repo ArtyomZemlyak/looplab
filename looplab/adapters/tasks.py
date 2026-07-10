@@ -65,6 +65,17 @@ class TaskAdapter(Protocol):
     def build_roles(self) -> tuple[Researcher, Developer]: ...
 
 
+# The optional-hook REGISTRY (docs/15 §P4.2): the machine-checked twin of the docstring above.
+# `tests/test_task_adapter_contract.py` source-scans every consumer package for
+# `getattr(task, "<name>")` / `getattr(self.task, "<name>")` probes and asserts BOTH directions:
+# a probe for a name not listed here is a typo'd/undeclared hook (red test), and a listed hook
+# with no remaining consumer is registry rot (red test). Renaming a hook on one side alone —
+# the historical "the run silently stages/scores nothing" failure — is now a test failure.
+TASK_OPTIONAL_HOOKS: tuple[str, ...] = (
+    "llm_roles", "assets", "columns", "leakage_inputs", "host_grader", "data_samples",
+    "repo_spec", "agent_brief", "eval_spec", "make_onboarder", "params")
+
+
 _KINDS = {"quadratic": ToyTask, "regression": RegressionTask,
           "code_regression": CodeRegressionTask, "mlebench": MLEBenchTask,
           "mlebench_real": MLEBenchRealTask,

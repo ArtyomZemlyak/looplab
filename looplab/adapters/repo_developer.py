@@ -628,13 +628,22 @@ class LLMRepoDeveloper:
     cmd, writing `looplab_stages.json`), PLAN (read-only atomic-step decomposition), then IMPLEMENT
     (write the code, one bounded session per step). A REPAIR skips both and runs a single session."""
 
+    # PromptStore handle (docs/15 §P4.7): the intro/body blocks render through it, so an
+    # operator's prompt_dir override applies to the REPO developer exactly like it always did to
+    # the toy one. A CLASS-level default (not only an __init__ assignment): tests exercise these
+    # methods on bare `__new__` instances, and the attr also opts into make_roles' existing
+    # post-construction hook (`if hasattr(developer, "prompts"): developer.prompts = prompts`).
+    prompts = None
+
     def __init__(self, client: LLMClient, task, *, parser: str = "tool_call",
                  loop_opts: Optional[dict] = None, plan_decompose: bool = True,
                  plan_min_steps: int = 2, plan_max_steps: int = 8,
-                 session_max_turns: int = 500, session_time_budget_s: float = 1200.0):
+                 session_max_turns: int = 500, session_time_budget_s: float = 1200.0,
+                 prompts=None):
         self.client = client
         self.task = task
         self.parser = parser
+        self.prompts = prompts
         self.loop_opts = dict(loop_opts or {})
         # C4 plan decomposition + hard per-session backstop (see Settings.developer_*).
         self._plan_decompose = plan_decompose
@@ -1084,9 +1093,11 @@ class LLMRepoDeveloper:
             write.deleted = list(self.last_deleted)
         params = ", ".join(f"{k}={v}" for k, v in (idea.params or {}).items()) or "(choose sensible values)"
         from looplab.core.hardware import operational_attention_points
+        from looplab.core.prompts import render
         system = (
-            _REPO_DEV_SYSTEM_INTRO + self.brief + "\n\n"
-            + _REPO_DEV_SYSTEM_BODY
+            render(self.prompts, "repo_developer_system_intro", _REPO_DEV_SYSTEM_INTRO)
+            + self.brief + "\n\n"
+            + render(self.prompts, "repo_developer_system_body", _REPO_DEV_SYSTEM_BODY)
             + operational_attention_points() + "\n\n"
             + _REPO_DEV_COMMANDS_HEADER + self._recipes() + "\n\n"
             + ((_REPO_DEV_RESULTS_HEADER + _results + "\n\n")

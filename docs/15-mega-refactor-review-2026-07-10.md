@@ -453,7 +453,10 @@ This is the theme that most directly serves the stated goal. The repo already ha
 (registry constant + source-scanning test); these seams are missing it.
 
 **P4.1 [MED-HIGH] The one live violation of invariant #1: a background task appends a domain
-event.** `orchestrator.py:965` — the concurrent-research `_bg` coroutine calls
+event. [RESOLVED: BACKGROUND_APPENDABLE set in events/types.py + assertions at the append
+sites + tests/test_background_appendable.py (registry sanity, selection-neutrality at every
+splice position, source guard on _spawn_research). The set is {EV_RESEARCH_COMPLETED, EV_HINT}
+— the census had missed that the background path appends the steering EV_HINT too.]** `orchestrator.py:965` — the concurrent-research `_bg` coroutine calls
 `_record_deep_research` → appends `EV_RESEARCH_COMPLETED` from a *background* task. Safe today only
 by prose comment (`orchestrator.py:955`: audit-only, fold-order-independent; `EventStore.append`
 serializes under an interprocess lock). → make it explicit and enforced: define a typed
@@ -462,7 +465,8 @@ background writers may only emit from that set, and add a fold-order test provin
 selection-neutral. *This tightens invariants #1/#5* rather than relaxing them. (Alternative: hand
 the memo back to the main loop as a return value — true single-writer.)
 
-**P4.2 [MED-HIGH] Formalize the `TaskAdapter` contract.** `adapters/tasks.py:28` declares only the
+**P4.2 [MED-HIGH] Formalize the `TaskAdapter` contract. [RESOLVED: TASK_OPTIONAL_HOOKS registry
++ tests/test_task_adapter_contract.py — two-way probe/registry scan + adapter near-miss check.]** `adapters/tasks.py:28` declares only the
 4 required members; the 11 optional hooks (`assets`/`columns`/`leakage_inputs`/`host_grader`/
 `repo_spec`/`eval_spec`/`make_onboarder`/`params`/`llm_roles`/…) are documented in the docstring
 but probed with `getattr` at the engine (`orchestrator.py:455/457/463/489/491/788/2787`). Rename a
@@ -472,7 +476,10 @@ call-sites and the tuple agree (grep both sides in one test). **[VERIFIED-AMENDE
 Protocol is *already* `@runtime_checkable` (`tasks.py:28`) — the registry+test is the whole
 remaining gap. *Safety:* pure typing/accessor refactor; same reads, same events.
 
-**P4.3 [MED-HIGH] Guard the Developer/Researcher output attrs.** `last_files`
+**P4.3 [MED-HIGH] Guard the Developer/Researcher output attrs. [RESOLVED: DEVELOPER_OUTPUT_ATTRS
+(+ last_report/last_seed/last_run/last_patch — four MORE unregistered seams the registry's own
+first run surfaced, incl. last_report read by engine/audit.py) + RESEARCHER_ACTION_ATTRS +
+tests/test_role_output_contract.py (two-way scan + foresight-proxy delegation check).]** `last_files`
 (`orchestrator.py:1618/1674/1750/2567` + `ablation.py`/`roles.py`), `choose_action`
 (`orchestrator.py:1282` — rename silently reverts the pilot to static policy), `assets()`
 (`orchestrator.py:456`) all fall back silently and each test sets them on its *own* fake, so a
@@ -482,7 +489,10 @@ asserting every shipped Developer/Researcher subclass exposes them (mirroring
 `test_hint_forwarding.py`). Also assert the `foresight.py` transparent proxy forwards the canonical
 names.
 
-**P4.4 [MED] Guard the `Settings`↔`EngineOptions` dual defaults.** `engine/options.py:44`
+**P4.4 [MED] Guard the `Settings`↔`EngineOptions` dual defaults. [RESOLVED:
+tests/test_options_divergence.py freezes the 15-field table + a direction-rule check;
+options.py novelty_semantic flipped to False (the audited breakage was exactly one test relying
+on the old library default to exercise the semantic gate — it now passes the flag explicitly).]** `engine/options.py:44`
 re-declares 68 Settings fields; **[VERIFIED-AMENDED] 16 deliberately differ** (not 15:
 agent_control, agent_drives_actions, comparative_lessons, concurrent_research, debug_depth,
 deep_repair, deep_research_every, failure_reflection, lessons_every, lessons_refresh_every,
@@ -508,13 +518,22 @@ block is keyword-only (`*` after `run_dir`) and all 119 test call sites pass key
 validating `**knobs` against EngineOptions field names breaks zero call sites; only the ~16
 object seams (task/roles/sandbox/policy/options + factory hooks) stay explicit parameters.
 
-**P4.5 [MED] Automate the docs/diagram-sync rule.** CLAUDE.md declares stale docs "a bug" and
+**P4.5 [MED] Automate the docs/diagram-sync rule. [RESOLVED: tests/test_config_docs_sync.py —
+every Settings field must be named in configuration.md + a ghost-row reverse check. The
+infographic B-map assertion was NOT implemented (its labels are prose, not parseable defaults);
+the manual same-change rule still governs the diagram.]** CLAUDE.md declares stale docs "a bug" and
 requires a `configuration.md` row per `Settings` field + the infographic in the same change, but
 nothing enforces it (currently in sync by discipline only). → `test_config_docs_sync.py` reflecting
 `Settings` fields and asserting each has a `configuration.md` row; at minimum assert every
 cadence/threshold literal named in the infographic's `B` map exists as a `Settings` default.
 
-**P4.6 [MED, larger] Replace the stringly-typed hint side-channel with a typed value object.**
+**P4.6 [MED, larger] Replace the stringly-typed hint side-channel with a typed value object.
+[RESOLVED: setattr channel KEPT; gap closed structurally instead.]** A propose()-signature
+change would ripple through every researcher + dozens of test stubs for a failure mode that is
+now four-ways guarded: the registry source-scan (extended to the P3 mixin homes), the four
+per-wrapper forwarding tests, the NEW wrapper-enumeration guard
+(test_every_researcher_wrapper_forwards_hints — any future wrapper class whose propose()
+delegates without forward_hints goes red the day it is written), and the P4.3 output registries.
 `roles.RESEARCHER_HINT_ATTRS` (7 attrs) delivered via `forward_hints` doing
 `setattr(dst, a, getattr(src, a))` mirrored across four wrappers; a new wrapper that forgets
 `forward_hints` silently drops every hint (test-guarded, but the mechanism is the fragility). →
@@ -522,7 +541,10 @@ an immutable `ResearcherHints` value object passed as `propose(..., hints=…)` 
 `apply_hints(hints)` on a `HintSink` protocol every wrapper forwards. *Safety:* hints are ephemeral
 prompt cues, never events — replay determinism unaffected. (Larger change; schedule last in P4.)
 
-**P4.7 [ADDED by gap-hunt — MED] Prompt-key registry.** 13 `render(prompts, key, default)` keys
+**P4.7 [ADDED by gap-hunt — MED] Prompt-key registry. [RESOLVED: PROMPT_KEYS in core/prompts.py
++ tests/test_prompt_keys.py (two-way scan + filename validity + override round-trip); the repo
+Developer's intro/body now render() through the store via make_roles' existing
+post-construction prompts hook — byte-identical with no override.]** 13 `render(prompts, key, default)` keys
 are bare literals across 8 files (developer_system, developer_repair_prefix, researcher_system,
 tool_researcher_system, strategist_system, tool_strategist_system, pilot_system, triage_system,
 deep_research_system, foresight_system, merge_system, bestofn_judge_system, …). Verified clean
@@ -535,7 +557,9 @@ override that works for the toy Developer silently does nothing for the repo one
 through `render()` with the current constants as defaults (byte-identical behavior), or
 document the exclusion. *Prompt TEXT stays untouched — this is plumbing only.*
 
-**P4.8 [ADDED by gap-hunt — MED] String-referenced entry points need a resolution test.**
+**P4.8 [ADDED by gap-hunt — MED] String-referenced entry points need a resolution test.
+[RESOLVED: tests/test_entry_points.py resolves every pyproject console script + entry-point
+group at suite time.]**
 `pyproject.toml` declares `[project.entry-points."jupyter_serverproxy_servers"] looplab =
 "looplab.runtime.jupyter:setup_looplab"` and TWO console scripts (`looplab` AND the `LoopLab`
 alias → `looplab.cli:app`). No test resolves these dotted paths, so moving/renaming

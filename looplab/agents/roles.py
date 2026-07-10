@@ -145,6 +145,22 @@ class Developer(Protocol):
     def implement(self, idea: Idea) -> str: ...
 
 
+# Duck-typed OUTPUT attributes the engine reads off the ACTIVE Developer/Researcher after a
+# call (docs/15 §P4.3) — the mirror of RESEARCHER_HINT_ATTRS for the outbound direction. The
+# engine reads them with `getattr(..., default)`, so a one-sided rename historically failed
+# SILENTLY (an empty node shipped with no diagnostic; the pilot quietly reverted to the static
+# policy). `tests/test_role_output_contract.py` source-scans BOTH sides against these tuples:
+# every consumer getattr and every producer assignment must use exactly these names, and every
+# delegating wrapper (ValidatingDeveloper, best-of-N, the foresight panel) must forward them.
+DEVELOPER_OUTPUT_ATTRS: tuple[str, ...] = (
+    "last_files", "last_deleted",
+    # CLI-agent (ADR-7) developer outputs: the validation report the engine's audit emitter
+    # reads (engine/audit.py `_emit_agent_report`), and the seed/process/patch evidence the
+    # ValidatingDeveloper's checks consume. Surfaced by the contract test's own first run —
+    # the original census had missed all four.
+    "last_report", "last_seed", "last_run", "last_patch")
+RESEARCHER_ACTION_ATTRS: tuple[str, ...] = ("choose_action",)
+
 RESEARCHER_HINT_ATTRS: tuple[str, ...] = (
     "_digest_cap", "_complexity_hint", "_sweep_hint", "_novelty_feedback", "_novelty_hint",
     "_novelty_stance", "_hyp_order")

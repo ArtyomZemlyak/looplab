@@ -185,3 +185,36 @@ def test_foresight_forwards_hints_even_without_a_client():
     outer.propose(RunState(goal="g", direction="min"), None)
     assert inner.seen["_novelty_feedback"] == "you already tried X"
     assert inner.seen["track_hypotheses"] is False
+
+def test_every_researcher_wrapper_forwards_hints():
+    """docs/15 §P4.6 (resolution): instead of replacing the setattr channel with a value object
+    (a propose()-signature change across every researcher + test stub), close its one remaining
+    gap structurally — a NEW wrapper class that delegates propose() to a wrapped researcher MUST
+    call roles.forward_hints before delegating, or the engine's hints silently die at it (the
+    historical dead-board bug). Enumerates wrapper classes by shape, so the next wrapper is
+    covered the day it is written, without a bespoke test."""
+    import ast
+    import inspect
+    from pathlib import Path
+
+    pkg = Path(__file__).resolve().parents[1] / "looplab"
+    offenders = []
+    for f in pkg.rglob("*.py"):
+        # utf-8-sig: several tracked files carry a BOM, which plain utf-8 turns into a SyntaxError
+        tree = ast.parse(f.read_text(encoding="utf-8-sig", errors="replace"))
+        for cls in [n for n in ast.walk(tree) if isinstance(n, ast.ClassDef)]:
+            methods = {m.name: m for m in cls.body if isinstance(m, ast.FunctionDef)}
+            if "propose" not in methods:
+                continue
+            src = ast.unparse(methods["propose"])
+            # a WRAPPER's propose delegates to a wrapped researcher handle:
+            delegates = any(h in src for h in
+                            ("self.base.propose(", "self.fallback.propose(",
+                             "self.inner.propose(", "self.researcher.propose(",
+                             "self._wrapped.propose("))
+            if delegates and "forward_hints(" not in src:
+                offenders.append(f"{f.relative_to(pkg)}::{cls.name}")
+    assert not offenders, (
+        f"researcher wrapper(s) {offenders} delegate propose() WITHOUT forward_hints — engine "
+        "hints (novelty feedback, complexity cues, board order) silently die at that wrapper. "
+        "Call roles.forward_hints(self, <wrapped>) before delegating.")
