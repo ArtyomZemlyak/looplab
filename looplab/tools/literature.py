@@ -14,6 +14,10 @@ import urllib.request
 from looplab.tools._base import fn_spec
 
 _ARXIV = "http://export.arxiv.org/api/query"
+# Bound the download (see web.py `_MAX_DOWNLOAD_BYTES`): a plain `r.read()` slurps the whole Atom
+# response into host RAM before we parse the top few entries — cap it so a huge/hostile response can't
+# exhaust memory. 2 MB is far more than `max_results` arXiv entries ever occupy.
+_MAX_DOWNLOAD_BYTES = 2_000_000
 _ENTRY = re.compile(r"<entry>(.*?)</entry>", re.DOTALL)
 _TITLE = re.compile(r"<title>(.*?)</title>", re.DOTALL)
 _SUMMARY = re.compile(r"<summary>(.*?)</summary>", re.DOTALL)
@@ -47,7 +51,7 @@ class LiteratureTools:
             url = f"{_ARXIV}?" + urllib.parse.urlencode(
                 {"search_query": f"all:{query}", "start": 0, "max_results": self.max_results})
             with urllib.request.urlopen(url, timeout=self.timeout) as r:
-                xml = r.read().decode("utf-8", errors="replace")
+                xml = r.read(_MAX_DOWNLOAD_BYTES).decode("utf-8", errors="replace")   # bounded read
         except Exception as e:  # noqa: BLE001 — network is best-effort; never crash the run
             return f"(literature search unavailable: {e})"
         out = []

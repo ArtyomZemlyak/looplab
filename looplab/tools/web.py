@@ -50,6 +50,11 @@ from looplab.tools._base import fn_spec
 
 _DDG = "https://html.duckduckgo.com/html/"
 _UA = "Mozilla/5.0 (compatible; LoopLab/1.0; +https://example.invalid/looplab)"
+# Bound the DOWNLOAD itself (not just the text handed to the agent, which is already capped to
+# max_bytes): a plain `r.read()` slurps the WHOLE response into host RAM before truncation, so a huge
+# / hostile / endless URL is a memory-blowup vector. Read at most this many bytes — far above the ~4k
+# chars ever surfaced, small enough to bound RAM. A bigger body is cut here (marked truncated).
+_MAX_DOWNLOAD_BYTES = 2_000_000
 # DuckDuckGo HTML result anchors + snippets (class names are stable on the html endpoint).
 _RESULT = re.compile(
     r'<a[^>]+class="result__a"[^>]+href="(?P<href>[^"]+)"[^>]*>(?P<title>.*?)</a>', re.DOTALL)
@@ -113,7 +118,9 @@ class WebTools:
     def _get(self, url: str, data: bytes | None = None) -> str:
         req = urllib.request.Request(url, data=data, headers={"User-Agent": _UA})
         with _SSRF_OPENER.open(req, timeout=self.timeout) as r:   # re-checks SSRF on each redirect hop
-            return r.read().decode("utf-8", errors="replace")
+            # Bounded read (see _MAX_DOWNLOAD_BYTES): `read(n)` returns AT MOST n bytes, so a multi-GB /
+            # endless response can't exhaust host memory; the unread tail is dropped when the stream closes.
+            return r.read(_MAX_DOWNLOAD_BYTES).decode("utf-8", errors="replace")
 
     def _search(self, query: str) -> str:
         if not query:
