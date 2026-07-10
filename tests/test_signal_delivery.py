@@ -144,3 +144,45 @@ def test_learning_signals_close_the_loop():
     out = foresight_scoreboard(st)
     assert "0 improved" in out, out
     assert any(r.closes_loop for r in SIGNALS)
+
+
+# --- code-review pass regressions ----------------------------------------------------------------
+
+def test_foresight_scoreboard_counts_a_crashed_pick_as_a_miss():
+    """A foresight pick that CRASHED (terminal, no metric) is the strongest possible miss and must
+    count against the track record — the old `n.metric is None: continue` dropped it from the
+    denominator too, inflating the hit rate toward over-confidence (the opposite of L4)."""
+    from looplab.search.foresight import foresight_scoreboard
+    st = RunState(direction="min", goal="g")
+    st.nodes[0] = Node(id=0, operator="draft", idea=Idea(operator="draft", params={}),
+                       metric=1.0, status=NodeStatus.evaluated)
+    st.nodes[1] = Node(id=1, operator="improve", parent_ids=[0],
+                       idea=Idea(operator="improve", params={}),
+                       metric=0.5, status=NodeStatus.evaluated)              # a real improvement
+    st.nodes[2] = Node(id=2, operator="improve", parent_ids=[0],
+                       idea=Idea(operator="improve", params={}),
+                       metric=None, status=NodeStatus.failed)               # a crash = a miss
+    st.foresight_selected = [{"node_id": 1, "confidence": 0.8}, {"node_id": 2, "confidence": 0.8}]
+    out = foresight_scoreboard(st)
+    assert "last 2 predict-before-execute" in out and "1 improved" in out, out
+    # a pick that is only PENDING (no outcome yet) is NOT judgeable and stays out of the denominator
+    st.nodes[3] = Node(id=3, operator="improve", parent_ids=[0],
+                       idea=Idea(operator="improve", params={}), status=NodeStatus.pending)
+    st.foresight_selected.append({"node_id": 3, "confidence": 0.8})
+    assert "last 2 predict-before-execute" in foresight_scoreboard(st)
+
+
+def test_trust_reflection_names_a_hardcoded_metric_flag():
+    """A node hard-flagged ONLY by `critic:hardcoded_metric` must render its reason, not "node N ()":
+    `hard_flagged_ids` promotes that signal to hard, so the display filter must use the SAME shared
+    `is_hard_signal` predicate instead of blanket-stripping every `critic:` signal."""
+    from looplab.events.digest import trust_reflection
+    st = RunState(direction="min", goal="g", trust_gate="gate")
+    st.nodes[7] = Node(id=7, operator="draft", idea=Idea(operator="draft", params={}),
+                       metric=0.0, status=NodeStatus.evaluated)
+    st.reward_hacks = [{"node_id": 7, "signals": [{"signal": "critic:hardcoded_metric"},
+                                                  {"signal": "critic:style_nit"}]}]
+    out = trust_reflection(st)
+    assert "critic:hardcoded_metric" in out          # the hard reason is named...
+    assert "node 7 ()" not in out                    # ...never a contentless warning
+    assert "critic:style_nit" not in out             # advisory critic noise stays hidden

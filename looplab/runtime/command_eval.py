@@ -42,14 +42,23 @@ def _regex_metric(text: str, pattern: str, group: int) -> Optional[float]:
     # A bad operator-supplied pattern (re.error) or out-of-range group (IndexError) must read
     # as "no metric", not crash the eval.
     try:
+        rx = re.compile(pattern)
+
+        def _last(s):
+            last = None
+            for m in rx.finditer(s):   # take the LAST match in this window (final epoch, etc.)
+                last = m
+            return last
+
         # Bound the input: an operator/agent-authored pattern run over the FULL stdout can ReDoS-hang
-        # the engine thread on a pathological regex. The metric line is at the tail (final epoch), so
-        # cap to the last ~200k chars — enough for any real metric print, small enough to bound backtracking.
+        # the engine thread on a pathological regex. The metric is usually at the TAIL (final epoch),
+        # so scan the last ~200k chars first; but a script that prints the metric EARLY and then dumps
+        # a long report/prediction log would lose it to a tail-only cap, so fall back to the HEAD 200k
+        # when the tail has no match. Bounded to 2×200k either way — the ReDoS ceiling is preserved.
         if len(text) > 200_000:
-            text = text[-200_000:]
-        last = None
-        for m in re.finditer(pattern, text):   # take the LAST match (final epoch, etc.)
-            last = m
+            last = _last(text[-200_000:]) or _last(text[:200_000])
+        else:
+            last = _last(text)
         return _to_float(last.group(group)) if last else None
     except (re.error, IndexError):
         return None

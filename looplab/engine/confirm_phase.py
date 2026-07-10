@@ -82,15 +82,23 @@ class ConfirmPhaseMixin:
             return
 
         summaries: list[dict] = []
-        # Eval budget for the confirm phase: it runs confirm_top_k × confirm_seeds FULL-profile evals
-        # with no budget check (the loop-top guard only runs after the whole phase returns), so a
-        # budget already at 99% still paid the entire pass. The per-seed memo makes a mid-phase break
-        # resumable for free. Check once per node (re-folding per seed is too costly); overshoot is
-        # bounded to one node's seeds instead of the whole pass.
+        # Eval-budget guard for the confirm phase. Confirmation is the run's FINAL robustness gate
+        # (multi-seed-confirm the top leaders, demote a seed-lucky #1), so it must NOT be skipped
+        # wholesale: on an eval-seconds-bounded run the search normally consumes the whole budget, so
+        # `total_eval_seconds >= max_es` is ALREADY true when confirm starts. A naive per-node break
+        # there confirmed ZERO nodes yet still emitted `best_confirmed` (→ confirmed_done True),
+        # permanently disabling confirmation even across a budget-extending resume, and kept the
+        # un-demoted seed-lucky leader. So ALWAYS confirm at least the top `min(2, len(topk))` leaders
+        # (enough for a demotion decision — a bounded, one-time overrun); the budget break applies only
+        # to the lower-ranked tail. `spent` is folded ONCE (re-folding the whole log per node was
+        # O(topk×events) on a repo run whose node_created events embed full file sets) then accrued from
+        # each node's wall-clock confirm cost, so a large confirm_top_k can't overshoot unbounded.
         max_es = state.budget_overrides.get("max_eval_seconds", self.max_eval_seconds)
-        for nd in topk:
-            if max_es is not None and fold(self.store.read_all()).total_eval_seconds >= max_es:
-                break                                     # budget spent — stop; a resume finishes it
+        spent = fold(self.store.read_all()).total_eval_seconds
+        must_confirm = min(2, len(topk))
+        for i, nd in enumerate(topk):
+            if i >= must_confirm and max_es is not None and spent >= max_es:
+                break                                     # leaders confirmed; a resume extends the tail
             if nd.confirmed_mean is not None:  # reuse a prior (crashed) attempt's result
                 # Use the REAL seed count from that attempt, not confirm_seeds — some
                 # seeds may have failed, and inflating n shrinks the SE in the variance
@@ -106,12 +114,14 @@ class ConfirmPhaseMixin:
             # D1 seed-holdout: confirm seeds start at confirm_seed_base (default 1) so every
             # confirm split is DISJOINT from the search's implicit seed 0 — the confirm metric
             # is a generalization signal, not a re-measurement of what the search optimized.
+            _t0 = time.time()
             for s in range(self.confirm_seed_base, self.confirm_seed_base + self.confirm_seeds):
                 if s in done:                         # already evaluated this seed earlier
                     continue
                 m = await self._run_confirm_seed(nd, s)
                 if m is not None:
                     scores.append(m)
+            spent += time.time() - _t0        # accrue this node's confirm cost (avoids the O(n²) re-fold)
             if scores:
                 summ = cv_summary(scores)
                 summaries.append({"node_id": nd.id, **summ})

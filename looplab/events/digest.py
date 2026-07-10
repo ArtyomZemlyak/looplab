@@ -137,7 +137,10 @@ def trust_reflection(state: RunState, max_shown: int = 2) -> str:
     (not inline in the engine) so `tests/test_signal_delivery.py` can exercise it directly."""
     if not getattr(state, "reward_hacks", None):
         return ""
-    from looplab.events.replay import hard_flagged_ids   # lazy: avoid an import cycle at module load
+    # lazy import (avoid a cycle at module load): the SAME `is_hard_signal` classifier the gate uses,
+    # so the names we render never diverge from the reason the node was hard-flagged (a node flagged
+    # ONLY by `critic:hardcoded_metric` used to render as "node N ()" because _sigs stripped it).
+    from looplab.events.replay import hard_flagged_ids, is_hard_signal
     hard = hard_flagged_ids(state)
     if not hard:
         return ""
@@ -145,8 +148,10 @@ def trust_reflection(state: RunState, max_shown: int = 2) -> str:
                     key=lambda r: r.get("node_id") or -1, reverse=True)[:max_shown]
 
     def _sigs(r) -> str:
+        # Name the HARD signals (the reason it gates); advisory `critic:`/`perfect_metric` noise stays
+        # hidden. A hard-flagged node therefore always renders at least one signal, never "()".
         return "; ".join(str(s.get("signal", "")) for s in (r.get("signals") or [])
-                         if not str(s.get("signal", "")).startswith(("critic:", "perfect_metric")))
+                         if is_hard_signal(s.get("signal", "")))
     items = "; ".join(f"node {r.get('node_id')} ({_sigs(r)})" for r in recent)
     gated = (" (EXCLUDED from winning under the active trust gate)"
              if getattr(state, "trust_gate", "audit") in ("gate", "block") else "")

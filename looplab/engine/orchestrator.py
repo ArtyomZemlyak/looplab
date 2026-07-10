@@ -364,7 +364,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin):
             from looplab.tools.vectorstore import hash_embed as _he
             embedder = _he
         self._embedder = embedder
-        self._idea_vecs: dict[int, list] = {}   # node_id -> embedding of its idea text (lazy cache)
+        self._idea_vecs: dict[int, list] = {}   # hash(idea text) -> embedding (lazy in-memory cache)
         self._debug_depth = max(1, int(debug_depth))
         self._operator_bandit = bool(operator_bandit)
         # M5: the Researcher's always-on digest budget (0 = auto-scale with run size).
@@ -1650,8 +1650,8 @@ class Engine(ConfirmPhaseMixin, AblationMixin):
         return " ".join(filter(None, [getattr(idea, "rationale", "") or "",
                                       getattr(idea, "hypothesis", "") or ""])).strip()
 
-    def _idea_vec(self, node_id: int, text: str):
-        # Key on the TEXT, not the node_id: the embedding is a pure function of the text, and a
+    def _idea_vec(self, text: str):
+        # Key on the TEXT (not a node_id): the embedding is a pure function of the text, and a
         # `node_reset` re-creates the SAME id with a NEW idea — a node_id-keyed cache then returned the
         # OLD vector and the semantic-novelty gate compared future proposals against a stale idea. The
         # cache is in-memory only (never persisted/replayed), so a per-process `hash(text)` key is safe.
@@ -1676,7 +1676,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin):
             if len(nt) < 20:
                 continue
             try:
-                s = _cosine(v, self._idea_vec(n.id, nt))
+                s = _cosine(v, self._idea_vec(nt))
             except Exception:  # noqa: BLE001 — an embedder hiccup must never block proposing
                 continue
             if s > best_s:

@@ -34,6 +34,18 @@ def test_regex_metric_bad_pattern_is_none():
                                         "group": 5}) is None       # group out of range
 
 
+def test_regex_metric_found_before_a_long_trailing_log():
+    # Code-review pass: the ReDoS cap scans only the last 200k chars, but a script that prints the
+    # metric EARLY and then dumps a long report would lose it to a tail-only window. The head is a
+    # fallback when the tail has no match, so an early metric before >200k of trailing logs is found.
+    spec = {"kind": "stdout_regex", "pattern": r"RMSE:\s*([0-9.]+)", "group": 1}
+    stdout = "RMSE: 0.1234\n" + ("progress....\n" * 40_000)   # >200k chars of trailing noise
+    assert len(stdout) > 200_000
+    assert read_metric(stdout, ".", spec) == 0.1234
+    # and a metric at the TAIL (the common case) still wins as the LAST match
+    assert read_metric("RMSE: 9.9\n" + ("x\n" * 100) + "RMSE: 0.5\n", ".", spec) == 0.5
+
+
 # #55 — a metric file with a UTF-8 BOM still parses
 def test_file_json_strips_bom(tmp_path):
     (tmp_path / "m.json").write_text('﻿{"metric": 0.7}', encoding="utf-8")

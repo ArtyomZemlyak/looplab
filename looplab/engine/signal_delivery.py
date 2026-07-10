@@ -101,7 +101,10 @@ SIGNALS: tuple[SignalRoute, ...] = (
         inject="looplab.agents.hints:render_hint_directives",
         consumer="Researcher, Strategist, pilot, crash-triage, Developer",
         call_sites=(("looplab/engine/orchestrator.py", "render_hint_directives(state.pending_hints)"),
-                    ("looplab/engine/orchestrator.py", "self._directed_idea("))),
+                    ("looplab/engine/orchestrator.py", "self._directed_idea("),
+                    # the ablation-produced refine_block is a real tree-entering Developer node too, so
+                    # its directive threading is enforced here (it was silently bypassed before).
+                    ("looplab/engine/ablation.py", "self._directed_idea("))),
     SignalRoute(
         name="run_states",
         produced_by="control/eval events (pause/approval/build/leakage/trust)",

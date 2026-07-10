@@ -34,6 +34,7 @@ from typing import Optional
 from pydantic import BaseModel, Field
 
 from looplab.agents.roles import forward_hints
+from looplab.core.models import NodeStatus
 from looplab.core.parse import parse_structured
 from looplab.core.prompts import render
 
@@ -250,14 +251,18 @@ def foresight_scoreboard(state, last_n: int = 12) -> str:
     confs: list[float] = []
     for p in list(by_node.values())[-last_n:]:
         n = state.nodes.get(p.get("node_id"))
-        if n is None or n.metric is None:
+        # Skip picks not yet judgeable — node uncreated, or still pending/evaluating (no outcome). But
+        # a FAILED pick (terminal, metric None) is NOT skipped: a crash is the strongest possible miss,
+        # and the old `n.metric is None: continue` dropped every crashed pick from the DENOMINATOR too,
+        # inflating the hit rate toward over-confidence — the opposite of this L4 close-the-loop signal.
+        if n is None or n.status is NodeStatus.pending:
             continue
         pm = [state.nodes[pi].metric for pi in n.parent_ids
               if pi in state.nodes and state.nodes[pi].metric is not None]
         if not pm:                               # a draft pick has no parent baseline to score against
             continue
         base = max(pm) if state.direction == "max" else min(pm)
-        improved = (n.metric > base) if state.direction == "max" else (n.metric < base)
+        improved = n.metric is not None and state.is_better(n.metric, base)
         graded += 1
         beat += 1 if improved else 0
         c = p.get("confidence")

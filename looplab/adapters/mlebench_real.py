@@ -125,9 +125,10 @@ class MLEBenchRealTask(BaseModel):
         for p in sorted(pub.iterdir()):
             if p.is_file() and (p.suffix.lower() == ".csv" or p.name == "description.md"):
                 try:
-                    if p.stat().st_size > _MAX_ASSET_BYTES:
+                    sz = p.stat().st_size
+                    if sz > _MAX_ASSET_BYTES:
                         raise RuntimeError(
-                            f"{p.name} is {p.stat().st_size // (1024*1024)} MB — too large to stage as a "
+                            f"{p.name} is {sz // (1024*1024)} MB — too large to stage as a "
                             f"per-node content asset (it would be copied into every node workdir and OOM "
                             f"the engine). This competition needs the read-only data-mount path.")
                     out[p.name] = p.read_text(encoding="utf-8", errors="replace")

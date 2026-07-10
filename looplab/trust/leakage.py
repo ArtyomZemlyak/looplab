@@ -50,6 +50,13 @@ def target_leakage(features: dict[str, list[float]], target: list[float],
 
 _FIT_RE = re.compile(r"\.(fit|fit_transform)\s*\(([^)]*)\)")
 _SPLIT_RE = re.compile(r"train_test_split\s*\(|KFold|StratifiedKFold|\.split\s*\(")
+# The early-stopping monitor kwarg (split off from the fit ARGS so a benign eval_set on VALIDATION
+# isn't read as fit-on-validation) and the TEST-monitor tell. The monitor tell matches the substring
+# `test` (NOT `\bx_test\b`): a suffixed name like `X_test_scaled`/`X_testing`/`y_test_final` has no
+# word boundary after `test`, so the anchored form silently missed a real test-set monitor — while a
+# validation-named monitor (`X_val`, `X_holdout`) never contains `test`, so the substring stays safe.
+_EVALSET_KW_RE = re.compile(r"\b(?:eval_set|validation_data|eval_names)\s*=")
+_TEST_MONITOR_RE = re.compile(r"\b(?:eval_set|validation_data|eval_names)\s*=[^=]*test")
 
 
 def code_leakage_scan(code: str) -> dict:
@@ -74,10 +81,9 @@ def code_leakage_scan(code: str) -> dict:
         # kwarg → its `val` stays flagged). The TEST-monitor check scans the FULL LINE, not `arg`:
         # `_FIT_RE`'s `([^)]*)` truncates at the first `)`, so a test tuple in a SECOND eval_set entry
         # (`eval_set=[(X_val,y_val),(X_test,y_test)]`) never reaches `arg` — the line-level scan sees it.
-        head = re.split(r"\b(?:eval_set|validation_data|eval_names)\s*=", arg, maxsplit=1)[0]
-        test_monitor = re.search(
-            r"\b(?:eval_set|validation_data|eval_names)\s*=[^=]*\b(?:x_test|y_test)\b", line.lower())
-        if ("test" in head or "x_test" in head or "val" in head        # val/test in the fit args = leak
+        head = _EVALSET_KW_RE.split(arg, maxsplit=1)[0]
+        test_monitor = _TEST_MONITOR_RE.search(line.lower())
+        if ("test" in head or "val" in head                            # val/test in the fit args = leak
                 or test_monitor):                                       # test INSIDE the monitor = leak
             flags.append({"signal": "fit_on_test", "line": i + 1, "code": line.strip()[:90]})
         elif split_at is not None and i < split_at and "train" not in arg:

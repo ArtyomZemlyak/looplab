@@ -116,6 +116,12 @@ class Settings(BaseSettings):
     # Image for the untrusted command-eval tier (RepoTask, Phase 4): the framework's deps
     # should be baked in (the container runs --network none, so a pip setup can't fetch).
     docker_image: str = "python:3.12-slim"
+    # Resource caps for the untrusted/hostile Docker tier (passed to `docker run --memory/--cpus`).
+    # The default 4g bound protects other tenants from an OOM, but a model-training MLE-bench eval
+    # routinely needs more — raise it (e.g. "16g") for such runs. "" disables the cap (unbounded).
+    # Ignored by the trusted_local (subprocess) tier.
+    sandbox_memory: str = "4g"
+    sandbox_cpus: str = ""
     # Search policy (ADR-2): "greedy" | "evolutionary" | "mcts" | "asha".
     policy: str = "greedy"
     # Ablation-driven refinement (I7): every N improves, ablate the best to find the

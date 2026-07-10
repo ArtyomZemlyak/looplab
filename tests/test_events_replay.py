@@ -148,6 +148,21 @@ def test_fold_confirm_seed_results():
     assert st.confirm_seed_results == {3: {0: 0.5, 1: None}}
 
 
+# Code-review pass: budget_extend must reject NON-FINITE values. `float("nan")`/`float("inf")` PASS the
+# numeric coercion but `total_eval_seconds >= nan` is always False (budget silently disabled) / inf never
+# trips — and the poison value re-folds on every resume, permanently. Reject it; keep the prior ceiling.
+def test_budget_extend_rejects_nonfinite():
+    from looplab.core.models import Event
+    base = Event(type="run_started", data={"run_id": "r", "task_id": "t"})
+    for bad in ("nan", "inf", "-inf", float("nan"), float("inf")):
+        st = fold([base, Event(type="budget_extend", data={"max_eval_seconds": bad})])
+        assert "max_eval_seconds" not in st.budget_overrides, bad
+    # a FINITE string still coerces (the legitimate UI/TUI case the coercion exists for)
+    st = fold([base, Event(type="budget_extend", data={"max_eval_seconds": "600", "max_seconds": "30"})])
+    assert st.budget_overrides["max_eval_seconds"] == 600.0
+    assert st.budget_overrides["max_seconds"] == 30.0
+
+
 # A "reused" stage marker (a re-eval that SKIPPED a stage the inline-repair reuse kept) must NOT clobber
 # the REAL completion record from the attempt that actually ran the stage — else the node reads as if it
 # trained in 0s. Keep the informative record; order-tolerant (a real record still supersedes a reused).

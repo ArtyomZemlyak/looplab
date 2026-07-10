@@ -183,3 +183,36 @@ def test_hybrid_cluster_has_a_similarity_floor():
                  "reinforcement agent", "random forest", "transformer attention"]
     clusters = cluster_near_duplicates(unrelated, k=3)
     assert len(clusters) >= len(unrelated) - 1          # not collapsed into one giant cluster
+
+
+def _asha_rung0(extra):
+    # 4 evaluated draft survivors (min: 0.1<0.2<0.5<0.6, top-2 = nodes 0,1) + caller-supplied children.
+    st = RunState(direction="min")
+    for i, m in [(0, 0.1), (1, 0.2), (2, 0.5), (3, 0.6)]:
+        st.nodes[i] = Node(id=i, operator="draft", idea=Idea(operator="draft", params={}),
+                           metric=m, status=NodeStatus.evaluated, feasible=True)
+    st.nodes.update(extra)
+    return st
+
+
+def test_asha_one_failed_promotion_keeps_survivor_repromotable():
+    # Batch-5 behaviour preserved: node 0's ONLY promotion crashed → it stays re-promotable (one
+    # transient crash must not abandon a possibly-best lineage), so it is still the chosen parent.
+    child = {10: Node(id=10, parent_ids=[0], operator="improve",
+                      idea=Idea(operator="improve", params={}), status=NodeStatus.failed)}
+    # debug_depth=0 isolates the PROMOTION logic (skip the debug-failed-leaf step).
+    act = ASHAPolicy(n_seeds=4, max_nodes=20, eta=2, debug_depth=0).next_actions(_asha_rung0(child))
+    assert act and act[0]["kind"] == "improve" and act[0]["parent_id"] == 0
+
+
+def test_asha_retires_a_deterministically_crashing_survivor():
+    # Code-review pass: after `_ASHA_MAX_FAILED_PROMOTIONS` (2) failed promotions and no live child, the
+    # survivor is RETIRED — else a lineage that crashes deterministically is re-promoted every iteration
+    # (chosen = lowest-id survivor), starving siblings and burning the node budget. So the next promotion
+    # goes to the OTHER survivor (node 1), not node 0.
+    kids = {10: Node(id=10, parent_ids=[0], operator="improve",
+                     idea=Idea(operator="improve", params={}), status=NodeStatus.failed),
+            11: Node(id=11, parent_ids=[0], operator="improve",
+                     idea=Idea(operator="improve", params={}), status=NodeStatus.failed)}
+    act = ASHAPolicy(n_seeds=4, max_nodes=20, eta=2, debug_depth=0).next_actions(_asha_rung0(kids))
+    assert act and act[0]["kind"] == "improve" and act[0]["parent_id"] == 1

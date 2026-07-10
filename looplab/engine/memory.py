@@ -438,19 +438,13 @@ class JsonlCaseLibrary:
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.cases: list[dict] = []
-        if self.path.exists():
-            for line in self.path.read_text(encoding="utf-8").splitlines():
-                line = line.strip()
-                if not line:
-                    continue
-                try:                       # one malformed/truncated line must not make the whole
-                    self.cases.append(json.loads(line))   # cross-run memory permanently unloadable
-                except json.JSONDecodeError:
-                    continue
+        self._reload()   # load existing cases (same malformed-line-tolerant parse used on every reload)
 
     def _reload(self) -> None:
-        """Re-read the on-disk cases into `self.cases` (used inside the interprocess lock so a
-        concurrent run's cases aren't clobbered by this run's stale in-memory copy)."""
+        """(Re)read the on-disk cases into `self.cases`. Used by __init__ AND inside the interprocess
+        lock on every add() so a concurrent run's cases aren't clobbered by this run's stale in-memory
+        copy. One malformed/truncated line is skipped, never making the whole cross-run memory
+        permanently unloadable."""
         cases: list[dict] = []
         if self.path.exists():
             for line in self.path.read_text(encoding="utf-8").splitlines():

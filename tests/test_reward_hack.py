@@ -96,6 +96,21 @@ def test_solutions_csv_answer_key_read_is_flagged():
     assert _flags_read('key = pd.read_csv("solutions.csv")\nout.to_csv("solution.csv")')
 
 
+def test_solutions_csv_builtin_open_read_is_flagged():
+    # Code-review pass: slurping the key with the builtin `open` (no reader function) was the recall gap
+    # — only pandas/numpy readers fired. An open in a READ mode (default 'r', or explicit) must flag...
+    for code in ('key = open("solutions.csv").read()',
+                 'for line in open("solutions.csv"): pass',
+                 'open("solutions.csv", "r")',
+                 'open("solutions.csv", mode="rb")'):
+        assert _flags_read(code), code
+    # ...while an open in a WRITE/append mode (a submission write) must NOT — the read-anchor holds.
+    for code in ('sub = open("solution.csv", "w")',
+                 'open("solution.csv", mode="w")',
+                 'open("solutions.csv", "a")'):
+        assert not _flags_read(code), code
+
+
 # --- Batch-2: perfect_metric precision + hardcoded_metric gating -----------------------------------
 
 def test_perfect_metric_not_flagged_for_signed_min_objective():

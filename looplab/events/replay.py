@@ -4,6 +4,7 @@ evaluated nodes (tie-break by id), so no separate `best_updated` event is needed
 """
 from __future__ import annotations
 
+import math
 from typing import Iterable
 
 from looplab.core.models import (Event, Hypothesis, Idea, Node, NodeStatus, RunState, Trial,
@@ -37,23 +38,30 @@ def flagged_node_ids(st: RunState) -> set:
     return hard_flagged_ids(st)
 
 
+def is_hard_signal(sig: str) -> bool:
+    """Is this reward-hack/leakage signal HIGH-PRECISION (gating + agent-facing), vs advisory noise?
+
+    The single classifier shared by `hard_flagged_ids` (gate/block selection exclusion) AND
+    `digest.trust_reflection._sigs` (which signals to NAME in the agent hint) — kept here so the two
+    can't drift: before, `_sigs` stripped EVERY `critic:` signal while `hard_flagged_ids` promoted
+    `critic:hardcoded_metric`, so a node hard-flagged ONLY for that rendered as "node N ()" (a
+    contentless warning). `critic:hardcoded_metric` is HIGH-PRECISION (the critic requires a LITERAL
+    metric value with no computed assignment anywhere), so it gates — closing the "hardcode a
+    near-optimal metric and win under every built-in gate" bypass on self-report tasks. Other
+    `critic:` issues and `perfect_metric` (which a legitimately-perfect score hits) stay advisory."""
+    sig = str(sig)
+    if sig == "critic:hardcoded_metric":
+        return True
+    return not sig.startswith(("critic:", "perfect_metric"))
+
+
 def hard_flagged_ids(st: RunState) -> set:
     """Node ids carrying a HIGH-PRECISION (non-`critic:`, non-`perfect_metric`) cheating/leakage
     signal, INDEPENDENT of `trust_gate` mode. `flagged_node_ids` uses it for gate/block selection
     exclusion; the agent-facing trust-reflection hint (signal-delivery §1) uses it to warn the
     Researcher about a flagged lineage even under `audit`, where nothing is gate-excluded."""
-    def _is_hard(sig: str) -> bool:
-        sig = str(sig)
-        # `critic:hardcoded_metric` is HIGH-PRECISION (the critic requires a LITERAL metric value with
-        # no computed assignment anywhere), so it gates — closing the "hardcode a near-optimal metric
-        # and win under every built-in gate" bypass on self-report tasks. Other `critic:` issues and
-        # `perfect_metric` (which a legitimately-perfect score hits) stay advisory.
-        if sig == "critic:hardcoded_metric":
-            return True
-        return not sig.startswith(("critic:", "perfect_metric"))
-
     def _has_hard_signal(rh: dict) -> bool:
-        return any(_is_hard(s.get("signal", "")) for s in (rh.get("signals") or []))
+        return any(is_hard_signal(s.get("signal", "")) for s in (rh.get("signals") or []))
     return {r.get("node_id") for r in st.reward_hacks if _has_hard_signal(r)}
 
 
@@ -474,9 +482,16 @@ def fold(events: Iterable[Event]) -> RunState:
                               ("timeout", float), ("max_parallel", int)):
                 if d.get(_k) is not None:
                     try:
-                        st.budget_overrides[_k] = _cast(d[_k])
+                        _v = _cast(d[_k])
                     except (TypeError, ValueError):
-                        pass
+                        continue
+                    # Reject NaN/Inf: `float("nan")`/`float("inf")` PASS the cast, but a ceiling of
+                    # nan makes `total_eval_seconds >= nan` always False (budget silently disabled) and
+                    # inf never trips — and the poison value re-folds on every resume, permanently. Skip
+                    # it (keep the prior ceiling) rather than store a budget-disabling value.
+                    if _cast is float and not math.isfinite(_v):
+                        continue
+                    st.budget_overrides[_k] = _v
             if d.get("add_nodes") is not None:
                 try:
                     st.budget_overrides["add_nodes"] = int(st.budget_overrides.get("add_nodes", 0)) + int(d["add_nodes"])
