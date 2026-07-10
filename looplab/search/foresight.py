@@ -236,9 +236,19 @@ def foresight_scoreboard(state, last_n: int = 12) -> str:
     picks = getattr(state, "foresight_selected", None) or []
     if not picks:
         return ""
+    # De-dup by node_id BEFORE scoring: one node can fold TWO foresight_selected entries — the
+    # researcher's idea-pick AND the developer's best-of-N solution-pick (foresight_panel>1 +
+    # best_of_n>1). Scoring both would double-weight dual-pick nodes 2:1 and halve the effective
+    # lookback. Keep the LAST pick per node (dict insertion order = event order), then take the last
+    # `last_n` DISTINCT nodes, so the track record reflects distinct predicted nodes.
+    by_node: dict = {}
+    for p in picks:
+        nid = p.get("node_id")
+        if nid is not None:
+            by_node[nid] = p          # last-wins per node
     graded = beat = 0
     confs: list[float] = []
-    for p in picks[-last_n:]:
+    for p in list(by_node.values())[-last_n:]:
         n = state.nodes.get(p.get("node_id"))
         if n is None or n.metric is None:
             continue

@@ -462,6 +462,28 @@ the same change). What shipped:
 `feasible_nodes` gate/block semantics deserves a dedicated change + tests); the budget/loop and
 auth/fold P0s (§2.3–2.5); the corner-case fixes in §3; per-role temperature (§4.1).
 
+**Adversarial mega-review of this change (2026-07-10, 18 agents, 5 dimensions × review→verify).**
+13 findings, 2 refuted, 11 confirmed (1 major, the rest minor/nit) — all addressed on this branch:
+- **Foresight scoreboard double-count** (minor) — with `foresight_panel>1` *and* `best_of_n>1` a node
+  folds TWO `foresight_selected` entries (idea-pick + solution-pick), so the calibration line
+  double-weighted dual-pick nodes and halved the lookback. Fixed: `foresight_scoreboard` de-dups by
+  `node_id` (last pick per node) before scoring.
+- **Trust-fix recall regressions** (minor) — stripping the whole `eval_set=` kwarg also masked a
+  genuine `eval_set=[(X_test,y_test)]` monitor-on-test leak, and the `solutions.csv` read-anchor still
+  flagged `open('solution.csv','w')` while missing a variable-path read. Fixed: leakage now waives only
+  `val` inside the monitor but still flags `test`/`x_test` there; `solutions.csv` is flagged unless it
+  is *solely* a write (`to_csv`/`savetxt`/`write_text`/`open(...,'w'|'a')`). Verified: false positives
+  gone, both genuine leaks and answer-key reads still caught.
+- **Test rigor** (major) — the per-signal probes exercised each render function in isolation, so a
+  deleted *call site* would not have turned the suite red (the exact §1 failure the registry claims to
+  prevent). Fixed: each route now carries `call_sites` (the real wiring points) that a source-scan test
+  asserts present (mirroring `test_hint_forwarding`), the memo probe routes through `specs()`/`execute()`
+  (not the private method), and the memo's dual channel (tool + `_state_brief`) is registered. Also
+  reworded the `_state_brief` takeaway to be channel-neutral (the toolless plain researcher is no longer
+  told to call a tool it lacks) and moved `EV_FORESIGHT_SELECTED` out from under the "NOT folded" divider.
+
+Suite after the fix pass: **1584 passed / 23 skipped**.
+
 ---
 
 *Companion docs: [PROMPT_REVIEW.md](PROMPT_REVIEW.md) (the 2026-07-09 prompt/delivery review this

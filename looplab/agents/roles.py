@@ -305,7 +305,9 @@ def _state_brief(state: RunState, parent: Optional[Node], digest_cap: int = 0,
     if research and isinstance(research[-1], dict) and research[-1].get("summary"):
         lines.append("Latest deep-research takeaway: "
                      + " ".join(str(research[-1]["summary"]).split())[:300]
-                     + " (call read_research_memo for the full findings/claims).")
+                     # channel-neutral: a plain researcher has no tools, so state that the depth is
+                     # recorded rather than commanding a `read_research_memo` call it can't make.
+                     + " (full findings/claims are recorded; the read_research_memo tool returns them).")
     # P1: surface OPEN board hypotheses (human "+ Add" / deep-research directions) verbatim.
     # Without this the Researcher never sees them, and evidence only links when an experiment's
     # `hypothesis` matches the statement exactly — so board cards would stay "open" forever.

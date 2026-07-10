@@ -47,11 +47,18 @@ def _probe_foresight_calibration():
 
 
 def _probe_deep_research_memo():
+    # Route through the REAL tool surface — specs() registration + execute() dispatch — not the
+    # private _research_memo, so removing either leaves the signal undeliverable with a red probe
+    # (review #9). Also asserts the tool is actually exposed to the agent.
     from looplab.tools.run_tools import RunTools
     st = RunState(direction="min", goal="g")
     st.research = [{"summary": "the leader is overfit", "findings": ["node 4 leaks val stats"],
                     "recommended_directions": ["try CV-gated features"], "at_node": 5}]
-    return RunTools()._research_memo(st), "the leader is overfit"
+    rt = RunTools()
+    rt.bind_state(st)
+    assert any(s["function"]["name"] == "read_research_memo" for s in rt.specs()), \
+        "read_research_memo not registered in RunTools.specs()"
+    return rt.execute("read_research_memo", {}), "the leader is overfit"
 
 
 def _probe_operator_yields():
@@ -107,6 +114,20 @@ def test_signal_reaches_rendered_output(route):
     assert must_contain in text, (
         f"{route.name}: injected via {route.inject} but rendered output did not carry the signal "
         f"(looked for {must_contain!r} in {text!r})")
+
+
+@pytest.mark.parametrize("route", SIGNALS, ids=lambda r: r.name)
+def test_injection_call_sites_present(route):
+    """The REAL wiring point of each route is present in the source (review #7). The isolated probes
+    above prove the render function WORKS; this proves it is actually CALLED at the producer/consumer,
+    so deleting a call site — the "folded but no longer injected" §1 failure — turns the suite red.
+    A source scan, mirroring tests/test_hint_forwarding.py's setattr-site scan."""
+    import pathlib
+    repo = pathlib.Path(__file__).resolve().parent.parent
+    assert route.call_sites, f"{route.name}: no call_sites registered — add the real wiring point(s)"
+    for rel, needle in route.call_sites:
+        src = (repo / rel).read_text(encoding="utf-8")
+        assert needle in src, f"{route.name}: call site {needle!r} missing from {rel} (injection deleted?)"
 
 
 def test_learning_signals_close_the_loop():
