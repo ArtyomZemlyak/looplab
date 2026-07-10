@@ -484,6 +484,38 @@ auth/fold P0s (§2.3–2.5); the corner-case fixes in §3; per-role temperature 
 
 Suite after the fix pass: **1584 passed / 23 skipped**.
 
+## 9. Bug-fix pass — the remaining findings, resolved (2026-07-10)
+
+§8 shipped P1 (signal-delivery) plus only the trust P0s that made the signal channel trustworthy;
+this pass closes the rest of §2–§3 (and the corner cases surfaced by the code-review of the P1
+branch itself). Fixes landed subsystem-by-subsystem so each batch is independently bisectable and
+green. The suite ends at **1600 passed / 23 skipped / 1 docker deselected**; the offline smoke +
+`looplab replay` reproduce byte-identically (no fold divergence introduced).
+
+| Batch | Subsystem | Class of defect fixed |
+|---|---|---|
+| 1 | `events/` | fold/replay P0: `budget_extend` string coercion (§2.4 poison event — now killed even for existing bad logs); first-terminal-wins extended to gate **every** field mutation in `node_evaluated`/`node_failed` (a corrupt second terminal can't flip metric/status/feasibility); `novelty_rejected` stamps the gap-safe prospective id; `normalize_task` rejects `cmd`+`eval` both set. |
+| 2 | `trust/` | gate precision: `perfect_metric` flags the exact floor (`metric == 0.0`), not every signed objective; `critic:hardcoded_metric` promoted to a hard gate (closes the hardcode-and-win bypass); metric readers confined to the workdir (`_is_within`); `_regex_metric` ReDoS cap; dep-install latch resets per run; surrogate never trains on a flagged/cheated metric (preserves the tested gate-vs-block breeding contract). |
+| 3 | `engine/` | unbudgeted loops: inline-repair honors the eval ceiling (`_evaluate(max_es=…)`); confirm phase checks budget once per node; `_idea_vec` keys the cache on text (a `node_reset` no longer compares against a stale vector); role telemetry consumed on rerun/inject/ablate so a pick can't leak onto the next id; `JsonlCaseLibrary.add` re-reads under the interprocess lock; deep-research cadence uses the since-last gate. |
+| 4 | `agents/` + `core/parse.py` | `extract_code` salvages an unclosed fence (was a guaranteed SyntaxError node); `agentic_text`/`agentic_struct` re-raise `BudgetExceeded`; deep-research loop restored `emit_after`/`emit_force` (was unbounded under the shipped `max_turns=0`); forced emits validated (`_accept_forced`); plain researcher folds the parse error into the retry prompt. |
+| 5 | `search/` | policy/archive corner cases: `merge_every`/MCTS `c` clamped; `DiversityArchive` + best-of-N tie-break skip infeasible / identical candidates; `HybridRetriever` `min_signals` floor (8 unrelated texts → 8 clusters, was 1); ASHA counts only live children as expanded; ablate emits its `policy_decision`. |
+| 6 | `tools/` | ToolProvider never-raise contract (a junk arg reads as a tool error, not a killed phase); hand-written + auto skills share one library (no shadowing); `CompositeTools` de-dups by name; reposcout overlay suffix-match is absolute-only; `edit_match` preserves CRLF; vector search drops non-positive scores. |
+| 7 | `runtime/` | untrusted-tier hardening the isolation path lacked: `--memory`/`--cpus`/`--cap-drop ALL`/`no-new-privileges`; `_run_argv` always drains through the memory-bounded reader (no unbounded host-RAM buffering); reward-hack write-detection broadened past bare `open(name,'w')`. |
+| 8 | `serve/` + `adapters/` | assistant session-transcript GET is token-gated (`raw` leaked attached-file contents past the auth gate — §2.5); `state_payload` caches the fold+dump by `(size, mtime, upto_seq)` (SSE hot path was O(n²)); `LLMOnboarder` bounds the rglob walk + guards every stat/read with `OSError`; `MLEBenchRealTask.assets` fails loud on a >512MB public file instead of OOMing. |
+
+**Deliberately deferred (enhancements, not bugs — noted in the commits):**
+- **Trust/policy split-brain full fix (§2.2).** Only the unambiguous surrogate-training exclusion was
+  applied. Changing `feasible_nodes` so a *gated* node is also barred from **breeding** (not just
+  winning) would collapse the gate-vs-block distinction that `tests/test_profile_trust_gate.py` pins
+  as a contract (`gate` = exclude-from-win, `block` = also-infeasible). That deserves its own change
+  with its own tests, not a rider on a bug-fix batch.
+- **`kill_background` tool + background timeout / log-pruning** (batch 6) — a capability gap, not a
+  correctness bug.
+- **Mid-file corrupt-log divergence surfacing** (batch 8) — a rare FUSE/NFS-only detection
+  enhancement; the fold already ignores unparseable lines safely.
+- **Full MLEBench asset→mount refactor** (batch 8) — only the >512MB OOM guard was added; large
+  competitions still need a real data mount, which is a task-adapter feature.
+
 ---
 
 *Companion docs: [PROMPT_REVIEW.md](PROMPT_REVIEW.md) (the 2026-07-09 prompt/delivery review this
