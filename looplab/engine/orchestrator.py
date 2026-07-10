@@ -56,7 +56,7 @@ from looplab.core.llm import BudgetExceeded
 from looplab.core.models import Idea, NodeStatus, RunState
 from looplab.search.coverage import coverage_signal
 from looplab.search.operators import merge_idea
-from looplab.search.policy import SearchPolicy, available_policies, make_policy
+from looplab.search.policy import SearchPolicy, available_policies, make_policy, operator_yields
 from looplab.agents.strategist import (
     NOVELTY_STANCES,
     StrategyContext,
@@ -364,7 +364,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin):
             from looplab.tools.vectorstore import hash_embed as _he
             embedder = _he
         self._embedder = embedder
-        self._idea_vecs: dict[int, list] = {}   # node_id -> embedding of its idea text (lazy cache)
+        self._idea_vecs: dict[int, list] = {}   # hash(idea text) -> embedding (lazy in-memory cache)
         self._debug_depth = max(1, int(debug_depth))
         self._operator_bandit = bool(operator_bandit)
         # M5: the Researcher's always-on digest budget (0 = auto-scale with run size).
@@ -658,6 +658,10 @@ class Engine(ConfirmPhaseMixin, AblationMixin):
             ablates = [a for a in actions if a["kind"] == "ablate"]
             if ablates:
                 for a in ablates:
+                    if "_scores" in a:   # surface "why this node" for ablates too (was dropped: this
+                        self.store.append(EV_POLICY_DECISION,   # branch continues before the create loop)
+                                          {"scores": a["_scores"], "chosen": a.get("_chosen"),
+                                           "reason": a.get("_reason")})
                     await self._ablate(a["parent_id"])
                 continue
 
@@ -699,6 +703,14 @@ class Engine(ConfirmPhaseMixin, AblationMixin):
     # emission, _write_lock point, and fold site stays exactly where it was in the original run().
 
     def _setup_phase(self, state: RunState) -> None:
+        # Per-RUN reset of the dep-install circuit breaker: it is a module global, so in the long-lived
+        # `looplab ui` server a run that latched (egress blip) would leave auto-install disabled for the
+        # next run in the same process until some pip call happens to respond.
+        try:
+            from looplab.runtime.deps import reset_install_latch
+            reset_install_latch()
+        except Exception:  # noqa: BLE001 - best-effort; a missing helper must not block setup
+            pass
         if not state.run_id:
             # SETUP PHASE (task + data), made an explicit, ONLINE-watchable phase: the pre-node work
             # (fingerprint the workspace, hash data provenance, profile columns, write AGENTS.md) is
@@ -971,7 +983,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin):
                     # iteration), so a multi-eval batch can't overshoot by a whole batch (#2/#25).
                     if (max_es is not None and cur.total_eval_seconds >= max_es):
                         break
-                    await self._evaluate(a["node_id"], limiter)
+                    await self._evaluate(a["node_id"], limiter, max_es)
         else:
             # G3 distributed/parallel eval: fan out under a CapacityLimiter (worker pool). The
             # eval-budget guard the review flagged for this path: cap the number STARTED so an
@@ -992,7 +1004,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin):
                     # the overshoot to ~one batch instead of launching the whole `evals` list at once.
                     if started >= self.max_parallel:
                         break
-                    tg.start_soon(self._evaluate, a["node_id"], limiter)
+                    tg.start_soon(self._evaluate, a["node_id"], limiter, max_es)
                     started += 1
 
     # -------------------------------------------------- strategist cadence (A7)
@@ -1034,6 +1046,10 @@ class Engine(ConfirmPhaseMixin, AblationMixin):
             available_developers=self._available_developers(),
             defaults=defaults,
             coverage=self._coverage_for_ctx(state),
+            # Signal-delivery (§1): the folded per-operator yield so the Strategist tunes operator
+            # cadences from the run's own evidence, not priors. Computed on the (rare) consult
+            # cadence only — O(nodes) is fine here, not on the per-proposal path.
+            operator_yields=operator_yields(state),
         )
 
     def _coverage_for_ctx(self, state: RunState) -> dict:
@@ -1261,7 +1277,12 @@ class Engine(ConfirmPhaseMixin, AblationMixin):
         # node-count already researched (the at_node gate makes resume a no-op).
         if state.pending_nodes() or n == 0 or self._already_researched_at(state, n):
             return state
-        if self.deep_research_every and n % self.deep_research_every == 0:
+        # Since-last cadence (not `n % every == 0`): a rung-0/seed batch that jumps the node count by
+        # k>1 must not step over the only multiple and skip the whole window. The last researched
+        # at_node is the marker; `_already_researched_at` above already de-dups the same-n resume.
+        _last_research_n = max((int(m.get("at_node", -1)) for m in state.research
+                                if isinstance(m, dict) and m.get("at_node") is not None), default=-1)
+        if self._cadence_due(n, _last_research_n, self.deep_research_every):
             return self._run_deep_research(state, trigger="cadence", manual=False)
         hist = state.strategy_history
         if (hist and hist[-1].get("at_node") == n
@@ -1351,7 +1372,9 @@ class Engine(ConfirmPhaseMixin, AblationMixin):
         n = len(state.nodes)
         if n == 0 or self._already_researched_at(state, n):
             return None
-        if self.deep_research_every and n % self.deep_research_every == 0:
+        _last_research_n = max((int(m.get("at_node", -1)) for m in state.research
+                                if isinstance(m, dict) and m.get("at_node") is not None), default=-1)
+        if self._cadence_due(n, _last_research_n, self.deep_research_every):   # since-last, gap-safe
             return "cadence"
         hist = state.strategy_history
         if (hist and hist[-1].get("at_node") == n
@@ -1462,8 +1485,19 @@ class Engine(ConfirmPhaseMixin, AblationMixin):
                             if n.status is NodeStatus.failed and n.error_reason),
                            key=lambda n: n.id, reverse=True)[:3]
             if fails:
-                summ = "; ".join(f"node {n.id} ({n.error_reason}): {(n.error or '')[:60]}" for n in fails)
+                def _why(n) -> str:
+                    # Signal-delivery (§1): prefer the crash-triage VERDICT (the LLM's judgment of
+                    # why the idea/code failed) over the raw stderr tail — that judgment is the most
+                    # expensive reasoning in the failure path and was previously dropped by the fold.
+                    tr = " ".join((getattr(n, "triage_rationale", "") or "").split())[:90]
+                    return tr or (n.error or "")[:60]
+                summ = "; ".join(f"node {n.id} ({n.error_reason}): {_why(n)}" for n in fails)
                 hint += f"\nReflection — recent failures to avoid repeating: {summ}."
+        # Signal-delivery (§1): surface a recently trust-FLAGGED node so the next proposal reacts to
+        # it (trust flags otherwise only bar a WIN — the agent never learns and keeps re-deriving the
+        # flagged approach). Pure rendering lives in digest.trust_reflection so a test can exercise it.
+        from looplab.events.digest import trust_reflection
+        hint += trust_reflection(state)
         if self._localize_faults and self._repo_spec.get("editables"):
             fails = sorted((n for n in state.nodes.values()
                             if n.status is NodeStatus.failed and n.error),
@@ -1616,11 +1650,16 @@ class Engine(ConfirmPhaseMixin, AblationMixin):
         return " ".join(filter(None, [getattr(idea, "rationale", "") or "",
                                       getattr(idea, "hypothesis", "") or ""])).strip()
 
-    def _idea_vec(self, node_id: int, text: str):
-        v = self._idea_vecs.get(node_id)
+    def _idea_vec(self, text: str):
+        # Key on the TEXT (not a node_id): the embedding is a pure function of the text, and a
+        # `node_reset` re-creates the SAME id with a NEW idea — a node_id-keyed cache then returned the
+        # OLD vector and the semantic-novelty gate compared future proposals against a stale idea. The
+        # cache is in-memory only (never persisted/replayed), so a per-process `hash(text)` key is safe.
+        key = hash(text)
+        v = self._idea_vecs.get(key)
         if v is None:
             v = self._embedder(text)
-            self._idea_vecs[node_id] = v
+            self._idea_vecs[key] = v
         return v
 
     def _semantic_duplicate(self, state: RunState, idea: Idea):
@@ -1637,7 +1676,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin):
             if len(nt) < 20:
                 continue
             try:
-                s = _cosine(v, self._idea_vec(n.id, nt))
+                s = _cosine(v, self._idea_vec(nt))
             except Exception:  # noqa: BLE001 — an embedder hiccup must never block proposing
                 continue
             if s > best_s:
@@ -1697,7 +1736,9 @@ class Engine(ConfirmPhaseMixin, AblationMixin):
         outcome = (f"it FAILED ({dup.error_reason})" if dup.status is NodeStatus.failed
                    else f"it scored {dup.metric}")
         self.store.append(EV_NOVELTY_REJECTED, {
-            "node_id": len(state.nodes), "near_node": dup.id, "kind": "llm",
+            # the PROSPECTIVE id this proposal would get — allocated as max+1, NOT len(): on a gapped
+            # log (a dropped/malformed node_created) len() points at the wrong slot (audit only).
+            "node_id": max(state.nodes, default=-1) + 1, "near_node": dup.id, "kind": "llm",
             "reason": str(v.reason)[:200], "stance": self._novelty_stance,
             "action": "reproposed" if callable(repropose) else "kept"})
         if callable(repropose):
@@ -1755,7 +1796,8 @@ class Engine(ConfirmPhaseMixin, AblationMixin):
                            if dup.status is NodeStatus.failed
                            else f"it scored {dup.metric}")
                 self.store.append(EV_NOVELTY_REJECTED, {
-                    "node_id": len(state.nodes), "near_node": dup.id, "kind": "semantic",
+                    # prospective id = max+1, not len() (gap-safe; audit only) — see the llm gate above.
+                    "node_id": max(state.nodes, default=-1) + 1, "near_node": dup.id, "kind": "semantic",
                     "similarity": round(sim, 4), "stance": self._novelty_stance,
                     "action": "reproposed" if callable(repropose) else "kept"})
                 if callable(repropose):
@@ -1791,7 +1833,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin):
                 mind, nearest = d, n.id
         if mind >= self._novelty_epsilon:
             return idea
-        nid = len(state.nodes)
+        nid = max(state.nodes, default=-1) + 1       # the PROSPECTIVE id (max+1, not len — gap-safe)
         rng = _random.Random(nid * 1009 + 7)        # deterministic per node-slot
         nudged = dict(idea.params)
         for k in params:
@@ -1841,10 +1883,14 @@ class Engine(ConfirmPhaseMixin, AblationMixin):
         if not callable(chooser):              # defensive: agent_drives_actions implies unified
             return self.policy.next_actions(state)
         from looplab.agents.roles import _state_brief
+        from looplab.agents.hints import render_hint_directives
         try:
             brief = _state_brief(state, None)
         except Exception:  # noqa: BLE001 - a brief is advisory; never block on it
             brief = ""
+        # Signal-delivery (§1): the pilot picks the next macro action, so a standing operator
+        # directive must reach it too — else it can choose an action that fights the directive.
+        brief += render_hint_directives(state.pending_hints)
         choice = chooser(state, legal, recommended, brief=brief)
         idx = choice.get("index", -1) if isinstance(choice, dict) else -1
         chosen = legal[idx] if isinstance(idx, int) and 0 <= idx < len(legal) else \
@@ -1883,10 +1929,14 @@ class Engine(ConfirmPhaseMixin, AblationMixin):
         if callable(fn):
             try:
                 from looplab.agents.roles import _state_brief
+                from looplab.agents.hints import render_hint_directives
                 try:
                     brief = _state_brief(state, None)
                 except Exception:  # noqa: BLE001 - a brief is advisory; never block on it
                     brief = ""
+                # Signal-delivery (§1): a standing directive (e.g. "prefer lighter models") is
+                # relevant to the repair-vs-reject decision, so surface it to the triage agent too.
+                brief += render_hint_directives(state.pending_hints)
                 # Own span so the crash-triage LLM turns band as `triage`, NOT `evaluate`: triage runs
                 # INSIDE the engine's `evaluate` span, so without this its (often many, agentic) turns
                 # inherit phase=evaluate and inflate the "evaluate" band with failure-debugging that has
@@ -1997,15 +2047,36 @@ class Engine(ConfirmPhaseMixin, AblationMixin):
             return impl_from(idea, parent)
         return self.developer.implement(idea)
 
-    def _repair(self, node, err: str) -> str:
+    def _directed_idea(self, idea, state: RunState):
+        """Signal-delivery (§1): fold the active operator directives into the idea HANDED TO THE
+        DEVELOPER so a standing directive ("use only sklearn") steers the CODE that gets written,
+        not only the proposal (the Researcher already renders directives; the Developer never saw
+        them). Returns a COPY with the rendered directive block appended to `rationale` — the field
+        every Developer backend renders — so it reaches the innermost developer through ANY wrapper
+        chain (the copy rides the data, not a forwarded attribute that a wrapper could drop). The
+        ORIGINAL idea, recorded in `node_created`, is untouched, so the audit rationale stays the
+        Researcher's own. No pending directives -> the idea is returned unchanged (identity)."""
+        from looplab.agents.hints import render_hint_directives
+        block = render_hint_directives(state.pending_hints)
+        if not block:
+            return idea
+        di = idea.model_copy(deep=True)
+        di.rationale = ((di.rationale or "") + "\n" + block).strip()
+        return di
+
+    def _repair(self, node, err: str, state: Optional[RunState] = None) -> str:
         """Route a repair through `repair_from(idea, node, error)` when the Developer supports it, so
         the fix is seeded from the FAILING NODE's OWN files — not the shared developer's `last_files`,
         which holds whatever node it built last (a batch builds every node before any eval, so
-        `last_files` is almost never the node being repaired). Falls back to `repair(idea, code, err)`."""
+        `last_files` is almost never the node being repaired). Falls back to `repair(idea, code, err)`.
+
+        §1: when `state` is given, standing operator directives are folded into the idea so the REPAIRED
+        code honors them too (consistency with the four build sites); without it the raw idea is used."""
+        idea = self._directed_idea(node.idea, state) if state is not None else node.idea
         rf = getattr(self.developer, "repair_from", None)
         if callable(rf):
-            return rf(node.idea, node, err)
-        return self.developer.repair(node.idea, node.code, err)
+            return rf(idea, node, err)
+        return self.developer.repair(idea, node.code, err)
 
     def _emit_node_created(self, *, node_id: int, parent_ids: list, operator: str, idea: dict,
                            code: str, files: dict, deleted=_OMIT, research_origin=_OMIT,
@@ -2055,7 +2126,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin):
                 idea.operator = "draft"        # operator is authoritative from the policy,
                 parents: list[int] = []        # not whatever label the LLM returns
                 with self.tracer.span("implement"):
-                    code = self.developer.implement(idea)
+                    code = self.developer.implement(self._directed_idea(idea, state))
             elif kind == "merge":
                 parents = list(action["parent_ids"])
                 # A0b: real ensembling (code recombination) when configured/Strategist-selected;
@@ -2071,9 +2142,10 @@ class Engine(ConfirmPhaseMixin, AblationMixin):
                     # parent[0]'s working code + entrypoint carry over and the idea directs blending in
                     # the other parent. Mean-param merges (numeric tasks, no files) stay from-scratch.
                     _impl_from = getattr(self.developer, "implement_from", None)
-                    code = (_impl_from(idea, pnodes[0])
+                    _didea = self._directed_idea(idea, state)   # §1: directives steer the merge code too
+                    code = (_impl_from(_didea, pnodes[0])
                             if (self._merge_mode == "ensemble" and _impl_from and pnodes)
-                            else self.developer.implement(idea))
+                            else self.developer.implement(_didea))
             elif kind == "debug":
                 parent = state.nodes[action["parent_id"]]
                 parents = [parent.id]
@@ -2093,18 +2165,23 @@ class Engine(ConfirmPhaseMixin, AblationMixin):
                     err = self._repair_error_context(parent.error_reason, parent.error,
                                                      state=state, node=parent)
                     with self.tracer.span("repair", parent_id=parent.id):
-                        code = self._repair(parent, err)   # seed from parent's OWN files (repair_from)
+                        code = self._repair(parent, err, state)   # seed from parent's OWN files (repair_from)
                 else:
-                    # Debug/repair is stance-NEUTRAL: novelty pressure ("open a new direction") is
-                    # wrong when the job is to FIX a failure. Clear any stale explore/exploit hint a
-                    # prior draft/improve left on the researcher before this repair proposal (this
-                    # branch does not call _set_complexity_hint, so nothing else refreshes it).
+                    # Signal-delivery (§1): the debug re-propose now gets the SAME cross-run priors +
+                    # failure-reflection + fault-localization + trust cues as draft/improve — exactly
+                    # when the agent is FIXING a failure it most needs "this crash class recurred
+                    # before" and "the likely files to edit". Previously this branch called only
+                    # _stamp_novelty_hint, so those cues were absent on the repair proposal.
+                    self._set_complexity_hint(state, parent)
+                    # ...then FORCE a balanced novelty stance: novelty pressure ("open a new
+                    # direction") is wrong when the job is to FIX a failure, so override the stance
+                    # _set_complexity_hint just stamped (it uses the live self._novelty_stance).
                     self._stamp_novelty_hint(state, "balanced")
                     with self.tracer.span("propose"):
                         idea = self.researcher.propose(state, parent)
                     idea.operator = "debug"
                     with self.tracer.span("implement"):
-                        code = self._implement(idea, parent)
+                        code = self._implement(self._directed_idea(idea, state), parent)
             else:  # improve
                 parent = state.nodes[action["parent_id"]]
                 self._set_complexity_hint(state, parent)   # A0d breadth-keyed complexity cue
@@ -2116,7 +2193,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin):
                 idea.operator = "improve"
                 parents = [parent.id]
                 with self.tracer.span("implement"):
-                    code = self._implement(idea, parent)
+                    code = self._implement(self._directed_idea(idea, state), parent)
             # 💡 deep-research provenance: tag the first couple of nodes created right after a research
             # memo (its directions are the active steering) so the UI can show WHERE research landed in
             # the tree. Audit/UI only — never affects search. Coarse-but-honest (temporal proximity).
@@ -2182,7 +2259,9 @@ class Engine(ConfirmPhaseMixin, AblationMixin):
             else:                                   # "implement" (or merge): keep the idea, re-develop
                 idea = node.idea
             with self.tracer.span("implement"):
-                code = self._implement(idea, parent)
+                # §1: a reset RE-BUILDS the node from scratch, so standing operator directives must
+                # steer its code too — same as the four _create_node build sites.
+                code = self._implement(self._directed_idea(idea, state), parent)
             self._emit_node_created(
                 node_id=node.id, parent_ids=parents, operator=idea.operator,
                 idea=idea.model_dump(mode="json"), code=code,
@@ -2195,6 +2274,11 @@ class Engine(ConfirmPhaseMixin, AblationMixin):
                     "reason": "auto-paused: a Developer session crashed (LLM unreachable or a hard error, "
                               "unresolved within the node) — resume once it's fixed"})
         self._emit_agent_report(node.id)
+        # Consume the predictive telemetry for THIS node too: a "propose" reset re-runs the researcher
+        # (setting last_hyp_priority/last_foresight), so without consuming it here the pick set would
+        # leak onto the NEXT _create_node's id — the exact mis-attribution _emit_role_telemetry prevents.
+        self._emit_hypothesis_ranked(node.id)
+        self._emit_foresight_selected(node.id)
 
     def _create_injected_node(self, req: dict) -> None:
         """Materialize an operator-authored experiment (`inject_node` control event) into a real
@@ -2269,6 +2353,9 @@ class Engine(ConfirmPhaseMixin, AblationMixin):
             )
         if not req.get("code"):
             self._emit_agent_report(node_id)
+            # consume predictive telemetry for this node so it can't leak onto the next created node
+            self._emit_hypothesis_ranked(node_id)
+            self._emit_foresight_selected(node_id)
 
     def _activate_spec(self, proposal: dict) -> None:
         """Make the ratified onboarding proposal the trusted eval (Phase 3): the eval_spec
@@ -2860,7 +2947,8 @@ class Engine(ConfirmPhaseMixin, AblationMixin):
         external-agent calls by len(params) per ablation (ADR-7 cost rule)."""
         return getattr(self.developer, "inner", self.developer)
 
-    async def _evaluate(self, node_id: int, limiter: anyio.CapacityLimiter) -> None:
+    async def _evaluate(self, node_id: int, limiter: anyio.CapacityLimiter,
+                        max_es: Optional[float] = None) -> None:
         async with limiter:
           with self.tracer.span("evaluate", new_trace=True, node_id=node_id) as sp:
             state = fold(self.store.read_all())
@@ -2998,6 +3086,14 @@ class Engine(ConfirmPhaseMixin, AblationMixin):
                 _sig = _normalize_error_sig(err)
                 stuck_n = (stuck_n + 1) if _sig and _sig == stuck_sig else 1
                 stuck_sig = _sig
+                # Eval-budget stop: the inline-repair loop re-runs FULL evals with no budget check
+                # between attempts — the loop-top / per-eval guards only see `total_eval_seconds` from
+                # TERMINAL events, and no terminal is emitted mid-repair, so an LLM whose repairs vary
+                # the stderr (never tripping anti-stuck) can overshoot the eval budget by multiples
+                # inside ONE node. Abandon once this node's cumulative eval time would cross the ceiling.
+                if max_es is not None and state.total_eval_seconds + total_eval >= max_es:
+                    triage_outcome = ("abandon", "eval budget exhausted during inline repair")
+                    break
                 # Inline-repair gate: feature on, repairable reason, a Developer that can repair, and
                 # something to repair (whole-file code, multi-file edits, or a repo). The attempt CAP is
                 # skipped when unlimited (_inline_repair_attempts == 0); the anti-stuck guard bounds it.
@@ -3035,7 +3131,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin):
                 prev_deleted = set(getattr(node, "deleted", []) or [])
                 with self.tracer.span("inline_repair", node_id=node_id, attempt=attempt + 1):
                     new_code = self._repair(
-                        node, self._repair_error_context(reason, err, state=state, node=node))
+                        node, self._repair_error_context(reason, err, state=state, node=node), state)
                 # Snapshot the developer's per-call audit state IMMEDIATELY, before any `await`: under
                 # max_parallel>1 the developer instance is SHARED across concurrent _evaluate tasks,
                 # and `async with self._write_lock` below is a checkpoint — a sibling task's repair()

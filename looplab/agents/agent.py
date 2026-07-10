@@ -50,12 +50,21 @@ class CompositeTools:
     def __init__(self, providers: list):
         self.providers = providers
         self._route: dict[str, object] = {}
+        # De-dup by function name (FIRST provider wins): two providers registering the same tool name
+        # otherwise (a) sent DUPLICATE specs to the endpoint — some OpenAI-compatible backends 400 on
+        # that — and (b) routed execute() last-wins, silently shadowing the first provider. Dedup makes
+        # the toolset well-formed and the shadowing deterministic (and surfaceable).
+        self._specs: list[dict] = []
         for p in providers:
             for spec in p.specs():
-                self._route[spec["function"]["name"]] = p
+                fname = (spec.get("function") or {}).get("name")
+                if not fname or fname in self._route:
+                    continue
+                self._route[fname] = p
+                self._specs.append(spec)
 
     def specs(self) -> list[dict]:
-        return [s for p in self.providers for s in p.specs()]
+        return list(self._specs)
 
     def execute(self, name: str, args: dict) -> str:
         p = self._route.get(name)
@@ -283,6 +292,22 @@ def drive_tool_loop(client, tools, messages: list, emit_spec: dict, *,
     tool_turns = 0                      # G: investigation turns, for the emit_after soft-convergence nudge
     emit_nudged = False
     exhausted = False                    # ran out of turns/time (vs stalled/stuck/cancelled)
+
+    def _accept_forced(forced):
+        """Validate a FORCED emit the same way an in-loop emit is validated, then finalize it. Returns
+        (True, result) when acceptable, else (False, None) so the caller can fall through to a nudge /
+        fallback instead of accepting an empty/malformed emit — the very no-op node the `validate`
+        bounce exists to prevent, which the forced-emit paths otherwise re-created."""
+        if forced is None:
+            return False, None
+        if validate is not None:
+            try:
+                if validate(forced):      # non-None err string == rejected
+                    return False, None
+            except Exception:  # noqa: BLE001 — a broken validator must not crash the loop
+                pass
+        return True, finalize(forced)
+
     turns = itertools.count() if max_turns is None or max_turns <= 0 else range(max_turns)
     for turn_idx in turns:
         if _cancelled():                # user hit stop -> finalize from what we have, promptly
@@ -328,9 +353,9 @@ def drive_tool_loop(client, tools, messages: list, emit_spec: dict, *,
             # emit now so we always get a structured result; only if that's unsupported do we nudge
             # and retry (bounded, so an unlimited loop can't spin forever on a model that won't emit).
             messages.append({"role": "assistant", "content": msg.get("content") or ""})
-            forced = _force_emit(client, messages, emit_spec)
-            if forced is not None:
-                return finalize(forced)
+            ok, result = _accept_forced(_force_emit(client, messages, emit_spec))
+            if ok:
+                return result
             stalls += 1
             if stalls >= 2:
                 break
@@ -449,9 +474,10 @@ def drive_tool_loop(client, tools, messages: list, emit_spec: dict, *,
         if (emit_after or emit_force) and tools is not None:
             tool_turns += 1
             if emit_force and tool_turns >= emit_force:
-                forced = _force_emit(client, messages, emit_spec)
-                if forced is not None:
-                    return finalize(forced)
+                ok, result = _accept_forced(_force_emit(client, messages, emit_spec))
+                if ok:
+                    return result
+                break   # force unsupported/rejected: fall to fallback, don't re-attempt every turn
             elif emit_after and tool_turns == emit_after and not emit_nudged:
                 emit_nudged = True
                 messages.append({"role": "user",
@@ -465,9 +491,9 @@ def drive_tool_loop(client, tools, messages: list, emit_spec: dict, *,
                              "content": (stuck_prompt.replace("{reason}", str(stuck_reason)) if stuck_prompt
                                          else f"Stop: you appear to be stuck ({stuck_reason}). "
                                               f"Call `{emit_name}` now with your best answer.")})
-            forced = _force_emit(client, messages, emit_spec)
-            if forced is not None:
-                return finalize(forced)
+            ok, result = _accept_forced(_force_emit(client, messages, emit_spec))
+            if ok:
+                return result
             break
     else:
         exhausted = True                # every turn used without an emit
@@ -479,9 +505,9 @@ def drive_tool_loop(client, tools, messages: list, emit_spec: dict, *,
         messages.append({"role": "user",
                          "content": f"Out of turn/time budget. Call `{emit_name}` NOW with your "
                                     "best answer from everything you have gathered."})
-        forced = _force_emit(client, messages, emit_spec)
-        if forced is not None:
-            return finalize(forced)
+        ok, result = _accept_forced(_force_emit(client, messages, emit_spec))
+        if ok:
+            return result
     return fallback(messages)
 
 
@@ -504,6 +530,8 @@ def agentic_text(client, tools, messages, *, loop_opts=None, fallback=None,
         return drive_tool_loop(client, tools, messages, emit_spec,
                                finalize=lambda a: str((a or {}).get("text", "") or ""),
                                fallback=fb, **(loop_opts or {}))
+    except BudgetExceeded:  # a HARD budget stop must propagate — degrading to fb() runs ANOTHER LLM
+        raise                # call after the budget tripped (every sibling loop caller re-raises first)
     except Exception:  # noqa: BLE001 — an agentic-path failure must never break a best-effort step
         return fb(messages)
 
@@ -530,6 +558,8 @@ def agentic_struct(client, tools, messages, model_cls, *, parser="tool_call",
     try:
         return drive_tool_loop(client, tools, messages, emit_spec, finalize=_final, fallback=fb,
                                **(loop_opts or {}))
+    except BudgetExceeded:  # a HARD budget stop must propagate, not degrade to another LLM call
+        raise
     except Exception:  # noqa: BLE001 — the agentic path must never break a best-effort step
         return fb(messages)
 

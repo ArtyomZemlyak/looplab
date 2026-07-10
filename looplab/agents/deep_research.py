@@ -100,7 +100,8 @@ class DeepResearcher:
     def __init__(self, client, tools=None, parser: str = "tool_call", max_turns: int = 0,
                  context_budget_chars: int | None = None, time_budget_s: float = 0.0,
                  stuck_detection: bool = True, stuck_repeat: int = 4, stuck_alternate: int = 4,
-                 auto_summary: bool = True, prompts=None):
+                 auto_summary: bool = True, prompts=None,
+                 emit_after: int = 300, emit_force: int = 500):
         self.client = client
         self.tools = tools
         self.parser = parser
@@ -113,6 +114,11 @@ class DeepResearcher:
         self.stuck_repeat = stuck_repeat
         self.stuck_alternate = stuck_alternate
         self.auto_summary = auto_summary    # C2: summarize the stale middle when the memo trace grows
+        # G soft-convergence: a model that issues ever-DIFFERENT web/literature searches never trips
+        # the StuckDetector (repeats only), so with the shipped defaults max_turns=0 / time_budget=0 it
+        # would run unbounded ("one idea, then ~200 more reads"). These nudge/force the memo emit.
+        self.emit_after = emit_after
+        self.emit_force = emit_force
 
     def _emit_spec(self) -> dict:
         return {"type": "function", "function": {
@@ -153,6 +159,7 @@ class DeepResearcher:
                 fallback=lambda msgs: self._forced(msgs, memo, sources),
                 stuck_detection=self.stuck_detection,   # B1: stop searching in circles -> force the memo
                 stuck_repeat=self.stuck_repeat, stuck_alternate=self.stuck_alternate,
+                emit_after=self.emit_after, emit_force=self.emit_force,   # G: bound ever-different searches
                 auto_summary=self.auto_summary, self_plan=False,
                 on_tool_result=_record,
                 nudge_prompt="Now call `emit` with your memo.",
@@ -244,4 +251,6 @@ def make_deep_researcher(settings, *, client=None, task=None) -> Optional[DeepRe
                           stuck_detection=bool(getattr(settings, "agent_stuck_detection", True)),
                           stuck_repeat=int(getattr(settings, "agent_stuck_repeat", 4)),
                           stuck_alternate=int(getattr(settings, "agent_stuck_alternate", 4)),
-                          auto_summary=bool(getattr(settings, "agent_auto_summary", True)))
+                          auto_summary=bool(getattr(settings, "agent_auto_summary", True)),
+                          emit_after=int(getattr(settings, "agent_emit_after", 300)),
+                          emit_force=int(getattr(settings, "agent_emit_force", 500)))

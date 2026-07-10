@@ -132,6 +132,7 @@ _LAYOUT = {
     "server": "serve",
     "settings_store": "serve",
     "shell_tools": "tools",
+    "signal_delivery": "engine",   # §1 signal-delivery registry (docs/14-agent-framework-mega-review)
     "skills": "tools",
     "strategist": "agents",
     "stuck": "agents",

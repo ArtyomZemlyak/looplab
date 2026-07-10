@@ -163,6 +163,7 @@ See [LLM & coding agents](llm-and-agents.md) for full guidance.
 | `foresight` | `LOOPLAB_FORESIGHT` | `true` | FOREAGENT predict-before-execute: LLM world model ranks candidates/ideas before an eval, primed with a data report + memory (master switch) |
 | `foresight_panel` | `LOOPLAB_FORESIGHT_PANEL` | `2` | Generate K ideas, keep the one predicted best pre-execution (ranks structural/text ideas the numeric surrogate can't; LLM backend only; 1 = off) |
 | `foresight_agentic` | `LOOPLAB_FORESIGHT_AGENTIC` | `true` | Run foresight ranking as a TOOL-USING loop that can pull actual experiment results / data facts before deciding (vs a one-shot prediction). A few extra LLM calls per proposal; falls back to one-shot on any hiccup |
+| `foresight_min_confidence` | `LOOPLAB_FORESIGHT_MIN_CONFIDENCE` | `0.0` | Minimum predicted confidence at which a predict-before-execute pick is ACTED on. Below it the ranker abstains (K-idea panel → first proposal; best-of-N → D10 tie-break) instead of committing a low-confidence choice. `0.0` = off (act on every pick); raise toward ~0.5 to make the world model defer when unsure. Pairs with the foresight track record the predictor is primed with |
 | `proxy_scoring` | `LOOPLAB_PROXY_SCORING` | `false` | Rank a candidate's potential from early signals |
 | `proxy_kill_fraction` | `LOOPLAB_PROXY_KILL_FRACTION` | `0.0` | Skip a full eval for the doomed bottom fraction (0 = off) |
 | `novelty_mode` | `LOOPLAB_NOVELTY_MODE` | `llm` | How a proposal is dedup-checked: `off` (Researcher's own judgment) / `algo` (param-distance + optional embedding) / `llm` (an LLM reads the real experiments and decides, then re-proposes — one extra call/proposal) |
@@ -235,6 +236,8 @@ default grants resource/search-shape knobs to the agents and keeps infra (`llm_*
 |---|---|---|---|
 | `trust_mode` | `LOOPLAB_TRUST_MODE` | `trusted_local` | Sandbox tier: `trusted_local` (subprocess) · `untrusted` (Docker `--network none`) · `hostile` (Docker `--network none` **+ gVisor** `--runtime runsc`) |
 | `docker_image` | `LOOPLAB_DOCKER_IMAGE` | `python:3.12-slim` | Image for the untrusted command-eval tier |
+| `sandbox_memory` | `LOOPLAB_SANDBOX_MEMORY` | `4g` | Memory cap for the untrusted/hostile Docker tier (`docker run --memory`). Raise for model-training evals; `""` = unbounded. Ignored by `trusted_local`. |
+| `sandbox_cpus` | `LOOPLAB_SANDBOX_CPUS` | _(unset)_ | CPU cap for the untrusted/hostile Docker tier (`docker run --cpus`, e.g. `2`). `""` = unbounded. Ignored by `trusted_local`. |
 | `redact_output` | `LOOPLAB_REDACT_OUTPUT` | `false` | Mask credentials in stdout/stderr before persisting (recommend on for untrusted) |
 | `reward_hack_detect` | `LOOPLAB_REWARD_HACK_DETECT` | `false` | Flag suspicious wins (grader access, frozen-file writes) |
 | `code_leakage_detect` | `LOOPLAB_CODE_LEAKAGE_DETECT` | `false` | Static code-leakage scan (fit-before-split, fit-on-test) |

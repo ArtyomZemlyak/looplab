@@ -91,10 +91,15 @@ class BestOfNDeveloper(WrapsDeveloper):
     Forwarding (brief/client/prompts/is_code_generating/last_report) comes from `WrapsDeveloper`."""
 
     def __init__(self, inner, n: int = 3, listwise: bool = True, parser: str = "tool_call",
-                 foresight: bool = True, direction: str = "min", goal: str = ""):
+                 foresight: bool = True, direction: str = "min", goal: str = "",
+                 min_confidence: float = 0.0):
         self.inner = inner
         self.n = max(1, n)
         self.listwise = listwise
+        # §1 confidence gate: below this predicted confidence the foresight pick ABSTAINS (leaves
+        # last_foresight_pick=None so the D10 tie-break runs), rather than committing a low-confidence
+        # choice. 0.0 (default) = off — byte-identical to the historical behavior.
+        self.min_confidence = max(0.0, float(min_confidence))
         # Run objective, threaded into the FOREAGENT ranker so its predict-before-execute world model
         # optimizes for the RIGHT direction. `foresight.rank` defaults to direction="min"; without this
         # a max-direction task (accuracy/AUC/F1) would be told to prefer the LOWEST-predicted candidate.
@@ -155,14 +160,20 @@ class BestOfNDeveloper(WrapsDeveloper):
                      parser=self.parser, prompts=self.prompts)
             if r is not None:
                 order, conf, reason = r
-                chosen = top[order[0]]
-                self.last_foresight_pick = {
-                    "kind": "solution", "method": "foresight", "n": len(top),
-                    "chosen": order[0], "order": order, "confidence": conf, "reason": reason}
+                # §1 confidence gate: only let the prediction DECIDE (and be recorded as a committed
+                # pick) when it's confident enough; below the threshold leave last_foresight_pick=None
+                # so the D10 tie-break runs, exactly as on a ranker abstain. 0.0 default = off.
+                if conf is None or conf >= self.min_confidence:
+                    chosen = top[order[0]]
+                    self.last_foresight_pick = {
+                        "kind": "solution", "method": "foresight", "n": len(top),
+                        "chosen": order[0], "order": order, "confidence": conf, "reason": reason}
         # D10: break a tie among the top static-scorers with a list-wise LLM comparison (advisory).
-        # Only when the predictor abstained, it would actually change the outcome (>1 tied), and a
-        # client is available.
-        if self.last_foresight_pick is None and self.listwise and len(top) > 1 and self.client is not None:
+        # Only when the predictor abstained, there are >1 DISTINCT candidates (a temperature-0 inner
+        # developer yields N identical strings — a full LLM comparison of identical code is wasted),
+        # and a client is available.
+        if (self.last_foresight_pick is None and self.listwise and self.client is not None
+                and len({c[0] for c in top}) > 1):
             # Pass the prompt store only when one is configured: callers/tests monkeypatch
             # `_listwise_pick` with its historical 4-arg signature, so the default (no-store)
             # path must keep that call shape unchanged.

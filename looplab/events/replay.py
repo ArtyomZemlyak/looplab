@@ -4,6 +4,7 @@ evaluated nodes (tie-break by id), so no separate `best_updated` event is needed
 """
 from __future__ import annotations
 
+import math
 from typing import Iterable
 
 from looplab.core.models import (Event, Hypothesis, Idea, Node, NodeStatus, RunState, Trial,
@@ -12,7 +13,8 @@ from looplab.events.types import (
     EV_ABLATE, EV_AGENT_DECISION, EV_AGENT_VALIDATED, EV_ANNOTATION, EV_APPROVAL_GRANTED,
     EV_APPROVAL_REQUESTED, EV_BEST_CONFIRMED, EV_BUDGET_EXTEND, EV_CONFIRM_DONE,
     EV_CONFIRM_EVAL, EV_DATA_LEAKAGE, EV_DATA_PROFILED, EV_DATA_PROVENANCE,
-    EV_COVERAGE_SNAPSHOT, EV_DEEP_RESEARCH, EV_DIVERSITY_ARCHIVE, EV_FORCE_ABLATE, EV_FORCE_CONFIRM, EV_FORK,
+    EV_COVERAGE_SNAPSHOT, EV_DEEP_RESEARCH, EV_DIVERSITY_ARCHIVE, EV_FORCE_ABLATE, EV_FORCE_CONFIRM,
+    EV_FORESIGHT_SELECTED, EV_FORK,
     EV_FORK_DONE, EV_HINT, EV_HOLDOUT_EVALUATED, EV_HOST_GRADING, EV_HYPOTHESIS_ADDED, EV_HYPOTHESIS_MERGED,
     EV_HYPOTHESIS_RANKED, EV_HYPOTHESIS_UPDATED, EV_INJECT_DONE, EV_INJECT_NODE, EV_LESSONS_DISTILLED,
     EV_LESSONS_REFRESHED, EV_LLM_COST, EV_NODE_ABORT, EV_NODE_BUILDING, EV_NODE_CONFIRMED,
@@ -33,10 +35,33 @@ def flagged_node_ids(st: RunState) -> set:
     `audit`. Shared by the fold and the engine's holdout-topk so both apply the SAME exclusion."""
     if st.trust_gate not in ("gate", "block"):
         return set()
+    return hard_flagged_ids(st)
 
+
+def is_hard_signal(sig: str) -> bool:
+    """Is this reward-hack/leakage signal HIGH-PRECISION (gating + agent-facing), vs advisory noise?
+
+    The single classifier shared by `hard_flagged_ids` (gate/block selection exclusion) AND
+    `digest.trust_reflection._sigs` (which signals to NAME in the agent hint) — kept here so the two
+    can't drift: before, `_sigs` stripped EVERY `critic:` signal while `hard_flagged_ids` promoted
+    `critic:hardcoded_metric`, so a node hard-flagged ONLY for that rendered as "node N ()" (a
+    contentless warning). `critic:hardcoded_metric` is HIGH-PRECISION (the critic requires a LITERAL
+    metric value with no computed assignment anywhere), so it gates — closing the "hardcode a
+    near-optimal metric and win under every built-in gate" bypass on self-report tasks. Other
+    `critic:` issues and `perfect_metric` (which a legitimately-perfect score hits) stay advisory."""
+    sig = str(sig)
+    if sig == "critic:hardcoded_metric":
+        return True
+    return not sig.startswith(("critic:", "perfect_metric"))
+
+
+def hard_flagged_ids(st: RunState) -> set:
+    """Node ids carrying a HIGH-PRECISION (non-`critic:`, non-`perfect_metric`) cheating/leakage
+    signal, INDEPENDENT of `trust_gate` mode. `flagged_node_ids` uses it for gate/block selection
+    exclusion; the agent-facing trust-reflection hint (signal-delivery §1) uses it to warn the
+    Researcher about a flagged lineage even under `audit`, where nothing is gate-excluded."""
     def _has_hard_signal(rh: dict) -> bool:
-        return any(not str(s.get("signal", "")).startswith(("critic:", "perfect_metric"))
-                   for s in (rh.get("signals") or []))
+        return any(is_hard_signal(s.get("signal", "")) for s in (rh.get("signals") or []))
     return {r.get("node_id") for r in st.reward_hacks if _has_hard_signal(r)}
 
 
@@ -113,41 +138,53 @@ def fold(events: Iterable[Event]) -> RunState:
                 # Idempotent (C4): only a node's FIRST terminal event contributes its eval time, so
                 # a duplicate node_evaluated/node_failed (corrupt log / double-fold) can't inflate
                 # total_eval_seconds or make the budget order-dependent.
+                # Invariant #2 "first terminal wins" applies to the WHOLE node, not just eval-seconds:
+                # gate every field mutation on `first_terminal` so a CONFLICTING second terminal
+                # (node_evaluated then node_failed, from a corrupt / double-appended log) can't flip the
+                # node's metric/status/feasibility last-wins. A `node_reset` returns status to pending,
+                # so a legitimate re-evaluation still applies (it IS the first terminal after the reset).
                 first_terminal = n.status is NodeStatus.pending
-                n.metric = d.get("metric")              # missing -> None (feasible_nodes filters it)
-                n.status = NodeStatus.evaluated
-                n.rerun_stage = None                    # any stage-scoped re-run has now landed
-                n.stdout_tail = d.get("stdout_tail", "")
-                n.eval_seconds = d.get("eval_seconds")
-                n.extra_metrics = d.get("extra_metrics", {}) or {}
-                n.violations = d.get("violations", []) or []
-                n.feasible = not n.violations           # #5: constraint-violating -> infeasible
-                # Intra-node sweep: per-trial results (audit/UI only; node.metric is already the
-                # best trial, set by the engine). Coerce defensively per trial so one malformed
-                # entry in a hand-edited/bring-your-own-script log can't crash the whole fold.
-                trials = []
-                for t_d in (d.get("trials", []) or []):
-                    try:
-                        trials.append(Trial(**t_d))
-                    except Exception:
-                        continue
-                n.trials = trials
                 if first_terminal:
+                    n.metric = d.get("metric")          # missing -> None (feasible_nodes filters it)
+                    n.status = NodeStatus.evaluated
+                    n.rerun_stage = None                # any stage-scoped re-run has now landed
+                    n.stdout_tail = d.get("stdout_tail", "")
+                    n.eval_seconds = d.get("eval_seconds")
+                    n.extra_metrics = d.get("extra_metrics", {}) or {}
+                    n.violations = d.get("violations", []) or []
+                    n.feasible = not n.violations       # #5: constraint-violating -> infeasible
+                    # Intra-node sweep: per-trial results (audit/UI only; node.metric is already the
+                    # best trial, set by the engine). Coerce defensively per trial so one malformed
+                    # entry in a hand-edited/bring-your-own-script log can't crash the whole fold.
+                    trials = []
+                    for t_d in (d.get("trials", []) or []):
+                        try:
+                            trials.append(Trial(**t_d))
+                        except Exception:
+                            continue
+                    n.trials = trials
                     st.total_eval_seconds += d.get("eval_seconds") or 0.0
         elif t == EV_NODE_FAILED:
             if st.building and st.building.get("node_id") == d.get("node_id"):
                 st.building = None
             n = st.nodes.get(d.get("node_id"))
             if n is not None:
+                # First-terminal-wins for the whole node (see node_evaluated above): a conflicting
+                # second terminal from a corrupt log must not flip an already-evaluated node to failed.
                 first_terminal = n.status is NodeStatus.pending
-                n.status = NodeStatus.failed
-                n.error = d.get("error", "")
-                n.error_reason = d.get("reason", "")
-                n.eval_seconds = d.get("eval_seconds")
-                n.rerun_stage = None                    # any stage-scoped re-run has now landed
-                if d.get("failed_stage"):
-                    n.failed_stage = d.get("failed_stage")   # Phase 1: which pipeline stage broke
                 if first_terminal:
+                    n.status = NodeStatus.failed
+                    n.error = d.get("error", "")
+                    n.error_reason = d.get("reason", "")
+                    # Crash-triage verdict, when the LLM triage ran (signal-delivery §1): fold it onto
+                    # the node so the failure-reflection hint / digest can hand it to the next proposal.
+                    # Additive + reader-defaulted: absent on old logs / rule-triaged nodes -> stays "".
+                    if d.get("triage_rationale"):
+                        n.triage_rationale = str(d.get("triage_rationale"))
+                    n.eval_seconds = d.get("eval_seconds")
+                    n.rerun_stage = None                # any stage-scoped re-run has now landed
+                    if d.get("failed_stage"):
+                        n.failed_stage = d.get("failed_stage")   # Phase 1: which pipeline stage broke
                     st.total_eval_seconds += d.get("eval_seconds") or 0.0
         elif t == EV_NODE_REPAIRED:
             # In-node inline repair (hybrid crash repair): a NON-terminal event that replaces the
@@ -178,6 +215,7 @@ def fold(events: Iterable[Event]) -> RunState:
                 n.metric = None
                 n.error = ""
                 n.error_reason = ""
+                n.triage_rationale = ""   # the crash-triage verdict describes the NOW-abandoned lifecycle
                 n.eval_seconds = None
                 n.stdout_tail = ""
                 n.extra_metrics = {}
@@ -344,6 +382,13 @@ def fold(events: Iterable[Event]) -> RunState:
             st.agent_decisions.append(d)
         elif t == EV_REWARD_HACK_SUSPECTED:
             st.reward_hacks.append({"node_id": d.get("node_id"), "signals": d.get("signals", [])})
+        elif t == EV_FORESIGHT_SELECTED:
+            # FOREAGENT predict-before-execute pick (audit-only). Kept so the world model can be
+            # primed with its OWN calibration (did the picked node beat its parent?), closing the
+            # predict→outcome loop. Store only the small fields the scoreboard needs; never selection.
+            nid = d.get("node_id")
+            if nid is not None:
+                st.foresight_selected.append({"node_id": nid, "confidence": d.get("confidence")})
         elif t == EV_NOVELTY_REJECTED:
             st.novelty_events.append(d)   # E1: a near-duplicate proposal nudged off (audit)
         elif t == EV_HYPOTHESIS_MERGED:
@@ -429,9 +474,24 @@ def fold(events: Iterable[Event]) -> RunState:
             # reopened, proposes more experiments instead of immediately re-finishing.
             # max_seconds/max_eval_seconds (budgets) + timeout/max_parallel (resource retune, gated by
             # the governance matrix at apply time) are ABSOLUTE new values (last write wins).
-            for _k in ("max_seconds", "max_eval_seconds", "timeout", "max_parallel"):
+            # COERCE to number in the fold: a UI form / TUI can post a STRING ("600"), and the engine
+            # compares these numerically (`total_eval_seconds >= max_es`), so an un-coerced string would
+            # raise TypeError in the main loop — and because the event replays, EVERY resume re-crashes
+            # (a permanent poison event). A non-numeric value is skipped, not stored.
+            for _k, _cast in (("max_seconds", float), ("max_eval_seconds", float),
+                              ("timeout", float), ("max_parallel", int)):
                 if d.get(_k) is not None:
-                    st.budget_overrides[_k] = d[_k]
+                    try:
+                        _v = _cast(d[_k])
+                    except (TypeError, ValueError):
+                        continue
+                    # Reject NaN/Inf: `float("nan")`/`float("inf")` PASS the cast, but a ceiling of
+                    # nan makes `total_eval_seconds >= nan` always False (budget silently disabled) and
+                    # inf never trips — and the poison value re-folds on every resume, permanently. Skip
+                    # it (keep the prior ceiling) rather than store a budget-disabling value.
+                    if _cast is float and not math.isfinite(_v):
+                        continue
+                    st.budget_overrides[_k] = _v
             if d.get("add_nodes") is not None:
                 try:
                     st.budget_overrides["add_nodes"] = int(st.budget_overrides.get("add_nodes", 0)) + int(d["add_nodes"])

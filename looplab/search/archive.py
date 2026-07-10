@@ -22,7 +22,10 @@ class DiversityArchive:
         better = (lambda a, b: a < b) if state.direction == "min" else (lambda a, b: a > b)
         elites: dict[tuple, Node] = {}
         for n in state.evaluated_nodes():
-            if n.metric is None:   # a hand-edited/BYO node_evaluated can carry metric=null; None<float crashes
+            # skip constraint-violating (and null-metric) nodes, matching every policy pool: an
+            # infeasible node must not become the recorded niche elite (run-end provenance) or inflate
+            # the coverage niche count. (None<float would also crash the `better` compare.)
+            if n.metric is None or not n.feasible:
                 continue
             niche = self._niche(n.idea.params)
             cur = elites.get(niche)

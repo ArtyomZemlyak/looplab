@@ -209,6 +209,33 @@ the whole run** on the *first* such crash (an `EV_PAUSE`) rather than rapid-firi
 nodes — resume once the endpoint is back. Use `looplab timings RUN_DIR` to see where a run's
 wall-clock actually went (LLM vs eval vs repair vs tools, per node).
 
+## Signal delivery (agent synergy)
+
+The engine computes rich, expensive signals — and each is only useful if it reaches the agent (or
+human) that can act on it. The recurring failure mode is *"the signal is folded into the event log
+but nothing injects it into a prompt"* — the same class the hint registry
+(`roles.RESEARCHER_HINT_ATTRS`) already turned into a test-enforced invariant. LoopLab now routes
+**seven** such signals, each through exactly one documented injection site:
+
+| Signal | Folded into | Reaches | How |
+|---|---|---|---|
+| **Trust flags** (reward-hack / leakage) | `RunState.reward_hacks` | Researcher | a trust-reflection line in the proposal hint (`digest.trust_reflection`) — "a recent solution was flagged for X; avoid it if unintended" |
+| **Crash-triage verdict** | `Node.triage_rationale` | Researcher | the failure line in the experiments digest + the failure-reflection hint carry the LLM's *why*, not just the error kind |
+| **Foresight calibration** | `RunState.foresight_selected` | the world model | a track-record line in `_memory_brief` — "of your last N predict-before-execute picks, K beat the parent" (closes the predict→outcome loop) |
+| **Deep-research memo** | `RunState.research` | Researcher | a one-line takeaway in the state brief **plus** a `read_research_memo` tool to pull the full findings/claims on demand |
+| **Operator yields** | derived from the DAG | Strategist | a per-operator gain-per-second line in the strategist brief, so it tunes the operator mix from evidence, not priors |
+| **Operator directives** | `RunState.pending_hints` | Researcher, Strategist, pilot, crash-triage, **Developer** | one `render_hint_directives` helper — the engine also folds directives into the idea handed to `implement`, so a directive steers the **code**, not only the proposal |
+| **Run states** (paused / awaiting-approval / trust-flag / stuck-build) | `RunState` | boss / assistant | an "ATTENTION" block in the boss context, surfacing the states where human intervention is most valuable |
+
+**The invariant.** `engine/signal_delivery.py` is a registry of these routes (signal → folded field
+→ injection site → consumer), and `tests/test_signal_delivery.py` asserts each injection symbol
+resolves *and* that a synthetic input's content actually reaches the rendered output. A signal added
+to the registry without a delivery probe fails the suite — so *"the signal silently stopped being
+delivered"* is a red test, not the next review's finding. Two of the routes (trust flags, operator
+directives) are **push** (the engine injects them), one (deep-research memo) is **pull** (a tool the
+agent may call for depth), and the rest ride the always-on folded-state briefs. The full rationale is
+in `docs/14-agent-framework-mega-review-2026-07-10.md` §1.
+
 ## Knowledge, skills & prompts
 
 Give the agentic Researcher extra context and tools:

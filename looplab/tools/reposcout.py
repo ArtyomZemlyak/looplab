@@ -218,10 +218,16 @@ class RepoScoutTools:
             return self._overlay[norm]
         if key in self._overlay:
             return self._overlay[key]
-        for k, v in self._overlay.items():                 # suffix match: full path ↦ repo-relative key
-            kk = str(k).replace("\\", "/")
-            if kk and (norm == kk or norm.endswith("/" + kk)):
-                return v
+        # Suffix match ONLY for an ABSOLUTE / workdir-prefixed request (norm starts with "/" or a
+        # Windows drive): strip the workdir prefix to reach the repo-relative overlay key. A RELATIVE
+        # request (e.g. "src/test.py") must NOT suffix-match a SHORTER key ("test.py") — that returned a
+        # DIFFERENT file's staged content on any repo with duplicate basenames (test.py / __init__.py),
+        # so the Developer edited a file it never actually read.
+        if norm.startswith("/") or (len(norm) > 1 and norm[1] == ":"):
+            for k, v in self._overlay.items():
+                kk = str(k).replace("\\", "/")
+                if kk and norm.endswith("/" + kk):
+                    return v
         return None
 
     def _read_file(self, path: str, start_line=0, lines=0) -> str:

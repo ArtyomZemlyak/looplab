@@ -460,7 +460,7 @@ node fails and its stderr is fed back to the agent's repair.
 | `trust_mode` | What runs the command | Boundary |
 |---|---|---|
 | `trusted_local` (default) | direct subprocess | process isolation + timeout + tree-kill + output caps. **No Docker, no network/FS isolation** — it's your own code on your box. |
-| `untrusted` | `docker run --rm --network none --pids-limit 1024 -v workspace:/work` | no network, fork-bomb guard, only the workspace mounted; metric read from the bind mount on the host. |
+| `untrusted` | `docker run --rm --network none --pids-limit 1024 --cap-drop ALL --security-opt no-new-privileges --memory 4g -v workspace:/work` | no network, fork-bomb guard, all Linux capabilities dropped, no privilege escalation, memory-capped (`sandbox_memory`; optional `--cpus` via `sandbox_cpus`), only the workspace mounted; metric read from the bind mount on the host. |
 | `hostile` | the above **+ gVisor** (`--runtime runsc`) | kernel-level isolation for actively hostile code. |
 
 **Other guards** on the agent's path: the [Genesis](#preferred-let-genesis-author-it) repo scout is

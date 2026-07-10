@@ -1265,16 +1265,32 @@ class LLMOnboarder:
         """Repo listing + the contents of a few small text files (the entrypoint, configs)
         so the Developer can see the actual metric shape it must read."""
         from pathlib import Path as _P
+        import itertools
         root = _P(self.repo_path)
         _skip = {".git", "__pycache__", ".venv", "node_modules", ".mypy_cache", ".pytest_cache"}
-        files = [p for p in root.rglob("*")
-                 if p.is_file() and _skip.isdisjoint(p.parts)]
+        # Bound the walk: `rglob("*")` on a large repo (e.g. a checked-in dataset) fully materializes
+        # every path — cap it. And guard every stat/read_text with OSError: one permission-denied file
+        # would otherwise crash Phase-3 onboarding at run start.
+        def _is_file_safe(p) -> bool:
+            try:
+                return p.is_file()
+            except OSError:
+                return False
+        try:
+            walked = itertools.islice(
+                (p for p in root.rglob("*") if _skip.isdisjoint(p.parts)), 5000)
+            files = [p for p in walked if _is_file_safe(p)]
+        except OSError:
+            files = []
         listing = "\n".join(str(p.relative_to(root)) for p in files[:60])
         snippets, exts = [], (".py", ".json", ".yaml", ".yml", ".cfg", ".toml", ".txt")
         for p in files:
-            if p.suffix in exts and p.stat().st_size < 4000:
-                snippets.append(f"--- {p.relative_to(root)} ---\n"
-                                + p.read_text(encoding="utf-8", errors="replace")[:2000])
+            try:
+                if p.suffix in exts and p.stat().st_size < 4000:
+                    snippets.append(f"--- {p.relative_to(root)} ---\n"
+                                    + p.read_text(encoding="utf-8", errors="replace")[:2000])
+            except OSError:
+                continue
             if len(snippets) >= 6:
                 break
         return listing, "\n\n".join(snippets)

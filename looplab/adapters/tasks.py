@@ -38,8 +38,9 @@ class TaskAdapter(Protocol):
       roles; called by `make_roles` (this module) when backend="llm". `core/hardware.py`
       (`task_runtime_caps`) inspects its signature: accepting `runtime_caps` opts the task into
       the torch/GPU capability brief.
-    - `assets() -> list[str]` — task data filenames staged into each eval workdir; consumed by
-      `engine/orchestrator.py` (staging + protected from edits).
+    - `assets() -> dict[str, str]` — {filename: content} staged into each eval workdir; consumed by
+      `engine/orchestrator.py` (staging + protected from edits). (Every implementation returns a dict
+      and the engine indexes it as one — the contract of record is the dict, not the old `list[str]`.)
     - `columns() -> dict` — tabular schema/profile; consumed by `engine/orchestrator.py` (I1
       grounding pre-phase) and `tools/run_tools.py` (`DataTools`).
     - `leakage_inputs() -> dict` — split/timestamp info for the leakage audit; consumed by
@@ -162,6 +163,13 @@ def normalize_task(data: dict) -> dict:
             f"Stray dotted keys: {', '.join(_stray)}.")
 
     # --- cmd (how to run + score) is the new name for `eval` ---
+    # Both present is an authoring conflict: mapping `cmd`->`eval` only "when eval is absent" would
+    # SILENTLY drop the composable `cmd` in favor of a stale legacy `eval` (pydantic ignores the
+    # leftover unknown `cmd` key) — the exact silent-loss the data/dataset clash check guards against.
+    if "cmd" in d and "eval" in d:
+        raise ValueError(
+            "give EITHER `cmd` (the current name) OR `eval` (the legacy alias) — not both; they are "
+            "the same field and specifying both is ambiguous. Keep `cmd` and drop `eval`.")
     if "cmd" in d and "eval" not in d:
         cmd = d.pop("cmd")
         if isinstance(cmd, list):
@@ -434,16 +442,19 @@ def _shared_providers(task: TaskAdapter, settings, run_dir=None, *, core_only: b
     if getattr(settings, "memory_dir", None):              # agentic pull of lessons + meta-notes (else injection-only)
         from looplab.tools.memory_tools import MemoryTools
         providers.append(MemoryTools(settings.memory_dir))
+    # Skills: hand-written (skills_dir) + M4 auto-distilled (<memory_dir>/skills) in ONE SkillTools
+    # over BOTH dirs — two separate providers would each register list_skills/use_skill and the second
+    # shadows the first (the hand-written library becomes unreachable). Hand-written wins a name clash.
+    _skill_dirs: list[str] = []
     if getattr(settings, "skills_dir", None):
-        from looplab.tools.skills import SkillTools
-        providers.append(SkillTools(settings.skills_dir))
-    # M4 auto-distilled skills: techniques distilled from prior winning runs live under
-    # <memory_dir>/skills (provenance: auto). Loaded alongside any hand-written skills_dir.
+        _skill_dirs.append(str(settings.skills_dir))
     if getattr(settings, "memory_dir", None):
         _auto = Path(settings.memory_dir) / "skills"
         if _auto.is_dir():
-            from looplab.tools.skills import SkillTools
-            providers.append(SkillTools(str(_auto)))
+            _skill_dirs.append(str(_auto))
+    if _skill_dirs:
+        from looplab.tools.skills import SkillTools
+        providers.append(SkillTools(_skill_dirs))
     if getattr(settings, "literature_search", False):       # E3 arXiv grounding (network-optional)
         from looplab.tools.literature import LiteratureTools
         providers.append(LiteratureTools(enabled=True))
@@ -692,7 +703,8 @@ def make_roles(task: TaskAdapter, settings, run_dir=None):
                                      parser=getattr(settings, "llm_parser", "tool_call"),
                                      foresight=getattr(settings, "foresight", True),
                                      direction=getattr(task, "direction", "min"),
-                                     goal=getattr(task, "goal", ""))
+                                     goal=getattr(task, "goal", ""),
+                                     min_confidence=getattr(settings, "foresight_min_confidence", 0.0))
     # H3 per-role model presets: point the Researcher / Developer at their own model/endpoint when
     # configured (e.g. Developer on a strong coding model, Researcher on a fast breadth model).
     if settings.researcher_model or settings.researcher_base_url:

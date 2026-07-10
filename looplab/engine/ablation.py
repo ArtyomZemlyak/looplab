@@ -70,13 +70,21 @@ class AblationMixin:
             new_params[top] = proposal.params[top]
         idea = Idea(operator="refine_block", params=new_params,
                     rationale=f"ablation: refine highest-impact '{top}' (impacts={impacts})")
-        code = self._implement(idea, parent)
+        # §1: a standing operator directive must steer the ablation-produced refine_block code too —
+        # this is a real tree-entering node built from an idea, exactly like the improve/merge sites
+        # that already thread _directed_idea (the signal_delivery registry lists the Developer as a
+        # consumer, so skipping it here would silently drop the directive for every ablation child).
+        code = self._implement(self._directed_idea(idea, state), parent)
         node_id = max(fold(self.store.read_all()).nodes, default=-1) + 1
         self._emit_node_created(
             node_id=node_id, parent_ids=[parent_id], operator="refine_block",
             idea=idea.model_dump(mode="json"), code=code,
             files=getattr(self.developer, "last_files", {}) or {})
         self._emit_agent_report(node_id)
+        # consume predictive telemetry for THIS node (propose/implement above set it) so it can't leak
+        # onto the next created node — same rule as _create_node / _rerun_node.
+        self._emit_hypothesis_ranked(node_id)
+        self._emit_foresight_selected(node_id)
 
     @staticmethod
     def _segment_blocks(code: str) -> list[tuple[int, int]]:
@@ -146,10 +154,12 @@ class AblationMixin:
         idea = Idea(operator="refine_block", params=dict(parent.idea.params),
                     rationale=("code-block ablation: refine the highest-impact pipeline block "
                                f"#{top} and keep the rest. Block:\n{top_src}"))
-        new_code = self._implement(idea, parent)
+        new_code = self._implement(self._directed_idea(idea, state), parent)   # §1: directives (see _ablate)
         node_id = max(fold(self.store.read_all()).nodes, default=-1) + 1
         self._emit_node_created(
             node_id=node_id, parent_ids=[parent_id], operator="refine_block",
             idea=idea.model_dump(mode="json"), code=new_code,
             files=getattr(self.developer, "last_files", {}) or {})
         self._emit_agent_report(node_id)
+        self._emit_hypothesis_ranked(node_id)   # consume predictive telemetry for THIS node (see above)
+        self._emit_foresight_selected(node_id)

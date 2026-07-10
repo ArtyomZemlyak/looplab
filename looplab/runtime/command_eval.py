@@ -42,9 +42,23 @@ def _regex_metric(text: str, pattern: str, group: int) -> Optional[float]:
     # A bad operator-supplied pattern (re.error) or out-of-range group (IndexError) must read
     # as "no metric", not crash the eval.
     try:
-        last = None
-        for m in re.finditer(pattern, text):   # take the LAST match (final epoch, etc.)
-            last = m
+        rx = re.compile(pattern)
+
+        def _last(s):
+            last = None
+            for m in rx.finditer(s):   # take the LAST match in this window (final epoch, etc.)
+                last = m
+            return last
+
+        # Bound the input: an operator/agent-authored pattern run over the FULL stdout can ReDoS-hang
+        # the engine thread on a pathological regex. The metric is usually at the TAIL (final epoch),
+        # so scan the last ~200k chars first; but a script that prints the metric EARLY and then dumps
+        # a long report/prediction log would lose it to a tail-only cap, so fall back to the HEAD 200k
+        # when the tail has no match. Bounded to 2×200k either way — the ReDoS ceiling is preserved.
+        if len(text) > 200_000:
+            last = _last(text[-200_000:]) or _last(text[:200_000])
+        else:
+            last = _last(text)
         return _to_float(last.group(group)) if last else None
     except (re.error, IndexError):
         return None
@@ -66,6 +80,15 @@ def read_metric(stdout: str, workdir: str, spec: dict, wrap=None) -> Optional[fl
         if not fp:
             return None                                 # malformed spec must fail the NODE, not crash the run
         p = Path(workdir) / fp
+        # Confine the reader to the workdir (same guard as host_score's held-out-labels check): an
+        # absolute `path` or a `../` traversal in the spec would otherwise escape the sandbox and read
+        # any host file (a direct answer-key read the moment reader paths become agent-authorable).
+        wd = Path(workdir)
+        try:
+            if not _is_within(p.resolve(), wd.resolve()):
+                return None
+        except (OSError, ValueError):
+            return None
         if not p.is_file():
             return None
         # utf-8-sig strips a UTF-8 BOM (common on Windows-written metric files) that would

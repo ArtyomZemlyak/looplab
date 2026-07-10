@@ -98,3 +98,11 @@ def test_frontmatter_keeps_markdown_horizontal_rules():
 def test_frontmatter_strips_real_leading_block():
     fm = "---\ntitle: x\nauthor: y\n---\nBody starts here.\n"
     assert _strip_frontmatter(fm).strip() == "Body starts here."
+
+
+def test_skilltools_execute_never_raises_on_junk_arg():
+    from looplab.tools.skills import SkillTools
+    import tempfile
+    st = SkillTools(tempfile.mkdtemp())
+    assert st.execute("use_skill", {"name": ["not", "hashable"]}).startswith("(")   # tool error, no raise
+    assert st.execute("bogus", {}).startswith("(unknown tool")

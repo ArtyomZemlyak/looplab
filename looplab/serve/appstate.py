@@ -44,6 +44,10 @@ class AppState:
         self.settings = settings
         self.jobs = jobs
         self.summary_cache: dict[str, tuple] = {}   # run_id -> (size, mtime, summary); skips re-folding
+        # Per-run folded-state cache keyed by (size, mtime, upto_seq): state_payload re-read + re-folded
+        # the WHOLE events.jsonl on every SSE tick (every ~0.4s per client), O(n²) for a repo run whose
+        # node_created events embed full file sets. The live-only `engine_running` is re-stamped on a hit.
+        self._state_cache: dict[tuple, tuple] = {}
         self.reports_dir = root / "reports"
         # Late-bound route callables (set by their owning router's build_router; see module docstring).
         self.list_runs_fn: Optional[Callable[[], list]] = None
@@ -65,6 +69,21 @@ class AppState:
         return evs
 
     def state_payload(self, rd: Path, upto_seq: Optional[int] = None) -> dict:
+        # Cache the expensive fold+dump+trim by (events.jsonl size, mtime, upto_seq): unchanged log ->
+        # reuse the trimmed payload, only re-stamping the live `engine_running` (a lock probe, not the
+        # log). Bounds the SSE hot path from O(events) per tick to a stat() + a dict copy.
+        try:
+            stt = (rd / "events.jsonl").stat()
+            ckey = (str(rd), stt.st_size, stt.st_mtime_ns, upto_seq)
+        except OSError:
+            ckey = None
+        if ckey is not None:
+            hit = self._state_cache.get(ckey)
+            if hit is not None:
+                d, last_seq = hit
+                out = dict(d)
+                out["engine_running"] = _engine_alive(rd)
+                return {"state": out, "seq": last_seq, "max_seq": last_seq}
         evs = self.events(rd, upto_seq)
         st = fold(evs)
         last_seq = evs[-1].seq if evs else -1
@@ -96,6 +115,10 @@ class AppState:
         # A run with finished=False but engine_running=False is a ZOMBIE — the UI uses this to stop
         # showing a perpetual "thinking" strip and to resume on the next engine-needing chat action.
         d["engine_running"] = _engine_alive(rd)
+        if ckey is not None:                 # cache the trimmed payload for the next unchanged tick
+            self._state_cache[ckey] = (d, last_seq)
+            if len(self._state_cache) > 256:  # bound the cache (many runs / seq points over a session)
+                self._state_cache.pop(next(iter(self._state_cache)))
         return {"state": d, "seq": last_seq, "max_seq": last_seq}
 
     def phase(self, st) -> str:

@@ -116,6 +116,12 @@ class Settings(BaseSettings):
     # Image for the untrusted command-eval tier (RepoTask, Phase 4): the framework's deps
     # should be baked in (the container runs --network none, so a pip setup can't fetch).
     docker_image: str = "python:3.12-slim"
+    # Resource caps for the untrusted/hostile Docker tier (passed to `docker run --memory/--cpus`).
+    # The default 4g bound protects other tenants from an OOM, but a model-training MLE-bench eval
+    # routinely needs more — raise it (e.g. "16g") for such runs. "" disables the cap (unbounded).
+    # Ignored by the trusted_local (subprocess) tier.
+    sandbox_memory: str = "4g"
+    sandbox_cpus: str = ""
     # Search policy (ADR-2): "greedy" | "evolutionary" | "mcts" | "asha".
     policy: str = "greedy"
     # Ablation-driven refinement (I7): every N improves, ablate the best to find the
@@ -411,6 +417,13 @@ class Settings(BaseSettings):
     # one-shot predictor on any hiccup). A few extra LLM calls per proposal; set False for the cheaper
     # single-call ranker.
     foresight_agentic: bool = True
+    # §1 foresight confidence gate: the minimum predicted confidence at which a predict-before-execute
+    # pick is ACTED ON. Below it the ranker abstains — the K-idea panel falls back to the first
+    # proposal, best-of-N falls through to the D10 tie-break — instead of committing a low-confidence
+    # choice. 0.0 (default) = OFF (act on every pick, the historical behavior); raise toward ~0.5 to
+    # make the world model defer when it isn't sure. Pairs with the foresight track record (§1) the
+    # predictor is now primed with. Range 0.0-1.0.
+    foresight_min_confidence: float = 0.0
     # T7 LLM response cache: serve an identical DETERMINISTIC (temperature 0) request from an
     # in-process content-addressed cache instead of re-hitting the model — cuts cost on
     # retry/panel/verify flows. NEVER caches sampling calls (temp>0: best-of-N / panel / novelty

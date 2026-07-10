@@ -117,9 +117,23 @@ class MLEBenchRealTask(BaseModel):
         The held-out answers are NOT here (host-graded)."""
         pub = self._public_dir()
         out: dict[str, str] = {}
+        # Guard against slurping a multi-GB Kaggle file into RAM (and then copying it into EVERY node
+        # workdir): assets are content-strings materialized per node, so a huge file OOMs the engine at
+        # start. Fail loud with an actionable message for oversized files instead of silently OOMing —
+        # such a competition needs the read-only data-mount path, not per-node content copies.
+        _MAX_ASSET_BYTES = 512 * 1024 * 1024
         for p in sorted(pub.iterdir()):
             if p.is_file() and (p.suffix.lower() == ".csv" or p.name == "description.md"):
-                out[p.name] = p.read_text(encoding="utf-8", errors="replace")
+                try:
+                    sz = p.stat().st_size
+                    if sz > _MAX_ASSET_BYTES:
+                        raise RuntimeError(
+                            f"{p.name} is {sz // (1024*1024)} MB — too large to stage as a "
+                            f"per-node content asset (it would be copied into every node workdir and OOM "
+                            f"the engine). This competition needs the read-only data-mount path.")
+                    out[p.name] = p.read_text(encoding="utf-8", errors="replace")
+                except OSError as e:
+                    raise RuntimeError(f"could not read public file {p}: {e}") from e
         if not any(n.startswith("train") for n in out):
             raise RuntimeError(f"No train.csv found in prepared public dir {pub}")
         return out

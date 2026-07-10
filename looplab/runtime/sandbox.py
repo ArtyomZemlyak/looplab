@@ -250,32 +250,12 @@ def run_argv(argv: list[str], workdir: str, timeout: float,
             text=True, encoding="utf-8", errors="replace", env=full_env, **kwargs)
     except OSError as e:
         return -1, "", f"failed to launch: {e}", False
-    if log_path:
-        rc, out, err, timed_out = _tee_drain(proc, log_path, timeout, max_output_bytes, cancel)
-        return rc, _clamp_tail_bytes(out, max_output_bytes), _clamp_tail_bytes(err, max_output_bytes), timed_out
-    timed_out = False
-    if cancel is None:
-        try:
-            out, err = proc.communicate(timeout=timeout)
-        except subprocess.TimeoutExpired:
-            _kill_tree(proc)
-            out, err = proc.communicate()
-            timed_out = True
-    else:
-        import time as _time
-        deadline = _time.monotonic() + timeout
-        while True:
-            try:
-                out, err = proc.communicate(timeout=0.25)
-                break
-            except subprocess.TimeoutExpired:
-                if cancel.is_set() or _time.monotonic() >= deadline:
-                    _kill_tree(proc)
-                    out, err = proc.communicate()
-                    timed_out = True
-                    break
-    rc = proc.returncode if proc.returncode is not None else -1
-    return rc, _clamp_tail_bytes(out or "", max_output_bytes), _clamp_tail_bytes(err or "", max_output_bytes), timed_out
+    # ALWAYS drain through the memory-bounded reader (log_path=None keeps no file but still caps the
+    # in-memory tail): `communicate()` buffered the ENTIRE stdout/stderr before clamping, so an
+    # adversarial/buggy fast printer on the untrusted solution.py path (which never sets log_path)
+    # could accumulate its whole output in HOST RAM for up to `timeout` seconds — a host-memory DoS.
+    rc, out, err, timed_out = _tee_drain(proc, log_path, timeout, max_output_bytes, cancel)
+    return rc, _clamp_tail_bytes(out, max_output_bytes), _clamp_tail_bytes(err, max_output_bytes), timed_out
 
 
 # Back-compat alias: pre-rename importers use `_run_argv`, and tests monkeypatch THIS module
@@ -292,11 +272,13 @@ def _tee_drain(proc, log_path, timeout, max_output_bytes, cancel):
     import threading
     import time as _time
 
-    cap = max(max_output_bytes * 4, 256_000)        # bound memory; the FILE keeps the full log
-    try:
-        logf = open(log_path, "a", encoding="utf-8", errors="replace")
-    except OSError:
-        logf = None
+    cap = max(max_output_bytes * 4, 256_000)        # bound memory; the FILE (when set) keeps the full log
+    logf = None
+    if log_path:                                    # log_path=None -> memory-bounded drain, no file
+        try:
+            logf = open(log_path, "a", encoding="utf-8", errors="replace")
+        except OSError:
+            logf = None
     lock = threading.Lock()
     bufs = {"out": [], "err": []}
 
@@ -406,10 +388,18 @@ class DockerSandbox:
     absent rather than silently degrading the boundary."""
 
     def __init__(self, image: str = "python:3.12-slim", network: str = "none",
-                 max_output_bytes: int = 64_000, runtime: Optional[str] = None, **_: object):
+                 max_output_bytes: int = 64_000, runtime: Optional[str] = None,
+                 mem: str = "4g", cpus: str = "", **_: object):
         self.image = image
         self.network = network
         self.max_output_bytes = max_output_bytes
+        # Resource caps for the untrusted tier: the whole point of this tier is to protect other
+        # tenants, but before this the solution.py path had NO memory/cpu bound and ran with default
+        # caps as root — a candidate could OOM the host or saturate every core. `mem`/`cpus` are
+        # generous, configurable defaults; "" disables a given cap. (gVisor stops kernel escape but
+        # NOT resource exhaustion, so these matter even on the hostile runtime.)
+        self.mem = mem
+        self.cpus = cpus
         # B4+ hostile tier: an OCI runtime that is a REAL isolation boundary for untrusted code —
         # gVisor ("runsc", user-space kernel) or Kata ("kata-runtime", microVM). None = the default
         # shared-kernel runtime (untrusted tier). Passed to `docker run --runtime`.
@@ -434,8 +424,17 @@ class DockerSandbox:
         # seconds even if the host kills the client first. Host timeout gets a grace margin.
         secs = max(1, int(timeout))
         rt = ["--runtime", self.runtime] if self.runtime else []   # B4+ gVisor/Kata isolation tier
+        # Resource + privilege hardening for the untrusted tier: bound memory/cpu, drop all Linux
+        # capabilities, and forbid privilege escalation. (--user is deliberately NOT set — the bind-
+        # mounted workdir is host-owned, so a non-root uid often can't write predictions/artifacts.)
+        caps = ["--cap-drop", "ALL", "--security-opt", "no-new-privileges"]
+        if self.mem:
+            caps += ["--memory", str(self.mem)]
+        if self.cpus:
+            caps += ["--cpus", str(self.cpus)]
         argv = (["docker", "run", "--rm", "--network", self.network, *rt,
                  "--pids-limit", "1024",      # fork-bomb guard (review C1: no pids limit before)
+                 *caps,
                  "-v", f"{wd.as_posix()}:/work", "-w", "/work"] + envs
                 + [self.image, "timeout", "-k", "5", str(secs), "python", "solution.py"])
         rc, out, err, to = _run_argv(argv, str(wd), timeout + 15.0, None, self.max_output_bytes, cancel)

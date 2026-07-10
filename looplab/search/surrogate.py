@@ -59,9 +59,16 @@ class SurrogateResearcher:
     last_foresight_pick = _fallback_telemetry("last_foresight_pick")
 
     def _history(self, state: RunState) -> list[tuple[dict, float]]:
+        # Never fit the surrogate on a CHEATED metric: under `gate` a hard-flagged node keeps its
+        # inflated metric (e.g. 0.99 from reading the answer key) AND stays feasible (gate excludes it
+        # only from WINNING, not from breeding), so without this the predictor would learn to propose
+        # near the cheated params. `flagged_node_ids` is empty under `audit`, so this is a no-op in the
+        # default posture and doesn't touch the documented gate-vs-block breeding contract.
+        from looplab.events.replay import flagged_node_ids
+        flagged = flagged_node_ids(state)
         hist = []
         for n in state.feasible_nodes():
-            if n.metric is None:
+            if n.metric is None or n.id in flagged:
                 continue
             p = {k: float(v) for k, v in n.idea.params.items()
                  if k in self.bounds and isinstance(v, (int, float))}

@@ -438,15 +438,23 @@ class JsonlCaseLibrary:
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.cases: list[dict] = []
+        self._reload()   # load existing cases (same malformed-line-tolerant parse used on every reload)
+
+    def _reload(self) -> None:
+        """(Re)read the on-disk cases into `self.cases`. Used by __init__ AND inside the interprocess
+        lock on every add() so a concurrent run's cases aren't clobbered by this run's stale in-memory
+        copy. One malformed/truncated line is skipped, never making the whole cross-run memory
+        permanently unloadable."""
+        cases: list[dict] = []
         if self.path.exists():
             for line in self.path.read_text(encoding="utf-8").splitlines():
                 line = line.strip()
-                if not line:
-                    continue
-                try:                       # one malformed/truncated line must not make the whole
-                    self.cases.append(json.loads(line))   # cross-run memory permanently unloadable
-                except json.JSONDecodeError:
-                    continue
+                if line:
+                    try:
+                        cases.append(json.loads(line))
+                    except json.JSONDecodeError:
+                        continue
+        self.cases = cases
 
     def _flush(self) -> None:
         # Atomic (temp + os.replace): the file is rewritten WHOLE on every add(), so a non-atomic
@@ -455,7 +463,18 @@ class JsonlCaseLibrary:
             self.path, "\n".join(json.dumps(c) for c in self.cases) + "\n")
 
     def add(self, case: dict) -> bool:
-        """Upsert by task_id, retaining the better metric. Returns True if stored."""
+        """Upsert by task_id, retaining the better metric. Returns True if stored.
+
+        Under the same best-effort interprocess lock the lessons store / event store use: `add` is a
+        full-file read-modify-write, so two runs sharing `memory_dir` (the live-share scenario) would
+        otherwise clobber each other's cases (the loser's case vanishes). We RE-READ inside the lock so
+        this run's possibly-stale in-memory `self.cases` can't overwrite a concurrent run's write."""
+        from looplab.events.eventstore import _interprocess_lock
+        with _interprocess_lock(Path(str(self.path) + ".lock")):
+            self._reload()
+            return self._add_locked(case)
+
+    def _add_locked(self, case: dict) -> bool:
         tid = case.get("task_id")
         direction = case.get("direction", "min")
         metric = case.get("metric")

@@ -148,6 +148,21 @@ def test_fold_confirm_seed_results():
     assert st.confirm_seed_results == {3: {0: 0.5, 1: None}}
 
 
+# Code-review pass: budget_extend must reject NON-FINITE values. `float("nan")`/`float("inf")` PASS the
+# numeric coercion but `total_eval_seconds >= nan` is always False (budget silently disabled) / inf never
+# trips — and the poison value re-folds on every resume, permanently. Reject it; keep the prior ceiling.
+def test_budget_extend_rejects_nonfinite():
+    from looplab.core.models import Event
+    base = Event(type="run_started", data={"run_id": "r", "task_id": "t"})
+    for bad in ("nan", "inf", "-inf", float("nan"), float("inf")):
+        st = fold([base, Event(type="budget_extend", data={"max_eval_seconds": bad})])
+        assert "max_eval_seconds" not in st.budget_overrides, bad
+    # a FINITE string still coerces (the legitimate UI/TUI case the coercion exists for)
+    st = fold([base, Event(type="budget_extend", data={"max_eval_seconds": "600", "max_seconds": "30"})])
+    assert st.budget_overrides["max_eval_seconds"] == 600.0
+    assert st.budget_overrides["max_seconds"] == 30.0
+
+
 # A "reused" stage marker (a re-eval that SKIPPED a stage the inline-repair reuse kept) must NOT clobber
 # the REAL completion record from the attempt that actually ran the stage — else the node reads as if it
 # trained in 0s. Keep the informative record; order-tolerant (a real record still supersedes a reused).
@@ -234,3 +249,38 @@ def test_event_envelope_has_version(tmp_path):
     s.append("x", {"a": 1})
     e = list(s.read_all())[0]
     assert e.v == 1                                  # ADR-1 envelope version present
+
+
+# --- Batch-1 P0 regressions (first framework mega-review) -----------------------------------------
+
+def test_budget_extend_string_value_is_coerced_not_poison(tmp_path):
+    """A UI/TUI can post `max_seconds` as a STRING; the engine compares it numerically, so an
+    un-coerced string would TypeError in the loop and re-crash every resume. The fold coerces it."""
+    s = EventStore(tmp_path / "e.jsonl")
+    s.append("run_started", {"run_id": "r", "task_id": "t", "direction": "min"})
+    s.append("budget_extend", {"max_seconds": "600", "max_eval_seconds": "300", "max_parallel": "2"})
+    bo = fold(s.read_all()).budget_overrides
+    assert bo["max_seconds"] == 600.0 and isinstance(bo["max_seconds"], float)
+    assert bo["max_parallel"] == 2 and isinstance(bo["max_parallel"], int)
+    assert (0.0 >= bo["max_eval_seconds"]) is False        # numeric compare no longer raises
+    # a non-numeric value is skipped, keeping the last good one
+    s.append("budget_extend", {"max_seconds": "abc"})
+    assert fold(s.read_all()).budget_overrides["max_seconds"] == 600.0
+
+
+def test_conflicting_second_terminal_does_not_flip_the_node(tmp_path):
+    """First-terminal-wins for the WHOLE node: a corrupt/double-appended node_failed after a
+    node_evaluated must not flip the evaluated node to failed and drop its metric."""
+    from looplab.core.models import NodeStatus
+    s = EventStore(tmp_path / "e.jsonl")
+    _seed_events(s)                                        # node 0 evaluated metric=5.0
+    s.append("node_failed", {"node_id": 0, "error": "boom", "reason": "crash"})
+    n = fold(s.read_all()).nodes[0]
+    assert n.status is NodeStatus.evaluated and n.metric == 5.0   # not flipped to failed
+
+
+def test_normalize_task_rejects_cmd_and_eval_both():
+    import pytest
+    from looplab.adapters.tasks import normalize_task
+    with pytest.raises(ValueError, match="EITHER"):
+        normalize_task({"cmd": {"command": ["python", "x.py"]}, "eval": {"command": ["python", "y.py"]}})
