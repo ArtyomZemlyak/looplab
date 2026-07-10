@@ -8,7 +8,7 @@ precedence are conveyed identically everywhere (the agent must be able to tell w
 newest and know that the newest wins on conflict): the Researcher (proposals), the Strategist
 (policy/operator mix), the pilot (macro-action choice), the crash-triage agent (repair-vs-reject),
 and the Developer (the built CODE — the engine folds the directives into the idea handed to
-`implement`, see `orchestrator._directed_idea`). Signal-delivery §1: a directive that only reached
+`implement`, see `engine/node_build.py::_directed_idea`). Signal-delivery §1: a directive that only reached
 the proposal used to steer WHAT to try but not HOW it was built or which action ran next.
 """
 from __future__ import annotations

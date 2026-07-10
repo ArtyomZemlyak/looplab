@@ -1,7 +1,7 @@
 """Staged-eval resolution & selective re-run (Phase 1/2) for the engine — extracted from
 orchestrator.py as a MIXIN: `class Engine(EvalStagesMixin, …)` inherits these methods unchanged,
 so there is ZERO call-site churn and `self` here IS the engine. The method bodies are verbatim
-moves (only the two `Engine.`-qualified staticmethod self-references became
+moves (only the three `Engine.`-qualified staticmethod self-references became
 `EvalStagesMixin.`-qualified) and read engine attributes freely (`_eval_spec`,
 `_strategy_fidelity`, `_reflect_client`, `_idea_text`, …), exactly as they did inside the class.
 

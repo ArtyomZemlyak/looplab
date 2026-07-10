@@ -4,7 +4,8 @@ MIXIN: `class Engine(EvaluateMixin, …)` inherits it unchanged, so there is ZER
 and `self` here IS the engine. The body is a verbatim move and reads engine attributes freely
 (~30 of them: `_write_lock`, `proxy_scorer`, `_inline_repair*`, `sandbox`, trust knobs, …); its
 helpers (`_materialize`/`_run_eval`/`_triage_crash`/`_repair`/`_safe_reuse_start`/
-`_audit_workdir_writes`/…) resolve through `self` onto the sibling mixins.
+`_audit_workdir_writes`/…) resolve through `self` — onto the sibling mixins or the Engine
+class itself (`_materialize`/`_write_node_files` stay in orchestrator.py).
 
 `fold` is imported from its canonical home here (the orchestrator's module-global `fold` seam —
 monkeypatched by two tests — does not reach `_evaluate`: those patches gate node CREATION).

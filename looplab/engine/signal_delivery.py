@@ -56,7 +56,7 @@ class SignalRoute:
 SIGNALS: tuple[SignalRoute, ...] = (
     SignalRoute(
         name="trust_flags",
-        produced_by="trust.reward_hack/leakage/critic scans (orchestrator._evaluate trust scan)",
+        produced_by="trust.reward_hack/leakage/critic scans (engine/evaluate.py _evaluate trust scan)",
         folded_into="RunState.reward_hacks",
         channel="push",
         inject="looplab.events.digest:trust_reflection",
@@ -64,7 +64,7 @@ SIGNALS: tuple[SignalRoute, ...] = (
         call_sites=(("looplab/engine/proposal_cues.py", "trust_reflection(state)"),)),  # _set_complexity_hint: ProposalCuesMixin
     SignalRoute(
         name="triage_rationale",
-        produced_by="orchestrator._triage_crash (LLM crash-triage verdict)",
+        produced_by="engine/crash_repair.py _triage_crash (LLM crash-triage verdict)",
         folded_into="Node.triage_rationale",
         channel="context",
         inject="looplab.events.digest:_node_line",

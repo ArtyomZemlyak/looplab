@@ -3,7 +3,7 @@
 Before this module, every engine knob cost FOUR edits: a `Settings` field, a ~1-line passthrough in
 `cli.py::_engine`, an `Engine.__init__` keyword, and a `self._x` assign. The Settings→Engine
 passthrough is now a single `options=EngineOptions.from_settings(settings)`; the Engine resolves each
-knob as: explicitly passed kwarg > `options` field > default (see `_UNSET` in orchestrator.py). The
+knob as: explicitly passed kwarg > `options` field > default (see `_UNSET` below). The
 ~100 existing `Engine(...)` keyword call sites keep working unchanged.
 
 How to add an engine knob now:
