@@ -679,6 +679,11 @@ back into the original module, exactly like `engine/triage.py` re-exports into o
   (F7), P4.6 (F6), P5.1 (F8), P3+P4.4 (F3 — knob triplication → `**knobs` validated by
   `EngineOptions`, deleting ~150 redundant signature lines + the dual-default-sync obligation;
   verified 68/68 exact knob↔field parity and keyword-only signature — zero call-site breakage).
+  **[F3 RESOLVED at implementation]:** the 68 `_UNSET` signature knobs are now `**knobs`
+  validated against EngineOptions field names (unknown knob -> TypeError, like a real keyword);
+  the 16 object seams stay explicit; per-knob docs live on EngineOptions. orchestrator.py is
+  ~1455 lines. **[P5.1 RESOLVED]:** fold() is a 63-handler dispatch table gated by the new
+  golden-log test (which caught a real transformation bug mid-work — its designed job).
 - **God-file decomposition:** P3 (orchestrator, full detail), P5.2 (llm/repo_developer/cli/tui/
   agent/lessons).
 - **Agent-friendliness:** P0.2/P0.3 (CLAUDE.md + comments), P2.5 (`runs_tools` rename), P4.2/P4.3
