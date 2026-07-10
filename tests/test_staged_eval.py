@@ -117,3 +117,45 @@ def test_inter_stage_check_ok_lets_pipeline_continue():
     r = run_command_eval(["true"], d, 30, {"kind": "stdout_json", "key": "m"},
                          stages=stages, check_fn=lambda name, tail: None)   # always OK
     assert r.metric == 0.7 and [s["status"] for s in r.stages] == ["ok", "ok"]
+
+
+def test_stage_check_is_sanity_only_and_names_the_objective(tmp_path, monkeypatch):
+    # Regression (node-21 incident): the inter-stage checker FAILED the run's best model — it read the
+    # loss MAGNITUDE (~14.6) as "no learning" and a bystander recall@50 (0.79) as "the metric, below
+    # best". The check must be SANITY-only (hard failures), NAME the objective metric so it can't grab a
+    # bystander scalar, and never judge quality/ranking — a healthy-but-high-loss stage must PASS.
+    from looplab.core.models import Idea, Node
+    from looplab.engine.orchestrator import Engine
+    from looplab.search.policy import GreedyTree
+    from looplab.runtime.sandbox import SubprocessSandbox
+    from looplab.adapters.toytask import ToyTask
+    task = ToyTask.load(Path(__file__).resolve().parents[1] / "examples" / "toy_task.json")
+    r, d = task.build_roles()
+    eng = Engine(tmp_path / "r", task=task, researcher=r, developer=d,
+                 sandbox=SubprocessSandbox(), policy=GreedyTree(n_seeds=2, max_nodes=3))
+    eng._eval_spec = {"metric": {"reader": "stdout_regex", "pattern": "RECALL@100: ([0-9.]+)"}}
+    node = Node(id=1, operator="improve",
+                idea=Idea(operator="improve", params={}, rationale="two-stage temperature schedule"))
+
+    class Fake:
+        def __init__(self, reply):
+            self.reply = reply
+            self.seen = []
+
+        def complete_text(self, msgs):
+            self.seen.append(msgs)
+            return self.reply
+
+    ok = Fake("OK")
+    monkeypatch.setattr(eng, "_reflect_client", lambda: ok)
+    res = eng._stage_check_fn(node)("train", "Epoch 29 loss=14.6 v_num=0\n0.8549\n0.7902\n")
+    assert res is None                                   # healthy-but-high-loss stage PASSES, not a concern
+    blob = " ".join(m["content"] for m in ok.seen[0]).upper()
+    assert "RECALL@100" in blob                          # objective NAMED, not guessed from bare scalars
+    assert "SANITY" in blob and "MAGNITUDE" in blob      # loss magnitude explicitly not a failure signal
+    assert "QUALITY" in blob or "RANKING" in blob        # must not judge quality / beat-the-best
+
+    boom = Fake("no checkpoint saved — silent fallback to the pretrained model")
+    monkeypatch.setattr(eng, "_reflect_client", lambda: boom)
+    res2 = eng._stage_check_fn(node)("train", "Traceback (most recent call last): ...")
+    assert res2 and "checkpoint" in res2                 # a HARD failure still stops the pipeline
