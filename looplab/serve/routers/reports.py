@@ -13,7 +13,6 @@ from pathlib import Path
 from fastapi import APIRouter, HTTPException
 
 from looplab.core.atomicio import atomic_write_text
-from looplab.events.replay import fold
 
 
 def _prior_learnings_index(reports_dir: Path) -> str:
@@ -68,7 +67,7 @@ def build_router(srv) -> APIRouter:
 
     def _run_brief(run_id: str, labels: dict) -> dict:
         rd = _run_dir(run_id)
-        st = fold(_events(rd))
+        st = srv.state(rd)
         best = st.best()
         cfg = {}
         snap = rd / "config.snapshot.json"
@@ -88,7 +87,7 @@ def build_router(srv) -> APIRouter:
         """Deep access for the report agent: read one experiment of one run via RunTools."""
         try:
             from looplab.tools.run_tools import RunTools
-            st = fold(_events(_run_dir(run_id)))
+            st = srv.state(_run_dir(run_id))
             rt = RunTools()
             rt.bind_state(st, None)
             return rt.execute("read_experiment", {"node_id": node_id})

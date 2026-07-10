@@ -596,7 +596,7 @@ def _select_best(st: RunState, flagged: set, best_confirmed: int | None) -> None
     # would raise TypeError and brick every re-fold/resume. Such a node simply can't be "best".
     evaluated = [n for n in st.evaluated_nodes()
                  if n.feasible and n.id not in flagged
-                 and (n.confirmed_mean if n.confirmed_mean is not None else n.metric) is not None]
+                 and n.robust_metric is not None]
     if evaluated:
         # If any node has been confirmed (multi-seed), the final answer must be the
         # robust winner: rank confirmed nodes by confirmed_mean. With no confirmations
@@ -606,7 +606,7 @@ def _select_best(st: RunState, flagged: set, best_confirmed: int | None) -> None
         chooser = min if st.direction == "min" else max
 
         def _key(n):
-            v = n.confirmed_mean if n.confirmed_mean is not None else n.metric
+            v = n.robust_metric
             return (v, n.id)
 
         st.best_node_id = chooser(pool, key=_key).id

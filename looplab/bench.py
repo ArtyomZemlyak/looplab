@@ -45,8 +45,7 @@ def run_benchmark(task_files, settings: Settings, out_dir) -> list[dict]:
             results.append({
                 "task": tf.stem, "task_id": state.task_id, "direction": state.direction,
                 "finished": state.finished,
-                "best_metric": (best.confirmed_mean if best and best.confirmed_mean is not None
-                                else (best.metric if best else None)),
+                "best_metric": (best.robust_metric if best else None),
                 "best_node": (best.id if best else None),
                 "nodes": len(state.nodes), "evaluated": len(state.evaluated_nodes()),
                 "failed": sum(1 for n in state.nodes.values() if n.status.value == "failed"),

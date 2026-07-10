@@ -133,24 +133,18 @@ def build_router(srv) -> APIRouter:
             return {"ok": False, "error": str(e), **info}
 
     # ------------------------------------------------------------------ GPU monitor
-    def _f(s: str) -> Optional[float]:
-        try:
-            return float(s)
-        except (TypeError, ValueError):
-            return None
-
     @router.get("/api/gpu")
     def gpu():
         try:
-            q = ("--query-gpu=name,utilization.gpu,memory.used,memory.total,temperature.gpu,"
-                 "power.draw")
-            out = subprocess.run(["nvidia-smi", q, "--format=csv,noheader,nounits"],
-                                 capture_output=True, text=True, timeout=4)
-            if out.returncode != 0 or not out.stdout.strip():
+            from looplab.core.hardware import query_nvidia_smi
+            from looplab.core.parse import to_float as _f
+            rows = query_nvidia_smi(
+                "name,utilization.gpu,memory.used,memory.total,temperature.gpu,power.draw",
+                timeout=4)
+            if rows is None:
                 return {"available": False}
             gpus = []
-            for line in out.stdout.strip().splitlines():
-                p = [c.strip() for c in line.split(",")]
+            for p in rows:
                 if len(p) >= 6:
                     gpus.append({"name": p[0], "util": _f(p[1]), "mem_used": _f(p[2]),
                                  "mem_total": _f(p[3]), "temp": _f(p[4]), "power": _f(p[5])})

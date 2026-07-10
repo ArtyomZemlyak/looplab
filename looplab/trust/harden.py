@@ -24,7 +24,7 @@ import re
 from pathlib import Path
 from typing import Callable, Optional
 
-from looplab.core.atomicio import atomic_write_text
+from looplab.events.eventstore import read_jsonl_lenient, write_jsonl_atomic
 
 # Seed exploit corpus: the canonical specification-gaming moves for LoopLab's eval contracts, each
 # with the durable detection pattern a fixer would add. `probe` is a code string a hacker might
@@ -58,20 +58,11 @@ class ExploitSuite:
     @classmethod
     def load(cls, path: str | Path) -> "ExploitSuite":
         p = Path(path)
-        rows: list[dict] = []
-        if p.exists():
-            for line in p.read_text(encoding="utf-8").splitlines():
-                try:
-                    o = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                if isinstance(o, dict) and o.get("pattern"):
-                    rows.append(o)
+        rows = [o for o in read_jsonl_lenient(p, loads=json.loads) if o.get("pattern")]
         return cls(rows)
 
     def save(self, path: str | Path) -> None:
-        atomic_write_text(Path(path),
-                          "".join(json.dumps(r) + "\n" for r in self.patterns))
+        write_jsonl_atomic(Path(path), self.patterns, dumps=json.dumps)
 
     def add(self, name: str, pattern: str, kind: str) -> bool:
         """Add a regex if it's new AND compiles. Returns True if added."""

@@ -27,26 +27,32 @@ def detect_gpus() -> list[dict]:
         return _GPUS_CACHE
     gpus: list[dict] = []
     try:
-        exe = shutil.which("nvidia-smi")
-        if exe:
-            out = subprocess.run(
-                [exe, "--query-gpu=index,name,memory.total,memory.free",
-                 "--format=csv,noheader,nounits"],
-                capture_output=True, text=True, timeout=5)
-            for line in (out.stdout or "").strip().splitlines():
-                parts = [p.strip() for p in line.split(",")]
-                if len(parts) >= 4:
-                    def _int(x):
-                        try:
-                            return int(float(x))
-                        except (ValueError, TypeError):
-                            return None
-                    gpus.append({"index": _int(parts[0]), "name": parts[1],
-                                 "mem_total_mib": _int(parts[2]), "mem_free_mib": _int(parts[3])})
+        from looplab.core.parse import to_int
+        for parts in (query_nvidia_smi("index,name,memory.total,memory.free") or []):
+            if len(parts) >= 4:
+                gpus.append({"index": to_int(parts[0]), "name": parts[1],
+                             "mem_total_mib": to_int(parts[2]), "mem_free_mib": to_int(parts[3])})
     except (OSError, ValueError, subprocess.SubprocessError):
         gpus = []
     _GPUS_CACHE = gpus
     return gpus
+
+
+def query_nvidia_smi(fields: str, *, timeout: float = 5.0, nounits: bool = True):
+    """Run `nvidia-smi --query-gpu=<fields>` and return the comma-split, stripped rows, or None
+    when there is no usable GPU signal (no binary / non-zero exit / empty output). The ONE
+    launcher+CSV-splitter shared by the inventory here, the name probe below, and the live
+    monitor in serve/routers/misc — callers keep their own field lists, timeouts, row shapes
+    and exception posture (this raises subprocess/OS errors; callers catch per their contract)."""
+    exe = shutil.which("nvidia-smi")
+    if not exe:
+        return None
+    fmt = "csv,noheader,nounits" if nounits else "csv,noheader"
+    out = subprocess.run([exe, f"--query-gpu={fields}", f"--format={fmt}"],
+                         capture_output=True, text=True, timeout=timeout)
+    if out.returncode != 0 or not (out.stdout or "").strip():
+        return None
+    return [[c.strip() for c in line.split(",")] for line in out.stdout.strip().splitlines()]
 
 
 def usable_cpu_count() -> int:
@@ -135,13 +141,10 @@ def detect_gpu() -> str | None:
         return _GPU_CACHE[1]
     name: str | None = None
     try:
-        exe = shutil.which("nvidia-smi")
-        if exe:
-            out = subprocess.run([exe, "--query-gpu=name", "--format=csv,noheader"],
-                                 capture_output=True, text=True, timeout=5)
-            first = (out.stdout or "").strip().splitlines()
-            if first and first[0].strip():
-                name = first[0].strip()
+        # nounits=False: name-only query, and the name itself may contain a comma-free unit word.
+        rows = query_nvidia_smi("name", nounits=False)
+        if rows and rows[0] and rows[0][0]:
+            name = ",".join(rows[0]).strip() or None   # a GPU name may contain a comma — rejoin
     except (OSError, ValueError, subprocess.SubprocessError):
         name = None
     _GPU_CACHE = (True, name)

@@ -80,6 +80,67 @@ def iter_jsonl(path: str | os.PathLike) -> Iterator[dict]:
             yield obj
 
 
+def read_jsonl_lenient(path: str | os.PathLike, *, loads=orjson.loads,
+                       keep_bad: bool = False, dicts_only: bool = True,
+                       errors: str = "strict") -> list:
+    """Read a MUTABLE JSONL store (lessons / meta-notes / cases / exploit patterns), SKIPPING
+    corrupt lines and continuing. Contrast `iter_jsonl`, which STOPS at the first bad line —
+    correct for the append-only event log (a bad line there is a torn tail), wrong for stores
+    that are rewritten/compacted in place, where one damaged line must not hide everything
+    after it. Previously copy-pasted at ~8 sites (lessons ×4, memory, knowledge/memory tools,
+    trust/harden) with drift-prone small variations — the parameters below ARE those variations:
+
+    - `loads`: the parser the store was WRITTEN with — orjson for the orjson-written stores,
+      stdlib `json.loads` for the stdlib-written ones. NOT interchangeable: stdlib accepts the
+      NaN/Infinity literals stdlib `json.dumps` emits for non-finite floats; orjson rejects them.
+    - `keep_bad=True`: emit a None placeholder per bad/blank/non-dict line, so list indices stay
+      aligned with RAW file line numbers (the lessons reconcile rewrite and the knowledge-index
+      record ids are index-keyed).
+    - `dicts_only=False`: keep any parsed JSON value, not just objects (the memory case-library's
+      historical reload shape).
+    - `errors`: passed to read_text — the spans reader uses "replace" (a mid-file mojibake byte
+      must cost one span, not the whole timings report).
+
+    Missing file -> []. An unreadable file raises OSError (callers decide how to degrade)."""
+    p = Path(path)
+    out: list = []
+    if not p.exists():
+        return out
+    for line in p.read_text(encoding="utf-8", errors=errors).splitlines():
+        rec = None
+        if line.strip():
+            try:
+                v = loads(line)
+                rec = v if (not dicts_only or isinstance(v, dict)) else None
+            except Exception:  # noqa: BLE001 — any unparseable line is "damage to step over"
+                rec = None
+        if rec is not None:
+            out.append(rec)
+        elif keep_bad:
+            out.append(None)
+    return out
+
+
+def write_jsonl_atomic(path: str | os.PathLike, rows, *, dumps=orjson.dumps) -> None:
+    """Atomically REWRITE a whole mutable JSONL store (temp + os.replace via core.atomicio):
+    one record per line, each line newline-terminated. `dumps` is the serializer the store's
+    readers expect (orjson for the lessons store / spans.jsonl, stdlib `json.dumps` for the
+    stdlib-written stores — the output bytes differ, so the per-store choice is part of the
+    contract; see `read_jsonl_lenient`).
+
+    NEVER route an APPEND-mode site through this (e.g. lessons.append_lessons appends under an
+    interprocess lock — a whole-file rewrite there would drop concurrent runs' rows). Callers
+    needing cross-process exclusion must hold their store's lock AROUND this call; the write
+    itself is only crash-atomic, not concurrency-safe."""
+    from looplab.core.atomicio import atomic_write_bytes
+
+    def _line(o) -> bytes:
+        d = dumps(o)
+        return (d if isinstance(d, bytes) else d.encode("utf-8")) + b"\n"
+
+    atomic_write_bytes(Path(path), b"".join(_line(o) for o in rows))
+
+
 def log_divergence(path: str | os.PathLike) -> Optional[dict]:
     """Detect a MID-FILE corruption, distinct from the normal torn tail. `iter_jsonl` STOPS at the
     first bad line, so a byte flipped in the MIDDLE of an append-only log — impossible with a single

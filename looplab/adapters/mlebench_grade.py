@@ -55,19 +55,13 @@ def grade_in_subprocess(competition_id: str, submission_path, data_dir: Optional
     # Single pass: main() prints exactly one JSON object line carrying BOTH "metric" and "report".
     # Scan from the end for the last parseable JSON object that has a "metric" key and read both from
     # it (so a stray log line that merely contains the text "report" can't be mis-parsed).
-    for line in reversed(out.splitlines()):
-        line = line.strip()
-        if not (line.startswith("{") and line.endswith("}")):
-            continue
-        try:
-            obj = json.loads(line)
-        except ValueError:
-            continue
-        if isinstance(obj, dict) and "metric" in obj:
-            m = obj.get("metric")
-            ok = isinstance(m, (int, float)) and not isinstance(m, bool) and math.isfinite(m)
-            return (float(m) if ok else None, obj.get("report"))
-    return None, None
+    from looplab.runtime.sandbox import _last_json_dict
+    obj = _last_json_dict(out, lambda o: "metric" in o)
+    if obj is None:
+        return None, None
+    m = obj.get("metric")
+    ok = isinstance(m, (int, float)) and not isinstance(m, bool) and math.isfinite(m)
+    return (float(m) if ok else None, obj.get("report"))
 
 
 def main(argv: Optional[list[str]] = None) -> int:

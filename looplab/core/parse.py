@@ -17,6 +17,26 @@ from pydantic import BaseModel, ValidationError
 
 from looplab.core.errors import LLMError
 
+
+def to_float(v, *, finite: bool = False):
+    """`float(v)` or None when unparseable. `finite=True` additionally rejects NaN/inf — the
+    metric-reading rule (a diverged run must read as "no metric", never enter best-selection).
+    The one spelling of scalar coercion previously re-implemented per module."""
+    import math
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return None
+    return None if (finite and not math.isfinite(f)) else f
+
+
+def to_int(v):
+    """`int(float(v))` or None when unparseable (nvidia-smi CSV cells and similar)."""
+    try:
+        return int(float(v))
+    except (TypeError, ValueError):
+        return None
+
 T = TypeVar("T", bound=BaseModel)
 
 _THINK = re.compile(r"<think>.*?</think>", re.DOTALL | re.IGNORECASE)

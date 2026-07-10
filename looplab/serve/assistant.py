@@ -31,13 +31,10 @@ from looplab.events.eventstore import iter_jsonl
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
 # Permission modes, mirroring Claude Code. `plan` is read-only (the safe default); the mutating modes
-# are honored by the write/shell/git providers in P1.
-MODES = ("plan", "default", "acceptEdits", "auto")
-DEFAULT_MODE = "plan"
-
-
-def normalize_mode(mode: Optional[str]) -> str:
-    return mode if mode in MODES else DEFAULT_MODE
+# are honored by the write/shell/git providers in P1. Re-exported from the single source of truth
+# (tools/perm_modes.py — the decision table the providers enforce) so the mode SET can never drift
+# between the session layer and the enforcing providers.
+from looplab.tools.perm_modes import DEFAULT_MODE, MODES, normalize_mode  # noqa: F401
 
 
 # --------------------------------------------------------------------------- session persistence

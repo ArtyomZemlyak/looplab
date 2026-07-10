@@ -47,7 +47,7 @@ def export_run(state: RunState, *, tracking_uri: str | None = None,
                     mlflow.log_param(str(k), v)
                 except Exception:  # noqa: BLE001
                     pass
-            metric = best.confirmed_mean if best.confirmed_mean is not None else best.metric
+            metric = best.robust_metric
             if metric is not None:
                 mlflow.log_metric("best_metric", float(metric))
             for k, v in (best.extra_metrics or {}).items():

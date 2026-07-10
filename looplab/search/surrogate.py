@@ -16,6 +16,7 @@ from typing import Optional
 
 from looplab.agents.roles import forward_hints
 from looplab.core.models import Idea, Node, RunState
+from looplab.events.digest import knn_idw, numeric_params
 
 
 def _fallback_telemetry(name: str) -> property:
@@ -67,23 +68,17 @@ class SurrogateResearcher:
         for n in state.breedable_nodes():
             if n.metric is None:
                 continue
-            p = {k: float(v) for k, v in n.idea.params.items()
-                 if k in self.bounds and isinstance(v, (int, float))}
-            if len(p) == len(self.bounds):
+            p = numeric_params(n.idea.params, keys=self.bounds)
+            if len(p) == len(self.bounds):     # only FULL-dimensional points are usable history
                 hist.append((p, n.metric))
         return hist
 
     def _predict(self, x: dict, hist: list[tuple[dict, float]]) -> tuple[float, float]:
         """Inverse-distance-weighted k-NN prediction + distance to the nearest sample (the
-        exploration signal). Returns (predicted_metric, nearest_distance)."""
-        dists = sorted(((math.sqrt(sum((x[k] - p[k]) ** 2 for k in self.bounds)), m)
-                        for p, m in hist), key=lambda t: t[0])
-        nn = dists[: self.k]
-        nearest = nn[0][0]
-        if nearest == 0.0:
-            return nn[0][1], 0.0
-        wsum = sum(1.0 / d for d, _ in nn)
-        pred = sum((1.0 / d) * m for d, m in nn) / wsum
+        exploration signal). Returns (predicted_metric, nearest_distance). Eligibility here is
+        "full bounds dimensionality" (enforced by _history); the IDW core is the shared knn_idw."""
+        pairs = [(math.sqrt(sum((x[k] - p[k]) ** 2 for k in self.bounds)), m) for p, m in hist]
+        pred, nearest = knn_idw(pairs, self.k)    # hist is non-empty (propose() gates on warmup)
         return pred, nearest
 
     def propose(self, state: RunState, parent: Optional[Node]) -> Idea:

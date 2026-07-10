@@ -174,6 +174,17 @@ class Node(BaseModel):
     # only (a 💡 chip) — shows where research landed in the tree; never affects search/selection.
     research_origin: Optional[dict] = None
 
+    @property
+    def robust_metric(self) -> Optional[float]:
+        """The metric used for ranking/display: the multi-seed confirmed mean when present, else the
+        raw metric. THE single spelling of "robust metric" — previously copy-pasted at a dozen call
+        sites (replay/_select_best, digest, holdout, lessons, exporters, UI, cli, bench), where the
+        copies could drift. Holdout precedence deliberately stays OUT of this property: holdout-gated
+        selection layers `holdout_metric` on top explicitly (see replay._select_best). A plain
+        @property (not a pydantic field/computed_field): excluded from model_dump, so event/snapshot
+        serialization is byte-identical."""
+        return self.confirmed_mean if self.confirmed_mean is not None else self.metric
+
 
 def hypothesis_id(statement: str) -> str:
     """Stable id for a hypothesis statement so the same claim (from different ideas / a human /

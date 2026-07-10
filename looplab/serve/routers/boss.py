@@ -14,7 +14,6 @@ from fastapi.responses import JSONResponse
 
 from looplab.core.atomicio import best_effort_fsync
 from looplab.events.eventstore import EventStore, iter_jsonl
-from looplab.events.replay import fold
 from looplab.events.types import (
     EV_ANNOTATION, EV_APPROVAL_GRANTED, EV_BUDGET_EXTEND, EV_DEEP_RESEARCH,
     EV_FORCE_ABLATE, EV_FORCE_CONFIRM, EV_FORK, EV_HINT,
@@ -207,7 +206,7 @@ def build_router(srv) -> APIRouter:
         body = await request.json()
         msgs = body.get("messages") or []
         nid = body.get("node_id")
-        st = fold(_events(rd))
+        st = srv.state(rd)
         # advisory=True: /chat has no actions channel, so the RUN STATUS block must recommend,
         # not command ("you MUST act: resume") — else the model claims actions it can't take.
         sys_prompt = CHAT_SYSTEM + _boss_context(st, nid, rd, advisory=True)
@@ -240,7 +239,7 @@ def build_router(srv) -> APIRouter:
         nid = body.get("node_id")
         instruction = (body.get("instruction") or "").strip()
         history = body.get("messages") or []
-        st = fold(_events(rd))
+        st = srv.state(rd)
         from looplab.core.models import Idea
         from looplab.core.parse import parse_structured
         convo = "\n".join(f"{m.get('role')}: {m.get('content')}" for m in history)
@@ -287,7 +286,7 @@ def build_router(srv) -> APIRouter:
         msgs = body.get("messages") or []
         nid = body.get("node_id")
         instruction = (body.get("instruction") or "").strip()
-        st = fold(_events(rd))
+        st = srv.state(rd)
         s = _llm_settings(rd)
         try:
             client = srv.make_llm_client(s)
@@ -408,7 +407,7 @@ def build_router(srv) -> APIRouter:
         so it hands back {status:'running', job_id} the UI awaits via jobAwait instead of 504ing — a
         fast model still returns {ok, seq, content} inline within the wait."""
         rd = _run_dir(run_id)
-        st = fold(_events(rd))
+        st = srv.state(rd)
         s = _llm_settings(rd)
 
         def _compute() -> dict:

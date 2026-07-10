@@ -21,6 +21,7 @@ import orjson
 
 from looplab.core.models import NodeStatus, RunState
 from looplab.engine.memory import JsonlCaseLibrary
+from looplab.events.eventstore import read_jsonl_lenient, write_jsonl_atomic
 from looplab.events.replay import fold
 from looplab.events.types import (EV_LESSONS_DISTILLED, EV_LESSONS_RECONCILED,
                                   EV_LESSONS_REFRESHED, EV_REFLECTION_NOTE)
@@ -108,31 +109,20 @@ class LessonMemory:
         # Researcher only; the Developer render drops them below).
         notes: list[str] = []
         npath = base / "meta_notes.jsonl"
-        if npath.exists():
-            for line in npath.read_text(encoding="utf-8").splitlines():
-                try:
-                    o = orjson.loads(line)
-                except Exception:  # noqa: BLE001
-                    continue
-                if not isinstance(o, dict):       # valid JSON but not an object (corrupt line)
-                    continue
-                if o.get("task_id") == self._e.task.id and o.get("note"):
-                    notes.append(str(o["note"]))
+        for o in read_jsonl_lenient(npath):
+            if o.get("task_id") == self._e.task.id and o.get("note"):
+                notes.append(str(o["note"]))
         # (2) fingerprint-matched lessons (M2/M3), incl. negatives — parsed once; the role filter and
         # similarity scoring happen per role in `_render_role_prior`.
         parsed: list[tuple[int, dict]] = []
         lpath = base / "lessons.jsonl"
-        if lpath.exists():
-            for idx, line in enumerate(lpath.read_text(encoding="utf-8").splitlines()):
-                try:
-                    o = orjson.loads(line)
-                except Exception:  # noqa: BLE001
-                    continue
-                if not isinstance(o, dict) or not o.get("statement"):
-                    continue
-                if exclude_run_id and o.get("run_id") == exclude_run_id:
-                    continue                     # M6: never echo this run's own lessons back
-                parsed.append((idx, o))
+        # keep_bad=True: idx must stay the RAW on-disk line number (stable lesson identity).
+        for idx, o in enumerate(read_jsonl_lenient(lpath, keep_bad=True)):
+            if o is None or not o.get("statement"):
+                continue
+            if exclude_run_id and o.get("run_id") == exclude_run_id:
+                continue                     # M6: never echo this run's own lessons back
+            parsed.append((idx, o))
         # Compare WITHOUT param: tokens: the writer stamps the winner's param names, but at read
         # time no winner exists yet, so those tokens only dilute the Jaccard overlap.
         fp = [t for t in self._e._task_fingerprint(self._e._empty_state_for_fp())
@@ -642,12 +632,9 @@ class LessonMemory:
         if not path.exists():
             return state
         try:
-            rows: list = []
-            for line in path.read_text(encoding="utf-8").splitlines():
-                try:
-                    rows.append(orjson.loads(line))
-                except Exception:  # noqa: BLE001
-                    rows.append(None)
+            # keep_bad=True: stale_idx below is keyed by RAW line number, so placeholders must
+            # hold the slot of every bad line for the index-keyed rewrite to stay aligned.
+            rows: list = read_jsonl_lenient(path, keep_bad=True)
         except OSError:
             return state
         # Which of THIS run's lessons drifted? Reflect-type (whole-run generalization) vs comparative
@@ -699,11 +686,9 @@ class LessonMemory:
             # SAME interprocess lock append_lessons uses (a concurrent run's O_APPEND between our read
             # and rewrite would otherwise be clobbered). Then the D2 hygiene pass consolidates/compacts.
             from looplab.events.eventstore import _interprocess_lock
-            from looplab.core.atomicio import atomic_write_text
             kept = [o for i, o in enumerate(rows) if isinstance(o, dict) and i not in stale_idx]
             with _interprocess_lock(Path(str(path) + ".lock")):
-                atomic_write_text(path, "".join(orjson.dumps(o).decode() + "\n"
-                                                for o in kept + fresh))
+                write_jsonl_atomic(path, kept + fresh)
                 prompts, parser = self._merge_prompt_opts()
                 self._e._consolidate_lessons_file(path, client, self._e._embedder,
                                                   parser=parser, prompts=prompts)
@@ -897,19 +882,11 @@ class LessonMemory:
         merge_system override). Atomic rewrite; best-effort (a hygiene failure must never fail the run)."""
         try:
             from looplab.engine.memory import consolidate_lessons
-            rows = []
-            for line in path.read_text(encoding="utf-8").splitlines():
-                try:
-                    o = orjson.loads(line)
-                except Exception:  # noqa: BLE001
-                    continue
-                if isinstance(o, dict):
-                    rows.append(o)
+            rows = read_jsonl_lenient(path)
             merged = consolidate_lessons(rows, client=client, embed=embed,
                                          parser=parser, prompts=prompts)
             if len(merged) < len(rows):
-                from looplab.core.atomicio import atomic_write_text
-                atomic_write_text(path, "".join(orjson.dumps(o).decode() + "\n" for o in merged))
+                write_jsonl_atomic(path, merged)
         except Exception:  # noqa: BLE001
             pass
 
@@ -939,6 +916,6 @@ class LessonMemory:
             "goal": final.goal,
             "direction": final.direction,
             "params": best.idea.params,
-            "metric": best.confirmed_mean if best.confirmed_mean is not None else best.metric,
+            "metric": best.robust_metric,
             "rationale": best.idea.rationale,
         })

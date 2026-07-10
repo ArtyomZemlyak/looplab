@@ -358,7 +358,7 @@ def _print_result(state) -> None:
     typer.echo(f"run={state.run_id} task={state.task_id} finished={state.finished}")
     typer.echo(f"nodes={len(state.nodes)} evaluated={len(state.evaluated_nodes())}")
     if best is not None:
-        m = best.confirmed_mean if best.confirmed_mean is not None else best.metric
+        m = best.robust_metric
         ms = f"{m:.6g}" if m is not None else "n/a"
         typer.echo(f"BEST node {best.id}: metric={ms} params={best.idea.params}")
 
@@ -777,7 +777,7 @@ def export_notebook(
     if champ is None:
         typer.echo("no champion/best node to export"); raise typer.Exit(1)
     nb = champion_notebook(state.goal, champ.code, params=champ.idea.params,
-                           metric=(champ.confirmed_mean if champ.confirmed_mean is not None else champ.metric),
+                           metric=champ.robust_metric,
                            task_id=state.task_id, run_id=state.run_id)
     dest = out or (run_dir / "champion.ipynb")
     atomic_write_text(dest, json.dumps(nb, indent=1))
@@ -870,12 +870,10 @@ def timings(run_dir: Path = typer.Argument(...),
             return f"op:{nm}" if nm else "op"
         return k or "other"
 
-    spans = []
-    for line in sp_path.read_text(encoding="utf-8", errors="replace").splitlines():
-        try:
-            spans.append(_json.loads(line))
-        except ValueError:
-            continue
+    from looplab.events.eventstore import read_jsonl_lenient
+    # skip-and-continue (not iter_jsonl's stop-at-first-bad): a mid-file corrupt span line must
+    # cost one span, not truncate every later span out of the report.
+    spans = read_jsonl_lenient(sp_path, loads=_json.loads, dicts_only=False, errors="replace")
     # An operation span's recorded duration INCLUDES every nested span (create_node ⊃ implement ⊃
     # stages/plan ⊃ the generations inside them), so summing raw durations counted the nested
     # phases twice or thrice and skewed every percentage. Charge each op its SELF time only

@@ -266,10 +266,12 @@ the mandatory `finally` restore (the load-bearing comment at `novelty.py:201-204
 - "Last JSON-dict line" reverse scanner ×3 in `runtime/sandbox.py:105/131/162` (+ `mlebench_grade.py:58`)
   → `_last_json_dict(text, predicate)` private to `sandbox.py`.
 - Toy-adapter scaffolding + blind-perturb Researcher across `adapters/{classification,regression,
-  timeseries}.py` → a `BlindPerturbResearcher` base + `_toy_llm_roles` factory in a new
-  `adapters/_toy_base.py`. *Safety:* preserve each RNG draw sequence exactly (deterministic-seed
-  demos depend on it); do NOT merge the embedded `_*_TEMPLATE` solution strings (generated-code
-  contracts).
+  timeseries}.py`. **[RESOLVED at implementation: NO extraction.]** Close reading showed the three
+  researchers are NOT copy-paste: draft/improve semantics and RNG call SEQUENCES differ materially
+  (choice-menus vs randint vs random()/gauss; different clamps and rationales), and the `llm_roles`
+  bodies share only a trivial one-line shape whose hint/bounds are per-task prompt contracts. A
+  shared base would be parameterization indirection with nothing left to drift, while risking the
+  deterministic-seed contract. Do NOT merge the embedded `_*_TEMPLATE` strings either.
 - Scalar coercion `_to_float`/`_f`/`_int`/`_num` (`sandbox.py:95`, `routers/misc.py:136`,
   `hardware.py:39`, `repo_developer.py:409`) → `to_float`/`to_int` in `core/` (keep sandbox's
   `isfinite` NaN/Inf rejection in the shared `to_float`).

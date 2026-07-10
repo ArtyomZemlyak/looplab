@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Callable, Optional
 
 from looplab.core.atomicio import atomic_write_text
+from looplab.events.eventstore import read_jsonl_lenient, write_jsonl_atomic
 from looplab.tools.vectorstore import Hit, Item, VectorStore, hash_embed
 
 _STOP = {"the", "a", "an", "to", "of", "and", "or", "for", "on", "in", "with", "from", "predict",
@@ -454,22 +455,15 @@ class JsonlCaseLibrary:
         lock on every add() so a concurrent run's cases aren't clobbered by this run's stale in-memory
         copy. One malformed/truncated line is skipped, never making the whole cross-run memory
         permanently unloadable."""
-        cases: list[dict] = []
-        if self.path.exists():
-            for line in self.path.read_text(encoding="utf-8").splitlines():
-                line = line.strip()
-                if line:
-                    try:
-                        cases.append(json.loads(line))
-                    except json.JSONDecodeError:
-                        continue
-        self.cases = cases
+        # dicts_only=False: the historical reload kept any parsed JSON value, not just objects.
+        self.cases = read_jsonl_lenient(self.path, loads=json.loads, dicts_only=False)
 
     def _flush(self) -> None:
         # Atomic (temp + os.replace): the file is rewritten WHOLE on every add(), so a non-atomic
         # write killed mid-flush would truncate and lose the entire accumulated case library.
-        atomic_write_text(
-            self.path, "\n".join(json.dumps(c) for c in self.cases) + "\n")
+        # (add() guarantees self.cases is non-empty here, so the output is byte-identical to the
+        #  historical "\n".join(...) + "\n" form.)
+        write_jsonl_atomic(self.path, self.cases, dumps=json.dumps)
 
     def add(self, case: dict) -> bool:
         """Upsert by task_id, retaining the better metric. Returns True if stored.
