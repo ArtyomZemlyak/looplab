@@ -525,7 +525,7 @@ function KbNote({ note }) {
   return <div className="mem-card">
     <div style={{ cursor: 'pointer', fontWeight: 600 }} onClick={() => setOpen(o => !o)}>
       <span style={{ opacity: 0.6, fontSize: 10, marginRight: 4 }}>{open ? '▾' : '▸'}</span>{note.name}</div>
-    {open && <div style={{ marginTop: 6 }}><Markdown>{note.text || note.content || ''}</Markdown></div>}
+    {open && <div style={{ marginTop: 6 }}><Markdown text={note.text || note.content || ''} /></div>}
   </div>
 }
 
@@ -568,7 +568,7 @@ export function MemoryPanel({ onClose }) {
       {tab === 'notes' && (mem.notes.length
         ? mem.notes.map((n, i) => <div key={i} className="mem-card">
             {n.task_id && <div className="muted" style={{ fontSize: 11, marginBottom: 2 }}>{n.task_id}</div>}
-            <Markdown>{n.note || n.statement || JSON.stringify(n)}</Markdown></div>)
+            <Markdown text={n.note || n.statement || JSON.stringify(n)} /></div>)
         : <div className="muted">No meta-notes yet.</div>)}
       {tab === 'knowledge' && (kbFiles.length
         ? <><div className="muted" style={{ fontSize: 11, marginBottom: 6 }}>{kb.dir} — agents save + retrieve these via kb_search</div>
