@@ -16,7 +16,6 @@ from typing import Optional
 
 from looplab.agents.roles import forward_hints
 from looplab.core.models import Idea, Node, RunState
-from looplab.events.digest import knn_idw, numeric_params
 
 
 def _fallback_telemetry(name: str) -> property:
@@ -64,6 +63,7 @@ class SurrogateResearcher:
         # (a hard-flagged node keeps its inflated metric — e.g. 0.99 from reading the answer key — AND
         # stays feasible under gate), so the predictor can't learn to propose near the cheated params.
         # audit / no flags -> identical to feasible_nodes(), a no-op in the default posture.
+        from looplab.events.digest import numeric_params   # local: search stays digest-free at import time
         hist = []
         for n in state.breedable_nodes():
             if n.metric is None:
@@ -77,6 +77,7 @@ class SurrogateResearcher:
         """Inverse-distance-weighted k-NN prediction + distance to the nearest sample (the
         exploration signal). Returns (predicted_metric, nearest_distance). Eligibility here is
         "full bounds dimensionality" (enforced by _history); the IDW core is the shared knn_idw."""
+        from looplab.events.digest import knn_idw          # local: search stays digest-free at import time
         pairs = [(math.sqrt(sum((x[k] - p[k]) ** 2 for k in self.bounds)), m) for p, m in hist]
         pred, nearest = knn_idw(pairs, self.k)    # hist is non-empty (propose() gates on warmup)
         return pred, nearest

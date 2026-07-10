@@ -17,7 +17,6 @@ Reads the metric from the last stdout line that is JSON containing a "metric" ke
 from __future__ import annotations
 
 import json
-import math
 import os
 import re
 import subprocess

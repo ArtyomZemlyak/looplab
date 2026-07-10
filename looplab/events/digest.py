@@ -40,9 +40,15 @@ def knn_idw(pairs, k: int):
     if not pairs:
         return None
     nn = sorted(pairs, key=lambda t: t[0])[: max(1, k)]
+    # Exact-match short-circuit scans the WHOLE top-k, not just nn[0]: a NaN distance (reachable —
+    # the proxy coerces string params, and a float('nan') param value is isinstance-numeric
+    # everywhere) sorts unpredictably and can sit AHEAD of a genuine 0.0; checking only nn[0]
+    # would then fall through to the 1/d weighting and divide by that hidden zero. With no zero
+    # present, a NaN distance degrades to a NaN prediction exactly like every pre-extraction copy.
+    for d, v in nn:
+        if d == 0.0:
+            return v, 0.0
     nearest = nn[0][0]
-    if nearest == 0.0:
-        return nn[0][1], 0.0
     wsum = sum(1.0 / d for d, _ in nn)
     return sum((1.0 / d) * v for d, v in nn) / wsum, nearest
 
