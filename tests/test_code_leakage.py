@@ -60,3 +60,12 @@ def test_eval_set_test_monitor_is_a_leak():
 
 def test_plain_fit_on_val_still_flags():
     assert code_leakage_scan("scaler.fit(X_val)")["leak"]
+
+
+def test_file_metric_reader_confined_to_workdir(tmp_path):
+    # an absolute / traversal `path` in a metric spec must not escape the workdir (answer-key read)
+    from looplab.runtime.command_eval import read_metric
+    (tmp_path / "m.json").write_text('{"metric": 0.5}')
+    assert read_metric("", str(tmp_path), {"kind": "file_json", "path": "m.json", "key": "metric"}) == 0.5
+    assert read_metric("", str(tmp_path), {"kind": "file_json", "path": "/etc/passwd"}) is None
+    assert read_metric("", str(tmp_path), {"kind": "file_json", "path": "../../secret.json"}) is None

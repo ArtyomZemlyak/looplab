@@ -42,9 +42,18 @@ def hard_flagged_ids(st: RunState) -> set:
     signal, INDEPENDENT of `trust_gate` mode. `flagged_node_ids` uses it for gate/block selection
     exclusion; the agent-facing trust-reflection hint (signal-delivery §1) uses it to warn the
     Researcher about a flagged lineage even under `audit`, where nothing is gate-excluded."""
+    def _is_hard(sig: str) -> bool:
+        sig = str(sig)
+        # `critic:hardcoded_metric` is HIGH-PRECISION (the critic requires a LITERAL metric value with
+        # no computed assignment anywhere), so it gates — closing the "hardcode a near-optimal metric
+        # and win under every built-in gate" bypass on self-report tasks. Other `critic:` issues and
+        # `perfect_metric` (which a legitimately-perfect score hits) stay advisory.
+        if sig == "critic:hardcoded_metric":
+            return True
+        return not sig.startswith(("critic:", "perfect_metric"))
+
     def _has_hard_signal(rh: dict) -> bool:
-        return any(not str(s.get("signal", "")).startswith(("critic:", "perfect_metric"))
-                   for s in (rh.get("signals") or []))
+        return any(_is_hard(s.get("signal", "")) for s in (rh.get("signals") or []))
     return {r.get("node_id") for r in st.reward_hacks if _has_hard_signal(r)}
 
 

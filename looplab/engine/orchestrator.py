@@ -699,6 +699,14 @@ class Engine(ConfirmPhaseMixin, AblationMixin):
     # emission, _write_lock point, and fold site stays exactly where it was in the original run().
 
     def _setup_phase(self, state: RunState) -> None:
+        # Per-RUN reset of the dep-install circuit breaker: it is a module global, so in the long-lived
+        # `looplab ui` server a run that latched (egress blip) would leave auto-install disabled for the
+        # next run in the same process until some pip call happens to respond.
+        try:
+            from looplab.runtime.deps import reset_install_latch
+            reset_install_latch()
+        except Exception:  # noqa: BLE001 - best-effort; a missing helper must not block setup
+            pass
         if not state.run_id:
             # SETUP PHASE (task + data), made an explicit, ONLINE-watchable phase: the pre-node work
             # (fingerprint the workspace, hash data provenance, profile columns, write AGENTS.md) is

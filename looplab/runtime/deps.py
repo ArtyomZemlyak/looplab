@@ -151,6 +151,14 @@ _consecutive_install_timeouts = 0
 _EGRESS_TIMEOUT_LATCH = 2
 
 
+def reset_install_latch() -> None:
+    """Clear the consecutive-timeout latch. Called at run start so the breaker is per-RUN, not a
+    process-lifetime global: in the long-lived `looplab ui` server a run that latched (egress blip)
+    otherwise leaves auto-install disabled for the NEXT run in the same process."""
+    global _consecutive_install_timeouts
+    _consecutive_install_timeouts = 0
+
+
 def install(package: str, *, python: Optional[str] = None, timeout: float = 900.0) -> InstallResult:
     """``<python> -m pip install <package>`` against the EVAL interpreter (so the install lands in
     the same env the solution runs in). Generous default timeout — wheels like torch are large.
