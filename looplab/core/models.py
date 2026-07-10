@@ -269,7 +269,16 @@ class Event(BaseModel):
 
 
 class RunState(BaseModel):
-    """Pure fold of the event log ([ADR-12]). Never mutated except by `replay.fold`."""
+    """Pure fold of the event log ([ADR-12]). Never mutated except by `replay.fold`.
+
+    Field regions (docs/15 §P5.3 — banners, deliberately NOT nested sub-models: readers spell
+    `st.<field>` at dozens of sites and the flat shape is additive-safe):
+      1. core run state (below)            — selection-relevant: nodes/best/gates/budget;
+      2. live operator control             — the `<x>_requests`/`<x>s_done` counter pairs (see
+         engine invariant #3: every side effect gates on a domain event);
+      3. audit-only sidecars               — folded for the UI/exports; NEVER touch selection;
+      4. read helpers                      — derived views, no mutation."""
+    # --- core run state (selection-relevant) ---
     run_id: str = ""
     task_id: str = ""
     goal: str = ""
@@ -377,6 +386,7 @@ class RunState(BaseModel):
     pending_strategy: Optional[dict] = None
     # A1 ASHA: rung-promotion audit trail {rung, survivors} for the UI (successive-halving view).
     rungs: list[dict] = Field(default_factory=list)
+    # --- audit-only sidecars (folded for the UI/exports; NEVER touch selection) ---
     # Unified self-driving agent (audit-only; never read by best-selection): timeline of the agent's
     # macro-action choices {at_node, chosen, legal, recommended, rationale} for the "why this action"
     # view. Additive — old event logs without `agent_decision` events fold to an empty list.

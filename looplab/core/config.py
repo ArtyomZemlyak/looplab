@@ -161,6 +161,7 @@ class Settings(BaseSettings):
     # then fix" directive on debug, not just the raw stderr tail. ON by default (product surface); the
     # conservative library default in EngineOptions stays off, per that module's contract.
     deep_repair: bool = True
+    # === Inline crash repair ==============================================================
     # Hybrid in-node crash repair: when an LLM-generated node CRASHES at runtime (mechanical errors
     # — bad import, removed kwarg, typo), the agent triages it and may repair the code IN PLACE within
     # the same eval (cheap; does NOT consume max_nodes and does NOT add a node to the search tree).
@@ -244,6 +245,7 @@ class Settings(BaseSettings):
     # and skip a full eval for the doomed bottom fraction. 0.0 = off (no candidate skipped).
     proxy_scoring: bool = False
     proxy_kill_fraction: float = Field(default=0.0, ge=0.0, le=0.9)
+    # === Novelty / dedup ==================================================================
     # E1 novelty/dedup gate: reject near-duplicate proposals (normalized param-space distance below
     # `novelty_epsilon`) by deterministically nudging them off the duplicate — stops the search
     # wasting evals re-trying the same idea. Audit event `novelty_rejected`. Off by default.
@@ -346,6 +348,7 @@ class Settings(BaseSettings):
     #   Strategist READS the run/data/sibling-runs/KB/memory with tools before deciding, not a single-shot
     #   call over aggregate stats. "llm" = the old non-agentic single-shot; "rule"/"off" = no LLM.
     strategist_every: int = Field(default=3, ge=1)   # consult cadence (created nodes)
+    # === Confirmation & holdout ===========================================================
     # Multi-seed confirmation (I12, ADR-15): confirm the top-k under N seeds before
     # finishing. 0 disables (default). Only meaningful when eval has variance.
     confirm_top_k: int = 0
@@ -400,6 +403,7 @@ class Settings(BaseSettings):
     # GAIA, arXiv:2506.12928). The static score stays the primary filter — the LLM is a weak
     # comparative prior, never the sole oracle. ON by default (no-op when best_of_n==1).
     best_of_n_listwise: bool = True
+    # === Foresight / predict-before-execute ===============================================
     # FOREAGENT predict-before-execute (arXiv:2601.05930): use the LLM as an IMPLICIT WORLD MODEL to
     # predict — WITHOUT executing — which candidate / hypothesis will score best, primed with a
     # Verified Data Analysis Report (data profile / brief) + the accumulated experiment memory. Master
@@ -453,6 +457,7 @@ class Settings(BaseSettings):
     # user's words; this is the global default when unspecified.
     seed_mode: str = "auto"
     llm_model: str = "qwen3:8b"
+    # === LLM / transport ==================================================================
     llm_base_url: str = "http://localhost:11434/v1"  # Ollama OpenAI-compatible endpoint
     llm_temperature: float = 0.6
     # H3 per-role model presets (5090 recipe): optionally run the Researcher and Developer on
@@ -535,6 +540,7 @@ class Settings(BaseSettings):
     # the shared llm_base_url.
     compressor_model: str | None = None
     compressor_base_url: str | None = None
+    # === Agentic tool-loop ================================================================
     # Agentic tool-loop limits — apply to EVERY tool-using agent (the LLM Researcher, the unified
     # agent's pilot + crash-triage, Deep-Research, the run-chat Boss, the genesis repo-scout, and the
     # cross-run report synthesizer). The loop lets the model call read-only tools across turns before
@@ -640,6 +646,7 @@ class Settings(BaseSettings):
     # re-call the model on unchanged notes/cases, and any endpoint failure degrades to lexical at call
     # time — so an offline box just gets lexical abstractions, never a crash. Set false to force lexical.
     memora_llm: bool = True
+    # === Cross-run memory / Memora ========================================================
     memora_anchors: int = 6           # max cue anchors kept per memory
     # Cosine similarity at/above which a new case is CONSOLIDATED into an existing one (same evolving
     # topic) rather than stored as a separate entry. Only used when `memora` is on.
