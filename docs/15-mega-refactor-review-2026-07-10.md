@@ -383,11 +383,12 @@ search/trust/engine/adapters/serve needs a `_LAYOUT` row — that includes P1.8'
 `test_no_stray_modules_at_package_root` pins the package root to `{__init__, cli, bench,
 sweep}` — no new root-level module can be added without touching that test.
 
-**Prep step (cheap insurance, do BEFORE any extraction):** the toy `_engine(run_dir, **kw)`
-builder is copy-pasted in ≥19 test files (`test_control.py:27`, `test_strategist.py:164`,
-`test_inline_repair.py:66`, `test_end_to_end.py:26`, …) — exactly the files whose monkeypatch
-targets P3 touches. Hoist one shared builder into `tests/conftest.py` first, so any
-patch-target fallout is fixed in one place.
+**Prep step — [RESOLVED at implementation: NO shared builder].** Close reading showed the
+`_engine(run_dir, **kw)` builders are per-file FIXTURES, not copies: different roles/stubs,
+policies, seeds and kwargs per file (`test_control` GreedyTree(2,4); `test_strategist`
+(3,8)+strategist; `test_inline_repair` stub researcher + repair caps; `test_end_to_end`
+max_parallel). A conftest builder would be forced parameterization; the mixin extraction has
+zero call-site churn anyway, so the insurance value never materialized.
 
 **The one real trap:** the module-global `fold` monkeypatch seam.
 `tests/test_creation_runaway_guard.py:46` does `monkeypatch.setattr(orch, "fold", …)` and relies
@@ -433,6 +434,13 @@ instance monkeypatch alive after extraction).
 
 **Net [VERIFIED-AMENDED arithmetic]:** safe tier → 2800 → ~2135; + evaluate → ~1785;
 + node_build *split* form (~150) → ~1635; + node_build *full* form (~390) → ~1395.
+**[RESOLVED at implementation]:** shipped the safe tier + evaluate + node_build SPLIT form +
+proposal_cues → orchestrator.py is now ~1515 lines / 12 mixins. Two extraction findings the
+plan missed, both caught by tests: (a) `_evaluate` passes the `_UNSET` sentinel POSITIONALLY
+(as `next_start`) into `_run_eval` — the sentinel had to move to `engine/options.py` so both
+modules share ONE object; (b) the signal-delivery registry call-sites for `trust_reflection` /
+`render_hint_directives` had to follow their methods into the new mixin files (the enforcement
+test went red exactly as designed).
 
 *Per step:* add the `_LAYOUT` row, run `pytest tests/test_package_layout.py`, then the cluster's
 named test(s), then the full suite.

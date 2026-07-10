@@ -65,10 +65,15 @@ def _setattr_hint_names(module) -> set[str]:
 
 
 def test_every_setattr_hint_site_is_in_the_registry():
+    import looplab.engine.novelty as nov
     import looplab.engine.orchestrator as orch
+    import looplab.engine.proposal_cues as cues
     import looplab.search.foresight as fs
 
-    found = _setattr_hint_names(orch) | _setattr_hint_names(fs)
+    # proposal_cues + novelty carry the engine's setattr-hint sites since the mixin extraction
+    # (P3); scanning them here keeps "a hint set outside the registry" a red test everywhere.
+    found = (_setattr_hint_names(orch) | _setattr_hint_names(fs)
+             | _setattr_hint_names(cues) | _setattr_hint_names(nov))
     hints = {n for n in found if n.startswith("_")}   # non-underscore (track_hypotheses) rides along
     assert hints, "the scan found no hint setattr sites — the scanner or the code moved; fix the test"
     missing = hints - set(RESEARCHER_HINT_ATTRS)

@@ -61,7 +61,7 @@ SIGNALS: tuple[SignalRoute, ...] = (
         channel="push",
         inject="looplab.events.digest:trust_reflection",
         consumer="Researcher (via _set_complexity_hint -> _complexity_hint)",
-        call_sites=(("looplab/engine/orchestrator.py", "trust_reflection(state)"),)),
+        call_sites=(("looplab/engine/proposal_cues.py", "trust_reflection(state)"),)),  # _set_complexity_hint: ProposalCuesMixin
     SignalRoute(
         name="triage_rationale",
         produced_by="orchestrator._triage_crash (LLM crash-triage verdict)",
@@ -106,11 +106,15 @@ SIGNALS: tuple[SignalRoute, ...] = (
         channel="push",
         inject="looplab.agents.hints:render_hint_directives",
         consumer="Researcher, Strategist, pilot, crash-triage, Developer",
-        call_sites=(("looplab/engine/orchestrator.py", "render_hint_directives(state.pending_hints)"),
+        call_sites=(("looplab/engine/node_build.py", "render_hint_directives(state.pending_hints)"),
+                    # _directed_idea itself lives in node_build.py (NodeBuildMixin); the orchestrator's
+                    # node-creation spine still threads every idea through it:
                     ("looplab/engine/orchestrator.py", "self._directed_idea("),
                     # the ablation-produced refine_block is a real tree-entering Developer node too, so
                     # its directive threading is enforced here (it was silently bypassed before).
-                    ("looplab/engine/ablation.py", "self._directed_idea("))),
+                    ("looplab/engine/ablation.py", "self._directed_idea("),
+                    # crash-triage briefs carry the directives too (CrashRepairMixin):
+                    ("looplab/engine/crash_repair.py", "render_hint_directives(state.pending_hints)"))),
     SignalRoute(
         name="run_states",
         produced_by="control/eval events (pause/approval/build/leakage/trust)",

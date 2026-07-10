@@ -22,6 +22,13 @@ opinionated product surface, the engine default is the conservative library beha
 """
 from __future__ import annotations
 
+# BACKLOG §4: THE engine sentinel for "keyword not passed" — used by every pure-config
+# Engine.__init__ knob AND by `_run_eval(start_stage=…)` (the engine passes it through
+# `_evaluate`'s `next_start`), so knob resolution and the stage-reuse identity check share ONE
+# object across orchestrator.py and the eval_dispatch mixin. It distinguishes "not passed" from
+# any REAL value, including None/0/False.
+_UNSET = object()
+
 import dataclasses
 from dataclasses import dataclass
 from typing import Optional, TYPE_CHECKING
