@@ -208,27 +208,13 @@ class LessonMemory:
                     "lessons": [{"statement": lz["statement"], "outcome": lz["outcome"],
                                  "evidence": lz.get("evidence")} for lz in comp]})
             lessons.extend(comp)
-        for h in (final.hypotheses or {}).values():
-            if h.status in ("supported", "tested", "abandoned"):
-                lessons.append({
-                    "task_id": final.task_id, "fingerprint": fp,
-                    "kind": getattr(self._e.task, "kind", ""), "statement": h.statement,
-                    "outcome": h.status, "delta": h.best_delta,
-                    "confidence": 0.7 if h.status == "supported" else 0.5,
-                    "run_id": final.run_id, "evidence": list(h.evidence)[:8]})
-        # dominant failure theme (so a repeat run is warned off the same crash class)
-        reasons: dict[str, int] = {}
-        for n in final.nodes.values():
-            if n.status is NodeStatus.failed and n.error_reason:
-                reasons[n.error_reason] = reasons.get(n.error_reason, 0) + 1
-        if reasons:
-            top = max(reasons, key=reasons.get)
-            # run_id stamped like every other lesson shape: the M6 own-run exclusion filters on it,
-            # and a row without the key would be read back as another run's experience on resume.
-            lessons.append({
-                "task_id": final.task_id, "fingerprint": fp, "kind": getattr(self._e.task, "kind", ""),
-                "statement": f"{reasons[top]} node(s) failed with reason '{top}'",
-                "outcome": "failed", "delta": None, "confidence": 0.4, "run_id": final.run_id})
+        # NOTE: lessons are now EXCLUSIVELY LLM-authored (the `_reflect_lessons` consolidation above +
+        # the M6 comparative pass). We deliberately NO LONGER append (a) each hypothesis's statement
+        # VERBATIM — that dumped the Researcher's raw, often run-on / "Experiment A:"-labelled proposal
+        # text and one near-duplicate per trial into the store — nor (b) a templated
+        # "N node(s) failed with reason X" line. Both were look-alike-hypothesis noise, not distilled
+        # findings; the LLM reflection is fed the full hypothesis+outcome+Δ record and the failure
+        # themes (see `reflect_lessons`), so it consolidates the SAME signal into one lesson per theme.
         self._e._append_lessons(lessons)
 
         # M4 · auto-distilled skills (episodic → procedural memory): a supported hypothesis that
@@ -297,6 +283,9 @@ class LessonMemory:
                      "outcome": "supported", "delta": None, "confidence": 0.7,
                      "run_id": final.run_id, "evidence": [best.id]}]
         client = self._e._reflect_client()
+        # `_winner_lesson` is the OFFLINE/toy safety net ONLY (no LLM at all). In a real run — an LLM
+        # IS wired — lessons are ALWAYS LLM-authored: on error or empty output we write NOTHING rather
+        # than a templated "op X reached Y" line (which polluted the real store as look-alike noise).
         if client is None or best is None:
             return _winner_lesson()
         rev = (final.direction != "min")
@@ -305,26 +294,40 @@ class LessonMemory:
         bad = [n for n in final.nodes.values() if n.status is NodeStatus.failed][:3]
         rows = [f"#{n.id} {n.operator} metric={n.metric:.4g} params={n.idea.params}" for n in ok]
         fails = [f"#{n.id} {n.operator} failed: {n.error_reason}" for n in bad]
+        # The full experimental record — every RESOLVED hypothesis with its outcome + Δ — so the LLM can
+        # CONSOLIDATE many trials of the SAME theme (e.g. every temperature experiment) into ONE lesson,
+        # instead of the old one-verbatim-hypothesis-per-lesson dump that filled the store with near-dupes.
+        hyps = [f"[{h.status}{f' Δ{h.best_delta:+.4g}' if isinstance(h.best_delta, (int, float)) else ''}] "
+                f"{' '.join((h.statement or '').split())[:160]}"
+                for h in (final.hypotheses or {}).values()
+                if h.status in ("supported", "tested", "abandoned") and h.statement]
         prompt = ("Distil reusable LESSONS from a finished ML experiment run, to guide FUTURE runs on "
                   f"SIMILAR tasks.\nTask: {final.goal}\nWhat worked (best first):\n" + "\n".join(rows) +
                   ("\nWhat failed:\n" + "\n".join(fails) if fails else "") +
-                  "\n\nWrite 1-3 GENERALIZABLE lessons — transferable findings, NOT these exact numbers "
-                  "(e.g. 'a larger batch size aided convergence', 'polynomial features overfit on small "
-                  "data'). Tag each [GOOD] (reuse this) or [BAD] (avoid this). One per line, no preamble.")
+                  ("\nHypotheses tested (outcome, Δ):\n" + "\n".join(hyps) if hyps else "") +
+                  "\n\nWrite GENERALIZABLE lessons — transferable findings, NOT these exact numbers "
+                  "(e.g. 'a larger batch size aided convergence'). CONSOLIDATE every finding about the "
+                  "SAME parameter/technique/theme into ONE lesson (e.g. merge all temperature trials "
+                  "into a single lesson stating the sweet spot AND what hurt); keep genuinely UNRELATED "
+                  "findings as SEPARATE lessons — one lesson per distinct theme. Each lesson is ONE "
+                  "self-contained sentence (no run-on chains, no 'Experiment A:' labels). Tag each "
+                  "[GOOD] (reuse this) or [BAD] (avoid this). One per line, no preamble.")
         try:
             from looplab.agents.agent import agentic_text
             out = agentic_text(client, self._reflect_tools(final), [{"role": "user", "content": prompt}],
                                loop_opts=self._reflect_loop_opts(),
-                               answer_desc="1-3 generalizable lessons, one per line, each tagged [GOOD]/[BAD]") or ""
-        except Exception:   # noqa: BLE001 - best-effort
-            return _winner_lesson()
+                               answer_desc="generalizable lessons, one theme per line, each tagged [GOOD]/[BAD]") or ""
+        except Exception:   # noqa: BLE001 - best-effort; a real run writes NO templated fallback
+            return []
         from looplab.engine.memory import parse_credit_lessons
+        # No fixed cap: one lesson per distinct theme (consolidation keeps this small); bound at 8 as a
+        # runaway guard, not a target.
         res = [{"task_id": final.task_id, "fingerprint": fp,
                 "kind": getattr(self._e.task, "kind", ""), "statement": stmt,
                 "outcome": outcome, "delta": None, "confidence": 0.6,
                 "run_id": final.run_id, "evidence": []}
-               for _, stmt, outcome in parse_credit_lessons(out, 0)[:3]]
-        return res or _winner_lesson()      # LLM gave nothing usable → keep the winner record
+               for _, stmt, outcome in parse_credit_lessons(out, 0)[:8]]
+        return res      # LLM gave nothing usable → [] (a real run never writes a templated lesson)
 
     def append_lessons(self, lessons: list, *, hygiene: bool = True) -> None:
         """Append lessons to the SHARED cross-run store. Used by run-end reflection AND the M6
@@ -426,13 +429,15 @@ class LessonMemory:
             out = agentic_text(client, self._reflect_tools(state), [{"role": "user", "content": prompt}],
                                loop_opts=self._reflect_loop_opts(),
                                answer_desc="one credited lesson per pair: `P<n> [GOOD]/[BAD] <lesson>`") or ""
-        except Exception:  # noqa: BLE001 — reflection is best-effort, never fails the run
-            return _fallback(), pairs
+        except Exception:  # noqa: BLE001 — reflection is best-effort; a real run writes NO templated lesson
+            return [], pairs
         lessons = []
         for idx, stmt, outcome in parse_credit_lessons(out, len(pairs)):
             pr = pairs[idx] if idx >= 0 else None
             lessons.append(_lesson(pr, stmt, outcome, 0.65 if idx >= 0 else 0.5))
-        return (lessons or _fallback()), pairs
+        # `_fallback` (deterministic param-diff) is the OFFLINE/toy path only (client is None above); a
+        # real run whose LLM returned nothing usable writes no comparative lesson rather than a template.
+        return lessons, pairs
 
     @staticmethod
     def spent_pairs(state: RunState) -> list:
