@@ -1,6 +1,6 @@
 """Shared fold-on-demand run-state cache (BACKLOG §4 "RunStateCache").
 
-`SiblingRunTools` (run_tools.py) and `RunsTools` (runs_tools.py) both read OTHER runs' event logs
+`SiblingRunTools` (run_tools.py) and `MachineRunsTools` (machine_runs_tools.py) both read OTHER runs' event logs
 off disk: resolve <run_root>/<run_id> with a path-traversal guard, fold the log into a `RunState`,
 and cache the fold by the log's (size, mtime) fingerprint so repeated turns don't re-fold unchanged
 runs. That plumbing was duplicated verbatim in both providers; it lives here once and they delegate.

@@ -237,8 +237,8 @@ def expand_mentions(text: str, run_root, *, alive_fn: Optional[Callable] = None,
     for m in _MENTION.finditer(text or ""):
         kind, raw = m.group(1), m.group(2).rstrip(".,;:!?)")
         if kind == "run":
-            from looplab.tools.runs_tools import RunsTools
-            summary = RunsTools(run_root, alive_fn=alive_fn)._read_run(raw, "best", 6)
+            from looplab.tools.machine_runs_tools import MachineRunsTools
+            summary = MachineRunsTools(run_root, alive_fn=alive_fn)._read_run(raw, "best", 6)
             if not summary.startswith("(no such run"):
                 blocks.append(f"[@run:{raw}]\n{summary}")
                 refs.append({"type": "run", "id": raw})
@@ -278,10 +278,10 @@ def build_tools(run_root, alive_fn: Optional[Callable] = None, mode: str = DEFAU
     only — a subagent runs with subagents=False to prevent unbounded nesting)."""
     from looplab.agents.agent import CompositeTools
     from looplab.tools.reposcout import RepoScoutTools
-    from looplab.tools.runs_tools import RunsTools, RunLauncherTools, RunControlTools
+    from looplab.tools.machine_runs_tools import MachineRunsTools, RunLauncherTools, RunControlTools
     mode = normalize_mode(mode)
     roots = [Path.home(), REPO_ROOT, Path(run_root)] + list(extra_roots)
-    providers = [RepoScoutTools(roots), RunsTools(run_root, alive_fn=alive_fn), RunLauncherTools()]
+    providers = [RepoScoutTools(roots), MachineRunsTools(run_root, alive_fn=alive_fn), RunLauncherTools()]
     kdir = getattr(settings, "knowledge_dir", None) if settings else None
     if kdir:                                            # write half of the KB — safe (scoped .md append) in EVERY mode
         from looplab.tools.knowledge_tools import KnowledgeWriteTools

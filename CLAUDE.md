@@ -42,7 +42,7 @@ in its inline `<script>`); edit the data, not hand-placed SVG.
 | Path | Contents |
 |---|---|
 | `looplab/core/` | foundation: domain models, `Settings` (config.py = schema, appconfig.py = loader), LLM client (`llm.py`), parsing, tracing, shared errors |
-| `looplab/events/` | event store, `types.py` (event-type registry), `replay.py::fold` (event log → `RunState`), digest, readmodel, exporters |
+| `looplab/events/` | event store, `types.py` (event-type registry), `replay.py::fold` (event log → `RunState`), digest, readmodel, exporters + the pure UI projections (`traceview.py`, `htmlview.py`) |
 | `looplab/runtime/` | sandboxes (subprocess/Docker tiers), command evaluation, dep install, background tasks |
 | `looplab/tools/` | agent-facing tools; `_base.py` documents the ToolProvider contract; `env_inspect.py` (repo Developer's read-only env inspector: pkg version/API/source), `vectorstore.py` + `memora.py` (embeddings + harmonic index) |
 | `looplab/agents/` | LLM personas: plain roles (`roles.py`), tool-loop roles (`agent.py::drive_tool_loop`), external CLI backend (`cli_agent.py`), facade (`unified_agent.py`) |
@@ -50,7 +50,7 @@ in its inline `<script>`); edit the data, not hand-placed SVG.
 | `looplab/trust/` | gates that keep results honest: leakage, reward-hack, CV, redaction, confirmation |
 | `looplab/engine/` | **the orchestrator loop** + cross-run memory; see invariants below. The `Engine` class spans SIX files: `orchestrator.py` (the largest) + five mixins — `confirm_phase.py`, `ablation.py`, `novelty.py`, `strategy.py` (cadence; the Strategist agent is `agents/strategist.py`), `research_cadence.py`. In a mixin `self` IS the Engine — grep all six files before renaming an engine attribute or hunting a method |
 | `looplab/adapters/` | task types (toy → dataset → repo → MLE-bench); the TaskAdapter contract is documented in `adapters/tasks.py` |
-| `looplab/serve/` | FastAPI server (`server.py` is a thin composition root; routes live in `serve/routers/*` — control/runs/genesis/assistant/boss/org/reports/misc), TUI, assistant; not imported at engine import time (`engine/finalize.py` lazily imports the htmlview/traceview projections at run end) |
+| `looplab/serve/` | FastAPI server (`server.py` is a thin composition root; routes live in `serve/routers/*` — control/runs/genesis/assistant/boss/org/reports/misc), TUI, assistant; never imported by the engine (the run-end projections live in `events/`) |
 | `ui/` | React control plane (built artifacts served by `serve/server.py`) |
 
 ## Engine invariants (violating these breaks replay/resume)

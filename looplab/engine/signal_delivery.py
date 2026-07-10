@@ -23,6 +23,12 @@ well-formed and its `inject` symbol is importable+callable, and (b) a per-signal
 signal's content actually reaching the rendered output. Adding a delivered signal here without a
 probe in that test FAILS the suite — so "the signal silently stopped being delivered" is a red test,
 not the next review's finding.
+
+Placement note: the routes reference serve/search/agents/tools symbols, but only as STRINGS —
+nothing here imports above the stdlib at import time, so parking the registry in `engine/` creates
+no layering edge. It lives here (not in `core/`) because the ENGINE is the producer whose signals
+this discipline governs, and `resolve_inject` is called only by the enforcement test (which needs
+the `[ui]` extra to resolve the serve entry regardless of where this file sits).
 """
 from __future__ import annotations
 

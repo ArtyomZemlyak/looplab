@@ -317,32 +317,10 @@ def _agent_model(backend: str, model: str) -> str:
     return model
 
 
-def make_llm_client(settings, *, model: str | None = None,
-                    base_url: str | None = None,
-                    timeout: float | None = None,
-                    temperature: float | None = None) -> OpenAICompatibleClient:
-    key = settings.llm_api_key.get_secret_value() if settings.llm_api_key else "local"
-    mdl = model or settings.llm_model
-    from looplab.core.llm import reasoning_body
-    reasoning = reasoning_body(mdl, getattr(settings, "llm_reasoning", ""),
-                               getattr(settings, "llm_reasoning_style", "auto"),
-                               getattr(settings, "llm_reasoning_extra", None))
-    # `timeout` lets a caller bound a UI-side probe (e.g. the health check) well under a proxy's
-    # gateway timeout; omitted -> the run-wide `llm_timeout` setting (idle/stall limit, default 180s).
-    extra = {"timeout": timeout if timeout is not None
-             else float(getattr(settings, "llm_timeout", 180.0) or 180.0)}
-    return OpenAICompatibleClient(
-        model=mdl, base_url=base_url or settings.llm_base_url, api_key=key,
-        temperature=(temperature if temperature is not None else settings.llm_temperature),
-        accountant=CostAccountant(),
-        guided_json=getattr(settings, "llm_guided_json", False),   # H1 constrained decoding
-        reasoning=reasoning,                                        # provider-aware thinking toggle
-        stream=getattr(settings, "llm_stream", True),              # inter-token idle-timeout via SSE
-        header_timeout=float(getattr(settings, "llm_header_timeout", 45.0) or 45.0),
-        trust_env=bool(getattr(settings, "llm_trust_env", False)),  # direct-connect by default (bypass proxy)
-        cache=getattr(settings, "llm_cache", False),               # T7 deterministic-response cache
-        **extra,
-    )
+# Re-export: the factory moved to its dependency-true home (core/llm.py — it only ever needed
+# core symbols). Kept importable here because dozens of call sites + tests spell
+# `from looplab.adapters.tasks import make_llm_client`.
+from looplab.core.llm import make_llm_client  # noqa: F401
 
 
 def _memora_cache_path(settings):

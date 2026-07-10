@@ -328,18 +328,22 @@ point (`serve/appstate.py:10`) keep resolving. Result: `agents` becomes cleanly 
 the re-export.
 
 **P2.3 [MED] Residual latent cycles** (defused only by lazy imports):
-- `tools→adapters` (`runs_tools.py:374` `validate_task`, lazy) vs `adapters→tools` (top-level).
-  Either move `validate_task`'s pure spec-shape checks to a neutral home, or have the `serve`
-  proposal layer validate (serve may import adapters freely).
-- `runtime→tools` (`bg_tasks.py:60` `from tools.shell_tools import git_config_env`, lazy) →
-  move `git_config_env` down to `core`/`runtime`; `shell_tools` re-exports.
-- Goal: no lazy import should be load-bearing purely for cycle-breaking.
+- `tools→adapters` (`validate_task`, lazy). **[RESOLVED as a documented exception]:**
+  `validate_task` is NOT pure-shape — it builds the adapter (`_KINDS` registry +
+  `model_validate`), which cannot move below tools; and a constructor-injected validator would
+  add a "silently unvalidated" default (worse than an ImportError). The lazy import stays,
+  now explicitly commented at the site as a deliberate runtime-only upward dependency.
+- `runtime→tools` (`bg_tasks.py` `git_config_env`, lazy). **[RESOLVED]:** moved verbatim to a
+  new `core/gitenv.py` (+ `_LAYOUT` row); `bg_tasks` imports it top-level downward;
+  `shell_tools` re-exports for its own call sites and the tests.
 
 **P2.4 [LOW-MED] `engine/signal_delivery.py` registry references 5 subpackages as strings** and is
 only called by its test. **[VERIFIED-AMENDED]** the originally proposed `looplab/_signals.py`
 destination FAILS `test_no_stray_modules_at_package_root` (root allows only
 `__init__/cli/bench/sweep`) — relocate to `core/signals.py` (+ `_LAYOUT` row) or leave in
-`engine/` with a docstring note. Strings-only at import time — no behavior change either way.
+`engine/` with a docstring note. **[RESOLVED: left in engine/ with the placement note]** — the
+engine is the producer these signals govern, moving wouldn't lift the test's `[ui]` need, and
+strings-only means zero layering edge either way.
 
 **P2.5 [MED] Rename the one-letter-apart twin.** `tools/run_tools.py` (live run + siblings) vs
 `tools/runs_tools.py` (every run on the machine), 717/700 lines, near-identical ADR-7 docstrings
@@ -353,7 +357,9 @@ SAME flat name), so the plan is: rename the file, swap the `_LAYOUT` key
 (`runs_tools`→`machine_runs_tools`), and update the 4 canonical importers
 (`serve/assistant.py:243,284`, `tests/test_run_control_tools.py:10`,
 `tests/test_run_logs_trace.py:16`). The old *flat* alias `looplab.runs_tools` simply disappears
-— verified zero importers, so nothing breaks.
+— verified zero importers, so nothing breaks. **[RESOLVED as planned]** (also repointed the
+class-name mentions in `tools/_runcache.py` / `run_tools.py` comments and the in-file
+constructor at `serve/assistant.py::build_tools`).
 
 *(Defensible blur, leave as-is: the task-specific developer personas in `adapters/repo_developer.py`
 import only downward and cohere with `repo_task.py` — cohesion beats purity there.)*

@@ -300,7 +300,7 @@ def build_router(srv) -> APIRouter:
 
     def _node_trace(rd: Path, nid: int) -> dict:
         try:
-            from looplab.serve.traceview import build_trace_view, load_spans
+            from looplab.events.traceview import build_trace_view, load_spans
             st = srv.state(rd)
             # light=True: the tree carries structure + tokens + timing but NOT the prompts/outputs —
             # the UI fetches a single observation's full I/O lazily via /spans/{sid} when expanded
@@ -398,7 +398,7 @@ def build_router(srv) -> APIRouter:
         raw span tree / spans.jsonl)."""
         rd = _run_dir(run_id)
         try:
-            from looplab.serve.traceview import build_conversation, load_spans
+            from looplab.events.traceview import build_conversation, load_spans
             return build_conversation(srv.state(rd), load_spans(rd / "spans.jsonl"), nid)
         except Exception:  # noqa: BLE001
             return {"run_id": run_id, "node_id": str(nid), "stages": []}
@@ -455,7 +455,7 @@ def build_router(srv) -> APIRouter:
     @router.get("/api/runs/{run_id}/trace")
     def trace(run_id: str):
         rd = _run_dir(run_id)
-        from looplab.serve.traceview import build_trace_view, load_spans
+        from looplab.events.traceview import build_trace_view, load_spans
         try:
             # light=True: strip prompt/output text — the run-level timeline needs only structure +
             # timing + token usage; a heavy run's full I/O is ~50 MB and crashes the browser.
@@ -472,7 +472,7 @@ def build_router(srv) -> APIRouter:
         inside, so eventstore stamps it), and the UI shows only THAT trace here, not the node's whole
         Researcher+Developer trace."""
         rd = _run_dir(run_id)
-        from looplab.serve.traceview import load_spans, _tree, _cap_span_io
+        from looplab.events.traceview import load_spans, _tree, _cap_span_io
         try:
             spans = [_cap_span_io(s) for s in load_spans(rd / "spans.jsonl")
                      if s.get("trace_id") == trace_id]

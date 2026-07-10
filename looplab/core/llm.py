@@ -1337,3 +1337,34 @@ class LiteLLMClient:
             gen.output(args if isinstance(args, str) else json.dumps(args)).thinking(thinking) \
                .usage(self._usage(resp)).cost(self._cost(resp))
             return json.loads(args) if isinstance(args, str) else (args or {})
+
+
+def make_llm_client(settings, *, model: str | None = None,
+                    base_url: str | None = None,
+                    timeout: float | None = None,
+                    temperature: float | None = None) -> OpenAICompatibleClient:
+    """The one Settings -> live client factory (used by cli, serve, adapters and the agent loop).
+    Historically lived in adapters/tasks.py — the only reason `agents` ever imported `adapters` —
+    but constructing an LLM client is a foundation (core) capability; both old import paths keep
+    resolving via re-exports (adapters.tasks and looplab.serve.server, the monkeypatch point)."""
+    key = settings.llm_api_key.get_secret_value() if settings.llm_api_key else "local"
+    mdl = model or settings.llm_model
+    reasoning = reasoning_body(mdl, getattr(settings, "llm_reasoning", ""),
+                               getattr(settings, "llm_reasoning_style", "auto"),
+                               getattr(settings, "llm_reasoning_extra", None))
+    # `timeout` lets a caller bound a UI-side probe (e.g. the health check) well under a proxy's
+    # gateway timeout; omitted -> the run-wide `llm_timeout` setting (idle/stall limit, default 180s).
+    extra = {"timeout": timeout if timeout is not None
+             else float(getattr(settings, "llm_timeout", 180.0) or 180.0)}
+    return OpenAICompatibleClient(
+        model=mdl, base_url=base_url or settings.llm_base_url, api_key=key,
+        temperature=(temperature if temperature is not None else settings.llm_temperature),
+        accountant=CostAccountant(),
+        guided_json=getattr(settings, "llm_guided_json", False),   # H1 constrained decoding
+        reasoning=reasoning,                                        # provider-aware thinking toggle
+        stream=getattr(settings, "llm_stream", True),              # inter-token idle-timeout via SSE
+        header_timeout=float(getattr(settings, "llm_header_timeout", 45.0) or 45.0),
+        trust_env=bool(getattr(settings, "llm_trust_env", False)),  # direct-connect by default (bypass proxy)
+        cache=getattr(settings, "llm_cache", False),               # T7 deterministic-response cache
+        **extra,
+    )

@@ -13,7 +13,7 @@ from looplab.core import tracing
 from looplab.core._pathsafe import readable
 from looplab.core.models import Idea, Node, NodeStatus, RunState
 from looplab.tools.run_tools import RunTools
-from looplab.tools.runs_tools import RunsTools
+from looplab.tools.machine_runs_tools import MachineRunsTools
 from looplab.tools.reposcout import RepoScoutTools
 from looplab.core.tracing import JsonlSpanExporter, Tracer
 
@@ -84,7 +84,7 @@ def test_read_logs_error_tail_survives_the_agent_result_cap():
     assert "ValueError: the real reason it died" in out  # the exception line (error tail) is preserved
 
 
-# ------------------------------------------------------ RunsTools.read_run_logs / read_run_trace
+# ----------------------------------------------- MachineRunsTools.read_run_logs / read_run_trace
 def _make_run(tmp_path: Path) -> Path:
     """A minimal on-disk run: events.jsonl (fold → one evaluated node with a stdout tail) + a real
     spans.jsonl written by the Tracer (one generation + one tool under a create_node trace)."""
@@ -114,7 +114,7 @@ def _make_run(tmp_path: Path) -> Path:
 
 def test_read_run_logs_reads_stdout_from_disk(tmp_path):
     root = _make_run(tmp_path)
-    rts = RunsTools(root)
+    rts = MachineRunsTools(root)
     names = {f["function"]["name"] for f in rts.specs()}
     assert {"read_run_logs", "read_run_trace"} <= names
 
@@ -125,7 +125,7 @@ def test_read_run_logs_reads_stdout_from_disk(tmp_path):
 
 def test_read_run_trace_is_a_linear_conversation(tmp_path):
     root = _make_run(tmp_path)
-    rts = RunsTools(root)
+    rts = MachineRunsTools(root)
     tr = rts.execute("read_run_trace", {"run_id": "demo", "node_id": 0})
     assert "node #0" in tr and "stage: create_node" in tr
     assert "You are a developer" in tr                  # the request prompt is shown once
@@ -140,7 +140,7 @@ def test_read_run_trace_is_a_linear_conversation(tmp_path):
 def test_read_run_trace_without_spans_is_graceful(tmp_path):
     root = _make_run(tmp_path)
     (root / "demo" / "spans.jsonl").unlink()
-    rts = RunsTools(root)
+    rts = MachineRunsTools(root)
     assert "no spans.jsonl" in rts.execute("read_run_trace", {"run_id": "demo", "node_id": 0})
 
 
@@ -151,7 +151,7 @@ def test_read_run_trace_soft_fails_on_malformed_spans(tmp_path):
     (root / "demo" / "spans.jsonl").write_text(
         json.dumps({"span_id": "s1", "trace_id": "tr", "parent_id": None, "attributes": None}) + "\n",
         encoding="utf-8")
-    rts = RunsTools(root)
+    rts = MachineRunsTools(root)
     out = rts.execute("read_run_trace", {"run_id": "demo", "node_id": 0})
     assert isinstance(out, str) and "could not read trace" in out
 

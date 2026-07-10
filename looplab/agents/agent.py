@@ -716,7 +716,7 @@ def loop_opts_from_settings(settings) -> dict:
     # summarizer for history compression, instead of paying the main model for it. Blank = the
     # loop's own client (byte-identical legacy behavior).
     if g(settings, "compressor_model", None):
-        from looplab.adapters.tasks import make_llm_client
+        from looplab.core.llm import make_llm_client
         try:
             opts["summary_client"] = make_llm_client(
                 settings, model=settings.compressor_model,

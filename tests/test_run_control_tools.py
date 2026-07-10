@@ -7,7 +7,7 @@ import json
 
 from looplab.events.eventstore import EventStore
 from looplab.events.replay import fold
-from looplab.tools.runs_tools import RunControlTools
+from looplab.tools.machine_runs_tools import RunControlTools
 
 
 def _run(rd, nodes=(0, 1, 2)):
