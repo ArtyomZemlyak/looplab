@@ -2746,9 +2746,16 @@ class Engine(ConfirmPhaseMixin, AblationMixin):
 
     def _stage_check_fn(self, node):
         """Phase 3 inter-stage verify: a callback (stage_name, log_tail) -> concern|None that asks an LLM
-        whether a `check`-flagged stage plausibly succeeded (train actually trained + saved a checkpoint,
-        no silent fallback) BEFORE the next stage runs. Returns None (checks skipped) when no client is
-        available. Runs inside the eval worker thread, so complete_text blocks there — fine, like the eval."""
+        whether a `check`-flagged stage physically SUCCEEDED (train actually trained + saved a checkpoint,
+        no silent fallback) BEFORE the next stage runs. This is a SANITY gate, NOT a quality/ranking
+        judgment: it must fail a stage ONLY on a hard, unambiguous failure — never because the metric
+        looks 'not good enough' or 'below the previous best' (that is the search's job downstream). A
+        real incident motivated the tightening: the checker failed the run's BEST model (val recall@100
+        ≈ 0.855, above the champion) by (a) reading loss MAGNITUDE (~14.6) as 'no learning' — loss scale
+        depends on the loss/temperature and is not comparable across configs — and (b) grabbing a
+        bystander scalar (val recall@50 = 0.79) as 'the metric' and calling it below-best. Returns None
+        (checks skipped) when no client is available. Runs inside the eval worker thread, so
+        complete_text blocks there — fine, like the eval."""
         try:
             client = self._reflect_client()
         except Exception:  # noqa: BLE001
@@ -2756,16 +2763,30 @@ class Engine(ConfirmPhaseMixin, AblationMixin):
         if client is None:
             return None
         idea_text = self._idea_text(node.idea) if node is not None else ""
+        # Name the run's OBJECTIVE metric (from the operator's metric reader) so the checker judges the
+        # RIGHT number and isn't misled by a bystander scalar in the log (e.g. recall@50 vs the @100 goal).
+        _ms = (self._eval_spec or {}).get("metric") or {}
+        objective = (str(_ms.get("pattern") or _ms.get("key") or "").split("(")[0].strip()
+                     or "the objective metric")
 
         def _check(stage_name, tail):
             msgs = [{"role": "system", "content":
-                     "You verify ONE stage of an ML eval pipeline before the next runs. Given the stage "
-                     "name and its output tail, decide if it plausibly SUCCEEDED and produced a sane "
-                     "artifact for the next stage (e.g. train actually trained and saved a checkpoint, "
-                     "loss moved, no silent fallback to a stale/pretrained model). Reply EXACTLY 'OK' if "
-                     "fine, otherwise a ONE-LINE concern."},
+                     "You are a SANITY checker for ONE stage of an ML eval pipeline, run BEFORE the next "
+                     "stage. Decide ONLY whether this stage physically SUCCEEDED and produced a usable "
+                     "artifact for the next stage. FAIL it ONLY on a HARD, unambiguous failure: a "
+                     "crash/traceback, no checkpoint saved, a silent fallback to a stale/pretrained "
+                     "model, a NaN/inf loss, or a loss LITERALLY UNCHANGED from the first training step "
+                     "(genuinely no learning). Do NOT judge result QUALITY or RANKING: a trained model "
+                     "whose metric is merely mediocre, or BELOW a previous run, still PASSES — the search "
+                     "ranks and selects downstream, never you. Loss MAGNITUDE is NOT a failure signal (it "
+                     "depends on the loss function and temperature; a loss around 14 can be perfectly "
+                     "healthy). A present, non-trivial validation metric is strong evidence the stage "
+                     "SUCCEEDED. Reply EXACTLY 'OK' if the stage succeeded, otherwise a ONE-LINE concern "
+                     "naming the HARD failure."},
                     {"role": "user", "content":
-                     f"Experiment: {idea_text[:400]}\n\nStage '{stage_name}' output tail:\n{tail}"}]
+                     f"The run's objective metric is `{objective}` — ignore other scalars when judging "
+                     f"whether the stage worked.\nExperiment: {idea_text[:400]}\n\n"
+                     f"Stage '{stage_name}' output tail:\n{tail}"}]
             try:
                 out = (client.complete_text(msgs) or "").strip()
             except Exception:  # noqa: BLE001 — a checker failure must never fail the eval

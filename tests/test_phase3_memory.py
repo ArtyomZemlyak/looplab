@@ -323,11 +323,13 @@ def test_reflection_writes_consolidated_lessons_and_skill(tmp_path):
     anyio.run(eng.run)
     lessons = [json.loads(line) for line in (mem / "lessons.jsonl").read_text().splitlines()]
     assert lessons and all("run_id" in lz for lz in lessons)          # D2 provenance
-    hyp = [lz for lz in lessons if "deeper trees" in lz["statement"]]
-    assert hyp and hyp[0].get("evidence")                             # node ids recorded
-    assert hyp[0].get("role") == "researcher"                        # §role-split: a hypothesis is R&D
+    # Lessons are LLM-authored ONLY now: with no LLM client wired, this toy run writes the offline
+    # winner record — NOT the raw hypothesis dumped verbatim (that produced look-alike-hypothesis
+    # noise; a real run's LLM reflection consolidates the hypothesis+Δ record into one lesson/theme).
+    # The supported hypothesis is still captured as an auto-SKILL (keys off h.statement, unchanged).
     skills = list((mem / "skills").glob("auto-*.md"))
     assert skills, "supported hypothesis with positive delta should distill an auto-skill"
+    assert any("deeper trees" in s.read_text() for s in skills)       # the hypothesis technique captured
 
 
 def test_lessons_route_by_role(tmp_path):
