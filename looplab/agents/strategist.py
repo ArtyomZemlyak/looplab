@@ -86,6 +86,11 @@ class StrategyContext(BaseModel):
     # CONTEXT the Strategist reads to judge how much novelty pressure to apply — it is informative,
     # not a decision (the LLM decides). Empty when coverage_context is off.
     coverage: dict = Field(default_factory=dict)
+    # Per-operator empirical yield (search/policy.py::operator_yields) {op: {n, gain}} — how much
+    # each operator has actually moved the metric per eval-second so far. Signal-delivery (§1): the
+    # Strategist tunes `ablate_every`/`merge_mode` but previously judged from priors only; this lets
+    # it set cadences from the run's OWN evidence. Empty on an early/degenerate run.
+    operator_yields: dict = Field(default_factory=dict)
 
 
 class Strategist(Protocol):
@@ -372,6 +377,17 @@ class _StrategyOut(BaseModel):
     rationale: str = ""
 
 
+def _fmt_operator_yields(yields: dict) -> str:
+    """Render per-operator empirical yield as one compact line for the Strategist prompt (evidence
+    for the operator mix — the model may raise/lower ablate_every or switch merge_mode when the data
+    shows an operator paying off or not). `unavailable` on an early run with no attributed gains."""
+    if not yields:
+        return "unavailable"
+    return "; ".join(
+        f"{op}: gain={d.get('gain', 0.0):.4g}/s over {d.get('n', 0)}"
+        for op, d in sorted(yields.items(), key=lambda kv: -(kv[1].get('gain') or 0.0)))
+
+
 def _fmt_coverage(cov: dict) -> str:
     """Render the breadth read-model as one compact line for the Strategist prompt (the narrowing
     signal is CONTEXT: it informs the novelty_stance the model chooses, it does not decide it)."""
@@ -393,6 +409,8 @@ def _strategist_brief(state: RunState, ctx: StrategyContext) -> str:
         f"eval_budget_remaining={ctx.eval_budget_remaining}\n"
         f"available_policies={ctx.available_policies} avg_eval_seconds={ctx.avg_eval_seconds}\n"
         f"coverage (narrowing signal): {_fmt_coverage(ctx.coverage)}\n"
+        f"operator yields (evidence for the operator mix — mean metric gain per eval-second, n tried): "
+        f"{_fmt_operator_yields(ctx.operator_yields)}\n"
         "Choose the next strategy (policy from the available list; fidelity smoke|full|adaptive; "
         "novelty_stance explore|balanced|exploit — pick explore when coverage shows the search "
         "narrowing onto one theme (high dominant_theme_frac / low theme_entropy), exploit in the "

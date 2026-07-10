@@ -692,7 +692,8 @@ def make_roles(task: TaskAdapter, settings, run_dir=None):
                                      parser=getattr(settings, "llm_parser", "tool_call"),
                                      foresight=getattr(settings, "foresight", True),
                                      direction=getattr(task, "direction", "min"),
-                                     goal=getattr(task, "goal", ""))
+                                     goal=getattr(task, "goal", ""),
+                                     min_confidence=getattr(settings, "foresight_min_confidence", 0.0))
     # H3 per-role model presets: point the Researcher / Developer at their own model/endpoint when
     # configured (e.g. Developer on a strong coding model, Researcher on a fast breadth model).
     if settings.researcher_model or settings.researcher_base_url:

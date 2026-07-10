@@ -56,7 +56,7 @@ from looplab.core.llm import BudgetExceeded
 from looplab.core.models import Idea, NodeStatus, RunState
 from looplab.search.coverage import coverage_signal
 from looplab.search.operators import merge_idea
-from looplab.search.policy import SearchPolicy, available_policies, make_policy
+from looplab.search.policy import SearchPolicy, available_policies, make_policy, operator_yields
 from looplab.agents.strategist import (
     NOVELTY_STANCES,
     StrategyContext,
@@ -1034,6 +1034,10 @@ class Engine(ConfirmPhaseMixin, AblationMixin):
             available_developers=self._available_developers(),
             defaults=defaults,
             coverage=self._coverage_for_ctx(state),
+            # Signal-delivery (§1): the folded per-operator yield so the Strategist tunes operator
+            # cadences from the run's own evidence, not priors. Computed on the (rare) consult
+            # cadence only — O(nodes) is fine here, not on the per-proposal path.
+            operator_yields=operator_yields(state),
         )
 
     def _coverage_for_ctx(self, state: RunState) -> dict:
@@ -1462,8 +1466,19 @@ class Engine(ConfirmPhaseMixin, AblationMixin):
                             if n.status is NodeStatus.failed and n.error_reason),
                            key=lambda n: n.id, reverse=True)[:3]
             if fails:
-                summ = "; ".join(f"node {n.id} ({n.error_reason}): {(n.error or '')[:60]}" for n in fails)
+                def _why(n) -> str:
+                    # Signal-delivery (§1): prefer the crash-triage VERDICT (the LLM's judgment of
+                    # why the idea/code failed) over the raw stderr tail — that judgment is the most
+                    # expensive reasoning in the failure path and was previously dropped by the fold.
+                    tr = " ".join((getattr(n, "triage_rationale", "") or "").split())[:90]
+                    return tr or (n.error or "")[:60]
+                summ = "; ".join(f"node {n.id} ({n.error_reason}): {_why(n)}" for n in fails)
                 hint += f"\nReflection — recent failures to avoid repeating: {summ}."
+        # Signal-delivery (§1): surface a recently trust-FLAGGED node so the next proposal reacts to
+        # it (trust flags otherwise only bar a WIN — the agent never learns and keeps re-deriving the
+        # flagged approach). Pure rendering lives in digest.trust_reflection so a test can exercise it.
+        from looplab.events.digest import trust_reflection
+        hint += trust_reflection(state)
         if self._localize_faults and self._repo_spec.get("editables"):
             fails = sorted((n for n in state.nodes.values()
                             if n.status is NodeStatus.failed and n.error),
@@ -1841,10 +1856,14 @@ class Engine(ConfirmPhaseMixin, AblationMixin):
         if not callable(chooser):              # defensive: agent_drives_actions implies unified
             return self.policy.next_actions(state)
         from looplab.agents.roles import _state_brief
+        from looplab.agents.hints import render_hint_directives
         try:
             brief = _state_brief(state, None)
         except Exception:  # noqa: BLE001 - a brief is advisory; never block on it
             brief = ""
+        # Signal-delivery (§1): the pilot picks the next macro action, so a standing operator
+        # directive must reach it too — else it can choose an action that fights the directive.
+        brief += render_hint_directives(state.pending_hints)
         choice = chooser(state, legal, recommended, brief=brief)
         idx = choice.get("index", -1) if isinstance(choice, dict) else -1
         chosen = legal[idx] if isinstance(idx, int) and 0 <= idx < len(legal) else \
@@ -1883,10 +1902,14 @@ class Engine(ConfirmPhaseMixin, AblationMixin):
         if callable(fn):
             try:
                 from looplab.agents.roles import _state_brief
+                from looplab.agents.hints import render_hint_directives
                 try:
                     brief = _state_brief(state, None)
                 except Exception:  # noqa: BLE001 - a brief is advisory; never block on it
                     brief = ""
+                # Signal-delivery (§1): a standing directive (e.g. "prefer lighter models") is
+                # relevant to the repair-vs-reject decision, so surface it to the triage agent too.
+                brief += render_hint_directives(state.pending_hints)
                 # Own span so the crash-triage LLM turns band as `triage`, NOT `evaluate`: triage runs
                 # INSIDE the engine's `evaluate` span, so without this its (often many, agentic) turns
                 # inherit phase=evaluate and inflate the "evaluate" band with failure-debugging that has
@@ -1997,6 +2020,23 @@ class Engine(ConfirmPhaseMixin, AblationMixin):
             return impl_from(idea, parent)
         return self.developer.implement(idea)
 
+    def _directed_idea(self, idea, state: RunState):
+        """Signal-delivery (§1): fold the active operator directives into the idea HANDED TO THE
+        DEVELOPER so a standing directive ("use only sklearn") steers the CODE that gets written,
+        not only the proposal (the Researcher already renders directives; the Developer never saw
+        them). Returns a COPY with the rendered directive block appended to `rationale` — the field
+        every Developer backend renders — so it reaches the innermost developer through ANY wrapper
+        chain (the copy rides the data, not a forwarded attribute that a wrapper could drop). The
+        ORIGINAL idea, recorded in `node_created`, is untouched, so the audit rationale stays the
+        Researcher's own. No pending directives -> the idea is returned unchanged (identity)."""
+        from looplab.agents.hints import render_hint_directives
+        block = render_hint_directives(state.pending_hints)
+        if not block:
+            return idea
+        di = idea.model_copy(deep=True)
+        di.rationale = ((di.rationale or "") + "\n" + block).strip()
+        return di
+
     def _repair(self, node, err: str) -> str:
         """Route a repair through `repair_from(idea, node, error)` when the Developer supports it, so
         the fix is seeded from the FAILING NODE's OWN files — not the shared developer's `last_files`,
@@ -2055,7 +2095,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin):
                 idea.operator = "draft"        # operator is authoritative from the policy,
                 parents: list[int] = []        # not whatever label the LLM returns
                 with self.tracer.span("implement"):
-                    code = self.developer.implement(idea)
+                    code = self.developer.implement(self._directed_idea(idea, state))
             elif kind == "merge":
                 parents = list(action["parent_ids"])
                 # A0b: real ensembling (code recombination) when configured/Strategist-selected;
@@ -2071,9 +2111,10 @@ class Engine(ConfirmPhaseMixin, AblationMixin):
                     # parent[0]'s working code + entrypoint carry over and the idea directs blending in
                     # the other parent. Mean-param merges (numeric tasks, no files) stay from-scratch.
                     _impl_from = getattr(self.developer, "implement_from", None)
-                    code = (_impl_from(idea, pnodes[0])
+                    _didea = self._directed_idea(idea, state)   # §1: directives steer the merge code too
+                    code = (_impl_from(_didea, pnodes[0])
                             if (self._merge_mode == "ensemble" and _impl_from and pnodes)
-                            else self.developer.implement(idea))
+                            else self.developer.implement(_didea))
             elif kind == "debug":
                 parent = state.nodes[action["parent_id"]]
                 parents = [parent.id]
@@ -2095,16 +2136,21 @@ class Engine(ConfirmPhaseMixin, AblationMixin):
                     with self.tracer.span("repair", parent_id=parent.id):
                         code = self._repair(parent, err)   # seed from parent's OWN files (repair_from)
                 else:
-                    # Debug/repair is stance-NEUTRAL: novelty pressure ("open a new direction") is
-                    # wrong when the job is to FIX a failure. Clear any stale explore/exploit hint a
-                    # prior draft/improve left on the researcher before this repair proposal (this
-                    # branch does not call _set_complexity_hint, so nothing else refreshes it).
+                    # Signal-delivery (§1): the debug re-propose now gets the SAME cross-run priors +
+                    # failure-reflection + fault-localization + trust cues as draft/improve — exactly
+                    # when the agent is FIXING a failure it most needs "this crash class recurred
+                    # before" and "the likely files to edit". Previously this branch called only
+                    # _stamp_novelty_hint, so those cues were absent on the repair proposal.
+                    self._set_complexity_hint(state, parent)
+                    # ...then FORCE a balanced novelty stance: novelty pressure ("open a new
+                    # direction") is wrong when the job is to FIX a failure, so override the stance
+                    # _set_complexity_hint just stamped (it uses the live self._novelty_stance).
                     self._stamp_novelty_hint(state, "balanced")
                     with self.tracer.span("propose"):
                         idea = self.researcher.propose(state, parent)
                     idea.operator = "debug"
                     with self.tracer.span("implement"):
-                        code = self._implement(idea, parent)
+                        code = self._implement(self._directed_idea(idea, state), parent)
             else:  # improve
                 parent = state.nodes[action["parent_id"]]
                 self._set_complexity_hint(state, parent)   # A0d breadth-keyed complexity cue
@@ -2116,7 +2162,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin):
                 idea.operator = "improve"
                 parents = [parent.id]
                 with self.tracer.span("implement"):
-                    code = self._implement(idea, parent)
+                    code = self._implement(self._directed_idea(idea, state), parent)
             # 💡 deep-research provenance: tag the first couple of nodes created right after a research
             # memo (its directions are the active steering) so the UI can show WHERE research landed in
             # the tree. Audit/UI only — never affects search. Coarse-but-honest (temporal proximity).

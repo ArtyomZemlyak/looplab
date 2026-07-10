@@ -160,6 +160,19 @@ box("sim",1670,TY,470,72,"Three kinds of ‘same’","",C.sig,["exact hash → h
 /* ============ EVENT SPINE (row y≈1480) ============ */
 box("spine",40,1480,2100,84,"THE EVENT SPINE","",C.sig,["any block → append 1 domain event → events.jsonl → replay.fold → RunState","single writer · deterministic fold → exact replay · every event stamped trace_id/span_id → spans.jsonl (+OTLP)"]);
 
+/* ============ SIGNAL DELIVERY (row y≈1600) — §1: every folded signal reaches the agent that acts on it ============
+   Registry engine/signal_delivery.py + tests/test_signal_delivery.py enforce ONE injection site per signal
+   (a signal folded-but-uninjected is a red test). push = engine injects · ctx = folded-state brief · pull = a tool. */
+const SY=1600, SW=250, SG=12; const sx=i=>40+i*(SW+SG);
+box("sd_hdr", sx(0),SY,SW,92,"SIGNAL DELIVERY","§1",C.sig,["every folded signal → 1 injection site","registry + test enforce it"]);
+box("sd_trust", sx(1),SY,SW,92,"Trust flags → Researcher","push",C.trust,["reward-hack/leakage → proposal hint","‘flagged for X; avoid if unintended’"]);
+box("sd_triage",sx(2),SY,SW,92,"Triage why → Researcher","ctx",C.r,["crash-triage verdict on the Node","in digest + failure-reflection hint"]);
+box("sd_fore", sx(3),SY,SW,92,"Foresight track record","L4",C.r,["did past picks beat the parent?","primes the world model (memory brief)"]);
+box("sd_memo", sx(4),SY,SW,92,"Deep-research memo","pull",C.dr,["1-line takeaway in the state brief","read_research_memo tool for depth"]);
+box("sd_ops", sx(5),SY,SW,92,"Op. yields → Strategist","ctx",C.s,["gain/eval-sec per operator","tunes the operator mix from evidence"]);
+box("sd_dir", sx(6),SY,SW,92,"Directives → Developer","push",C.d,["folded into the idea → steers CODE","+ pilot · triage · strategist briefs"]);
+box("sd_run", sx(7),SY,SW,92,"Run states → Boss","ctx",C.s,["paused·awaiting·trust-flag·stuck-build","ATTENTION block for human action"]);
+
 /* ================= EDGES ================= */
 // setup → loop
 edge("genesis","r","onboard","l",{c:C.mut});

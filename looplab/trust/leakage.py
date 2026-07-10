@@ -65,6 +65,13 @@ def code_leakage_scan(code: str) -> dict:
         if not m:
             continue
         arg = m.group(2).lower()
+        # Strip the EARLY-STOPPING kwargs before the substring test: `.fit(X_train, y_train,
+        # eval_set=[(X_val, y_val)])` is the standard LightGBM/XGBoost monitoring call, NOT leakage —
+        # but the literal substring `val` inside `eval_set` (and the held-out monitor tuple) made it
+        # read as fit-on-validation and hard-gated every early-stopping solution (signal-delivery §1:
+        # a false leakage flag would now also mislead the agent). Cut from the kwarg onward; a genuine
+        # `.fit(X_val, y_val)` has no such kwarg and is still flagged.
+        arg = re.split(r"\b(?:eval_set|validation_data|eval_names)\s*=", arg)[0]
         if "test" in arg or "x_test" in arg or "val" in arg:
             flags.append({"signal": "fit_on_test", "line": i + 1, "code": line.strip()[:90]})
         elif split_at is not None and i < split_at and "train" not in arg:

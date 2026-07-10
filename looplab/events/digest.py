@@ -119,7 +119,40 @@ def _node_line(n) -> str:
         outcome = f"metric={fmt_num(node_metric(n))}"
     theme = f" {{{n.idea.theme}}}" if getattr(n.idea, "theme", None) else ""
     swept = f" swept ×{len(n.trials)}" if getattr(n, "trials", None) else ""
-    return f"  #{n.id} {n.operator} {outcome} {fmt_params(n.idea.params)}{swept}{theme}"
+    # Signal-delivery (§1): surface the crash-triage verdict on a failed node so the "avoid
+    # repeating" set carries the agent's judgment of WHY it failed, not just the error kind — the
+    # next proposal then reacts to "the idea is unsound because X", not a bare taxonomy label.
+    triage = getattr(n, "triage_rationale", "") if n.status is NodeStatus.failed else ""
+    triage = f" — triage: {' '.join(triage.split())[:100]}" if triage else ""
+    return f"  #{n.id} {n.operator} {outcome} {fmt_params(n.idea.params)}{swept}{theme}{triage}"
+
+
+def trust_reflection(state: RunState, max_shown: int = 2) -> str:
+    """Signal-delivery (§1): the agent-facing trust-reflection block — a recently trust-FLAGGED node
+    surfaced to the NEXT proposal so the agent reacts to it instead of silently re-deriving the
+    flagged approach (trust flags otherwise only bar a WIN; the agent never learns). Advisory wording
+    (the detectors are heuristics): says what fired and to avoid it if unintended. Fires even under
+    `audit` (nothing gate-excluded) — the warning is then the only channel the signal has to the
+    agent. Pure projection of the folded `reward_hacks`; "" when nothing hard-flagged. Extracted here
+    (not inline in the engine) so `tests/test_signal_delivery.py` can exercise it directly."""
+    if not getattr(state, "reward_hacks", None):
+        return ""
+    from looplab.events.replay import hard_flagged_ids   # lazy: avoid an import cycle at module load
+    hard = hard_flagged_ids(state)
+    if not hard:
+        return ""
+    recent = sorted((r for r in state.reward_hacks if r.get("node_id") in hard),
+                    key=lambda r: r.get("node_id") or -1, reverse=True)[:max_shown]
+
+    def _sigs(r) -> str:
+        return "; ".join(str(s.get("signal", "")) for s in (r.get("signals") or [])
+                         if not str(s.get("signal", "")).startswith(("critic:", "perfect_metric")))
+    items = "; ".join(f"node {r.get('node_id')} ({_sigs(r)})" for r in recent)
+    gated = (" (EXCLUDED from winning under the active trust gate)"
+             if getattr(state, "trust_gate", "audit") in ("gate", "block") else "")
+    return ("\nTrust — a recent solution was flagged for a cheating/leakage pattern: " + items
+            + gated + ". If unintended, ensure your next experiment does NOT read held-out "
+            "answers/labels or fit on validation/test data.")
 
 
 def auto_char_cap(state: RunState) -> int:

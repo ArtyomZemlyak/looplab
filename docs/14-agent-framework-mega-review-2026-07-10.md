@@ -419,6 +419,51 @@ lives), `engine/cadences.py` (`:998-1360`, co-locates the two modulo cadences wi
 
 ---
 
+## 8. Implementation — P1 signal-delivery (shipped 2026-07-10)
+
+The §1 delivery system was implemented in one change (full suite green — **1577 passed / 23
+skipped** — offline smoke + replay reproduce; the infographic + configuration table were updated in
+the same change). What shipped:
+
+- **The seven routes of §1**, each with exactly one injection site, registered in the new
+  `engine/signal_delivery.py` and enforced by `tests/test_signal_delivery.py` (every route's inject
+  symbol must resolve *and* a synthetic input's content must reach the rendered output — a
+  folded-but-uninjected signal is now a red test, generalizing the hint-registry pattern):
+  1. **Trust flags → Researcher** — `digest.trust_reflection` renders a recently hard-flagged node
+     into the proposal hint (`_set_complexity_hint`); fires even under `audit`.
+  2. **Triage rationale → Researcher** — folded onto `Node.triage_rationale` (additive) and surfaced
+     in the experiments digest (`_node_line`) + the failure-reflection hint (was dropped by the fold).
+  3. **Foresight calibration → world model** — `foresight_selected` folded into
+     `RunState.foresight_selected`; `foresight.foresight_scoreboard` primes `_memory_brief` with the
+     predictor's own hit rate (L4, closing the predict→outcome loop).
+  4. **Deep-research memo → Researcher** — a `read_research_memo` tool (`RunTools`) for the full
+     findings/claims + a one-line takeaway in `_state_brief`.
+  5. **Operator yields → Strategist** — `StrategyContext.operator_yields` rendered in the strategist
+     brief.
+  6. **Operator directives → Developer / pilot / triage** — `render_hint_directives` folded into the
+     idea handed to the Developer (`_directed_idea`, recorded idea untouched) and appended to the
+     pilot + crash-triage briefs.
+  7. **Run states → boss/assistant** — `llm_context._attention_states` surfaces paused /
+     awaiting-approval / trust-flag / stuck-build.
+- **Preconditions for a sound trust channel (§2.1 P0):** the two trust false positives were fixed so
+  the flags are trustworthy before they steer the agent — `\b_Y\b` is now case-sensitive
+  (`\b(?-i:_Y)\b`; the uppercase answer-key access still fires, the `_y` variable no longer does),
+  `solutions?\.csv` is anchored to a READ call, and `leakage.code_leakage_scan` strips
+  `eval_set=`/`validation_data=` kwargs before the substring test (a standard early-stopping call is
+  no longer flagged as fit-on-test). Verified: false positives gone, true positives preserved.
+- **Foresight confidence gate (§6 item 10):** config-first `foresight_min_confidence` (default `0.0`
+  = off, byte-identical to prior behavior); above it a low-confidence pick abstains (panel → first
+  proposal, best-of-N → D10) rather than committing.
+- **Also shipped:** the debug-propose branch now calls `_set_complexity_hint` so cross-run priors +
+  fault localization + failure reflection reach the agent when it is FIXING a failure (engine
+  synergy #2).
+
+**Deliberately NOT in this change (own follow-ups):** the trust/policy split-brain (§2.2 — changing
+`feasible_nodes` gate/block semantics deserves a dedicated change + tests); the budget/loop and
+auth/fold P0s (§2.3–2.5); the corner-case fixes in §3; per-role temperature (§4.1).
+
+---
+
 *Companion docs: [PROMPT_REVIEW.md](PROMPT_REVIEW.md) (the 2026-07-09 prompt/delivery review this
 extends from hints to all signal classes), [BACKLOG.md](BACKLOG.md) §5–6 (deferred follow-ups),
 [11-agent-systems-research.md](11-agent-systems-research.md) + [13-external-works-analysis-2026-07.md](13-external-works-analysis-2026-07.md)

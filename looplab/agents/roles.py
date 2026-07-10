@@ -297,6 +297,15 @@ def _state_brief(state: RunState, parent: Optional[Node], digest_cap: int = 0,
     # lineage under the refined node (D6 insight backpropagation, Arbor's Backpropagate step).
     lines.append(sibling_digest(state, parent))
     lines.append(lineage_lessons(state, parent))
+    # Signal-delivery (§1): the latest deep-research memo's takeaway. Its `recommended_directions`
+    # already ride as standing hints, but the summary/findings/claims were recorded-but-unread — this
+    # surfaces the one-line conclusion plus a pointer to the `read_research_memo` tool for the full
+    # reasoning (available to the agentic Researcher). Best-effort; skipped when there's no memo.
+    research = getattr(state, "research", None) or []
+    if research and isinstance(research[-1], dict) and research[-1].get("summary"):
+        lines.append("Latest deep-research takeaway: "
+                     + " ".join(str(research[-1]["summary"]).split())[:300]
+                     + " (call read_research_memo for the full findings/claims).")
     # P1: surface OPEN board hypotheses (human "+ Add" / deep-research directions) verbatim.
     # Without this the Researcher never sees them, and evidence only links when an experiment's
     # `hypothesis` matches the statement exactly — so board cards would stay "open" forever.

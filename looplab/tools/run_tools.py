@@ -98,6 +98,13 @@ class RunTools:
             fn_spec("list_themes",
                 "List the experiment themes explored so far with counts and best metric per theme.",
                 {}),
+            fn_spec("read_research_memo",
+                "Read the latest DEEP-RESEARCH memo in full: its summary, concrete findings, and "
+                "evidence-cited claims. The run periodically does a 'think hard' review over all "
+                "results (and the web); only its top recommended directions are pushed into your "
+                "context automatically — call this to pull the rest of the reasoning before "
+                "proposing, when you want the deeper analysis behind those directions.",
+                {}),
         ]
 
     def execute(self, name: str, args: dict) -> str:
@@ -117,6 +124,8 @@ class RunTools:
                 return self._analogous(st, args)
             if name == "list_themes":
                 return self._themes(st)
+            if name == "read_research_memo":
+                return self._research_memo(st)
             return f"(unknown tool: {name})"
         except (KeyError, TypeError, ValueError, ArithmeticError) as e:
             return f"(tool error: {e})"
@@ -282,6 +291,41 @@ class RunTools:
             f"{t}: {d['count']} experiment(s)" +
             (f", best={digest.fmt_num(d['best_metric'])}" if d['best_metric'] is not None else "")
             for t, d in sorted(roll.items(), key=lambda kv: -kv[1]["count"]))
+
+    def _research_memo(self, st: RunState) -> str:
+        """Signal-delivery (§1): the FULL latest deep-research memo, on demand. Only the memo's top
+        `recommended_directions` are auto-pushed into the prompt; this returns the summary + findings
+        + evidence-cited claims (and any verifier verdicts) so the agent can pull the reasoning behind
+        those directions instead of it being recorded-but-unread. Soft-fails to a plain note."""
+        research = getattr(st, "research", None) or []
+        if not research:
+            return "(no deep-research memo yet — the run hasn't done a 'think hard' review)"
+        m = research[-1]
+        if not isinstance(m, dict):
+            return "(research memo unavailable)"
+        parts: list[str] = []
+        at = m.get("at_node")
+        parts.append(f"Deep-research memo (at node {at}):" if at is not None else "Deep-research memo:")
+        if m.get("summary"):
+            parts.append("Summary: " + str(m["summary"]).strip())
+        findings = [str(f).strip() for f in (m.get("findings") or []) if str(f).strip()]
+        if findings:
+            parts.append("Findings:\n" + "\n".join(f"  - {f}" for f in findings[:12]))
+        claims = [c for c in (m.get("claims") or []) if isinstance(c, dict) and c.get("statement")]
+        if claims:
+            def _cite(c: dict) -> str:
+                nodes = ", ".join(f"#{n}" for n in (c.get("node_ids") or []))
+                urls = ", ".join(str(u) for u in (c.get("urls") or []))
+                cite = "; ".join(x for x in (nodes, urls) if x)
+                return f"  - {str(c['statement']).strip()}" + (f"  [evidence: {cite}]" if cite else "")
+            parts.append("Claims (with evidence):\n" + "\n".join(_cite(c) for c in claims[:12]))
+        dirs = [str(d).strip() for d in (m.get("recommended_directions") or []) if str(d).strip()]
+        if dirs:
+            parts.append("Recommended directions:\n" + "\n".join(f"  - {d}" for d in dirs[:8]))
+        ver = m.get("verification")
+        if isinstance(ver, dict) and ver.get("summary"):
+            parts.append("Verifier: " + str(ver["summary"]).strip())
+        return "\n".join(parts)
 
 
 class SiblingRunTools:

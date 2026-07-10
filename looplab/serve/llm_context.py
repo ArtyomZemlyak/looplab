@@ -80,6 +80,42 @@ def _node_context(st, nid: Optional[int], full: "Path") -> str:
     return "\n".join(lines)
 
 
+def _attention_states(st) -> str:
+    """Signal-delivery (§1): the folded run states where a HUMAN intervention is most valuable but
+    which the finished/live/stalled status line doesn't cover — paused, awaiting approval, a
+    trust-flagged leader, a flagged-leakage task, or a node stuck mid-build. Every fact is already in
+    the fold; surfacing it here means the boss/assistant can raise it instead of the operator having
+    to spot it in the UI. Empty string when nothing needs attention."""
+    lines: list[str] = []
+    if getattr(st, "paused", False):
+        lines.append("- PAUSED: the run is paused (the engine may be alive but idle) — `resume` to "
+                     "continue it.")
+    if getattr(st, "awaiting_approval", False):
+        lines.append("- AWAITING APPROVAL: a result or eval spec is waiting on a human approve/ratify "
+                     "before the run can proceed.")
+    try:
+        from looplab.events.replay import hard_flagged_ids
+        hard = sorted(x for x in hard_flagged_ids(st) if x is not None)
+    except Exception:  # noqa: BLE001 - context is best-effort
+        hard = []
+    if hard:
+        ids = ", ".join(str(i) for i in hard[:5])
+        lines.append(f"- TRUST FLAG: node(s) {ids} were flagged for a cheating/leakage pattern "
+                     f"(trust_gate={getattr(st, 'trust_gate', 'audit')}) — review before trusting the "
+                     "leader.")
+    lk = getattr(st, "leakage", None)
+    if isinstance(lk, dict) and lk.get("leak"):
+        lines.append("- DATA LEAKAGE: the grounding leakage scan flagged the task inputs — the metric "
+                     "may be inflated.")
+    b = getattr(st, "building", None)
+    if isinstance(b, dict) and b.get("node_id") is not None and not st.finished:
+        lines.append(f"- BUILDING: node {b.get('node_id')} is mid-build (Researcher/Developer "
+                     "running); if this persists the build may be stuck.")
+    if not lines:
+        return ""
+    return "ATTENTION — run states that may need action:\n" + "\n".join(lines)
+
+
 def _boss_context(st, nid: Optional[int], full: "Path", *, advisory: bool = False) -> str:
     """Richer grounding for the BOSS (action-router + advisory chat): the node brief PLUS the
     experiments digest (top / weakest / failures / themes — the working set) PLUS the latest
@@ -117,6 +153,9 @@ def _boss_context(st, nid: Optional[int], full: "Path", *, advisory: bool = Fals
                    "restart the loop, and if a node is failing add a debug/inject step to fix it — "
                    "don't just advise."))
     parts = [status]
+    attn = _attention_states(st)          # §1: paused / awaiting-approval / trust-flag / stuck-build
+    if attn:
+        parts.append(attn)
     try:
         from looplab.core.hardware import operational_attention_points
         parts.append(operational_attention_points())

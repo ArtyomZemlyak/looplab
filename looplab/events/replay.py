@@ -12,7 +12,8 @@ from looplab.events.types import (
     EV_ABLATE, EV_AGENT_DECISION, EV_AGENT_VALIDATED, EV_ANNOTATION, EV_APPROVAL_GRANTED,
     EV_APPROVAL_REQUESTED, EV_BEST_CONFIRMED, EV_BUDGET_EXTEND, EV_CONFIRM_DONE,
     EV_CONFIRM_EVAL, EV_DATA_LEAKAGE, EV_DATA_PROFILED, EV_DATA_PROVENANCE,
-    EV_COVERAGE_SNAPSHOT, EV_DEEP_RESEARCH, EV_DIVERSITY_ARCHIVE, EV_FORCE_ABLATE, EV_FORCE_CONFIRM, EV_FORK,
+    EV_COVERAGE_SNAPSHOT, EV_DEEP_RESEARCH, EV_DIVERSITY_ARCHIVE, EV_FORCE_ABLATE, EV_FORCE_CONFIRM,
+    EV_FORESIGHT_SELECTED, EV_FORK,
     EV_FORK_DONE, EV_HINT, EV_HOLDOUT_EVALUATED, EV_HOST_GRADING, EV_HYPOTHESIS_ADDED, EV_HYPOTHESIS_MERGED,
     EV_HYPOTHESIS_RANKED, EV_HYPOTHESIS_UPDATED, EV_INJECT_DONE, EV_INJECT_NODE, EV_LESSONS_DISTILLED,
     EV_LESSONS_REFRESHED, EV_LLM_COST, EV_NODE_ABORT, EV_NODE_BUILDING, EV_NODE_CONFIRMED,
@@ -33,7 +34,14 @@ def flagged_node_ids(st: RunState) -> set:
     `audit`. Shared by the fold and the engine's holdout-topk so both apply the SAME exclusion."""
     if st.trust_gate not in ("gate", "block"):
         return set()
+    return hard_flagged_ids(st)
 
+
+def hard_flagged_ids(st: RunState) -> set:
+    """Node ids carrying a HIGH-PRECISION (non-`critic:`, non-`perfect_metric`) cheating/leakage
+    signal, INDEPENDENT of `trust_gate` mode. `flagged_node_ids` uses it for gate/block selection
+    exclusion; the agent-facing trust-reflection hint (signal-delivery §1) uses it to warn the
+    Researcher about a flagged lineage even under `audit`, where nothing is gate-excluded."""
     def _has_hard_signal(rh: dict) -> bool:
         return any(not str(s.get("signal", "")).startswith(("critic:", "perfect_metric"))
                    for s in (rh.get("signals") or []))
@@ -143,6 +151,11 @@ def fold(events: Iterable[Event]) -> RunState:
                 n.status = NodeStatus.failed
                 n.error = d.get("error", "")
                 n.error_reason = d.get("reason", "")
+                # Crash-triage verdict, when the LLM triage ran (signal-delivery §1): fold it onto the
+                # node so the failure-reflection hint / digest can hand it to the next proposal.
+                # Additive + reader-defaulted: absent on old logs / rule-triaged nodes -> stays "".
+                if d.get("triage_rationale"):
+                    n.triage_rationale = str(d.get("triage_rationale"))
                 n.eval_seconds = d.get("eval_seconds")
                 n.rerun_stage = None                    # any stage-scoped re-run has now landed
                 if d.get("failed_stage"):
@@ -178,6 +191,7 @@ def fold(events: Iterable[Event]) -> RunState:
                 n.metric = None
                 n.error = ""
                 n.error_reason = ""
+                n.triage_rationale = ""   # the crash-triage verdict describes the NOW-abandoned lifecycle
                 n.eval_seconds = None
                 n.stdout_tail = ""
                 n.extra_metrics = {}
@@ -344,6 +358,13 @@ def fold(events: Iterable[Event]) -> RunState:
             st.agent_decisions.append(d)
         elif t == EV_REWARD_HACK_SUSPECTED:
             st.reward_hacks.append({"node_id": d.get("node_id"), "signals": d.get("signals", [])})
+        elif t == EV_FORESIGHT_SELECTED:
+            # FOREAGENT predict-before-execute pick (audit-only). Kept so the world model can be
+            # primed with its OWN calibration (did the picked node beat its parent?), closing the
+            # predict→outcome loop. Store only the small fields the scoreboard needs; never selection.
+            nid = d.get("node_id")
+            if nid is not None:
+                st.foresight_selected.append({"node_id": nid, "confidence": d.get("confidence")})
         elif t == EV_NOVELTY_REJECTED:
             st.novelty_events.append(d)   # E1: a near-duplicate proposal nudged off (audit)
         elif t == EV_HYPOTHESIS_MERGED:

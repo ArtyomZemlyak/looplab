@@ -116,6 +116,11 @@ class Node(BaseModel):
     # Failure taxonomy (set by node_failed): setup | timeout | oom | crash | no_metric | drift.
     # Audit/observability only — lets a UI/operator see WHY runs fail across a search.
     error_reason: str = ""
+    # Crash-triage verdict (set by node_failed when the LLM triage ran): the agent's one-line
+    # judgment of WHY the failure happened / whether the IDEA is at fault — the most expensive
+    # reasoning in the failure path. Folded onto the node so the failure-reflection hint and the
+    # digest can feed it to the NEXT proposal instead of dropping it (signal-delivery, §1).
+    triage_rationale: str = ""
     stdout_tail: str = ""
     # Multi-seed confirmation (I12): set by a node_confirmed event. When present,
     # best-selection ranks by confirmed_mean (the robust metric) instead of `metric`.
@@ -366,6 +371,11 @@ class RunState(BaseModel):
     # B5 reward-hacking detector (audit-only; never changes selection): flagged suspicious wins
     # {node_id, signals:[{signal, detail}]} for the Trust panel.
     reward_hacks: list[dict] = Field(default_factory=list)
+    # FOREAGENT predict-before-execute picks {node_id, confidence, chosen, ...}, folded from
+    # `foresight_selected` events. Audit-only — never touches selection — but the fold keeps them so
+    # the world model can be primed with its OWN track record (did past predicted-best picks beat
+    # their parent?), closing the open predict→outcome loop (signal-delivery, §1). Additive.
+    foresight_selected: list[dict] = Field(default_factory=list)
     # E1 novelty/dedup gate: near-duplicate proposals that were nudged off {node_id, near_node, ...}.
     novelty_events: list[dict] = Field(default_factory=list)
     # Deep-Research stage (Phase 2, audit-only sidecar — NEVER read by best-selection). `research`

@@ -411,6 +411,13 @@ class Settings(BaseSettings):
     # one-shot predictor on any hiccup). A few extra LLM calls per proposal; set False for the cheaper
     # single-call ranker.
     foresight_agentic: bool = True
+    # §1 foresight confidence gate: the minimum predicted confidence at which a predict-before-execute
+    # pick is ACTED ON. Below it the ranker abstains — the K-idea panel falls back to the first
+    # proposal, best-of-N falls through to the D10 tie-break — instead of committing a low-confidence
+    # choice. 0.0 (default) = OFF (act on every pick, the historical behavior); raise toward ~0.5 to
+    # make the world model defer when it isn't sure. Pairs with the foresight track record (§1) the
+    # predictor is now primed with. Range 0.0-1.0.
+    foresight_min_confidence: float = 0.0
     # T7 LLM response cache: serve an identical DETERMINISTIC (temperature 0) request from an
     # in-process content-addressed cache instead of re-hitting the model — cuts cost on
     # retry/panel/verify flows. NEVER caches sampling calls (temp>0: best-of-N / panel / novelty

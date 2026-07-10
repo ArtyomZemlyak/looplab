@@ -225,13 +225,50 @@ def _novelty_rank_directive(stance: str) -> str:
     return ""
 
 
+def foresight_scoreboard(state, last_n: int = 12) -> str:
+    """Signal-delivery (§1) — CLOSE the predict→outcome loop. The world model's own track record on
+    its recent predict-before-execute picks: of the last `last_n` foresight-picked nodes that have
+    since been evaluated (and have a parent baseline), how many actually beat the parent, at what
+    mean predicted confidence. Priming the predictor with 'you were right K/N times at confidence C'
+    is the missing feedback that lets its calibration improve instead of every prediction landing
+    with equal weight. Pure projection of the folded `foresight_selected` list + node outcomes — no
+    events, replay-safe. Empty until a few picks have outcomes."""
+    picks = getattr(state, "foresight_selected", None) or []
+    if not picks:
+        return ""
+    graded = beat = 0
+    confs: list[float] = []
+    for p in picks[-last_n:]:
+        n = state.nodes.get(p.get("node_id"))
+        if n is None or n.metric is None:
+            continue
+        pm = [state.nodes[pi].metric for pi in n.parent_ids
+              if pi in state.nodes and state.nodes[pi].metric is not None]
+        if not pm:                               # a draft pick has no parent baseline to score against
+            continue
+        base = max(pm) if state.direction == "max" else min(pm)
+        improved = (n.metric > base) if state.direction == "max" else (n.metric < base)
+        graded += 1
+        beat += 1 if improved else 0
+        c = p.get("confidence")
+        if isinstance(c, (int, float)):
+            confs.append(float(c))
+    if graded == 0:
+        return ""
+    mc = f", mean predicted confidence {sum(confs) / len(confs):.2f}" if confs else ""
+    return (f"\nForesight track record: of your last {graded} predict-before-execute pick(s), "
+            f"{beat} improved over the parent{mc}. Calibrate your confidence to this hit rate.")
+
+
 def _memory_brief(state, parent) -> str:
     """The accumulated experiment memory that primes the hypothesis predictor (EvoScientist-style):
-    the whole-search working set + the lineage lessons under the node being refined. Best-effort;
-    "" when there's nothing yet. Local import keeps `search` import-time free of `events.digest`."""
+    the whole-search working set + the lineage lessons under the node being refined + the predictor's
+    OWN calibration track record (§1). Best-effort; "" when there's nothing yet. Local import keeps
+    `search` import-time free of `events.digest`."""
     try:
         from looplab.events.digest import experiments_digest, lineage_lessons
-        parts = [experiments_digest(state, char_cap=1200), lineage_lessons(state, parent)]
+        parts = [experiments_digest(state, char_cap=1200), lineage_lessons(state, parent),
+                 foresight_scoreboard(state)]
         return "\n".join(p for p in parts if p)
     except Exception:  # noqa: BLE001 — priming is best-effort; never break a proposal
         return ""
@@ -252,9 +289,13 @@ class ForesightPanelResearcher:
     """
 
     def __init__(self, base, k: int = 2, *, client=None, bounds=None,
-                 parser: Optional[str] = None, prompts=None, tools=None):
+                 parser: Optional[str] = None, prompts=None, tools=None,
+                 min_confidence: float = 0.0):
         self.base = base
         self.k = max(1, k)
+        # §1 confidence gate: below this predicted confidence the K->1 pick is NOT acted on (fall back
+        # to the first proposal). 0.0 (default) = off — byte-identical to the historical behavior.
+        self.min_confidence = max(0.0, float(min_confidence))
         self.client = client if client is not None else getattr(base, "client", None)
         self.bounds = bounds if bounds is not None else getattr(base, "bounds", None)
         # The panel must reflect the base's configured structured-output parser (mirroring the
@@ -384,6 +425,13 @@ class ForesightPanelResearcher:
             self.last_foresight = None
             return ideas[0]
         order, conf, reason = r
+        # §1 confidence gate: below the configured threshold the predictor ABSTAINS (fall back to the
+        # first proposal, record nothing) — mirroring the `r is None` abstain above, so only picks the
+        # model actually committed to are recorded and later scored by the foresight track record.
+        # 0.0 (default) = off: conf >= 0 is always true, so the behavior is byte-identical to before.
+        if conf is not None and conf < self.min_confidence:
+            self.last_foresight = None
+            return ideas[0]
         best = ideas[order[0]]
         # Telemetry the engine reads after propose() to emit `foresight_selected` (engine = sole event
         # writer): WHICH of the K generated ideas won + the discarded alternatives + confidence + the
