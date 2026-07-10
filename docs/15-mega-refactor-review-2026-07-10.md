@@ -298,7 +298,9 @@ The `core`/`events` layers are verified strictly downward. All the tangle is in 
 and survive only as lazy imports — the classic latent-cycle tell.
 
 **P2.1 [HIGH] Move pure read-model exporters `serve/traceview.py` + `serve/htmlview.py` →
-`events/`.** htmlview imports only `html` + `core.models`; traceview imports stdlib +
+`events/`. [RESOLVED as planned]** (byte-identical git mv; finalize's imports are now
+top-level; the canonical `serve.*` paths were dropped rather than stubbed — verified zero
+monkeypatchers; test imports repointed). htmlview imports only `html` + `core.models`; traceview imports stdlib +
 `core.models` + (lazily) `events.eventstore.iter_jsonl` — which *supports* the move (becomes
 intra-package). Neither touches fastapi/serve. Yet the engine hard-depends on them:
 `engine/finalize.py:60` lazily imports `render_html`/`build_trace_view`/`load_spans`, and
@@ -318,7 +320,9 @@ keep a 2-line `serve/traceview.py` re-export stub (stub is a *different module o
 here only because nothing monkeypatches it). Also update the stale `CLAUDE.md:53` parenthetical
 about finalize's lazy serve import in the same change.
 
-**P2.2 [HIGH] Move `make_llm_client` `adapters/tasks.py:320` → `core/llm.py`.** Its body depends
+**P2.2 [HIGH] Move `make_llm_client` `adapters/tasks.py:320` → `core/llm.py`. [RESOLVED as
+planned]** (verbatim move; re-export chain verified one-object; the sole `agents→adapters`
+edge is gone). Its body depends
 only on `core` (`OpenAICompatibleClient`, `reasoning_body`, `CostAccountant`), yet living in
 `adapters` forces the **only** `agents→adapters` edge (`agents/agent.py:719`) and a `serve`
 re-export shim. Relocate to `core/llm.py`; keep thin re-exports in `adapters/tasks.py` and

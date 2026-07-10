@@ -48,10 +48,6 @@ def _stream_tails(out: str, err: str) -> tuple[int, int]:
     out_take = min(len(out), avail - err_take)
     return out_take, err_take
 
-# Only these host GIT_* vars are passed through to a `git` child (see exec_argv): the multi-var config
-# (which `_run_argv` would partially scrub because GIT_CONFIG_KEY_* contains "KEY") + commit identity.
-# Deliberately EXCLUDES credential-bearing vars (GIT_ASKPASS, GIT_SSH_COMMAND, GIT_HTTP_EXTRAHEADER,
-# GIT_TOKEN, …) so a token can't reach a git subprocess whose stdout is returned to a remote model.
 # Moved verbatim to core/gitenv.py so runtime/bg_tasks imports it DOWNWARD (it was the one
 # runtime -> tools upward lazy import). Re-exported here because this module's own git subprocess
 # path and the tests (`from looplab.tools.shell_tools import git_config_env`) spell this path.

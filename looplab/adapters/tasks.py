@@ -12,7 +12,6 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Protocol, runtime_checkable
 
-from looplab.core.llm import CostAccountant, OpenAICompatibleClient
 from looplab.adapters.mlebench import MLEBenchTask
 from looplab.adapters.mlebench_real import MLEBenchRealTask
 from looplab.core.prompts import PromptStore

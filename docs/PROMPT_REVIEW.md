@@ -59,8 +59,8 @@ worst case.
 | D13 | minor | tests | The reuse feature's **loop wiring is untested** (only the static helpers are unit-tested): nothing asserts `next_start` actually reaches `run_command_eval` on re-eval, that the retrain-cap abandon fires, or `node_logs` for `cmd.stages` runs. |
 | D14 | minor (adjacent, **pre-existing** — found during verification, not introduced today) | `events/replay.py:187-197` + `trust/confirm_phase.py:101-104,133-136` | `EV_NODE_RESET` clears `confirmed_mean/std/seeds` and holdout but never clears `st.confirm_seed_results[node_id]` — a reset (even re-developed) node's later confirm memo-skips every seed and re-emits `node_confirmed` from the **pre-reset** seed metrics for post-reset code. |
 
-Prompt-text changes today were limited and consistent: `runs_tools.py:281-286` (goal-is-the-only-
-task-text block), `runs_tools.py:331-338` + `serve_prompts.py:60-70` (mount/edit coercion wording
+Prompt-text changes today were limited and consistent: `machine_runs_tools.py (runs_tools.py at review time):281-286` (goal-is-the-only-
+task-text block), `machine_runs_tools.py (runs_tools.py at review time):331-338` + `serve_prompts.py:60-70` (mount/edit coercion wording
 — matches the shipped coercing validator), and best-of-N now feeding real goal/direction into the
 foresight ranker (bug fix). Note on `1af12a2` "reject mount:true+edit:true": that message was
 accurate *for its own commit* (it shipped `raise ValueError`); `2d1b9bf` flipped reject→coerce the
@@ -113,7 +113,7 @@ appended at the END (`reposcout.py:122-135, 261-269`), and `env_inspect.read_ins
 > 4000 chars loses its tail *and* the pointer; the dedup cache even stores the truncated result
 (`agent.py:450`), so a re-read returns a stub of the truncated page. The
 prompt's "read a file ONCE, don't re-read" makes the model act on code it never saw.
-`_base.py:39` warns providers to clip under the cap; `runs_tools` obeys (`_TRACE_CHARS=3600`),
+`_base.py:39` warns providers to clip under the cap; `machine_runs_tools` (`runs_tools` at review time) obeys (`_TRACE_CHARS=3600`),
 reposcout/env_inspect don't. *Fix: page size ≤ ~3800 with the resume pointer inside the cap.*
 
 **P4 · "Copy the hypothesis statement EXACTLY" is unsatisfiable beyond 200 chars.** *(major,
@@ -224,7 +224,7 @@ follows the bounce, gets "(path not allowed…)" repeatedly, and burns the phase
 *Wrong info stated to the model*
 - `read_logs`/`read_run_logs` claim "the FULL error/stderr" — the value is a chain of tails
   (64KB capture → 2000/500-char event tails → 3600-char clip → 4000-char loop cap)
-  (`run_tools.py:85-88`, `runs_tools.py:119-124`).
+  (`run_tools.py:85-88`, `machine_runs_tools.py (runs_tools.py at review time):119-124`).
 - "no shell, no nvidia-smi — call gpu_info" and "check the GPU … (nvidia-smi)" coexist in the
   same assembled prompt (`repo_developer.py:436` vs `hardware.py:90`); the attention points also
   say "install only what's genuinely missing" to a Developer with no install capability.
@@ -286,7 +286,7 @@ follows the bounce, gets "(path not allowed…)" repeatedly, and burns the phase
   `CHAT_SYSTEM` omits the `merge` operator that its sibling prompts include
   (`serve_prompts.py:169` vs `:140`).
 - Genesis never teaches `cmd.stages` authoring though both launch gates now accept stages-only
-  tasks (`0fee408`) and `propose_run` teaches it (`runs_tools.py:341`).
+  tasks (`0fee408`) and `propose_run` teaches it (`machine_runs_tools.py (runs_tools.py at review time):341`).
 
 *Docs/registry hygiene (nit)*
 - The 13 PromptStore override keys (`researcher_system`, `developer_system`,

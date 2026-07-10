@@ -6,6 +6,11 @@ Consumers: tools/shell_tools (its own git subprocesses; re-exports these names f
 and runtime/bg_tasks (background git commands)."""
 from __future__ import annotations
 
+# Only these host GIT_* vars are passed through to a `git` child (see shell_tools.exec_argv): the
+# multi-var config (which `_run_argv` would partially scrub because GIT_CONFIG_KEY_* contains "KEY")
+# + commit identity. Deliberately EXCLUDES credential-bearing vars (GIT_ASKPASS, GIT_SSH_COMMAND,
+# GIT_HTTP_EXTRAHEADER, GIT_TOKEN, …) so a token can't reach a git subprocess whose stdout is
+# returned to a remote model.
 _GIT_IDENTITY = {"GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_AUTHOR_DATE",
                  "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL", "GIT_COMMITTER_DATE"}
 
