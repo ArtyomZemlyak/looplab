@@ -548,6 +548,13 @@ export function MemoryPanel({ onClose }) {
         {tabs.map(([k, label, n]) => <button key={k} className={'seg' + (tab === k ? ' on' : '')}
           onClick={() => setTab(k)}>{label} <span className="muted">{n}</span></button>)}
       </div>
+      {/* Why there's no Researcher-vs-Developer split: all cross-run memory is the Researcher's / shared —
+          the Developer works per-run and persists nothing across runs, so there is no Developer store. */}
+      <div className="muted" style={{ fontSize: 11, marginBottom: 10, lineHeight: 1.5 }}>
+        Cross-run memory the <b>Researcher</b> accumulates and reuses to propose better experiments
+        (distilled lessons · solved-task cases · meta-notes · the shared knowledge base). The Developer
+        works <b>per-run</b> and keeps no persistent memory, so there is no separate Developer store.
+      </div>
       {tab === 'lessons' && (mem.lessons.length
         ? mem.lessons.map((l, i) => <div key={i} className="mem-card">
             <div>{l.statement}</div>
