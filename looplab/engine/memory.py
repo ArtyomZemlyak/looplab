@@ -448,6 +448,20 @@ class JsonlCaseLibrary:
                 except json.JSONDecodeError:
                     continue
 
+    def _reload(self) -> None:
+        """Re-read the on-disk cases into `self.cases` (used inside the interprocess lock so a
+        concurrent run's cases aren't clobbered by this run's stale in-memory copy)."""
+        cases: list[dict] = []
+        if self.path.exists():
+            for line in self.path.read_text(encoding="utf-8").splitlines():
+                line = line.strip()
+                if line:
+                    try:
+                        cases.append(json.loads(line))
+                    except json.JSONDecodeError:
+                        continue
+        self.cases = cases
+
     def _flush(self) -> None:
         # Atomic (temp + os.replace): the file is rewritten WHOLE on every add(), so a non-atomic
         # write killed mid-flush would truncate and lose the entire accumulated case library.
@@ -455,7 +469,18 @@ class JsonlCaseLibrary:
             self.path, "\n".join(json.dumps(c) for c in self.cases) + "\n")
 
     def add(self, case: dict) -> bool:
-        """Upsert by task_id, retaining the better metric. Returns True if stored."""
+        """Upsert by task_id, retaining the better metric. Returns True if stored.
+
+        Under the same best-effort interprocess lock the lessons store / event store use: `add` is a
+        full-file read-modify-write, so two runs sharing `memory_dir` (the live-share scenario) would
+        otherwise clobber each other's cases (the loser's case vanishes). We RE-READ inside the lock so
+        this run's possibly-stale in-memory `self.cases` can't overwrite a concurrent run's write."""
+        from looplab.events.eventstore import _interprocess_lock
+        with _interprocess_lock(Path(str(self.path) + ".lock")):
+            self._reload()
+            return self._add_locked(case)
+
+    def _add_locked(self, case: dict) -> bool:
         tid = case.get("task_id")
         direction = case.get("direction", "min")
         metric = case.get("metric")

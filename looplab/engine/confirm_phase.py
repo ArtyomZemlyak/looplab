@@ -82,7 +82,15 @@ class ConfirmPhaseMixin:
             return
 
         summaries: list[dict] = []
+        # Eval budget for the confirm phase: it runs confirm_top_k × confirm_seeds FULL-profile evals
+        # with no budget check (the loop-top guard only runs after the whole phase returns), so a
+        # budget already at 99% still paid the entire pass. The per-seed memo makes a mid-phase break
+        # resumable for free. Check once per node (re-folding per seed is too costly); overshoot is
+        # bounded to one node's seeds instead of the whole pass.
+        max_es = state.budget_overrides.get("max_eval_seconds", self.max_eval_seconds)
         for nd in topk:
+            if max_es is not None and fold(self.store.read_all()).total_eval_seconds >= max_es:
+                break                                     # budget spent — stop; a resume finishes it
             if nd.confirmed_mean is not None:  # reuse a prior (crashed) attempt's result
                 # Use the REAL seed count from that attempt, not confirm_seeds — some
                 # seeds may have failed, and inflating n shrinks the SE in the variance

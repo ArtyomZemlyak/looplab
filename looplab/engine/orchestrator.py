@@ -979,7 +979,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin):
                     # iteration), so a multi-eval batch can't overshoot by a whole batch (#2/#25).
                     if (max_es is not None and cur.total_eval_seconds >= max_es):
                         break
-                    await self._evaluate(a["node_id"], limiter)
+                    await self._evaluate(a["node_id"], limiter, max_es)
         else:
             # G3 distributed/parallel eval: fan out under a CapacityLimiter (worker pool). The
             # eval-budget guard the review flagged for this path: cap the number STARTED so an
@@ -1000,7 +1000,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin):
                     # the overshoot to ~one batch instead of launching the whole `evals` list at once.
                     if started >= self.max_parallel:
                         break
-                    tg.start_soon(self._evaluate, a["node_id"], limiter)
+                    tg.start_soon(self._evaluate, a["node_id"], limiter, max_es)
                     started += 1
 
     # -------------------------------------------------- strategist cadence (A7)
@@ -1273,7 +1273,12 @@ class Engine(ConfirmPhaseMixin, AblationMixin):
         # node-count already researched (the at_node gate makes resume a no-op).
         if state.pending_nodes() or n == 0 or self._already_researched_at(state, n):
             return state
-        if self.deep_research_every and n % self.deep_research_every == 0:
+        # Since-last cadence (not `n % every == 0`): a rung-0/seed batch that jumps the node count by
+        # k>1 must not step over the only multiple and skip the whole window. The last researched
+        # at_node is the marker; `_already_researched_at` above already de-dups the same-n resume.
+        _last_research_n = max((int(m.get("at_node", -1)) for m in state.research
+                                if isinstance(m, dict) and m.get("at_node") is not None), default=-1)
+        if self._cadence_due(n, _last_research_n, self.deep_research_every):
             return self._run_deep_research(state, trigger="cadence", manual=False)
         hist = state.strategy_history
         if (hist and hist[-1].get("at_node") == n
@@ -1363,7 +1368,9 @@ class Engine(ConfirmPhaseMixin, AblationMixin):
         n = len(state.nodes)
         if n == 0 or self._already_researched_at(state, n):
             return None
-        if self.deep_research_every and n % self.deep_research_every == 0:
+        _last_research_n = max((int(m.get("at_node", -1)) for m in state.research
+                                if isinstance(m, dict) and m.get("at_node") is not None), default=-1)
+        if self._cadence_due(n, _last_research_n, self.deep_research_every):   # since-last, gap-safe
             return "cadence"
         hist = state.strategy_history
         if (hist and hist[-1].get("at_node") == n
@@ -1640,10 +1647,15 @@ class Engine(ConfirmPhaseMixin, AblationMixin):
                                       getattr(idea, "hypothesis", "") or ""])).strip()
 
     def _idea_vec(self, node_id: int, text: str):
-        v = self._idea_vecs.get(node_id)
+        # Key on the TEXT, not the node_id: the embedding is a pure function of the text, and a
+        # `node_reset` re-creates the SAME id with a NEW idea — a node_id-keyed cache then returned the
+        # OLD vector and the semantic-novelty gate compared future proposals against a stale idea. The
+        # cache is in-memory only (never persisted/replayed), so a per-process `hash(text)` key is safe.
+        key = hash(text)
+        v = self._idea_vecs.get(key)
         if v is None:
             v = self._embedder(text)
-            self._idea_vecs[node_id] = v
+            self._idea_vecs[key] = v
         return v
 
     def _semantic_duplicate(self, state: RunState, idea: Idea):
@@ -2258,6 +2270,11 @@ class Engine(ConfirmPhaseMixin, AblationMixin):
                     "reason": "auto-paused: a Developer session crashed (LLM unreachable or a hard error, "
                               "unresolved within the node) — resume once it's fixed"})
         self._emit_agent_report(node.id)
+        # Consume the predictive telemetry for THIS node too: a "propose" reset re-runs the researcher
+        # (setting last_hyp_priority/last_foresight), so without consuming it here the pick set would
+        # leak onto the NEXT _create_node's id — the exact mis-attribution _emit_role_telemetry prevents.
+        self._emit_hypothesis_ranked(node.id)
+        self._emit_foresight_selected(node.id)
 
     def _create_injected_node(self, req: dict) -> None:
         """Materialize an operator-authored experiment (`inject_node` control event) into a real
@@ -2332,6 +2349,9 @@ class Engine(ConfirmPhaseMixin, AblationMixin):
             )
         if not req.get("code"):
             self._emit_agent_report(node_id)
+            # consume predictive telemetry for this node so it can't leak onto the next created node
+            self._emit_hypothesis_ranked(node_id)
+            self._emit_foresight_selected(node_id)
 
     def _activate_spec(self, proposal: dict) -> None:
         """Make the ratified onboarding proposal the trusted eval (Phase 3): the eval_spec
@@ -2923,7 +2943,8 @@ class Engine(ConfirmPhaseMixin, AblationMixin):
         external-agent calls by len(params) per ablation (ADR-7 cost rule)."""
         return getattr(self.developer, "inner", self.developer)
 
-    async def _evaluate(self, node_id: int, limiter: anyio.CapacityLimiter) -> None:
+    async def _evaluate(self, node_id: int, limiter: anyio.CapacityLimiter,
+                        max_es: Optional[float] = None) -> None:
         async with limiter:
           with self.tracer.span("evaluate", new_trace=True, node_id=node_id) as sp:
             state = fold(self.store.read_all())
@@ -3061,6 +3082,14 @@ class Engine(ConfirmPhaseMixin, AblationMixin):
                 _sig = _normalize_error_sig(err)
                 stuck_n = (stuck_n + 1) if _sig and _sig == stuck_sig else 1
                 stuck_sig = _sig
+                # Eval-budget stop: the inline-repair loop re-runs FULL evals with no budget check
+                # between attempts — the loop-top / per-eval guards only see `total_eval_seconds` from
+                # TERMINAL events, and no terminal is emitted mid-repair, so an LLM whose repairs vary
+                # the stderr (never tripping anti-stuck) can overshoot the eval budget by multiples
+                # inside ONE node. Abandon once this node's cumulative eval time would cross the ceiling.
+                if max_es is not None and state.total_eval_seconds + total_eval >= max_es:
+                    triage_outcome = ("abandon", "eval budget exhausted during inline repair")
+                    break
                 # Inline-repair gate: feature on, repairable reason, a Developer that can repair, and
                 # something to repair (whole-file code, multi-file edits, or a repo). The attempt CAP is
                 # skipped when unlimited (_inline_repair_attempts == 0); the anti-stuck guard bounds it.

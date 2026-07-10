@@ -77,6 +77,10 @@ class AblationMixin:
             idea=idea.model_dump(mode="json"), code=code,
             files=getattr(self.developer, "last_files", {}) or {})
         self._emit_agent_report(node_id)
+        # consume predictive telemetry for THIS node (propose/implement above set it) so it can't leak
+        # onto the next created node — same rule as _create_node / _rerun_node.
+        self._emit_hypothesis_ranked(node_id)
+        self._emit_foresight_selected(node_id)
 
     @staticmethod
     def _segment_blocks(code: str) -> list[tuple[int, int]]:
@@ -153,3 +157,5 @@ class AblationMixin:
             idea=idea.model_dump(mode="json"), code=new_code,
             files=getattr(self.developer, "last_files", {}) or {})
         self._emit_agent_report(node_id)
+        self._emit_hypothesis_ranked(node_id)   # consume predictive telemetry for THIS node (see above)
+        self._emit_foresight_selected(node_id)
