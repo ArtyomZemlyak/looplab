@@ -157,6 +157,12 @@ class Node(BaseModel):
     # Phase 2 stage-scoped re-run: the pipeline stage a reset asked to RESTART from (skip earlier stages,
     # reuse their artifacts). Transient — set by node_reset, cleared on the next terminal.
     rerun_stage: Optional[str] = None
+    # Attempt generation (arch-review §3 P0-1): bumped by every `node_reset`. The engine stamps the
+    # attempt it is evaluating onto the node's terminal event; the fold REJECTS a terminal whose attempt
+    # no longer matches — so a LATE node_evaluated/node_failed from an abandoned attempt (its eval was
+    # in flight when a reset bumped the generation) can't land as the first-terminal-after-reset and
+    # accept a metric/cost from discarded code. Absent in old logs -> 0 on both sides -> always matches.
+    attempt: int = 0
     # External-agent audit (ADR-7): set by an `agent_validated` event when the code was
     # produced by a validated CLI-agent Developer. {"ok": bool, "checks": [...]}.
     agent_report: Optional[dict] = None

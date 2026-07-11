@@ -337,6 +337,37 @@ def test_conflicting_second_terminal_does_not_flip_the_node(tmp_path):
     assert n.status is NodeStatus.evaluated and n.metric == 5.0   # not flipped to failed
 
 
+def test_late_terminal_from_an_abandoned_attempt_is_rejected(tmp_path):
+    """arch-review §3 P0-1: after a node_reset bumps the attempt generation, a LATE node_evaluated
+    stamped with the OLD attempt (its eval was in flight when the reset happened) must be DROPPED — it
+    can't land as the first-terminal-after-reset and accept a metric/cost from the discarded code."""
+    from looplab.core.models import NodeStatus
+    s = EventStore(tmp_path / "e.jsonl")
+    s.append("run_started", {"run_id": "r", "task_id": "t", "direction": "min"})
+    s.append("node_created", {"node_id": 0, "parent_ids": [], "operator": "draft",
+                              "idea": {"operator": "draft", "params": {"x": 1.0}, "rationale": ""}})
+    s.append("node_reset", {"node_id": 0, "from_stage": "implement"})   # attempt 0 -> 1
+    # a LATE terminal from the pre-reset attempt (attempt=0) — must NOT be accepted
+    s.append("node_evaluated", {"node_id": 0, "attempt": 0, "metric": 9.0, "eval_seconds": 3.0})
+    st = fold(s.read_all())
+    assert st.nodes[0].status is NodeStatus.pending          # still pending — late terminal dropped
+    assert st.nodes[0].metric is None and st.total_eval_seconds == 0.0
+    # the NEW attempt's terminal (attempt=1) IS accepted
+    s.append("node_evaluated", {"node_id": 0, "attempt": 1, "metric": 1.0, "eval_seconds": 2.0})
+    st2 = fold(s.read_all())
+    assert st2.nodes[0].status is NodeStatus.evaluated and st2.nodes[0].metric == 1.0
+    assert st2.total_eval_seconds == 2.0                     # only the live attempt's cost counted
+
+
+def test_unstamped_terminal_still_accepted_backward_compat(tmp_path):
+    """Old logs don't carry `attempt`; a terminal with no attempt field defaults to the node's current
+    generation, so legacy runs (no resets) fold exactly as before."""
+    from looplab.core.models import NodeStatus
+    s = EventStore(tmp_path / "e.jsonl")
+    _seed_events(s)                                          # node_evaluated events carry no `attempt`
+    assert fold(s.read_all()).nodes[0].status is NodeStatus.evaluated
+
+
 def test_normalize_task_rejects_cmd_and_eval_both():
     import pytest
     from looplab.adapters.tasks import normalize_task

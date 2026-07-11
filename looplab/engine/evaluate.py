@@ -60,7 +60,7 @@ class EvaluateMixin:
                                           {"node_id": node_id, "score": round(pred, 6), "skipped": skip})
                         if skip:
                             self.store.append(EV_NODE_FAILED, {
-                                "node_id": node_id,
+                                "node_id": node_id, "attempt": node.attempt,   # P0-1 attempt guard
                                 "error": "skipped by proxy scorer (predicted in the doomed bottom fraction)",
                                 "reason": "proxy_skipped", "eval_seconds": 0.0})
                             self._maybe_crash()
@@ -134,7 +134,8 @@ class EvaluateMixin:
                 if aborted and not ok:                       # killed mid-eval by the operator (and the
                     async with self._write_lock:             # eval didn't already finish cleanly first)
                         self.store.append(EV_NODE_FAILED, {
-                            "node_id": node_id, "error": "aborted by operator (killed mid-eval)",
+                            "node_id": node_id, "attempt": node.attempt,   # P0-1 attempt guard
+                            "error": "aborted by operator (killed mid-eval)",
                             "reason": "aborted", "eval_seconds": total_eval})
                         self._maybe_crash()
                     return
@@ -310,7 +311,8 @@ class EvaluateMixin:
                 if ok:
                     self.store.append(
                         EV_NODE_EVALUATED,
-                        {"node_id": node_id, "metric": res.metric,
+                        {"node_id": node_id, "attempt": node.attempt,   # P0-1 attempt guard
+                         "metric": res.metric,
                          "stdout_tail": self._redact(res.stdout[-500:]), "eval_seconds": total_eval,
                          "extra_metrics": res.extra_metrics or {},   # #5 multi-objective
                          "violations": res.violations or [],
@@ -379,8 +381,8 @@ class EvaluateMixin:
                     # `err`/`reason` were computed in the attempt loop (reason may be "idea_rejected"
                     # if the crash-triage agent judged the idea fundamentally wrong).
                     sp.set("error_reason", reason)
-                    data = {"node_id": node_id, "error": err, "reason": reason,
-                            "eval_seconds": total_eval}
+                    data = {"node_id": node_id, "attempt": node.attempt,   # P0-1 attempt guard
+                            "error": err, "reason": reason, "eval_seconds": total_eval}
                     if res.failed_stage:                # Phase 1: pinpoint which pipeline stage broke
                         data["failed_stage"] = res.failed_stage
                     if triage_outcome is not None:

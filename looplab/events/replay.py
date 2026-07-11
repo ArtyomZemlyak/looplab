@@ -161,9 +161,19 @@ def _on_node_created(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     if st.building and st.building.get("node_id") == n.id:
         st.building = None          # the real node is here now — drop the "building" marker
 
+def _attempt_matches(n, d: dict) -> bool:
+    """P0-1 attempt guard: a node terminal (node_evaluated/node_failed) is honored only if the
+    `attempt` it was stamped with still matches the node's current attempt generation. `node_reset`
+    bumps `n.attempt`, so a LATE terminal from an abandoned attempt (its eval was in flight when the
+    reset happened) carries the OLD attempt and is dropped — it can't land as first-terminal-after-
+    reset and accept a metric/cost from discarded code. Old logs don't stamp `attempt`; defaulting to
+    `n.attempt` makes them always match, so legacy runs fold byte-identically."""
+    return d.get("attempt", n.attempt) == n.attempt
+
+
 def _on_node_evaluated(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     n = st.nodes.get(d.get("node_id"))          # tolerate an event for an unknown/missing node
-    if n is not None:                           # (corrupt/hand-edited log) — skip, don't crash
+    if n is not None and _attempt_matches(n, d):   # (corrupt/hand-edited log) — skip, don't crash
         # Idempotent (C4): only a node's FIRST terminal event contributes its eval time, so
         # a duplicate node_evaluated/node_failed (corrupt log / double-fold) can't inflate
         # total_eval_seconds or make the budget order-dependent.
@@ -198,7 +208,7 @@ def _on_node_failed(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     if st.building and st.building.get("node_id") == d.get("node_id"):
         st.building = None
     n = st.nodes.get(d.get("node_id"))
-    if n is not None:
+    if n is not None and _attempt_matches(n, d):
         # First-terminal-wins for the whole node (see node_evaluated above): a conflicting
         # second terminal from a corrupt log must not flip an already-evaluated node to failed.
         first_terminal = n.status is NodeStatus.pending
@@ -243,6 +253,10 @@ def _on_node_reset(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     n = st.nodes.get(d.get("node_id"))
     if n is not None:
         stage = d.get("from_stage", "eval")
+        # Bump the attempt generation (P0-1): the engine stamps this on the re-eval's terminal, and a
+        # LATE terminal from the attempt this reset abandons carries the OLD generation and is dropped
+        # by `_attempt_matches` — so an in-flight pre-reset eval can't land its metric on the new code.
+        n.attempt += 1
         n.status = NodeStatus.pending
         n.metric = None
         n.error = ""
