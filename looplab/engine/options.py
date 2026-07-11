@@ -3,7 +3,7 @@
 Before this module, every engine knob cost FOUR edits: a `Settings` field, a ~1-line passthrough in
 `cli.py::_engine`, an `Engine.__init__` keyword, and a `self._x` assign. The Settings→Engine
 passthrough is now a single `options=EngineOptions.from_settings(settings)`; the Engine resolves each
-knob as: explicitly passed kwarg > `options` field > default (see `_UNSET` in orchestrator.py). The
+knob as: explicitly passed kwarg > `options` field > default (see `_UNSET` below). The
 ~100 existing `Engine(...)` keyword call sites keep working unchanged.
 
 How to add an engine knob now:
@@ -21,6 +21,13 @@ DIFFER from the engine defaults (e.g. merge_mode="auto", report_every=3): Settin
 opinionated product surface, the engine default is the conservative library behavior.
 """
 from __future__ import annotations
+
+# BACKLOG §4: THE engine sentinel for "keyword not passed" — used by every pure-config
+# Engine.__init__ knob AND by `_run_eval(start_stage=…)` (the engine passes it through
+# `_evaluate`'s `next_start`), so knob resolution and the stage-reuse identity check share ONE
+# object across orchestrator.py and the eval_dispatch mixin. It distinguishes "not passed" from
+# any REAL value, including None/0/False.
+_UNSET = object()
 
 import dataclasses
 from dataclasses import dataclass
@@ -106,7 +113,12 @@ class EngineOptions:
     # rebuild policies with the same run-wide settings.
     debug_depth: int = 1                 # T10: debug-lineage bound for every policy
     operator_bandit: bool = False        # P4: deterministic UCB over operator yields (GreedyTree)
-    novelty_semantic: bool = True        # T5: embedding-similarity idea dedup (needs novelty_gate)
+    # T5 embedding-similarity dedup inside the "algo" gate. False matches the Settings default
+    # and the documented rationale (novelty is the agentic Researcher's job by default): the old
+    # True made a direct `Engine(novelty_gate=True)` behave differently from the identical
+    # product config — the one inversion in the deliberate Settings-vs-Engine divergence table
+    # (tests/test_options_divergence.py). Deliberate library-default change (docs/15 §P4.4).
+    novelty_semantic: bool = False
     novelty_semantic_threshold: float = 0.92
     digest_char_cap: int = 0             # M5: digest prompt budget; 0 = auto-scale with run size
     research_verify: bool = True         # D8: verify memo claims against cited evidence

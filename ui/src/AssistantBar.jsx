@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react'
 import { Turn, PermCard } from './AssistantChat.jsx'
 import { OpIcon } from './icons.jsx'
+import { usePoll } from './hooks.js'
 import {
   CONTROL, get, fmtAgo, ASSISTANT_MODES as MODES, tokText, assistantCreate, assistantMessageStream,
   assistantCommands, assistantRevert, assistantSessions, assistantGet, assistantDelete,
@@ -132,12 +133,7 @@ export default function AssistantBar({ runId, hidden = false }) {
   }, [view, sideW])
 
   useEffect(() => { assistantCommands().then(r => setCommands(r.commands || [])).catch(() => {}) }, [])
-  useEffect(() => {
-    let alive = true
-    const load = () => get('/api/runs').then(r => alive && setRuns(r || [])).catch(() => {})
-    load(); const t = setInterval(load, 6000)
-    return () => { alive = false; clearInterval(t) }
-  }, [])
+  usePoll((alive) => get('/api/runs').then(r => alive() && setRuns(r || [])).catch(() => {}), 6000, [])
   const runsById = React.useMemo(() => Object.fromEntries(runs.map(r => [r.run_id, r])), [runs])
   const refreshSessions = () => assistantSessions().then(r => setSessions(r.sessions || [])).catch(() => {})
   useEffect(() => { if (view === 'full') refreshSessions() }, [view])

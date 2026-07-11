@@ -11,10 +11,9 @@ import anyio
 import orjson
 from fastapi import APIRouter, HTTPException, Request
 
-from looplab.core.atomicio import atomic_write_bytes, best_effort_fsync
+from looplab.core.atomicio import best_effort_fsync
 from looplab.core.config import Settings
-from looplab.events.eventstore import EventStore
-from looplab.events.replay import fold
+from looplab.events.eventstore import EventStore, write_jsonl_atomic
 from looplab.events.types import EV_INJECT_NODE, EV_NODE_RESET
 from looplab.serve.appstate import _RESERVED_RUN_IDS
 from looplab.serve.engine_proc import _engine_alive, _spawn_engine
@@ -74,7 +73,7 @@ def _defaults_backend_llm(task_spec: Optional[dict], task_file: Optional[str],
 
 def build_router(srv) -> APIRouter:
     router = APIRouter()
-    _run_dir, _events, root = srv.run_dir, srv.events, srv.root
+    _run_dir, root = srv.run_dir, srv.root
 
     # ------------------------------------------------------------------ control
     @router.post("/api/runs/{run_id}/control")
@@ -98,7 +97,7 @@ def build_router(srv) -> APIRouter:
             stage = str(data.get("from_stage", "eval")).strip()
             if not stage or len(stage) > 64:
                 raise HTTPException(400, "from_stage must be a non-empty stage name")
-            if nid not in fold(_events(rd)).nodes:
+            if nid not in srv.state(rd).nodes:
                 raise HTTPException(404, f"no node #{nid} in this run")
             data = {"node_id": nid, "from_stage": stage}
         # Cross-run import: an inject seeded from a sibling run. Resolve the source experiment from disk
@@ -110,7 +109,7 @@ def build_router(srv) -> APIRouter:
                 sn = int(data.pop("source_node"))
             except (TypeError, ValueError):
                 raise HTTPException(400, "source_node must be an integer")
-            sst = fold(_events(_run_dir(sr)))            # 404 if the sibling run doesn't exist
+            sst = srv.state(_run_dir(sr))            # 404 if the sibling run doesn't exist
             snode = sst.nodes.get(sn)
             if snode is None:
                 raise HTTPException(404, f"no experiment #{sn} in run {sr}")
@@ -125,9 +124,7 @@ def build_router(srv) -> APIRouter:
             # to replay `deleted` because a sibling shares this task's pristine repo base (same task_id).
             data["files"] = dict(snode.files)
             data["deleted"] = list(snode.deleted)
-            data["origin"] = {"run_id": sr, "node_id": sn,
-                              "metric": snode.confirmed_mean if snode.confirmed_mean is not None
-                              else snode.metric}
+            data["origin"] = {"run_id": sr, "node_id": sn, "metric": snode.robust_metric}
         # Fresh EventStore per write (single-writer discipline): it rescans last seq before append.
         ev = EventStore(rd / "events.jsonl").append(etype, data)
         return {"ok": True, "seq": ev.seq, "type": etype}
@@ -174,7 +171,7 @@ def build_router(srv) -> APIRouter:
         # sub-second post-finish tail: llm_cost append + readmodel build). fold().finished alone has a
         # window where st.finished is True but the engine is still the sole writer; _engine_alive closes
         # it, matching resume_run. Archiving events.jsonl out from under a live engine corrupts the log.
-        if _engine_alive(rd) or not fold(_events(rd)).finished:
+        if _engine_alive(rd) or not srv.state(rd).finished:
             raise HTTPException(409, "run is still active — stop it first (Replay resets a finished run)")
         task_file = _task_file_for(rd)
         if not task_file:
@@ -234,7 +231,7 @@ def build_router(srv) -> APIRouter:
                 kept.append(o)
         if removed:
             # Atomic temp+rename so a crash mid-write can't truncate spans.jsonl to a partial trace.
-            atomic_write_bytes(sp, b"".join(orjson.dumps(o) + b"\n" for o in kept))
+            write_jsonl_atomic(sp, kept)
         return {"ok": True, "removed": removed, "kept": len(kept)}
 
     @router.post("/api/start")

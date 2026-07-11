@@ -145,7 +145,7 @@ class HoldoutGrader:
         flagged = flagged_node_ids(state)
 
         def _key(n):
-            return ((n.confirmed_mean if n.confirmed_mean is not None else n.metric), n.id)
+            return (n.robust_metric, n.id)
         pool = sorted((n for n in state.feasible_nodes() if n.id not in flagged),
                       key=_key, reverse=(state.direction == "max"))
         return [n.id for n in pool[: self._e._holdout_top_k]]

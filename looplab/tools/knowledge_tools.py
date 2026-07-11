@@ -12,6 +12,7 @@ import re
 from pathlib import Path
 
 from looplab.core import _pathsafe
+from looplab.events.eventstore import read_jsonl_lenient
 from looplab.tools._base import fn_spec
 from looplab.tools.retrieval import glob_files, grep, read_file
 from looplab.tools.vectorstore import InMemoryVectorStore, Item, cosine, hash_embed
@@ -207,15 +208,10 @@ class KnowledgeTools:
                 recs.append((p, Path(p).name + " " + text, {"path": p, "text": text}))
         # Cross-run memory (I19): past best solutions become searchable knowledge.
         if self.cases_path and self.cases_path.exists():
-            for i, line in enumerate(self.cases_path.read_text(encoding="utf-8").splitlines()):
-                line = line.strip()
-                if not line:
-                    continue
-                try:                       # a single malformed case line must not kill indexing
-                    c = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                if not isinstance(c, dict):
+            # keep_bad=True: `i` is the RAW line number — the stable "case:<i>" record id.
+            for i, c in enumerate(read_jsonl_lenient(self.cases_path, loads=json.loads,
+                                                     keep_bad=True)):
+                if c is None:              # a single malformed case line must not kill indexing
                     continue
                 text = (f"PAST CASE — task {c.get('task_id')}: {c.get('goal','')}\n"
                         f"best params={c.get('params')} metric={c.get('metric')}\n"

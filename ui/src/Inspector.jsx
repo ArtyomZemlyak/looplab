@@ -1,5 +1,6 @@
 import React, { useEffect, useState, useRef } from 'react'
 import { get, fmt, fmtInt, isSweep, spanDetail, nodeConversation, CONTROL, clearNodeTrace } from './util.js'
+import { usePoll } from './hooks.js'
 import { Trajectory, ParallelCoords, Scatter, MetricLines } from './charts.jsx'
 import { groupAggregate } from './grouping.js'
 import { mergeSummary, nodeChip } from './report.js'
@@ -75,13 +76,9 @@ export default function Inspector({ runId, nodeId, state, live, tab, setTab, onT
   const latestId = Math.max(-1, ...Object.keys(state?.nodes || {}).map(Number))
   const evaluatingThis = nodeStatus === 'pending' && !live?.paused && Number(nodeId) === latestId
   const nodeWorking = engineActive && (live.building?.node_id === nodeId || evaluatingThis)
-  useEffect(() => {
-    if (!nodeWorking) return
-    const iv = setInterval(() => {
-      get(`/api/runs/${runId}/nodes/${nodeId}`).then(d => { if (d) setDetail(d) }).catch(() => {})
-    }, 4000)
-    return () => clearInterval(iv)
-  }, [runId, nodeId, nodeWorking])
+  usePoll(() => {
+    get(`/api/runs/${runId}/nodes/${nodeId}`).then(d => { if (d) setDetail(d) }).catch(() => {})
+  }, 4000, [runId, nodeId, nodeWorking], { enabled: nodeWorking, immediate: false })
 
   if (nodeId == null) return <div className="insp-empty">Select a node to inspect its idea, code, metrics, trust, and agent trace.</div>
   const n = detail || (state.nodes[nodeId])
@@ -671,19 +668,16 @@ function Conversation({ n, runId, working, allOpen = true, reloadNonce = 0 }) {
   const [conv, setConv] = useState(null)
   const [logs, setLogs] = useState({})   // {eval, stages:{train,score,…}} — the live stage/eval logs
   useEffect(() => {
-    let on = true
     setConv(null)   // node changed → clear before the first load (poll ticks below don't clear, so no flash)
     setLogs({})     // …likewise the logs, else B's stage bands briefly render A's log text
-    const load = () => {
-      nodeConversation(runId, n.id).then(d => on && setConv(d || { stages: [] })).catch(() => on && setConv({ stages: [] }))
-      // Stage/eval logs ride ALONGSIDE the trace now (moved out of the old Training tab): each stage
-      // band renders its own live log inside it, so opening "Train" shows the training output in place.
-      get(`/api/runs/${runId}/nodes/${n.id}/logs`).then(d => on && setLogs(d || {})).catch(() => {})
-    }
-    load()
-    const iv = working ? setInterval(load, 4000) : null   // live-refresh while the agent works this node
-    return () => { on = false; if (iv) clearInterval(iv) }
-  }, [runId, n.id, working, reloadNonce])   // reloadNonce bumps after a "clear trace" so the band list refreshes
+  }, [runId, n.id, working, reloadNonce])
+  usePoll((alive) => {
+    nodeConversation(runId, n.id).then(d => alive() && setConv(d || { stages: [] })).catch(() => alive() && setConv({ stages: [] }))
+    // Stage/eval logs ride ALONGSIDE the trace now (moved out of the old Training tab): each stage
+    // band renders its own live log inside it, so opening "Train" shows the training output in place.
+    get(`/api/runs/${runId}/nodes/${n.id}/logs`).then(d => alive() && setLogs(d || {})).catch(() => {})
+  }, working ? 4000 : null,   // interval only while the agent works this node (live-refresh); null = load once
+  [runId, n.id, working, reloadNonce])   // reloadNonce bumps after a "clear trace" so the band list refreshes
   if (conv === null) return <div className="muted" style={{ fontSize: 12 }}>loading…</div>
   const stages = conv.stages || []
   if (!stages.length) return <div className="muted">No conversation captured for this node yet.</div>
@@ -850,14 +844,11 @@ function MetricCurves({ runId, nodeId, status }) {
   const done = ['evaluated', 'failed', 'confirmed'].includes(status)
   useEffect(() => {
     if (nodeId == null) return
-    let on = true
     setMetrics({})    // node changed → drop the previous node's curves before the first fetch resolves
-    const load = () => get(`/api/runs/${runId}/nodes/${nodeId}/metrics`)
-      .then(d => on && setMetrics((d && d.metrics) || {})).catch(() => {})
-    load()
-    const iv = setInterval(load, done ? 15000 : 3000)
-    return () => { on = false; clearInterval(iv) }
   }, [runId, nodeId, done])
+  usePoll((alive) => get(`/api/runs/${runId}/nodes/${nodeId}/metrics`)
+    .then(d => alive() && setMetrics((d && d.metrics) || {})).catch(() => {}),
+    done ? 15000 : 3000, [runId, nodeId, done], { enabled: nodeId != null })
   return <MetricLines series={metrics} />
 }
 

@@ -127,18 +127,30 @@ class NoveltyGateMixin:
             hint = (f"\nNOVELTY GATE (LLM): your proposal near-duplicates experiment #{dup.id} — "
                     f"{outcome} ({str(v.reason)[:160]}). Propose something MEANINGFULLY DIFFERENT "
                     "(another approach, component or direction), not a rewording.")
-            prev = getattr(self.researcher, "_novelty_feedback", "")
-            setattr(self.researcher, "_novelty_feedback", hint)
-            try:
-                idea2 = repropose()
-                if idea2 is not None:
-                    idea = idea2
-            except BudgetExceeded:
-                raise
-            except Exception:  # noqa: BLE001
-                pass
-            finally:
-                setattr(self.researcher, "_novelty_feedback", prev)
+            idea = self._repropose_with_feedback(repropose, hint, idea)
+        return idea
+
+    def _repropose_with_feedback(self, repropose, hint: str, idea: Idea) -> Idea:
+        """One informed re-propose with the duplicate surfaced as a TRANSIENT `_novelty_feedback`
+        directive (shared by the LLM and semantic gates — the set/try/finally-restore discipline
+        must stay identical in both). `BudgetExceeded` re-raises (the hard budget stop must end the
+        run, not be swallowed); any other repropose failure keeps the original idea. The `finally`
+        ALWAYS restores the previous feedback, even if repropose() raised: otherwise this transient
+        "you are duplicating #N" directive leaks into EVERY later proposal in the run — including
+        drafts in unrelated regions — permanently mis-steering the researcher away from a direction
+        the operator never banned."""
+        prev = getattr(self.researcher, "_novelty_feedback", "")
+        setattr(self.researcher, "_novelty_feedback", hint)
+        try:
+            idea2 = repropose()
+            if idea2 is not None:
+                idea = idea2
+        except BudgetExceeded:
+            raise
+        except Exception:  # noqa: BLE001 — a repropose failure keeps the original idea
+            pass
+        finally:
+            setattr(self.researcher, "_novelty_feedback", prev)
         return idea
 
     def _apply_novelty_gate(self, state: RunState, idea: Idea, repropose=None) -> Idea:
@@ -169,7 +181,7 @@ class NoveltyGateMixin:
             return idea
         import random as _random
 
-        from looplab.events.digest import param_distance
+        from looplab.events.digest import numeric_params, param_distance
 
         if self._novelty_semantic:
             dup, sim = self._semantic_duplicate(state, idea)
@@ -187,24 +199,9 @@ class NoveltyGateMixin:
                             f"#{dup.id} ('{self._idea_text(dup.idea)[:160]}') — {outcome}. "
                             "Propose something MEANINGFULLY DIFFERENT (another approach, "
                             "component or direction), not a rewording.")
-                    prev = getattr(self.researcher, "_novelty_feedback", "")
-                    setattr(self.researcher, "_novelty_feedback", hint)
-                    try:
-                        idea2 = repropose()
-                        if idea2 is not None:
-                            idea = idea2
-                    except BudgetExceeded:      # the hard budget stop must end the run, not be swallowed
-                        raise
-                    except Exception:  # noqa: BLE001 — a repropose failure keeps the original idea
-                        pass
-                    finally:
-                        # ALWAYS restore, even if repropose() raised: otherwise this transient
-                        # "you are duplicating #N" directive leaks into EVERY later proposal in the
-                        # run — including drafts in unrelated regions — permanently mis-steering the
-                        # researcher away from a direction the operator never banned.
-                        setattr(self.researcher, "_novelty_feedback", prev)
+                    idea = self._repropose_with_feedback(repropose, hint, idea)
 
-        params = {k: float(v) for k, v in idea.params.items() if isinstance(v, (int, float))}
+        params = numeric_params(idea.params)
         if not params:
             return idea
 

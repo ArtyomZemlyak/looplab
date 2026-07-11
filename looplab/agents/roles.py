@@ -145,13 +145,30 @@ class Developer(Protocol):
     def implement(self, idea: Idea) -> str: ...
 
 
+# Duck-typed OUTPUT attributes the engine reads off the ACTIVE Developer/Researcher after a
+# call (docs/15 §P4.3) — the mirror of RESEARCHER_HINT_ATTRS for the outbound direction. The
+# engine reads them with `getattr(..., default)`, so a one-sided rename historically failed
+# SILENTLY (an empty node shipped with no diagnostic; the pilot quietly reverted to the static
+# policy). `tests/test_role_output_contract.py` source-scans BOTH sides against these tuples:
+# every consumer getattr and every producer assignment must use exactly these names, and every
+# delegating wrapper (ValidatingDeveloper, best-of-N, the foresight panel) must forward them.
+DEVELOPER_OUTPUT_ATTRS: tuple[str, ...] = (
+    "last_files", "last_deleted",
+    # CLI-agent (ADR-7) developer outputs: the validation report the engine's audit emitter
+    # reads (engine/audit.py `_emit_agent_report`), and the seed/process/patch evidence the
+    # ValidatingDeveloper's checks consume. Surfaced by the contract test's own first run —
+    # the original census had missed all four.
+    "last_report", "last_seed", "last_run", "last_patch")
+RESEARCHER_ACTION_ATTRS: tuple[str, ...] = ("choose_action",)
+
 RESEARCHER_HINT_ATTRS: tuple[str, ...] = (
     "_digest_cap", "_complexity_hint", "_sweep_hint", "_novelty_feedback", "_novelty_hint",
     "_novelty_stance", "_hyp_order")
 """Ephemeral hint attributes communicated to the ACTIVE Researcher via `setattr` and consumed
-with `getattr(obj, name, default)`. Writers: the engine (orchestrator.py — `_digest_cap` in
-`__init__`, `_complexity_hint`/`_sweep_hint` in `_set_complexity_hint`, `_novelty_hint` +
-`_novelty_stance` in `_stamp_novelty_hint`, `_novelty_feedback` in the novelty gate) and the
+with `getattr(obj, name, default)`. Writers: the engine (`_digest_cap` in orchestrator.py
+`__init__`; `_complexity_hint`/`_sweep_hint` in engine/proposal_cues.py `_set_complexity_hint`;
+`_novelty_hint` + `_novelty_stance` in proposal_cues.py `_stamp_novelty_hint`;
+`_novelty_feedback` in engine/novelty.py's gate) and the
 foresight panel (search/foresight.py `_prioritize_board` sets `_hyp_order` — the predicted
 best-first board order — on its wrapped researcher). Readers: `LLMResearcher.propose` (below)
 and agent.py's `ToolUsingResearcher.propose` read the text cues and thread `_hyp_order` into

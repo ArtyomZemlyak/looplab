@@ -174,6 +174,17 @@ class Node(BaseModel):
     # only (a 💡 chip) — shows where research landed in the tree; never affects search/selection.
     research_origin: Optional[dict] = None
 
+    @property
+    def robust_metric(self) -> Optional[float]:
+        """The metric used for ranking/display: the multi-seed confirmed mean when present, else the
+        raw metric. THE single spelling of "robust metric" — previously copy-pasted at a dozen call
+        sites (replay/_select_best, digest, holdout, lessons, exporters, UI, cli, bench), where the
+        copies could drift. Holdout precedence deliberately stays OUT of this property: holdout-gated
+        selection layers `holdout_metric` on top explicitly (see replay._select_best). A plain
+        @property (not a pydantic field/computed_field): excluded from model_dump, so event/snapshot
+        serialization is byte-identical."""
+        return self.confirmed_mean if self.confirmed_mean is not None else self.metric
+
 
 def hypothesis_id(statement: str) -> str:
     """Stable id for a hypothesis statement so the same claim (from different ideas / a human /
@@ -258,7 +269,16 @@ class Event(BaseModel):
 
 
 class RunState(BaseModel):
-    """Pure fold of the event log ([ADR-12]). Never mutated except by `replay.fold`."""
+    """Pure fold of the event log ([ADR-12]). Never mutated except by `replay.fold`.
+
+    Field regions (docs/15 §P5.3 — banners, deliberately NOT nested sub-models: readers spell
+    `st.<field>` at dozens of sites and the flat shape is additive-safe):
+      1. core run state (below)            — selection-relevant: nodes/best/gates/budget;
+      2. live operator control             — the `<x>_requests`/`<x>s_done` counter pairs (see
+         engine invariant #3: every side effect gates on a domain event);
+      3. audit-only sidecars               — folded for the UI/exports; NEVER touch selection;
+      4. read helpers                      — derived views, no mutation."""
+    # --- core run state (selection-relevant) ---
     run_id: str = ""
     task_id: str = ""
     goal: str = ""
@@ -366,6 +386,7 @@ class RunState(BaseModel):
     pending_strategy: Optional[dict] = None
     # A1 ASHA: rung-promotion audit trail {rung, survivors} for the UI (successive-halving view).
     rungs: list[dict] = Field(default_factory=list)
+    # --- audit-only sidecars (folded for the UI/exports; NEVER touch selection) ---
     # Unified self-driving agent (audit-only; never read by best-selection): timeline of the agent's
     # macro-action choices {at_node, chosen, legal, recommended, rationale} for the "why this action"
     # view. Additive — old event logs without `agent_decision` events fold to an empty list.

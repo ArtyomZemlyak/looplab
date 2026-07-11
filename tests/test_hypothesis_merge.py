@@ -115,8 +115,13 @@ def test_engine_pass_writes_merge_events_gated(tmp_path, monkeypatch):
     # leaked `orch.fold` (returning this fixed st with empty .nodes) made a real Engine's `_create_node`
     # compute node_id=max({},default=-1)+1==0 forever, spinning the whole suite (184MB log / 95% CPU).
     monkeypatch.setattr(hm, "consolidate", fake_consolidate)
+    # `_maybe_merge_hypotheses` moved to engine/research_cadence.py, which binds `fold` from its
+    # canonical home — patch BOTH modules so the returned state stays simple for the assertion
+    # (the orchestrator patch alone stopped reaching it after the mixin extraction).
     import looplab.engine.orchestrator as orch
-    monkeypatch.setattr(orch, "fold", lambda evs: st)   # keep the returned state simple for the assertion
+    import looplab.engine.research_cadence as rc
+    monkeypatch.setattr(orch, "fold", lambda evs: st)
+    monkeypatch.setattr(rc, "fold", lambda evs: st)
 
     eng._maybe_merge_hypotheses(st)
     rows = list(EventStore(tmp_path / "events.jsonl").read_all())

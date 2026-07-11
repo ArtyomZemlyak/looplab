@@ -17,6 +17,7 @@ import math
 from typing import Optional
 
 from looplab.core.models import Node, RunState
+from looplab.events.digest import knn_idw
 
 
 class ProxyScorer:
@@ -31,6 +32,9 @@ class ProxyScorer:
 
     @staticmethod
     def _numeric(params: dict) -> dict:
+        # Deliberately NOT digest.numeric_params: this variant also coerces numeric STRINGS
+        # ("0.1" -> 0.1) via try/float, because generated solutions sometimes emit params as
+        # strings and the proxy should still rank them. Do not "unify" the two.
         out = {}
         for key, v in (params or {}).items():
             try:
@@ -55,14 +59,10 @@ class ProxyScorer:
                 continue
             dist = math.sqrt(sum((target[key] - p[key]) ** 2 for key in keys))
             neighbours.append((dist, n.metric))
-        if not neighbours:
-            return None
-        neighbours.sort(key=lambda t: t[0])
-        nn = neighbours[: self.k]
-        if any(d == 0.0 for d, _ in nn):                  # exact param match -> its metric
-            return next(m for d, m in nn if d == 0.0)
-        wsum = sum(1.0 / d for d, _ in nn)
-        return sum((1.0 / d) * m for d, m in nn) / wsum
+        # Shared IDW core (exact param match -> its metric via the zero-distance short-circuit;
+        # the pre-extraction `any(d==0)` + first-zero pick is the same sample after the sort).
+        res = knn_idw(neighbours, self.k)
+        return None if res is None else res[0]
 
     def should_skip(self, state: RunState, node: Node, predicted: float) -> bool:
         """Skip iff (a) past warmup, (b) kill_fraction > 0, and (c) the predicted metric falls in the

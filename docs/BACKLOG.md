@@ -44,8 +44,8 @@ it builds on). B6 parked per user decision.
 - ✅ **C1 (partial)** — `RepoTask._eval_protected` now protects *every* file-based reader (primary
   metric + `metrics` + `constraints` + drift `cross_check`); protected-name normalization (`_normp`);
   Docker `--pids-limit 1024` on both untrusted paths. *(commit 9722226)*
-- ✅ **C2 (partial)** — child process no longer inherits host secrets: `sandbox._run_argv` filters
-  `_SECRET_ENV`-matching vars out of the child env ([sandbox.py:112](../looplab/runtime/sandbox.py)).
+- ✅ **C2 (partial)** — child process no longer inherits host secrets: `sandbox.run_argv` filters
+  `SECRET_ENV`-matching vars out of the child env ([sandbox.py](../looplab/runtime/sandbox.py)).
 - ✅ **C3 (partial)** — CORS narrowed from `*` to a localhost allow-list (`LOOPLAB_UI_CORS` override);
   SPA fallback `GET /{path:path}` now resolve-guards against traversal ([server.py:739](../looplab/serve/server.py)).
 - ✅ **C4 (partial)** — `replay.fold` is idempotent for terminal node events (duplicate
@@ -350,8 +350,9 @@ reused-stage fold record). What remains open or was dismissed:
   `run_command_eval` return the resolved stage list on `RunResult` (it already
   returns `failed_stage`), so the repair loop inspects exactly what ran.
 - ⬜ **P2 · unify the launch-readiness gate (S–M).** "Is this task launchable" now
-  lives in 3 parallel copies — `EvalSpec._command_or_stages` (backend truth),
-  `serve/tui.py::spec_ready`, `ui/src/GenesisChat.jsx` — and this range was itself
+  lives in 2 parallel copies — `EvalSpec._command_or_stages` (backend truth) and
+  `serve/tui.py::spec_ready` (the third, `ui/src/GenesisChat.jsx`, was deleted as dead
+  UI 2026-07) — and this range was itself
   the drift repair (both frontends had to learn stages-only cmd + dataset mounts).
   Expose one server-side `validate_task` dry-run (e.g. `/api/validate`) both
   frontends call, instead of re-deriving the rules in Python + JS.

@@ -1,0 +1,696 @@
+{
+  "ablate_requests": [],
+  "ablations": [],
+  "aborted_nodes": [],
+  "active_strategy": null,
+  "agent_decisions": [],
+  "annotations": {},
+  "approved": false,
+  "archive": {
+    "elites": [
+      {
+        "metric": 4.482711760000001,
+        "node_id": 7,
+        "params": {
+          "x": 0.885,
+          "y": -0.9026
+        }
+      },
+      {
+        "metric": 5.57026258,
+        "node_id": 5,
+        "params": {
+          "x": 1.2187,
+          "y": -2.5483
+        }
+      },
+      {
+        "metric": 6.688963449999999,
+        "node_id": 6,
+        "params": {
+          "x": 0.7221,
+          "y": -2.2248
+        }
+      },
+      {
+        "metric": 8.51019194,
+        "node_id": 2,
+        "params": {
+          "x": 0.2255,
+          "y": -1.9013
+        }
+      },
+      {
+        "metric": 9.73679185,
+        "node_id": 3,
+        "params": {
+          "x": 0.4047,
+          "y": -2.7324
+        }
+      },
+      {
+        "metric": 17.17538701,
+        "node_id": 4,
+        "params": {
+          "x": -1.0835,
+          "y": -1.7074
+        }
+      },
+      {
+        "metric": 35.66064084999999,
+        "node_id": 1,
+        "params": {
+          "x": -1.5886,
+          "y": -4.8217
+        }
+      },
+      {
+        "metric": 53.054167369999995,
+        "node_id": 0,
+        "params": {
+          "x": 6.8884,
+          "y": 5.1591
+        }
+      }
+    ],
+    "niches": 8,
+    "resolution": 1.0
+  },
+  "awaiting_approval": false,
+  "best_node_id": 7,
+  "breed_excluded": [],
+  "budget_overrides": {},
+  "building": null,
+  "champion": null,
+  "config_hash": "1f0bc827ac74",
+  "confirm_requests": [],
+  "confirm_seed_results": {},
+  "confirmed_done": false,
+  "confirmed_forced": [],
+  "coverage_snapshots": [
+    {
+      "at_node": 3,
+      "dominant_theme_frac": 0.0,
+      "niches": 3,
+      "nodes": 3,
+      "operators": 1,
+      "recent_dominant_frac": 0.0,
+      "theme_entropy": 0.0,
+      "themes": 0,
+      "top_themes": []
+    },
+    {
+      "at_node": 6,
+      "dominant_theme_frac": 0.0,
+      "niches": 6,
+      "nodes": 6,
+      "operators": 2,
+      "recent_dominant_frac": 0.0,
+      "theme_entropy": 0.0,
+      "themes": 0,
+      "top_themes": []
+    }
+  ],
+  "data_profile": null,
+  "data_provenance": null,
+  "direction": "min",
+  "drifts": [],
+  "finished": true,
+  "foresight_selected": [],
+  "fork_requests": [],
+  "forks_done": 0,
+  "goal": "min (x-3)^2",
+  "holdout_evaluated_ids": [],
+  "holdout_fraction": 0.25,
+  "holdout_select": true,
+  "host_grading": null,
+  "hypotheses": {},
+  "hypotheses_abandoned": [],
+  "hypotheses_added": [],
+  "hypotheses_deleted": [],
+  "hypotheses_merged": [],
+  "hypothesis_ranking": null,
+  "inject_requests": [],
+  "injects_done": 0,
+  "leakage": null,
+  "lessons_distilled": [
+    {
+      "at_node": 4,
+      "count": 1,
+      "lessons": [
+        {
+          "evidence": [
+            3,
+            2
+          ],
+          "outcome": "failed",
+          "statement": "changing x 0.2255->0.4047, y -1.9013->-2.7324 regressed the metric by 1.227"
+        }
+      ],
+      "pairs": [
+        [
+          3,
+          2
+        ]
+      ],
+      "trigger": "cadence"
+    },
+    {
+      "at_node": 8,
+      "count": 3,
+      "lessons": [
+        {
+          "evidence": [
+            4,
+            2
+          ],
+          "outcome": "failed",
+          "statement": "changing x 0.2255->-1.0835, y -1.9013->-1.7074 regressed the metric by 8.665"
+        },
+        {
+          "evidence": [
+            5,
+            2
+          ],
+          "outcome": "supported",
+          "statement": "changing x 0.2255->1.2187, y -1.9013->-2.5483 improved the metric by 2.94"
+        },
+        {
+          "evidence": [
+            6,
+            2
+          ],
+          "outcome": "supported",
+          "statement": "changing x 0.2255->0.7221, y -1.9013->-2.2248 improved the metric by 1.821"
+        }
+      ],
+      "pairs": [
+        [
+          4,
+          2
+        ],
+        [
+          5,
+          2
+        ],
+        [
+          6,
+          2
+        ]
+      ],
+      "trigger": "cadence"
+    },
+    {
+      "at_node": 8,
+      "count": 2,
+      "lessons": [
+        {
+          "evidence": [
+            6,
+            5
+          ],
+          "outcome": "failed",
+          "statement": "changing x 1.2187->0.7221, y -2.5483->-2.2248 regressed the metric by 1.119"
+        },
+        {
+          "evidence": [
+            7,
+            5
+          ],
+          "outcome": "supported",
+          "statement": "changing x 1.2187->0.885, y -2.5483->-0.9026 improved the metric by 1.088"
+        }
+      ],
+      "pairs": [
+        [
+          6,
+          5
+        ],
+        [
+          7,
+          5
+        ]
+      ],
+      "trigger": "run_end"
+    }
+  ],
+  "lessons_refreshed": [
+    {
+      "at_node": 4,
+      "skipped": "unchanged"
+    },
+    {
+      "at_node": 8,
+      "changed": false,
+      "chars": 830
+    }
+  ],
+  "llm_cost": null,
+  "nodes": {
+    "0": {
+      "agent_report": null,
+      "code": "import json, os, random\n# Generated solution. The objective below is the toy \"ground truth\" the\n# Researcher optimizes blindly via observed metrics only.\nx = 6.8884\ny = 5.1591\nloss = (x - 3.0) ** 2 + (y + 1.0) ** 2\nnoise = 0.0\nif noise:\n    # Seeded eval noise: lets the multi-seed confirmation phase (I12) measure\n    # variance. LOOPLAB_EVAL_SEED is unset (-> \"0\") during normal evaluation, so\n    # search stays deterministic; the confirm phase varies it across seeds.\n    rng = random.Random(int(os.environ.get(\"LOOPLAB_EVAL_SEED\", \"0\")))\n    loss += rng.gauss(0.0, noise)\nprint(json.dumps({\"metric\": loss}))\n",
+      "confirmed_mean": null,
+      "confirmed_seeds": null,
+      "confirmed_std": null,
+      "deleted": [],
+      "error": "",
+      "error_reason": "",
+      "eval_seconds": 0.035,
+      "extra_metrics": {},
+      "failed_stage": null,
+      "feasible": true,
+      "files": {},
+      "generalization_gap": null,
+      "holdout_metric": null,
+      "id": 0,
+      "idea": {
+        "eval_profile": null,
+        "eval_timeout": null,
+        "hypothesis": null,
+        "operator": "draft",
+        "params": {
+          "x": 6.8884,
+          "y": 5.1591
+        },
+        "rationale": "random seed point",
+        "space": {},
+        "theme": null
+      },
+      "metric": 53.054167369999995,
+      "operator": "draft",
+      "origin": null,
+      "parent_ids": [],
+      "rerun_from": null,
+      "rerun_stage": null,
+      "research_origin": null,
+      "stages": [],
+      "status": "evaluated",
+      "stdout_tail": "{\"metric\": 53.054167369999995}\n",
+      "triage_rationale": "",
+      "trials": [],
+      "violations": []
+    },
+    "1": {
+      "agent_report": null,
+      "code": "import json, os, random\n# Generated solution. The objective below is the toy \"ground truth\" the\n# Researcher optimizes blindly via observed metrics only.\nx = -1.5886\ny = -4.8217\nloss = (x - 3.0) ** 2 + (y + 1.0) ** 2\nnoise = 0.0\nif noise:\n    # Seeded eval noise: lets the multi-seed confirmation phase (I12) measure\n    # variance. LOOPLAB_EVAL_SEED is unset (-> \"0\") during normal evaluation, so\n    # search stays deterministic; the confirm phase varies it across seeds.\n    rng = random.Random(int(os.environ.get(\"LOOPLAB_EVAL_SEED\", \"0\")))\n    loss += rng.gauss(0.0, noise)\nprint(json.dumps({\"metric\": loss}))\n",
+      "confirmed_mean": null,
+      "confirmed_seeds": null,
+      "confirmed_std": null,
+      "deleted": [],
+      "error": "",
+      "error_reason": "",
+      "eval_seconds": 0.034,
+      "extra_metrics": {},
+      "failed_stage": null,
+      "feasible": true,
+      "files": {},
+      "generalization_gap": null,
+      "holdout_metric": null,
+      "id": 1,
+      "idea": {
+        "eval_profile": null,
+        "eval_timeout": null,
+        "hypothesis": null,
+        "operator": "draft",
+        "params": {
+          "x": -1.5886,
+          "y": -4.8217
+        },
+        "rationale": "random seed point",
+        "space": {},
+        "theme": null
+      },
+      "metric": 35.66064084999999,
+      "operator": "draft",
+      "origin": null,
+      "parent_ids": [],
+      "rerun_from": null,
+      "rerun_stage": null,
+      "research_origin": null,
+      "stages": [],
+      "status": "evaluated",
+      "stdout_tail": "{\"metric\": 35.66064084999999}\n",
+      "triage_rationale": "",
+      "trials": [],
+      "violations": []
+    },
+    "2": {
+      "agent_report": null,
+      "code": "import json, os, random\n# Generated solution. The objective below is the toy \"ground truth\" the\n# Researcher optimizes blindly via observed metrics only.\nx = 0.2255\ny = -1.9013\nloss = (x - 3.0) ** 2 + (y + 1.0) ** 2\nnoise = 0.0\nif noise:\n    # Seeded eval noise: lets the multi-seed confirmation phase (I12) measure\n    # variance. LOOPLAB_EVAL_SEED is unset (-> \"0\") during normal evaluation, so\n    # search stays deterministic; the confirm phase varies it across seeds.\n    rng = random.Random(int(os.environ.get(\"LOOPLAB_EVAL_SEED\", \"0\")))\n    loss += rng.gauss(0.0, noise)\nprint(json.dumps({\"metric\": loss}))\n",
+      "confirmed_mean": null,
+      "confirmed_seeds": null,
+      "confirmed_std": null,
+      "deleted": [],
+      "error": "",
+      "error_reason": "",
+      "eval_seconds": 0.034,
+      "extra_metrics": {},
+      "failed_stage": null,
+      "feasible": true,
+      "files": {},
+      "generalization_gap": null,
+      "holdout_metric": null,
+      "id": 2,
+      "idea": {
+        "eval_profile": null,
+        "eval_timeout": null,
+        "hypothesis": null,
+        "operator": "draft",
+        "params": {
+          "x": 0.2255,
+          "y": -1.9013
+        },
+        "rationale": "random seed point",
+        "space": {},
+        "theme": null
+      },
+      "metric": 8.51019194,
+      "operator": "draft",
+      "origin": null,
+      "parent_ids": [],
+      "rerun_from": null,
+      "rerun_stage": null,
+      "research_origin": {
+        "at_node": 2,
+        "trigger": "cadence"
+      },
+      "stages": [],
+      "status": "evaluated",
+      "stdout_tail": "{\"metric\": 8.51019194}\n",
+      "triage_rationale": "",
+      "trials": [],
+      "violations": []
+    },
+    "3": {
+      "agent_report": null,
+      "code": "import json, os, random\n# Generated solution. The objective below is the toy \"ground truth\" the\n# Researcher optimizes blindly via observed metrics only.\nx = 0.4047\ny = -2.7324\nloss = (x - 3.0) ** 2 + (y + 1.0) ** 2\nnoise = 0.0\nif noise:\n    # Seeded eval noise: lets the multi-seed confirmation phase (I12) measure\n    # variance. LOOPLAB_EVAL_SEED is unset (-> \"0\") during normal evaluation, so\n    # search stays deterministic; the confirm phase varies it across seeds.\n    rng = random.Random(int(os.environ.get(\"LOOPLAB_EVAL_SEED\", \"0\")))\n    loss += rng.gauss(0.0, noise)\nprint(json.dumps({\"metric\": loss}))\n",
+      "confirmed_mean": null,
+      "confirmed_seeds": null,
+      "confirmed_std": null,
+      "deleted": [],
+      "error": "",
+      "error_reason": "",
+      "eval_seconds": 0.034,
+      "extra_metrics": {},
+      "failed_stage": null,
+      "feasible": true,
+      "files": {},
+      "generalization_gap": null,
+      "holdout_metric": null,
+      "id": 3,
+      "idea": {
+        "eval_profile": null,
+        "eval_timeout": null,
+        "hypothesis": null,
+        "operator": "improve",
+        "params": {
+          "x": 0.4047,
+          "y": -2.7324
+        },
+        "rationale": "perturb best node 2 (metric=8.51019194)",
+        "space": {},
+        "theme": null
+      },
+      "metric": 9.73679185,
+      "operator": "improve",
+      "origin": null,
+      "parent_ids": [
+        2
+      ],
+      "rerun_from": null,
+      "rerun_stage": null,
+      "research_origin": {
+        "at_node": 2,
+        "trigger": "cadence"
+      },
+      "stages": [],
+      "status": "evaluated",
+      "stdout_tail": "{\"metric\": 9.73679185}\n",
+      "triage_rationale": "",
+      "trials": [],
+      "violations": []
+    },
+    "4": {
+      "agent_report": null,
+      "code": "import json, os, random\n# Generated solution. The objective below is the toy \"ground truth\" the\n# Researcher optimizes blindly via observed metrics only.\nx = -1.0835\ny = -1.7074\nloss = (x - 3.0) ** 2 + (y + 1.0) ** 2\nnoise = 0.0\nif noise:\n    # Seeded eval noise: lets the multi-seed confirmation phase (I12) measure\n    # variance. LOOPLAB_EVAL_SEED is unset (-> \"0\") during normal evaluation, so\n    # search stays deterministic; the confirm phase varies it across seeds.\n    rng = random.Random(int(os.environ.get(\"LOOPLAB_EVAL_SEED\", \"0\")))\n    loss += rng.gauss(0.0, noise)\nprint(json.dumps({\"metric\": loss}))\n",
+      "confirmed_mean": null,
+      "confirmed_seeds": null,
+      "confirmed_std": null,
+      "deleted": [],
+      "error": "",
+      "error_reason": "",
+      "eval_seconds": 0.034,
+      "extra_metrics": {},
+      "failed_stage": null,
+      "feasible": true,
+      "files": {},
+      "generalization_gap": null,
+      "holdout_metric": null,
+      "id": 4,
+      "idea": {
+        "eval_profile": null,
+        "eval_timeout": null,
+        "hypothesis": null,
+        "operator": "improve",
+        "params": {
+          "x": -1.0835,
+          "y": -1.7074
+        },
+        "rationale": "perturb best node 2 (metric=8.51019194)",
+        "space": {},
+        "theme": null
+      },
+      "metric": 17.17538701,
+      "operator": "improve",
+      "origin": null,
+      "parent_ids": [
+        2
+      ],
+      "rerun_from": null,
+      "rerun_stage": null,
+      "research_origin": null,
+      "stages": [],
+      "status": "evaluated",
+      "stdout_tail": "{\"metric\": 17.17538701}\n",
+      "triage_rationale": "",
+      "trials": [],
+      "violations": []
+    },
+    "5": {
+      "agent_report": null,
+      "code": "import json, os, random\n# Generated solution. The objective below is the toy \"ground truth\" the\n# Researcher optimizes blindly via observed metrics only.\nx = 1.2187\ny = -2.5483\nloss = (x - 3.0) ** 2 + (y + 1.0) ** 2\nnoise = 0.0\nif noise:\n    # Seeded eval noise: lets the multi-seed confirmation phase (I12) measure\n    # variance. LOOPLAB_EVAL_SEED is unset (-> \"0\") during normal evaluation, so\n    # search stays deterministic; the confirm phase varies it across seeds.\n    rng = random.Random(int(os.environ.get(\"LOOPLAB_EVAL_SEED\", \"0\")))\n    loss += rng.gauss(0.0, noise)\nprint(json.dumps({\"metric\": loss}))\n",
+      "confirmed_mean": null,
+      "confirmed_seeds": null,
+      "confirmed_std": null,
+      "deleted": [],
+      "error": "",
+      "error_reason": "",
+      "eval_seconds": 0.034,
+      "extra_metrics": {},
+      "failed_stage": null,
+      "feasible": true,
+      "files": {},
+      "generalization_gap": null,
+      "holdout_metric": null,
+      "id": 5,
+      "idea": {
+        "eval_profile": null,
+        "eval_timeout": null,
+        "hypothesis": null,
+        "operator": "improve",
+        "params": {
+          "x": 1.2187,
+          "y": -2.5483
+        },
+        "rationale": "perturb best node 2 (metric=8.51019194)",
+        "space": {},
+        "theme": null
+      },
+      "metric": 5.57026258,
+      "operator": "improve",
+      "origin": null,
+      "parent_ids": [
+        2
+      ],
+      "rerun_from": null,
+      "rerun_stage": null,
+      "research_origin": {
+        "at_node": 5,
+        "trigger": "cadence"
+      },
+      "stages": [],
+      "status": "evaluated",
+      "stdout_tail": "{\"metric\": 5.57026258}\n",
+      "triage_rationale": "",
+      "trials": [],
+      "violations": []
+    },
+    "6": {
+      "agent_report": null,
+      "code": "import json, os, random\n# Generated solution. The objective below is the toy \"ground truth\" the\n# Researcher optimizes blindly via observed metrics only.\nx = 0.7221\ny = -2.2248\nloss = (x - 3.0) ** 2 + (y + 1.0) ** 2\nnoise = 0.0\nif noise:\n    # Seeded eval noise: lets the multi-seed confirmation phase (I12) measure\n    # variance. LOOPLAB_EVAL_SEED is unset (-> \"0\") during normal evaluation, so\n    # search stays deterministic; the confirm phase varies it across seeds.\n    rng = random.Random(int(os.environ.get(\"LOOPLAB_EVAL_SEED\", \"0\")))\n    loss += rng.gauss(0.0, noise)\nprint(json.dumps({\"metric\": loss}))\n",
+      "confirmed_mean": null,
+      "confirmed_seeds": null,
+      "confirmed_std": null,
+      "deleted": [],
+      "error": "",
+      "error_reason": "",
+      "eval_seconds": 0.034,
+      "extra_metrics": {},
+      "failed_stage": null,
+      "feasible": true,
+      "files": {},
+      "generalization_gap": null,
+      "holdout_metric": null,
+      "id": 6,
+      "idea": {
+        "eval_profile": null,
+        "eval_timeout": null,
+        "hypothesis": null,
+        "operator": "merge",
+        "params": {
+          "x": 0.7221,
+          "y": -2.2248
+        },
+        "rationale": "mean-merge of nodes 5,2",
+        "space": {},
+        "theme": null
+      },
+      "metric": 6.688963449999999,
+      "operator": "merge",
+      "origin": null,
+      "parent_ids": [
+        5,
+        2
+      ],
+      "rerun_from": null,
+      "rerun_stage": null,
+      "research_origin": {
+        "at_node": 5,
+        "trigger": "cadence"
+      },
+      "stages": [],
+      "status": "evaluated",
+      "stdout_tail": "{\"metric\": 6.688963449999999}\n",
+      "triage_rationale": "",
+      "trials": [],
+      "violations": []
+    },
+    "7": {
+      "agent_report": null,
+      "code": "import json, os, random\n# Generated solution. The objective below is the toy \"ground truth\" the\n# Researcher optimizes blindly via observed metrics only.\nx = 0.885\ny = -0.9026\nloss = (x - 3.0) ** 2 + (y + 1.0) ** 2\nnoise = 0.0\nif noise:\n    # Seeded eval noise: lets the multi-seed confirmation phase (I12) measure\n    # variance. LOOPLAB_EVAL_SEED is unset (-> \"0\") during normal evaluation, so\n    # search stays deterministic; the confirm phase varies it across seeds.\n    rng = random.Random(int(os.environ.get(\"LOOPLAB_EVAL_SEED\", \"0\")))\n    loss += rng.gauss(0.0, noise)\nprint(json.dumps({\"metric\": loss}))\n",
+      "confirmed_mean": null,
+      "confirmed_seeds": null,
+      "confirmed_std": null,
+      "deleted": [],
+      "error": "",
+      "error_reason": "",
+      "eval_seconds": 0.034,
+      "extra_metrics": {},
+      "failed_stage": null,
+      "feasible": true,
+      "files": {},
+      "generalization_gap": null,
+      "holdout_metric": null,
+      "id": 7,
+      "idea": {
+        "eval_profile": null,
+        "eval_timeout": null,
+        "hypothesis": null,
+        "operator": "improve",
+        "params": {
+          "x": 0.885,
+          "y": -0.9026
+        },
+        "rationale": "perturb best node 5 (metric=5.57026258)",
+        "space": {},
+        "theme": null
+      },
+      "metric": 4.482711760000001,
+      "operator": "improve",
+      "origin": null,
+      "parent_ids": [
+        5
+      ],
+      "rerun_from": null,
+      "rerun_stage": null,
+      "research_origin": null,
+      "stages": [],
+      "status": "evaluated",
+      "stdout_tail": "{\"metric\": 4.482711760000001}\n",
+      "triage_rationale": "",
+      "trials": [],
+      "violations": []
+    }
+  },
+  "novelty_events": [],
+  "paused": false,
+  "pending_hints": [],
+  "pending_strategy": null,
+  "policy_chosen": 5,
+  "policy_reason": "exploit best",
+  "policy_scores": {
+    "0": 53.0542,
+    "1": 35.6606,
+    "2": 8.5102,
+    "3": 9.7368,
+    "4": 17.1754,
+    "5": 5.5703,
+    "6": 6.689
+  },
+  "promotions": [],
+  "proposed_spec": null,
+  "proxy_scores": {},
+  "proxy_skipped": [],
+  "report": null,
+  "research": [
+    {
+      "at_node": 2,
+      "claims": [],
+      "findings": [],
+      "proposed_ideas": [],
+      "reasoning": "",
+      "recommended_directions": [],
+      "sources": [],
+      "summary": "(deep research unavailable: no model configured)",
+      "trigger": "cadence"
+    },
+    {
+      "at_node": 5,
+      "claims": [],
+      "findings": [],
+      "proposed_ideas": [],
+      "reasoning": "",
+      "recommended_directions": [],
+      "sources": [],
+      "summary": "(deep research unavailable: no model configured)",
+      "trigger": "cadence"
+    },
+    {
+      "at_node": 8,
+      "claims": [],
+      "findings": [],
+      "proposed_ideas": [],
+      "reasoning": "",
+      "recommended_directions": [],
+      "sources": [],
+      "summary": "(deep research unavailable: no model configured)",
+      "trigger": "cadence"
+    }
+  ],
+  "research_requests": [],
+  "research_served": 0,
+  "reward_hacks": [],
+  "run_id": "golden",
+  "rungs": [],
+  "spec_approval_requested": false,
+  "spec_confirmed": false,
+  "stop_reason": null,
+  "stop_requested": null,
+  "strategy_history": [],
+  "task_id": "toy_quadratic",
+  "total_eval_seconds": 0.273,
+  "trust_gate": "audit",
+  "workspace": {},
+  "workspace_changed": false
+}

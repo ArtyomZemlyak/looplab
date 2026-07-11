@@ -43,12 +43,12 @@ def test_engine_call_site_protected_grader_without_asset_stays_strict():
     PROTECTED grader.py (protect=["grader.py"], no asset) must NOT waive the import tells. The
     detector's None-inference keys on `protected_names`, but the engine hands it the
     protected∪assets UNION, so a protect-list grader.py would wrongly read as a sanction there.
-    Mirrors the exact call-site expressions (see orchestrator.py's detect_reward_hacks call)."""
+    Mirrors the exact call-site expressions (see engine/evaluate.py's detect_reward_hacks call)."""
     code = "from grader import score"
     protected_names = {"grader.py"}          # repo_spec protect list — "hands off", NOT a sanction
     assets: dict = {}                        # the task ships no grader → import is not the contract
 
-    def call_site(assets):                   # the exact orchestrator expression (normalized match)
+    def call_site(assets):                   # the exact engine/evaluate.py expression (normalized match)
         return any(str(a).replace("\\", "/").lower() == "grader.py" for a in (assets or ()))
 
     protected = set(protected_names) | set(assets)                    # the call-site union

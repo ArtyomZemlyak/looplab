@@ -14,7 +14,7 @@ from looplab.search.policy import GreedyTree
 from looplab.adapters.repo_task import EvalSpec, RepoTask
 from looplab.runtime.sandbox import SubprocessSandbox
 from looplab.core.tracing import JsonlSpanExporter, Tracer, current_ids
-from looplab.serve.traceview import build_trace_view, load_spans
+from looplab.events.traceview import build_trace_view, load_spans
 
 _M = {"kind": "stdout_json", "key": "metric"}
 
@@ -150,7 +150,7 @@ def test_conversation_dedups_resent_history():
     per-turn re-send of the whole growing message history. A context RESET (shorter input, e.g. a
     compaction or a sub-agent handoff) starts a fresh request."""
     from types import SimpleNamespace
-    from looplab.serve.traceview import build_conversation
+    from looplab.events.traceview import build_conversation
 
     def span(sid, kind, start, parent, **attrs):
         return {"span_id": sid, "parent_id": parent, "trace_id": "t1", "kind": kind,
@@ -232,7 +232,7 @@ def test_live_developer_spans_band_under_implement_not_researcher(tmp_path):
     the per-node conversation mis-grouped them under the Researcher/create_node. Now each child carries a
     `phase` attribute (tracing._phase_ctx), so build_conversation bands it under `implement` immediately."""
     from types import SimpleNamespace
-    from looplab.serve.traceview import build_conversation
+    from looplab.events.traceview import build_conversation
     T = "trace1"
     spans = [
         {"span_id": "R", "parent_id": None, "trace_id": T, "name": "create_node", "kind": "operation",
@@ -257,7 +257,7 @@ def test_conversation_bands_all_phases_in_order():
     propose, then the Developer's stages -> plan -> implement — grouped by the `phase` stamped on each
     generation, so nesting (stages/plan sit under the orchestrator's implement span) doesn't merge them."""
     from types import SimpleNamespace
-    from looplab.serve.traceview import build_conversation
+    from looplab.events.traceview import build_conversation
     T = "t"
 
     def gen(sid, phase, start):
@@ -279,7 +279,7 @@ def test_live_trace_with_no_root_bands_by_phase_never_flat_generation():
     turns kept appending across role changes (Developer writing into the previous Researcher block).
     A rootless trace must band by the phase stamps, chronologically."""
     from types import SimpleNamespace
-    from looplab.serve.traceview import build_conversation
+    from looplab.events.traceview import build_conversation
 
     def gen(sid, phase, start):
         return {"span_id": sid, "parent_id": "UNWRITTEN", "trace_id": "t", "name": "generation",
@@ -297,7 +297,7 @@ def test_live_same_phase_retries_separate_bands_via_phase_span():
     disk): the phase NAME alone can't tell them apart, but the stamped `phase_span` (the op's span
     id) can — each retry is its own chronological band."""
     from types import SimpleNamespace
-    from looplab.serve.traceview import build_conversation
+    from looplab.events.traceview import build_conversation
 
     def gen(sid, ph_sid, start):
         return {"span_id": sid, "parent_id": ph_sid, "trace_id": "t", "name": "generation",
@@ -313,7 +313,7 @@ def test_eval_pipeline_stage_ops_become_train_score_blocks():
     """The eval pipeline's per-stage op spans (train / score) surface as their own blocks in the
     node story ('… Developer · implement, Train, Evaluate·score') with a status/duration turn."""
     from types import SimpleNamespace
-    from looplab.serve.traceview import build_conversation
+    from looplab.events.traceview import build_conversation
     spans = [{"span_id": "E", "parent_id": None, "trace_id": "t", "name": "evaluate",
               "kind": "operation", "start": 0.0, "attributes": {"node_id": 0}},
              {"span_id": "T", "parent_id": "E", "trace_id": "t", "name": "train", "kind": "operation",
@@ -348,7 +348,7 @@ def test_finished_trace_same_phase_retries_stay_separate_bands():
     exist. Keying bands by the op SPAN (not the phase string) keeps attempt 2's stages turns as their
     own chronological band instead of merging them into attempt 1's band out of order."""
     from types import SimpleNamespace
-    from looplab.serve.traceview import build_conversation
+    from looplab.events.traceview import build_conversation
     T = "t"
 
     def op(sid, name, start, parent="R"):

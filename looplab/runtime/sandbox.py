@@ -17,7 +17,6 @@ Reads the metric from the last stdout line that is JSON containing a "metric" ke
 from __future__ import annotations
 
 import json
-import math
 import os
 import re
 import subprocess
@@ -30,7 +29,6 @@ from typing import Optional, Protocol
 # code can't read (and persist into the event log) the operator's keys/tokens. Name-based, so it
 # never touches PATH/SYSTEMROOT/TEMP etc. that a process legitimately needs.
 SECRET_ENV = re.compile(r"(KEY|SECRET|TOKEN|PASSWORD|PASSWD|CREDENTIAL|API_KEY)", re.IGNORECASE)
-_SECRET_ENV = SECRET_ENV   # back-compat alias (pre-rename importers)
 
 
 def docker_timed_out(rc: int) -> bool:
@@ -95,16 +93,15 @@ class Sandbox(Protocol):
 def _to_float(v) -> Optional[float]:
     """Parse a metric value, rejecting non-finite (NaN/inf) — a diverged run reads as 'no
     metric', never slips into best-selection (where min/max over NaN is undefined)."""
-    try:
-        f = float(v)
-    except (TypeError, ValueError):
-        return None
-    return f if math.isfinite(f) else None
+    from looplab.core.parse import to_float
+    return to_float(v, finite=True)
 
 
-def json_line_metric(text: str, key: str = "metric") -> Optional[float]:
-    """Last stdout line that is a JSON object containing `key`. The one tolerant metric-line
-    scanner — both the solution.py path (_parse_metric) and the command-eval readers use it."""
+def _last_json_dict(text: str, pred) -> Optional[dict]:
+    """The LAST stdout line that parses as a JSON object satisfying `pred` — the one bottom-up
+    tolerant scanner behind json_line_metric / json_line_extras / json_line_trials (and the
+    mlebench grader), so trailing chatter after a solution's summary line is tolerated the same
+    way everywhere. Returns the raw dict (callers extract what they need), or None."""
     for line in reversed(text.splitlines()):
         line = line.strip()
         if not line.startswith("{"):
@@ -113,18 +110,21 @@ def json_line_metric(text: str, key: str = "metric") -> Optional[float]:
             obj = json.loads(line)
         except json.JSONDecodeError:
             continue
-        if isinstance(obj, dict) and key in obj:
-            return _to_float(obj[key])
+        if isinstance(obj, dict) and pred(obj):
+            return obj
     return None
 
 
-# Back-compat alias (pre-rename importers/tests use `_json_line_metric`).
-_json_line_metric = json_line_metric
+def json_line_metric(text: str, key: str = "metric") -> Optional[float]:
+    """Last stdout line that is a JSON object containing `key`. The one tolerant metric-line
+    scanner — both the solution.py path (_parse_metric) and the command-eval readers use it."""
+    obj = _last_json_dict(text, lambda o: key in o)
+    return None if obj is None else _to_float(obj[key])
 
 
 def _parse_metric(stdout: str) -> Optional[float]:
     # Kept (not folded into its callers): the sandboxes' readable name for "read the solution's
-    # self-reported metric", and imported directly by tests (test_review_fixes_2).
+    # self-reported metric", and imported directly by tests (test_sandbox_gate).
     return json_line_metric(stdout, "metric")
 
 
@@ -134,25 +134,18 @@ def json_line_extras(text: str, primary_key: str = "metric") -> dict:
     ALL of them with no per-task config. Structural/bookkeeping keys and non-numeric values are skipped;
     only the primary key drives selection (extras are audit-only)."""
     _skip = {primary_key, "metric", "trials", "params", "seconds", "second", "time", "epoch", "step"}
-    for line in reversed(text.splitlines()):
-        line = line.strip()
-        if not line.startswith("{"):
+    obj = _last_json_dict(text, lambda o: primary_key in o)
+    if obj is None:
+        return {}
+    out = {}
+    for k, v in obj.items():
+        if k in _skip or isinstance(v, bool):
             continue
-        try:
-            obj = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(obj, dict) and primary_key in obj:
-            out = {}
-            for k, v in obj.items():
-                if k in _skip or isinstance(v, bool):
-                    continue
-                if isinstance(v, (int, float)):
-                    f = _to_float(v)     # same finiteness rule as the primary metric: JSON parses
-                    if f is not None:    # NaN/Infinity literals, and a NaN extra breaks serializers
-                        out[str(k)] = f
-            return out
-    return {}
+        if isinstance(v, (int, float)):
+            f = _to_float(v)     # same finiteness rule as the primary metric: JSON parses
+            if f is not None:    # NaN/Infinity literals, and a NaN extra breaks serializers
+                out[str(k)] = f
+    return out
 
 
 # Back-compat alias (pre-rename importers/tests use `_json_line_extras`).
@@ -161,19 +154,10 @@ _json_line_extras = json_line_extras
 
 def json_line_trials(text: str) -> Optional[list]:
     """Last stdout line that is a JSON object with a "trials" key holding a list (intra-node
-    sweep). Scans bottom-up like `_json_line_metric`, so trailing chatter after the sweep's
+    sweep). Scans bottom-up like `json_line_metric`, so trailing chatter after the sweep's
     summary line is tolerated. Returns the raw list of trial dicts, or None if absent."""
-    for line in reversed(text.splitlines()):
-        line = line.strip()
-        if not line.startswith("{"):
-            continue
-        try:
-            obj = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(obj, dict) and isinstance(obj.get("trials"), list):
-            return obj["trials"]
-    return None
+    obj = _last_json_dict(text, lambda o: isinstance(o.get("trials"), list))
+    return None if obj is None else obj["trials"]
 
 
 # Back-compat alias (pre-rename importers/tests use `_json_line_trials`).

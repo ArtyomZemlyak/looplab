@@ -11,14 +11,13 @@ from __future__ import annotations
 
 import json
 import os
-import subprocess
 from pathlib import Path
 from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Request
 
 from looplab.core.config import Settings
-from looplab.events.eventstore import iter_jsonl
+from looplab.events.eventstore import read_jsonl_lenient
 from looplab.serve.settings_store import _ALLOWED_FIELDS, _SECRET_ENV, _SECRET_FIELDS
 
 
@@ -133,24 +132,18 @@ def build_router(srv) -> APIRouter:
             return {"ok": False, "error": str(e), **info}
 
     # ------------------------------------------------------------------ GPU monitor
-    def _f(s: str) -> Optional[float]:
-        try:
-            return float(s)
-        except (TypeError, ValueError):
-            return None
-
     @router.get("/api/gpu")
     def gpu():
         try:
-            q = ("--query-gpu=name,utilization.gpu,memory.used,memory.total,temperature.gpu,"
-                 "power.draw")
-            out = subprocess.run(["nvidia-smi", q, "--format=csv,noheader,nounits"],
-                                 capture_output=True, text=True, timeout=4)
-            if out.returncode != 0 or not out.stdout.strip():
+            from looplab.core.hardware import query_nvidia_smi
+            from looplab.core.parse import to_float as _f
+            rows = query_nvidia_smi(
+                "name,utilization.gpu,memory.used,memory.total,temperature.gpu,power.draw",
+                timeout=4)
+            if rows is None:
                 return {"available": False}
             gpus = []
-            for line in out.stdout.strip().splitlines():
-                p = [c.strip() for c in line.split(",")]
+            for p in rows:
                 if len(p) >= 6:
                     gpus.append({"name": p[0], "util": _f(p[1]), "mem_used": _f(p[2]),
                                  "mem_total": _f(p[3]), "temp": _f(p[4]), "power": _f(p[5])})
@@ -171,7 +164,11 @@ def build_router(srv) -> APIRouter:
         md = Path(s.memory_dir)
         out["dir"] = str(md)
         for f in sorted(md.glob("*.jsonl")) if md.exists() else []:
-            rows = list(iter_jsonl(f))
+            # These are MUTABLE stores (rewritten/compacted in place), so skip-and-continue: one
+            # damaged line must not hide the rest of the Memory panel (iter_jsonl would stop there).
+            # cases.jsonl is stdlib-json-written (NaN literals possible); lessons/notes are orjson —
+            # stdlib json parses BOTH (a superset), so one parser is safe on this read-only panel.
+            rows = read_jsonl_lenient(f, loads=json.loads)
             nm = f.name.lower()
             if "lesson" in nm:
                 out["lessons"].extend(rows)

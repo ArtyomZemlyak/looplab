@@ -13,6 +13,7 @@ import json
 import re
 from pathlib import Path
 
+from looplab.events.eventstore import read_jsonl_lenient
 from looplab.tools._base import fn_spec
 
 _WORD = re.compile(r"[a-z0-9@._]+")
@@ -53,21 +54,7 @@ class MemoryTools:
         ]
 
     def _load(self, fname: str) -> list[dict]:
-        p = self.dir / fname
-        if not p.exists():
-            return []
-        out = []
-        for line in p.read_text(encoding="utf-8").splitlines():
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                d = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if isinstance(d, dict):
-                out.append(d)
-        return out
+        return read_jsonl_lenient(self.dir / fname, loads=json.loads)
 
     def execute(self, name: str, args: dict) -> str:
         # ToolProvider contract (_base.py): execute NEVER raises — a junk arg from a small model

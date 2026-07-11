@@ -13,8 +13,44 @@ from typing import Optional
 from looplab.core.models import NodeStatus, RunState
 
 
-def _numeric(params: dict) -> dict:
-    return {k: float(v) for k, v in params.items() if isinstance(v, (int, float))}
+def numeric_params(params: dict, keys=None) -> dict:
+    """The NUMERIC (int/float — bools included, matching the historical isinstance check) subset of a
+    param dict, coerced to float. `keys` optionally restricts to a key set (e.g. the search bounds).
+    Shared by the novelty gate, the surrogate and the panel so "numeric params" means the same thing
+    everywhere. NOTE: runtime/proxy.py deliberately keeps its own try/float() variant — it also
+    accepts numeric STRINGS, which this helper must not start doing."""
+    return {k: float(v) for k, v in params.items()
+            if (keys is None or k in keys) and isinstance(v, (int, float))}
+
+
+def _numeric(params: dict) -> dict:   # param_distance's pre-rename local shorthand
+    return numeric_params(params)
+
+
+def knn_idw(pairs, k: int):
+    """Inverse-distance-weighted k-NN over pre-computed `(distance, value)` pairs — the shared CORE
+    of the three empirical predictors (search/surrogate, serve/panel, runtime/proxy). The callers
+    keep their own (deliberately different) neighbour-eligibility and distance computations; only
+    the rank / zero-distance short-circuit / weighting steps are unified here, so those can't
+    silently drift apart again.
+
+    Returns `(prediction, nearest_distance)`, or None when `pairs` is empty (the caller's abstain
+    path). A zero-distance sample short-circuits to that sample's value with nearest=0.0 (ties keep
+    input order — `sorted` is stable, exactly like every pre-extraction copy)."""
+    if not pairs:
+        return None
+    nn = sorted(pairs, key=lambda t: t[0])[: max(1, k)]
+    # Exact-match short-circuit scans the WHOLE top-k, not just nn[0]: a NaN distance (reachable —
+    # the proxy coerces string params, and a float('nan') param value is isinstance-numeric
+    # everywhere) sorts unpredictably and can sit AHEAD of a genuine 0.0; checking only nn[0]
+    # would then fall through to the 1/d weighting and divide by that hidden zero. With no zero
+    # present, a NaN distance degrades to a NaN prediction exactly like every pre-extraction copy.
+    for d, v in nn:
+        if d == 0.0:
+            return v, 0.0
+    nearest = nn[0][0]
+    wsum = sum(1.0 / d for d, _ in nn)
+    return sum((1.0 / d) * v for d, v in nn) / wsum, nearest
 
 
 def param_distance(a: dict, b: dict) -> float:
@@ -38,7 +74,7 @@ def theme_rollup(state: RunState) -> dict:
         theme = getattr(n.idea, "theme", None)
         if not theme:
             continue
-        m = n.confirmed_mean if n.confirmed_mean is not None else n.metric
+        m = n.robust_metric
         e = out.setdefault(theme, {"count": 0, "best_metric": None})
         e["count"] += 1
         if m is not None and (e["best_metric"] is None or better(m, e["best_metric"])):
@@ -48,7 +84,7 @@ def theme_rollup(state: RunState) -> dict:
 
 def node_metric(n) -> Optional[float]:
     """The metric used for ranking/display: the robust confirmed mean when present, else the raw."""
-    return n.confirmed_mean if n.confirmed_mean is not None else n.metric
+    return n.robust_metric
 
 
 def top_nodes(state: RunState, k: int, *, worst: bool = False) -> list:

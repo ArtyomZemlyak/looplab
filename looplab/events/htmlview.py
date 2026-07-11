@@ -88,7 +88,7 @@ def render_html(state: RunState, trace_view: dict | None = None) -> str:
         )
     best = state.best()
     if best:
-        bm = best.confirmed_mean if best.confirmed_mean is not None else best.metric
+        bm = best.robust_metric
         bm_s = "—" if bm is None else f"{bm:.6g}"
         best_line = f"<b>Best:</b> node {best.id} — metric {bm_s} — params {html.escape(str(best.idea.params))}"
     else:

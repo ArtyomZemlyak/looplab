@@ -15,12 +15,23 @@ import orjson
 
 from looplab.core.config import Settings
 from looplab.adapters.tasks import load_task
+# Top-level on purpose (this was a lazy in-function import "to avoid an import cycle"): the cycle is
+# gone — the CLI's `bench` command imports looplab.bench lazily inside its own body
+# (looplab/cli/export_cmds.py), so nothing in the looplab.cli package imports this module at import
+# time, in either direction. Importing the shared engine builder here retires that load-bearing lazy
+# import (docs/15 §P5.2b).
+def _engine(*args, **kwargs):
+    """Late-binding shim: resolve `looplab.cli._engine` at CALL time, matching the cli package's
+    own command-module shims — so a test patching `cli._engine` (to stub the engine for an
+    offline bench) is seen here too. A top-level `from ... import _engine` froze the original
+    object and silently bypassed that seam."""
+    from looplab import cli
+    return cli._engine(*args, **kwargs)
 
 
 def run_benchmark(task_files, settings: Settings, out_dir) -> list[dict]:
     """Run each task to completion and return a capability summary per task. Writes
     `<out_dir>/benchmark.json` with the full report."""
-    from looplab.cli import _engine   # lazy to avoid an import cycle (cli imports bench in its command)
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     results: list[dict] = []
@@ -45,8 +56,7 @@ def run_benchmark(task_files, settings: Settings, out_dir) -> list[dict]:
             results.append({
                 "task": tf.stem, "task_id": state.task_id, "direction": state.direction,
                 "finished": state.finished,
-                "best_metric": (best.confirmed_mean if best and best.confirmed_mean is not None
-                                else (best.metric if best else None)),
+                "best_metric": (best.robust_metric if best else None),
                 "best_node": (best.id if best else None),
                 "nodes": len(state.nodes), "evaluated": len(state.evaluated_nodes()),
                 "failed": sum(1 for n in state.nodes.values() if n.status.value == "failed"),

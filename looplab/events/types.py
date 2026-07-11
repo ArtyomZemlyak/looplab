@@ -145,3 +145,17 @@ EV_RUN_SETUP_FINISHED = "run_setup_finished"
 ALL_EVENT_TYPES: frozenset[str] = frozenset(
     v for k, v in globals().items() if k.startswith("EV_") and isinstance(v, str)
 )
+
+# Engine invariant #1 states "only the main task appends" — this set is the ONE enforced
+# exception (previously a prose comment in `_spawn_research`): event types a BACKGROUND task may
+# append. Membership requires BOTH properties, and `tests/test_background_appendable.py` proves
+# them: (a) SELECTION-NEUTRAL — the fold never reads the event for node selection, so a
+# thread-schedule-dependent position in events.jsonl cannot change which node wins; (b) the fold
+# handles it ORDER-TOLERANTLY. (EV_HINT does mutate `pending_hints`, so a background hint racing
+# an operator `replace` hint can change which STEERING text survives a resume — accepted:
+# steering is transient advice; selection is what replay must pin. EV_HYPOTHESIS_ADDED only
+# appends to the `hypotheses_added` board list — same class: board order is transient advice,
+# selection is untouched.) `research_cadence._record_deep_research` appends all three from the
+# concurrent task and asserts each against this set, so a future selection-affecting append from
+# that task is an AssertionError in every test that exercises it, not a nondeterministic replay.
+BACKGROUND_APPENDABLE: frozenset[str] = frozenset({EV_RESEARCH_COMPLETED, EV_HINT, EV_HYPOTHESIS_ADDED})

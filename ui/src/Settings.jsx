@@ -104,7 +104,7 @@ export default function Settings({ onBack }) {
         : <>
           <div className="muted" style={{ marginBottom: 14 }}>
             These are saved as defaults and applied to every new run via <code>LOOPLAB_*</code> env.
-            Per-run overrides are still available in the <b>New run</b> dialog.
+            Per-run overrides are still available on the assistant's <b>/new</b> launch card.
             A <span className="sf-dot unsaved">●</span> marks an <b>unsaved</b> edit (clears on Save);
             a <span className="sf-dot fromdefault">●</span> marks a saved value that differs from the engine default.
             The <span className="agpill on" style={{ position: 'static' }}>R</span><span className="agpill on" style={{ position: 'static' }}>S</span><span className="agpill on" style={{ position: 'static' }}>B</span> pills set whether the <b>R</b>esearcher (per experiment), <b>S</b>trategist, or <b>B</b>oss may change a setting at runtime.

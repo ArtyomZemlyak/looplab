@@ -10,7 +10,7 @@ by replaying it. Design docs live in `docs/` (see `docs/02-architecture.md`, ADR
 
 ```bash
 pip install -e ".[dev,ui]"        # dev deps; [ui] needed for server/assistant/TUI tests (fastapi)
-python -m pytest                  # full suite (~1150 tests, a few minutes; addopts already has -q)
+python -m pytest                  # full suite (~1.7k tests, a few minutes; addopts already has -q)
 python -m pytest tests/test_events_replay.py           # targeted run — always do this first
 python -m pytest -o addopts="" -q ...                  # if you need to override the default -q
 python -m pytest -m "not docker"  # skip Docker-daemon tests
@@ -26,7 +26,9 @@ The suite runs fully offline in ~1-2 minutes; live-LLM tests auto-skip (opt in w
 surrounding code (~100-col lines, heavy why-comments) and do not reformat.
 Docs are built with `mkdocs build --strict` in CI — broken doc links fail the deploy.
 `looplab build-ui` builds the React UI (`npm ci && npm run build` in `ui/`); `looplab ui`
-auto-builds when the dist is missing.
+auto-builds when the dist is missing. `looplab/cli/` is a PACKAGE (command groups in
+`run_cmds`/`export_cmds`/`inspect_cmds`/`ui_cmds`; the Typer app + patchable builders live in
+its `__init__`; `python -m looplab.cli` works via `__main__.py`).
 
 **Keep the docs and the process diagram in sync with the code — in the SAME change.** When you
 change a default, a cadence/threshold, an event type, or add/rename a subsystem, update: (1) the
@@ -41,22 +43,26 @@ in its inline `<script>`); edit the data, not hand-placed SVG.
 
 | Path | Contents |
 |---|---|
-| `looplab/core/` | foundation: domain models, `Settings` (config.py = schema, appconfig.py = loader), LLM client (`llm.py`), parsing, tracing, shared errors |
-| `looplab/events/` | event store, `types.py` (event-type registry), `replay.py::fold` (event log → `RunState`), digest, readmodel, exporters |
+| `looplab/core/` | foundation: domain models, `Settings` (config.py = schema, appconfig.py = loader), LLM client (`llm.py` + its `llm_streaming`/`llm_toolcall`/`llm_transient` siblings — every split name re-exported through `llm.py`), parsing, tracing, shared errors |
+| `looplab/events/` | event store, `types.py` (event-type registry), `replay.py::fold` (event log → `RunState`), digest, readmodel, exporters + the pure UI projections (`traceview.py`, `htmlview.py`) |
 | `looplab/runtime/` | sandboxes (subprocess/Docker tiers), command evaluation, dep install, background tasks |
 | `looplab/tools/` | agent-facing tools; `_base.py` documents the ToolProvider contract; `env_inspect.py` (repo Developer's read-only env inspector: pkg version/API/source), `vectorstore.py` + `memora.py` (embeddings + harmonic index) |
-| `looplab/agents/` | LLM personas: plain roles (`roles.py`), tool-loop roles (`agent.py::drive_tool_loop`), external CLI backend (`cli_agent.py`), facade (`unified_agent.py`) |
+| `looplab/agents/` | LLM personas: plain roles (`roles.py`), the tool-loop machinery (`tool_loop.py::drive_tool_loop`/`agentic_*`; `agent.py` keeps `run_phase` + `ToolUsingResearcher` and re-exports the rest — patch seams resolve through `agent.py`), external CLI backend (`cli_agent.py`), facade (`unified_agent.py`) |
 | `looplab/search/` | search policies (`policy.py` — action kinds/meta-key constants live here), `operators.py`, best-of-N, surrogate, archive, `foresight.py` (hypothesis prioritization / predict-before-execute), `hybrid_merge.py` (grep+BM25+vector RRF retrieval + agent-decided merge, shared by lesson & hypothesis-board consolidation) |
 | `looplab/trust/` | gates that keep results honest: leakage, reward-hack, CV, redaction, confirmation |
-| `looplab/engine/` | **the orchestrator loop** (`orchestrator.py`, the largest file) + cross-run memory; see invariants below |
+| `looplab/engine/` | **the orchestrator loop** + cross-run memory; see invariants below. The `Engine` class spans THIRTEEN files: `orchestrator.py` (`__init__`, the `run` spine, node creation — the module-global `fold` seam lives here) + twelve mixins — `confirm_phase.py`, `ablation.py`, `novelty.py`, `strategy.py` (cadence; the Strategist agent is `agents/strategist.py`), `research_cadence.py`, `eval_stages.py`, `crash_repair.py`, `eval_dispatch.py`, `audit.py`, `evaluate.py`, `node_build.py`, `proposal_cues.py`. In a mixin `self` IS the Engine — grep the engine package before renaming an engine attribute or hunting a method |
 | `looplab/adapters/` | task types (toy → dataset → repo → MLE-bench); the TaskAdapter contract is documented in `adapters/tasks.py` |
-| `looplab/serve/` | FastAPI server (`server.py` — routes live inside `make_app`), TUI, assistant; not imported at engine import time (`engine/finalize.py` lazily imports the htmlview/traceview projections at run end) |
+| `looplab/serve/` | FastAPI server (`server.py` is a thin composition root; routes live in `serve/routers/*` — control/runs/genesis/assistant/boss/org/reports/misc), TUI, assistant; never imported by the engine (the run-end projections live in `events/`) |
 | `ui/` | React control plane (built artifacts served by `serve/server.py`) |
 
 ## Engine invariants (violating these breaks replay/resume)
 
 1. **The engine is the sole writer of domain events.** Background tasks return values; only the
-   main task appends. UI/CLI append only *control intents* (allow-listed in `serve/server.py`).
+   main task appends — with ONE typed exception: the concurrent-research task may append the
+   selection-neutral types in `events/types.py::BACKGROUND_APPENDABLE` (asserted at the append
+   sites; `tests/test_background_appendable.py` proves splice-position neutrality). UI/CLI append
+   only *control intents* (allow-listed in `serve/protocol.py::CONTROL_EVENTS`, enforced by
+   `serve/routers/control.py`).
 2. **Exactly one terminal event per node** (`node_evaluated` | `node_failed`). The fold is
    idempotent on duplicate terminals (first terminal wins).
 3. **Every side effect must be gated on a domain event** so resume-by-replay is idempotent
@@ -84,10 +90,20 @@ in its inline `<script>`); edit the data, not hand-placed SVG.
 - **Prompt strings are contracts.** Changes to prompt text alter agent behavior — never "clean up"
   prompt wording as part of a refactor. Several prompts are routed through the PromptStore
   (`render(prompts, key, default)`); grep for `render(` to find overridable prompts.
-- **Duck-typed seams**: the engine reads optional attributes off tasks/roles (`assets()`,
-  `last_files`, `choose_action`, hint attrs listed in `agents/roles.py::RESEARCHER_HINT_ATTRS`).
-  The TaskAdapter hooks are documented in `adapters/tasks.py`. Renames here break the engine
-  silently — grep both sides before renaming any such attribute.
+- **Duck-typed seams are REGISTRY-GUARDED** — a rename that used to break silently is now a red
+  test. The registries (each with a two-way source-scan test): TaskAdapter hooks
+  `adapters/tasks.py::TASK_OPTIONAL_HOOKS`; role outputs `agents/roles.py::DEVELOPER_OUTPUT_ATTRS`
+  / `RESEARCHER_ACTION_ATTRS`; hint attrs `agents/roles.py::RESEARCHER_HINT_ATTRS`; prompt keys
+  `core/prompts.py::PROMPT_KEYS`; delivered signals `engine/signal_delivery.py::SIGNALS`;
+  background-appendable events `events/types.py::BACKGROUND_APPENDABLE`. Adding/renaming any such
+  seam means updating the registry in the SAME change. Note `search/foresight.py`'s
+  panel is a `__getattr__` proxy over the wrapped agent: a typo'd read silently resolves to the
+  base object, and an attribute SET on the panel shadows reads *through the panel* but does NOT
+  reach the base's own `self.<attr>` reads until `forward_hints` mirrors it — set hints on the
+  outermost wrapper and let the registry forward them, never on `base` directly.
+- **Tool providers**: the `bind_state` hook is OPTIONAL (`tools/_base.py` — providers that don't
+  need run state simply omit it), but a provider that DOES implement it must accept the second
+  `parent` argument (`bind_state(self, state, parent=None)`) or it raises `TypeError` at dispatch.
 - **Tests isolate the environment** (`tests/conftest.py`): dotenv loading is disabled and
   `LOOPLAB_MEMORY_DIR`/`LOOPLAB_KNOWLEDGE_DIR` point at tmp dirs. Engine tests construct
   `Engine(...)` directly (~100 call sites) — keep its keyword API stable.

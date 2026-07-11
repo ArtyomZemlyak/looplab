@@ -1,7 +1,7 @@
 """Cross-run introspection tools for the assistant (ADR-7 tool protocol).
 
 Where `RunTools` reads the ONE live run bound to it and `SiblingRunTools` reads other runs of the
-SAME task, `RunsTools` gives the general-purpose assistant a view over EVERY run on this machine —
+SAME task, `MachineRunsTools` gives the general-purpose assistant a view over EVERY run on this machine —
 so it can reference an existing run, report which ones are live, and read one in detail before
 steering or fixing it. Same `.specs()`/`.execute()` shape as the other providers; every `execute`
 returns a string and soft-fails (a junk tool call must never crash the loop).
@@ -80,7 +80,7 @@ def _render_conversation(convo: dict, run_id, nid, stage: Optional[str], max_cha
     return text[:budget].rstrip() + f"\n…[+{len(text) - budget} chars truncated — narrow with `stage`]"
 
 
-class RunsTools:
+class MachineRunsTools:
     """Read-only view over ALL runs under the run-root (for the assistant)."""
 
     def __init__(self, run_root, alive_fn: Optional[Callable[[Path], bool]] = None,
@@ -92,7 +92,7 @@ class RunsTools:
         self._runs = RunStateCache(self.run_root)
         self._reader = RunTools(max_chars=max_chars)
 
-    # RunsTools is not bound to a single run; accept bind_state for CompositeTools symmetry (no-op).
+    # MachineRunsTools is not bound to a single run; accept bind_state for CompositeTools symmetry (no-op).
     def bind_state(self, state=None, parent=None) -> None:
         return None
 
@@ -245,7 +245,7 @@ class RunsTools:
         st = self._state(run_id)
         if rd is None or st is None:
             return f"(no such run: {run_id!r})"
-        from looplab.serve.traceview import build_conversation, load_spans
+        from looplab.events.traceview import build_conversation, load_spans
         spans_path = rd / "spans.jsonl"
         if not spans_path.exists():
             return (f"(run {run_id} has no spans.jsonl — no agent trace was recorded. This run may "
@@ -371,6 +371,10 @@ class RunLauncherTools:
         # of failing only when the user clicks Start (which spawns an engine that dies with no events).
         if task:
             try:
+                # DELIBERATE runtime-only upward import (tools -> adapters): validating a task spec
+                # inherently needs the adapter registry (_KINDS + model_validate), which cannot move
+                # below tools; a constructor-injected validator would add a "silently unvalidated"
+                # default. Kept lazy so the import graph stays acyclic at import time.
                 from looplab.adapters.tasks import validate_task
                 validate_task(task)
             except Exception as e:  # noqa: BLE001

@@ -3,8 +3,9 @@ summary, diversity-archive dump, LLM cost roll-up, cross-run case store + reflec
 the derived SQLite read-model, and the trace.json / tree.html UI projections. Event emission
 order is preserved exactly — resume/replay semantics depend on it.
 
-Layering: the `serve.*` imports (traceview/htmlview) live INSIDE `finalize_run` so importing
-the engine never pulls in `serve` (the engine must not grow dependencies on serve)."""
+Layering: the trace/html projections moved from `serve/` to their dependency-true home
+`events/` (they are pure RunState -> string readers), so the engine no longer touches `serve`
+at all — the imports below are ordinary downward engine -> events imports."""
 from __future__ import annotations
 
 import time
@@ -13,8 +14,10 @@ from typing import TYPE_CHECKING
 import orjson
 
 from looplab.core.models import RunState
+from looplab.events.htmlview import render_html
 from looplab.events.readmodel import build_readmodel
 from looplab.events.replay import fold
+from looplab.events.traceview import build_trace_view, load_spans
 from looplab.events.types import (EV_BUDGET, EV_DIVERSITY_ARCHIVE, EV_LLM_COST,
                                   EV_READMODEL_SKIPPED)
 from looplab.search.archive import DiversityArchive
@@ -57,8 +60,6 @@ def finalize_run(engine: "Engine", *, entry_finished: bool, start_time: float) -
             pass
     # UI projection (ADR-17): join the research tree (events) to its execution detail
     # (spans) -> trace.json for the React UI + an inline span tree in the static HTML.
-    from looplab.serve.htmlview import render_html
-    from looplab.serve.traceview import build_trace_view, load_spans
     tv = build_trace_view(final, load_spans(engine.run_dir / "spans.jsonl"))
     (engine.run_dir / "trace.json").write_bytes(orjson.dumps(tv))
     (engine.run_dir / "tree.html").write_text(render_html(final, tv), encoding="utf-8")

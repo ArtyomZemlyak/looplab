@@ -65,10 +65,15 @@ def _setattr_hint_names(module) -> set[str]:
 
 
 def test_every_setattr_hint_site_is_in_the_registry():
+    import looplab.engine.novelty as nov
     import looplab.engine.orchestrator as orch
+    import looplab.engine.proposal_cues as cues
     import looplab.search.foresight as fs
 
-    found = _setattr_hint_names(orch) | _setattr_hint_names(fs)
+    # proposal_cues + novelty carry the engine's setattr-hint sites since the mixin extraction
+    # (P3); scanning them here keeps "a hint set outside the registry" a red test everywhere.
+    found = (_setattr_hint_names(orch) | _setattr_hint_names(fs)
+             | _setattr_hint_names(cues) | _setattr_hint_names(nov))
     hints = {n for n in found if n.startswith("_")}   # non-underscore (track_hypotheses) rides along
     assert hints, "the scan found no hint setattr sites — the scanner or the code moved; fix the test"
     missing = hints - set(RESEARCHER_HINT_ATTRS)
@@ -180,3 +185,47 @@ def test_foresight_forwards_hints_even_without_a_client():
     outer.propose(RunState(goal="g", direction="min"), None)
     assert inner.seen["_novelty_feedback"] == "you already tried X"
     assert inner.seen["track_hypotheses"] is False
+
+def test_every_researcher_wrapper_forwards_hints():
+    """docs/15 §P4.6 (resolution): instead of replacing the setattr channel with a value object
+    (a propose()-signature change across every researcher + test stub), close its one remaining
+    gap structurally — a NEW wrapper class that delegates propose() to a wrapped researcher MUST
+    call roles.forward_hints before delegating, or the engine's hints silently die at it (the
+    historical dead-board bug). Enumerates wrapper classes by shape, so the next wrapper is
+    covered the day it is written, without a bespoke test."""
+    import ast
+    import inspect
+    from pathlib import Path
+
+    pkg = Path(__file__).resolve().parents[1] / "looplab"
+
+    def _delegates_propose(fn) -> bool:
+        # ANY `self.<attr>.propose(...)` / `self.<attr>().propose(...)` call — handle-name
+        # agnostic, so a future wrapper spelling its wrapped agent `self._base`/`self.role`/…
+        # is covered the day it is written (the needle-list version was not).
+        for node in ast.walk(fn):
+            if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                    and node.func.attr == "propose"):
+                inner = node.func.value
+                while isinstance(inner, (ast.Attribute, ast.Call)):
+                    inner = inner.func if isinstance(inner, ast.Call) else inner.value
+                if isinstance(inner, ast.Name) and inner.id == "self":
+                    return True
+        return False
+
+    offenders = []
+    for f in pkg.rglob("*.py"):
+        # utf-8-sig: several tracked files carry a BOM, which plain utf-8 turns into a SyntaxError
+        tree = ast.parse(f.read_text(encoding="utf-8-sig", errors="replace"))
+        for cls in [n for n in ast.walk(tree) if isinstance(n, ast.ClassDef)]:
+            methods = {m.name: m for m in cls.body
+                       if isinstance(m, (ast.FunctionDef, ast.AsyncFunctionDef))}
+            if "propose" not in methods:
+                continue
+            if (_delegates_propose(methods["propose"])
+                    and "forward_hints(" not in ast.unparse(methods["propose"])):
+                offenders.append(f"{f.relative_to(pkg)}::{cls.name}")
+    assert not offenders, (
+        f"researcher wrapper(s) {offenders} delegate propose() WITHOUT forward_hints — engine "
+        "hints (novelty feedback, complexity cues, board order) silently die at that wrapper. "
+        "Call roles.forward_hints(self, <wrapped>) before delegating.")

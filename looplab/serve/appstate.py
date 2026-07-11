@@ -68,6 +68,14 @@ class AppState:
             evs = [e for e in evs if e.seq <= upto_seq]
         return evs
 
+    def state(self, rd: Path):
+        """`fold(self.events(rd))` — the routers' one-line state hydration (previously spelled out
+        at ~16 call sites). DELIBERATELY uncached: engine invariant #4 (state is only observed via
+        a fresh fold of the log) — the SSE hot path has its own size+mtime-keyed cache in
+        `state_payload`, which is a *payload* cache, never a folded-state handle reused across
+        requests."""
+        return fold(self.events(rd))
+
     def state_payload(self, rd: Path, upto_seq: Optional[int] = None) -> dict:
         # Cache the expensive fold+dump+trim by (events.jsonl size, mtime, upto_seq): unchanged log ->
         # reuse the trimmed payload, only re-stamping the live `engine_running` (a lock probe, not the

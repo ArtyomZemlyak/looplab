@@ -26,6 +26,7 @@ import threading
 import time
 from pathlib import Path
 
+from looplab.core.gitenv import git_config_env
 from looplab.runtime.sandbox import SECRET_ENV
 from looplab.core.context_budget import RESULT_CAP   # the agent loop's per-result cap (core home —
 # runtime must not import tools/: tools sits ABOVE runtime and already imports back into it)
@@ -57,7 +58,6 @@ _MAX_FINISHED = 32
 def _child_env(argv) -> dict:
     base = {k: v for k, v in os.environ.items() if not SECRET_ENV.search(k)}
     if argv and argv[0] == "git":     # restore ONLY git config + identity (not credential-bearing vars)
-        from looplab.tools.shell_tools import git_config_env
         base.update(git_config_env())
     base.setdefault("PYTHONUNBUFFERED", "1")
     return base

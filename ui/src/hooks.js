@@ -1,6 +1,37 @@
 import { useEffect, useRef, useState } from 'react'
 import { apiUrl } from './util'   // join the served path prefix so SSE works behind a proxy subpath
 
+// The ONE shared poll hook (mega-refactor P5.2), replacing the hand-rolled setInterval effects that
+// were copy-pasted across AssistantBar/Dock/Inspector/RunList/panels. Calls `fn` once immediately and
+// then every `ms` milliseconds until unmount or a `deps` change — the exact clearInterval-on-cleanup
+// semantics of the effects it replaces. `fn` receives an `alive()` predicate (true until THIS effect
+// instance is cleaned up) so async callers can guard their setState exactly like the old
+// `let alive = true` closure flag.
+//   ms == null        → no interval (the immediate call still fires) — "poll only while working" sites.
+//   enabled: false    → do nothing at all (the old `if (!cond) return` early-out; cond goes in deps).
+//   immediate: false  → skip the immediate call (interval ticks only).
+//   pauseHidden: true → RunList's tab-visibility guard, OPT-IN so the other sites keep polling while
+//                       hidden as they always did: skip ticks while document.hidden, and refresh once
+//                       immediately when the tab becomes visible again.
+export function usePoll(fn, ms, deps = [], { pauseHidden = false, immediate = true, enabled = true } = {}) {
+  useEffect(() => {
+    if (!enabled) return
+    let on = true
+    const alive = () => on
+    const tick = () => fn(alive)
+    if (immediate) tick()
+    const t = (ms != null) ? setInterval(() => { if (!pauseHidden || !document.hidden) tick() }, ms) : null
+    const onVis = pauseHidden ? () => { if (!document.hidden) tick() } : null
+    if (onVis) document.addEventListener('visibilitychange', onVis)
+    return () => {
+      on = false
+      if (t != null) clearInterval(t)
+      if (onVis) document.removeEventListener('visibilitychange', onVis)
+    }
+    // deps come from the caller (they list what their fn reads), mirroring the effects this replaces
+  }, deps)
+}
+
 // Splice the currently-BUILDING node (server marker `state.building`) into `nodes` as a synthetic
 // status:'building' card, so it shows the INSTANT the engine starts on it — before node_created — and
 // every node consumer (canvas / list / panels) renders it with no extra wiring. Cleared server-side the

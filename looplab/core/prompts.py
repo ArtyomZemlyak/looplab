@@ -35,6 +35,25 @@ class PromptStore:
         return string.Template(text).safe_substitute(vars)
 
 
+# The overridable prompt-key REGISTRY (docs/15 §P4.7): every `render(prompts, "<key>", …)` call
+# site must use a key listed here — `tests/test_prompt_keys.py` source-scans both directions
+# (the same discipline as event types / hints / signals). Why: an override lands as
+# `<prompt_dir>/<key>.md`, so a typo'd KEY at a call site (or a renamed key with a stale
+# override file) silently falls back to the built-in default — no error, the operator's tuned
+# prompt just stops applying.
+PROMPT_KEYS: tuple[str, ...] = (
+    "researcher_system", "tool_researcher_system",
+    "developer_system", "developer_repair_prefix",
+    "repo_developer_system_intro", "repo_developer_system_body",
+    "strategist_system", "tool_strategist_system",
+    "pilot_system", "triage_system",
+    "deep_research_system", "foresight_system", "merge_system", "bestofn_judge_system",
+)
+# NOT registered (documented exclusion): the LLMOnboarder's system prompt
+# (adapters/repo_developer.py::_SYS) — the onboarder is built pre-run via task.make_onboarder()
+# with no PromptStore handle wired; route it through render() when that wiring exists.
+
+
 def render(store: Optional[PromptStore], name: str, default: str, **vars) -> str:
     """Resolve a prompt via the store (if any) or the inline default; render $vars."""
     if store is not None:

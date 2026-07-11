@@ -343,7 +343,7 @@ class SiblingRunTools:
         self.self_run_id = self_run_id
         self.task_id = ""
         self.max_chars = max_chars
-        # Traversal-guarded, (size, mtime)-fingerprinted fold cache — shared with RunsTools.
+        # Traversal-guarded, (size, mtime)-fingerprinted fold cache — shared with MachineRunsTools.
         self._runs = RunStateCache(self.run_root)
         self._reader = RunTools(max_chars=max_chars)
 

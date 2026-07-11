@@ -27,26 +27,32 @@ def detect_gpus() -> list[dict]:
         return _GPUS_CACHE
     gpus: list[dict] = []
     try:
-        exe = shutil.which("nvidia-smi")
-        if exe:
-            out = subprocess.run(
-                [exe, "--query-gpu=index,name,memory.total,memory.free",
-                 "--format=csv,noheader,nounits"],
-                capture_output=True, text=True, timeout=5)
-            for line in (out.stdout or "").strip().splitlines():
-                parts = [p.strip() for p in line.split(",")]
-                if len(parts) >= 4:
-                    def _int(x):
-                        try:
-                            return int(float(x))
-                        except (ValueError, TypeError):
-                            return None
-                    gpus.append({"index": _int(parts[0]), "name": parts[1],
-                                 "mem_total_mib": _int(parts[2]), "mem_free_mib": _int(parts[3])})
+        from looplab.core.parse import to_int
+        for parts in (query_nvidia_smi("index,name,memory.total,memory.free") or []):
+            if len(parts) >= 4:
+                gpus.append({"index": to_int(parts[0]), "name": parts[1],
+                             "mem_total_mib": to_int(parts[2]), "mem_free_mib": to_int(parts[3])})
     except (OSError, ValueError, subprocess.SubprocessError):
         gpus = []
     _GPUS_CACHE = gpus
     return gpus
+
+
+def query_nvidia_smi(fields: str, *, timeout: float = 5.0, nounits: bool = True):
+    """Run `nvidia-smi --query-gpu=<fields>` and return the comma-split, stripped rows, or None
+    when there is no usable GPU signal (no binary / non-zero exit / empty output). The ONE
+    launcher+CSV-splitter shared by the inventory here, the name probe below, and the live
+    monitor in serve/routers/misc — callers keep their own field lists, timeouts, row shapes
+    and exception posture (this raises subprocess/OS errors; callers catch per their contract)."""
+    exe = shutil.which("nvidia-smi")
+    if not exe:
+        return None
+    fmt = "csv,noheader,nounits" if nounits else "csv,noheader"
+    out = subprocess.run([exe, f"--query-gpu={fields}", f"--format={fmt}"],
+                         capture_output=True, text=True, timeout=timeout)
+    if out.returncode != 0 or not (out.stdout or "").strip():
+        return None
+    return [[c.strip() for c in line.split(",")] for line in out.stdout.strip().splitlines()]
 
 
 def usable_cpu_count() -> int:
@@ -126,48 +132,6 @@ def operational_attention_points(*, include_env: bool = True) -> str:
         "prefer the cheap/safe option and surface the question.")
 
 
-def path_size_note(path: str, *, timeout: float = 8.0) -> str:
-    """A bounded, best-effort size note for a path — so a prompt can warn against copying a huge
-    tree without ever hanging on a multi-GB/geesefs dir. Returns a short human string; on a slow
-    filesystem the measurement is abandoned and reported as 'very large (measurement timed out)'.
-    For a git working tree, also notes tracked vs untracked so 'seed only code' is an obvious call."""
-    from pathlib import Path as _P
-    p = _P(os.path.expanduser(str(path)))
-    if not p.exists():
-        return f"{path}: (missing)"
-    try:
-        out = subprocess.run(["du", "-sb", str(p)], capture_output=True, text=True, timeout=timeout)
-        if out.returncode == 0 and out.stdout.strip():
-            nbytes = int(out.stdout.split()[0])
-            human = _human_bytes(nbytes)
-        else:
-            human = "?"
-    except subprocess.TimeoutExpired:
-        return f"{path}: very large (measurement timed out — treat as huge)"
-    except (OSError, ValueError, subprocess.SubprocessError):
-        human = "?"
-    note = f"{path}: {human}"
-    # git-tracked footprint (fast) so 'code is tiny, artifacts are huge' is visible.
-    try:
-        g = subprocess.run(["git", "-C", str(p if p.is_dir() else p.parent), "ls-files", "-z"],
-                           capture_output=True, text=True, timeout=timeout)
-        if g.returncode == 0:
-            ntracked = sum(1 for x in g.stdout.split("\0") if x)
-            if ntracked:
-                note += f" ({ntracked} git-tracked files; untracked content is NOT source)"
-    except (OSError, subprocess.SubprocessError):
-        pass
-    return note
-
-
-def _human_bytes(n: float) -> str:
-    for unit in ("B", "KB", "MB", "GB"):
-        if n < 1024:
-            return f"{n:.0f}{unit}" if unit == "B" else f"{n:.1f}{unit}"
-        n /= 1024
-    return f"{n:.1f}TB"
-
-
 def detect_gpu() -> str | None:
     """The first GPU's name via `nvidia-smi`, or None if none/undetectable. Cached for the process.
     Deliberately NO torch dependency — torch may not be installed yet (it's auto-installed on demand),
@@ -177,13 +141,11 @@ def detect_gpu() -> str | None:
         return _GPU_CACHE[1]
     name: str | None = None
     try:
-        exe = shutil.which("nvidia-smi")
-        if exe:
-            out = subprocess.run([exe, "--query-gpu=name", "--format=csv,noheader"],
-                                 capture_output=True, text=True, timeout=5)
-            first = (out.stdout or "").strip().splitlines()
-            if first and first[0].strip():
-                name = first[0].strip()
+        # nounits=False: matches the pre-extraction call (`--format=csv,noheader` — a name-only
+        # query has no unit columns to strip).
+        rows = query_nvidia_smi("name", nounits=False)
+        if rows and rows[0] and rows[0][0]:
+            name = ",".join(rows[0]).strip() or None   # a GPU name may contain a comma — rejoin
     except (OSError, ValueError, subprocess.SubprocessError):
         name = None
     _GPU_CACHE = (True, name)

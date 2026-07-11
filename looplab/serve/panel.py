@@ -13,13 +13,14 @@ from typing import Optional
 
 from looplab.agents.roles import forward_hints
 from looplab.core.models import Idea, Node, RunState
+from looplab.events.digest import knn_idw, numeric_params
 
 
 def _predict(params: dict, hist: list[tuple[dict, float]], bounds, k: int = 3) -> Optional[float]:
     """Inverse-distance-weighted k-NN prediction of an idea's metric over the history (in the shared
-    numeric param space). None when there's no comparable point."""
-    target = {key: float(v) for key, v in params.items()
-              if (not bounds or key in bounds) and isinstance(v, (int, float))}
+    numeric param space). None when there's no comparable point. Eligibility here: a neighbour must
+    contain ALL the target's keys (distance over the target's subspace); the IDW core is knn_idw."""
+    target = numeric_params(params, keys=bounds or None)
     if not target:
         return None
     tkeys = set(target)
@@ -28,14 +29,8 @@ def _predict(params: dict, hist: list[tuple[dict, float]], bounds, k: int = 3) -
         if not tkeys.issubset(p):          # only full-dimensional points are comparable
             continue
         pts.append((math.sqrt(sum((target[x] - p[x]) ** 2 for x in tkeys)), m))
-    if not pts:
-        return None
-    pts.sort(key=lambda t: t[0])
-    nn = pts[:k]
-    if nn[0][0] == 0.0:
-        return nn[0][1]
-    w = sum(1.0 / d for d, _ in nn)
-    return sum((1.0 / d) * m for d, m in nn) / w
+    res = knn_idw(pts, k)
+    return None if res is None else res[0]
 
 
 class PanelResearcher:
@@ -73,8 +68,8 @@ class PanelResearcher:
         ideas = [self.base.propose(state, parent) for _ in range(self.k)]
         if self.k == 1:
             return ideas[0]
-        hist = [({k: float(v) for k, v in n.idea.params.items() if isinstance(v, (int, float))},
-                 n.metric) for n in state.feasible_nodes() if n.metric is not None]
+        hist = [(numeric_params(n.idea.params), n.metric)
+                for n in state.feasible_nodes() if n.metric is not None]
         if len(hist) < self.warmup:
             return ideas[0]            # not enough signal to rank -> first proposal
         best, best_pred = None, None

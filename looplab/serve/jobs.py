@@ -1,7 +1,8 @@
 """Generic background-job registry for the UI server (BACKLOG §4 extraction; bodies verbatim from
 `serve/server.py`). One `JobRegistry` per app — genesis, the boss command route, report refresh and
 the scope reports all share it, so ONE store backs both `/api/jobs/{id}` and `/api/genesis/{id}`
-(genesis rides along by writing a `progress` field its poll endpoint surfaces)."""
+(genesis rides through `run_as_job(with_progress=True)`, writing a `progress` field its poll
+endpoint surfaces)."""
 from __future__ import annotations
 
 import os
@@ -39,23 +40,28 @@ class JobRegistry:
             j = self._jobs.get(job_id)
             return dict(j) if j else None
 
-    async def run_as_job(self, compute):
+    async def run_as_job(self, compute, *, inline_wait: float | None = None, with_progress: bool = False):
         """Run `compute` (a 0-arg callable returning the final response dict) in a worker thread; return
         its result inline when it finishes within the inline wait, else {status:'running', job_id}. The
         thread keeps a blocking LLM/agent call off the event loop AND off the request's critical path,
-        so it can't stall other clients or 504 behind a proxy."""
+        so it can't stall other clients or 504 behind a proxy.
+
+        `with_progress=True` hands `compute` ONE argument instead — a `set_progress(payload)` callable
+        that annotates the running job's `progress` field (thread-safe; genesis streams its live scout
+        steps through it, and its poll endpoint surfaces them). `inline_wait` overrides the registry-wide
+        default for this one call (genesis keeps its own LOOPLAB_GENESIS_INLINE_WAIT knob)."""
         job_id = secrets.token_hex(8)
         self.put(job_id, status=JOB_RUNNING, result=None, ts=time.time())
 
         def _worker():
             try:
-                res = compute()
+                res = compute(lambda p: self.put(job_id, progress=p)) if with_progress else compute()
             except Exception as e:  # noqa: BLE001 - surface a usable error, never crash the worker
                 res = {"ok": False, "error": str(e)}
             self.put(job_id, status=JOB_DONE, result=res, ts=time.time())
         threading.Thread(target=_worker, daemon=True).start()
 
-        deadline = time.monotonic() + self._inline_wait
+        deadline = time.monotonic() + (self._inline_wait if inline_wait is None else inline_wait)
         while time.monotonic() < deadline:
             j = self.get(job_id)
             if j and j.get("status") == JOB_DONE:

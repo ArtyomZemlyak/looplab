@@ -82,7 +82,7 @@ def svg_dag(st):
         border = (C["best"] if n.id == st.best_node_id else
                   C["fail"] if n.status == "failed" else
                   C["infeasible"] if not n.feasible else C["ok"] if n.status == "evaluated" else C["mut"])
-        m = n.confirmed_mean if n.confirmed_mean is not None else n.metric
+        m = n.robust_metric
         crown = " ♚" if n.id == st.best_node_id else ""
         parts.append(
             f'<g transform="translate({x-58},{y-22})">'
@@ -100,19 +100,19 @@ def svg_trajectory(st):
         return "<p class=mut>no evaluated nodes</p>"
     W, H, pad = 760, 240, 40
     ids = [n.id for n in ev]
-    ys = [(n.confirmed_mean if n.confirmed_mean is not None else n.metric) for n in ev]
+    ys = [n.robust_metric for n in ev]
     miny, maxy = min(ys), max(ys)
     def X(i): return pad + (i - min(ids)) / max(1, (max(ids) - min(ids))) * (W - pad - 12)
     def Y(v): return H - pad - (v - miny) / max(1e-9, maxy - miny) * (H - pad - 14)
     best, pts = None, []
     for n in ev:
-        v = n.confirmed_mean if n.confirmed_mean is not None else n.metric
+        v = n.robust_metric
         if n.feasible and (best is None or (v < best if st.direction == "min" else v > best)):
             best = v
         if best is not None:
             pts.append((X(n.id), Y(best)))
     line = " ".join(("L" if k else "M") + f"{x:.1f} {y:.1f}" for k, (x, y) in enumerate(pts))
-    dots = "".join(f'<circle cx="{X(n.id):.1f}" cy="{Y(n.confirmed_mean if n.confirmed_mean is not None else n.metric):.1f}" '
+    dots = "".join(f'<circle cx="{X(n.id):.1f}" cy="{Y(n.robust_metric):.1f}" '
                    f'r="4" fill="{C["infeasible"] if not n.feasible else C["accent"]}" opacity=".85"/>' for n in ev)
     grid = "".join(f'<line x1="{pad}" x2="{W-12}" y1="{pad/2+t*(H-pad-14)}" y2="{pad/2+t*(H-pad-14)}" stroke="{C["bg2"]}"/>'
                    for t in (0, .25, .5, .75, 1))
@@ -199,7 +199,7 @@ def build(run_dir: Path) -> str:
         f'<td>{fmt(n.metric)}</td><td>{fmt(n.eval_seconds)}</td></tr>' for n in sorted(st.nodes.values(), key=lambda n: n.id))
 
     seedluck = (f'<div class="kv"><span class="k">naive single-eval leader</span><b>#{naive.id} · {fmt(naive.metric)}</b>'
-                f'<span class="k">selected robust winner</span><b>#{best.id} · {fmt(best.confirmed_mean if best.confirmed_mean is not None else best.metric)}</b></div>'
+                f'<span class="k">selected robust winner</span><b>#{best.id} · {fmt(best.robust_metric)}</b></div>'
                 + (f'<div class="flag">↳ demotion: single-eval leader #{naive.id} was corrected by multi-seed confirmation</div>'
                    if naive and best and naive.id != best.id else '')) if (naive and best) else '<span class=mut>n/a</span>'
 

@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useState } from 'react'
 import { get, fmt, fmtDate, fmtAgo, listProjects, createProject, patchProject, deleteProject, assignRun, renameRun, deleteRun,
   listSupertasks, createSupertask, renameSupertask, deleteSupertask, assignSupertask } from './util.js'
+import { usePoll } from './hooks.js'
 import MapView from './MapView.jsx'
 import ScopeReport from './ScopeReport.jsx'
 import ThemeSwitcher from './ThemeSwitcher.jsx'
@@ -163,13 +164,8 @@ export default function RunList({ onOpen, onSettings }) {
   const loadSupers = () => listSupertasks().then(setSuperdata).catch(() => {})
   // Poll the runs list every 2.5s, but skip the request while the tab is hidden (no point refreshing a
   // list nobody's looking at) — and refresh once immediately when it becomes visible again.
-  useEffect(() => {
-    loadRuns(); loadProjects(); loadSupers()
-    const t = setInterval(() => { if (!document.hidden) loadRuns() }, 2500)
-    const onVis = () => { if (!document.hidden) loadRuns() }
-    document.addEventListener('visibilitychange', onVis)
-    return () => { clearInterval(t); document.removeEventListener('visibilitychange', onVis) }
-  }, [])
+  usePoll(loadRuns, 2500, [], { pauseHidden: true })
+  useEffect(() => { loadProjects(); loadSupers() }, [])
 
   const stName = useMemo(() => Object.fromEntries(superdata.supertasks.map(s => [s.id, s.name])), [superdata])
   const assignToSuper = async (runId, sid) => { await assignSupertask(runId, sid === UNASSIGNED ? null : sid); loadRuns() }

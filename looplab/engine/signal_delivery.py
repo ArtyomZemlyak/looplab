@@ -23,6 +23,12 @@ well-formed and its `inject` symbol is importable+callable, and (b) a per-signal
 signal's content actually reaching the rendered output. Adding a delivered signal here without a
 probe in that test FAILS the suite — so "the signal silently stopped being delivered" is a red test,
 not the next review's finding.
+
+Placement note: the routes reference serve/search/agents/tools symbols, but only as STRINGS —
+nothing here imports above the stdlib at import time, so parking the registry in `engine/` creates
+no layering edge. It lives here (not in `core/`) because the ENGINE is the producer whose signals
+this discipline governs, and `resolve_inject` is called only by the enforcement test (which needs
+the `[ui]` extra to resolve the serve entry regardless of where this file sits).
 """
 from __future__ import annotations
 
@@ -50,15 +56,15 @@ class SignalRoute:
 SIGNALS: tuple[SignalRoute, ...] = (
     SignalRoute(
         name="trust_flags",
-        produced_by="trust.reward_hack/leakage/critic scans (orchestrator._evaluate trust scan)",
+        produced_by="trust.reward_hack/leakage/critic scans (engine/evaluate.py _evaluate trust scan)",
         folded_into="RunState.reward_hacks",
         channel="push",
         inject="looplab.events.digest:trust_reflection",
         consumer="Researcher (via _set_complexity_hint -> _complexity_hint)",
-        call_sites=(("looplab/engine/orchestrator.py", "trust_reflection(state)"),)),
+        call_sites=(("looplab/engine/proposal_cues.py", "trust_reflection(state)"),)),  # _set_complexity_hint: ProposalCuesMixin
     SignalRoute(
         name="triage_rationale",
-        produced_by="orchestrator._triage_crash (LLM crash-triage verdict)",
+        produced_by="engine/crash_repair.py _triage_crash (LLM crash-triage verdict)",
         folded_into="Node.triage_rationale",
         channel="context",
         inject="looplab.events.digest:_node_line",
@@ -100,11 +106,15 @@ SIGNALS: tuple[SignalRoute, ...] = (
         channel="push",
         inject="looplab.agents.hints:render_hint_directives",
         consumer="Researcher, Strategist, pilot, crash-triage, Developer",
-        call_sites=(("looplab/engine/orchestrator.py", "render_hint_directives(state.pending_hints)"),
+        call_sites=(("looplab/engine/node_build.py", "render_hint_directives(state.pending_hints)"),
+                    # _directed_idea itself lives in node_build.py (NodeBuildMixin); the orchestrator's
+                    # node-creation spine still threads every idea through it:
                     ("looplab/engine/orchestrator.py", "self._directed_idea("),
                     # the ablation-produced refine_block is a real tree-entering Developer node too, so
                     # its directive threading is enforced here (it was silently bypassed before).
-                    ("looplab/engine/ablation.py", "self._directed_idea("))),
+                    ("looplab/engine/ablation.py", "self._directed_idea("),
+                    # crash-triage briefs carry the directives too (CrashRepairMixin):
+                    ("looplab/engine/crash_repair.py", "render_hint_directives(state.pending_hints)"))),
     SignalRoute(
         name="run_states",
         produced_by="control/eval events (pause/approval/build/leakage/trust)",

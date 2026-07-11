@@ -5,7 +5,7 @@ create_node stage so nothing is dropped."""
 from __future__ import annotations
 
 from looplab.core.models import RunState
-from looplab.serve.traceview import build_conversation
+from looplab.events.traceview import build_conversation
 
 
 def _gen(sid, parent, start, tid="T", nid=5):
