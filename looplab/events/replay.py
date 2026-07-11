@@ -23,7 +23,7 @@ from looplab.events.types import (
     EV_POLICY_DECISION, EV_PROMOTE, EV_PROXY_SCORED, EV_REPORT_GENERATED,
     EV_RESEARCH_COMPLETED, EV_RESUME, EV_REWARD_HACK_SUSPECTED, EV_RUN_ABORT,
     EV_RUN_FINISHED, EV_RUN_REOPENED, EV_RUN_STARTED, EV_RUNG_PROMOTED, EV_SET_STRATEGY,
-    EV_SPEC_APPROVAL_REQUESTED, EV_SPEC_APPROVED, EV_SPEC_DRIFT, EV_SPEC_PROPOSED,
+    EV_SETUP_FINISHED, EV_SPEC_APPROVAL_REQUESTED, EV_SPEC_APPROVED, EV_SPEC_DRIFT, EV_SPEC_PROPOSED,
     EV_STRATEGY_DECISION, EV_TRUST_GATE_CHANGED, EV_WORKSPACE_CHANGED)
 
 
@@ -372,6 +372,12 @@ def _on_data_provenance(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> Non
 def _on_host_grading(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     st.host_grading = d      # out-of-process host-side grading active (audit; no labels)
 
+def _on_setup_finished(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
+    # P0-3: setup completed (task+data preflight, incl. the leakage hard-stop). Folded so resume can
+    # tell "setup done" from "crashed mid-setup right after run_started" — the latter must re-run the
+    # rest of preflight (leakage!) rather than skip it forever. Idempotent (a re-run re-appends it).
+    st.setup_done = True
+
 def _on_data_leakage(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     st.leakage = d
 
@@ -666,6 +672,7 @@ _HANDLERS = {
     EV_DATA_PROFILED: _on_data_profiled,
     EV_DATA_PROVENANCE: _on_data_provenance,
     EV_HOST_GRADING: _on_host_grading,
+    EV_SETUP_FINISHED: _on_setup_finished,
     EV_DATA_LEAKAGE: _on_data_leakage,
     EV_APPROVAL_REQUESTED: _on_approval_requested,
     EV_APPROVAL_GRANTED: _on_approval_granted,

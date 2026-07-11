@@ -670,13 +670,20 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
             reset_install_latch()
         except Exception:  # noqa: BLE001 - best-effort; a missing helper must not block setup
             pass
-        if not state.run_id:
-            # SETUP PHASE (task + data), made an explicit, ONLINE-watchable phase: the pre-node work
+        # SETUP-COMPLETION GATE (arch-review §3 P0-3): gate on `setup_done` (folded from
+        # setup_finished), NOT on run_id. run_started is appended in the MIDDLE of this block — before
+        # AGENTS.md/provenance/host-grading/profiling and the leakage hard-stop — so a crash right
+        # after it used to make every later resume skip the rest of preflight (leakage included)
+        # forever. Gating on setup_done re-runs the body until it actually completes. Legacy logs that
+        # never emitted setup_finished but already reached a node (or finished) are treated as
+        # set-up-complete via `state.nodes`/`state.finished`, so they never re-run setup.
+        if not (state.setup_done or state.nodes or state.finished):
+            # SETUP PHASE (task + data), an explicit, ONLINE-watchable phase: the pre-node work
             # (fingerprint the workspace, hash data provenance, profile columns, write AGENTS.md) is
             # otherwise silent between run_started and the first node. `setup_started` +/ `setup_step`
             # + `setup_finished` events land in the activity feed live, and a `setup` span (node_id=-1)
-            # captures the trace so the UI's Setup pseudo-node shows what happened. fold ignores these
-            # (forward-compat), so they're pure observability.
+            # captures the trace so the UI's Setup pseudo-node shows what happened. setup_finished is
+            # now folded (setup_done); the others stay pure observability.
             _su_t0 = time.time()
             self.store.append(EV_SETUP_STARTED,
                               {"phase": "task+data", "repo": bool(self._repo_spec),
@@ -695,26 +702,30 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                 _ev("workspace_fingerprint")
                 wf = self._workspace_fingerprint()
                 _su_step("workspace fingerprint", sources=list(wf.keys()))
-                self.store.append(
-                    EV_RUN_STARTED,
-                    {
-                        "run_id": self.run_dir.name,
-                        "task_id": self.task.id,
-                        "goal": self.task.goal,
-                        "direction": self.task.direction,
-                        "config_hash": cfg_hash,
-                        "workspace": wf,
-                        # T2 trust enforcement: recorded here so the pure fold applies the same
-                        # gate on replay/resume (config isn't available to `replay.fold`). Absent in
-                        # old logs -> "audit" -> byte-identical legacy selection.
-                        "trust_gate": self.trust_gate,
-                        # D1 holdout-gated promotion: same recorded-at-start discipline. Absent in
-                        # old logs -> False -> byte-identical legacy selection. The FRACTION is
-                        # pinned too so a resume re-uses the exact split every metric was scored on.
-                        "holdout_select": self._holdout_select,
-                        "holdout_fraction": self._holdout_fraction,
-                    },
-                )
+                # run_started is the one-time identity anchor: append it only if it isn't already
+                # recorded, so a resume RE-ENTERING setup after a crash-right-after-run_started (P0-3)
+                # re-runs the REST of preflight (leakage) without minting a second run_started.
+                if not state.run_id:
+                    self.store.append(
+                        EV_RUN_STARTED,
+                        {
+                            "run_id": self.run_dir.name,
+                            "task_id": self.task.id,
+                            "goal": self.task.goal,
+                            "direction": self.task.direction,
+                            "config_hash": cfg_hash,
+                            "workspace": wf,
+                            # T2 trust enforcement: recorded here so the pure fold applies the same
+                            # gate on replay/resume (config isn't available to `replay.fold`). Absent in
+                            # old logs -> "audit" -> byte-identical legacy selection.
+                            "trust_gate": self.trust_gate,
+                            # D1 holdout-gated promotion: same recorded-at-start discipline. Absent in
+                            # old logs -> False -> byte-identical legacy selection. The FRACTION is
+                            # pinned too so a resume re-uses the exact split every metric was scored on.
+                            "holdout_select": self._holdout_select,
+                            "holdout_fraction": self._holdout_fraction,
+                        },
+                    )
                 # AGENTS.md (I18): task/contract context for coding-agent backends. Runtime line is
                 # honest about libs/hardware — capable tasks get the auto-install capability sentence,
                 # offline/synthetic tasks stay numpy+stdlib (task_runtime_caps returns None for those).
