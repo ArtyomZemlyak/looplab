@@ -1,15 +1,18 @@
 # LoopLab — Architecture & Code Review (2026-07-11, revalidated)
 
-> Current-state report for `2ce82fdb05e6be27bd6e91d943d378dbcd73860c`.
+> Reviewed repository baseline: `32dc6c055b768976d9a9ebcc2e873e8da140375e`.
+> The production, test, and UI trees are identical to executable snapshot
+> `2ce82fdb05e6be27bd6e91d943d378dbcd73860c`; the four intervening commits are documentation-only.
 > This revision supersedes the first-pass verdict in commit `0009837`. The original report remains
 > available in Git history; this file deliberately separates historical findings, applied fixes,
 > surviving defects, and newly discovered regressions.
 
 ## 0. Scope, method, and priority model
 
-The review covers the whole current repository, with extra scrutiny on the 96 commits made from
-2026-07-09 through 2026-07-11 (`01c5febc..2ce82fdb`): 220 changed files and
-20,832 insertions / 8,009 deletions.
+The review covers the whole repository at `32dc6c0`, with extra scrutiny on the 100 commits made from
+2026-07-09 through 2026-07-11 (`01c5febc..32dc6c0`): 221 changed files and
+21,638 insertions / 8,009 deletions. The last four commits only add and consolidate documentation;
+the executable code baseline remains `2ce82fd`.
 
 Current size and structure:
 
@@ -25,10 +28,12 @@ This revalidation combined:
 
 1. a complete reread of the original report and its implementation/follow-up ledgers;
 2. line-by-line review of all current subsystem boundaries and the July 9–11 diff;
-3. independent adversarial passes over state/replay, architecture/contracts, security/runtime,
+3. semantic reconciliation against the newly consolidated strategic review in
+   `docs/17-project-review-and-directions-2026-07-11.md`;
+4. independent adversarial passes over state/replay, architecture/contracts, security/runtime,
    platform/CLI, and UI/control semantics;
-4. executable event-sequence, API, process, filesystem, Docker, and property-style reproductions;
-5. Linux Python 3.11/3.12, Windows-targeted, UI, static-analysis, and selected regression suites.
+5. executable event-sequence, API, process, filesystem, Docker, and property-style reproductions;
+6. Linux Python 3.11/3.12, Windows-targeted, UI, static-analysis, and selected regression suites.
 
 Priority meanings in this document:
 
@@ -581,6 +586,16 @@ actor/separate control journal or storage CAS, and require `expected_seq` on sta
 - **Numeric ablation is not a paired experiment.** `engine/ablation.py:55-62` asks a stochastic
   Developer to regenerate code per parameter, so the measured delta mixes parameter effect and
   arbitrary implementation changes. Use the same artifact plus overrides or `ablate_from`.
+- **The default profile under-delivers the product's trust positioning.** Confirmation, reward-hack,
+  leakage, critic, and output redaction are disabled or audit-only by default
+  (`core/config.py:336-400`). `thorough` enables confirmation/detectors and changes `trust_gate` to
+  `gate`, but does not enable `redact_output` (`core/config.py:43-63`). This is a P2 product/safety
+  contract mismatch, not a reason to flip every gate immediately: P1-6 and P1-7 must be fixed before
+  heuristic evidence can safely block promotion.
+- **The real dataset path lacks a private-grader/isolated-tier contract.** `adapters/dataset_task.py:1-21`
+  uses a task script's self-reported metric and an absolute data path. That is useful for trusted local
+  experimentation, but it does not provide the private host-side grading or explicit Docker data mount
+  needed to claim the same integrity on untrusted/hostile tiers.
 
 ### P2 contract and decomposition debt
 
@@ -596,6 +611,9 @@ actor/separate control journal or storage CAS, and require `expected_seq` on sta
   bug while only v1 exists, but it must be fixed before the first schema migration.
 - `TaskAdapter` promises four required members, yet Engine requires serialization and the LLM path
   calls `llm_roles`; a structurally conforming third-party adapter can pass `isinstance` and fail.
+- `trust/cv.py:8-12,35-62` defines temporal-CV/Evaluator contracts but has no production caller. This
+  is a real advertised-capability and ownership gap, not a current replay defect: either wire one live
+  adapter through the contract or stop presenting it as an active evaluation layer.
 - `SearchPolicy` promises only `next_actions`, yet Engine mutates `max_nodes` and
   `ablation_capable`; a conforming frozen/slotted third-party policy can break.
 - `Developer` promises only `implement`; repair, parent-aware implementation, output files, deletes,
@@ -637,6 +655,13 @@ actor/separate control journal or storage CAS, and require `expected_seq` on sta
 - Deferred toy/latent edges remain: multiplicative ridge lambda cannot escape zero in one offline
   baseline, MLE-bench docs assume `train.csv/test.csv` despite a wider asset glob, and fork/inject
   retains an effect-before-gate SIGKILL window.
+- Strategic wiring opportunities from the companion review remain P3, not correctness fixes:
+  literature/web grounding is deliberately off by default (`core/config.py:688-700`;
+  `agents/deep_research.py:214-256`); knowledge notes/retrieval remain markdown plus a rebuilt in-memory
+  top-k index while the harmonic `CaseLibrary` has no production path (`tools/knowledge_tools.py:163-300`;
+  `engine/memory.py:514-609`); and coverage affects proposal cues reactively after concentration rather
+  than selection (`search/coverage.py:50-100`; `agents/strategist.py:145-160`;
+  `engine/proposal_cues.py:91-111`). These are legitimate roadmap bets after stabilization.
 
 ---
 
@@ -698,6 +723,15 @@ dial rather than a Settings field.
 ---
 
 ## 7. Review of the July 9–11 changes
+
+### Documentation-only changes after the reviewed code snapshot
+
+Commits `07dfa06`, `83d48d5`, `967faac`, and `32dc6c0` added, adversarially checked, and
+consolidated the strategic project review into doc 17, then registered it in `mkdocs.yml`. They
+changed no production, test, UI, CI, or dependency file and therefore close none of the P0/P1
+findings above. Doc 17's Part I was written against the superseded first-pass verdict; its key
+current-state and test-evidence statements are reconciled in the same integration as this report,
+as recorded in §11.
 
 ### Changes that introduced or exposed current regressions
 
@@ -872,8 +906,10 @@ tests exist.
 
 ### Current test evidence
 
-- Separate full Linux runs under Python 3.11 and Python 3.12 at this HEAD each produced **1,711 passed,
-  33 skipped, 1 failed**; both interpreters had the same stale keepalive test failure.
+- Separate full Linux runs under Python 3.11 and Python 3.12 on executable snapshot `2ce82fd` each
+  produced **1,711 passed, 33 skipped, 1 failed**; both interpreters had the same stale keepalive test
+  failure. The repository changes through `32dc6c0` are documentation-only, so this evidence remains
+  applicable, but the suites were not rerun specifically at the documentation head.
 - A fresh focused Windows run of the 11 most relevant suites passed with two skips after running
   outside the filesystem sandbox; the first sandboxed attempt failed only because pytest could not
   create Windows temp directories.
@@ -945,6 +981,13 @@ The old universal “architecture concepts and process diagram are clean” conc
 LLM novelty adjudicator is a separate active path. More importantly, the diagrams do not model node
 attempts, search epochs, subject-bound approval, setup completion, or the hybrid non-log inputs needed
 for resume. Concrete values can be correct while the lifecycle model is incomplete.
+
+The newly consolidated doc 17 is strategically useful, but its `32dc6c0` version still quoted the
+superseded first-pass doc-16 verdict: it described this audit as static, reported 1,718 passed / 23
+skipped and a green suite, claimed zero critical or reproducible replay/data-corruption defects, and
+concluded that correctness and replay safety held. The integration containing this revision also
+reconciles doc 17's opening ledger, test caveat, code-health qualifications, architecture verdict, and
+priority order with the evidence here; its product and research-direction analysis remains intact.
 
 Documentation should be updated in the same PRs that introduce the new state/event contracts, with
 the diagrams generated or at least checked from the same registries where possible.
