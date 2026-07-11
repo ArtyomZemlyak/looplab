@@ -280,3 +280,46 @@ def test_background_evicts_oldest_finished_logs(tmp_path):
     assert tids[3] in mgr._tasks                # the newest is always retained
     retained = [t for t in mgr._tasks.values() if t["proc"].poll() is not None]
     assert len(retained) <= 3                   # bounded (≤ max_finished + the just-started one)
+
+
+def test_kill_waits_and_reports_exit_code(tmp_path):
+    # arch-review §4 P1-4: kill must WAIT for exit and report the ACTUAL outcome, not fire one SIGTERM
+    # and claim success.
+    mgr = BackgroundManager()
+    tid = mgr.start([sys.executable, "-c", "import time; time.sleep(30)"], str(tmp_path))
+    r = mgr.kill(tid)
+    assert r["ok"] and r["status"] == "killed" and r.get("exit_code") is not None
+    assert mgr._tasks[tid]["proc"].poll() is not None      # the process is actually gone
+
+
+def test_kill_reaps_the_whole_tree(tmp_path):
+    # arch-review §4 P1-4: killing the parent must reap its children too (tree kill), not orphan them.
+    import os
+    import time
+    if os.name == "nt":
+        import pytest
+        pytest.skip("POSIX liveness probe (os.kill(pid, 0))")
+    code = ("import subprocess, sys, time\n"
+            "c = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])\n"
+            "print(c.pid, flush=True)\n"
+            "time.sleep(60)\n")
+    mgr = BackgroundManager()
+    tid = mgr.start([sys.executable, "-c", code], str(tmp_path))
+    child_pid = None
+    for _ in range(60):
+        out = mgr.read(tid).get("new_output", "")
+        tok = out.strip().split()
+        if tok and tok[0].isdigit():
+            child_pid = int(tok[0]); break
+        time.sleep(0.1)
+    assert child_pid, "child pid not observed"
+    assert mgr.kill(tid)["ok"]
+    # the child must be gone within a moment (killpg / taskkill /T reaps the tree)
+    gone = False
+    for _ in range(50):
+        try:
+            os.kill(child_pid, 0)          # raises if the process no longer exists
+            time.sleep(0.1)
+        except OSError:
+            gone = True; break
+    assert gone, f"child {child_pid} survived the parent kill (tree not reaped)"
