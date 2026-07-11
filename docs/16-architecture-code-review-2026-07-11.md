@@ -620,3 +620,54 @@ untrusted/hostile trust modes. H3 and M12 are written up in §4 and §5; the doc
   container, collapsing the confirm variance gate. (CONFIRMED, medium)
 - `sandbox.py:178` — `run_argv` docstring describes a `communicate()` fast path that no longer
   exists (always drains via `_tee_drain`). (CONFIRMED, low — §7)
+
+---
+
+## 13. Implementation ledger — fixes applied
+
+The findings above were then **implemented** on `claude/architecture-code-review-76zgdt` (commits
+after this report), in severity-ordered phases. Every phase was **adversarially reviewed per-fix**
+by an independent agent panel, and a final **mega-review** (5 angles — invariant-safety,
+strategy-cluster interactions, a fresh bug-hunt, completeness-vs-report, docs/diagram-sync) swept
+the whole diff. Each phase's REQUEST_CHANGES were fixed before moving on. Every fix carries a
+regression test where testable. **Final state: 1718 passed, 23 skipped** (full offline suite);
+diff ≈ 44 code files, +~600/−170.
+
+**Applied (by the fix that landed it):**
+
+- **High** — H1 ablation spin (`policy.ablation_capable`, engine-stamped), H2 leakage token-anchor
+  (+ D-leak docstring), H3 untrusted-container hardening (`make_docker_wrap`).
+- **Medium** — M1 dataset objective-orientation (direction-conditional), M2 MCTS bounded reward
+  (`_mcts_reward`), M3 strategy resume-merge, M4 governance enforcement (per-field `_pinned`
+  provenance so the human pin always wins, the strategist is gated, direct-construction defaults to
+  the shipped matrix), M5 lessons-file lock race (re-read + drop-by-identity), M6 lessons cap 3→8,
+  M7 stage carry-over (+ bare-list manifest), M8 token-auth raw-content gate (log/logs/spans/trace/
+  conversation/chat-log/agents_md/authoring/memory/permissions), M9 `repo_read` EOF, M10/M11 doc
+  fixes, M12 container env forwarding.
+- **Low / nit** — reasoning-retry guard, PEP-604 coercion, replay defensive reads + confirm-eval
+  idempotency, `novelty_mode` config-time validation, GPU-name comma parse, `_clamp_fill` swept
+  dims, deep-research cadence first-fire, `perfect_metric` ceiling, `_validate_emit` sweep grid,
+  `_pathsafe` resolve guard, `truncate_history` tool-call-arg shrink, MCP result cap + single-task
+  lifecycle (no leaked subprocess), grader-glob boundary (incl. `autograder`), `delete_node` atomic
+  writes + guarded span parse, `put_run_config` shared secret set, streaming-assistant error bubble,
+  robust-metric projections, `run` on a paused run, `timings` dicts_only, dev-crash batch break,
+  reconcile hash-reset, harmonic `kb_search` query space, TUI composable-task panel, `trust_gate` /
+  `novelty_semantic` comment/doc corrections, and the doc/comment-drift set (strategist default
+  backend, `declare_stages`, `_dep_attempted`, router order, MLEBENCH count, README badge, LanceDB).
+
+**Deliberately deferred** (very latent / no current trigger — flagged for a maintainer, not fixed):
+
+- `strategy.py::_strategy_core` omits `timeout`/`max_parallel` — no producer emits them into a
+  strategy today, so the change-detector cannot drop them; zero current trigger.
+- `adapters/regression.py` multiplicative-λ absorbing at 0 — offline toy blind-baseline only; the
+  global search still reaches λ>0 via other root drafts.
+- `adapters/mlebench_real.py` hard-codes `train.csv`/`test.csv` vs `assets()` accepting `train*.csv`
+  — PLAUSIBLE, no current trigger (every supported competition + baseline uses those names).
+- `orchestrator.py::_serve_forced_requests` fork/inject effect-before-gate — a duplicate node only
+  on a SIGKILL/OOM in a sub-millisecond window; worst case one wasted experiment, no corruption. A
+  correct fix needs request-indexed (deterministic) node-id minting — a larger change with its own
+  risk, left for a focused follow-up.
+
+The architecture verdict from §1 stands after the changes: layering and the event-log invariants
+are intact (the mega-review's invariant-safety angle came back clean), and the fixes are additive
+and replay-safe.
