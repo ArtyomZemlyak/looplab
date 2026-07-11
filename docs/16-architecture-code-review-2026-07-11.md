@@ -1,725 +1,963 @@
-# LoopLab — Architecture & Code Review (2026-07-11)
+# LoopLab — Architecture & Code Review (2026-07-11, revalidated)
 
-**Goal of this review.** A whole-codebase audit across four axes the maintainer asked for:
-(1) **architecture** — layering, the event-sourced engine invariants, coupling, duck-typed
-seams; (2) **functional consistency** — that no two parts of the system contradict each other;
-(3) **general code quality/correctness** — real bugs, races, security, robustness; and
-(4) **documentation, schemas and diagrams** — that the docs, the settings table, and the
-process diagram match the code. **No fixes are applied in this document** — every item carries a
-`file:line` anchor, the concrete failure/contradiction, and a suggested fix so the work can be
-sequenced and test-gated.
+> Current-state report for `2ce82fdb05e6be27bd6e91d943d378dbcd73860c`.
+> This revision supersedes the first-pass verdict in commit `0009837`. The original report remains
+> available in Git history; this file deliberately separates historical findings, applied fixes,
+> surviving defects, and newly discovered regressions.
 
-**Method.** The review fanned out over `looplab/` (~39k LoC, 160 test files) as **33 independent
-scopes** — 23 per-subsystem code reviews + 5 cross-cutting architecture/consistency scopes +
-5 documentation/diagram scopes — run as parallel agents. **Every finding was then adversarially
-re-verified** by a second agent that re-read each cited `file:line`, confirmed *both* sides of
-each contradiction, and refuted false positives. 66 agents, ~5.7M tokens. Only findings that
-survived verification appear below; each is marked **CONFIRMED** (failure fully traced) or
-**PLAUSIBLE** (real code defect, runtime trigger conditional). Severities are the *verified*
-severities — several reviewer over-statements were downgraded during verification, and where a
-reviewer's suggested fix was itself wrong (e.g. a discontinuous MCTS reward map) the corrected
-fix is used.
+## 0. Scope, method, and priority model
 
-> **Environment note.** `pytest` is not installed in the review environment, so this is a
-> **static** review: test code was read, not executed. Claims that required running code
-> (e.g. reproducing the `X_trainval` leakage false-positive, the PEP-604 coercion miss) were
-> reproduced by the agents in a Python REPL where noted; the full suite was not run.
+The review covers the whole current repository, with extra scrutiny on the 96 commits made from
+2026-07-09 through 2026-07-11 (`01c5febc..2ce82fdb`): 220 changed files and
+20,832 insertions / 8,009 deletions.
 
-**Non-negotiable invariants checked against** (from `CLAUDE.md`): the engine is the sole writer
-of domain events; exactly one terminal event per node; every side effect gated on a domain event
-(resume-by-replay idempotent); state observed only via `fold(store.read_all())`; `fold` stays
-deterministic, order-tolerant, unknown-type-tolerant, additive-only with reader-side defaults;
-`Settings` fields flat and never renamed/nested; event-type names are constants; prompt strings
-are behavioural contracts.
+Current size and structure:
+
+- 170 production Python modules under `looplab/`, totaling approximately 39.8k physical lines;
+- 156 Python `test_*.py` files and one JavaScript test file;
+- 77 registered event types, 64 fold handlers, and 13 currently unhandled types manually classified
+  in this review as diagnostic (there is no explicit diagnostic registry);
+- 81 Python functions above Ruff's default C901 complexity threshold of 10;
+- a React UI whose largest components remain `panels.jsx` (~1,100 lines), `Inspector.jsx`
+  (~1,000), `AssistantBar.jsx` (~685), and `Dock.jsx` (~637).
+
+This revalidation combined:
+
+1. a complete reread of the original report and its implementation/follow-up ledgers;
+2. line-by-line review of all current subsystem boundaries and the July 9–11 diff;
+3. independent adversarial passes over state/replay, architecture/contracts, security/runtime,
+   platform/CLI, and UI/control semantics;
+4. executable event-sequence, API, process, filesystem, Docker, and property-style reproductions;
+5. Linux Python 3.11/3.12, Windows-targeted, UI, static-analysis, and selected regression suites.
+
+Priority meanings in this document:
+
+- **P0 — release blocker:** silent state/result corruption, unrecoverable durability failure, or a
+  bypass of an explicit trust/permission boundary. Fix before relying on unattended long runs.
+- **P1 — high:** serious correctness, security, resource, or supported-platform failure. Fix in the
+  stabilization cycle immediately following P0.
+- **P2 — medium:** bounded operational risk, broken extensibility/compatibility contract, or
+  architectural debt already producing secondary defects.
+- **P3 — low:** latent edge, documentation/compatibility cleanup, or bounded UX issue.
+
+The word **confirmed** below means the code path was traced end-to-end and, where meaningful,
+reproduced. **Conditional** means the defect is real but requires the stated environment or mode.
 
 ---
 
 ## 1. Executive summary
 
-**The architecture is sound and the load-bearing invariants hold.** The event-sourced design
-does what it claims: the layering rules are respected (no upward or `engine → serve` imports),
-the fold is deterministic, the six registry-guarded seams are in sync, and the "engine is the
-sole writer" invariant survives an end-to-end trace of every `store.append` site. **No critical
-defects and no reproducible data-corruption / replay-divergence bugs were found.** The two
-`high`-severity items are a search-liveness bug and a trust-gate false-positive, both gated
-behind non-default configuration; everything else is `medium` or below, and a large share is
-documentation/comment drift rather than runtime behaviour.
+The original executive conclusion — “the architecture is sound, the load-bearing invariants hold,
+and no reproducible data-corruption/replay-divergence bug exists” — is **refuted**.
 
-| Severity | Count | Character |
+The foundation remains worth keeping: the lower dependency direction is clean, the append-only
+event log plus pure fold is a strong projection model, host-side scoring is thoughtful, and the
+July refactors substantially improved navigation. However, the current model lacks four identities
+that the runtime now requires:
+
+- a **node attempt** identity for reset/re-evaluation;
+- a **search/finalization epoch** for reopen/add-nodes and winner promotion;
+- a **request/subject revision** for approval, confirmation, abort, and forced operations;
+- a **source/run manifest identity** for task/config/workspace bytes.
+
+Without those identities, current code accepts late results from abandoned attempts, preserves stale
+confirmation/approval/trust state across changed code, can reopen a run while retaining its old
+confirmed champion, and can mix a new task snapshot with an old event log. These are related state-
+model failures rather than isolated missing `if` statements.
+
+The second major theme is **policy enforcement by distributed convention**. Auth is a sensitive-GET
+blacklist; tool permissions are implemented separately by providers; control “needs engine” metadata
+exists independently in Python and JavaScript; budgets are checked separately by normal evaluation,
+confirmation, and ablation; process termination has separate sandbox/background implementations.
+The July fixes closed several individual holes but did not remove the duplication that keeps creating
+new ones.
+
+Current priority order:
+
+1. node-attempt, search-epoch, approval/request identity, and resume/finalization coordination;
+2. fail-closed event-log/setup/run/workspace durability;
+3. auth, permission, MCP/background-process, and eval path boundaries;
+4. a shared hard `BudgetLedger` and one fitness/promotion model;
+5. task/developer/tool contracts, Windows Docker, and client control semantics;
+6. component decomposition, compatibility, UI coverage, and documentation cleanup.
+
+No wholesale rewrite is recommended. The event log and public flat read model can stay; the fix is an
+additive event-schema evolution plus explicit services/value objects behind the existing facade.
+
+---
+
+## 2. How the system currently works
+
+End-to-end execution is:
+
+1. `adapters/tasks.py::normalize_task` maps composable and legacy task spellings into a concrete
+   Pydantic task adapter.
+2. CLI/server composition builds Researcher, Developer, Strategist, SearchPolicy, tool providers,
+   sandbox, and `Engine`.
+3. `Engine.__init__` resolves roughly 70 options and caches optional task hooks such as assets,
+   repo/eval specs, host grader, and onboarding capability.
+4. Setup writes `run_started`, then materializes AGENTS.md, provenance, profiling, host-grading, and
+   leakage information.
+5. Each loop iteration folds `events.jsonl` into a new `RunState`; the policy returns untyped action
+   dictionaries.
+6. On the normal proposal path, node creation is sequential: Researcher → Developer →
+   `node_created`; inject, fork, ablate, and reset paths intentionally bypass parts of that chain.
+7. Evaluation may be parallel: workspace materialization → sandbox/command stages → metric readers,
+   constraints, drift/trust checks → a terminal node event.
+8. When search actions end, confirmation, holdout, approval, finalization, read-model export, and
+   cross-run memory run.
+9. Resume reconstructs a new object graph from task/config snapshots, folds the log, and re-enters
+   pending work. Stage reuse additionally depends on node workdirs still existing.
+
+The intended dependency direction holds narrowly:
+
+```text
+core  <-  events  <-  engine  <-  cli/serve/UI composition
+```
+
+There is no direct `engine -> serve` import. `core` remains below the application layer and `events`
+imports only `core`.
+
+The middle band is not actually a DAG. Lazy imports hide a conceptual strongly connected component:
+
+```text
+adapters <-> agents <-> search <-> tools
+```
+
+- `adapters/tasks.py` normalizes schemas *and* builds agents, policies, and tool providers;
+- `search` imports concrete agent wrappers and tool-backed merge helpers;
+- `agents/tool_loop.py` imports tools;
+- `tools/machine_runs_tools.py` reaches back into task validation.
+
+### What is genuinely strong
+
+- `fold` is pure and deterministic for a **fixed ordered log**.
+- Unknown event types are ignored, and the first terminal event is correctly idempotent **within one
+  node attempt**.
+- The event log is a useful source of truth for the state projection and audit trail.
+- EventStore serializes ordinary local writers and repairs/ignores a torn final line correctly.
+- `RunResult` unifies subprocess, Docker, command-eval, and stage outcomes.
+- Host-side scoring keeps held-out labels out of the candidate workspace.
+- `Node.robust_metric`, handler extraction, shared JSONL helpers, `materialized_stages`, and
+  `default_agent_control()` removed real semantic duplication.
+- Golden-state and prefix-replay tests are a valuable foundation.
+
+### What “source of truth” does not currently include
+
+Continuation is not reproducible from `events.jsonl` alone. It also depends on task/config snapshots,
+the current source repo/data, mutable node workdirs, role `last_*` side channels, process-global
+background tasks, and shared memory files. `config_hash` hashes only the task model, not Engine options,
+code revision, environment/image digest, or the exact bytes seeded into nodes.
+
+---
+
+## 3. P0 findings — fix before release confidence
+
+### P0-1 · Node lifecycle events have no attempt identity
+
+**Anchors:** `events/replay.py:159-213,231-290,313-335,440-441,498-521,535-538,588-590,631-634`;
+`engine/evaluate.py:42-140`; `engine/orchestrator.py:822-860,948-988`.
+
+`node_reset` reuses the same node ID and manually clears fields. A late event from work started before
+the reset is indistinguishable from the new attempt.
+
+Confirmed sequence:
+
+```text
+node_created(0)
+node_reset(0)
+late node_evaluated(0, attempt_id="old", metric=9)
+=> node 0 becomes evaluated; metric and cost are accepted
+```
+
+`Event.data` preserves the extra `attempt_id`, but the fold handlers do not interpret or validate it.
+The same defect accepts late `confirm_eval`, `node_confirmed`, and `best_confirmed` after reset. A
+reproduced run ended with raw metric `1`, confirmed/robust metric `9`, and `confirmed_done=True`.
+
+Node-keyed state also survives reset:
+
+- abort immediately aborts the replacement attempt;
+- reward-hack/leakage evidence for old code can exclude newly implemented code after an
+  `implement|propose` reset (preserving it for a plain eval reset of identical code can be valid);
+- after one completed forced-confirm, a **new explicit** request for the same node ID is ignored
+  because completion is stored by node ID rather than request ID.
+
+**Fix:** add `attempt_id` to all node lifecycle, evaluation, confirmation, abort, holdout, trust, and
+forced-operation events. Reset increments the attempt. Fold accepts effects only for the active
+attempt. Old v1 events migrate as `attempt_id=0`. Preserve old trust evidence as audit history, but
+scope enforcement to `(node_id, attempt_id, code_hash)`.
+
+### P0-2 · Confirmation, holdout, and approval have no search epoch or subject revision
+
+**Anchors:** `events/replay.py:373-387,498-521,751-796`; `engine/confirm_phase.py:35-64`;
+`engine/orchestrator.py:577-599`; `search/policy.py:61-66,324-347,423-435,530-532`.
+
+Confirmed sequence:
+
+```text
+node 0 raw=.80, confirmed=.75
+run_finished
+resume + add_nodes
+node 1 raw=.10 (better, direction=min)
+=> fold best remains node 0; confirmed_done remains true
+```
+
+Once any confirmed pool exists, new unconfirmed candidates are excluded from final selection and no
+new confirmation pass runs. Policies simultaneously disagree: Greedy follows the folded champion,
+while Evolutionary/ASHA/MCTS use raw metric and may expand a different node.
+
+Approval is global rather than subject-bound. `approval_granted(node_id=999)` sets `approved=True`;
+after reopen and a different best, no second approval is required. `spec_approved` is also accepted
+without a proposal, setting `spec_confirmed=True` while `proposed_spec=None` and skipping onboarding.
+
+**Fix:** introduce `search_epoch` and subject-bound promotion records:
+`{request_id, epoch, node_id, attempt_id, subject_hash}`. Reopen/add-nodes begins a new epoch and
+invalidates confirmation, holdout promotion, and approval completion for the old candidate set.
+Transition validation must reject approval without a matching pending request/proposal hash. A
+holdout that has already been surfaced through state/UI is no longer unseen: continuing search must
+use an epoch-specific still-hidden holdout/secondary holdout, or start a new run rather than reusing
+the disclosed final signal.
+
+One concrete consequence is the apparent search/promotion fitness split: fold uses confirmed/holdout
+promotion fitness, while Evolutionary, ASHA, and MCTS rank raw metrics and Greedy often follows the
+folded best. Separate `SearchFitness` and `PromotionFitness` are valid between explicit phases; they
+become contradictory only when reopen leaves the prior promotion epoch active. This is a consequence
+of P0-2, not an additional independent finding. One owner should expose typed search-rank and
+promotion APIs, and a new epoch should re-confirm the current candidate set.
+
+### P0-3 · Setup completion is inferred from `run_id`, creating a permanent crash window
+
+**Anchor:** `engine/orchestrator.py:664-765`, especially `:673` and `:698-758`.
+
+`run_started` is appended before AGENTS.md, data provenance, host-grading metadata, dataset profiling,
+and the leakage hard-stop. Resume gates the whole setup phase on `not state.run_id`; diagnostic
+`setup_*` events are not folded.
+
+A crash immediately after `run_started` therefore makes every later resume permanently skip the
+remaining preflight, including leakage enforcement.
+
+**Fix:** fold an explicit setup state machine:
+`setup_started(step_hash) -> setup_step_completed -> setup_completed`. Search may begin only after
+`setup_completed`. Make each step idempotent/content-addressed and add crash injection after every
+append boundary.
+
+### P0-4 · Mid-file event-log corruption is detected but allowed to grow an invisible tail
+
+**Anchors:** `events/eventstore.py:298-371`; `cli/run_cmds.py:329-339`.
+
+Confirmed sequence:
+
+```text
+valid seq0
+corrupt line
+valid seq2
+read_all() => [seq0]
+append resume seq3
+read_all() => [seq0]
+log_divergence() => two dropped records
+```
+
+The CLI warns, then resumes and appends behind the unreadable boundary. Every new event is durable on
+disk but invisible to fold. Torn **final** lines are handled correctly; this finding is specifically
+about corruption in the middle.
+
+**Fix:** fail closed in EventStore itself before any append/resume. Provide an explicit operator
+`repair-log` workflow that backs up the original, quarantines or salvages the tail, atomically
+truncates to the last valid boundary, and records the repair provenance.
+
+### P0-5 · Run/task/workspace identity can silently mix different experiments
+
+**Anchors:** `cli/run_cmds.py:271-313`; `engine/triage.py:16-40`;
+`engine/workspace.py:103-145,172-213`; `adapters/tasks.py:133-136`.
+
+Confirmed failures:
+
+- `looplab run` on an existing output directory writes the new task snapshot before folding/reopening
+  the old event log. A real reproduction produced `task.snapshot=poly_regression` while
+  `run_started.task_id=toy_quadratic`, then added regression evaluations to the toy run.
+- For a git repo, the workspace fingerprint is only `HEAD`. Dirty tracked bytes are copied by the
+  seeder but do not change the fingerprint. A tracked file changed from `AAAA` to `BBBB`; fingerprint
+  stayed `git:<same sha>` while the node received `BBBB`.
+- Detected workspace drift is audit-only; the run continues comparing nodes built from different
+  baselines.
+- `{repo: NEW, editable_path: OLD}` silently keeps `OLD`, because `repo` is only popped when the
+  legacy alias is absent.
+- Relative repo path `.` may be validated in the server cwd and later interpreted under the package
+  cwd of the child Engine.
+- HTTP preflight checks only the legacy `editable_path`, not every `editables[].path`, reference, or
+  data source; relative paths in those collections are likewise child-cwd dependent.
+
+**Fix:** an immutable `RunManifest` must include canonical task/config hash, code revision, environment
+identity, and an exact `WorkspaceSnapshot` of the bytes/materialized file set. `run` must refuse a
+non-empty run directory; continuation is `resume`. Conflicting aliases are errors. Resolve relative
+paths once against the config/task-file source and persist the canonical absolute form. Workspace
+drift requires an explicit new epoch/run, not an audit-only flag.
+
+### P0-6 · Assistant permission decisions are not centrally enforced
+
+**Anchors:** `serve/routers/assistant.py:90-156`; `serve/assistant.py:269-314`;
+`tools/shell_tools.py:152-159`; `agents/tool_loop.py:27-52`.
+
+Three independent bypasses survived:
+
+1. Cancel marks a pending permission as denied/resolved, but a stale resolve request does not check
+   state ownership and overwrites it with allow. A deterministic reproduction wrote a file after the
+   user cancelled the turn.
+2. MCP providers are added even in `plan` mode and CompositeTools dispatches them without a policy
+   wrapper. Building the toolset may also start a configured stdio MCP server before any decision.
+3. `kill_background` checks only `deny`; in default `ask` mode it never calls the approver and kills
+   the process-global task directly.
+
+The original report listed the third item as “refuted”. That refutation was incorrect: plan-mode deny
+does not satisfy ask-mode approval semantics.
+
+**Fix:** introduce immutable `ToolSpec(effect=read|write|process|network|run_control)` and a central
+policy decorator around every provider, including MCP. Permission resolution must be an atomic CAS
+`pending -> allowed|denied|cancelled`, keyed by turn/request revision; stale resolution returns 409.
+MCP connections are lazy and happen only after authorization.
+
+### P0-7 · Command-eval paths cross the declared workspace boundary
+
+**Anchors:** `runtime/command_eval.py:41-64,104-152,253-290,475,521-548`.
+
+Confirmed:
+
+- stage names accept `../escape`, `..\escape`, `C:\temp\escape`, `\`, control characters, and NUL;
+  the name is interpolated into a log path, and an escaped log was written outside the expected dir.
+  Embedded NUL can raise `ValueError` while opening the log **after** the child was spawned, outside
+  the current OSError-only guard and without guaranteed tree cleanup;
+- `adapter.path="../outside/adapter.py"` executes external Python and returned a metric;
+- `host_score.predictions="../preds.json"` reads stale predictions outside the attempt workdir and
+  produced a perfect score.
+
+The file readers already have a containment helper, but adapter and prediction paths do not share it.
+
+**Fix:** a single `PathPolicy` resolves all task, stage, adapter, metric, prediction, artifact, and log
+paths. Stage names use a short slug allowlist with no separators, drives, control/NUL, or dot segments.
+Prediction input must be a newly created regular file under the current `(node, attempt)` workdir.
+Stage/eval timeouts also need a finite, positive, bounded value object rather than raw floats.
+
+---
+
+## 4. P1 findings — stabilization blockers
+
+### P1-1 · Resume/finalization can leave a zombie run
+
+**Anchors:** `serve/routers/control.py:128-156`; `engine/finalize.py:29-65`;
+`cli/run_cmds.py:367-378`.
+
+While an old Engine holds the singleton lock during finalization, UI/CLI appends `resume`; the spawn
+endpoint returns `already_running`. The old process then exits without re-entering the loop, leaving
+`finished=False` and no Engine. Confirmed with TestClient plus the real OS lock.
+
+**Fix:** a server-side `RunCommandService.append_and_ensure_engine()` and `EngineSupervisor` must
+coordinate intent, epoch, lock acquisition, and pending wakeup. Clients should never assemble the
+two-step transaction.
+
+### P1-2 · `max_eval_seconds` is not a hard cumulative ceiling
+
+**Anchors:** `engine/orchestrator.py:948-988`; `engine/confirm_phase.py:85-141`;
+`engine/ablation.py:27-66,120-152`.
+
+Confirmed:
+
+- `max_parallel=4`, cap `.05` launched four evaluations and spent `.20`;
+- confirmation launched six seed evaluations despite starting above its cap;
+- ablation probes did not change `total_eval_seconds` at all.
+
+Parallel overrun is bounded to a batch, but the documented “hard cumulative ceiling” is false.
+
+**Fix:** a shared atomic `BudgetLedger.reserve(kind, estimate)` before every eval/confirm/ablate
+operation, followed by actual-cost commit/release. Parallel work reserves before spawn. Host-only
+holdout scoring should still be accounted, but may use a separate resource bucket unless the public
+`max_eval_seconds` contract is explicitly broadened to include it.
+
+### P1-3 · Sensitive GET auth remains a default-open blacklist
+
+**Anchors:** `serve/server.py:80-85,126-160`; `serve/routers/runs.py:195-225`;
+`serve/routers/misc.py:116-132`; `serve/jobs.py:76-85`;
+`serve/routers/assistant.py:175-182`.
+
+With `LOOPLAB_UI_TOKEN` enabled:
+
+- unauthenticated node detail returned 200 with full code, files, persisted `stdout_tail`, trials,
+  and parent code;
+- the same caller received 401 for `/log`;
+- unauthenticated `/api/llm/health` performed a real model completion. A fake client counted a new
+  completion for missing and bad tokens; those calls are billable when the configured backend is.
+
+`/api/jobs/{id}` and assistant progress also return sensitive data without the token, though random
+IDs make them less enumerable (P2 capability-style mitigation). Public `/state`/SSE projections keep
+the first 160 characters of each node's stdout/error, which can still expose a secret printed near the
+start. The route census must also classify genesis-job results, synthesized scope reports, and `/prov`
+rationale/params rather than assuming every projection is harmless.
+
+**Fix:** auth dependencies/scopes should be attached to routes. Default-deny all `/api` data and
+effects; explicitly mark only lightweight public projections. Convert model health to authenticated
+POST or a transport-only probe without generation.
+
+### P1-4 · Background process termination is not reliable
+
+**Anchor:** `runtime/bg_tasks.py:73-128,216-235`.
+
+BackgroundManager is process-global and session-unowned. On Windows it creates no process group;
+deadline enforcement happens lazily only on read/list; timeout sends one terminate and permanently
+suppresses retries; kill neither waits nor escalates and reports success immediately. A parent/child
+reproduction killed the parent while the child remained alive.
+
+The generic sandbox path is not affected: it uses the robust `_kill_tree` implementation.
+
+**Fix:** one session-owned `ProcessSupervisor`, using process groups/job objects, deadline watcher,
+TERM → bounded wait → tree KILL, verified exit, and bounded/rotated logs.
+
+### P1-5 · Resource caps still have CPU, RAM, and disk bypasses
+
+**Anchors:** `runtime/sandbox.py:253-284`; `runtime/command_eval.py:41-64,96-103,127-133`;
+`serve/routers/runs.py:230-287`.
+
+- `_tee_drain` uses `readline`, so one no-newline output line is fully allocated before truncation.
+- Live logs are unbounded on disk.
+- BackgroundManager's temp log has no byte quota, and its lazy deadline is never enforced if no caller
+  polls `read/list`.
+- file JSON and host-score JSON inputs are read wholly into memory.
+- `run_setup.log` ignores the node-log API tail cap.
+- stage count is unbounded, while the log endpoint caps each stage separately, allowing authenticated
+  response amplification.
+- Python `re` can catastrophically backtrack; clipping text to 200k characters does not bound CPU.
+  `^(a+)+$` showed exponential growth by input length.
+- stage timeout accepts negative, NaN, and infinity. A NaN deadline makes the trusted-local timeout
+  comparison permanently false.
+
+**Fix:** chunked binary drains, log quotas/rotation, stage-count and size checks, finite positive
+bounded timeouts, streaming/bounded JSON parsing, and RE2/non-backtracking regex or a separately timed
+worker process. Any failure after spawn, including NUL path errors, must still kill/reap the tree.
+
+### P1-6 · Workdir trust audit fails open
+
+**Anchors:** `engine/audit.py:76-107`; `trust/reward_hack.py:50-60`.
+
+Missing protected files are skipped, invalid UTF-8 becomes `got=None` without a signal, and a broad
+exception returns an empty finding list. Confirmed deletion and unreadable-byte cases both reported
+clean. Static scanning also misses ordinary deletion APIs such as `os.remove`.
+
+**Fix:** return `clean | tampered | unavailable`. Missing/unreadable protected inputs are hard
+signals in gate/block modes; audit failure must never be represented as clean.
+
+### P1-7 · Leakage detector remains unsafe as a hard gate
+
+**Anchor:** `trust/leakage.py:51-113`.
+
+The July token anchor fixed the original `X_trainval`, `X_interval`, and `X_latest` examples, but the
+current regex still:
+
+- false-positives on `train_values`, `values`, and benign `validation_split`;
+- misses multiline `.fit(X_test)` and a second `.fit()` on the same line;
+- can hide target leakage when NaN propagates through the correlation calculation.
+
+Because `data_leakage:*` can exclude a node from winning and breeding, a heuristic regex is too
+authoritative.
+
+**Fix:** AST/token analysis with structured evidence and confidence. Only high-confidence/verified
+signals may hard-gate; heuristic results remain advisory until corroborated.
+
+### P1-8 · Windows Docker extra mounts are malformed
+
+**Anchor:** `runtime/command_eval.py:384-418`.
+
+Additional data/reference mounts use the same absolute Windows path as host and container target,
+producing `C:/host:C:/host:ro`. Docker Desktop 29.5.3 rejects this as “too many colons”. The main
+`C:/...:/work` mount works; untrusted Windows RepoTasks with extra inputs fail.
+
+**Fix:** map inputs to stable Linux container targets such as `/looplab-inputs/<hash>` and rewrite
+the in-container path/symlink map. Prefer `--mount type=bind,src=...,dst=...,readonly` over colon
+syntax.
+
+### P1-9 · Developer wrappers lose failures and parent semantics
+
+**Anchors:** `adapters/repo_developer.py:464-494,830-881`;
+`search/best_of_n.py:128-193`; `agents/roles.py:512-585`; `engine/node_build.py:95-141`.
+
+- RepoDeveloper returns step errors as ordinary strings; the caller ignores them. If every step
+  fails, it can return empty output/parent files and evaluate the baseline as a new experiment.
+- BestOfN implements only `implement/repair`, so outer capability detection cannot see the inner
+  `implement_from/repair_from`; improve/repair loses the parent-aware path.
+
+**Fix:** `DevelopmentRequest(base_node, mode, idea)` → immutable
+`DevelopmentResult(code, files, deleted, report, step_results, status)`. Explicit capability
+protocols or one complete protocol must be preserved by all wrappers.
+
+### P1-10 · Client control semantics are duplicated and already diverged
+
+**Anchors:** `ui/src/AssistantBar.jsx:32-40,299-302`; `ui/src/api.js:58-80`;
+`serve/tui_format.py:179-188`; `ui/src/Dock.jsx:553-557`.
+
+AssistantBar `/resume`, `/finalize` (and its `/abort` alias), `/approve`, and `/ratify` append a control
+event and show success without spawning the Engine. Dock correctly performs control + resume.
+`actionNeedsEngine` exists but is unused. Both the JavaScript and TUI registries omit
+`approval_granted`, `spec_approved`, `node_reset`, and `run_reopened`; the TUI path is active while the
+JS helper is currently latent.
+
+**Fix:** one server-side command service and one `ControlSpec` registry containing validation,
+authorization, transition effect, and `needs_engine`; generate/export the client metadata.
+
+### P1-11 · The latest strategy governance fix still applies forbidden params
+
+**Anchor:** `engine/strategy.py:184-207` (`2ce82fd`).
+
+`name_ok` and `params_ok` are calculated independently, but when policy-name change is allowed and
+parameter change is locked, the code still builds `pp` from the raw input and passes it to
+`make_policy`.
+
+Confirmed:
+
+```text
+agent_control = {policy: [strategist]}; policy_params locked
+apply {policy: mcts, policy_params: {c: 9}}
+=> MCTSPolicy.c == 9
+```
+
+**Fix:** authorize into a new filtered `StrategyDelta`; mutation consumes only that object. Add both
+asymmetric tests: name locked/params allowed and name allowed/params locked.
+
+### P1-12 · Fail-open filesystem locks permit duplicate event sequence numbers
+
+**Anchors:** `events/eventstore.py:27-56,298-329`; `cli/__init__.py:109-159`.
+
+On normal NTFS/ext4 the lock works. On the documented unsupported/FUSE fail-open path, two
+EventStore instances can both derive and write the same next sequence number. State-sensitive
+control endpoints also validate one fold and append later without expected-revision/CAS semantics.
+
+**Fix:** do not degrade a multi-writer source-of-truth log to unlocked append. Use a single writer
+actor/separate control journal or storage CAS, and require `expected_seq` on state-sensitive commands.
+
+---
+
+## 5. P2/P3 operational and architectural findings
+
+### P2 operational risks
+
+- **`run_setup` “exactly once” is process-local.** `engine/eval_dispatch.py:32-63` uses an in-memory
+  flag; a new Engine repeats successful setup, while a second call on the same failed object can skip
+  it. The pre-run flag correctly prevents concurrent workers in one process, but not crash-safe
+  exactly-once behavior. Fold completion **should be** keyed by command/environment hash.
+- **Fold-handler coverage is no longer protected by its test.** `events/replay.py:646-712` dispatches
+  through `_HANDLERS`, while `tests/test_event_types.py:100-125` still scans old string comparisons.
+  Other registry tests still catch unregistered literal emissions and invalid control membership,
+  and this review manually classifies all 13 currently unhandled types as diagnostic; the missing
+  protection is specifically an explicit folded/diagnostic partition. Current census: 77 registered,
+  64 handlers, 16 golden-log types, and 11 handled types in the golden log.
+- **Foreign/hand-edited event cost can poison replay.** `eval_seconds="3"` raises `TypeError` and a
+  negative value reduces the cumulative budget (`events/replay.py:159-213,313-328`). Normal Engine
+  emitters do not produce these values, so this is a P2 persisted-input validation defect rather than
+  a current normal-path P1. Use typed payloads with finite non-negative constrained floats.
+- **Context compaction does not enforce its aggregate target.** `core/context_budget.py:37-93`
+  (`bc56bb6`, `2ce82fd`) correctly keeps a replacement `tool_calls.arguments` blob valid JSON, but
+  skips every message at or below `per_msg_cap` even when their aggregate exceeds `max_chars`. A
+  reproduction remained 7,983 characters before and after a 2,000-character target. Compact complete
+  assistant/tool turn groups until the aggregate postcondition is met and report any irreducible
+  protected head/tail separately.
+- **Background research can change future steering by scheduler order.** `events/types.py:149-161`
+  labels the allowed events selection-neutral and order-tolerant and explicitly acknowledges the hint
+  race; it does not claim full order neutrality. A fixed log still replays deterministically, and the
+  already folded champion is unchanged. However, `human replace -> background hint` retains both
+  hints while the inverse order retains only the human hint (`engine/research_cadence.py:92-136`;
+  `events/replay.py:571-578`; `engine/node_build.py:67-74`), so later proposals are schedule-dependent.
+  Return background values to the main writer at a deterministic causal slot, or add logical
+  revision/priority. This is P2 because current impact is bounded to future steering.
+- **`trusted_local edit:false` is a data-integrity footgun.** `engine/workspace.py:146-160,215-231`
+  creates writable symlinks. This is not a container escape — docs reserve hard RO for
+  untrusted/hostile — but candidate code can still mutate the original. Prefer copy/reflink/ACL or
+  advertise the weaker contract explicitly.
+- **Capability-like GET leaks.** `/api/jobs/{id}` and assistant progress are untokened. Random IDs
+  reduce exploitability but results/live model text remain sensitive.
+- **The SPA token is not per-user isolation on a shared JupyterHub origin.** It is embedded in a meta
+  tag and is a per-deployment secret readable by other same-origin content. Route scopes close API
+  omissions, but real multi-user isolation still requires upstream/per-user auth or a private origin.
+- **Case-insensitive reserved run IDs.** `ASSISTANT` passes the exact-case check and aliases the
+  service directory on Windows.
+- **TensorBoard exposure.** `cli/inspect_cmds.py:114` defaults to `0.0.0.0` without authentication.
+- **Windows TUI loses live refresh.** `select` on a console fd fails and falls back to blocking
+  `readline`; this is degraded UX, not a permanent production deadlock.
+- **Numeric ablation is not a paired experiment.** `engine/ablation.py:55-62` asks a stochastic
+  Developer to regenerate code per parameter, so the measured delta mixes parameter effect and
+  arbitrary implementation changes. Use the same artifact plus overrides or `ablate_from`.
+
+### P2 contract and decomposition debt
+
+- `Engine` is still a distributed god object: 12 mixins, 121 method definitions across Engine and its
+  mixins, and approximately 111 fields
+  assigned in its constructor. File navigation materially improved and composition objects such as
+  `LessonMemory`, `HoldoutGrader`, and `WorkspaceSeeder` are real progress; state ownership is still
+  largely shared through the Engine namespace.
+- `RunState` has 74 flat fields and `Node` 30. Lifecycle, control requests, promotion gates, budgets,
+  and audit sidecars share one mutable projection, which is why reset invalidates local fields but
+  misses run-level collections.
+- `Event.data` is untyped and `Event.v` is written but never read/migrated. This is not a version-skew
+  bug while only v1 exists, but it must be fixed before the first schema migration.
+- `TaskAdapter` promises four required members, yet Engine requires serialization and the LLM path
+  calls `llm_roles`; a structurally conforming third-party adapter can pass `isinstance` and fail.
+- `SearchPolicy` promises only `next_actions`, yet Engine mutates `max_nodes` and
+  `ablation_capable`; a conforming frozen/slotted third-party policy can break.
+- `Developer` promises only `implement`; repair, parent-aware implementation, output files, deletes,
+  reports, and audit evidence are duck-typed side channels.
+- Task/Developer source-scan registries do mitigate accidental hook renames; they do not express or
+  preserve undeclared capabilities such as parent-aware implementation through wrappers.
+- `ValidatingDeveloper`, like BestOfN, exposes only implement/repair and does not forward parent-aware
+  hooks. BestOfN is the reproduced P1 path; the validating wrapper is a P2 contract omission today.
+- `ToolProvider` returns strings and has no effect, permission, cancellation, or session metadata.
+- `AppState` uses late-bound route callbacks and router registration order is load-bearing because of
+  a generic `/api/{kind}` route.
+- Docker hardening policy is built independently in `sandbox.py` and `command_eval.py`; it already
+  drifted once and was manually resynchronized by the July fixes.
+- `Settings`, `EngineOptions`, constructor `_opt`, UI schema, and docs remain parallel representations.
+  The deliberate product/library default profile is valid, but `**knobs` removed signature-level
+  checking while leaving manual unpacking.
+- Repeated full fold keeps purity but remains O(events²) over a long run's iterations; EventStore's
+  incremental parser saves parsing, not reconstruction of the Pydantic projection.
+- Final LLM-cost aggregation follows the current object graph and can miss replaced/auxiliary clients;
+  resume records a latest rollup rather than a guaranteed lifetime ledger.
+
+### P3 compatibility and cleanup
+
+- The July split preserved flat imports for most modules but removed `looplab.runs_tools` and
+  `looplab.tools.runs_tools` in favor of `machine_runs_tools`. `_LAYOUT` tests are self-referential and
+  cannot detect deletion of a historical alias. Treat the impact as downstream compatibility risk,
+  not an internal runtime defect.
+- Flat `looplab.htmlview` and `looplab.traceview` still work. Missing intermediate
+  `looplab.serve.htmlview` was not part of the promised flat compatibility contract.
+- Moved functions retain their defining module globals. Assignment-based patches to re-exported
+  helper/constants such as `llm.BACKOFF_CAP_S`/`_chunk_has_content` do not affect those globals;
+  patching a re-exported callable itself can still work at call sites, and `agent.run_phase` was
+  intentionally preserved as a patch seam. The gap is narrow, not a blanket monkeypatch failure.
+- `ui/src/Dock.jsx` contains duplicate `resume` and `run_abort` object keys; the later definitions win.
+- Conservative fallback defaults still differ from `Settings` in a few incremental-construction paths
+  (`auto_install_deps`, `foresight_panel`, strategist backend).
+- `seed_mode`, `eval_trust_mode`, and `strategist_backend` still accept some invalid strings at config
+  construction time; downstream behavior is mostly fail-safe/later-loud, so this remains low priority.
+- Deferred toy/latent edges remain: multiplicative ridge lambda cannot escape zero in one offline
+  baseline, MLE-bench docs assume `train.csv/test.csv` despite a wider asset glob, and fork/inject
+  retains an effect-before-gate SIGKILL window.
+
+---
+
+## 6. Revalidation of the original H/M findings
+
+This table is the authoritative disposition of the first-pass IDs. “Fixed” means the original
+failure no longer reproduces; it does not imply the subsystem has no newer issue.
+
+| Original ID | Current disposition | Revalidation |
 |---|---|---|
-| **Critical** | 0 | — |
-| **High** | 3 | a no-progress engine spin (repo/eval-spec + ablation cadence); a leakage-gate false-positive that can silently bar an honest winner; an untrusted-container hardening gap |
-| **Medium** | 12 | objective-inversion prompts, an MCTS UCB degeneracy for unbounded `max` metrics, a lessons-file race, a token-auth gap, a dropped-env confirm-gate bug, several genuine doc/config contradictions |
-| **Low** | 49 | mostly latent (hand-edited-log robustness, crash-window idempotency), conservative defensive-default divergences, and doc/comment drift |
-| **Nit** | 6 | cosmetic / undefined-name annotations / advertised-vs-actual budget rounding |
-| *Refuted* | 4 | false positives dropped in verification (documented as intended behaviour) |
+| H1 ablation no-progress spin | **Fixed** | Engine stamps `ablation_capable`; policy/cadence honors it. |
+| H2 bare-substring leakage gate | **Partially fixed / reopened** | `X_trainval/X_latest` fixed, but `train_values`/`validation_split` false-positive and multiline/second-fit false-negative remain; see P1-7. |
+| H3 untrusted command-eval hardening | **Fixed** | The original H3 is fixed: caps, no-new-privileges, resources, and env forwarding are present. A separate Windows extra-bind defect remains; see P1-8. |
+| M1 dataset `min` objective negation | **Fixed** | Direction-conditional instruction and tests present. |
+| M2 unbounded max MCTS reward | **Fixed** | Bounded continuous `_mcts_reward` present. |
+| M3 partial strategy lost on resume | **Fixed** | Active strategy is merged/reapplied. |
+| M4 governance mostly unenforced | **Partially fixed / reopened** | Broad per-field gating exists, but the inverse `policy`/`policy_params` case bypasses it; see P1-11. |
+| M5 lessons read outside lock | **Fixed** | Authoritative reread occurs inside interprocess lock. |
+| M6 reflection cap 3 vs 8 | **Fixed** | Explicit limit 8 is threaded. |
+| M7 carried stage mismatch | **Fixed** | Shared `materialized_stages` and prompt/eval parity. |
+| M8 raw GET auth omissions | **Partially fixed / reopened** | Original raw routes are gated; node detail, paid health, jobs/progress omissions remain; see P1-3. |
+| M9 `repo_read` false EOF | **Fixed** | Full-file pagination/resume marker test present. |
+| M10 context budget docs | **Fixed** | `None` fallback vs `0=off` now documented correctly. |
+| M11 missing prompt override keys | **Fixed** | Repo Developer keys are documented. |
+| M12 Docker env/seed drop | **Fixed** | Per-call env forwarded into container. |
 
-*(70 verified findings across 33 scopes; 4 refuted.)*
+### Original low/nit groups
 
-**Where to spend the first day** (details in §4): the three `high` items — `engine/ablation.py`
-liveness (H1), `trust/leakage.py` substring match (H2), and the untrusted command-eval container
-hardening (H3) — then the objective-inversion prompt (`adapters/dataset_task.py`, M1), the
-strategy-resume divergence (`engine/strategy.py`, M3), and the `agent_control` governance
-contradiction (`core/config.py`, M4) — because the last is a **documented guarantee the code does
-not provide**, which is exactly the "no contradictions" concern.
+The following original low/nit items were source-checked and remain fixed: defensive `run_started`
+reads, unkeyed confirm-cost guard, PEP-604 coercion, GPU comma parsing, path resolve guard, reasoning
+retry guard, sweep parameter/emit handling, developer-crash batch stop, deep-research cadence,
+reconcile hash reset, harmonic query abstraction, shared secret fields, streaming error bubble,
+TUI composable preview, atomic delete-node rewrite and pre-parse, grader glob precision, MCP late-boot
+unwind/result cap, sandbox docstring, perfect-metric equality, robust projections, paused `run`, timings
+non-dict guard, imported Node annotation, stderr floor, README/mkdocs counts, and the documented
+trust/novelty/stages/router/memory/MLE-bench wording corrections.
 
-**Functional contradictions** (the specific ask "что нет противоречий"): the review surfaced a
-focused set of real ones — see §6. The most consequential are behavioural (governance map is
-advisory for all but two knobs; strategy deltas silently revert on resume; a loss metric is
-unconditionally negated for `direction="min"`); the rest are doc/comment-vs-code contradictions,
-which `CLAUDE.md` explicitly classes as bugs.
+Items still open or reopened:
 
----
+- aggregate context truncation — P2 operational risk;
+- fork/inject effect-before-gate crash window — P3;
+- `_strategy_core` omits timeout/max_parallel, but no shipped producer currently emits them — P3;
+- assistant SSE holds a worker on blocking `q.get(timeout=10)` — P3;
+- remaining enum validation gaps — P3;
+- toy lambda and MLE-bench filename assumptions — P3.
 
-## 2. Coverage map (33 scopes)
+The old “`fidelity` is a dead Settings seam” finding is refuted: it is intentionally a governance
+dial rather than a Settings field.
 
-| Dimension | Scopes |
+### Revalidation of the original “refuted” list
+
+| Old refutation | Current status |
 |---|---|
-| **Code — core** | core-llm · core-config-models · core-foundation |
-| **Code — events** | events-replay-fold · events-projections |
-| **Code — runtime/tools** | runtime-sandbox · tools-exec · tools-retrieval-memory |
-| **Code — agents/search** | agents-core · agents-aux · search-policy · search-foresight-merge |
-| **Code — trust/engine** | trust-gates · engine-orchestrator · engine-eval · engine-memory-lessons · engine-strategy-cadence |
-| **Code — adapters/serve/cli** | adapters-tasks · adapters-repo · adapters-mlebench · serve-routers · serve-assistant-tui · cli |
-| **Architecture** | arch-layering · arch-invariants · arch-registries · arch-contradictions · arch-eventlog-schema |
-| **Docs & diagram** | docs-config-table · docs-diagram-infographic · docs-architecture-concepts · docs-guides · docs-readme-adr |
-
-Scopes that came back **clean** (0 findings after verification): **arch-layering**
-(layering rules hold; back-compat `_LAYOUT` shim resolves), **search-foresight-merge** (the
-`__getattr__` proxy hint-forwarding is correct), **docs-architecture-concepts** (the
-architecture spec / concepts / package map match the code — including, on inspection, the
-"thirteen files" Engine claim: exactly 13 files host the `Engine` class + mixins; the other
-engine modules are helpers, so the claim is accurate), and **docs-diagram-infographic** — see §11.
-
-> Two scopes needed a second pass: the diagram finder first exceeded the structured-output cap
-> and was re-run at high effort (result: clean, §11), and the runtime-sandbox verifier misfired
-> and was re-verified separately (§12).
+| `kill_background` does not bypass approver | **Old refutation was wrong.** Ask mode bypass confirmed; see P0-6. |
+| Strategy timeout/max-parallel whitelist is a bug | Still refuted; intentional forward seam, no producer. |
+| `_ablate` needs the writer lock | Still refuted; sequential main-loop path. |
+| `trust_gate_changed` is undocumented | Still refuted; exception is documented. |
 
 ---
 
-## 3. Architecture assessment
+## 7. Review of the July 9–11 changes
 
-**Layering & coupling — clean.** `core` imports nothing above itself, `events` imports only
-`core`, and the engine has **no** dependency on `serve`. The back-compat meta-path shim in
-`looplab/__init__.py` correctly aliases every pre-split flat module path to the same module
-object.
+### Changes that introduced or exposed current regressions
 
-**Event log / fold invariants — hold, with two latent robustness gaps.** The fold is pure and
-deterministic; unknown event types are ignored; the first-terminal-wins idempotency and the
-`<x>_requests`/`<x>s_done` counter pairs are correctly implemented. The two gaps are both
-*conditional*, not live:
+- **`2ce82fd`** independently gated policy name/params but consumed raw params, creating P1-11.
+- **`bc56bb6` / `2ce82fd`** fixed counting and valid-JSON replacement for large tool arguments but
+  did not enforce the aggregate history target (P2 operational risk).
+- **`abc3632`** made fold handlers much clearer, but left the old comparison-scanning fold-handler
+  coverage test ineffective (P2). It moved reset logic; reset itself was introduced July 7 and its missing
+  attempt model predates this refactor.
+- **`3eebbd6`** fixed the exact old leakage examples but the replacement regex introduced/retained the
+  P1-7 false-positive/false-negative set.
+- **`80986d8`** expanded the sensitive-GET blacklist, **`29258b4`** refined trace/span segment matching,
+  and **`2ce82fd`** hoisted the constants; all preserved the default-open architecture that omitted
+  node detail and model-completion health (P1-3).
+- **`d9e4e23`** added kill/background timeout/retention but did not reuse the robust process supervisor
+  or permission flow (P0-6, P1-4).
+- **`eecd3ea` / `3e89272`** split UI/CLI/TUI utilities, preserving duplicated control metadata and
+  creating/retaining the client divergence in P1-10.
+- **`3e89272`** promised historical monkeypatch compatibility through re-exports, but assignment to
+  re-exported helper/constants cannot change the defining globals of moved functions.
+- **`f6e5b0a`** improved the `core/events/engine` dependency direction. It deliberately renamed
+  `runs_tools` after verifying no internal importers; downstream compatibility still needs an explicit
+  immutable manifest if it is to be guaranteed. The middle-band lazy cycle remains.
+- The Windows extra-bind form was introduced July 8; the main Docker hardening fixes did not exercise
+  Windows host-path grammar.
 
-- `_on_run_started` reads `d["run_id"]`/`d["task_id"]` with **bare subscripts** while every
-  other fold read (and the twin `_on_node_created`) defends against a hand-edited/torn log — so
-  a malformed `run_started` raises `KeyError` out of the *entire* fold instead of degrading
-  (§5, `events-replay-fold`). Unreachable under the sole-writer invariant, but it contradicts
-  the file's own repeatedly-documented "tolerate a BYO/hand-edited log" posture.
-- The operator **fork/inject** side effect is appended *before* its gate counter, so a hard
-  crash in the sub-millisecond window between the two `append`s duplicates the node on resume
-  (§5, `arch-invariants` / `engine-orchestrator`). Worst case: one wasted experiment.
+### Changes that were good and should be preserved
 
-**Sole-writer invariant — holds.** Every `store.append` site was classified. The only
-non-engine writers are the allow-listed control/ratification events (`spec_approved`,
-`trust_gate_changed`, `report_generated`), which are documented exceptions in
-`events/types.py` and are fold-safe (last-write-wins/audit-only). The reviewer's claim that
-`trust_gate_changed` is an *undocumented* exception was **refuted** — it is documented.
+- projection modules moved out of `serve` into `events`;
+- fold dispatch is easier to audit than a 63-arm conditional;
+- shared robust metric, materialized stage parsing, JSONL helpers, and agent-control factory;
+- golden exact-state/prefix replay fixtures;
+- stronger Docker flags/env forwarding on Linux;
+- numerous real prompt, docs, pagination, secret, memory, and atomic-write fixes listed in §6.
 
-**Registry-guarded seams — in sync.** `TASK_OPTIONAL_HOOKS`, `DEVELOPER_OUTPUT_ATTRS`,
-`RESEARCHER_ACTION_ATTRS`, `RESEARCHER_HINT_ATTRS`, `PROMPT_KEYS`, `SIGNALS`, and
-`BACKGROUND_APPENDABLE` all match their usage. One **dormant** gap: the `PROMPT_KEYS`
-source-scan test regex omits digits, so a digit-bearing prompt key would escape the "every
-render key is registered" guard — no current key triggers it (§5, `arch-registries`).
-
----
-
-## 4. High-severity findings
-
-### H1 · Ablation no-op on repo/eval-spec runs → unbounded no-progress spin
-**`looplab/engine/ablation.py:41` · correctness · CONFIRMED**
-
-On a `RepoTask`/command-eval run, `_ablate` appends an empty `ablate` event and returns
-**without creating a `refine_block` node**. That empty event closes the *forced*-ablate gate but
-not the **policy-cadence / operator-bandit** ablate path: `GreedyTree.next_actions` re-proposes
-`KIND_ABLATE` when `n_improve >= (n_refine+1)*ablate_every`, and because the skip creates no
-node, `n_refine`/`n_improve`/`total` never change — so the *identical* ablate action is returned
-every iteration. No safety net fires: the runaway trip counts only creates, `total >= max_nodes`
-never trips (total frozen), and the eval-compute budget never trips (no eval runs). Absent a
-wall-clock `max_seconds` the engine **loops forever** appending empty `ablate` events; with
-`max_seconds` set it burns the whole budget. Reachable whenever `ablate_every > 0` (the
-`thorough` preset sets 3; the strategist sets 2 without an `is_numeric_space` guard) on a
-repo/eval-spec run whose leader has ≥2 numeric params.
-
-**Fix.** On a repo/eval-spec run, advance the search instead of a bare return (create a
-`refine_block` child via the normal `_implement(...)` path so `n_refine` increments), **or**
-guard the policy so it stops proposing `ablate` on ablation-incapable runs (an
-"ablation-capable" flag set when `_eval_spec`/`_repo_spec` is present).
-
-### H2 · `code_leakage_scan` matches `val`/`test` as bare substrings → bars honest winners
-**`looplab/trust/leakage.py:86` · correctness · CONFIRMED**
-
-The fit-on-test detector tests `"test" in head or "val" in head` on lowercased fit arguments —
-a raw substring test. The agents reproduced at runtime that `model.fit(X_trainval, y_trainval)`
-(the standard non-leaking refit on train+validation after CV), `pipe.fit(X_interval, ...)`, and
-`clf.fit(X_latest, ...)` (`latest` contains `test`) are **all** flagged as `fit_on_test`. That
-flag is a hard signal: `is_hard_signal('data_leakage:fit_on_test')` is `True`, so the node is
-stamped into `breed_excluded` and excluded from `_select_best`. Because the shipped `thorough`
-profile enables `code_leakage_detect=True` **and** `trust_gate='gate'` together, an honest
-solution that refits on `X_trainval` is **silently barred from ever being selected best and from
-being bred/confirmed**. The maintainers already treat this class as a bug — the `eval_set`
-carve-out was added for exactly the benign-`val`-substring case.
-
-**Fix.** Token-anchor the match, e.g. `re.compile(r"(?<![a-z])(?:val|test)")`, which still fires
-on `x_val`/`x_test`/`_val` while rejecting `trainval`, `eval`, `retrieval`, `interval`,
-`latest`. Add regression cases for `X_trainval`/`X_latest` to `tests/test_code_leakage.py`.
-
-> Note: `H2` is coupled to a documentation contradiction — `leakage.py`'s docstring calls these
-> flags "not a hard gate", but the wiring makes them hard-gate under `gate`/`block` (§6, D-leak).
-> Fixing precision (H2) and reconciling the docstring should land together.
-
-### H3 · Untrusted command-eval container is under-hardened (and contradicts two docs)
-**`looplab/runtime/command_eval.py:379` · security · CONFIRMED**
-
-`make_docker_wrap` builds the **RepoTask command-eval** (and shell-tool) container as
-`docker run --rm --network none [--runtime] --pids-limit 1024 -v root:/work [--memory mem]` — with
-**no** `--cap-drop ALL`, **no** `--security-opt no-new-privileges`, **no** `--cpus`, and
-`eval_dispatch.py:125` calls it with **no** `mem`, so `--memory` is omitted too. The *other* Docker
-tier, `DockerSandbox.run` (the `solution.py` path, `sandbox.py:414-423`), drops all caps, forbids
-privilege escalation, sets `--memory` (default `4g`), and supports `--cpus`. Both tiers serve the
-same untrusted/hostile trust modes. Verified that `sandbox_memory`/`sandbox_cpus` reach *only* the
-`DockerSandbox` path (`cli/__init__.py:273-274`), never `make_docker_wrap`. So an untrusted/hostile
-RepoTask candidate **keeps all Linux capabilities, can privilege-escalate via a setuid binary, and
-can exhaust host RAM/CPU** (gVisor on the hostile tier blocks kernel escape but not resource
-exhaustion — `DockerSandbox`'s own comment says so). It is also a two-sided doc contradiction:
-`generating-code.md:463` documents this tier's command literally *with* `--cap-drop ALL
---security-opt no-new-privileges --memory 4g`, and `configuration.md:239-241` scope
-`sandbox_memory`/`sandbox_cpus` to the "untrusted command-eval tier" — the exact path that ignores
-them. **Fix:** add `--cap-drop ALL --security-opt no-new-privileges` to the `make_docker_wrap`
-argv, add a `cpus` param, and plumb `settings.sandbox_memory`/`sandbox_cpus` through the engine so
-`eval_dispatch` passes them. *(Correction from verification: `DockerSandbox`'s `cpus` default is
-`""` (off), not on — only `mem=4g` is a live default — but the caps/no-new-privileges/memory
-asymmetry fully holds.)*
-
-Precondition: this is the **opt-in Docker tier for untrusted/hostile RepoTasks**; the default
-subprocess tier and trusted runs are unaffected. It is `high` because it is precisely the tier
-whose entire purpose is tenant isolation, and the docs promise hardening the code does not apply.
+The right conclusion is not “the refactor failed”. It improved locality and removed real duplication,
+but mechanical/verbatim moves preserved hidden contracts. The next phase should change ownership and
+types, not repeat another file split.
 
 ---
 
-## 5. Medium-severity findings
+## 8. Architecture remediation plan
 
-### M1 · Objective inverted: `DatasetTask._brief` unconditionally negates a loss metric
-**`looplab/adapters/dataset_task.py:319` · correctness · CONFIRMED**
+### Phase 0 — fail-closed containment (small PRs, first)
 
-`higher = self.direction == "max"` drives `sense`/`objective` correctly, but *both* metric-line
-branches hard-code "report its NEGATIVE" for a loss. That is correct only for `direction="max"`.
-For the supported `direction="min"`, a natural loss (RMSE) already matches the orientation and
-must be reported as-is; negating it makes the loop `minimize(-loss) = maximize(loss)` — silently
-**selecting the worst model**. The named-metric branch even self-contradicts (says "SAME
-orientation as the loop (LOWER is better)" then tells the agent to negate). Prompt strings are
-contracts, so a provably-inverted instruction is a real defect. **Fix:** make the negate
-instruction conditional on `higher`; add a min-direction test.
+1. Filter `StrategyDelta`; add inverse governance tests.
+2. Replace sensitive-GET blacklist with route scopes; protect node/job/progress; change LLM health.
+3. CAS permission resolution; centrally gate MCP and `kill_background`.
+4. Add `StageName` and shared PathPolicy for adapter/prediction/log paths.
+5. Make EventStore reject mid-file divergence before append; add explicit repair command.
+6. Enforce aggregate context postcondition.
+7. Add the minimal atomic `RunCommandService.append_and_ensure_engine()` plus pending wakeup so
+   resume cannot be lost during finalization.
+8. Replace the fold-handler source-scan with an exact folded/diagnostic registry partition.
+9. Immediately make heuristic leakage evidence advisory until a safe parser lands; make missing or
+   unreadable protected inputs `unavailable/tampered`, never clean.
+10. Reject non-finite/non-positive stage/eval timeouts before process spawn.
 
-### M2 · MCTS reward unbounded for `max` runs → UCB1 degenerates to greedy
-**`looplab/search/policy.py:419` · correctness · CONFIRMED**
+**Gate:** no behavioral API change without regression tests; all current v1 logs continue to fold.
 
-The `min` branch maps reward through a bounded monotone transform, with a load-bearing comment
-explaining *why* (keep reward O(1) so the `c·√(ln N / visits)` exploration term isn't swamped).
-The `max` branch is bare `reward = value` with no normalization. For a `max` metric of large
-magnitude/spread (log-likelihood ≈ −400, Sharpe, throughput, negative-MSE), reward differences
-dwarf the exploration bonus and UCB1 collapses to `argmax(reward)` — silently greedy search
-recorded as legitimate MCTS. Accuracy/AUC/F1 (∈[0,1]) are safe, so it hides until an unbounded
-`max` metric is used. **Fix (corrected during verification):** mirror the `min` branch with a
-*continuous, monotone-increasing* map — `reward = (2 - 1/(1+value)) if value>=0 else 1/(1-value)`
-(the reviewer's first proposal was discontinuous at 0). Opt-in policy, no replay impact → medium.
+### Phase 1 — event/state identity
 
-### M3 · Strategy deltas silently revert the applied machinery on resume
-**`looplab/engine/strategy.py:274` · invariant-violation · CONFIRMED**
+Add, without rewriting old logs:
 
-The autonomous Strategist consult records the decision **un-merged** with the active strategy.
-Strategist decisions are *partial* dicts (a novelty-stance-only decision carries no `policy`).
-`fold` then *replaces* `active_strategy` wholesale, and on resume `_reentry_repin` applies only
-the last `active_strategy`. Because `_apply_strategy` uses `if pol:` guards that never reset
-omitted fields, the **live** engine accumulates knobs across decisions while the folded/resumed
-engine holds only the last decision's fields. Scenario: node k1 switches `policy greedy→mcts`
-(live=mcts); node k2's decision is `{novelty_stance:'explore'}` with no policy, so the folded
-`active_strategy` loses the policy, and **a resumed run selects nodes with the config-default
-policy, not mcts** — a silent divergence of the search machinery from pre-crash state. The
-operator-pin path deliberately *merges* onto `active_strategy` to avoid exactly this; the
-autonomous path lacks the merge. **Fix:** record the decision merged onto `active_strategy`
-(mirror the pin path), or replay `strategy_history` in order on resume.
+- `attempt_id` on node lifecycle/eval/trust/holdout events;
+- `search_epoch` on reopen, confirmation, promotion, approval, and all finalization outputs
+  (`run_finished`, report, budget/archive, and derived final artifacts);
+- `request_id` on forced/approval/control operations;
+- `subject_hash` and `expected_seq` on state-sensitive decisions;
+- typed payload models and an explicit v1 migration/default layer.
 
-### M4 · `agent_control` governance contract is unenforced for all but two knobs
-**`looplab/core/config.py:208` · contradiction · CONFIRMED**
+Keep the external flat RunState JSON as a compatibility projection. Internally split reducers into
+`RunLifecycle`, `NodeAttempt`, `PromotionState`, and `RequestLedger`.
 
-`config.py:208` documents "A setting ABSENT from this map is LOCKED — no agent may change it"
-(restated in `configuration.md:216`). But the enforcement gate `_agent_may` is only ever consulted
-for **`timeout`** and **`max_parallel`**. Every other knob the strategist applies
-(`policy`, `novelty_stance`, `ablate_every`, `merge_mode`, `complexity_cue`,
-`ablate_code_blocks`, `prefer_sweep`, `developer`) and the boss's `max_eval_seconds` are applied
-**ungated**. So an operator who removes `policy` from the map to lock the search policy still has
-the strategist switch it on the next consult — and the UI renders per-setting R/S/B pills
-implying the lock takes effect. The map is decorative for every knob other than
-`timeout`/`max_parallel`. **Fix:** either gate the strategist/boss knob applications behind
-`_agent_may`, or narrow the docstring + doc to say only `timeout`/`max_parallel` are
-runtime-gated. *(Related dead-seam, §7: the default map lists `"fidelity"`, which is not a
-Settings field at all — the grant is inert.)*
+**Gate:** model-based/random event-sequence tests; reset during eval; repeated reset; stale terminal;
+reopen after confirmation; new best requires new promotion/approval; old logs produce the same public
+projection before the new events appear.
 
-### M5 · `reconcile_lessons` reads the shared lessons file outside the interprocess lock
-**`looplab/engine/lessons_reconcile.py:209` · race · CONFIRMED**
+### Phase 2 — durability and reproducibility
 
-`reconcile_lessons` does a read-modify-write of the **shared** cross-run `lessons.jsonl` but only
-the *write* is inside the interprocess lock: `rows` is read unlocked, seconds of LLM
-re-derivation follow, then the whole file is rewritten (`os.replace`) from that pre-lock
-snapshot. A concurrent run sharing `memory_dir` (the supported AgentRxiv live-share) can
-`O_APPEND` a lesson under the lock during the LLM window; that row isn't in `rows`, so the
-rewrite **silently drops it**. `JsonlCaseLibrary.add` and `append_lessons` avoid this by reading
-*inside* the lock; `reconcile` is the sole path reading outside. **Fix:** move the read inside
-the lock and reconcile by identity, or drop-stale + `O_APPEND` the fresh derivations under the
-lock. Best-effort store → medium.
+- explicit folded setup completion and content-addressed run-setup completion;
+- immutable `RunManifest` and `WorkspaceSnapshot`/CAS;
+- exact separation of `run` and `resume`;
+- fail/explicit rebase on source drift;
+- no unlocked multi-writer fallback on actual deployment targets, including FUSE/geesefs: use a
+  single-writer service/control journal, storage CAS, or fail startup for multi-writer mode when
+  locking is unavailable.
 
-### M6 · Run-end reflection lessons capped at 3, not the documented 8
-**`looplab/engine/lessons_distill.py:225` · correctness · CONFIRMED**
+**Gate:** crash after every setup append; corrupt-middle repair; dirty tracked repo resume; task alias
+conflicts; run directory reuse; original data unchanged by `edit:false` policy where promised.
 
-`reflect_lessons` calls `parse_credit_lessons(out, 0)[:8]`, but `parse_credit_lessons`'s internal
-cap is `if len(out) >= max(3, n_pairs): break` → `max(3,0)=3`, so it stops after 3 and the `[:8]`
-slice is **dead**. A run with >3 distinct themes silently loses themes 4–8 from the cross-run
-lessons store, despite the adjacent comment intending 8 ("bound at 8 as a runaway guard, not a
-target"). **Fix:** give `parse_credit_lessons` an explicit count cap and pass 8 from
-`reflect_lessons`, decoupled from the per-pair `max(3, n_pairs)` index-clamp floor.
+### Phase 3 — execution infrastructure
 
-### M7 · Improve path mislabels a carried-over parent pipeline on a degraded stages phase
-**`looplab/adapters/repo_developer.py:777` · correctness · CONFIRMED**
+- atomic `BudgetLedger` for eval/confirm/ablate/holdout;
+- one `ProcessSupervisor` for foreground/background/sandbox work;
+- process group/job object, deadline watcher, verified kill escalation;
+- chunked output, disk quotas, bounded readers, timed regex;
+- stable Windows Docker input mapping.
 
-On improve/refine, `_run` preloads `write.files = dict(base)` including the parent's
-`looplab_stages.json`. If the STAGES phase *degrades* (exception / no-emit / invalid manifest) it
-returns `[]` and **never clears** the stale parent entry, but `stage_note` is computed from the
-phase *return* — so the implement session is told "NO pipeline stages are declared … train a
-FRESH model", while the eval actually runs the parent's prep→train stages **plus** the operator's
-score cmd. Net: the model is trained twice and the reported metric reflects the entrypoint's own
-training, not the declared pipeline. The **repair** path does this correctly (reads
-`write.files['looplab_stages.json']`); the fresh-improve path is the inconsistent one. **Fix:**
-recompute `stage_note` from `write.files` after the stages phase, or clear the pre-seeded
-manifest when the phase yields `[]`.
+**Gate:** budgets never over-reserve across parallel work; parent+child processes are gone before kill
+returns; bounded memory/disk adversarial tests; Windows and Linux Docker matrix.
 
-### M8 · Token-auth middleware comment falsely guarantees "never raw files"
-**`looplab/serve/server.py:124` · security · CONFIRMED**
+### Phase 4 — typed domain contracts and layer boundaries
 
-When `LOOPLAB_UI_TOKEN` is set, the middleware only gates GETs ending in `/artifact(s)` or
-containing `/assistant/sessions`, justified by "Every OTHER GET only returns folded projections …
-never raw files." That is **false**: `GET /api/runs/{id}/agents_md` returns `AGENTS.md` text,
-`GET /api/{kind}` returns operator-authored prompt/skill/knowledge markdown, `GET
-/api/runs/{id}/log` returns the **raw event envelopes** (source-of-truth `events.jsonl`, which
-embeds solution code + captured stdout/stderr), and `GET /api/assistant/permissions` returns an
-action whose `preview` is a snippet of the file about to be written. On a shared-origin /
-multi-principal deployment (the scenario the token exists for) an untokened caller reads all of
-this. **Fix:** extend the sensitive-GET predicate to gate these raw-content routes (or invert to
-gate all `/api` GETs and allow-list the public ones). Conditional on token + shared origin →
-medium.
+- `TaskSpec` plus backend capability protocols;
+- `DevelopmentRequest/DevelopmentResult` and parent-aware semantics;
+- `ToolSpec/ToolResult/ExecutionContext` with central policy;
+- `SearchFitness/PromotionFitness`;
+- `NodeLifecycleService`, `EvaluationService`, `PromotionService`, `StrategyController`;
+- composition root above adapters/agents/search/tools to break the middle cycle.
 
-### M9 · `repo_read` caps files at 200 KB but reports truncation as end-of-file
-**`looplab/tools/knowledge_tools.py:120` · correctness · CONFIRMED**
+Keep `Engine` as a compatibility facade/coordinator; remove mixins incrementally only after service
+tests exist.
 
-`repo_read` paginates `read_file(...)`, whose default `max_bytes=200_000` truncates before the
-paginator sees the content; `_paginate` then computes line count from the already-truncated
-string and **omits the "… (more below)" resume marker** at the end of the slice. The tool spec
-says a reply *without* that marker **is** the end of the file — so for any repo file >200 KB the
-Researcher/Developer is told it read the whole file while everything past 200 KB is missing, then
-proposes changes to code it never saw. The sibling `RepoScoutTools._read_file` reads the full
-file first (the intended pattern). **Fix:** read the full file before paginating (or pass
-`max_bytes=size+1`).
+### Phase 5 — server/UI/compatibility
 
-### M10 · `context_budget_chars=0` — doc says "120 k fallback", code says "compaction OFF"
-**`docs/guide/configuration.md:131` · doc-drift · CONFIRMED**
-
-The `agent_auto_summary` row says the compactor "falls back to a ~120k-char high-water mark only
-if `context_budget_chars` is `0`". The code does the opposite: the 120 k fallback applies only
-when the budget is **`None`** (unset); `0` is falsy so compaction is **disabled entirely**. This
-contradicts the same doc's `context_budget_chars` row ("0 = off") **and** the load-bearing
-`tool_loop.py:304-306` comment recording that the old "turn 0 into 120 k" behaviour was the exact
-bug that was fixed. An operator setting `0` expecting a 120 k cap gets compaction fully off.
-**Fix:** reword the row — the 120 k fallback applies only when the value is *unset*; `0` means
-OFF.
-
-### M11 · Prompt-override table omits two registered `repo_developer_*` keys
-**`docs/guide/llm-and-agents.md:256` · doc-drift · CONFIRMED**
-
-The page claims "Every built-in system prompt below can be replaced …" then lists 12 keys, but
-omits `repo_developer_system_intro` and `repo_developer_system_body` — both in the enforced
-`PROMPT_KEYS` registry and both live `render(...)` call sites driving the in-house repo-editing
-Developer that the whole repo-edit flow depends on. **Fix:** add the two rows.
-
-### M12 · Container eval drops engine env → confirm variance gate collapses
-**`looplab/runtime/command_eval.py:384` · correctness · CONFIRMED**
-
-On the Docker command-eval path, `run_argv` merges the engine-provided `env` only into the **host**
-`docker run` client process; `make_docker_wrap` emits **no `-e` flags**, and Docker does not
-forward host env into the container. So `LOOPLAB_EVAL_SEED` never reaches the eval. The confirm
-pass runs multi-seed via `_run_eval(nd, workdir, {"LOOPLAB_EVAL_SEED": str(s)}, "full")`
-(`confirm_phase.py:53-55`); inside the container each seed reads
-`os.environ.get("LOOPLAB_EVAL_SEED","0")` → **`"0"` for every seed**, so all confirm seeds produce
-identical results — collapsing the confirm/variance gate that is supposed to demote seed-lucky
-leaders, and also defeating the seed-holdout disjointness (search-seed-0 and every confirm seed
-both resolve to `"0"`). `DockerSandbox.run` forwards env via `-e` correctly; only the command-eval
-path is broken, and only for untrusted/hostile RepoTasks (the trusted subprocess tier passes env
-directly). **Fix:** thread the per-call `env` into `make_docker_wrap`'s inner `wrap` and emit
-`-e {k}={v}` per key (redacting secret-named keys per `run_argv`'s `SECRET_ENV` policy); note the
-seed varies per call, so it cannot be baked in at wrap-construction time.
+- finish the server-side `RunCommandService`/`EngineSupervisor` abstraction begun by the minimal
+  Phase-0 wakeup fix;
+- one generated/exported `ControlSpec` for Python and JavaScript;
+- UI e2e coverage for AssistantBar, Dock, TUI, auth, and zombie recovery;
+- immutable `LEGACY_ALIASES` manifest and behavioral monkeypatch tests;
+- one schema source for Settings/EngineOptions/UI/docs profiles.
 
 ---
 
-## 6. Functional contradictions (focused list)
+## 9. Required validation matrix
 
-The maintainer specifically asked to confirm there are no contradictions. There are a handful of
-real ones; the behavioural ones are the priority, the doc/comment ones are `CLAUDE.md`-class bugs.
+### State machine and durability
 
-**Behavioural contradictions (system disagrees with itself at runtime):**
+- crash injection after every state-changing append;
+- reset during real parallel evaluation;
+- late eval/confirm/holdout events from prior attempts;
+- repeated force-confirm/abort/approval requests with distinct IDs;
+- premature `spec_approved` without a proposal;
+- finish → resume during finalization;
+- late `run_finished`/report/archive from an old epoch;
+- reopen/add-nodes after confirmation/holdout/approval;
+- mid-file corruption, torn tail, and explicit repair;
+- unsupported-lock filesystem behavior.
+- malformed, non-finite, string, and negative persisted cost payloads;
+- repeated explicit forced request after an earlier completion;
+- background-hint interleavings followed by actual proposal generation;
+- dirty tracked bytes with unchanged git HEAD;
+- BestOfN preservation of parent-aware capabilities;
+- duplicate sequence plus stale `expected_seq` under no-lock mode.
 
-- **Governance map advisory for all but two knobs** — M4. The documented lock is real for
-  `timeout`/`max_parallel` and decorative for everything else.
-- **Strategy machinery reverts on resume** — M3. Live engine state and folded/resumed state
-  diverge because partial deltas aren't merged.
-- **Loss metric negated under `min`** — M1. The brief's own "LOWER is better" framing contradicts
-  its "report the negative" instruction.
-- **MCTS bounded for `min`, unbounded for `max`** — M2. The same UCB-swamping the `min` branch
-  documents-and-fixes recurs, unaddressed, on the `max` side.
-- **Defensive `getattr` fallbacks disagree with the real schema defaults** (PLAUSIBLE, latent):
-  `auto_install_deps` fallback `False` vs default `True` (`adapters/tasks.py:563`);
-  `foresight_panel` fallback `1` vs default `2` (`cli/__init__.py:200,210`); `strategist_backend`
-  fallback `'off'` vs default `'agent'` (`strategist.py:571`). No live misbehaviour (full
-  `Settings` is always passed) and all fallbacks are the conservative choice — but they are a
-  two-place inconsistency waiting for an incremental-construction refactor.
+### Security and trust
 
-**Doc / load-bearing-comment contradictions:**
+- route census: every `/api` endpoint declares auth/public scope;
+- unauthenticated health performs zero model calls; `/state` contains no stdout/error snippets; genesis,
+  scope-report, provenance, job, and progress routes have explicit scopes;
+- stale permission resolve after cancel/delete/new turn;
+- every tool provider, including MCP, exercised in plan/ask/auto modes; constructing a plan-mode
+  toolset must not spawn an MCP stdio process;
+- `kill_background` must invoke the approver in ask mode;
+- a stubborn child that ignores TERM and a task never polled after its deadline must still be reaped;
+- stage/path fuzzing (separators, drives, UNC, NUL, Unicode, symlinks);
+- NaN/infinite/negative timeouts and NUL-after-spawn cleanup;
+- adapter/prediction files must remain inside the current attempt;
+- protected file missing/unreadable/modified states;
+- regex CPU timeout and bounded JSON/log readers.
 
-- **D-leak** · `trust/leakage.py:66` — docstring "not a hard gate" vs the wiring that makes
-  `data_leakage:*` hard-gate under `gate`/`block`. Reconcile with H2.
-- **`trust_gate` gate-vs-block** · `config.py:318` — the schema comment says `gate` keeps a node
-  *breedable* and only `block` stops breeding; the code excludes from breeding under **both**
-  (only `feasible=False` is block-exclusive). The `models.py` comments and `configuration.md:247`
-  are correct; the schema comment is the stale outlier.
-- **`novelty_semantic` "needs `novelty_gate` on"** · `configuration.md:173` / `config.py:263` —
-  it also activates under `novelty_mode=algo` and the explore stance.
-- **`declare_stages` "NOT in RepoWriteTools"** · `repo_developer.py:14` — it *is* in the toolset
-  (deliberately, per the write-tool's own D1 comment); the two load-bearing comments contradict.
-- **`misc.py` router-order docstring is inverted** · `misc.py:8` — says `/api/memory` is kept
-  *after* `/api/{kind}`; the code (correctly) and the route's own comment say **before** (else the
-  Memory panel 404s). Following the docstring would reintroduce the bug.
-- **`_dep_failed` cache** · `triage.py:131`, `evaluate.py:164` — both comments name a cache that
-  doesn't exist; the attribute is `_dep_attempted`.
-- **Strategist default backend** · `strategist.py:10` (and `config.py:343`) — docstring says the
-  default is `"llm"`; the actual default is `"agent"`.
-- **generating-code.md undercounts from-scratch kinds** · `:49` — says "three" (code_regression,
-  mlebench, mlebench_real); `dataset` also writes the whole solution (the same page and tasks.md
-  say so) → four.
-- **memory.md Cases schema** · `:18` — lists `operator`/`run_id`/`evidence` (never persisted) and
-  omits `direction` (persisted and load-bearing for retain-on-improvement).
-- **`--selected` "3 CPU-lite comps"** · `mlebench_prep.py:18` + `MLEBENCH.md:71,34` — the set has
-  only 2 (insults was removed).
-- **Untrusted-container hardening claimed but absent** · H3 — `generating-code.md:463` and
-  `configuration.md:239-241` document `--cap-drop ALL` / `--security-opt no-new-privileges` /
-  `sandbox_memory` / `sandbox_cpus` for the untrusted command-eval tier, but `make_docker_wrap`
-  provides none of them. This is the most security-relevant contradiction in the set.
+### Platform and clients
 
----
+- Windows/Linux Docker mounts with data/reference inputs;
+- Windows job-object and POSIX process-group tree termination;
+- Windows case-insensitive `ASSISTANT` run ID and TensorBoard bind/auth behavior;
+- CLI run-dir/task identity;
+- direct AssistantBar, Dock, TUI control actions against stopped/finalizing runs;
+- control-registry parity including run-reopened, approval, spec approval, and reset;
+- legacy imports and assignment-based monkeypatch behavior.
 
-## 7. Low-severity findings (grouped)
+### Current test evidence
 
-**Robustness / hand-edited-log tolerance (latent under sole-writer):**
-- `events/replay.py:91` — `_on_run_started` bare-subscripts `run_id`/`task_id`; a malformed
-  `run_started` bricks the whole fold instead of degrading. (CONFIRMED)
-- `events/replay.py:316` *(nit)* — `_on_confirm_eval` eval-cost accounting is only idempotent when
-  the event carries both `node_id` and `seed`; an un-keyed duplicate double-counts. Unreachable
-  today (sole emitter always writes both). (CONFIRMED)
-- `engine/orchestrator.py:798` — fork/inject effect appended before its gate counter; crash-window
-  duplicate on resume. (PLAUSIBLE)
-- `core/parse.py:126` — `_coerce_value` misses PEP-604 `X | None` unions (`get_origin` returns
-  `types.UnionType`, not `typing.Union`), so schema-aligned coercion is skipped for such fields.
-  No currently-parsed model uses `| None`, so zero live impact; a trap for the next one.
-  (CONFIRMED, reproduced)
-- `core/hardware.py:33` — `detect_gpus` mis-columns memory for a GPU **name containing a comma**;
-  the sibling `detect_gpu` handles it. Feeds a degraded hardware line into agent prompts.
-  (PLAUSIBLE)
-- `core/_pathsafe.py:82` *(nit)* — raw-string root `.resolve()` lacks the `OSError` guard its two
-  siblings have; unreachable today (callers pass resolved `Path`s). (PLAUSIBLE)
+- Separate full Linux runs under Python 3.11 and Python 3.12 at this HEAD each produced **1,711 passed,
+  33 skipped, 1 failed**; both interpreters had the same stale keepalive test failure.
+- A fresh focused Windows run of the 11 most relevant suites passed with two skips after running
+  outside the filesystem sandbox; the first sandboxed attempt failed only because pytest could not
+  create Windows temp directories.
+- A distinct broader platform-targeted matrix produced Linux 281 passed / 2 skipped and Windows 278
+  passed / 2 skipped / two platform failures (a POSIX `/tmp` assumption and the real Docker bind
+  grammar).
+- UI grouping tests: 8/8; production build succeeds with duplicate-key and ~636 KB chunk warnings.
+- Ruff C901 reports 81 functions over complexity 10; Ruff's fatal-name checks found no undefined-name
+  class of runtime errors.
+- The current event census is independently reproduced: 77 types / 64 handlers / 16 golden types /
+  11 golden handled types.
 
-**LLM client / context budget:**
-- `core/llm.py:444` — the reasoning-reject retry branch omits the `attempt < _max_retries` guard
-  its five siblings have; a reasoning-reject on the final attempt raises a misleading "no response
-  after retries" instead of retrying without reasoning. (CONFIRMED)
-- `core/context_budget.py:55` — `truncate_history` counts `tool_calls[].arguments` in the budget
-  trigger but only ever trims `content`, so the deterministic-compaction fallback is a no-op for
-  argument-heavy histories. Default path (`compact_history`) is immune; the fallbacks
-  (summarizer-fails / degenerate-middle / `auto_summary=False`) are not. (CONFIRMED)
-
-**Search / researcher prompt fidelity:**
-- `agents/roles.py:295` — `_clamp_fill` injects swept dimensions as spurious fixed midpoint params,
-  so the Developer prompt says a swept dim is *both* "sweep over [1,2,3]" and "fixed at 3.0".
-  Bypasses the `_clamp_params_to_space` validator via direct mutation. (CONFIRMED)
-- `agents/agent.py:182` — `_validate_emit` treats a sweep-only Idea (populated `space`, empty
-  params/rationale/hypothesis) as EMPTY and bounces it with a wrong message; narrow trigger.
-  (PLAUSIBLE; the finding's secondary "`_sanitize` drops space" claim was refuted)
-
-**Engine liveness / cadence:**
-- `engine/orchestrator.py:615` — the Developer-crash circuit-breaker pauses on the first
-  `developer_crash` but the batch loop finishes the *rest* of the current create batch first
-  (checks `paused` only at the next while-top), contradicting its "PAUSE on the FIRST" comment.
-  Bounded blast radius (one batch). (CONFIRMED)
-- `engine/research_cadence.py:48` — deep-research cadence first-fires one node early (`default=-1`)
-  vs the report/lessons cadences (`default=0`). Audit-only sidecar. (CONFIRMED)
-- `engine/strategy.py:40` — `_strategy_core` omits `timeout`/`max_parallel`, so a strategy
-  differing *only* in those would be dropped by the change-detector. Fully latent (no producer
-  emits them). (PLAUSIBLE)
-- `engine/lessons_reconcile.py:268` — the `except` handler doesn't reset the change-gate hash on a
-  re-derivation failure (unlike the client-None branch), suppressing a same-signature retry.
-  (PLAUSIBLE)
-
-**Memory / retrieval:**
-- `engine/memory.py:572` — harmonic retrieval embeds the **raw** query against an
-  **abstraction-keyed** index in `kb_search`/`CaseLibrary.retrieve`, diverging from
-  `retrieve_lessons_harmonic` (which abstracts both sides and documents why). `CaseLibrary` is
-  dead/test-only; `kb_search` is the live default path → retrieval-quality dampening. (PLAUSIBLE)
-
-**Serve / tools:**
-- `serve/routers/runs.py:540` — `put_run_config` hardcodes `{"llm_api_key"}` instead of the shared
-  `_SECRET_FIELDS`, breaking the single-source contract; latent plaintext-leak if a second
-  `SecretStr` field is ever added. (CONFIRMED)
-- `serve/routers/assistant.py:432` — streaming endpoint leaves a dangling user turn on offline
-  soft-fail (non-stream endpoint appends an error bubble; stream doesn't). (CONFIRMED)
-- `serve/routers/assistant.py:491` — the SSE generator holds a shared anyio threadpool thread via
-  blocking `q.get(timeout=10)`; the sibling run-events stream avoids this. (PLAUSIBLE)
-- `serve/tui_format.py:104` — the TUI proposed-run panel omits goal/task/repo for composable
-  (kind-less) genesis tasks. Display-only. (CONFIRMED)
-- `tools/machine_runs_tools.py:682` — `delete_node` rewrites the source-of-truth `events.jsonl`
-  **non-atomically** (a `.bak` is copied first, so recovery is manual not automatic); the same
-  module uses `atomic_write_text` for the far-less-critical snapshot. (CONFIRMED)
-- `tools/machine_runs_tools.py:686` — `delete_node` parses `spans.jsonl` *after* rewriting events,
-  with no guard, so a torn spans line leaves a half-applied deletion reported as failure.
-  (CONFIRMED)
-- `tools/perm_modes.py:59` — `DEFAULT_PROTECT` grader globs `**/*grade*.py` over-match `upgrade.py`
-  / `downgrade.py`, silently locking legitimate files with no override. (CONFIRMED)
-- `tools/_mcp_transport.py:29` — `_ServerHandle` leaks its thread/loop/subprocess when boot exceeds
-  the 30 s wait but later succeeds (the "can't leak" comment reasons only about the failure path).
-  (CONFIRMED)
-- `runtime/sandbox.py:178` — `run_argv` docstring describes a `communicate()` fast path (keyed on
-  `cancel`/`log_path` being None) that no longer exists — the impl always drains via `_tee_drain`;
-  a load-bearing comment right below even explains *why* it was removed (host-memory DoS). Stale
-  docstring only, no behaviour change. (CONFIRMED)
-
-**Trust panel noise (advisory-only, no gating):**
-- `trust/reward_hack.py:128` — `perfect_metric` false-positives on any `max` metric ≥ 1.0; the
-  `min` sibling was narrowed to the exact floor, the `max` side wasn't. Advisory-only. (CONFIRMED)
-
-**Projections (derived, non-source-of-truth):**
-- `events/readmodel.py:42` & `events/htmlview.py:67` — store/show **raw** `n.metric` while `is_best`
-  / the "Best:" line follow the **robust** (confirmed-mean/holdout) selection, so an external
-  `ORDER BY metric` (or the same HTML page) can disagree about which node is best. The sibling
-  `digest.py` uses `robust_metric` consistently. (CONFIRMED)
-
-**CLI:**
-- `cli/run_cmds.py:297` — `run` on a *paused* run dir silently does nothing and prints the stale
-  best (only `finished` is handled; `resume` handles paused). (CONFIRMED)
-- `cli/inspect_cmds.py:58` — `timings` passes `dicts_only=False`, so a valid-JSON-non-dict corrupt
-  span line crashes the command instead of being skipped, contradicting its guarding comment.
-  (CONFIRMED)
-
-**Config hardening:**
-- `core/config.py:259` — enum-like fields (`novelty_mode`, `seed_mode`, `eval_trust_mode`,
-  `strategist_backend`) aren't validated at config time the way `trust_gate`/`merge_mode` are, so a
-  typo (`NOVELTY_MODE=LLM`) silently disables the gate instead of failing loud. (CONFIRMED)
-
-**Dead seam:**
-- `core/config.py:225` — `agent_control` default lists `"fidelity"`, which is not a Settings field;
-  the grant is inert and no UI pill can bind to it. (CONFIRMED)
+The lone full-suite failure, `test_complete_text_stream_bails_on_a_keepalive_stall`, patches the old
+`urllib` seam while the implementation uses OpenAI SDK/httpx and sets `timeout=0`, disabling the guard.
+Current keepalive watchdog/raw-httpx fallback tests pass. Treat it as stale test isolation, not a
+runtime keepalive regression.
 
 ---
 
-## 8. Nits
+## 10. False positives and explicit downgrades
 
-- `engine/orchestrator.py:1238` — `_rerun_node(self, node: Node, ...)` annotates with an
-  **unimported** `Node`; harmless at runtime (`from __future__ import annotations`) but
-  `get_type_hints` raises `NameError`. (CONFIRMED)
-- `tools/shell_tools.py:90` — `run_command` spec advertises a stderr floor (~1900) that
-  `_stream_tails` can't guarantee (true worst case 1800). (CONFIRMED)
-- `tools/mcp_tools.py:87` — `McpTools.execute` truncates at 8000 chars, 2× the loop's
-  `RESULT_CAP` (4000), against the "derive budgets from RESULT_CAP" convention. (CONFIRMED)
-- `adapters/regression.py:124` *(offline toy baseline only)* — multiplicative lambda perturbation
-  is absorbing at zero, so a `lam=0.0`-rooted subtree can never introduce ridge. (PLAUSIBLE)
-- `adapters/mlebench_real.py:194` — brief/schema hard-code `train.csv`/`test.csv` while `assets()`
-  accepts any `train*.csv`; latent coupling, no current trigger. (PLAUSIBLE)
-- *(docs)* `README.md:6` — Tests badge (1147) and "~1150 tests" prose are stale; actual ≈1706.
-  `mkdocs.yml:99` — `docs/13-external-works-analysis-2026-07.md` is orphaned from both `nav` and
-  `not_in_nav` (every sibling review doc is in `not_in_nav`). (CONFIRMED)
+These were rechecked so they do not re-enter the priority list incorrectly:
 
----
-
-## 9. Refuted (checked and cleared)
-
-These were reported by a finder and **dropped** in verification — recorded so the same ground
-isn't re-litigated:
-
-- **`kill_background` bypasses the approver** — the comment was misread; SIGTERM-ing a process
-  group is correctly treated as a side effect and denied only in read-only plan mode.
-- **`validate_strategy` whitelists unreachable `timeout`/`max_parallel`** — factually accurate that
-  no shipped emitter produces them, but it's a deliberate forward-compat whitelist, not a bug (this
-  is the same latent seam noted non-critically at `strategy.py:40`).
-- **`_ablate` repo-skip appends a domain event without `_write_lock`** — benign; `_ablate` runs
-  only in the sequential main loop, so there is no concurrent writer to race.
-- **`trust_gate_changed` is an undocumented sole-writer exception** — it **is** documented in the
-  `events/types.py` registry as an allow-listed, fold-safe control event.
-
----
-
-## 10. Suggested priority order
-
-1. **H1** `engine/ablation.py:41` — engine can hang / burn the whole budget on repo+ablation runs.
-2. **H2** `trust/leakage.py:86` + **D-leak** docstring — stop barring honest winners; reconcile the
-   "not a hard gate" doc in the same change.
-3. **H3** `runtime/command_eval.py:379` — harden the untrusted command-eval container to match the
-   `solution.py` tier and the two docs (critical if you run untrusted RepoTasks multi-tenant).
-4. **M1** `adapters/dataset_task.py:319` — objective inversion selects the worst model under `min`.
-5. **M3** `engine/strategy.py:274` — resume no longer reconstructs the search machinery faithfully.
-6. **M12 / M4 / M8 / M5** — dropped-env confirm-gate collapse, governance-contract contradiction,
-   token-auth raw-file gap, lessons-file race.
-7. **M2 / M6 / M7 / M9 / M10 / M11** — search quality, lessons cap, stage mislabel, pagination
-   EOF, and the two doc contradictions.
-8. Sweep the doc/comment contradictions in §6 and §7 (they are `CLAUDE.md`-class bugs) and the
-   config-time enum validation (`config.py:259`).
+- generic Windows sandbox tree-kill works; only BackgroundManager has the parent/child bug;
+- Windows TUI falls back to blocking input and loses live refresh; it is not an infinite production
+  hang once the user presses Enter;
+- writable `trusted_local` symlinks are a data-integrity/design risk, not a container escape;
+- random job/session IDs reduce the exploitability of jobs/progress endpoints relative to enumerable
+  node detail, though the data should still be authenticated;
+- Bandit MD5/SHA1 findings are predominantly non-cryptographic stable identifiers;
+- the plan-mode `remember` operation is an intentional scoped knowledge-base write exception;
+- the read-only wheel smoke failure came from setuptools trying to update `egg-info` on a read-only
+  source bind, not from a product runtime path;
+- flat `looplab.htmlview/traceview` compatibility works; intermediate `serve.*` paths were not the
+  promised compatibility surface;
+- first-terminal-wins is correct within an attempt; the defect is the absence of attempt identity;
+- background events do not directly change an already folded champion; they change causal inputs to
+  future proposals;
+- `run_setup` is neither globally “never retried” nor crash-safe exactly once: a fresh Engine repeats
+  it, while the in-process flag usefully prevents concurrent workers;
+- preserving reward-hack evidence is reasonable for a plain eval reset of identical code and stale
+  when implement/propose replaces the code;
+- the forced-operation defect is a new explicit request being ignored after prior completion, not an
+  obligation to replay an old request automatically;
+- fold is deterministic for a fixed ordered log, not commutative/order-independent;
+- confirmed-only promotion is valid at the original finalization; it becomes wrong only after a new
+  epoch/candidate set without re-promotion;
+- workspace dirty-*tracked* bytes are unconditionally reproduced; untracked bytes matter only under
+  `seed_mode=all` or non-git copytree;
+- parallel budget overrun is bounded to a batch; ablation remains wholly outside accounting;
+- `Event.v` is pre-migration debt, not an active version-skew failure while only v1 exists.
+- physical extraction materially improved navigation; the remaining problem is logical ownership,
+  not that the refactor had no value;
+- source-scan Task/Developer registries reduce rename drift, but cannot preserve capabilities they do
+  not declare;
+- duplicate sequence numbers are specific to the documented no-lock fail-open path; ordinary
+  NTFS/ext4 locking works.
 
 ---
 
-## 11. Diagram & schema accuracy — clean
+## 11. Documentation and diagram status
 
-`docs/infographic/agent-architecture.html` is **data-driven** (a `B` block map + `E` edge list in
-its inline `<script>`); `CLAUDE.md` mandates its numbers/cadences/thresholds be verified against
-`looplab/`. A high-effort audit enumerated every concrete claim — config defaults, engine cadence
-math, event-type names, the signal-delivery registry, digest composition counts, and
-stage-to-stage edges — and found **no drift**. Spot-verified as correct against the code:
+The infographic's concrete spot values still match current Settings/code: novelty default/mode and
+thresholds, seed/holdout counts, confirmation default/base seed, and deep-research/strategist cadences.
+The “Engine + 12 mixin files” statement also remains literally true.
 
-- `novelty_mode=llm` default with the `algo` gate opt-in; `novelty_semantic_threshold=0.92`,
-  `novelty_epsilon=0.05`; the nudge `seed=id*1009+7`, `scale=max(|p|,1)*0.1` (`novelty.py:216,219`).
-- `n_seeds=3`, `holdout=0.25`, `holdout_top_k=3`; confirm OFF by default, `confirm_seed_base=1`.
-- `deep_research_every=3`, `strategist_every=3`, `strategist_backend="agent"`.
+The old universal “architecture concepts and process diagram are clean” conclusion is too strong.
+`docs/guide/concepts.md` still describes novelty as effectively opt-in/agent-decided while the default
+LLM novelty adjudicator is a separate active path. More importantly, the diagrams do not model node
+attempts, search epochs, subject-bound approval, setup completion, or the hybrid non-log inputs needed
+for resume. Concrete values can be correct while the lifecycle model is incomplete.
 
-**The process diagram is well-maintained and matches the code** — a credit to the "keep the docs
-and the process diagram in sync in the SAME change" discipline. (The settings-table accuracy is a
-separate axis: see M10, D-`trust_gate`, D-`novelty_semantic`, and the memory.md Cases-schema
-drift for the table/guide mismatches that *were* found.)
-
-## 12. Runtime & sandbox hardening
-
-The runtime-sandbox scope surfaced the most consequential *security* finding in the review (H3),
-a related correctness bug (M12), and one doc-drift (the `run_argv` docstring, §7). The through-line
-is that the **RepoTask command-eval Docker path** (`make_docker_wrap`) is a second, weaker Docker
-tier than the `solution.py` path (`DockerSandbox.run`): the former omits the container hardening
-and per-call env forwarding that the latter has, even though both serve the *same*
-untrusted/hostile trust modes. H3 and M12 are written up in §4 and §5; the docstring drift is in §7.
-
-- **H3** `command_eval.py:379` — untrusted command-eval container missing `--cap-drop ALL` /
-  `--security-opt no-new-privileges` / `--cpus` / `--memory`; contradicts two docs. (CONFIRMED, high)
-- **M12** `command_eval.py:384` — engine env (incl. `LOOPLAB_EVAL_SEED`) dropped inside the
-  container, collapsing the confirm variance gate. (CONFIRMED, medium)
-- `sandbox.py:178` — `run_argv` docstring describes a `communicate()` fast path that no longer
-  exists (always drains via `_tee_drain`). (CONFIRMED, low — §7)
+Documentation should be updated in the same PRs that introduce the new state/event contracts, with
+the diagrams generated or at least checked from the same registries where possible.
 
 ---
 
-## 13. Implementation ledger — fixes applied
+## 12. Final current-state verdict
 
-The findings above were then **implemented** on `claude/architecture-code-review-76zgdt` (commits
-after this report), in severity-ordered phases. Every phase was **adversarially reviewed per-fix**
-by an independent agent panel, and a final **mega-review** (5 angles — invariant-safety,
-strategy-cluster interactions, a fresh bug-hunt, completeness-vs-report, docs/diagram-sync) swept
-the whole diff. Each phase's REQUEST_CHANGES were fixed before moving on. Every fix carries a
-regression test where testable. **Final state: 1718 passed, 23 skipped** (full offline suite);
-diff ≈ 44 code files, +~600/−170.
+LoopLab has a strong experimental foundation and substantial, thoughtful hardening. The July fixes
+resolved most of the original H/M list and the refactors improved code navigation. The system is not,
+however, at the point where event replay alone guarantees safe reset/reopen/resume under concurrency.
 
-**Applied (by the fix that landed it):**
-
-- **High** — H1 ablation spin (`policy.ablation_capable`, engine-stamped), H2 leakage token-anchor
-  (+ D-leak docstring), H3 untrusted-container hardening (`make_docker_wrap`).
-- **Medium** — M1 dataset objective-orientation (direction-conditional), M2 MCTS bounded reward
-  (`_mcts_reward`), M3 strategy resume-merge, M4 governance enforcement (per-field `_pinned`
-  provenance so the human pin always wins, the strategist is gated, direct-construction defaults to
-  the shipped matrix), M5 lessons-file lock race (re-read + drop-by-identity), M6 lessons cap 3→8,
-  M7 stage carry-over (+ bare-list manifest), M8 token-auth raw-content gate (log/logs/spans/trace/
-  conversation/chat-log/agents_md/authoring/memory/permissions), M9 `repo_read` EOF, M10/M11 doc
-  fixes, M12 container env forwarding.
-- **Low / nit** — reasoning-retry guard, PEP-604 coercion, replay defensive reads + confirm-eval
-  idempotency, `novelty_mode` config-time validation, GPU-name comma parse, `_clamp_fill` swept
-  dims, deep-research cadence first-fire, `perfect_metric` ceiling, `_validate_emit` sweep grid,
-  `_pathsafe` resolve guard, `truncate_history` tool-call-arg shrink, MCP result cap + single-task
-  lifecycle (no leaked subprocess), grader-glob boundary (incl. `autograder`), `delete_node` atomic
-  writes + guarded span parse, `put_run_config` shared secret set, streaming-assistant error bubble,
-  robust-metric projections, `run` on a paused run, `timings` dicts_only, dev-crash batch break,
-  reconcile hash-reset, harmonic `kb_search` query space, TUI composable-task panel, `trust_gate` /
-  `novelty_semantic` comment/doc corrections, and the doc/comment-drift set (strategist default
-  backend, `declare_stages`, `_dep_attempted`, router order, MLEBENCH count, README badge, LanceDB).
-
-**Deliberately deferred** (very latent / no current trigger — flagged for a maintainer, not fixed):
-
-- `strategy.py::_strategy_core` omits `timeout`/`max_parallel` — no producer emits them into a
-  strategy today, so the change-detector cannot drop them; zero current trigger.
-- `adapters/regression.py` multiplicative-λ absorbing at 0 — offline toy blind-baseline only; the
-  global search still reaches λ>0 via other root drafts.
-- `adapters/mlebench_real.py` hard-codes `train.csv`/`test.csv` vs `assets()` accepting `train*.csv`
-  — PLAUSIBLE, no current trigger (every supported competition + baseline uses those names).
-- `orchestrator.py::_serve_forced_requests` fork/inject effect-before-gate — a duplicate node only
-  on a SIGKILL/OOM in a sub-millisecond window; worst case one wasted experiment, no corruption. A
-  correct fix needs request-indexed (deterministic) node-id minting — a larger change with its own
-  risk, left for a focused follow-up.
-
-The architecture verdict from §1 stands after the changes: layering and the event-log invariants
-are intact (the mega-review's invariant-safety angle came back clean), and the fixes are additive
-and replay-safe.
-
-## 14. Follow-up code-review pass (`/code-review -fix` over the fix diff)
-
-A final max-effort review (10 finder angles × 1-vote adversarial verify + a sweep) ran over the
-whole fix diff. No critical/high survived; 15 medium-and-below findings were triaged.
-
-**Applied:**
-
-- **budget_extend is a human intent, not a boss knob** (`orchestrator._apply_control_overrides`) —
-  M4 over-gated `max_eval_seconds`/`timeout`/`max_parallel` on `_agent_may("boss", …)`, but the
-  boss action-builder can only emit `add_nodes`, so those fields only ever come from a human via the
-  control endpoint. The gate protected nothing and silently DROPPED the operator's own override,
-  pinning the run to the old cap. Now applied as-is (matching `max_seconds`), and the config/doc
-  governance text was corrected to match.
-- **operator `policy_params` pin honoured when `policy` is locked** (`strategy._apply_strategy`) —
-  the name and its params are now gated independently, so a `_pinned` params-only pin rebuilds the
-  policy with the current name instead of being a silent no-op.
-- **truncated `tool_calls.arguments` stays valid JSON** (`context_budget`) — a compact valid-JSON
-  placeholder (recording the elided size) replaces the middle-truncated blob, so a strict
-  OpenAI-compatible gateway can't 400 on malformed arguments when the trimmed history is re-sent.
-- **reconcile spend recorded before best-effort consolidate/compact** (`lessons_reconcile`) — a
-  post-write LLM/embedder failure no longer skips the `lessons_distilled(reconcile)` ledger append,
-  so run-end reflection can't double-count the just-written pairs.
-- **shared `materialized_stages` helper** (`command_eval`, called by `eval_stages._resolve_stages`
-  and `repo_developer._materialized_stage_list`) — replaces two hand-copied parse+validate blocks
-  kept "in lock-step" by comment, so the implement prompt and the eval can no longer drift (M7).
-- **`default_agent_control()` factory** (`config`, used by the Settings default_factory and the
-  Engine's direct-construction default) — one copy expression instead of two verbatim ones.
-- **module-level raw-GET constant tuples** (`server`) — hoisted out of the per-request middleware
-  closure.
-
-**Deliberately deferred** (documented-intentional, inherent, or a tested design trade — not a
-regression this diff introduced):
-
-- grader-glob recall for mid-token names (`regrade.py`, `pregrader.py`) — the boundary-anchoring is
-  a deliberate precision choice locked by `test_grader_globs_precise_boundary` (keeps `upgrade.py`/
-  `upgrader.py` editable); no glob set separates `regrade` from `retrograde`/`upgrade`, and all
-  conventional grader names stay protected.
-- `kb_search` per-query LLM abstraction — mirrors the established `retrieve_lessons_harmonic` pattern
-  (abstract both sides) and is content-cached; switching the query to a lexical abstraction would
-  regress retrieval quality for a latency win, so it stays consistent with the codebase.
-- resume divergence for runs started *before* M4 (an old recorded `agent_control` lacks the new
-  gated keys) — a one-time migration window with no way to distinguish "operator omitted" from "old
-  snapshot"; `active_strategy` is audit-only.
-- ShellTools inheriting `--cap-drop ALL`/`no-new-privileges` from the shared docker wrap — a
-  security-positive change on an already-`--network none` untrusted tier, not a defect.
-- `active_strategy` recording gated-out knob values — audit-only (never read by selection); a
-  correct filter couples recording to the governance gate for a UI-panel cosmetic.
-- `repo_read` full-file read per paginated call — intentional (the `(more below)` marker needs the
-  full length); repo source files are small in practice.
-- the leakage token-anchor and `perfect_metric` exact-equality edges — both documented,
-  precision-over-recall, audit-only decisions from the first pass.
+The next engineering work should be a stabilization program centered on identity, transition
+validation, fail-closed durability, and centralized effects — not another broad mechanical split.
+Once attempts/epochs/requests/manifests are explicit, the existing event log, fold, policies, UI
+projections, and compatibility facade can remain and become considerably easier to reason about.
