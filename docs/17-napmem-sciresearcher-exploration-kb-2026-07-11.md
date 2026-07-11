@@ -9,9 +9,10 @@ research/exploration stack (`agents/roles.py`, `agents/agent.py`, `engine/propos
 `engine/novelty.py`, `search/archive.py`, `search/coverage.py`, `search/policy.py`, `search/foresight.py`,
 `agents/deep_research.py`, `engine/research_cadence.py`, `engine/genesis.py`, `agents/strategist.py` +
 `engine/strategy.py`) — plus primary-source research on the three papers. **arXiv full texts were
-proxy-blocked this session** (403 on `arxiv.org/abs|html|pdf`, as in doc 13); paper claims come from
-search-index snippets + secondary reviews and are marked where unverified. Every code claim below is
-anchored to `file:line` from a direct read. Sources are linked at the end.
+proxy-blocked this session** (403 on `arxiv.org/abs|html|pdf`, as in doc 13); paper claims — including every
+quantitative figure and the arXiv IDs themselves — come from search-index snippets + secondary reviews and
+are **unverified this session** (marked inline). Every code claim below is anchored to `file:line` from a
+direct read **and independently re-verified by an 8-agent adversarial pass — see [§6](#6-verification-pass-corner-cases-2026-07-11)** for the corner cases and the corrections that pass folded back in. Sources are linked at the end.
 
 **The four items.** Work through, at the arch-design + code-integration level: (0) a **general knowledge
 base** of frameworks + libraries (общая БЗ); and three papers — (1) **NapMem** (navigable memory
@@ -46,8 +47,11 @@ The **storage + retrieval** exist; the **curated corpus** and the **rich note sc
   notes are ML *concepts* (`examples/knowledge/polynomial_model_selection.md`).
 - **Skills** — the **procedural** tier (`SkillTools`, `skills.py:56-89`; `examples/skills/cross_validation.md`):
   a recipe + code, read via `list_skills`/`use_skill`. **Skills already carry YAML frontmatter**
-  (`name/description/status/provenance/fingerprints`, written by `write_auto_skill`, `memory.py:411-446`;
-  parsed by `_parse_skill`, `skills.py:22-35`).
+  (`name/description/status/provenance/source_task/fingerprints`, written by `write_auto_skill`,
+  `memory.py:411-446`). Note the reader is minimal: `_parse_skill` (`skills.py:22-35`) parses the block but
+  extracts only `name`+`description`; the other fields are consumed by `write_auto_skill`'s own regex
+  (`memory.py:423,429`), not by `_parse_skill` — so the frontmatter *machinery* to copy exists, even if the
+  reader would need extending.
 - **`tools/env_inspect.py`** — the repo Developer's **live, read-only** introspector: an installed package's
   *version/source*, a class/function *signature*, an Enum's valid members, grep over installed source. Built
   to kill the #1 repo-experiment failure — the Developer **guessing** an API and being wrong (`precision='16-mixed'`
@@ -67,8 +71,10 @@ The **storage + retrieval** exist; the **curated corpus** and the **rich note sc
    (`knowledge_tools.py:163-189`) writes plain markdown + a trailing `_tags:_` line: **no frontmatter, no
    provenance/type/confidence/status, no on-disk embedding** (embeddings are ephemeral, rebuilt in-memory by
    `KnowledgeTools._build_index`, `knowledge_tools.py:233-265`), **no `[[links]]`** (wikilink-graph is
-   unimplemented — see item 1). The structured fields (`fingerprint/confidence/outcome`) exist only in the
-   **JSONL** stores (`lessons.jsonl`/`cases.jsonl`), not in knowledge notes.
+   unimplemented — see item 1). The structured fields (`fingerprint/confidence/outcome`) live in the
+   **JSONL** stores (`lessons.jsonl`/`cases.jsonl`) — and `fingerprints` additionally in auto-skill
+   frontmatter, `outcome` in the event log — but **not** in the plain-markdown knowledge notes written by
+   `remember`. *(The `_tags:` line is emitted only when tags are non-empty.)*
 
 ### Design — the KB is the ADR-10 *semantic* tier, split by facet
 
@@ -141,15 +147,19 @@ The subagent map is unambiguous: **there is no tiering, no coarse→fine navigat
 only two non-flat behaviors are (a) Memora's *single lateral anchor hop* and (b) Skills' manifest→body
 disclosure:
 
-- **`kb_search`** — flat **top-k=3** vector hits + one round of anchor-expansion appended as
-  `[related via anchors]` (`knowledge_tools.py:282-300`; k defaults to 3, never overridden).
+- **`kb_search`** — flat **top-k=3** vector hits, **plus** one anchor-expansion hop *only when a harmonic
+  abstractor is wired* (`self.abstract` set); on a legacy/no-abstract index — e.g. the deep-research path
+  (`deep_research.py:227`) — it is **pure flat top-k, no hop** (`knowledge_tools.py:282-300`). `k` defaults to
+  3 at both production call sites (tests set `k=1`). *(The conditional hop actually **strengthens** "flat
+  top-k almost everywhere" on the harmonic-off path.)*
 - **`search_lessons` / `recall_notes`** — **pure token-overlap set intersection, no embeddings at all**,
   top-`limit` (`memory_tools.py:68-100`).
 - **Memora** (`tools/memora.py`) — indexes an `Abstraction` = `primary` (essence) + `anchors` (cue tags);
   `expand_by_anchors` (`memora.py:241-269`) is **one extra retrieval hop** to "different-primary, shared-cue"
   entries — *lateral cross-links, not a hierarchy* (`Abstraction` has no level field).
 - **`retrieve_lessons_harmonic`** (`memory.py:229-278`) builds a *fresh flat index per call*, top-k + one
-  anchor hop; `_render_role_prior` then Jaccard-gates and picks **top-5** (`lessons_priors.py:160-173`).
+  anchor hop; `_render_role_prior` then Jaccard-gates (`lessons_priors.py:137`), splices in harmonic recall,
+  applies D2 hygiene/ranking, and picks **top-5** (`lessons_priors.py:160-173`).
 - **`VectorStore`**: only `InMemoryVectorStore` ships (brute-force cosine, `vectorstore.py:165-201`); **no
   BM25/hybrid here** (RRF lives in `hybrid_merge.py`, and is a *write-path hygiene* tool, not read retrieval).
 - **`[[wikilinks]]→graph`: confirmed NOT implemented** — no `[[`-parsing, no `networkx` in the memory code
@@ -198,8 +208,12 @@ training data, but that's opt-in and external.)
 - **More tool-calls = more latency/cost.** Drill-down is several round-trips vs one top-k — pays only when
   the corpus is large enough that flat top-k pulls distractors (the context-rot case). Gate it; keep flat
   top-k as the cheap default.
-- **No persistent store yet.** With only `InMemoryVectorStore`, a large pyramid re-embeds each run — the
-  LanceDB seam (`vectorstore.py:1-9`) becomes worth building *before* a big pyramid, not after.
+- **No persistent *vector* store yet.** Only the **vector index** is ephemeral: with `InMemoryVectorStore` a
+  large pyramid re-embeds each run — the LanceDB seam (`vectorstore.py:1-9`) becomes worth building *before* a
+  big pyramid, not after. *(To be precise: the **JSONL stores + cross-run reflection priors are ON by
+  default** — `memory_dir=~/.looplab/memory` (`config.py:411`), `reflection_priors=True` (`config.py:318`),
+  `comparative_lessons=True`; clear `LOOPLAB_MEMORY_DIR` to disable. So the pyramid's *content* persists; only
+  its *index* is rebuilt in-memory.)*
 
 ### Synergy — highest of the three
 
@@ -241,14 +255,17 @@ test-time search scaling (which for us is ADR-6's throughput lever).
   research memo is grounded in the run's own experiments + local knowledge — not external literature.** That is
   the *opposite* of SciResearcher's "information acquisition" pillar. The single highest-ROI SciResearcher-
   flavored change is: **default literature/web on for the deep-research pass** and give it a **broader
-  tool-integrated reasoning budget** (`max_turns`/`emit_after`, `deep_research.py:120-121`). The plumbing to
-  *act* on the output already exists — `recommended_directions` auto-become OPEN hypotheses
-  (`research_cadence.py:130-136`). Seam: `make_deep_researcher` (`deep_research.py:214`) + the two default
-  flags.
+  tool-integrated reasoning budget** (`max_turns`/`emit_after`/`emit_force`, `deep_research.py:118-121`). The
+  plumbing to *act* on the output already exists — when `track_hypotheses` is on (default True) the first 5
+  non-empty `recommended_directions` become OPEN hypotheses (`research_cadence.py:130-136`), and all top-5
+  also surface as a standing operator hint (`research_cadence.py:122-126`). Seam: `make_deep_researcher`
+  (`deep_research.py:214`) + the two default flags.
 - **(C) Self-distillation from our own `events.jsonl` — L, opt-in, out of core scope.** The teacher→
   trajectory→rejection-sampling→SFT recipe *could* fine-tune a cheap local role from **LoopLab's own** event
-  log — we already record every proposal/patch/verdict, a trajectory corpus with **verified rewards from the
-  trust layer** (exactly the signal rejection-sampling needs). Genuinely synergistic on paper, but a **training
+  log — the event log records proposals/patches/verdicts, *plausibly* a trajectory corpus with gated rewards
+  from the trust layer (exactly the signal rejection-sampling needs). **This premise is unverified — it needs
+  an events.jsonl schema audit** (are proposal + patch + verdict + reward co-located per node with the linkage
+  SFT needs?) before treating the data as in-hand. Genuinely synergistic *if* it holds, but a **training
   project**, not an inference-engine feature; it also risks the "recursively train on un-curated self-output"
   trap ADR-10 point 3 warns against (mitigated by our *gated* verdicts, still a hazard). Park as a research
   direction.
@@ -286,15 +303,20 @@ not a fix; concurrent related work: *Heuresis* 2606.25198 on quality/diversity/n
 
 The subagent map found the smoking gun in two places:
 
-- **The narrowing is baked into prompts.** `ToolUsingResearcher`'s system prompt literally says *"Work
-  FOCUSED, not scattered: pick the most promising direction... and RESEARCH THAT"* (`agent.py:103-117`), and
-  `_state_brief` **always leads with the current best + parent** (`roles.py:307-311`). This is precisely
-  finding #4 (local elaboration of the leader) as a design choice.
+- **The narrowing is (partly) baked into prompts.** `ToolUsingResearcher`'s system prompt literally says
+  *"Work FOCUSED, not scattered: pick the most promising direction... and RESEARCH THAT"* (`agent.py:103-117`),
+  and `_state_brief` opens with the goal + optimize-direction, then **foregrounds the current best + parent
+  *when they exist*** (`roles.py:307-311`; both are absent in the first-seed phase, so it doesn't *always*
+  lead with them). It leans toward the leader — finding #4 as a design choice — but it *does* also carry an
+  always-on **sibling-diversity digest** (`roles.py:320`), so the narrowing is a tendency, not absolute.
 - **`search/coverage.py` already cites arXiv 2605.27905** in its docstring (`coverage.py:16-19`) and computes
   a concentration signal — `themes`, `niches`, `theme_entropy`, `dominant_theme_frac`, `recent_dominant_frac`
-  (`coverage_signal`, `coverage.py:50-100`). **So the metric this paper implies is already implemented** —
-  but it is **context, never a decision**: recorded as `coverage_snapshot` sidecars (`strategy.py:239-252`)
-  and fed to the Strategist, nothing more.
+  (`coverage_signal`, `coverage.py:50-100`). **So the metric this paper implies is already implemented.** It
+  never drives **node selection** (no policy reads it — confirmed) — but it is *not* inert: the recorded
+  snapshot is read by `proposal_cues.py:104-111` to inject an EXPLORE "broaden the space" directive into the
+  researcher's **proposal prompt**, *once the Strategist stance has flipped to `explore`*. So it already
+  shapes proposal content — **reactively, post-collapse** (see below), which is exactly the gap: the fix is to
+  make that trigger *proactive*, not to add a first consumer.
 
 ### The honest tension with ADR-6 — and its resolution
 
@@ -313,11 +335,11 @@ reversal.
 
 | Lever | Status today | Gap |
 |---|---|---|
-| Concentration metric | **Built** — `coverage_signal` (`coverage.py:50-100`), folded every cadence | Within-run *theme* concentration only; not distance-from-seed-*literature*; **not acted on** except reactively |
-| Novelty gate | `_llm_novelty_gate` default (`novelty.py:70-131`) — **within-run dedup** ("already tried in THIS run"), prefers NOVEL only vs repeats; doesn't hard-reject | No notion of "too close to the seed literature"; `"algo"` semantic gate off by default (`config.py:298`) |
-| Diversity archive | `DiversityArchive` (`archive.py:12-46`) — **pure bookkeeping**; nothing consumes it for selection | No MAP-Elites "expand an empty niche" operator |
-| Selection diversity | Lives in `EvolutionaryPolicy.weighted_parent` / `MCTSPolicy` (`policy.py:133,369`) — **both off by default**; `GreedyTree` always improves `state.best()` (`policy.py:286`) | Default is pure exploitation |
-| Broaden lever | Strategist `novelty_stance=explore\|balanced\|exploit` (`strategist.py:50-68`) — **the main dial** | **Reactive**: flips to `explore` only *after* concentration ≥0.6–0.75 (`strategist.py:145-160`), i.e. after collapse; stall logic keys on metric stagnation, blind to coverage collapse (`strategist.py:305-324`) |
+| Concentration metric | **Built** — `coverage_signal` (`coverage.py:50-100`), folded every cadence | Within-run *theme* concentration only (not distance-from-seed-*literature*); drives **proposal content** only reactively (via `proposal_cues.py:104-111` once stance=`explore`), never **node selection** |
+| Novelty gate | `_llm_novelty_gate` default (`novelty.py:70-131`) — **within-run dedup** ("already tried in THIS run"), prefers NOVEL only vs repeats; doesn't hard-reject (worst case keeps the original) | No notion of "too close to the seed literature"; `"algo"` semantic gate off by default (`config.py:298`) — but *fires* whenever the Strategist flips stance to `explore` |
+| Diversity archive | `DiversityArchive` (`archive.py:12-46`) — **audit-only** ("never affects selection", `models.py:323`); build() feeds only the `niches` count into `coverage_signal` | No MAP-Elites "expand an empty niche" operator |
+| Selection diversity | Only `GreedyTree`'s **IMPROVE** arm targets `state.best()` (`policy.py:286`); parent-selection diversity lives in `weighted_parent` (`policy.py:133`, used by `EvolutionaryPolicy`), `MCTSPolicy` (`policy.py:369`), ASHA/BOHB (`policy.py:450`) — **all off by default** (`policy=greedy`) | Default is exploitation on the IMPROVE arm; **the agentic Strategist *can* switch policy at runtime** (`agent_control`) — reactively |
+| Broaden lever | Strategist `novelty_stance=explore\|balanced\|exploit` (`strategist.py:50-68`) — **the main dial**; the default `strategist_backend='agent'` (`config.py:377`) governs it live | **Reactive**: `_rule_novelty_stance` flips to `explore` only *after* concentration ≥0.6–0.75 (`strategist.py:145-160`), i.e. after collapse; stall logic keys on metric stagnation, blind to coverage collapse (`strategist.py:305-324`) |
 | Diverse seeding | Genesis authors *what to solve*, not an idea portfolio (`genesis.py:161-238`); seeds = 3 blind drafts (`policy.py:225-227`) | No "generate N orthogonal seed directions" step |
 
 ### Integration seams
@@ -327,7 +349,8 @@ reversal.
 | Concentration is measurable | `coverage_signal` (`coverage.py:50-100`) — already computed | **Surface it as a KPI** (dashboard) and **make the Strategist trigger proactive**, not post-collapse |
 | Distance-from-seed | `engine/novelty.py` + the seed embeddings from Genesis/ingestion | Add a **distance-from-seed** term (reuse the `_embedder`/`HybridRetriever` plumbing already present); degrade to distance-from-archive on `--no-genesis` |
 | Question-novelty vs method-recombination | `engine/novelty.py`, `idea.hypothesis` field | Embed the idea's *question/hypothesis* separately from its *method*; stop scoring pure recombination as "novel" |
-| Diversity in selection | `GreedyTree.next_actions` (`policy.py:172-288`) + `DiversityArchive.build()` (`archive.py:20`) / `weighted_parent` (`policy.py:133`) | Reserve a **breadth quota** (every Nth node a forced-divergent draft) or a niche-expansion action — **open-ended mode only** |
+| Diversity in selection | `GreedyTree.next_actions` (`policy.py:172-288`) + `DiversityArchive.build()` (`archive.py:20`) / `weighted_parent` (`policy.py:133`); ASHA/BOHB rung-racing (`policy.py:450`) already exist as non-greedy parent selection (off by default) | Reserve a **breadth quota** (every Nth node a forced-divergent draft) or a niche-expansion action — **open-ended mode only** |
+| Ranker breadth (already partial) | `search/foresight.py:213` (`_novelty_rank_directive`) | The foresight panel (default **on**, `foresight_panel=2`) *already* breaks near-ties toward the **more divergent** candidate — but **only under `explore` stance**. Make that divergence directive always-on / raise the panel in open-ended mode |
 | Proactive, not reactive | `_rule_novelty_stance` / Strategist prompt (`strategist.py:145,353`) | Lower/invert the collapse thresholds; add a coverage-collapse stall trigger (today it's metric-only) |
 | Broaden at entry | `engine/genesis.py` + the board (`hypothesis_added` + `_prioritize_board`) | A seed-phase "portfolio generation": emit N deliberately-orthogonal seed hypotheses (the board machinery already carries them) |
 | Broaden at ideation | `agents/deep_research.py` `recommended_directions` (auto-become hypotheses, `research_cadence.py:130-136`) | Diversify the directions set; compounds with item 2(B)'s literature-on change |
@@ -398,12 +421,12 @@ Priority-ordered, each mapped to an existing seam; none replaces the engine:
 | # | Item | Source | Seam | Effort | Mode | Why now |
 |---|---|---|---|---|---|---|
 | 1 | **Turn deep research literature-expanding** (default `literature_search`/`web_search` on + wider tool budget) | SciResearcher (2B) | `deep_research.py:214`, `config.py:691,695` | S | opt-in default | Flip two flags; plumbing to act on directions already exists; fills the KB + broadens ideation |
-| 2 | **Make the coverage KPI proactive** (dashboard + collapse trigger; add distance-from-seed) | Narrow-Exploration | `coverage.py:50`, `strategist.py:145`, `novelty.py` | S–M | KPI all / action open-ended | The metric is *already computed*; the gap is acting on it before collapse |
+| 2 | **Make the coverage trigger proactive** (dashboard KPI + pre-collapse trigger; add distance-from-seed) | Narrow-Exploration | `coverage.py:50`, `strategist.py:145`, `proposal_cues.py:104`, `novelty.py` | S–M | KPI all / action open-ended | The metric is *already computed* and already drives a *reactive* explore-hint (`proposal_cues.py:104-111`); the gap is firing it **before** collapse, not after |
 | 3 | **Frameworks/Libs KB** (`knowledge/{frameworks,libs}/` + note frontmatter) | общая БЗ | `knowledge_tools.py:163-265` (borrow Skills frontmatter) | S–M | all | Substrate for 1/4/5; small build (frontmatter parse), not zero-code |
 | 4 | **NapMem pyramid tools** (activate dormant `CaseLibrary`; provenance drill-down; no RL) | NapMem | `memory.py:514-609`, `memora.py:241-269`, kb tools | M | large-corpus / open-ended | ADR-10 retrieval upgrade; attacks context-rot; a store is already 80% built |
-| 5 | **Quality-diversity selection re-activation** (breadth quota / niche-expansion) | Narrow-Exploration | `policy.py:172-288`, `archive.py:20`, `foresight.py:213` | M | open-ended only (gated) | Re-justifies ADR-6-parked machinery for the mode where it matters |
-| 6 | **SciResearcher-8B as a deep-research backend** (if released) | SciResearcher (A) | `roles.*.model` (ADR-7) | S | opt-in | Config-only; benchmark before trusting (domain mismatch) |
-| 7 | **Self-distillation from `events.jsonl`** (fine-tune a local role) | SciResearcher (C) | *external training project* | L | research direction | We own the trajectory+verified-reward data; but training breaks backend-agnosticism → external only |
+| 5 | **Quality-diversity selection re-activation** (breadth quota / niche-expansion; make the `foresight.py:213` divergence tie-break always-on) | Narrow-Exploration | `policy.py:172-288` (+ ASHA/BOHB `450`), `archive.py:20`, `foresight.py:213` | M | open-ended only (gated) | Re-justifies ADR-6-parked machinery; foresight already nudges divergent *under `explore`* — just make it proactive |
+| 6 | **SciResearcher-8B as a deep-research backend** (if released) | SciResearcher (A) | `roles.*.model` (ADR-7) | S | opt-in | Config-only; benchmark before trusting (domain mismatch); *paper claims unverified* |
+| 7 | **Self-distillation from `events.jsonl`** (fine-tune a local role) | SciResearcher (C) | *external training project* | L | research direction | Event log *plausibly* holds proposal+patch+verdict trajectories with gated rewards — **needs a schema audit** before treating as in-hand; training breaks backend-agnosticism → external only |
 
 ### One-line strategy read
 
@@ -419,6 +442,68 @@ Priority-ordered, each mapped to an existing seam; none replaces the engine:
 
 ---
 
+## 6. Verification pass & corner cases (2026-07-11)
+
+Every code claim above was re-checked by an **8-agent adversarial pass** (7 claim-cluster verifiers + a
+config-profile/env sweep, then a completeness critic) — each opened the source, tested the `file:line`
+anchors, and hunted exceptions to "always/never/only/everywhere" and to "default off/on." **The load-bearing
+claims held (18 of 30 CONFIRMED verbatim);** the rest were tightened and the corrections folded into the body
+above. The corners worth knowing:
+
+**A. The single biggest corner — "default off" ≠ "unreachable": the agentic Strategist is a live override
+surface.** `strategist_backend='agent'` by default (`config.py:377`), and the governance matrix
+(`DEFAULT_AGENT_CONTROL`, `config.py:70-85`) grants it live control of `policy`, `novelty_stance`,
+`ablate_every`, `merge_mode`, `fidelity`, … So the exploration machinery the doc calls "off by default" is
+**static-config off but Strategist-mutable at runtime** — and it flips **reactively, post-collapse**
+(`novelty_stance`→`explore` only at concentration ≥0.6–0.75, which in turn switches on the `novelty_semantic`
+gate *and* the `proposal_cues` broaden-hint). This *reinforces* the Narrow-Exploration thesis (the levers
+exist; they fire too late) and sharpens Rec #2/#5 from "add machinery" to "make the existing trigger proactive."
+
+**B. Config profiles do not flip any "default" the doc relies on.** `PROFILES` (`config.py:43-64`):
+`default`/`fast` are empty `{}`; `thorough` turns on quality/trust machinery (`confirm_*`, `reward_hack_detect`,
+`code_leakage_detect`, `critic_check`, `trust_gate=gate`, `ablate_every=3`, `operator_bandit`, `complexity_cue`,
+`budget_aware`) but **deliberately leaves OFF** the novelty algo-gate (comment: it "mis-fired" — nudged a fresh
+idea onto a twice-dead lineage), `novelty_semantic`, the `explore` stance, a diversity `policy`, and
+`web_search`/`literature_search`. So **`web/literature off` (Rec #1), `novelty_semantic off`, `policy=greedy`
+hold under every shipped profile** — env vars can flip them, no *profile* does. *(Two `thorough` keys —
+`failure_reflection`, `reflection_priors` — are redundant no-ops, already default True.)*
+
+**C. Corrections folded into the body:**
+
+| Claim | Was | Now (corrected) |
+|---|---|---|
+| `kb_search` k / hop (§1) | "k=3, never overridden; + one anchor hop" | k=3 at the two *production* sites (tests set k=1); the anchor hop fires **only** with a harmonic abstractor — the deep-research path (`deep_research.py:227`) is pure flat top-k (this *strengthens* the thesis) |
+| coverage (§3, Rec #2) | "context, never a decision; fed to Strategist, nothing more" | never drives *selection* — but already drives the *proposal* explore-hint via `proposal_cues.py:104-111`, **reactively**; the gap is making it *proactive*, not adding a first consumer |
+| `_state_brief` (§3) | "always leads with best+parent" | best/parent are conditional (absent in the first-seed phase); the brief also carries a sibling-diversity digest — a tendency, not absolute |
+| `GreedyTree` (§3) | "always improves `best()`; selection diversity only in Evo/MCTS" | only the IMPROVE arm targets `best()`; it also drafts/debugs/ablates/merges-top-2; ASHA/BOHB are further non-greedy paths (all off by default) |
+| `recommended_directions` (§2) | "auto-become hypotheses" | gated on `track_hypotheses` (default True), first 5 non-empty only; also surfaced as a standing hint |
+| Skills frontmatter (§0) | "parsed by `_parse_skill`" | `_parse_skill` reads only name+description; the other fields are parsed by `write_auto_skill`'s own regex |
+| Cross-run memory (§1) | (persistence framing implied ephemeral) | only the *vector index* is ephemeral; the JSONL stores + reflection priors are **on by default** |
+
+Anchor drift corrected in two places: the lessons Jaccard gate is `lessons_priors.py:137` (not 160-173); the
+deep-research budget knobs are `deep_research.py:118-121`.
+
+**D. Two claim classes the code-only verifiers structurally COULD NOT check — read these as contingent:**
+1. **Paper content.** All three papers' quantitative figures (NapMem GRPO/benchmarks; SciResearcher-8B 19.46%
+   HLE-Bio/Chem-Gold; the 37,802-idea study) and the **arXiv IDs themselves** are snippet-sourced and
+   unresolved this session — the *only* independently corroborated paper fact is that `coverage.py` cites
+   2605.27905. **Rec #6/#7 are contingent on the paper claims holding.**
+2. **`events.jsonl` as a training corpus** (Rec #7 premise) carries no `file:line` anchor and needs a schema
+   audit before "we already own the data" is safe.
+
+**E. A default the doc had understated:** the **foresight ranker is a default-ON stage** (`foresight=True`,
+`foresight_panel=2`), and its `foresight.py:213` tie-break *already* nudges toward the more-divergent
+candidate — but only under `explore` stance. Rec #5 now points at it as an existing, partial breadth lever to
+make *proactive*, not a fresh build.
+
+**Net:** no recommendation was invalidated. Rec #2 and #5 were **sharpened** (the levers exist and fire
+reactively — make them proactive), Rec #7 was **hedged** (needs a data audit), and the "flat top-k almost
+everywhere" thesis was **strengthened** (the one hop the doc counted is conditional). The honest through-line:
+LoopLab's exploration-breadth machinery is *present but reactive/post-collapse*, which is exactly the
+Narrow-Exploration pathology — so the fixes are mostly about *timing and gating*, not new subsystems.
+
+---
+
 ## Sources
 
 - NapMem: *From Passive Retrieval to Active Memory Navigation: Learning to Use Memory as a Structured Action Space* — [arXiv:2607.05794](https://arxiv.org/abs/2607.05794) (abstract/PDF proxy-blocked; claims from search-index snippets).
@@ -426,4 +511,3 @@ Priority-ordered, each mapped to an existing seam; none replaces the engine:
 - Narrow-Exploration: *AI Research Agents Narrow Scientific Exploration* — [arXiv:2605.27905](https://arxiv.org/abs/2605.27905); [HuggingFace paper page](https://huggingface.co/papers/2605.27905).
 - Related: *Heuresis: Search Strategies for Autonomous AI Research Agents Across Quality, Diversity and Novelty* — [arXiv:2606.25198](https://arxiv.org/abs/2606.25198).
 - Internal: [ADR-6](03-decisions.md) (2026 SOTA re-prioritization), [ADR-9](03-decisions.md) (MCP + Skills), [ADR-10](03-decisions.md) (unified knowledge/memory), [ADR-16](05-build-decisions.md) (RAG/vector store), [guide/memory.md](guide/memory.md), [13-external-works-analysis-2026-07.md](13-external-works-analysis-2026-07.md).
-</content>
