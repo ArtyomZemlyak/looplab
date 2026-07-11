@@ -111,7 +111,11 @@ def inspect(run_dir: Path = typer.Argument(...)):
 def tensorboard(
     run_dir: Path = typer.Argument(..., help="Run dir; its nodes/ hold each experiment's training logs."),
     port: int = typer.Option(6006, help="Port to serve on."),
-    host: str = typer.Option("0.0.0.0", help="Bind address."),
+    host: str = typer.Option(
+        "127.0.0.1",
+        help="Bind address. Defaults to localhost — TensorBoard has NO auth, so an experiment's "
+             "training logs (and any secret a script printed into them) must not be exposed on all "
+             "interfaces by default. Pass --host 0.0.0.0 explicitly to bind all interfaces."),
 ):
     """Serve TensorBoard over a run's per-node training logs — online curves for ALL metrics the
     training framework logged (loss, recall@k, grad norms, lr, …), one comparable run per experiment.

@@ -757,6 +757,18 @@ class Settings(BaseSettings):
         if self.novelty_mode not in ("off", "algo", "llm"):
             raise ValueError(
                 f"novelty_mode must be off|algo|llm, got {self.novelty_mode!r}")
+        # The remaining enum-ish string fields (arch-review §5 P3): a typo used to be accepted at
+        # construction and only fail-safe/later-loud downstream (e.g. a mis-cased strategist_backend
+        # silently ran the default). Fail loudly here like the fields above.
+        if self.strategist_backend not in ("off", "rule", "llm", "agent"):
+            raise ValueError(
+                f"strategist_backend must be off|rule|llm|agent, got {self.strategist_backend!r}")
+        if self.eval_trust_mode not in ("ratify_freeze", "autonomous", "ratify_freeze_drift"):
+            raise ValueError(
+                "eval_trust_mode must be ratify_freeze|autonomous|ratify_freeze_drift, "
+                f"got {self.eval_trust_mode!r}")
+        if self.seed_mode not in ("auto", "tracked", "all"):
+            raise ValueError(f"seed_mode must be auto|tracked|all, got {self.seed_mode!r}")
         return self
 
     def masked_snapshot(self) -> dict:

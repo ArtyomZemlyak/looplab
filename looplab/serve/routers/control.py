@@ -247,7 +247,9 @@ def build_router(srv) -> APIRouter:
         # resolved directory name, so "./reports" can't sneak into the cross-run report store.
         if rd.parent != root or rd == root:
             raise HTTPException(400, "bad run_id (must be a plain name, not a path)")
-        if rd.name in _RESERVED_RUN_IDS:       # don't let a run clobber the report/assistant stores
+        # Case-INSENSITIVE (arch-review §5 P2): on a case-insensitive FS (Windows/macOS default) an
+        # `ASSISTANT` run dir aliases the reserved `assistant` service store, so compare lowercased.
+        if rd.name.lower() in _RESERVED_RUN_IDS:   # don't let a run clobber the report/assistant stores
             raise HTTPException(400, f"run_id {rd.name!r} is reserved")
         if (rd / "events.jsonl").exists():
             raise HTTPException(409, f"run {run_id!r} already exists — pick another id")

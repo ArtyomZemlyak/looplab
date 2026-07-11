@@ -136,6 +136,16 @@ def test_assistant_session_transcript_is_token_gated(tmp_path, monkeypatch):
     assert client.get("/api/runs/demo/state").status_code == 200
 
 
+def test_reserved_run_id_is_case_insensitive(tmp_path):
+    """arch-review §5 P2: a reserved run id (assistant/reports) must be refused case-INSENSITIVELY —
+    on a case-insensitive FS `ASSISTANT` would otherwise alias the reserved service store."""
+    client = TestClient(make_app(tmp_path))
+    for rid in ("assistant", "ASSISTANT", "Assistant", "REPORTS"):
+        r = client.post("/api/start", json={"run_id": rid, "task": {"kind": "quadratic",
+                                                                     "goal": "g", "direction": "min"}})
+        assert r.status_code == 400 and "reserved" in r.json()["detail"], rid
+
+
 def test_public_state_drops_stdout_and_redacts_error(tmp_path):
     """arch-review §4 P1-3: the public /state projection (served without the UI token) must not ship
     raw captured stdout, and must redact the short error snippet it shows — a secret the candidate
