@@ -671,3 +671,55 @@ diff ≈ 44 code files, +~600/−170.
 The architecture verdict from §1 stands after the changes: layering and the event-log invariants
 are intact (the mega-review's invariant-safety angle came back clean), and the fixes are additive
 and replay-safe.
+
+## 14. Follow-up code-review pass (`/code-review -fix` over the fix diff)
+
+A final max-effort review (10 finder angles × 1-vote adversarial verify + a sweep) ran over the
+whole fix diff. No critical/high survived; 15 medium-and-below findings were triaged.
+
+**Applied:**
+
+- **budget_extend is a human intent, not a boss knob** (`orchestrator._apply_control_overrides`) —
+  M4 over-gated `max_eval_seconds`/`timeout`/`max_parallel` on `_agent_may("boss", …)`, but the
+  boss action-builder can only emit `add_nodes`, so those fields only ever come from a human via the
+  control endpoint. The gate protected nothing and silently DROPPED the operator's own override,
+  pinning the run to the old cap. Now applied as-is (matching `max_seconds`), and the config/doc
+  governance text was corrected to match.
+- **operator `policy_params` pin honoured when `policy` is locked** (`strategy._apply_strategy`) —
+  the name and its params are now gated independently, so a `_pinned` params-only pin rebuilds the
+  policy with the current name instead of being a silent no-op.
+- **truncated `tool_calls.arguments` stays valid JSON** (`context_budget`) — a compact valid-JSON
+  placeholder (recording the elided size) replaces the middle-truncated blob, so a strict
+  OpenAI-compatible gateway can't 400 on malformed arguments when the trimmed history is re-sent.
+- **reconcile spend recorded before best-effort consolidate/compact** (`lessons_reconcile`) — a
+  post-write LLM/embedder failure no longer skips the `lessons_distilled(reconcile)` ledger append,
+  so run-end reflection can't double-count the just-written pairs.
+- **shared `materialized_stages` helper** (`command_eval`, called by `eval_stages._resolve_stages`
+  and `repo_developer._materialized_stage_list`) — replaces two hand-copied parse+validate blocks
+  kept "in lock-step" by comment, so the implement prompt and the eval can no longer drift (M7).
+- **`default_agent_control()` factory** (`config`, used by the Settings default_factory and the
+  Engine's direct-construction default) — one copy expression instead of two verbatim ones.
+- **module-level raw-GET constant tuples** (`server`) — hoisted out of the per-request middleware
+  closure.
+
+**Deliberately deferred** (documented-intentional, inherent, or a tested design trade — not a
+regression this diff introduced):
+
+- grader-glob recall for mid-token names (`regrade.py`, `pregrader.py`) — the boundary-anchoring is
+  a deliberate precision choice locked by `test_grader_globs_precise_boundary` (keeps `upgrade.py`/
+  `upgrader.py` editable); no glob set separates `regrade` from `retrograde`/`upgrade`, and all
+  conventional grader names stay protected.
+- `kb_search` per-query LLM abstraction — mirrors the established `retrieve_lessons_harmonic` pattern
+  (abstract both sides) and is content-cached; switching the query to a lexical abstraction would
+  regress retrieval quality for a latency win, so it stays consistent with the codebase.
+- resume divergence for runs started *before* M4 (an old recorded `agent_control` lacks the new
+  gated keys) — a one-time migration window with no way to distinguish "operator omitted" from "old
+  snapshot"; `active_strategy` is audit-only.
+- ShellTools inheriting `--cap-drop ALL`/`no-new-privileges` from the shared docker wrap — a
+  security-positive change on an already-`--network none` untrusted tier, not a defect.
+- `active_strategy` recording gated-out knob values — audit-only (never read by selection); a
+  correct filter couples recording to the governance gate for a UI-panel cosmetic.
+- `repo_read` full-file read per paginated call — intentional (the `(more below)` marker needs the
+  full length); repo source files are small in practice.
+- the leakage token-anchor and `perfect_metric` exact-equality edges — both documented,
+  precision-over-recall, audit-only decisions from the first pass.

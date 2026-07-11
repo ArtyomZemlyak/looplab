@@ -85,6 +85,15 @@ DEFAULT_AGENT_CONTROL: dict[str, list[str]] = {
 }
 
 
+def default_agent_control() -> dict[str, list[str]]:
+    """A FRESH deep-ish copy of the shipped governance matrix (each role list copied so a caller can
+    mutate its own map without touching the module constant). The SINGLE constructor of the default,
+    called by both `Settings.agent_control`'s default_factory AND the Engine's direct-construction
+    default — so "Engine() == shipped defaults" can't drift if the copy depth ever needs to change
+    (e.g. nested values requiring copy.deepcopy), instead of two verbatim copy expressions."""
+    return {k: list(v) for k, v in DEFAULT_AGENT_CONTROL.items()}
+
+
 class Settings(BaseSettings):
     """The engine settings schema (every knob a run accepts).
 
@@ -227,10 +236,12 @@ class Settings(BaseSettings):
     # Roles: "strategist" (A7 meta-controller; run-wide), "boss" (run-chat operator-proxy; run-wide),
     # "researcher" (per-experiment proposer; PER-NODE — e.g. set a longer eval timeout for a neural-net
     # idea). A setting ABSENT from this map is LOCKED — no agent may change it, only a human via the
-    # snapshot/UI. The gate is ENFORCED at every agent seam via `_agent_may` — the strategist's whole
-    # control surface (policy/operators/novelty_stance/prefer_sweep/developer/fidelity) and the boss's
-    # resource retunes (timeout/max_parallel/max_eval_seconds) are each checked, so removing a role from
-    # a knob genuinely locks it, not just greys out the UI pill. Defaults are conservative: resource/
+    # snapshot/UI. The gate is ENFORCED at every AGENT seam via `_agent_may` — the strategist's whole
+    # control surface (policy/operators/novelty_stance/prefer_sweep/developer/fidelity/timeout/
+    # max_parallel) is checked in `_apply_strategy`, so removing a role from a knob genuinely locks it,
+    # not just greys out the UI pill. The boss/max_* grants document boss-relevant knobs, but a
+    # `budget_extend` is a HUMAN control intent (the boss action-builder can only emit `add_nodes`), so
+    # it is applied as-is — the human always wins via the UI/snapshot. Defaults are conservative: resource/
     # search-shape knobs the agents already reason about; infra (llm_*, trust_mode, api_key,
     # docker_image) stays locked. The UI shows S/B/R pills per setting. `timeout` granted to the
     # researcher IS the "auto" per-node mode — the researcher sizes each experiment's wall-clock
@@ -238,8 +249,7 @@ class Settings(BaseSettings):
     # expects a JSON object. (`fidelity`/`novelty_stance`/`prefer_sweep`/`developer` are governance keys
     # for the strategist's per-node dials — not 1:1 Settings fields, but gated the same way.) The default
     # lives in the module-level DEFAULT_AGENT_CONTROL so the Engine's direct-construction default matches.
-    agent_control: dict[str, list[str]] = Field(
-        default_factory=lambda: {k: list(v) for k, v in DEFAULT_AGENT_CONTROL.items()})
+    agent_control: dict[str, list[str]] = Field(default_factory=default_agent_control)
     # C1 (Agentless localization): for repo tasks, rank the source files most relevant to the most
     # recent failure (traceback + identifiers) and surface them in the proposal/repair prompt so the
     # Developer edits the right place. Off by default; repo tasks only.

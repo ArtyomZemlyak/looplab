@@ -590,21 +590,18 @@ class LLMRepoDeveloper:
         SAME way the eval does (reserved 'score'): an invalid manifest the eval would DROP to the
         single command returns [] here too, keeping the implement prompt in step with the eval."""
         import json as _json
-        from looplab.runtime.command_eval import validate_stages
+        from looplab.runtime.command_eval import materialized_stages
         try:
             obj = _json.loads(write.files.get("looplab_stages.json", ""))
         except (ValueError, TypeError):
             return []
-        # Mirror _resolve_stages (eval_stages.py) EXACTLY: it accepts both the wrapped {"stages":[...]}
-        # shape declare_stages authors AND a BARE top-level JSON list (hand-written / write_file /
-        # pre-redesign manifests) via `dev = data.get("stages") if isinstance(data, dict) else data`.
-        # Parsing only the wrapped shape would leave the note claiming 'no pipeline' while the eval runs
-        # a carried-over bare-list manifest — the very M7 mismatch, un-fixed for that shape.
-        dev = obj.get("stages") if isinstance(obj, dict) else obj
-        if not isinstance(dev, list) or not dev:
-            return []
-        clean, err = validate_stages(dev, reserved=("score",))
-        return clean if (err is None and clean) else []
+        # ONE source of truth with the eval's `_resolve_stages`: `materialized_stages` accepts both the
+        # wrapped {"stages":[...]} shape declare_stages authors AND a bare top-level JSON list
+        # (hand-written / write_file / pre-redesign manifests), and drops an invalid manifest to None
+        # exactly as the eval drops it to the single command. Sharing the helper (not a hand-copied
+        # parse kept "in lock-step" by comment) is what guarantees the implement prompt advertises the
+        # SAME pipeline the eval will run (M7) — they can no longer drift.
+        return materialized_stages(obj) or []
 
     def _stages_user(self, idea: Idea, ev: dict, has_cmd: bool) -> str:
         import json as _json

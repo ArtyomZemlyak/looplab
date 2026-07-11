@@ -100,4 +100,22 @@ def test_truncate_history_shrinks_tool_call_arguments():
     assert after < before and after <= 1500, (before, after)
     # the system + last-2 messages are preserved; only the arg-heavy middle turn shrank
     assert out[0] == msgs[0] and out[-1] == msgs[-1]
-    assert "truncated" in out[1]["tool_calls"][0]["function"]["arguments"]
+    shrunk = out[1]["tool_calls"][0]["function"]["arguments"]
+    assert len(shrunk) < 5000 and "__elided_arguments_chars__" in shrunk
+
+
+def test_shrunk_tool_call_arguments_stay_valid_json():
+    """code-review: a tool call's `arguments` is a JSON string that a strict OpenAI-compatible gateway
+    may re-validate on the NEXT request (the trimmed history is re-sent verbatim). Middle-truncating it
+    would splice a marker into the JSON and make it un-parseable — trading a context-length 400 for a
+    malformed-arguments 400. The shrunk value must stay VALID JSON."""
+    import json
+    msgs = [{"role": "system", "content": "sys"},
+            {"role": "assistant", "content": "x",
+             "tool_calls": [{"id": "1", "function": {"name": "write_file",
+                             "arguments": '{"path": "a.py", "content": "' + "Z" * 5000 + '"}'}}]},
+            {"role": "user", "content": "u1"}, {"role": "user", "content": "u2"}]
+    out = truncate_history(msgs, max_chars=1000)
+    shrunk = out[1]["tool_calls"][0]["function"]["arguments"]
+    parsed = json.loads(shrunk)                       # must NOT raise (still valid JSON)
+    assert parsed["__elided_arguments_chars__"] == 5000 + len('{"path": "a.py", "content": ""}')

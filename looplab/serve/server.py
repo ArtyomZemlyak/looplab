@@ -77,6 +77,14 @@ def _ui_dist() -> Path:
     return ui_dist_dir()
 
 
+# Raw-content GET routes the UI-token middleware gates (as sensitive as mutations). Module-level
+# constants (not rebuilt inside `_require_token` on every request): `_RAW_GET_SUFFIX` match by
+# path suffix, `_RAW_GET_EXACT` by exact path. See `_require_token` for the per-route rationale.
+_RAW_GET_SUFFIX = ("/artifact", "/artifacts", "/log", "/logs", "/agents_md", "/chat-log",
+                   "/conversation", "/assistant/permissions")
+_RAW_GET_EXACT = ("/api/prompts", "/api/skills", "/api/knowledge", "/api/memory")
+
+
 def make_app(run_root: str | os.PathLike) -> "FastAPI":
     root = Path(run_root).resolve()
     root.mkdir(parents=True, exist_ok=True)
@@ -135,9 +143,7 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
             # (The /assistant/shared/{sid} route STRIPS raw and stays open for sharing.) The UI attaches
             # the token to EVERY request (ui/src/api.js::_authHeaders), so gating these never affects the
             # authenticated UI — only an untokened same-origin caller, which is who the token defends against.
-            _RAW_GET_SUFFIX = ("/artifact", "/artifacts", "/log", "/logs", "/agents_md", "/chat-log",
-                               "/conversation", "/assistant/permissions")
-            _RAW_GET_EXACT = ("/api/prompts", "/api/skills", "/api/knowledge", "/api/memory")
+            # (_RAW_GET_SUFFIX / _RAW_GET_EXACT are module-level constants — see above make_app.)
             # /api/runs/{id}/spans/... and /api/runs/{id}/trace[...] carry the raw span I/O. Match the
             # sub-resource by PATH SEGMENT (parts[4]), not a bare `/trace`/`/spans` substring, so a run
             # literally named "trace" or "spans" isn't over-gated on its projection routes.

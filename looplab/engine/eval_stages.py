@@ -57,31 +57,30 @@ class EvalStagesMixin:
             if err is None:
                 return _expand(clean)
 
-        # single-command cmd: read the Developer's PRECEDING stages, append the protected cmd stage
-        dev = None
+        # single-command cmd: read the Developer's PRECEDING stages, append the protected cmd stage.
+        # `materialized_stages` applies the SAME shared rules as the declare_stages tool (reserved
+        # 'score', no duplicates, argv shape) and accepts both the wrapped + bare-list manifest shapes
+        # — the tool is the friendly authoring path, but write_file / a CLI-agent diff / a pre-redesign
+        # run can still hand-write the manifest, and an unvalidated one could smuggle a second 'score'
+        # stage (clobbering score.log and confusing stage-scoped re-runs) or a full scorer that
+        # double-runs the eval after cmd is appended. Invalid → None (single-command fallback), never a
+        # half-cleaned pipeline. It is the SAME helper the repo-Developer prompt reads, so the two can't
+        # drift (M7).
+        preceding = None
         mf = Path(workdir) / "looplab_stages.json"
         if mf.exists():
             try:
-                data = json.loads(mf.read_text(encoding="utf-8"))
-                dev = data.get("stages") if isinstance(data, dict) else data
+                preceding = command_eval.materialized_stages(json.loads(mf.read_text(encoding="utf-8")))
             except Exception:  # noqa: BLE001 — a malformed manifest just falls back to the single command
-                dev = None
-        if isinstance(dev, list) and dev:
-            # SAME shared rules as the declare_stages tool (reserved 'score', no duplicates, argv
-            # shape) — the tool is the friendly authoring path, but write_file / a CLI-agent diff /
-            # a pre-redesign run can still hand-write the manifest, and an unvalidated one could
-            # smuggle a second 'score' stage (clobbering score.log and confusing stage-scoped
-            # re-runs) or a full scorer that double-runs the eval after cmd is appended. Invalid →
-            # ignore the whole manifest (single-command fallback), never a half-cleaned pipeline.
-            preceding, err = command_eval.validate_stages(dev, reserved=("score",))
-            if err is None and preceding:
-                # the operator's cmd is the FINAL + protected scoring stage; reuse the already
-                # profile-resolved command/timeout (build_command) so smoke/full still applies.
-                final = {"name": "score",
-                         "command": list(score_cmd) if score_cmd is not None
-                                    else command_eval.expand_params(list(es.get("command") or []), params),
-                         "timeout": score_timeout if score_timeout is not None else es.get("timeout", 600.0)}
-                return _expand(preceding) + [final]
+                preceding = None
+        if preceding:
+            # the operator's cmd is the FINAL + protected scoring stage; reuse the already
+            # profile-resolved command/timeout (build_command) so smoke/full still applies.
+            final = {"name": "score",
+                     "command": list(score_cmd) if score_cmd is not None
+                                else command_eval.expand_params(list(es.get("command") or []), params),
+                     "timeout": score_timeout if score_timeout is not None else es.get("timeout", 600.0)}
+            return _expand(preceding) + [final]
         return None
 
     def _resolved_stages(self, node, workdir) -> list:

@@ -290,6 +290,22 @@ def validate_stages(stages, *, reserved: tuple = ()) -> tuple[Optional[list], Op
     return clean, None
 
 
+def materialized_stages(manifest_obj, *, reserved: tuple = ("score",)) -> Optional[list]:
+    """The validated PRECEDING stage list from a PARSED `looplab_stages.json` object, or None when it
+    declares no usable pipeline / fails validation. Accepts BOTH the wrapped ``{"stages":[...]}`` shape
+    `declare_stages` authors AND a bare top-level JSON list (hand-written / write_file / pre-redesign
+    manifests): ``dev = obj.get("stages") if isinstance(obj, dict) else obj``. The SINGLE source of
+    truth for reading a materialized dev manifest, shared by the eval's `_resolve_stages` (consume
+    time) and the repo-Developer's implement-prompt `_materialized_stage_list` (authoring time) — so
+    the two can't drift and advertise a pipeline different from the one the eval runs (M7). An invalid
+    manifest the eval would DROP to the single command returns None here too."""
+    dev = manifest_obj.get("stages") if isinstance(manifest_obj, dict) else manifest_obj
+    if not isinstance(dev, list) or not dev:
+        return None
+    clean, err = validate_stages(dev, reserved=reserved)
+    return clean if (err is None and clean) else None
+
+
 def build_command(eval_spec: dict, params: Optional[dict] = None,
                   profile: Optional[str] = None) -> tuple[list[str], float]:
     """Build the eval argv + timeout from an eval_spec, an eval profile (smoke/full), and

@@ -51,6 +51,16 @@ def truncate_history(messages: list[dict], max_chars: int, *, keep_last: int = 2
         return (s[:head] + f"\n…[truncated {len(s) - 2 * head} chars]…\n" + s[-head:]
                 if len(s) > per_msg_cap else s)
 
+    def _mt_args(s: str) -> str:
+        # A tool call's `arguments` is a JSON STRING that a strict OpenAI-compatible gateway may
+        # re-validate as JSON on the NEXT request (this trimmed history is re-sent verbatim — see
+        # tool_loop.py). Middle-truncating it (`_mt`) would splice a marker into the middle of the JSON
+        # and make it un-parseable, trading a context-length 400 for a malformed-arguments 400. So
+        # replace an over-long blob with a COMPACT, still-valid JSON object recording the elided size —
+        # the history keeps a syntactically valid tool call, just without the (never re-parsed by us)
+        # payload. Only rewrites when it actually shrinks; the caller's size guard skips it otherwise.
+        return ('{"__elided_arguments_chars__": %d}' % len(s)) if len(s) > per_msg_cap else s
+
     out: list[dict] = []
     for i, m in enumerate(messages):
         protected = m.get("role") == "system" or i >= n - keep_last
@@ -65,10 +75,10 @@ def truncate_history(messages: list[dict], max_chars: int, *, keep_last: int = 2
             continue
         nm: dict = {**m, "content": _mt(str(m.get("content") or ""))}
         tcs = m.get("tool_calls")
-        if tcs:   # middle-truncate each past tool call's arguments (history context, never re-parsed)
+        if tcs:   # shrink each past tool call's arguments (history context) to a VALID-JSON placeholder
             nm["tool_calls"] = [
                 ({**c, "function": {**((c or {}).get("function") or {}),
-                                    "arguments": _mt(str(((c or {}).get("function") or {}).get("arguments") or ""))}}
+                                    "arguments": _mt_args(str(((c or {}).get("function") or {}).get("arguments") or ""))}}
                  if len(str(((c or {}).get("function") or {}).get("arguments") or "")) > per_msg_cap else c)
                 for c in tcs]
         new_size = _msg_chars(nm)

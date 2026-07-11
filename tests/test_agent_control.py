@@ -151,3 +151,40 @@ def test_default_settings_matrix_shape():
     assert s.agent_control["timeout"] == ["researcher", "strategist"]
     assert "boss" in s.agent_control["max_nodes"]      # budget_extend was already a boss power
     assert "llm_model" not in s.agent_control           # infra stays locked
+
+
+def test_budget_extend_is_a_human_intent_applied_regardless_of_matrix(tmp_path):
+    """A `budget_extend` is a HUMAN control intent (the boss action-builder only emits add_nodes), so
+    its resource fields are applied AS-IS even under a fully-locked matrix — an earlier pass gated
+    max_eval_seconds/timeout/max_parallel on the boss grant and silently DROPPED the operator's own
+    override, pinning the run to the old cap (code-review). max_seconds was always applied as-is."""
+    eng = _engine(tmp_path / "locked", timeout=30.0, agent_control={})   # boss granted NOTHING
+    st = RunState()
+    st.budget_overrides = {"max_seconds": 111.0, "max_eval_seconds": 222.0,
+                           "timeout": 44.0, "max_parallel": 6}
+    max_s, max_es = eng._apply_control_overrides(st)
+    assert max_s == 111.0                 # operator max_seconds honoured (always was)
+    assert max_es == 222.0                # operator max_eval_seconds honoured despite the locked matrix
+    assert eng.timeout == 44.0            # operator timeout retune applied as-is
+    assert eng.max_parallel == 6          # operator max_parallel retune applied as-is
+
+
+def test_operator_policy_params_pin_applies_even_when_policy_is_locked(tmp_path):
+    """M4/code-review: `policy_params` is EXEMPT when the operator pins it (`_pinned`), independently of
+    the `policy` NAME grant. Locking `policy` against the strategist must NOT also drop an operator's
+    params-only pin — the policy is REBUILT (with the current name + the pinned params) rather than the
+    whole block being skipped as a silent no-op. The old `if pol and may("policy")` gate dropped it."""
+    eng = _engine(tmp_path / "pp", agent_control={})     # policy NAME locked against every agent
+    name0, pol0 = eng._policy_name, eng.policy
+    # Operator pins policy_params alone (the active policy NAME rides in the record). `_pinned` lists
+    # exactly the operator-pinned fields; `policy` is NOT pinned, so its name grant stays locked.
+    eng._apply_strategy({"policy": name0, "policy_params": {"c": 0.5},
+                         "_pinned": ["policy_params"]})
+    assert eng._policy_name == name0                     # name unchanged (still locked to the current one)
+    assert eng.policy is not pol0                        # but the policy WAS rebuilt (pin took effect)
+
+    # Control: with NO policy_params pin and `policy` locked, the block stays skipped (no rebuild).
+    eng2 = _engine(tmp_path / "pp2", agent_control={})
+    pol_before = eng2.policy
+    eng2._apply_strategy({"policy": eng2._policy_name})   # policy-name-only, locked -> no-op
+    assert eng2.policy is pol_before                      # untouched

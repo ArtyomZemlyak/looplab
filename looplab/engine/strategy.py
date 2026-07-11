@@ -181,8 +181,18 @@ class StrategyCadenceMixin:
                 self.max_parallel = max(1, int(strat["max_parallel"]))
             except (TypeError, ValueError):
                 pass
+        # The policy NAME and its `policy_params` are gated INDEPENDENTLY: an operator can pin
+        # `policy_params` ALONE (with `policy` locked out of the strategist's grant) and that pin must
+        # still take effect — the `_pinned` exemption promises "a human can always change it via the
+        # UI/snapshot". So rebuild the policy when the NAME may change OR when the params may change,
+        # keeping the CURRENT policy name when only the name is locked. The old `if pol and may("policy")`
+        # dropped an operator's params-only pin as a permanent no-op whenever `policy` was locked (an
+        # M4 regression: locking the name silently also blocked the EXEMPT params pin — code-review).
         pol = strat.get("policy")
-        if pol and may("policy"):
+        name_ok = bool(pol) and may("policy")
+        params_ok = bool(strat.get("policy_params")) and may("policy_params")
+        base = pol if name_ok else self._policy_name
+        if base and (name_ok or params_ok):
             try:
                 # Strip the names make_policy takes as explicit kwargs: a policy_params entry like
                 # {"n_seeds": 4} would otherwise raise "multiple values for keyword argument",
@@ -190,7 +200,7 @@ class StrategyCadenceMixin:
                 pp = {k: v for k, v in (strat.get("policy_params") or {}).items()
                       if k not in ("n_seeds", "max_nodes", "ablate_every",
                                    "debug_depth", "operator_bandit")}
-                self.policy = make_policy(pol, n_seeds=self.n_seeds, max_nodes=self.max_nodes,
+                self.policy = make_policy(base, n_seeds=self.n_seeds, max_nodes=self.max_nodes,
                                           ablate_every=self._ablate_every,
                                           debug_depth=self._debug_depth,
                                           operator_bandit=self._operator_bandit, **pp)
@@ -198,9 +208,9 @@ class StrategyCadenceMixin:
                 self._base_max_nodes = getattr(self.policy, "max_nodes", self.max_nodes)  # new base for the live override
                 # A3 BOHB = ASHA racing + the surrogate proposer. make_policy only builds the racing
                 # half; wire the surrogate now so a mid-run switch to bohb isn't bare ASHA.
-                if pol == "bohb":
+                if base == "bohb":
                     self._ensure_surrogate()
-                self._policy_name = pol
+                self._policy_name = base
             except (ValueError, TypeError):
                 pass    # keep the current policy on a bad spec (validate_strategy already whitelisted)
         fid = strat.get("fidelity")

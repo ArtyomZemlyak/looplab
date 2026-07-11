@@ -273,9 +273,9 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         # to the SHIPPED default matrix — so a directly-constructed engine behaves like a real CLI run
         # (the EngineOptions "Engine() == shipped defaults" invariant); pass an explicit `{}` to lock
         # every knob against the agents.
-        from looplab.core.config import DEFAULT_AGENT_CONTROL
+        from looplab.core.config import default_agent_control
         self._agent_control: dict = (dict(agent_control) if agent_control is not None
-                                     else {k: list(v) for k, v in DEFAULT_AGENT_CONTROL.items()})
+                                     else default_agent_control())
         self._localize_faults = localize_faults
         self._feature_engineering = feature_engineering
         self._ablate_code_blocks = ablate_code_blocks
@@ -801,18 +801,20 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         # budget_extend control event, not an agent_control-governed knob — applied as-is.
         max_s = state.budget_overrides.get("max_seconds", self.max_seconds)
         _bo = state.budget_overrides
-        # max_eval_seconds IS a governed resource cap (agent_control lists it for the boss): honour the
-        # matrix so a boss budget_extend can't raise a LOCKED per-eval cap (architecture-review M4).
-        max_es = self.max_eval_seconds
-        if "max_eval_seconds" in _bo and self._agent_may("boss", "max_eval_seconds"):
-            max_es = _bo["max_eval_seconds"]
-        # Boss (run-chat) resource retune: a `budget_extend` may carry timeout / max_parallel. Apply
-        # to self.* (read fresh per eval / per batch) only when the matrix grants the boss — so the
-        # operator can e.g. give the run more per-eval time or more parallelism mid-flight.
-        if "timeout" in _bo and self._agent_may("boss", "timeout"):
+        # A `budget_extend` is a HUMAN control intent, NOT an agent decision: CONTROL_EVENTS are
+        # UI/CLI-authored (see the engine-writer invariant), and the boss action-builder
+        # (serve/routers/boss.py::_Action) can ONLY ever emit `add_nodes` — it carries no field for
+        # any resource ceiling. So the budget fields below reach the log ONLY from an operator via the
+        # /control endpoint. Apply them AS-IS ("a human can always change it via the UI/snapshot").
+        # Gating them on `_agent_may("boss", …)` (as an earlier M4 pass did) protected against nothing
+        # — no agent authors them — and only ever DROPPED the operator's OWN override, silently pinning
+        # the run to the old cap. Agent-authored resource retunes (the Strategist's timeout/max_parallel)
+        # remain governed by the matrix in `_apply_strategy`, which is where the M4 lock genuinely lives.
+        max_es = _bo.get("max_eval_seconds", self.max_eval_seconds)
+        if "timeout" in _bo:
             try: self.timeout = max(0.1, float(_bo["timeout"]))
             except (TypeError, ValueError): pass
-        if "max_parallel" in _bo and self._agent_may("boss", "max_parallel"):
+        if "max_parallel" in _bo:
             try: self.max_parallel = max(1, int(_bo["max_parallel"]))
             except (TypeError, ValueError): pass
         return max_s, max_es

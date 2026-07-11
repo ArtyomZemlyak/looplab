@@ -201,6 +201,37 @@ def test_reconcile_comparative_pair_flip_retires_and_rederives(tmp_path, monkeyp
     assert len(rec) == 1 and rec[0].data["n_retired"] == 1 and rec[0].data["n_added"] == 1
 
 
+def test_reconcile_records_spend_even_if_consolidate_fails_after_write(tmp_path, monkeypatch):
+    """code-review: the atomic write COMMITS the re-derived comparative lessons; the LLM
+    consolidate/compact that follow are best-effort. If one raises AFTER the write, the
+    `lessons_distilled(reconcile)` spend record must STILL be appended — otherwise the just-written
+    pairs are NOT marked spent and run-end reflection re-derives them (a double count). The old handler
+    caught the post-write failure, reset the gate, and returned early, SKIPPING the spend append."""
+    mem = tmp_path / "mem"
+    eng = _engine(tmp_path, reflection_priors=True, memory_dir=str(mem), comparative_lessons=True)
+    _seed(mem, [{"task_id": "toy_quadratic", "run_id": "run_me", "source": "comparative",
+                 "statement": "OLD STALE moving x helped by 5", "outcome": "supported",
+                 "evidence": [1, 0], "delta": 5.0,
+                 "evidence_sig": {"1": "evaluated:4.0", "0": "evaluated:9.0"},
+                 "fingerprint": [], "kind": "quadratic"}])
+    st = _state([_node(0, metric=9.0, op="draft", params={"x": 1.0}, code="x=1\n"),
+                 _node(1, metric=6.0, parent_ids=[0], params={"x": 3.0}, code="x=3\n")])
+    monkeypatch.setattr(eng, "_reflect_client",
+                        lambda: FakeClient("P1 [BAD] this change regressed the metric\n"))
+
+    def _boom(*a, **k):
+        raise RuntimeError("consolidation LLM/embedder transiently down")
+    monkeypatch.setattr(eng, "_consolidate_lessons_file", _boom)   # fails AFTER the atomic write lands
+
+    eng.lessons.reconcile_lessons(st)                              # best-effort: must not raise
+    # the write COMMITTED (stale retired, fresh comparative present on disk)
+    fresh = [r for r in _rows(mem) if r.get("source") == "comparative"]
+    assert len(fresh) == 1 and "regressed" in fresh[0]["statement"]
+    # and the spend ledger recorded the re-derived pair DESPITE the post-write consolidate failure
+    final = fold(eng.store.read_all())
+    assert [d for d in final.lessons_distilled if d.get("trigger") == "reconcile"]
+
+
 def test_reconcile_idempotent_same_conclusion_is_noop(tmp_path, monkeypatch):
     # "such же → ничего не теряем": if re-derivation yields the SAME statement, the net store is
     # unchanged in content (old retired, identical re-appended) — and the sig-gate then stops.

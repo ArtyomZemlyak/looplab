@@ -279,10 +279,20 @@ class LessonReconcileMixin:
                 kept = [o for o in cur if isinstance(o, dict) and not _is_stale(o)]
                 n_retired = len(cur) - len(kept)   # rows ACTUALLY dropped (audit); reflect-sweep included
                 write_jsonl_atomic(path, kept + fresh)
-                prompts, parser = self._merge_prompt_opts()
-                self._e._consolidate_lessons_file(path, client, self._e._embedder,
-                                                  parser=parser, prompts=prompts)
-                self._e._compact_lessons(path)
+                # The write above COMMITTED the fresh comparative lessons to disk. Consolidate/compact
+                # merely merge near-dups + cap the file AFTER that; they call the LLM merge agent /
+                # embedder and can raise (transient error). Swallow that LOCALLY so a post-write failure
+                # cannot skip the spend-ledger append below: the pairs are already on disk, and without
+                # the `lessons_distilled(reconcile)` record run-end reflection re-derives them (a double
+                # count). The write itself failing still falls to the outer guard (nothing committed →
+                # nothing to spend) — code-review.
+                try:
+                    prompts, parser = self._merge_prompt_opts()
+                    self._e._consolidate_lessons_file(path, client, self._e._embedder,
+                                                      parser=parser, prompts=prompts)
+                    self._e._compact_lessons(path)
+                except Exception:  # noqa: BLE001 — best-effort post-processing; ledger recorded below
+                    pass
         except Exception:  # noqa: BLE001 — reconciliation is best-effort; never fail the run for it
             # Nothing was actually reconciled (a transient LLM/network/write error), so RESET the
             # change-gate hash — mirroring the client-None branch above — else the next same-signature
