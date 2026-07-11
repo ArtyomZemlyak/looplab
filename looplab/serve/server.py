@@ -138,10 +138,15 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
             _RAW_GET_SUFFIX = ("/artifact", "/artifacts", "/log", "/logs", "/agents_md", "/chat-log",
                                "/conversation", "/assistant/permissions")
             _RAW_GET_EXACT = ("/api/prompts", "/api/skills", "/api/knowledge", "/api/memory")
-            _RAW_GET_CONTAINS = ("/spans/", "/trace", "/assistant/sessions")
+            # /api/runs/{id}/spans/... and /api/runs/{id}/trace[...] carry the raw span I/O. Match the
+            # sub-resource by PATH SEGMENT (parts[4]), not a bare `/trace`/`/spans` substring, so a run
+            # literally named "trace" or "spans" isn't over-gated on its projection routes.
+            _parts = p.split("/")
+            _run_scoped_raw = (len(_parts) > 4 and _parts[1] == "api" and _parts[2] == "runs"
+                               and _parts[4] in ("spans", "trace"))
             sensitive_get = (request.method == "GET"
                              and (p.endswith(_RAW_GET_SUFFIX) or p in _RAW_GET_EXACT
-                                  or any(seg in p for seg in _RAW_GET_CONTAINS)))
+                                  or _run_scoped_raw or "/assistant/sessions" in p))
             mutating = request.method in ("POST", "PUT", "PATCH", "DELETE")
             if ((mutating or sensitive_get) and p.startswith("/api/")
                     and request.headers.get("X-LoopLab-Token") != ui_token):

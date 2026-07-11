@@ -689,8 +689,8 @@ class RunControlTools:
             def _span_node(line):
                 try:
                     return (json.loads(line).get("attributes") or {}).get("node_id")
-                except (ValueError, TypeError):
-                    return None   # torn line -> unknown node -> keep it (never mis-drop or crash)
+                except (ValueError, TypeError, AttributeError):
+                    return None   # torn OR valid-JSON-non-object line -> unknown node -> keep it (never crash)
             skept = [x for x in sp.read_text("utf-8").splitlines()
                      if x.strip() and _span_node(x) not in subtree]
         shutil.copy(evp, rd / f"events.jsonl.bak-del{nid}")     # recoverable backup (before the writes)
