@@ -128,6 +128,7 @@ class ResearchCadenceMixin:
             # tracked to a verdict (was fire-and-forget) — it accrues evidence when a matching node
             # runs, and shows on the board as an open question the search should resolve.
             if self._track_hypotheses:
+                assert EV_HYPOTHESIS_ADDED in BACKGROUND_APPENDABLE   # see the method-level note
                 for direction in memo.recommended_directions[:5]:
                     if str(direction).strip():
                         self.store.append(EV_HYPOTHESIS_ADDED, {

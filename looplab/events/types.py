@@ -153,8 +153,9 @@ ALL_EVENT_TYPES: frozenset[str] = frozenset(
 # thread-schedule-dependent position in events.jsonl cannot change which node wins; (b) the fold
 # handles it ORDER-TOLERANTLY. (EV_HINT does mutate `pending_hints`, so a background hint racing
 # an operator `replace` hint can change which STEERING text survives a resume — accepted:
-# steering is transient advice; selection is what replay must pin.) `research_cadence._record_deep_research`
-# asserts its appends against this set, so a future selection-affecting append from the
-# concurrent-research task is an AssertionError in every test that exercises it, not a
-# nondeterministic replay.
-BACKGROUND_APPENDABLE: frozenset[str] = frozenset({EV_RESEARCH_COMPLETED, EV_HINT})
+# steering is transient advice; selection is what replay must pin. EV_HYPOTHESIS_ADDED only
+# appends to the `hypotheses_added` board list — same class: board order is transient advice,
+# selection is untouched.) `research_cadence._record_deep_research` appends all three from the
+# concurrent task and asserts each against this set, so a future selection-affecting append from
+# that task is an AssertionError in every test that exercises it, not a nondeterministic replay.
+BACKGROUND_APPENDABLE: frozenset[str] = frozenset({EV_RESEARCH_COMPLETED, EV_HINT, EV_HYPOTHESIS_ADDED})
