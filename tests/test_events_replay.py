@@ -1,6 +1,8 @@
 """I1 keystone: event store durability + replay determinism (the #1 P0 risk)."""
 from __future__ import annotations
 
+import pytest
+
 from looplab.events.eventstore import EventStore, iter_jsonl
 from looplab.events.replay import fold
 from looplab.search.archive import DiversityArchive
@@ -128,6 +130,38 @@ def test_log_divergence_ignores_a_torn_tail(tmp_path):
     # a wholly clean log: None
     p.write_bytes(b'{"seq":0,"type":"a"}\n{"seq":1,"type":"b"}\n')
     assert log_divergence(p) is None
+
+
+def test_append_fails_closed_on_mid_file_corruption(tmp_path):
+    """arch-review §3 P0-4: a store opened over a MID-FILE divergence must REFUSE to append — else
+    the new record is durable on disk but invisible to fold (grows behind the corrupt boundary)."""
+    from looplab.events.eventstore import EventStore, EventLogCorruptionError
+    p = tmp_path / "events.jsonl"
+    p.write_bytes(b'{"seq":0,"type":"a"}\n{"seq":1,"type":"b"}\n{corrupt\n{"seq":2,"type":"c"}\n')
+    es = EventStore(p)
+    assert es.divergence and es.divergence["corrupt_line"] == 3
+    with pytest.raises(EventLogCorruptionError):
+        es.append("resume", {})
+    # a torn tail (no divergence) still appends fine — this is NOT the corruption case
+    p.write_bytes(b'{"seq":0,"type":"a"}\n{"seq":1,"type":"partial')
+    EventStore(p).append("c", {"x": 1})   # heals the torn tail, does not raise
+
+
+def test_repair_log_truncates_backs_up_and_reopens(tmp_path):
+    """`repair_log` backs up the original, truncates to the last valid boundary, records provenance,
+    and leaves a log a fresh store can append to again."""
+    from looplab.events.eventstore import EventStore, repair_log, iter_jsonl
+    p = tmp_path / "events.jsonl"
+    p.write_bytes(b'{"seq":0,"type":"a"}\n{"seq":1,"type":"b"}\n{corrupt\n{"seq":2,"type":"c"}\n')
+    rec = repair_log(p)
+    assert rec["good_records"] == 2 and rec["dropped_lines"] == 1 and rec["corrupt_line"] == 3
+    assert (tmp_path / rec["backup"]).exists()                       # original preserved
+    types = [r["type"] for r in iter_jsonl(p)]
+    assert types == ["a", "b", "log_repaired"]                       # prefix + provenance, tail gone
+    es = EventStore(p)
+    assert es.divergence is None                                     # clean now
+    es.append("resume", {})                                          # appends without raising
+    assert repair_log(p) == {}                                       # idempotent no-op on a clean log
 
 
 def test_eventstore_heals_torn_final_line(tmp_path):
