@@ -24,8 +24,23 @@ from contextlib import nullcontext
 from pathlib import Path
 from typing import Optional
 
-from looplab.runtime.sandbox import (RunResult, _to_float, docker_timed_out, json_line_extras,
-                                     json_line_metric, json_line_trials, run_argv)
+from looplab.runtime.sandbox import (RunResult, _to_float, docker_timed_out, finite_timeout,
+                                     json_line_extras, json_line_metric, json_line_trials, run_argv)
+
+# A stage name is interpolated into a log FILE PATH (`<name>.log`) and shown in the trace, so it must
+# be a short filesystem-safe SLUG — no path separators, drive letters, control chars, NUL, or dot
+# segments (`.`/`..`). Without this a stage named `../escape` (or `C:\x`, or an embedded NUL that
+# raises ValueError only AFTER the child spawned) writes/redirects its log outside the run dir
+# (arch-review §3 P0-7). The allowlist is deliberately strict: an alnum start, then alnum/_/-/.  with
+# no `..` anywhere, bounded length. Both authoring (declare_stages) and consume (EvalSpec.stages)
+# validate through validate_stages, so a bad name can never reach the runner.
+_STAGE_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+
+
+def safe_stage_name(name: str) -> bool:
+    """True when `name` is a filesystem-safe stage slug (see `_STAGE_NAME_RE`): rejects separators,
+    drives, control/NUL bytes, and `.`/`..` dot segments that would escape the log directory."""
+    return bool(name) and ".." not in name and bool(_STAGE_NAME_RE.match(name))
 
 
 def _dig(obj, key: str):
@@ -108,6 +123,15 @@ def read_metric(stdout: str, workdir: str, spec: dict, wrap=None) -> Optional[fl
         # computed here, on the host — the candidate cannot self-report or see the labels. This turns
         # `stdout_json` self-reporting into an enforced guarantee for untrusted real tasks.
         preds_path = Path(workdir) / spec.get("predictions", "predictions.json")
+        # Contain the CANDIDATE-controlled predictions path INSIDE the workdir. A `../preds.json` (or an
+        # absolute path, or a symlink out) would read a stale/planted file outside the attempt workspace
+        # and could return a perfect score (arch-review §3 P0-7). Labels are guarded to be OUTSIDE the
+        # workspace below; predictions must be INSIDE it. `.resolve()` also collapses a symlink escape.
+        try:
+            if not _is_within(preds_path.resolve(), Path(workdir).resolve()):
+                return None
+        except (OSError, ValueError):
+            return None
         labels_path = Path(spec["labels"]).resolve()   # operator-declared host path (trusted)
         # Enforce the invariant the docstring asserts: the answer key must live OUTSIDE the
         # candidate's workspace. Under the untrusted/hostile tier the whole MOUNT ROOT (the run root)
@@ -138,7 +162,14 @@ def read_metric(stdout: str, workdir: str, spec: dict, wrap=None) -> Optional[fl
         # in the workdir (not in-process) so it inherits the same timeout/tree-kill harness
         # and can't hang or crash the orchestrator; its printed metric is parsed back.
         rel = spec.get("path", "LOOPLAB_adapter.py")
-        if not (Path(workdir) / rel).is_file():
+        ap = Path(workdir) / rel
+        # Contain the adapter module INSIDE the workdir before EXECing it: an absolute or `../` path
+        # (or a symlink out) would runpy an arbitrary host .py — a code-exec escape the file readers
+        # already guard but this branch did not (arch-review §3 P0-7). `.resolve()` collapses symlinks.
+        try:
+            if not _is_within(ap.resolve(), Path(workdir).resolve()) or not ap.is_file():
+                return None
+        except (OSError, ValueError):
             return None
         runner = ("import json, runpy; "
                   f"_ns = runpy.run_path({rel!r}); "
@@ -149,7 +180,7 @@ def read_metric(stdout: str, workdir: str, spec: dict, wrap=None) -> Optional[fl
         if wrap:
             argv = wrap(argv, str(workdir))
         rc, out, _, to = run_argv(argv, str(workdir),
-                                   float(spec.get("timeout", 120)), None, 64_000)
+                                   finite_timeout(spec.get("timeout", 120), 120), None, 64_000)
         return json_line_metric(out, "metric") if (rc == 0 and not to) else None
     return None
 
@@ -268,6 +299,11 @@ def validate_stages(stages, *, reserved: tuple = ()) -> tuple[Optional[list], Op
         nm = str(s.get("name") or "").strip()
         if not nm:
             return None, f"stage {i} has no `name`."
+        if not safe_stage_name(nm):
+            # The name becomes a `<name>.log` path + a trace label — keep it a filesystem-safe slug so
+            # it can't traverse out of the log dir (`../escape`, `C:\x`, control/NUL). See safe_stage_name.
+            return None, (f"stage name {nm!r} must be a short slug (letters, digits, '_', '-', '.'; "
+                          "no path separators, drive letters, control characters, or '..').")
         if nm.lower() in reserved:
             return None, ("'score' is reserved for the operator's final scoring stage. Name "
                           "your PRECEDING stages e.g. data_prep, train — the cmd is appended after them.")
@@ -281,9 +317,15 @@ def validate_stages(stages, *, reserved: tuple = ()) -> tuple[Optional[list], Op
         st = {"name": nm, "command": list(cmd)}
         if "timeout" in s:
             try:
-                st["timeout"] = float(s["timeout"])
+                _t = float(s["timeout"])
             except (TypeError, ValueError):
                 return None, f"stage {nm!r} `timeout` must be a number of seconds."
+            import math
+            if not math.isfinite(_t) or _t <= 0:
+                # A NaN/inf/negative/zero stage timeout would disable (or trivially trip) the wall-clock
+                # deadline — reject at authoring time rather than coerce silently (arch-review §4 P1-5).
+                return None, f"stage {nm!r} `timeout` must be a finite, positive number of seconds."
+            st["timeout"] = _t
         if s.get("check"):
             st["check"] = True
         clean.append(st)
@@ -332,7 +374,9 @@ def build_command(eval_spec: dict, params: Optional[dict] = None,
     timeout = prof["timeout"] if (prof and "timeout" in prof) else eval_spec.get("timeout", 600.0)
     if eval_spec.get("params_style") == "cli_overrides" and not _had_token:  # legacy Hydra append …
         overrides += [f"{k}={_fmt(v)}" for k, v in (params or {}).items()]   # … skip if %params% already injected
-    return cmd + overrides, timeout
+    # Bound the timeout to a finite, positive, capped value: a NaN/inf here would flow into the
+    # deadline (never fires) and into the docker `timeout -k` prefix as int(nan) (ValueError). P1-5.
+    return cmd + overrides, finite_timeout(timeout, 600.0)
 
 
 _CROSS_CHECK_ADAPTER_MSG = ("cross_check must be an independent built-in reader, not "
@@ -467,6 +511,10 @@ def run_command_eval(command: list[str], cwd: str, timeout: float, metric: dict,
     runs each command inside a container. The host cwd is still passed to the subprocess (the
     docker CLI ignores it); metric reading stays on host paths via the bind mount.
     Returns the sandbox `RunResult` shape."""
+    # Bound both deadlines up front (finite, positive, capped): the docker `_bound` prefix does
+    # int(secs), which raises on NaN/inf, and a non-finite deadline never fires (arch-review §4 P1-5).
+    timeout = finite_timeout(timeout, 600.0)
+    setup_timeout = finite_timeout(setup_timeout, 600.0)
     wd = Path(cwd).resolve()
     wd.mkdir(parents=True, exist_ok=True)
     _w = (lambda argv, hc: wrap(argv, hc)) if wrap else (lambda argv, hc: argv)
@@ -530,7 +578,7 @@ def run_command_eval(command: list[str], cwd: str, timeout: float, metric: dict,
                     pass
                 stage_results.append({"name": _sname, "status": "reused", "exit_code": 0, "seconds": 0.0})
                 continue
-            _sto = float(_stg.get("timeout", timeout))
+            _sto = finite_timeout(_stg.get("timeout", timeout), timeout)
             if not _scmd:
                 continue
             _t0 = time.monotonic()

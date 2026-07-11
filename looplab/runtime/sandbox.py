@@ -30,6 +30,38 @@ from typing import Optional, Protocol
 # never touches PATH/SYSTEMROOT/TEMP etc. that a process legitimately needs.
 SECRET_ENV = re.compile(r"(KEY|SECRET|TOKEN|PASSWORD|PASSWD|CREDENTIAL|API_KEY)", re.IGNORECASE)
 
+# A sane wall-clock ceiling for any single subprocess run. A "timeout" larger than this is a
+# misconfiguration, not an intent, so it is clamped rather than trusted — one eval must not be able
+# to wedge the loop for a week (or forever) on a fat-fingered/hostile value.
+MAX_TIMEOUT_S = 24 * 3600.0    # 24 hours
+
+
+def finite_timeout(value, default: float = 600.0) -> float:
+    """Coerce a timeout into a FINITE, BOUNDED number of seconds, capped at `MAX_TIMEOUT_S`.
+
+    The fail-OPEN case is the only one that must be rewritten: a NaN/±inf deadline is NEVER reached,
+    so `monotonic() >= start + timeout` stays False and a runaway never times out (arch-review §3
+    P0-7 / §4 P1-5). NaN/inf/unparseable therefore fall back to `default`. Finite values are clamped
+    to `[0, MAX_TIMEOUT_S]`: a negative deadline is already fail-SAFE (it fires immediately), and 0 is
+    a deliberately-honored sentinel elsewhere (a profile can set timeout:0), so both stay non-fatal
+    rather than being rewritten. Every subprocess deadline flows through `run_argv`, which applies
+    this; the eval/stage builders apply it too so the bounded value is what gets traced. Note the
+    stricter authoring gate in `validate_stages` still REJECTS a non-finite/non-positive stage timeout
+    outright — this is the defensive back-stop for every other caller."""
+    import math
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        v = float("nan")
+    if not math.isfinite(v):
+        try:
+            v = float(default)
+        except (TypeError, ValueError):
+            v = 600.0
+        if not math.isfinite(v):
+            v = 600.0
+    return max(0.0, min(v, MAX_TIMEOUT_S))
+
 
 def docker_timed_out(rc: int) -> bool:
     """True when a coreutils-``timeout``-wrapped docker exit code means THIS run hit its wall-clock
@@ -184,6 +216,9 @@ def run_argv(argv: list[str], workdir: str, timeout: float,
     long eval (training epochs, tqdm) is tail-able in real time instead of opaque until it returns.
     The returned (capped) stdout/stderr are unchanged, so the metric reader + repair feedback see
     exactly what they did before. None simply keeps no live file (the drain still runs)."""
+    # Bound the deadline at the universal choke point: a NaN/inf/negative timeout from ANY caller
+    # would otherwise disable the wall-clock kill (a NaN deadline is never reached). See finite_timeout.
+    timeout = finite_timeout(timeout)
     wd = Path(workdir).resolve()
     wd.mkdir(parents=True, exist_ok=True)
     kwargs: dict = {}
@@ -263,7 +298,10 @@ def _tee_drain(proc, log_path, timeout, max_output_bytes, cancel):
     if log_path:                                    # log_path=None -> memory-bounded drain, no file
         try:
             logf = open(log_path, "a", encoding="utf-8", errors="replace")
-        except OSError:
+        except (OSError, ValueError):
+            # ValueError too: an embedded NUL in the path raises it (not OSError), which would escape
+            # here AFTER the child was spawned and leak the process tree (arch-review §3 P0-7 / §4 P1-5).
+            # Degrade to no live-file; the drain + deadline + tree-kill below still run.
             logf = None
     lock = threading.Lock()
     bufs = {"out": [], "err": []}
