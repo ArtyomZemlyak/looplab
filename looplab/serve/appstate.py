@@ -99,10 +99,15 @@ class AppState:
         # fetched on demand via /nodes/{id}. Keeps SSE ticks small even for code-writing runs.
         d = st.model_dump(mode="json")
         better = (lambda a, b: a < b) if st.direction == "min" else (lambda a, b: a > b)
+        from looplab.trust.redact import redact_secrets
         for n in d.get("nodes", {}).values():
             n.pop("code", None); n.pop("files", None)
-            n["stdout_tail"] = (n.get("stdout_tail") or "")[:160]
-            n["error"] = (n.get("error") or "")[:160]
+            # SECURITY (arch-review §4 P1-3): /state is a LIGHT projection served WITHOUT the UI token,
+            # so it must not ship raw captured program output — a secret the candidate prints could ride
+            # in the stdout tail. Drop stdout_tail entirely (the full tail is behind the token-gated
+            # node-detail endpoint) and redact the short error message the node table still shows.
+            n.pop("stdout_tail", None)
+            n["error"] = redact_secrets((n.get("error") or "")[:160])
             # Intra-node sweep: a node can carry many trials — replace the full array with a compact
             # summary for the live state (card badge + spark + explode-hull header). The full trials
             # ride along the on-demand /nodes/{id} detail endpoint, like code/files do.

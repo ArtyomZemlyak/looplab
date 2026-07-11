@@ -136,6 +136,31 @@ def test_assistant_session_transcript_is_token_gated(tmp_path, monkeypatch):
     assert client.get("/api/runs/demo/state").status_code == 200
 
 
+def test_public_state_drops_stdout_and_redacts_error(tmp_path):
+    """arch-review §4 P1-3: the public /state projection (served without the UI token) must not ship
+    raw captured stdout, and must redact the short error snippet it shows — a secret the candidate
+    printed could otherwise leak. The full tail stays behind the token-gated node-detail endpoint."""
+    from looplab.events.eventstore import EventStore
+    secret = "AKIAIOSFODNN7EXAMPLE1234"
+    rd = tmp_path / "demo"
+    rd.mkdir(parents=True)
+    s = EventStore(rd / "events.jsonl")
+    s.append("run_started", {"run_id": "demo", "task_id": "t", "goal": "g", "direction": "min"})
+    s.append("node_created", {"node_id": 0, "parent_ids": [], "operator": "draft",
+                              "idea": {"operator": "draft", "params": {}, "rationale": ""}})
+    s.append("node_evaluated", {"node_id": 0, "metric": 1.0,
+                                "stdout_tail": f"token={secret} printed near the start"})
+    s.append("node_created", {"node_id": 1, "parent_ids": [], "operator": "improve",
+                              "idea": {"operator": "improve", "params": {}, "rationale": ""}})
+    s.append("node_failed", {"node_id": 1, "error": f"crashed with key={secret}", "reason": "crash"})
+    client = TestClient(make_app(tmp_path))
+    nodes = client.get("/api/runs/demo/state").json()["state"]["nodes"]
+    assert "stdout_tail" not in nodes["0"]                       # raw captured stdout dropped from /state
+    assert secret not in (nodes["1"].get("error") or "")         # error snippet redacted
+    # the FULL stdout tail is still available via the node-detail endpoint (token-gated in prod)
+    assert secret in (client.get("/api/runs/demo/nodes/0").json().get("stdout_tail") or "")
+
+
 def test_runs_list_state_and_node_detail(tmp_path):
     st = _build_run(tmp_path)
     client = TestClient(make_app(tmp_path))
