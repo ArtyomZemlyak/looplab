@@ -45,27 +45,41 @@ def truncate_history(messages: list[dict], max_chars: int, *, keep_last: int = 2
     if total <= max_chars:
         return messages
     n = len(messages)
+    head = per_msg_cap // 2
+
+    def _mt(s: str) -> str:                       # middle-truncate a long string, keeping head+tail
+        return (s[:head] + f"\n…[truncated {len(s) - 2 * head} chars]…\n" + s[-head:]
+                if len(s) > per_msg_cap else s)
+
     out: list[dict] = []
     for i, m in enumerate(messages):
-        content = str(m.get("content") or "")
         protected = m.get("role") == "system" or i >= n - keep_last
-        # Stop once the running total is back under budget: max_chars is a TARGET, not just a
-        # trigger — keep truncating oldest long messages only until we're under, then leave the
-        # rest intact (over-truncating would discard far more context than the budget requires).
-        if protected or len(content) <= per_msg_cap or total <= max_chars:
+        msize = _msg_chars(m)   # gate on the SAME size _msg_chars counts (content + tool_call args),
+        # Stop once the running total is back under budget: max_chars is a TARGET, not just a trigger.
+        # Gating on _msg_chars (not len(content)) + trimming tool_call arguments below is what lets an
+        # ARGUMENT-heavy turn (a write_file(content=<KB>) carried in tool_calls.arguments, tiny content)
+        # actually shrink — otherwise it trips the over-budget trigger but can never be reduced, and the
+        # deterministic fallback keeps growing until the endpoint 400s on context length.
+        if protected or msize <= per_msg_cap or total <= max_chars:
             out.append(m)
             continue
-        head = per_msg_cap // 2
-        trimmed = (content[:head] + f"\n…[truncated {len(content) - 2 * head} chars]…\n"
-                   + content[-head:])
-        # For a message only marginally over the cap the marker overhead can make `trimmed` LONGER
+        nm: dict = {**m, "content": _mt(str(m.get("content") or ""))}
+        tcs = m.get("tool_calls")
+        if tcs:   # middle-truncate each past tool call's arguments (history context, never re-parsed)
+            nm["tool_calls"] = [
+                ({**c, "function": {**((c or {}).get("function") or {}),
+                                    "arguments": _mt(str(((c or {}).get("function") or {}).get("arguments") or ""))}}
+                 if len(str(((c or {}).get("function") or {}).get("arguments") or "")) > per_msg_cap else c)
+                for c in tcs]
+        new_size = _msg_chars(nm)
+        # For a message only marginally over the cap the marker overhead can make the rewrite LARGER
         # than the original; replacing it would grow the history the budget exists to shrink. Skip
         # unless truncation actually saves bytes.
-        if len(trimmed) >= len(content):
+        if new_size >= msize:
             out.append(m)
             continue
-        total -= len(content) - len(trimmed)
-        out.append({**m, "content": trimmed})
+        total -= msize - new_size
+        out.append(nm)
     return out
 
 

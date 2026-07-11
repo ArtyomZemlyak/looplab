@@ -276,7 +276,10 @@ class Settings(BaseSettings):
     # Legacy sub-toggles, honored by the "algo" mode (and back-compat: novelty_gate=True forces "algo"):
     novelty_gate: bool = False
     novelty_epsilon: float = 0.05
-    # T5 semantic novelty (needs novelty_gate): reject a proposal whose idea TEXT embeds within
+    # T5 semantic novelty (active whenever the deterministic gate runs — novelty_mode=algo,
+    # novelty_gate=true which is the legacy alias for algo, OR the Strategist novelty stance is
+    # "explore"; a no-op only under novelty_mode=llm/off with a non-explore stance): reject a proposal
+    # whose idea TEXT embeds within
     # `novelty_semantic_threshold` cosine of an existing node's. OFF BY DEFAULT: novelty is the agentic
     # Researcher's call, made by READING the actual prior experiments (read_experiment /
     # find_analogous_across_runs / list_experiments), NOT an embedding-similarity auto-reject that can't
@@ -331,10 +334,11 @@ class Settings(BaseSettings):
     reward_hack_detect: bool = False
     # Trust enforcement (T2): what a reward-hack / data-leakage flag actually DOES to selection.
     #   "audit" (default) = surface it in the Trust panel, never change selection (today's behavior);
-    #   "gate"  = a flagged node can no longer be selected as BEST (it stays in the tree; the search
-    #             may still repair/improve it into a clean version) — closes the "a hacked/leaky node
-    #             can win" hole;
-    #   "block" = additionally mark it infeasible so the policy won't breed from it either.
+    #   "gate"  = a flagged node can no longer be selected as BEST **and isn't bred/confirmed from**
+    #             (breed_excluded — see replay._apply_trust_gate / models.breedable_nodes), but stays
+    #             FEASIBLE so it still counts for diversity/audit — closes the "a hacked/leaky node can
+    #             win OR seed its lineage" hole;
+    #   "block" = additionally mark it fully INFEASIBLE (removed from feasible_nodes entirely).
     # Deliberately gates only high-precision CHEATING/LEAKAGE signals; the heuristic `critic` signal
     # stays advisory (audit) in every mode — the field is a per-node quality hint, not proof of a hack.
     trust_gate: str = "audit"

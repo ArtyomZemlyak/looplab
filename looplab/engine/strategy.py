@@ -143,15 +143,18 @@ class StrategyCadenceMixin:
         (see Settings.agent_control), so default behaviour is unchanged. The gate is deterministic and
         applied both when the decision is recorded AND on resume (`_reentry_repin`), so a blocked knob
         stays blocked identically on replay — the recorded active_strategy and the live engine agree."""
+        # PER-FIELD operator provenance: `_pinned` lists exactly the fields the operator pinned via a
+        # `set_strategy` CONTROL_EVENT. Those are EXEMPT from the strategist's grant (the human "can
+        # always change it via the UI/snapshot"); every OTHER field — including a strategist-decided
+        # field that rides in a record whose top-level source is "operator" — stays gated. Whole-dict
+        # `source=="operator"` was too coarse: a later autonomous-consult merge flattened an
+        # operator-pinned field's provenance (reverting it on resume), and an operator pin of one field
+        # blanket-exempted strategist-decided fields the matrix had locked (mega-review). `_pinned` is
+        # not in _strategy_core, so it never affects change-detection; it survives fold as plain data.
+        pinned = set(strat.get("_pinned") or [])
+
         def may(k):
-            # The governance matrix gates the AUTONOMOUS strategist's own decisions. A human/operator
-            # pin arrives as a `set_strategy` CONTROL_EVENT recorded with source=="operator" — the
-            # human "can always change it via the snapshot/UI" per the contract — so it is EXEMPT from
-            # the strategist's grant (else a matrix that locks the strategist out of a knob would also
-            # block the operator's own UI pin, recording a decision the engine never applies).
-            if strat.get("source") == "operator":
-                return True
-            return self._agent_may("strategist", k)
+            return k in pinned or self._agent_may("strategist", k)
         if may("novelty_stance") and strat.get("novelty_stance") in NOVELTY_STANCES:
             self._novelty_stance = strat["novelty_stance"]   # Strategist's novelty dial (slice 2)
         ops = strat.get("operators") or {}
@@ -276,6 +279,7 @@ class StrategyCadenceMixin:
                                        "source": "operator"}, ctx)
             if strat:
                 strat.setdefault("rationale", "operator-pinned strategy")
+                strat["_pinned"] = sorted(pin_fields)   # per-field operator provenance (see may())
                 self._record_strategy(strat, state, ctx)
                 return fold(self.store.read_all())
         # 2. Bounded-cadence Strategist consult — but the pin wins over it for the pinned fields.
@@ -312,6 +316,10 @@ class StrategyCadenceMixin:
                     if strat.get("request_research"):
                         merged["request_research"] = True
                     merged = validate_strategy(merged, ctx) or strat
+                    # Carry the CURRENT operator-pinned field set (not the strategist's decision, which
+                    # owns no fields) so resume-time _apply_strategy still exempts the operator's knobs
+                    # even though this record's top-level source is the strategist's (mega-review).
+                    merged["_pinned"] = sorted(pin_fields)
                     if self._strategy_core(merged) != self._strategy_core(state.active_strategy):
                         self._record_strategy(merged, state, ctx)
                         return fold(self.store.read_all())

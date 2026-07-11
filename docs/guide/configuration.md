@@ -170,7 +170,7 @@ See [LLM & coding agents](llm-and-agents.md) for full guidance.
 | `novelty_mode` | `LOOPLAB_NOVELTY_MODE` | `llm` | How a proposal is dedup-checked: `off` (Researcher's own judgment) / `algo` (param-distance + optional embedding) / `llm` (an LLM reads the real experiments and decides, then re-proposes — one extra call/proposal) |
 | `novelty_gate` | `LOOPLAB_NOVELTY_GATE` | `false` | Reject near-duplicate proposals (param-space distance) |
 | `novelty_epsilon` | `LOOPLAB_NOVELTY_EPSILON` | `0.05` | Duplicate threshold for the novelty gate |
-| `novelty_semantic` | `LOOPLAB_NOVELTY_SEMANTIC` | `false` | Also reject a proposal whose idea TEXT (rationale+hypothesis) embeds within `novelty_semantic_threshold` cosine of an existing node's — dedups structural/free-form ideas the numeric distance can't. **Needs `novelty_gate` on**; no-op otherwise |
+| `novelty_semantic` | `LOOPLAB_NOVELTY_SEMANTIC` | `false` | Also reject a proposal whose idea TEXT (rationale+hypothesis) embeds within `novelty_semantic_threshold` cosine of an existing node's — dedups structural/free-form ideas the numeric distance can't. Active whenever the deterministic gate runs — `novelty_mode=algo`, `novelty_gate=true` (legacy alias for algo), or the Strategist novelty stance is `explore`; a no-op only under `novelty_mode=llm`/`off` with a non-explore stance |
 | `novelty_semantic_threshold` | `LOOPLAB_NOVELTY_SEMANTIC_THRESHOLD` | `0.92` | Cosine at/above which two idea texts count as duplicates |
 
 ## Operators & refinement

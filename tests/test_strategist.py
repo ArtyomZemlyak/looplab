@@ -649,6 +649,45 @@ def test_operator_pin_wins_even_when_strategist_locked_out_of_the_knob(tmp_path)
     assert (state.active_strategy or {}).get("policy") == "asha"
 
 
+def test_operator_pin_reapplies_on_resume_under_strategist_lock(tmp_path):
+    """Mega-review: an operator-pinned knob the matrix LOCKS the strategist out of must still apply on
+    RESUME. The autonomous-consult merge flattened the pin's provenance to the strategist source, so
+    _apply_strategy(active_strategy) blocked it on resume and the policy reverted to config default.
+    Per-field `_pinned` provenance keeps the operator's knob exempt at record-time AND on resume."""
+    from looplab.events.eventstore import EventStore
+
+    class _NudgesNoveltyOnly:
+        def decide(self, state, ctx):
+            return {"novelty_stance": "explore", "source": "rule", "rationale": "nudge"}
+
+    rd = tmp_path / "pinresume"; rd.mkdir()
+    EventStore(rd / "events.jsonl").append("set_strategy", {"strategy": {"policy": "asha"}})
+    lock = {"policy": [], "novelty_stance": ["strategist"]}   # strategist LOCKED out of policy
+    eng = _engine(rd, strategist=_NudgesNoveltyOnly(), strategist_every=1, agent_control=lock)
+    state = anyio.run(eng.run)
+    assert eng._policy_name == "asha"                              # operator pin applied live despite the lock
+    assert "policy" in (state.active_strategy.get("_pinned") or [])
+
+    # Simulate RESUME: a fresh engine re-applies the recorded active_strategy under the SAME lock.
+    eng2 = _engine(tmp_path / "e2", agent_control=lock)
+    assert eng2._policy_name != "asha"                            # fresh engine starts on the config default
+    eng2._apply_strategy(state.active_strategy)
+    assert eng2._policy_name == "asha"                            # pinned policy survives resume (not reverted)
+
+
+def test_operator_pin_does_not_blanket_exempt_a_locked_strategist_knob(tmp_path):
+    """Mega-review (reverse): an operator pin of one field must NOT blanket-apply a DIFFERENT
+    strategist-decided field the matrix locked. Per-field `_pinned` gates everything the operator
+    didn't pin."""
+    eng = _engine(tmp_path / "blanket", agent_control={"policy": ["strategist"]})  # novelty_stance LOCKED
+    # a recorded strategy carrying a strategist-origin novelty_stance the operator never pinned, with an
+    # operator pin on the unrelated `policy` (only policy is in _pinned)
+    eng._apply_strategy({"policy": "mcts", "novelty_stance": "explore", "source": "operator",
+                         "_pinned": ["policy"]})
+    assert eng._policy_name == "mcts"          # the operator-pinned field applies
+    assert eng._novelty_stance != "explore"    # the locked strategist field does NOT (not in _pinned)
+
+
 def test_operator_pin_policy_wins_over_strategist(tmp_path):
     # Boss pins policy=asha; the (greedy-loving) strategist must never flip it back -> no thrash.
     from looplab.events.eventstore import EventStore

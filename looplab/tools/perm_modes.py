@@ -62,6 +62,9 @@ DEFAULT_PROTECT = [
     # protected. The old `**/*grade*.py` used fnmatch's substring `*` and locked upgrade.py in EVERY mode.
     "**/grade*.py", "**/grader*.py", "**/grading*.py",
     "**/*_grade*.py", "**/*-grade*.py",
+    # `autograder.py`/`autograde.py` is a common no-separator grader convention — protect it (but NOT
+    # `autograd.py`, the PyTorch lib: `autograde*` needs the trailing `e`, which `autograd` lacks).
+    "**/autograde*.py",
 ]
 
 

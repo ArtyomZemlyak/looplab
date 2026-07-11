@@ -41,3 +41,17 @@ def test_protect_list_covers_integrity_files():
     joined = " ".join(DEFAULT_PROTECT)
     assert ".git/**" in DEFAULT_PROTECT
     assert "events.jsonl" in joined and "grader" in joined
+
+
+def test_grader_globs_precise_boundary():
+    """Architecture review + mega-review: grader/grade files are protected at a filename-COMPONENT
+    boundary (name-start, after a _/- separator, or the autograder convention) — so real grader files
+    stay read-only while upgrade.py/downgrade.py/upgrader.py (which merely CONTAIN 'grade') are editable
+    and autograd.py (the PyTorch lib) is not falsely locked."""
+    from looplab.tools.patch import _match
+    prot = lambda p: any(_match(p, g) for g in DEFAULT_PROTECT)
+    for f in ("grader.py", "grade.py", "grading.py", "mle_grader.py", "grade_submission.py",
+              "autograder.py", "autograde.py", "sub/autograder.py"):
+        assert prot(f), f + " should be protected"
+    for f in ("upgrade.py", "downgrade.py", "upgrader.py", "autograd.py", "gradient.py"):
+        assert not prot(f), f + " should be editable"

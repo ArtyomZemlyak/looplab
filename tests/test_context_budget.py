@@ -84,3 +84,20 @@ def test_truncate_history_triggers_on_tool_call_heavy_trace():
     out = compact_history(msgs, max_chars=2000, summarize=lambda _t: "SUMMARY", keep_last=2)
     note = next((m for m in out if "SUMMARY" in str(m.get("content"))), None)
     assert note is not None and note["role"] == "user"
+
+
+def test_truncate_history_shrinks_tool_call_arguments():
+    """Architecture review: _msg_chars counts tool_calls.arguments in the over-budget trigger, so
+    truncate_history must also SHRINK them — else an argument-heavy turn (write_file(content=<KB>)
+    carried in arguments, tiny content) trips the trigger but never shrinks, growing until a 400."""
+    msgs = [{"role": "system", "content": "sys"},
+            {"role": "assistant", "content": "x",
+             "tool_calls": [{"id": "1", "function": {"name": "write_file", "arguments": "A" * 5000}}]},
+            {"role": "user", "content": "u1"}, {"role": "user", "content": "u2"}]
+    before = sum(_msg_chars(m) for m in msgs)
+    out = truncate_history(msgs, max_chars=1000)
+    after = sum(_msg_chars(m) for m in out)
+    assert after < before and after <= 1500, (before, after)
+    # the system + last-2 messages are preserved; only the arg-heavy middle turn shrank
+    assert out[0] == msgs[0] and out[-1] == msgs[-1]
+    assert "truncated" in out[1]["tool_calls"][0]["function"]["arguments"]
