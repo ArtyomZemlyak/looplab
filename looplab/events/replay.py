@@ -52,7 +52,12 @@ def is_hard_signal(sig: str) -> bool:
     sig = str(sig)
     if sig == "critic:hardcoded_metric":
         return True
-    return not sig.startswith(("critic:", "perfect_metric"))
+    # `protected_audit_unavailable` (the whole workdir-tamper audit threw) is fail-closed evidence
+    # that the node is NOT verified-clean, but it is not itself proof of tampering — a transient FS
+    # error should SURFACE to the operator/agent, not gate-exclude an honest node. So it stays
+    # advisory alongside critic:*/perfect_metric. `protected_missing`/`protected_unreadable` (a
+    # protected file we placed is gone/corrupt) ARE real tamper evidence and remain HARD (P1-6).
+    return not sig.startswith(("critic:", "perfect_metric", "protected_audit_unavailable"))
 
 
 def hard_flagged_ids(st: RunState) -> set:
