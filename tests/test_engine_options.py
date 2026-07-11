@@ -48,6 +48,8 @@ ATTR_BY_FIELD = {
     "eval_trust_mode": "eval_trust_mode",
     "trust_mode": "trust_mode",
     "docker_image": "docker_image",
+    "sandbox_memory": "sandbox_memory",
+    "sandbox_cpus": "sandbox_cpus",
     "seed_mode": "_seed_mode",
     "n_seeds": "n_seeds",
     "max_nodes": "max_nodes",

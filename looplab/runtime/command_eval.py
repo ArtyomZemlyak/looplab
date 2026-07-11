@@ -343,8 +343,9 @@ def _drift(primary: Optional[float], cross: Optional[float], tol: float) -> bool
 
 
 def make_docker_wrap(mount_root: str, image: str, network: str = "none",
-                     mem: Optional[str] = None, runtime: Optional[str] = None,
-                     binds: Optional[list] = None):
+                     mem: Optional[str] = None, cpus: Optional[str] = None,
+                     runtime: Optional[str] = None, binds: Optional[list] = None,
+                     env: Optional[dict] = None):
     """untrusted tier (ADR-13, Phase 4): return a `wrap(argv, host_cwd) -> argv` that runs the
     command inside `docker run` with the run workspace bind-mounted at /work and the network
     off by default — a real isolation boundary for executing an arbitrary framework. The bind
@@ -376,11 +377,29 @@ def make_docker_wrap(mount_root: str, image: str, network: str = "none",
             raise ValueError(f"eval cwd {host_cwd!r} is outside the mounted workspace {str(root)!r}")
         cdir = "/work" if rel in (".", "") else f"/work/{rel}"
         rt = ["--runtime", runtime] if runtime else []   # B4+ gVisor/Kata true-isolation tier
+        # Resource + privilege hardening for the untrusted tier — mirror sandbox.DockerSandbox.run
+        # so BOTH untrusted Docker tiers (this command-eval path and the solution.py path) bound
+        # memory/cpu, drop all Linux capabilities, and forbid privilege escalation. Without this an
+        # untrusted/hostile RepoTask candidate keeps default caps (setuid escalation) and can OOM the
+        # host / saturate every core (gVisor blocks kernel escape, NOT resource exhaustion). The two
+        # docs (generating-code.md untrusted-tier command, configuration.md sandbox_memory/cpus rows)
+        # promise exactly these flags for this tier — the engine now threads settings.sandbox_* here.
+        caps = ["--cap-drop", "ALL", "--security-opt", "no-new-privileges"]
+        if mem:
+            caps += ["--memory", str(mem)]
+        if cpus:
+            caps += ["--cpus", str(cpus)]
+        # Forward engine-provided env INTO the container: `docker run` does not inherit the host
+        # client's environment, so without `-e` the LOOPLAB_EVAL_SEED (and any eval env) never
+        # reaches the eval — every confirm seed would read the default seed and the variance gate
+        # would collapse. Mirrors DockerSandbox.run's `-e` forwarding.
+        envs: list[str] = []
+        for k, v in (env or {}).items():
+            envs += ["-e", f"{k}={v}"]
         base = ["docker", "run", "--rm", "--network", network, *rt,
                 "--pids-limit", "1024",       # fork-bomb guard (review C1: no pids limit before)
+                *caps, *envs,
                 "-v", f"{root.as_posix()}:/work", *extra, "-w", cdir]
-        if mem:
-            base += ["--memory", mem]
         return base + [image] + list(argv)
 
     wrap._docker = True   # marks a real container wrap -> run_command_eval adds in-container timeout

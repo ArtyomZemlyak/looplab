@@ -189,6 +189,40 @@ def test_strategist_records_and_applies(tmp_path):
     assert len(decisions) == 1   # act-only-on-change: no duplicate re-records
 
 
+class _TwoPhaseStrategist:
+    """consult #1 switches policy->mcts; every later consult emits a PARTIAL decision that nudges
+    only novelty_stance (no policy). The accumulated live machinery (policy=mcts) must survive in
+    the recorded active_strategy — the M3 merge — so a resume reconstructs it faithfully."""
+    def __init__(self):
+        self.calls = 0
+
+    def decide(self, state, ctx):
+        self.calls += 1
+        if self.calls == 1:
+            return {"policy": "mcts", "source": "rule", "rationale": "switch to mcts"}
+        return {"novelty_stance": "explore", "source": "rule", "rationale": "nudge exploration"}
+
+
+def test_partial_consult_does_not_revert_earlier_machinery(tmp_path):
+    """M3 regression: a partial strategist decision recorded un-merged made fold replace
+    active_strategy wholesale, silently reverting policy/operators/fidelity set by an earlier
+    consult. After the merge fix the recorded active_strategy accumulates both."""
+    strat = _TwoPhaseStrategist()
+    state = anyio.run(_engine(tmp_path / "acc", strategist=strat, strategist_every=1).run)
+    assert strat.calls >= 2, "need at least two consults to exercise the merge"
+    assert state.active_strategy["policy"] == "mcts"          # earlier switch NOT reverted
+    assert state.active_strategy["novelty_stance"] == "explore"  # later partial nudge also present
+
+    # Resume (finished run) with a strategist that raises if consulted: fold must reconstruct BOTH
+    # fields from the log, proving the recorded active_strategy carried the full machinery.
+    class _Boom:
+        def decide(self, s, c):
+            raise AssertionError("strategist re-called on replay")
+    st2 = anyio.run(_engine(tmp_path / "acc", strategist=_Boom(), strategist_every=1).run)
+    assert st2.active_strategy["policy"] == "mcts"
+    assert st2.active_strategy["novelty_stance"] == "explore"
+
+
 def test_strategist_resume_reapplies_without_recall(tmp_path):
     # First run with a strategist that records a strategy_decision, finishing the run.
     stub = _StubStrategist()

@@ -56,6 +56,73 @@ def test_policy_merges_after_improves():
     assert len(act[0]["parent_ids"]) == 2
 
 
+def _ablate_cadence_state():
+    """A state where GreedyTree's ablate cadence would fire: past seed phase, best carries >=2
+    numeric params, and n_improve >= ablate_every with no refine_block yet."""
+    st = RunState(direction="min")
+    for i, (op, m) in enumerate([("draft", 5.0), ("improve", 3.0), ("improve", 1.0),
+                                 ("improve", 2.0)]):
+        st.nodes[i] = Node(id=i, operator=op,
+                           idea=Idea(operator=op, params={"x": float(i), "y": 0.0}),
+                           metric=m, status=NodeStatus.evaluated)
+    st.best_node_id = 2  # lowest metric
+    return st
+
+
+def test_ablate_cadence_fires_when_capable():
+    """Baseline: on an ablation-capable run the cadence proposes an ablate."""
+    st = _ablate_cadence_state()
+    pol = GreedyTree(n_seeds=3, max_nodes=12, ablate_every=1, enable_merge=False)
+    assert pol.next_actions(st)[0]["kind"] == "ablate"
+
+
+def test_ablation_incapable_policy_never_proposes_ablate():
+    """H1 regression: a repo/eval-spec run stamps policy.ablation_capable=False; the ablate
+    cadence must then NOT propose an ablate (which would spin forever, since the skip creates no
+    refine_block node so the cadence never clears). It must fall through to improve instead."""
+    st = _ablate_cadence_state()
+    # GreedyTree cadence path + operator-bandit path both honor the flag.
+    for pol in (GreedyTree(n_seeds=3, max_nodes=12, ablate_every=1, enable_merge=False),
+                GreedyTree(n_seeds=3, max_nodes=12, ablate_every=1, enable_merge=False,
+                           operator_bandit=True)):
+        pol.ablation_capable = False
+        acts = pol.next_actions(st)
+        assert all(a["kind"] != "ablate" for a in acts), acts
+        assert acts[0]["kind"] == "improve"
+
+
+def test_legal_actions_builder_honors_ablation_capability():
+    """H1: the self-driving legal_actions() builder (the ASHA/surrogate action set) is the real
+    route that proposes ablate for those policies — it must also drop ablate when the run is
+    ablation-incapable. (ASHAPolicy.next_actions itself never emits ablate; legal_actions does.)"""
+    from looplab.search.policy import legal_actions
+    st = _ablate_cadence_state()
+    pol = ASHAPolicy(n_seeds=3, max_nodes=12)
+    # capable (flag unset -> getattr default True): ablate IS offered
+    assert any(a["kind"] == "ablate" for a in legal_actions(st, pol, max_nodes=12))
+    # incapable: ablate is dropped
+    pol.ablation_capable = False
+    assert all(a["kind"] != "ablate" for a in legal_actions(st, pol, max_nodes=12))
+
+
+def test_mcts_reward_bounded_and_monotone_both_directions():
+    """M2 regression: the UCB reward map must be BOUNDED in (0,2) and direction-correct-monotone for
+    BOTH directions, so a large-magnitude metric can't swamp exploration and collapse MCTS to greedy.
+    The max branch used to be a bare, unbounded `reward = value`."""
+    from looplab.search.policy import _mcts_reward
+    vals = [-1e6, -400.0, -3.5, -1.0, -0.01, 0.0, 0.01, 1.0, 3.5, 400.0, 1e6]
+    for d in ("min", "max"):
+        rs = [_mcts_reward(v, d) for v in vals]
+        assert all(0.0 < r < 2.0 for r in rs), (d, rs)          # bounded
+        assert _mcts_reward(0.0, d) == 1.0                       # continuous at 0
+    # min: lower value -> higher reward (strictly decreasing)
+    assert all(_mcts_reward(a, "min") > _mcts_reward(b, "min") for a, b in zip(vals, vals[1:]))
+    # max: higher value -> higher reward (strictly increasing)
+    assert all(_mcts_reward(a, "max") < _mcts_reward(b, "max") for a, b in zip(vals, vals[1:]))
+    # a huge max metric must NOT dominate the ~1.4 exploration bonus: its reward stays < 2
+    assert _mcts_reward(1e9, "max") < 2.0
+
+
 def _engine(run_dir, max_nodes):
     task = ToyTask.load(TASK_FILE)
     researcher, developer = task.build_roles()

@@ -37,7 +37,10 @@ class AblationMixin:
         if self._repo_spec or self._eval_spec:
             # Still emit an (empty) ablate event so an operator `force_ablate` request is marked
             # done — otherwise the forced-ablate gate, which waits for an ablate event for this
-            # parent, never closes and the loop spins forever on repo/eval-spec runs.
+            # parent, never closes and the loop spins forever on repo/eval-spec runs. The POLICY
+            # cadence no longer proposes ablate here (the engine stamps policy.ablation_capable
+            # False for repo/eval-spec runs — see orchestrator init), so this path is now reached
+            # only via an explicit operator force_ablate; the empty event closes that gate.
             self.store.append(EV_ABLATE, {"parent_id": parent_id, "impacts": {},
                                          "skipped": "repo_or_eval_spec"})
             return

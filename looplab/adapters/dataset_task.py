@@ -307,16 +307,28 @@ class DatasetTask(BaseModel):
         srcs = "\n".join(f"  - {label}: {path}" for label, path in self._paths())
         goal = self.goal.strip() or ("Explore the data and build the best predictive/analytical "
                                      "solution you can.")
+        # Orientation hint MUST depend on the direction: the loop optimizes the PRINTED `metric`.
+        # For direction=max it maximizes, so a natural error/loss must be negated (maximize(-loss) =
+        # minimize(loss)) while a natural gain is reported as-is. For direction=min it minimizes, so a
+        # natural loss is already oriented (report as-is) and a natural GAIN must be negated instead.
+        # Unconditionally negating a loss (the old behavior) inverted the objective under min and made
+        # the loop select the WORST model (architecture-review M1). Prompt strings are contracts.
+        if higher:
+            orient_hint = ("if it is naturally an error/loss (RMSE, log-loss), report its NEGATIVE so the "
+                           "printed value follows that orientation; a natural gain (accuracy/F1/AUC/R^2) — "
+                           "report it as-is")
+        else:
+            orient_hint = ("if it is naturally a gain (accuracy/F1/AUC/R^2), report its NEGATIVE so the "
+                           "printed value follows that orientation; a natural error/loss (RMSE, log-loss) — "
+                           "report it as-is")
         if self.metric:
             metric_line = (f"Optimize the metric '{self.metric}'. Print it as the JSON `metric` value, "
-                           f"with the SAME orientation as the loop ({sense}); if it is naturally an "
-                           "error/loss, report its negative so the printed value follows that "
-                           "orientation.")
+                           f"with the SAME orientation as the loop ({sense}); {orient_hint}.")
         else:
             metric_line = ("CHOOSE the most appropriate metric for this data and goal (e.g. accuracy / "
                            "F1 / AUC / R^2 / RMSE) and report BOTH its value as `metric` and its name "
                            f"as `metric_name`. The loop will {objective} `metric`, so report it such "
-                           f"that {sense} (for an error/loss metric, report its NEGATIVE).")
+                           f"that {sense} ({orient_hint}).")
         caps = runtime_caps or ("You may use numpy, pandas and scikit-learn plus the Python standard "
                                 "library; CPU only, no network.")
         return (

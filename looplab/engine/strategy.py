@@ -174,6 +174,7 @@ class StrategyCadenceMixin:
                                           ablate_every=self._ablate_every,
                                           debug_depth=self._debug_depth,
                                           operator_bandit=self._operator_bandit, **pp)
+                self.policy.ablation_capable = getattr(self, "_ablation_capable", True)  # re-stamp: a repo/eval-spec run must not propose ablate (see orchestrator init)
                 self._base_max_nodes = getattr(self.policy, "max_nodes", self.max_nodes)  # new base for the live override
                 # A3 BOHB = ASHA racing + the surrogate proposer. make_policy only builds the racing
                 # half; wire the surrogate now so a mid-run switch to bohb isn't bare ASHA.
@@ -271,7 +272,21 @@ class StrategyCadenceMixin:
                 strat = validate_strategy(self.strategist.decide(state, ctx), ctx)
                 if strat:
                     strat.update(pin_fields)   # pinned (validated) policy/fidelity are non-negotiable
-                    if self._strategy_core(strat) != self._strategy_core(state.active_strategy):
-                        self._record_strategy(strat, state, ctx)
+                    # Record the decision MERGED onto the live/active strategy (mirror the operator-pin
+                    # path above). A strategist decision is a PARTIAL dict — only the fields the model
+                    # changed — and `_apply_strategy` never resets an omitted field, so the live engine
+                    # ACCUMULATES knobs across consults. Recording the bare partial made fold replace
+                    # active_strategy wholesale, so a resumed run reverted every omitted knob (policy,
+                    # fidelity, operators, …) to the config default — a silent divergence of the search
+                    # machinery from the pre-crash live state (architecture-review M3). `operators` is
+                    # applied field-by-field too, so it must DEEP-merge, not replace the whole sub-dict.
+                    prev = state.active_strategy or {}
+                    merged = {**prev, **strat}
+                    prev_ops, new_ops = prev.get("operators") or {}, strat.get("operators") or {}
+                    if prev_ops or new_ops:
+                        merged["operators"] = {**prev_ops, **new_ops}
+                    merged = validate_strategy(merged, ctx) or strat
+                    if self._strategy_core(merged) != self._strategy_core(state.active_strategy):
+                        self._record_strategy(merged, state, ctx)
                         return fold(self.store.read_all())
         return state

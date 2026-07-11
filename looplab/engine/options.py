@@ -62,6 +62,8 @@ class EngineOptions:
     eval_trust_mode: str = "ratify_freeze"
     trust_mode: str = "trusted_local"
     docker_image: str = "python:3.12-slim"
+    sandbox_memory: str = "4g"           # --memory for the untrusted command-eval Docker tier ("" = unbounded)
+    sandbox_cpus: str = ""               # --cpus for the untrusted command-eval Docker tier ("" = unbounded)
     seed_mode: str = "auto"              # RepoTask node seeding fallback: auto|tracked|all
     # --- A7 Strategist + richer-operator knobs (config-first; defaults == today's behavior) ---
     n_seeds: int = 3

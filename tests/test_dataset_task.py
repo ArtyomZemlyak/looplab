@@ -72,6 +72,23 @@ def test_brief_includes_path_and_open_ended_metric():
     assert "'f1'" in fb and "metric_name" not in fb               # a named metric: no self-naming ask
 
 
+def test_brief_orientation_is_direction_correct():
+    """M1 regression: the negate instruction must depend on direction. For min the loop minimizes the
+    printed metric, so a natural loss (RMSE) is reported AS-IS and a natural GAIN is negated; the old
+    prompt unconditionally negated a loss, inverting the objective and selecting the worst model."""
+    lo = DatasetTask(data_path=str(DATA_CSV), metric="rmse", direction="min")._brief()
+    assert "LOWER is better" in lo
+    # under min: a natural gain is what must be negated; the brief must NOT tell the agent to negate a loss
+    assert "gain (accuracy/F1/AUC/R^2), report its NEGATIVE" in lo
+    assert "error/loss (RMSE, log-loss), report its NEGATIVE" not in lo
+
+    hi = DatasetTask(data_path=str(DATA_CSV), metric="rmse", direction="max")._brief()
+    assert "HIGHER is better" in hi
+    # under max: a natural loss is what must be negated
+    assert "error/loss (RMSE, log-loss), report its NEGATIVE" in hi
+    assert "gain (accuracy/F1/AUC/R^2), report its NEGATIVE" not in hi
+
+
 def test_dataset_run_end_to_end_and_replays(tmp_path):
     from looplab.events.replay import fold
     task = load_task(TASK_FILE)

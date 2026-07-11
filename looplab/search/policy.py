@@ -243,7 +243,8 @@ class GreedyTree:
             cands = ["improve"]
             if self.enable_merge and len(evaluated) >= 2 and n_merge < self.max_merges:
                 cands.append("merge")
-            if self.ablate_every > 0 and len(best.idea.params) >= 2:
+            if (self.ablate_every > 0 and len(best.idea.params) >= 2
+                    and getattr(self, "ablation_capable", True)):
                 cands.append("refine_block")
             pick = _bandit_pick(operator_yields(state), cands)
             if pick == "merge":
@@ -270,8 +271,12 @@ class GreedyTree:
                      META_REASON: "merge top-2"}]
 
         # 5. Ablation-driven refinement (I7): periodically ablate the best to find the
-        #    highest-impact parameter, then refine just that one.
+        #    highest-impact parameter, then refine just that one. `ablation_capable` is stamped
+        #    False by the engine on repo/eval-spec runs, where ablation probes cannot run (the
+        #    solution.py sandbox path is wrong) — proposing it there would spin forever, since the
+        #    skip creates no refine_block node and the cadence never clears (see engine/ablation.py).
         if (self.ablate_every > 0 and len(best.idea.params) >= 2
+                and getattr(self, "ablation_capable", True)
                 and n_improve >= (n_refine + 1) * self.ablate_every):
             return [{"kind": KIND_ABLATE, "parent_id": best.id,
                      META_SCORES: _metric_scores(evaluated), META_CHOSEN: best.id,
@@ -342,6 +347,25 @@ class EvolutionaryPolicy:
                  META_REASON: "weighted parent (fitness-rank × under-expansion)"}]
 
 
+def _mcts_reward(value: float, direction: str) -> float:
+    """Map a subtree's best metric to a BOUNDED, direction-correct UCB1 reward so the exploration
+    term (c≈1.4, calibrated for a ~(0,1] reward) is never swamped by a large-magnitude metric.
+
+    Both directions are continuous at 0 (=1.0), strictly monotone (min: decreasing; max: increasing),
+    and bounded in (0, 2):
+      * min (lower is better): value>=0 -> (0,1] via 1/(1+value); value<0 -> (1,2) via 2 - 1/(1-value).
+        A bare `abs(value)` inverted signed metrics; a plain `1-value` made reward unbounded for
+        negatives (log-likelihood ≈ -400 -> reward ≈ 400 -> pure greedy).
+      * max (higher is better): the SYMMETRIC reflection — value>=0 -> [1,2) via 2 - 1/(1+value);
+        value<0 -> (0,1) via 1/(1-value). A bare `reward = value` left the same UCB-degeneracy the
+        min branch fixes unaddressed for unbounded max metrics (Sharpe, throughput, negative-MSE) —
+        architecture-review M2. Bounded max metrics (accuracy/AUC/F1 in [0,1]) keep a sensible order.
+    """
+    if direction == "min":
+        return (1.0 / (1.0 + value)) if value >= 0 else (2.0 - 1.0 / (1.0 - value))
+    return (2.0 - 1.0 / (1.0 + value)) if value >= 0 else (1.0 / (1.0 - value))
+
+
 class MCTSPolicy:
     """Opt-in UCB1 tree search (I22, ADR-2). Selects which node to expand by
     UCB1 = reward + c·sqrt(ln N / visits), balancing exploiting good subtrees against
@@ -405,18 +429,10 @@ class MCTSPolicy:
             if not metrics:
                 continue
             value = best_of(metrics)
-            # min-direction reward must be MONOTONE DECREASING in `value` (lower metric = better) AND
-            # BOUNDED, so the UCB exploration term (c≈1.4, calibrated for a ~(0,1] reward) is never
-            # swamped. `1/(1+value)` gives a bounded (0,1] map for the common non-negative min metric
-            # (MSE/error/loss); `abs(value)` INVERTED the order for signed metrics and an earlier `1-value`
-            # fix made the reward UNBOUNDED for negative metrics (log-likelihood ≈ -400 → reward ≈ 400,
-            # dwarfing exploration → pure greedy). Extend past 0 with `2 - 1/(1-value)` instead: monotone
-            # decreasing across all reals, continuous at 0 (both branches = 1.0), and bounded in (1, 2) for
-            # value<0 — so large-magnitude negatives compress just like large positives do, symmetrically.
-            if state.direction == "min":
-                reward = (1.0 / (1.0 + value)) if value >= 0 else (2.0 - 1.0 / (1.0 - value))
-            else:
-                reward = value
+            # Bounded, direction-correct reward so a large-magnitude metric can't swamp the c≈1.4
+            # exploration term and collapse UCB1 to greedy (see _mcts_reward for the full rationale;
+            # the max branch was unbounded `reward = value` before architecture-review M2).
+            reward = _mcts_reward(value, state.direction)
             # Visits = real (feasible, evaluated) trials in the subtree, not failed/infeasible
             # nodes, so the UCB exploration term reflects actual exploration (#76).
             visits = sum(1 for i in tree if state.nodes[i].status is NodeStatus.evaluated
@@ -568,7 +584,8 @@ def legal_actions(state: RunState, policy: SearchPolicy, *, max_nodes: int) -> l
     if len(feasible) >= 2:
         actions.append({"kind": KIND_MERGE, "parent_ids": [feasible[0].id, feasible[1].id]})
     best = state.best()
-    if best is not None and len(best.idea.params) >= 2:
+    if (best is not None and len(best.idea.params) >= 2
+            and getattr(policy, "ablation_capable", True)):
         actions.append({"kind": KIND_ABLATE, "parent_id": best.id})
     return actions
 

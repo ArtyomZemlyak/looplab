@@ -112,3 +112,40 @@ def test_stage_start_emits_a_live_band_anchor(tmp_path):
     by_stage = {r["attributes"]["stage"]: r for r in anchors}
     assert by_stage["train"]["attributes"].get("phase") == "train"     # phase-stamped -> bands "Train"
     assert all(r["attributes"].get("node_id") == 7 for r in anchors)   # attributed to the node
+
+
+# --- untrusted-tier hardening + env forwarding (architecture review H3 / M12) ---
+# make_docker_wrap builds the RepoTask command-eval container. It must mirror DockerSandbox.run's
+# hardening (cap-drop / no-new-privileges / memory / cpus) and forward engine env via -e, so the
+# untrusted/hostile tier actually isolates and LOOPLAB_EVAL_SEED reaches the containerized eval.
+# Inspects the produced argv only — no Docker daemon needed (monkeypatch shutil.which).
+
+def _wrap_argv(monkeypatch, **kw):
+    import shutil
+    from looplab.runtime import command_eval as ce
+    monkeypatch.setattr(shutil, "which", lambda name: "/usr/bin/docker")
+    w = ce.make_docker_wrap("/tmp/root", "python:3.12-slim", **kw)
+    return w(["python", "solution.py"], "/tmp/root")
+
+
+def test_docker_wrap_hardens_container(monkeypatch):
+    argv = _wrap_argv(monkeypatch, mem="4g", cpus="2")
+    joined = " ".join(argv)
+    assert "--cap-drop ALL" in joined
+    assert "--security-opt no-new-privileges" in joined
+    assert argv[argv.index("--memory") + 1] == "4g"
+    assert argv[argv.index("--cpus") + 1] == "2"
+    assert argv[:2] == ["docker", "run"] and argv[-3:] == ["python:3.12-slim", "python", "solution.py"]
+
+
+def test_docker_wrap_omits_unset_resource_caps_but_keeps_privilege_hardening(monkeypatch):
+    argv = _wrap_argv(monkeypatch)   # mem/cpus unset -> --memory/--cpus omitted
+    assert "--memory" not in argv and "--cpus" not in argv
+    # privilege hardening is unconditional
+    assert "--cap-drop" in argv and "--security-opt" in argv
+
+
+def test_docker_wrap_forwards_env(monkeypatch):
+    argv = _wrap_argv(monkeypatch, env={"LOOPLAB_EVAL_SEED": "7"})
+    i = argv.index("-e")
+    assert argv[i + 1] == "LOOPLAB_EVAL_SEED=7"

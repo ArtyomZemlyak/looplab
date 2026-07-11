@@ -124,8 +124,10 @@ class EvalDispatchMixin:
             # source's `edit` permission grants writes (mount-layer enforcement of edit:false).
             wrap = (command_eval.make_docker_wrap(
                         root, self.docker_image,
+                        mem=self.sandbox_memory or None, cpus=self.sandbox_cpus or None,
                         runtime=("runsc" if self.trust_mode == "hostile" else None),
-                        binds=self._data_binds())
+                        binds=self._data_binds(),
+                        env=env)   # forward LOOPLAB_EVAL_SEED etc. into the container (per-eval env)
                     if self.trust_mode in ("untrusted", "hostile") else None)
             res = command_eval.run_command_eval(
                 cmd, cwd, timeout, es["metric"], env,

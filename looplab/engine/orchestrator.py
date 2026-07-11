@@ -148,6 +148,8 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         eval_trust_mode = _opt("eval_trust_mode")
         trust_mode = _opt("trust_mode")
         docker_image = _opt("docker_image")
+        sandbox_memory = _opt("sandbox_memory")
+        sandbox_cpus = _opt("sandbox_cpus")
         seed_mode = _opt("seed_mode")
         n_seeds = _opt("n_seeds")
         max_nodes = _opt("max_nodes")
@@ -366,6 +368,10 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         # "trusted_local" runs it directly. The solution.py path uses self.sandbox instead.
         self.trust_mode = trust_mode
         self.docker_image = docker_image
+        # Resource caps for the untrusted/hostile command-eval Docker tier (make_docker_wrap).
+        # Mirror the solution.py DockerSandbox tier so both untrusted tiers bound memory/cpu.
+        self.sandbox_memory = sandbox_memory
+        self.sandbox_cpus = sandbox_cpus
         self._seed_mode = seed_mode or "auto"   # run-wide fallback for per-editable seeding
         self._run_setup_done = False             # run-level (once) dependency setup guard
         self._run_setup_lock = _threading.Lock()   # _run_eval runs on parallel worker threads; the
@@ -426,6 +432,13 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         self._repo_spec: dict = rs() if callable(rs) else {}
         es = getattr(task, "eval_spec", None)
         self._eval_spec: dict = es() if callable(es) else {}
+        # Ablation probes run via the solution.py sandbox path, which is wrong for a repo/eval-spec
+        # run (the repo tree is absent) — so `_ablate` no-ops there. Tell the policy not to PROPOSE
+        # ablate on such runs: the skip creates no refine_block node, so the ablate cadence would
+        # never clear and the loop would spin forever (re-stamped on every policy rebuild, see
+        # strategy.py::_apply_strategy). The flag is read via getattr so any policy object is safe.
+        self._ablation_capable: bool = not (bool(self._repo_spec) or bool(self._eval_spec))
+        self.policy.ablation_capable = self._ablation_capable
         # Fail loudly: a repo task with no trusted eval AND no onboarder would silently
         # evaluate every node via the empty solution.py path. Require one or the other.
         if self._repo_spec and not self._eval_spec and onboarder is None:

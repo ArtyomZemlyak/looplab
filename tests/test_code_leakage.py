@@ -62,6 +62,28 @@ def test_plain_fit_on_val_still_flags():
     assert code_leakage_scan("scaler.fit(X_val)")["leak"]
 
 
+# --- token-anchored fit-arg match: an identifier that merely CONTAINS `val`/`test` is not a leak ---
+# (regression for the architecture review H2: the bare-substring `in` test flagged X_trainval /
+#  X_latest / X_interval as fit_on_test, and under trust_gate=gate/block that silently barred an
+#  honest refit-on-train+validation solution from selection and breeding.)
+
+def test_refit_on_trainval_is_not_a_leak():
+    # the standard non-leaking refit on train+validation after CV
+    for code in ("model.fit(X_trainval, y_trainval)",
+                 "pipe.fit(X_interval, y_interval)",
+                 "clf.fit(X_latest, y_latest)",
+                 "est.fit(retrieval_features, labels)"):
+        r = code_leakage_scan(code)
+        assert not any(f["signal"] == "fit_on_test" for f in r["flags"]), code
+
+
+def test_true_val_test_fits_still_flag_after_anchoring():
+    for code in ("scaler.fit(X_val)", "scaler.fit(X_test)", "m.fit(x_valid, y)",
+                 "m.fit(X_testing, y)", "m.fit(y_test_final, z)"):
+        r = code_leakage_scan(code)
+        assert any(f["signal"] == "fit_on_test" for f in r["flags"]), code
+
+
 def test_file_metric_reader_confined_to_workdir(tmp_path):
     # an absolute / traversal `path` in a metric spec must not escape the workdir (answer-key read)
     from looplab.runtime.command_eval import read_metric

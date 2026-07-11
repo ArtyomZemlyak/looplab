@@ -57,13 +57,34 @@ _SPLIT_RE = re.compile(r"train_test_split\s*\(|KFold|StratifiedKFold|\.split\s*\
 # validation-named monitor (`X_val`, `X_holdout`) never contains `test`, so the substring stays safe.
 _EVALSET_KW_RE = re.compile(r"\b(?:eval_set|validation_data|eval_names)\s*=")
 _TEST_MONITOR_RE = re.compile(r"\b(?:eval_set|validation_data|eval_names)\s*=[^=]*test")
+# Fit-on-val/test detector: match `val`/`test` only when NOT preceded by another letter, so a
+# genuine held-out identifier (`x_val`, `y_test`, `_val`, `x_valid`, `x_testing`, or a bare `val`
+# at the start of the args) still fires, while an identifier that merely CONTAINS those letters —
+# `x_trainval` (the standard non-leaking refit on train+validation after CV), `x_interval`,
+# `x_latest`, `eval`, `retrieval`, `contest` — does NOT. Bare-substring `in` here silently barred
+# honest solutions from selection/breeding under trust_gate=gate/block (data_leakage:fit_on_test
+# is a hard signal); token-anchoring keeps the true positives without the false ones.
+# ACCEPTED RECALL GAP (precision-over-recall, on purpose): a NO-separator held-out name — `Xtest`,
+# `ytest`, `Xval` (lowercased -> `xtest`/`ytest`/`xval`) — is NOT flagged, because anchoring cannot
+# tell `xtest` (a leak) from `contest` (benign) without a name whitelist. A false NEGATIVE here is
+# far less harmful than a false positive: it only means one heuristic misses a leak the operator can
+# still catch (and fit_before_split / exact-row / temporal detectors still run), whereas a false
+# positive silently kills an honest winner on a hard gate. sklearn convention is overwhelmingly the
+# separated `X_test`/`X_val`, which IS caught.
+_LEAKY_FIT_ARG_RE = re.compile(r"(?<![a-z])(?:val|test)")
 
 
 def code_leakage_scan(code: str) -> dict:
     """I3 data-centric: static-dataflow-lite scan of solution CODE for train->test information flow
     (beyond exact-row contamination). Flags the classic anti-patterns: fitting a preprocessor on the
-    FULL data before the split, and calling .fit() on test data. Heuristic + dependency-free — a
-    surfaced suspicion for the operator, not a hard gate."""
+    FULL data before the split, and calling .fit() on test data. Heuristic + dependency-free.
+
+    NOTE on gating: under `trust_gate='audit'` (the default) these flags are advisory — surfaced to
+    the operator and the agent only. But the engine emits them as `data_leakage:<signal>` signals,
+    which `is_hard_signal` treats as HARD — so under `trust_gate='gate'`/`'block'` a flagged node is
+    excluded from best-selection AND from breeding/confirmation (`_apply_trust_gate`). The fit-arg
+    match is therefore token-anchored (see `_LEAKY_FIT_ARG_RE`) so a benign identifier can't hard-gate
+    an honest solution. Keep this scan's precision high whenever it feeds a non-audit trust gate."""
     flags: list[dict] = []
     lines = code.splitlines()
     split_at = next((i for i, l in enumerate(lines) if _SPLIT_RE.search(l)), None)
@@ -83,7 +104,7 @@ def code_leakage_scan(code: str) -> dict:
         # (`eval_set=[(X_val,y_val),(X_test,y_test)]`) never reaches `arg` — the line-level scan sees it.
         head = _EVALSET_KW_RE.split(arg, maxsplit=1)[0]
         test_monitor = _TEST_MONITOR_RE.search(line.lower())
-        if ("test" in head or "val" in head                            # val/test in the fit args = leak
+        if (_LEAKY_FIT_ARG_RE.search(head)                             # val/test token in the fit args = leak
                 or test_monitor):                                       # test INSIDE the monitor = leak
             flags.append({"signal": "fit_on_test", "line": i + 1, "code": line.strip()[:90]})
         elif split_at is not None and i < split_at and "train" not in arg:
