@@ -25,3 +25,15 @@ def test_settings_roundtrip_through_snapshot():
     snap.pop("llm_api_key", None)
     s2 = Settings(**snap)
     assert s2.require_approval is True and s2.trust_mode == "untrusted" and s2.confirm_seeds == 4
+
+
+def test_novelty_mode_rejected_when_out_of_set():
+    """Architecture review: an out-of-set novelty_mode (a mis-cased env value, or 'on') used to fall
+    through as a silent NO-OP that disabled the gate. It must fail loudly at config time like
+    trust_gate/merge_mode."""
+    from pydantic import ValidationError
+    for good in ("off", "algo", "llm"):
+        assert Settings(novelty_mode=good).novelty_mode == good
+    for bad in ("LLM", "on", "algorithm", ""):
+        with pytest.raises(ValidationError):
+            Settings(novelty_mode=bad)

@@ -244,6 +244,28 @@ def test_reconcile_reflect_batch_replaced_on_false_failure_correction(tmp_path, 
     assert [e for e in eng.store.read_all() if e.type == "lessons_reconciled"][0].data["reflect"] is True
 
 
+def test_reconcile_reflect_sweep_keeps_unattributed_comparative_row(tmp_path, monkeypatch):
+    """M5 review follow-up: when a drifting reflect lesson triggers the whole-reflect-batch replace,
+    an UNATTRIBUTED comparative row (source=comparative, no valid evidence pair) of the SAME run must
+    NOT be swept — the old code excluded ALL comparative rows from the reflect sweep; dropping it would
+    be silent loss of a valid non-stale lesson (the identity predicate must key comparative on source)."""
+    mem = tmp_path / "mem"
+    eng = _engine(tmp_path, reflection_priors=True, memory_dir=str(mem), comparative_lessons=True)
+    _seed(mem, [
+        {"task_id": "toy_quadratic", "run_id": "run_me", "statement": "STALE reflect", "outcome": "failed",
+         "evidence": [1, 2], "fingerprint": [], "kind": "quadratic",
+         "evidence_sig": {"1": "evaluated:4.0", "2": "failed:no_metric"}},
+        {"run_id": "run_me", "source": "comparative", "statement": "UNATTRIBUTED comparative",
+         "outcome": "noted", "evidence": [], "fingerprint": [], "kind": "quadratic"},
+    ])
+    st = _state([_node(1, metric=4.0), _node(2, metric=3.0)])   # node 2 re-scored -> reflect drifts
+    monkeypatch.setattr(eng, "_reflect_client", lambda: FakeClient("[GOOD] node 2 trained fine"))
+    eng.lessons.reconcile_lessons(st)
+    stmts = [r["statement"] for r in _rows(mem)]
+    assert "STALE reflect" not in stmts                  # drifted reflect row replaced (sweep worked)
+    assert "UNATTRIBUTED comparative" in stmts           # unattributed comparative survives the sweep
+
+
 def test_reconcile_empty_rederivation_never_nukes_memory(tmp_path, monkeypatch):
     # If the LLM re-derivation returns nothing (transient error / empty), the DRIFTED row is dropped
     # (it's wrong) but non-drifted sibling reflect lessons of the run are KEPT — memory is not nuked.

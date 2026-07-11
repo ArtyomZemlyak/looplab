@@ -109,3 +109,19 @@ def test_helper_failed_trial_isolated():
     metrics = [t["metric"] for t in trials]
     assert metrics == [1.0, None, 3.0]
     assert "boom" in trials[1]["error"]
+
+
+def test_clamp_fill_leaves_swept_dims_to_the_grid():
+    """Architecture review: _clamp_fill must NOT midpoint-fill a dimension the Idea SWEEPS (present in
+    idea.space). Injecting a fixed midpoint made the Developer prompt render 'sweep degree in [1,2,3]'
+    AND 'degree=<midpoint>' — telling the model a swept dim is simultaneously fixed."""
+    from looplab.agents.roles import _clamp_fill
+    from looplab.core.models import Idea
+    idea = Idea(operator="improve", params={"lam": 0.1}, space={"degree": [1, 2, 3]})
+    out = _clamp_fill(idea, {"degree": (0.0, 6.0), "lam": (0.0, 100.0)})
+    assert "degree" not in out.params            # swept dim left to its grid, not fixed at 3.0
+    assert out.params["lam"] == 0.1              # a fixed param present is still clamped/kept
+    # a NON-swept missing bound is still midpoint-filled (crash-guard preserved)
+    idea2 = Idea(operator="improve", params={}, space={"degree": [1, 2]})
+    out2 = _clamp_fill(idea2, {"degree": (0.0, 6.0), "lam": (0.0, 10.0)})
+    assert "degree" not in out2.params and out2.params["lam"] == 5.0

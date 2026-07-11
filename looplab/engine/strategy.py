@@ -144,6 +144,13 @@ class StrategyCadenceMixin:
         applied both when the decision is recorded AND on resume (`_reentry_repin`), so a blocked knob
         stays blocked identically on replay — the recorded active_strategy and the live engine agree."""
         def may(k):
+            # The governance matrix gates the AUTONOMOUS strategist's own decisions. A human/operator
+            # pin arrives as a `set_strategy` CONTROL_EVENT recorded with source=="operator" — the
+            # human "can always change it via the snapshot/UI" per the contract — so it is EXEMPT from
+            # the strategist's grant (else a matrix that locks the strategist out of a knob would also
+            # block the operator's own UI pin, recording a decision the engine never applies).
+            if strat.get("source") == "operator":
+                return True
             return self._agent_may("strategist", k)
         if may("novelty_stance") and strat.get("novelty_stance") in NOVELTY_STANCES:
             self._novelty_stance = strat["novelty_stance"]   # Strategist's novelty dial (slice 2)

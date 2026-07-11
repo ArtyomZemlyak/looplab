@@ -286,12 +286,17 @@ class ToyObjectiveDeveloper:
 
 def _clamp_fill(idea: Idea, bounds: Optional[dict]) -> Idea:
     """Clamp numeric params into bounds and fill any missing ones with the midpoint, so
-    a stray/empty proposal can't crash the objective."""
+    a stray/empty proposal can't crash the objective. A SWEPT dimension (present in `idea.space`) is
+    left to its grid — midpoint-filling it would inject a spurious 'fixed at X' param the Developer
+    prompt renders ALONGSIDE the sweep grid ('sweep degree in [1,2,3]' AND 'degree=3.0'), telling the
+    model the swept dim is simultaneously fixed; the sweep-offer contract keeps swept dims out of
+    params on purpose. (Direct mutation here bypasses Idea._clamp_params_to_space, so guard here.)"""
     if bounds:
+        swept = set(getattr(idea, "space", None) or {})
         for k, (lo, hi) in bounds.items():
             if k in idea.params:
                 idea.params[k] = max(lo, min(hi, float(idea.params[k])))
-            else:
+            elif k not in swept:
                 idea.params[k] = (lo + hi) / 2.0
     return idea
 

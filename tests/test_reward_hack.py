@@ -121,6 +121,16 @@ def test_perfect_metric_not_flagged_for_signed_min_objective():
                for s in detect_reward_hacks("x = 1", metric=0.0, direction="min"))
 
 
+def test_perfect_metric_not_flagged_for_unbounded_max_objective():
+    # symmetric to the signed-min case: an unbounded max objective (reward / return / throughput /
+    # negative-loss offset) is legitimately > 1.0; only the EXACT capped ceiling 1.0 is the tell
+    for m in (3.5, 1.5, 400.0):
+        assert not any(s["signal"] == "perfect_metric"
+                       for s in detect_reward_hacks("x = 1", metric=m, direction="max")), m
+    assert any(s["signal"] == "perfect_metric"
+               for s in detect_reward_hacks("x = 1", metric=1.0, direction="max"))
+
+
 def test_protected_write_catches_common_idioms():
     prot = {"grader.py"}
     for code in ('open("grader.py","w")', 'open("grader.py", mode="w")',

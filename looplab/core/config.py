@@ -735,6 +735,14 @@ class Settings(BaseSettings):
         if self.merge_mode not in ("auto", "mean", "ensemble"):
             raise ValueError(
                 f"merge_mode must be auto|mean|ensemble, got {self.merge_mode!r}")
+        # novelty_mode drives the dedup/novelty gate; an out-of-set value (e.g. a mis-cased
+        # LOOPLAB_NOVELTY_MODE=LLM, or "on") used to fall through _apply_novelty_gate silently as a
+        # NO-OP — turning the gate off with no diagnostic. Fail loudly at config time like trust_gate/
+        # merge_mode do. (Other enum-ish string fields — seed_mode/eval_trust_mode/strategist_backend —
+        # share the pattern; left unvalidated here only because their full value sets are less settled.)
+        if self.novelty_mode not in ("off", "algo", "llm"):
+            raise ValueError(
+                f"novelty_mode must be off|algo|llm, got {self.novelty_mode!r}")
         return self
 
     def masked_snapshot(self) -> dict:

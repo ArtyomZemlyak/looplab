@@ -46,7 +46,7 @@ class ResearchCadenceMixin:
         # k>1 must not step over the only multiple and skip the whole window. The last researched
         # at_node is the marker; `_already_researched_at` above already de-dups the same-n resume.
         _last_research_n = max((int(m.get("at_node", -1)) for m in state.research
-                                if isinstance(m, dict) and m.get("at_node") is not None), default=-1)
+                                if isinstance(m, dict) and m.get("at_node") is not None), default=0)
         if self._cadence_due(n, _last_research_n, self.deep_research_every):
             return self._run_deep_research(state, trigger="cadence", manual=False)
         hist = state.strategy_history
@@ -147,7 +147,7 @@ class ResearchCadenceMixin:
         if n == 0 or self._already_researched_at(state, n):
             return None
         _last_research_n = max((int(m.get("at_node", -1)) for m in state.research
-                                if isinstance(m, dict) and m.get("at_node") is not None), default=-1)
+                                if isinstance(m, dict) and m.get("at_node") is not None), default=0)
         if self._cadence_due(n, _last_research_n, self.deep_research_every):   # since-last, gap-safe
             return "cadence"
         hist = state.strategy_history

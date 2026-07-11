@@ -11,6 +11,7 @@ import ast
 import json
 import math
 import re
+import types
 import typing
 from typing import Protocol, Type, TypeVar, get_args, get_origin
 
@@ -123,7 +124,10 @@ def _coerce_value(val, ann):
     Optional, cast string/number/bool drift, and recurse into dict/list element types. Never raises —
     returns the original value if it can't coerce, so validation makes the final decision."""
     origin = get_origin(ann)
-    if origin is typing.Union:                       # Optional[X] / Union[...]
+    # `typing.Union` covers Optional[X]/Union[...]; `types.UnionType` covers the PEP 604 `X | None`
+    # spelling the codebase uses pervasively (get_origin(int | None) is types.UnionType on 3.11, NOT
+    # typing.Union) — without it the schema-aligned coercion was silently skipped for `| None` fields.
+    if origin is typing.Union or origin is types.UnionType:   # Optional[X] / Union[...] / X | None
         if val is None:
             return None
         non_none = [a for a in get_args(ann) if a is not type(None)]

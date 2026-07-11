@@ -119,26 +119,29 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
         @app.middleware("http")
         async def _require_token(request: "Request", call_next):
             p = request.url.path
-            # Raw-file-content / captured-output reads are as sensitive as mutations, so gate every GET
-            # that returns something OTHER than a folded projection (events/state):
+            # Raw-content / captured-output / model-transcript reads are as sensitive as mutations, so
+            # gate every GET that returns something OTHER than a light folded projection (events/state/
+            # nodes/metrics/cost/config-masked). The raw surface is large — enumerate it exhaustively:
             #   - /artifact(s): repo files a run produced (a checked-in .env, credentials, a log key)
             #   - /assistant/sessions: the full model-facing transcript incl. pasted $HOME file contents
-            #   - /log, /nodes/*/logs: the RAW event envelopes / captured stdout+stderr (solution code +
-            #     anything the eval printed — the same "a log that printed a key" risk as /artifact)
+            #   - /log, /nodes/*/logs: RAW event envelopes / captured stdout+stderr (solution code + the
+            #     "a log that printed a key" risk) ; /chat-log: the operator↔boss chat transcript
+            #   - /spans/{sid}: the UNCAPPED span I/O — the FULL LLM prompt (repo source + pasted files +
+            #     printed secrets) and model output ; /trace*, /conversation: the (capped) model transcript
             #   - /agents_md: the repo's AGENTS.md, served verbatim
             #   - /api/{prompts,skills,knowledge}: operator-authored files served verbatim
             #   - /api/memory: cross-run memory rows (goals / rationales / lessons)
             #   - /assistant/permissions: a preview snippet of the file the assistant is about to write
-            # (The /shared/{sid} assistant route STRIPS raw and stays open for sharing.) Every OTHER GET
-            # returns a folded projection and stays open. The UI attaches the token to EVERY request
-            # (ui/src/api.js::_authHeaders), so gating these GETs never affects the authenticated UI —
-            # only an untokened same-origin caller, which is exactly who the token defends against.
-            _RAW_GET_SUFFIX = ("/artifact", "/artifacts", "/log", "/logs", "/agents_md",
-                               "/assistant/permissions")
+            # (The /assistant/shared/{sid} route STRIPS raw and stays open for sharing.) The UI attaches
+            # the token to EVERY request (ui/src/api.js::_authHeaders), so gating these never affects the
+            # authenticated UI — only an untokened same-origin caller, which is who the token defends against.
+            _RAW_GET_SUFFIX = ("/artifact", "/artifacts", "/log", "/logs", "/agents_md", "/chat-log",
+                               "/conversation", "/assistant/permissions")
             _RAW_GET_EXACT = ("/api/prompts", "/api/skills", "/api/knowledge", "/api/memory")
+            _RAW_GET_CONTAINS = ("/spans/", "/trace", "/assistant/sessions")
             sensitive_get = (request.method == "GET"
                              and (p.endswith(_RAW_GET_SUFFIX) or p in _RAW_GET_EXACT
-                                  or "/assistant/sessions" in p))
+                                  or any(seg in p for seg in _RAW_GET_CONTAINS)))
             mutating = request.method in ("POST", "PUT", "PATCH", "DELETE")
             if ((mutating or sensitive_get) and p.startswith("/api/")
                     and request.headers.get("X-LoopLab-Token") != ui_token):

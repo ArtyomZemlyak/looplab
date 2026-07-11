@@ -146,3 +146,14 @@ def test_extract_code_salvages_unclosed_fence():
     assert extract_code("```\nx = 2").strip() == "x = 2"
     # a properly closed fence is unaffected
     assert extract_code("```python\ny = 3\n```").strip() == "y = 3"
+
+
+def test_coerce_unwraps_pep604_optional():
+    """Architecture review: _coerce_value must unwrap the PEP 604 `X | None` union (get_origin returns
+    types.UnionType, not typing.Union) so schema-aligned coercion isn't silently skipped for those
+    fields — the codebase uses `| None` pervasively."""
+    from typing import Optional
+    assert _coerce_value(3.9, Optional[int]) == 4          # classic Optional (already worked)
+    assert _coerce_value(3.9, int | None) == 4             # PEP 604 spelling (was skipped before the fix)
+    assert _coerce_value(None, int | None) is None
+    assert _coerce_value("true", bool | None) is True

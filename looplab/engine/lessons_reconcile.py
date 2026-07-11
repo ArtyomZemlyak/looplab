@@ -256,8 +256,14 @@ class LessonReconcileMixin:
                 # (run_id != ours), which _is_stale never matches, so they are preserved.
                 if not isinstance(o, dict) or o.get("run_id") != state.run_id:
                     return False
-                if o.get("source") == "comparative" and len(o.get("evidence") or []) == 2:
-                    return tuple(o["evidence"]) in _stale_pairs
+                # Gate the comparative branch on SOURCE ALONE — matching the old expansion's
+                # `source != "comparative"` exclusion. An UNATTRIBUTED comparative row (no valid
+                # P-marker -> evidence != 2) is NOT pair-keyed, so it must be immune to the reflect
+                # `drop_all_reflect` sweep (which only ever replaced non-comparative reflect rows);
+                # falling through to the reflect branch would silently drop a valid non-stale lesson.
+                if o.get("source") == "comparative":
+                    ev = o.get("evidence") or []
+                    return len(ev) == 2 and tuple(ev) in _stale_pairs
                 return drop_all_reflect or self._lesson_evidence_stale(state, o)
 
             # Rewrite UNDER the lock, RE-READING the file INSIDE it: read + drop-stale + append-fresh must
@@ -271,6 +277,7 @@ class LessonReconcileMixin:
                 except OSError:
                     cur = [o for o in rows if isinstance(o, dict)]
                 kept = [o for o in cur if isinstance(o, dict) and not _is_stale(o)]
+                n_retired = len(cur) - len(kept)   # rows ACTUALLY dropped (audit); reflect-sweep included
                 write_jsonl_atomic(path, kept + fresh)
                 prompts, parser = self._merge_prompt_opts()
                 self._e._consolidate_lessons_file(path, client, self._e._embedder,
@@ -288,6 +295,6 @@ class LessonReconcileMixin:
                              "evidence": lz.get("evidence")} for lz in comp]})
         # Audit sidecar (fold ignores it): what drifted and what replaced it.
         self._e.store.append(EV_LESSONS_RECONCILED, {
-            "at_node": len(state.nodes), "n_retired": len(stale_idx), "n_added": len(fresh),
+            "at_node": len(state.nodes), "n_retired": n_retired, "n_added": len(fresh),
             "reflect": reflect_stale, "pairs": [list(p) for p in stale_pairs]})
         return fold(self._e.store.read_all())

@@ -118,15 +118,17 @@ def detect_reward_hacks(code: str, metric: float | None, direction: str,
     # Suspiciously-perfect score: an exact theoretical optimum is rare from real learning and is the
     # classic specification-gaming tell (e.g. MSE == 0.0, accuracy == 1.0). Heuristic, audit-only.
     if metric is not None:
-        # Only the EXACT theoretical optimum is the gaming tell — `metric <= 0.0` false-flagged every
-        # SIGNED objective (a log-likelihood / signed score is legitimately negative), flooding the
-        # Trust panel. A ceiling metric strictly above 1.0 is impossible for a capped score (accuracy/
-        # AUC/F1) so it stays suspicious. Advisory in every gate mode either way.
+        # Only the EXACT theoretical optimum is the gaming tell. `metric <= 0.0` false-flagged every
+        # SIGNED objective on the min side (a log-likelihood / signed score is legitimately negative);
+        # SYMMETRICALLY, `metric >= 1.0` on the max side false-flagged every UNBOUNDED max objective
+        # (reward / return / throughput / negative-loss offset / log-likelihood are routinely > 1.0),
+        # flooding the Trust panel. So flag ONLY the exact capped ceiling metric == 1.0 (accuracy/AUC/F1
+        # at their cap), never a value merely above it. Advisory in every gate mode either way.
         if direction == "min" and metric == 0.0:
             signals.append({"signal": "perfect_metric",
                             "detail": f"metric {metric} at the theoretical floor (0.0)"})
-        elif direction == "max" and metric >= 1.0:
+        elif direction == "max" and metric == 1.0:
             signals.append({"signal": "perfect_metric",
-                            "detail": f"metric {metric} at/above the theoretical ceiling (1.0)"})
+                            "detail": f"metric {metric} at the theoretical ceiling (1.0)"})
 
     return signals

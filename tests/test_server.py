@@ -100,12 +100,18 @@ def test_raw_content_read_routes_are_token_gated(tmp_path, monkeypatch):
     monkeypatch.setenv("LOOPLAB_UI_TOKEN", "sekret")
     _build_run(tmp_path)
     client = TestClient(make_app(tmp_path))
-    for path in ("/api/runs/demo/log", "/api/runs/demo/agents_md", "/api/prompts", "/api/skills",
+    # Raw content / captured output / model transcript — the FULL enumerated set, incl. the uncapped
+    # span I/O (the complete LLM prompt) and the trace/conversation transcript the first pass missed.
+    for path in ("/api/runs/demo/log", "/api/runs/demo/nodes/0/logs", "/api/runs/demo/agents_md",
+                 "/api/runs/demo/chat-log", "/api/runs/demo/spans/abc", "/api/runs/demo/trace",
+                 "/api/runs/demo/trace/tail", "/api/runs/demo/trace/by_trace/t1",
+                 "/api/runs/demo/nodes/0/conversation", "/api/prompts", "/api/skills",
                  "/api/knowledge", "/api/memory", "/api/assistant/permissions"):
         assert client.get(path).status_code == 401, f"{path} should be gated"
         assert client.get(path, headers={"X-LoopLab-Token": "sekret"}).status_code == 200, path
-    # projection reads stay open without the token
+    # light projection reads stay open without the token (the established contract)
     assert client.get("/api/runs/demo/state").status_code == 200
+    assert client.get("/api/runs/demo/events").status_code == 200
     assert client.get("/api/runs").status_code == 200
 
 

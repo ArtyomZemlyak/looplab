@@ -215,10 +215,11 @@ See [LLM & coding agents](llm-and-agents.md) for full guidance.
 meta-controller), `boss` (run-chat operator-proxy), `researcher` (per-experiment, per-node sizing).
 A setting **absent** from the map is locked — only a human can change it via the snapshot/UI. This
 is **enforced at runtime** (`_agent_may`) at every agent seam, so removing a role from a knob truly
-locks it — not just a UI hint: the Strategist's whole control surface (`policy`, `n_seeds`,
+locks it — not just a UI hint: the Strategist's whole applied control surface (`policy`,
 `ablate_every`, `merge_mode`, `complexity_cue`, `ablate_code_blocks`, `prefer_sweep`,
 `novelty_stance`, `developer`, `fidelity`) and the boss's resource retunes (`timeout`,
-`max_parallel`, `max_eval_seconds`) are each gated. The default grants those resource/search-shape
+`max_parallel`, `max_eval_seconds`) are each gated. (A human/operator pin via the UI/snapshot always
+wins — the matrix governs the autonomous agents, not the human.) The default grants those resource/search-shape
 knobs to the agents and keeps infra (`llm_*`, `trust_mode`, `docker_image`, api key) locked.
 (`fidelity`/`novelty_stance`/`prefer_sweep`/`developer` are governance keys for the strategist's
 per-node dials — not 1:1 `Settings` fields, but gated the same way.)

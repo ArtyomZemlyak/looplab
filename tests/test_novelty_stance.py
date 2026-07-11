@@ -150,12 +150,10 @@ def test_engine_defaults_to_balanced(tmp_path):
 
 
 def test_strategist_stance_is_applied_and_recorded(tmp_path):
-    # M4: strategist knob application is governance-gated. A real (CLI) run grants the strategist its
-    # knobs via the shipped Settings.agent_control default — grant them here to exercise the APPLIED
-    # behaviour (a directly-constructed Engine defaults to the conservative all-locked map).
-    from looplab.core.config import Settings
-    eng = _engine(tmp_path / "s", strategist=_ExploreStrategist(),
-                  agent_control=Settings().agent_control)
+    # M4: strategist knob application is governance-gated. A directly-constructed Engine defaults
+    # agent_control to the SHIPPED DEFAULT_AGENT_CONTROL (which grants the strategist novelty_stance),
+    # so the default _engine already exercises the APPLIED behaviour — no explicit grant needed.
+    eng = _engine(tmp_path / "s", strategist=_ExploreStrategist())
     state = anyio.run(eng.run)
     assert eng._novelty_stance == "explore"
     decisions = [e for e in EventStore(tmp_path / "s" / "events.jsonl").read_all()

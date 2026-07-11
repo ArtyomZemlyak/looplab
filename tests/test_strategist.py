@@ -634,6 +634,21 @@ def _policy_decisions(run_dir):
             if e.type == "strategy_decision"]
 
 
+def test_operator_pin_wins_even_when_strategist_locked_out_of_the_knob(tmp_path):
+    """M4 review follow-up: the governance matrix gates the AUTONOMOUS strategist, NOT the human. An
+    operator set_strategy pin (a UI CONTROL_EVENT, source=operator) must still switch the LIVE policy
+    even when agent_control removes the strategist's own policy grant — otherwise the recorded decision
+    diverges from the live engine (the UI shows the pin while the run runs the old policy)."""
+    from looplab.events.eventstore import EventStore
+    rd = tmp_path / "pinlock"; rd.mkdir()
+    EventStore(rd / "events.jsonl").append("set_strategy", {"strategy": {"policy": "asha"}})
+    eng = _engine(rd, strategist=_AlwaysGreedy(), strategist_every=1,
+                  agent_control={"policy": [], "timeout": ["strategist"]})   # strategist LOCKED out of policy
+    state = anyio.run(eng.run)
+    assert eng._policy_name == "asha"                          # operator pin APPLIED despite the lock
+    assert (state.active_strategy or {}).get("policy") == "asha"
+
+
 def test_operator_pin_policy_wins_over_strategist(tmp_path):
     # Boss pins policy=asha; the (greedy-loving) strategist must never flip it back -> no thrash.
     from looplab.events.eventstore import EventStore

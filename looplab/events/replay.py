@@ -88,8 +88,12 @@ class _FoldCtx:
         self.best_confirmed: int | None = None
 
 def _on_run_started(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
-    st.run_id = d["run_id"]
-    st.task_id = d["task_id"]
+    # Read with defaults like every other fold handler (RunState already defaults these to ""): the
+    # fold loop dispatches handlers with NO per-event try/except, so a bare d["run_id"] KeyError on a
+    # malformed/hand-edited run_started would take down the WHOLE fold (every view/replay/resume of the
+    # run) — the exact hand-edited-log-tolerance the _on_node_created guard was added to provide.
+    st.run_id = d.get("run_id", "")
+    st.task_id = d.get("task_id", "")
     st.goal = d.get("goal", "")
     # `direction` drives is_better/best-selection for the whole run — a typo ("Max",
     # "maximize") must not silently invert the objective. Accept only the two valid values;
@@ -314,7 +318,11 @@ def _on_confirm_eval(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     # per-seed memo below already keys on that pair — so a re-fold stays idempotent.
     keyed = "node_id" in d and "seed" in d
     first = not (keyed and d["seed"] in st.confirm_seed_results.get(d["node_id"], {}))
-    if first:
+    # Only a KEYED event (node_id+seed) can participate in the per-seed memo that makes the eval-cost
+    # add idempotent; an un-keyed confirm_eval has no memo slot, so a duplicate/re-fold would
+    # double-count total_eval_seconds (order/duplication-sensitive — the fold must not be). The sole
+    # emitter always writes both keys, so this only guards a future/foreign/hand-edited un-keyed event.
+    if keyed and first:
         st.total_eval_seconds += d.get("eval_seconds") or 0.0   # confirm-seed eval cost
     if keyed:                                                # per-seed resume memo (#0)
         st.confirm_seed_results.setdefault(d["node_id"], {})[d["seed"]] = d.get("metric")

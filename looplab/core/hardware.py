@@ -30,8 +30,12 @@ def detect_gpus() -> list[dict]:
         from looplab.core.parse import to_int
         for parts in (query_nvidia_smi("index,name,memory.total,memory.free") or []):
             if len(parts) >= 4:
-                gpus.append({"index": to_int(parts[0]), "name": parts[1],
-                             "mem_total_mib": to_int(parts[2]), "mem_free_mib": to_int(parts[3])})
+                # A GPU name may itself contain a comma (the sibling detect_gpu documents + handles
+                # this) — the CSV split then yields >4 fields and fixed positions parts[2]/parts[3]
+                # read a name fragment / the wrong column. `index` is the FIRST field and the two
+                # memory numbers are the LAST two, so parse from the ends and rejoin the middle as name.
+                gpus.append({"index": to_int(parts[0]), "name": ",".join(parts[1:-2]).strip(),
+                             "mem_total_mib": to_int(parts[-2]), "mem_free_mib": to_int(parts[-1])})
     except (OSError, ValueError, subprocess.SubprocessError):
         gpus = []
     _GPUS_CACHE = gpus

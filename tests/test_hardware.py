@@ -44,3 +44,18 @@ def test_task_caps_reflects_auto_install():
     capable = _CapableTask()
     assert "torch" in task_runtime_caps(capable, auto_install=True, gpu=None)
     assert "torch" not in task_runtime_caps(capable, auto_install=False, gpu=None)
+
+
+def test_detect_gpus_handles_comma_in_gpu_name(monkeypatch):
+    """Architecture review: a GPU name containing a comma shifts the CSV columns; detect_gpus must
+    parse index from the head and the memory numbers from the tail (rejoining the name), matching the
+    sibling detect_gpu — not read fixed positions that land on a name fragment."""
+    import looplab.core.hardware as hw
+    monkeypatch.setattr(hw, "_GPUS_CACHE", None)
+    # nvidia-smi row for a comma-bearing name: index, "NVIDIA A100, SXM4", mem.total, mem.free
+    monkeypatch.setattr(hw, "query_nvidia_smi",
+                        lambda *a, **k: [["0", "NVIDIA A100", "SXM4", "40960", "40000"]])
+    g = hw.detect_gpus()[0]
+    assert g["index"] == 0
+    assert g["name"] == "NVIDIA A100,SXM4"
+    assert g["mem_total_mib"] == 40960 and g["mem_free_mib"] == 40000

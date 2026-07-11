@@ -442,8 +442,16 @@ class OpenAICompatibleClient:
                 # returns UnsupportedParamsError for `reasoning_effort` — isn't a real bad request:
                 # drop reasoning for this client and retry (deepseek keeps it; glm-5.1 adapts).
                 if self.reasoning and self._reasoning_ok and _is_reasoning_reject(_err_body(e)):
-                    self._reasoning_ok = False
-                    continue
+                    self._reasoning_ok = False   # permanent for this client: the NEXT request drops the param
+                    if attempt < self._max_retries:
+                        continue                 # a remaining iteration re-issues with reasoning dropped
+                    # On the LAST attempt the loop can't retry — but `_reasoning_ok` is now False, so the
+                    # caller's retry/fallback WILL succeed. Surface a CLEAR reason instead of falling
+                    # through to the generic, misleading "no response after retries" (every sibling retry
+                    # branch guards on attempt<_max_retries; this one silently did not).
+                    raise LLMError(f"LLM request to {self.base_url} rejected the reasoning param on the "
+                                   f"final attempt; reasoning is now disabled for this client so a retry "
+                                   f"will succeed: {e}") from e
                 raise LLMError(f"LLM request to {self.base_url} failed: {e}") from e
             except openai.AuthenticationError as e:
                 raise LLMError(f"LLM request to {self.base_url} failed: {e} — check the API key "
