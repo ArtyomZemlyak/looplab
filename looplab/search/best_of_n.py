@@ -126,15 +126,42 @@ class BestOfNDeveloper(WrapsDeveloper):
         return extra
 
     def implement(self, idea: Idea) -> str:
+        return self._best_of(idea, lambda: self.inner.implement(idea))
+
+    def implement_from(self, idea: Idea, parent) -> str:
+        """Parent-aware best-of-N (arch-review §4 P1-9): forward the inner developer's `implement_from`
+        so an IMPROVE/REFINE still starts from the parent's actual solution through the BestOfN wrapper.
+        Without exposing this, the engine's `getattr(developer, 'implement_from')` capability check saw
+        only BestOfN's plain `implement` and regenerated every child from the pristine baseline."""
+        impl_from = getattr(self.inner, "implement_from", None)
+        if not callable(impl_from):
+            return self.implement(idea)     # inner has no parent-aware path -> plain best-of-N
+        return self._best_of(idea, lambda: impl_from(idea, parent))
+
+    def repair_from(self, idea: Idea, node, error: str) -> str:
+        """Parent-aware repair, forwarded like `implement_from` — the fix is seeded from the FAILING
+        node's own files. Single-shot (repair is not best-of-N'd), mirroring `repair`."""
+        rf = getattr(self.inner, "repair_from", None)
+        if not callable(rf):
+            return self.repair(idea, getattr(node, "code", ""), error)
+        self.last_foresight_pick = None     # repair uses no predictive ranker: clear the prior pick
+        out = rf(idea, node, error)
+        self._sync_audit()                  # else last_files stale from a prior implement()
+        return out
+
+    def _best_of(self, idea: Idea, gen_one) -> str:
+        """Run `gen_one()` (one inner implement / implement_from candidate) N times and pick the best by
+        the execution-free static score, then the FOREAGENT predictor / D10 list-wise tie-break. Shared
+        by `implement` and `implement_from` so both get identical best-of-N + parent-aware behavior."""
         if self.n == 1:
-            code = self.inner.implement(idea)
+            code = gen_one()
             self._sync_audit()
             self.last_n_scores = [_score(code)]
             return code
         self.last_n_scores = []          # per-node telemetry: reset so it holds only THIS node's N
         cands: list[tuple[str, dict, list, float]] = []
         for _ in range(self.n):
-            code = self.inner.implement(idea)
+            code = gen_one()
             sc = _score(code)
             self.last_n_scores.append(sc)
             cands.append((code, getattr(self.inner, "last_files", {}) or {},
