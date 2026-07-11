@@ -368,6 +368,18 @@ def test_unstamped_terminal_still_accepted_backward_compat(tmp_path):
     assert fold(s.read_all()).nodes[0].status is NodeStatus.evaluated
 
 
+def test_ablation_eval_cost_is_budgeted(tmp_path):
+    """arch-review §4 P1-2: ablation probes run real evals; their wall-clock must count against the
+    cumulative budget (total_eval_seconds), not spend entirely outside accounting."""
+    s = EventStore(tmp_path / "e.jsonl")
+    s.append("run_started", {"run_id": "r", "task_id": "t", "direction": "min"})
+    s.append("ablate", {"parent_id": 0, "impacts": {"x": 0.1}, "eval_seconds": 4.5})
+    assert fold(s.read_all()).total_eval_seconds == 4.5
+    # an old ablate event with no eval_seconds adds nothing (backward compatible)
+    s.append("ablate", {"parent_id": 1, "impacts": {}})
+    assert fold(s.read_all()).total_eval_seconds == 4.5
+
+
 def test_normalize_task_rejects_cmd_and_eval_both():
     import pytest
     from looplab.adapters.tasks import normalize_task

@@ -428,6 +428,13 @@ def _on_llm_cost(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
 
 def _on_ablate(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     st.ablations.append(d)   # {parent_id, impacts} — parameter-sensitivity audit
+    # Account the ablation probes' eval wall-clock against the cumulative budget (arch-review §4 P1-2:
+    # ablation was wholly outside accounting, so a run could spend well past max_eval_seconds on
+    # probes). Additive + reader-defaulted: old ablate events carry no eval_seconds -> +0.0.
+    try:
+        st.total_eval_seconds += float(d.get("eval_seconds") or 0.0)
+    except (TypeError, ValueError):
+        pass
 
 def _on_policy_decision(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     _scores = {}
