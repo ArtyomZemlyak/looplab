@@ -526,11 +526,14 @@ def test_mount_true_plus_edit_true_is_coerced_to_a_writable_copy(tmp_path):
     assert adapter.data["d"].mount is False and adapter.data["d"].edit is True
 
 
-def test_docker_wrap_binds_data_sources_read_only(tmp_path):
-    # mega-review fix: edit:false is now enforced at the MOUNT layer for sandboxed evals — a
-    # symlink-mounted source rides along as a same-path bind (:ro unless edit:true); without it the
-    # /work bind left the symlink dangling AND any train stage could write the original.
+def test_docker_wrap_binds_only_symlinked_sources(tmp_path):
+    # mega-review fix: edit:false is enforced at the MOUNT layer for sandboxed evals — a symlink-mounted
+    # source rides along as a bind (readonly unless edit:true) so the /work symlink resolves. arch-review
+    # §4 P1-8: only ACTUAL symlinks are bound (a copied-in source already rides in /work), and the mount
+    # uses `--mount` not the `-v` colon form (malformed for a Windows host path -> "too many colons").
+    import os
     import shutil
+    import pytest
     from looplab.engine.orchestrator import Engine
     from looplab.runtime.command_eval import make_docker_wrap
     e = object.__new__(Engine)
@@ -540,14 +543,40 @@ def test_docker_wrap_binds_data_sources_read_only(tmp_path):
                              "legacy": "/data/legacy"},
                     "references": [{"name": "lib", "path": "/refs/lib", "mount": True},
                                    {"name": "ctx", "path": "/refs/ctx", "mount": False}]}
-    binds = e._data_binds()
+    wd = tmp_path / "wd"
+    wd.mkdir()
+    try:                                              # materialize the mount:true sources AS symlinks
+        for name in ("raw", "rw", "legacy", "lib"):   # (dangling is fine — is_symlink() is True)
+            os.symlink("/nonexistent/target", wd / name)
+    except (OSError, NotImplementedError):
+        pytest.skip("platform can't create symlinks (the copy-in path is exercised elsewhere)")
+    (wd / "cp").mkdir()                                # copied-in sources are real dirs, never bound
+    (wd / "ctx").mkdir()
+    binds = e._data_binds(str(wd))
     assert ("/data/raw", True) in binds and ("/data/rw", False) in binds
     assert ("/data/legacy", True) in binds and ("/refs/lib", True) in binds
     assert all(p not in ("/data/cp", "/refs/ctx") for p, _ in binds)   # copy-in / context-only: no bind
     if shutil.which("docker"):                       # argv assembly (docker CLI present only)
         wrap = make_docker_wrap(str(tmp_path), "img", binds=binds)
         argv = wrap(["python", "x.py"], str(tmp_path))
-        assert "-v" in argv and "/data/raw:/data/raw:ro" in argv and "/data/rw:/data/rw" in argv
+        assert "--mount" in argv                                     # extra binds use --mount, not -v colon
+        assert "type=bind,src=/data/raw,dst=/data/raw,readonly" in argv
+        assert "type=bind,src=/data/rw,dst=/data/rw" in argv          # edit:true -> writable (no readonly)
+        # only the /work bind uses `-v`; no extra data bind does (that colon form was the P1-8 crash)
+        assert [a for a in argv if a == "-v"] and argv[argv.index("-v") + 1].endswith(":/work")
+
+
+def test_data_binds_skips_copied_in_sources(tmp_path):
+    # arch-review §4 P1-8: a mount:true source that ended up COPIED (Windows os.symlink fallback) must
+    # not be bound — it already lives in /work and its drive path has no Linux container target.
+    import os
+    from looplab.engine.orchestrator import Engine
+    e = object.__new__(Engine)
+    e._repo_spec = {"data": {"copied": {"path": "/data/copied", "mount": True, "edit": False}}}
+    wd = tmp_path / "wd"
+    wd.mkdir()
+    (wd / "copied").mkdir()                            # copied in as a real dir, NOT a symlink
+    assert e._data_binds(str(wd)) is None              # nothing to bind
 
 
 def test_api_start_infers_kind_for_composable_task():

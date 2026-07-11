@@ -429,7 +429,15 @@ def make_docker_wrap(mount_root: str, image: str, network: str = "none",
     extra: list[str] = []
     for p, ro in (binds or []):
         ap = Path(p).resolve().as_posix()
-        extra += ["-v", f"{ap}:{ap}:ro" if ro else f"{ap}:{ap}"]
+        # Use `--mount` (comma-separated key=value) instead of `-v host:container[:ro]`: the colon form
+        # is MALFORMED for a resolved Windows host path — `C:/data:C:/data:ro` -> Docker Desktop "too
+        # many colons" — so untrusted Windows RepoTasks with extra inputs failed (arch-review §4 P1-8).
+        # `--mount` parses src/dst as explicit keys with no colon ambiguity. dst mirrors the symlink
+        # target (same absolute path) so the in-/work symlink resolves in the container. Only real
+        # symlinks reach here (see _data_binds), so on POSIX ap is a valid Linux container path; a
+        # copied-in source (the common Windows case) rides in the /work bind and is never bound here.
+        spec = f"type=bind,src={ap},dst={ap}" + (",readonly" if ro else "")
+        extra += ["--mount", spec]
 
     def wrap(argv: list[str], host_cwd: str) -> list[str]:
         rel = os.path.relpath(Path(host_cwd).resolve(), root).replace(os.sep, "/")
