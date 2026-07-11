@@ -592,29 +592,20 @@ class LessonMemory:
         return out
 
     def _lesson_evidence_stale(self, state: RunState, o: dict) -> bool:
-        """True iff a lesson's grounding nodes no longer match what it was distilled from — a re-eval
-        FLIPPED an outcome it depends on. Uses the stored `evidence_sig` (exact) when present; a node
-        that is now pending/absent (sig None) is 'not yet resolved', NOT drift (wait for its re-eval).
-        For LEGACY rows (no sig) falls back to an outcome-CONTRADICTION check (claims success but a cited
-        node is now failed, or vice-versa) so a pre-upgrade false-failure correction is still caught."""
-        ev = o.get("evidence") or []
-        if not ev:
-            return False
+        """True iff a lesson's grounding nodes no longer match the OUTCOME SIGNATURE it was distilled
+        from — a re-eval FLIPPED something it depends on. Requires the exact `evidence_sig`: a node now
+        pending/absent (sig None) is 'not yet resolved', NOT drift (wait for its re-eval). LEGACY rows
+        (written before sigs) carry NO reliable provenance and are NEVER judged stale — an outcome-only
+        heuristic is unsound here: a lesson's `outcome` is a VERDICT (a comparative 'failed' means the
+        change REGRESSED, a reflect '[BAD]' means 'avoid this technique'), NOT the node's crash/eval
+        STATUS, so comparing the two mis-fires on legitimate lessons whose nodes are evaluated (observed
+        in prod: it retired two valid 'this change regressed' comparative lessons). Legacy rows age out
+        via normal consolidation instead; everything written from here on carries a sig."""
         sig = o.get("evidence_sig")
-        if isinstance(sig, dict) and sig:
-            return any((cur := self._node_sig(state.nodes.get(self._coerce_id(k)))) is not None
-                       and cur != v for k, v in sig.items())
-        # Legacy (pre-sig): can't diff exactly — fire only on a HARD contradiction of the recorded
-        # outcome (the exact case this mechanism exists for: a success/failure verdict reversed).
-        out = str(o.get("outcome") or "").lower()
-        sigs = [self._node_sig(state.nodes.get(n)) or "" for n in ev]
-        now_failed = any(s.startswith("failed") for s in sigs)
-        now_ok = any(s.startswith("evaluated") for s in sigs)
-        if out in ("supported", "tested", "good") and now_failed and not now_ok:
-            return True
-        if out in ("failed", "bad") and now_ok and not now_failed:
-            return True
-        return False
+        if not (isinstance(sig, dict) and sig):
+            return False
+        return any((cur := self._node_sig(state.nodes.get(self._coerce_id(k)))) is not None
+                   and cur != v for k, v in sig.items())
 
     def reconcile_lessons(self, state: RunState) -> RunState:
         """Memory reconciliation on a CHANGED OUTCOME (the node_reset / re-eval seam). Fold-derived

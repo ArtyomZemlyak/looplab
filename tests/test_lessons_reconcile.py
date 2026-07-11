@@ -110,16 +110,23 @@ def test_evidence_stale_pending_node_is_not_drift(tmp_path):
     assert eng.lessons._lesson_evidence_stale(st, lz) is True
 
 
-def test_evidence_stale_legacy_contradiction(tmp_path):
-    # LEGACY rows (no evidence_sig): can't diff exactly, so fire only on a HARD outcome contradiction.
+def test_evidence_stale_legacy_no_sig_is_never_stale(tmp_path):
+    # LEGACY rows (no evidence_sig) carry no reliable provenance, so they are NEVER judged stale — an
+    # outcome-only heuristic is unsound (a lesson's `outcome` is a VERDICT, not the node's crash/eval
+    # STATUS): a comparative 'failed' means "the change regressed", a reflect '[BAD]' means "avoid
+    # this", and both routinely sit on EVALUATED nodes. Comparing the two mis-fired in prod (it retired
+    # two valid 'this change regressed' lessons whose nodes were evaluated). So no sig → not stale.
     eng = _engine(tmp_path)
-    st = _state([_node(5, metric=4.0)])                                  # node 5 is now EVALUATED
+    st = _state([_node(5, metric=4.0), _node(7, metric=9.0)])
+    for outcome in ("failed", "supported", "bad", "tested"):
+        assert eng.lessons._lesson_evidence_stale(
+            st, {"run_id": "run_me", "source": "comparative", "evidence": [5, 7],
+                 "outcome": outcome}) is False
+        assert eng.lessons._lesson_evidence_stale(
+            st, {"run_id": "run_me", "evidence": [5], "outcome": outcome}) is False
+    # a legacy row still becomes reconcilable the moment it's rewritten WITH a sig (exact path)
     assert eng.lessons._lesson_evidence_stale(
-        st, {"run_id": "run_me", "evidence": [5], "outcome": "failed"}) is True   # claimed failed → flipped
-    assert eng.lessons._lesson_evidence_stale(
-        st, {"run_id": "run_me", "evidence": [5], "outcome": "supported"}) is False  # consistent
-    assert eng.lessons._lesson_evidence_stale(
-        st, {"run_id": "run_me", "evidence": [], "outcome": "failed"}) is False   # ungrounded → skip
+        st, {"run_id": "run_me", "evidence": [5], "evidence_sig": {"5": "failed:oom"}}) is True
 
 
 # --------------------------------------------------------------------------- #
