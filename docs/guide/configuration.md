@@ -128,7 +128,7 @@ These are no-ops unless `backend=llm`.
 | `agent_stuck_alternate` | `LOOPLAB_AGENT_STUCK_ALTERNATE` | `4` | Ping-pong cycles between two calls that count as "stuck" (min 2) |
 | `agent_self_plan` | `LOOPLAB_AGENT_SELF_PLAN` | `true` | **C1** — expose a TodoWrite-style `update_plan` tool so a long-running agent keeps its own TODO, re-surfaced periodically |
 | `agent_plan_reinject_every` | `LOOPLAB_AGENT_PLAN_REINJECT_EVERY` | `5` | How often (tool-loop turns) to re-surface the agent's current plan |
-| `agent_auto_summary` | `LOOPLAB_AGENT_AUTO_SUMMARY` | `true` | **C2** — LLM-summarize the stale middle of the tool-loop history once it exceeds `context_budget_chars` (default ~1M chars ≈ 250k tokens; falls back to a ~120k-char high-water mark only if `context_budget_chars` is 0) |
+| `agent_auto_summary` | `LOOPLAB_AGENT_AUTO_SUMMARY` | `true` | **C2** — LLM-summarize the stale middle of the tool-loop history once it exceeds `context_budget_chars` (default ~1M chars ≈ 250k tokens). The ~120k-char high-water fallback applies only when `context_budget_chars` is **unset** (`None`) — with the shipped default of 1,000,000 it never fires; `context_budget_chars=0` means compaction **off**, matching its own row above |
 | `developer_plan_decompose` | `LOOPLAB_DEVELOPER_PLAN_DECOMPOSE` | `true` | **C4** — the repo Developer first proposes an ordered plan of ATOMIC steps; a multi-step plan is executed step-by-step, each a FRESH bounded session building on the files so far (syntax-validated per write). Stops a big feature from making a non-converging model run away (writing+exploring without ever emitting `done`). A 1-step plan == the old single pass |
 | `developer_plan_min_steps` | `LOOPLAB_DEVELOPER_PLAN_MIN_STEPS` | `2` | A proposed plan with ≥ this many steps runs step-by-step; fewer falls back to one session |
 | `developer_plan_max_steps` | `LOOPLAB_DEVELOPER_PLAN_MAX_STEPS` | `8` | Cap on plan length (a runaway planner can't spawn 100 steps) |
@@ -213,9 +213,15 @@ See [LLM & coding agents](llm-and-agents.md) for full guidance.
 
 `agent_control` maps a setting name → the roles allowed to change it: `strategist` (run-wide
 meta-controller), `boss` (run-chat operator-proxy), `researcher` (per-experiment, per-node sizing).
-A setting **absent** from the map is locked — only a human can change it via the snapshot/UI. The
-default grants resource/search-shape knobs to the agents and keeps infra (`llm_*`, `trust_mode`,
-`docker_image`, api key) locked.
+A setting **absent** from the map is locked — only a human can change it via the snapshot/UI. This
+is **enforced at runtime** (`_agent_may`) at every agent seam, so removing a role from a knob truly
+locks it — not just a UI hint: the Strategist's whole control surface (`policy`, `n_seeds`,
+`ablate_every`, `merge_mode`, `complexity_cue`, `ablate_code_blocks`, `prefer_sweep`,
+`novelty_stance`, `developer`, `fidelity`) and the boss's resource retunes (`timeout`,
+`max_parallel`, `max_eval_seconds`) are each gated. The default grants those resource/search-shape
+knobs to the agents and keeps infra (`llm_*`, `trust_mode`, `docker_image`, api key) locked.
+(`fidelity`/`novelty_stance`/`prefer_sweep`/`developer` are governance keys for the strategist's
+per-node dials — not 1:1 `Settings` fields, but gated the same way.)
 
 ## Evaluation rigor & confirmation
 

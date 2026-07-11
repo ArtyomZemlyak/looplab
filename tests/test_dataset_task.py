@@ -88,6 +88,15 @@ def test_brief_orientation_is_direction_correct():
     assert "error/loss (RMSE, log-loss), report its NEGATIVE" in hi
     assert "gain (accuracy/F1/AUC/R^2), report its NEGATIVE" not in hi
 
+    # the self-chosen (open-ended metric) branch must be direction-correct too
+    lo_open = DatasetTask(data_path=str(DATA_CSV), direction="min")._brief()
+    assert "metric_name" in lo_open and "LOWER is better" in lo_open
+    assert "gain (accuracy/F1/AUC/R^2), report its NEGATIVE" in lo_open
+    assert "error/loss (RMSE, log-loss), report its NEGATIVE" not in lo_open
+    hi_open = DatasetTask(data_path=str(DATA_CSV), direction="max")._brief()
+    assert "error/loss (RMSE, log-loss), report its NEGATIVE" in hi_open
+    assert "gain (accuracy/F1/AUC/R^2), report its NEGATIVE" not in hi_open
+
 
 def test_dataset_run_end_to_end_and_replays(tmp_path):
     from looplab.events.replay import fold

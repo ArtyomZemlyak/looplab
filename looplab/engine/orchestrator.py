@@ -269,8 +269,13 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         self._dep_lock = _threading.Lock()
         # Agent governance (Settings.agent_control): per-setting allow-list of which roles may change it
         # at runtime. A setting absent from the map is LOCKED (no agent). Enforced at the strategist /
-        # boss / researcher seams via `_agent_may`. None => the conservative defaults are off (locked).
-        self._agent_control: dict = dict(agent_control or {})
+        # boss / researcher seams via `_agent_may`. `None` (a bare Engine(...) with no options) resolves
+        # to the SHIPPED default matrix — so a directly-constructed engine behaves like a real CLI run
+        # (the EngineOptions "Engine() == shipped defaults" invariant); pass an explicit `{}` to lock
+        # every knob against the agents.
+        from looplab.core.config import DEFAULT_AGENT_CONTROL
+        self._agent_control: dict = (dict(agent_control) if agent_control is not None
+                                     else {k: list(v) for k, v in DEFAULT_AGENT_CONTROL.items()})
         self._localize_faults = localize_faults
         self._feature_engineering = feature_engineering
         self._ablate_code_blocks = ablate_code_blocks
@@ -784,12 +789,18 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
     def _apply_control_overrides(self, state: RunState) -> tuple[Optional[float], Optional[float]]:
         # Effective budgets: an operator may raise (or lower) them live via a `budget_extend`
         # control event (folded into state.budget_overrides), e.g. "keep going for 600s more".
+        # max_seconds ("keep going 600s more") is a first-class operator budget extension via the
+        # budget_extend control event, not an agent_control-governed knob — applied as-is.
         max_s = state.budget_overrides.get("max_seconds", self.max_seconds)
-        max_es = state.budget_overrides.get("max_eval_seconds", self.max_eval_seconds)
+        _bo = state.budget_overrides
+        # max_eval_seconds IS a governed resource cap (agent_control lists it for the boss): honour the
+        # matrix so a boss budget_extend can't raise a LOCKED per-eval cap (architecture-review M4).
+        max_es = self.max_eval_seconds
+        if "max_eval_seconds" in _bo and self._agent_may("boss", "max_eval_seconds"):
+            max_es = _bo["max_eval_seconds"]
         # Boss (run-chat) resource retune: a `budget_extend` may carry timeout / max_parallel. Apply
         # to self.* (read fresh per eval / per batch) only when the matrix grants the boss — so the
         # operator can e.g. give the run more per-eval time or more parallelism mid-flight.
-        _bo = state.budget_overrides
         if "timeout" in _bo and self._agent_may("boss", "timeout"):
             try: self.timeout = max(0.1, float(_bo["timeout"]))
             except (TypeError, ValueError): pass

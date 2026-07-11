@@ -92,6 +92,23 @@ def test_artifacts_token_gated(tmp_path, monkeypatch):
                       headers=h).json()["content"] == "hi\n"
 
 
+def test_raw_content_read_routes_are_token_gated(tmp_path, monkeypatch):
+    """M8 regression: routes that serve RAW content (not folded projections) must be gated when
+    LOOPLAB_UI_TOKEN is set — the raw event log (solution code + captured stdout/stderr), AGENTS.md,
+    operator-authored prompt/skill/knowledge files, cross-run memory, and the assistant permission
+    preview. The old gate only covered /artifact(s) and falsely claimed everything else was projections."""
+    monkeypatch.setenv("LOOPLAB_UI_TOKEN", "sekret")
+    _build_run(tmp_path)
+    client = TestClient(make_app(tmp_path))
+    for path in ("/api/runs/demo/log", "/api/runs/demo/agents_md", "/api/prompts", "/api/skills",
+                 "/api/knowledge", "/api/memory", "/api/assistant/permissions"):
+        assert client.get(path).status_code == 401, f"{path} should be gated"
+        assert client.get(path, headers={"X-LoopLab-Token": "sekret"}).status_code == 200, path
+    # projection reads stay open without the token
+    assert client.get("/api/runs/demo/state").status_code == 200
+    assert client.get("/api/runs").status_code == 200
+
+
 def test_assistant_session_transcript_is_token_gated(tmp_path, monkeypatch):
     """An assistant session transcript returns `raw` (the full model-facing instruction incl. attached
     file contents), so it must be gated like a raw-file read when LOOPLAB_UI_TOKEN is set."""

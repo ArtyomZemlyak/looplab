@@ -23,6 +23,25 @@ def test_grep_list_read_root_repo(tmp_path):
     assert "SECRET" in t.execute("repo_read", {"path": "pkg/util.py"})
 
 
+def test_repo_read_large_file_reports_more_not_eof(tmp_path):
+    """M9 regression: repo_read used read_file's default 200KB cap, so a >200KB file was truncated
+    and _paginate reported EOF (no '(more below)' marker) — telling the agent it read the whole file
+    while everything past 200KB was silently missing. The full file must now be read + paginated."""
+    repo = tmp_path / "repo"; repo.mkdir()
+    # ~300KB file: 6000 lines of ~50 chars each, with a unique sentinel on the last line.
+    lines = [f"line {i:05d}: " + "x" * 40 for i in range(6000)]
+    lines[-1] = "FINAL_SENTINEL_LINE"
+    (repo / "big.py").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    t = RepoTools([{"name": ".", "path": str(repo)}])
+    # Windowing the first page must advertise more content (not falsely claim EOF).
+    first = t.execute("repo_read", {"path": "big.py", "start_line": 1, "lines": 50})
+    assert "more below" in first, first[-200:]
+    # Windowing to the true end (past the old 200KB cut) must reach the sentinel and NOT say more below.
+    last = t.execute("repo_read", {"path": "big.py", "start_line": 5995, "lines": 50})
+    assert "FINAL_SENTINEL_LINE" in last
+    assert "more below" not in last
+
+
 def test_named_repos_namespacing(tmp_path):
     a = tmp_path / "a"; a.mkdir(); (a / "x.py").write_text("AAA = 1\n", encoding="utf-8")
     b = tmp_path / "b"; b.mkdir(); (b / "y.py").write_text("BBB = 2\n", encoding="utf-8")

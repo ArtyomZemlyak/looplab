@@ -216,13 +216,15 @@ class LessonDistillMixin:
         from looplab.engine.memory import parse_credit_lessons
         # No fixed cap: one lesson per distinct theme (consolidation keeps this small); bound at 8 as a
         # runaway guard, not a target. §role-split: these are generalizable technique/strategy takeaways
-        # → the RESEARCHER's context (what to try next).
+        # → the RESEARCHER's context (what to try next). n_pairs=0 (reflection lines carry no valid
+        # P-marker) — pass limit=8 explicitly: the parser's default cap is max(3, n_pairs)=3, which
+        # used to silently drop themes 4-8 (the [:8] slice was dead) (architecture-review M6).
         res = [{"task_id": final.task_id, "fingerprint": fp,
                 "kind": getattr(self._e.task, "kind", ""), "statement": stmt,
                 "outcome": outcome, "delta": None, "confidence": 0.6,
                 "run_id": final.run_id, "evidence": list(ev_ids), "evidence_sig": ev_sig,
                 "role": LESSON_ROLE_RESEARCHER}
-               for _, stmt, outcome in parse_credit_lessons(out, 0)[:8]]
+               for _, stmt, outcome in parse_credit_lessons(out, 0, limit=8)]
         return res      # LLM gave nothing usable → [] (a real run never writes a templated lesson)
 
     def distill_skill_body(self, final: RunState, h, ev: list) -> str:

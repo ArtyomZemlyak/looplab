@@ -237,29 +237,40 @@ class LessonReconcileMixin:
             fresh_reflect = self._e._reflect_lessons(state, state.best(), fp) if reflect_stale else []
             # A reflect (whole-run) lesson drifting invalidates the WHOLE reflect batch for this run —
             # the generalization spans all its fed nodes — so replace EVERY reflect row of this run, not
-            # just the one that drifted (retiring one would leave near-dup siblings to merge against the
-            # fresh batch). BUT only when re-derivation actually produced lessons: an empty/failed LLM
-            # re-derivation must NOT nuke existing memory — in that case we still drop the specifically
-            # drifted rows (already in `stale_idx`; they're wrong) but keep the non-drifted siblings.
-            if reflect_stale and fresh_reflect:
-                for idx, o in enumerate(rows):
-                    if (isinstance(o, dict) and o.get("run_id") == state.run_id
-                            and o.get("source") != "comparative"):
-                        stale_idx.add(idx)
+            # just the one that drifted. BUT only when re-derivation actually produced lessons: an
+            # empty/failed LLM re-derivation must NOT nuke existing memory (then drop only the drifted).
+            drop_all_reflect = reflect_stale and bool(fresh_reflect)
+            _stale_pairs = {tuple(p) for p in stale_pairs}
             comp: list = []
             pairs_used: list = []
             if stale_pairs and self._e._comparative_lessons_on:
                 # Un-spend the drifted pairs so `select_comparison_pairs` can re-pick them, then re-derive.
-                _stale = {tuple(p) for p in stale_pairs}
-                exclude = [p for p in self._e._spent_pairs(state) if tuple(p) not in _stale]
+                exclude = [p for p in self._e._spent_pairs(state) if tuple(p) not in _stale_pairs]
                 comp, pairs_used = self._e._comparative_lessons(state, fp, exclude=exclude)
             fresh = fresh_reflect + comp
-            # Rewrite: drop the stale rows, keep the rest, append the fresh re-derivations — under the
-            # SAME interprocess lock append_lessons uses (a concurrent run's O_APPEND between our read
-            # and rewrite would otherwise be clobbered). Then the D2 hygiene pass consolidates/compacts.
+
+            def _is_stale(o) -> bool:
+                # Identify a stale row of THIS run by IDENTITY (evidence pair / staleness), NOT raw line
+                # index — so the drop survives a RE-READ inside the lock. A concurrent run's O_APPEND
+                # during the LLM window shifts line numbers, and it only ever appends OTHER runs' lessons
+                # (run_id != ours), which _is_stale never matches, so they are preserved.
+                if not isinstance(o, dict) or o.get("run_id") != state.run_id:
+                    return False
+                if o.get("source") == "comparative" and len(o.get("evidence") or []) == 2:
+                    return tuple(o["evidence"]) in _stale_pairs
+                return drop_all_reflect or self._lesson_evidence_stale(state, o)
+
+            # Rewrite UNDER the lock, RE-READING the file INSIDE it: read + drop-stale + append-fresh must
+            # be atomic vs a concurrent run's O_APPEND, or the whole-file replace clobbers a lesson that
+            # landed in the read→write window (the pre-lock snapshot never saw it) — the exact race the
+            # lock exists to prevent (JsonlCaseLibrary.add / append_lessons both re-read inside the lock).
             from looplab.events.eventstore import _interprocess_lock
-            kept = [o for i, o in enumerate(rows) if isinstance(o, dict) and i not in stale_idx]
             with _interprocess_lock(Path(str(path) + ".lock")):
+                try:
+                    cur = read_jsonl_lenient(path)   # authoritative current file, inside the lock
+                except OSError:
+                    cur = [o for o in rows if isinstance(o, dict)]
+                kept = [o for o in cur if isinstance(o, dict) and not _is_stale(o)]
                 write_jsonl_atomic(path, kept + fresh)
                 prompts, parser = self._merge_prompt_opts()
                 self._e._consolidate_lessons_file(path, client, self._e._embedder,

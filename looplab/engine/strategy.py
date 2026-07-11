@@ -134,35 +134,45 @@ class StrategyCadenceMixin:
     def _apply_strategy(self, strat: dict) -> None:
         """Rebuild the live search machinery from a Strategy (pure wiring, no events). Policies share
         the action vocabulary and are pure, so swapping between loop iterations is safe; the Developer
-        is swapped only between sequential _create_node calls."""
-        if strat.get("novelty_stance") in NOVELTY_STANCES:
+        is swapped only between sequential _create_node calls.
+
+        EVERY knob application is gated on the governance matrix (`_agent_may("strategist", <knob>)`),
+        so the documented contract actually holds (architecture-review M4): a knob whose grant an
+        operator removes from `agent_control` is genuinely LOCKED against the autonomous Strategist,
+        not merely a decorative UI pill. The default matrix grants the Strategist every knob it applies
+        (see Settings.agent_control), so default behaviour is unchanged. The gate is deterministic and
+        applied both when the decision is recorded AND on resume (`_reentry_repin`), so a blocked knob
+        stays blocked identically on replay — the recorded active_strategy and the live engine agree."""
+        def may(k):
+            return self._agent_may("strategist", k)
+        if may("novelty_stance") and strat.get("novelty_stance") in NOVELTY_STANCES:
             self._novelty_stance = strat["novelty_stance"]   # Strategist's novelty dial (slice 2)
         ops = strat.get("operators") or {}
-        if "ablate_every" in ops:
+        if "ablate_every" in ops and may("ablate_every"):
             self._ablate_every = int(ops["ablate_every"])
-        if "merge_mode" in ops:
+        if "merge_mode" in ops and may("merge_mode"):
             self._merge_mode = ops["merge_mode"]
-        if "complexity_cue" in ops:
+        if "complexity_cue" in ops and may("complexity_cue"):
             self._complexity_cue = bool(ops["complexity_cue"])
-        if "ablate_code_blocks" in ops:
+        if "ablate_code_blocks" in ops and may("ablate_code_blocks"):
             self._ablate_code_blocks = bool(ops["ablate_code_blocks"])
-        if "prefer_sweep" in ops:
+        if "prefer_sweep" in ops and may("prefer_sweep"):
             self._prefer_sweep = bool(ops["prefer_sweep"])
         # Resource budgets the Strategist may retune live (gated by the governance matrix). self.timeout
         # is read fresh per eval and self.max_parallel rebuilds the CapacityLimiter each batch, so a
         # mid-run change takes effect on the next node without any rewiring.
-        if "timeout" in strat and self._agent_may("strategist", "timeout"):
+        if "timeout" in strat and may("timeout"):
             try:
                 self.timeout = max(0.1, float(strat["timeout"]))
             except (TypeError, ValueError):
                 pass
-        if "max_parallel" in strat and self._agent_may("strategist", "max_parallel"):
+        if "max_parallel" in strat and may("max_parallel"):
             try:
                 self.max_parallel = max(1, int(strat["max_parallel"]))
             except (TypeError, ValueError):
                 pass
         pol = strat.get("policy")
-        if pol:
+        if pol and may("policy"):
             try:
                 # Strip the names make_policy takes as explicit kwargs: a policy_params entry like
                 # {"n_seeds": 4} would otherwise raise "multiple values for keyword argument",
@@ -184,17 +194,18 @@ class StrategyCadenceMixin:
             except (ValueError, TypeError):
                 pass    # keep the current policy on a bad spec (validate_strategy already whitelisted)
         fid = strat.get("fidelity")
-        if fid in ("smoke", "full"):
-            self._strategy_fidelity = fid
-        elif fid == "adaptive":
-            self._strategy_fidelity = None
+        if may("fidelity"):
+            if fid in ("smoke", "full"):
+                self._strategy_fidelity = fid
+            elif fid == "adaptive":
+                self._strategy_fidelity = None
         dev = strat.get("developer")
         # Unified mode: researcher IS developer (one agent). A live developer-backend swap would
         # replace `self.developer` with a different object, desyncing it from `self.researcher` (and
         # the factory, still seeing unified_agent=True, would build a whole new agent). The unified
         # agent owns its own implement stage — skip the swap rather than fracture the identity (R1).
-        if dev and self.developer_factory is not None and dev != self._developer_name \
-                and not self.unified_agent:
+        if dev and may("developer") and self.developer_factory is not None \
+                and dev != self._developer_name and not self.unified_agent:
             try:
                 self.developer = self.developer_factory(dev)
                 self._developer_name = dev
@@ -285,6 +296,14 @@ class StrategyCadenceMixin:
                     prev_ops, new_ops = prev.get("operators") or {}, strat.get("operators") or {}
                     if prev_ops or new_ops:
                         merged["operators"] = {**prev_ops, **new_ops}
+                    # request_research is a ONE-SHOT trigger (it fires a single Deep-Research stage at
+                    # THIS node via _maybe_deep_research), NOT accumulated machinery. Carrying it forward
+                    # from active_strategy would latch it True and re-fire the expensive Deep-Research at
+                    # every later consult — so honour it only when THIS decision set it (the pre-merge
+                    # semantics: the flag clears on the next recorded decision).
+                    merged.pop("request_research", None)
+                    if strat.get("request_research"):
+                        merged["request_research"] = True
                     merged = validate_strategy(merged, ctx) or strat
                     if self._strategy_core(merged) != self._strategy_core(state.active_strategy):
                         self._record_strategy(merged, state, ctx)

@@ -116,8 +116,18 @@ class RepoTools:
                         continue
                 # PAGINATE (reuse read_file's window logic) instead of a blind [:max_bytes] head — the
                 # same truncation that made the agent re-read the same file 8× on a >max_bytes file.
+                # Read the WHOLE file (bound = its own size) BEFORE paginating: read_file's default
+                # 200KB cap truncates silently, and _paginate derives its line count from the string it
+                # is handed — so for a >200KB file it would omit the '(more below)' marker and report
+                # EOF, telling the agent it read the whole file (a partial read misreported as complete,
+                # exactly the contract this pagination exists to keep). Mirrors RepoScoutTools._read_file
+                # (full-file read then paginate). (architecture-review M9)
                 from looplab.tools.reposcout import RepoScoutTools
-                return RepoScoutTools._paginate(read_file(str(target)),
+                try:
+                    full_bound = target.stat().st_size + 1
+                except OSError:
+                    full_bound = 200_000
+                return RepoScoutTools._paginate(read_file(str(target), max_bytes=full_bound),
                                                 args.get("start_line", 0), args.get("lines", 0))
         except Exception as e:  # noqa: BLE001 — tool errors are fed back to the model
             return f"(tool error: {e})"

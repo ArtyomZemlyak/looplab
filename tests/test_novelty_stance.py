@@ -150,12 +150,29 @@ def test_engine_defaults_to_balanced(tmp_path):
 
 
 def test_strategist_stance_is_applied_and_recorded(tmp_path):
-    eng = _engine(tmp_path / "s", strategist=_ExploreStrategist())
+    # M4: strategist knob application is governance-gated. A real (CLI) run grants the strategist its
+    # knobs via the shipped Settings.agent_control default — grant them here to exercise the APPLIED
+    # behaviour (a directly-constructed Engine defaults to the conservative all-locked map).
+    from looplab.core.config import Settings
+    eng = _engine(tmp_path / "s", strategist=_ExploreStrategist(),
+                  agent_control=Settings().agent_control)
     state = anyio.run(eng.run)
     assert eng._novelty_stance == "explore"
     decisions = [e for e in EventStore(tmp_path / "s" / "events.jsonl").read_all()
                  if e.type == "strategy_decision"]
     assert decisions and decisions[0].data["strategy"]["novelty_stance"] == "explore"
+
+
+def test_strategist_stance_locked_when_not_granted(tmp_path):
+    """M4 enforcement: with novelty_stance absent from the governance matrix, the strategist's
+    decision is still RECORDED but NOT applied — the documented per-setting lock actually holds now
+    (before the fix, every strategist knob except timeout/max_parallel was applied ungated)."""
+    eng = _engine(tmp_path / "s2", strategist=_ExploreStrategist(), agent_control={})   # all locked
+    anyio.run(eng.run)
+    assert eng._novelty_stance != "explore"                     # locked: decision not applied
+    decisions = [e for e in EventStore(tmp_path / "s2" / "events.jsonl").read_all()
+                 if e.type == "strategy_decision"]
+    assert decisions and decisions[0].data["strategy"]["novelty_stance"] == "explore"   # still recorded
 
 
 def _one_node_state(tmp_path) -> RunState:

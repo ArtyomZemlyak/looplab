@@ -292,6 +292,37 @@ def test_reconcile_leaves_other_runs_lessons_untouched(tmp_path, monkeypatch):
     assert "MINE stale" not in stmts                                    # only this run's stale row rewritten
 
 
+def test_reconcile_preserves_concurrent_append_during_rederivation(tmp_path, monkeypatch):
+    """M5 regression: reconcile RE-READS the lessons file inside the interprocess lock, so a lesson a
+    CONCURRENT run O_APPENDs during the (seconds-long) LLM re-derivation window survives. Before the
+    fix, the whole-file rewrite from the PRE-lock snapshot silently clobbered that row."""
+    mem = tmp_path / "mem"
+    eng = _engine(tmp_path, reflection_priors=True, memory_dir=str(mem), comparative_lessons=True)
+    _seed(mem, [
+        {"run_id": "run_me", "source": "comparative", "statement": "MINE stale", "outcome": "supported",
+         "evidence": [1, 0], "evidence_sig": {"1": "evaluated:4.0", "0": "evaluated:9.0"},
+         "fingerprint": [], "kind": "quadratic"},
+    ])
+    st = _state([_node(0, metric=9.0, op="draft", params={"x": 1.0}, code="x=1\n"),
+                 _node(1, metric=6.0, parent_ids=[0], params={"x": 3.0}, code="x=3\n")])  # mine drifts
+
+    # Simulate a concurrent run O_APPENDing its lesson DURING our re-derivation (between the pre-lock
+    # read and the locked rewrite) by appending from inside the comparative re-derivation call.
+    real_comp = eng._comparative_lessons
+
+    def _comp_then_concurrent_append(*a, **k):
+        _seed(mem, [{"run_id": "CONCURRENT", "source": "comparative", "statement": "CONCURRENT lesson",
+                     "outcome": "failed", "evidence": [2, 3], "fingerprint": [], "kind": "quadratic"}])
+        return real_comp(*a, **k)
+
+    monkeypatch.setattr(eng, "_comparative_lessons", _comp_then_concurrent_append)
+    monkeypatch.setattr(eng, "_reflect_client", lambda: FakeClient("P1 [BAD] regressed\n"))
+    eng.lessons.reconcile_lessons(st)
+    stmts = [r["statement"] for r in _rows(mem)]
+    assert "CONCURRENT lesson" in stmts     # the concurrent append survived the rewrite (the M5 fix)
+    assert "MINE stale" not in stmts        # this run's own stale row was still rewritten
+
+
 def test_reconcile_offline_leaves_store_and_will_retry(tmp_path):
     # No LLM wired: reconcile must NOT write a templated stand-in — it leaves the stale row and clears
     # its gate so a later pass (once a client appears) re-checks rather than skipping forever.

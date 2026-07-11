@@ -102,6 +102,28 @@ def test_strategist_blocked_when_not_granted(tmp_path):
     assert eng.timeout == 30.0 and eng.max_parallel == 1               # unchanged
 
 
+def test_strategist_search_knobs_gated_by_matrix(tmp_path):
+    """M4: EVERY strategist knob (not just timeout/max_parallel) is governance-gated. Under an empty
+    matrix a policy/operator/novelty change is blocked; granting it in the matrix lets it through."""
+    pol0 = tmp_path / "locked"
+    locked = _engine(pol0, agent_control={})                          # all locked
+    before = locked._policy_name
+    locked._apply_strategy({"policy": "mcts", "novelty_stance": "explore",
+                            "operators": {"ablate_every": 5}})
+    assert locked._policy_name == before                             # policy switch blocked
+    assert locked._novelty_stance != "explore"                       # stance blocked
+    assert locked._ablate_every != 5                                 # operator blocked
+
+    granted = _engine(tmp_path / "granted",
+                      agent_control={"policy": ["strategist"], "novelty_stance": ["strategist"],
+                                     "ablate_every": ["strategist"]})
+    granted._apply_strategy({"policy": "mcts", "novelty_stance": "explore",
+                             "operators": {"ablate_every": 5}})
+    assert granted._policy_name == "mcts"                            # granted -> applied
+    assert granted._novelty_stance == "explore"
+    assert granted._ablate_every == 5
+
+
 def test_validate_strategy_whitelists_resource_budgets():
     ctx = StrategyContext(available_policies=["greedy"], available_developers=["default"])
     out = validate_strategy({"timeout": 120.0, "max_parallel": 3}, ctx)

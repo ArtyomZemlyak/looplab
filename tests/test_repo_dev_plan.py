@@ -226,6 +226,45 @@ def test_empty_stages_phase_degrades_the_prompt_not_asserts_train(monkeypatch):
     assert "train a FRESH model" in user
 
 
+def test_degraded_stages_uses_carried_over_parent_manifest_not_no_stages(monkeypatch):
+    """M7 regression: on an IMPROVE the parent's looplab_stages.json is preloaded into write.files.
+    If the stages phase DEGRADES (declares nothing new), the eval's _resolve_stages still runs that
+    carried-over parent manifest — so the implement prompt must describe THAT pipeline, not say 'NO
+    pipeline stages / train a FRESH model' (which double-trained the model and disagreed with the
+    eval, since the entrypoint then trained a fresh model that ran AFTER the parent's train stage)."""
+    import json
+    rec: list = []
+    cap: list = []
+    _install_fake_loop(monkeypatch, [], rec, capture=cap, stages_emit={"stages": []})   # degrade the phase
+    dev = _dev(plan_decompose=False)
+    parent_manifest = json.dumps({"stages": [{"name": "prep", "command": ["python", "prep.py"]},
+                                             {"name": "train", "command": ["python", "train.py"]}]})
+    dev._run(Idea(operator="improve", params={}, rationale="x"),
+             base={"looplab_stages.json": parent_manifest, "main.py": "print(1)\n"})
+    user = next(c for c in cap if c["name"] == "done")["messages"][1]["content"]
+    assert "carried over from the parent solution" in user
+    assert "prep → train" in user
+    assert "NO pipeline stages" not in user and "train a FRESH model" not in user
+
+
+def test_degraded_stages_handles_bare_list_parent_manifest(monkeypatch):
+    """M7 (review follow-up): _resolve_stages accepts a BARE top-level JSON-list manifest, not only
+    the wrapped {"stages":[...]} shape. _materialized_stage_list must parse it the same way, or a
+    carried-over bare-list parent manifest still runs in the eval while the note says 'no pipeline'."""
+    import json
+    rec: list = []
+    cap: list = []
+    _install_fake_loop(monkeypatch, [], rec, capture=cap, stages_emit={"stages": []})   # degrade
+    dev = _dev(plan_decompose=False)
+    bare_list_manifest = json.dumps([{"name": "prep", "command": ["python", "prep.py"]},
+                                     {"name": "train", "command": ["python", "train.py"]}])
+    dev._run(Idea(operator="improve", params={}, rationale="x"),
+             base={"looplab_stages.json": bare_list_manifest, "main.py": "print(1)\n"})
+    user = next(c for c in cap if c["name"] == "done")["messages"][1]["content"]
+    assert "carried over from the parent solution" in user and "prep → train" in user
+    assert "NO pipeline stages" not in user
+
+
 def test_operator_declared_stages_skip_the_stages_phase(monkeypatch):
     """When the OPERATOR already declared a full eval.stages pipeline, the engine uses it verbatim (a
     Developer manifest would be ignored by _resolve_stages) — so the mandatory STAGES phase is SKIPPED

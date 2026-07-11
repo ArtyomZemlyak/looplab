@@ -361,10 +361,17 @@ def code_diff(old: str, new: str, max_lines: int = 60) -> str:
 _PAIR_LINE = re.compile(r"^P(\d+)\b\s*[:.\-]?\s*(.*)$", re.I)
 
 
-def parse_credit_lessons(text: str, n_pairs: int) -> list[tuple[int, str, str]]:
+def parse_credit_lessons(text: str, n_pairs: int, limit: Optional[int] = None) -> list[tuple[int, str, str]]:
     """Parse the LLM's per-pair verdict lines (`P<n> [GOOD|BAD] <lesson>`) into
     (pair_index, statement, outcome) tuples. pair_index is -1 when the line carries no usable
-    P-marker (the lesson still counts, unattributed). Tolerant of bullets/numbering; capped."""
+    P-marker (the lesson still counts, unattributed). Tolerant of bullets/numbering; capped.
+
+    `n_pairs` only clamps index VALIDITY (a P-marker beyond the real pair count collapses to -1).
+    The COUNT cap is `limit` (default `max(3, n_pairs)` for the comparative caller, whose lessons
+    naturally track its pair count). The whole-run reflection caller passes n_pairs=0 (its lines
+    carry no valid P-marker) and MUST pass an explicit limit — otherwise the default max(3,0)=3
+    silently capped reflection lessons at 3 instead of the intended 8 (architecture-review M6)."""
+    cap = limit if limit is not None else max(3, n_pairs)
     out: list[tuple[int, str, str]] = []
     for line in (text or "").splitlines():
         s = line.strip().lstrip("-*•0123456789.) ").strip()
@@ -385,7 +392,7 @@ def parse_credit_lessons(text: str, n_pairs: int) -> list[tuple[int, str, str]]:
         # (negative) meaning — no migration, readers tolerate both.
         out.append((idx if 0 <= idx < n_pairs else -1, body,
                     "failed" if bad else ("supported" if good else _NEUTRAL)))
-        if len(out) >= max(3, n_pairs):
+        if len(out) >= cap:
             break
     return out
 

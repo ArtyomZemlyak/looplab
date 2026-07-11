@@ -119,16 +119,25 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
         @app.middleware("http")
         async def _require_token(request: "Request", call_next):
             p = request.url.path
-            # Raw-file-content reads are as sensitive as mutations (the artifact routes can serve repo
-            # secrets — a checked-in .env, credentials, a log that printed a key), so gate those GETs
-            # too. Every OTHER GET only returns folded projections (events/state), never raw files, so
-            # they stay open exactly as before.
-            # An assistant SESSION transcript returns `raw` — the full model-facing instruction,
-            # including attached file contents ($HOME files the user pasted) + the UI-context preamble
-            # — so it is as sensitive as a raw-file read and must be gated too. (The `/shared/{sid}`
-            # route STRIPS raw and stays open for sharing; only the session-transcript GET is gated.)
+            # Raw-file-content / captured-output reads are as sensitive as mutations, so gate every GET
+            # that returns something OTHER than a folded projection (events/state):
+            #   - /artifact(s): repo files a run produced (a checked-in .env, credentials, a log key)
+            #   - /assistant/sessions: the full model-facing transcript incl. pasted $HOME file contents
+            #   - /log, /nodes/*/logs: the RAW event envelopes / captured stdout+stderr (solution code +
+            #     anything the eval printed — the same "a log that printed a key" risk as /artifact)
+            #   - /agents_md: the repo's AGENTS.md, served verbatim
+            #   - /api/{prompts,skills,knowledge}: operator-authored files served verbatim
+            #   - /api/memory: cross-run memory rows (goals / rationales / lessons)
+            #   - /assistant/permissions: a preview snippet of the file the assistant is about to write
+            # (The /shared/{sid} assistant route STRIPS raw and stays open for sharing.) Every OTHER GET
+            # returns a folded projection and stays open. The UI attaches the token to EVERY request
+            # (ui/src/api.js::_authHeaders), so gating these GETs never affects the authenticated UI —
+            # only an untokened same-origin caller, which is exactly who the token defends against.
+            _RAW_GET_SUFFIX = ("/artifact", "/artifacts", "/log", "/logs", "/agents_md",
+                               "/assistant/permissions")
+            _RAW_GET_EXACT = ("/api/prompts", "/api/skills", "/api/knowledge", "/api/memory")
             sensitive_get = (request.method == "GET"
-                             and (p.endswith("/artifact") or p.endswith("/artifacts")
+                             and (p.endswith(_RAW_GET_SUFFIX) or p in _RAW_GET_EXACT
                                   or "/assistant/sessions" in p))
             mutating = request.method in ("POST", "PUT", "PATCH", "DELETE")
             if ((mutating or sensitive_get) and p.startswith("/api/")

@@ -574,16 +574,35 @@ class LLMRepoDeveloper:
             chain = " → ".join(str(s.get("name")) for s in op_stages)
             return (f"\nPIPELINE for this node (OPERATOR-declared, runs verbatim): {chain}. "
                     "The stage manifest cannot change it — fix the failing stage's script instead.")
-        import json as _json
-        try:
-            stages = (_json.loads(write.files.get("looplab_stages.json", "")) or {}).get("stages") or []
-        except (ValueError, TypeError, AttributeError):
-            stages = []
-        chain = " → ".join(str(s.get("name")) for s in stages if isinstance(s, dict))
+        stages = self._materialized_stage_list(write)
+        chain = " → ".join(str(s.get("name")) for s in stages)
         if chain:
             return (f"\nPIPELINE for this node (from its staged looplab_stages.json): {chain} → "
                     "score (operator cmd).")
         return ""
+
+    def _materialized_stage_list(self, write) -> list:
+        """The stage pipeline currently MATERIALIZED in the working set's looplab_stages.json — e.g.
+        the PARENT's manifest carried over on an improve (base preload). This is exactly what the
+        eval's `_resolve_stages` runs when the STAGES phase declares nothing new, so validate it the
+        SAME way the eval does (reserved 'score'): an invalid manifest the eval would DROP to the
+        single command returns [] here too, keeping the implement prompt in step with the eval."""
+        import json as _json
+        from looplab.runtime.command_eval import validate_stages
+        try:
+            obj = _json.loads(write.files.get("looplab_stages.json", ""))
+        except (ValueError, TypeError):
+            return []
+        # Mirror _resolve_stages (eval_stages.py) EXACTLY: it accepts both the wrapped {"stages":[...]}
+        # shape declare_stages authors AND a BARE top-level JSON list (hand-written / write_file /
+        # pre-redesign manifests) via `dev = data.get("stages") if isinstance(data, dict) else data`.
+        # Parsing only the wrapped shape would leave the note claiming 'no pipeline' while the eval runs
+        # a carried-over bare-list manifest — the very M7 mismatch, un-fixed for that shape.
+        dev = obj.get("stages") if isinstance(obj, dict) else obj
+        if not isinstance(dev, list) or not dev:
+            return []
+        clean, err = validate_stages(dev, reserved=("score",))
+        return clean if (err is None and clean) else []
 
     def _stages_user(self, idea: Idea, ev: dict, has_cmd: bool) -> str:
         import json as _json
@@ -741,6 +760,7 @@ class LLMRepoDeveloper:
         try:
             operator_stages: list = []
             declared: list = []
+            carried_over = False   # M7: declared came from a carried-over parent manifest, not this phase
             manifest_protected = False
             if is_fresh_repo:
                 # Skip the STAGES phase when the OPERATOR already declared an `eval.stages` pipeline the
@@ -762,6 +782,16 @@ class LLMRepoDeveloper:
                     # stamped on its generations).
                     with tracing.operation("stages"):
                         declared = self._declare_stages_phase(idea, write, system) or []
+                    # M7: a DEGRADED stages phase (declared == []) leaves any PARENT manifest carried
+                    # over on an improve (base preload) still materialized in write.files, and the
+                    # eval's _resolve_stages WILL run it. Recompute `declared` from that materialized
+                    # manifest so the implement prompt matches the pipeline the eval actually uses —
+                    # otherwise the model is told "no stages, train a FRESH model" while the parent's
+                    # prep→train stages run (the model trains twice; the reported metric reflects the
+                    # entrypoint's own training, not the declared pipeline).
+                    if not declared:
+                        declared = self._materialized_stage_list(write)
+                        carried_over = bool(declared)
                 # Tell the implement sessions what pipeline ACTUALLY exists. The old prompt asserted
                 # "your STAGES phase already declared a train stage" unconditionally — after a failed/
                 # empty stages phase the model then wrote a score-only entrypoint that scored a stale
@@ -771,7 +801,9 @@ class LLMRepoDeveloper:
                     stage_note = (f"\nPIPELINE for this node (OPERATOR-declared, runs verbatim): "
                                   f"{_chain}. Implement the code those stages run.")
                 elif declared:
-                    stage_note = (f"\nPIPELINE for this node (declared by your STAGES phase): {_chain} "
+                    _src = ("carried over from the parent solution — your STAGES phase declared "
+                            "nothing new this node" if carried_over else "declared by your STAGES phase")
+                    stage_note = (f"\nPIPELINE for this node ({_src}): {_chain} "
                                   "→ score (operator cmd). Implement the code those stages run; the "
                                   "eval entrypoint only SCORES the artifacts the earlier stages produce.")
                 else:

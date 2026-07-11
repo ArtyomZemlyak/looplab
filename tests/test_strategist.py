@@ -203,6 +203,34 @@ class _TwoPhaseStrategist:
         return {"novelty_stance": "explore", "source": "rule", "rationale": "nudge exploration"}
 
 
+class _ResearchOnceStrategist:
+    """Requests deep research on the FIRST consult, then keeps recording partial changes (alternating
+    novelty_stance) at later consults. request_research is a ONE-SHOT signal (fires a single
+    Deep-Research), so it must NOT latch True through the M3 active_strategy merge and re-fire."""
+    def __init__(self):
+        self.calls = 0
+
+    def decide(self, state, ctx):
+        self.calls += 1
+        if self.calls == 1:
+            return {"request_research": True, "novelty_stance": "explore",
+                    "source": "rule", "rationale": "need research"}
+        return {"novelty_stance": "balanced" if self.calls % 2 == 0 else "explore",
+                "source": "rule", "rationale": "nudge"}
+
+
+def test_request_research_is_one_shot_not_latched_by_merge(tmp_path):
+    """M3 review follow-up: merging the decision onto active_strategy must NOT carry the one-shot
+    request_research flag forward — otherwise a single research request re-fires the expensive
+    Deep-Research stage at every later consult. deep_research_every=0 => only the request fires it."""
+    strat = _ResearchOnceStrategist()
+    anyio.run(_engine(tmp_path / "rr", strategist=strat, strategist_every=1,
+                      deep_research_every=0).run)
+    assert strat.calls >= 3, "need several consults so a latched flag would re-fire"
+    research = [e for e in _read(tmp_path / "rr") if e.type == "research_completed"]
+    assert len(research) == 1, [e.data.get("trigger") for e in research]
+
+
 def test_partial_consult_does_not_revert_earlier_machinery(tmp_path):
     """M3 regression: a partial strategist decision recorded un-merged made fold replace
     active_strategy wholesale, silently reverting policy/operators/fidelity set by an earlier

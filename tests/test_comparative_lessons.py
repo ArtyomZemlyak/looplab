@@ -162,6 +162,20 @@ def test_parse_credit_lessons():
     assert "noted" not in _NEGATIVE and untagged[0][2] != "supported"
 
 
+def test_parse_credit_lessons_limit_decouples_count_from_pair_index():
+    """M6 regression: reflect_lessons passes n_pairs=0 (its lines carry no valid P-marker), so the
+    old count cap max(3, n_pairs)=3 silently dropped reflection themes 4-8. An explicit `limit`
+    must decouple the count bound from the index-validity clamp."""
+    txt = "\n".join(f"[GOOD] distinct generalizable technique number {i} worth remembering"
+                    for i in range(1, 9))
+    assert len(parse_credit_lessons(txt, 0)) == 3            # default (comparative) cap unchanged
+    assert len(parse_credit_lessons(txt, 0, limit=8)) == 8   # reflection now keeps up to 8
+    # the index clamp still keys on n_pairs, independent of the count limit
+    tagged = "\n".join(f"P{i} [GOOD] indexed lesson body number {i} here" for i in range(1, 6))
+    parsed = parse_credit_lessons(tagged, 2, limit=8)
+    assert [p[0] for p in parsed] == [0, 1, -1, -1, -1]      # P3..P5 exceed n_pairs=2 -> -1
+
+
 # --------------------------------------------------------------------------- #
 # Engine._comparative_lessons: offline fallback + LLM path
 # --------------------------------------------------------------------------- #
