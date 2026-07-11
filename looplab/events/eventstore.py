@@ -179,10 +179,23 @@ def log_divergence(path: str | os.PathLike) -> Optional[dict]:
         s = line.strip()
         if not s:
             continue
+        # A line is "good" only if `read_all` would ACCEPT it — i.e. it is a valid JSON object AND a
+        # constructible `Event`. read_all stops not just at non-JSON/non-dict lines but ALSO at a
+        # dict-valid line that fails `Event(**o)` (a byte-flip that renames a required key like `type`,
+        # or makes `data` a non-dict). Checking only `isinstance(..., dict)` here was strictly weaker
+        # than read_all's stop condition, so such a corruption dropped the tail on read yet went
+        # UNDETECTED — defeating the fail-closed guard that gates on this (review of arch-review §3 P0-4).
         try:
-            ok = isinstance(orjson.loads(s), dict)
+            obj = orjson.loads(s)
         except orjson.JSONDecodeError:
             ok = False
+        else:
+            ok = isinstance(obj, dict)
+            if ok:
+                try:
+                    Event(**obj)
+                except Exception:  # noqa: BLE001 — a dict that isn't a valid Event is where read_all stops
+                    ok = False
         if not ok:
             dropped = sum(1 for later in complete[i + 1:] if later.strip())
             if dropped:                       # a valid tail exists AFTER the corrupt complete line

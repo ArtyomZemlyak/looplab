@@ -114,6 +114,18 @@ def test_multiline_fit_on_test_is_flagged():
     assert any(f["signal"] == "fit_on_test" for f in r["flags"])
 
 
+def test_informal_valset_testset_names_are_flagged():
+    """Review of P1-7: the common informal `valset`/`testset` held-out names (token + `set`, no
+    separator) must stay flagged — the old `(?![a-z])` boundary dropped them; the token set now lists
+    them explicitly."""
+    from looplab.trust.leakage import code_leakage_scan
+    for code in ("clf.fit(valset, y)", "m.fit(testset)", "m.fit(x_valset, y)", "m.fit(X_testset, y)"):
+        assert any(f["signal"] == "fit_on_test" for f in code_leakage_scan(code)["flags"]), code
+    # `trainset` is benign (not a held-out set) and must NOT flag
+    assert not any(f["signal"] == "fit_on_test"
+                   for f in code_leakage_scan("m.fit(trainset, y)")["flags"])
+
+
 def test_pearson_ignores_nan_rows_and_still_flags_a_proxy():
     from looplab.trust.leakage import _pearson, target_leakage
     # a near-perfect proxy with ONE NaN row must still correlate (not collapse to NaN -> hidden)

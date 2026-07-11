@@ -132,6 +132,23 @@ def test_log_divergence_ignores_a_torn_tail(tmp_path):
     assert log_divergence(p) is None
 
 
+def test_fail_closed_detects_dict_valid_but_event_invalid_corruption(tmp_path):
+    """Review of P0-4: read_all stops not only at non-JSON lines but at a dict that fails Event(**o)
+    (a byte-flip renaming a required key like `type`). The divergence guard must match that stop
+    condition, else such a corruption drops the tail on read yet appends past it, undetected."""
+    from looplab.events.eventstore import EventStore, EventLogCorruptionError, log_divergence
+    p = tmp_path / "events.jsonl"
+    # line 3 is a valid JSON DICT but not a constructible Event (`type` renamed to `typ3`); line 4 valid
+    p.write_bytes(b'{"seq":0,"type":"a"}\n{"seq":1,"type":"b"}\n'
+                  b'{"seq":2,"typ3":"c"}\n{"seq":3,"type":"d"}\n')
+    div = log_divergence(p)
+    assert div and div["corrupt_line"] == 3 and div["dropped_lines"] == 1
+    es = EventStore(p)
+    assert es.divergence and es.divergence["corrupt_line"] == 3
+    with pytest.raises(EventLogCorruptionError):
+        es.append("resume", {})
+
+
 def test_append_fails_closed_on_mid_file_corruption(tmp_path):
     """arch-review §3 P0-4: a store opened over a MID-FILE divergence must REFUSE to append — else
     the new record is durable on disk but invisible to fold (grows behind the corrupt boundary)."""

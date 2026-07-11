@@ -77,20 +77,23 @@ _SPLIT_RE = re.compile(r"train_test_split\s*\(|KFold|StratifiedKFold|\.split\s*\
 # fit as fit-on-val (arch-review §4 P1-7).
 _EVALSET_KW_RE = re.compile(r"\b(?:eval_set|validation_data|validation_split|eval_names)\s*=")
 _TEST_MONITOR_RE = re.compile(r"\b(?:eval_set|validation_data|eval_names)\s*=[^=]*test")
-# Fit-on-val/test detector: match a WHOLE held-out token — one of {val, valid, validation, test,
-# testing} — bounded on BOTH sides (not preceded by a letter, not FOLLOWED by a letter). The trailing
-# `(?![a-z])` is what fixes the P1-7 false positives: `values`/`train_values` are `val`+`ues` and
-# `validation_split` is handled as a kwarg above, so none hard-gate an honest node any more. The token
-# SET (not a bare `val`/`test` prefix) is what keeps the true positives the old anchor caught —
-# `x_valid` (`valid`), `x_testing` (`testing`), `y_test_final` (`test`) — flagged. Benign words that
-# merely CONTAIN the letters — `x_trainval`, `x_interval`, `x_latest`, `eval`, `retrieval`, `contest`,
-# `values` — do NOT match (the letter before/after breaks the boundary).
-# ACCEPTED RECALL GAP (precision-over-recall, on purpose): a NO-separator held-out name — `Xtest`,
-# `Xval` (lowercased -> `xtest`/`xval`) — is NOT flagged, because anchoring cannot tell `xtest` (a
-# leak) from `contest` (benign) without a name whitelist. A false NEGATIVE is far less harmful than a
-# false positive that silently kills an honest winner on a hard gate; sklearn convention is
-# overwhelmingly the separated `X_test`/`X_val`, which IS caught.
-_LEAKY_FIT_ARG_RE = re.compile(r"(?<![a-z])(?:validation|valid|testing|test|val)(?![a-z])")
+# Fit-on-val/test detector: match a WHOLE held-out token — one of {val, valid, validation, valset,
+# test, testing, testset} — bounded on BOTH sides (not preceded by a letter, not FOLLOWED by a
+# letter). The trailing `(?![a-z])` is what fixes the P1-7 false positives: `values`/`train_values`
+# are `val`+`ues` and `validation_split` is handled as a kwarg above, so none hard-gate an honest node
+# any more. The token SET (not a bare `val`/`test` prefix) is what keeps the true positives the old
+# anchor caught — `x_valid` (`valid`), `x_testing` (`testing`), `y_test_final` (`test`), and the
+# common informal `valset`/`testset`/`x_valset` — flagged. Benign words that merely CONTAIN the
+# letters — `x_trainval`, `x_interval`, `x_latest`, `eval`, `retrieval`, `contest`, `values` — do NOT
+# match (the letter before/after breaks the boundary).
+# ACCEPTED RECALL GAP (precision-over-recall, on purpose): a NO-separator, NON-listed held-out name —
+# `Xtest`, `Xval`, `trainset` (lowercased) — is NOT flagged, because anchoring cannot tell `xtest` (a
+# leak) from `contest` (benign) without a name whitelist, and only the concrete `valset`/`testset`
+# suffixes are enumerated. A false NEGATIVE is far less harmful than a false positive that silently
+# kills an honest winner on a hard gate; sklearn convention is overwhelmingly the separated
+# `X_test`/`X_val`, which IS caught.
+_LEAKY_FIT_ARG_RE = re.compile(
+    r"(?<![a-z])(?:validation|valset|valid|testset|testing|test|val)(?![a-z])")
 
 
 def code_leakage_scan(code: str) -> dict:
