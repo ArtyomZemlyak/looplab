@@ -106,12 +106,21 @@ def test_raw_content_read_routes_are_token_gated(tmp_path, monkeypatch):
                  "/api/runs/demo/chat-log", "/api/runs/demo/spans/abc", "/api/runs/demo/trace",
                  "/api/runs/demo/trace/tail", "/api/runs/demo/trace/by_trace/t1",
                  "/api/runs/demo/nodes/0/conversation", "/api/prompts", "/api/skills",
-                 "/api/knowledge", "/api/memory", "/api/assistant/permissions"):
+                 "/api/knowledge", "/api/memory", "/api/assistant/permissions",
+                 # arch-review §4 P1-3: node DETAIL (full code/files/stdout_tail/parent code) and the
+                 # billable model-completion health check were open; gate them.
+                 "/api/runs/demo/nodes/0", "/api/llm/health"):
         assert client.get(path).status_code == 401, f"{path} should be gated"
         assert client.get(path, headers={"X-LoopLab-Token": "sekret"}).status_code == 200, path
-    # light projection reads stay open without the token (the established contract)
+    # unauthenticated health must NOT reach a (billable) model completion — 401 first
+    assert client.get("/api/llm/health").status_code == 401
+    # assistant progress is gated too (session query required once past auth)
+    assert client.get("/api/assistant/progress?session=x").status_code == 401
+    # light projection reads stay open without the token (the established contract) — including the
+    # LIGHT /nodes/{nid}/metrics projection, which must NOT be over-gated by the node-detail rule
     assert client.get("/api/runs/demo/state").status_code == 200
     assert client.get("/api/runs/demo/events").status_code == 200
+    assert client.get("/api/runs/demo/nodes/0/metrics").status_code == 200
     assert client.get("/api/runs").status_code == 200
 
 
