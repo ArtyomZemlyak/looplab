@@ -2,11 +2,15 @@
 
 **Companion docs:** [01-product-design.md](01-product-design.md) · [02-architecture.md](02-architecture.md) · [03-decisions.md](03-decisions.md) (ADR-6, ADR-9, ADR-10) · [16-architecture-code-review-2026-07-11.md](16-architecture-code-review-2026-07-11.md) (the tactical audit this complements) · [13-external-works-analysis-2026-07.md](13-external-works-analysis-2026-07.md) · [ROADMAP.md](ROADMAP.md) · [BACKLOG.md](BACKLOG.md) · [guide/memory.md](guide/memory.md)
 
+**Current-state baseline.** Strategic content is reconciled through repository baseline `32dc6c0`;
+the production, test, and UI trees remain executable snapshot `2ce82fd`.
+
 **What this is.** One structural document in three parts. **Part I** is a *strategic* review across the
 three axes the maintainer asked for — **functionality**, **code**, **architecture** — the altitude
-companion to [doc 16](16-architecture-code-review-2026-07-11.md) (the *line-level* audit: 66 agents, 70
-verified findings, fixes already applied to this branch). **Part II** works out the **development
-directions** (themes, an honest shipped-vs-open split, tensions, a three-horizon plan). **Part III** is a
+companion to [doc 16](16-architecture-code-review-2026-07-11.md), the revalidated line-level audit and
+priority ledger: 7 P0, 12 P1, plus P2/P3; most original H/M findings are fixed, while H2, M4, and M8
+are partial/reopened. **Part II** works out the **development directions** (themes, an honest
+shipped-vs-open split, tensions, a four-horizon plan). **Part III** is a
 code-level **deep-dive on four specific candidate directions** — a curated Frameworks/Libs knowledge base,
 and three 2026 papers (NapMem, SciResearcher, "AI Research Agents Narrow Scientific Exploration") — each
 assessed for how it integrates in code, the complications, and the synergy, then re-verified by an 8-agent
@@ -17,11 +21,11 @@ a deduplicated directions synthesis over the whole `docs/` corpus; and the four-
 each anchored to `file:line` and cross-verified against `looplab/` on this branch, then synthesized against
 [doc 16](16-architecture-code-review-2026-07-11.md) and the product goals ([doc 01 §3](01-product-design.md)).
 
-> **Caveat.** `pytest` is not installed in this environment, so — like doc 16 — this is a **static** review
-> (test code was read, not executed). Doc 16 reports the full offline suite green at **1718 passed, 23
-> skipped**; that figure is quoted, not re-run. All doc-16 fixes are present on this branch (spot-verified:
-> `policy.ablation_capable`, `_mcts_reward`). **Part III's paper claims** (quantitative figures + the arXiv
-> IDs) were arXiv-proxy-blocked and are snippet-sourced — **unverified this session** (marked inline; see §13).
+> **Caveat.** This strategic pass itself was static because `pytest` was unavailable in its environment;
+> doc 16 was not static-only. It reports separate Linux 3.11 and 3.12 runs of **1,711 passed, 33 skipped,
+> 1 failed** each, plus focused Windows, platform, UI, and static-analysis evidence. Both full runs had
+> the same stale keepalive-test failure. **Part III's paper claims** (quantitative figures + the arXiv IDs)
+> were arXiv-proxy-blocked and are snippet-sourced — **unverified this session** (marked inline; see §13).
 
 **Contents.** Part I — §1 executive summary · §2 snapshot · §3 functionality · §4 code & tests · §5
 architecture. Part II — §6 development directions · §7 the next bets. Part III — §8 Frameworks/Libs KB · §9
@@ -34,29 +38,32 @@ verification pass.
 
 ## 1. Executive summary — where LoopLab stands
 
-**LoopLab is a mature, unusually well-engineered system whose hard parts are built and whose remaining
-frontier is small and concentrated.** ~39.7k LoC of engine across 12 packages, ~27k LoC of tests
-(~1,600 test functions, ~1 test per 25 source LoC), an event-sourced spine whose replay/fold invariants
-hold under an end-to-end crash-resume test, and a self-audit ([doc 16](16-architecture-code-review-2026-07-11.md))
-that surfaced **zero critical and zero reproducible data-corruption/replay-divergence defects**. The
-multi-document roadmap reads mostly as a *record of completed work*, not a wish-list: held-out-gated
-promotion, comparative live-shared lessons, the SWE-reliability stack, structured-output reliability, the
-trust ladder, memory hygiene, the decoupled verifier, and the entire UI layer are **shipped and verified**.
+**LoopLab is a mature, unusually well-engineered system with a strong experimental foundation, but its
+remaining frontier is not only small feature work or maintainability.** ~39.7k LoC of engine across 12
+packages and ~27k LoC of tests (~1,600 test functions, ~1 test per 25 source LoC) support an event-sourced
+spine that is deterministic for a fixed ordered log. The revalidated tactical audit in
+[doc 16](16-architecture-code-review-2026-07-11.md) also found **7 P0 and 12 P1** issues around attempt/epoch
+identity, durability, permissions, trust, budgets, process control, and supported-platform behavior. The
+multi-document roadmap still records substantial shipped work — held-out promotion, comparative shared
+lessons, the SWE-reliability stack, structured-output reliability, memory hygiene, the verifier, and UI —
+but release confidence now requires stabilization before more broad feature work.
 
 **The verdict on each axis:**
 
 | Axis | Verdict |
 |---|---|
-| **Architecture** | **Sound.** Event-log-as-truth + single-writer + layered packages hold; `events/replay.py` is exemplary. Risks are *maintainability* (a god-object Engine paginated across 12 mixins; a 147-field flat config), not correctness. |
-| **Code & tests** | **Healthy and rigorously tested.** Two-way registry source-scans, splice-neutrality tests, a real subprocess crash-resume test. Thinnest layer is `serve/` UI relative to size. |
+| **Architecture** | **Strong foundation, conditional invariants.** The lower dependency direction and pure fold are worth keeping, but reset/reopen/resume lack attempt, epoch, request/subject, and manifest identity; durability and policy enforcement still have release-blocking gaps. |
+| **Code & tests** | **Broadly tested, not all-green.** The suite and registry tests are substantial, but the fold-handler partition guard is stale, one full-suite test fails on both Linux interpreters, and important server/platform/concurrency paths remain thin. |
 | **Functionality** | **Broad and largely complete**, with two strategic soft spots: the **trust/rigor differentiator ships OFF by default**, and the **temporal-CV "moat" has no live caller**. |
-| **Directions** | **The genuinely-open frontier is ~8 items**, most of them cheap refinements of already-built machinery (timing/gating, two feature flags, a dormant class to activate) — plus one L-effort external proof point. |
+| **Directions** | **Stabilization first, then the strategic frontier.** Most product directions are refinements of already-built machinery, but they follow doc 16's Phase 0–3 identity, durability, boundary, budget, and process work. |
 
-**The two findings the review most wants surfaced** (both defensible-by-design, both a risk):
+**After the P0/P1 stabilization ledger, the two strategic findings this review most wants surfaced**
+(both defensible-by-design, both a risk):
 
 1. **The trust layer is comprehensively built but shipped dormant.** Confirmation, reward-hack, code-leakage,
-   critic, redaction, and *enforcement* (`trust_gate`) are all OFF/advisory by default; only `--profile
-   thorough` turns them on and flips `trust_gate` to `gate` (`core/config.py:46-63`). This is a *deliberate*
+   critic, redaction, and *enforcement* (`trust_gate`) are all OFF/audit-only by default. `--profile
+   thorough` enables confirmation/detectors and flips `trust_gate` to `gate`, but it does **not** enable
+   `redact_output` (`core/config.py:43-63,336-354`). This is a *deliberate*
    cheap-toy-default design (the config comment says so), but it means the default `looplab run` performs
    none of the rigor the product — and the UI's own "Trust & rigor — the point of LoopLab" panel
    (`ui/src/panels.jsx:118`) — advertises. **Reconcile the default with the positioning.**
@@ -99,14 +106,17 @@ Hotspots (LoC): `engine/orchestrator.py` 1486 · `adapters/repo_developer.py` 96
 | **"Evaluator" role** | ⬜ | There is **no first-class Evaluator**; verification is a distributed subsystem (sandbox + host grader + trust gates + critic + memo-verifier), and `trust/cv.py`'s `Evaluator` Protocol is **unused**. A naming/architecture gap. |
 | **Search policies** | 🟡 | `greedy` is the only default; `evolutionary`/`mcts`/`asha`/`bohb` are **opt-in and under-exercised** (their own docstrings say "opt-in", "no published ablation") — yet they're in the Strategist's default decision space. |
 | **Operators** | ✅/🟡 | draft/improve/`debug`(depth-bounded)/merge(ensemble for code kinds) default; `ablate→refine_block` **opt-in** (`ablate_every=0`) and correctly disabled on repo/eval-spec runs. Mean-merge silently no-ops on non-numeric params. |
-| **Trust layer** | 🟡 (built, **shipped OFF**) | Every gate exists and is unit-tested, but defaults are advisory/disabled: `confirm_top_k=0`, `reward_hack_detect=False`, `code_leakage_detect=False`, `critic_check=False`, `redact_output=False`, `trust_gate=advisory`. `--profile thorough` flips them. **Held-out-gated promotion is the exception — ON by default** (`holdout_select=True`). Temporal-CV **unwired** (see §1). |
-| **Sandbox tiers** | 🟡 | `trusted_local` (subprocess, default) / `untrusted` (docker `--network none`) / `hostile` (gVisor) implemented — but the **real adapters aren't validated on the isolated tiers** (`dataset` reads absolute host paths; `mlebench_real` needs pandas/sklearn in-image). |
+| **Trust layer** | 🟡 (built, **shipped OFF**) | Defaults are disabled/audit-only: `confirm_top_k=0`, `reward_hack_detect=False`, `code_leakage_detect=False`, `critic_check=False`, `redact_output=False`, `trust_gate='audit'`. `--profile thorough` enables confirmation/detectors and gating, but not redaction. **Held-out-gated promotion is ON by default** (`holdout_select=True`), while reopen/epoch semantics remain a doc-16 P0. Temporal-CV is **unwired** (see §1). |
+| **Sandbox tiers** | 🟡 | `trusted_local` (subprocess, default) / `untrusted` (Docker `--network none`) / `hostile` (gVisor) are implemented, but real adapters lack a complete isolated-tier input/image contract; Windows extra mounts are currently malformed (doc 16 P1-8). |
 | **Memory / knowledge** | ✅ | All seven tiers complete and wired (cases/lessons/meta-notes/skills/KB/hypotheses/deep-research memo); fingerprint transfer; Memora harmonic index. (Retrieval is flat top-k — the NapMem upgrade in §9.) |
-| **Serve / UI** | ✅ | ~20 React panels, full router set, token-auth/CSRF hardening, a dependency-light TUI. **Assistant write/shell/git is phased (P0 read-only)** — the "fix LoopLab itself" story is largely aspirational in the default. |
+| **Serve / UI** | 🟡 | ~20 React panels, a full router set, token/CSRF hardening, and a dependency-light TUI. Sensitive-GET auth is still default-open for missed routes and client control registries diverge (doc 16 P1-3/P1-10). **Assistant write/shell/git is phased (product P0 read-only)** — the "fix LoopLab itself" story is largely aspirational in the default. |
 | **CLI** | ✅ | run/resume/stop/finalize/approve/init + export/bench/harden/smoke + inspect/replay/timings + ui/tui. Comprehensive, friendly errors, exclusive `engine.lock`. |
-| **Genesis / Strategist / deep-research** | ✅ | Genesis authors the task from a goal (CLI + web); the **Strategist is the standout** (rule/LLM/tool-using backends, a governance matrix, replay-safe); deep-research memo with evidence ledger + verifier — but **introspective by default** (`literature_search`/`web_search` off — see §10). |
+| **Genesis / Strategist / deep-research** | 🟡 | Genesis authors the task from a goal (CLI + web); the **Strategist is a standout** (rule/LLM/tool-using backends and an event-recorded governance matrix), though the latest policy/parameter authorization has a P1-11 bypass. Deep-research memo has an evidence ledger + verifier but is **introspective by default** (`literature_search`/`web_search` off — see §10). |
 
 ### The functionality gaps worth prioritizing
+
+These are strategic/product gaps. They come **after** doc 16's P0 and P1 stabilization work; none
+supersedes the attempt/epoch, durability, permission, auth, trust, or process-control blockers.
 
 1. **Trust/rigor ships dormant** (§1.1) — reconcile the default with the "trust is the point" positioning.
 2. **Temporal-CV moat has no caller** (§1.2) — ship one adapter that runs the purged/embargoed splitter live.
@@ -124,21 +134,23 @@ Hotspots (LoC): `engine/orchestrator.py` 1486 · `adapters/repo_developer.py` 96
 
 ## 4. Code & test health
 
-**Healthy and rigorously tested — the concentrated risks are maintainability, not correctness.**
+**Broadly and seriously tested — but the concentrated risks now include correctness and durability,
+not only maintainability.**
 
 ### Test coverage shape
 
 | Tier | Subsystems | Character |
 |---|---|---|
-| **Very strong** | `events/`, `engine/` | The crown jewel. Fold determinism, torn-tail healing, idempotent terminals, seq monotonicity; a **real subprocess `kill -9` + resume** test (`test_end_to_end.py`) asserting the log is un-rewritten and all nodes replay. |
+| **Very strong foundation** | `events/`, `engine/` | Fold is deterministic for a fixed ordered log; torn **final-line** healing and first-terminal idempotency **within one node attempt** are well tested. A real subprocess `kill -9` + resume test exists. Mid-file corruption, cross-attempt effects, epoch transitions, and fail-open-lock sequence numbers remain outside those guarantees. |
 | **Strong** | `core/`, `search/`, `trust/` | Dense; config↔docs sync guarded; `test_openai_client` (792 LoC). |
 | **Good** | `tools/`, `adapters/`, `agents/` | Contract-tested seams; a few thin modules (`edit_match`, `kaggle_dl`, `mlebench_prep`). |
-| **Moderate — thinnest per LoC** | `serve/`, `cli/`, `runtime/` | ~10 `serve/` modules unreferenced by name (`tui_format`, `scope_report`, `routers/misc`, `routers/reports`, `settings_store`) — and this is exactly where doc-16's real bugs slipped (token-auth raw-file gap, projection metric disagreement). |
+| **Moderate — thinnest per LoC** | `serve/`, `cli/`, `runtime/` | ~10 `serve/` modules are unreferenced by name (`tui_format`, `scope_report`, `routers/misc`, `routers/reports`, `settings_store`) — and this is where doc 16's current auth, permission, process, platform, and client-control bugs cluster. |
 
-**Invariant discipline is a standout.** Every load-bearing seam has a *two-way source-scan* test (producer
-**and** consumer checked against one registry): task hooks, role-output attrs, prompt keys, signals
-(`test_signal_delivery`), hints. Splice-neutrality is proven by folding the same log with a background event
-at *every* position (`test_background_appendable`). This is unusually strong for a system this size.
+**Invariant discipline is a real strength, with one important qualification.** Two-way source-scan tests
+protect task hooks, role-output attrs, prompt keys, signals (`test_signal_delivery`), and control membership.
+The fold-handler coverage test still scans the pre-dispatch implementation and no longer proves the
+handled/diagnostic partition. Background splice tests preserve the already-folded champion, but a hint
+racing an operator `replace` can still change steering text seen by later proposals.
 
 ### Complexity hotspots & structural debt
 
@@ -161,10 +173,15 @@ at *every* position (`test_background_appendable`). This is unusually strong for
   dispatched via one dict; additive, unknown-tolerant. The cleanest big file in the tree.
 
 **Error-handling posture is a genuine strength**: a clean transient/deterministic/fatal classification
-(`core/errors.py` + `core/llm_transient.py`), fold tolerance of malformed rows, and resume-by-replay tested
-end-to-end.
+(`core/errors.py` + `core/llm_transient.py`) and tolerant handling of a torn final JSONL row. Resume is a
+hybrid of events, snapshots, mutable workdirs, current source/data, and process side channels; mid-file
+corruption and setup crash boundaries are not safely recovered by replay alone.
 
 ### Code-health directions (from the audit)
+
+First execute doc 16's Phase 0–3 stabilization program: fail-closed containment, event/state identity,
+durability/reproducibility, and shared execution infrastructure. The maintainability items below are
+second-order unless they directly support that work.
 
 1. **Dissolve the Engine god-object for real, or stop pretending** — either extract genuine collaborators with
    declared interfaces (finish the `LessonMemory`-as-held-object job; delete the property-forwarders), or
@@ -175,8 +192,9 @@ end-to-end.
    default in two places.
 4. **Raise the `serve/` test floor** — even import+shape tests on the ~10 unreferenced modules would catch the
    doc-16-class regressions.
-5. **Close the fork/inject crash-window** (doc-16 §13 deferred) — deterministic request-indexed node-ids so
-   effect-before-gate becomes idempotent on resume; the one place the flagship invariant still leaks.
+5. **Close the fork/inject crash-window** (doc 16 P3) — deterministic request-indexed node IDs so
+   effect-before-gate becomes idempotent on resume. It is one residual edge, not the only lifecycle gap;
+   attempt, epoch, request/subject, setup, and manifest identities are higher-priority work.
 6. **Make the mixin/registry seams statically checkable** — `typing.Protocol` for what each Engine mixin
    requires of `self`, so a type checker (not just a red test) catches an orphaning rename.
 7. **Plan the `_LAYOUT` shim's retirement** — migrate call sites to canonical paths, shrink the map, keep
@@ -184,36 +202,46 @@ end-to-end.
 
 ## 5. Architecture review
 
-**The event-sourced design does what it claims, and the load-bearing invariants hold** (verified afresh in
-[doc 16 §3](16-architecture-code-review-2026-07-11.md); re-summarized, not re-derived, here):
+**The event-sourced foundation is valuable, but its load-bearing guarantees are conditional** (see the
+revalidated [doc 16 §§2–5](16-architecture-code-review-2026-07-11.md)):
 
-- **Files-as-truth + single-writer + CQRS.** The engine is the sole writer of domain events (every
-  `store.append` site classified; the only non-engine writers are the allow-listed, fold-safe control events).
-  The UI reads projections and appends command intents — no UI↔engine write race.
-- **Layering is clean.** `core` imports nothing above itself; `events` imports only `core`; the engine has
-  **no** dependency on `serve`. The back-compat shim resolves both names to the same module object.
-- **The fold is deterministic, order-tolerant, unknown-type-tolerant, additive-only.** First-terminal-wins
-  idempotency and the `<x>_requests`/`<x>s_done` counter pairs are correct; resume = replay.
-- **Six registry-guarded duck-typed seams are in sync**, each with a two-way source-scan test.
+- **Fold is deterministic for a fixed ordered log, not commutative or attempt-aware.** Unknown events are
+  tolerated and first-terminal-wins is correct inside one attempt; reset reuses the node ID, so late work
+  can mutate the replacement attempt. Reopen likewise lacks a search/finalization epoch and subject-bound
+  approval/promotion records.
+- **EventStore handles a torn final line, not arbitrary corruption.** A malformed middle line creates an
+  invisible valid tail that future appends continue to extend. Sequence monotonicity also depends on a
+  working filesystem lock; the documented fail-open path can duplicate sequence numbers.
+- **The lower dependency direction is clean.** `core <- events <- engine <- cli/serve` holds narrowly and
+  engine has no `serve` dependency. The middle layer still contains a lazy-import SCC among adapters,
+  agents, search, and tools.
+- **Resume is not replay alone.** It also depends on task/config snapshots, mutable node workdirs, current
+  source/data bytes, role side channels, background processes, and memory files. A task hash does not pin
+  the complete executable environment or workspace manifest.
+- **Single-writer/CQRS is a useful intent, not a complete concurrency proof.** Control and allow-listed
+  background writers append outside the main loop; state-sensitive commands lack expected-revision/CAS,
+  and client registries disagree about which controls require a live Engine.
 
-**Architectural evolution pressure points** (where the design will strain as it grows):
+**Architectural evolution pressure points, in priority order:**
 
-1. **The mixin-Engine's implicit coupling** (§4) is the biggest structural risk — it scales file count, not
-   comprehensibility. As the Engine accretes knobs, the 106-attribute shared `self` becomes the limiting
-   factor on safe change. *This is the #1 architectural refactor to schedule.*
-2. **Concurrency is single-node, in-process, and off by default.** `max_parallel=1` (a deliberate local-first
-   cost choice); the `anyio` `CapacityLimiter` fan-out seam exists but there is **no remote worker pool or
-   fleet launcher**. Scaling to throughput-based test-time compute (the AIRA lever) needs this seam extended
-   outward — a real architectural project, not a flag.
-3. **Verification is distributed, not a component.** No Evaluator object owns "is this result real"; it's
-   spread across sandbox/grader/gates/critic/verifier. Fine today, but it's why `trust/cv.py`'s Protocol
-   drifted into being unused — there's no single home to wire it into.
-4. **The flat-config invariant** trades nesting for env-mapping simplicity; the cost is a 147-field surface
-   that only validators keep honest.
+1. **Add state identity and fail-closed durability first.** Node attempts, search/finalization epochs,
+   request/subject revisions, setup completion, and immutable run/workspace manifests are the release
+   blockers; they fit as additive event-schema evolution rather than a rewrite.
+2. **Centralize policy-bearing effects.** Auth, permission, transition validation, budgets, path policy,
+   and process supervision are currently enforced by duplicated conventions that have already drifted.
+3. **Then dissolve the mixin-Engine's implicit coupling.** The shared `self` improves file navigation but
+   not ownership. Extract typed collaborators behind the existing facade as the stabilization services
+   become real.
+4. **Concurrency remains local and in-process.** `max_parallel=1` is a deliberate default; scaling to a
+   worker fleet is a separate architecture project and should follow correct atomic budgets/process control.
+5. **Verification has no single owner.** Sandbox, grader, gates, critic, and verifier are distributed, while
+   `trust/cv.py`'s Evaluator Protocol has no live caller.
+6. **The flat-config invariant** trades nesting for env-mapping simplicity; the cost is a 147-field surface
+   that validators and generated representations must keep consistent.
 
-**Net architectural verdict: sound and defensible.** The event-log spine is the genuine, still-defensible
-edge (per [ADR-6](03-decisions.md)); the risks are maintainability and a few structural debts the team is
-visibly managing, not correctness or replay-safety.
+**Net architectural verdict: strong foundation, not yet release-safe under reset/reopen/resume and
+concurrency.** Keep the event log, fold, lower layer direction, and public projections. Stabilize identities,
+transitions, durability, and effect ownership before treating correctness/replay safety as closed.
 
 ---
 
@@ -226,6 +254,10 @@ Themes A–I schemes) has heavy **ID sprawl** — the same direction appears und
 record of completed work.** Deduplicated and verified against code, it splits into six themes. The critical
 honesty move: **most of it is already shipped.**
 
+This feature/direction inventory does not supersede the tactical priority ledger. Doc 16 Phase 0–3
+stabilization — containment, state identity, durability, budgets, process control, and supported-platform
+boundaries — is the prerequisite for the product bets below.
+
 ### 6.1 Already shipped — do NOT re-propose (verified against code)
 
 Held-out-gated promotion (`holdout_select=True`, ON by default — the single most-cited "gap" in the corpus,
@@ -235,10 +267,14 @@ fingerprint transfer; real embeddings + fold read-cache; the decoupled **verifie
 the **hacker-fixer-solver** hardening core (`trust/harden.py`); the hypothesis ledger + board; **richer
 operators** (ablation, ensemble-merge, depth-bounded debug); ASHA/BOHB; proxy scoring; list-wise Best-of-N;
 endgame reserve; the SWE-reliability stack (localize→best-of-N→repair→critic); structured-output reliability
-(Theme H); feature-eng + tabular adapters (Theme I); and the **entire U1–U7 UI layer**. Plus doc-16's H/M
-bug set (44 files, suite green).
+(Theme H); feature-eng + tabular adapters (Theme I); and the **entire U1–U7 UI layer**. Most original doc-16
+H/M defects are fixed; H2, M4, and M8 are partial/reopened, and the current full-suite evidence includes one
+stale keepalive-test failure per Linux interpreter rather than an all-green run.
 
 ### 6.2 The genuinely-open frontier (the small, concentrated part)
+
+**Prerequisite, not counted as a feature direction:** complete doc 16's 7 P0 and immediate P1 stabilization
+ledger. The table below is the strategic frontier after that gate.
 
 | # | Direction | Theme | Status (verified) | Effort | Evidence |
 |---|---|---|---|---|---|
@@ -276,9 +312,17 @@ bug set (44 files, suite green).
 8. **SciResearcher-8B backend / self-distillation** (§12, rec 6/7) **breaks backend-agnosticism** (ADR-7) and
    rests on unverified paper claims — external/opt-in only.
 
-## 7. Recommendation — the next bets, in three horizons
+## 7. Recommendation — the next bets, in four horizons
 
-**Horizon 1 — cheap, high-ROI, on existing seams (do first).**
+**Horizon 0 — stabilization (before product bets).**
+
+- Ship fail-closed containment for auth/permissions/path policy/log corruption and the resume/finalization
+  wakeup race.
+- Add node-attempt, search-epoch, request/subject, setup, and manifest identity; then centralize budgets and
+  process supervision. Use doc 16's Phase 0–3 gates and event-sequence/platform matrix as exit criteria.
+
+**Horizon 1 — cheap, high-ROI, on existing seams (after stabilization).**
+
 - **Flip deep-research `literature_search`/`web_search` ON + widen its budget** (dir 1) — two flags; the
   plumbing to turn `recommended_directions` into hypotheses already exists. The single highest-ROI open item.
 - **Cost-aware reward in search** (dir 5) + **pass `parent.code` into `improve`** (dir 6 first step) — both
@@ -287,6 +331,7 @@ bug set (44 files, suite green).
   whole class of latent config bugs cheaply.
 
 **Horizon 2 — close the credibility gaps (the "built but not on the default path" problems).**
+
 - **Reconcile the trust default with the positioning** (dir 8) — e.g. auto-enable a rigor tier on
   `repo`/`mlebench_real`/`dataset`, since a real-work run doing zero rigor undercuts the product's core claim.
 - **Wire the temporal-CV moat** (dir 7) — one adapter that runs the purged/embargoed splitter live, so ADR-6's
@@ -298,6 +343,7 @@ bug set (44 files, suite green).
 - **Raise the `serve/` test floor + close the fork/inject crash-window** (dir 11, code-health #4/#5).
 
 **Horizon 3 — strategic depth & external proof.**
+
 - **Memory navigation**: Frameworks/Libs KB (dir 3) → activate the dormant `CaseLibrary` into a NapMem pyramid
   (dir 4) — the ADR-10 retrieval upgrade (detailed in §8–§9).
 - **Dissolve the mixin-Engine god-object** (dir 11, code-health #1) — the #1 maintainability investment before
@@ -306,12 +352,12 @@ bug set (44 files, suite green).
 - **The external proof point**: a real MLE-bench run published with the shipped holdout discipline, plus the
   AgentDS adapter (dir 10) — the L-effort item that would validate the whole stack against MARS+/Arbor.
 
-**One-line strategy read.** LoopLab has already built the hard, differentiated core — an event-sourced,
-crash-resumable, trust-gated research loop with deep memory. The highest-value near-term work is not new
-subsystems but **turning on and wiring up what's already built** (literature grounding, the trust default, the
-temporal-CV moat, the dormant memory pyramid) and **paying down the one structural debt that will otherwise
-throttle everything** (the god-object Engine). The single strategic bet that would convert all of this into
-external credibility is a **published real-MLE-bench result** under the holdout discipline that already ships.
+**One-line strategy read.** LoopLab has built a differentiated event-sourced research foundation with deep
+memory, but its highest-value near-term work is **stabilizing lifecycle identity, durability, and centralized
+effects**. After that, turn on and wire what already exists (literature grounding, the trust default,
+temporal CV, the dormant memory pyramid) and reduce the god-object Engine as those services take ownership.
+The strategic proof point remains a **published real-MLE-bench result**, but only after the promotion,
+holdout, workspace, and trust boundaries in doc 16 are reliable.
 
 ---
 
@@ -635,7 +681,7 @@ reversal.
 | Diversity archive | `DiversityArchive` (`archive.py:12-46`) — **audit-only** ("never affects selection", `models.py:323`); build() feeds only the `niches` count into `coverage_signal` | No MAP-Elites "expand an empty niche" operator |
 | Selection diversity | Only `GreedyTree`'s **IMPROVE** arm targets `state.best()` (`policy.py:286`); parent-selection diversity lives in `weighted_parent` (`policy.py:133`, used by `EvolutionaryPolicy`), `MCTSPolicy` (`policy.py:369`), ASHA/BOHB (`policy.py:450`) — **all off by default** (`policy=greedy`) | Default is exploitation on the IMPROVE arm; **the agentic Strategist *can* switch policy at runtime** (`agent_control`) — reactively |
 | Broaden lever | Strategist `novelty_stance=explore\|balanced\|exploit` (`strategist.py:50-68`) — **the main dial**; the default `strategist_backend='agent'` (`config.py:377`) governs it live | **Reactive**: `_rule_novelty_stance` flips to `explore` only *after* concentration ≥0.6–0.75 (`strategist.py:145-160`), i.e. after collapse; stall logic keys on metric stagnation, blind to coverage collapse (`strategist.py:305-324`) |
-| Diverse seeding | Genesis authors *what to solve*, not an idea portfolio (`genesis.py:161-238`); seeds = 3 blind drafts (`policy.py:225-227`) | No "generate N orthogonal seed directions" step |
+| Diverse seeding | Genesis authors *what to solve*, not an idea portfolio (`engine/genesis.py:161-238`); seeds = 3 blind drafts (`search/policy.py:225-227`) | No "generate N orthogonal seed directions" step |
 
 ### Integration seams
 
@@ -789,7 +835,8 @@ Narrow-Exploration pathology — so the fixes are mostly about *timing and gatin
   to `file:line` and verified against `looplab/` on this branch, plus an 8-agent adversarial re-verification
   pass over Part III (§13).
 - **Complements:** [16-architecture-code-review-2026-07-11.md](16-architecture-code-review-2026-07-11.md)
-  (tactical line-level audit + applied fixes), [13-external-works-analysis-2026-07.md](13-external-works-analysis-2026-07.md)
+  (revalidated tactical audit, current P0–P3 priority ledger, old-finding disposition, and validation
+  evidence), [13-external-works-analysis-2026-07.md](13-external-works-analysis-2026-07.md)
   (MARS/AgentDS/AgentRxiv), [ROADMAP.md](ROADMAP.md) / [BACKLOG.md](BACKLOG.md) (the shipped record).
 - **Framing:** [01-product-design.md](01-product-design.md) §3 (goals/non-goals), [ADR-6](03-decisions.md)
   (2026 positioning: differentiate on operators / evaluation rigor / ensembling / leakage-safety),
@@ -801,5 +848,6 @@ Narrow-Exploration pathology — so the fixes are mostly about *timing and gatin
   ([themoonlight.io review](https://www.themoonlight.io/en/review/sciresearcher-scaling-deep-research-agents-for-frontier-scientific-reasoning));
   *AI Research Agents Narrow Scientific Exploration* — [arXiv:2605.27905](https://arxiv.org/abs/2605.27905)
   ([HF page](https://huggingface.co/papers/2605.27905)); related *Heuresis* — [arXiv:2606.25198](https://arxiv.org/abs/2606.25198).
-- **Caveat:** static review (pytest unavailable); suite status (1718 passed) quoted from doc 16, not re-run.
-</content>
+- **Caveat:** this strategic pass was static because pytest was unavailable in its environment. Doc 16's
+  separately executed evidence is 1,711 passed / 33 skipped / 1 failed on each Linux interpreter, plus
+  focused Windows, broader platform, UI, and static-analysis results; see its §9 for exact scopes.
