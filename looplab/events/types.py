@@ -161,3 +161,16 @@ ALL_EVENT_TYPES: frozenset[str] = frozenset(
 # concurrent task and asserts each against this set, so a future selection-affecting append from
 # that task is an AssertionError in every test that exercises it, not a nondeterministic replay.
 BACKGROUND_APPENDABLE: frozenset[str] = frozenset({EV_RESEARCH_COMPLETED, EV_HINT, EV_HYPOTHESIS_ADDED})
+
+# Event types the fold DELIBERATELY does not handle — diagnostic / sidecar records that exist for the
+# live activity feed, the audit trail, and observability, but never mutate the RunState projection
+# (`replay.fold` skips them for forward-compat). This is the explicit half of the folded/diagnostic
+# PARTITION that `tests/test_event_types.py` enforces: every registered type must be EITHER in
+# `replay._HANDLERS` (folded) OR in this set (diagnostic), never both and never neither — so adding a
+# new event type FORCES a conscious "does the fold read this?" decision (arch-review §5 P2: the old
+# source-scan test went dead after the fold became a dispatch table, leaving coverage unprotected).
+DIAGNOSTIC_EVENTS: frozenset[str] = frozenset({
+    EV_SETUP_STARTED, EV_SETUP_STEP, EV_DRIFT_UNAVAILABLE, EV_INJECT_FAILED, EV_BUDGET,
+    EV_READMODEL_SKIPPED, EV_DEPS_INSTALLED, EV_WORKSPACE_SEEDED, EV_RUN_SETUP_STARTED,
+    EV_RUN_SETUP_FINISHED, EV_LOG_REPAIRED, EV_REFLECTION_NOTE, EV_LESSONS_RECONCILED,
+})

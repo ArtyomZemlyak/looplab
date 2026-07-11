@@ -97,32 +97,24 @@ def test_every_emitted_event_type_is_registered():
             (5, "aliased_emit"), (6, "kw_emit")] == _emitted_string_literals(demo)
 
 
-def test_every_type_string_in_replay_fold_is_registered():
-    """Every string literal compared against an event type in replay.py (`t == ...` /
-    `e.type == ...` / membership tests) must be in the registry."""
-    src = (LOOPLAB / "events" / "replay.py").read_text(encoding="utf-8")
-    tree = ast.parse(src, filename="replay.py")
-    unknown = []
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.Compare):
-            continue
-        left = node.left
-        is_type_expr = (isinstance(left, ast.Name) and left.id == "t") or (
-            isinstance(left, ast.Attribute) and left.attr == "type")
-        if not is_type_expr:
-            continue
-        for comp in node.comparators:
-            literals = []
-            if isinstance(comp, ast.Constant) and isinstance(comp.value, str):
-                literals = [comp.value]
-            elif isinstance(comp, (ast.Tuple, ast.List, ast.Set)):
-                literals = [e.value for e in comp.elts
-                            if isinstance(e, ast.Constant) and isinstance(e.value, str)]
-            unknown += [f"replay.py:{node.lineno}: {s!r}" for s in literals
-                        if s not in ALL_EVENT_TYPES]
-    assert not unknown, "replay.py compares unregistered event types:\n" + "\n".join(unknown)
-    # the fold must reference registry constants (sanity: the import is real, not vestigial)
-    assert "from looplab.events.types import" in src
+def test_fold_handler_diagnostic_partition_is_exact():
+    """arch-review §5 P2: after the fold became a `_HANDLERS` dispatch TABLE, the old source-scan of
+    `t == ...` comparisons went dead (there are none), so fold-handler coverage was unprotected. Assert
+    the EXPLICIT partition instead: every registered event type is EITHER folded (in `_HANDLERS`) OR
+    declared diagnostic (in `DIAGNOSTIC_EVENTS`) — never both, never neither. Adding a new event type
+    now FORCES a conscious "does the fold read this?" classification or this test fails."""
+    from looplab.events.replay import _HANDLERS
+    from looplab.events.types import DIAGNOSTIC_EVENTS
+    folded = set(_HANDLERS.keys())
+    diagnostic = set(DIAGNOSTIC_EVENTS)
+    # every handler key and every diagnostic entry is a real registered type
+    assert folded <= ALL_EVENT_TYPES, folded - ALL_EVENT_TYPES
+    assert diagnostic <= ALL_EVENT_TYPES, diagnostic - ALL_EVENT_TYPES
+    # the two halves are DISJOINT (a type can't be both folded and declared unfolded)
+    assert not (folded & diagnostic), folded & diagnostic
+    # and together they COVER the registry — no unclassified type
+    unclassified = ALL_EVENT_TYPES - folded - diagnostic
+    assert not unclassified, f"event types neither folded nor declared diagnostic: {sorted(unclassified)}"
 
 
 def test_control_events_subset_of_registry():
