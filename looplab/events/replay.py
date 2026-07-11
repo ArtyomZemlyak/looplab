@@ -161,6 +161,20 @@ def _on_node_created(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     if st.building and st.building.get("node_id") == n.id:
         st.building = None          # the real node is here now — drop the "building" marker
 
+def _nonneg_seconds(v) -> float:
+    """Coerce a PERSISTED eval-cost value to a FINITE, NON-NEGATIVE float before it enters the
+    cumulative budget. A hand-edited / foreign-writer log with eval_seconds="3" (str) would otherwise
+    TypeError the WHOLE fold — taking down every view/replay/resume of the run — and a negative value
+    would silently REDUCE total_eval_seconds, extending the budget (arch-review §5 P2). Normal engine
+    emitters always produce a clean non-negative float, so this only guards malformed input."""
+    import math
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return 0.0
+    return f if (math.isfinite(f) and f >= 0.0) else 0.0
+
+
 def _attempt_matches(n, d: dict) -> bool:
     """P0-1 attempt guard: a node terminal (node_evaluated/node_failed) is honored only if the
     `attempt` it was stamped with still matches the node's current attempt generation. `node_reset`
@@ -202,7 +216,7 @@ def _on_node_evaluated(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None
                 except Exception:
                     continue
             n.trials = trials
-            st.total_eval_seconds += d.get("eval_seconds") or 0.0
+            st.total_eval_seconds += _nonneg_seconds(d.get("eval_seconds"))
 
 def _on_node_failed(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     if st.building and st.building.get("node_id") == d.get("node_id"):
@@ -225,7 +239,7 @@ def _on_node_failed(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
             n.rerun_stage = None                # any stage-scoped re-run has now landed
             if d.get("failed_stage"):
                 n.failed_stage = d.get("failed_stage")   # Phase 1: which pipeline stage broke
-            st.total_eval_seconds += d.get("eval_seconds") or 0.0
+            st.total_eval_seconds += _nonneg_seconds(d.get("eval_seconds"))
 
 def _on_node_repaired(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     # In-node inline repair (hybrid crash repair): a NON-terminal event that replaces the
@@ -342,7 +356,7 @@ def _on_confirm_eval(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     # double-count total_eval_seconds (order/duplication-sensitive — the fold must not be). The sole
     # emitter always writes both keys, so this only guards a future/foreign/hand-edited un-keyed event.
     if keyed and first:
-        st.total_eval_seconds += d.get("eval_seconds") or 0.0   # confirm-seed eval cost
+        st.total_eval_seconds += _nonneg_seconds(d.get("eval_seconds"))   # confirm-seed eval cost
     if keyed:                                                # per-seed resume memo (#0)
         st.confirm_seed_results.setdefault(d["node_id"], {})[d["seed"]] = d.get("metric")
 
@@ -432,7 +446,7 @@ def _on_ablate(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     # ablation was wholly outside accounting, so a run could spend well past max_eval_seconds on
     # probes). Additive + reader-defaulted: old ablate events carry no eval_seconds -> +0.0.
     try:
-        st.total_eval_seconds += float(d.get("eval_seconds") or 0.0)
+        st.total_eval_seconds += _nonneg_seconds(d.get("eval_seconds"))
     except (TypeError, ValueError):
         pass
 

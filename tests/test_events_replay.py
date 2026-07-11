@@ -368,6 +368,25 @@ def test_unstamped_terminal_still_accepted_backward_compat(tmp_path):
     assert fold(s.read_all()).nodes[0].status is NodeStatus.evaluated
 
 
+def test_foreign_eval_cost_does_not_poison_the_fold(tmp_path):
+    """arch-review §5 P2: a hand-edited/foreign eval_seconds (string / negative / non-finite) must not
+    TypeError the whole fold nor reduce the cumulative budget."""
+    s = EventStore(tmp_path / "e.jsonl")
+    s.append("run_started", {"run_id": "r", "task_id": "t", "direction": "min"})
+    s.append("node_created", {"node_id": 0, "parent_ids": [], "operator": "draft",
+                              "idea": {"operator": "draft", "params": {}, "rationale": ""}})
+    s.append("node_evaluated", {"node_id": 0, "metric": 1.0, "eval_seconds": "3"})   # numeric str -> 3.0
+    s.append("node_created", {"node_id": 1, "parent_ids": [], "operator": "improve",
+                              "idea": {"operator": "improve", "params": {}, "rationale": ""}})
+    s.append("node_evaluated", {"node_id": 1, "metric": 2.0, "eval_seconds": -50.0})  # negative -> 0.0
+    s.append("node_created", {"node_id": 2, "parent_ids": [], "operator": "improve",
+                              "idea": {"operator": "improve", "params": {}, "rationale": ""}})
+    s.append("node_evaluated", {"node_id": 2, "metric": 3.0, "eval_seconds": "junk"})  # unparseable -> 0.0
+    st = fold(s.read_all())                                                            # must not raise
+    # "3" recovers to 3.0; the negative and the junk both contribute 0.0 (never REDUCE the budget)
+    assert st.total_eval_seconds == 3.0 and st.nodes[0].status.value == "evaluated"
+
+
 def test_ablation_eval_cost_is_budgeted(tmp_path):
     """arch-review §4 P1-2: ablation probes run real evals; their wall-clock must count against the
     cumulative budget (total_eval_seconds), not spend entirely outside accounting."""
