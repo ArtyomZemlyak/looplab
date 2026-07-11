@@ -28,6 +28,8 @@ htmlcov/
 runs/
 cache/
 *.jsonl
+# checked-in fixture: the golden-log replay gate (docs/15 §P5.1)
+!tests/data/golden_run_events.jsonl
 *.db
 *.sqlite
 

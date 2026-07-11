@@ -1,11 +1,12 @@
 """Golden-log replay gate (docs/15 §P5.1).
 
-`tests/data/golden_run_events.jsonl` is a REAL offline run's event log; `golden_run_state.json`
-is the byte-stable `fold(...)` output captured BEFORE the dispatch-table refactor. Any change to
-`fold` (or to a model default a folded field depends on) that alters the produced `RunState`
-for an existing log — the exact regression class the fold refactor must not introduce — turns
-this red. Additive event/model changes with reader-side defaults keep it green by construction
-(the golden log carries only the fields its writer wrote).
+`tests/data/golden_run_events.jsonl` is a REAL offline run's event log (the quadratic smoke,
+`--no-genesis --kind quadratic`); `golden_run_state.json` is the byte-stable `fold(...)` output
+captured as the current baseline. Any change to `fold` (or to a model default a folded field
+depends on) that alters the produced `RunState` for an existing log — the exact regression class
+the dispatch-table refactor must not introduce — turns this red. Additive event/model changes
+with reader-side defaults keep it green by construction (the golden log carries only the fields
+its writer wrote).
 
 If this fails INTENTIONALLY (a deliberate fold semantics change), regenerate the snapshot in
 the same change and say why in the commit:
