@@ -161,7 +161,7 @@ class EvaluateMixin:
                 # not a bad idea — install it (trusted_local only) and re-run BEFORE the crash-triage
                 # agent can reject the idea. This is what lets torch/XGBoost/CatBoost (e.g. a GRU
                 # model) run on a fresh box instead of dying as `idea_rejected`. Bounded by
-                # _MAX_DEP_ROUNDS + the `_dep_failed` cache; does NOT consume a repair attempt (env
+                # _MAX_DEP_ROUNDS + the `_dep_attempted` cache; does NOT consume a repair attempt (env
                 # prep is not a code fix), and the unchanged node is simply re-evaluated.
                 if (self._auto_install_deps and reason == "crash" and dep_rounds < _MAX_DEP_ROUNDS):
                     installed = await anyio.to_thread.run_sync(self._prepare_env, res.stderr)

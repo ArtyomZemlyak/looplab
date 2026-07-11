@@ -31,7 +31,7 @@ Already done on this box, but for reproduction:
 
 ```bash
 # mle-bench package (host tooling only) — skip its heavy/incompatible deps (tensorflow,
-# pycocotools, …); the 3 CPU-lite comps need just pandas + scikit-learn.
+# pycocotools, …); the CPU-lite comps need just pandas + scikit-learn.
 git clone --depth 1 https://github.com/openai/mle-bench.git ../mle-bench-src
 pip install -e ../mle-bench-src --no-deps
 pip install pandas scikit-learn appdirs diskcache tenacity py7zr kaggle
@@ -68,7 +68,7 @@ website (the API cannot do this for you). Click **"I Understand and Accept"** on
 ## Prepare the data
 
 ```bash
-python -m looplab.adapters.mlebench_prep --selected           # the 3 CPU-lite comps
+python -m looplab.adapters.mlebench_prep --selected           # the CPU-lite comps
 # or one at a time:
 python -m looplab.adapters.mlebench_prep -c spooky-author-identification
 # add --verify to check the prepared split matches mle-bench's committed checksums

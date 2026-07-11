@@ -356,7 +356,7 @@ class Settings(BaseSettings):
     critic_check: bool = False
     # A7 Strategist (NEW, user-requested): optional LLM/rule meta-controller that picks the search
     # policy/allocator + operator mix + fidelity (+ Developer backend) per situation. Config-first:
-    # every choice the Strategist makes is also a direct knob. Defaults to "llm" so the agent adapts
+    # every choice the Strategist makes is also a direct knob. Defaults to "agent" so the agent adapts
     # the search policy/operators/fidelity per situation; set "off" for static config-driven search.
     # "agent" = a tool-using Strategist that READS the run/data/sibling-runs/KB/memory (B1-guarded)
     # before deciding, instead of the single-shot "llm" call over aggregate stats.

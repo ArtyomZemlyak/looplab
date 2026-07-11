@@ -39,7 +39,10 @@ def build_readmodel(events: Iterable[Event], db_path: str | os.PathLike) -> RunS
                     n.id,
                     ",".join(map(str, n.parent_ids)),
                     n.operator,
-                    n.metric,
+                    # robust_metric (confirmed-mean when present, else raw): the SAME value is_best is
+                    # selected by and the digest ranks/shows by, so an external `ORDER BY metric` agrees
+                    # with the is_best flag. Equals the raw metric for the common unconfirmed node.
+                    n.robust_metric,
                     n.status.value,
                     1 if n.id == st.best_node_id else 0,
                     _tri(rep.get("ok")),

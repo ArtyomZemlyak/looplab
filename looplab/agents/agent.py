@@ -179,9 +179,14 @@ class ToolUsingResearcher:
         except Exception as e:  # noqa: BLE001
             return (f"it didn't parse ({str(e)[:180]}). Emit an object with `operator`, numeric "
                     "`params`, and a `rationale` naming WHAT you change and WHY")
-        if not (idea.params or (idea.rationale or "").strip() or (idea.hypothesis or "").strip()):
-            return ("it is EMPTY — no params and no rationale. Every experiment must state a concrete "
-                    "change and its reason; propose a real one (a param OR a structural change)")
+        # A populated sweep grid (`idea.space`) IS a concrete proposal — count it, so a sweep-only emit
+        # isn't rejected as EMPTY with a message that is factually wrong for it (`_sanitize` preserves
+        # `space`, so idea.space is populated here for such an emit).
+        if not (idea.params or idea.space
+                or (idea.rationale or "").strip() or (idea.hypothesis or "").strip()):
+            return ("it is EMPTY — no params, no sweep grid, and no rationale. Every experiment must "
+                    "state a concrete change and its reason; propose a real one (a param, a sweep, or a "
+                    "structural change)")
         return None
 
     def _finalize(self, args: dict) -> Idea:

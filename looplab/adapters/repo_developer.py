@@ -11,8 +11,10 @@ IMPLEMENT (see `LLMRepoDeveloper._run`): a mandatory READ-ONLY stages phase decl
 eval pipeline (prep → train → … before the operator's protected `score` cmd) via a `declare_stages`
 emit and writes `looplab_stages.json`; the plan phase decomposes the code changes into atomic steps;
 the implement phase writes the code those stages run. A repair is a single focused session (no
-stages/plan). Because stages are owned by this dedicated phase, `declare_stages` is NOT in the
-implement write toolset (`RepoWriteTools`) — the manifest is already written before implement starts.
+stages/plan). The dedicated STAGES phase AUTHORS the manifest before implement, but `declare_stages`
+DOES remain in `RepoWriteTools` (mega-review D1): a repair whose root cause is a bad stage can FIX the
+manifest instead of repeating the identical stage failure until abandon — it refuses only when the
+operator declared `cmd.stages`.
 
 The task/spec half (`RepoTask`, `ReferenceSpec`/`EditableSpec`/`EvalSpec`, the researchers and
 `NoOpRepoDeveloper`) stays in `repo_task.py`, which re-imports these names at its END for

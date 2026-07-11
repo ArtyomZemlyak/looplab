@@ -431,6 +431,13 @@ def build_router(srv) -> APIRouter:
             client = srv.make_llm_client(s)
         except Exception as e:  # noqa: BLE001 - offline -> stream a single error event
             _release_turn(sid, cancel_ev)
+            # Persist an assistant error bubble too (mirror the non-stream endpoint) so a page reload
+            # shows the failure instead of a DANGLING user turn — the user's message with no reply,
+            # since _begin_turn already appended the user turn before make_llm_client.
+            try:
+                _asst.append(sid, {"role": "assistant", "content": f"Couldn't reach the model ({e})."})
+            except Exception:  # noqa: BLE001 - a concurrent session DELETE must not turn this into a 500
+                pass
             err_msg = str(e)
 
             async def _err_gen():

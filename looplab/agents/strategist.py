@@ -7,7 +7,8 @@ It never selects a node itself and never writes a domain event — it emits an a
 `strategy_decision` that swaps the active policy/operators. Every field it can decide is also a
 direct `Settings` knob, so the Strategist is a convenience layer over the same config, fully
 hand-overridable, and `backend="off"` is byte-identical to today's legacy static-config
-behavior (the shipped default is `"llm"` — an adaptive meta-controller consulted at cadence).
+behavior (the shipped default is `"agent"` — the tool-using agentic meta-controller consulted at
+cadence; `"llm"`/`"rule"` are the lighter single-shot backends).
 
 Replay-safe by construction: the chosen `Strategy` is recorded in the event log and reconstructed
 by `replay.fold`; the (possibly non-deterministic) LLM backend is NEVER re-invoked during replay —

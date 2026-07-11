@@ -4,9 +4,9 @@ the GPU monitor, files-as-truth authoring and the memory viewer. Bodies are verb
 
 ORDER IS LOAD-BEARING inside this router and for its placement: the generic authoring route
 `GET /api/{kind}` full-matches ANY single-segment /api GET, so every such literal route must be
-registered before it — this router therefore registers settings/tasks/health/gpu first, is included
-LAST among the /api routers by `make_app`, and keeps `/api/memory` after `/api/{kind}` exactly as
-the original inline registration order had it."""
+registered BEFORE it — this router therefore registers settings/tasks/health/gpu AND `/api/memory`
+first (memory before `/api/{kind}`, else it's swallowed as an unknown kind → 404, the empty-Memory-
+panel bug), and is included LAST among the /api routers by `make_app`."""
 from __future__ import annotations
 
 import json

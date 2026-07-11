@@ -54,8 +54,11 @@ def timings(run_dir: Path = typer.Argument(...),
 
     from looplab.events.eventstore import read_jsonl_lenient
     # skip-and-continue (not iter_jsonl's stop-at-first-bad): a mid-file corrupt span line must
-    # cost one span, not truncate every later span out of the report.
-    spans = read_jsonl_lenient(sp_path, loads=_json.loads, dicts_only=False, errors="replace")
+    # cost one span, not truncate every later span out of the report. Keep dicts_only=True (the
+    # default): a valid-JSON-but-NON-dict corrupt line (e.g. a bare `123`) must be SKIPPED like any
+    # other damaged line — with dicts_only=False it'd survive and the `sp.get(...)` accesses below
+    # would raise AttributeError, crashing the whole command (worse than the truncation this avoids).
+    spans = read_jsonl_lenient(sp_path, loads=_json.loads, errors="replace")
     # An operation span's recorded duration INCLUDES every nested span (create_node ⊃ implement ⊃
     # stages/plan ⊃ the generations inside them), so summing raw durations counted the nested
     # phases twice or thrice and skewed every percentage. Charge each op its SELF time only

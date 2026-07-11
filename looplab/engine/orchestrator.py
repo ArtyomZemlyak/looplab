@@ -58,7 +58,7 @@ from looplab.engine.workspace import WorkspaceSeeder
 from looplab.engine.triage import (_MAX_DEP_ROUNDS, _MECHANICAL_MARKERS,  # noqa: F401
                                    _dir_fingerprint, _failure_reason, _holdout_indices,
                                    _normalize_error_sig, _rule_triage, _shallow_fingerprint)
-from looplab.core.models import Idea, NodeStatus, RunState
+from looplab.core.models import Idea, Node, NodeStatus, RunState
 from looplab.search.operators import merge_idea
 from looplab.search.policy import SearchPolicy
 # The strategist-cadence cluster (StrategyContext / make_policy / validate_strategy / coverage_signal
@@ -630,6 +630,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                     self.store.append(EV_RUN_FINISHED, {
                         "reason": "stuck: node creation not converging (no node reached terminal)"})
                     break
+                self._create_paused = False   # set by _create_node's developer_crash circuit-breaker
                 for a in creates:
                     if "_scores" in a:   # policy exposed candidate scores -> surface "why this node"
                         self.store.append(EV_POLICY_DECISION,
@@ -639,6 +640,13 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                         self.store.append(EV_RUNG_PROMOTED,
                                           {"rung": a["_rung"], "survivors": a.get("_promoted", [])})
                     self._create_node(a)  # sequential -> deterministic ids/proposals
+                    if self._create_paused:
+                        # A developer_crash auto-PAUSED the run (LLM unreachable / hard error). STOP the
+                        # rest of the batch instead of building every seed and paying the full within-call
+                        # retry/backoff on each — honouring the "PAUSE on the FIRST developer_crash"
+                        # guarantee the crash branch documents. The loop re-folds paused=True at the top
+                        # and finalizes; a plain `resume` continues once the cause is fixed.
+                        break
                 continue
 
             await self._dispatch_evals(evals, state, max_es)
@@ -1255,6 +1263,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                 self.store.append(EV_PAUSE, {
                     "reason": "auto-paused: a Developer session crashed (LLM unreachable or a hard error, "
                               "unresolved within the node) — resume once it's fixed"})
+                self._create_paused = True   # tell the create-batch loop to STOP after this node
         self._emit_agent_report(node_id)
         self._emit_hypothesis_ranked(node_id)
         self._emit_foresight_selected(node_id)

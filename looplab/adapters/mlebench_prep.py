@@ -15,7 +15,7 @@ against the committed ``checksums.yaml`` — that proves the split matches mle-b
 CLI::
 
     python -m looplab.adapters.mlebench_prep -c spooky-author-identification
-    python -m looplab.adapters.mlebench_prep --selected          # the 3 CPU-lite comps below
+    python -m looplab.adapters.mlebench_prep --selected          # the CPU-lite set below
     python -m looplab.adapters.mlebench_prep -c <id> --data-dir D:/mle-data --verify
 """
 from __future__ import annotations

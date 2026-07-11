@@ -87,9 +87,9 @@ class ShellTools:
             fn_spec("run_command",
                      "Run a command as an ARGV LIST (no shell) inside the allowed roots — e.g. "
                      '["python","-m","pytest","-q","tests/test_patch.py"]. Returns exit code + '
-                     f"stdout/stderr, each as a TAIL (at least ~{_STDOUT_TAIL}/{_STDERR_TAIL} chars "
-                     f"stdout/stderr; a short stream donates its unused budget to the other, up to "
-                     f"~{RESULT_CAP - 400} total — earlier output is "
+                     f"stdout/stderr, each as a TAIL (each stream keeps at least ~{RESULT_CAP // 2 - 200} "
+                     f"chars when both are long; a short stream donates its unused budget to the other, "
+                     f"up to ~{RESULT_CAP - 400} total — earlier output is "
                      "dropped, with a truncation note). Pass argv, NOT a shell string. A foreground "
                      f"command is KILLED at `timeout` seconds (default {int(self.timeout)}, hard max "
                      f"{int(_MAX_TIMEOUT)}); set "

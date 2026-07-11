@@ -56,7 +56,12 @@ DEFAULT_PROTECT = [
     "**/events.jsonl", "**/spans.jsonl", "**/readmodel.sqlite", "**/engine.lock",
     "**/task.snapshot.json", "**/config.snapshot.json",
     "**/answers/**", "**/answers.csv", "**/held_out/**", "**/private/**",
-    "**/*grader*.py", "**/*grade*.py",
+    # grader / grade / grading files — anchored to a filename-boundary COMPONENT (name-start, or after
+    # a `_`/`-` separator) so upgrade.py / downgrade.py / upgrader.py (which merely CONTAIN "grade")
+    # stay editable, while grader.py / grade.py / grading.py / mle_grader.py / grade_submission.py stay
+    # protected. The old `**/*grade*.py` used fnmatch's substring `*` and locked upgrade.py in EVERY mode.
+    "**/grade*.py", "**/grader*.py", "**/grading*.py",
+    "**/*_grade*.py", "**/*-grade*.py",
 ]
 
 

@@ -56,6 +56,28 @@ def test_policy_merges_after_improves():
     assert len(act[0]["parent_ids"]) == 2
 
 
+def test_developer_crash_pauses_after_first_node_not_the_whole_batch(tmp_path):
+    """Architecture review: the developer-crash circuit-breaker must PAUSE on the FIRST crash and STOP
+    the rest of the create batch — not build every seed of the batch and pay the full within-call
+    retry/backoff on each. A seed batch is proposed all at once (n_seeds drafts)."""
+    from looplab.core.models import Idea as _Idea
+    from looplab.events.eventstore import EventStore
+
+    class _CrashingDev:
+        def implement(self, idea: "_Idea") -> str:
+            return "(developer error: LLM unreachable)"
+
+    task = ToyTask.load(TASK_FILE)
+    researcher, _ = task.build_roles()
+    eng = Engine(tmp_path / "crash", task=task, researcher=researcher, developer=_CrashingDev(),
+                 sandbox=SubprocessSandbox(), policy=GreedyTree(n_seeds=3, max_nodes=8))
+    state = anyio.run(eng.run)
+    failed = [e for e in EventStore(tmp_path / "crash" / "events.jsonl").read_all()
+              if e.type == "node_failed" and e.data.get("reason") == "developer_crash"]
+    assert len(failed) == 1, [e.data for e in failed]   # only the FIRST seed built, not the whole batch
+    assert state.paused                                 # run auto-paused on the crash
+
+
 def _ablate_cadence_state():
     """A state where GreedyTree's ablate cadence would fire: past seed phase, best carries >=2
     numeric params, and n_improve >= ablate_every with no refine_block yet."""

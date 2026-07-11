@@ -172,16 +172,18 @@ def run_argv(argv: list[str], workdir: str, timeout: float,
     place process management lives — SubprocessSandbox, DockerSandbox, and command_eval all
     route through it so timeouts/tree-kill/encoding behave identically everywhere.
 
+    ALL runs drain through the memory-bounded `_tee_drain` reader (there is no `communicate()`
+    fast path — it buffered the ENTIRE child output in host RAM, a DoS on a chatty run; see the
+    comment at the `_tee_drain` call). `cancel` and `log_path` are handled INSIDE that drain loop:
+
     `cancel` (optional `threading.Event`): when set mid-run, tree-kill the subprocess and return
     early — this is how an operator's `node_abort` interrupts an in-flight eval (the engine watches
-    the event log and sets it). When `cancel` is None the original single-`communicate` fast path
-    runs unchanged. Repeated `communicate(timeout=)` after a TimeoutExpired is the documented,
-    output-preserving way to poll, so capping a chatty run's pipe never deadlocks.
+    the event log and sets it); None simply never interrupts.
 
     `log_path` (optional): mirror the child's stdout+stderr to this file *live*, line by line, so a
     long eval (training epochs, tqdm) is tail-able in real time instead of opaque until it returns.
     The returned (capped) stdout/stderr are unchanged, so the metric reader + repair feedback see
-    exactly what they did before. When None the original buffered fast path runs (zero regression)."""
+    exactly what they did before. None simply keeps no live file (the drain still runs)."""
     wd = Path(workdir).resolve()
     wd.mkdir(parents=True, exist_ok=True)
     kwargs: dict = {}

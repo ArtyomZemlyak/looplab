@@ -674,17 +674,31 @@ class RunControlTools:
         blocked = self._gate("delete_node", rid, f"delete node(s) {sorted(subtree)} of {rid}")
         if blocked:
             return blocked
+        from looplab.core.atomicio import atomic_write_text
         evp = rd / "events.jsonl"
         recs = [json.loads(x) for x in evp.read_text("utf-8").splitlines() if x.strip()]
         kept = [r for r in recs
                 if not (isinstance(r.get("data"), dict) and r["data"].get("node_id") in subtree)]
-        shutil.copy(evp, rd / f"events.jsonl.bak-del{nid}")     # recoverable backup
-        evp.write_text("".join(json.dumps(r) + "\n" for r in kept), "utf-8")
+        # Compute the spans filter BEFORE any destructive write: a torn spans line must not be able to
+        # leave the source-of-truth events.jsonl already rewritten while spans/workdirs are un-cleaned
+        # (a misleading half-deletion reported as failure). Guard each parse — a torn/hand-edited span
+        # is KEPT verbatim (soft-fail, mirroring read_run_trace) rather than crashing the whole delete.
         sp = rd / "spans.jsonl"
+        skept = None
         if sp.exists():
+            def _span_node(line):
+                try:
+                    return (json.loads(line).get("attributes") or {}).get("node_id")
+                except (ValueError, TypeError):
+                    return None   # torn line -> unknown node -> keep it (never mis-drop or crash)
             skept = [x for x in sp.read_text("utf-8").splitlines()
-                     if x.strip() and (json.loads(x).get("attributes") or {}).get("node_id") not in subtree]
-            sp.write_text("".join(x + "\n" for x in skept), "utf-8")
+                     if x.strip() and _span_node(x) not in subtree]
+        shutil.copy(evp, rd / f"events.jsonl.bak-del{nid}")     # recoverable backup (before the writes)
+        # ATOMIC rewrites (temp + os.replace) of BOTH source-of-truth logs — an interrupted delete must
+        # never leave events.jsonl half-written (the same atomicio the sibling snapshot write uses).
+        atomic_write_text(evp, "".join(json.dumps(r) + "\n" for r in kept))
+        if skept is not None:
+            atomic_write_text(sp, "".join(x + "\n" for x in skept))
         for d in subtree:
             shutil.rmtree(rd / "nodes" / f"node_{d}", ignore_errors=True)
         st2 = fold(EventStore(evp).read_all())

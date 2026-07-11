@@ -537,7 +537,11 @@ def build_router(srv) -> APIRouter:
             raise HTTPException(404, "run has no config.snapshot.json (it predates self-describing runs)")
         body = await request.json()
         incoming = body.get("settings", body) or {}
-        allowed, secret = set(Settings.model_fields), {"llm_api_key"}
+        # Use the SHARED single-source sets (settings_store) rather than a hardcoded {"llm_api_key"} —
+        # a future SecretStr field is then masked here automatically instead of leaking into
+        # config.snapshot.json in plaintext (the whole point of the _SECRET_FIELDS abstraction).
+        from looplab.serve.settings_store import _ALLOWED_FIELDS, _SECRET_FIELDS
+        allowed, secret = _ALLOWED_FIELDS, _SECRET_FIELDS
         current = json.loads(snap.read_text(encoding="utf-8"))
         updated = dict(current)
         changed = {}

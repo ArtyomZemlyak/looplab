@@ -46,8 +46,9 @@ the equivalent task file.
 | Use when | there is no code yet — a Kaggle-style "data in, predictions out" problem | you already have a project and want it improved/completed in place |
 
 > `classification`, `regression`, and `timeseries` also run with an LLM, but they **tune knobs in a
-> fixed template** rather than writing free-form code. The three "writes the whole script" kinds are
-> `code_regression`, `mlebench`, and `mlebench_real`.
+> fixed template** rather than writing free-form code. The held-out-grader "writes the whole script"
+> kinds are `code_regression`, `mlebench`, and `mlebench_real`; `dataset` also writes the whole
+> solution from scratch, but self-reports its metric rather than using a held-out grader the engine owns.
 
 ---
 

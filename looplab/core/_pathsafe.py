@@ -79,7 +79,19 @@ def resolve_within(roots, path: str):
     so an escape lands outside the roots and is refused."""
     if not path:
         return None
-    rroots = [r if isinstance(r, Path) else Path(os.path.expanduser(str(r))).resolve() for r in roots]
+    # Guard the raw-string root resolve like the `path` resolve below (and resolve_roots): resolve()
+    # can raise OSError (e.g. ELOOP), and this helper's docstring accepts raw-string roots — a
+    # pathological root must be SKIPPED, not propagate out of the safety gate. (Fail-closed: a skipped
+    # root simply can't match, it never grants access.)
+    rroots = []
+    for r in roots:
+        if isinstance(r, Path):
+            rroots.append(r)
+            continue
+        try:
+            rroots.append(Path(os.path.expanduser(str(r))).resolve())
+        except OSError:
+            continue
     try:
         p = Path(os.path.expanduser(str(path))).resolve()
     except OSError:

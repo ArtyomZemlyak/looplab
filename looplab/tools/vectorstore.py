@@ -1,6 +1,8 @@
-﻿"""Pluggable vector store (I17, ADR-16). `VectorStore` is the seam; LanceDB is the
-production default — here we ship a dependency-free `InMemoryVectorStore` (brute-force
-cosine) as the testable default so swapping in LanceDB/Qdrant is a config change.
+﻿"""Pluggable vector store (I17, ADR-16). `VectorStore` is the seam; the ONLY implementation shipped
+today is the dependency-free `InMemoryVectorStore` (brute-force cosine, no persistence — it
+re-embeds on each rebuild). A persistent backend (LanceDB/Qdrant) is a documented FUTURE seam (see
+the deferred-infra notes in the design docs); there is no LanceDB store or store-selection Settings
+field yet, so "swap it in" is not a config change today.
 
 `hash_embed` is a deterministic (hashlib-based) bag-of-words embedder for offline
 tests; production embeddings go through LiteLLM (`ollama/nomic-embed-text`).

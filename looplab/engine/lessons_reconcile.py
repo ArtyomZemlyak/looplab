@@ -284,6 +284,11 @@ class LessonReconcileMixin:
                                                   parser=parser, prompts=prompts)
                 self._e._compact_lessons(path)
         except Exception:  # noqa: BLE001 — reconciliation is best-effort; never fail the run for it
+            # Nothing was actually reconciled (a transient LLM/network/write error), so RESET the
+            # change-gate hash — mirroring the client-None branch above — else the next same-signature
+            # cadence pass returns early at the gate and never retries. Forward progress (a new terminal)
+            # flips the hash anyway; this only matters when the failure is the run's last activity.
+            self._reconcile_sig_hash = None
             return state
         # Ledger consistency: the re-derived pairs are (re-)spent so run-end reflection won't double
         # them — recorded as a lessons_distilled(reconcile) exactly like the mid-run cadence.

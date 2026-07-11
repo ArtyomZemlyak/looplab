@@ -25,21 +25,45 @@ class _ServerHandle:
         self._tools_cache: list = []
         self._ready = threading.Event()
         self._err: Optional[Exception] = None
+        self._abandoned = False
         threading.Thread(target=self._run, daemon=True).start()
         if not self._ready.wait(timeout=30) or self._err:
+            # A >30s startup TIMEOUT (or a boot error) makes __init__ raise and the caller discard this
+            # handle. Mark it ABANDONED so _run doesn't run_forever() a slow-but-successful boot into a
+            # leaked thread/loop/subprocess — it unwinds the session/CM in-task and closes the loop.
+            # Race-safe: on timeout _boot hasn't reached _ready.set() yet, so _run is still inside
+            # run_until_complete(_boot) and reads this flag only afterwards.
+            self._abandoned = True
             raise RuntimeError(f"MCP server {name!r} failed to start: {self._err}")
 
     def _run(self):
         asyncio.set_event_loop(self._loop)
         self._loop.run_until_complete(self._boot())
-        # Keep the loop alive for the session's lifetime ONLY when boot succeeded. If boot FAILED,
-        # __init__ raises and the caller (McpTools.from_config) skips this server — but a bare
-        # run_forever() here would leak the daemon thread + event loop forever. `_boot` already unwound
-        # its own context managers IN-TASK on failure (see below), so here we just close the loop.
-        if self._err is None and self._session is not None:
+        # Keep the loop alive for the session's lifetime ONLY when boot succeeded AND the handle wasn't
+        # ABANDONED. If boot FAILED, __init__ raises and the caller (McpTools.from_config) skips this
+        # server; if it merely TIMED OUT (>30s) but then succeeded, __init__ has already raised and set
+        # _abandoned — a bare run_forever() here would leak the daemon thread + loop + stdio subprocess.
+        # `_boot` unwound its own CMs IN-TASK on failure (see below); on abandon-after-success we unwind
+        # the successfully-entered session/CM here (same task) so the subprocess is reaped.
+        if self._err is None and self._session is not None and not self._abandoned:
             self._loop.run_forever()
         else:
+            if self._abandoned and self._session is not None:
+                try:
+                    self._loop.run_until_complete(self._shutdown())
+                except Exception:  # noqa: BLE001 - best-effort reap; never raise from the daemon thread
+                    pass
             self._loop.close()
+
+    async def _shutdown(self):
+        """Unwind the successfully-entered CMs of an ABANDONED handle, in the loop's own task (anyio
+        cancel scopes must exit in the task that entered them)."""
+        for cm in (self._session_cm, self._cm):
+            if cm is not None:
+                try:
+                    await cm.__aexit__(None, None, None)
+                except Exception:  # noqa: BLE001
+                    pass
 
     async def _boot(self):
         self._cm = None

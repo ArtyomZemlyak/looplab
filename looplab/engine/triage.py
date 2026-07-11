@@ -128,8 +128,8 @@ def _holdout_indices(n: int, fraction: float) -> frozenset:
 
 
 # Env-prep: max auto-install + re-run rounds per node before giving up (a re-run can reveal a
-# *second* missing lib; bound it so an odd install state can't loop). The `_dep_failed` cache
-# already prevents re-attempting the same uninstallable module.
+# *second* missing lib; bound it so an odd install state can't loop). The `_dep_attempted` cache
+# already prevents re-attempting the same module (one pip attempt per module per run, success or fail).
 _MAX_DEP_ROUNDS = 6
 
 # Mechanical-failure signatures: a crash whose stderr matches one of these is almost always a

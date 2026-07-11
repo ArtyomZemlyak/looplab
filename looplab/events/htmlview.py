@@ -64,7 +64,10 @@ def render_html(state: RunState, trace_view: dict | None = None) -> str:
         best = " ⭐" if n.id == state.best_node_id else ""
         color = _STATUS_COLOR.get(n.status, "#444")
         parents = ", ".join(map(str, n.parent_ids)) or "—"
-        metric = "" if n.metric is None else f"{n.metric:.6g}"
+        # robust_metric so the per-node cell matches the ⭐ best row's selection and the "Best:" line
+        # below (both robust) — a confirmed node's raw metric would otherwise show a DIFFERENT number
+        # for the same node on the same page. Equals the raw metric for the common unconfirmed node.
+        metric = "" if n.robust_metric is None else f"{n.robust_metric:.6g}"
         params = html.escape(str(n.idea.params))
         status_cell = n.status.value
         if n.status is NodeStatus.failed and n.error_reason:

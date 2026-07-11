@@ -294,13 +294,22 @@ def run(
         # Reopen it (the same event the Web UI/TUI append to continue a finished run) so the loop
         # processes the new budget / retries the failure, and SAY so — never silently no-op.
         prior = fold(eng.store.read_all())
-        if prior.finished:
+        if prior.stop_requested and not prior.finished:
+            # a pending finalize (a stop was requested) — let the loop wrap it up; don't reopen/resume.
+            typer.echo("run has a pending finalize — wrapping it up (report / cross-run lessons / cost)")
+        elif prior.finished:
             typer.echo(
                 f"run dir {out} already finished"
                 + (f" (reason={prior.stop_reason})" if prior.stop_reason else "")
                 + " — reopening to continue with the current task/settings "
                   "(use a new --out for a fresh run).")
             eng.store.append(EV_RUN_REOPENED, {})
+        elif prior.paused:
+            # a STOPped (paused) run: the loop would fold paused=True and break at once, printing the
+            # STALE best and doing no work — the exact silent no-op the finished branch guards against.
+            # Lift the pause and continue, mirroring `resume` (whose paused branch appends EV_RESUME).
+            typer.echo(f"run dir {out} is stopped — resuming to continue with the current task/settings.")
+            eng.store.append(EV_RESUME, {})
         state = _run_engine_guarded(eng)
     _print_result(state)
 
