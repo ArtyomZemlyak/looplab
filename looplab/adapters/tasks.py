@@ -131,9 +131,18 @@ def normalize_task(data: dict) -> dict:
         d["kind"] = "mlebench_real"
 
     # --- repo (editable codebase): "do whatever WITHIN it" — default the surface to ALL files ---
-    if "repo" in d and not d.get("editable_path"):
-        d["editable_path"] = d.pop("repo")
-        d.setdefault("edit_surface", ["**/*"])   # composable-repo default: full freedom (protect=exceptions)
+    if "repo" in d:
+        _repo = d.pop("repo")
+        # CONFLICTING aliases are an ERROR, not silent-keep-the-old (arch-review §3 P0-5): {repo: NEW,
+        # editable_path: OLD} used to keep OLD because `repo` was only consumed when editable_path was
+        # absent — so a user who switched the repo via the composable alias silently ran the old one.
+        if d.get("editable_path") and d["editable_path"] != _repo:
+            raise ValueError(
+                f"conflicting task aliases: repo={_repo!r} and editable_path={d['editable_path']!r} "
+                "name different codebases — set exactly one.")
+        if not d.get("editable_path"):
+            d["editable_path"] = _repo
+            d.setdefault("edit_surface", ["**/*"])   # composable-repo default: full freedom (protect=exceptions)
 
     # --- dataset: read-only mounts. A bare path -> one mount named "dataset"; a dict -> merged ---
     if "dataset" in d:

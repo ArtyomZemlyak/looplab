@@ -291,9 +291,22 @@ def run(
         if not ok:
             typer.echo(f"engine already running on {out} — not starting a second loop")
             return
-        # Write the run snapshots only AFTER winning the singleton lock — a second `run` on a dir a
-        # live engine already owns must NOT clobber config.snapshot.json / task.snapshot.json. A later
-        # `resume` reads them, so a stale overwrite would re-enter the run with the wrong settings/task.
+        # Fold the EXISTING log FIRST (before writing any snapshot): a `run` on a dir that already
+        # belongs to a DIFFERENT task must REFUSE rather than overwrite its task/config snapshot and
+        # then reopen the old event log — that silently mixed two experiments (a reproduced
+        # task.snapshot=poly_regression while run_started.task_id=toy_quadratic — arch-review §3 P0-5).
+        # Continuing the SAME task is fine; an empty/fresh dir has no prior run_started.
+        prior = fold(eng.store.read_all())
+        if prior.run_id and prior.task_id and prior.task_id != task.id:
+            typer.echo(
+                f"run dir {out} already holds task {prior.task_id!r}, not {task.id!r} — refusing to "
+                f"mix experiments in one event log. Use a new --out for a fresh run, or "
+                f"`looplab resume {out}` to continue the existing one.", err=True)
+            raise typer.Exit(2)
+        # Write the run snapshots only AFTER winning the singleton lock AND passing the identity check —
+        # a second `run` on a dir a live engine already owns must NOT clobber config.snapshot.json /
+        # task.snapshot.json. A later `resume` reads them, so a stale overwrite would re-enter the run
+        # with the wrong settings/task.
         atomic_write_text(out / "config.snapshot.json",
                           json.dumps(settings.masked_snapshot(), indent=2))
         # Self-describing run: write the RESOLVED task dict (after file + flags) as canonical JSON so
@@ -309,7 +322,6 @@ def run(
         # reason=error un-retryable: fixing the cause and re-running the same command does nothing.
         # Reopen it (the same event the Web UI/TUI append to continue a finished run) so the loop
         # processes the new budget / retries the failure, and SAY so — never silently no-op.
-        prior = fold(eng.store.read_all())
         if prior.stop_requested and not prior.finished:
             # a pending finalize (a stop was requested) — let the loop wrap it up; don't reopen/resume.
             typer.echo("run has a pending finalize — wrapping it up (report / cross-run lessons / cost)")

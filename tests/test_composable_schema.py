@@ -26,6 +26,17 @@ def test_composable_repo_infers_kind_and_maps_fields():
     assert n["eval"]["timeout"] == 9000
 
 
+def test_conflicting_repo_editable_path_aliases_error():
+    # arch-review §3 P0-5: {repo: NEW, editable_path: OLD} must ERROR, not silently keep OLD.
+    with pytest.raises(ValueError, match="conflicting task aliases"):
+        normalize_task({"goal": "g", "direction": "max", "repo": "/new", "editable_path": "/old",
+                        "cmd": ["python", "t.py"]})
+    # equal aliases are fine (redundant but not conflicting)
+    n = normalize_task({"goal": "g", "direction": "max", "repo": "/same", "editable_path": "/same",
+                        "cmd": ["python", "t.py"]})
+    assert n["editable_path"] == "/same"
+
+
 def test_cmd_bare_list_and_dataset_bare_path():
     n = normalize_task({"repo": "/repo", "direction": "max", "cmd": ["python", "run.py"],
                         "dataset": "/data/foo.csv"})
