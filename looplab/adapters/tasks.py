@@ -569,7 +569,10 @@ def make_roles(task: TaskAdapter, settings, run_dir=None):
     # isn't silently downgraded to sklearn. `task_runtime_caps` returns None for offline/synthetic
     # tasks (locked to numpy+stdlib), so only capable tasks (e.g. MLEBenchReal) get the kwarg.
     from looplab.core.hardware import detect_gpu, task_runtime_caps
-    _auto_install = bool(getattr(settings, "auto_install_deps", False)) and \
+    # Fallbacks MATCH the Settings defaults (arch-review §5 P3): a real Settings always carries the
+    # field, so these only bite an incremental/mock settings — where the conservative-but-DIFFERENT
+    # value (False) silently diverged from the shipped default (auto_install_deps=True).
+    _auto_install = bool(getattr(settings, "auto_install_deps", True)) and \
         getattr(settings, "trust_mode", "trusted_local") == "trusted_local"
     _caps = task_runtime_caps(task, auto_install=_auto_install,
                               gpu=detect_gpu() if _auto_install else None)
