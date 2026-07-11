@@ -58,7 +58,7 @@ So the mega-refactor is **not** a rescue — it is consolidation. Five themes, i
    Developer/Researcher output attrs (`last_files`, `choose_action`, `assets()`), the
    `Settings`↔`EngineOptions` dual-default drift, and docs/diagram sync. This *is* the
    "better for agents" goal, expressed as machine-checked contracts.
-5. **Refactor `fold()` from a 497-line mega-function (62 if/elif arms, one arm handling two
+5. **Refactor `fold()` from a 497-line mega-function (63 if/elif arms, one arm handling two
    event types) into an ordered dispatch table** of pure per-event handlers — same single
    left-fold, isolated logic, golden-log-gated.
 
@@ -572,7 +572,7 @@ importing each declared entry point (also protects the P5.2 cli split).
 
 **P5.1 [MED, high-leverage] Refactor `fold()` from a 497-line mega-function into an
 ordered pure-handler dispatch table.** `events/replay.py:68-565` is one `for e in events` loop
-with 62 `if/elif` arms over shared mutable `st` (61 single-type `elif t ==` arms + the opening
+with 63 `if/elif` arms over shared mutable `st` (61 single-type `elif t ==` arms + the opening
 `if`, plus one arm handling two types — `elif t in (EV_RESUME, EV_RUN_REOPENED)` at `:444`,
 which becomes the same handler under two dict keys) — the single highest-blast-radius
 function in the system. → `HANDLERS: dict[str, Callable[[RunState, Event], None]]`, one verbatim
@@ -722,7 +722,7 @@ Outcome, so a reader knows the document's error profile:
    package root is pinned to `{__init__, cli, bench, sweep}`; `core/llm/` cannot become a nested
    package. These re-shaped P2.4 and the P5.2 cli/llm split plans.
 7. **Numbers** — knobs are 68/68 (1:1, keyword-only; strengthens F3), orchestrator has 98 defs
-   (not ~130), fold has 62 arms (one dual-type), P1.3 uses two different JSON parsers across its
+   (not ~130), fold has 63 arms (one dual-type), P1.3 uses two different JSON parsers across its
    8 sites, P1.5 had 6 more copies (`bench.py:48` + `tools/e2e_report.py` ×5), P1.8's
    `load_spans` swap changes skip-vs-stop semantics, P0.2's `bind_state` is optional-but-strict,
    P4.2's Protocol is already `@runtime_checkable`.
