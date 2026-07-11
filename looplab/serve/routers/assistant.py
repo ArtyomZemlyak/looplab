@@ -151,7 +151,15 @@ def build_router(srv) -> APIRouter:
             r = _perm_reqs.get(req_id)
             if not r:
                 raise HTTPException(404, "no such permission request")
+            # CAS pending -> resolved (arch-review §3 P0-6): a request that is ALREADY resolved — the
+            # user approved it once, or cancel/delete auto-denied it — must not be overwritten. Without
+            # this, a stale resolve racing a cancel could flip a denied request back to `allow` after
+            # the worker un-parked, firing the mutation the user just cancelled (a reproduced
+            # write-after-cancel). A stale/duplicate resolve now returns 409 instead of clobbering.
+            if r.get("status") != "pending":
+                raise HTTPException(409, "permission request already resolved")
             r["decision"] = dec if dec in (PERM_ALLOW_ONCE, PERM_ALLOW_ALWAYS, PERM_DENY) else PERM_DENY
+            r["status"] = "resolved"
             r["event"].set()
         return {"ok": True}
 

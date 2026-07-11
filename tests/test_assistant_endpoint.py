@@ -213,6 +213,35 @@ def test_assistant_permission_pause_resume(tmp_path, monkeypatch):
     assert target.read_text() == "yo"
 
 
+def test_stale_permission_resolve_is_rejected(tmp_path, monkeypatch):
+    """arch-review §3 P0-6 CAS: once a permission request is resolved (approved, or auto-denied on
+    cancel), a stale/duplicate resolve returns 409 instead of overwriting the decision — so a resolve
+    racing a cancel can't flip a denied request back to allow and fire the cancelled mutation."""
+    import time
+    monkeypatch.setenv("LOOPLAB_JOB_INLINE_WAIT", "0.3")
+    target = tmp_path / "made2.txt"
+    monkeypatch.setattr("looplab.serve.server.make_llm_client",
+                        lambda s: _FakeChatClient([_call("write_file", {"path": str(target), "content": "z"}),
+                                                   _final("done")]))
+    client = TestClient(make_app(tmp_path))
+    sid = client.post("/api/assistant/sessions", json={"mode": "default"}).json()["id"]
+    client.post(f"/api/assistant/sessions/{sid}/message",
+                json={"instruction": "make it", "mode": "default"})
+    req = None
+    for _ in range(100):
+        pend = client.get(f"/api/assistant/permissions?session={sid}").json()["pending"]
+        if pend:
+            req = pend[0]; break
+        time.sleep(0.1)
+    assert req
+    # first resolve succeeds
+    assert client.post(f"/api/assistant/permissions/{req['id']}",
+                       json={"decision": "allow_once"}).status_code == 200
+    # a second (stale) resolve is rejected — the decision is already committed
+    assert client.post(f"/api/assistant/permissions/{req['id']}",
+                       json={"decision": "deny"}).status_code == 409
+
+
 def test_assistant_message_soft_fails_offline(tmp_path, monkeypatch):
     def _boom(s):
         raise RuntimeError("connection refused")

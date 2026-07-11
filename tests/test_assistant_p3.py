@@ -232,6 +232,21 @@ def test_shell_kill_background_tool(tmp_path):
     assert "(" in s.execute("kill_background", {"task_id": "nope"})   # graceful note, no crash
 
 
+def test_kill_background_goes_through_ask_mode_approver(tmp_path):
+    """arch-review §3 P0-6: kill_background is a side effect, so in the DEFAULT (ask) mode it must ask
+    the approver — the old code checked only plan-mode `deny` and killed with no approval."""
+    launcher = ShellTools([tmp_path], mode="auto")     # launch in auto (MANAGER is process-global)
+    r = launcher.execute("run_command",
+                         {"command": [sys.executable, "-c", "import time; time.sleep(30)"], "background": True})
+    tid = r.split("task ")[1].split(" ")[0]
+    # default mode + DENY approver: the kill is declined and the task survives
+    denied = ShellTools([tmp_path], mode="default", approver=lambda a: "deny")
+    assert "declined" in denied.execute("kill_background", {"task_id": tid})
+    # default mode + ALLOW approver: the kill goes through
+    allowed = ShellTools([tmp_path], mode="default", approver=lambda a: "allow_once")
+    assert "killed" in allowed.execute("kill_background", {"task_id": tid})
+
+
 def test_background_timeout_reaps_a_hung_task(tmp_path):
     # a wall-clock budget past which a hung/runaway child is SIGTERM'd (lazily, on read/list) so it
     # can't leak a process for the life of the server.
