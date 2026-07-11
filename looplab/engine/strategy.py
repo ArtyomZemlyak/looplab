@@ -194,10 +194,18 @@ class StrategyCadenceMixin:
         base = pol if name_ok else self._policy_name
         if base and (name_ok or params_ok):
             try:
+                # Only consume policy_params when the params change is AUTHORIZED (params_ok). When the
+                # NAME may change but params_ok is False, rebuild the new policy from its OWN defaults —
+                # never smuggle the raw operator/strategist params past the lock. The old code built
+                # `pp` from the raw policy_params regardless of params_ok, so a name-granted +
+                # params-LOCKED grant still applied {c: 9} to MCTSPolicy (a governance bypass —
+                # arch-review §4 P1-11: name and params are gated independently, so the MUTATION must
+                # also consume only the authorized fields).
+                raw_pp = (strat.get("policy_params") or {}) if params_ok else {}
                 # Strip the names make_policy takes as explicit kwargs: a policy_params entry like
                 # {"n_seeds": 4} would otherwise raise "multiple values for keyword argument",
                 # silently dropping the whole switch (recorded decision diverging from live policy).
-                pp = {k: v for k, v in (strat.get("policy_params") or {}).items()
+                pp = {k: v for k, v in raw_pp.items()
                       if k not in ("n_seeds", "max_nodes", "ablate_every",
                                    "debug_depth", "operator_bandit")}
                 self.policy = make_policy(base, n_seeds=self.n_seeds, max_nodes=self.max_nodes,
