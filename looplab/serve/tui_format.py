@@ -110,6 +110,18 @@ def spec_lines(spec: Optional[dict]) -> list[str]:
             out.append(f"goal     : {task['goal']}")
         if task.get("editable_path"):
             out.append(f"repo     : {task['editable_path']}")
+    elif task:
+        # A COMPOSABLE (kind-less) genesis task — Genesis proposes these with NO `kind`, so the
+        # branches above skip them; still surface the substance of the run (goal + capabilities), not
+        # just the run-name/settings, so the operator sees what they're about to spend tokens on.
+        if task.get("goal"):
+            out.append(f"goal     : {task['goal']}")
+        if task.get("direction"):
+            out.append(f"direction: {task['direction']}")
+        for lbl, key in (("repo", "editable_path"), ("repo", "repo"), ("data", "data_path"),
+                         ("dataset", "dataset"), ("cmd", "cmd"), ("competition", "competition")):
+            if task.get(key):
+                out.append(f"{lbl:<9}: {task[key]}")
     settings = spec.get("settings") or {}
     knobs = [(k, settings[k]) for k in ("llm_model", "max_nodes", "n_seeds", "policy") if settings.get(k) is not None]
     if knobs:

@@ -72,6 +72,13 @@ def test_spec_lines_catalogue_and_inline():
     blob = "\n".join(lines)
     assert "mlebench_real · titanic" in blob and "step 1." in blob and "step 2." in blob
 
+    # a COMPOSABLE (kind-less) genesis task must still show goal / repo, not just run-name + settings
+    lines = tui.spec_lines({"run_id": "c", "settings": {},
+                            "task": {"goal": "beat the baseline", "direction": "max",
+                                     "editable_path": "/repo/x"}})
+    blob = "\n".join(lines)
+    assert "beat the baseline" in blob and "/repo/x" in blob and "max" in blob
+
 
 def test_spec_ready_gates():
     assert tui.spec_ready(None) is not None                 # no plan

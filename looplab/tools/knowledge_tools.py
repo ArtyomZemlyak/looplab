@@ -280,7 +280,15 @@ class KnowledgeTools:
     def execute(self, name: str, args: dict) -> str:
         try:
             if name == "kb_search":
-                hits = self._index.search("kb", self.embed(args.get("query", "")), self.k)
+                q = args.get("query", "")
+                # Embed the query in the SAME space as the index. When a HARMONIC (abstraction-keyed)
+                # index is in use (self.abstract set — _build_index keys each entry by
+                # embed(abstract(src).index_text())), abstract the query too: scoring a RAW query vector
+                # against abstraction+anchor keys lives in a different textual space, dampening cosine
+                # and losing the anchor weighting. Mirrors retrieve_lessons_harmonic (abstracts both sides).
+                qvec = (self.embed(self.abstract(q).index_text())
+                        if self.abstract is not None else self.embed(q))
+                hits = self._index.search("kb", qvec, self.k)
                 out = [f"{Path(h.payload['path']).name}:\n{h.payload['text'][:600]}" for h in hits]
                 # Anchor-expansion (Memora): follow the top hits' cue anchors to related-but-not-
                 # similar notes the plain query missed. No-op on a legacy (no-anchor) index.
