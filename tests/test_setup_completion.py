@@ -123,6 +123,17 @@ def test_run_started_pins_environment(tmp_path):
     assert fold(s2.read_all()).env is None                 # old logs: no env pin
 
 
+def test_run_started_records_dirty_inputs(tmp_path):
+    # P0-5 dirty-input enumeration: the uncommitted-file list is pinned at run_started and folded.
+    s = EventStore(tmp_path / "events.jsonl")
+    s.append(EV_RUN_STARTED, {"run_id": "r", "task_id": "t", "direction": "min",
+                              "dirty_inputs": [{"source": "repo", "dirty": [" M model.py", "?? new.py"]}]})
+    assert fold(s.read_all()).dirty_inputs == [{"source": "repo", "dirty": [" M model.py", "?? new.py"]}]
+    s2 = EventStore(tmp_path / "e2.jsonl")        # a clean / non-repo / old-log run records []
+    s2.append(EV_RUN_STARTED, {"run_id": "r", "task_id": "t", "direction": "min"})
+    assert fold(s2.read_all()).dirty_inputs == []
+
+
 def test_resume_flags_environment_drift(tmp_path, monkeypatch):
     # P0-5: a resume whose Python/library environment differs from run start emits env_changed; an
     # unchanged environment (and the first run) does not.

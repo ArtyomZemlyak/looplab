@@ -110,6 +110,8 @@ def _on_run_started(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     st.config_hash = d.get("config_hash", "")
     st.workspace = d.get("workspace")
     st.env = d.get("env")   # P0-5 environment identity pinned at start (None on old logs)
+    _di = d.get("dirty_inputs")
+    st.dirty_inputs = _di if isinstance(_di, list) else []   # P0-5 uncommitted-input enumeration
     _tg = str(d.get("trust_gate", "audit")).strip().lower()
     st.trust_gate = _tg if _tg in ("audit", "gate", "block") else "audit"
     # D1: recorded at start so replay applies the same selection rule. Absent in old

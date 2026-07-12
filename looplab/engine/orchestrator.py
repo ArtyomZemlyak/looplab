@@ -726,6 +726,10 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                             # P0-5 environment identity: pin the interpreter + key-lib versions so a
                             # resume can flag a library upgrade that breaks bit-reproducibility.
                             "env": self._env_fingerprint(),
+                            # P0-5 dirty-input enumeration: which repo files were uncommitted at start
+                            # (repo tasks only; a clean/non-repo run records []). Provenance on top of
+                            # the workspace content hash in `wf`.
+                            "dirty_inputs": (self._dirty_inputs(wf) if self._repo_spec else []),
                             # T2 trust enforcement: recorded here so the pure fold applies the same
                             # gate on replay/resume (config isn't available to `replay.fold`). Absent in
                             # old logs -> "audit" -> byte-identical legacy selection.
@@ -1488,6 +1492,26 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         if libs:
             env["libs"] = libs
         return env
+
+    def _dirty_inputs(self, wf: "dict | None") -> list:
+        """P0-5 dirty-input enumeration: for each git-repo workspace source, the uncommitted-file list
+        (`git status --porcelain`) — the EXPLICIT record of which inputs differ from a clean checkout,
+        on top of the content hash the workspace fingerprint already pins. Best-effort: git absent, a
+        non-repo source, or a timeout contributes nothing and never fails the run. Bounded output."""
+        import subprocess
+        out: list = []
+        for src in sorted((wf or {}).keys()):
+            try:
+                p = Path(src)
+                root = str(p if p.is_dir() else p.parent)
+                r = subprocess.run(["git", "-C", root, "status", "--porcelain"],
+                                   capture_output=True, text=True, timeout=10)
+                dirty = [ln[:200] for ln in r.stdout.splitlines() if ln.strip()][:500]
+                if r.returncode == 0 and dirty:
+                    out.append({"source": src, "dirty": dirty})
+            except Exception:  # noqa: BLE001 — git missing / not a repo / timeout: no enumeration
+                pass
+        return out
 
     def _seed_workspace(self, workdir) -> None:
         return self.workspace.seed_workspace(workdir)

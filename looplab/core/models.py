@@ -405,6 +405,11 @@ class RunState(BaseModel):
     # diagnostic) on drift — a run continued after a library upgrade is no longer bit-reproducible, so
     # record it instead of pretending it is. None on old logs -> no env pin -> the check is skipped.
     env: Optional[dict] = None
+    # P0-5 dirty-input enumeration: for a repo task, the list of workspace files that were UNCOMMITTED
+    # (git status --porcelain) at run start — the explicit "which inputs differ from a clean checkout"
+    # on top of the content hash the workspace fingerprint already pins. Empty for non-repo/clean runs
+    # and old logs. Provenance only; never gates.
+    dirty_inputs: list[dict] = Field(default_factory=list)
     # Eval-compute budget accounting (#2): cumulative wall-clock spent INSIDE evals (training
     # runs), distinct from the run's total wall-clock (which includes LLM/agent time). The
     # search stops cleanly once this crosses `max_eval_seconds` — guards the silent long sweep.

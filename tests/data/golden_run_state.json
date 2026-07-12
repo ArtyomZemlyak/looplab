@@ -115,6 +115,7 @@
   "data_profile": null,
   "data_provenance": null,
   "direction": "min",
+  "dirty_inputs": [],
   "drifts": [],
   "env": null,
   "eval_seconds_by_kind": {

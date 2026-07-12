@@ -153,6 +153,16 @@ def test_calibrate_detector_precision_recall():
     assert empty["precision"] is None and empty["recall"] is None
 
 
+def test_calibrate_detector_seed_corpus_baseline():
+    # P1-7: the SHIPPED seed corpus makes calibrate_detector return a REAL baseline out of the box —
+    # the "needs an external corpus" objection reduces to "extend this". Every seed cheat is flagged and
+    # no seed clean example is, so the baseline precision/recall are 1.0 (an operator grows the corpus).
+    from looplab.trust.reward_hack import SEED_CALIBRATION_CORPUS, calibrate_detector
+    r = calibrate_detector()                                    # defaults to the seed corpus
+    assert r["n"] == len(SEED_CALIBRATION_CORPUS) and r["n"] >= 10
+    assert r["precision"] == 1.0 and r["recall"] == 1.0 and r["fp"] == 0 and r["fn"] == 0
+
+
 def test_reward_hack_signals_carry_method_and_confidence():
     ga = next(s for s in detect_reward_hacks("print(grader._Y)", metric=1.0, direction="max")
               if s["signal"] == "grader_access")
