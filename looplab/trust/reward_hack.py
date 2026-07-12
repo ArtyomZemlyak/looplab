@@ -9,6 +9,7 @@ adds nothing to the event log on a clean node. OFF by default (`reward_hack_dete
 """
 from __future__ import annotations
 
+import ast
 import re
 
 # Tokens that, appearing in a solution's code, suggest it is reaching for the held-out answer key
@@ -63,6 +64,64 @@ _WRITE_RE = re.compile(
 _DELETE_RE = re.compile(
     r"(?:os\.remove|os\.unlink|shutil\.rmtree|send2trash|os\.rename|os\.replace)\s*\(\s*['\"]([^'\"]+)['\"]"
     r"|['\"]([^'\"]+)['\"]\s*\)?\s*\.\s*unlink\s*\(")
+
+
+# P1-7 trust-detector architecture: a small AST pass that recovers a cheat the TEXT regexes provably
+# cannot follow — an answer-key file READ whose path flows through a simple variable
+# (`f = "solutions.csv"; pd.read_csv(f)` / `open(f)`), where the regexes need the literal inside the
+# call. AST-only ADD (literal-arg reads stay the regexes' job, so nothing is double-counted), high
+# precision (only a name proven-bound to an answer-key filename, only in a READ position), and it
+# ABSTAINS (returns []) on unparseable code so the text pass still covers it. This is the first step of
+# the doc's "regex -> AST/semantic evidence" direction; token/dataflow depth + calibration remain.
+_ANSWER_FILE_RE = re.compile(r"solutions?\.csv$|answer[_-]?key|test[_-]?labels", re.IGNORECASE)
+_READER_ATTRS = frozenset({"read_csv", "read_table", "read_parquet", "loadtxt", "genfromtxt", "load"})
+
+
+def detect_reward_hacks_ast(code: str) -> list[dict]:
+    """AST recall pass (see the module note above). Returns grader_access signals — each tagged
+    method='ast' + a confidence — for answer-key reads reached through a one-hop string variable.
+    Deterministic and side-effect-free; empty on clean or unparseable code."""
+    try:
+        tree = ast.parse(code or "")
+    except (SyntaxError, ValueError):
+        return []      # abstain: the text regexes in detect_reward_hacks still scan this code
+    # simple `name = "literal"` string bindings (last assignment wins per name — enough for a one-hop path)
+    strvars: dict[str, str] = {}
+    for node in ast.walk(tree):
+        if (isinstance(node, ast.Assign) and isinstance(node.value, ast.Constant)
+                and isinstance(node.value.value, str)):
+            for tgt in node.targets:
+                if isinstance(tgt, ast.Name):
+                    strvars[tgt.id] = node.value.value
+
+    def _is_write_open(call: ast.Call) -> bool:
+        mode = None
+        if len(call.args) >= 2 and isinstance(call.args[1], ast.Constant):
+            mode = call.args[1].value
+        for kw in call.keywords:
+            if kw.arg == "mode" and isinstance(kw.value, ast.Constant):
+                mode = kw.value.value
+        return isinstance(mode, str) and mode[:1] in ("w", "a", "x")
+
+    out: list[dict] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call) or not node.args:
+            continue
+        f = node.func
+        is_reader = isinstance(f, ast.Attribute) and f.attr in _READER_ATTRS
+        is_open = isinstance(f, ast.Name) and f.id == "open"
+        if not (is_reader or is_open):
+            continue
+        if is_open and _is_write_open(node):
+            continue                                     # a submission WRITE, not an answer-key read
+        arg0 = node.args[0]
+        if not isinstance(arg0, ast.Name):
+            continue                                     # literal path -> the regexes already cover it
+        path = strvars.get(arg0.id)
+        if path and _ANSWER_FILE_RE.search(path):
+            out.append({"signal": "grader_access", "method": "ast", "confidence": "medium",
+                        "detail": f"reads an answer-key file via a variable path ({path!r})"})
+    return out
 
 
 def detect_reward_hacks(code: str, metric: float | None, direction: str,
@@ -147,5 +206,18 @@ def detect_reward_hacks(code: str, metric: float | None, direction: str,
         elif direction == "max" and metric == 1.0:
             signals.append({"signal": "perfect_metric",
                             "detail": f"metric {metric} at the theoretical ceiling (1.0)"})
+
+    # P1-7 versioned TrustEvidence: annotate each signal with the METHOD that found it and a
+    # CONFIDENCE, so the event/panel carry structured evidence instead of a bare {signal, detail}.
+    # perfect_metric is advisory (a legitimately-perfect score hits it) -> low; the direct answer-key /
+    # tamper tells are high. Additive: existing consumers read `signal`/`detail` and are unaffected.
+    _CONF = {"perfect_metric": "low"}
+    for s in signals:
+        s.setdefault("method", "regex")
+        s.setdefault("confidence", _CONF.get(s.get("signal", ""), "high"))
+    # AST recall pass: add a variable-path answer-key read the regexes miss — but only if no
+    # grader_access already fired (one is enough for the gate; avoids double-counting the same cheat).
+    if not any(s["signal"] == "grader_access" for s in signals):
+        signals.extend(detect_reward_hacks_ast(code))
 
     return signals

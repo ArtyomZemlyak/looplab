@@ -584,7 +584,12 @@ def _on_agent_decision(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None
     st.agent_decisions.append(d)
 
 def _on_reward_hack_suspected(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
-    st.reward_hacks.append({"node_id": d.get("node_id"), "signals": d.get("signals", [])})
+    # P1-7 versioned TrustEvidence: carry the evidence schema version + scanned-surface digest onto the
+    # folded record (provenance), additively — old logs lack them (version 0 / no digest) and fold the
+    # same. `signals` still drives the gate (is_hard_signal keys on signal STRING, unchanged).
+    st.reward_hacks.append({"node_id": d.get("node_id"), "signals": d.get("signals", []),
+                            "evidence_version": d.get("evidence_version", 0),
+                            "code_digest": d.get("code_digest")})
 
 def _on_foresight_selected(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     # FOREAGENT predict-before-execute pick (audit-only). Kept so the world model can be

@@ -375,8 +375,16 @@ class EvaluateMixin:
                         for c in critique(node.idea, scan_src, submission_file=sub_file):
                             sigs.append({"signal": "critic:" + c["issue"], "detail": c["detail"]})
                     if sigs:
+                        # P1-7 versioned TrustEvidence: bind the evidence to a schema version + a digest
+                        # of the exact scanned surface (provenance — which bytes produced these signals),
+                        # so a stored flag isn't a bare {node_id, signals}. Additive; the fold reads the
+                        # new fields with defaults, so old logs are unaffected.
+                        import hashlib
                         self.store.append(EV_REWARD_HACK_SUSPECTED,
-                                          {"node_id": node_id, "signals": sigs})
+                                          {"node_id": node_id, "signals": sigs,
+                                           "evidence_version": 1,
+                                           "code_digest": hashlib.sha256(
+                                               scan_src.encode("utf-8", "replace")).hexdigest()[:16]})
                 else:
                     # `err`/`reason` were computed in the attempt loop (reason may be "idea_rejected"
                     # if the crash-triage agent judged the idea fundamentally wrong).
