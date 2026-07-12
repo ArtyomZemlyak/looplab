@@ -34,7 +34,7 @@ from looplab.events.types import (
     EV_RUN_STARTED, EV_RUNG_PROMOTED,
     EV_SETUP_FINISHED, EV_SETUP_STARTED, EV_SETUP_STEP, EV_SPEC_APPROVAL_REQUESTED,
     EV_SPEC_APPROVED, EV_SPEC_PROPOSED,
-    EV_WORKSPACE_CHANGED)
+    EV_ENV_CHANGED, EV_WORKSPACE_CHANGED)
 from looplab.engine.ablation import AblationMixin
 from looplab.engine.audit import AuditMixin
 from looplab.engine.confirm_phase import ConfirmPhaseMixin
@@ -723,6 +723,9 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                             "direction": self.task.direction,
                             "config_hash": cfg_hash,
                             "workspace": wf,
+                            # P0-5 environment identity: pin the interpreter + key-lib versions so a
+                            # resume can flag a library upgrade that breaks bit-reproducibility.
+                            "env": self._env_fingerprint(),
                             # T2 trust enforcement: recorded here so the pure fold applies the same
                             # gate on replay/resume (config isn't available to `replay.fold`). Absent in
                             # old logs -> "audit" -> byte-identical legacy selection.
@@ -785,6 +788,14 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
             now = self._workspace_fingerprint()
             if now != state.workspace:
                 self.store.append(EV_WORKSPACE_CHANGED, {"was": state.workspace, "now": now})
+        # P0-5 environment drift: on ANY resume where an env was pinned at run start, flag a Python/
+        # library change — a run continued after an upgrade is no longer bit-reproducible, so record it
+        # instead of pretending it is. Diagnostic-only (mirrors workspace_changed). state.env is None on
+        # the first run (run_started is appended mid-setup, after this fold) and on old logs -> skipped.
+        if state.env is not None:
+            _cur_env = self._env_fingerprint()
+            if _cur_env != state.env:
+                self.store.append(EV_ENV_CHANGED, {"was": state.env, "now": _cur_env})
 
     def _reentry_repin(self) -> bool:
         entry_finished = fold(self.store.read_all()).finished  # resuming a done run?
@@ -1452,6 +1463,31 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         return hashlib.sha256(orjson.dumps(
             {"config": cfg, "workspace": wf, "provenance": prov},
             option=orjson.OPT_SORT_KEYS)).hexdigest()[:16]
+
+    def _env_fingerprint(self) -> dict:
+        """P0-5 environment identity: a small, stable record of the interpreter + the key libraries a
+        result depends on, pinned at run start so a resume after an upgrade can flag that the run is no
+        longer bit-reproducible. Best-effort: a missing/broken package is simply omitted, and
+        importlib.metadata never touches the network. Deterministic on a fixed environment."""
+        import platform
+        import sys
+        env: dict = {"python": sys.version.split()[0], "platform": platform.platform()}
+        libs: dict = {}
+        try:
+            from importlib.metadata import PackageNotFoundError, version
+            for pkg in ("numpy", "pandas", "scikit-learn", "scipy", "torch", "xgboost",
+                        "lightgbm", "tensorflow", "transformers"):
+                try:
+                    libs[pkg] = version(pkg)
+                except PackageNotFoundError:
+                    pass
+                except Exception:  # noqa: BLE001 — a broken metadata entry must not fail setup
+                    pass
+        except Exception:  # noqa: BLE001 — importlib.metadata unavailable: skip the lib pins
+            pass
+        if libs:
+            env["libs"] = libs
+        return env
 
     def _seed_workspace(self, workdir) -> None:
         return self.workspace.seed_workspace(workdir)

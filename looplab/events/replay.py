@@ -109,6 +109,7 @@ def _on_run_started(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     st.direction = _dir if _dir in ("min", "max") else "min"
     st.config_hash = d.get("config_hash", "")
     st.workspace = d.get("workspace")
+    st.env = d.get("env")   # P0-5 environment identity pinned at start (None on old logs)
     _tg = str(d.get("trust_gate", "audit")).strip().lower()
     st.trust_gate = _tg if _tg in ("audit", "gate", "block") else "audit"
     # D1: recorded at start so replay applies the same selection rule. Absent in old

@@ -116,6 +116,7 @@
   "data_provenance": null,
   "direction": "min",
   "drifts": [],
+  "env": null,
   "finished": true,
   "foresight_selected": [],
   "fork_requests": [],

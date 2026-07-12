@@ -76,6 +76,7 @@ EV_SPEC_PROPOSED = "spec_proposed"
 EV_SPEC_APPROVAL_REQUESTED = "spec_approval_requested"
 EV_SPEC_DRIFT = "spec_drift"
 EV_WORKSPACE_CHANGED = "workspace_changed"
+EV_ENV_CHANGED = "env_changed"           # P0-5: the Python/lib environment differs from run start (resume)
 EV_DIVERSITY_ARCHIVE = "diversity_archive"
 # Breadth read-model recorded at the strategist cadence (narrowing curve). Audit-only — it never
 # affects node selection; folded ONLY so the at_node gate makes resume idempotent and the UI/replay
@@ -188,5 +189,5 @@ BACKGROUND_APPENDABLE: frozenset[str] = frozenset({EV_RESEARCH_COMPLETED, EV_HIN
 DIAGNOSTIC_EVENTS: frozenset[str] = frozenset({
     EV_SETUP_STARTED, EV_SETUP_STEP, EV_DRIFT_UNAVAILABLE, EV_INJECT_FAILED, EV_BUDGET,
     EV_READMODEL_SKIPPED, EV_DEPS_INSTALLED, EV_WORKSPACE_SEEDED, EV_RUN_SETUP_STARTED,
-    EV_LOG_REPAIRED, EV_REFLECTION_NOTE, EV_LESSONS_RECONCILED,
+    EV_LOG_REPAIRED, EV_REFLECTION_NOTE, EV_LESSONS_RECONCILED, EV_ENV_CHANGED,
 })

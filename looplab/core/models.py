@@ -400,6 +400,11 @@ class RunState(BaseModel):
     # run_started, and whether a resume detected the source changed underneath.
     workspace: Optional[dict] = None
     workspace_changed: bool = False
+    # P0-5 environment identity: the Python/platform + key-library version fingerprint pinned at
+    # run_started. A resume compares the current environment against it and emits `env_changed` (a
+    # diagnostic) on drift — a run continued after a library upgrade is no longer bit-reproducible, so
+    # record it instead of pretending it is. None on old logs -> no env pin -> the check is skipped.
+    env: Optional[dict] = None
     # Eval-compute budget accounting (#2): cumulative wall-clock spent INSIDE evals (training
     # runs), distinct from the run's total wall-clock (which includes LLM/agent time). The
     # search stops cleanly once this crosses `max_eval_seconds` — guards the silent long sweep.

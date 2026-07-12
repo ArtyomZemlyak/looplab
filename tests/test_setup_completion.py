@@ -112,6 +112,57 @@ def test_resume_reruns_setup_when_material_manifest_changes(tmp_path):
     assert _n_setup() == 2
 
 
+def test_run_started_pins_environment(tmp_path):
+    # P0-5 environment identity is pinned at run_started and folded onto RunState.env.
+    s = EventStore(tmp_path / "events.jsonl")
+    s.append(EV_RUN_STARTED, {"run_id": "r", "task_id": "t", "direction": "min",
+                              "env": {"python": "3.11.0", "libs": {"numpy": "1.0"}}})
+    assert fold(s.read_all()).env == {"python": "3.11.0", "libs": {"numpy": "1.0"}}
+    s2 = EventStore(tmp_path / "e2.jsonl")
+    s2.append(EV_RUN_STARTED, {"run_id": "r", "task_id": "t", "direction": "min"})
+    assert fold(s2.read_all()).env is None                 # old logs: no env pin
+
+
+def test_resume_flags_environment_drift(tmp_path, monkeypatch):
+    # P0-5: a resume whose Python/library environment differs from run start emits env_changed; an
+    # unchanged environment (and the first run) does not.
+    from looplab.engine.orchestrator import Engine
+    from looplab.runtime.sandbox import SubprocessSandbox
+    from looplab.search.policy import GreedyTree
+
+    class _Task:
+        id = "t"; goal = "g"; direction = "min"
+        def model_dump(self, mode="json"):
+            return {"id": "t"}
+        def leakage_inputs(self):
+            return None
+
+    class _R:
+        def propose(self, s, p):
+            return Idea(operator="draft", params={})
+
+    class _D:
+        def implement(self, idea):
+            return "print(1)"
+
+    eng = Engine(tmp_path / "run", task=_Task(), researcher=_R(), developer=_D(),
+                 sandbox=SubprocessSandbox(), policy=GreedyTree(n_seeds=1, max_nodes=1),
+                 auto_install_deps=False)
+
+    def _types():
+        return [e.type for e in eng.store.read_all()]
+
+    monkeypatch.setattr(eng, "_env_fingerprint", lambda: {"python": "3.11.0", "libs": {"numpy": "1.0"}})
+    eng._setup_phase(fold(eng.store.read_all()))           # first run pins env A
+    assert fold(eng.store.read_all()).env == {"python": "3.11.0", "libs": {"numpy": "1.0"}}
+    assert "env_changed" not in _types()                   # no drift on the first run
+    eng._setup_phase(fold(eng.store.read_all()))           # resume, same env -> no drift
+    assert "env_changed" not in _types()
+    monkeypatch.setattr(eng, "_env_fingerprint", lambda: {"python": "3.11.0", "libs": {"numpy": "2.0"}})
+    eng._setup_phase(fold(eng.store.read_all()))           # resume after a numpy upgrade -> drift
+    assert "env_changed" in _types()
+
+
 def test_completed_legacy_run_without_setup_finished_is_not_re_setup(tmp_path):
     # A legacy log that reached a node but never emitted setup_finished must be treated as
     # set-up-complete (via state.nodes), so _setup_phase's gate never re-runs preflight on it.
