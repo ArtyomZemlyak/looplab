@@ -1097,12 +1097,13 @@ default-on web, a production pyramid, or a global diversity policy.
 
 #### 13.2 Code and test evidence
 
-Post-audit implementation disposition at executable revision `369d6a6`:
+Post-audit implementation disposition at executable revision `369d6a6` (P0-2 advanced from **open**
+to **partial** in the follow-on increment at `931c28b` — see §13.6):
 
 | Finding | Status | Landed containment | Residual exit gate |
 |---|---|---|---|
 | P0-1 attempt identity | **partial** | `47f786a`: attempt generation rejects stale eval/fail terminals | bind confirm/holdout/trust/abort/repair/forced/cost/artifact effects |
-| P0-2 epoch/subject identity | **open** | — | SearchEpoch, subject-bound requests, promotion/finalization invalidation |
+| P0-2 epoch/subject identity | **partial** | `931c28b`: reopen-of-finished bumps `search_epoch` and re-opens confirmation + approval for the new candidate set; subject-bound (existence-checked) approval; `spec_approved` requires a proposal (§13.6) | stamp `search_epoch` on promotion/finalization outputs; subject/`expected_seq` on all forced/control requests; epoch-specific still-hidden holdout |
 | P0-3 setup crash window | **partial** | `5f5ce46`: folded completion and crash re-entry | content-addressed step state and manifest digest |
 | P0-4 invisible event tail | **partial** | `57e6312`, `13f087c`: JSON/Event-envelope refusal and repair | recheck under writer coordination; serialize repair; collision-safe digest provenance |
 | P0-5 run/task/workspace mixing | **partial** | `4c6c59f`: different-task and conflicting-alias refusal | canonical config/source/dirty-bytes/environment InputSnapshot |
@@ -1207,6 +1208,66 @@ Post-audit implementation disposition at executable revision `369d6a6`:
   `Superseded by`, and `Last verified` metadata. The documentation index/nav surfaces docs 16–18 and labels
   older plans as historical; future authority changes must update those surfaces
   in the same PR.
+
+#### 13.6 Stabilization increment landed since `369d6a6`, and the deferred carryover
+
+*As of commit: `931c28b` · Normative for: post-`369d6a6` P0-2 disposition · Supersedes: the P0-2 row of §13.2*
+
+A follow-on stabilization increment (six commits, `a23ca92..931c28b`) landed the largest safely-additive
+piece of the identity program and closed a small durability gap, keeping the full suite green
+(**1,776 passed / 23 skipped**) and every v1 log folding byte-identically apart from additive default fields
+(golden regenerated for those fields only):
+
+- **P0-2 (open → partial).** Reopening a *finished* run now begins a new `search_epoch` and re-opens the
+  promotion-completion gates, so a better candidate found with the added budget is re-confirmed
+  (already-confirmed nodes reuse their memoized mean — no wasted seeds) and, under HITL, re-approved —
+  instead of the prior epoch's confirmed champion permanently locking selection. Approval became
+  **subject-bound**: a grant is honored only for a node that exists in the run, closing
+  `approval_granted(node_id=999)` global approval; `spec_approved` requires a folded proposal.
+- **Fold robustness (adversarial-review hardening).** Two rounds of adversarial review of the above caught
+  a regression class where a forged control event (`approval_granted`/`annotation`) carrying a non-int
+  `node_id` (`[999]`, `{}`, bool, non-finite) would raise inside a fold key/membership op and brick every
+  replay — the same forged-control DoS class P0-2 exists to neutralize. Both handlers now coerce/guard the
+  id totally before any hash; every other `CONTROL_EVENTS` handler was audited (list-append/membership or
+  engine-only, hence safe).
+- **run_setup exactly-once (P2).** A successful run-level `run_setup` (dep install) is now folded (keyed by
+  command) into `run_setup_done`, so a resume skips it instead of re-installing every time — crash-safe
+  exactly-once. Census delta at `931c28b`: `run_setup_finished` moved diagnostic → folded, giving **66 fold
+  handlers / 12 explicit diagnostic types** (still 78 registered types, zero unclassified — partition test
+  green).
+- **Docs.** `docs/guide/concepts.md` reconciled with the reopen-epoch, node-attempt, and subject-bound
+  approval semantics; the process infographic's spot-values and best-selection-order box were re-verified
+  against code (unchanged — the change re-opens the confirmation *gate*, not the selection order or any
+  default). `mkdocs build --strict` passes.
+
+**Deferred carryover — the interdependent foundation programs, still to be done whole.** Each remains open
+because it is a change to a load-bearing invariant (log/replay identity, cross-process coordination, storage
+locking, or ownership); a partial version risks breaking the replay/single-writer guarantees the whole system
+rests on, so they are sequenced as dedicated workstreams with their own verification rather than shipped as
+risky slices:
+
+1. **P0-2 residual — full epoch stamping + epoch-specific hidden holdout.** The increment re-opens the
+   confirmation/approval gates but does not yet stamp `search_epoch` onto promotion/finalization outputs, nor
+   give a reopened epoch a *freshly hidden* holdout partition. A reopened run re-scores new candidates on the
+   *same* holdout that was already disclosed at the first finish — comparable and non-crashing, but no longer a
+   truly unseen signal (an "already-seen exam"). Fix: reserve a still-hidden per-epoch partition (or start a
+   fresh run) and carry the epoch on every promotion/finalization record. (§13.2 P0-2 residual.)
+2. **P1-1 zombie run (open).** The resume/finalize handoff on the server has a race that can leave a run
+   marked live with no engine driving it. Fix: an atomic durable command intent plus an
+   `EngineSupervisor`/reconciler that owns lock acquisition and pending wakeup, so clients never assemble the
+   two-step transaction. Hard to make correct *and* to verify deterministically — belongs in its own program.
+   (§13.2 P1-1; primary sources: Temporal run-id, Kubernetes reconciliation, transactional outbox in §13.4.)
+3. **P1-12 fail-open locks / append CAS (open).** The single-writer file lock silently degrades to a no-op on
+   some FUSE/S3 mounts, where two writers can mint duplicate sequence numbers. Fix: a mandatory lock (or
+   startup refusal when locking is unavailable) plus an `expected_seq` optimistic-concurrency check on
+   state-sensitive appends. This is a platform-dependent storage-layer change, not a local patch. (§13.2 P1-12;
+   KurrentDB expected-revision, SQLite WAL in §13.4.)
+4. **Engine decomposition (structural debt).** `Engine` remains a distributed god-object (12 mixins, ~120
+   methods, ~110 constructor fields sharing one mutable projection), which is *why* a reset invalidates local
+   node fields but can miss run-level collections. Fix: split into typed services (`NodeLifecycleService`,
+   `EvaluationService`, `PromotionService`, `StrategyController`) behind the Engine compatibility facade, only
+   after service tests exist — a pure refactor with no immediate correctness payoff, so it is sequenced after
+   the identity/durability programs, not interleaved with bug fixes. (§4 structural debt; §6.3 workstreams.)
 
 **Final verdict:** prioritize identity-safe state transitions, fail-closed durability, centralized effects,
 and bounded execution. Preserve the existing event-log projection and Engine compatibility surface. Treat
