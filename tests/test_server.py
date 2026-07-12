@@ -351,6 +351,18 @@ def test_control_append_and_validation(tmp_path):
     # unknown control event rejected
     bad = client.post("/api/runs/demo/control", json={"type": "danger", "data": {}})
     assert bad.status_code == 400
+    # P1-12 optimistic concurrency: a stale expected_seq -> 409 (the log advanced since); the matching
+    # tail seq -> 200. A non-integer expected_seq -> 400.
+    tail = client.post("/api/runs/demo/control", json={"type": "pause", "data": {}}).json()["seq"]
+    stale = client.post("/api/runs/demo/control",
+                        json={"type": "resume", "data": {}, "expected_seq": tail - 1})
+    assert stale.status_code == 409
+    fresh = client.post("/api/runs/demo/control",
+                        json={"type": "resume", "data": {}, "expected_seq": tail})
+    assert fresh.status_code == 200
+    nonint = client.post("/api/runs/demo/control",
+                         json={"type": "pause", "data": {}, "expected_seq": "nope"})
+    assert nonint.status_code == 400
 
 
 def test_config_masked_and_gpu_softfail(tmp_path):

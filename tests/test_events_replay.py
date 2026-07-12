@@ -258,6 +258,23 @@ def test_fold_resume_intent_seq_gated(tmp_path):
     assert not fold(s.read_all()).resume_pending()             # one serve satisfies both
 
 
+def test_append_expected_last_seq_cas(tmp_path):
+    # P1-12 explicit-seq optimistic concurrency: an append with expected_last_seq lands only if the
+    # log tail is still exactly that seq — else it raises and writes NOTHING.
+    import pytest
+    from looplab.events.eventstore import EventStoreConcurrencyError
+    s = EventStore(tmp_path / "e.jsonl")
+    e0 = s.append("run_started", {"run_id": "r", "task_id": "t", "direction": "min"})
+    e1 = s.append("pause", {}, expected_last_seq=e0.seq)       # tail matches -> lands
+    assert e1.seq == e0.seq + 1
+    with pytest.raises(EventStoreConcurrencyError):
+        s.append("resume", {}, expected_last_seq=e0.seq)       # tail moved to e1 -> conflict
+    assert [ev.type for ev in s.read_all()] == ["run_started", "pause"]   # rejected write left no trace
+    # None (default) is unconditional, unchanged behavior
+    s.append("resume", {})
+    assert [ev.type for ev in s.read_all()][-1] == "resume"
+
+
 def test_log_divergence_detects_mid_file_corruption(tmp_path):
     from looplab.events.eventstore import log_divergence
     p = tmp_path / "events.jsonl"

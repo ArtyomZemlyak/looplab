@@ -13,7 +13,7 @@ from fastapi import APIRouter, HTTPException, Request
 
 from looplab.core.atomicio import best_effort_fsync
 from looplab.core.config import Settings
-from looplab.events.eventstore import EventStore, write_jsonl_atomic
+from looplab.events.eventstore import EventStore, EventStoreConcurrencyError, write_jsonl_atomic
 from looplab.events.types import EV_INJECT_NODE, EV_NODE_RESET, EV_RESUME_REQUESTED
 from looplab.serve.appstate import _RESERVED_RUN_IDS
 from looplab.serve.engine_proc import _engine_alive, _spawn_engine
@@ -125,8 +125,21 @@ def build_router(srv) -> APIRouter:
             data["files"] = dict(snode.files)
             data["deleted"] = list(snode.deleted)
             data["origin"] = {"run_id": sr, "node_id": sn, "metric": snode.robust_metric}
+        # P1-12 optional optimistic concurrency: a client may pass `expected_seq` (the log tail it based
+        # this intent on). The append then lands ONLY if nothing else was written since — else 409, so a
+        # control raised on a STALE view (an approval for a best that just changed, a reset of a node
+        # that just advanced) is rejected instead of applied blind. Omitted => today's unconditional append.
+        expected = body.get("expected_seq")
+        if expected is not None:
+            try:
+                expected = int(expected)
+            except (TypeError, ValueError):
+                raise HTTPException(400, "expected_seq must be an integer")
         # Fresh EventStore per write (single-writer discipline): it rescans last seq before append.
-        ev = EventStore(rd / "events.jsonl").append(etype, data)
+        try:
+            ev = EventStore(rd / "events.jsonl").append(etype, data, expected_last_seq=expected)
+        except EventStoreConcurrencyError as e:
+            raise HTTPException(409, str(e))
         return {"ok": True, "seq": ev.seq, "type": etype}
 
     # ------------------------------------------------------------------ spawn / resume
