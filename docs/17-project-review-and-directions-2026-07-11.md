@@ -10,11 +10,11 @@
 |---|---|
 | **Status** | current / canonical plan |
 | **As of executable commit** | `369d6a6c6fe0ccf0f921051ffba71c742879bfdb` |
-| **Post-audit increment** | `931c28b` (P0-2 open→partial; census 66/12; see §13.6). Quantitative figures are pinned per statement; unpinned counts are as of `369d6a6`. |
+| **Post-audit increment** | `931c28b` (P0-2 open→partial; census 66/12; see §14.6). Quantitative figures are pinned per statement; unpinned counts are as of `369d6a6`. |
 | **Documentation reconciliation** | `89af408` (doc 18 and post-fix UI disposition) |
 | **Normative for** | priority, dependencies, release gates, feature promotion criteria |
 | **Finding/reproduction authority** | [doc 16](16-architecture-code-review-2026-07-11.md) |
-| **Current implementation disposition** | §6.3 and §13.2 of this document |
+| **Current implementation disposition** | §6.3 and §14.2 of this document |
 | **Supersedes** | doc-17 verdict in `32dc6c0`; current-order claims in docs 06/10/11/12, ROADMAP, BACKLOG where they conflict |
 | **Superseded by** | — |
 | **Last verified** | 2026-07-12 |
@@ -31,8 +31,9 @@ criteria, subordinate to this plan) ·
 **What this is.** One structural document in three parts. **Part I** gives the strategic verdict on
 functionality, code, and architecture without duplicating doc 16's line-level issue ledger. **Part II**
 turns that verdict into a dependency-ordered delivery plan with migration rules, release gates, metrics,
-and decision criteria. **Part III** re-evaluates four candidate feature directions — a curated
-Frameworks/Libs knowledge base, NapMem, SciResearcher, and research-exploration breadth — against the
+and decision criteria. **Part III** re-evaluates five candidate feature directions — a curated
+Frameworks/Libs knowledge base, NapMem, SciResearcher, research-exploration breadth, and LLM-as-a-Verifier —
+against the
 stabilization plan rather than treating them as immediately shippable flags.
 
 **Method and evidence discipline.** The revision combines a fresh code/doc cross-check, direct inspection
@@ -47,14 +48,16 @@ Statements are classified implicitly as:
   documentation;
 - **recommendation/inference** — a proposed LoopLab design, not a result claimed by the external source.
 
-All four Part III papers and their arXiv identifiers were verified from their official pages on
-2026-07-11. Paper results remain author-reported and domain-specific; they justify experiments, not an
+The first four Part III papers and their arXiv identifiers were verified from their official pages on
+2026-07-11; the fifth (§12 LLM-as-a-Verifier, arXiv 2607.05391) was added 2026-07-12 from the
+requester-supplied abstract and its arXiv page was unreachable from this environment, so it is unverified
+here. Paper results remain author-reported and domain-specific; they justify experiments, not an
 automatic production rollout.
 
 **Contents.** Part I — §1 executive summary · §2 snapshot · §3 functionality · §4 code & tests · §5
 architecture. Part II — §6 development directions and target architecture · §7 dependency-ordered delivery
-plan. Part III — §8 Frameworks/Libs KB · §9 NapMem · §10 SciResearcher · §11 exploration breadth · §12
-composition and recommendation · §13 verification and sources.
+plan. Part III — §8 Frameworks/Libs KB · §9 NapMem · §10 SciResearcher · §11 exploration breadth ·
+§12 LLM-as-a-Verifier · §13 composition and recommendation · §14 verification and sources.
 
 ---
 
@@ -66,8 +69,8 @@ composition and recommendation · §13 verification and sources.
 immediate risk, but the remaining frontier is still not small feature work.** Doc 16 originally confirmed
 **7 P0 and 12 P1 findings**. At `369d6a6`, the exact reproductions behind many of them are contained and
 covered by regression tests. P1-1 and P1-12 remain wholly open (P0-2 advanced open→partial at `931c28b` —
-the reopen-epoch + subject-bound approval increment; see §13.6); the rest range from a closed original
-reproduction to a partial architectural contract, depending on the residual stated in §13.2. Commit titles
+the reopen-epoch + subject-bound approval increment; see §14.6); the rest range from a closed original
+reproduction to a partial architectural contract, depending on the residual stated in §14.2. Commit titles
 are therefore not counted automatically as architectural closure.
 
 The first doc-17 verdict — “the load-bearing invariants hold; zero reproducible replay/data-corruption
@@ -95,7 +98,7 @@ Four incomplete identity families explain much of the residual defect cluster:
    subject-bound approval for the new candidate set (`931c28b`), so an older champion no longer locks
    selection. The residual is partial: holdout is not re-hidden per epoch, and promotion/finalization outputs
    are not yet epoch-stamped, so a reopened run still scores against an already-disclosed holdout — P0-2
-   partial (§13.6).
+   partial (§14.6).
 3. **`RequestId` + `SubjectHash`** — permission resolution now uses pending→resolved CAS and centrally gates
    MCP/background kill (`87dfc7e`), but approvals, aborts, forced operations, and promotion/finalization
    decisions are not all bound to the exact request and subject revision.
@@ -195,11 +198,11 @@ assistant or production remote execution until its permission and process bounda
 The codebase is substantial and often disciplined; the previous conclusion failed by equating a large green
 suite with coverage of the system's hardest state and effect boundaries. Current size (as of the pinned
 `369d6a6`) is 170 production Python modules / 40,242 physical lines and 157 Python test files / 27,170
-physical lines; the `931c28b` increment adds ~128 production and ~248 test lines with no new modules (§13.6).
+physical lines; the `931c28b` increment adds ~128 production and ~248 test lines with no new modules (§14.6).
 Doc 16's historical
 baseline records two Linux runs (Python 3.11 and 3.12) at **1,711 passed, 33 skipped, 1 stale-test failure**
 each. More importantly for this revision, the complete GitHub `python -m pytest` workflow and strict docs
-workflow both pass for validation commit `89af408` (code tree `369d6a6`; §13.2). This is strong regression
+workflow both pass for validation commit `89af408` (code tree `369d6a6`; §14.2). This is strong regression
 evidence, not proof of the remaining epoch/CAS/concurrency/resource guarantees.
 
 #### What the tests establish — and what they do not
@@ -304,6 +307,12 @@ reconcile/probe after uncertainty. “Exactly once” is defensible only where t
 share a real transaction. A downstream idempotency key gives only provider-scoped, effectively-once behavior
 within that API's retention and parameter-matching contract; duplicate delivery remains possible and the
 consumer/effect handler must be idempotent.
+
+**Deferred vehicle (see §6.6).** Under the mandatory single-writer lock, the versioned envelope,
+`expected_seq`/CAS, the upcaster registry, and causation/correlation IDs are not a near-term requirement —
+the landed P0-2 partial proves the identities that matter close as additive fold fields in ~25 lines, and old
+logs still fold byte-identically. Keep the scope-key refs below as additive fields on existing events; adopt
+the full envelope/CAS only if a shared/remote multi-writer actually appears.
 
 The v2 event envelope should carry stable `event_id`, schema version, sequence, causation/correlation IDs,
 and only the scope keys relevant to that event:
@@ -425,10 +434,10 @@ fail-closed behavior so safety does not depend on an operator remembering this l
 |---|---|---|---|---|---|
 | **R0 — fail-closed containment** | P0-4, P0-6, P0-7; P1-3, P1-6, P1-7, P1-11, P1-12 | **in progress · release blocker** | **Landed:** known corrupt-tail refusal/repair, permission CAS and MCP/kill gates, stage/path/timeout containment, tri-state workdir audit, named leakage fixes, strategy-param guard, event partition, aggregate-context fix. **Remaining:** recheck divergence under writer coordination, fail on unsupported locks, default-deny route/object scopes, one ToolSpec/effect inventory, global PathPolicy/fresh artifacts, calibrated advisory policy, durable wakeup | none | every known and newly identified bypass is red before and green after; unambiguous v1 logs still read; no unsupported shared mode starts |
 | **R1 — event/state identity** | P0-1, P0-2; P1-12 | **in progress · release blocker** | **Landed:** node attempt generation for eval/fail terminals; reopen-of-finished `search_epoch` bump with confirmation/approval re-open and subject-bound (existence-checked) approval (P0-2 partial, `931c28b`). **Remaining:** run instances, event/evaluation IDs, attempt scope for all effects, full search-epoch stamping of promotion/finalization plus a per-epoch hidden holdout, request/subject revisions on all forced/control requests, transition validator, append CAS, typed payload/upcaster registry | R0 | model-based stale-event/reset/reopen/approval tests; exactly one terminal per attempt; no old instance/attempt/epoch can mutate, promote, or finalize |
-| **R2 — durability/reproducibility** | P0-3, P0-5; replay extensions in §13.2 | **in progress · release blocker** | **Landed:** folded setup completion/re-entry, different-task and alias refusal, corrupt-log repair. **Remaining:** content-addressed setup steps; RunManifest/InputSnapshot; attempt-scoped clean workdirs and ArtifactManifests; strict `run` vs `resume`; repair generation/digest provenance | R1 | crash at every setup/effect boundary converges or fails closed; dirty inputs and stale outputs cannot masquerade as current |
+| **R2 — durability/reproducibility** | P0-3, P0-5; replay extensions in §14.2 | **in progress · release blocker** | **Landed:** folded setup completion/re-entry, different-task and alias refusal, corrupt-log repair. **Remaining:** content-addressed setup steps; RunManifest/InputSnapshot; attempt-scoped clean workdirs and ArtifactManifests; strict `run` vs `resume`; repair generation/digest provenance | R1 | crash at every setup/effect boundary converges or fails closed; dirty inputs and stale outputs cannot masquerade as current |
 | **R3 — execution infrastructure** | P1-2, P1-4, P1-5, P1-8 | **in progress · stabilization blocker** | **Landed:** ablation cost accounting, explicit background tree kill/wait, finite timeout/path fixes, `--mount` Windows grammar. **Remaining:** multidimensional reserve-before-spawn BudgetLedger; session-owned deadline watcher; bounded logs/readers/regex; stable cross-platform input mapping; physical token/deadline/OS quotas | R0–R2 | no over-admission; incurred stale-worker cost is settled once; no orphan tree after kill; memory/disk bounds; real Windows/Linux matrix green |
-| **R4 — typed domain services** | P0-2; P1-7, P1-9, P1-11 | **in progress · stabilization blocker** | **Landed:** parent-aware wrapper forwarding and the concrete strategy-param bypass fix. **Remaining:** TaskSpec/capabilities; DevelopmentRequest/Result; ToolSpec/Result/ExecutionContext; SearchFitness/PromotionFitness; versioned TrustEvidence/Decision; lifecycle/evaluation/promotion/strategy services | R1–R3 | wrappers preserve typed capabilities/failures; one policy gate and one fitness owner; Engine remains a compatible facade |
-| **R5 — clients/compatibility** | P1-1, P1-3, P1-10 | **in progress · stabilization blocker** | **Landed:** named sensitive-route gates/state redaction and TUI/JS needs-engine parity. **Remaining:** RunCommandService/EngineSupervisor; generated ControlSpec; direct-client postconditions; upstream principal/run-owner/session isolation; UI e2e; Settings schema source; legacy alias manifest | R0–R4 | every client has identical transition semantics; no zombie run; route/object/control/schema census is exact; shared mode either passes its auth matrix or refuses startup |
+| **R4 — typed domain services** | P0-2; P1-7, P1-9, P1-11 | **in progress · post-stabilization polish — only versioned TrustEvidence binding is release-relevant; see §6.6** | **Landed:** parent-aware wrapper forwarding and the concrete strategy-param bypass fix. **Remaining:** TaskSpec/capabilities; DevelopmentRequest/Result; ToolSpec/Result/ExecutionContext; SearchFitness/PromotionFitness; versioned TrustEvidence/Decision; lifecycle/evaluation/promotion/strategy services | R1–R3 | wrappers preserve typed capabilities/failures; one policy gate and one fitness owner; Engine remains a compatible facade |
+| **R5 — clients/compatibility** | P1-1, P1-3, P1-10 | **in progress · the P1-1 zombie-run reconciler is a release blocker; multi-tenant auth is deferred (refuse off-loopback); see §6.6** | **Landed:** named sensitive-route gates/state redaction and TUI/JS needs-engine parity. **Remaining:** RunCommandService/EngineSupervisor; generated ControlSpec; direct-client postconditions; upstream principal/run-owner/session isolation; UI e2e; Settings schema source; legacy alias manifest | R0–R4 | every client has identical transition semantics; no zombie run; route/object/control/schema census is exact; shared mode either passes its auth matrix or refuses startup |
 
 Two P0 details belong explicitly in R1/R2 rather than being hidden under “event sourcing”:
 
@@ -474,6 +483,54 @@ than saying “current.” Shared object storage still needs a single writer or 
 | Proactive breadth / QD | R1 epoch identity; R4 SearchFitness/PromotionFitness and EvaluationService; trustworthy evaluator; explicit open-ended capability | frozen A/B benchmark against greedy/reactive baseline | promote only if novelty/diversity improves without unacceptable quality, trust, or cost regression (§11) |
 | Remote workers | R1 EvaluationRef/CAS; R2 manifests/artifacts; R3 ledger/supervisor; R4 EvaluationService contract | one idempotent remote evaluation worker | no fleet until duplicate/late delivery, cost settlement, and fencing tests pass |
 | Real MLE-bench publication | R1–R4 plus real isolated adapter | preregistered limited pilot | publish confidence intervals, cost, failures, and holdout discipline; do not benchmark around known safety gaps |
+
+#### 6.6 Right-sizing the remediation — substance reconciliation (2026-07-12)
+
+*Normative over the §6.3 status labels where they conflict. The diagnosis (§1–§5) is sound and the landed
+increments confirm its shape; this pass judges the **necessity** and **correctness** of the remediation
+against the actual threat model — a single-host, single-operator, loopback loop whose source of truth is a
+replayed append-only log — and re-scopes what is a release blocker versus post-stabilization polish.*
+
+- **The identity vehicle is additive fold fields, not a v2 envelope.** The landed P0-2 partial stamped plain
+  `int`/optional fields onto existing events and added reader-side stale-generation checks in ~25 lines of
+  fold (`replay.py:179-186, 602-625, 421-457`), old logs folding byte-identically. Extend that same
+  stamp-generation + reject-stale pattern to every node effect. **Defer** the v2 envelope, `expected_seq`/CAS,
+  the upcaster registry, and causation/correlation IDs (§5) until a shared/remote writer exists — under the
+  mandatory single-writer lock the CAS is belt-and-suspenders and correlation IDs have no consumer here.
+- **Separate in-log counters from the external material manifest.** Identity families 1–3 (attempt / epoch /
+  request+subject) are one cheap, proven, additive fold pattern. Family 4 (`RunInstanceId` / `RunManifest` /
+  `InputSnapshot`) is a different, heavier class — external material identity (input digests, environment,
+  dirty bytes) the pure fold cannot observe. Do not let the shared "identity" label smuggle a provenance
+  subsystem into the "just add a counter" bucket. Ship the cheap enforcement half — the artifact **freshness
+  gate** ("output created by THIS evaluation") — independently of, and before, the full RunManifest.
+- **Pull the cheap fail-closed fixes into R0.** The freshness gate, a host-RAM cap on the subprocess tier, the
+  tombstone-before-physical-delete event, an always-on background deadline watcher (`bg_tasks.py:116-128`
+  enforces the 2 h cap lazily today), the duplicate-lifecycle double-charge guard (`replay.py:161` overwrites
+  a node to pending and the terminal then re-charges `total_eval_seconds`), and the P1-1 zombie-run reconciler
+  are small, high-value, and must not wait behind the full identity program.
+- **R4 is post-stabilization, not a blocker.** By §14.6's own admission the Engine decomposition has "no
+  immediate correctness payoff"; a maintainability refactor cannot gate features. Of the R4 type contracts,
+  only versioned **TrustEvidence** binding is release-relevant (today `reward_hack_suspected` carries only
+  `{node_id, signals}`); `DevelopmentResult` is already rename-guarded (`DEVELOPER_OUTPUT_ATTRS` +
+  `test_role_output_contract.py`) and a SearchFitness/PromotionFitness value-object hierarchy is optional.
+  Keep the sequencing rule — decompose only after the identity contracts exist.
+- **R5: split the zombie-run reconciler from multi-tenant auth.** The P1-1 `EngineSupervisor`/reconciler
+  affects the SUPPORTED loopback mode and stays a release blocker. Principal identity, per-object
+  authorization, and session isolation defend a multi-tenant threat model the tool doesn't have — the correct,
+  cheap control is the **refusal to bind off loopback** (already the "Shared deployment" gate).
+- **Trust is a detector-ARCHITECTURE problem, not only calibration.** A precision ≥99% gate (§7.3) over
+  brittle regex detectors, with no plan for "the regex plateaus below the gate," risks trust-by-default never
+  shipping. The blocker is evolving the detectors — regex → AST/semantic, and possibly a calibrated
+  LLM-as-a-Verifier advisory (§12) — before calibration, not calibration alone.
+- **Gate research-loop QUALITY, not only state safety.** R0–R5 ensure the engine won't corrupt state or lie
+  about a metric, but say almost nothing about whether it produces GOOD ML (idea grounding, prompt contracts,
+  evaluator trustworthiness). Add a loop-quality gate (§7.3, §7.6) and a run-postmortem / failure-observability
+  deliverable — "why did this run/node fail" is the highest-frequency operator question and is nobody's
+  deliverable today.
+- **Do not gate pure offline analysis behind identity/services.** Coverage diagnostics, the KB pilot, and the
+  retrieval benchmarks (§8–§12) that neither write domain state, launch processes, call the network, nor
+  change promotion do not require R2/R4 — only their live steering does. Keep the offline harnesses on the
+  early lane.
 
 ### 7. Recommendation — dependency-ordered delivery, gates, and rollout
 
@@ -551,12 +608,13 @@ experiments, not their starting assumption.
 | Event durability | invalid JSON **or invalid Event envelope** in the middle blocks append; repair preserves original and records byte offsets/digests; duplicate event ID cannot charge twice |
 | Setup/resume | crash after every setup append either resumes to the same RunManifest/InputSnapshot or fails closed; `run` refuses non-empty dirs; source/task/config drift requires explicit fork/rebase; mutable attempt outputs never cause input drift |
 | Artifact freshness | every declared metric/prediction/submission is a regular contained file in the current EvaluationRef's ArtifactManifest and created by that evaluation, unless a digest-bound reuse event exists |
-| Authorization | 100% of `/api` routes declare deny-by-default public/auth scope and enforce principal/run/artifact/session ownership; unauthenticated health triggers zero model calls; plan/ask/auto tests cover every provider including MCP |
+| Authorization | 100% of `/api` routes declare deny-by-default public/auth scope; unauthenticated health triggers zero model calls; plan/ask/auto tests cover every provider including MCP. (Principal/run/artifact/session ownership is a **shared-mode** gate — see "Shared deployment" and §6.6; it is not required for the supported loopback single-operator mode.) |
 | Permission decisions | stale allow after cancel/new turn returns conflict and performs zero effects; grants are subject/args/session/revision bound and consumed once |
 | Budget | admission atomically preserves `spent + reserved <= hard_limit`; no eval class bypasses the ledger; physical limits enforce the reservation; fenced results are rejected while incurred cost is settled once, and any overage stops new admission |
 | Process/resources | kill returns only after the owned tree is gone or an explicit failure is reported; stubborn/unpolled/exception-after-spawn cases pass on Windows and POSIX; logs/readers stay bounded |
-| Trust gating | missing/unreadable protected inputs are never “clean”; hard-gated detector class meets a predeclared labelled-corpus threshold (target precision ≥99%, with recall and abstention reported) |
+| Trust gating | missing/unreadable protected inputs are never “clean”; the hard-gated detector class first has an architecture beyond brittle regex (AST/semantic, and/or a calibrated advisory verifier — §12) and only then meets a predeclared labelled-corpus threshold (target precision ≥99%, with recall and abstention reported). Calibrating the current regex alone is not the exit — see §6.6 |
 | Shared deployment | server refuses non-loopback/shared mode until upstream authenticated principals, object-level authorization, private-origin/session isolation, CSRF/session controls, and per-user run/artifact tests pass |
+| Loop quality & observability | a research-loop quality signal (idea grounding / plan / memo) is reported and, on open-ended tasks, gated — not only state-safety; every run/node failure produces a postmortem surface answering "why did it fail" (§6.6, §7.6) |
 | Compatibility | Python 3.11/3.12, supported Windows/Linux, UI build/e2e, golden v1 replay, and v2 migration matrices are green; old public RunState shape remains compatible |
 
 Product outcome metrics should be reported alongside safety gates: successful-resume rate, projection
@@ -599,14 +657,35 @@ the trust layer is supposed to prevent.
 “turn everything on.” It is a demonstrably identity-safe, reproducible, fail-closed local research loop.
 That baseline makes the later trust, memory, exploration, real-benchmark, and scale claims credible.
 
+#### 7.6 Program cost and the minimal viable path
+
+The plan above is a multi-horizon program; without a cost estimate and a lean path, the safety framing can
+indefinitely defer shipping. The **minimal viable containment (MVC)** that makes the supported single-operator
+loopback loop demonstrably safe is a small, already-specified subset:
+
+- the R0 fail-closed set plus the cheap fixes pulled forward in §6.6 (freshness gate, host-RAM cap, tombstone,
+  deadline watcher, double-charge guard, zombie-run reconciler, fail-startup-on-unsupported-lock);
+- additive fold-field identity for attempt / epoch / request+subject (extend the landed pattern) — **not** the
+  v2 envelope/CAS/manifest;
+- trust stays advisory/audit — no hard gate until detector architecture plus calibration (§6.6).
+
+That MVC is roughly the §6.2 operating envelope encoded as fail-closed behavior plus about a dozen targeted
+fixes — weeks, not the full program. Everything beyond it (RunManifest/InputSnapshot, the v2 envelope/CAS, the
+reserve/fencing BudgetLedger, a cgroups/Job-Object ProcessSupervisor, the R4 services, R5 multi-tenant auth)
+is real but should be scheduled by demonstrated need and reversibility, each carrying an effort estimate — not
+treated as one undifferentiated release wall. Report effort per workstream alongside the §7.3 DoD gates so the
+plan can be sequenced by ROI rather than by list order.
+
 ---
 
 ## PART III — RESEARCH HYPOTHESES & GATED FEATURE OPTIONS
 
-> A code-level integration study of a curated Frameworks/Libs KB and four 2026 papers. Their official arXiv
-> records and available full text were checked on 2026-07-11; code claims were rechecked against the current
-> repository and doc 16. Each item below is a hypothesis with prerequisites and evaluation criteria, not a
-> commitment to enable a flag or import a framework.
+> A code-level integration study of a curated Frameworks/Libs KB and five 2026 papers. The first four papers'
+> official arXiv records and available full text were checked on 2026-07-11; **§12 (LLM-as-a-Verifier,
+> arXiv 2607.05391) was added on 2026-07-12 from the requester-supplied abstract — its arXiv page was
+> unreachable from this environment, so its results are author-reported and unverified here.** Code claims were
+> rechecked against the current repository and doc 16. Each item below is a hypothesis with prerequisites and
+> evaluation criteria, not a commitment to enable a flag or import a framework.
 
 **TL;DR verdict.**
 
@@ -616,6 +695,7 @@ That baseline makes the later trust, memory, exploration, real-benchmark, and sc
 | **§9 · NapMem** | **Benchmark structured navigation before building a pyramid.** Reuse CaseLibrary/Memora primitives, but do not call them “80% built”; NapMem's result couples structure with a learned navigation policy. | Conceptually promising; corpus-size sensitivity and a flat-retrieval failure threshold are LoopLab hypotheses to measure, not paper findings. | **M–L** | retrieval-intensive/open-ended |
 | **§10 · SciResearcher** | **Treat as an optional model/data-pipeline precedent.** A safe grounded-research profile requires network policy, source snapshots, and budgets; self-training is a separate governed project. | Modest/domain-specific until LoopLab benchmarks show transfer. | **M integration / L training** | explicit opt-in |
 | **§11 · Narrow exploration / Heuresis** | **Measure first, A/B second.** Current concentration is a monitoring signal, not validated scientific novelty. In Heuresis's six-strategy, three-domain study, search steered distributions but did not expand the measured frontier. | High relevance for open-ended mode; harmful if applied globally to fixed-metric tasks. | **M–L** | explicit open-ended capability |
+| **§12 · LLM-as-a-Verifier** | **Adopt as a calibrated ADVISORY verifier** on open-ended surfaces (best-of-N ranking, foresight, novelty, memo quality) and a candidate trust-detector architecture; never override the ground-truth metric. | High — fills the "no first-class Evaluator" (§3) and research-loop-quality (§6.6) gaps; strictly advisory. | **M** integration / gated | advisory/audit; open-ended; logprob-capable backends |
 
 Nothing here replaces the core or outranks R0–R4. Offline corpus design and evaluation harnesses may proceed
 early; production steering waits for identity, provenance, tool policy, budget, and trustworthy promotion.
@@ -1044,7 +1124,101 @@ diversity does not by itself create high-quality novelty. **Recommend:** instrum
 the gated A/B second, and adopt only the intervention that moves the measured quality–novelty frontier for
 LoopLab's tasks.
 
-### 12. How the four compose — only after individual evidence
+### 12. LLM-as-a-Verifier — verification as a scaling axis (arXiv 2607.05391, Jul 2026)
+
+**What it is** ([arXiv:2607.05391](https://arxiv.org/abs/2607.05391); abstract as supplied by the requester —
+the official page was unreachable from this environment, so results below are **author-reported** and
+unverified here). A **general-purpose, training-free** verification framework that gives fine-grained feedback
+for agentic tasks. Instead of prompting an LLM for a discrete score, it computes the **expectation over the
+distribution of scoring-token logits** to produce a **continuous** score, and scales verification along three
+axes: (1) **score granularity** (better positive/negative separation and calibration), (2) **repeated
+evaluation** (variance reduction), and (3) **criteria decomposition** (complexity reduction). It adds a
+cost-efficient ranking algorithm for best-of-N selection over the continuous scores, and reports
+state-of-the-art on Terminal-Bench V2 (86.5%), SWE-Bench Verified (78.2%), RoboRewardBench (87.4%), and
+MedAgentBench (73.3%). The fine-grained signal also serves as a **task-progress proxy**, ships as a Claude Code
+extension for monitoring agentic systems, and provides dense reward for RL (improving SAC/GRPO sample
+efficiency). It frames verification itself as a new scaling axis alongside pre-/post-/test-time compute.
+
+#### Relation to LoopLab — unusually well-matched to the doc's own weakest spot
+
+The doc already names the gap this targets: **§3 marks the "Evaluator" role ⬜** — "no first-class Evaluator;
+verification is a distributed subsystem (sandbox + host grader + trust gates + critic + memo-verifier)." A
+general-purpose verifier is a candidate first-class evaluation primitive, and LoopLab already has the exact
+consumer seams:
+
+- **Best-of-N selection** (`search/best_of_n.py`) — the paper's cost-efficient continuous-score ranking maps
+  directly onto choosing among N code drafts *before* an expensive real evaluation.
+- **Foresight / predict-before-execute** (`search/foresight.py`) — the audit-only world-model calibration
+  track is a natural home for a continuous verification signal on candidate hypotheses.
+- **Novelty gate / critic** (`engine/novelty.py`) — replace a discrete LLM-judge with a continuous, criteria-
+  decomposed score; criteria decomposition maps onto multiple quality/novelty dimensions.
+- **Deep-research memo** (`agents/deep_research.py`) — verify `recommended_directions` grounding/quality before
+  the first five become OPEN hypotheses.
+
+It also directly answers two gaps §6.6 flags: it is a candidate **trust-detector architecture beyond regex**
+(criteria-decomposed advisory scoring), and it is a concrete **research-loop quality signal** (the loop-quality
+gate §7.3/§7.6 asks for). Repeated-evaluation ↔ LoopLab's confirmation (it already re-evaluates); criteria-
+decomposition ↔ its multi-signal trust (leakage/reward-hack/critic).
+
+**Why it is not a drop-in — four LoopLab-specific caveats:**
+
+1. **Never override the ground-truth metric.** On fixed-metric tasks (`mlebench_real`, `dataset`) the held-out
+   metric *is* the truth; an LLM verifier that could displace a real leaderboard/holdout score would reopen the
+   exact reward-hack/leakage vector the trust layer exists to close. The verifier belongs to the **open-ended /
+   no-ground-truth surfaces** (idea/plan/memo quality, novelty, best-of-N among drafts, foresight priority) as
+   an **advisory** signal — mode-gated exactly like §11's diversity pressure.
+2. **Logit access vs backend-agnosticism (ADR-7).** The continuous-score mechanism needs scoring-token
+   logprobs. LoopLab routes every role through LiteLLM and logprob exposure varies by provider/endpoint; where
+   it is absent the method degrades to an ordinary discrete LM-judge and loses its main advantage. Gate on
+   logprob-capable backends.
+3. **Cost multiplies.** granularity × repeated-eval × criteria-decomposition multiplies LLM calls — it must run
+   through the R3 budget accounting the doc already wants, or it is a cost blow-out. (A point *for* R3.)
+4. **The verifier is itself attackable.** An adversarial candidate or injected code/output can target the
+   verifier; used as a trust signal it must stay **advisory/audit** and be calibrated on a labelled corpus
+   before any gating — the same bar as §7.3. The RL/self-distillation angle is out of scope like §10's angle C.
+
+#### Integration seams
+
+| Paper piece | LoopLab seam | Change |
+|---|---|---|
+| Continuous score from scoring-token logit expectation | `core/llm.py` (logprob-capable path) | Add an optional logprob-scored verify call; fall back to discrete judge where logprobs are unavailable; record method + backend digest |
+| Cost-efficient best-of-N ranking | `search/best_of_n.py` | Offer the continuous-score ranker as an alternative selector over candidate drafts; A/B vs the current selector |
+| Task-progress proxy | `search/foresight.py` + tracing | Feed continuous verification into the audit-only predict-before-execute calibration track; never into selection until proven |
+| Criteria decomposition | `engine/novelty.py` / critic / `trust/` advisory | Decompose quality/novelty/reward-hack into named criteria; keep trust use audit-only and calibrated |
+| Repeated evaluation | confirmation (`engine/confirm_phase.py`) | Reuse the existing re-evaluation machinery; charge every repeat to the R3 budget |
+
+#### Complications
+
+- **Ground-truth override** (caveat 1) and **mode-gating** — needs the explicit open-ended capability §11 also
+  requires, not a task-name heuristic.
+- **Logprob dependency** collides with backend-agnosticism; the discrete fallback is a different, uncalibrated
+  method and must be labelled as such in any result.
+- **Author-reported, off-domain benchmarks** (coding/robotics/med agents), not ML-engineering — transfer to
+  LoopLab's idea/plan/memo surfaces must be measured, not assumed; the arXiv record could not be verified here.
+- **Verifier-as-trust is attackable**; keep advisory + calibrated, never a standalone hard gate.
+
+#### Evaluation gate
+
+On a frozen set of LoopLab candidates, compare verifier-ranked best-of-N against the current selector, and
+score whether the continuous verification predicts which candidate actually wins on the eventual **real** held-
+out metric (does the advisory proxy correlate with ground truth?). Report calibration/separation, added
+tokens/latency/cost against the R3 budget, injection robustness, and — for the trust use — precision/recall/
+abstention on the labelled corpus. Promote as an **advisory** selector/foresight input only if it improves
+selection or prioritization within a declared cost ceiling and **never** overrides ground truth; keep any trust
+use in audit mode until it clears the §7.3 bar.
+
+#### Synergy — high and well-targeted, but strictly advisory
+
+This is the closest of the Part III items to a piece LoopLab is explicitly missing: the **first-class
+evaluation primitive** §3 names, feeding best-of-N, foresight, novelty, and memo quality, and a candidate
+answer to §6.6's trust-detector-architecture and loop-quality gaps. It fits the doc's discipline exactly —
+measure first, gate behind R3 budget and the trust-calibration bar, mode-gate to open-ended surfaces, and
+never let it touch the fixed-metric promotion path. **Recommend:** build the best-of-N and memo-quality
+evaluation harness now (offline, no new safety surface); adopt the continuous verifier as an advisory selector
+on logprob-capable backends if it beats the current selector within budget; treat the trust and RL angles as
+separately gated.
+
+### 13. How the five compose — only after individual evidence
 
 The directions can compose, but they should not be delivered as one speculative stack:
 
@@ -1053,6 +1227,7 @@ flowchart LR
     S[R0–R4 safety/provenance/services] --> K[§8 governed KB pilot]
     S --> G[§10 grounded-research profile]
     S --> C[§11 calibrated coverage diagnostics]
+    S --> V[§12 verifier: best-of-N / foresight advisory A/B]
     K --> N[§9 navigation A/B]
     G --> B[§11 breadth/QD A/B]
     C --> B
@@ -1070,6 +1245,9 @@ flowchart LR
   search policy authority by themselves.
 - A SciResearcher backend and a self-trained model are independent model/data decisions, not required parts
   of the retrieval or exploration architecture.
+- The §12 verifier is an advisory evaluation layer that can feed best-of-N and foresight independently of the
+  others; it never overrides the ground-truth metric and is gated on logprob-capable backends plus the R3
+  budget, so it composes with — but does not depend on — the KB/navigation/exploration lanes.
 
 #### Consolidated experiment order
 
@@ -1079,21 +1257,22 @@ flowchart LR
 | 1 | Coverage + retrieval baselines | R1 identity; frozen corpora/evaluators | diagnostics are reproducible and correlate with independent judgement | proxies are unstable/uninformative |
 | 2 | Governed Frameworks/Libs pilot | R2 provenance + R4 tool policy/schema | edit correctness improves within token/latency ceiling | stale/distractor/poisoning rate offsets benefit |
 | 3 | Literature-only grounded profile | R0 policy + R2 source snapshots + R3 budget + R4 ToolSpec | cited-claim precision and useful executed directions improve | injection/egress violation or cost ceiling breach |
-| 4 | NapMem-style navigation A/B | winning §8 pilot plus a reproducible retrieval gap | beats flat/harmonic retrieval on evidence and task success | extra calls add no practical gain |
-| 5 | Proactive breadth/QD A/B | calibrated §11 metrics + R1 epoch/promotion identity + R4 SearchFitness/EvaluationService + trustworthy eval | improves quality–novelty frontier under fixed budget | quality/trust/cost regression or reward hacking rises |
-| 6 | SciResearcher-8B backend A/B | available model/license + §10 harness | pairwise transfer gain on LoopLab tasks | domain mismatch/no gain |
-| 7 | Self-distillation | v2 trajectory audit + data governance + isolated training budget | separate approved research proposal | default: deferred |
+| 4 | Verifier-ranked best-of-N + memo-quality A/B (§12) | logprob-capable backend + R3 budget; frozen LoopLab candidates | advisory ranking beats the current selector within a cost ceiling AND its score correlates with the eventual ground-truth metric | no correlation with the real metric, any ground-truth override, or cost-ceiling breach |
+| 5 | NapMem-style navigation A/B | winning §8 pilot plus a reproducible retrieval gap | beats flat/harmonic retrieval on evidence and task success | extra calls add no practical gain |
+| 6 | Proactive breadth/QD A/B | calibrated §11 metrics + R1 epoch/promotion identity + R4 SearchFitness/EvaluationService + trustworthy eval | improves quality–novelty frontier under fixed budget | quality/trust/cost regression or reward hacking rises |
+| 7 | SciResearcher-8B backend A/B | available model/license + §10 harness | pairwise transfer gain on LoopLab tasks | domain mismatch/no gain |
+| 8 | Self-distillation | v2 trajectory audit + data governance + isolated training budget | separate approved research proposal | default: deferred |
 
 The recommended near-term output of Part III is therefore **evaluation harnesses and governed schemas**, not
 default-on web, a production pyramid, or a global diversity policy.
 
-### 13. Verification, corrections, and evidence status (reconciled 2026-07-12)
+### 14. Verification, corrections, and evidence status (reconciled 2026-07-12)
 
-#### 13.1 Disposition of the first doc-17 verdict
+#### 14.1 Disposition of the first doc-17 verdict
 
 | Earlier claim | Current disposition |
 |---|---|
-| Architecture is sound; correctness/replay are not concerns | **Refuted as a baseline claim.** Doc 16's seven P0 and twelve P1 reproductions were real. The post-audit series contains fixes for many of them; the current tally is **2 fixed / 15 partial / 2 open** (§13.2, P0-2 advanced open→partial at `931c28b`). |
+| Architecture is sound; correctness/replay are not concerns | **Refuted as a baseline claim.** Doc 16's seven P0 and twelve P1 reproductions were real. The post-audit series contains fixes for many of them; the current tally is **2 fixed / 15 partial / 2 open** (§14.2, P0-2 advanced open→partial at `931c28b`). |
 | The remaining frontier is small and mostly flags | **Refuted.** R0–R5 are prerequisite engineering programs; feature flags expand unsafe surfaces if enabled first. |
 | `resume = replay` | **Refuted as a continuation guarantee.** Projection comes from the log; continuation also depends on task/config/source/environment/workdirs/processes/shared memory. |
 | Event log is universally append-only/idempotent | **Narrowed.** First-terminal-wins holds within one matching node-attempt generation. Full lifecycle duplication can re-charge cost, and ordinary node delete currently rewrites the log. |
@@ -1104,15 +1283,15 @@ default-on web, a production pyramid, or a global diversity policy.
 | Proactive/QD exploration is the clear next feature | **Downgraded to A/B hypothesis.** Current coverage is an uncalibrated proxy; Heuresis's six-strategy, three-domain study shows steering without measured quality–novelty frontier expansion. |
 | Papers/IDs were unavailable and snippet-only | **Resolved.** The official arXiv records/full text available on 2026-07-11 were checked; results remain author-reported. |
 
-#### 13.2 Code and test evidence
+#### 14.2 Code and test evidence
 
 Post-audit implementation disposition at executable revision `369d6a6` (P0-2 advanced from **open**
-to **partial** in the follow-on increment at `931c28b` — see §13.6):
+to **partial** in the follow-on increment at `931c28b` — see §14.6):
 
 | Finding | Status | Landed containment | Residual exit gate |
 |---|---|---|---|
 | P0-1 attempt identity | **partial** | `47f786a`: attempt generation rejects stale eval/fail terminals | bind confirm/holdout/trust/abort/repair/forced/cost/artifact effects |
-| P0-2 epoch/subject identity | **partial** | `a23ca92`+`daf585d` (increment tip `931c28b`): reopen-of-finished bumps `search_epoch` and re-opens confirmation + approval for the new candidate set; subject-bound (existence-checked) approval; `spec_approved` requires a proposal (§13.6) | stamp `search_epoch` on promotion/finalization outputs; subject/`expected_seq` on all forced/control requests; epoch-specific still-hidden holdout |
+| P0-2 epoch/subject identity | **partial** | `a23ca92`+`daf585d` (increment tip `931c28b`): reopen-of-finished bumps `search_epoch` and re-opens confirmation + approval for the new candidate set; subject-bound (existence-checked) approval; `spec_approved` requires a proposal (§14.6) | stamp `search_epoch` on promotion/finalization outputs; subject/`expected_seq` on all forced/control requests; epoch-specific still-hidden holdout |
 | P0-3 setup crash window | **partial** | `5f5ce46`: folded completion and crash re-entry | content-addressed step state and manifest digest |
 | P0-4 invisible event tail | **partial** | `57e6312`, `13f087c`: JSON/Event-envelope refusal and repair | recheck under writer coordination; serialize repair; collision-safe digest provenance |
 | P0-5 run/task/workspace mixing | **partial** | `4c6c59f`: different-task and conflicting-alias refusal | canonical config/source/dirty-bytes/environment InputSnapshot |
@@ -1134,7 +1313,7 @@ to **partial** in the follow-on increment at `931c28b` — see §13.6):
 - Current census was reproduced (as of the pinned `369d6a6`): 170 production Python files / 40,242 physical
   lines; 157 Python test files / 27,170 physical lines; 78 event types, 65 fold handlers, 13 explicit
   diagnostic types, and zero unclassified registered types. At `931c28b` this is 66 fold handlers / 12
-  diagnostic (78 registered, zero unclassified) after `run_setup_finished` moved diagnostic→folded — see §13.6.
+  diagnostic (78 registered, zero unclassified) after `run_setup_finished` moved diagnostic→folded — see §14.6.
 - Doc 16 records full Linux Python 3.11 and 3.12 runs of **1,711 passed, 33 skipped, 1 failed** each. The one
   repeated failure came from a stale test patch targeting the old `urllib` seam, while the implementation had
   moved to OpenAI SDK/httpx; current watchdog/raw-httpx tests pass. This is historical evidence for the
@@ -1156,7 +1335,7 @@ to **partial** in the follow-on increment at `931c28b` — see §13.6):
 - This reconciliation distinguishes **fixed**, **partial**, and **open** findings. It does not infer full
   architectural closure from a passing regression or a commit title.
 
-#### 13.3 Retained code-level corner cases
+#### 14.3 Retained code-level corner cases
 
 - `default`/`fast` profiles are empty; `thorough` enables confirmation and several trust/quality controls but
   leaves web/literature, novelty policy, and diversity policy off. The Strategist can still mutate several
@@ -1172,7 +1351,7 @@ to **partial** in the follow-on increment at `931c28b` — see §13.6):
 
 ---
 
-#### 13.4 Selected primary sources and official documentation
+#### 14.4 Selected primary sources and official documentation
 
 **State, durability, and provenance**
 
@@ -1202,8 +1381,10 @@ to **partial** in the follow-on increment at `931c28b` — see §13.6):
 - [SciResearcher — arXiv:2605.01489](https://arxiv.org/abs/2605.01489)
 - [AI Research Agents Narrow Scientific Exploration — arXiv:2605.27905](https://arxiv.org/abs/2605.27905)
 - [Heuresis — arXiv:2606.25198](https://arxiv.org/abs/2606.25198)
+- [LLM-as-a-Verifier — arXiv:2607.05391](https://arxiv.org/abs/2607.05391) *(added 2026-07-12; abstract per
+  requester, official page unverified from this environment)*
 
-#### 13.5 Scope limits and documentation authority
+#### 14.5 Scope limits and documentation authority
 
 - Current-state dispositions and code anchors are current for the executable revision named at the top;
   doc 16 preserves the original reproduction anchors. Re-run the census, suite, and
@@ -1219,9 +1400,9 @@ to **partial** in the follow-on increment at `931c28b` — see §13.6):
   older plans as historical; future authority changes must update those surfaces
   in the same PR.
 
-#### 13.6 Stabilization increment landed since `369d6a6`, and the deferred carryover
+#### 14.6 Stabilization increment landed since `369d6a6`, and the deferred carryover
 
-*As of commit: `931c28b` · Normative for: post-`369d6a6` P0-2 disposition · Supersedes: the P0-2 row of §13.2*
+*As of commit: `931c28b` · Normative for: post-`369d6a6` P0-2 disposition · Supersedes: the P0-2 row of §14.2*
 
 A follow-on stabilization increment (six commits, `a23ca92..931c28b`) landed the largest safely-additive
 piece of the identity program and closed a small durability gap, keeping the full suite green
@@ -1261,17 +1442,17 @@ risky slices:
    give a reopened epoch a *freshly hidden* holdout partition. A reopened run re-scores new candidates on the
    *same* holdout that was already disclosed at the first finish — comparable and non-crashing, but no longer a
    truly unseen signal (an "already-seen exam"). Fix: reserve a still-hidden per-epoch partition (or start a
-   fresh run) and carry the epoch on every promotion/finalization record. (§13.2 P0-2 residual.)
+   fresh run) and carry the epoch on every promotion/finalization record. (§14.2 P0-2 residual.)
 2. **P1-1 zombie run (open).** The resume/finalize handoff on the server has a race that can leave a run
    marked live with no engine driving it. Fix: an atomic durable command intent plus an
    `EngineSupervisor`/reconciler that owns lock acquisition and pending wakeup, so clients never assemble the
    two-step transaction. Hard to make correct *and* to verify deterministically — belongs in its own program.
-   (§13.2 P1-1; primary sources: Temporal run-id, Kubernetes reconciliation, transactional outbox in §13.4.)
+   (§14.2 P1-1; primary sources: Temporal run-id, Kubernetes reconciliation, transactional outbox in §14.4.)
 3. **P1-12 fail-open locks / append CAS (open).** The single-writer file lock silently degrades to a no-op on
    some FUSE/S3 mounts, where two writers can mint duplicate sequence numbers. Fix: a mandatory lock (or
    startup refusal when locking is unavailable) plus an `expected_seq` optimistic-concurrency check on
-   state-sensitive appends. This is a platform-dependent storage-layer change, not a local patch. (§13.2 P1-12;
-   KurrentDB expected-revision, SQLite WAL in §13.4.)
+   state-sensitive appends. This is a platform-dependent storage-layer change, not a local patch. (§14.2 P1-12;
+   KurrentDB expected-revision, SQLite WAL in §14.4.)
 4. **Engine decomposition (structural debt).** `Engine` remains a distributed god-object (12 mixins, ~120
    methods, ~111 constructor fields sharing one mutable projection), which is *why* a reset invalidates local
    node fields but can miss run-level collections. Fix: split into typed services (`NodeLifecycleService`,
