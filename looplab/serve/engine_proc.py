@@ -137,7 +137,18 @@ def _spawn_engine(cli_args: list[str], env: Optional[dict] = None,
     if run_dir is not None:
         try:
             run_dir.mkdir(parents=True, exist_ok=True)
-            err_f = open(run_dir / "engine.stderr.log", "ab")
+            # P1-4 bounded logs: engine.stderr.log is append-only across resumes, so a run whose engine
+            # keeps crashing on startup (esp. one the P1-1 reconciler re-spawns) could grow it without
+            # bound. Cap it: past the ceiling, keep only the most-recent half (the recent crash is what
+            # matters) with a truncation marker. Best-effort — a stat/rewrite failure just skips it.
+            _errlog = run_dir / "engine.stderr.log"
+            try:
+                if _errlog.exists() and _errlog.stat().st_size > _ENGINE_STDERR_CAP:
+                    _tail = _errlog.read_bytes()[-(_ENGINE_STDERR_CAP // 2):]
+                    _errlog.write_bytes(b"...(engine.stderr.log truncated to the recent tail)...\n" + _tail)
+            except OSError:
+                pass
+            err_f = open(_errlog, "ab")
             err = err_f
         except OSError:
             err = subprocess.DEVNULL
@@ -155,6 +166,10 @@ def _spawn_engine(cli_args: list[str], env: Optional[dict] = None,
 # re-spawning it, so the ORIGINAL detached spawn has time to acquire the lock + append resume_served.
 # Only a resume that stays unserved past this window is treated as a died-on-startup zombie.
 _RESUME_RECONCILE_GRACE_S = 30.0
+
+# P1-4 bounded logs: ceiling for the append-only engine.stderr.log before `_spawn_engine` truncates it
+# to its recent tail — so a crash-looping (or reconciler-re-spawned) engine can't grow it without bound.
+_ENGINE_STDERR_CAP = 8 * 1024 * 1024
 
 
 def _resolve_task_file(rd: Path) -> Optional[str]:
@@ -185,6 +200,7 @@ def reconcile_pending_resume(rd: Path, *, now: Optional[float] = None) -> bool:
       * the run is resumable (a task file exists)."""
     from looplab.events.eventstore import EventStore
     from looplab.events.replay import fold
+    from looplab.events.types import EV_RESUME_REQUESTED
     import time as _time
     now = _time.time() if now is None else now
     try:
@@ -200,6 +216,11 @@ def reconcile_pending_resume(rd: Path, *, now: Optional[float] = None) -> bool:
     task_file = _resolve_task_file(rd)
     if not task_file:
         return False                      # not resumable (predates self-describing runs)
+    # Re-record the intent BEFORE re-spawning so its fresh timestamp RESETS the grace window: a run
+    # whose engine keeps dying on startup then re-spawns at most once per grace (bounded), not on every
+    # dashboard load. Seq-gated fulfillment is unchanged — the (re)spawned engine's resume_served, at a
+    # newer seq, still clears every pending request at once.
+    EventStore(rd / "events.jsonl").append(EV_RESUME_REQUESTED, {"reconcile": True})
     _spawn_engine(["resume", str(rd), "--task-file", str(task_file)], run_dir=rd)
     return True
 

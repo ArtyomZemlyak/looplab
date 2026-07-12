@@ -258,6 +258,9 @@ def test_reconcile_pending_resume(tmp_path, monkeypatch):
     req_ts = fold(s.read_all()).last_resume_request_ts
     assert ep.reconcile_pending_resume(rd, now=req_ts + 1) is False and not spawns   # within grace
     assert ep.reconcile_pending_resume(rd, now=req_ts + 31) is True and len(spawns) == 1  # zombie -> spawn
+    # backoff: the re-spawn re-recorded the intent, so a call within the NEW grace does NOT re-spawn
+    new_ts = fold(EventStore(rd / "events.jsonl").read_all()).last_resume_request_ts
+    assert ep.reconcile_pending_resume(rd, now=new_ts + 1) is False and len(spawns) == 1
 
     monkeypatch.setattr(ep, "_engine_alive", lambda _rd: True)         # an engine IS running now
     assert ep.reconcile_pending_resume(rd, now=req_ts + 31) is False and len(spawns) == 1
