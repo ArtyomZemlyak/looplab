@@ -585,6 +585,22 @@ def test_approval_granted_coerces_string_node_id(tmp_path):
     assert fold(s2.read_all()).approved is False
 
 
+def test_approval_granted_tolerates_unhashable_and_bool_node_id(tmp_path):
+    """final-verification §F (blocker regression): a forged approval_granted with an UNHASHABLE node_id
+    (list/dict) — a sanctioned /control event appended verbatim — must NOT crash fold (hashing an
+    unhashable in `subj not in st.nodes` raises TypeError and bricks every replay). A bool id must not
+    spuriously match node 1 (bool subclasses int). Both are ignored; the run stays awaiting approval."""
+    for bad in ([999], {}, {"x": 1}, True, False):
+        s = EventStore(tmp_path / f"e_{hash(str(bad)) & 0xffff}.jsonl")
+        s.append("run_started", {"run_id": "r", "task_id": "t", "direction": "min"})
+        _n(s, 0, 0.4)                       # node 0 exists; a bool id must NOT approve it via True->1/0
+        _n(s, 1, 0.5)
+        s.append("approval_requested", {"node_id": 0})
+        s.append("approval_granted", {"node_id": bad})
+        st = fold(s.read_all())             # must not raise
+        assert st.approved is False and st.awaiting_approval is True
+
+
 def test_spec_approved_requires_a_proposal(tmp_path):
     """arch-review §3 P0-2: a premature `spec_approved` with no `spec_proposed` must not confirm the
     spec (which would skip onboarding); a real proposal-then-approval works."""

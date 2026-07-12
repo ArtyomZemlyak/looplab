@@ -436,15 +436,20 @@ def _on_approval_granted(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> No
     # runs fold identically.
     subj = d.get("node_id")
     if subj is not None:
-        # Coerce to int before the membership test (node ids are int keys): a client that posts a JSON
-        # STRING id (`{"node_id":"3"}`) would otherwise fold `"3" not in {3: Node}` -> True and the grant
-        # would be silently dropped, hanging the run awaiting approval (final ultra-review §F). `/control`
-        # coerces node_id for node_reset but not for approval_granted; coercing here defends every
-        # producer/entry point in one place. A non-numeric id stays as-is and fails the existence test.
+        # Make the membership test TOTAL (final-verification §F): node ids are int keys, and
+        # `approval_granted` is a sanctioned /control event appended VERBATIM, so a forged
+        # `{"node_id":[999]}` / `{"node_id":{}}` must not reach `subj not in st.nodes` — hashing an
+        # unhashable list/dict there raises TypeError and bricks every fold/replay/engine-loop (the exact
+        # forged-grant DoS this subject-binding exists to prevent). So: reject a bool (subclasses int, so
+        # int(True)==1 would spuriously match node 1), coerce a JSON string/number id to int, and ignore
+        # anything non-coercible (unhashable container / non-numeric string) WITHOUT hashing it — the run
+        # then stays awaiting the real approval. A `{"node_id":"3"}` still coerces and is honored.
+        if isinstance(subj, bool):
+            return
         try:
             subj = int(subj)
         except (TypeError, ValueError):
-            pass
+            return   # non-coercible id -> ignore (never hashed)
         if subj not in st.nodes:
             return   # not a real candidate — ignore (the run stays awaiting the real approval)
     st.awaiting_approval = False
