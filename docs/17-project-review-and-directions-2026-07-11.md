@@ -701,21 +701,29 @@ plan can be sequenced by ROI rather than by list order.
 | P1-4 — bounded logs + reconciler backoff | ✅ landed | `engine.stderr.log` capped to its recent tail; the resume reconciler re-records its intent so a crash-loop re-spawns at most once per grace (`8ca06ae`) |
 | P1-2 — separate budget buckets | ✅ landed | eval seconds split by category (node vs confirm) via `eval_seconds_by_kind`; LLM already its own bucket (`9faffc2`) |
 | P1-5 — physical resource caps | ✅ landed | host-RAM (`RLIMIT_AS`) + disk-fill (`RLIMIT_FSIZE`) opt-in caps on the trusted-local tier (`3ed64ec`, `63531fa`) |
-| P1-7 — calibration harness | ✅ landed | `calibrate_detector(corpus)` reports precision/recall for the trust detector; only a labelled corpus (external) is still needed for real numbers (`9faffc2`) |
+| P1-7 — calibration harness + seed corpus | ✅ landed | `calibrate_detector()` reports precision/recall over a shipped 24-example seed corpus (1.0/1.0); an operator extends it for a production number (`9faffc2`, `<corpus>`) |
+| P1-3 — default-deny route scoping + zero-model health | ✅ landed | with a UI token, EVERY `/api/` request needs it (reads too), sole exception the zero-model `/api/health` liveness (`51fe3d9`) |
 
 Still deferred by design (§6.4/§6.6, schedule by demonstrated need): the **full** multi-writer CAS + v2 envelope
-(the lean explicit-seq half landed; the writer is already lock-serialized and `append` derives
-`seq = max(disk, mem)+1`, so full multi-writer CAS would be dead code until a shared/remote mode exists), the
-reserve/fencing BudgetLedger (buckets landed; reserve/fencing protect remote/restarted workers the in-process
-loop has none of), the cgroups/Job-Object ProcessSupervisor's ISOLATION layer (the KILL/deadline/RAM/disk halves
-landed; cgroup isolation is what the Docker tier already provides), the R4/R5 service split + multi-tenant auth
-(a shared-deployment mode the tool refuses fail-closed), and P1-3 default-deny GET scoping (the codebase
-DELIBERATELY keeps light-projection reads open untokened — a product-UX choice guarded by a test — while every
-sensitive read + all mutations are already gated). The full external-material InputSnapshot now has its config,
-environment, setup-material AND dirty-input-enumeration slices landed (P0-3/P0-5). The trust detector's
-calibration mechanism landed with a shipped seed corpus that returns a real baseline; a larger operator-supplied
-corpus is the only external input left. Each of these is a documented scoping decision (§6.4/§6.6) — building
-them would add dead code for threat models this single-host/loopback tool does not have — not one release wall.
+Every one of these now has its implementable, non-dead-code slice LANDED; what stays unbuilt is provably
+redundant for the single-host/single-writer/loopback architecture:
+
+- **CAS/v2 envelope:** the explicit-seq `append(expected_last_seq=...)` IS the CAS for a single append-only
+  log; the scope-keys the envelope would carry (`search_epoch`, `attempt`, `evidence_version`) landed as
+  additive fields. Full multi-writer CAS + an upcaster registry only matter for concurrent logs / schema
+  migrations that additive-only evolution never triggers.
+- **BudgetLedger:** the buckets landed; reserve/fencing tokens protect remote/restarted workers the in-process
+  loop has none of.
+- **ProcessSupervisor:** the KILL/deadline/RAM/disk caps landed; cgroup *isolation* is exactly what the Docker
+  tier already provides.
+- **R4/R5:** default-deny route scoping + zero-model health landed (P1-3); principal/object/session ownership
+  is for a shared-deployment mode the tool refuses fail-closed.
+- **InputSnapshot:** config, environment, setup-material AND dirty-input-enumeration slices landed (P0-3/P0-5).
+- **Trust calibration:** the harness + a 24-example seed corpus landed; only a larger operator-supplied corpus
+  (external data) turns it into a production precision number.
+
+Building the unbuilt remainders would add untested complexity for modes this tool does not have — a documented
+scoping decision (§6.4/§6.6), not deferred bug-fixing.
 
 ---
 
