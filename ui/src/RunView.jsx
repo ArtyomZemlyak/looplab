@@ -36,31 +36,42 @@ const HUBS = [
   ['Lab', [['artifacts', 'Artifacts'], ['registry', 'Registry'], ['memory', 'Memory'], ['collab', 'Collab'], ['authoring', 'Authoring'], ['events', 'Events'], ['gpu', 'GPU']]],
 ]
 const HUB_OF = Object.fromEntries(HUBS.flatMap(([label, items]) => items.map(([k]) => [k, label])))
+const REVIEW_SAFE_PANELS = new Set([
+  'overview', 'trust', 'sensitivity', 'importance', 'failures', 'pareto', 'data', 'compare',
+])
 
-export default function RunView({ runId, onBack }) {
-  const { live, seq, connected, status: runStatus, error: runError, retry: retryRun } = useRunState(runId)
+export default function RunView({ runId, onBack, reviewMode = false, reviewMeta = null }) {
+  const { live, seq, connected, status: runStatus, error: runError, retry: retryRun } =
+    useRunState(runId, { pollOnly: reviewMode })
   const compactWorkspace = useMediaQuery('(max-width: 900px)')
   const [viewSeq, setViewSeq] = useState(null)
   const [history, setHistory] = useState(liveHistory)
   const [historyRetry, setHistoryRetry] = useState(0)
   const historyActive = viewSeq != null
+  const readOnlyMode = reviewMode || historyActive
+  const reviewEvidence = reviewMode && (reviewMeta?.scopes || []).includes('evidence')
+  const reviewPanelAllowed = (name) => !reviewMode || (REVIEW_SAFE_PANELS.has(name) && (name !== 'compare' || reviewEvidence))
   const changeViewSeq = (next) => {
     const n = next == null || Number(next) >= seq ? null : Number(next)
-    setRunAccess(runId, { readOnly: n != null, seq: n })
+    setRunAccess(runId, { readOnly: reviewMode || n != null, seq: n,
+      mode: reviewMode ? 'review' : n != null ? 'history' : 'live' })
     setViewSeq(n)
   }
   useEffect(() => {
     // A fresh route always starts live. This also heals any stale client registry entry left by an
     // interrupted historical scrub before the previous workspace could finish unmounting.
-    setRunAccess(runId, { readOnly: false, seq: null })
+    setRunAccess(runId, { readOnly: reviewMode, seq: null, mode: reviewMode ? 'review' : 'live' })
     return () => clearRunAccess(runId)
-  }, [runId])
+  }, [runId, reviewMode])
   const [selectedId, setSelectedId] = useState(null)
   const [inspectTab, setInspectTab] = useState('Overview')
   const [groupMode, setGroupMode] = useState('theme')
   const [collapsed, setCollapsed] = useState(() => new Set())
   const [selectedGroup, setSelectedGroup] = useState(null)
   const [panel, setPanel] = useState(null)
+  useEffect(() => {
+    if (panel && !reviewPanelAllowed(panel)) setPanel(null)
+  }, [panel, reviewMode, reviewEvidence])
   const panelReturnFocusRef = useRef(null)
   const hubTriggerRef = useRef(null)
   const closePanel = () => {
@@ -129,7 +140,7 @@ export default function RunView({ runId, onBack }) {
   useEffect(() => () => dragCleanupRef.current?.(), [])
   const [toast, setToast] = useState(null)
   const [cfg, setCfg] = useState(null)
-  useEffect(() => { get(`/api/runs/${runId}/config`).then(setCfg).catch(() => {}) }, [runId])
+  useEffect(() => { get(`/api/runs/${encodeURIComponent(runId)}/config`).then(setCfg).catch(() => {}) }, [runId])
   // Auto-land on the Report once, when a live run finishes — the conclusion is what the user wants
   // at that moment. Guarded so a manual switch back to the DAG sticks. Live runs default to 'dag'.
   useEffect(() => {
@@ -140,7 +151,7 @@ export default function RunView({ runId, onBack }) {
     let alive = true
     const want = Number(viewSeq)
     setHistory(requestHistory(want))
-    get(`/api/runs/${runId}/state?seq=${want}`)
+    get(`/api/runs/${encodeURIComponent(runId)}/state?seq=${want}`)
       .then(p => { if (alive) setHistory(current => resolveHistory(current, want, p)) })
       .catch(e => { if (alive) setHistory(current => rejectHistory(current, want, e)) })
     return () => { alive = false }
@@ -201,7 +212,7 @@ export default function RunView({ runId, onBack }) {
     showToast(`${label} — run reopened, engine resuming`)
   }
   const onNodeAction = async (action, arg) => {
-    if (historyActive) { showToast(`Historical snapshot seq ${viewSeq} is read-only`); return }
+    if (readOnlyMode) { showToast(reviewMode ? 'This review link is read-only' : `Historical snapshot seq ${viewSeq} is read-only`); return }
     try {
       if (action === 'merge' && arg && typeof arg === 'object') {   // drag drop A->B
         await CONTROL.merge(runId, [arg.from, arg.to]); await kickEngine(`merging #${arg.from} + #${arg.to}`)
@@ -234,7 +245,7 @@ export default function RunView({ runId, onBack }) {
   }
   // When armed for merge, a node click completes the merge instead of selecting.
   const onCanvasSelect = (id) => {
-    if (historyActive && mergeFrom != null) { setMergeFrom(null); return }
+    if (readOnlyMode && mergeFrom != null) { setMergeFrom(null); return }
     if (mergeFrom != null && id != null && id !== mergeFrom) {
       CONTROL.merge(runId, [mergeFrom, id])
         .then(() => kickEngine(`merging #${mergeFrom} + #${id}`))
@@ -287,22 +298,27 @@ export default function RunView({ runId, onBack }) {
     }
   }, [live?.finished, groupMode, historyActive])
 
-  if (!live) return <div className="app">
+  if (!live) return <div className={'app' + (reviewMode ? ' review-mode' : '')}>
     <div className="topbar run-head">
       <span className="brand"><span className="dot">◉</span> LoopLab</span>
-      <button className="btn sm ghost" onClick={onBack}>← runs</button>
+      {onBack ? <button className="btn sm ghost" onClick={onBack}>← runs</button>
+        : <span className="pill">read-only review</span>}
     </div>
     <main className="run-resource-state" aria-live="polite">
       {runStatus === 'not_found' ? <>
         <div className="resource-state-icon" aria-hidden="true">404</div>
         <h1>Run not found</h1>
         <p><code>{runId}</code> does not exist or may have been removed.</p>
-        <div className="resource-state-actions"><button className="btn primary" onClick={onBack}>Back to runs</button><button className="btn" onClick={retryRun}>Retry</button></div>
+        <div className="resource-state-actions">{onBack && <button className="btn primary" onClick={onBack}>Back to runs</button>}<button className="btn" onClick={retryRun}>Retry</button></div>
+      </> : runStatus === 'gone' ? <>
+        <div className="resource-state-icon" aria-hidden="true">×</div>
+        <h1>Review access ended</h1>
+        <p>{runError || 'This review link expired or was revoked.'}</p>
       </> : runStatus === 'error' ? <>
         <div className="resource-state-icon" aria-hidden="true">!</div>
         <h1>Could not load run</h1>
         <p>{runError || 'Check that the LoopLab server is reachable.'}</p>
-        <div className="resource-state-actions"><button className="btn primary" onClick={retryRun}>Retry</button><button className="btn" onClick={onBack}>Back to runs</button></div>
+        <div className="resource-state-actions"><button className="btn primary" onClick={retryRun}>Retry</button>{onBack && <button className="btn" onClick={onBack}>Back to runs</button>}</div>
       </> : <>
         <div className="history-spinner" aria-hidden="true" />
         <h1>Opening run…</h1><p>Loading the latest search state.</p>
@@ -321,7 +337,8 @@ export default function RunView({ runId, onBack }) {
   if (historyActive && !hist) return <div className="app">
     <div className="topbar run-head">
       <span className="brand"><span className="dot">◉</span> LoopLab</span>
-      <button className="btn sm ghost" onClick={onBack}>← runs</button>
+      {onBack ? <button className="btn sm ghost" onClick={onBack}>← runs</button>
+        : <span className="pill">read-only review</span>}
       <span className="spacer" />
       <span className={'live ' + liveStatus}><span className="led" />current run: {liveLabel}</span>
     </div>
@@ -349,10 +366,11 @@ export default function RunView({ runId, onBack }) {
 
 
   return (
-    <div className="app">
+    <div className={'app' + (reviewMode ? ' review-mode' : '')}>
       <div className="topbar run-head">
         <span className="brand"><span className="dot">◉</span> LoopLab</span>
-        <button className="btn sm ghost" onClick={onBack}>← runs</button>
+        {onBack ? <button className="btn sm ghost" onClick={onBack}>← runs</button>
+          : <span className="pill">read-only review</span>}
         <div className="view-toggle" role="tablist">
           <button className={'vt' + (view === 'dag' ? ' on' : '')} onClick={() => setView('dag')}>Search</button>
           <button className={'vt report' + (view === 'report' ? ' on' : '')} onClick={() => setView('report')}
@@ -367,7 +385,7 @@ export default function RunView({ runId, onBack }) {
         <EnergyToggle />
         <span className="pill phase">{phaseLabel(state)}</span>
         <span className="muted" style={{ maxWidth: 280, overflow: 'hidden', whiteSpace: 'nowrap', textOverflow: 'ellipsis' }} title={state.goal}>{state.goal || state.task_id}</span>
-        <span className={'live ' + liveStatus}><span className="led" />{liveLabel}{historyActive && ' · history'}</span>
+        <span className={'live ' + (reviewMode ? 'off' : liveStatus)}><span className="led" />{reviewMode ? 'read-only' : liveLabel}{historyActive && ' · history'}</span>
         <span className="spacer" />
         {/* round-8: keep only COMPACT at-a-glance metrics here (eval, tokens) + alerts; the fuller
             set (strategy + rationale, hints, dedup) moved to the Overview tab so this header stays a
@@ -384,6 +402,16 @@ export default function RunView({ runId, onBack }) {
         {live.paused && <span className="chip warn"><OpIcon name="pause" size={11} /> paused</span>}
       </div>
 
+      {reviewMode && <div className="review-banner" role="status">
+        <span className="history-lock" aria-hidden="true">◈</span>
+        <b>Read-only review</b>
+        <span>{(reviewMeta?.scopes || []).includes('evidence') ? 'summary + redacted source evidence' : 'summary only'}</span>
+        {reviewMeta?.expires_at && <span>expires {new Date(reviewMeta.expires_at * 1000).toLocaleString()}</span>}
+        <span className="spacer" />
+        {!connected && <span className="review-refresh-warn" role="alert">Refresh interrupted — showing the last received data.</span>}
+        <span>Actions, Assistant, raw logs, artifacts, and owner settings are unavailable.</span>
+      </div>}
+
       {historyActive && <div className="history-banner" role="status">
         <span className="history-lock" aria-hidden="true">◷</span>
         <b>Historical snapshot · seq {history.resolvedSeq} of {seq}</b>
@@ -393,7 +421,7 @@ export default function RunView({ runId, onBack }) {
 
       {/* All actions now run through the chat (type a /command or just say what to do). The approval
           phase shows an inline reminder of the exact command to type. */}
-      {!historyActive && (live.phase === 'approval' || live.phase === 'spec_approval') &&
+      {!readOnlyMode && (live.phase === 'approval' || live.phase === 'spec_approval') &&
         <div className="topbar" style={{ background: 'rgba(74,163,255,.12)', borderBottom: '1px solid var(--accent-dim)' }}>
           <b>{live.phase === 'approval'
             ? `Human approval required for the final best — type `
@@ -414,13 +442,22 @@ export default function RunView({ runId, onBack }) {
               <div className="menu-backdrop" onClick={() => setOpenHub(null)} />
               <div className="run-menu more-menu" onClick={e => e.stopPropagation()}>
                 {items.map(([k, l]) => <button key={k} className={'mi' + (panel === k ? ' on' : '')}
-                  onClick={() => { panelReturnFocusRef.current = hubTriggerRef.current; setOpenHub(null); setPanel(k) }}>{l}</button>)}
+                  disabled={!reviewPanelAllowed(k)}
+                  title={!reviewPanelAllowed(k)
+                    ? k === 'compare' && reviewMode && !reviewEvidence
+                      ? 'Requires a review link with redacted evidence'
+                      : 'Unavailable in read-only review'
+                    : undefined}
+                  onClick={() => {
+                    if (!reviewPanelAllowed(k)) return
+                    panelReturnFocusRef.current = hubTriggerRef.current; setOpenHub(null); setPanel(k)
+                  }}>{l}</button>)}
               </div>
             </>}
           </div>)}
           <span className="panel-sep" />
           <button className={'btn sm ghost' + (panel === 'config' ? ' on' : '')}
-                  disabled={historyActive}
+                  disabled={readOnlyMode}
                   onClick={event => { setOpenHub(null); panelReturnFocusRef.current = event.currentTarget; setPanel('config') }}>Settings</button>
         </div>
       </div>
@@ -428,8 +465,9 @@ export default function RunView({ runId, onBack }) {
       {view === 'report'
         ? <div className="main"><div className="report-scroll">
             <ReportView state={state} runId={runId} onToast={showToast}
-              readOnly={historyActive} historySeq={history.resolvedSeq}
-              onOpenPanel={historyActive ? null : (p) => setPanel(p)}
+              readOnly={readOnlyMode} historySeq={history.resolvedSeq}
+              readOnlyReason={reviewMode ? 'review' : 'history'} evidenceAvailable={!reviewMode || reviewEvidence}
+              onOpenPanel={readOnlyMode ? null : (p) => setPanel(p)}
               onPickNode={(id) => { setView('dag'); selectNode(id) }} /></div></div>
         : <>
       <DirectionsOverview state={state} active={themeFilter} onPick={setThemeFilter} />
@@ -438,8 +476,8 @@ export default function RunView({ runId, onBack }) {
         <div className="canvas-wrap"><Dag state={state} selectedId={selectedId} onSelect={onCanvasSelect}
           groupMode={groupMode} collapsed={collapsed} onToggleGroup={toggleGroup} onSetMode={changeMode}
           onCollapseAll={(keys) => setCollapsed(new Set(keys))} onExpandAll={() => setCollapsed(new Set())}
-          onAutoCollapse={autoCollapse} onNodeAction={historyActive ? null : onNodeAction}
-          mergeArm={historyActive ? null : mergeFrom}
+          onAutoCollapse={autoCollapse} onNodeAction={readOnlyMode ? null : onNodeAction}
+          mergeArm={readOnlyMode ? null : mergeFrom}
           selectedGroup={selectedGroup} onSelectGroup={selectGroup} themeFilter={themeFilter} /></div>
         {compactWorkspace && !showInspector && hasInspectorContext &&
           <button className="workspace-pane-toggle" onClick={() => setCompactInspectorOpen(true)}
@@ -471,43 +509,45 @@ export default function RunView({ runId, onBack }) {
                       state={state} onSelectNode={focusNode} onClose={() => { setSelectedGroup(null); setCompactInspectorOpen(false) }} />
                   : <Inspector runId={runId} nodeId={selectedId} state={state} live={live}
                       tab={inspectTab} setTab={setInspectTab} onToast={showToast}
-                      readOnly={historyActive} historySeq={history.resolvedSeq} />}
+                      readOnly={readOnlyMode} historySeq={history.resolvedSeq}
+                      readOnlyReason={reviewMode ? 'review' : 'history'} evidenceAvailable={!reviewMode || reviewEvidence} />}
               </aside>
             </>}
       </div>
 
-      {!compactWorkspace && !dockC && <div className="splitter h" onPointerDown={startDrag('dock')} onKeyDown={resizeWithKeys('dock')}
+      {!reviewMode && !compactWorkspace && !dockC && <div className="splitter h" onPointerDown={startDrag('dock')} onKeyDown={resizeWithKeys('dock')}
         role="separator" tabIndex={0} aria-orientation="horizontal" aria-label="Resize timeline"
         aria-valuemin={90} aria-valuemax={Math.max(140, window.innerHeight - 470)} aria-valuenow={Math.round(dockH)} title="Drag or use arrow keys to resize" />}
-      <Dock runId={runId} live={live} liveSeq={seq} viewSeq={viewSeq} setViewSeq={changeViewSeq} onFocus={focusNode}
+      {!reviewMode && <Dock runId={runId} live={live} liveSeq={seq} viewSeq={viewSeq} setViewSeq={changeViewSeq} onFocus={focusNode}
             onToast={showToast}
             readOnly={historyActive}
             collapsed={timelineCollapsed}
             onToggleCollapse={() => compactWorkspace ? setCompactTimelineOpen(v => !v) : setDockC(c => !c)}
-            height={dockH} />
+            height={dockH} />}
         </>}
 
-      {panel === 'overview' && <OverviewPanel state={state} maxEval={maxEval} onClose={closePanel} onOpenPanel={setPanel} />}
-      {panel === 'research' && <ResearchPanel state={state} runId={runId} onToast={showToast} onClose={closePanel} />}
-      {panel === 'trust' && <TrustPanel state={state} runId={runId} onSelect={selectNode} onToast={showToast} onClose={closePanel} />}
-      {panel === 'queue' && <QueuePanel state={state} runId={runId} onSelect={selectNode} onToast={showToast} onClose={closePanel} />}
-      {panel === 'hypotheses' && <HypothesisBoard state={state} runId={runId} onSelect={selectNode} onToast={showToast} onClose={closePanel} />}
-      {panel === 'sensitivity' && <SensitivityPanel state={state} onSelect={selectNode} onClose={closePanel} />}
-      {panel === 'importance' && <HyperImportancePanel state={state} onClose={closePanel} />}
-      {panel === 'failures' && <FailuresPanel state={state} onSelect={selectNode} onClose={closePanel} />}
-      {panel === 'pareto' && <ParetoPanel state={state} onSelect={selectNode} onClose={closePanel} />}
-      {panel === 'data' && <DataQualityPanel state={state} onClose={closePanel} />}
-      {panel === 'compare' && <ComparePanel state={state} runId={runId} initialPair={comparePair}
+      {panel === 'overview' && reviewPanelAllowed('overview') && <OverviewPanel state={state} maxEval={maxEval} onClose={closePanel}
+        onOpenPanel={p => { if (reviewPanelAllowed(p)) setPanel(p) }} />}
+      {panel === 'research' && reviewPanelAllowed('research') && <ResearchPanel state={state} runId={runId} onToast={showToast} onClose={closePanel} />}
+      {panel === 'trust' && reviewPanelAllowed('trust') && <TrustPanel state={state} runId={runId} onSelect={selectNode} onToast={showToast} onClose={closePanel} readOnly={readOnlyMode} />}
+      {panel === 'queue' && reviewPanelAllowed('queue') && <QueuePanel state={state} runId={runId} onSelect={selectNode} onToast={showToast} onClose={closePanel} />}
+      {panel === 'hypotheses' && reviewPanelAllowed('hypotheses') && <HypothesisBoard state={state} runId={runId} onSelect={selectNode} onToast={showToast} onClose={closePanel} />}
+      {panel === 'sensitivity' && reviewPanelAllowed('sensitivity') && <SensitivityPanel state={state} onSelect={selectNode} onClose={closePanel} />}
+      {panel === 'importance' && reviewPanelAllowed('importance') && <HyperImportancePanel state={state} onClose={closePanel} />}
+      {panel === 'failures' && reviewPanelAllowed('failures') && <FailuresPanel state={state} onSelect={selectNode} onClose={closePanel} />}
+      {panel === 'pareto' && reviewPanelAllowed('pareto') && <ParetoPanel state={state} onSelect={selectNode} onClose={closePanel} />}
+      {panel === 'data' && reviewPanelAllowed('data') && <DataQualityPanel state={state} onClose={closePanel} />}
+      {panel === 'compare' && reviewPanelAllowed('compare') && <ComparePanel state={state} runId={runId} initialPair={comparePair}
         onClose={() => { closePanel(); setComparePair(null) }} />}
-      {panel === 'crossrun' && <CrossRunPanel state={state} onClose={closePanel} />}
-      {panel === 'collab' && <CollabPanel state={state} runId={runId} onSelect={selectNode} onToast={showToast} onClose={closePanel} />}
-      {panel === 'config' && <ConfigPanel runId={runId} state={state} live={live} onToast={showToast} onClose={closePanel} />}
-      {panel === 'authoring' && <AuthoringPanel onToast={showToast} onClose={closePanel} />}
-      {panel === 'memory' && <MemoryPanel onClose={closePanel} />}
-      {panel === 'registry' && <RegistryPanel state={state} onClose={closePanel} />}
-      {panel === 'gpu' && <GpuPanel onClose={closePanel} />}
-      {panel === 'events' && <EventExplorer runId={runId} onClose={closePanel} />}
-      {panel === 'artifacts' && <ArtifactsPanel runId={runId} onToast={showToast} onClose={closePanel} />}
+      {panel === 'crossrun' && reviewPanelAllowed('crossrun') && <CrossRunPanel state={state} onClose={closePanel} />}
+      {panel === 'collab' && reviewPanelAllowed('collab') && <CollabPanel state={state} runId={runId} onSelect={selectNode} onToast={showToast} onClose={closePanel} />}
+      {panel === 'config' && reviewPanelAllowed('config') && <ConfigPanel runId={runId} state={state} live={live} onToast={showToast} onClose={closePanel} />}
+      {panel === 'authoring' && reviewPanelAllowed('authoring') && <AuthoringPanel onToast={showToast} onClose={closePanel} />}
+      {panel === 'memory' && reviewPanelAllowed('memory') && <MemoryPanel onClose={closePanel} />}
+      {panel === 'registry' && reviewPanelAllowed('registry') && <RegistryPanel state={state} onClose={closePanel} />}
+      {panel === 'gpu' && reviewPanelAllowed('gpu') && <GpuPanel onClose={closePanel} />}
+      {panel === 'events' && reviewPanelAllowed('events') && <EventExplorer runId={runId} onClose={closePanel} />}
+      {panel === 'artifacts' && reviewPanelAllowed('artifacts') && <ArtifactsPanel runId={runId} onToast={showToast} onClose={closePanel} />}
 
       {toast && <div className="toast">{toast}</div>}
     </div>

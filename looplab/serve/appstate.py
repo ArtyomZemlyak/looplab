@@ -27,22 +27,24 @@ from looplab.serve.projects import ProjectStore
 from looplab.serve.protocol import (
     PHASE_APPROVAL, PHASE_FINISHED, PHASE_GROUNDING, PHASE_ONBOARDING, PHASE_PAUSED,
     PHASE_SEARCH, PHASE_SPEC_APPROVAL)
+from looplab.serve.reviews import ReviewStore
 from looplab.serve.settings_store import SettingsStore
 
 # run-root subdirectories that are NOT runs and must never be used as a run_id (would collide with the
 # cross-run scope-report store at <run-root>/reports/).
-_RESERVED_RUN_IDS = {"reports", "assistant"}
+_RESERVED_RUN_IDS = {"reports", "assistant", ".reviews"}
 
 
 class AppState:
     """Plain state bag + canonical read helpers shared by the routers of ONE app instance."""
 
     def __init__(self, root: Path, projects: ProjectStore, settings: SettingsStore,
-                 jobs: JobRegistry):
+                 jobs: JobRegistry, reviews: ReviewStore | None = None):
         self.root = root
         self.projects = projects
         self.settings = settings
         self.jobs = jobs
+        self.reviews = reviews or ReviewStore(root / ".reviews")
         self.summary_cache: dict[str, tuple] = {}   # run_id -> (size, mtime, summary); skips re-folding
         # Per-run folded-state cache keyed by (size, mtime, upto_seq): state_payload re-read + re-folded
         # the WHOLE events.jsonl on every SSE tick (every ~0.4s per client), O(n²) for a repo run whose

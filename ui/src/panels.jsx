@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react'
-import { get, putText, post, fmt, fmtInt, fmtBytes, CONTROL, gpuStat, saveRunConfig, resumeRun, apiPrefix, operatorMeta } from './util.js'
+import { get, putText, post, fmt, fmtInt, fmtBytes, CONTROL, gpuStat, saveRunConfig, resumeRun, apiPrefix, operatorMeta,
+  createRunReview, listRunReviews, revokeRunReview } from './util.js'
 import { usePoll } from './hooks.js'
 import { Bars, ParallelCoords, Scatter, MultiTrajectory } from './charts.jsx'
 import { hyperImportance } from './report.js'
@@ -131,13 +132,13 @@ function TrustState({ value, action = null }) {
   </div>
 }
 
-export function TrustPanel({ state, runId, onClose, onSelect, onToast }) {
+export function TrustPanel({ state, runId, onClose, onSelect, onToast, readOnly = false }) {
   const [configResource, setConfigResource] = useState({ status: 'loading', data: null, error: null })
   const [configNonce, setConfigNonce] = useState(0)
   useEffect(() => {
     let alive = true
     setConfigResource({ status: 'loading', data: null, error: null })
-    get(`/api/runs/${runId}/config`)
+    get(`/api/runs/${encodeURIComponent(runId)}/config`)
       .then(data => { if (alive) setConfigResource({ status: 'ready', data, error: null }) })
       .catch(error => { if (alive) setConfigResource({ status: 'error', data: null, error: error.message || 'Request failed' }) })
     return () => { alive = false }
@@ -218,8 +219,8 @@ export function TrustPanel({ state, runId, onClose, onSelect, onToast }) {
             <td className="flag"><button className="btn xs ghost" onClick={() => { onSelect && onSelect(h.node_id); onClose() }}>#{h.node_id}</button></td>
             <td>{(h.signals || []).map(s => s.signal).join(', ')}</td>
             <td className="muted">{(h.signals || []).map(s => s.detail).filter(Boolean).join(' · ')}</td>
-            <td><button className="btn xs ghost" title="quarantine: abort this node so it can't be selected"
-              onClick={() => quarantine(h.node_id)}>quarantine</button></td>
+            <td>{!readOnly && <button className="btn xs ghost" title="quarantine: abort this node so it can't be selected"
+              onClick={() => quarantine(h.node_id)}>quarantine</button>}</td>
           </tr>)}</tbody></table>
         : null}
       </div>
@@ -829,21 +830,89 @@ export function CrossRunPanel({ state, onClose }) {
 // F4 · Collaboration — a thread view of every node annotation (folded from `annotation` events) plus
 // a read-only share link. Annotations are already events; this surfaces them as a reviewable thread.
 export function CollabPanel({ state, runId, onSelect, onClose, onToast }) {
+  const [ttl, setTtl] = useState(7 * 24 * 60 * 60)
+  const [includeEvidence, setIncludeEvidence] = useState(false)
+  const [links, setLinks] = useState([])
+  const [linksStatus, setLinksStatus] = useState('loading')
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState('')
+  const [createdUrl, setCreatedUrl] = useState('')
   const ann = state.annotations || {}
   const entries = Object.entries(ann).flatMap(([nid, notes]) =>
     (notes || []).map((text, i) => ({ nid: Number(nid), i, text })))
     .sort((a, b) => a.nid - b.nid)
-  const share = () => {
-    const url = `${location.origin}${apiPrefix()}/#/run/${encodeURIComponent(runId)}`
-    if (navigator.clipboard) navigator.clipboard.writeText(url).then(() => onToast && onToast('share link copied'))
-    else onToast && onToast(url)
+  const refreshLinks = async () => {
+    setLinksStatus('loading')
+    try {
+      const result = await listRunReviews(runId)
+      setLinks(result.links || []); setLinksStatus('ready'); setError('')
+    } catch (e) {
+      setLinksStatus('error'); setError(e.message || 'Could not load review links')
+    }
+  }
+  useEffect(() => {
+    let active = true
+    setLinksStatus('loading'); setError('')
+    listRunReviews(runId)
+      .then(result => { if (active) { setLinks(result.links || []); setLinksStatus('ready') } })
+      .catch(e => { if (active) { setLinksStatus('error'); setError(e.message || 'Could not load review links') } })
+    return () => { active = false }
+  }, [runId])
+  const copy = async (url) => {
+    try { await navigator.clipboard.writeText(url); onToast?.('review link copied') }
+    catch { setCreatedUrl(url); onToast?.('Copy the visible link manually') }
+  }
+  const create = async () => {
+    if (busy) return
+    setBusy(true); setError(''); setCreatedUrl('')
+    try {
+      const result = await createRunReview(runId, { ttl_seconds: ttl, include_evidence: includeEvidence })
+      const base = `${location.origin}${apiPrefix()}/`
+      const url = new URL(result.path, base).href
+      setCreatedUrl(url)
+      await copy(url)
+      await refreshLinks()
+    } catch (e) { setError(e.message || 'Could not create review link') }
+    finally { setBusy(false) }
+  }
+  const revoke = async (id) => {
+    setBusy(true); setError('')
+    try { await revokeRunReview(runId, id); await refreshLinks(); onToast?.('review link revoked') }
+    catch (e) { setError(e.message || 'Could not revoke link') }
+    finally { setBusy(false) }
   }
   return (
     <Panel title="Collaboration" sub={`${entries.length} note(s)`} onClose={onClose}>
-      <div className="toolbar" style={{ marginBottom: 10 }}>
-        <button className="btn sm" onClick={share}><OpIcon name="link" size={12} /> Copy read-only share link</button>
+      <div className="review-link-builder">
+        <div className="section-h">Create a read-only review link</div>
+        <p className="muted">The link is bound to this run, expires automatically, can be revoked, and never carries owner controls.</p>
+        <div className="review-link-options">
+          <label>Expires
+            <select value={ttl} onChange={e => setTtl(Number(e.target.value))}>
+              <option value={60 * 60}>1 hour</option><option value={24 * 60 * 60}>1 day</option>
+              <option value={7 * 24 * 60 * 60}>7 days</option><option value={30 * 24 * 60 * 60}>30 days</option>
+            </select>
+          </label>
+          <label className="review-evidence-option"><input type="checkbox" checked={includeEvidence}
+            onChange={e => setIncludeEvidence(e.target.checked)} /> Include redacted source evidence</label>
+        </div>
+        {includeEvidence && <div className="notice warn">Source and result details can still contain sensitive project information. Known credential patterns are redacted; raw logs, prompts, traces, and artifacts remain excluded.</div>}
+        {error && <div className="notice resource-error" role="alert">{error}</div>}
+        <button className="btn sm primary" disabled={busy} onClick={create}><OpIcon name="link" size={12} /> {busy ? 'Creating…' : 'Create & copy link'}</button>
+        {createdUrl && <div className="review-created"><label htmlFor="created-review-url">New link (shown once)</label>
+          <div><input id="created-review-url" readOnly value={createdUrl} onFocus={e => e.target.select()} />
+            <button className="btn sm" onClick={() => copy(createdUrl)}>Copy</button></div></div>}
+        <div className="section-h">Existing links</div>
+        {linksStatus === 'loading' ? <div className="muted" role="status">Loading review links…</div>
+          : links.length ? <div className="review-link-list">{links.map(link => <div key={link.id} className="review-link-row">
+          <div><b>{link.status}</b> · {(link.scopes || []).includes('evidence') ? 'summary + evidence' : 'summary'}
+            <div className="muted">expires {new Date(link.expires_at * 1000).toLocaleString()}</div></div>
+          {link.status === 'active' && <button className="btn sm danger" disabled={busy} onClick={() => revoke(link.id)}>Revoke</button>}
+        </div>)}</div> : linksStatus === 'ready' ? <div className="muted">No review links created yet.</div>
+          : <div className="review-links-error"><span className="muted">Existing links could not be loaded.</span>
+            <button className="btn sm" disabled={busy} onClick={refreshLinks}>Retry</button></div>}
       </div>
-      <div className="muted" style={{ marginBottom: 8 }}>Annotations are appended as events (any reviewer with the run can add them via a node’s Note action); they read back here as a thread.</div>
+      <div className="muted" style={{ margin: '16px 0 8px' }}>Annotations are owner-authored run events. Review-link recipients can read them but cannot add or change them.</div>
       {entries.length
         ? <div className="thread">{entries.map((e, k) => <div key={k} className="kv" style={{ alignItems: 'baseline' }}>
             <div className="k"><button className="btn sm ghost" onClick={() => { onSelect && onSelect(e.nid); onClose() }}>#{e.nid}</button></div>

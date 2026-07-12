@@ -53,7 +53,8 @@ function ResetBtn({ runId, id, onToast }) {
   </span>
 }
 
-export default function Inspector({ runId, nodeId, state, live, tab, setTab, onToast, readOnly = false, historySeq = null }) {
+export default function Inspector({ runId, nodeId, state, live, tab, setTab, onToast, readOnly = false,
+  historySeq = null, readOnlyReason = 'history', evidenceAvailable = true }) {
   const [detail, setDetail] = useState(null)
   const [detailStatus, setDetailStatus] = useState('idle')
   const [detailError, setDetailError] = useState('')
@@ -62,14 +63,15 @@ export default function Inspector({ runId, nodeId, state, live, tab, setTab, onT
     setDetail(null)               // clear stale detail immediately so we never render node A's
     setDetailError('')
     if (nodeId == null) { setDetailStatus('idle'); return } // payload under node B while B's fetch is in flight (or failed)
+    if (readOnlyReason === 'review' && !evidenceAvailable) { setDetailStatus('restricted'); return }
     setDetailStatus('loading')
     let on = true
     const at = readOnly && historySeq != null ? `?seq=${encodeURIComponent(historySeq)}` : ''
-    get(`/api/runs/${runId}/nodes/${nodeId}${at}`)
+    get(`/api/runs/${encodeURIComponent(runId)}/nodes/${nodeId}${at}`)
       .then(d => { if (on) { setDetail(d); setDetailStatus('ready') } })
       .catch(() => { if (on) { setDetailStatus('error'); setDetailError('Full node details could not be loaded.') } })
     return () => { on = false }
-  }, [runId, nodeId, state?.nodes?.[nodeId]?.status, readOnly, historySeq, detailNonce])
+  }, [runId, nodeId, state?.nodes?.[nodeId]?.status, readOnly, historySeq, readOnlyReason, evidenceAvailable, detailNonce])
   // Live-refresh the node detail (it carries n.trace spans + the agent report) while the run is ACTIVELY
   // working this node — so the Trace tab fills in WITHOUT the user toggling tabs. Two windows, both
   // engine-alive & not-finished (stops at terminal / engine death):
@@ -88,7 +90,7 @@ export default function Inspector({ runId, nodeId, state, live, tab, setTab, onT
   const evaluatingThis = nodeStatus === 'pending' && !live?.paused && Number(nodeId) === latestId
   const nodeWorking = engineActive && (live.building?.node_id === nodeId || evaluatingThis)
   usePoll(() => {
-    get(`/api/runs/${runId}/nodes/${nodeId}`).then(d => { if (d) { setDetail(d); setDetailStatus('ready'); setDetailError('') } }).catch(() => {})
+    get(`/api/runs/${encodeURIComponent(runId)}/nodes/${nodeId}`).then(d => { if (d) { setDetail(d); setDetailStatus('ready'); setDetailError('') } }).catch(() => {})
   }, 4000, [runId, nodeId, nodeWorking], { enabled: !readOnly && nodeWorking, immediate: false })
 
   if (nodeId == null) return <div className="insp-empty">Select a node to inspect its idea, code, metrics, trust, and agent trace.</div>
@@ -101,7 +103,9 @@ export default function Inspector({ runId, nodeId, state, live, tab, setTab, onT
   // (e.g. 'Trials' left selected after switching to a non-sweep node) falling through to nothing.
   const sweep = isSweep(n)
   const liveTabs = sweep ? ['Overview', 'Trials', ...TABS.slice(1)] : TABS
-  const tabs = readOnly ? ['Overview', 'Code', 'Trust', 'Cost'] : liveTabs
+  const tabs = readOnly
+    ? readOnlyReason === 'review' && !evidenceAvailable ? ['Overview', 'Trust', 'Cost'] : ['Overview', 'Code', 'Trust', 'Cost']
+    : liveTabs
   const activeTab = tabs.includes(tab) ? tab : 'Overview'
 
   return (
@@ -115,7 +119,11 @@ export default function Inspector({ runId, nodeId, state, live, tab, setTab, onT
         {detailStatus === 'loading' && <div className="notice" role="status">Loading full node details…</div>}
         {detailStatus === 'error' && <div className="notice resource-error" role="alert"><span>{detailError} The summary below may be incomplete.</span><button className="btn sm" onClick={() => setDetailNonce(n => n + 1)}>Retry</button></div>}
         {readOnly
-          ? <div className="insp-hint history-inline">Snapshot seq {historySeq} · read-only. Live traces, metrics sidecars and actions are hidden.</div>
+          ? <div className="insp-hint history-inline">{readOnlyReason === 'review'
+              ? evidenceAvailable
+                ? 'Read-only review with redacted source evidence. Live traces and actions stay hidden.'
+                : 'Summary-only review. Source, live traces, and actions are not included.'
+              : `Snapshot seq ${historySeq} · read-only. Live traces, metrics sidecars and actions are hidden.`}</div>
           : <div className="insp-hint muted">Actions (confirm · ablate · fork · promote · note) live in the chat — <button className="ctx-chip" style={{ padding: '0 6px', cursor: 'pointer' }} title="attach this experiment to the assistant context" onClick={() => window.dispatchEvent(new CustomEvent('ll:attach-node', { detail: { id: n.id } }))}>＋ #{n.id}</button> as context there, or type a <code>/command</code>.<ResetBtn runId={runId} id={n.id} onToast={onToast} /></div>}
 
         {activeTab === 'Overview' && <Overview n={n} state={state} runId={readOnly ? null : runId} onToast={onToast} />}

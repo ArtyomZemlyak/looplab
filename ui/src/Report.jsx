@@ -58,7 +58,8 @@ function List({ items }) {
   return <ul className="bul">{items.map((x, i) => <li key={i}>{x}</li>)}</ul>
 }
 
-export default function ReportView({ state, runId, onOpenPanel, onToast, onPickNode, readOnly = false, historySeq = null }) {
+export default function ReportView({ state, runId, onOpenPanel, onToast, onPickNode, readOnly = false,
+  historySeq = null, readOnlyReason = 'history', evidenceAvailable = true }) {
   const best = state.best_node_id != null ? state.nodes[state.best_node_id] : null
   const failed = Object.values(state.nodes).filter(n => n.status === 'failed')
   const a = useMemo(() => analyze(state), [state])
@@ -74,14 +75,17 @@ export default function ReportView({ state, runId, onOpenPanel, onToast, onPickN
   const lastAt = useRef(rep?.at_node)
   useEffect(() => {
     if (!best) { setBestCodeResource({ status: 'idle', data: null, error: null }); return }
+    if (readOnlyReason === 'review' && !evidenceAvailable) {
+      setBestCodeResource({ status: 'restricted', data: null, error: null }); return
+    }
     let alive = true
     setBestCodeResource({ status: 'loading', data: null, error: null })
     const at = readOnly && historySeq != null ? `?seq=${encodeURIComponent(historySeq)}` : ''
-    get(`/api/runs/${runId}/nodes/${best.id}${at}`)
+    get(`/api/runs/${encodeURIComponent(runId)}/nodes/${best.id}${at}`)
       .then(data => { if (alive) setBestCodeResource({ status: 'ready', data, error: null }) })
       .catch(() => { if (alive) setBestCodeResource({ status: 'error', data: null, error: 'The node detail request failed.' }) })
     return () => { alive = false }
-  }, [runId, best?.id, readOnly, historySeq, bestCodeNonce])
+  }, [runId, best?.id, readOnly, historySeq, readOnlyReason, evidenceAvailable, bestCodeNonce])
   const bestCode = bestCodeResource.data
   // Refresh completes when a newer report (different at_node / trigger) folds in via SSE.
   useEffect(() => {
@@ -124,14 +128,16 @@ export default function ReportView({ state, runId, onOpenPanel, onToast, onPickN
       <div className="toolbar report-toolbar">
         {!readOnly && <button className="btn sm primary" disabled={refreshing} onClick={refresh}
           title="Agent rewrites the report from all results so far"><OpIcon name="replay" size={12} /> {refreshing ? 'Refreshing…' : 'Refresh report'}</button>}
-        {readOnly && <span className="history-inline">Snapshot seq {historySeq} · report refresh disabled</span>}
+        {readOnly && <span className="history-inline">{readOnlyReason === 'review'
+          ? 'Read-only review · report refresh disabled'
+          : `Snapshot seq ${historySeq} · report refresh disabled`}</span>}
         <span className="muted report-fresh">{rep
           ? `agent report @ ${rep.at_node} nodes${rep.trigger ? ` · ${rep.trigger}` : ''}`
           : 'deterministic report (no agent narrative yet)'}</span>
         <span className="spacer" style={{ flex: 1 }} />
         <button className="btn sm" onClick={() => window.print()}><OpIcon name="printer" size={12} /> Print / PDF</button>
         <button className="btn sm" onClick={() => dl(`${state.run_id}_report.md`, toMarkdown(state, best), 'text/markdown')}><OpIcon name="download" size={12} /> Markdown</button>
-        {best && <button className="btn sm" disabled={!bestCode?.code} onClick={() => dl(`solution_node${best.id}.py`, bestCode.code, 'text/x-python')}><OpIcon name="download" size={12} /> Solution</button>}
+        {best && evidenceAvailable && <button className="btn sm" disabled={!bestCode?.code} onClick={() => dl(`solution_node${best.id}.py`, bestCode.code, 'text/x-python')}><OpIcon name="download" size={12} /> Solution</button>}
         <button className="btn sm" onClick={() => dl(`${state.run_id}_model_card.json`, modelCard(), 'application/json')}><OpIcon name="download" size={12} /> Model card</button>
       </div>
       {refreshError && <div className="report-inline-state error" role="alert">
@@ -200,6 +206,9 @@ export default function ReportView({ state, runId, onOpenPanel, onToast, onPickN
       {rep?.what_didnt?.length > 0 && <List items={rep.what_didnt} />}
 
       {best && <><div className="section-h">Reproduce — winning solution</div>
+        {bestCodeResource.status === 'restricted' && <div className="report-inline-state report-code-state" role="status">
+          Solution source was not included in this summary-only review link.
+        </div>}
         {bestCodeResource.status === 'loading' && <div className="report-inline-state report-code-state" role="status">Loading solution code…</div>}
         {bestCodeResource.status === 'error' && <div className="report-inline-state report-code-state error" role="alert">
           <span>Couldn’t load the winning code: {bestCodeResource.error}</span>

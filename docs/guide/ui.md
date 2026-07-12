@@ -73,6 +73,10 @@ Then open the printed URL. The server serves the **built** React bundle from `ui
   action narrated in a durable feed (`chat.jsonl`).
 - **Reports** — an agent-authored, conclusion-first run report plus deterministic metric-improvement
   charts.
+- **Read-only review links** — with `LOOPLAB_UI_TOKEN` configured, **Lab → Collaboration** creates a
+  revocable, expiring capability for one run. Summary links expose the DAG/report and derived metrics;
+  an explicit evidence option adds redacted node source/results. Assistant, actions, raw
+  logs/prompts/traces, artifacts, and owner settings are never available to the recipient.
 - **Trust panel** — surfaces the safety monitors (reward-hack, code-leakage, critic flags); set
   `trust_gate` to `gate`/`block` (or pick the `thorough` profile) to make a flagged node ineligible
   to win, not just logged.
@@ -95,12 +99,14 @@ Bind to `127.0.0.1` (the default) for local use. The control plane is **unauthen
 set a token, so it is not placed on the LAN implicitly. To serve beyond localhost, set
 `LOOPLAB_UI_TOKEN` and bind to `0.0.0.0`.
 
-`LOOPLAB_UI_TOKEN` separates users **only when each has its own origin** (the `127.0.0.1` bind, or a
-per-user subdomain). On a **shared** origin — notably a JupyterHub `…/user/<name>/proxy/<port>/` path
-where every user shares one origin — the same-origin policy is per-origin, not per-path, so the token
-is a per-deployment secret rather than a per-user one. LoopLab warns at startup and hardens the
-token-bearing page (token injected only on a top-level navigation; `X-Frame-Options`/`no-store`), but
-the real fix is a **private origin per user**. See deployment.md → *Shared JupyterHub origin*.
+The token is never embedded in HTML. The owner enters it at **Unlock LoopLab controls** and it remains
+in that tab's `sessionStorage`. True review links cannot be created in anonymous mode; the reviewer
+uses a separate tokenless `/review` shell and a server-enforced GET-only capability.
+
+`LOOPLAB_UI_TOKEN` is a static deployment-owner credential, not per-user identity or RBAC. On a
+shared origin — notably a JupyterHub `…/user/<name>/proxy/<port>/` path — other applications still
+share one browser security principal. Use a private origin or authenticated reverse proxy for hostile
+multi-user isolation. See the [deployment guide](deployment.md#shared-jupyterhub-origin-important).
 
 ### Behind a path-mounting proxy (JupyterHub, reverse-proxy subpath)
 

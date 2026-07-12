@@ -67,7 +67,7 @@ function withBuilding(state) {
 
 // Subscribe to a run's live folded state over SSE. The server emits `event: state` frames whose
 // data is { state, seq }. Returns the latest live state + connection status. Auto-reconnects.
-export function useRunState(runId) {
+export function useRunState(runId, { pollOnly = false, pollMs = 4000 } = {}) {
   const [live, setLive] = useState(null)
   const [seq, setSeq] = useState(-1)
   const [connected, setConnected] = useState(false)
@@ -80,6 +80,7 @@ export function useRunState(runId) {
     if (!runId) return
     let stopped = false
     let timer = null
+    let pollTimer = null
     let lastSeq = -2, lastAlive
     setLive(null)
     setSeq(-1)
@@ -126,15 +127,49 @@ export function useRunState(runId) {
         lastSeq = p.seq
         lastAlive = p.state && p.state.engine_running
         setLive(withBuilding(p.state)); setSeq(p.seq); setStatus('ready'); setError(null)
-        connect()
+        if (!pollOnly) connect()
+        else {
+          setConnected(true)
+          const poll = () => {
+            get(`/api/runs/${encodeURIComponent(runId)}/state`)
+              .then(next => {
+                if (stopped) return
+                setConnected(true); setStatus('ready'); setError(null)
+                const alive = next.state && next.state.engine_running
+                if (next.seq !== lastSeq || alive !== lastAlive) {
+                  lastSeq = next.seq; lastAlive = alive
+                  setLive(withBuilding(next.state)); setSeq(next.seq)
+                }
+                pollTimer = setTimeout(poll, pollMs)
+              })
+              .catch(error => {
+                if (stopped) return
+                const ended = error?.status === 401 || error?.status === 404 || error?.status === 410
+                setConnected(false)
+                if (ended) {
+                  setError('This review link expired, was revoked, or is invalid.')
+                  setLive(null); setStatus('gone')
+                  return
+                }
+                setError(error?.message || 'Review refresh failed')
+                pollTimer = setTimeout(poll, pollMs)
+              })
+          }
+          pollTimer = setTimeout(poll, pollMs)
+        }
       })
       .catch(e => {
         if (stopped) return
-        setStatus(e?.status === 404 ? 'not_found' : 'error')
-        setError(e?.status === 404 ? 'This run does not exist or was removed.' : (e?.message || 'Could not load this run.'))
+        const reviewEnded = pollOnly && (e?.status === 401 || e?.status === 404 || e?.status === 410)
+        setStatus(reviewEnded ? 'gone' : e?.status === 404 ? 'not_found' : 'error')
+        setError(reviewEnded ? 'This review link expired, was revoked, or is invalid.'
+          : e?.status === 404 ? 'This run does not exist or was removed.' : (e?.message || 'Could not load this run.'))
       })
-    return () => { stopped = true; clearTimeout(timer); esRef.current && esRef.current.close() }
-  }, [runId, retryToken])
+    return () => {
+      stopped = true; clearTimeout(timer); clearTimeout(pollTimer)
+      esRef.current && esRef.current.close()
+    }
+  }, [runId, retryToken, pollOnly, pollMs])
 
   return { live, seq, connected, status, error, retry: () => setRetryToken(n => n + 1) }
 }

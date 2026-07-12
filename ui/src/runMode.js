@@ -42,9 +42,14 @@ function announce(runId) {
   window.dispatchEvent(new CustomEvent('ll:run-access', { detail: { runId, ...getRunAccess(runId) } }))
 }
 
-export function setRunAccess(runId, { readOnly = false, seq = null } = {}) {
+export function setRunAccess(runId, { readOnly = false, seq = null, mode = null } = {}) {
   if (!runId) return
-  accessByRun.set(String(runId), { readOnly: !!readOnly, seq: readOnly ? Number(seq) : null })
+  const resolvedMode = mode || (readOnly ? 'history' : 'live')
+  accessByRun.set(String(runId), {
+    readOnly: !!readOnly,
+    seq: readOnly && seq != null ? Number(seq) : null,
+    mode: resolvedMode,
+  })
   announce(String(runId))
 }
 
@@ -55,7 +60,7 @@ export function clearRunAccess(runId) {
 }
 
 export function getRunAccess(runId) {
-  return accessByRun.get(String(runId)) || { readOnly: false, seq: null }
+  return accessByRun.get(String(runId)) || { readOnly: false, seq: null, mode: 'live' }
 }
 
 export function runIdFromApiPath(path) {
@@ -69,8 +74,11 @@ export function assertRunMutationAllowed(path) {
   if (!runId) return
   const access = getRunAccess(runId)
   if (!access.readOnly) return
-  const error = new Error(`Historical snapshot seq ${access.seq} is read-only — return to live to act`)
-  error.code = 'HISTORICAL_READ_ONLY'
+  const review = access.mode === 'review'
+  const error = new Error(review
+    ? 'This review link is read-only'
+    : `Historical snapshot seq ${access.seq} is read-only — return to live to act`)
+  error.code = review ? 'REVIEW_READ_ONLY' : 'HISTORICAL_READ_ONLY'
   error.runId = runId
   error.seq = access.seq
   throw error

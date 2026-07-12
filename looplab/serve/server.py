@@ -19,6 +19,7 @@ the `looplab.server.make_llm_client` monkeypatch point keep working).
 """
 from __future__ import annotations
 
+import hmac
 import logging
 import os
 import subprocess  # noqa: F401 — kept as a module attribute: tests patch `looplab.server.subprocess.Popen`
@@ -36,6 +37,7 @@ from looplab.adapters.tasks import make_llm_client  # noqa: F401 — patchable r
 from looplab.serve.engine_proc import (  # noqa: F401 — _engine_alive/_kill_process_tree re-exported
     _engine_alive, _kill_process_tree, _on_shared_hub, install_reap_hooks)
 from looplab.serve.projects import ProjectStore
+from looplab.serve.reviews import REVIEW_HEADER, ReviewError, ReviewStore, review_request_allowed
 from looplab.serve.settings_store import SettingsStore
 
 _log = logging.getLogger("looplab.server")
@@ -58,7 +60,7 @@ from looplab.serve import jobs as _jobs_router
 from looplab.serve.routers import (
     assistant as _assistant_router, boss as _boss_router, control as _control_router,
     genesis as _genesis_router, misc as _misc_router, org as _org_router,
-    reports as _reports_router, runs as _runs_router)
+    reports as _reports_router, reviews as _reviews_router, runs as _runs_router)
 # Historical `looplab.server.<name>` import paths for the boss/genesis models + mappers (tests and
 # operator tooling import these from here; the definitions moved with their routes).
 from looplab.serve.routers.boss import (  # noqa: F401 — re-exports
@@ -99,24 +101,41 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
                ["http://localhost:5173", "http://127.0.0.1:5173"])
     app.add_middleware(CORSMiddleware, allow_origins=origins, allow_methods=["*"],
                        allow_headers=["*"])
-    # G1 server auth (review C3): when LOOPLAB_UI_TOKEN is set, require a matching X-LoopLab-Token
-    # header on every MUTATING /api/* request (GET/HEAD/OPTIONS + SSE stay open for read/stream). The
-    # SPA is served the token in a same-origin <meta> tag (see _index_response). NOTE: "same-origin"
-    # protects the token only when each principal has its OWN origin — true for the default local
-    # bind (127.0.0.1) and a per-user subdomain. On a SHARED origin (jupyter-server-proxy: every
-    # user under https://hub/user/<name>/proxy/<port>/ shares one origin) the token is a
-    # per-DEPLOYMENT secret, not per-user — see _on_shared_hub() and the deployment guide. Unset
-    # (default local single-user) -> no auth, behaviour unchanged.
+    reviews = ReviewStore(root / ".reviews")
+    # Owner auth: LOOPLAB_UI_TOKEN is entered through the SPA's unlock gate and sent as a request
+    # header.  It is never embedded in public HTML.  A reviewer can therefore navigate to `/` but
+    # cannot promote the read-only capability into owner access.  Unset preserves local open mode;
+    # creation of true share links is refused there because the ambient owner API is anonymous.
     ui_token = os.environ.get("LOOPLAB_UI_TOKEN")
+
+    def _owner_authenticated(request: "Request") -> bool:
+        supplied = request.headers.get("X-LoopLab-Token", "")
+        return bool(ui_token) and hmac.compare_digest(supplied, ui_token)
+
+    def _review_denial(detail: str, kind: str, status_code: int) -> "JSONResponse":
+        """A review denial is capability-specific and must never be reused for another bearer.
+
+        In particular, an early revoked/expired response used to bypass the success-path header
+        hardening below.  Browsers could then cache that 410 for the shared `/api/review/state` URL
+        and replay it after the owner created a fresh link.  `no-store` is authoritative; `Vary` is
+        defense in depth for intermediaries that key their caches before applying that directive.
+        """
+        return JSONResponse(
+            {"detail": detail, "kind": kind}, status_code=status_code,
+            headers={
+                "Cache-Control": "no-store",
+                "Referrer-Policy": "no-referrer",
+                "Vary": REVIEW_HEADER,
+            },
+        )
+
     if _on_shared_hub():
         if ui_token:
             _log.warning(
                 "LoopLab UI is on a SHARED JupyterHub origin (jupyter-server-proxy). LOOPLAB_UI_TOKEN "
-                "is a PER-DEPLOYMENT secret here, NOT per-user: same-origin policy is per-origin, not "
-                "per-path, so any same-origin page (another proxied app, a file you open under "
-                "/user/<you>/files/...) can read the token and drive this control plane. For real "
-                "per-user isolation give each user a PRIVATE origin (per-user subdomain or a dedicated "
-                "host/port), not a shared hub path. See docs/guide/deployment.md (Shared JupyterHub).")
+                "is a PER-DEPLOYMENT owner secret, NOT per-user identity. It is no longer embedded in "
+                "HTML, but a shared origin is still not RBAC: use a private origin or authenticated "
+                "reverse proxy for per-user isolation. See docs/guide/deployment.md (Shared JupyterHub).")
         else:
             _log.warning(
                 "LoopLab UI is on a SHARED JupyterHub origin with NO LOOPLAB_UI_TOKEN: the control "
@@ -127,6 +146,25 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
         @app.middleware("http")
         async def _require_token(request: "Request", call_next):
             p = request.url.path
+            review_token = request.headers.get(REVIEW_HEADER, "")
+            if review_token:
+                try:
+                    review = reviews.resolve(review_token)
+                except ReviewError as exc:
+                    code = 410 if exc.kind in {"expired", "revoked"} else 401
+                    return _review_denial(str(exc), exc.kind, code)
+                if not review_request_allowed(review, request.method, p):
+                    return _review_denial(
+                        "read-only review capability does not permit this request",
+                        "review_read_only", 403)
+                # A valid review capability is independently authorized for this exact GET.  Do not
+                # require or expose the owner UI token, including on sensitive evidence reads that
+                # the link creator explicitly opted into.
+                response = await call_next(request)
+                response.headers["Cache-Control"] = "no-store"
+                response.headers["Referrer-Policy"] = "no-referrer"
+                response.headers["Vary"] = REVIEW_HEADER
+                return response
             # Raw-content / captured-output / model-transcript reads are as sensitive as mutations, so
             # gate every GET that returns something OTHER than a light folded projection (events/state/
             # nodes/metrics/cost/config-masked). The raw surface is large — enumerate it exhaustively:
@@ -160,16 +198,48 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
             # Job / genesis-job results carry model output + synthesized scope reports. Random ids make
             # them less enumerable (the review rates this P2), but gate them too — defense in depth.
             _job_result = (len(_parts) >= 4 and _parts[1] == "api" and _parts[2] in ("jobs", "genesis"))
+            _review_admin = (len(_parts) >= 5 and _parts[1] == "api" and _parts[2] == "runs"
+                             and _parts[4] == "reviews")
             sensitive_get = (request.method == "GET"
                              and (p.endswith(_RAW_GET_SUFFIX) or p in _RAW_GET_EXACT
                                   or _run_scoped_raw or _node_detail or _job_result
-                                  or "/assistant/sessions" in p))
+                                  or _review_admin or "/assistant/sessions" in p))
             mutating = request.method in ("POST", "PUT", "PATCH", "DELETE")
             if ((mutating or sensitive_get) and p.startswith("/api/")
-                    and request.headers.get("X-LoopLab-Token") != ui_token):
+                    and not _owner_authenticated(request)):
                 return JSONResponse({"detail": "unauthorized (missing/invalid UI token)"},
                                     status_code=401)
-            return await call_next(request)
+            response = await call_next(request)
+            # Keep authenticated API responses out of shared/browser caches, but do not defeat the
+            # immutable cache policy of Vite's content-hashed /assets.  The owner and review HTML
+            # shells already carry their own stricter headers in the handlers below.
+            if p.startswith("/api/"):
+                response.headers["Cache-Control"] = "no-store"
+                response.headers["Referrer-Policy"] = "no-referrer"
+            return response
+    else:
+        # Even on the default local/open control plane, a request that presents a review identity is
+        # capability-scoped and read-only.  This protects the actual review UI from accidental writes;
+        # deployment auth is still required if unrelated anonymous callers can reach the owner API.
+        @app.middleware("http")
+        async def _scope_review_capability(request: "Request", call_next):
+            review_token = request.headers.get(REVIEW_HEADER, "")
+            if not review_token:
+                return await call_next(request)
+            try:
+                review = reviews.resolve(review_token)
+            except ReviewError as exc:
+                code = 410 if exc.kind in {"expired", "revoked"} else 401
+                return _review_denial(str(exc), exc.kind, code)
+            if not review_request_allowed(review, request.method, request.url.path):
+                return _review_denial(
+                    "read-only review capability does not permit this request",
+                    "review_read_only", 403)
+            response = await call_next(request)
+            response.headers["Cache-Control"] = "no-store"
+            response.headers["Referrer-Policy"] = "no-referrer"
+            response.headers["Vary"] = REVIEW_HEADER
+            return response
     projects = ProjectStore(root / "projects.json")   # ClearML-style run organization (UI-only)
     # JupyterHub reaper hooks (ASGI shutdown + atexit backstop) — registered before the secret
     # priming below, matching the original make_app construction side-effect order.
@@ -177,22 +247,35 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
     settings_store = SettingsStore(root)
     settings_store.prime_env()   # apply stored secrets to this process's env (env/.env still wins)
 
-    srv = AppState(root=root, projects=projects, settings=settings_store, jobs=JobRegistry())
+    srv = AppState(root=root, projects=projects, settings=settings_store, jobs=JobRegistry(),
+                   reviews=reviews)
+    srv.owner_auth_enabled = bool(ui_token)
+
+    @app.get("/api/auth/status")
+    def auth_status(request: Request):
+        return {"required": bool(ui_token),
+                "authenticated": not ui_token or _owner_authenticated(request)}
+
+    @app.post("/api/auth/verify")
+    def auth_verify():
+        # When auth is enabled the middleware has already validated the owner header.
+        return {"ok": True, "required": bool(ui_token)}
 
     # Router include ORDER (load-bearing for the overlapping patterns — see routers/__init__.py):
     #   1. runs      — the runs list + per-run read model (also late-binds srv.list_runs_fn)
-    #   2. org       — projects / super-tasks / label / delete-run
-    #   3. control   — /control appends + resume/reset//api/start engine spawns
-    #   4. genesis   — /api/research + /api/genesis (reads srv.list_tasks_fn at request time)
-    #   5. assistant — sessions + the HITL permission registry
-    #   6. boss      — chat-log / chat / suggest / command / report_refresh
-    #   7. jobs      — GET /api/jobs/{id} over the shared JobRegistry
-    #   8. reports   — cross-run scope reports (reads srv.list_runs_fn at request time)
-    #   9. misc      — settings/secret/tasks/health/gpu, then the generic `GET /api/{kind}`
+    #   2. reviews   — owner link management + the token-scoped reviewer manifest
+    #   3. org       — projects / super-tasks / label / delete-run
+    #   4. control   — /control appends + resume/reset//api/start engine spawns
+    #   5. genesis   — /api/research + /api/genesis (reads srv.list_tasks_fn at request time)
+    #   6. assistant — sessions + the HITL permission registry
+    #   7. boss      — chat-log / chat / suggest / command / report_refresh
+    #   8. jobs      — GET /api/jobs/{id} over the shared JobRegistry
+    #   9. reports   — cross-run scope reports (reads srv.list_runs_fn at request time)
+    #  10. misc      — settings/secret/tasks/health/gpu, then the generic `GET /api/{kind}`
     #                  authoring route, which MUST register after every other /api route it would
     #                  otherwise shadow (and before /api/memory, preserving the original order).
     # The static mounts + the SPA catch-all `GET /{path:path}` come after ALL /api routers.
-    for _build in (_runs_router.build_router, _org_router.build_router,
+    for _build in (_runs_router.build_router, _reviews_router.build_router, _org_router.build_router,
                    _control_router.build_router, _genesis_router.build_router,
                    _assistant_router.build_router, _boss_router.build_router,
                    _jobs_router.build_router, _reports_router.build_router,
@@ -203,40 +286,40 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
     dist = _ui_dist()
 
     def _index_response(request: "Optional[Request]" = None):
-        # G1: inject the UI token into the served page (same-origin <meta>) when auth is on, so the
-        # SPA can echo it on mutating requests. No token (default local single-user) -> serve the
-        # file unchanged, behaviour identical to before.
+        # Never inject the owner secret into HTML.  The SPA asks the operator to unlock the owner
+        # control plane and keeps the token only for this browser tab (sessionStorage).
         html_path = dist / "index.html"
         if not ui_token:
             # `no-cache` = the browser MUST revalidate index.html every load (it's tiny). Without it a
             # shared cache / the jupyter-server-proxy can pin a stale index that references an OLD hashed
             # bundle, so rebuilt UI never loads. The hashed /assets are immutable and stay cacheable.
             return FileResponse(str(html_path), headers={"Cache-Control": "no-cache"})
-        # Token is set. The <meta> is readable by ANY code that can read this document, INCLUDING a
-        # same-origin page on a different path (the shared-JupyterHub-origin case). We can't make a
-        # shared origin per-user — that needs a private origin (see deployment guide) — but we DO
-        # refuse to hand the token to the easy automated exfil paths and forbid framing the
-        # token-bearing doc:
-        #   * a programmatic fetch()/XHR carries `Sec-Fetch-Dest: empty` (never a top-level nav);
-        #   * a framed load carries `Sec-Fetch-Dest: iframe` AND we send X-Frame-Options/CSP to
-        #     stop the frame rendering, so a same-origin parent can't read its contentDocument.
-        # Only a genuine top-level document navigation (Sec-Fetch-Dest: document, or a client too
-        # old to send the header / a non-browser client) receives the token. This blocks the common
-        # `fetch('/').then(r=>r.text())` token-scrape without touching the default local path.
-        # NOT a complete fix: a same-origin page can still window.open() the app and read the popup
-        # — only a private origin closes that. The headers below are defence-in-depth, not isolation.
-        dest = request.headers.get("sec-fetch-dest") if request is not None else None
         html = html_path.read_text(encoding="utf-8")
-        if dest is None or dest == "document":
-            meta = f'<meta name="ll-token" content="{ui_token}">'
-            html = html.replace("</head>", meta + "</head>", 1)
         headers = {
-            "X-Frame-Options": "DENY",                       # no same-origin iframe -> contentDocument read
+            "X-Frame-Options": "DENY",
             "Content-Security-Policy": "frame-ancestors 'none'",
-            "Cache-Control": "no-store",                      # never let a shared cache retain the token
+            "Cache-Control": "no-store",
+            "Referrer-Policy": "same-origin",
             "X-Content-Type-Options": "nosniff",
         }
         return HTMLResponse(html, headers=headers)
+
+    def _review_index_response():
+        """Serve a review SPA without ever embedding the owner UI token.
+
+        ``../`` resolves from ``<mount>/review`` back to ``<mount>/`` and therefore keeps
+        Vite's relative asset URLs working behind an arbitrary proxy prefix.  Referrers are disabled
+        because the bearer lives in the fragment.
+        """
+        html = (dist / "index.html").read_text(encoding="utf-8")
+        html = html.replace("<head>", '<head><base href="../">', 1)
+        return HTMLResponse(html, headers={
+            "Cache-Control": "no-store",
+            "Referrer-Policy": "no-referrer",
+            "X-Frame-Options": "DENY",
+            "Content-Security-Policy": "frame-ancestors 'none'",
+            "X-Content-Type-Options": "nosniff",
+        })
 
     if dist.exists():
         app.mount("/assets", StaticFiles(directory=str(dist / "assets")), name="assets")
@@ -245,17 +328,19 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
         def index(request: Request):
             return _index_response(request)
 
+        @app.get("/review")
+        def review_spa():
+            # Credential validity is rendered by GET /api/review so expired/revoked links get the
+            # product's accessible error state rather than a bare server error page.
+            return _review_index_response()
+
         @app.get("/{path:path}")
         def spa(path: str, request: Request):
             # SPA fallback for client-side routes; never shadow /api. Resolve-guard the path so a
             # traversal (`/..%2f..%2fwin.ini`) can't read a file outside the built assets dir — the
             # other file routes guard, this one used to serve any readable file (review C3).
             if path in ("", "index.html"):
-                # Serve the index THROUGH _index_response so the auth <meta name="ll-token"> is injected
-                # here too. A proxy/bookmark that lands on `.../proxy/8765/index.html` (not the bare `/`)
-                # would otherwise get the un-injected file → no token → every mutating action 401s.
-                # Pass `request` so the Sec-Fetch-Dest token-gating applies to /index.html too — else a
-                # `fetch('/index.html')` (dest=empty) would be handed the token, reopening the exfil hole.
+                # Keep /index.html and the bare root on the same tokenless owner shell.
                 return _index_response(request)
             base = dist.resolve()
             target = (dist / path).resolve()

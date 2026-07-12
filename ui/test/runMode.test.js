@@ -52,3 +52,12 @@ test('run mutation guard blocks encoded run paths only while history is active',
   clearRunAccess(runId)
   assert.deepEqual(liveHistory().status, 'live')
 })
+
+test('review access has its own terminal read-only error', () => {
+  setRunAccess('demo', { readOnly: true, mode: 'review' })
+  assert.throws(
+    () => assertRunMutationAllowed('/api/runs/demo/control'),
+    error => error.code === 'REVIEW_READ_ONLY' && /review link/i.test(error.message),
+  )
+  clearRunAccess('demo')
+})

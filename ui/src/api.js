@@ -5,6 +5,33 @@
 
 import { assertRunMutationAllowed } from './runMode.js'
 
+const OWNER_TOKEN_KEY = 'll.owner-token'
+let volatileOwnerToken = ''
+
+export function isReviewLocation(loc = (typeof location !== 'undefined' ? location : null)) {
+  return !!loc && /\/review\/?$/.test(loc.pathname || '')
+}
+
+export function reviewTokenFromLocation(loc = (typeof location !== 'undefined' ? location : null)) {
+  if (!isReviewLocation(loc)) return ''
+  const m = String(loc.hash || '').match(/^#\/(rv_[A-Za-z0-9_-]+)$/)
+  return m ? m[1] : ''
+}
+
+function ownerToken() {
+  if (typeof sessionStorage === 'undefined') return volatileOwnerToken
+  try { return sessionStorage.getItem(OWNER_TOKEN_KEY) || volatileOwnerToken } catch { return volatileOwnerToken }
+}
+
+export function setOwnerToken(token) {
+  volatileOwnerToken = token ? String(token) : ''
+  if (typeof sessionStorage === 'undefined') return
+  try {
+    if (volatileOwnerToken) sessionStorage.setItem(OWNER_TOKEN_KEY, volatileOwnerToken)
+    else sessionStorage.removeItem(OWNER_TOKEN_KEY)
+  } catch { /* module memory keeps this tab usable when session storage is disabled */ }
+}
+
 export const CONTROL = {
   // Three operator controls (see docs/guide/concepts.md → "Stopping a run"):
   //   stop     — freeze the run, NO finalization (event: pause). Resumable; finalize later if wanted.
@@ -94,16 +121,17 @@ export const clearNodeTrace = (rid, id) =>
 
 export const llmHealth = () => get('/api/llm/health')
 
-// G1 server auth: when the server runs with LOOPLAB_UI_TOKEN it injects the token into the served
-// page as <meta name="ll-token">. A *cross-origin* page can't read it (that's per-origin SOP), but a
-// SAME-origin page on a different path CAN — so the token only isolates users when each has its own
-// origin (default 127.0.0.1 bind, or a per-user subdomain), NOT on a shared jupyter-server-proxy
-// origin where it's a per-deployment secret (server injects it only on top-level navigations + sets
-// X-Frame-Options/no-store; see looplab/server.py and docs/guide/deployment.md). Send it on every
-// mutating request. No token (default local) -> header omitted, behaviour unchanged.
+// Owner and reviewer are distinct principals. A review fragment wins even if this tab has stale
+// owner state, so the read-only surface can never accidentally send both credentials.
 const _authHeaders = (base) => {
-  const t = (typeof document !== 'undefined' && document.querySelector('meta[name="ll-token"]')?.content) || ''
-  return t ? { ...base, 'X-LoopLab-Token': t } : { ...base }
+  // The review pathname is an authority boundary even when its fragment is missing or malformed.
+  // Never fall back to a session-scoped owner credential from a tab that navigated to /review.
+  if (isReviewLocation()) {
+    const review = reviewTokenFromLocation()
+    return review ? { ...base, 'X-LoopLab-Review': review } : { ...base }
+  }
+  const owner = ownerToken()
+  return owner ? { ...base, 'X-LoopLab-Token': owner } : { ...base }
 }
 // Surface the server's error DETAIL (FastAPI puts the human-readable reason in `detail`) instead of a
 // bare status code — so e.g. a 422 from a per-run config save reads "invalid settings — n_seeds: …"
@@ -124,31 +152,57 @@ async function _throw(r, path) {
 // so the backend still sees `/api/…`. At the root (local `looplab ui`) the prefix is '' — unchanged.
 export function apiPrefix() {
   if (typeof location === 'undefined') return ''
-  return location.pathname.replace(/\/index\.html$/, '').replace(/\/+$/, '')
+  return location.pathname.replace(/\/index\.html$/, '').replace(/\/review\/?$/, '').replace(/\/+$/, '')
 }
 export const apiUrl = (path) => apiPrefix() + path
+
+// Review reads use a namespace whose run identity comes from the bearer. Existing read-only
+// components can keep asking for `/api/runs/<id>/...`; only GET paths are translated.
+export function reviewReadPath(path) {
+  if (!isReviewLocation()) return path
+  const m = String(path || '').match(/^\/api\/runs\/[^/?#]+(\/[^?#]*)?(\?[^#]*)?$/)
+  if (!m) return path
+  return `/api/review${m[1] || ''}${m[2] || ''}`
+}
+
+function assertNotReviewMutation(path) {
+  if (!isReviewLocation()) return
+  const error = new Error('This review link is read-only')
+  error.code = 'REVIEW_READ_ONLY'
+  error.path = path
+  throw error
+}
 
 export async function get(path) {
   // Carry the UI token on reads too: most GETs don't need it, but the artifact routes (raw file
   // content) are token-gated server-side. _authHeaders is a no-op when no token is set (local), so
   // ordinary local use is unchanged.
-  const r = await fetch(apiUrl(path), { headers: _authHeaders({}) })
+  const requestPath = reviewReadPath(path)
+  // Every review bearer addresses the same small URL namespace.  Force a cache bypass so a cached
+  // 401/410 from a revoked capability can never poison a subsequently created link in this tab.
+  const r = await fetch(apiUrl(requestPath), {
+    headers: _authHeaders({}),
+    ...(isReviewLocation() ? { cache: 'no-store' } : {}),
+  })
   if (!r.ok) await _throw(r, path)
   return r.json()
 }
 export async function post(path, body) {
+  assertNotReviewMutation(path)
   assertRunMutationAllowed(path)
   const r = await fetch(apiUrl(path), { method: 'POST', headers: _authHeaders({ 'Content-Type': 'application/json' }), body: JSON.stringify(body) })
   if (!r.ok) await _throw(r, path)
   return r.json()
 }
 export async function putText(path, text) {
+  assertNotReviewMutation(path)
   assertRunMutationAllowed(path)
   const r = await fetch(apiUrl(path), { method: 'PUT', headers: _authHeaders({ 'Content-Type': 'text/plain' }), body: text })
   if (!r.ok) await _throw(r, path)
   return r.json()
 }
 async function send(path, method, body) {
+  if (method !== 'GET') assertNotReviewMutation(path)
   if (method !== 'GET') assertRunMutationAllowed(path)
   // Only attach a JSON body for methods that carry one (PATCH/PUT/POST). A DELETE with a request
   // body + Content-Type is unusual and some reverse proxies (e.g. jupyter-server-proxy) mishandle it
@@ -161,6 +215,20 @@ async function send(path, method, body) {
   return r.json()
 }
 
+export const authStatus = () => get('/api/auth/status')
+export async function verifyOwnerToken(token) {
+  const r = await fetch(apiUrl('/api/auth/verify'), {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'X-LoopLab-Token': String(token || '') },
+    body: '{}',
+  })
+  if (!r.ok) await _throw(r, '/api/auth/verify')
+  setOwnerToken(token)
+  return r.json()
+}
+export const clearOwnerToken = () => setOwnerToken('')
+export const reviewManifest = () => get('/api/review')
+
 // ---- ClearML-style project API ----
 export const listProjects = () => get('/api/projects')
 export const createProject = (name, parent_id = null) => post('/api/projects', { name, parent_id })
@@ -169,6 +237,11 @@ export const deleteProject = (id) => send(`/api/projects/${id}`, 'DELETE')
 export const assignRun = (runId, project_id) => post(`/api/runs/${encodeURIComponent(runId)}/project`, { project_id })
 export const renameRun = (runId, label) => send(`/api/runs/${encodeURIComponent(runId)}`, 'PATCH', { label })
 export const deleteRun = (runId) => send(`/api/runs/${encodeURIComponent(runId)}`, 'DELETE')
+export const createRunReview = (runId, { ttl_seconds, include_evidence = false } = {}) =>
+  post(`/api/runs/${encodeURIComponent(runId)}/reviews`, { ttl_seconds, include_evidence })
+export const listRunReviews = (runId) => get(`/api/runs/${encodeURIComponent(runId)}/reviews`)
+export const revokeRunReview = (runId, linkId) =>
+  send(`/api/runs/${encodeURIComponent(runId)}/reviews/${encodeURIComponent(linkId)}`, 'DELETE')
 
 // super-tasks: a user-managed, flat grouping of runs by the global task they attack (parallel axis
 // to projects). create / rename / delete the bucket, then assign any run (existing or new) to it.

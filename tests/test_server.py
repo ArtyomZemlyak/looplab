@@ -691,41 +691,24 @@ def _fake_dist(tmp_path, monkeypatch):
     return dist
 
 
-def test_g1_token_injected_only_on_top_level_navigation(tmp_path, monkeypatch):
-    """Shared-origin hardening: the ll-token <meta> is handed out ONLY on a genuine top-level
-    document navigation. A programmatic fetch()/XHR (Sec-Fetch-Dest: empty) or a framed load
-    (iframe) gets a tokenless page, so a same-origin different-path page can't scrape the token.
-    The token-bearing doc is also un-frameable and un-cacheable."""
+def test_g1_owner_token_is_never_injected_into_html(tmp_path, monkeypatch):
+    """A review recipient can navigate to `/`, so public HTML must never be an owner-token oracle.
+    The operator enters LOOPLAB_UI_TOKEN through the client unlock gate; every document navigation,
+    programmatic fetch, frame, and SPA fallback stays tokenless and hardened."""
     _build_run(tmp_path)
     _fake_dist(tmp_path, monkeypatch)
     monkeypatch.setenv("LOOPLAB_UI_TOKEN", "s3cret")
     client = TestClient(make_app(tmp_path))
 
-    # genuine top-level navigation -> token present + hardened
-    r = client.get("/", headers={"Sec-Fetch-Dest": "document"})
-    assert r.status_code == 200
-    assert 'name="ll-token" content="s3cret"' in r.text
-    assert r.headers.get("X-Frame-Options") == "DENY"
-    assert "frame-ancestors 'none'" in (r.headers.get("Content-Security-Policy") or "")
-    assert r.headers.get("Cache-Control") == "no-store"
-
-    # a programmatic fetch()/XHR must NOT receive the token, but stays un-frameable
-    r = client.get("/", headers={"Sec-Fetch-Dest": "empty"})
-    assert r.status_code == 200
-    assert "ll-token" not in r.text
-    assert r.headers.get("X-Frame-Options") == "DENY"
-
-    # a framed load (would let a same-origin parent read contentDocument) gets no token
-    r = client.get("/", headers={"Sec-Fetch-Dest": "iframe"})
-    assert "ll-token" not in r.text
-
-    # a client too old to send Sec-Fetch (header absent) still works -> fail-open on absence
-    r = client.get("/")
-    assert 'name="ll-token" content="s3cret"' in r.text
-
-    # the SPA fallback (client-side route) is gated the same way
-    r = client.get("/some/spa/route", headers={"Sec-Fetch-Dest": "empty"})
-    assert "ll-token" not in r.text
+    for path, dest in (("/", "document"), ("/", "empty"), ("/", "iframe"),
+                       ("/", None), ("/some/spa/route", "empty")):
+        headers = {"Sec-Fetch-Dest": dest} if dest else {}
+        r = client.get(path, headers=headers)
+        assert r.status_code == 200
+        assert "ll-token" not in r.text and "s3cret" not in r.text
+        assert r.headers.get("X-Frame-Options") == "DENY"
+        assert "frame-ancestors 'none'" in (r.headers.get("Content-Security-Policy") or "")
+        assert r.headers.get("Cache-Control") == "no-store"
 
 
 def test_g1_no_token_index_unchanged(tmp_path, monkeypatch):

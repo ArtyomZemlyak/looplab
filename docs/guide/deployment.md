@@ -70,7 +70,35 @@ artifacts land in `./runs`, shared with the host and the UI.
   models) — set it to `1` in `.env` only if a weaker model needs constrained decoding.
 - **Exposure:** both ports publish to `127.0.0.1` only by default. The UI control plane is
   unauthenticated unless `LOOPLAB_UI_TOKEN` is set, so it is not put on the LAN implicitly. To serve
-  it beyond localhost, set a token and `UI_BIND=0.0.0.0` in `.env`.
+  it beyond localhost, set a strong token and `UI_BIND=0.0.0.0` in `.env`. The token is not embedded
+  in HTML: the owner enters it in the unlock screen and it stays in that browser tab's
+  `sessionStorage`.
+
+## Owner access and read-only review links
+
+`LOOPLAB_UI_TOKEN` protects mutations and sensitive owner reads. When it is configured, the browser
+first shows **Unlock LoopLab controls**; enter the same value there. The SPA sends it as
+`X-LoopLab-Token` for the rest of that tab. Neither the owner page nor `/review` contains the token in
+HTML, and it is not written to a persistent browser store.
+
+Read-only sharing is available only when this owner credential is configured. From a run's
+**Lab → Collaboration** panel, the owner chooses an expiry (one hour through 30 days), optionally
+includes redacted source evidence, and creates a link. The link is a one-run bearer capability:
+
+- the bearer is after the URL fragment on the tokenless `/review` shell, not in the HTTP path;
+- the server stores only its digest under `<run-root>/.reviews/` and returns the bearer once;
+- reviewer requests are confined to the dedicated GET-only `/api/review/*` namespace;
+- `summary` includes the DAG/report, masked configuration, cost, and derived metrics;
+- optional `evidence` adds redacted node source/results and parent diff;
+- raw logs, prompts, traces, live sidecars, artifacts, Assistant, owner settings, and every mutation
+  remain unavailable;
+- expiry and revocation are checked on every request. Revocation blocks future reads but cannot erase
+  material the recipient already copied.
+
+This is scoped read-only access, not an identity provider, RBAC system, or DLP guarantee. Do not share
+from anonymous mode: the server refuses link creation without `LOOPLAB_UI_TOKEN`. Known credential
+patterns are redacted from the optional evidence projection, but source can still contain sensitive
+project information.
 
 ## Run as a JupyterHub app (jupyter-server-proxy)
 
@@ -106,30 +134,25 @@ local box.
 
 ### Shared JupyterHub origin (important)
 
-`LOOPLAB_UI_TOKEN` isolates users **only when each principal has its own origin** — the default
-`127.0.0.1` bind, or a per-user subdomain. It does **not** make the token per-user on a shared
-origin.
+`LOOPLAB_UI_TOKEN` is a **per-deployment owner credential**, not per-user identity. It does not turn a
+shared origin into an RBAC boundary.
 
 Behind `jupyter-server-proxy`, every user's app lives under one origin —
 `https://hub.example.org/user/alice/proxy/8765/`, `…/user/bob/proxy/8765/`, files at
-`…/user/alice/files/…`, other proxied apps — all on `hub.example.org`. The same-origin policy is
-**per-origin, not per-path**, so any same-origin page running in the user's browser can `fetch()`
-the app's index, regex out the injected `ll-token`, and replay it to drive the control plane
-(start/delete runs, edit configs, run shell-executing experiments). On a shared hub the token is a
-**per-deployment secret, not a per-user one.**
+`…/user/alice/files/…`, and other proxied apps can all live on `hub.example.org`. The same-origin
+policy is **per-origin, not per-path**. LoopLab no longer embeds the owner token in the page, which
+removes the former index-scraping path, and serves owner/review shells unframeable and `no-store`.
+That is defence in depth, not isolation between mutually untrusted same-origin applications: they
+still share the browser security principal, and the static token has no user identity or role.
 
-LoopLab detects the hub (`JUPYTERHUB_SERVICE_PREFIX`) and logs a warning at startup. As
-defence-in-depth it injects the token only on a genuine top-level navigation (`Sec-Fetch-Dest:
-document`) — never on a programmatic `fetch`/XHR or a framed load — and serves the token-bearing
-page with `X-Frame-Options: DENY`, `Content-Security-Policy: frame-ancestors 'none'`, and
-`Cache-Control: no-store`. That blocks the common `fetch('/').then(r => r.text())` scrape and the
-iframe-reads-`contentDocument` trick, **but it is not a complete fix**: a same-origin page can still
-`window.open()` the app and read the popup.
+LoopLab detects the hub (`JUPYTERHUB_SERVICE_PREFIX`) and logs this limitation at startup. A review
+link remains server-enforced read-only, but it must not be presented as a substitute for upstream
+authentication, reviewer identity, or tenant separation.
 
 **For real per-user isolation, give each user a private origin** — a per-user subdomain
-(`alice.hub.example.org`), a dedicated host/port reachable only by that user, or network isolation —
-rather than a shared `…/proxy/<port>/` path. Treat `LOOPLAB_UI_TOKEN` on a shared hub as a
-deployment-wide gate (keeps *other* hubs/origins out), not as a wall between co-tenant users.
+(`alice.hub.example.org`), a dedicated host/port reachable only by that user, or an authenticated
+reverse proxy/network boundary — rather than a shared `…/proxy/<port>/` path. Treat
+`LOOPLAB_UI_TOKEN` as the deployment owner's static control credential, not a wall between co-tenants.
 
 ## Observability export
 
