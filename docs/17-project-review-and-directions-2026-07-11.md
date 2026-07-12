@@ -699,16 +699,21 @@ plan can be sequenced by ROI rather than by list order.
 | P0-3 — content-addressed setup manifest | ✅ landed | `setup_finished` carries a config+workspace+data digest; a pre-node resume re-runs preflight when the material changed (`7603114`) |
 | P0-5 — environment identity (InputSnapshot slice) | ✅ landed | run start pins a Python/platform/lib fingerprint; a resume emits `env_changed` on drift (`cbcde25`) |
 | P1-4 — bounded logs + reconciler backoff | ✅ landed | `engine.stderr.log` capped to its recent tail; the resume reconciler re-records its intent so a crash-loop re-spawns at most once per grace (`8ca06ae`) |
+| P1-2 — separate budget buckets | ✅ landed | eval seconds split by category (node vs confirm) via `eval_seconds_by_kind`; LLM already its own bucket (`9faffc2`) |
+| P1-5 — physical resource caps | ✅ landed | host-RAM (`RLIMIT_AS`) + disk-fill (`RLIMIT_FSIZE`) opt-in caps on the trusted-local tier (`3ed64ec`, `63531fa`) |
+| P1-7 — calibration harness | ✅ landed | `calibrate_detector(corpus)` reports precision/recall for the trust detector; only a labelled corpus (external) is still needed for real numbers (`9faffc2`) |
 
 Still deferred by design (§6.4/§6.6, schedule by demonstrated need): the **full** multi-writer CAS + v2 envelope
 (the lean explicit-seq half landed above; the writer is already lock-serialized and `append` derives
 `seq = max(disk, mem)+1`), the full external-material RunManifest/InputSnapshot (the setup-material, config, and
-environment slices landed as P0-3/P0-5; the remaining dirty-input-bytes enumeration is the follow-up), the
-reserve/fencing BudgetLedger (P1-2's real over-admission hole closed at `a5f74b1`; separate budget buckets are a
-lean observability enhancement, not a correctness bug), a cgroups/Job-Object ProcessSupervisor (host-RAM cap +
-deadline watcher landed as the cheap halves), and the R4/R5 service split + multi-tenant auth. The remaining
-P1-7 depth (token/dataflow analysis + labelled-corpus calibration) needs a labelled corpus. These extend the
-landed patterns and are scheduled by demonstrated need, not treated as one release wall.
+environment slices landed as P0-3/P0-5; only the dirty-input-bytes ENUMERATION remains — the working-tree
+content itself is already captured by the workspace fingerprint), the reserve/fencing BudgetLedger (P1-2's real
+over-admission hole closed at `a5f74b1` and its buckets landed above; reserve/fencing protect remote/restarted
+workers the in-process loop has none of), the cgroups/Job-Object ProcessSupervisor's ISOLATION layer (the
+KILL/deadline/RAM/disk halves landed; cgroup isolation is what the Docker tier already provides), and the R4/R5
+service split + multi-tenant auth. The trust detector's CALIBRATION mechanism landed (`calibrate_detector`); a
+labelled cheating/clean corpus is the one external input still needed to turn it into a real precision number.
+These are each scheduled by demonstrated need — a documented scoping decision (§6.4/§6.6), not one release wall.
 
 ---
 
