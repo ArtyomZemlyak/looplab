@@ -1494,10 +1494,14 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         return env
 
     def _dirty_inputs(self, wf: "dict | None") -> list:
-        """P0-5 dirty-input enumeration: for each git-repo workspace source, the uncommitted-file list
-        (`git status --porcelain`) — the EXPLICIT record of which inputs differ from a clean checkout,
-        on top of the content hash the workspace fingerprint already pins. Best-effort: git absent, a
-        non-repo source, or a timeout contributes nothing and never fails the run. Bounded output."""
+        """P0-5 dirty-input enumeration: for each git-repo workspace source, the uncommitted-file LIST
+        (`git status --porcelain`) plus a DIGEST of the actual diff vs HEAD (`git diff HEAD`) — the
+        EXPLICIT record of which inputs differ from a clean checkout AND a content fingerprint of HOW,
+        on top of the content hash the workspace fingerprint already pins. The digest (not the diff
+        TEXT) is stored on purpose: it detects a changed dirty-content across runs WITHOUT leaking a
+        secret a raw patch could carry (a pasted key, an edited .env) into the world-readable log.
+        Best-effort: git absent, a non-repo source, or a timeout contributes nothing and never fails
+        the run. Bounded output."""
         import subprocess
         out: list = []
         for src in sorted((wf or {}).keys()):
@@ -1508,7 +1512,18 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                                    capture_output=True, text=True, timeout=10)
                 dirty = [ln[:200] for ln in r.stdout.splitlines() if ln.strip()][:500]
                 if r.returncode == 0 and dirty:
-                    out.append({"source": src, "dirty": dirty})
+                    entry = {"source": src, "dirty": dirty}
+                    # Content fingerprint of the dirty changes (staged + unstaged vs HEAD). A HASH, never
+                    # the patch bytes — provenance + change-detection without the secret-leak risk of the
+                    # raw diff. Absent when the diff can't be taken (leaves the enumeration intact).
+                    try:
+                        dr = subprocess.run(["git", "-C", root, "diff", "HEAD"],
+                                            capture_output=True, timeout=15)
+                        if dr.returncode == 0 and dr.stdout:
+                            entry["diff_digest"] = hashlib.sha256(dr.stdout).hexdigest()[:16]
+                    except Exception:  # noqa: BLE001 — no diff available: keep the file list only
+                        pass
+                    out.append(entry)
             except Exception:  # noqa: BLE001 — git missing / not a repo / timeout: no enumeration
                 pass
         return out

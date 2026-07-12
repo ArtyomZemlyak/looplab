@@ -134,6 +134,76 @@ def test_run_started_records_dirty_inputs(tmp_path):
     assert fold(s2.read_all()).dirty_inputs == []
 
 
+def _mk_engine(run_dir):
+    from looplab.engine.orchestrator import Engine
+    from looplab.runtime.sandbox import SubprocessSandbox
+    from looplab.search.policy import GreedyTree
+
+    class _Task:
+        id = "t"; goal = "g"; direction = "min"
+        def model_dump(self, mode="json"):
+            return {"id": "t"}
+        def leakage_inputs(self):
+            return None
+
+    class _R:
+        def propose(self, s, p):
+            return Idea(operator="draft", params={})
+
+    class _D:
+        def implement(self, idea):
+            return "print(1)"
+
+    return Engine(run_dir, task=_Task(), researcher=_R(), developer=_D(),
+                  sandbox=SubprocessSandbox(), policy=GreedyTree(n_seeds=1, max_nodes=1),
+                  auto_install_deps=False)
+
+
+def test_dirty_inputs_hashes_the_diff_of_a_dirty_repo(tmp_path):
+    # P0-5: a git-repo source with uncommitted edits contributes both the porcelain file LIST and a
+    # sha256 DIGEST of `git diff HEAD` — the fingerprint of the change without the leak-prone patch text.
+    import subprocess
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+
+    def _git(*a):
+        return subprocess.run(["git", "-C", str(repo), *a], capture_output=True, text=True)
+
+    _git("init", "-q")
+    _git("config", "user.email", "t@t.t")
+    _git("config", "user.name", "t")
+    (repo / "model.py").write_text("print(0)\n")
+    _git("add", "-A")
+    _git("commit", "-q", "-m", "init")
+
+    eng = _mk_engine(tmp_path / "run")
+    assert eng._dirty_inputs({str(repo / "model.py"): {}}) == []   # committed & clean -> nothing
+
+    (repo / "model.py").write_text("print(1)\n")                   # now dirty vs HEAD
+    out = eng._dirty_inputs({str(repo / "model.py"): {}})
+    assert len(out) == 1 and out[0]["source"] == str(repo / "model.py")
+    assert any("model.py" in ln for ln in out[0]["dirty"])
+    d1 = out[0]["diff_digest"]
+    assert isinstance(d1, str) and len(d1) == 16
+
+    (repo / "model.py").write_text("print(2)\n")                   # a DIFFERENT dirty content
+    d2 = eng._dirty_inputs({str(repo / "model.py"): {}})[0]["diff_digest"]
+    assert d2 != d1                                                # the digest tracks the change
+
+    # The raw patch text never appears in the enumeration (only its hash).
+    assert "print(1)" not in str(out) and "print(2)" not in d2
+
+
+def test_dirty_inputs_non_repo_source_is_silent(tmp_path):
+    # A source that is not a git repo (or git absent) contributes nothing and never raises.
+    eng = _mk_engine(tmp_path / "run")
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    (plain / "f.txt").write_text("x")
+    assert eng._dirty_inputs({str(plain / "f.txt"): {}}) == []
+
+
 def test_resume_flags_environment_drift(tmp_path, monkeypatch):
     # P0-5: a resume whose Python/library environment differs from run start emits env_changed; an
     # unchanged environment (and the first run) does not.
