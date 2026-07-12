@@ -687,11 +687,20 @@ plan can be sequenced by ROI rather than by list order.
 | Host-RAM cap (subprocess tier) | ✅ landed | opt-in `RLIMIT_AS` via `sandbox_memory_local` (`3ed64ec`) |
 | Artifact freshness gate | ✅ landed | file-based metric readers reject stale workdir artifacts via a `since` mtime gate (`78fbfc3`) |
 
-Still open in the MVC set: the **zombie-run reconciler** (P1-1 — a recoverable-intent kernel, not a standing
-daemon) and the **additive fold-field identity residuals** (bind confirm/holdout/trust/repair effects to the
-attempt generation; stamp `search_epoch` on promotion/finalization; a freshly-hidden per-epoch holdout). Trust
-stays advisory pending the detector-architecture work (§6.6). These extend already-landed patterns; the heavy
-machinery listed above stays deferred.
+**Second batch landed (2026-07-12) — the endorsed identity/recovery/trust residuals, each regression-tested:**
+
+| Residual | Status | Where |
+|---|---|---|
+| P0-1 — confirm/holdout bound to the attempt generation | ✅ landed | `attempt` stamped on confirm/holdout; fold drops a late event from an abandoned attempt (`a6837c1`) |
+| P0-2 — freshly-hidden per-epoch holdout | ✅ landed | epoch-salted split; reopen clears the disclosed holdout so a new epoch re-scores on a fresh one (`e111bf5`) |
+| P1-1 — zombie-run recovery | ✅ landed | durable `resume_requested`/`resume_served` intent + on-load reconciler (no daemon), idempotent via the singleton lock (`f0c36e0`) |
+| P1-7 — trust detector architecture (first step) | ✅ landed | AST recall pass for variable-path answer-key reads + versioned TrustEvidence (method/confidence/digest) (`a87f9a0`) |
+
+Still deferred by design (§6.4/§6.6, schedule by demonstrated need): the append-`expected_seq` CAS and v2
+envelope (the writer is already lock-serialized and `append` derives `seq = max(disk, mem)+1`), the full
+RunManifest/InputSnapshot, the reserve/fencing BudgetLedger, a cgroups/Job-Object ProcessSupervisor, and the
+R4/R5 service split + multi-tenant auth. The remaining P1-7 depth (token/dataflow analysis + labelled-corpus
+calibration) and P0-3/P0-5 content-addressed manifests are follow-ups on top of the landed patterns.
 
 ---
 
