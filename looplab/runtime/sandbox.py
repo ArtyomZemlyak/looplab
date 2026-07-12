@@ -221,7 +221,8 @@ def parse_mem_bytes(spec) -> Optional[int]:
 
 def run_argv(argv: list[str], workdir: str, timeout: float,
              env: Optional[dict] = None, max_output_bytes: int = 64_000, cancel=None,
-             log_path: Optional[str] = None, mem_bytes: Optional[int] = None):
+             log_path: Optional[str] = None, mem_bytes: Optional[int] = None,
+             fsize_bytes: Optional[int] = None):
     """Run one subprocess (argv, no shell) in `workdir` with timeout + process-tree kill +
     capped UTF-8/replace capture. Returns (returncode, stdout, stderr, timed_out). The single
     place process management lives — SubprocessSandbox, DockerSandbox, and command_eval all
@@ -249,23 +250,29 @@ def run_argv(argv: list[str], workdir: str, timeout: float,
         kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
     else:
         kwargs["start_new_session"] = True
-        if mem_bytes and mem_bytes > 0:
-            # Best-effort host-OOM guard (trusted_local tier, #5 / doc 17 §7.6): cap the child's
-            # VIRTUAL address space (RLIMIT_AS) so a runaway trainer hits MemoryError instead of
-            # OOM-killing the whole host (and the engine driving the loop). preexec_fn runs in the
-            # child AFTER fork, BEFORE exec — keep it tiny and swallow errors (an exception there
-            # aborts the spawn). POSIX only; Windows has no rlimit (Job Objects would be the analog).
-            # Caps VIRTUAL, not RSS, so the caller leaves it OFF for CUDA/torch (which reserve tens of
-            # GB of virtual) and uses the Docker tier's real --memory cgroup bound for those.
-            def _apply_rlimit(_m: int = int(mem_bytes)):
+        _mem = int(mem_bytes) if (mem_bytes and mem_bytes > 0) else None
+        _fsize = int(fsize_bytes) if (fsize_bytes and fsize_bytes > 0) else None
+        if _mem is not None or _fsize is not None:
+            # Best-effort resource caps for the trusted_local tier (#5 / doc 17 §7.6, P1-5). RLIMIT_AS
+            # bounds the child's VIRTUAL address space so a runaway trainer hits MemoryError instead of
+            # OOM-killing the whole host (+ the engine); RLIMIT_FSIZE bounds the size of any single file
+            # it writes so a runaway can't fill the disk (SIGXFSZ past the cap). preexec_fn runs in the
+            # child AFTER fork, BEFORE exec — keep it tiny and swallow errors (an exception there aborts
+            # the spawn). POSIX only; Windows has no rlimit (Job Objects would be the analog). Both cap
+            # aggressively (AS is virtual, FSIZE is per-file), so each defaults OFF and the caller opts
+            # in only where it fits (CUDA/torch reserve huge virtual; large checkpoints need big files).
+            def _apply_rlimits(_m=_mem, _f=_fsize):
                 import resource
-                try:
-                    soft, hard = resource.getrlimit(resource.RLIMIT_AS)
-                    new_hard = _m if (hard == resource.RLIM_INFINITY or _m < hard) else hard
-                    resource.setrlimit(resource.RLIMIT_AS, (_m, new_hard))
-                except (ValueError, OSError):
-                    pass   # can't lower (unprivileged / already lower) -> run uncapped, never crash
-            kwargs["preexec_fn"] = _apply_rlimit
+                for _res, _val in ((resource.RLIMIT_AS, _m), (resource.RLIMIT_FSIZE, _f)):
+                    if _val is None:
+                        continue
+                    try:
+                        _soft, _hard = resource.getrlimit(_res)
+                        _nh = _val if (_hard == resource.RLIM_INFINITY or _val < _hard) else _hard
+                        resource.setrlimit(_res, (_val, _nh))
+                    except (ValueError, OSError):
+                        pass   # can't lower that limit (unprivileged / already lower) -> run uncapped
+            kwargs["preexec_fn"] = _apply_rlimits
     # Don't hand the child code the host's secrets (review C2): a `print(os.environ)` or a stack
     # trace would otherwise exfiltrate LLM_API_KEY / cloud creds into the durable stdout tail. Drop
     # env vars whose NAME looks secret, but keep everything a process needs (PATH, SYSTEMROOT, …)
@@ -424,13 +431,15 @@ class SubprocessSandbox:
     box, so they are best-effort, not a boundary."""
 
     def __init__(self, python: Optional[str] = None, max_output_bytes: int = 64_000,
-                 mem_bytes: Optional[int] = None,
+                 mem_bytes: Optional[int] = None, fsize_bytes: Optional[int] = None,
                  **_: object):  # ignore tier-specific kwargs (symmetry with DockerSandbox)
         self.python = python or sys.executable
         self.max_output_bytes = max_output_bytes
-        # Best-effort host-OOM guard (RLIMIT_AS on the eval child), None = off. See run_argv's
-        # preexec_fn: caps VIRTUAL memory, so operators leave it off for CUDA/torch.
+        # Best-effort resource caps on the eval child (None = off). See run_argv's preexec_fn:
+        # mem_bytes = RLIMIT_AS (virtual, off for CUDA/torch); fsize_bytes = RLIMIT_FSIZE (per-file,
+        # off where large checkpoints are written).
         self.mem_bytes = mem_bytes
+        self.fsize_bytes = fsize_bytes
 
     def run(self, code: str, workdir: str, timeout: float = 30.0,
             env: Optional[dict] = None, cancel=None) -> RunResult:
@@ -439,7 +448,8 @@ class SubprocessSandbox:
         (wd / "solution.py").write_text(code, encoding="utf-8")
         rc, out, err, to = _run_argv(
             [self.python, "solution.py"],  # by name, relative to cwd -> no path doubling
-            str(wd), timeout, env, self.max_output_bytes, cancel, mem_bytes=self.mem_bytes)
+            str(wd), timeout, env, self.max_output_bytes, cancel,
+            mem_bytes=self.mem_bytes, fsize_bytes=self.fsize_bytes)
         # Discard metric/trials/extras from a TIMED-OUT run: a process killed at the deadline may have
         # printed a partial/misleading metric line before hanging. Matches DockerSandbox.run and
         # command_eval.run_command_eval, which both null these out on timeout.
@@ -516,12 +526,14 @@ class DockerSandbox:
 
 
 def make_sandbox(trust_mode: str = "trusted_local", *, image: Optional[str] = None,
-                 mem_local: str = "", **kwargs) -> Sandbox:
+                 mem_local: str = "", fsize_local: str = "", **kwargs) -> Sandbox:
     """Select the sandbox tier from the trust mode (ADR-13). `image` is routed only to the
-    Docker tier (the subprocess tier ignores it); `mem_local` (a human size like "8g") is the
-    trusted-local RLIMIT_AS host-OOM cap and is routed only to the subprocess tier."""
+    Docker tier (the subprocess tier ignores it); `mem_local`/`fsize_local` (human sizes like "8g")
+    are the trusted-local RLIMIT_AS host-OOM and RLIMIT_FSIZE disk-fill caps, routed only to the
+    subprocess tier."""
     if trust_mode == "trusted_local":
-        return SubprocessSandbox(mem_bytes=parse_mem_bytes(mem_local), **kwargs)
+        return SubprocessSandbox(mem_bytes=parse_mem_bytes(mem_local),
+                                 fsize_bytes=parse_mem_bytes(fsize_local), **kwargs)
     if trust_mode == "untrusted":
         return DockerSandbox(image=image or "python:3.12-slim", **kwargs)
     if trust_mode == "hostile":

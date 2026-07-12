@@ -68,6 +68,26 @@ def test_make_sandbox_wires_mem_local():
     assert s2.mem_bytes is None
 
 
+def test_make_sandbox_wires_fsize_local():
+    from looplab.runtime.sandbox import make_sandbox
+    s = make_sandbox("trusted_local", fsize_local="2g")
+    assert isinstance(s, SubprocessSandbox) and s.fsize_bytes == 2 * 1024**3
+    assert make_sandbox("trusted_local").fsize_bytes is None    # default off
+
+
+def test_subprocess_fsize_cap_bounds_a_runaway_write(tmp_path):
+    """#P1-5 disk-fill guard: with fsize_bytes set, a child writing past the per-file cap gets SIGXFSZ
+    instead of filling the disk; a small write under the cap succeeds. POSIX-only."""
+    pytest.importorskip("resource")
+    sb = SubprocessSandbox(fsize_bytes=1 * 1024 * 1024)         # 1 MiB per-file cap
+    ok = sb.run('open("out.bin", "wb").write(b"x" * 1000)\nprint(\'{"metric": 1.0}\')',
+                str(tmp_path / "small"), timeout=30.0)
+    assert ok.exit_code == 0 and ok.metric == 1.0              # small write under the cap is fine
+    big = sb.run('open("out.bin", "wb").write(b"x" * (8 * 1024 * 1024))\nprint("DONE")',
+                 str(tmp_path / "big"), timeout=30.0)
+    assert big.exit_code != 0 and "DONE" not in big.stdout     # 8 MiB > cap -> killed, never completes
+
+
 def test_sandbox_relative_workdir(tmp_path, monkeypatch):
     """Regression: a relative workdir must not double against cwd."""
     monkeypatch.chdir(tmp_path)

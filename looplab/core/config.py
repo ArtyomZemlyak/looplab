@@ -159,6 +159,11 @@ class Settings(BaseSettings):
     # so a default cap would spuriously kill GPU evals — leave it off for those and use the Docker
     # tier's real --memory cgroup bound (sandbox_memory) instead. Ideal for CPU/numpy/sklearn runs.
     sandbox_memory_local: str = ""
+    # Best-effort disk-fill guard for the TRUSTED-LOCAL tier (P1-5): an RLIMIT_FSIZE cap on the size of
+    # any single file an eval child writes (e.g. "2g"), so a runaway that writes an unbounded file gets
+    # SIGXFSZ instead of filling the host disk. POSIX only. Default "" = OFF (large model checkpoints
+    # need big files); set it for tasks that write only small artifacts.
+    sandbox_fsize_local: str = ""
     # Search policy (ADR-2): "greedy" | "evolutionary" | "mcts" | "asha".
     policy: str = "greedy"
     # Ablation-driven refinement (I7): every N improves, ablate the best to find the
