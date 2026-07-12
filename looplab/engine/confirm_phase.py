@@ -56,7 +56,7 @@ class ConfirmPhaseMixin:
             valid = res.metric is not None and res.exit_code == 0 and not res.timed_out
             async with self._write_lock:            # confirm-seed eval cost (#2) + memo (#0)
                 self.store.append(EV_CONFIRM_EVAL, {
-                    "node_id": nd.id, "seed": s,
+                    "node_id": nd.id, "seed": s, "attempt": nd.attempt,   # P0-1 attempt guard
                     "eval_seconds": round(time.time() - _t0, 3),
                     "metric": res.metric if valid else None})
                 if res.drift is not None:           # Phase 4: drop + audit drifted seeds
@@ -128,7 +128,8 @@ class ConfirmPhaseMixin:
                 summaries.append({"node_id": nd.id, **summ})
                 async with self._write_lock:
                     self.store.append(EV_NODE_CONFIRMED, {
-                        "node_id": nd.id, "mean": summ["mean"],
+                        "node_id": nd.id, "attempt": nd.attempt,   # P0-1 attempt guard
+                        "mean": summ["mean"],
                         "std": summ["std"], "seeds": len(scores),
                     })
 

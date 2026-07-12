@@ -187,6 +187,31 @@ def test_fold_tombstoned_pending_node_not_re_evaluated(tmp_path):
     assert st.pending_nodes() == []
 
 
+def test_fold_confirm_and_holdout_bound_to_attempt(tmp_path):
+    # P0-1: confirm-seed / node_confirmed / holdout_evaluated events stamped with an attempt the node
+    # has since abandoned (node_reset bumped the generation) must be dropped — their stale metrics must
+    # not land on the post-reset code, and the stale confirm-seed cost must not inflate the budget.
+    s = EventStore(tmp_path / "e.jsonl")
+    s.append("run_started", {"run_id": "r", "task_id": "t", "direction": "min"})
+    s.append("node_created", {"node_id": 0, "parent_ids": [], "operator": "draft",
+                              "idea": {"operator": "draft", "params": {}}, "code": "c"})
+    s.append("node_evaluated", {"node_id": 0, "metric": 0.5, "eval_seconds": 0.5, "attempt": 0})
+    s.append("node_reset", {"node_id": 0, "from_stage": "implement"})     # attempt 0 -> 1
+    # LATE events from the abandoned attempt 0 (their eval was in flight when the reset landed)
+    s.append("confirm_eval", {"node_id": 0, "seed": 1, "attempt": 0, "eval_seconds": 2.0, "metric": 0.4})
+    s.append("node_confirmed", {"node_id": 0, "attempt": 0, "mean": 0.4, "std": 0.0, "seeds": 3})
+    s.append("holdout_evaluated", {"node_id": 0, "attempt": 0, "metric": 0.3})
+    st = fold(s.read_all())
+    n = st.nodes[0]
+    assert n.confirmed_mean is None and n.holdout_metric is None    # stale confirm/holdout dropped
+    assert 0 not in st.holdout_evaluated_ids                        # gate not marked by a stale attempt
+    assert 0 not in st.confirm_seed_results                         # stale confirm-seed not memoized
+    assert st.total_eval_seconds == 0.5                             # stale confirm cost (2.0) NOT added
+    # a FRESH confirm at the current attempt (1) DOES land
+    s.append("node_confirmed", {"node_id": 0, "attempt": 1, "mean": 0.2, "std": 0.0, "seeds": 3})
+    assert fold(s.read_all()).nodes[0].confirmed_mean == 0.2
+
+
 def test_log_divergence_detects_mid_file_corruption(tmp_path):
     from looplab.events.eventstore import log_divergence
     p = tmp_path / "events.jsonl"

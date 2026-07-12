@@ -394,6 +394,14 @@ def _on_stage_finished(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None
             n.stages.append(rec)
 
 def _on_confirm_eval(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
+    # P0-1 attempt guard: a confirm-seed eval stamped with an attempt that no longer matches the
+    # node's current generation is from an abandoned attempt (its confirm was in flight when a
+    # node_reset bumped the attempt). Drop it — else its stale per-seed metric lands in
+    # `confirm_seed_results`, and the confirm phase memo-skips that seed and emits node_confirmed
+    # from PRE-reset seed metrics for the POST-reset code. Old logs (no `attempt`) default-match.
+    _n = st.nodes.get(d.get("node_id"))
+    if _n is not None and not _attempt_matches(_n, d):
+        return
     # First-occurrence eval-cost accounting: `confirm_eval` is the one eval-cost contributor
     # without the node-terminal first-terminal guard (events/types.py), so a duplicated/
     # double-folded confirm_eval would inflate `total_eval_seconds` and make the budget
@@ -412,7 +420,7 @@ def _on_confirm_eval(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
 
 def _on_node_confirmed(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     n = st.nodes.get(d.get("node_id"))
-    if n is not None:
+    if n is not None and _attempt_matches(n, d):   # P0-1: ignore a confirm from an abandoned attempt
         n.confirmed_mean = d.get("mean")
         n.confirmed_std = d.get("std")
         n.confirmed_seeds = d.get("seeds")
@@ -423,9 +431,13 @@ def _on_holdout_evaluated(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> N
     # an event for an unknown node (corrupt log) is skipped, and a null metric (missing
     # predictions) records nothing — such a node simply can't win the holdout pick.
     nid = d.get("node_id")
+    n = st.nodes.get(nid)
+    # P0-1 attempt guard: a holdout score from an attempt the node has since abandoned (reset
+    # bumped the generation) must neither mark the gate nor set holdout_metric on the new code.
+    if n is not None and not _attempt_matches(n, d):
+        return
     if nid is not None and nid not in st.holdout_evaluated_ids:
         st.holdout_evaluated_ids.append(nid)   # gate: attempted, even if metric is null
-    n = st.nodes.get(nid)
     if n is not None and d.get("metric") is not None:
         try:
             n.holdout_metric = float(d["metric"])
