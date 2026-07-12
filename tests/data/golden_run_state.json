@@ -117,6 +117,9 @@
   "direction": "min",
   "drifts": [],
   "env": null,
+  "eval_seconds_by_kind": {
+    "node": 0.273
+  },
   "finished": true,
   "foresight_selected": [],
   "fork_requests": [],

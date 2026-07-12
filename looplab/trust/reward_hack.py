@@ -124,6 +124,36 @@ def detect_reward_hacks_ast(code: str) -> list[dict]:
     return out
 
 
+def calibrate_detector(corpus, *, direction: str = "max") -> dict:
+    """P1-7 calibration harness: run `detect_reward_hacks` over a LABELLED corpus of (code, is_cheat)
+    examples and report precision/recall/confusion for the hard (gate-eligible) grader_access signal.
+
+    This is the MECHANISM the doc's "then calibration on a labelled corpus" step needs — the detector
+    architecture (regex + AST + confidence) is the hard part and landed; calibration only requires a
+    corpus to turn into real numbers. NONE ships here (a labelled cheating/clean corpus is the external
+    input still missing); an operator/harness supplies one and gates the trust mode on the measured
+    precision (e.g. only flip trust_gate off self-report tasks once precision >= a threshold).
+    Deterministic; a precision/recall of None means the denominator was empty (nothing flagged / no
+    positives), which the caller must treat as "not yet calibrated", never as "passed"."""
+    tp = fp = tn = fn = 0
+    for code, is_cheat in corpus:
+        flagged = any(s.get("signal") == "grader_access"
+                      for s in detect_reward_hacks(code, metric=None, direction=direction))
+        if is_cheat and flagged:
+            tp += 1
+        elif is_cheat and not flagged:
+            fn += 1
+        elif (not is_cheat) and flagged:
+            fp += 1
+        else:
+            tn += 1
+    return {
+        "n": tp + fp + tn + fn, "tp": tp, "fp": fp, "tn": tn, "fn": fn,
+        "precision": (tp / (tp + fp)) if (tp + fp) else None,
+        "recall": (tp / (tp + fn)) if (tp + fn) else None,
+    }
+
+
 def detect_reward_hacks(code: str, metric: float | None, direction: str,
                         protected_names: set[str] | None = None,
                         stdout: str = "",

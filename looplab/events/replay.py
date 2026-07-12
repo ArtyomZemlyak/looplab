@@ -196,6 +196,15 @@ def _nonneg_seconds(v) -> float:
     return f if (math.isfinite(f) and f >= 0.0) else 0.0
 
 
+def _charge_eval_seconds(st: RunState, kind: str, raw) -> None:
+    """P1-2 budget buckets: add a coerced non-negative eval-seconds to the cumulative total AND to its
+    category bucket (node|confirm). One helper so the total and the per-kind split can never drift."""
+    secs = _nonneg_seconds(raw)
+    st.total_eval_seconds += secs
+    if secs:
+        st.eval_seconds_by_kind[kind] = st.eval_seconds_by_kind.get(kind, 0.0) + secs
+
+
 def _attempt_matches(n, d: dict) -> bool:
     """P0-1 attempt guard: a node terminal (node_evaluated/node_failed) is honored only if the
     `attempt` it was stamped with still matches the node's current attempt generation. `node_reset`
@@ -254,7 +263,7 @@ def _on_node_evaluated(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None
                 except Exception:
                     continue
             n.trials = trials
-            st.total_eval_seconds += _nonneg_seconds(d.get("eval_seconds"))
+            _charge_eval_seconds(st, "node", d.get("eval_seconds"))   # P1-2 bucket: search/node eval
 
 def _on_node_failed(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     if st.building and st.building.get("node_id") == d.get("node_id"):
@@ -277,7 +286,7 @@ def _on_node_failed(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
             n.rerun_stage = None                # any stage-scoped re-run has now landed
             if d.get("failed_stage"):
                 n.failed_stage = d.get("failed_stage")   # Phase 1: which pipeline stage broke
-            st.total_eval_seconds += _nonneg_seconds(d.get("eval_seconds"))
+            _charge_eval_seconds(st, "node", d.get("eval_seconds"))   # P1-2 bucket: search/node eval
 
 def _on_node_repaired(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     # In-node inline repair (hybrid crash repair): a NON-terminal event that replaces the
@@ -416,7 +425,7 @@ def _on_confirm_eval(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     # double-count total_eval_seconds (order/duplication-sensitive — the fold must not be). The sole
     # emitter always writes both keys, so this only guards a future/foreign/hand-edited un-keyed event.
     if keyed and first:
-        st.total_eval_seconds += _nonneg_seconds(d.get("eval_seconds"))   # confirm-seed eval cost
+        _charge_eval_seconds(st, "confirm", d.get("eval_seconds"))   # P1-2 bucket: confirm-seed eval cost
     if keyed:                                                # per-seed resume memo (#0)
         st.confirm_seed_results.setdefault(d["node_id"], {})[d["seed"]] = d.get("metric")
 

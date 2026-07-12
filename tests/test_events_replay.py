@@ -275,6 +275,21 @@ def test_append_expected_last_seq_cas(tmp_path):
     assert [ev.type for ev in s.read_all()][-1] == "resume"
 
 
+def test_fold_eval_seconds_split_into_buckets(tmp_path):
+    # P1-2: total_eval_seconds is ALSO split by category (node vs confirm) for observability; the
+    # buckets sum to the total, and confirm-seed cost is tracked apart from node-eval cost.
+    s = EventStore(tmp_path / "e.jsonl")
+    s.append("run_started", {"run_id": "r", "task_id": "t", "direction": "min"})
+    s.append("node_created", {"node_id": 0, "parent_ids": [], "operator": "draft",
+                              "idea": {"operator": "draft", "params": {}}, "code": "c"})
+    s.append("node_evaluated", {"node_id": 0, "metric": 0.5, "eval_seconds": 3.0})
+    s.append("confirm_eval", {"node_id": 0, "seed": 1, "eval_seconds": 2.0, "metric": 0.4})
+    s.append("confirm_eval", {"node_id": 0, "seed": 2, "eval_seconds": 1.0, "metric": 0.45})
+    st = fold(s.read_all())
+    assert st.eval_seconds_by_kind == {"node": 3.0, "confirm": 3.0}
+    assert st.total_eval_seconds == 6.0 == sum(st.eval_seconds_by_kind.values())
+
+
 def test_log_divergence_detects_mid_file_corruption(tmp_path):
     from looplab.events.eventstore import log_divergence
     p = tmp_path / "events.jsonl"

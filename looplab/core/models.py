@@ -409,6 +409,12 @@ class RunState(BaseModel):
     # runs), distinct from the run's total wall-clock (which includes LLM/agent time). The
     # search stops cleanly once this crosses `max_eval_seconds` — guards the silent long sweep.
     total_eval_seconds: float = 0.0
+    # P1-2 separate budget buckets: the SAME cumulative eval seconds split by category (node/search
+    # eval vs multi-seed confirm) for observability — where the compute went, not just the total. LLM
+    # spend is already its own bucket (llm_cost -> total_llm_*); holdout re-scores existing predictions
+    # for free (no eval_seconds), so it never contributes. Sums to total_eval_seconds. Empty on old
+    # logs -> populated additively on the next fold; never gates selection.
+    eval_seconds_by_kind: dict[str, float] = Field(default_factory=dict)
     # Per-seed confirmation results {node_id: {seed: metric|None}} from `confirm_eval` events —
     # lets a crash-interrupted confirm pass RESUME mid-node (skip seeds already run) instead of
     # re-executing every expensive full-profile seed from scratch.
