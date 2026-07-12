@@ -108,6 +108,41 @@ def test_fold_idempotent_to_duplicate_terminal_events(tmp_path):
     assert st.total_eval_seconds == 2.0          # counted once, not 4.0
 
 
+def test_fold_idempotent_to_duplicate_node_created_lifecycle(tmp_path):
+    # A DUPLICATE complete lifecycle (node_created + terminal for the SAME id, from a corrupt /
+    # double-appended / hand-edited log) must not double-charge the budget. Before first-create-wins,
+    # the second node_created replaced node 0 with a fresh status=pending Node, re-arming the
+    # first_terminal guard so the second node_evaluated re-added its eval_seconds (2.0 -> 4.0).
+    s = EventStore(tmp_path / "e.jsonl")
+    s.append("run_started", {"run_id": "r", "task_id": "t", "direction": "min"})
+    s.append("node_created", {"node_id": 0, "parent_ids": [], "operator": "draft",
+                              "idea": {"operator": "draft", "params": {}}, "code": ""})
+    s.append("node_evaluated", {"node_id": 0, "metric": 1.0, "eval_seconds": 2.0})
+    # duplicate whole lifecycle — the second create must NOT reset node 0 off `evaluated`
+    s.append("node_created", {"node_id": 0, "parent_ids": [], "operator": "draft",
+                              "idea": {"operator": "draft", "params": {}}, "code": ""})
+    s.append("node_evaluated", {"node_id": 0, "metric": 1.0, "eval_seconds": 2.0})
+    st = fold(s.read_all())
+    assert st.total_eval_seconds == 2.0          # counted once, not 4.0
+    assert st.nodes[0].status.name == "evaluated"
+
+
+def test_fold_duplicate_node_created_does_not_flip_settled_metric(tmp_path):
+    # A duplicate node_created carrying DIFFERENT terminal data must not overwrite the settled
+    # node (first-create-wins): the first lifecycle's metric/status is authoritative.
+    s = EventStore(tmp_path / "e.jsonl")
+    s.append("run_started", {"run_id": "r", "task_id": "t", "direction": "min"})
+    s.append("node_created", {"node_id": 0, "parent_ids": [], "operator": "draft",
+                              "idea": {"operator": "draft", "params": {}}, "code": ""})
+    s.append("node_evaluated", {"node_id": 0, "metric": 1.0, "eval_seconds": 2.0})
+    s.append("node_created", {"node_id": 0, "parent_ids": [], "operator": "draft",
+                              "idea": {"operator": "draft", "params": {}}, "code": ""})
+    s.append("node_failed", {"node_id": 0, "error": "boom", "eval_seconds": 5.0})   # conflicting terminal
+    st = fold(s.read_all())
+    assert st.nodes[0].status.name == "evaluated" and st.nodes[0].metric == 1.0
+    assert st.total_eval_seconds == 2.0
+
+
 def test_log_divergence_detects_mid_file_corruption(tmp_path):
     from looplab.events.eventstore import log_divergence
     p = tmp_path / "events.jsonl"

@@ -134,6 +134,24 @@ def _on_node_building(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
                    "parent_ids": d.get("parent_ids", []), "started": e.ts}
 
 def _on_node_created(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
+    # Don't let a duplicate node_created RESURRECT a settled node (invariant #2 "first terminal
+    # wins"): if the id already exists AND is in a TERMINAL state (evaluated/failed), skip the event.
+    # Overwriting a terminal node installed a fresh status=pending Node, which re-armed the
+    # `first_terminal` guard so a following duplicate terminal RE-added its eval_seconds to
+    # total_eval_seconds (cost double-charged) and could flip a settled metric/status/feasibility
+    # last-wins — the exact idempotency `_on_node_evaluated` protects the terminal against.
+    # A re-emit onto a PENDING id is legitimate and MUST apply: `node_reset` (propose/implement)
+    # re-opens a node to pending and the engine re-develops it in place, emitting a SECOND
+    # node_created for the same id (orchestrator `_rerun_reset_node`) whose new code/idea must land
+    # and clear `rerun_from` — dropping it loops the engine forever re-developing. So the guard keys
+    # on terminal status, not mere existence. A clean first build has no prior node -> applies.
+    nid = d.get("node_id")
+    try:
+        existing = st.nodes.get(nid)
+    except TypeError:
+        existing = None   # unhashable forged id -> treat as new; Node(...) below rejects the bad event
+    if existing is not None and existing.status is not NodeStatus.pending:
+        return
     # Defensive like the per-trial / unknown-node tolerance below: a malformed or incomplete
     # node_created (missing key, non-coercible idea param in a hand-edited / bring-your-own-script
     # log) must not crash the WHOLE fold — skip the bad event instead (the engine, sole writer,
