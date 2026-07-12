@@ -704,16 +704,18 @@ plan can be sequenced by ROI rather than by list order.
 | P1-7 — calibration harness | ✅ landed | `calibrate_detector(corpus)` reports precision/recall for the trust detector; only a labelled corpus (external) is still needed for real numbers (`9faffc2`) |
 
 Still deferred by design (§6.4/§6.6, schedule by demonstrated need): the **full** multi-writer CAS + v2 envelope
-(the lean explicit-seq half landed above; the writer is already lock-serialized and `append` derives
-`seq = max(disk, mem)+1`), the full external-material RunManifest/InputSnapshot (the setup-material, config, and
-environment slices landed as P0-3/P0-5; only the dirty-input-bytes ENUMERATION remains — the working-tree
-content itself is already captured by the workspace fingerprint), the reserve/fencing BudgetLedger (P1-2's real
-over-admission hole closed at `a5f74b1` and its buckets landed above; reserve/fencing protect remote/restarted
-workers the in-process loop has none of), the cgroups/Job-Object ProcessSupervisor's ISOLATION layer (the
-KILL/deadline/RAM/disk halves landed; cgroup isolation is what the Docker tier already provides), and the R4/R5
-service split + multi-tenant auth. The trust detector's CALIBRATION mechanism landed (`calibrate_detector`); a
-labelled cheating/clean corpus is the one external input still needed to turn it into a real precision number.
-These are each scheduled by demonstrated need — a documented scoping decision (§6.4/§6.6), not one release wall.
+(the lean explicit-seq half landed; the writer is already lock-serialized and `append` derives
+`seq = max(disk, mem)+1`, so full multi-writer CAS would be dead code until a shared/remote mode exists), the
+reserve/fencing BudgetLedger (buckets landed; reserve/fencing protect remote/restarted workers the in-process
+loop has none of), the cgroups/Job-Object ProcessSupervisor's ISOLATION layer (the KILL/deadline/RAM/disk halves
+landed; cgroup isolation is what the Docker tier already provides), the R4/R5 service split + multi-tenant auth
+(a shared-deployment mode the tool refuses fail-closed), and P1-3 default-deny GET scoping (the codebase
+DELIBERATELY keeps light-projection reads open untokened — a product-UX choice guarded by a test — while every
+sensitive read + all mutations are already gated). The full external-material InputSnapshot now has its config,
+environment, setup-material AND dirty-input-enumeration slices landed (P0-3/P0-5). The trust detector's
+calibration mechanism landed with a shipped seed corpus that returns a real baseline; a larger operator-supplied
+corpus is the only external input left. Each of these is a documented scoping decision (§6.4/§6.6) — building
+them would add dead code for threat models this single-host/loopback tool does not have — not one release wall.
 
 ---
 
