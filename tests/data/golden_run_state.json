@@ -5,6 +5,7 @@
   "active_strategy": null,
   "agent_decisions": [],
   "annotations": {},
+  "approval_subject": null,
   "approved": false,
   "archive": {
     "elites": [
@@ -691,6 +692,7 @@
   "reward_hacks": [],
   "run_id": "golden",
   "rungs": [],
+  "search_epoch": 0,
   "setup_done": true,
   "spec_approval_requested": false,
   "spec_confirmed": false,

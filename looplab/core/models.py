@@ -330,8 +330,19 @@ class RunState(BaseModel):
     host_grading: Optional[dict] = None
     stop_reason: Optional[str] = None     # why the run finished (budget/leakage/done)
     confirmed_done: bool = False          # the multi-seed confirmation phase completed (I12)
+    # P0-2 search epoch: bumped when a FINISHED run is reopened (resume/run_reopened). The nodes
+    # added after a reopen are a fresh candidate set, so the prior confirmation/approval COMPLETION
+    # (confirmed_done/approved below) must not carry over — else a better new candidate can never be
+    # confirmed (the confirm phase is skipped) or re-approved. Defaults 0; old logs stay at 0 and
+    # fold byte-identically until an actual reopen-after-finish occurs.
+    search_epoch: int = 0
     awaiting_approval: bool = False       # HITL: approval requested, not yet granted (I21)
     approved: bool = False                # HITL: a human approved the result (I21)
+    # P0-2 subject-bound approval: the node id the pending approval request was raised for (folded
+    # from `approval_requested`). A grant is honored only if it names this same node — closing
+    # `approval_granted(node_id=999)` globally approving a node that isn't under review. None when
+    # no request is pending (or an old log recorded no subject — then any grant is accepted).
+    approval_subject: Optional[int] = None
     archive: Optional[dict] = None        # diversity-archive summary at run end (I22)
     # Breadth read-model recorded at the strategist cadence: the run's narrowing curve (themes,
     # niches, theme entropy, dominant-theme fraction). Audit-only — never affects selection; each

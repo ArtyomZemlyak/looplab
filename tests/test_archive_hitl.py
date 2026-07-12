@@ -73,6 +73,24 @@ def test_hitl_pauses_then_finishes_on_approval(tmp_path):
     assert s2.best() is not None
 
 
+def test_reopen_after_approval_re_requests_approval(tmp_path):
+    """arch-review §3 P0-2: reopening a FINISHED, approved HITL run starts a new search epoch, so the
+    prior global approval no longer stands — the engine must pause and re-request approval instead of
+    inheriting the old grant for a (possibly different) candidate set."""
+    from looplab.events.types import EV_RUN_REOPENED
+    rd = tmp_path / "run"
+    anyio.run(_hitl_engine(rd).run)                                  # pauses awaiting approval
+    s1 = fold(EventStore(rd / "events.jsonl").read_all())
+    EventStore(rd / "events.jsonl").append("approval_granted", {"node_id": s1.best().id})
+    s2 = anyio.run(_hitl_engine(rd).run)                             # resumes -> finishes approved
+    assert s2.finished and s2.approved and s2.search_epoch == 0
+
+    # Reopen the finished run: epoch advances, approval re-opens.
+    EventStore(rd / "events.jsonl").append(EV_RUN_REOPENED, {})
+    s3 = anyio.run(_hitl_engine(rd).run)
+    assert s3.search_epoch == 1 and not s3.approved and s3.awaiting_approval and not s3.finished
+
+
 def test_no_approval_required_finishes_directly(tmp_path):
     task = ToyTask.load(TASK)
     r, d = task.build_roles()

@@ -421,3 +421,100 @@ def test_normalize_task_rejects_cmd_and_eval_both():
     from looplab.adapters.tasks import normalize_task
     with pytest.raises(ValueError, match="EITHER"):
         normalize_task({"cmd": {"command": ["python", "x.py"]}, "eval": {"command": ["python", "y.py"]}})
+
+
+# --------------------------------------------------------------- P0-2 search epoch / approval
+def _confirmed_finished_log(s: EventStore) -> None:
+    """A run that evaluated + confirmed node 0 and finished (direction=min)."""
+    s.append("run_started", {"run_id": "r", "task_id": "t", "goal": "g", "direction": "min"})
+    s.append("node_created", {"node_id": 0, "parent_ids": [], "operator": "draft",
+                              "idea": {"operator": "draft", "params": {}, "rationale": ""}})
+    s.append("node_evaluated", {"node_id": 0, "metric": 0.80})
+    s.append("node_confirmed", {"node_id": 0, "mean": 0.75, "std": 0.0, "seeds": 3})
+    s.append("best_confirmed", {"node_id": 0, "significant": True})
+    s.append("run_finished", {"reason": "done"})
+
+
+def test_reopen_after_finish_starts_new_epoch_and_reopens_confirmation(tmp_path):
+    """arch-review §3 P0-2: reopening a FINISHED, confirmed run advances the search epoch and
+    re-opens the confirmation/approval completion gates, so a better candidate added in the new
+    epoch is confirmed and wins instead of being locked out by the prior confirmed champion."""
+    s = EventStore(tmp_path / "e.jsonl")
+    _confirmed_finished_log(s)
+    s0 = fold(s.read_all())
+    assert s0.finished and s0.confirmed_done and s0.best_node_id == 0 and s0.search_epoch == 0
+
+    # Reopen (resume a finished run): epoch advances, confirmed_done re-opens, finished cleared.
+    s.append("resume", {})
+    s1 = fold(s.read_all())
+    assert s1.search_epoch == 1 and not s1.confirmed_done and not s1.finished
+
+    # A strictly-better new candidate is evaluated + confirmed in the new epoch -> it wins.
+    s.append("node_created", {"node_id": 1, "parent_ids": [], "operator": "improve",
+                              "idea": {"operator": "improve", "params": {}, "rationale": ""}})
+    s.append("node_evaluated", {"node_id": 1, "metric": 0.10})
+    s.append("node_confirmed", {"node_id": 1, "mean": 0.10, "std": 0.0, "seeds": 3})
+    s.append("best_confirmed", {"node_id": 1, "significant": True})
+    s2 = fold(s.read_all())
+    assert s2.best_node_id == 1 and s2.confirmed_done and s2.search_epoch == 1
+
+
+def test_run_reopened_alias_also_advances_epoch(tmp_path):
+    """The legacy `run_reopened` alias of resume advances the epoch identically."""
+    s = EventStore(tmp_path / "e.jsonl")
+    _confirmed_finished_log(s)
+    s.append("run_reopened", {})
+    st = fold(s.read_all())
+    assert st.search_epoch == 1 and not st.confirmed_done
+
+
+def test_resume_after_pause_keeps_same_epoch_and_gates(tmp_path):
+    """A resume from a mere PAUSE (finished never set) is the SAME epoch — the confirmation gate
+    must NOT re-open (nothing about the candidate set changed)."""
+    s = EventStore(tmp_path / "e.jsonl")
+    s.append("run_started", {"run_id": "r", "task_id": "t", "goal": "g", "direction": "min"})
+    s.append("node_created", {"node_id": 0, "parent_ids": [], "operator": "draft",
+                              "idea": {"operator": "draft", "params": {}, "rationale": ""}})
+    s.append("node_evaluated", {"node_id": 0, "metric": 0.5})
+    s.append("best_confirmed", {"node_id": 0, "significant": True})   # confirmed_done True
+    s.append("pause", {})
+    s.append("resume", {})
+    st = fold(s.read_all())
+    assert st.search_epoch == 0 and st.confirmed_done and not st.paused
+
+
+def test_subject_bound_approval_rejects_mismatched_grant(tmp_path):
+    """arch-review §3 P0-2: an `approval_granted` naming a node other than the one under review is a
+    no-op (the run stays awaiting approval); a grant for the request's subject is honored."""
+    s = EventStore(tmp_path / "e.jsonl")
+    s.append("run_started", {"run_id": "r", "task_id": "t", "direction": "min"})
+    s.append("approval_requested", {"node_id": 5, "metric": 0.1})
+    s.append("approval_granted", {"node_id": 999})                    # not the subject -> ignored
+    st = fold(s.read_all())
+    assert st.approved is False and st.awaiting_approval is True and st.approval_subject == 5
+    # a grant for the real subject IS honored (and clears the pending subject)
+    s.append("approval_granted", {"node_id": 5})
+    st2 = fold(s.read_all())
+    assert st2.approved is True and st2.awaiting_approval is False and st2.approval_subject is None
+
+
+def test_approval_backward_compat_direct_grant(tmp_path):
+    """Back-compat: a grant with no recorded pending subject (an old log / direct grant) is accepted
+    so legacy HITL runs fold identically."""
+    s = EventStore(tmp_path / "e.jsonl")
+    s.append("run_started", {"run_id": "r", "task_id": "t", "direction": "min"})
+    s.append("approval_granted", {"node_id": 7})                      # no prior approval_requested
+    assert fold(s.read_all()).approved is True
+
+
+def test_spec_approved_requires_a_proposal(tmp_path):
+    """arch-review §3 P0-2: a premature `spec_approved` with no `spec_proposed` must not confirm the
+    spec (which would skip onboarding); a real proposal-then-approval works."""
+    s = EventStore(tmp_path / "e.jsonl")
+    s.append("run_started", {"run_id": "r", "task_id": "t", "direction": "min"})
+    s.append("spec_approved", {})                                    # forged: no proposal
+    assert fold(s.read_all()).spec_confirmed is False
+    # the real flow: proposal first, then approval
+    s.append("spec_proposed", {"eval_spec": {"metric": {"kind": "adapter"}}})
+    s.append("spec_approved", {})
+    assert fold(s.read_all()).spec_confirmed is True

@@ -411,10 +411,25 @@ def _on_data_leakage(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
 
 def _on_approval_requested(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     st.awaiting_approval = True
+    # P0-2: record WHICH node the request is for (the engine emits the current best). The grant
+    # below is honored only for this same subject. `node_id` has always been in the event payload;
+    # reading it now makes old logs bind their (matching) grant identically.
+    st.approval_subject = d.get("node_id")
 
 def _on_approval_granted(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
+    # P0-2 subject-bound approval: honor the grant only when it names the SAME node the pending
+    # request was raised for. `approval_granted(node_id=999)` for a node that isn't under review no
+    # longer flips `approved` globally — it's a complete no-op (the run stays awaiting approval, so
+    # the engine simply re-requests). Back-compat: when no request recorded a subject
+    # (approval_subject is None — a direct grant, or an old log whose request had best=None) any
+    # grant is accepted, so legacy runs fold identically; the real UI/CLI always send the best's id,
+    # which equals the request subject, so ordinary approvals are unaffected.
+    subj = d.get("node_id")
+    if st.approval_subject is not None and subj != st.approval_subject:
+        return   # mismatched grant: not the node under review — ignore entirely
     st.awaiting_approval = False
     st.approved = True
+    st.approval_subject = None
 
 def _on_spec_proposed(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     st.proposed_spec = d
@@ -423,7 +438,13 @@ def _on_spec_approval_requested(st: RunState, e: Event, d: dict, ctx: "_FoldCtx"
     st.spec_approval_requested = True
 
 def _on_spec_approved(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
-    st.spec_confirmed = True
+    # P0-2: ratify only a spec that was actually PROPOSED. A premature/forged `spec_approved` (no
+    # preceding `spec_proposed`) would set `spec_confirmed=True` while `proposed_spec` is None,
+    # skipping onboarding entirely. The real flow always folds `spec_proposed` first (the engine
+    # gates the emit on it), so this only rejects an out-of-order ratification; old logs are
+    # unaffected (they always carry the proposal).
+    if st.proposed_spec is not None:
+        st.spec_confirmed = True
 
 def _on_spec_drift(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     st.drifts.append(d)                         # audit only; metric already discarded
@@ -561,6 +582,22 @@ def _on_resume_or_run_reopened(st: RunState, e: Event, d: dict, ctx: "_FoldCtx")
     # under replay — a later run_finished simply sets `finished` again. EV_RUN_REOPENED is the
     # legacy alias of RESUME (kept so old logs + the UI's reopen path fold identically); the two
     # 3-verb operator controls are `stop` (EV_PAUSE) and `finalize` (EV_RUN_ABORT).
+    #
+    # P0-2 search epoch: reopening a run that had already FINISHED (its confirmation/approval
+    # promotion completed for the prior candidate set) begins a NEW search epoch. Any nodes added
+    # after the reopen are a fresh candidate set, so the prior COMPLETION gates must not carry over:
+    # clear `confirmed_done` (so the confirm phase re-runs and can confirm a better new candidate —
+    # already-confirmed nodes are cheaply reused via their memoized `confirmed_mean`) and re-open
+    # approval (so the possibly-new best is re-ratified rather than inheriting the old grant). A
+    # resume from a mere PAUSE (finished never set) is the SAME epoch and leaves these gates intact.
+    # Checked BEFORE clearing `finished` below. Back-compat: old logs without a reopen-after-finish
+    # keep search_epoch=0 and fold identically.
+    if st.finished:
+        st.search_epoch += 1
+        st.confirmed_done = False
+        st.approved = False
+        st.awaiting_approval = False
+        st.approval_subject = None
     st.paused = False
     st.finished = False
     st.stop_reason = None
