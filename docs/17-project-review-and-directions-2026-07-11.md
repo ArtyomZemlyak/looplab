@@ -695,12 +695,17 @@ plan can be sequenced by ROI rather than by list order.
 | P0-2 — freshly-hidden per-epoch holdout | ✅ landed | epoch-salted split; reopen clears the disclosed holdout so a new epoch re-scores on a fresh one (`e111bf5`) |
 | P1-1 — zombie-run recovery | ✅ landed | durable `resume_requested`/`resume_served` intent + on-load reconciler (no daemon), idempotent via the singleton lock (`f0c36e0`) |
 | P1-7 — trust detector architecture (first step) | ✅ landed | AST recall pass for variable-path answer-key reads + versioned TrustEvidence (method/confidence/digest) (`a87f9a0`) |
+| P1-12 — explicit-seq append CAS (the lean half) | ✅ landed | optional `expected_last_seq` optimistic-concurrency check on `append`, wired into `/control` (409 on a stale view) (`83fc1f5`) |
+| P0-3 — content-addressed setup manifest | ✅ landed | `setup_finished` carries a config+workspace+data digest; a pre-node resume re-runs preflight when the material changed (`7603114`) |
 
-Still deferred by design (§6.4/§6.6, schedule by demonstrated need): the append-`expected_seq` CAS and v2
-envelope (the writer is already lock-serialized and `append` derives `seq = max(disk, mem)+1`), the full
-RunManifest/InputSnapshot, the reserve/fencing BudgetLedger, a cgroups/Job-Object ProcessSupervisor, and the
-R4/R5 service split + multi-tenant auth. The remaining P1-7 depth (token/dataflow analysis + labelled-corpus
-calibration) and P0-3/P0-5 content-addressed manifests are follow-ups on top of the landed patterns.
+Still deferred by design (§6.4/§6.6, schedule by demonstrated need): the **full** multi-writer CAS + v2 envelope
+(the lean explicit-seq half landed above; the writer is already lock-serialized and `append` derives
+`seq = max(disk, mem)+1`), the full external-material RunManifest/InputSnapshot (P0-5 — the setup-material half
+landed as P0-3), the reserve/fencing BudgetLedger (P1-2's real over-admission hole closed at `a5f74b1`;
+separate budget buckets are a lean enhancement, not a correctness bug), a cgroups/Job-Object ProcessSupervisor
+(host-RAM cap landed as the cheap half), and the R4/R5 service split + multi-tenant auth. The remaining P1-7
+depth (token/dataflow analysis + labelled-corpus calibration) needs a labelled corpus. These extend the landed
+patterns and are scheduled by demonstrated need, not treated as one release wall.
 
 ---
 
