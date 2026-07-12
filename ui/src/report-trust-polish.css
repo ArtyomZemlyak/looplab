@@ -1,0 +1,141 @@
+/* Report + Trust semantic polish. Kept separate so these evidence-oriented surfaces can evolve
+   without adding more special cases to the core design-system stylesheet. */
+:root {
+  --trust-ok-ink: color-mix(in srgb, var(--ok) 64%, var(--fg));
+  --trust-warn-ink: color-mix(in srgb, var(--working) 62%, var(--fg));
+  --trust-alarm-ink: color-mix(in srgb, var(--alarm) 68%, var(--fg));
+  --trust-neutral-ink: var(--fg-dim);
+}
+
+.report-view .report-toolbar {
+  gap: 8px;
+  background: color-mix(in srgb, var(--bg) 94%, transparent);
+  backdrop-filter: blur(10px);
+}
+
+.report-view .report-fresh { color: var(--fg-dim); }
+.report-view .report-title { font-size: clamp(20px, 2.2vw, 27px); line-height: 1.2; letter-spacing: -.015em; }
+.report-view .report-sub { color: var(--fg-dim); line-height: 1.55; }
+.report-view .section-h { margin-top: 24px; color: var(--fg); }
+.report-view .tbl { border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+.report-view .tbl th { color: var(--fg-dim); font-weight: 650; }
+.report-view .tbl td { padding-block: 7px; vertical-align: top; }
+.report-view .champion-card { box-shadow: var(--shadow-card); }
+
+.verdict-banner.neutral {
+  border-left-color: var(--fg-dim);
+  background: color-mix(in srgb, var(--fg-dim) 6%, var(--bg-1));
+}
+
+.verdict-trust-label { color: var(--fg-dim); }
+.report-view .verdict-pill.ok { color: var(--trust-ok-ink); border-color: var(--trust-ok-ink); }
+.report-view .verdict-pill.fail { color: var(--trust-alarm-ink); border-color: var(--trust-alarm-ink); }
+.report-step-kind { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.report-step-theme { text-transform: none; letter-spacing: 0; }
+.report-delta { font-weight: 650; }
+.report-delta.baseline { color: var(--accent); }
+.report-delta.improved { color: var(--trust-ok-ink); }
+.report-delta.regressed { color: var(--trust-alarm-ink); }
+
+.report-inline-state,
+.report-empty-state,
+.trust-state {
+  border: 1px solid var(--line-2);
+  border-left-width: 3px;
+  border-radius: 8px;
+  background: var(--bg-1);
+  color: var(--fg-dim);
+}
+
+.report-inline-state { display: flex; align-items: center; gap: 8px; padding: 8px 10px; margin: -4px 0 12px; }
+.report-empty-state { padding: 18px; margin: 12px 0 20px; }
+.report-empty-state h2 { color: var(--fg); font-size: 15px; margin: 0 0 4px; }
+.report-empty-state p { margin: 0; }
+.report-inline-state.error { border-left-color: var(--alarm); color: var(--trust-alarm-ink); }
+.report-code-state { min-height: 90px; display: grid; place-items: center; padding: 20px; }
+.report-code-state.error { display: flex; justify-content: center; gap: 9px; }
+
+.trust-panel-body { display: grid; gap: 2px; }
+.trust-panel-body .section-h,
+.inspector-trust .section-h { margin-top: 18px; }
+.trust-panel-body .cardgrid { margin-bottom: 6px !important; }
+.trust-panel-body .stat .n { overflow-wrap: anywhere; }
+
+.trust-state {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  column-gap: 9px;
+  row-gap: 2px;
+  padding: 9px 11px;
+  margin: 6px 0 10px;
+}
+.trust-state > svg { grid-row: 1 / span 2; margin-top: 2px; }
+.trust-state strong { color: var(--fg); font-size: 12px; }
+.trust-state span { min-width: 0; line-height: 1.45; }
+.trust-state.ok { border-left-color: var(--ok); color: var(--trust-ok-ink); }
+.trust-state.ok strong { color: var(--trust-ok-ink); }
+.trust-state.warn { border-left-color: var(--working); color: var(--trust-warn-ink); }
+.trust-state.warn strong { color: var(--trust-warn-ink); }
+.trust-state.alarm { border-left-color: var(--alarm); color: var(--trust-alarm-ink); }
+.trust-state.alarm strong { color: var(--trust-alarm-ink); }
+.trust-state.unknown,
+.trust-state.loading { border-left-color: var(--fg-mut); color: var(--trust-neutral-ink); }
+.trust-state-actions { grid-column: 2; margin-top: 4px; }
+.trust-result { font-weight: 700; }
+.trust-result.pass { color: var(--trust-ok-ink); }
+.trust-result.fail { color: var(--trust-alarm-ink); }
+
+/* Existing global chip colors contain light-only text constants. These scoped overrides keep
+   success/warning/alarm text readable on Paper and White Sci-Fi without changing unrelated UI. */
+.report-view .chip.ok,
+.trust-panel-body .chip.ok,
+.inspector-trust .chip.ok {
+  color: var(--trust-ok-ink);
+  border-color: color-mix(in srgb, var(--ok) 62%, var(--line-2));
+  background: color-mix(in srgb, var(--ok) 10%, var(--bg-1));
+}
+.report-view .chip.warn,
+.trust-panel-body .chip.warn,
+.inspector-trust .chip.warn,
+.report-view .caveat-chip.warn {
+  color: var(--trust-warn-ink);
+  border-color: color-mix(in srgb, var(--working) 62%, var(--line-2));
+  background: color-mix(in srgb, var(--working) 9%, var(--bg-1));
+}
+.report-view .chip.alarm,
+.trust-panel-body .chip.alarm,
+.inspector-trust .chip.alarm,
+.report-view .caveat-chip.alarm {
+  color: var(--trust-alarm-ink);
+  border-color: color-mix(in srgb, var(--alarm) 64%, var(--line-2));
+  background: color-mix(in srgb, var(--alarm) 9%, var(--bg-1));
+}
+
+@media (max-width: 700px) {
+  .report-view { padding-inline: 14px; }
+  .report-view .report-toolbar { align-items: stretch; }
+  .report-view .report-toolbar .btn { justify-content: center; flex: 1 1 130px; }
+  .report-view .report-fresh { flex-basis: 100%; order: 2; }
+  .report-view .tbl { display: block; overflow-x: auto; }
+  .trust-panel-body .tbl,
+  .inspector-trust .tbl { display: block; overflow-x: auto; }
+}
+
+@media print {
+  @page { margin: 14mm; }
+  html, body, #root, .app-shell, .app-shell-main, .app, .main, .report-scroll {
+    height: auto !important;
+    min-height: 0 !important;
+    overflow: visible !important;
+    position: static !important;
+    background: #fff !important;
+  }
+  .app > .topbar, .panel-bar, .directions-overview, .why-strip, .dock,
+  .cmdbar-wrap, .asst-side-panel, .asst-view, .toast { display: none !important; }
+  .report-view .report-toolbar { display: none; }
+  .report-view { max-width: none; padding: 0; color: #111; background: #fff; }
+  .report-view .tbl { display: table; overflow: visible; width: 100%; }
+  .report-view pre, .report-view code { white-space: pre-wrap; overflow-wrap: anywhere; }
+  .report-view .verdict-banner,
+  .report-view .champion-card { break-inside: avoid; box-shadow: none; }
+}

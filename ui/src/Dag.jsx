@@ -367,7 +367,12 @@ export default function Dag({ state, selectedId, onSelect, groupMode = 'none', c
                onNodeContextMenu={(e, rf) => {
                  const id = rf?.data?.node?.id
                  if (id == null || !onNodeAction) return
-                 e.preventDefault(); setMenu({ x: e.clientX, y: e.clientY, nodeId: id })
+                  e.preventDefault()
+                  setMenu({
+                    x: Math.max(8, Math.min(e.clientX, window.innerWidth - 270)),
+                    y: Math.max(8, Math.min(e.clientY, window.innerHeight - 390)),
+                    nodeId: id,
+                  })
                }}
                onNodeDragStop={(e, rf) => {
                  // U3 drag-to-merge: dropped a node near another -> merge the two. Manual intersection

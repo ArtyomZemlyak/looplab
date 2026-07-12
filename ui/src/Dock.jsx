@@ -401,7 +401,7 @@ function OpTrace({ runId, traceId }) {
 }
 
 // One feed row, chat-message styled: an icon/color by kind, the narration, an expandable "why" card.
-function EventRow({ e, trace, onFocusEvent, autoOpen, runId }) {
+function EventRow({ e, trace, onFocusEvent, autoOpen, runId, readOnly = false }) {
   const [open, setOpen] = useState(autoOpen)
   const touched = useRef(false)   // once the user toggles, stop auto-following the live frontier
   // collapse-when-done: follow autoOpen (expand while live, collapse when the node resolves) UNLESS
@@ -425,7 +425,7 @@ function EventRow({ e, trace, onFocusEvent, autoOpen, runId }) {
   // A sub-operation event the engine wrapped in its OWN named trace (strategy_decision, hypothesis_
   // merged) carries a trace_id — expand to ONLY that operation's trace (lazily fetched by trace_id),
   // never the node's whole Researcher+Developer trace. Old events (no trace_id) fall through to detail.
-  const opTraceId = (OP_TRACE_TYPES.has(e.type) && e.trace_id) ? e.trace_id : null
+  const opTraceId = (!readOnly && OP_TRACE_TYPES.has(e.type) && e.trace_id) ? e.trace_id : null
   // no-truncation: a row whose one-line narration clamped text (or used the raw JSON fallback) is
   // expandable to its FULL content even without a dedicated reasoning card.
   const isRawFallback = !hasReason && !NARR[e.type]
@@ -456,8 +456,10 @@ function EventRow({ e, trace, onFocusEvent, autoOpen, runId }) {
 
 // Round-9: the per-run "boss" chat moved to the single persistent assistant, so the Dock is purely
 // the run's EVENTS window — the timeline feed + scrubber + filters + transport.
-export default function Dock({ runId, live, liveSeq, viewSeq, setViewSeq, onFocus, collapsed, onToggleCollapse, height = 230, onToast }) {
+export default function Dock({ runId, live, liveSeq, viewSeq, setViewSeq, onFocus, collapsed, onToggleCollapse, height = 230, onToast, readOnly = false }) {
   const [log, setLog] = useState([])
+  const [logStatus, setLogStatus] = useState('loading')
+  const [logNonce, setLogNonce] = useState(0)
   const [trace, setTrace] = useState(null)
   const [filter, setFilter] = useState('')
   const [kinds, setKinds] = useState(() => new Set())     // selected kind chips (empty = all)
@@ -467,9 +469,12 @@ export default function Dock({ runId, live, liveSeq, viewSeq, setViewSeq, onFocu
   const toggleControls = () => setShowControls(v => { const n = !v; localStorage.setItem('ll.dock.controls', n ? '1' : '0'); return n })
   useEffect(() => {
     let alive = true
-    get(`/api/runs/${runId}/log`).then(d => { if (alive) setLog(d) }).catch(() => {})
+    if (!log.length) setLogStatus('loading')
+    get(`/api/runs/${runId}/log`)
+      .then(d => { if (alive) { setLog(d); setLogStatus('ready') } })
+      .catch(() => { if (alive) setLogStatus('error') })
     return () => { alive = false }
-  }, [runId, liveSeq])
+  }, [runId, liveSeq, logNonce])
   // The trace re-folds the whole spans.jsonl server-side, and it only backs the inline "thinking"
   // cards — so refetch when a NODE is added (or the run finishes), not on every SSE seq tick.
   const nodeCount = live ? Object.keys(live.nodes || {}).length : 0
@@ -482,8 +487,10 @@ export default function Dock({ runId, live, liveSeq, viewSeq, setViewSeq, onFocu
   // so the setup trace streams in live (the phase is short; a few small refetches). Once the first node
   // lands this collapses to 0 and normal node-based refetching resumes.
   const inSetup = !!live && !live.finished && live.engine_running !== false && nodeCount === 0
-  useEffect(() => { get(`/api/runs/${runId}/trace`).then(setTrace).catch(() => {}) },
-    [runId, nodeCount, settledCount, live?.finished, inSetup ? liveSeq : 0])
+  useEffect(() => {
+    if (readOnly) { setTrace(null); return }
+    get(`/api/runs/${runId}/trace`).then(setTrace).catch(() => {})
+  }, [runId, nodeCount, settledCount, live?.finished, inSetup ? liveSeq : 0, readOnly])
   // While a node is BUILDING, its spans stream in but nodeCount/settledCount don't change — so the
   // fetch above never re-runs and the building node's Trace stays FROZEN (you see spans, but they never
   // grow). Poll the trace while a node builds so its Trace tab/row fills in live; the poll stops the
@@ -491,7 +498,7 @@ export default function Dock({ runId, live, liveSeq, viewSeq, setViewSeq, onFocu
   const buildingId = live && !live.finished && live.engine_running !== false && live.building
     ? live.building.node_id : null
   usePoll(() => get(`/api/runs/${runId}/trace`).then(setTrace).catch(() => {}),
-    4000, [runId, buildingId], { enabled: buildingId != null })
+    4000, [runId, buildingId, readOnly], { enabled: !readOnly && buildingId != null })
   const atLive = viewSeq == null || viewSeq >= liveSeq
 
   // The live frontier: the highest-id node still pending while the run runs — its proposal card stays
@@ -508,6 +515,14 @@ export default function Dock({ runId, live, liveSeq, viewSeq, setViewSeq, onFocu
   // DAG) is throttled to ~11fps. `drag == null` means "follow the committed seq".
   const [drag, setDrag] = useState(null)
   const thr = useRef({ last: 0, timer: null })
+  useEffect(() => () => clearTimeout(thr.current.timer), [])
+  useEffect(() => {
+    if (viewSeq == null) {
+      clearTimeout(thr.current.timer)
+      thr.current.timer = null
+      setDrag(null)
+    }
+  }, [viewSeq])
   const sliderVal = drag != null ? drag : (atLive ? liveSeq : viewSeq)
   const commit = (v) => setViewSeq(v >= liveSeq ? null : v)
   const onScrub = (v) => {
@@ -599,11 +614,14 @@ export default function Dock({ runId, live, liveSeq, viewSeq, setViewSeq, onFocu
           </div>
         </div>}
         <div className="feed chat-feed" ref={feedRef}>
-          {feed.length === 0
+          {logStatus === 'loading' && log.length === 0 && <div className="muted" role="status">Loading timeline…</div>}
+          {logStatus === 'error' && <div className="notice resource-error" role="alert"><span>{log.length ? 'Could not refresh the timeline; showing the last loaded events.' : 'Could not load the timeline.'}</span><button className="btn sm" onClick={() => setLogNonce(n => n + 1)}>Retry</button></div>}
+          {feed.length === 0 && logStatus !== 'loading'
             ? <div className="muted">{(filter || kinds.size) ? 'nothing matches the filter' : 'no events yet'}</div>
-            : feed.map(e =>
-                <EventRow key={'e' + e.seq} e={e} trace={trace} onFocusEvent={focusEvent} runId={runId}
-                    autoOpen={false} />)}
+            : feed.length > 0 ? feed.map(e =>
+                <EventRow key={'e' + e.seq} e={e} trace={readOnly ? null : trace} onFocusEvent={focusEvent} runId={runId}
+                    readOnly={readOnly}
+                    autoOpen={false} />) : null}
           {(() => {
             // A short, honest "what's the agent doing now" strip at the foot of the feed.
             const pipeline = atLive ? agentStatus(live, log) : null
@@ -619,9 +637,11 @@ export default function Dock({ runId, live, liveSeq, viewSeq, setViewSeq, onFocu
         </div>
         <div className="dock-foot">
           <span className="muted" style={{ fontSize: 11, flex: 1 }}>
-            Steer this run from the assistant bar below — say what to do, or use <code className="cmd-hint">/stop</code> · <code className="cmd-hint">/finalize</code> · <code className="cmd-hint">/resume</code> · <code className="cmd-hint">/approve #id</code>.
+            {readOnly ? 'Historical timeline — live controls and sidecar trace details are disabled.' : <>
+              Steer this run from the assistant bar below — say what to do, or use <code className="cmd-hint">/stop</code> · <code className="cmd-hint">/finalize</code> · <code className="cmd-hint">/resume</code> · <code className="cmd-hint">/approve #id</code>.
+            </>}
           </span>
-          <div className="transport">
+          {!readOnly && <div className="transport">
             {mode === 'running' && <>
               <button className="btn sm" title="Stop — freeze the run (no wrap-up; resume or finalize later)" onClick={onStop}><OpIcon name="pause" size={13} /></button>
               <button className="btn sm danger" title="Finalize — stop AND wrap up (report, cross-run lessons, cost)" onClick={onFinalize}><OpIcon name="stop" size={13} /></button></>}
@@ -631,7 +651,7 @@ export default function Dock({ runId, live, liveSeq, viewSeq, setViewSeq, onFocu
             {mode === 'finished' && <>
               <button className="btn sm primary" title="Resume — reopen & continue" onClick={onResume}><OpIcon name="play" size={13} /></button>
               <button className="btn sm" title="reset & restart from scratch" onClick={onReplay}><OpIcon name="replay" size={13} /></button></>}
-          </div>
+          </div>}
         </div>
       </div>}
     </div>

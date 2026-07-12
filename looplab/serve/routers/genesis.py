@@ -15,6 +15,7 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
 from looplab.core.config import Settings
+from looplab.serve.assistant import safe_assistant_failure
 from looplab.serve.protocol import JOB_DONE, JOB_RUNNING, JOB_UNKNOWN
 from looplab.serve.serve_prompts import RESEARCH_BRIEF_SYSTEM, genesis_system
 from looplab.serve.settings_store import _ALLOWED_FIELDS, _SECRET_FIELDS
@@ -180,8 +181,9 @@ def build_router(srv) -> APIRouter:
         try:
             client = srv.make_llm_client(gset)
         except Exception as e:  # noqa: BLE001 - offline / no model -> soft fail with a usable message
-            return {"ok": False, "error": str(e), "spec": _soft,
-                    "reply": f"Couldn't reach the model to plan this ({e}). You can still use the manual form."}
+            failure = safe_assistant_failure(e)
+            return {"ok": False, "error": failure["error"], "error_kind": failure["error_kind"],
+                    "spec": _soft, "reply": "The model provider is unavailable. Check Settings and retry; you can still use the manual form."}
         base_msgs = [{"role": "system", "content": sys_prompt}, {"role": "user", "content": user}]
 
         def _plan_agentic(on_step=None) -> Optional["_GenesisSpec"]:

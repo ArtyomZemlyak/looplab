@@ -5,15 +5,21 @@ import { Bars, ParallelCoords, Scatter, MultiTrajectory } from './charts.jsx'
 import { hyperImportance } from './report.js'
 import Markdown from './markdown.jsx'
 import { OpIcon } from './icons.jsx'
-import { diffLines } from './Inspector.jsx'
+import CodeViewer from './CodeViewer.jsx'
+import { diffLines } from './lineDiff.js'
 import SettingsForm from './SettingsForm.jsx'
 import { toForm, fromForm, FIELD_BY_KEY } from './settingsSchema.js'
+import { useDialogFocus } from './useDialogFocus.js'
+import { driftStatus, leakageStatus, rewardHackStatus } from './trustSemantics.js'
 
 export function Panel({ title, sub, onClose, children, wide }) {
+  const dialogRef = useRef(null)
+  useDialogFocus(dialogRef, onClose)
   return (
-    <div className="overlay" onClick={onClose}>
-      <div className="panel" style={wide ? { width: 'min(1100px, 95%)' } : {}} onClick={e => e.stopPropagation()}>
-        <div className="panel-h"><span className="ttl">{title}</span>{sub && <span className="pill">{sub}</span>}<span className="right" /><button className="btn sm ghost" onClick={onClose}>✕</button></div>
+    <div className="overlay" onMouseDown={event => { if (event.target === event.currentTarget) onClose?.() }}>
+      <div ref={dialogRef} className="panel" role="dialog" aria-modal="true" aria-label={title} tabIndex={-1}
+           style={wide ? { width: 'min(1100px, 95%)' } : {}}>
+        <div className="panel-h"><span className="ttl">{title}</span>{sub && <span className="pill">{sub}</span>}<span className="right" /><button className="btn sm ghost" aria-label={`Close ${title}`} onClick={onClose}>✕</button></div>
         <div className="panel-b">{children}</div>
       </div>
     </div>
@@ -115,9 +121,28 @@ export function ResearchPanel({ state, runId, onToast, onClose }) {
   )
 }
 
+function TrustState({ value, action = null }) {
+  const icon = value.tone === 'alarm' ? 'alert' : value.tone === 'ok' ? 'check' : 'dot'
+  return <div className={`trust-state ${value.tone}`} role={value.tone === 'alarm' ? 'alert' : 'status'}>
+    <OpIcon name={icon} size={14} />
+    <strong>{value.label}</strong>
+    <span>{value.detail}</span>
+    {action && <div className="trust-state-actions">{action}</div>}
+  </div>
+}
+
 export function TrustPanel({ state, runId, onClose, onSelect, onToast }) {
-  const [cfg, setCfg] = useState(null)
-  useEffect(() => { get(`/api/runs/${runId}/config`).then(setCfg).catch(() => {}) }, [runId])
+  const [configResource, setConfigResource] = useState({ status: 'loading', data: null, error: null })
+  const [configNonce, setConfigNonce] = useState(0)
+  useEffect(() => {
+    let alive = true
+    setConfigResource({ status: 'loading', data: null, error: null })
+    get(`/api/runs/${runId}/config`)
+      .then(data => { if (alive) setConfigResource({ status: 'ready', data, error: null }) })
+      .catch(error => { if (alive) setConfigResource({ status: 'error', data: null, error: error.message || 'Request failed' }) })
+    return () => { alive = false }
+  }, [runId, configNonce])
+  const cfg = configResource.data
   const quarantine = async (id) => {   // U6: act on a flagged node — remove it from the search
     try { await CONTROL.nodeAbort(runId, id); onToast && onToast(`quarantined #${id} (aborted)`) }
     catch { onToast && onToast('could not quarantine (run not live?)') }
@@ -128,44 +153,59 @@ export function TrustPanel({ state, runId, onClose, onSelect, onToast }) {
   const naive = evald.slice().sort((a, b) => chooser(a.metric, b.metric) ? -1 : 1)[0]
   const robust = state.best_node_id != null ? state.nodes[state.best_node_id] : null
   const leak = state.leakage
+  const leakState = leakageStatus(leak)
+  const driftState = driftStatus(state.drifts, cfg, evald.length)
+  const hackState = rewardHackStatus(state.reward_hacks, cfg, evald.length)
   return (
-    <Panel title="Trust & rigor" sub="the point of LoopLab" onClose={onClose} wide>
-      <div className="cardgrid" style={{ marginBottom: 14 }}>
-        <Stat n={cfg?.trust_mode || '—'} l="sandbox tier" />
-        <Stat n={cfg?.eval_trust_mode || '—'} l="eval trust mode" />
-        <Stat n={state.host_grading ? 'host-side' : 'self-reported'} l="metric scoring" />
-        <Stat n={state.workspace_changed ? 'changed' : 'pinned'} l="workspace repro" />
-      </div>
-      {state.host_grading && <div className="chip ok" style={{ marginBottom: 12 }}>
-        Out-of-process grading: the candidate writes predictions only; the host scores them
-        ({state.host_grading.scorer}, {state.host_grading.n_labels} held-out labels) — the answer key
-        never touches the candidate process, so the metric can’t be self-reported.</div>}
+    <Panel title="Trust & rigor" sub="evidence and coverage" onClose={onClose} wide>
+      <div className="trust-panel-body">
+      {configResource.status === 'loading' && <TrustState value={{ tone: 'loading', label: 'Loading detector configuration', detail: 'Checking which trust controls were actually enabled for this run.' }} />}
+      {configResource.status === 'error' && <TrustState
+        value={{ tone: 'unknown', label: 'Detector configuration unavailable', detail: `Coverage cannot be verified: ${configResource.error}` }}
+        action={<button className="btn sm" onClick={() => setConfigNonce(n => n + 1)}>Retry</button>} />}
 
-      <div className="section-h">Seed-luck check (naive leader vs robust winner)</div>
+      <div className="cardgrid">
+        <Stat n={cfg?.trust_mode || (configResource.status === 'loading' ? 'Loading…' : 'Unknown')} l="sandbox tier" />
+        <Stat n={cfg?.eval_trust_mode || (configResource.status === 'loading' ? 'Loading…' : 'Unknown')} l="eval trust mode" />
+        <Stat n={state.host_grading ? 'host-side' : 'self-reported'} l="metric scoring" />
+        <Stat n={state.workspace_changed ? 'changed' : 'no change flag'} l="workspace drift" />
+      </div>
+      {state.host_grading
+        ? <TrustState value={{ tone: 'ok', label: 'Host-side grading recorded', detail: `The candidate writes predictions only; ${state.host_grading.scorer || 'the host scorer'} evaluates ${state.host_grading.n_labels ?? 'held-out'} labels outside the candidate process.` }} />
+        : <TrustState value={{ tone: 'warn', label: 'Metric is not host-graded', detail: 'This run does not record an out-of-process grader, so the displayed metric may be self-reported by the candidate process.' }} />}
+
+      <div className="section-h">Seed-luck and robustness</div>
       {robust && naive
-        ? <div className="kv">
-          <div className="k">naive single-eval leader</div><div className="v">#{naive.id} · {fmt(naive.metric)}</div>
-          <div className="k">selected (robust) winner</div><div className="v">#{robust.id} · {fmt(robust.confirmed_mean ?? robust.metric)}{robust.confirmed_mean != null ? ` ±${fmt(robust.confirmed_std)}` : ' (unconfirmed)'}</div>
-          {naive.id !== robust.id && <><div className="k flag">demotion</div><div className="v">single-eval leader #{naive.id} was NOT selected — multi-seed confirmation corrected a seed-lucky result.</div></>}
-        </div>
-        : <div className="muted">No feasible evaluated nodes yet.</div>}
+        ? <>
+          <TrustState value={robust.confirmed_mean != null
+            ? { tone: 'ok', label: 'Winner is multi-seed confirmed', detail: `${robust.confirmed_seeds || 'Multiple'} successful seeds produced ${fmt(robust.confirmed_mean)} ±${fmt(robust.confirmed_std)}.` }
+            : { tone: 'warn', label: 'Winner is single-evaluation', detail: 'Seed luck has not been ruled out; the selected winner is not a robust result yet.' }} />
+          <div className="kv">
+            <div className="k">single-eval leader</div><div className="v">#{naive.id} · {fmt(naive.metric)}</div>
+            <div className="k">selected winner</div><div className="v">#{robust.id} · {fmt(robust.confirmed_mean ?? robust.metric)}{robust.confirmed_mean != null ? ` ±${fmt(robust.confirmed_std)}` : ' (unconfirmed)'}</div>
+            {robust.confirmed_mean != null && naive.id !== robust.id && <><div className="k flag">demotion</div><div className="v">Single-eval leader #{naive.id} was not selected — multi-seed confirmation corrected a seed-lucky result.</div></>}
+          </div>
+        </>
+        : <TrustState value={{ tone: 'unknown', label: 'No result to confirm', detail: 'There are no feasible evaluated nodes yet.' }} />}
 
       <div className="section-h">Leakage scan {leak && leak.leak && <span className="chip alarm">LEAK — run refused</span>}</div>
-      {leak
-        ? <table className="tbl"><thead><tr><th>detector</th><th>leak</th><th>detail</th></tr></thead><tbody>
+      <TrustState value={leakState} />
+      {(leak?.verdicts || []).length > 0 &&
+        <table className="tbl"><thead><tr><th>detector</th><th>result</th><th>detail</th></tr></thead><tbody>
           {(leak.verdicts || []).map((v, i) => <tr key={i}>
-            <td>{v.detector}</td><td style={{ color: v.leak ? 'var(--fail)' : 'var(--ok)' }}>{v.leak ? 'YES' : 'no'}</td>
-            <td className="muted">{Object.entries(v).filter(([k]) => !['detector', 'leak'].includes(k)).map(([k, val]) => `${k}=${typeof val === 'object' ? JSON.stringify(val) : val}`).join('  ')}</td>
-          </tr>)}</tbody></table>
-        : <div className="chip ok">no leakage scan recorded (or task exposes no split/target/time data)</div>}
+            <td>{v.detector || 'unnamed detector'}</td><td className={`trust-result ${v.leak ? 'fail' : 'pass'}`}>{v.leak ? 'Flagged' : 'Passed'}</td>
+            <td className="muted">{Object.entries(v).filter(([k]) => !['detector', 'leak'].includes(k)).map(([k, val]) => `${k}=${typeof val === 'object' ? JSON.stringify(val) : val}`).join('  ') || '—'}</td>
+          </tr>)}</tbody></table>}
 
       <div className="section-h">Drift cross-check</div>
+      <TrustState value={driftState} />
       {(state.drifts || []).length
         ? <table className="tbl"><thead><tr><th>node</th><th>primary</th><th>cross</th><th>tolerance</th></tr></thead><tbody>
           {state.drifts.map((d, i) => <tr key={i}><td className="flag">#{d.node_id}</td><td>{fmt(d.primary)}</td><td>{fmt(d.cross)}</td><td>{fmt(d.tolerance)}</td></tr>)}</tbody></table>
-        : <div className="chip ok">no metric drift detected</div>}
+        : null}
 
       <div className="section-h">Reward-hacking monitor (B5) {(state.reward_hacks || []).length > 0 && <span className="chip alarm">{state.reward_hacks.length} flagged</span>}</div>
+      <TrustState value={hackState} />
       {/* Folded state is the enforcement truth (it applies trust_gate_changed events);
           the config snapshot alone can claim a gate the fold never engages. */}
       {(state.trust_gate || cfg) && <div className="muted" style={{ marginBottom: 6 }}>
@@ -181,7 +221,8 @@ export function TrustPanel({ state, runId, onClose, onSelect, onToast }) {
             <td><button className="btn xs ghost" title="quarantine: abort this node so it can't be selected"
               onClick={() => quarantine(h.node_id)}>quarantine</button></td>
           </tr>)}</tbody></table>
-        : <div className="chip ok">no suspicious wins flagged{cfg && !cfg.reward_hack_detect ? ' (detector off — enable reward_hack_detect)' : ''}</div>}
+        : null}
+      </div>
     </Panel>
   )
 }
@@ -925,25 +966,46 @@ export function HypothesisBoard({ state, runId, onSelect, onClose, onToast }) {
 
 // Module scope so their identity is stable across SSE frames (ComparePanel re-renders on every live
 // fold); defined inline they remounted the <select> each frame, closing an open dropdown mid-pick.
-function CmpSel({ v, set, ids }) {
-  return <select className="text" style={{ width: 90 }} value={v} onChange={e => set(Number(e.target.value))}>{ids.map(i => <option key={i} value={i}>#{i}</option>)}</select>
+function CmpSel({ label, v, set, ids }) {
+  return <label className="cmp-select"><span>{label}</span>
+    <select className="text" value={v ?? ''} aria-label={label}
+            onChange={e => set(Number(e.target.value))}>{ids.map(i => <option key={i} value={i}>#{i}</option>)}</select>
+  </label>
 }
-function CmpCol({ d }) {
-  return d ? <div style={{ flex: 1 }}>
+
+function useNodeResource(runId, nodeId) {
+  const [resource, setResource] = useState({ nodeId: null, status: 'idle', data: null, error: null })
+  const [nonce, setNonce] = useState(0)
+  useEffect(() => {
+    if (nodeId == null) { setResource({ nodeId, status: 'idle', data: null, error: null }); return }
+    let alive = true; const requested = nodeId
+    setResource({ nodeId: requested, status: 'loading', data: null, error: null })
+    get(`/api/runs/${runId}/nodes/${requested}`)
+      .then(data => { if (alive) setResource({ nodeId: requested, status: 'ready', data, error: null }) })
+      .catch(error => { if (alive) setResource({ nodeId: requested, status: 'error', data: null, error: error.message }) })
+    return () => { alive = false }
+  }, [runId, nodeId, nonce])
+  const current = resource.nodeId === nodeId ? resource : { nodeId, status: 'loading', data: null, error: null }
+  return { ...current, retry: () => setNonce(n => n + 1) }
+}
+
+function CmpCol({ resource, label }) {
+  if (resource.status === 'error') return <div className="notice resource-error" style={{ flex: 1 }} role="alert"><span>{label}: full details could not be loaded.</span><button className="btn sm" onClick={resource.retry}>Retry</button></div>
+  const d = resource.data
+  return d ? <div className="cmp-col">
     <div className="kv">
       <div className="k">operator</div><div className="v">{d.operator}</div>
       <div className="k">metric</div><div className="v">{fmt(d.confirmed_mean ?? d.metric)}</div>
       <div className="k">status</div><div className="v">{d.status}</div>
       <div className="k">params</div><div className="v">{JSON.stringify(d.idea?.params)}</div>
     </div>
-    <pre className="code" style={{ maxHeight: 280 }}>{d.code || '(no code)'}</pre>
+    <CodeViewer code={d.code || '(no code)'} label={`${label} code`} maxHeight={280} />
   </div> : <div className="muted" style={{ flex: 1 }}>…</div>
 }
 
 export function ComparePanel({ state, runId, onClose, initialPair = null }) {
   const ids = Object.keys(state.nodes).map(Number).sort((a, b) => a - b)
   const [a, setA] = useState(null), [b, setB] = useState(null)
-  const [da, setDa] = useState(null), [db, setDb] = useState(null)
   const [diff, setDiff] = useState(false)   // U4: line diff between ANY two nodes (not just vs parent)
   // Seed from an explicit pair (e.g. canvas "diff vs champion"), else best vs latest.
   useEffect(() => {
@@ -961,23 +1023,30 @@ export function ComparePanel({ state, runId, onClose, initialPair = null }) {
     setA(cur => (cur == null || !ids.includes(cur)) ? (state.best_node_id ?? ids[0]) : cur)
     setB(cur => (cur == null || !ids.includes(cur)) ? ids[ids.length - 1] : cur)
   }, [ids.join(','), state.best_node_id])
-  useEffect(() => { if (a != null) get(`/api/runs/${runId}/nodes/${a}`).then(setDa).catch(() => {}) }, [runId, a])
-  useEffect(() => { if (b != null) get(`/api/runs/${runId}/nodes/${b}`).then(setDb).catch(() => {}) }, [runId, b])
+  const resourceA = useNodeResource(runId, a)
+  const resourceB = useNodeResource(runId, b)
+  const da = resourceA.data, db = resourceB.data
+  const codeDiff = useMemo(
+    () => diff && da?.code != null && db?.code != null ? diffLines(da.code, db.code) : null,
+    [diff, da?.code, db?.code])
+  const diffError = resourceA.status === 'error' || resourceB.status === 'error'
   if (!ids.length) return <Panel title="Compare nodes" onClose={onClose}><div className="muted">No nodes yet.</div></Panel>
   return (
     <Panel title="Compare nodes" onClose={onClose} wide>
       <div className="toolbar" style={{ marginBottom: 10 }}>
-        <CmpSel v={a} set={setA} ids={ids} /><span className="muted">vs</span><CmpSel v={b} set={setB} ids={ids} />
+        <CmpSel label="Left node" v={a} set={setA} ids={ids} /><span className="muted">vs</span><CmpSel label="Right node" v={b} set={setB} ids={ids} />
         <span className="spacer" style={{ flex: 1 }} />
         <button className={'btn sm' + (diff ? ' primary' : '')} onClick={() => setDiff(d => !d)}
-          title="line diff of the two nodes' code">diff</button>
+          title="ordered line diff of the two nodes' code">Code diff</button>
       </div>
       {diff
-        ? (da?.code != null && db?.code != null
-            ? <pre className="code" style={{ maxHeight: 460 }}>{diffLines(da.code, db.code).map((d, i) =>
-                <span key={i} className={d.cls}>{d.l + '\n'}</span>)}</pre>
-            : <div className="muted">Loading code for both nodes…</div>)
-        : <div style={{ display: 'flex', gap: 14 }}><CmpCol d={da} /><CmpCol d={db} /></div>}
+        ? (diffError
+            ? <div className="notice resource-error" role="alert"><span>Could not load both node details for the diff.</span><button className="btn sm" onClick={() => { resourceA.retry(); resourceB.retry() }}>Retry</button></div>
+            : codeDiff
+            ? <CodeViewer diff={codeDiff} copyText={db.code || ''}
+                label={`Code diff #${a} to #${b}`} maxHeight={460} />
+            : <div className="muted" role="status">Loading code for both nodes…</div>)
+        : <div className="cmp-cols"><CmpCol resource={resourceA} label={`Node #${a}`} /><CmpCol resource={resourceB} label={`Node #${b}`} /></div>}
     </Panel>
   )
 }

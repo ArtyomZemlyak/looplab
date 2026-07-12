@@ -24,7 +24,9 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
 
 from looplab.serve.assistant import (
-    REPO_ROOT as _ASSISTANT_REPO_ROOT, SessionStore, run_turn as _assistant_run_turn)
+    REPO_ROOT as _ASSISTANT_REPO_ROOT, SessionStore, run_turn as _assistant_run_turn,
+    safe_assistant_failure as _safe_assistant_failure,
+    sanitize_assistant_message as _sanitize_assistant_message)
 from looplab.serve.engine_proc import _engine_alive
 from looplab.serve.llm_context import _client_tokens
 from looplab.serve.protocol import (
@@ -221,6 +223,7 @@ def build_router(srv) -> APIRouter:
             raise HTTPException(404, "no such session")
         if sess is None:
             raise HTTPException(404, "no such session")
+        sess = {**sess, "messages": [_sanitize_assistant_message(m) for m in sess["messages"]]}
         return sess
 
     @router.delete("/api/assistant/sessions/{sid}")
@@ -265,7 +268,8 @@ def build_router(srv) -> APIRouter:
         # Strip `raw` (the full model-facing instruction: attached-file contents, UI-context preamble)
         # from the read-only share — a shared link shows the clean bubbles, not the injected context.
         return {"meta": sess["meta"],
-                "messages": [{k: v for k, v in m.items() if k != "raw"} for m in sess["messages"]]}
+                "messages": [{k: v for k, v in _sanitize_assistant_message(m).items() if k != "raw"}
+                             for m in sess["messages"]]}
 
     @router.post("/api/assistant/sessions/{sid}/fork")
     def assistant_fork(sid: str):
@@ -369,6 +373,7 @@ def build_router(srv) -> APIRouter:
             # could finalize turn 2's placeholder with turn 1's stale reply — drop the stale reply.
             ok = _asst.append_if_len(
                 sid, {"role": "assistant", "content": res.get("reply", ""),
+                      "error_kind": res.get("error_kind"),
                       "steps": res.get("steps") or [], "applied": res.get("applied") or [],
                       "proposals": res.get("proposals") or [], "todos": res.get("todos") or [],
                       "tokens": res.get("tokens")},
@@ -406,9 +411,10 @@ def build_router(srv) -> APIRouter:
             client = srv.make_llm_client(s)
         except Exception as e:  # noqa: BLE001 - offline / no model -> soft fail with a usable message
             _release_turn(sid, cancel_ev)
-            reply = f"Couldn't reach the model ({e})."
-            _asst.append(sid, {"role": "assistant", "content": reply})
-            return {"ok": False, "error": str(e), "reply": reply, "mode": eff_mode}
+            failure = _safe_assistant_failure(e)
+            _asst.append(sid, {"role": "assistant", "content": failure["reply"],
+                               "error_kind": failure["error_kind"]})
+            return {"ok": False, **failure, "mode": eff_mode}
 
         approver = _make_approver(sid, cancel_ev)   # a confirm raised after Stop denies instantly
         _on_step, _on_todos = _make_progress_hooks(sid, cancel_ev)
@@ -442,11 +448,13 @@ def build_router(srv) -> APIRouter:
             # Persist an assistant error bubble too (mirror the non-stream endpoint) so a page reload
             # shows the failure instead of a DANGLING user turn — the user's message with no reply,
             # since _begin_turn already appended the user turn before make_llm_client.
+            failure = _safe_assistant_failure(e)
             try:
-                _asst.append(sid, {"role": "assistant", "content": f"Couldn't reach the model ({e})."})
+                _asst.append(sid, {"role": "assistant", "content": failure["reply"],
+                                   "error_kind": failure["error_kind"]})
             except Exception:  # noqa: BLE001 - a concurrent session DELETE must not turn this into a 500
                 pass
-            err_msg = str(e)
+            err_msg = failure["reply"]
 
             async def _err_gen():
                 yield f"event: {SSE_ERROR}\ndata: {json.dumps(err_msg)}\n\n"

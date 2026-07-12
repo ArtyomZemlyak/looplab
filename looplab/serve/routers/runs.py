@@ -15,6 +15,7 @@ from fastapi.responses import PlainTextResponse, StreamingResponse
 from looplab.core.atomicio import atomic_write_text
 from looplab.core.config import Settings
 from looplab.events.eventstore import EventStore, iter_jsonl
+from looplab.events.replay import fold
 from looplab.events.types import EV_TRUST_GATE_CHANGED
 # Per-theme rollup for the cross-run map: {theme: {count, best_metric}}. Now lives in `digest` so the
 # Researcher's working-set digest and this UI endpoint share one definition.
@@ -193,9 +194,11 @@ def build_router(srv) -> APIRouter:
 
     # ------------------------------------------------------------------ node detail
     @router.get("/api/runs/{run_id}/nodes/{nid}")
-    def node_detail(run_id: str, nid: int):
+    def node_detail(run_id: str, nid: int, seq: Optional[int] = None):
         rd = _run_dir(run_id)
-        st = srv.state(rd)
+        # Historical Inspector/Report must use the same prefix fold as the visible DAG.  Falling back
+        # to the live fold here leaked later code, annotations and confirmations into old snapshots.
+        st = fold(srv.events(rd, seq)) if seq is not None else srv.state(rd)
         n = st.nodes.get(nid)
         if n is None:
             # A node still BUILDING has no node_created yet (not in st.nodes), but its create_node
@@ -203,6 +206,8 @@ def build_router(srv) -> APIRouter:
             # with this node_id AS THEY COMPLETE. Serve a minimal in-progress detail carrying that live
             # trace instead of 404ing — otherwise the Trace tab can't fill in until the whole build ends
             # (the exact "nothing, then everything at once" the operator hit).
+            if seq is not None:
+                raise HTTPException(404, "no such node at requested sequence")
             trace = _node_trace(rd, nid)
             building = bool(st.building and st.building.get("node_id") == nid)
             if building or trace.get("nodes"):
@@ -220,8 +225,11 @@ def build_router(srv) -> APIRouter:
             if p is not None:
                 out["parent_code"] = p.code
                 out["parent_id_diffed"] = p.id
-        # per-node execution/agent trace from the trace projection
-        out["trace"] = _node_trace(rd, nid)
+        # spans.jsonl is a current sidecar rather than an event-versioned projection. Never label its
+        # future contents as historical; the UI explains that trace is unavailable in History.
+        out["trace"] = _node_trace(rd, nid) if seq is None else {"nodes": []}
+        if seq is not None:
+            out["historical_seq"] = seq
         return out
 
     def _node_dir(rd: Path, nid: int) -> Path:

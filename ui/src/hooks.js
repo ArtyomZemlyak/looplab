@@ -1,5 +1,21 @@
 import { useEffect, useRef, useState } from 'react'
-import { apiUrl } from './util'   // join the served path prefix so SSE works behind a proxy subpath
+import { apiUrl, get } from './api.js'   // join the served path prefix so SSE works behind a proxy subpath
+
+// Keep responsive behavior in React aligned with the CSS breakpoints.  The workspace uses this to
+// switch persistent desktop panes into temporary drawers on smaller screens; listening to the media
+// query also makes resizing/zoom changes take effect without a reload.
+export function useMediaQuery(query) {
+  const read = () => typeof window !== 'undefined' && window.matchMedia(query).matches
+  const [matches, setMatches] = useState(read)
+  useEffect(() => {
+    const media = window.matchMedia(query)
+    const onChange = () => setMatches(media.matches)
+    onChange()
+    media.addEventListener?.('change', onChange)
+    return () => media.removeEventListener?.('change', onChange)
+  }, [query])
+  return matches
+}
 
 // The ONE shared poll hook (mega-refactor P5.2), replacing the hand-rolled setInterval effects that
 // were copy-pasted across AssistantBar/Dock/Inspector/RunList/panels. Calls `fn` once immediately and
@@ -55,6 +71,9 @@ export function useRunState(runId) {
   const [live, setLive] = useState(null)
   const [seq, setSeq] = useState(-1)
   const [connected, setConnected] = useState(false)
+  const [status, setStatus] = useState('loading')
+  const [error, setError] = useState(null)
+  const [retryToken, setRetryToken] = useState(0)
   const esRef = useRef(null)
 
   useEffect(() => {
@@ -62,6 +81,11 @@ export function useRunState(runId) {
     let stopped = false
     let timer = null
     let lastSeq = -2, lastAlive
+    setLive(null)
+    setSeq(-1)
+    setConnected(false)
+    setStatus('loading')
+    setError(null)
     // Reconnect backoff: behind a proxy a hard drop/504 on the GET (or a keepalive-starved idle drop)
     // would otherwise retry on a fixed 1.5s tick forever — a GET storm that re-folds the run each time.
     // Ramp 1.5s → ×2 → 30s cap; a live `state` frame proves the stream works and resets it.
@@ -80,7 +104,8 @@ export function useRunState(runId) {
         // new event/seq); track lastAlive in the closure (NOT stale React `live`) to avoid churn.
         const alive = p.state && p.state.engine_running
         if (p.seq === lastSeq && alive === lastAlive) return
-        lastSeq = p.seq; lastAlive = alive; setLive(withBuilding(p.state)); setSeq(p.seq)
+        lastSeq = p.seq; lastAlive = alive
+        setLive(withBuilding(p.state)); setSeq(p.seq); setStatus('ready'); setError(null)
       })
       // `done` = the run reached a terminal state and the server ends the stream. We do NOT treat it
       // as "stop forever": reconnect-poll so a reopen (fork / branch / add-experiment) is picked up
@@ -93,11 +118,25 @@ export function useRunState(runId) {
         backoff = Math.min(backoff * 2, MAX_BACKOFF)   // ramp on repeated failure; reset on a live frame
       }
     }
-    connect()
+    // Probe once before opening a self-reconnecting EventSource. This turns a mistyped/deleted run
+    // URL into an explicit 404 state instead of an endless "Connecting…" loop.
+    get(`/api/runs/${encodeURIComponent(runId)}/state`)
+      .then(p => {
+        if (stopped) return
+        lastSeq = p.seq
+        lastAlive = p.state && p.state.engine_running
+        setLive(withBuilding(p.state)); setSeq(p.seq); setStatus('ready'); setError(null)
+        connect()
+      })
+      .catch(e => {
+        if (stopped) return
+        setStatus(e?.status === 404 ? 'not_found' : 'error')
+        setError(e?.status === 404 ? 'This run does not exist or was removed.' : (e?.message || 'Could not load this run.'))
+      })
     return () => { stopped = true; clearTimeout(timer); esRef.current && esRef.current.close() }
-  }, [runId])
+  }, [runId, retryToken])
 
-  return { live, seq, connected }
+  return { live, seq, connected, status, error, retry: () => setRetryToken(n => n + 1) }
 }
 
 // Browser notifications for finish / approval / failure-spike.

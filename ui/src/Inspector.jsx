@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useRef } from 'react'
+import React, { useEffect, useMemo, useState, useRef } from 'react'
 import { get, fmt, fmtInt, isSweep, spanDetail, nodeConversation, CONTROL, clearNodeTrace } from './util.js'
 import { usePoll } from './hooks.js'
 import { Trajectory, ParallelCoords, Scatter, MetricLines } from './charts.jsx'
@@ -6,6 +6,9 @@ import { groupAggregate } from './grouping.js'
 import { mergeSummary, nodeChip } from './report.js'
 import { OpIcon } from './icons.jsx'
 import Markdown from './markdown.jsx'
+import CodeViewer from './CodeViewer.jsx'
+import { diffLines } from './lineDiff.js'
+import { nodeFeasibilityStatus } from './trustSemantics.js'
 
 // One lifecycle "Trace" tab replaces the old Reasoning / LLM / Agent split: a node is worked on by
 // several parts in sequence (Researcher proposes, Developer implements/repairs, then it's evaluated
@@ -50,15 +53,23 @@ function ResetBtn({ runId, id, onToast }) {
   </span>
 }
 
-export default function Inspector({ runId, nodeId, state, live, tab, setTab, onToast }) {
+export default function Inspector({ runId, nodeId, state, live, tab, setTab, onToast, readOnly = false, historySeq = null }) {
   const [detail, setDetail] = useState(null)
+  const [detailStatus, setDetailStatus] = useState('idle')
+  const [detailError, setDetailError] = useState('')
+  const [detailNonce, setDetailNonce] = useState(0)
   useEffect(() => {
     setDetail(null)               // clear stale detail immediately so we never render node A's
-    if (nodeId == null) return    // payload under node B while B's fetch is in flight (or failed)
+    setDetailError('')
+    if (nodeId == null) { setDetailStatus('idle'); return } // payload under node B while B's fetch is in flight (or failed)
+    setDetailStatus('loading')
     let on = true
-    get(`/api/runs/${runId}/nodes/${nodeId}`).then(d => on && setDetail(d)).catch(() => {})
+    const at = readOnly && historySeq != null ? `?seq=${encodeURIComponent(historySeq)}` : ''
+    get(`/api/runs/${runId}/nodes/${nodeId}${at}`)
+      .then(d => { if (on) { setDetail(d); setDetailStatus('ready') } })
+      .catch(() => { if (on) { setDetailStatus('error'); setDetailError('Full node details could not be loaded.') } })
     return () => { on = false }
-  }, [runId, nodeId, state?.nodes?.[nodeId]?.status])
+  }, [runId, nodeId, state?.nodes?.[nodeId]?.status, readOnly, historySeq, detailNonce])
   // Live-refresh the node detail (it carries n.trace spans + the agent report) while the run is ACTIVELY
   // working this node — so the Trace tab fills in WITHOUT the user toggling tabs. Two windows, both
   // engine-alive & not-finished (stops at terminal / engine death):
@@ -69,7 +80,7 @@ export default function Inspector({ runId, nodeId, state, live, tab, setTab, onT
   //     A pending node's status doesn't change until it's scored, so without polling here the Trace
   //     tab froze after "Developer implement" for the whole training run.
   const nodeStatus = state?.nodes?.[nodeId]?.status
-  const engineActive = !!live && live.engine_running !== false && !live.finished && nodeId != null
+  const engineActive = !readOnly && !!live && live.engine_running !== false && !live.finished && nodeId != null
   // The node being EVALUATED right now is the LATEST pending one — the loop creates a node then scores
   // it before creating the next. Gate the pending pulse on that (+ not paused), so an older queued or
   // injected pending node doesn't poll-spin every 4s or mislabel itself as "training".
@@ -77,8 +88,8 @@ export default function Inspector({ runId, nodeId, state, live, tab, setTab, onT
   const evaluatingThis = nodeStatus === 'pending' && !live?.paused && Number(nodeId) === latestId
   const nodeWorking = engineActive && (live.building?.node_id === nodeId || evaluatingThis)
   usePoll(() => {
-    get(`/api/runs/${runId}/nodes/${nodeId}`).then(d => { if (d) setDetail(d) }).catch(() => {})
-  }, 4000, [runId, nodeId, nodeWorking], { enabled: nodeWorking, immediate: false })
+    get(`/api/runs/${runId}/nodes/${nodeId}`).then(d => { if (d) { setDetail(d); setDetailStatus('ready'); setDetailError('') } }).catch(() => {})
+  }, 4000, [runId, nodeId, nodeWorking], { enabled: !readOnly && nodeWorking, immediate: false })
 
   if (nodeId == null) return <div className="insp-empty">Select a node to inspect its idea, code, metrics, trust, and agent trace.</div>
   const n = detail || (state.nodes[nodeId])
@@ -89,22 +100,32 @@ export default function Inspector({ runId, nodeId, state, live, tab, setTab, onT
   // Sweep nodes get a Trials tab (right after Overview). `activeTab` guards against a stale tab
   // (e.g. 'Trials' left selected after switching to a non-sweep node) falling through to nothing.
   const sweep = isSweep(n)
-  const tabs = sweep ? ['Overview', 'Trials', ...TABS.slice(1)] : TABS
+  const liveTabs = sweep ? ['Overview', 'Trials', ...TABS.slice(1)] : TABS
+  const tabs = readOnly ? ['Overview', 'Code', 'Trust', 'Cost'] : liveTabs
   const activeTab = tabs.includes(tab) ? tab : 'Overview'
 
   return (
     <>
-      <div className="tabs">
-        {tabs.map(t => <div key={t} className={'tab' + (t === activeTab ? ' active' : '') + (t === 'Trust' && (n.violations?.length || nodeDrifts.length) ? ' alarm' : '')}
-                            onClick={() => setTab(t)}>{t}</div>)}
+      <div className="tabs" role="tablist" aria-label="Inspector sections">
+        {tabs.map(t => <button key={t} type="button" role="tab" aria-selected={t === activeTab}
+          className={'tab' + (t === activeTab ? ' active' : '') + (t === 'Trust' && (n.violations?.length || nodeDrifts.length) ? ' alarm' : '')}
+          onClick={() => setTab(t)}>{t}</button>)}
       </div>
       <div className="insp-body">
-        <div className="insp-hint muted">Actions (confirm · ablate · fork · promote · note) live in the chat — <button className="ctx-chip" style={{ padding: '0 6px', cursor: 'pointer' }} title="attach this experiment to the assistant context" onClick={() => window.dispatchEvent(new CustomEvent('ll:attach-node', { detail: { id: n.id } }))}>＋ #{n.id}</button> as context there, or type a <code>/command</code>.<ResetBtn runId={runId} id={n.id} onToast={onToast} /></div>
+        {detailStatus === 'loading' && <div className="notice" role="status">Loading full node details…</div>}
+        {detailStatus === 'error' && <div className="notice resource-error" role="alert"><span>{detailError} The summary below may be incomplete.</span><button className="btn sm" onClick={() => setDetailNonce(n => n + 1)}>Retry</button></div>}
+        {readOnly
+          ? <div className="insp-hint history-inline">Snapshot seq {historySeq} · read-only. Live traces, metrics sidecars and actions are hidden.</div>
+          : <div className="insp-hint muted">Actions (confirm · ablate · fork · promote · note) live in the chat — <button className="ctx-chip" style={{ padding: '0 6px', cursor: 'pointer' }} title="attach this experiment to the assistant context" onClick={() => window.dispatchEvent(new CustomEvent('ll:attach-node', { detail: { id: n.id } }))}>＋ #{n.id}</button> as context there, or type a <code>/command</code>.<ResetBtn runId={runId} id={n.id} onToast={onToast} /></div>}
 
-        {activeTab === 'Overview' && <Overview n={n} state={state} runId={runId} onToast={onToast} />}
+        {activeTab === 'Overview' && <Overview n={n} state={state} runId={readOnly ? null : runId} onToast={onToast} />}
         {activeTab === 'Trials' && <Trials n={n} detail={detail} state={state} />}
         {activeTab === 'Trace' && <Trace n={n} runId={runId} live={live} working={nodeWorking} />}
-        {activeTab === 'Code' && <Code n={n} />}
+        {activeTab === 'Code' && (detailStatus === 'ready'
+          ? <Code n={n} />
+          : detailStatus === 'error'
+            ? <div className="insp-empty">Code is unavailable because full node details failed to load.</div>
+            : <div className="insp-empty">Loading code…</div>)}
         {activeTab === 'Metrics' && <Metrics n={n} detail={detail} state={state} runId={runId} />}
         {activeTab === 'Trust' && <Trust n={n} drifts={nodeDrifts} />}
         {activeTab === 'Cost' && <Cost state={state} />}
@@ -156,14 +177,17 @@ function StagePipeline({ stages, failed, runId, id, onToast }) {
     .catch(() => onToast && onToast('re-run failed'))
   return <div style={{ margin: '8px 0' }}>
     <div className="muted" style={{ fontSize: 10, marginBottom: 3 }}>
-      eval pipeline{failed ? ` — failed at ${failed}` : ''} · click a stage to re-run from there</div>
+      eval pipeline{failed ? ` — failed at ${failed}` : ''}{runId ? ' · click a stage to re-run from there' : ' · historical result (read-only)'}</div>
     <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4, alignItems: 'center' }}>
       {stages.map((s, i) => <React.Fragment key={i}>
-        <span onClick={() => rerun(s.name)}
-          style={{ padding: '2px 7px', borderRadius: 4, fontSize: 11, cursor: 'pointer',
+        {runId ? <button type="button" onClick={() => rerun(s.name)}
+          style={{ padding: '2px 7px', borderRadius: 4, fontSize: 11, cursor: 'pointer', background: 'transparent',
                    border: `1px solid ${tone(s)}`, color: tone(s) }}
           title={`${s.name}: ${s.status}${s.seconds != null ? ` · ${s.seconds}s` : ''}${s.exit_code != null ? ` · exit ${s.exit_code}` : ''} — click to re-run the pipeline FROM here (reuse earlier stages)`}>
-          {ic(s)} {s.name}</span>
+          {ic(s)} {s.name}</button> : <span
+          style={{ padding: '2px 7px', borderRadius: 4, fontSize: 11, border: `1px solid ${tone(s)}`, color: tone(s) }}
+          title={`${s.name}: ${s.status}${s.seconds != null ? ` · ${s.seconds}s` : ''}${s.exit_code != null ? ` · exit ${s.exit_code}` : ''} · historical result`}>
+          {ic(s)} {s.name}</span>}
         {i < stages.length - 1 && <span className="muted" style={{ fontSize: 10 }}>→</span>}
       </React.Fragment>)}
     </div>
@@ -812,26 +836,22 @@ function Trace({ n, runId, live, working }) {
   </div>
 }
 
-export function diffLines(a, b) {
-  const A = (a || '').split('\n'), B = (b || '').split('\n')
-  const setA = new Set(A), setB = new Set(B)
-  return B.map(l => ({ l, cls: setA.has(l) ? '' : 'diff-add' }))
-    .concat(A.filter(l => !setB.has(l)).map(l => ({ l, cls: 'diff-del' })))
-}
-
 function Code({ n }) {
   const [diff, setDiff] = useState(false)
   const files = n.files || {}
+  const codeDiff = useMemo(
+    () => diff && n.parent_code != null ? diffLines(n.parent_code, n.code) : null,
+    [diff, n.parent_code, n.code])
   return <>
     <div className="toolbar" style={{ marginBottom: 8 }}>
       {n.parent_code != null && <button className={'btn sm' + (diff ? ' primary' : '')} onClick={() => setDiff(d => !d)}>diff vs parent #{n.parent_id_diffed}</button>}
     </div>
-    {diff && n.parent_code != null
-      ? <pre className="code">{diffLines(n.parent_code, n.code).map((d, i) => <span key={i} className={d.cls}>{d.l + '\n'}</span>)}</pre>
-      : <pre className="code">{n.code || '(no solution.py — repo task or no code)'}</pre>}
+    {codeDiff
+      ? <CodeViewer diff={codeDiff} copyText={n.code || ''} label={`Node ${n.id} diff`} />
+      : <CodeViewer code={n.code || '(no solution.py — repo task or no code)'} label={`Node ${n.id} code`} />}
     {Object.keys(files).length > 0 && <>
       <div className="section-h">Helper files <span className="pill">{Object.keys(files).length}</span></div>
-      {Object.entries(files).map(([fn, c]) => <div key={fn}><div className="muted" style={{ marginTop: 6 }}>{fn}</div><pre className="code">{c}</pre></div>)}
+      {Object.entries(files).map(([fn, c]) => <div key={fn}><div className="muted" style={{ marginTop: 6 }}>{fn}</div><CodeViewer code={c} label={fn} maxHeight={300} /></div>)}
     </>}
   </>
 }
@@ -953,28 +973,35 @@ function Trials({ n, detail, state }) {
 }
 
 function Trust({ n, drifts = [] }) {
-  return <>
+  const feasibility = nodeFeasibilityStatus(n)
+  const State = ({ tone, label, detail }) => <div className={`trust-state ${tone}`} role={tone === 'alarm' ? 'alert' : 'status'}>
+    <OpIcon name={tone === 'alarm' ? 'alert' : tone === 'ok' ? 'check' : 'dot'} size={14} />
+    <strong>{label}</strong><span>{detail}</span>
+  </div>
+  return <div className="inspector-trust">
     <div className="section-h">Robustness</div>
     {n.confirmed_mean != null
-      ? <div className="kv">
+      ? <><State tone="ok" label="Multi-seed confirmed" detail={`${n.confirmed_seeds || 'Multiple'} successful seeds are recorded for this node.`} /><div className="kv">
         <KV k="single" v={fmt(n.metric)} />
         <KV k="robust mean" v={fmt(n.confirmed_mean)} />
         <KV k="std" v={fmt(n.confirmed_std)} />
         <KV k="seeds" v={n.confirmed_seeds} />
-      </div>
-      : <div className="muted">Not multi-seed confirmed — single-eval metric only (could be seed-lucky).</div>}
+      </div></>
+      : <State tone="warn" label="Single-evaluation only" detail="This node is not multi-seed confirmed and could be seed-lucky." />}
     <div className="section-h">Feasibility</div>
+    <State {...feasibility} />
     {n.violations?.length
       ? <table className="tbl"><thead><tr><th>constraint</th><th>value</th><th>bound</th></tr></thead>
         <tbody>{n.violations.map((v, i) => <tr key={i}><td className="flag">{v.name}</td><td>{fmt(v.value)}</td><td>{v.max != null ? `≤ ${fmt(v.max)}` : `≥ ${fmt(v.min)}`}</td></tr>)}</tbody></table>
-      : <div className="chip ok">no constraint violations</div>}
+      : null}
     <div className="section-h">Metric drift</div>
     {drifts.length
-      ? <table className="tbl"><thead><tr><th>seed</th><th>primary</th><th>cross-check</th><th>tol</th></tr></thead>
+      ? <><State tone="alarm" label={`${drifts.length} divergence${drifts.length === 1 ? '' : 's'} recorded`} detail="The independent metric reader disagreed with the primary metric." /><table className="tbl"><thead><tr><th>seed</th><th>primary</th><th>cross-check</th><th>tol</th></tr></thead>
         <tbody>{drifts.map((d, i) => <tr key={i}><td>{d.seed ?? '—'}</td><td className="flag">{fmt(d.primary)}</td><td>{fmt(d.cross)}</td><td className="muted">{fmt(d.tolerance)}</td></tr>)}</tbody></table>
-      : <div className="chip ok">no uncorroborated (drifted) metrics</div>}
+      </>
+      : <State tone="unknown" label="No drift flag recorded" detail="This does not prove that an independent cross-check ran for this node." />}
     {n.status === 'failed' && <><div className="section-h">Failure</div><span className="badge reason">{n.error_reason}</span><pre className="code">{n.error}</pre></>}
-  </>
+  </div>
 }
 
 function Agent({ n }) {

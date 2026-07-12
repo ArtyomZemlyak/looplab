@@ -12,7 +12,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from fastapi.testclient import TestClient  # noqa: E402
 
-from looplab.serve.assistant import SessionStore, run_turn, normalize_mode, expand_mentions  # noqa: E402
+from looplab.serve.assistant import (  # noqa: E402
+    SessionStore, expand_mentions, normalize_mode, run_turn, safe_assistant_failure,
+    sanitize_assistant_message)
 from looplab.serve.server import make_app  # noqa: E402
 
 
@@ -108,7 +110,26 @@ def test_run_turn_soft_fails_on_client_error(tmp_path):
         def chat(self, *a, **k):
             raise RuntimeError("no endpoint")
     res = run_turn(_Boom(), tmp_path, [], "hi", "plan")
-    assert res["ok"] is False and "no endpoint" in res["error"]
+    assert res["ok"] is False
+    assert res["error_kind"] == res["error"] == "provider_error"
+    assert "no endpoint" not in res["reply"]
+
+
+def test_assistant_failure_never_persists_provider_payload():
+    failure = safe_assistant_failure(RuntimeError(
+        "429 Client Error https://provider.example/model/private user_id=secret-user"))
+    assert failure["error_kind"] == failure["error"] == "rate_limit"
+    rendered = json.dumps(failure)
+    assert "provider.example" not in rendered
+    assert "secret-user" not in rendered
+
+    legacy = sanitize_assistant_message({
+        "role": "assistant",
+        "content": "Couldn't reach the model (AuthenticationError secret-key user-77)",
+    })
+    assert legacy["error_kind"] == "credentials"
+    assert "secret-key" not in legacy["content"]
+    assert "user-77" not in legacy["content"]
 
 
 def test_run_turn_write_with_approval(tmp_path):
@@ -249,10 +270,13 @@ def test_assistant_message_soft_fails_offline(tmp_path, monkeypatch):
     client = TestClient(make_app(tmp_path))
     sid = client.post("/api/assistant/sessions", json={}).json()["id"]
     r = client.post(f"/api/assistant/sessions/{sid}/message", json={"instruction": "hi"}).json()
-    assert r["ok"] is False and "connection refused" in r["error"]
+    assert r["ok"] is False and r["error_kind"] == r["error"] == "unavailable"
+    assert "connection refused" not in r["reply"]
     # the failure reply is still persisted so the transcript isn't lost
     msgs = client.get(f"/api/assistant/sessions/{sid}").json()["messages"]
     assert msgs[-1]["role"] == "assistant"
+    assert msgs[-1]["error_kind"] == "unavailable"
+    assert "connection refused" not in msgs[-1]["content"]
 
 
 # --- SessionStore concurrency + subagent cancel (mega-review fixes) -------------------------------

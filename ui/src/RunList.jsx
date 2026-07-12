@@ -1,14 +1,18 @@
-import React, { useEffect, useMemo, useState } from 'react'
+import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { get, fmt, fmtDate, fmtAgo, listProjects, createProject, patchProject, deleteProject, assignRun, renameRun, deleteRun,
   listSupertasks, createSupertask, renameSupertask, deleteSupertask, assignSupertask } from './util.js'
-import { usePoll } from './hooks.js'
+import { useMediaQuery, usePoll } from './hooks.js'
 import MapView from './MapView.jsx'
 import ScopeReport from './ScopeReport.jsx'
 import ThemeSwitcher from './ThemeSwitcher.jsx'
 import EnergyToggle from './EnergyToggle.jsx'
 import { OpIcon } from './icons.jsx'
-
-const ALL = '__all__', UNASSIGNED = '__unassigned__'
+import {
+  ALL_RUNS as ALL, UNASSIGNED_RUNS as UNASSIGNED, filterRuns, indexProjects,
+  effectiveRunStatus, metricComparable, scopeRuns, sortRuns,
+} from './runIndex.js'
+import { defaultCollapsedClusters } from './runMapModel.js'
+import { useDialogFocus } from './useDialogFocus.js'
 
 // Module-scope so its identity is stable across re-renders (the runs list polls every 2.5s). Defined
 // inside RunList it got a fresh identity each render, so React remounted the whole project subtree and
@@ -22,8 +26,13 @@ function TreeNode({ p, depth, ctx }) {
   return <div className="ptree-node">
     <div className={'ptree-row' + (sel === p.id ? ' sel' : '')} style={{ paddingLeft: 6 + depth * 14 }}
          onClick={() => setSel(p.id)}
+         role="treeitem" tabIndex={0} aria-selected={sel === p.id} aria-expanded={kids.length ? open : undefined}
+         onKeyDown={e => { if (e.target === e.currentTarget && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); setSel(p.id) } }}
          onDragOver={e => { e.preventDefault() }} onDrop={() => onDrop(p.id)}>
-      <span className="ptw" onClick={e => { e.stopPropagation(); toggle(p.id) }}>{kids.length ? (open ? '▾' : '▸') : '·'}</span>
+      <span className="ptw" role={kids.length ? 'button' : undefined} tabIndex={kids.length ? 0 : undefined}
+            aria-label={kids.length ? `${open ? 'Collapse' : 'Expand'} ${p.name}` : undefined}
+            onKeyDown={e => { if (kids.length && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); e.stopPropagation(); toggle(p.id) } }}
+            onClick={e => { e.stopPropagation(); if (kids.length) toggle(p.id) }}>{kids.length ? (open ? '▾' : '▸') : '·'}</span>
       {renaming === p.id
         ? <input className="text ptree-rename" autoFocus defaultValue={p.name}
                  onClick={e => e.stopPropagation()}
@@ -43,10 +52,12 @@ function TreeNode({ p, depth, ctx }) {
 
 // Small centered popup (replaces window.prompt for project create / run rename).
 function Modal({ title, onClose, children }) {
-  return <div className="overlay" onMouseDown={onClose}>
-    <div className="modal" onMouseDown={e => e.stopPropagation()}>
+  const dialogRef = useRef(null)
+  useDialogFocus(dialogRef, onClose)
+  return <div className="overlay" onMouseDown={event => { if (event.target === event.currentTarget) onClose?.() }}>
+    <div ref={dialogRef} className="modal" role="dialog" aria-modal="true" aria-label={title} tabIndex={-1}>
       <div className="modal-h"><b>{title}</b><span style={{ flex: 1 }} />
-        <button className="btn sm ghost" onClick={onClose} title="close">✕</button></div>
+        <button className="btn sm ghost" onClick={onClose} aria-label={`Close ${title}`}>✕</button></div>
       <div className="modal-b">{children}</div>
     </div>
   </div>
@@ -121,28 +132,18 @@ function SuperTaskModal({ supertasks, onCreate, onRename, onDelete, onClose }) {
   </Modal>
 }
 
-// children-by-parent index + the set of a project's own id plus all descendants (for run counts
-// and "show runs in this project and everything under it" selection — nesting implies containment).
-function indexProjects(projects) {
-  const byParent = {}
-  projects.forEach(p => { (byParent[p.parent_id || null] ||= []).push(p) })
-  Object.values(byParent).forEach(a => a.sort((x, y) => x.name.localeCompare(y.name)))
-  const subtree = (id) => {
-    const out = new Set([id]); const stack = [id]
-    while (stack.length) { const c = stack.pop(); (byParent[c] || []).forEach(k => { out.add(k.id); stack.push(k.id) }) }
-    return out
-  }
-  return { byParent, subtree }
-}
-
 export default function RunList({ onOpen, onSettings }) {
+  const compactNav = useMediaQuery('(max-width: 900px)')
   const [runs, setRuns] = useState(null)
+  const [runsError, setRunsError] = useState(null)
   const [proj, setProj] = useState({ projects: [], assignments: {} })
+  const [projectsError, setProjectsError] = useState(null)
   const [sel, setSel] = useState(ALL)
   const [expanded, setExpanded] = useState(() => new Set())
   const [renaming, setRenaming] = useState(null)   // project id being renamed (inline)
   const [dragRun, setDragRun] = useState(null)
   const [view, setView] = useState('list')         // 'list' | 'map' (semantic-zoom cross-run map)
+  const [mapCollapseOverrides, setMapCollapseOverrides] = useState(() => new Map())
   const [projModal, setProjModal] = useState(null) // {parent_id} → show create-project popup
   const [runMenu, setRunMenu] = useState(null)     // run_id whose ⋮ menu is open
   const [runRename, setRunRename] = useState(null) // run object being renamed (popup)
@@ -156,11 +157,20 @@ export default function RunList({ onOpen, onSettings }) {
   const [superdata, setSuperdata] = useState({ supertasks: [], assignments: {} })
   const [stModal, setStModal] = useState(false)             // manage-super-tasks popup open?
   const [showReport, setShowReport] = useState(false)       // cross-run scope-report panel open?
+  const [projectsOpen, setProjectsOpen] = useState(false)   // compact-screen Projects drawer
+  const projectsToggleRef = useRef(null)
+  const projectsCloseRef = useRef(null)
+  const projectsDialogRef = useRef(null)
+  useDialogFocus(projectsDialogRef, () => setProjectsOpen(false), compactNav && projectsOpen)
   // Run creation is no longer a modal here — it happens INSIDE the assistant (the bottom command bar's
   // "/new" asks the assistant to propose a run, which renders as an inline launch card in the chat).
 
-  const loadRuns = () => get('/api/runs').then(setRuns).catch(() => setRuns([]))
-  const loadProjects = () => listProjects().then(setProj).catch(() => {})
+  const loadRuns = () => get('/api/runs')
+    .then(data => { setRuns(data); setRunsError(null) })
+    .catch(e => setRunsError(e?.message || 'Could not load runs.'))
+  const loadProjects = () => listProjects()
+    .then(data => { setProj(data); setProjectsError(null) })
+    .catch(e => setProjectsError(e?.message || 'Could not load projects.'))
   const loadSupers = () => listSupertasks().then(setSuperdata).catch(() => {})
   // Poll the runs list every 2.5s, but skip the request while the tab is hidden (no point refreshing a
   // list nobody's looking at) — and refresh once immediately when it becomes visible again.
@@ -174,11 +184,7 @@ export default function RunList({ onOpen, onSettings }) {
   const projName = useMemo(() => Object.fromEntries(proj.projects.map(p => [p.id, p.name])), [proj.projects])
 
   const runsOf = (id) => {
-    const rs = runs || []
-    if (id === ALL) return rs
-    if (id === UNASSIGNED) return rs.filter(r => !proj.assignments[r.run_id])
-    const set = subtree(id)
-    return rs.filter(r => set.has(proj.assignments[r.run_id]))
+    return scopeRuns(runs || [], id, proj.projects)
   }
   const count = (id) => runsOf(id).length
 
@@ -187,35 +193,29 @@ export default function RunList({ onOpen, onSettings }) {
     () => Array.from(new Set((runs || []).map(r => r.task_id).filter(Boolean))).sort(),
     [runs])
 
-  // The runs to render: project selection -> filters -> sort. Pure derivation of loaded summaries.
-  const visible = useMemo(() => {
-    let rs = runsOf(sel)
-    const q = query.trim().toLowerCase()
-    if (q) rs = rs.filter(r => [r.label, r.run_id, r.task_id, r.goal]
-      .some(s => (s || '').toLowerCase().includes(q)))
-    if (taskFilter !== ALL) rs = rs.filter(r => r.task_id === taskFilter)
-    if (stFilter === UNASSIGNED) rs = rs.filter(r => !r.supertask_id)
-    else if (stFilter !== ALL) rs = rs.filter(r => r.supertask_id === stFilter)
-    if (statusFilter === 'running') rs = rs.filter(r => !r.finished)
-    else if (statusFilter === 'finished') rs = rs.filter(r => r.finished)
+  // List and Map consume this exact same derived result set.  Map no longer performs an independent
+  // fetch, so switching representation cannot silently reset scope or show stale assignments.
+  const filtered = useMemo(() => filterRuns(runs || [], {
+    project: sel, projects: proj.projects, query, task: taskFilter,
+    supertask: stFilter, status: statusFilter,
+  }), [runs, sel, proj.projects, query, taskFilter, stFilter, statusFilter])
+  const visible = useMemo(() => sortRuns(filtered, sortKey, sortDir), [filtered, sortKey, sortDir])
+  const metricSortAvailable = taskFilter !== ALL && metricComparable(filtered)
+  useEffect(() => {
+    if (sortKey === 'metric' && !metricSortAvailable) setSortKey('time')
+  }, [sortKey, metricSortAvailable])
 
-    const name = r => (r.label || r.run_id || '').toLowerCase()
-    const metric = r => r.best_confirmed ?? r.best_metric
-    const mul = sortDir === 'asc' ? 1 : -1
-    const cmps = {
-      time: (a, b) => mul * ((a.mtime || 0) - (b.mtime || 0)),
-      name: (a, b) => mul * name(a).localeCompare(name(b)),
-      task: (a, b) => mul * (a.task_id || '').localeCompare(b.task_id || '') || name(a).localeCompare(name(b)),
-      nodes: (a, b) => mul * ((a.nodes || 0) - (b.nodes || 0)),
-      phase: (a, b) => mul * (a.phase || '').localeCompare(b.phase || ''),
-      metric: (a, b) => {                       // best metric; missing values sort last in BOTH dirs
-        const av = metric(a), bv = metric(b)
-        if (av == null || bv == null) return (av == null ? 1 : 0) - (bv == null ? 1 : 0)
-        return mul * (av - bv)
-      },
-    }
-    return [...rs].sort(cmps[sortKey] || (() => 0))
-  }, [runs, sel, proj.assignments, query, taskFilter, stFilter, statusFilter, sortKey, sortDir])
+  const autoMapCollapsed = useMemo(
+    () => defaultCollapsedClusters(proj.projects, visible, subtree),
+    [proj.projects, visible, subtree])
+  const mapCollapsed = useMemo(() => {
+    const next = new Set(autoMapCollapsed)
+    mapCollapseOverrides.forEach((collapsed, id) => collapsed ? next.add(id) : next.delete(id))
+    return next
+  }, [autoMapCollapsed, mapCollapseOverrides])
+  const toggleMapCluster = (id) => setMapCollapseOverrides(current => {
+    const next = new Map(current); next.set(id, !mapCollapsed.has(id)); return next
+  })
 
   const breadcrumb = useMemo(() => {
     if (sel === ALL || sel === UNASSIGNED) return []
@@ -275,53 +275,74 @@ export default function RunList({ onOpen, onSettings }) {
 
   // TreeNode lives at MODULE scope (below) so its component identity is stable across the 2.5s runs
   // poll; defined inline it remounted the whole subtree every poll, wiping the inline-rename input.
-  const treeCtx = { byParent, expanded, sel, setSel, onDrop, toggle, renaming, commitRename, setRenaming,
+  const chooseProject = (id) => { setSel(id); setProjectsOpen(false) }
+  const treeCtx = { byParent, expanded, sel, setSel: chooseProject, onDrop, toggle, renaming, commitRename, setRenaming,
                     count, addProject, removeProject }
 
   return (
     <div className="app">
-      <div className="topbar"><span className="brand"><span className="dot">◉</span> LoopLab</span>
-        <span className="muted">autonomous R&D — live runs</span>
+      <div className="topbar home-head"><span className="brand"><span className="dot">◉</span> LoopLab</span>
+        <span className="muted home-subtitle">autonomous R&D — live runs</span>
+        <button ref={projectsToggleRef} className="btn sm ghost projects-toggle" onClick={() => setProjectsOpen(true)}
+                aria-expanded={projectsOpen} aria-controls="projects-drawer">
+          <OpIcon name="folder" className="t-ic" /> Projects
+        </button>
+        <button className="btn sm primary new-run-cta"
+                onClick={() => window.dispatchEvent(new CustomEvent('ll:new-run'))}>
+          ＋ New run
+        </button>
         <span className="spacer" style={{ flex: 1 }} />
         <div className="seg">
           <button className={view === 'list' ? 'on' : ''} onClick={() => setView('list')}><OpIcon name="list" className="t-ic" /> List</button>
           <button className={view === 'map' ? 'on' : ''} onClick={() => setView('map')}><OpIcon name="map" className="t-ic" /> Map</button>
         </div>
-        {/* The ▶ New run + ✦ Assistant buttons are gone: both now live in the always-docked bottom
-            command bar (AssistantBar). Run creation = type "/new" (or describe a run) there. */}
-        <span className="muted" style={{ fontSize: 11 }}>type <code className="cmd-hint">/new</code> in the bar below to start a run</span>
+        {/* Slash remains a power-user shortcut; New run above is the first-use primary action. */}
+        <span className="muted home-new-hint" style={{ fontSize: 11 }}>type <code className="cmd-hint">/new</code> in the bar below to start a run</span>
         <span className="spacer" style={{ flex: 1 }} />
-        <ThemeSwitcher />
-        <EnergyToggle />
-        <button className="btn sm ghost" title="settings" onClick={() => onSettings && onSettings()}><OpIcon name="gear" className="t-ic" /> Settings</button>
+        <div className="home-actions">
+          <ThemeSwitcher />
+          <EnergyToggle />
+          <button className="btn sm ghost" title="settings" onClick={() => onSettings && onSettings()}><OpIcon name="gear" className="t-ic" /> Settings</button>
+        </div>
       </div>
 
-      {view === 'map' && <div style={{ flex: 1, minHeight: 0 }}><MapView onOpen={onOpen} /></div>}
-      {view === 'list' && <div className="runlayout">
-        <aside className="psidebar">
+      <div className={'runlayout' + (projectsOpen ? ' projects-open' : '')}>
+        {projectsOpen && <button className="project-backdrop" onClick={() => setProjectsOpen(false)}
+                                 aria-label="Close projects" />}
+        <aside ref={projectsDialogRef} className="psidebar" id="projects-drawer" aria-label="Projects"
+               role={compactNav ? 'dialog' : undefined} aria-modal={compactNav ? 'true' : undefined}
+               tabIndex={compactNav ? -1 : undefined}
+               aria-hidden={compactNav && !projectsOpen ? 'true' : undefined}
+               inert={compactNav && !projectsOpen ? '' : undefined}>
           <div className="psidebar-h">
             <b>Projects</b>
+            <button ref={projectsCloseRef} className="btn sm ghost projects-close" onClick={() => setProjectsOpen(false)}
+                    aria-label="Close projects">×</button>
             <button className="btn sm" onClick={() => addProject(null)}>＋ New</button>
           </div>
-          <div className={'ptree-row pseudo' + (sel === ALL ? ' sel' : '')} onClick={() => setSel(ALL)}
-               onDragOver={e => e.preventDefault()} onDrop={() => onDrop(UNASSIGNED)}>
+          {projectsError && <div className="notice compact-error" role="alert">Projects unavailable. <button className="btn sm" onClick={loadProjects}>Retry</button></div>}
+          <div className={'ptree-row pseudo' + (sel === ALL ? ' sel' : '')} onClick={() => chooseProject(ALL)}
+               role="button" tabIndex={0} aria-pressed={sel === ALL}
+               onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); chooseProject(ALL) } }}>
             <span className="ptw">▦</span><span className="pname">All runs</span><span className="pcount">{count(ALL)}</span>
           </div>
-          <div className={'ptree-row pseudo' + (sel === UNASSIGNED ? ' sel' : '')} onClick={() => setSel(UNASSIGNED)}
+          <div className={'ptree-row pseudo' + (sel === UNASSIGNED ? ' sel' : '')} onClick={() => chooseProject(UNASSIGNED)}
+               role="button" tabIndex={0} aria-pressed={sel === UNASSIGNED}
+               onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); chooseProject(UNASSIGNED) } }}
                onDragOver={e => e.preventDefault()} onDrop={() => onDrop(UNASSIGNED)}>
             <span className="ptw">○</span><span className="pname">Unassigned</span><span className="pcount">{count(UNASSIGNED)}</span>
           </div>
-          <div className="ptree">
+          <div className="ptree" role="tree" aria-label="Project folders">
             {(byParent[null] || []).map(p => <TreeNode key={p.id} p={p} depth={0} ctx={treeCtx} />)}
             {!proj.projects.length && <div className="muted" style={{ padding: 10, fontSize: 12 }}>No projects yet. Create one to organize runs.</div>}
           </div>
         </aside>
 
-        <div className="runlist">
+        <div className={'runlist' + (view === 'map' ? ' map-list-shell' : '')}>
           <div className="crumbs">
-            <span className="crumb" onClick={() => setSel(ALL)}>All runs</span>
+            <span className="crumb" onClick={() => chooseProject(ALL)}>All runs</span>
             {breadcrumb.map(p => <React.Fragment key={p.id}><span className="sep">/</span>
-              <span className="crumb" onClick={() => setSel(p.id)}>{p.name}</span></React.Fragment>)}
+              <span className="crumb" onClick={() => chooseProject(p.id)}>{p.name}</span></React.Fragment>)}
             {sel === UNASSIGNED && <><span className="sep">/</span><span className="crumb">Unassigned</span></>}
             <span style={{ flex: 1 }} />
             {scope && <div className="view-toggle crumb-report">
@@ -335,7 +356,10 @@ export default function RunList({ onOpen, onSettings }) {
                    onChange={e => setQuery(e.target.value)} />
             <select className="sel" value={statusFilter} onChange={e => setStatusFilter(e.target.value)} title="status">
               <option value="all">all status</option>
-              <option value="running">running</option>
+               <option value="running">running</option>
+               <option value="paused">paused</option>
+               <option value="approval">approval needed</option>
+               <option value="stalled">stalled</option>
               <option value="finished">finished</option>
             </select>
             <select className="sel" value={taskFilter} onChange={e => setTaskFilter(e.target.value)} title="task">
@@ -350,32 +374,51 @@ export default function RunList({ onOpen, onSettings }) {
             <button className="btn sm ghost" title="create / manage super-tasks" onClick={() => setStModal(true)}><OpIcon name="target" className="t-ic" /> ＋</button>
             <span style={{ flex: 1 }} />
             <span className="muted runbar-count">{visible.length}/{runsOf(sel).length}</span>
-            <select className="sel" value={sortKey} onChange={e => setSortKey(e.target.value)} title="sort by">
+            <select className="sel" value={sortKey} onChange={e => {
+              setSortKey(e.target.value)
+              if (e.target.value === 'metric') setSortDir('asc')
+            }} title="sort by">
               <option value="time">time</option>
               <option value="name">name</option>
-              <option value="metric">best metric</option>
+              <option value="metric" disabled={!metricSortAvailable}>best metric{metricSortAvailable ? '' : ' (select one task)'}</option>
               <option value="task">task</option>
               <option value="nodes">nodes</option>
               <option value="phase">phase</option>
             </select>
-            <button className="btn sm ghost" title={sortDir === 'asc' ? 'ascending' : 'descending'}
-                    onClick={() => setSortDir(d => d === 'asc' ? 'desc' : 'asc')}>{sortDir === 'asc' ? '↑' : '↓'}</button>
+            <button className="btn sm ghost"
+                    title={sortKey === 'metric' ? (sortDir === 'asc' ? 'best first' : 'worst first') : (sortDir === 'asc' ? 'ascending' : 'descending')}
+                    onClick={() => setSortDir(d => d === 'asc' ? 'desc' : 'asc')}>
+              {sortKey === 'metric' ? (sortDir === 'asc' ? 'best' : 'worst') : (sortDir === 'asc' ? '↑' : '↓')}
+            </button>
           </div>}
-          {runs == null && <div className="notice">Loading runs…</div>}
-          {runs && !runsOf(sel).length && <div className="notice">No runs here.{sel === ALL && <> Start one with
-            <code> python -m looplab.cli run examples/toy_task.json --out runs/demo</code>.</>} Drag a run onto a project, or use its <b>Move</b> menu.</div>}
+          {runs == null && !runsError && <div className="notice" role="status">Loading runs…</div>}
+          {runs == null && runsError && <div className="notice resource-error" role="alert"><b>Could not load runs.</b><span>{runsError}</span><button className="btn sm primary" onClick={loadRuns}>Retry</button></div>}
+          {runs != null && runsError && <div className="notice resource-warning" role="status">Could not refresh runs; showing the last loaded data. <button className="btn sm" onClick={loadRuns}>Retry</button></div>}
+          {runs && !runsOf(sel).length && <div className="notice resource-empty">No runs here.
+            {sel === ALL
+              ? <button className="btn sm primary" onClick={() => window.dispatchEvent(new CustomEvent('ll:new-run'))}>Start a new run</button>
+              : <span>Drag a run onto this project, or use its <b>Move</b> menu.</span>}</div>}
           {runs && !!runsOf(sel).length && !visible.length && <div className="notice">No runs match the filter.</div>}
-          {runs && visible.map(r => (
+          {view === 'map' && projectsError && <div className="notice resource-error" role="alert"><b>Map unavailable.</b><span>Project metadata is required to place runs correctly.</span><button className="btn sm primary" onClick={loadProjects}>Retry</button></div>}
+          {view === 'map' && !projectsError && runs && visible.length > 0 && <div className="map-stage">
+            <MapView onOpen={onOpen} runs={visible} projects={proj.projects}
+              collapsed={mapCollapsed} onToggle={toggleMapCluster}
+              scopeLabel={scope?.label || (sel === ALL ? 'All runs' : sel === UNASSIGNED ? 'Unassigned' : (projName[sel] || sel))} />
+          </div>}
+          {view === 'list' && runs && visible.map(r => (
             <div className="run-card" key={r.run_id} draggable
                  onDragStart={() => setDragRun(r.run_id)} onDragEnd={() => setDragRun(null)}>
               {(() => {
                 // A zombie (not finished, but no engine holds the lock) reads as "search" from phase
                 // alone — surface it as "stalled" so the list matches the run header's badge.
-                const zombie = !r.finished && r.engine_running === false
-                return <span className={'pill phase' + (zombie ? ' stalled' : '')} onClick={() => onOpen(r.run_id)}
-                             title={zombie ? 'engine stopped — open to resume' : undefined}>{zombie ? 'stalled' : r.phase}</span>
+                const status = effectiveRunStatus(r)
+                const stalled = status === 'stalled'
+                return <span className={'pill phase ' + status} role="link" tabIndex={0}
+                             onKeyDown={e => { if (e.key === 'Enter') onOpen(r.run_id) }} onClick={() => onOpen(r.run_id)}
+                             title={stalled ? 'engine stopped unexpectedly — open to resume' : status === 'paused' ? 'paused intentionally' : undefined}>{status}</span>
               })()}
-              <div onClick={() => onOpen(r.run_id)} style={{ cursor: 'pointer', flex: 1 }}>
+              <div onClick={() => onOpen(r.run_id)} onKeyDown={e => { if (e.key === 'Enter') onOpen(r.run_id) }}
+                   role="link" tabIndex={0} aria-label={`Open run ${r.label || r.run_id}`} style={{ cursor: 'pointer', flex: 1 }}>
                 <div><b>{r.label || r.run_id}</b> <span className="muted">· {r.label ? r.run_id + ' · ' : ''}{r.task_id}</span>
                   {r.project_id && projName[r.project_id] && <span className="pill" style={{ marginLeft: 6 }}><OpIcon name="folder" className="t-ic" /> {projName[r.project_id]}</span>}
                   {r.supertask_id && stName[r.supertask_id] && <span className="pill st-pill" style={{ marginLeft: 6 }}><OpIcon name="target" className="t-ic" /> {stName[r.supertask_id]}</span>}</div>
@@ -398,7 +441,7 @@ export default function RunList({ onOpen, onSettings }) {
             </div>
           ))}
         </div>
-      </div>}
+      </div>
 
       {projModal && <PromptModal
         title={projModal.parent_id ? 'New sub-project' : 'New project'}

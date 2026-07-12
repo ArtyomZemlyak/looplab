@@ -34,9 +34,13 @@ export function GroupRegion({ w, h, label, count, tint, onToggle }) {
 
 // Collapsed-group card shell. Caller supplies the body (children) and the click/selected state.
 export function SuperShell({ tint, selected, onClick, title, children }) {
+  const onKeyDown = onClick ? (event) => {
+    if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); onClick() }
+  } : undefined
   return (
     <div className={'grp-super' + (selected ? ' sel' : '')} style={{ '--grp-tint': tint }}
-         onClick={onClick} title={title}>
+         onClick={onClick} onKeyDown={onKeyDown} role={onClick ? 'button' : undefined}
+         tabIndex={onClick ? 0 : undefined} title={title}>
       {children}
     </div>
   )

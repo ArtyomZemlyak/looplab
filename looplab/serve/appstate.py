@@ -88,11 +88,15 @@ class AppState:
         if ckey is not None:
             hit = self._state_cache.get(ckey)
             if hit is not None:
-                d, last_seq = hit
+                d, last_seq, max_seq = hit
                 out = dict(d)
-                out["engine_running"] = _engine_alive(rd)
-                return {"state": out, "seq": last_seq, "max_seq": last_seq}
-        evs = self.events(rd, upto_seq)
+                # Liveness is a present-time fact. Stamping it into an old prefix fold creates a
+                # hybrid object that is neither historical nor live.
+                out["engine_running"] = _engine_alive(rd) if upto_seq is None else None
+                return {"state": out, "seq": last_seq, "max_seq": max_seq}
+        all_evs = self.events(rd)
+        max_seq = all_evs[-1].seq if all_evs else -1
+        evs = all_evs if upto_seq is None else [e for e in all_evs if e.seq <= upto_seq]
         st = fold(evs)
         last_seq = evs[-1].seq if evs else -1
         # Trim heavy per-node payloads from the live state (code/files/stdout/error) — they are
@@ -127,12 +131,12 @@ class AppState:
         # Liveness: is a real engine process driving this run RIGHT NOW? (lock probe, not the event log).
         # A run with finished=False but engine_running=False is a ZOMBIE — the UI uses this to stop
         # showing a perpetual "thinking" strip and to resume on the next engine-needing chat action.
-        d["engine_running"] = _engine_alive(rd)
+        d["engine_running"] = _engine_alive(rd) if upto_seq is None else None
         if ckey is not None:                 # cache the trimmed payload for the next unchanged tick
-            self._state_cache[ckey] = (d, last_seq)
+            self._state_cache[ckey] = (d, last_seq, max_seq)
             if len(self._state_cache) > 256:  # bound the cache (many runs / seq points over a session)
                 self._state_cache.pop(next(iter(self._state_cache)))
-        return {"state": d, "seq": last_seq, "max_seq": last_seq}
+        return {"state": d, "seq": last_seq, "max_seq": max_seq}
 
     def phase(self, st) -> str:
         if st.finished:

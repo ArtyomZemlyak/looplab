@@ -239,12 +239,36 @@ def test_engine_liveness_lock_probe(tmp_path):
 
 def test_time_travel_seq(tmp_path):
     _build_run(tmp_path)
+    rd = tmp_path / "demo"
+    raw = list(iter_jsonl(rd / "events.jsonl"))
+    created = next(e for e in raw if e["type"] == "node_created")
+    created_seq = created["seq"]
+    nid = created["data"]["node_id"]
+    EventStore(rd / "events.jsonl").append(
+        "annotation", {"node_id": nid, "text": "added after the snapshot"})
     client = TestClient(make_app(tmp_path))
     # seq=0 is just run_started -> no nodes yet; the full state has nodes.
     early = client.get("/api/runs/demo/state", params={"seq": 0}).json()
     full = client.get("/api/runs/demo/state").json()
     assert len(early["state"]["nodes"]) == 0
     assert len(full["state"]["nodes"]) > 0
+    assert early["seq"] == 0
+    assert early["max_seq"] == full["seq"]
+    assert early["state"]["engine_running"] is None  # current liveness is not stamped into history
+
+    # Node detail uses the same prefix fold: future annotations and live spans must not leak backward.
+    historical_node = client.get(f"/api/runs/demo/nodes/{nid}",
+                                 params={"seq": created_seq}).json()
+    live_node = client.get(f"/api/runs/demo/nodes/{nid}").json()
+    assert historical_node["annotations"] == []
+    assert live_node["annotations"] == ["added after the snapshot"]
+    assert historical_node["trace"] == {"nodes": []}
+    assert historical_node["historical_seq"] == created_seq
+
+    # A future node is an explicit 404 at an earlier prefix rather than a live-detail fallback.
+    later = next(e for e in raw if e["type"] == "node_created" and e["seq"] > created_seq)
+    assert client.get(f"/api/runs/demo/nodes/{later['data']['node_id']}",
+                      params={"seq": created_seq}).status_code == 404
 
 
 def test_clear_node_trace_removes_only_that_nodes_spans(tmp_path):

@@ -254,7 +254,7 @@ export function verdict(state, a) {
   const best = state.best_node_id != null ? state.nodes[state.best_node_id] : null
   const caveats = trustCaveats(state, best)
   if (!best || a.finalBest == null) {
-    return { outcome: 'none', robustness: 'n/a', trust: 'caveats', best, caveats,
+    return { outcome: 'none', robustness: 'n/a', trust: caveats.length ? 'caveats' : 'unverified', best, caveats,
       headline: a.nEval ? 'No feasible result yet — every evaluated node violated a constraint.' : 'No experiments have been evaluated yet.' }
   }
   const baseline = a.firstBest, finalv = a.finalBest
@@ -270,7 +270,9 @@ export function verdict(state, a) {
   }
   // trust rollup
   const hasAlarm = caveats.some(c => c.severity === 'alarm')
-  const trust = hasAlarm ? 'suspect' : (caveats.length ? 'caveats' : 'trustworthy')
+  // No recorded caveat is not proof that every optional detector ran. Without the run config and
+  // per-detector coverage in this folded report state, the honest roll-up is unverified, not green.
+  const trust = hasAlarm ? 'suspect' : (caveats.length ? 'caveats' : 'unverified')
   const gainPct = baseline ? Math.abs(gain / baseline) * 100 : null
   const gainStr = fmt(Math.abs(gain)) + (gainPct != null ? ` (${fmt(gainPct, 1)}%)` : '')
   let headline
@@ -279,7 +281,8 @@ export function verdict(state, a) {
       : robustness === 'fragile' ? `but the multi-seed spread is wide` : `single-seed so far`
     headline = `Improved the metric by ${gainStr} over baseline — champion #${best.id} is ${rob}`
       + (trust === 'suspect' ? '; the win is flagged, treat with caution.'
-        : trust === 'caveats' ? ' (with caveats).' : ' and passes the trust checks.')
+        : trust === 'caveats' ? ' (with caveats).'
+          : '; no trust flags are recorded, but detector coverage is not fully verified.')
   } else if (outcome === 'flat') {
     headline = `No improvement over the baseline yet — best stays at ${fmt(finalv)} (#${best.id}).`
   } else if (outcome === 'regressed') {

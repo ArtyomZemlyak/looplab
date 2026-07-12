@@ -1,6 +1,7 @@
 import React, { useState } from 'react'
 import Markdown from './markdown.jsx'
 import { fmt, startRun } from './util.js'
+import { assistantErrorInfo } from './assistantErrors.js'
 
 const RUN_MENTION = /@run:([^\s.,;:!?)]+)/g
 const runMentions = (s) => [...new Set([...(s || '').matchAll(RUN_MENTION)].map(m => m[1]))]
@@ -26,10 +27,30 @@ function RunChip({ id, run }) {
 const stripCtx = (s) => typeof s === 'string'
   ? s.replace(/\n*\[UI context:[^\]]*\]\s*$/, '').trimEnd() : s
 
-export function Turn({ m, runsById, onRevert, readOnly = false }) {
+function AssistantErrorCard({ error, onRetry, onOpenSettings }) {
+  return <div className={`assistant-error-card ${error.kind}`} role="alert">
+    <div className="assistant-error-card__head">
+      <span className="assistant-error-card__icon" aria-hidden="true">!</span>
+      <div>
+        <strong>{error.title}</strong>
+        <p>{error.message}</p>
+      </div>
+    </div>
+    {error.technical && <code className="assistant-error-card__technical">{error.technical}</code>}
+    <div className="assistant-error-card__actions">
+      {error.retryable && onRetry && <button className="btn xs primary" onClick={onRetry}>Retry</button>}
+      {onOpenSettings && <button className="btn xs ghost" onClick={onOpenSettings}>Open Settings</button>}
+    </div>
+  </div>
+}
+
+export function Turn({ m, runsById, onRevert, onRetry, onOpenSettings, readOnly = false }) {
   const who = m.role === 'user' ? 'you' : 'assistant'
   const content = m.role === 'user' ? stripCtx(m.content) : m.content
-  const mentions = runMentions(content)
+  // Provider payloads can contain URLs, model routing, account ids and other implementation details.
+  // Classify the raw persisted text, but render only the fixed, allow-listed copy returned here.
+  const assistantError = m.role === 'assistant' && !m.streaming ? assistantErrorInfo(content, m.error_kind) : null
+  const mentions = assistantError ? [] : runMentions(content)
   return <div className={'feed-msg chat ' + m.role}>
     <div className="fm-body">
       <div className="chat-who">{who}</div>
@@ -54,9 +75,11 @@ export function Turn({ m, runsById, onRevert, readOnly = false }) {
             {onRevert && a.abs_path && <button className="asst-undo" title="undo this change"
               onClick={() => onRevert(a.abs_path)}>undo</button>}</span>)}</div>}
       {m.role === 'assistant' && <Todos items={m.todos} />}
-      {(m.content || !m.streaming) && <div className="chat-bubble">
+      {(m.content || !m.streaming) && <div className={'chat-bubble' + (assistantError ? ' assistant-error-bubble' : '')}>
         {m.role === 'assistant'
-          ? <><Markdown text={m.content || ''} className="chat-text" />{m.streaming && <span className="asst-cursor">▍</span>}</>
+          ? assistantError
+            ? <AssistantErrorCard error={assistantError} onRetry={onRetry} onOpenSettings={onOpenSettings} />
+            : <><Markdown text={m.content || ''} className="chat-text" />{m.streaming && <span className="asst-cursor">▍</span>}</>
           : <div className="chat-text">{content}</div>}
       </div>}
       {mentions.length > 0 && <div className="asst-runchips">

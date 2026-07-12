@@ -1,0 +1,256 @@
+/* Settings progressive disclosure and form accessibility. Kept separate from the shared stylesheet so
+   the overhaul can evolve without widening the blast radius of generic tabs, fields, or buttons. */
+.settings-overview {
+  margin-bottom: 16px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--bg-1);
+  overflow: hidden;
+}
+
+.settings-heading-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 24px;
+  padding: 16px 18px 12px;
+}
+
+.settings-heading-row h1 {
+  margin: 0 0 4px;
+  color: var(--fg);
+  font-size: 19px;
+  line-height: 1.25;
+}
+
+.settings-heading-row p {
+  margin: 0;
+  color: var(--fg-dim);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.settings-help {
+  flex: 0 0 min(330px, 42%);
+  color: var(--fg-dim);
+  font-size: 12px;
+}
+
+.settings-help summary {
+  width: max-content;
+  margin-left: auto;
+  color: var(--accent);
+  cursor: pointer;
+}
+
+.settings-help[open] summary { margin-bottom: 7px; }
+.settings-help p + p { margin-top: 6px; }
+.settings-help .sf-dot + .sf-dot { margin-left: 8px; }
+
+.settings-toolbar {
+  display: grid;
+  grid-template-columns: minmax(180px, .42fr) minmax(260px, 1fr);
+  gap: 14px;
+  align-items: start;
+  padding: 12px 18px;
+  border-top: 1px solid var(--line);
+  background: var(--bg-2);
+}
+
+.settings-control-label {
+  display: block;
+  margin-bottom: 5px;
+  color: var(--fg-dim);
+  font-size: 11px;
+  font-weight: 650;
+}
+
+.settings-mode {
+  display: inline-flex;
+  padding: 2px;
+  border: 1px solid var(--line-2);
+  border-radius: 8px;
+  background: var(--bg-1);
+}
+
+.settings-mode button {
+  min-height: 30px;
+  padding: 4px 12px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--fg-dim);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.settings-mode button:hover:not(:disabled) { color: var(--fg); }
+.settings-mode button.active { background: var(--bg-3); color: var(--fg); box-shadow: 0 0 0 1px var(--line); }
+.settings-mode button:disabled { cursor: not-allowed; opacity: .58; }
+.settings-mode button:focus-visible,
+.settings-search-clear:focus-visible,
+.settings-summary-link:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+.settings-search-control {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 36px;
+  padding: 0 8px 0 10px;
+  border: 1px solid var(--line-2);
+  border-radius: 8px;
+  background: var(--bg-1);
+  color: var(--fg-mut);
+}
+
+.settings-search-control:focus-within {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 18%, transparent);
+}
+
+.settings-search-control input {
+  flex: 1;
+  min-width: 0;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: var(--fg);
+  font: inherit;
+  font-size: 13px;
+}
+
+.settings-search-control input::placeholder { color: var(--fg-mut); }
+.settings-search-control input::-webkit-search-cancel-button { display: none; }
+
+.settings-search-clear {
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--fg-dim);
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.settings-search-clear:hover { background: var(--bg-3); color: var(--fg); }
+.settings-search-scope { display: block; margin-top: 4px; color: var(--fg-mut); font-size: 11px; }
+
+.settings-summary {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-height: 36px;
+  padding: 8px 18px;
+  border-top: 1px solid var(--line);
+  color: var(--fg-dim);
+  font-size: 12px;
+}
+
+.settings-summary-divider { color: var(--line-2); }
+.settings-summary .is-unsaved,
+.settings-save-state.is-unsaved { color: var(--working); }
+
+.settings-summary-link {
+  margin-left: auto;
+  padding: 2px 0;
+  border: 0;
+  background: transparent;
+  color: var(--accent);
+  font: inherit;
+  cursor: pointer;
+}
+
+.settings-summary-link:hover { text-decoration: underline; }
+
+.settings-form .sf-label-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 21px;
+  margin-bottom: 3px;
+}
+
+.settings-form .sf-label-row .sf-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  margin: 0;
+  cursor: pointer;
+}
+
+/* The shared switch used display:none for its checkbox. Keep it visually hidden instead so the
+   native control remains reachable to keyboards and assistive technology. */
+.settings-form .switch { position: relative; }
+.settings-form .switch input {
+  display: block;
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: 0;
+  opacity: 0;
+  pointer-events: none;
+}
+.settings-form .switch:focus-within .track {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.settings-form .sf-group-h h2 {
+  margin: 0;
+  color: var(--fg);
+  font-size: 13px;
+  line-height: 1.3;
+}
+
+.settings-search-results { gap: 12px; }
+.settings-search-results .sf-group-h { flex-wrap: wrap; }
+.settings-search-results .sf-group-h h2 + .muted { margin-left: auto; }
+
+.settings-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 5px;
+  padding: 42px 20px;
+  border: 1px dashed var(--line-2);
+  border-radius: 10px;
+  color: var(--fg-dim);
+  text-align: center;
+}
+
+.settings-empty strong { color: var(--fg); font-size: 14px; }
+.settings-empty span { color: var(--fg-mut); font-size: 12px; }
+.sf-secret-state { color: var(--fg-dim); font-weight: 600; }
+
+.settings-save-state {
+  color: var(--fg-mut);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+@media (max-width: 720px) {
+  .settings-heading-row { flex-direction: column; gap: 10px; }
+  .settings-help { flex-basis: auto; width: 100%; }
+  .settings-help summary { margin-left: 0; }
+  .settings-toolbar { grid-template-columns: 1fr; }
+  .settings-actions .sa-inner { flex-wrap: wrap; }
+  .settings-actions .sa-inner .spacer { display: none; }
+  .settings-save-state { margin-left: auto; }
+}
+
+@media (max-width: 480px) {
+  .settings-heading-row,
+  .settings-toolbar,
+  .settings-summary { padding-left: 12px; padding-right: 12px; }
+  .settings-summary-divider { display: none; }
+  .settings-summary > span { flex-basis: 100%; }
+  .settings-summary-link { margin-left: 0; }
+  .settings-mode { display: flex; width: 100%; }
+  .settings-mode button { flex: 1; }
+  .settings-save-state { order: -1; width: 100%; margin-left: 0; }
+}

@@ -37,6 +37,56 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 from looplab.tools.perm_modes import DEFAULT_MODE, MODES, normalize_mode  # noqa: F401
 
 
+def safe_assistant_failure(exc: Exception) -> dict:
+    """Return a persistable, user-facing assistant failure without provider payloads.
+
+    Provider exceptions can embed request URLs, routed model names, account identifiers, or even
+    credential fragments.  Those belong in server diagnostics, never in the chat transcript/API.
+    Keep the stored contract small and allow-listed so reloads are as safe as the live error card.
+    """
+    raw = str(exc or "")
+    status_match = re.search(r"(?:\bHTTP\s+|\bcode\D{0,6}|^\s*)(\d{3})\b", raw, re.IGNORECASE)
+    status = int(status_match.group(1)) if status_match else None
+    if status == 429 or re.search(r"rate[- _]?limit", raw, re.IGNORECASE):
+        kind = "rate_limit"
+        message = "The model provider is temporarily rate-limited. Retry shortly or choose another provider in Settings."
+    elif status in {401, 403} or re.search(r"authentication|unauthori[sz]ed|credential|api[ -]?key", raw, re.IGNORECASE):
+        kind = "credentials"
+        message = "Assistant credentials need attention. Check the provider and API key in Settings."
+    elif re.search(r"timeout|timed out|network|connection|unreachable|couldn't reach", raw, re.IGNORECASE):
+        kind = "unavailable"
+        message = "The assistant could not reach the model provider. Check the connection and retry."
+    else:
+        kind = "provider_error"
+        message = "The model provider returned an error. Retry or review the provider settings."
+    return {"error": kind, "error_kind": kind, "reply": f"(assistant error: {message})"}
+
+
+def sanitize_assistant_message(message: dict) -> dict:
+    """Return a transcript message safe for API/share reads, including legacy raw failures."""
+    out = dict(message or {})
+    if out.get("role") != "assistant":
+        return out
+    kind = out.get("error_kind")
+    markers = {
+        "rate_limit": "429 rate-limited", "credentials": "401 authentication error",
+        "unavailable": "connection timeout", "provider_error": "provider error",
+    }
+    content = str(out.get("content") or "")
+    legacy = re.search(
+        r"^\s*(?:\(?assistant error\s*:|couldn['’]t reach the model\s*\(|authenticationerror\b|\d{3}\s+client error\b|http\s+\d{3}\b)",
+        content, re.IGNORECASE)
+    if kind in markers:
+        failure = safe_assistant_failure(RuntimeError(markers[kind]))
+    elif legacy:
+        failure = safe_assistant_failure(RuntimeError(content))
+    else:
+        return out
+    out["content"] = failure["reply"]
+    out["error_kind"] = failure["error_kind"]
+    return out
+
+
 # --------------------------------------------------------------------------- session persistence
 class SessionStore:
     """Append-only assistant sessions under `<run_root>/assistant/<sid>/`.
@@ -401,7 +451,7 @@ def run_turn(client, run_root, messages: list, instruction: str, mode: str = DEF
                                 finalize=_fin, fallback=_fb, on_step=_on_step, on_text=on_text,
                                 cancel_check=cancel_check, **opts)
     except Exception as e:  # noqa: BLE001 - surface a usable error, never crash the request
-        return {"ok": False, "error": str(e), "reply": f"(assistant error: {e})", "steps": steps,
+        return {"ok": False, **safe_assistant_failure(e), "steps": steps,
                 "applied": _collect("applied"), "proposals": _collect("proposals"),
                 "todos": _collect("todos"), "refs": refs, "mode": mode}
     reply = reply or box.get("reply") or "(no reply)"

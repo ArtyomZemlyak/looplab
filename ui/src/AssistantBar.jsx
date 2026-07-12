@@ -2,6 +2,9 @@ import React, { useEffect, useRef, useState } from 'react'
 import { Turn, PermCard } from './AssistantChat.jsx'
 import { OpIcon } from './icons.jsx'
 import { usePoll } from './hooks.js'
+import { getRunAccess } from './runMode.js'
+import { assistantErrorInfo, assistantPreview } from './assistantErrors.js'
+import './assistant-polish.css'
 import {
   CONTROL, get, fmtAgo, ASSISTANT_MODES as MODES, tokText, assistantCreate, assistantMessageStream,
   assistantCommands, assistantRevert, assistantSessions, assistantGet, assistantDelete,
@@ -52,6 +55,22 @@ function parseDirect(t) {
 }
 
 const firstLine = (s) => (s || '').replace(/[#*`>_-]/g, '').split('\n').map(l => l.trim()).find(Boolean) || ''
+const previewText = (value) => firstLine(assistantPreview(value)).slice(0, 120)
+
+// Keep only an allow-listed error marker in newly rendered turns. The classifier can reconstruct the
+// canonical card from this marker, while URLs, provider routing, model names and account ids never
+// enter the visible reply or collapsed preview.
+const normalizedFailureText = (value) => {
+  const info = assistantErrorInfo(`Assistant error: ${String(value || '')}`)
+  if (!info) return 'Assistant error: provider returned error'
+  const status = info.status ? ` Error code: ${info.status}.` : ''
+  if (info.kind === 'rate_limit') return `Assistant error: temporarily rate-limited.${status}`
+  if (info.kind === 'credentials') return `Assistant error: credentials need attention.${status}`
+  if (info.kind === 'unavailable') return `Assistant error: connection unavailable.${status}`
+  return `Assistant error: provider returned error.${status}`
+}
+
+const safeErrorNotice = (value) => assistantErrorInfo(`Assistant error: ${String(value || '')}`)?.title || 'Assistant request failed'
 
 // U5 · cheap pre-router: catch a few natural-language control phrases WITHOUT paying for an LLM
 // round-trip. Fires ONLY when the phrase names the run ("stop the run", "finalize run") — a bare
@@ -93,6 +112,8 @@ const readFileText = (file) => new Promise((resolve) => {
 })
 
 export default function AssistantBar({ runId, hidden = false }) {
+  const [runAccess, setRunAccessState] = useState(() => getRunAccess(runId))
+  const historical = !!runId && runAccess.readOnly
   const [input, setInput] = useState('')
   const [sid, setSid] = useState(null)
   const [msgs, setMsgs] = useState([])
@@ -103,6 +124,8 @@ export default function AssistantBar({ runId, hidden = false }) {
   const [mode, setMode] = useState('plan')
   const [toast, setToast] = useState(null)
   const [commands, setCommands] = useState([])
+  const [suggestionIndex, setSuggestionIndex] = useState(0)
+  const [suggestionsDismissed, setSuggestionsDismissed] = useState(false)
   const [runs, setRuns] = useState([])
   const [pending, setPending] = useState([])      // live HITL confirm requests
   const [sessions, setSessions] = useState([])    // full-view session list
@@ -120,6 +143,14 @@ export default function AssistantBar({ runId, hidden = false }) {
   const atBottomRef = useRef(true)     // is the feed scrolled to (near) the bottom? gates autoscroll
   const flashTimerRef = useRef(null)   // single toast-clear timer so rapid flashes don't clip each other
   const fileRef = useRef(null)
+  useEffect(() => {
+    setRunAccessState(getRunAccess(runId))
+    const onAccess = (e) => {
+      if (String(e.detail?.runId) === String(runId)) setRunAccessState(getRunAccess(runId))
+    }
+    window.addEventListener('ll:run-access', onAccess)
+    return () => window.removeEventListener('ll:run-access', onAccess)
+  }, [runId])
   useEffect(() => () => { mountedRef.current = false; if (abortRef.current) abortRef.current.abort() }, [])
   useEffect(() => { localStorage.setItem('ll.asstW', sideW) }, [sideW])
   // VS Code-style docking: when the side panel is open, reserve its width on the right so the MAIN
@@ -160,7 +191,7 @@ export default function AssistantBar({ runId, hidden = false }) {
   const openFull = () => { setView('full'); setHasNew(false) }
   const collapseToBar = () => {
     const la = lastAssistant()
-    if (la && la.content) { setPreview(firstLine(la.content).slice(0, 120)); setHasNew(true) }
+    if (la && la.content) { setPreview(previewText(la.content)); setHasNew(true) }
     setView('bar')
   }
   const toggleSide = () => (view === 'side' ? collapseToBar() : openSide())
@@ -199,7 +230,7 @@ export default function AssistantBar({ runId, hidden = false }) {
       const arr = s.messages || []
       setMsgs(arr); if (s.meta?.mode) setMode(s.meta.mode)
       const la = [...arr].reverse().find(m => m.role === 'assistant' && m.content)
-      if (la) setPreview(firstLine(la.content).slice(0, 120))
+      if (la) setPreview(previewText(la.content))
       // Reattach to a turn still running server-side — after a page RELOAD or after switching AWAY and
       // BACK to this session. The worker keeps going and only persists its reply when done, so the turn
       // state would otherwise vanish from the UI. `progress.active` is authoritative (falls back to the
@@ -289,15 +320,18 @@ export default function AssistantBar({ runId, hidden = false }) {
   }
 
   const resolvePerm = async (reqId, decision) => {
+    if (historical) { flash(`History seq ${runAccess.seq} is read-only — return live to resolve actions`); return }
     setPending(p => p.filter(x => x.id !== reqId))
     try { await assistantResolve(reqId, decision) } catch (e) { flash(e.message) }
   }
   const onRevert = async (absPath) => {
+    if (historical) { flash(`History seq ${runAccess.seq} is read-only — return live to undo edits`); return }
     try { const r = await assistantRevert(absPath); flash(r.result || 'reverted') } catch (e) { flash(e.message) }
   }
 
   const runDirect = async (d) => {
     if (!runId) { flash(`/${d.name} needs an open run`); return }
+    if (historical) { flash(`History seq ${runAccess.seq} is read-only — return live to act`); return }
     try { await d.spec.run(runId, d.arg); flash(typeof d.spec.ok === 'function' ? d.spec.ok(d.arg) : d.spec.ok) }
     catch (e) { flash('failed: ' + (e.message || e)) }
   }
@@ -337,7 +371,7 @@ export default function AssistantBar({ runId, hidden = false }) {
         if (arr.length >= priorLen && la) {
           if (mountedRef.current && sidRef.current === id) {
             setMsgs(arr)
-            setPreview(firstLine(la.content).slice(0, 120)); setHasNew(view === 'bar')
+            setPreview(previewText(la.content)); setHasNew(view === 'bar')
           }
           return true
         }
@@ -348,11 +382,11 @@ export default function AssistantBar({ runId, hidden = false }) {
 
   // Stream one instruction to the assistant. `userText` = the bubble shown; `instruction` = what the
   // model receives (run context + attached files appended, not shown in the bubble).
-  const runLLM = async (instruction, { userText = null, ensureVisible = false, context = null } = {}) => {
+  const runLLM = async (instruction, { userText = null, ensureVisible = false, context = null, retryFiles = null } = {}) => {
     if (ensureVisible && view === 'bar' && hasChat) setView('side')
     const wasBar = view === 'bar' && !ensureVisible
     setPreview(''); setHasNew(false)
-    const atts = files
+    const atts = retryFiles || files
     let id = sid
     if (!id) {
       // Create the session FIRST; only then clear the attached-file chips — else a create failure
@@ -360,13 +394,14 @@ export default function AssistantBar({ runId, hidden = false }) {
       try { const m = await assistantCreate((userText || instruction).slice(0, 60), mode); id = m.id; sidRef.current = id; try { localStorage.setItem('ll.asstSid', id) } catch { /* ignore */ } if (mountedRef.current) setSid(id) }
       catch { flash('assistant offline'); return }
     }
-    setFiles([])   // committed to sending this turn -> clear the composer's attachments
+    if (!retryFiles) setFiles([])   // a retry reuses its own snapshot; do not clear newly composed files
     // What was silently attached to this turn (run, #experiments, files) — shown as a faint caption
     // ABOVE the user's bubble so the injected context is visible, not hidden inside the instruction.
     const ctxInfo = { run: context?.run || null, refs: context?.refs || [], files: atts.map(a => a.name) }
     const hasCtx = ctxInfo.run || ctxInfo.refs.length || ctxInfo.files.length
     atBottomRef.current = true          // sending my own message: always scroll it into view
-    setMsgs(m => [...m, { role: 'user', content: userText || instruction, context: hasCtx ? ctxInfo : null },
+    setMsgs(m => [...m, { role: 'user', content: userText || instruction, context: hasCtx ? ctxInfo : null,
+                          retryPayload: { instruction, userText: userText || instruction, context, files: atts } },
                         { role: 'assistant', content: '', streaming: true }])
     const priorLen = msgs.length + 2
     setBusy(true); runningRef.current = true
@@ -376,6 +411,7 @@ export default function AssistantBar({ runId, hidden = false }) {
     // must not surface the DEPARTED session's confirm-cards over the one the user switched to.
     ;(async () => { while (polling && mountedRef.current && sidRef.current === id) { try { const p = await assistantPermissions(id); if (mountedRef.current && sidRef.current === id) setPending(p.pending || []) } catch { /* transient */ } await sleep(800) } })()
     let acc = ''
+    let streamedFailure = ''
     // Concurrent PROGRESS poll — the SSE fallback. Behind a buffering proxy (jupyter-server-proxy /
     // nginx) the token/text/step SSE events arrive batched only at the END, leaving a dead "thinking"
     // bubble the whole time. So ALSO poll /progress: while the real SSE tokens haven't arrived yet
@@ -390,7 +426,7 @@ export default function AssistantBar({ runId, hidden = false }) {
           if (!pp || !pp.active) continue
           if (mountedRef.current && sidRef.current === id && acc.length < (pp.text || '').length)
             patchLast(prev => (prev && prev.role === 'assistant' && prev.streaming)
-              ? { content: pp.text || prev.content,
+              ? { content: assistantErrorInfo(pp.text) ? normalizedFailureText(pp.text) : (pp.text || prev.content),
                   activity: (pp.steps || []).length ? [{ type: 'tools', labels: pp.steps }] : prev.activity }
               : prev)
         } catch { /* transient */ }
@@ -403,7 +439,10 @@ export default function AssistantBar({ runId, hidden = false }) {
       // against (and instantly kill) THIS new turn's cancel event server-side.
       if (cancelReqRef.current) { try { await cancelReqRef.current } catch { /* done */ } }
       const res = await assistantMessageStream(id, fullInstruction, mode, {
-        onToken: safeSid((tok) => { acc += tokText(tok); patchLast({ content: acc }) }),
+        onToken: safeSid((tok) => {
+          acc += tokText(tok)
+          patchLast({ content: assistantErrorInfo(acc) ? normalizedFailureText(acc) : acc })
+        }),
         onText: safeSid((txt) => patchLast(prev => ({ activity: [...(prev.activity || []), { type: 'text', content: txt }] }))),
         onStep: safeSid((s) => patchLast(prev => {
           const a = prev.activity || []; const last = a[a.length - 1]
@@ -412,19 +451,28 @@ export default function AssistantBar({ runId, hidden = false }) {
             : { activity: [...a, { type: 'tools', labels: [s] }] }
         })),
         onTodos: safeSid((items) => patchLast({ todos: items })),
-        onError: safeSid((e) => flash(e)),
+        onError: safeSid((e) => {
+          streamedFailure = normalizedFailureText(e)
+          patchLast({ content: streamedFailure })
+          flash(safeErrorNotice(e))
+        }),
       }, ctrl.signal, userText || instruction)   // persist the CLEAN bubble, not the ctx-augmented instruction
       if (!mountedRef.current || sidRef.current !== id) return
       // Stop was pressed: aborting a fetch mid-stream does NOT throw (the reader catch swallows it and
       // returns), so we land here on the success path — but the turn is cancelled. Don't overwrite the
       // "(stopped)" bubble stop() already wrote with a "(no reply)".
       if (!runningRef.current) return
-      const reply = (res && res.reply) || acc || (res && res.ok === false && res.error ? `(error: ${res.error})` : '(no reply)')
+      const rawReply = streamedFailure || (res && res.reply) || acc || (res && res.ok === false && res.error ? `Assistant error: ${res.error}` : '(no reply)')
+      const reply = assistantErrorInfo(rawReply) ? normalizedFailureText(rawReply) : rawReply
       patchLast({ content: reply, streaming: false, steps: res && res.steps, applied: res && res.applied,
-                  proposals: res && res.proposals, todos: res && res.todos, tokens: res && res.tokens })
-      setPreview(firstLine(reply).slice(0, 120)); setHasNew(wasBar)
+                  proposals: res && res.proposals, todos: res && res.todos, tokens: res && res.tokens,
+                  error_kind: res && res.error_kind })
+      setPreview(previewText(reply)); setHasNew(wasBar)
     } catch (e) {
       if (!mountedRef.current || sidRef.current !== id || e.name === 'AbortError') { /* handled in finally */ }
+      else if (streamedFailure) {
+        patchLast({ content: streamedFailure, streaming: false })
+      }
       else if (acc) {
         // We already have partial tokens — keep them (the stream dropped mid-answer).
         patchLast({ content: acc, streaming: false })
@@ -436,7 +484,9 @@ export default function AssistantBar({ runId, hidden = false }) {
         flash('reconnecting…')
         const ok = await recoverReply(id, priorLen)
         // `runningRef` guard: if the user hit Stop during recovery, keep the "(stopped)" bubble.
-        if (mountedRef.current && sidRef.current === id && runningRef.current && !ok) patchLast({ content: 'Could not reach the assistant.', streaming: false, recovering: false })
+        if (mountedRef.current && sidRef.current === id && runningRef.current && !ok) patchLast({
+          content: normalizedFailureText('connection unreachable'), streaming: false, recovering: false,
+        })
       }
     } finally {   // guard shared-ref/state cleanup on still-current session (see reattach finally)
       polling = false
@@ -444,17 +494,52 @@ export default function AssistantBar({ runId, hidden = false }) {
     }
   }
 
+  const requestNewRun = (goal = '') => runLLM(
+    goal ? `Plan a new run for this goal and show me a launch card to start it: ${goal}`
+         : 'I want to start a new run. Propose a run spec (name, task, key settings) as a launch card I can start; ask me for anything you need first.',
+    { userText: goal ? `/new ${goal}` : '/new', ensureVisible: true })
+
+  const retryTurn = (assistantIndex) => {
+    if (busy) { flash('Assistant is busy'); return }
+    if (historical) { flash(`Assistant is paused for history seq ${runAccess.seq} — return live to retry`); return }
+    const prior = [...msgs.slice(0, assistantIndex)].reverse().find(m => m.role === 'user')
+    if (!prior) { flash('The original message is no longer available'); return }
+    if (prior.retryPayload) {
+      const payload = prior.retryPayload
+      runLLM(payload.instruction, { userText: payload.userText, ensureVisible: true,
+        context: payload.context || null, retryFiles: payload.files || [] })
+      return
+    }
+    if (prior.context?.files?.length) {
+      flash(`Reattach ${prior.context.files.join(', ')} before retrying this turn`)
+      return
+    }
+    const userText = String(prior.content || '').replace(/\n*\[UI context:[^\]]*\]\s*$/, '').trim()
+    if (!userText) { flash('The original message is empty'); return }
+    const contextRun = prior.context?.run || null
+    const refs = Array.isArray(prior.context?.refs) ? prior.context.refs : []
+    const safeRun = String(contextRun || '').replace(/[\]"\r\n]/g, ' ').slice(0, 200)
+    const ctx = contextRun
+      ? `\n\n[UI context: run "${safeRun}" is open.${refs.length ? ` The user is referring to experiment(s) ${refs.map(i => '#' + i).join(', ')} — read them with the run tools.` : ''} Use the run tools if this is about it.]`
+      : ''
+    runLLM(userText + ctx, { userText, ensureVisible: true, context: prior.context || null })
+  }
+
+  const openAssistantSettings = () => {
+    setView('bar')
+    setHasNew(false)
+    location.hash = '#/settings'
+  }
+
   const send = () => {
+    if (historical) { flash(`Assistant is paused for history seq ${runAccess.seq} — return live to use run context`); return }
     const t = input.trim()
     if ((!t && files.length === 0) || busy) return
     const mNew = /^\/(new|genesis|run)\b\s*([\s\S]*)$/i.exec(t)
     if (mNew) {
       setInput('')
       const goal = mNew[2].trim()
-      runLLM(
-        goal ? `Plan a new run for this goal and show me a launch card to start it: ${goal}`
-             : 'I want to start a new run. Propose a run spec (name, task, key settings) as a launch card I can start; ask me for anything you need first.',
-        { userText: goal ? `/new ${goal}` : '/new', ensureVisible: true })
+      requestNewRun(goal)
       return
     }
     const direct = parseDirect(t)
@@ -469,6 +554,15 @@ export default function AssistantBar({ runId, hidden = false }) {
       : ''
     runLLM((t || 'See the attached file(s).') + ctx, { userText: t || '(attached files)', context: { run: runId || null, refs } })
   }
+  useEffect(() => {
+    const onNewRun = (event) => {
+      if (busy || historical) { flash(historical ? 'Return live before starting a run from this context' : 'Assistant is busy'); return }
+      setInput('')
+      requestNewRun(String(event.detail?.goal || '').trim())
+    }
+    window.addEventListener('ll:new-run', onNewRun)
+    return () => window.removeEventListener('ll:new-run', onNewRun)
+  }, [busy, historical])
 
   const stop = () => {
     runningRef.current = false                              // halt reattach/recover polling immediately
@@ -486,6 +580,9 @@ export default function AssistantBar({ runId, hidden = false }) {
       ? { streaming: false, recovering: false, content: prev.content || '(stopped)' } : prev || {})
     flash('stopped')
   }
+  useEffect(() => {
+    if (historical && runningRef.current) stop()
+  }, [historical])
 
   const activeMode = MODES.find(x => x.id === mode) || MODES[0]
   // Context usage: the last turn's CONTEXT (its peak single prompt) ≈ how much the assistant is carrying
@@ -504,26 +601,54 @@ export default function AssistantBar({ runId, hidden = false }) {
   const slashMatch = /^\/(\w*)$/.exec(input)
   const directNames = [
     { name: 'new', desc: 'plan & start a run — in this chat' },
-    ...Object.keys(DIRECT).map(n => ({ name: n, desc: 'run control · no LLM' })),
+    ...(runId ? Object.keys(DIRECT).map(n => ({ name: n, desc: 'run control · no LLM' })) : []),
   ]
   const suggestions = slashMatch
     ? [...directNames, ...commands.map(c => ({ name: c.name, desc: c.desc }))]
         .filter(c => c.name.startsWith(slashMatch[1].toLowerCase()))
         .filter((c, i, a) => a.findIndex(x => x.name === c.name) === i).slice(0, 6)
     : []
+  const showSuggestions = view === 'bar' && !historical && !suggestionsDismissed && suggestions.length > 0
+  const activeSuggestionIndex = showSuggestions ? Math.min(suggestionIndex, suggestions.length - 1) : -1
+  const chooseSuggestion = (index = activeSuggestionIndex) => {
+    const choice = suggestions[index]
+    if (!choice) return
+    setInput(`/${choice.name} `)
+    setSuggestionsDismissed(true)
+    setSuggestionIndex(0)
+    requestAnimationFrame(() => inputRef.current?.focus())
+  }
 
   const onKey = (e) => {
+    if (showSuggestions && (e.key === 'ArrowDown' || e.key === 'ArrowUp')) {
+      e.preventDefault()
+      const delta = e.key === 'ArrowDown' ? 1 : -1
+      setSuggestionIndex(i => (Math.min(i, suggestions.length - 1) + delta + suggestions.length) % suggestions.length)
+      return
+    }
+    if (showSuggestions && e.key === 'Escape') {
+      e.preventDefault()
+      setSuggestionsDismissed(true)
+      setSuggestionIndex(0)
+      return
+    }
     if (e.key !== 'Enter' || e.shiftKey) return
-    // Only the bar view renders the suggestion popup, so only it may hold Enter back — and an
-    // exact command ("/stop") must send even there, not be swallowed by its own suggestion.
-    const exact = slashMatch && suggestions.some(c => c.name === slashMatch[1].toLowerCase())
-    if (view === 'bar' && suggestions.length > 0 && !exact) return
+    // An exact command ("/stop") executes immediately. A partial command accepts the keyboard-active
+    // option and leaves a trailing space for its argument, matching pointer selection.
+    const exact = slashMatch && suggestions[activeSuggestionIndex]?.name === slashMatch[1].toLowerCase()
+    if (showSuggestions && !exact) { e.preventDefault(); chooseSuggestion(); return }
     e.preventDefault(); send()
   }
 
   if (hidden) return null
 
   // ── shared sub-renders ──────────────────────────────────────────────────────────────────────────
+  const retryHandlerFor = (assistantIndex) => {
+    if (historical) return null
+    const prior = [...msgs.slice(0, assistantIndex)].reverse().find(x => x.role === 'user')
+    if (prior?.context?.files?.length && !prior.retryPayload) return null
+    return () => retryTurn(assistantIndex)
+  }
   const renderThread = () => <>
     {msgs.length === 0 && <div className="asst-empty">
       <div className="muted" style={{ fontSize: 12, marginBottom: 10 }}>
@@ -540,9 +665,11 @@ export default function AssistantBar({ runId, hidden = false }) {
         {(m.context.refs || []).map(r => <span key={'r' + r} className="asst-ctx-i">#{r}</span>)}
         {(m.context.files || []).map(f => <span key={'f' + f} className="asst-ctx-i"><OpIcon name="clip" size={10} /> {f}</span>)}
       </div>}
-      <Turn m={m} runsById={runsById} onRevert={onRevert} />
+      <Turn m={m} runsById={runsById} readOnly={historical} onRevert={historical ? null : onRevert}
+        onRetry={retryHandlerFor(i)}
+        onOpenSettings={openAssistantSettings} />
     </React.Fragment>)}
-    {pending.map(req => <PermCard key={req.id} req={req} onResolve={resolvePerm} />)}
+    {!historical && pending.map(req => <PermCard key={req.id} req={req} onResolve={resolvePerm} />)}
     {/* The streaming placeholder is itself in `msgs`; its Turn renders the activity timeline +
         the "thinking" indicator — no separate block here (which would double the label). */}
   </>
@@ -553,20 +680,23 @@ export default function AssistantBar({ runId, hidden = false }) {
       <button className="chip-x" onClick={() => removeFile(f.name)} title="remove">✕</button></span>)}
   </div>
 
-  const attachBtn = (cls) => <button className={cls} title="attach text file(s)" onClick={() => fileRef.current?.click()}>
+  const attachBtn = (cls) => <button className={cls} title={historical ? 'Unavailable while viewing history' : 'attach text file(s)'}
+    disabled={historical} onClick={() => fileRef.current?.click()}>
     <OpIcon name="clip" size={14} /></button>
 
   // mode selector row — placed BELOW the input in the side + full composers.
   const modeRow = <div className="asst-moderow">
     <div className="asst-modes">
       {MODES.map(x => <button key={x.id} className={'asst-mode' + (x.id === mode ? ' on' : '')}
-        title={x.hint} onClick={() => setMode(x.id)}>{x.label}</button>)}
+        disabled={historical} title={historical ? 'Return live to use run context' : x.hint}
+        onClick={() => setMode(x.id)}>{x.label}</button>)}
     </div>
     <span className="asst-modehint muted">{activeMode.hint}</span>
   </div>
 
   // A full composer (textarea + attach + send/stop + mode row below) — reused by side + full views.
   const composer = (placeholder) => <div className="chat-in asst-in">
+    {historical && <div className="assistant-history-lock">History seq {runAccess.seq} · Assistant paused. Return live to ask about or change this run.</div>}
     {runId && refNodes(input).length > 0 && <div className="cmdbar-ctx">
       {refNodes(input).map(id => <span key={id} className="chip xs">#{id}
         <button className="chip-x" title="detach" onClick={() => setInput(input.replace(new RegExp(`#(?:node-)?${id}\\b`, 'gi'), '').replace(/\s{2,}/g, ' ').trim())}>✕</button></span>)}
@@ -575,10 +705,11 @@ export default function AssistantBar({ runId, hidden = false }) {
     <div className="asst-inrow">
       {attachBtn('asst-attach')}
       <textarea className="text" ref={inputRef} value={input}
-        onChange={e => setInput(e.target.value)} onKeyDown={onKey} placeholder={placeholder} />
+        disabled={historical} onChange={e => { setInput(e.target.value); setSuggestionsDismissed(false); setSuggestionIndex(0) }} onKeyDown={onKey}
+        placeholder={historical ? `History seq ${runAccess.seq} is read-only` : placeholder} />
       {busy
         ? <button className="btn sm" title="stop" onClick={stop}>■</button>
-        : <button className="btn sm primary" disabled={!input.trim() && files.length === 0} onClick={send}>Send</button>}
+        : <button className="btn sm primary" disabled={historical || (!input.trim() && files.length === 0)} onClick={send}>Send</button>}
     </div>
     {modeRow}
   </div>
@@ -598,14 +729,19 @@ export default function AssistantBar({ runId, hidden = false }) {
           {files.map(f => <span key={f.name} className="chip xs file"><OpIcon name="doc" size={10} /> {f.name}
             <button className="chip-x" onClick={() => removeFile(f.name)}>✕</button></span>)}
         </div>}
-        {suggestions.length > 0 && <div className="cmdbar-pop">
-          {suggestions.map(c => <button key={c.name} className="cmdbar-pop-item"
-            onMouseDown={(e) => { e.preventDefault(); setInput(`/${c.name} `); inputRef.current?.focus() }}>
+        {showSuggestions && <div className="cmdbar-pop" id="assistant-command-listbox" role="listbox" aria-label="Assistant commands">
+          {suggestions.map((c, index) => <button key={c.name} id={`assistant-command-option-${index}`}
+            className="cmdbar-pop-item" role="option" tabIndex={-1} aria-selected={index === activeSuggestionIndex}
+            onMouseMove={() => setSuggestionIndex(index)}
+            onMouseDown={(e) => { e.preventDefault(); chooseSuggestion(index) }}>
             <b>/{c.name}</b><span className="muted"> {c.desc}</span></button>)}
         </div>}
         <input className="cmdbar-in" ref={inputRef} value={input}
-          onChange={e => setInput(e.target.value)} onKeyDown={onKey}
-          placeholder={runId
+          role="combobox" aria-autocomplete="list" aria-expanded={showSuggestions}
+          aria-controls="assistant-command-listbox"
+          aria-activedescendant={activeSuggestionIndex >= 0 ? `assistant-command-option-${activeSuggestionIndex}` : undefined}
+          disabled={historical} onChange={e => { setInput(e.target.value); setSuggestionsDismissed(false); setSuggestionIndex(0) }} onKeyDown={onKey}
+          placeholder={historical ? `History seq ${runAccess.seq} · return live to use Assistant` : runId
             ? 'Command or ask…  /stop · pause · #12 to attach an experiment · or describe what to do'
             : 'Describe a run to start, or ask the assistant…  ( / for commands )'} />
       </div>
@@ -620,7 +756,7 @@ export default function AssistantBar({ runId, hidden = false }) {
           so stopping never opens a view. */}
       {busy
         ? <button className="cmdbar-go stop" title="stop the assistant" onClick={stop}>■</button>
-        : <button className="cmdbar-go" title="send (Enter)" disabled={!input.trim() && files.length === 0} onClick={send}>▶</button>}
+        : <button className="cmdbar-go" title={historical ? 'Return live to use Assistant' : 'send (Enter)'} disabled={historical || (!input.trim() && files.length === 0)} onClick={send}>▶</button>}
       <button className="cmdbar-drawer-btn" title="open chat on the right (side view)" onClick={openSide}><OpIcon name="chat" size={13} /></button>
       {toast && <div className="cmdbar-toast">{toast}</div>}
     </div></div>}

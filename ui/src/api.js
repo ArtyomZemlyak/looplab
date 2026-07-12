@@ -3,6 +3,8 @@
 // util.js (mega-refactor P5.2 — bodies verbatim); util.js re-exports everything, so importers are
 // unchanged.
 
+import { assertRunMutationAllowed } from './runMode.js'
+
 export const CONTROL = {
   // Three operator controls (see docs/guide/concepts.md → "Stopping a run"):
   //   stop     — freeze the run, NO finalization (event: pause). Resumable; finalize later if wanted.
@@ -135,16 +137,19 @@ export async function get(path) {
   return r.json()
 }
 export async function post(path, body) {
+  assertRunMutationAllowed(path)
   const r = await fetch(apiUrl(path), { method: 'POST', headers: _authHeaders({ 'Content-Type': 'application/json' }), body: JSON.stringify(body) })
   if (!r.ok) await _throw(r, path)
   return r.json()
 }
 export async function putText(path, text) {
+  assertRunMutationAllowed(path)
   const r = await fetch(apiUrl(path), { method: 'PUT', headers: _authHeaders({ 'Content-Type': 'text/plain' }), body: text })
   if (!r.ok) await _throw(r, path)
   return r.json()
 }
 async function send(path, method, body) {
+  if (method !== 'GET') assertRunMutationAllowed(path)
   // Only attach a JSON body for methods that carry one (PATCH/PUT/POST). A DELETE with a request
   // body + Content-Type is unusual and some reverse proxies (e.g. jupyter-server-proxy) mishandle it
   // — which surfaced as a 500 on "delete chat"/"delete run". DELETE goes bodyless.
