@@ -362,12 +362,14 @@ def test_engine_alive_unsupported_flock_reads_not_alive(tmp_path, monkeypatch):
     assert _engine_alive(rd) is True            # genuinely held by a live engine
 
 
-def test_engine_singleton_fails_open_on_unsupported_flock(tmp_path, monkeypatch):
-    """The OTHER half of the lock: on a FUSE/S3 mount where flock raises a plain OSError, the engine
-    singleton must DEGRADE TO A NO-OP (yield True, run anyway) — NOT misread it as 'another engine holds
-    it' and silently refuse to run. Before the fix a bare `except OSError` failed CLOSED, so on a
-    JupyterHub geesefs home EVERY `run`/`resume` saw a phantom 'already running' and exited. Only a
-    genuine BlockingIOError = held. Mirrors _engine_alive's fail-open so the two halves agree on FUSE."""
+def test_engine_singleton_fails_closed_on_unsupported_flock(tmp_path, monkeypatch):
+    """The OTHER half of the lock: on a FUSE/S3 mount where flock raises a plain OSError, single-writer
+    CANNOT be enforced, so the engine singleton now FAILS CLOSED by default — it refuses startup with an
+    actionable RuntimeError. The old fail-open no-op let two engines (or the UI server + engine) corrupt
+    events.jsonl / mint duplicate seq numbers (P1-12, doc 17 §6.3). The refusal is LOUD, not the older
+    silent phantom-'already running' exit; LOOPLAB_ALLOW_UNLOCKED_WRITER=1 restores the degrade-and-run
+    opt-in for a single operator who vouches for one engine per run dir. A genuine BlockingIOError is
+    still just 'held' -> caller no-ops (not a refusal)."""
     fcntl = pytest.importorskip("fcntl")        # POSIX-only; Windows uses the msvcrt branch
     from looplab.cli import _engine_singleton
     rd = tmp_path / "r"
@@ -376,9 +378,15 @@ def test_engine_singleton_fails_open_on_unsupported_flock(tmp_path, monkeypatch)
         def _f(*a, **k):
             raise exc
         return _f
+    monkeypatch.delenv("LOOPLAB_ALLOW_UNLOCKED_WRITER", raising=False)
     monkeypatch.setattr(fcntl, "flock", _raise(OSError("flock not supported on this fs")))
+    with pytest.raises(RuntimeError, match="single writer"):   # unsupported lock -> fail CLOSED
+        with _engine_singleton(rd):
+            pass
+    monkeypatch.setenv("LOOPLAB_ALLOW_UNLOCKED_WRITER", "1")    # explicit opt-in -> degrade + run
     with _engine_singleton(rd) as ok:
-        assert ok is True            # unsupported lock -> fail OPEN (engine still runs)
+        assert ok is True
+    monkeypatch.delenv("LOOPLAB_ALLOW_UNLOCKED_WRITER", raising=False)
     monkeypatch.setattr(fcntl, "flock", _raise(BlockingIOError("held")))
     with _engine_singleton(rd) as ok:
         assert ok is False           # genuinely HELD by a live engine -> caller no-ops

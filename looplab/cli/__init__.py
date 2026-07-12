@@ -105,6 +105,13 @@ def _require_run_dir(run_dir: Path) -> EventStore:
     return EventStore(run_dir / "events.jsonl")
 
 
+def _truthy_env(name: str) -> bool:
+    """A LOOPLAB_* deployment env var read as a boolean (1/true/yes/on, case-insensitive). Not a
+    Settings field on purpose: it's a property of the FILESYSTEM/deployment, not the run, so it must
+    NOT be snapshotted into run_started (a run moved to a lock-capable disk should re-evaluate)."""
+    return os.environ.get(name, "").strip().lower() in ("1", "true", "yes", "on")
+
+
 @contextmanager
 def _engine_singleton(run_dir: Path):
     """Hold an exclusive OS lock on <run_dir>/engine.lock for the engine's whole lifetime, so a second
@@ -113,7 +120,8 @@ def _engine_singleton(run_dir: Path):
     resumes a finished run per message, so two tabs acting at once is a real race this closes. Yields
     True when the lock was acquired (run), False when another engine already holds it (caller no-ops).
     The OS frees the lock when the process exits (even on crash), so there's no stale-lock problem.
-    Degrades to a no-op (yields True) where file locking is unavailable."""
+    Where file locking is UNAVAILABLE (FUSE/S3 mounts) single-writer can't be enforced, so it fails
+    CLOSED with an actionable error unless LOOPLAB_ALLOW_UNLOCKED_WRITER=1 opts into the risk."""
     run_dir.mkdir(parents=True, exist_ok=True)
     f = open(run_dir / "engine.lock", "a+")
     acquired = True
@@ -132,15 +140,26 @@ def _engine_singleton(run_dir: Path):
                     fcntl.flock(f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
                 except BlockingIOError:
                     acquired = False    # genuinely HELD by a live engine (EWOULDBLOCK) -> caller no-ops
-                except OSError:
+                except OSError as exc:
                     # flock UNSUPPORTED on this filesystem (FUSE/S3 like geesefs, some NFS) raises
-                    # ENOTSUP/EINVAL — NOT a held lock. Degrade to a no-op (acquired stays True) so the
-                    # engine STILL RUNS, matching the docstring and server._engine_alive's fail-open.
-                    # The old bare `except OSError: acquired = False` failed CLOSED here: on a JupyterHub
-                    # home mounted via geesefs, every `run`/`resume` saw a phantom "already running" and
-                    # silently exited. Locking just isn't available on such a mount; single-writer
-                    # discipline (one engine per run dir) still holds in practice.
-                    pass
+                    # ENOTSUP/EINVAL — NOT a held lock, so single-writer CANNOT be enforced here. Two
+                    # engines (or the UI server + engine) writing the one events.jsonl unlocked can
+                    # interleave appends into a torn line / mint duplicate seq numbers and corrupt the
+                    # log (P1-12, doc 17 §6.3). Fail CLOSED by default — but LOUDLY and ACTIONABLY, not
+                    # the old silent phantom-"already running" exit that just failed closed with no
+                    # explanation. A single operator on such a mount who guarantees one engine per run
+                    # dir sets LOOPLAB_ALLOW_UNLOCKED_WRITER=1 to knowingly degrade to a no-op.
+                    if _truthy_env("LOOPLAB_ALLOW_UNLOCKED_WRITER"):
+                        pass   # explicit operator override -> single-writer assumption, run anyway
+                    else:
+                        acquired = False   # never acquired the lock -> skip the unlock in `finally`
+                        raise RuntimeError(
+                            f"Cannot enforce a single writer of the append-only event log: file "
+                            f"locking is unavailable on the filesystem holding {run_dir}/engine.lock "
+                            f"({type(exc).__name__}: {exc}). Two runs here could corrupt events.jsonl. "
+                            f"Move the run dir to a local disk (see LOOPLAB_RUN_ROOT), or set "
+                            f"LOOPLAB_ALLOW_UNLOCKED_WRITER=1 if you guarantee only one engine writes "
+                            f"this run dir.") from exc
         except OSError:
             acquired = False
         yield acquired
