@@ -697,15 +697,18 @@ plan can be sequenced by ROI rather than by list order.
 | P1-7 — trust detector architecture (first step) | ✅ landed | AST recall pass for variable-path answer-key reads + versioned TrustEvidence (method/confidence/digest) (`a87f9a0`) |
 | P1-12 — explicit-seq append CAS (the lean half) | ✅ landed | optional `expected_last_seq` optimistic-concurrency check on `append`, wired into `/control` (409 on a stale view) (`83fc1f5`) |
 | P0-3 — content-addressed setup manifest | ✅ landed | `setup_finished` carries a config+workspace+data digest; a pre-node resume re-runs preflight when the material changed (`7603114`) |
+| P0-5 — environment identity (InputSnapshot slice) | ✅ landed | run start pins a Python/platform/lib fingerprint; a resume emits `env_changed` on drift (`cbcde25`) |
+| P1-4 — bounded logs + reconciler backoff | ✅ landed | `engine.stderr.log` capped to its recent tail; the resume reconciler re-records its intent so a crash-loop re-spawns at most once per grace (`8ca06ae`) |
 
 Still deferred by design (§6.4/§6.6, schedule by demonstrated need): the **full** multi-writer CAS + v2 envelope
 (the lean explicit-seq half landed above; the writer is already lock-serialized and `append` derives
-`seq = max(disk, mem)+1`), the full external-material RunManifest/InputSnapshot (P0-5 — the setup-material half
-landed as P0-3), the reserve/fencing BudgetLedger (P1-2's real over-admission hole closed at `a5f74b1`;
-separate budget buckets are a lean enhancement, not a correctness bug), a cgroups/Job-Object ProcessSupervisor
-(host-RAM cap landed as the cheap half), and the R4/R5 service split + multi-tenant auth. The remaining P1-7
-depth (token/dataflow analysis + labelled-corpus calibration) needs a labelled corpus. These extend the landed
-patterns and are scheduled by demonstrated need, not treated as one release wall.
+`seq = max(disk, mem)+1`), the full external-material RunManifest/InputSnapshot (the setup-material, config, and
+environment slices landed as P0-3/P0-5; the remaining dirty-input-bytes enumeration is the follow-up), the
+reserve/fencing BudgetLedger (P1-2's real over-admission hole closed at `a5f74b1`; separate budget buckets are a
+lean observability enhancement, not a correctness bug), a cgroups/Job-Object ProcessSupervisor (host-RAM cap +
+deadline watcher landed as the cheap halves), and the R4/R5 service split + multi-tenant auth. The remaining
+P1-7 depth (token/dataflow analysis + labelled-corpus calibration) needs a labelled corpus. These extend the
+landed patterns and are scheduled by demonstrated need, not treated as one release wall.
 
 ---
 
