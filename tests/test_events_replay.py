@@ -240,6 +240,24 @@ def test_fold_reopen_rehides_holdout(tmp_path):
     assert st.nodes[0].holdout_metric == 0.2 and 0 in st.holdout_evaluated_ids
 
 
+def test_fold_resume_intent_seq_gated(tmp_path):
+    # P1-1: a resume_requested newer than the last resume_served is a PENDING (unfulfilled) resume;
+    # a serve at a later seq fulfills it, and one serve satisfies several piled-up requests.
+    s = EventStore(tmp_path / "e.jsonl")
+    s.append("run_started", {"run_id": "r", "task_id": "t", "direction": "min"})
+    assert not fold(s.read_all()).resume_pending()
+    s.append("resume_requested", {})
+    st = fold(s.read_all())
+    assert st.resume_pending() and st.last_resume_request_ts > 0
+    s.append("resume_served", {})
+    assert not fold(s.read_all()).resume_pending()             # fulfilled by a later-seq serve
+    s.append("resume_requested", {})
+    s.append("resume_requested", {})                            # two piled-up requests
+    assert fold(s.read_all()).resume_pending()
+    s.append("resume_served", {})
+    assert not fold(s.read_all()).resume_pending()             # one serve satisfies both
+
+
 def test_log_divergence_detects_mid_file_corruption(tmp_path):
     from looplab.events.eventstore import log_divergence
     p = tmp_path / "events.jsonl"

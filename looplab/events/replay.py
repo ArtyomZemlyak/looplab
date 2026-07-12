@@ -21,7 +21,8 @@ from looplab.events.types import (
     EV_NODE_CREATED, EV_NODE_EVALUATED, EV_NODE_FAILED, EV_NODE_REPAIRED, EV_NODE_RESET,
     EV_NODE_TOMBSTONED, EV_NOVELTY_REJECTED, EV_PAUSE, EV_STAGE_FINISHED,
     EV_POLICY_DECISION, EV_PROMOTE, EV_PROXY_SCORED, EV_REPORT_GENERATED,
-    EV_RESEARCH_COMPLETED, EV_RESUME, EV_REWARD_HACK_SUSPECTED, EV_RUN_ABORT,
+    EV_RESEARCH_COMPLETED, EV_RESUME, EV_RESUME_REQUESTED, EV_RESUME_SERVED,
+    EV_REWARD_HACK_SUSPECTED, EV_RUN_ABORT,
     EV_RUN_FINISHED, EV_RUN_REOPENED, EV_RUN_SETUP_FINISHED, EV_RUN_STARTED, EV_RUNG_PROMOTED,
     EV_SET_STRATEGY,
     EV_SETUP_FINISHED, EV_SPEC_APPROVAL_REQUESTED, EV_SPEC_APPROVED, EV_SPEC_DRIFT, EV_SPEC_PROPOSED,
@@ -693,6 +694,20 @@ def _on_resume_or_run_reopened(st: RunState, e: Event, d: dict, ctx: "_FoldCtx")
 
 # --- live operator control events (UI intervention). Intent only; the engine reads
 # these and writes the matching domain effect. Deterministic under replay. ---
+def _on_resume_requested(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
+    # P1-1 durable resume intent: record the request seq + time. A request seq newer than the last
+    # `resume_served` (below) is an unfulfilled resume the reconciler re-spawns. Monotonic by seq, so a
+    # duplicate/out-of-order fold is idempotent; the ts is the request event's own recorded time.
+    if e.seq > st.last_resume_request_seq:
+        st.last_resume_request_seq = e.seq
+        st.last_resume_request_ts = float(getattr(e, "ts", 0.0) or 0.0)
+
+def _on_resume_served(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
+    # P1-1: the engine acquired the singleton lock and is driving the loop -> every resume requested
+    # before this seq is fulfilled. Seq-gated so one serve satisfies several piled-up requests.
+    if e.seq > st.last_resume_served_seq:
+        st.last_resume_served_seq = e.seq
+
 def _on_run_abort(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     # FINALIZE: the loop turns stop_requested into a run_finished (which runs the end-of-run
     # finalization — report/lessons/case/cost). A bare `stop` uses EV_PAUSE instead (no finalize).
@@ -830,6 +845,8 @@ _HANDLERS = {
     EV_NODE_FAILED: _on_node_failed,
     EV_NODE_REPAIRED: _on_node_repaired,
     EV_NODE_TOMBSTONED: _on_node_tombstoned,
+    EV_RESUME_REQUESTED: _on_resume_requested,
+    EV_RESUME_SERVED: _on_resume_served,
     EV_NODE_RESET: _on_node_reset,
     EV_STAGE_FINISHED: _on_stage_finished,
     EV_CONFIRM_EVAL: _on_confirm_eval,

@@ -360,6 +360,15 @@ class RunState(BaseModel):
     # confirmed (the confirm phase is skipped) or re-approved. Defaults 0; old logs stay at 0 and
     # fold byte-identically until an actual reopen-after-finish occurs.
     search_epoch: int = 0
+    # P1-1 recoverable-intent kernel: seq of the last durable `resume_requested` (appended by /resume
+    # before spawning the detached engine) and of the last engine-written `resume_served` (appended
+    # once the engine holds the singleton lock). A request whose seq is NEWER than the last serve is an
+    # UNFULFILLED resume — the engine crashed before running — which the on-load reconciler re-spawns.
+    # `resume_pending()` reads these. `_ts` carries the request's event time so the reconciler can wait
+    # a grace period before re-spawning. All 0 on old logs -> never pending -> unchanged behavior.
+    last_resume_request_seq: int = 0
+    last_resume_served_seq: int = 0
+    last_resume_request_ts: float = 0.0
     awaiting_approval: bool = False       # HITL: approval requested, not yet granted (I21)
     approved: bool = False                # HITL: a human approved the result (I21)
     # P0-2: the node id the pending approval request was raised for (folded from `approval_requested`),
@@ -503,6 +512,12 @@ class RunState(BaseModel):
         return sorted(v)
 
     # --- read helpers (no mutation) ---
+    def resume_pending(self) -> bool:
+        """P1-1: a durable resume intent was recorded but no engine has served it yet (its request seq
+        is newer than the last serve). Combined by the reconciler with a not-alive / not-finished probe
+        to detect a zombie whose resume spawn died before the engine ran."""
+        return self.last_resume_request_seq > self.last_resume_served_seq
+
     def best(self) -> Optional[Node]:
         return self.nodes.get(self.best_node_id) if self.best_node_id is not None else None
 

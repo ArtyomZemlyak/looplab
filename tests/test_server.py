@@ -237,6 +237,40 @@ def test_engine_liveness_lock_probe(tmp_path):
     assert _engine_alive(tmp_path / "demo") is False   # released on context exit
 
 
+def test_reconcile_pending_resume(tmp_path, monkeypatch):
+    """P1-1 recoverable-intent reconciler: re-spawn a run whose durable resume intent stayed unserved
+    past the grace window (its detached spawn died before the engine ran) — but ONLY then, and never
+    for a finished/alive/within-grace run. Idempotent via the singleton lock (not exercised here)."""
+    from looplab.serve import engine_proc as ep
+    from looplab.events.eventstore import EventStore
+    from looplab.events.replay import fold
+    rd = tmp_path / "run1"
+    rd.mkdir()
+    (rd / "task.snapshot.json").write_text("{}", encoding="utf-8")     # resumable
+    s = EventStore(rd / "events.jsonl")
+    s.append("run_started", {"run_id": "run1", "task_id": "t", "direction": "min"})
+    spawns = []
+    monkeypatch.setattr(ep, "_spawn_engine", lambda *a, **k: spawns.append((a, k)))
+    monkeypatch.setattr(ep, "_engine_alive", lambda _rd: False)
+
+    assert ep.reconcile_pending_resume(rd) is False and not spawns    # no intent -> no re-spawn
+    s.append("resume_requested", {})
+    req_ts = fold(s.read_all()).last_resume_request_ts
+    assert ep.reconcile_pending_resume(rd, now=req_ts + 1) is False and not spawns   # within grace
+    assert ep.reconcile_pending_resume(rd, now=req_ts + 31) is True and len(spawns) == 1  # zombie -> spawn
+
+    monkeypatch.setattr(ep, "_engine_alive", lambda _rd: True)         # an engine IS running now
+    assert ep.reconcile_pending_resume(rd, now=req_ts + 31) is False and len(spawns) == 1
+    monkeypatch.setattr(ep, "_engine_alive", lambda _rd: False)
+    s.append("resume_served", {})                                     # engine served the intent
+    assert ep.reconcile_pending_resume(rd, now=req_ts + 100) is False and len(spawns) == 1
+
+    s.append("resume_requested", {})                                  # a new intent, but the run then finishes
+    s.append("run_finished", {"reason": "done"})
+    fin_ts = fold(s.read_all()).last_resume_request_ts
+    assert ep.reconcile_pending_resume(rd, now=fin_ts + 100) is False and len(spawns) == 1
+
+
 def test_time_travel_seq(tmp_path):
     _build_run(tmp_path)
     client = TestClient(make_app(tmp_path))

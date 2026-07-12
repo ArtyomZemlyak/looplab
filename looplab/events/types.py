@@ -100,6 +100,13 @@ EV_LESSONS_DISTILLED = "lessons_distilled"
 EV_LESSONS_REFRESHED = "lessons_refreshed"
 EV_REPORT_GENERATED = "report_generated"
 EV_CONFIRM_DONE = "confirm_done"         # fulfillment gate for `force_confirm` requests
+# P1-1 recoverable-intent kernel for the resume/spawn handoff. `/resume` records a DURABLE
+# `resume_requested` intent BEFORE spawning the detached engine (so a spawn that crashes before the
+# engine runs isn't lost); the engine appends `resume_served` once it has ACQUIRED the singleton lock
+# and is about to drive the loop. The pair is a seq-gated fulfillment (like fork/inject): a request
+# whose seq is newer than the last serve is an UNFULFILLED (zombie) resume that the on-load reconciler
+# re-spawns — idempotent because a second engine no-ops on the lock. resume_served is engine-written.
+EV_RESUME_SERVED = "resume_served"
 
 # --- CONTROL events (live operator/UI intents appended to the same log; the engine reads
 #     the folded intent and writes the matching DOMAIN effect — see CONTROL_EVENTS in
@@ -127,6 +134,7 @@ EV_HYPOTHESIS_ADDED = "hypothesis_added"       # also engine-written after deep 
 EV_HYPOTHESIS_UPDATED = "hypothesis_updated"
 EV_HYPOTHESIS_MERGED = "hypothesis_merged"     # engine-written: fold alias hypotheses into a canonical
 EV_RUN_REOPENED = "run_reopened"
+EV_RESUME_REQUESTED = "resume_requested"   # P1-1: durable resume intent, appended by /resume pre-spawn
 EV_TRUST_GATE_CHANGED = "trust_gate_changed"   # server config edit; folded last-write-wins
 # Predict-before-execute pick among K ideas / N code candidates. FOLDED into RunState.foresight_selected
 # (audit-only, never touches selection) so the world model can be primed with its own calibration track

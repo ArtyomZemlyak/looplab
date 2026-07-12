@@ -151,6 +151,59 @@ def _spawn_engine(cli_args: list[str], env: Optional[dict] = None,
             err_f.close()   # the child inherited its own dup; release the parent's handle
 
 
+# P1-1 recoverable-intent reconciler grace: wait this long after a durable resume_requested before
+# re-spawning it, so the ORIGINAL detached spawn has time to acquire the lock + append resume_served.
+# Only a resume that stays unserved past this window is treated as a died-on-startup zombie.
+_RESUME_RECONCILE_GRACE_S = 30.0
+
+
+def _resolve_task_file(rd: Path) -> Optional[str]:
+    """The task file a `resume` spawn needs — the UI's recorded task_file, else the verbatim
+    task.snapshot.json every `run` writes. Mirrors control._task_file_for so the reconciler can
+    re-spawn without the router closure. None => not resumable."""
+    import json
+    meta = rd / "ui_meta.json"
+    if meta.exists():
+        try:
+            tf = json.loads(meta.read_text(encoding="utf-8")).get("task_file")
+            if tf:
+                return tf
+        except (OSError, ValueError):
+            pass
+    snap = rd / "task.snapshot.json"
+    return str(snap) if snap.exists() else None
+
+
+def reconcile_pending_resume(rd: Path, *, now: Optional[float] = None) -> bool:
+    """P1-1 on-load reconciler (NO standing daemon): re-spawn the engine for a run whose durable resume
+    intent was recorded but never served — the detached `/resume` spawn died before the engine ran, so
+    the run is a zombie (not finished, no engine driving it). Returns True if it re-spawned. Idempotent
+    and safe to over-call: a second engine no-ops on the singleton lock. Conservative gates, ALL required:
+      * `resume_pending()` — a resume_requested seq newer than the last resume_served (unfulfilled);
+      * the request is older than the grace window (the real spawn had its chance to acquire the lock);
+      * the run is NOT finished AND no engine currently holds the lock (a genuine zombie);
+      * the run is resumable (a task file exists)."""
+    from looplab.events.eventstore import EventStore
+    from looplab.events.replay import fold
+    import time as _time
+    now = _time.time() if now is None else now
+    try:
+        st = fold(EventStore(rd / "events.jsonl").read_all())
+    except Exception:  # noqa: BLE001 — a corrupt/absent log is not reconcilable; never crash the list
+        return False
+    if st.finished or not st.resume_pending():
+        return False
+    if (now - float(st.last_resume_request_ts or 0.0)) < _RESUME_RECONCILE_GRACE_S:
+        return False                      # give the in-flight spawn time to acquire the lock + serve
+    if _engine_alive(rd):
+        return False                      # an engine IS running -> the intent is being served
+    task_file = _resolve_task_file(rd)
+    if not task_file:
+        return False                      # not resumable (predates self-describing runs)
+    _spawn_engine(["resume", str(rd), "--task-file", str(task_file)], run_dir=rd)
+    return True
+
+
 def _reap_spawned_engines() -> None:
     # Reap engines THIS server spawned — but ONLY under JupyterHub. A detached engine (own session,
     # so it survives an HTTP request) ALSO survives the single-user server's process-group SIGTERM

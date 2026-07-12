@@ -133,6 +133,9 @@
   "hypothesis_ranking": null,
   "inject_requests": [],
   "injects_done": 0,
+  "last_resume_request_seq": 0,
+  "last_resume_request_ts": 0.0,
+  "last_resume_served_seq": 0,
   "leakage": null,
   "lessons_distilled": [
     {

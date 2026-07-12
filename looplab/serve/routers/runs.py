@@ -21,7 +21,7 @@ from looplab.events.types import EV_TRUST_GATE_CHANGED
 from looplab.events.digest import theme_rollup as _theme_rollup
 from looplab.serve.artifacts import (
     _ART_MAX_BYTES, _LOG_TAIL_MAX, _artifact_roots, _list_artifact_files)
-from looplab.serve.engine_proc import _engine_alive
+from looplab.serve.engine_proc import _engine_alive, reconcile_pending_resume
 from looplab.serve.protocol import POLL_SECONDS, SSE_DONE, SSE_STATE
 
 # Snapshot-derived OPERATOR stage names, memoized per run DIRECTORY + snapshot VERSION: keyed on
@@ -129,10 +129,22 @@ def build_router(srv) -> APIRouter:
         st_assign = pdata.get("supertask_assignments", {})
         # engine_running is a live fact (lock probe), so it stays OUT of the mtime-keyed summary cache —
         # a zombie's events.jsonl is unchanged, yet its liveness flips the instant its engine dies.
+        def _alive(rd, finished):
+            alive = _engine_alive(rd)
+            # P1-1 on-load reconcile: a not-finished, not-alive run may be a zombie whose resume spawn
+            # died before the engine ran. reconcile_pending_resume re-spawns it IFF a durable resume
+            # intent stayed unserved past the grace window (idempotent via the singleton lock). The
+            # re-spawn is detached, so this poll still reports not-running; the next refresh shows it.
+            if not finished and not alive:
+                try:
+                    reconcile_pending_resume(rd)
+                except Exception:  # noqa: BLE001 — recovery is best-effort; never break the run list
+                    pass
+            return alive
         return [{**s, "project_id": assignments.get(s["run_id"]),
                  "label": labels.get(s["run_id"]),
                  "supertask_id": st_assign.get(s["run_id"]),
-                 "engine_running": _engine_alive(root / s["run_id"])} for s in out]
+                 "engine_running": _alive(root / s["run_id"], s["finished"])} for s in out]
 
     # Late-bind the runs list for the cross-run scope reports (`_scope_run_ids`), breaking the
     # route-calls-route dependency between this router and `routers/reports.py`.

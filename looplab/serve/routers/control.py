@@ -14,7 +14,7 @@ from fastapi import APIRouter, HTTPException, Request
 from looplab.core.atomicio import best_effort_fsync
 from looplab.core.config import Settings
 from looplab.events.eventstore import EventStore, write_jsonl_atomic
-from looplab.events.types import EV_INJECT_NODE, EV_NODE_RESET
+from looplab.events.types import EV_INJECT_NODE, EV_NODE_RESET, EV_RESUME_REQUESTED
 from looplab.serve.appstate import _RESERVED_RUN_IDS
 from looplab.serve.engine_proc import _engine_alive, _spawn_engine
 from looplab.serve.protocol import CONTROL_EVENTS, GENESIS_CHAT_SEQ_BASE
@@ -153,6 +153,11 @@ def build_router(srv) -> APIRouter:
         if not task_file:
             raise HTTPException(400, "run is not resumable — no task.snapshot.json or ui_meta.json "
                                      "(it predates self-describing runs; start it via the UI to enable resume)")
+        # P1-1 recoverable-intent: record a DURABLE resume intent BEFORE the detached spawn. If that
+        # spawn dies before the engine acquires the lock (import error, unreachable LLM, OOM), the
+        # intent survives and the on-load reconciler re-spawns it — instead of a silent zombie. The
+        # engine appends resume_served once it holds the lock, fulfilling the intent.
+        EventStore(rd / "events.jsonl").append(EV_RESUME_REQUESTED, {})
         _spawn_engine(["resume", str(rd), "--task-file", str(task_file)], run_dir=rd)
         return {"ok": True}
 
