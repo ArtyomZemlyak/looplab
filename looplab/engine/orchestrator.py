@@ -75,6 +75,12 @@ from looplab.core.tracing import JsonlSpanExporter, Tracer
 # kept importable from this module path for pre-collapse importers.
 from looplab.engine.options import _UNSET  # noqa: F401
 
+# P0-5 dirty-input diff digest: the byte ceiling on how much of `git diff HEAD` is hashed before the
+# digest is marked truncated (`~`). A real code diff is far under this; beyond it we're diffing a
+# tracked data/generated file, where buffering the whole patch would spike run-start memory (a latent
+# OOM) and a truncated "did-it-change" signal is enough. Module-level so an operator/test can retune.
+_DIFF_DIGEST_CAP = 8 * 1024 * 1024
+
 
 # The confirm phase (engine/confirm_phase.py) and ablation (engine/ablation.py) clusters are
 # MIXINS — pure file-level moves inherited unchanged, so every `self._confirm_phase(...)` /
@@ -1495,15 +1501,70 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
 
     def _dirty_inputs(self, wf: "dict | None") -> list:
         """P0-5 dirty-input enumeration: for each git-repo workspace source, the uncommitted-file LIST
-        (`git status --porcelain`) plus a DIGEST of the actual diff vs HEAD (`git diff HEAD`) — the
-        EXPLICIT record of which inputs differ from a clean checkout AND a content fingerprint of HOW,
-        on top of the content hash the workspace fingerprint already pins. The digest (not the diff
-        TEXT) is stored on purpose: it detects a changed dirty-content across runs WITHOUT leaking a
-        secret a raw patch could carry (a pasted key, an edited .env) into the world-readable log.
-        Best-effort: git absent, a non-repo source, or a timeout contributes nothing and never fails
-        the run. Bounded output."""
+        (`git status --porcelain`) plus a bounded DIGEST of the actual diff vs HEAD (`git diff HEAD`) —
+        the EXPLICIT record of which inputs differ from a clean checkout AND a content fingerprint of
+        HOW, on top of the HEAD-SHA the workspace fingerprint pins (which is blind to uncommitted work).
+        The digest (not the diff TEXT) is stored on purpose: it detects a changed dirty-content across
+        runs WITHOUT leaking a secret a raw patch could carry (a pasted key, an edited .env) into the
+        world-readable log.
+
+        Corner-case behavior (all best-effort — a source never fails the run):
+          * A heavy UNTRACKED artifact costs nothing: `git diff HEAD` never emits untracked files, so
+            only its NAME lands in the porcelain list. A heavy TRACKED+modified text file would make
+            git stream a giant patch, so the diff is hashed INCREMENTALLY and capped at
+            `_DIFF_DIGEST_CAP` — the engine never buffers the whole patch, and an over-cap digest is
+            marked `~` (truncated) so a reader knows the tail was not seen.
+          * A gitignored file is INVISIBLE here BY DESIGN — porcelain skips it and the repo fingerprint
+            is HEAD-only, so declared-non-source scratch (`runs/`, `__pycache__`, `model.pkl`, `.env`)
+            never pollutes the enumeration (and `.env`'s secret never enters the log). A gitignored
+            path that is genuinely a run INPUT should be mounted as a `data:` source, where
+            `_shallow_fingerprint` covers it outside git's ignore rules.
+          * Multiple sources under one repo share a single diff (computed once per resolved root).
+        Bounded output: <=500 porcelain lines x 200 chars, and one capped digest per repo root."""
+        import os
         import subprocess
+        import time
+
+        def _diff_digest(root: str) -> "str | None":
+            # Incrementally hash `git diff HEAD` (staged + unstaged) so a multi-GB tracked-file diff
+            # never lands in memory: raw fd reads, an 8 MiB byte cap, and a wall-clock deadline.
+            proc = None
+            try:
+                proc = subprocess.Popen(["git", "-C", root, "diff", "HEAD"],
+                                        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+                fd = proc.stdout.fileno()
+                h, read, truncated, deadline = hashlib.sha256(), 0, False, time.monotonic() + 15
+                while read < _DIFF_DIGEST_CAP:
+                    if time.monotonic() > deadline:
+                        truncated = True
+                        break
+                    chunk = os.read(fd, min(65536, _DIFF_DIGEST_CAP - read))
+                    if not chunk:
+                        break                                       # EOF: the whole diff was hashed
+                    h.update(chunk)
+                    read += len(chunk)
+                else:
+                    truncated = bool(os.read(fd, 1))                # bytes remained past the cap
+                return (h.hexdigest()[:16] + ("~" if truncated else "")) if read else None
+            except Exception:  # noqa: BLE001 — no HEAD / git error / decode: keep the file list only
+                return None
+            finally:
+                if proc is not None:
+                    try:
+                        proc.stdout.close()
+                    except Exception:  # noqa: BLE001
+                        pass
+                    try:
+                        proc.terminate()                            # stop git if we bailed mid-stream
+                        proc.wait(timeout=5)
+                    except Exception:  # noqa: BLE001
+                        try:
+                            proc.kill()
+                        except Exception:  # noqa: BLE001
+                            pass
+
         out: list = []
+        digests: dict = {}                                          # resolved-root -> digest (once)
         for src in sorted((wf or {}).keys()):
             try:
                 p = Path(src)
@@ -1513,16 +1574,10 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                 dirty = [ln[:200] for ln in r.stdout.splitlines() if ln.strip()][:500]
                 if r.returncode == 0 and dirty:
                     entry = {"source": src, "dirty": dirty}
-                    # Content fingerprint of the dirty changes (staged + unstaged vs HEAD). A HASH, never
-                    # the patch bytes — provenance + change-detection without the secret-leak risk of the
-                    # raw diff. Absent when the diff can't be taken (leaves the enumeration intact).
-                    try:
-                        dr = subprocess.run(["git", "-C", root, "diff", "HEAD"],
-                                            capture_output=True, timeout=15)
-                        if dr.returncode == 0 and dr.stdout:
-                            entry["diff_digest"] = hashlib.sha256(dr.stdout).hexdigest()[:16]
-                    except Exception:  # noqa: BLE001 — no diff available: keep the file list only
-                        pass
+                    if root not in digests:
+                        digests[root] = _diff_digest(root)
+                    if digests[root] is not None:
+                        entry["diff_digest"] = digests[root]
                     out.append(entry)
             except Exception:  # noqa: BLE001 — git missing / not a repo / timeout: no enumeration
                 pass

@@ -195,6 +195,73 @@ def test_dirty_inputs_hashes_the_diff_of_a_dirty_repo(tmp_path):
     assert "print(1)" not in str(out) and "print(2)" not in d2
 
 
+def test_dirty_inputs_untracked_heavy_file_costs_only_its_name(tmp_path):
+    # A heavy UNTRACKED artifact never reaches `git diff HEAD` (git diffs tracked paths only), so it
+    # contributes just its porcelain name — no giant patch buffered, and no digest at all here.
+    import subprocess
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+
+    def _git(*a):
+        return subprocess.run(["git", "-C", str(repo), *a], capture_output=True, text=True)
+
+    _git("init", "-q"); _git("config", "user.email", "t@t.t"); _git("config", "user.name", "t")
+    (repo / "keep.py").write_text("print(0)\n")
+    _git("add", "-A"); _git("commit", "-q", "-m", "init")
+    (repo / "big.bin").write_bytes(b"A" * (2 * 1024 * 1024))        # untracked heavy artifact
+
+    out = _mk_engine(tmp_path / "run")._dirty_inputs({str(repo / "keep.py"): {}})
+    assert len(out) == 1
+    assert any("big.bin" in ln for ln in out[0]["dirty"])          # listed by name...
+    assert "diff_digest" not in out[0]                             # ...but no tracked change to diff
+
+
+def test_dirty_inputs_caps_a_huge_tracked_diff(tmp_path, monkeypatch):
+    # A heavy TRACKED+modified text file is hashed incrementally and capped: with a tiny cap the
+    # digest is marked `~` (truncated) rather than buffering the whole patch.
+    import subprocess
+
+    from looplab.engine import orchestrator
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+
+    def _git(*a):
+        return subprocess.run(["git", "-C", str(repo), *a], capture_output=True, text=True)
+
+    _git("init", "-q"); _git("config", "user.email", "t@t.t"); _git("config", "user.name", "t")
+    (repo / "data.txt").write_text("seed\n")
+    _git("add", "-A"); _git("commit", "-q", "-m", "init")
+    (repo / "data.txt").write_text("x\n" * 100000)                 # tracked -> a large real diff
+
+    monkeypatch.setattr(orchestrator, "_DIFF_DIGEST_CAP", 4096)    # force truncation cheaply
+    out = _mk_engine(tmp_path / "run")._dirty_inputs({str(repo / "data.txt"): {}})
+    assert out[0]["diff_digest"].endswith("~")                     # capped => truncation marked
+    assert len(out[0]["diff_digest"]) == 17                        # 16 hex + the '~'
+
+
+def test_dirty_inputs_shares_one_diff_across_sources_in_a_repo(tmp_path):
+    # Two declared sources under the SAME repo each get an entry, but the diff is computed once —
+    # both carry the identical (repo-level) digest.
+    import subprocess
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+
+    def _git(*a):
+        return subprocess.run(["git", "-C", str(repo), *a], capture_output=True, text=True)
+
+    _git("init", "-q"); _git("config", "user.email", "t@t.t"); _git("config", "user.name", "t")
+    (repo / "a.py").write_text("0\n"); (repo / "b.py").write_text("0\n")
+    _git("add", "-A"); _git("commit", "-q", "-m", "init")
+    (repo / "a.py").write_text("1\n")
+
+    out = _mk_engine(tmp_path / "run")._dirty_inputs({str(repo / "a.py"): {}, str(repo / "b.py"): {}})
+    assert len(out) == 2
+    assert out[0]["diff_digest"] == out[1]["diff_digest"]          # one repo -> one shared digest
+
+
 def test_dirty_inputs_non_repo_source_is_silent(tmp_path):
     # A source that is not a git repo (or git absent) contributes nothing and never raises.
     eng = _mk_engine(tmp_path / "run")
