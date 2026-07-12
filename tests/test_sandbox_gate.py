@@ -16,6 +16,58 @@ def test_sandbox_captures_metric(tmp_path):
     assert not res.timed_out
 
 
+def test_parse_mem_bytes():
+    from looplab.runtime.sandbox import parse_mem_bytes
+    assert parse_mem_bytes("8g") == 8 * 1024**3
+    assert parse_mem_bytes("512m") == 512 * 1024**2
+    assert parse_mem_bytes("1024k") == 1024 * 1024
+    assert parse_mem_bytes("2t") == 2 * 1024**4
+    assert parse_mem_bytes("1073741824") == 1073741824
+    assert parse_mem_bytes(4096) == 4096
+    for off in ("", "  ", None, "0", "-1g", "garbage"):        # all disable the cap
+        assert parse_mem_bytes(off) is None
+
+
+def test_subprocess_mem_cap_applies_rlimit(tmp_path):
+    """#5 host-OOM guard: with mem_bytes set, the eval child runs under an RLIMIT_AS soft cap, so a
+    runaway allocation gets MemoryError instead of OOM-killing the host. POSIX-only (no rlimit on nt)."""
+    resource = pytest.importorskip("resource")
+    cap = 900 * 1024 * 1024
+    sb = SubprocessSandbox(mem_bytes=cap)
+    # the child reports the RLIMIT_AS it actually runs under -> proves the preexec_fn set it
+    code = ('import resource, json;'
+            ' print(json.dumps({"metric": resource.getrlimit(resource.RLIMIT_AS)[0]}))')
+    res = sb.run(code, str(tmp_path / "capped"), timeout=30.0)
+    assert res.exit_code == 0
+    assert res.metric == cap                                    # soft limit == the requested cap
+
+    # and an allocation past the cap fails rather than being served (would OOM the host uncapped)
+    big = ('x = bytearray(4 * 1024 * 1024 * 1024)\nprint("ALLOCATED", len(x))')
+    res2 = sb.run(big, str(tmp_path / "runaway"), timeout=30.0)
+    assert res2.exit_code != 0 and "ALLOCATED" not in res2.stdout
+
+
+def test_subprocess_mem_cap_off_by_default(tmp_path):
+    # No cap configured -> the child's RLIMIT_AS is untouched (unlimited on a normal box), so the
+    # default trusted-local tier is byte-for-byte unchanged (no regression for CUDA/torch evals).
+    resource = pytest.importorskip("resource")
+    sb = SubprocessSandbox()
+    assert sb.mem_bytes is None
+    code = ('import resource, json;'
+            ' print(json.dumps({"metric": 1.0 if resource.getrlimit(resource.RLIMIT_AS)[0]'
+            ' == resource.RLIM_INFINITY else 0.0}))')
+    res = sb.run(code, str(tmp_path / "uncapped"), timeout=30.0)
+    assert res.exit_code == 0 and res.metric == 1.0
+
+
+def test_make_sandbox_wires_mem_local():
+    from looplab.runtime.sandbox import make_sandbox
+    s = make_sandbox("trusted_local", mem_local="8g", max_output_bytes=1000)
+    assert isinstance(s, SubprocessSandbox) and s.mem_bytes == 8 * 1024**3
+    s2 = make_sandbox("trusted_local")                         # default off
+    assert s2.mem_bytes is None
+
+
 def test_sandbox_relative_workdir(tmp_path, monkeypatch):
     """Regression: a relative workdir must not double against cwd."""
     monkeypatch.chdir(tmp_path)
