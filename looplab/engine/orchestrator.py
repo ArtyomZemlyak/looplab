@@ -677,7 +677,15 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         # forever. Gating on setup_done re-runs the body until it actually completes. Legacy logs that
         # never emitted setup_finished but already reached a node (or finished) are treated as
         # set-up-complete via `state.nodes`/`state.finished`, so they never re-run setup.
-        if not (state.setup_done or state.nodes or state.finished):
+        # P0-3 material re-verification: on a PRE-node resume, re-run preflight if setup completed
+        # against a DIFFERENT material manifest than we now hold (edited config / changed data or
+        # workspace) — the `setup_done` boolean alone would skip the leakage/grounding checks on the
+        # changed inputs. Only pre-node (a node present => the run is underway; mid-run drift is handled
+        # by workspace_changed below). Re-running records a fresh setup_finished with the new manifest,
+        # so this can never loop. Old logs (no recorded manifest) keep the pure-boolean behavior.
+        _setup_stale = bool(state.setup_done and not state.nodes and state.setup_manifest
+                            and self._setup_manifest() != state.setup_manifest)
+        if not (state.setup_done or state.nodes or state.finished) or _setup_stale:
             # SETUP PHASE (task + data), an explicit, ONLINE-watchable phase: the pre-node work
             # (fingerprint the workspace, hash data provenance, profile columns, write AGENTS.md) is
             # otherwise silent between run_started and the first node. `setup_started` +/ `setup_step`
@@ -766,7 +774,10 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                 # data and a leak is detected, refuse to run — don't produce results on leaky data.
                 if self._leakage_blocks():
                     self.store.append(EV_RUN_FINISHED, {"reason": "leakage"})
-            self.store.append(EV_SETUP_FINISHED, {"seconds": round(time.time() - _su_t0, 3)})
+            # P0-3: bind this completion to the material it verified (reuse the wf computed above), so a
+            # later resume can tell "done for THIS material" from "done for material that has changed".
+            self.store.append(EV_SETUP_FINISHED, {"seconds": round(time.time() - _su_t0, 3),
+                                                  "manifest": self._setup_manifest(wf=wf)})
         elif self._repo_spec and state.workspace and not state.workspace_changed:
             # Resume (item #4): the editable workspace is copied fresh each node, so if the
             # operator's repo changed since the run started, later nodes silently evaluate a
@@ -1425,6 +1436,22 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
     # (extracted to engine/workspace.py — see the delegator block after __init__)
     def _workspace_fingerprint(self) -> dict:
         return self.workspace.workspace_fingerprint()
+
+    def _setup_manifest(self, wf: "dict | None" = None) -> str:
+        """P0-3 content-addressed setup: a stable digest of the MATERIAL the task+data preflight
+        verified — the config hash, the workspace fingerprint, and the data-asset provenance. Binds
+        `setup_done` to the exact inputs so a pre-node resume re-runs preflight (leakage!) when they
+        changed rather than trusting a stale boolean. Deterministic (pure content hashes), so an
+        unchanged workspace yields the recorded digest and never loops. `wf` may be passed to reuse an
+        already-computed fingerprint. Both hashlib + orjson are imported for the setup block above."""
+        cfg = hashlib.sha256(orjson.dumps(self.task.model_dump(mode="json"))).hexdigest()[:12]
+        wf = self._workspace_fingerprint() if wf is None else wf
+        prov = {name: hashlib.sha256(
+                    c.encode("utf-8") if isinstance(c, str) else bytes(c)).hexdigest()[:16]
+                for name, c in (self._assets or {}).items()}
+        return hashlib.sha256(orjson.dumps(
+            {"config": cfg, "workspace": wf, "provenance": prov},
+            option=orjson.OPT_SORT_KEYS)).hexdigest()[:16]
 
     def _seed_workspace(self, workdir) -> None:
         return self.workspace.seed_workspace(workdir)

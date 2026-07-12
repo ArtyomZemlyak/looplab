@@ -55,6 +55,63 @@ def test_resume_after_crash_reruns_leakage(tmp_path):
     assert st2.finished and st2.setup_done                         # blocked, and setup is now marked done
 
 
+def test_setup_finished_records_and_folds_manifest(tmp_path):
+    # P0-3: setup_finished carries a material manifest that binds setup_done to the exact inputs.
+    s = EventStore(tmp_path / "events.jsonl")
+    s.append(EV_RUN_STARTED, {"run_id": "r", "task_id": "t", "goal": "g", "direction": "min"})
+    s.append(EV_SETUP_FINISHED, {"seconds": 0.1, "manifest": "deadbeef"})
+    st = fold(s.read_all())
+    assert st.setup_done and st.setup_manifest == "deadbeef"
+    # an old log without a manifest still folds setup_done, manifest stays "" (pure-boolean fallback)
+    s2 = EventStore(tmp_path / "e2.jsonl")
+    s2.append(EV_RUN_STARTED, {"run_id": "r", "task_id": "t", "goal": "g", "direction": "min"})
+    s2.append(EV_SETUP_FINISHED, {"seconds": 0.1})
+    st2 = fold(s2.read_all())
+    assert st2.setup_done and st2.setup_manifest == ""
+
+
+def test_resume_reruns_setup_when_material_manifest_changes(tmp_path):
+    # P0-3: on a PRE-node resume, setup re-runs preflight when the material manifest no longer matches
+    # what setup completed against (edited config/data), instead of trusting the stale setup_done boolean.
+    from looplab.engine.orchestrator import Engine
+    from looplab.runtime.sandbox import SubprocessSandbox
+    from looplab.search.policy import GreedyTree
+
+    class _Task:
+        id = "t"; goal = "g"; direction = "min"
+        cfg = {"id": "t", "v": 1}
+        def model_dump(self, mode="json"):
+            return dict(self.cfg)
+        def leakage_inputs(self):
+            return None                       # no leak -> setup completes cleanly
+
+    class _R:
+        def propose(self, s, p):
+            return Idea(operator="draft", params={})
+
+    class _D:
+        def implement(self, idea):
+            return "print(1)"
+
+    task = _Task()
+    eng = Engine(tmp_path / "run", task=task, researcher=_R(), developer=_D(),
+                 sandbox=SubprocessSandbox(), policy=GreedyTree(n_seeds=1, max_nodes=1),
+                 auto_install_deps=False)
+
+    def _n_setup():
+        return len([e for e in eng.store.read_all() if e.type == EV_SETUP_FINISHED])
+
+    eng._setup_phase(fold(eng.store.read_all()))            # first setup completes + records a manifest
+    assert fold(eng.store.read_all()).setup_manifest and _n_setup() == 1
+    eng._setup_phase(fold(eng.store.read_all()))            # unchanged material -> NOT re-run (no loop)
+    assert _n_setup() == 1
+    task.cfg = {"id": "t", "v": 2}                          # the config material changed
+    eng._setup_phase(fold(eng.store.read_all()))            # manifest differs -> setup RE-RUNS
+    assert _n_setup() == 2
+    eng._setup_phase(fold(eng.store.read_all()))            # new manifest recorded -> stable again
+    assert _n_setup() == 2
+
+
 def test_completed_legacy_run_without_setup_finished_is_not_re_setup(tmp_path):
     # A legacy log that reached a node but never emitted setup_finished must be treated as
     # set-up-complete (via state.nodes), so _setup_phase's gate never re-runs preflight on it.

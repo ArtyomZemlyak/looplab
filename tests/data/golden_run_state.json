@@ -706,6 +706,7 @@
   "rungs": [],
   "search_epoch": 0,
   "setup_done": true,
+  "setup_manifest": "",
   "spec_approval_requested": false,
   "spec_confirmed": false,
   "stop_reason": null,

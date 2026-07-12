@@ -473,6 +473,10 @@ def _on_setup_finished(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None
     # tell "setup done" from "crashed mid-setup right after run_started" — the latter must re-run the
     # rest of preflight (leakage!) rather than skip it forever. Idempotent (a re-run re-appends it).
     st.setup_done = True
+    # P0-3 manifest: bind the completion to the material it verified (config/workspace/data digest).
+    # Additive: absent on old logs -> "" -> resume falls back to the boolean (unchanged behavior).
+    if d.get("manifest"):
+        st.setup_manifest = str(d.get("manifest"))
 
 def _on_run_setup_finished(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     # arch-review §5 P2: a SUCCESSFUL run-level `run_setup` (dep install) is folded (keyed by its

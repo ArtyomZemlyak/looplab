@@ -315,6 +315,11 @@ class RunState(BaseModel):
     # that already reached the first node also have run_id set, so `_setup_phase` treats a run with any
     # node/finished as already-set-up (see the guard there) — legacy runs never re-run setup.
     setup_done: bool = False
+    # P0-3 content-addressed setup: a digest of the MATERIAL setup completed against (config hash +
+    # workspace fingerprint + data provenance), folded from `setup_finished`. Binds `setup_done` to the
+    # exact inputs so resume can tell "setup done for THIS material" from "done for material that has
+    # since changed" — the boolean alone trusted a stale preflight (leakage!). Empty on old logs.
+    setup_manifest: str = ""
     # RUN-LEVEL run_setup (dep install) completion, folded from a successful `run_setup_finished`
     # keyed by the command (arch-review §5 P2). Distinct from `setup_done` above: this is the eval's
     # one-time `run_setup` command, not the task/data preflight. The engine's in-memory `_run_setup_done`
