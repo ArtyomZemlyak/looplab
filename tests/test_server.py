@@ -73,8 +73,8 @@ def test_artifacts_list_and_view(tmp_path):
 
 
 def test_artifacts_token_gated(tmp_path, monkeypatch):
-    """The artifact routes serve raw file CONTENT, so when LOOPLAB_UI_TOKEN is set they're gated like a
-    mutation — while other (projection-only) read routes stay open."""
+    """The artifact routes serve raw file CONTENT, so when LOOPLAB_UI_TOKEN is set they're gated — and
+    under P1-3 deny-default so is every other /api/ read (only the zero-model /api/health stays open)."""
     monkeypatch.setenv("LOOPLAB_UI_TOKEN", "sekret")
     _build_run(tmp_path)
     (tmp_path / "demo" / "out.txt").write_bytes(b"hi\n")
@@ -83,10 +83,11 @@ def test_artifacts_token_gated(tmp_path, monkeypatch):
     assert client.get("/api/runs/demo/artifacts").status_code == 401
     assert client.get("/api/runs/demo/artifact",
                       params={"root": "run", "path": "out.txt"}).status_code == 401
-    # a folded-projection GET stays open (unchanged behaviour)
-    assert client.get("/api/runs/demo/state").status_code == 200
+    # P1-3 deny-default: even a folded-projection GET now requires the token
+    assert client.get("/api/runs/demo/state").status_code == 401
     # with the token, content is served
     h = {"X-LoopLab-Token": "sekret"}
+    assert client.get("/api/runs/demo/state", headers=h).status_code == 200
     assert client.get("/api/runs/demo/artifacts", headers=h).status_code == 200
     assert client.get("/api/runs/demo/artifact", params={"root": "run", "path": "out.txt"},
                       headers=h).json()["content"] == "hi\n"
@@ -116,12 +117,13 @@ def test_raw_content_read_routes_are_token_gated(tmp_path, monkeypatch):
     assert client.get("/api/llm/health").status_code == 401
     # assistant progress is gated too (session query required once past auth)
     assert client.get("/api/assistant/progress?session=x").status_code == 401
-    # light projection reads stay open without the token (the established contract) — including the
-    # LIGHT /nodes/{nid}/metrics projection, which must NOT be over-gated by the node-detail rule
-    assert client.get("/api/runs/demo/state").status_code == 200
-    assert client.get("/api/runs/demo/events").status_code == 200
-    assert client.get("/api/runs/demo/nodes/0/metrics").status_code == 200
-    assert client.get("/api/runs").status_code == 200
+    # P1-3 deny-default: even LIGHT projection reads now require the token (a new sensitive route can no
+    # longer leak by being omitted from an allow-list). The zero-model /api/health is the sole exception.
+    for light in ("/api/runs/demo/state", "/api/runs/demo/events",
+                  "/api/runs/demo/nodes/0/metrics", "/api/runs"):
+        assert client.get(light).status_code == 401, light
+        assert client.get(light, headers={"X-LoopLab-Token": "sekret"}).status_code == 200, light
+    assert client.get("/api/health").status_code == 200          # zero-model liveness stays open
 
 
 def test_assistant_session_transcript_is_token_gated(tmp_path, monkeypatch):
@@ -132,8 +134,8 @@ def test_assistant_session_transcript_is_token_gated(tmp_path, monkeypatch):
     client = TestClient(make_app(tmp_path))
     # the session-transcript GET requires the token (not a 200 open read)
     assert client.get("/api/assistant/sessions/whatever").status_code == 401
-    # a folded-projection GET still stays open
-    assert client.get("/api/runs/demo/state").status_code == 200
+    # P1-3 deny-default: a folded-projection GET now also requires the token
+    assert client.get("/api/runs/demo/state").status_code == 401
 
 
 def test_reserved_run_id_is_case_insensitive(tmp_path):
@@ -691,19 +693,20 @@ def test_sse_emits_state_snapshot(tmp_path):
 
 
 def test_g1_auth_token_required_on_mutating(tmp_path, monkeypatch):
-    """G1: with LOOPLAB_UI_TOKEN set, mutating /api/* needs the X-LoopLab-Token header; reads stay open."""
+    """G1 + P1-3 deny-default: with LOOPLAB_UI_TOKEN set, EVERY /api/* request needs the
+    X-LoopLab-Token — reads too, not just mutations — except the zero-model /api/health liveness."""
     _build_run(tmp_path)
     monkeypatch.setenv("LOOPLAB_UI_TOKEN", "s3cret")
     client = TestClient(make_app(tmp_path))
-    # reads are open
-    assert client.get("/api/runs").status_code == 200
-    # mutating without the token -> 401
-    r = client.post("/api/runs/demo/control", json={"type": "pause", "data": {}})
-    assert r.status_code == 401
-    # with the token -> allowed
-    r = client.post("/api/runs/demo/control", json={"type": "pause", "data": {}},
-                    headers={"X-LoopLab-Token": "s3cret"})
-    assert r.status_code == 200
+    h = {"X-LoopLab-Token": "s3cret"}
+    # P1-3: reads now require the token (deny-default), except zero-model liveness
+    assert client.get("/api/runs").status_code == 401
+    assert client.get("/api/runs", headers=h).status_code == 200
+    assert client.get("/api/health").status_code == 200          # sole untokened-OK /api/ route
+    # mutating without the token -> 401; with it -> allowed
+    assert client.post("/api/runs/demo/control", json={"type": "pause", "data": {}}).status_code == 401
+    assert client.post("/api/runs/demo/control", json={"type": "pause", "data": {}},
+                       headers=h).status_code == 200
 
 
 def test_g1_no_token_means_open(tmp_path, monkeypatch):

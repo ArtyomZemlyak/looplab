@@ -77,9 +77,14 @@ def _ui_dist() -> Path:
     return ui_dist_dir()
 
 
-# Raw-content GET routes the UI-token middleware gates (as sensitive as mutations). Module-level
-# constants (not rebuilt inside `_require_token` on every request): `_RAW_GET_SUFFIX` match by
-# path suffix, `_RAW_GET_EXACT` by exact path. See `_require_token` for the per-route rationale.
+# P1-3 default-deny route scoping: when a UI token is set, EVERY /api/ request needs it (reads too,
+# not just mutations + an enumerated sensitive list — a new sensitive route that wasn't added to that
+# list used to leak; deny-default closes that whole class). The ONLY exceptions are the light,
+# non-sensitive routes an untokened monitor legitimately needs — kept to zero-model liveness. The
+# authenticated UI attaches the token to every request (ui/src/api.js::_authHeaders), so this never
+# affects it, only an untokened same-origin caller. (The old `_RAW_GET_*` sensitive enumeration is now
+# subsumed by deny-default; kept below only as documentation of the raw surface.)
+_SAFE_UNAUTH_API = ("/api/health",)   # zero-model liveness — the sole untokened-OK /api/ route
 _RAW_GET_SUFFIX = ("/artifact", "/artifacts", "/log", "/logs", "/agents_md", "/chat-log",
                    "/conversation", "/assistant/permissions", "/assistant/progress")
 _RAW_GET_EXACT = ("/api/prompts", "/api/skills", "/api/knowledge", "/api/memory", "/api/llm/health")
@@ -127,45 +132,15 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
         @app.middleware("http")
         async def _require_token(request: "Request", call_next):
             p = request.url.path
-            # Raw-content / captured-output / model-transcript reads are as sensitive as mutations, so
-            # gate every GET that returns something OTHER than a light folded projection (events/state/
-            # nodes/metrics/cost/config-masked). The raw surface is large — enumerate it exhaustively:
-            #   - /artifact(s): repo files a run produced (a checked-in .env, credentials, a log key)
-            #   - /assistant/sessions: the full model-facing transcript incl. pasted $HOME file contents
-            #   - /log, /nodes/*/logs: RAW event envelopes / captured stdout+stderr (solution code + the
-            #     "a log that printed a key" risk) ; /chat-log: the operator↔boss chat transcript
-            #   - /spans/{sid}: the UNCAPPED span I/O — the FULL LLM prompt (repo source + pasted files +
-            #     printed secrets) and model output ; /trace*, /conversation: the (capped) model transcript
-            #   - /agents_md: the repo's AGENTS.md, served verbatim
-            #   - /api/{prompts,skills,knowledge}: operator-authored files served verbatim
-            #   - /api/memory: cross-run memory rows (goals / rationales / lessons)
-            #   - /assistant/permissions: a preview snippet of the file the assistant is about to write
-            # (The /assistant/shared/{sid} route STRIPS raw and stays open for sharing.) The UI attaches
-            # the token to EVERY request (ui/src/api.js::_authHeaders), so gating these never affects the
-            # authenticated UI — only an untokened same-origin caller, which is who the token defends against.
-            # (_RAW_GET_SUFFIX / _RAW_GET_EXACT are module-level constants — see above make_app.)
-            # /api/runs/{id}/spans/... and /api/runs/{id}/trace[...] carry the raw span I/O. Match the
-            # sub-resource by PATH SEGMENT (parts[4]), not a bare `/trace`/`/spans` substring, so a run
-            # literally named "trace" or "spans" isn't over-gated on its projection routes.
-            _parts = p.split("/")
-            _run_scoped_raw = (len(_parts) > 4 and _parts[1] == "api" and _parts[2] == "runs"
-                               and _parts[4] in ("spans", "trace"))
-            # Node DETAIL (/api/runs/{id}/nodes/{nid}) returns full code, files, persisted stdout_tail,
-            # trials, AND parent code — as sensitive as /logs (already gated), but it was open because
-            # it has no raw suffix (arch-review §4 P1-3: node detail leaked 200 to an untokened caller).
-            # Match the EXACT 6-part path so the LIGHTER /nodes/{nid}/metrics projection (7 parts) and
-            # /nodes/{nid}/logs|conversation (gated by suffix) are unaffected.
-            _node_detail = (len(_parts) == 6 and _parts[1] == "api" and _parts[2] == "runs"
-                            and _parts[4] == "nodes")
-            # Job / genesis-job results carry model output + synthesized scope reports. Random ids make
-            # them less enumerable (the review rates this P2), but gate them too — defense in depth.
-            _job_result = (len(_parts) >= 4 and _parts[1] == "api" and _parts[2] in ("jobs", "genesis"))
-            sensitive_get = (request.method == "GET"
-                             and (p.endswith(_RAW_GET_SUFFIX) or p in _RAW_GET_EXACT
-                                  or _run_scoped_raw or _node_detail or _job_result
-                                  or "/assistant/sessions" in p))
-            mutating = request.method in ("POST", "PUT", "PATCH", "DELETE")
-            if ((mutating or sensitive_get) and p.startswith("/api/")
+            # P1-3 DEFAULT-DENY: every /api/ request needs the token — reads included — EXCEPT the
+            # explicit safe allow-list (zero-model liveness). Deny-default (vs. the old "gate mutations
+            # + an enumerated sensitive-GET list") closes the whole class of leaks where a NEW sensitive
+            # route wasn't added to the list (arch-review §4 P1-3: node detail once leaked 200 that way).
+            # The authenticated UI attaches the token to EVERY request, so this never affects it — only
+            # an untokened same-origin caller, which is who the token defends against. The raw surface
+            # the old list enumerated (/artifacts, /log, /spans, /nodes/{nid}, /assistant/sessions,
+            # /api/{prompts,skills,knowledge,memory}, …) is all covered now by "deny unless allow-listed".
+            if (p.startswith("/api/") and p not in _SAFE_UNAUTH_API
                     and request.headers.get("X-LoopLab-Token") != ui_token):
                 return JSONResponse({"detail": "unauthorized (missing/invalid UI token)"},
                                     status_code=401)
