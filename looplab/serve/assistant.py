@@ -303,12 +303,15 @@ def build_tools(run_root, alive_fn: Optional[Callable] = None, mode: str = DEFAU
     if subagents and client is not None:
         providers.append(SubagentTools(client, run_root, alive_fn=alive_fn, settings=settings,
                                        cancel_check=cancel_check))
-    if mcp:
+    if mcp and mode != "plan":
+        # MCP tools are arbitrary external side effects: never in read-only plan mode (which also keeps
+        # connecting/spawning a configured stdio MCP server out of a read-only session), and always
+        # behind the permission policy — CompositeTools dispatched them unpoliced before (P0-6).
         try:
-            from looplab.tools.mcp_tools import McpTools
+            from looplab.tools.mcp_tools import McpTools, GatedMcpTools
             m = McpTools.cached()      # connect to MCP servers ONCE per process, not per turn
             if m.specs():
-                providers.append(m)
+                providers.append(GatedMcpTools(m, mode=mode, approver=approver))
         except Exception:  # noqa: BLE001 - MCP is optional; never break the toolset
             pass
     return CompositeTools(providers)

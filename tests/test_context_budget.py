@@ -57,6 +57,22 @@ def test_truncate_history_stops_once_under_budget():
     assert out[2]["content"] == small and out[3]["content"] == small
 
 
+def test_truncate_history_meets_aggregate_target_with_many_small_messages():
+    """arch-review §5 P2: a long tail of messages each <= per_msg_cap whose AGGREGATE exceeds the
+    target must still be compacted below max_chars — the old `msize <= per_msg_cap` skip left them all
+    untouched (a reproduced 7,983 chars before and after a 2,000-char target)."""
+    small = "y" * 300                                   # each below the 400 per_msg_cap
+    msgs = ([{"role": "system", "content": "sys"}]
+            + [{"role": "user" if i % 2 else "assistant", "content": small} for i in range(26)]
+            + [{"role": "assistant", "content": "recent"}])
+    before = sum(_msg_chars(m) for m in msgs)
+    assert before > 7000                                # ~26*300 = 7800, well over the target
+    out = truncate_history(msgs, max_chars=2000, keep_last=2, per_msg_cap=400)
+    after = sum(_msg_chars(m) for m in out)
+    assert after <= 2000, after                         # aggregate target actually met
+    assert out[0]["content"] == "sys" and out[-1]["content"] == "recent"   # protected head/tail kept
+
+
 def test_truncate_history_never_grows():
     # Messages just over the cap: the truncation marker must not make the history larger.
     msgs = [{"role": "user", "content": "x" * 401} for _ in range(50)]

@@ -23,7 +23,7 @@ from looplab.events.types import (
     EV_POLICY_DECISION, EV_PROMOTE, EV_PROXY_SCORED, EV_REPORT_GENERATED,
     EV_RESEARCH_COMPLETED, EV_RESUME, EV_REWARD_HACK_SUSPECTED, EV_RUN_ABORT,
     EV_RUN_FINISHED, EV_RUN_REOPENED, EV_RUN_STARTED, EV_RUNG_PROMOTED, EV_SET_STRATEGY,
-    EV_SPEC_APPROVAL_REQUESTED, EV_SPEC_APPROVED, EV_SPEC_DRIFT, EV_SPEC_PROPOSED,
+    EV_SETUP_FINISHED, EV_SPEC_APPROVAL_REQUESTED, EV_SPEC_APPROVED, EV_SPEC_DRIFT, EV_SPEC_PROPOSED,
     EV_STRATEGY_DECISION, EV_TRUST_GATE_CHANGED, EV_WORKSPACE_CHANGED)
 
 
@@ -52,7 +52,12 @@ def is_hard_signal(sig: str) -> bool:
     sig = str(sig)
     if sig == "critic:hardcoded_metric":
         return True
-    return not sig.startswith(("critic:", "perfect_metric"))
+    # `protected_audit_unavailable` (the whole workdir-tamper audit threw) is fail-closed evidence
+    # that the node is NOT verified-clean, but it is not itself proof of tampering — a transient FS
+    # error should SURFACE to the operator/agent, not gate-exclude an honest node. So it stays
+    # advisory alongside critic:*/perfect_metric. `protected_missing`/`protected_unreadable` (a
+    # protected file we placed is gone/corrupt) ARE real tamper evidence and remain HARD (P1-6).
+    return not sig.startswith(("critic:", "perfect_metric", "protected_audit_unavailable"))
 
 
 def hard_flagged_ids(st: RunState) -> set:
@@ -156,9 +161,33 @@ def _on_node_created(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     if st.building and st.building.get("node_id") == n.id:
         st.building = None          # the real node is here now — drop the "building" marker
 
+def _nonneg_seconds(v) -> float:
+    """Coerce a PERSISTED eval-cost value to a FINITE, NON-NEGATIVE float before it enters the
+    cumulative budget. A hand-edited / foreign-writer log with eval_seconds="3" (str) would otherwise
+    TypeError the WHOLE fold — taking down every view/replay/resume of the run — and a negative value
+    would silently REDUCE total_eval_seconds, extending the budget (arch-review §5 P2). Normal engine
+    emitters always produce a clean non-negative float, so this only guards malformed input."""
+    import math
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return 0.0
+    return f if (math.isfinite(f) and f >= 0.0) else 0.0
+
+
+def _attempt_matches(n, d: dict) -> bool:
+    """P0-1 attempt guard: a node terminal (node_evaluated/node_failed) is honored only if the
+    `attempt` it was stamped with still matches the node's current attempt generation. `node_reset`
+    bumps `n.attempt`, so a LATE terminal from an abandoned attempt (its eval was in flight when the
+    reset happened) carries the OLD attempt and is dropped — it can't land as first-terminal-after-
+    reset and accept a metric/cost from discarded code. Old logs don't stamp `attempt`; defaulting to
+    `n.attempt` makes them always match, so legacy runs fold byte-identically."""
+    return d.get("attempt", n.attempt) == n.attempt
+
+
 def _on_node_evaluated(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     n = st.nodes.get(d.get("node_id"))          # tolerate an event for an unknown/missing node
-    if n is not None:                           # (corrupt/hand-edited log) — skip, don't crash
+    if n is not None and _attempt_matches(n, d):   # (corrupt/hand-edited log) — skip, don't crash
         # Idempotent (C4): only a node's FIRST terminal event contributes its eval time, so
         # a duplicate node_evaluated/node_failed (corrupt log / double-fold) can't inflate
         # total_eval_seconds or make the budget order-dependent.
@@ -187,13 +216,13 @@ def _on_node_evaluated(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None
                 except Exception:
                     continue
             n.trials = trials
-            st.total_eval_seconds += d.get("eval_seconds") or 0.0
+            st.total_eval_seconds += _nonneg_seconds(d.get("eval_seconds"))
 
 def _on_node_failed(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     if st.building and st.building.get("node_id") == d.get("node_id"):
         st.building = None
     n = st.nodes.get(d.get("node_id"))
-    if n is not None:
+    if n is not None and _attempt_matches(n, d):
         # First-terminal-wins for the whole node (see node_evaluated above): a conflicting
         # second terminal from a corrupt log must not flip an already-evaluated node to failed.
         first_terminal = n.status is NodeStatus.pending
@@ -210,7 +239,7 @@ def _on_node_failed(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
             n.rerun_stage = None                # any stage-scoped re-run has now landed
             if d.get("failed_stage"):
                 n.failed_stage = d.get("failed_stage")   # Phase 1: which pipeline stage broke
-            st.total_eval_seconds += d.get("eval_seconds") or 0.0
+            st.total_eval_seconds += _nonneg_seconds(d.get("eval_seconds"))
 
 def _on_node_repaired(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     # In-node inline repair (hybrid crash repair): a NON-terminal event that replaces the
@@ -238,6 +267,10 @@ def _on_node_reset(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     n = st.nodes.get(d.get("node_id"))
     if n is not None:
         stage = d.get("from_stage", "eval")
+        # Bump the attempt generation (P0-1): the engine stamps this on the re-eval's terminal, and a
+        # LATE terminal from the attempt this reset abandons carries the OLD generation and is dropped
+        # by `_attempt_matches` — so an in-flight pre-reset eval can't land its metric on the new code.
+        n.attempt += 1
         n.status = NodeStatus.pending
         n.metric = None
         n.error = ""
@@ -323,7 +356,7 @@ def _on_confirm_eval(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     # double-count total_eval_seconds (order/duplication-sensitive — the fold must not be). The sole
     # emitter always writes both keys, so this only guards a future/foreign/hand-edited un-keyed event.
     if keyed and first:
-        st.total_eval_seconds += d.get("eval_seconds") or 0.0   # confirm-seed eval cost
+        st.total_eval_seconds += _nonneg_seconds(d.get("eval_seconds"))   # confirm-seed eval cost
     if keyed:                                                # per-seed resume memo (#0)
         st.confirm_seed_results.setdefault(d["node_id"], {})[d["seed"]] = d.get("metric")
 
@@ -367,6 +400,12 @@ def _on_data_provenance(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> Non
 def _on_host_grading(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     st.host_grading = d      # out-of-process host-side grading active (audit; no labels)
 
+def _on_setup_finished(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
+    # P0-3: setup completed (task+data preflight, incl. the leakage hard-stop). Folded so resume can
+    # tell "setup done" from "crashed mid-setup right after run_started" — the latter must re-run the
+    # rest of preflight (leakage!) rather than skip it forever. Idempotent (a re-run re-appends it).
+    st.setup_done = True
+
 def _on_data_leakage(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     st.leakage = d
 
@@ -403,6 +442,13 @@ def _on_llm_cost(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
 
 def _on_ablate(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     st.ablations.append(d)   # {parent_id, impacts} — parameter-sensitivity audit
+    # Account the ablation probes' eval wall-clock against the cumulative budget (arch-review §4 P1-2:
+    # ablation was wholly outside accounting, so a run could spend well past max_eval_seconds on
+    # probes). Additive + reader-defaulted: old ablate events carry no eval_seconds -> +0.0.
+    try:
+        st.total_eval_seconds += _nonneg_seconds(d.get("eval_seconds"))
+    except (TypeError, ValueError):
+        pass
 
 def _on_policy_decision(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     _scores = {}
@@ -661,6 +707,7 @@ _HANDLERS = {
     EV_DATA_PROFILED: _on_data_profiled,
     EV_DATA_PROVENANCE: _on_data_provenance,
     EV_HOST_GRADING: _on_host_grading,
+    EV_SETUP_FINISHED: _on_setup_finished,
     EV_DATA_LEAKAGE: _on_data_leakage,
     EV_APPROVAL_REQUESTED: _on_approval_requested,
     EV_APPROVAL_GRANTED: _on_approval_granted,

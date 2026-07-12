@@ -11,20 +11,35 @@ from typing import Sequence
 
 
 def _pearson(a: Sequence[float], b: Sequence[float]) -> float:
-    # Compare the overlapping prefix when columns are ragged (a dropped NaN row, a mismatched slice)
-    # rather than silently returning 0.0 — returning 0 would HIDE a near-perfect proxy that happens to
-    # be one row short, letting a leaking solution through the hard gate.
-    n = min(len(a), len(b))
-    if n < 3:   # a 2-point overlap is always perfectly collinear -> meaningless |r|==1.0 against the hard gate
+    # Compare the overlapping prefix when columns are ragged (a mismatched slice) rather than silently
+    # returning 0.0 — returning 0 would HIDE a near-perfect proxy that happens to be one row short.
+    # DROP non-finite PAIRS (a stray NaN/inf in either column) instead of letting them propagate: a NaN
+    # anywhere poisons cov/var to NaN, and `abs(NaN) >= threshold` is False, so a leaking feature with a
+    # single NaN row would slip through the hard gate (arch-review §4 P1-7). Dropping the pair keeps the
+    # correlation on the clean rows, so the proxy is still caught.
+    import math
+    n0 = min(len(a), len(b))
+    pairs: list[tuple[float, float]] = []
+    for x, y in zip(list(a)[:n0], list(b)[:n0]):
+        try:
+            fx, fy = float(x), float(y)
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(fx) and math.isfinite(fy):
+            pairs.append((fx, fy))
+    n = len(pairs)
+    if n < 3:   # a 2-point overlap is always perfectly collinear -> meaningless |r|==1.0 against the gate
         return 0.0
-    a, b = list(a)[:n], list(b)[:n]
-    ma, mb = sum(a) / n, sum(b) / n
-    cov = sum((x - ma) * (y - mb) for x, y in zip(a, b))
-    va = sum((x - ma) ** 2 for x in a)
-    vb = sum((y - mb) ** 2 for y in b)
+    ax = [p[0] for p in pairs]
+    bx = [p[1] for p in pairs]
+    ma, mb = sum(ax) / n, sum(bx) / n
+    cov = sum((x - ma) * (y - mb) for x, y in pairs)
+    va = sum((x - ma) ** 2 for x in ax)
+    vb = sum((y - mb) ** 2 for y in bx)
     if va == 0.0 or vb == 0.0:
         return 0.0
-    return cov / (va * vb) ** 0.5
+    r = cov / (va * vb) ** 0.5
+    return r if math.isfinite(r) else 0.0
 
 
 def train_test_contamination(train_rows: list, test_rows: list) -> dict:
@@ -55,23 +70,30 @@ _SPLIT_RE = re.compile(r"train_test_split\s*\(|KFold|StratifiedKFold|\.split\s*\
 # `test` (NOT `\bx_test\b`): a suffixed name like `X_test_scaled`/`X_testing`/`y_test_final` has no
 # word boundary after `test`, so the anchored form silently missed a real test-set monitor — while a
 # validation-named monitor (`X_val`, `X_holdout`) never contains `test`, so the substring stays safe.
-_EVALSET_KW_RE = re.compile(r"\b(?:eval_set|validation_data|eval_names)\s*=")
+# Benign monitor/holdout kwargs split off the fit ARGS so they don't read as fit-on-val/test:
+# eval_set / validation_data / eval_names carry a `(X_val, y_val)` monitor tuple (early stopping, not
+# leakage), and `validation_split=0.1` is Keras internally holding out a fraction of the TRAINING data
+# (also not leakage). Without validation_split here its `validation` token false-flagged every Keras
+# fit as fit-on-val (arch-review §4 P1-7).
+_EVALSET_KW_RE = re.compile(r"\b(?:eval_set|validation_data|validation_split|eval_names)\s*=")
 _TEST_MONITOR_RE = re.compile(r"\b(?:eval_set|validation_data|eval_names)\s*=[^=]*test")
-# Fit-on-val/test detector: match `val`/`test` only when NOT preceded by another letter, so a
-# genuine held-out identifier (`x_val`, `y_test`, `_val`, `x_valid`, `x_testing`, or a bare `val`
-# at the start of the args) still fires, while an identifier that merely CONTAINS those letters —
-# `x_trainval` (the standard non-leaking refit on train+validation after CV), `x_interval`,
-# `x_latest`, `eval`, `retrieval`, `contest` — does NOT. Bare-substring `in` here silently barred
-# honest solutions from selection/breeding under trust_gate=gate/block (data_leakage:fit_on_test
-# is a hard signal); token-anchoring keeps the true positives without the false ones.
-# ACCEPTED RECALL GAP (precision-over-recall, on purpose): a NO-separator held-out name — `Xtest`,
-# `ytest`, `Xval` (lowercased -> `xtest`/`ytest`/`xval`) — is NOT flagged, because anchoring cannot
-# tell `xtest` (a leak) from `contest` (benign) without a name whitelist. A false NEGATIVE here is
-# far less harmful than a false positive: it only means one heuristic misses a leak the operator can
-# still catch (and fit_before_split / exact-row / temporal detectors still run), whereas a false
-# positive silently kills an honest winner on a hard gate. sklearn convention is overwhelmingly the
-# separated `X_test`/`X_val`, which IS caught.
-_LEAKY_FIT_ARG_RE = re.compile(r"(?<![a-z])(?:val|test)")
+# Fit-on-val/test detector: match a WHOLE held-out token — one of {val, valid, validation, valset,
+# test, testing, testset} — bounded on BOTH sides (not preceded by a letter, not FOLLOWED by a
+# letter). The trailing `(?![a-z])` is what fixes the P1-7 false positives: `values`/`train_values`
+# are `val`+`ues` and `validation_split` is handled as a kwarg above, so none hard-gate an honest node
+# any more. The token SET (not a bare `val`/`test` prefix) is what keeps the true positives the old
+# anchor caught — `x_valid` (`valid`), `x_testing` (`testing`), `y_test_final` (`test`), and the
+# common informal `valset`/`testset`/`x_valset` — flagged. Benign words that merely CONTAIN the
+# letters — `x_trainval`, `x_interval`, `x_latest`, `eval`, `retrieval`, `contest`, `values` — do NOT
+# match (the letter before/after breaks the boundary).
+# ACCEPTED RECALL GAP (precision-over-recall, on purpose): a NO-separator, NON-listed held-out name —
+# `Xtest`, `Xval`, `trainset` (lowercased) — is NOT flagged, because anchoring cannot tell `xtest` (a
+# leak) from `contest` (benign) without a name whitelist, and only the concrete `valset`/`testset`
+# suffixes are enumerated. A false NEGATIVE is far less harmful than a false positive that silently
+# kills an honest winner on a hard gate; sklearn convention is overwhelmingly the separated
+# `X_test`/`X_val`, which IS caught.
+_LEAKY_FIT_ARG_RE = re.compile(
+    r"(?<![a-z])(?:validation|valset|valid|testset|testing|test|val)(?![a-z])")
 
 
 def code_leakage_scan(code: str) -> dict:
@@ -88,28 +110,31 @@ def code_leakage_scan(code: str) -> dict:
     flags: list[dict] = []
     lines = code.splitlines()
     split_at = next((i for i, l in enumerate(lines) if _SPLIT_RE.search(l)), None)
-    for i, line in enumerate(lines):
-        m = _FIT_RE.search(line)
-        if not m:
-            continue
+    # finditer over the FULL code (not per-line via `.search`): `.search` returned only the FIRST fit on
+    # a line and could not see an argument that spans lines, so `model.fit(X_train); m2.fit(X_test)` and
+    # a multiline `.fit(\n  X_test\n)` both slipped through (arch-review §4 P1-7). `_FIT_RE`'s `[^)]*`
+    # already matches newlines, so a full-code finditer catches every fit and multiline args; the line
+    # number is derived from the match offset.
+    for m in _FIT_RE.finditer(code):
         arg = m.group(2).lower()
+        line_i = code.count("\n", 0, m.start())          # 0-based line index of the fit
+        snippet = (lines[line_i].strip()[:90] if line_i < len(lines) else m.group(0).strip()[:90])
         # Split off the EARLY-STOPPING monitor kwargs: `.fit(X_train, y_train, eval_set=[(X_val,
-        # y_val)])` is the standard LightGBM/XGBoost call, NOT leakage — but the literal substring
-        # `val` inside `eval_set` made it read as fit-on-validation and hard-gated every early-stopping
-        # solution (signal-delivery §1: a false leakage flag now also misleads the agent). So we WAIVE
-        # only a benign `val` in the fit ARGS, but a monitor on the TEST set is a genuine leak and must
-        # still fire. `head` = the fit args BEFORE the monitor kwarg (a plain `.fit(X_val,y_val)` has no
-        # kwarg → its `val` stays flagged). The TEST-monitor check scans the FULL LINE, not `arg`:
-        # `_FIT_RE`'s `([^)]*)` truncates at the first `)`, so a test tuple in a SECOND eval_set entry
+        # y_val)])` is the standard LightGBM/XGBoost call, NOT leakage — the `val` inside `eval_set`
+        # would else read as fit-on-validation and hard-gate every early-stopping solution. `head` = the
+        # fit args BEFORE the monitor kwarg (a plain `.fit(X_val,y_val)` has no kwarg → its `val` stays
+        # flagged). The TEST-monitor check scans the fit's SOURCE LINE, not `arg`: `_FIT_RE`'s `([^)]*)`
+        # truncates at the first `)`, so a test tuple in a SECOND eval_set entry
         # (`eval_set=[(X_val,y_val),(X_test,y_test)]`) never reaches `arg` — the line-level scan sees it.
         head = _EVALSET_KW_RE.split(arg, maxsplit=1)[0]
-        test_monitor = _TEST_MONITOR_RE.search(line.lower())
+        line_src = lines[line_i].lower() if line_i < len(lines) else m.group(0).lower()
+        test_monitor = _TEST_MONITOR_RE.search(line_src)
         if (_LEAKY_FIT_ARG_RE.search(head)                             # val/test token in the fit args = leak
                 or test_monitor):                                       # test INSIDE the monitor = leak
-            flags.append({"signal": "fit_on_test", "line": i + 1, "code": line.strip()[:90]})
-        elif split_at is not None and i < split_at and "train" not in arg:
+            flags.append({"signal": "fit_on_test", "line": line_i + 1, "code": snippet})
+        elif split_at is not None and line_i < split_at and "train" not in arg:
             # a fit/fit_transform on (apparently full) data BEFORE the split leaks test statistics
-            flags.append({"signal": "fit_before_split", "line": i + 1, "code": line.strip()[:90]})
+            flags.append({"signal": "fit_before_split", "line": line_i + 1, "code": snippet})
     return {"detector": "code_leakage", "leak": bool(flags), "flags": flags}
 
 

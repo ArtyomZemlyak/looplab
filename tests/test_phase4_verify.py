@@ -185,6 +185,61 @@ def test_audit_workdir_writes_flags_tampered_asset(tmp_path):
     assert sigs and sigs[0]["signal"] == "protected_write"
 
 
+def test_audit_fail_closed_on_missing_and_unreadable(tmp_path):
+    """arch-review §4 P1-6: a deleted or unreadable protected file must NOT read as clean."""
+    from looplab.engine.orchestrator import Engine
+    from looplab.runtime.sandbox import SubprocessSandbox
+    from looplab.search.policy import GreedyTree
+    from looplab.events.replay import is_hard_signal
+
+    class _T:
+        id = "t"; goal = "g"; direction = "max"
+        def model_dump(self, mode="json"):
+            return {"id": "t"}
+        def assets(self):
+            return {"answer_key.json": '{"y": [1,2,3]}'}
+
+    class _R:
+        def propose(self, s, p):
+            return Idea(operator="draft", params={})
+
+    class _D:
+        def implement(self, idea):
+            return "print(1)"
+
+    eng = Engine(tmp_path / "run", task=_T(), researcher=_R(), developer=_D(),
+                 sandbox=SubprocessSandbox(), policy=GreedyTree(n_seeds=1, max_nodes=1),
+                 reward_hack_detect=True, workdir_audit=True)
+    wd = tmp_path / "wd"
+    wd.mkdir()
+    # DELETED protected file (os.remove-style tamper) -> protected_missing, and it is a HARD signal
+    sigs = eng._audit_workdir_writes(wd, {"answer_key.json"})
+    assert sigs and sigs[0]["signal"] == "protected_missing"
+    assert is_hard_signal("protected_missing")
+    # UNREADABLE (invalid UTF-8 bytes) -> protected_unreadable, also hard, never clean
+    (wd / "answer_key.json").write_bytes(b"\xff\xfe not utf8")
+    sigs = eng._audit_workdir_writes(wd, {"answer_key.json"})
+    assert sigs and sigs[0]["signal"] == "protected_unreadable"
+    assert is_hard_signal("protected_unreadable")
+    # a whole-audit failure surfaces as advisory (never an empty clean list)
+    assert not is_hard_signal("protected_audit_unavailable")
+
+
+def test_static_scan_flags_protected_deletion():
+    """arch-review §4 P1-6: the static scan missed deletion APIs (os.remove) on a protected file."""
+    from looplab.trust.reward_hack import detect_reward_hacks
+    prot = {"grader.py"}
+    for code in ("import os; os.remove('grader.py')", "import os\nos.unlink('grader.py')",
+                 "from pathlib import Path; Path('grader.py').unlink()",
+                 "import shutil; shutil.rmtree('grader.py')"):
+        sigs = detect_reward_hacks(code, None, "min", protected_names=prot, grader_import_ok=True)
+        assert any(s["signal"] == "protected_delete" for s in sigs), code
+    # a non-protected deletion is not flagged
+    assert not any(s["signal"] == "protected_delete"
+                   for s in detect_reward_hacks("import os; os.remove('scratch.tmp')", None, "min",
+                                                protected_names=prot, grader_import_ok=True))
+
+
 def test_settings_phase4_defaults():
     from looplab.core.config import Settings
     s = Settings()

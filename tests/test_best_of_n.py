@@ -50,6 +50,53 @@ def test_best_of_n_forwards_repair_and_audit():
     assert dev.audit_extra()["best_of_n"] == 3
 
 
+class _ParentAwareDev:
+    """A developer with the parent-aware protocol (like RepoDeveloper)."""
+    def __init__(self, outs):
+        self.outs = outs
+        self.calls = 0
+        self.from_calls = 0
+        self.last_files = {}
+        self.last_deleted = []
+
+    def implement(self, idea):
+        o = self.outs[self.calls % len(self.outs)]; self.calls += 1
+        return o
+
+    def implement_from(self, idea, parent):
+        self.from_calls += 1
+        return self.implement(idea)
+
+    def repair(self, idea, code, error):
+        return _GOOD
+
+    def repair_from(self, idea, node, error):
+        self.from_calls += 1
+        return _GOOD
+
+
+def test_best_of_n_forwards_parent_aware_hooks():
+    """arch-review §4 P1-9: BestOfN must expose implement_from/repair_from so the engine's capability
+    check routes the parent-aware path THROUGH the wrapper (not fall back to baseline regeneration)."""
+    inner = _ParentAwareDev([_BROKEN, _GOOD])
+    dev = BestOfNDeveloper(inner, n=2)
+    assert hasattr(dev, "implement_from") and hasattr(dev, "repair_from")
+    out = dev.implement_from(Idea(operator="improve"), parent=object())
+    assert out == _GOOD and inner.from_calls == 2       # best-of-N ran through implement_from twice
+
+    class _N:
+        code = "x"
+        idea = Idea(operator="debug")
+    assert dev.repair_from(Idea(operator="debug"), _N(), "err") == _GOOD
+    assert inner.from_calls == 3                          # repair_from is single-shot
+
+
+def test_best_of_n_implement_from_falls_back_when_inner_lacks_it():
+    # a plain inner (no implement_from) -> BestOfN.implement_from degrades to plain best-of-N implement
+    dev = BestOfNDeveloper(_VaryingDev([_BROKEN, _GOOD]), n=2)
+    assert dev.implement_from(Idea(operator="improve"), parent=object()) == _GOOD
+
+
 def test_make_roles_wraps_best_of_n():
     from pathlib import Path
     from looplab.core.config import Settings

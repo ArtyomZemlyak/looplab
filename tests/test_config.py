@@ -37,3 +37,17 @@ def test_novelty_mode_rejected_when_out_of_set():
     for bad in ("LLM", "on", "algorithm", ""):
         with pytest.raises(ValidationError):
             Settings(novelty_mode=bad)
+
+
+def test_remaining_enum_fields_rejected_when_out_of_set():
+    """arch-review §5 P3: strategist_backend / eval_trust_mode / seed_mode were accepted with any
+    string at construction and only fail-safe/later-loud downstream. Fail loudly at config time."""
+    from pydantic import ValidationError
+    assert Settings().strategist_backend and Settings().eval_trust_mode and Settings().seed_mode  # defaults valid
+    for field, good, bad in (
+        ("strategist_backend", "rule", "Agent"),
+        ("eval_trust_mode", "autonomous", "freeze"),
+        ("seed_mode", "tracked", "full")):
+        assert getattr(Settings(**{field: good}), field) == good
+        with pytest.raises(ValidationError):
+            Settings(**{field: bad})

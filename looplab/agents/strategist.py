@@ -570,7 +570,7 @@ def make_strategist(settings, *, client=None, n_seeds: int = 3, tools=None) -> O
     tool-using agent that reads the run/data/siblings/KB/memory before deciding (`tools` is the
     read-only toolset; None falls back to emit-only). `llm`/`agent` need an LLM client (else the rule
     baseline)."""
-    backend = getattr(settings, "strategist_backend", "off")
+    backend = getattr(settings, "strategist_backend", "agent")   # fallback MATCHES the Settings default (P3)
     if backend == "off":
         return None
     if backend == "rule":

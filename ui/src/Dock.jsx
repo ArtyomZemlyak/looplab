@@ -23,7 +23,9 @@ const NARR = {
   data_leakage: (d) => `leakage scan: ${d.leak ? 'LEAK DETECTED' : 'clean'}`,
   approval_requested: (d) => `awaiting approval of #${d.node_id}`,
   approval_granted: (d) => `approved #${d.node_id}`,
-  pause: () => 'stopped (frozen — not finalized)', resume: () => 'resumed', run_abort: () => 'finalize requested (wrap-up)',
+  pause: () => 'stopped (frozen — not finalized)',
+  // (`resume` / `run_abort` are defined once, below with the richer wording — the duplicate keys here
+  // were dead: the later definitions always won. arch-review §5 P3.)
   node_abort: (d) => `stop requested for #${d.node_id}`,
   budget_extend: (d) => {
     const bits = []

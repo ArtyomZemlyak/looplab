@@ -62,7 +62,9 @@ export const CONTROL = {
 // Actions whose effect only takes hold once the engine is (re)spawned on a stopped/finished run.
 // run_abort = FINALIZE: the wrap-up (report/lessons/cost) needs the engine to fold stop_requested
 // into run_finished; resume needs it to keep going. (Twin of tui.py _NEEDS_RESUME.)
-const NEEDS_RESUME = new Set(['fork', 'inject_node', 'force_confirm', 'force_ablate', 'deep_research', 'set_strategy', 'budget_extend', 'resume', 'run_abort'])
+// arch-review §4 P1-10: approval_granted/spec_approved/node_reset/run_reopened also only take hold once
+// the engine re-enters a finished/zombie run — keep this in step with tui_format.py::_NEEDS_RESUME.
+const NEEDS_RESUME = new Set(['fork', 'inject_node', 'force_confirm', 'force_ablate', 'deep_research', 'set_strategy', 'budget_extend', 'resume', 'run_abort', 'approval_granted', 'spec_approved', 'node_reset', 'run_reopened'])
 
 // Does applying this action on a FINISHED run require reopening + resuming the engine? (Used to batch a
 // multi-action plan: append every step's intent, then reopen+resume ONCE if any step needs the loop.)

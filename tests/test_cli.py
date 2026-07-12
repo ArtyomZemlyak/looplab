@@ -35,6 +35,25 @@ def test_run_toy_task_offline(tmp_path):
     assert "finished=True" in result.output
 
 
+def test_run_refuses_a_different_task_in_an_existing_run_dir(tmp_path):
+    # arch-review §3 P0-5: a `run` on a dir that already holds a DIFFERENT task must refuse rather than
+    # overwrite its snapshot and reopen the old log (mixing experiments in one event log).
+    import json
+    out = tmp_path / "run"
+    a = tmp_path / "a.json"
+    b = tmp_path / "b.json"
+    a.write_text(json.dumps({"id": "exp_a", "kind": "quadratic", "goal": "min", "direction": "min",
+                             "bounds": {"x": [-5, 5]}, "seed": 1, "step": 1.0}))
+    b.write_text(json.dumps({"id": "exp_b", "kind": "quadratic", "goal": "min", "direction": "min",
+                             "bounds": {"x": [-5, 5]}, "seed": 1, "step": 1.0}))
+    assert runner.invoke(app, ["run", str(a), "--out", str(out), "--max-nodes", "2"]).exit_code == 0
+    res = runner.invoke(app, ["run", str(b), "--out", str(out), "--max-nodes", "2"])
+    assert res.exit_code == 2
+    assert "refusing to mix" in res.output and "exp_a" in res.output
+    # re-running the SAME task in the dir is allowed (continuation)
+    assert runner.invoke(app, ["run", str(a), "--out", str(out), "--max-nodes", "3"]).exit_code == 0
+
+
 def test_version_flag():
     result = runner.invoke(app, ["--version"])
     assert result.exit_code == 0, result.output

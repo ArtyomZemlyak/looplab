@@ -91,3 +91,46 @@ def test_file_metric_reader_confined_to_workdir(tmp_path):
     assert read_metric("", str(tmp_path), {"kind": "file_json", "path": "m.json", "key": "metric"}) == 0.5
     assert read_metric("", str(tmp_path), {"kind": "file_json", "path": "/etc/passwd"}) is None
     assert read_metric("", str(tmp_path), {"kind": "file_json", "path": "../../secret.json"}) is None
+
+
+# ------------------------------------------------------ P1-7: precision, multiline, second-fit, NaN
+def test_benign_values_names_are_not_flagged():
+    from looplab.trust.leakage import code_leakage_scan
+    for code in ("scaler.fit(train_values, y)", "m.fit(values)", "m.fit(X_train, y_train)",
+                 "model.fit(X, y, validation_split=0.2)", "clf.fit(feature_values, labels)"):
+        r = code_leakage_scan(code)
+        assert not any(f["signal"] == "fit_on_test" for f in r["flags"]), code
+
+
+def test_second_fit_on_same_line_is_flagged():
+    from looplab.trust.leakage import code_leakage_scan
+    r = code_leakage_scan("m1.fit(X_train, y_train); m2.fit(X_test, y_test)")
+    assert any(f["signal"] == "fit_on_test" for f in r["flags"])
+
+
+def test_multiline_fit_on_test_is_flagged():
+    from looplab.trust.leakage import code_leakage_scan
+    r = code_leakage_scan("model.fit(\n    X_test,\n    y_test,\n)")
+    assert any(f["signal"] == "fit_on_test" for f in r["flags"])
+
+
+def test_informal_valset_testset_names_are_flagged():
+    """Review of P1-7: the common informal `valset`/`testset` held-out names (token + `set`, no
+    separator) must stay flagged — the old `(?![a-z])` boundary dropped them; the token set now lists
+    them explicitly."""
+    from looplab.trust.leakage import code_leakage_scan
+    for code in ("clf.fit(valset, y)", "m.fit(testset)", "m.fit(x_valset, y)", "m.fit(X_testset, y)"):
+        assert any(f["signal"] == "fit_on_test" for f in code_leakage_scan(code)["flags"]), code
+    # `trainset` is benign (not a held-out set) and must NOT flag
+    assert not any(f["signal"] == "fit_on_test"
+                   for f in code_leakage_scan("m.fit(trainset, y)")["flags"])
+
+
+def test_pearson_ignores_nan_rows_and_still_flags_a_proxy():
+    from looplab.trust.leakage import _pearson, target_leakage
+    # a near-perfect proxy with ONE NaN row must still correlate (not collapse to NaN -> hidden)
+    feat = [1.0, 2.0, 3.0, float("nan"), 5.0]
+    tgt = [1.0, 2.0, 3.0, 4.0, 5.0]
+    assert abs(_pearson(feat, tgt)) > 0.99
+    v = target_leakage({"proxy": feat}, tgt)
+    assert v["leak"] and "proxy" in v["flagged"]
