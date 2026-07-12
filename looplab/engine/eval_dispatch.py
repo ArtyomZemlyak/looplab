@@ -12,6 +12,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Optional
 
+from looplab.events.replay import fold
 from looplab.events.types import EV_RUN_SETUP_FINISHED, EV_RUN_SETUP_STARTED
 
 # THE engine sentinel (engine/options.py): `_evaluate` passes it into `_run_eval` positionally
@@ -48,6 +49,14 @@ class EvalDispatchMixin:
             if not cmd or self.trust_mode != "trusted_local":
                 self._run_setup_done = True
                 return
+            # Crash-safe exactly-once across resume (arch-review §5 P2): if THIS run_setup command
+            # already completed successfully in a prior process (folded from `run_setup_finished`),
+            # skip it — don't re-install deps on every resume. The in-memory flag above still guards
+            # the concurrent case within one process; this closes the cross-process/resume gap.
+            from looplab.core.models import run_setup_key
+            if run_setup_key(cmd) in fold(self.store.read_all()).run_setup_done:
+                self._run_setup_done = True
+                return
             self._run_setup_done = True
             self._do_run_setup(cmd)
 
@@ -59,8 +68,10 @@ class EvalDispatchMixin:
         self.store.append(EV_RUN_SETUP_STARTED, {"command": cmd, "cwd": cwd})
         log = str(Path(self.run_dir) / "run_setup.log")
         rc, out, err, timed = _run_argv(cmd, cwd, to, log_path=log)
+        # Carry the command so the fold can key the exactly-once record on it (arch-review §5 P2).
         self.store.append(EV_RUN_SETUP_FINISHED,
-                          {"exit_code": rc, "timed_out": timed, "stderr_tail": (err or "")[-2000:]})
+                          {"command": cmd, "exit_code": rc, "timed_out": timed,
+                           "stderr_tail": (err or "")[-2000:]})
         if rc != 0 or timed:
             raise RuntimeError(f"run_setup failed (exit={rc}, timed_out={timed}); see {log}\n"
                                + (err or out or "")[-500:])

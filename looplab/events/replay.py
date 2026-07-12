@@ -8,7 +8,7 @@ import math
 from typing import Iterable
 
 from looplab.core.models import (Event, Hypothesis, Idea, Node, NodeStatus, RunState, Trial,
-                     hypothesis_id)
+                     hypothesis_id, run_setup_key)
 from looplab.events.types import (
     EV_ABLATE, EV_AGENT_DECISION, EV_AGENT_VALIDATED, EV_ANNOTATION, EV_APPROVAL_GRANTED,
     EV_APPROVAL_REQUESTED, EV_BEST_CONFIRMED, EV_BUDGET_EXTEND, EV_CONFIRM_DONE,
@@ -22,7 +22,8 @@ from looplab.events.types import (
     EV_NOVELTY_REJECTED, EV_PAUSE, EV_STAGE_FINISHED,
     EV_POLICY_DECISION, EV_PROMOTE, EV_PROXY_SCORED, EV_REPORT_GENERATED,
     EV_RESEARCH_COMPLETED, EV_RESUME, EV_REWARD_HACK_SUSPECTED, EV_RUN_ABORT,
-    EV_RUN_FINISHED, EV_RUN_REOPENED, EV_RUN_STARTED, EV_RUNG_PROMOTED, EV_SET_STRATEGY,
+    EV_RUN_FINISHED, EV_RUN_REOPENED, EV_RUN_SETUP_FINISHED, EV_RUN_STARTED, EV_RUNG_PROMOTED,
+    EV_SET_STRATEGY,
     EV_SETUP_FINISHED, EV_SPEC_APPROVAL_REQUESTED, EV_SPEC_APPROVED, EV_SPEC_DRIFT, EV_SPEC_PROPOSED,
     EV_STRATEGY_DECISION, EV_TRUST_GATE_CHANGED, EV_WORKSPACE_CHANGED)
 
@@ -406,6 +407,14 @@ def _on_setup_finished(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None
     # rest of preflight (leakage!) rather than skip it forever. Idempotent (a re-run re-appends it).
     st.setup_done = True
 
+def _on_run_setup_finished(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
+    # arch-review §5 P2: a SUCCESSFUL run-level `run_setup` (dep install) is folded (keyed by its
+    # command) so a resume skips it instead of re-installing every time — crash-safe exactly-once. A
+    # failed/timed-out setup is NOT recorded (the command must actually re-run). Old logs whose
+    # run_setup_finished carried no `command` just don't populate the set (setup runs as before).
+    if d.get("exit_code") == 0 and not d.get("timed_out") and d.get("command"):
+        st.run_setup_done.add(run_setup_key(d.get("command")))
+
 def _on_data_leakage(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     st.leakage = d
 
@@ -417,16 +426,17 @@ def _on_approval_requested(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> 
     st.approval_subject = d.get("node_id")
 
 def _on_approval_granted(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
-    # P0-2 subject-bound approval: honor the grant only when it names the SAME node the pending
-    # request was raised for. `approval_granted(node_id=999)` for a node that isn't under review no
-    # longer flips `approved` globally — it's a complete no-op (the run stays awaiting approval, so
-    # the engine simply re-requests). Back-compat: when no request recorded a subject
-    # (approval_subject is None — a direct grant, or an old log whose request had best=None) any
-    # grant is accepted, so legacy runs fold identically; the real UI/CLI always send the best's id,
-    # which equals the request subject, so ordinary approvals are unaffected.
+    # P0-2 subject-bound approval: honor a grant that names a REAL candidate node under review — the
+    # current best, OR an operator-chosen node (`approve --node-id N` / the boss `approve` action both
+    # exist to ratify a specific node). A grant for a node that doesn't exist in the run — a
+    # forged/typo'd `approval_granted(node_id=999)` — is ignored so it can't globally flip `approved`;
+    # the run correctly stays awaiting the real approval. Binding to node EXISTENCE (not to the exact
+    # best) closes the forged-id hole without dropping the legitimate non-best `--node-id` grant.
+    # Back-compat: a bare grant with no node_id (old logs / a direct grant) is accepted, so legacy HITL
+    # runs fold identically.
     subj = d.get("node_id")
-    if st.approval_subject is not None and subj != st.approval_subject:
-        return   # mismatched grant: not the node under review — ignore entirely
+    if subj is not None and subj not in st.nodes:
+        return   # not a real candidate — ignore (the run stays awaiting the real approval)
     st.awaiting_approval = False
     st.approved = True
     st.approval_subject = None
@@ -745,6 +755,7 @@ _HANDLERS = {
     EV_DATA_PROVENANCE: _on_data_provenance,
     EV_HOST_GRADING: _on_host_grading,
     EV_SETUP_FINISHED: _on_setup_finished,
+    EV_RUN_SETUP_FINISHED: _on_run_setup_finished,
     EV_DATA_LEAKAGE: _on_data_leakage,
     EV_APPROVAL_REQUESTED: _on_approval_requested,
     EV_APPROVAL_GRANTED: _on_approval_granted,

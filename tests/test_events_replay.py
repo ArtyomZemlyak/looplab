@@ -483,28 +483,74 @@ def test_resume_after_pause_keeps_same_epoch_and_gates(tmp_path):
     assert st.search_epoch == 0 and st.confirmed_done and not st.paused
 
 
-def test_subject_bound_approval_rejects_mismatched_grant(tmp_path):
-    """arch-review §3 P0-2: an `approval_granted` naming a node other than the one under review is a
-    no-op (the run stays awaiting approval); a grant for the request's subject is honored."""
+def _n(s: EventStore, nid: int, metric: float) -> None:
+    s.append("node_created", {"node_id": nid, "parent_ids": [], "operator": "draft",
+                              "idea": {"operator": "draft", "params": {}, "rationale": ""}})
+    s.append("node_evaluated", {"node_id": nid, "metric": metric})
+
+
+def test_subject_bound_approval_rejects_a_forged_nonexistent_node(tmp_path):
+    """arch-review §3 P0-2: an `approval_granted` for a node that doesn't exist in the run (a forged
+    `node_id=999`) is a no-op — it can't globally flip `approved`; the run stays awaiting approval. A
+    grant for a real candidate IS honored."""
     s = EventStore(tmp_path / "e.jsonl")
     s.append("run_started", {"run_id": "r", "task_id": "t", "direction": "min"})
-    s.append("approval_requested", {"node_id": 5, "metric": 0.1})
-    s.append("approval_granted", {"node_id": 999})                    # not the subject -> ignored
+    _n(s, 3, 0.5)                                                     # the best (min)
+    s.append("approval_requested", {"node_id": 3, "metric": 0.5})
+    s.append("approval_granted", {"node_id": 999})                   # not a real node -> ignored
     st = fold(s.read_all())
-    assert st.approved is False and st.awaiting_approval is True and st.approval_subject == 5
-    # a grant for the real subject IS honored (and clears the pending subject)
-    s.append("approval_granted", {"node_id": 5})
+    assert st.approved is False and st.awaiting_approval is True and st.approval_subject == 3
+    s.append("approval_granted", {"node_id": 3})                     # the real best -> honored
     st2 = fold(s.read_all())
     assert st2.approved is True and st2.awaiting_approval is False and st2.approval_subject is None
 
 
-def test_approval_backward_compat_direct_grant(tmp_path):
-    """Back-compat: a grant with no recorded pending subject (an old log / direct grant) is accepted
-    so legacy HITL runs fold identically."""
+def test_operator_may_approve_a_real_non_best_node(tmp_path):
+    """arch-review §3 P0-2 (regression guard): `approve --node-id N` / the boss approve action let an
+    operator ratify a SPECIFIC real node that isn't the current best — that grant must still be honored
+    (binding to node existence, not to the exact best, so the human isn't silently ignored and hung)."""
     s = EventStore(tmp_path / "e.jsonl")
     s.append("run_started", {"run_id": "r", "task_id": "t", "direction": "min"})
-    s.append("approval_granted", {"node_id": 7})                      # no prior approval_requested
+    _n(s, 3, 0.5)                                                    # best (min)
+    _n(s, 7, 0.9)                                                    # a real, non-best node
+    s.append("approval_requested", {"node_id": 3, "metric": 0.5})    # engine requests for the best
+    s.append("approval_granted", {"node_id": 7})                     # operator chooses node 7
+    st = fold(s.read_all())
+    assert st.approved is True and st.awaiting_approval is False
+
+
+def test_approval_backward_compat_direct_grant(tmp_path):
+    """Back-compat: a bare grant (no node_id) is accepted, and a direct grant for a REAL node with no
+    prior approval_requested is accepted — so legacy HITL runs fold identically."""
+    s = EventStore(tmp_path / "e.jsonl")
+    s.append("run_started", {"run_id": "r", "task_id": "t", "direction": "min"})
+    s.append("approval_granted", {})                                 # bare grant (no subject) -> accepted
     assert fold(s.read_all()).approved is True
+    # a direct grant for a real node, no prior request
+    s2 = EventStore(tmp_path / "e2.jsonl")
+    s2.append("run_started", {"run_id": "r", "task_id": "t", "direction": "min"})
+    _n(s2, 0, 0.5)
+    s2.append("approval_granted", {"node_id": 0})
+    assert fold(s2.read_all()).approved is True
+
+
+def test_run_setup_finished_folds_exactly_once_by_command(tmp_path):
+    """arch-review §5 P2: a SUCCESSFUL run-level run_setup is folded (keyed by its command) so a
+    resume can skip re-installing deps; a failed/timed-out one is NOT recorded (must re-run)."""
+    from looplab.core.models import run_setup_key
+    s = EventStore(tmp_path / "e.jsonl")
+    s.append("run_started", {"run_id": "r", "task_id": "t", "direction": "min"})
+    cmd = ["pip", "install", "-r", "requirements.txt"]
+    s.append("run_setup_finished", {"command": cmd, "exit_code": 1, "timed_out": False})   # failed
+    assert run_setup_key(cmd) not in fold(s.read_all()).run_setup_done
+    s.append("run_setup_finished", {"command": cmd, "exit_code": 0, "timed_out": False})   # ok
+    st = fold(s.read_all())
+    assert run_setup_key(cmd) in st.run_setup_done
+    # a DIFFERENT command is keyed separately (not skipped by this record)
+    assert run_setup_key(["pip", "install", "numpy"]) not in st.run_setup_done
+    # a timed-out completion is not recorded either
+    s.append("run_setup_finished", {"command": ["make"], "exit_code": 0, "timed_out": True})
+    assert run_setup_key(["make"]) not in fold(s.read_all()).run_setup_done
 
 
 def test_spec_approved_requires_a_proposal(tmp_path):

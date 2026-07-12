@@ -204,6 +204,16 @@ def hypothesis_id(statement: str) -> str:
     return f"{slug}-{hashlib.md5(norm.encode('utf-8')).hexdigest()[:6]}"
 
 
+def run_setup_key(command) -> str:
+    """Stable identity for a run-level `run_setup` command, so a resume can tell "this exact setup
+    already completed" from "not yet run" (arch-review §5 P2). A short hash of the canonical argv —
+    single-sourced here (core) so the fold (`run_setup_finished` handler) and the engine's skip-check
+    compute it identically without a layering violation (events/engine both import core)."""
+    import hashlib
+    canon = "\x00".join(str(a) for a in (command or []))
+    return hashlib.md5(canon.encode("utf-8")).hexdigest()[:12]
+
+
 class Hypothesis(BaseModel):
     """A first-class research hypothesis (P1). Audit-only — it never affects best-selection; it makes
     the run legible ("what have we learned?") and gives the UI a board. Mostly DERIVED by the fold
@@ -298,6 +308,13 @@ class RunState(BaseModel):
     # that already reached the first node also have run_id set, so `_setup_phase` treats a run with any
     # node/finished as already-set-up (see the guard there) — legacy runs never re-run setup.
     setup_done: bool = False
+    # RUN-LEVEL run_setup (dep install) completion, folded from a successful `run_setup_finished`
+    # keyed by the command (arch-review §5 P2). Distinct from `setup_done` above: this is the eval's
+    # one-time `run_setup` command, not the task/data preflight. The engine's in-memory `_run_setup_done`
+    # flag only makes it once-per-PROCESS, so a resume (fresh Engine) re-installs deps every time and a
+    # crash mid-setup can't be told from a completed one. Folding the successful command here makes it
+    # crash-safe exactly-once across resume. Absent in old logs -> empty set -> setup runs as before.
+    run_setup_done: set[str] = Field(default_factory=set)
     # T2 trust enforcement (folded from run_started; "audit" for old logs). "gate"/"block" make
     # best-selection exclude nodes flagged for a reward-hack / data-leakage signal (not critic).
     trust_gate: str = "audit"

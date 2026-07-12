@@ -691,6 +691,7 @@
   "research_served": 0,
   "reward_hacks": [],
   "run_id": "golden",
+  "run_setup_done": [],
   "rungs": [],
   "search_epoch": 0,
   "setup_done": true,
