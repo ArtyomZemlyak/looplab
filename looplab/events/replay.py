@@ -435,8 +435,18 @@ def _on_approval_granted(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> No
     # Back-compat: a bare grant with no node_id (old logs / a direct grant) is accepted, so legacy HITL
     # runs fold identically.
     subj = d.get("node_id")
-    if subj is not None and subj not in st.nodes:
-        return   # not a real candidate — ignore (the run stays awaiting the real approval)
+    if subj is not None:
+        # Coerce to int before the membership test (node ids are int keys): a client that posts a JSON
+        # STRING id (`{"node_id":"3"}`) would otherwise fold `"3" not in {3: Node}` -> True and the grant
+        # would be silently dropped, hanging the run awaiting approval (final ultra-review §F). `/control`
+        # coerces node_id for node_reset but not for approval_granted; coercing here defends every
+        # producer/entry point in one place. A non-numeric id stays as-is and fails the existence test.
+        try:
+            subj = int(subj)
+        except (TypeError, ValueError):
+            pass
+        if subj not in st.nodes:
+            return   # not a real candidate — ignore (the run stays awaiting the real approval)
     st.awaiting_approval = False
     st.approved = True
     st.approval_subject = None

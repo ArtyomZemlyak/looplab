@@ -314,3 +314,25 @@ def test_run_kind_pins_genesis(tmp_path, monkeypatch):
     assert result.exit_code == 0, result.output
     assert seen["kind"] == "quadratic"                        # the pin reached genesis
     assert "Genesis -> kind=quadratic" in result.output and "finished=True" in result.output
+
+
+def test_approve_rejects_a_nonexistent_node_id(tmp_path):
+    """final ultra-review §F: `approve --node-id <typo>` must fail loudly rather than append a grant
+    the fold silently ignores (subject-bound approval only honors a real candidate) while printing
+    'approved' — the confusing no-op the review flagged."""
+    from looplab.events.eventstore import EventStore
+    rd = tmp_path / "run"
+    rd.mkdir()
+    es = EventStore(rd / "events.jsonl")
+    es.append("run_started", {"run_id": "r", "task_id": "t", "goal": "g", "direction": "min"})
+    es.append("node_created", {"node_id": 0, "parent_ids": [], "operator": "draft",
+                               "idea": {"operator": "draft", "params": {}, "rationale": ""}})
+    es.append("node_evaluated", {"node_id": 0, "metric": 0.5})
+    result = runner.invoke(app, ["approve", str(rd), "--node-id", "999"])
+    assert result.exit_code == 2, result.output
+    assert "no node #999" in result.output
+    assert not any(e.type == "approval_granted" for e in EventStore(rd / "events.jsonl").read_all())
+    # approving the real node works
+    ok = runner.invoke(app, ["approve", str(rd), "--node-id", "0"])
+    assert ok.exit_code == 0, ok.output
+    assert any(e.type == "approval_granted" for e in EventStore(rd / "events.jsonl").read_all())

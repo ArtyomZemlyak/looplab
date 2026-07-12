@@ -4,7 +4,7 @@ from __future__ import annotations
 from enum import Enum
 from typing import Any, Optional
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_serializer, model_validator
 
 
 class NodeStatus(str, Enum):
@@ -484,6 +484,15 @@ class RunState(BaseModel):
     # `lessons_refreshed` records each mid-run re-read of the shared cross-run store (cadence gate).
     lessons_distilled: list[dict] = Field(default_factory=list)
     lessons_refreshed: list[dict] = Field(default_factory=list)
+
+    @field_serializer("run_setup_done")
+    def _ser_run_setup_done(self, v: set) -> list:
+        # Serialize the str-set as a SORTED list so the projection is deterministic across processes
+        # (final ultra-review §A): a plain set[str] dumps in hash-slot order, which PYTHONHASHSEED
+        # randomizes per process (unlike set[int], whose hash==value), so `looplab replay` / `/state`
+        # could show a spurious ordering diff for a run with ≥2 distinct run_setup commands. The live
+        # attribute stays a set (membership is all the fold/engine use); only the dump is ordered.
+        return sorted(v)
 
     # --- read helpers (no mutation) ---
     def best(self) -> Optional[Node]:

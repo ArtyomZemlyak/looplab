@@ -553,6 +553,38 @@ def test_run_setup_finished_folds_exactly_once_by_command(tmp_path):
     assert run_setup_key(["make"]) not in fold(s.read_all()).run_setup_done
 
 
+def test_run_setup_done_serializes_sorted_for_determinism(tmp_path):
+    """final ultra-review §A: a str-set dumps in hash-randomized order across processes; the projection
+    (looplab replay / /state) must be deterministic, so run_setup_done serializes as a SORTED list."""
+    from looplab.core.models import run_setup_key
+    s = EventStore(tmp_path / "e.jsonl")
+    s.append("run_started", {"run_id": "r", "task_id": "t", "direction": "min"})
+    for cmd in (["pip", "install", "b"], ["pip", "install", "a"], ["make"]):
+        s.append("run_setup_finished", {"command": cmd, "exit_code": 0, "timed_out": False})
+    dumped = fold(s.read_all()).model_dump(mode="json")["run_setup_done"]
+    assert dumped == sorted(run_setup_key(c) for c in
+                            (["pip", "install", "b"], ["pip", "install", "a"], ["make"]))
+    assert dumped == sorted(dumped)                                  # deterministic order
+
+
+def test_approval_granted_coerces_string_node_id(tmp_path):
+    """final ultra-review §F: a grant carrying a JSON STRING node id ("3") must be coerced and honored
+    (node ids are int keys) — else it folds as `"3" not in {3: Node}` and the run hangs awaiting
+    approval. A non-numeric id still fails the existence test."""
+    s = EventStore(tmp_path / "e.jsonl")
+    s.append("run_started", {"run_id": "r", "task_id": "t", "direction": "min"})
+    _n(s, 3, 0.5)
+    s.append("approval_requested", {"node_id": 3})
+    s.append("approval_granted", {"node_id": "3"})                   # string id -> coerced to 3
+    assert fold(s.read_all()).approved is True
+    # a non-numeric garbage id is still rejected
+    s2 = EventStore(tmp_path / "e2.jsonl")
+    s2.append("run_started", {"run_id": "r", "task_id": "t", "direction": "min"})
+    _n(s2, 3, 0.5)
+    s2.append("approval_granted", {"node_id": "not-a-node"})
+    assert fold(s2.read_all()).approved is False
+
+
 def test_spec_approved_requires_a_proposal(tmp_path):
     """arch-review §3 P0-2: a premature `spec_approved` with no `spec_proposed` must not confirm the
     spec (which would skip onboarding); a real proposal-then-approval works."""

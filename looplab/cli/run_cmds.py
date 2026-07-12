@@ -465,6 +465,13 @@ def approve(run_dir: Path = typer.Argument(..., help="Run dir awaiting approval.
         return
     best = state.best()
     nid = node_id if node_id is not None else (best.id if best else None)
+    # Validate the target before appending: the fold honors a grant only for a REAL candidate node
+    # (subject-bound approval, P0-2), so an explicit `--node-id` typo would append a grant the fold
+    # silently ignores while this command printed "approved" — a confusing no-op. Fail loudly instead.
+    if node_id is not None and node_id not in state.nodes:
+        typer.echo(f"no node #{node_id} in run {run_dir.name} — nothing approved "
+                   f"(pass a real node id, or omit --node-id to approve the current best)")
+        raise typer.Exit(2)
     store.append(EV_APPROVAL_GRANTED, {"node_id": nid})
     typer.echo(f"approved node {nid} for run {run_dir.name}")
 
