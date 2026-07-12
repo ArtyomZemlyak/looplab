@@ -448,8 +448,8 @@ def _on_approval_granted(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> No
             return
         try:
             subj = int(subj)
-        except (TypeError, ValueError):
-            return   # non-coercible id -> ignore (never hashed)
+        except (TypeError, ValueError, OverflowError):
+            return   # non-coercible id (incl. a non-finite float that slipped in) -> ignore, never hashed
         if subj not in st.nodes:
             return   # not a real candidate — ignore (the run stays awaiting the real approval)
     st.awaiting_approval = False
@@ -742,9 +742,19 @@ def _on_confirm_done(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
         st.confirmed_forced.append(nid)
 
 def _on_annotation(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
+    # `annotation` is a sanctioned /control event appended VERBATIM, and `annotations` is keyed by int
+    # node id (dict[int, list[str]]) — so a forged `{"node_id":[999]}` would make `setdefault` hash the
+    # unhashable list and raise TypeError, bricking the fold (same class as the approval grant above,
+    # final-verification §4). Coerce/guard the key first (reject a bool — it subclasses int — and any
+    # non-coercible id) so the key op can never raise; a null/garbage id simply drops the note.
     nid = d.get("node_id")
-    if nid is not None:
-        st.annotations.setdefault(nid, []).append(d.get("text", ""))
+    if isinstance(nid, bool):
+        return
+    try:
+        nid = int(nid)
+    except (TypeError, ValueError, OverflowError):
+        return
+    st.annotations.setdefault(nid, []).append(d.get("text", ""))
 
 def _on_promote(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     st.promotions.append(d)

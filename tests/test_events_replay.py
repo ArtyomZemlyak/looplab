@@ -601,6 +601,23 @@ def test_approval_granted_tolerates_unhashable_and_bool_node_id(tmp_path):
         assert st.approved is False and st.awaiting_approval is True
 
 
+def test_annotation_tolerates_unhashable_and_bool_node_id(tmp_path):
+    """final-verification §4: `annotation` is a sanctioned /control event appended verbatim and
+    `_on_annotation` keys `st.annotations` by node id — a forged unhashable/bool id must not crash the
+    fold (setdefault would hash it), the same blocker class as approval_granted."""
+    for bad in ([999], {}, True, "x", None):
+        s = EventStore(tmp_path / f"a_{hash(str(bad)) & 0xffff}.jsonl")
+        s.append("run_started", {"run_id": "r", "task_id": "t", "direction": "min"})
+        s.append("annotation", {"node_id": bad, "text": "note"})
+        st = fold(s.read_all())             # must not raise
+        assert st.annotations == {}         # forged/garbage id dropped, no note recorded
+    # a real int id still records the note
+    s2 = EventStore(tmp_path / "a_ok.jsonl")
+    s2.append("run_started", {"run_id": "r", "task_id": "t", "direction": "min"})
+    s2.append("annotation", {"node_id": 2, "text": "hello"})
+    assert fold(s2.read_all()).annotations == {2: ["hello"]}
+
+
 def test_spec_approved_requires_a_proposal(tmp_path):
     """arch-review §3 P0-2: a premature `spec_approved` with no `spec_proposed` must not confirm the
     spec (which would skip onboarding); a real proposal-then-approval works."""
