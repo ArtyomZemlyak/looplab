@@ -147,6 +147,7 @@ nav:
       - Current finding ledger (2026-07-11): 16-architecture-code-review-2026-07-11.md
       - Current delivery plan (2026-07-11): 17-project-review-and-directions-2026-07-11.md
       - Current UI/UX audit (2026-07-11): 18-ui-ux-review-2026-07-11.md
+      - IDE integration & remote development (2026-07-12): 19-ide-integration-and-remote-development-2026-07-12.md
       - Product design: 01-product-design.md
       - Decisions (ADRs): 03-decisions.md
       - File layout: 04-file-layout.md

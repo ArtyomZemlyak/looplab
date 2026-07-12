@@ -8,11 +8,13 @@
 > task-oriented documentation — install, quickstart, CLI, configuration, tasks — see the
 > **[User Guide](guide/index.md)** and the [README](../README.md).
 
-> **Current implementation authority (2026-07-11):** [doc 16](16-architecture-code-review-2026-07-11.md)
+> **Current implementation authority (2026-07-12):** [doc 16](16-architecture-code-review-2026-07-11.md)
 > is the finding/reproduction ledger; [doc 17](17-project-review-and-directions-2026-07-11.md) is the
 > canonical priority, dependency, and release-gate plan; [doc 18](18-ui-ux-review-2026-07-11.md) is
 > authoritative for UI/UX observations and UI-specific acceptance criteria. Doc 18 is subordinate to
-> doc 17's overall ordering and does not claim the findings are fixed.
+> doc 17's overall ordering and does not claim the findings are fixed. [Doc 19](19-ide-integration-and-remote-development-2026-07-12.md)
+> is authoritative for IDE-integration and secure remote-workspace option criteria; it is likewise
+> subordinate to doc 17 and does not claim that an IDE or remote-access path is implemented.
 
 ---
 
@@ -20,6 +22,7 @@
 
 | # | Doc | What it answers |
 |---|-----|-----------------|
+| 19 | **[19-ide-integration-and-remote-development-2026-07-12.md](19-ide-integration-and-remote-development-2026-07-12.md)** | **Current IDE and remote-development analysis.** Code-grounded explanation of JupyterLab/web-VS-Code lag, embedded CodeMirror/Monaco architecture, full-functionality SSH/WSS/Teleport/Coder options, strict-no-SSH Kubernetes Attach, security boundaries, benchmark plan, and go/no-go gates. |
 | 18 | **[18-ui-ux-review-2026-07-11.md](18-ui-ux-review-2026-07-11.md)** | **Current UI/UX audit.** Render- and code-validated visual, interaction, accessibility, responsive, safety, and functional-gap findings with acceptance criteria and an UI-R0–R5 delivery sequence subordinate to doc 17. |
 | 17 | **[17-project-review-and-directions-2026-07-11.md](17-project-review-and-directions-2026-07-11.md)** | **Current canonical delivery plan.** Strategic architecture verdict, R0–R5 dependency order, migration/canary/rollback rules, release gates, and gated research directions. Start here for “what next.” |
 | 16 | **[16-architecture-code-review-2026-07-11.md](16-architecture-code-review-2026-07-11.md)** | **Current finding ledger.** Reproductions and evidence for the P0/P1 blockers that determine doc 17's order. Read this for issue-level detail. |
@@ -61,5 +64,7 @@ To **learn the loop**, read **Karpathy `autoresearch`** then fork **AIDE**; **R&
 > **Note:** docs 01–05 are the original *design* documents. For current implementation risk and
 > sequencing, use [doc 16](16-architecture-code-review-2026-07-11.md) and
 > [doc 17](17-project-review-and-directions-2026-07-11.md); for UI/UX findings and acceptance criteria,
-> use [doc 18](18-ui-ux-review-2026-07-11.md). Current code is the runtime source of truth;
-> `docs/guide/` describes intended use, while verified discrepancies in docs 16–18 take precedence.
+> use [doc 18](18-ui-ux-review-2026-07-11.md); for IDE integration, JupyterHub performance constraints,
+> and secure remote-workspace choices, use
+> [doc 19](19-ide-integration-and-remote-development-2026-07-12.md). Current code is the runtime source of truth;
+> `docs/guide/` describes intended use, while verified discrepancies in docs 16–19 take precedence.
