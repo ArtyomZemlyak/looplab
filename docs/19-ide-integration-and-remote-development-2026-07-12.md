@@ -17,6 +17,7 @@
 
 **Companion material:** [current delivery plan](17-project-review-and-directions-2026-07-11.md) ·
 [UI/UX audit](18-ui-ux-review-2026-07-11.md) ·
+[multi-user workspace and distributed execution](20-looplab-unified-ds-workspace-and-distributed-execution-2026-07-12.md) ·
 [architecture](02-architecture.md) · [file contract](04-file-layout.md) ·
 [Web UI guide](guide/ui.md) · [deployment guide](guide/deployment.md)
 
@@ -688,8 +689,8 @@ These intervals are starting hypotheses for the PoC, not production SLOs.
 
 The safe primary flow is:
 
-1. Open a selected parent node as a deterministic view of **run-start baseline + parent
-   `files`/`deleted`/`code` overlay**.
+1. Open a selected parent node as a deterministic view of the Run's **sealed InputSnapshot + parent
+   `files`/`deleted`/`code` overlay**. Do not read newer bytes from a mutable Project workspace.
 2. Edits create a private draft. **Save draft does not mutate source and does not change lineage.**
 3. Validate all changed paths, count/byte limits, protected surfaces, secrets, syntax, delete/rename
    operations, and optimistic versions.
@@ -716,6 +717,35 @@ Build the same thin vertical slice in both editors:
 Choose CodeMirror unless Monaco materially improves the tested product journey enough to justify
 its bundle, worker, accessibility, and maintenance cost. Do not choose by synthetic editor startup
 alone.
+
+### 11.7 Authoring workspace versus execution workdir
+
+The embedded editor and every desktop path target an AuthoringWorkspace, WorkspaceSession, or
+candidate draft. They do not make a running ExecutionAttempt an editable workspace.
+
+A browser editor may edit a candidate overlay directly against content-addressed state without a
+live runtime. JupyterLab, terminals, language servers, browser IDEs, and desktop VS Code require a
+leased WorkspaceSession. Both paths produce the same sealed WorkspaceRevision/InputSnapshot
+contract before detached execution:
+
+```text
+mutable authoring generation
+  -> Snapshot workspace / Commit candidate
+  -> sealed WorkspaceRevision + InputSnapshot
+  -> clean attempt-scoped execution workdir
+```
+
+Workspace mode, Candidate mode, and Artifact/Debug mode must be visually distinct. Candidate commit
+appends lineage but does not mutate Project source. Workspace snapshot creates a new Run baseline
+but does not append a child candidate. Applying a successful candidate or debug fix back to the
+workspace is a separate, reviewed, base-revision-pinned ChangeSet.
+
+No IDE connects to the canonical execution directory by default. “Open debug copy” creates a new
+TTL workspace from the exact snapshot plus selected sanitized artifacts/checkpoint. Exceptional
+write-capable live attach taints the attempt and requires a clean rerun before scientific promotion.
+Doc 20 §8.6 is authoritative for AuthoringWorkspace, access-grant, snapshot, writer-fence,
+debug-copy, and multi-domain lifecycle semantics; this document remains authoritative for editor,
+transport, performance, security, and licensing choices.
 
 ## 12. Desktop Remote-SSH through WSS/443
 
@@ -951,6 +981,11 @@ compatibility and licensing model.
 8. **The browser does not render unbounded training output.**
 9. **Proxy replacement is evidence-driven.** Keep JSP for MVP if the real p95 is good; move to a
    standalone/direct service only when path A/B identifies material benefit.
+10. **IDE support has an explicit resource budget.** LSP, extension host, Git indexer, watcher,
+    access agent, CPU, memory, PIDs, storage IOPS, and log channels have bounded requests/limits;
+    detached training does not share their process/resource budget.
+11. **Snapshotting is generation-based and bounded.** It never recursively captures datasets, run
+    outputs, checkpoints, caches, environments, mounted secrets, or unsaved desktop buffers.
 
 ## 18. PoC benchmark matrix
 
