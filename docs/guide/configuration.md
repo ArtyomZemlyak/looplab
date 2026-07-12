@@ -249,6 +249,8 @@ per-node dials — not 1:1 `Settings` fields, but gated the same way.)
 | `docker_image` | `LOOPLAB_DOCKER_IMAGE` | `python:3.12-slim` | Image for the untrusted command-eval tier |
 | `sandbox_memory` | `LOOPLAB_SANDBOX_MEMORY` | `4g` | Memory cap for the untrusted/hostile Docker tier (`docker run --memory`). Raise for model-training evals; `""` = unbounded. Ignored by `trusted_local`. |
 | `sandbox_cpus` | `LOOPLAB_SANDBOX_CPUS` | _(unset)_ | CPU cap for the untrusted/hostile Docker tier (`docker run --cpus`, e.g. `2`). `""` = unbounded. Ignored by `trusted_local`. |
+| `sandbox_memory_local` | `LOOPLAB_SANDBOX_MEMORY_LOCAL` | _(unset)_ | Best-effort host-OOM guard for the `trusted_local` (subprocess) tier: an `RLIMIT_AS` cap on each eval child (e.g. `8g`) so a runaway allocation hits `MemoryError` instead of OOM-killing the host. POSIX only. `""` = off; caps **virtual** memory, so leave it off for CUDA/torch (use the Docker tier's `sandbox_memory` for those). |
+| `sandbox_fsize_local` | `LOOPLAB_SANDBOX_FSIZE_LOCAL` | _(unset)_ | Best-effort disk-fill guard for the `trusted_local` tier: an `RLIMIT_FSIZE` cap on the size of any single file an eval child writes (e.g. `2g`), so a runaway gets `SIGXFSZ` instead of filling the host disk. POSIX only. `""` = off; leave it off for tasks that write large model checkpoints. |
 | `redact_output` | `LOOPLAB_REDACT_OUTPUT` | `false` | Mask credentials in stdout/stderr before persisting (recommend on for untrusted) |
 | `reward_hack_detect` | `LOOPLAB_REWARD_HACK_DETECT` | `false` | Flag suspicious wins (grader access, frozen-file writes) |
 | `code_leakage_detect` | `LOOPLAB_CODE_LEAKAGE_DETECT` | `false` | Static code-leakage scan (fit-before-split, fit-on-test) |

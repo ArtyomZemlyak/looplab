@@ -55,6 +55,14 @@ EV_NODE_CREATED = "node_created"
 EV_NODE_EVALUATED = "node_evaluated"
 EV_NODE_FAILED = "node_failed"
 EV_NODE_REPAIRED = "node_repaired"
+# Append-only node delete (§6.3): logically removes a node + its descendant subtree instead of
+# physically rewriting events.jsonl (which broke append-only semantics and could leave
+# parent/chosen/archive references stale). Data: {"node_ids": [subtree ids]} — the writer computes
+# the whole subtree so the fold stays a pure set op. Folded: marks each node tombstoned (kept in
+# st.nodes, excluded from selection). Written offline by the machine-runs boss tool while the engine
+# is stopped (delete refuses on a live run); irreversible physical purge is a separate explicit
+# compaction, never an ordinary domain command.
+EV_NODE_TOMBSTONED = "node_tombstoned"
 EV_CONFIRM_EVAL = "confirm_eval"
 EV_NODE_CONFIRMED = "node_confirmed"
 EV_HOLDOUT_EVALUATED = "holdout_evaluated"
@@ -68,6 +76,7 @@ EV_SPEC_PROPOSED = "spec_proposed"
 EV_SPEC_APPROVAL_REQUESTED = "spec_approval_requested"
 EV_SPEC_DRIFT = "spec_drift"
 EV_WORKSPACE_CHANGED = "workspace_changed"
+EV_ENV_CHANGED = "env_changed"           # P0-5: the Python/lib environment differs from run start (resume)
 EV_DIVERSITY_ARCHIVE = "diversity_archive"
 # Breadth read-model recorded at the strategist cadence (narrowing curve). Audit-only — it never
 # affects node selection; folded ONLY so the at_node gate makes resume idempotent and the UI/replay
@@ -92,6 +101,13 @@ EV_LESSONS_DISTILLED = "lessons_distilled"
 EV_LESSONS_REFRESHED = "lessons_refreshed"
 EV_REPORT_GENERATED = "report_generated"
 EV_CONFIRM_DONE = "confirm_done"         # fulfillment gate for `force_confirm` requests
+# P1-1 recoverable-intent kernel for the resume/spawn handoff. `/resume` records a DURABLE
+# `resume_requested` intent BEFORE spawning the detached engine (so a spawn that crashes before the
+# engine runs isn't lost); the engine appends `resume_served` once it has ACQUIRED the singleton lock
+# and is about to drive the loop. The pair is a seq-gated fulfillment (like fork/inject): a request
+# whose seq is newer than the last serve is an UNFULFILLED (zombie) resume that the on-load reconciler
+# re-spawns — idempotent because a second engine no-ops on the lock. resume_served is engine-written.
+EV_RESUME_SERVED = "resume_served"
 
 # --- CONTROL events (live operator/UI intents appended to the same log; the engine reads
 #     the folded intent and writes the matching DOMAIN effect — see CONTROL_EVENTS in
@@ -119,6 +135,7 @@ EV_HYPOTHESIS_ADDED = "hypothesis_added"       # also engine-written after deep 
 EV_HYPOTHESIS_UPDATED = "hypothesis_updated"
 EV_HYPOTHESIS_MERGED = "hypothesis_merged"     # engine-written: fold alias hypotheses into a canonical
 EV_RUN_REOPENED = "run_reopened"
+EV_RESUME_REQUESTED = "resume_requested"   # P1-1: durable resume intent, appended by /resume pre-spawn
 EV_TRUST_GATE_CHANGED = "trust_gate_changed"   # server config edit; folded last-write-wins
 # Predict-before-execute pick among K ideas / N code candidates. FOLDED into RunState.foresight_selected
 # (audit-only, never touches selection) so the world model can be primed with its own calibration track
@@ -172,5 +189,5 @@ BACKGROUND_APPENDABLE: frozenset[str] = frozenset({EV_RESEARCH_COMPLETED, EV_HIN
 DIAGNOSTIC_EVENTS: frozenset[str] = frozenset({
     EV_SETUP_STARTED, EV_SETUP_STEP, EV_DRIFT_UNAVAILABLE, EV_INJECT_FAILED, EV_BUDGET,
     EV_READMODEL_SKIPPED, EV_DEPS_INSTALLED, EV_WORKSPACE_SEEDED, EV_RUN_SETUP_STARTED,
-    EV_LOG_REPAIRED, EV_REFLECTION_NOTE, EV_LESSONS_RECONCILED,
+    EV_LOG_REPAIRED, EV_REFLECTION_NOTE, EV_LESSONS_RECONCILED, EV_ENV_CHANGED,
 })

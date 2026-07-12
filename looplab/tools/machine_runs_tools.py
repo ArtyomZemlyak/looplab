@@ -438,10 +438,16 @@ class RunControlTools:
                            "name (train, data_prep, …) to re-run the pipeline from that stage"}},
                 ["run_id", "node_id"]),
             fn_spec("delete_node",
-                "DELETE a node AND its descendants from a run (removes their events, spans and workdirs; "
-                "the best node is recomputed). DESTRUCTIVE + backs the log up. Refuses while the engine "
-                "is live — stop the run first.",
-                {"run_id": {"type": "string"}, "node_id": {"type": "integer"}},
+                "DELETE a node AND its descendants from a run. Default is an APPEND-ONLY tombstone: the "
+                "subtree is logically removed (excluded from best-pick / breeding / re-eval) while its "
+                "events stay in the log, so it's reversible and parent/chosen/archive refs stay valid. "
+                "Pass purge=true for an IRREVERSIBLE physical compaction that also rewrites the log and "
+                "removes spans + workdirs (backs the log up first). Refuses while the engine is live — "
+                "stop the run first.",
+                {"run_id": {"type": "string"}, "node_id": {"type": "integer"},
+                 "purge": {"type": "boolean",
+                           "description": "irreversibly rewrite the log + remove workdirs (default: "
+                           "false = reversible tombstone)"}},
                 ["run_id", "node_id"]),
             fn_spec("delete_run",
                 "DELETE an entire run and all its artifacts. DESTRUCTIVE + irreversible. Refuses while "
@@ -653,13 +659,16 @@ class RunControlTools:
         import shutil
         from looplab.events.eventstore import EventStore
         from looplab.events.replay import fold
+        from looplab.events.types import EV_NODE_TOMBSTONED
         try:
             nid = int(args.get("node_id"))
         except (TypeError, ValueError):
             return "(delete_node needs an integer node_id)"
+        purge = bool(args.get("purge"))
         if self._live(rd):
             return f"(run {rid} is LIVE — stop it first; the engine is the sole writer of its log)"
-        st = fold(EventStore(rd / "events.jsonl").read_all())
+        evp = rd / "events.jsonl"
+        st = fold(EventStore(evp).read_all())
         if nid not in st.nodes:
             return f"(no node #{nid} in {rid})"
         # The node AND every descendant (deleting a node alone would orphan its children's parent links).
@@ -671,11 +680,23 @@ class RunControlTools:
                 if n.id not in subtree and any(p in subtree for p in n.parent_ids):
                     subtree.add(n.id)
                     changed = True
-        blocked = self._gate("delete_node", rid, f"delete node(s) {sorted(subtree)} of {rid}")
+        verb = "PURGE (physical, irreversible)" if purge else "tombstone"
+        blocked = self._gate("delete_node", rid, f"{verb} node(s) {sorted(subtree)} of {rid}")
         if blocked:
             return blocked
+        if not purge:
+            # DEFAULT: append-only delete (§6.3). A single tombstone event marks the whole subtree
+            # logically deleted; the fold excludes them from selection while KEEPING their events, so
+            # parent/chosen/archive references stay valid and the delete is reversible + auditable. No
+            # log rewrite, no workdir/span removal. (Only foldable id-int subtree is listed.)
+            EventStore(evp).append(EV_NODE_TOMBSTONED, {"node_ids": sorted(subtree)})
+            st2 = fold(EventStore(evp).read_all())
+            live_left = sum(1 for n in st2.nodes.values() if not n.tombstoned)
+            return (f"(tombstoned node(s) {sorted(subtree)} of {rid} — logically deleted, log intact + "
+                    f"reversible; {live_left} live nodes left, best now #{st2.best_node_id}. "
+                    f"Use purge=true for an irreversible physical compaction.)")
+        # --- purge=true: irreversible physical compaction (rewrites the append-only log) ---
         from looplab.core.atomicio import atomic_write_text
-        evp = rd / "events.jsonl"
         recs = [json.loads(x) for x in evp.read_text("utf-8").splitlines() if x.strip()]
         kept = [r for r in recs
                 if not (isinstance(r.get("data"), dict) and r["data"].get("node_id") in subtree)]

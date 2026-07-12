@@ -110,6 +110,13 @@ class Node(BaseModel):
     # In-surface files the agent DELETED (patch-gate accepted the deletion). Applied to the eval
     # workdir after the pristine repo is seeded, so an accepted deletion actually takes effect.
     deleted: list[str] = Field(default_factory=list)
+    # Logically deleted via a `node_tombstoned` event (append-only delete, §6.3). The node and its
+    # events STAY in the log — so parent links still resolve, the delete is reversible/auditable, and
+    # node-id allocation never reuses the id — but a tombstoned node is invisible to selection: the
+    # evaluated/feasible/breedable/pending helpers skip it, so it can never be chosen best, bred from,
+    # or re-picked for eval. Irreversible physical purge is a separate explicit compaction, never an
+    # ordinary domain command. Additive + reader-defaulted: absent on old logs -> False -> unchanged fold.
+    tombstoned: bool = False
     metric: Optional[float] = None
     status: NodeStatus = NodeStatus.pending
     error: str = ""
@@ -308,6 +315,11 @@ class RunState(BaseModel):
     # that already reached the first node also have run_id set, so `_setup_phase` treats a run with any
     # node/finished as already-set-up (see the guard there) — legacy runs never re-run setup.
     setup_done: bool = False
+    # P0-3 content-addressed setup: a digest of the MATERIAL setup completed against (config hash +
+    # workspace fingerprint + data provenance), folded from `setup_finished`. Binds `setup_done` to the
+    # exact inputs so resume can tell "setup done for THIS material" from "done for material that has
+    # since changed" — the boolean alone trusted a stale preflight (leakage!). Empty on old logs.
+    setup_manifest: str = ""
     # RUN-LEVEL run_setup (dep install) completion, folded from a successful `run_setup_finished`
     # keyed by the command (arch-review §5 P2). Distinct from `setup_done` above: this is the eval's
     # one-time `run_setup` command, not the task/data preflight. The engine's in-memory `_run_setup_done`
@@ -353,6 +365,15 @@ class RunState(BaseModel):
     # confirmed (the confirm phase is skipped) or re-approved. Defaults 0; old logs stay at 0 and
     # fold byte-identically until an actual reopen-after-finish occurs.
     search_epoch: int = 0
+    # P1-1 recoverable-intent kernel: seq of the last durable `resume_requested` (appended by /resume
+    # before spawning the detached engine) and of the last engine-written `resume_served` (appended
+    # once the engine holds the singleton lock). A request whose seq is NEWER than the last serve is an
+    # UNFULFILLED resume — the engine crashed before running — which the on-load reconciler re-spawns.
+    # `resume_pending()` reads these. `_ts` carries the request's event time so the reconciler can wait
+    # a grace period before re-spawning. All 0 on old logs -> never pending -> unchanged behavior.
+    last_resume_request_seq: int = 0
+    last_resume_served_seq: int = 0
+    last_resume_request_ts: float = 0.0
     awaiting_approval: bool = False       # HITL: approval requested, not yet granted (I21)
     approved: bool = False                # HITL: a human approved the result (I21)
     # P0-2: the node id the pending approval request was raised for (folded from `approval_requested`),
@@ -379,10 +400,26 @@ class RunState(BaseModel):
     # run_started, and whether a resume detected the source changed underneath.
     workspace: Optional[dict] = None
     workspace_changed: bool = False
+    # P0-5 environment identity: the Python/platform + key-library version fingerprint pinned at
+    # run_started. A resume compares the current environment against it and emits `env_changed` (a
+    # diagnostic) on drift — a run continued after a library upgrade is no longer bit-reproducible, so
+    # record it instead of pretending it is. None on old logs -> no env pin -> the check is skipped.
+    env: Optional[dict] = None
+    # P0-5 dirty-input enumeration: for a repo task, the list of workspace files that were UNCOMMITTED
+    # (git status --porcelain) at run start — the explicit "which inputs differ from a clean checkout"
+    # on top of the content hash the workspace fingerprint already pins. Empty for non-repo/clean runs
+    # and old logs. Provenance only; never gates.
+    dirty_inputs: list[dict] = Field(default_factory=list)
     # Eval-compute budget accounting (#2): cumulative wall-clock spent INSIDE evals (training
     # runs), distinct from the run's total wall-clock (which includes LLM/agent time). The
     # search stops cleanly once this crosses `max_eval_seconds` — guards the silent long sweep.
     total_eval_seconds: float = 0.0
+    # P1-2 separate budget buckets: the SAME cumulative eval seconds split by category (node/search
+    # eval vs multi-seed confirm) for observability — where the compute went, not just the total. LLM
+    # spend is already its own bucket (llm_cost -> total_llm_*); holdout re-scores existing predictions
+    # for free (no eval_seconds), so it never contributes. Sums to total_eval_seconds. Empty on old
+    # logs -> populated additively on the next fold; never gates selection.
+    eval_seconds_by_kind: dict[str, float] = Field(default_factory=dict)
     # Per-seed confirmation results {node_id: {seed: metric|None}} from `confirm_eval` events —
     # lets a crash-interrupted confirm pass RESUME mid-node (skip seeds already run) instead of
     # re-executing every expensive full-profile seed from scratch.
@@ -496,11 +533,21 @@ class RunState(BaseModel):
         return sorted(v)
 
     # --- read helpers (no mutation) ---
+    def resume_pending(self) -> bool:
+        """P1-1: a durable resume intent was recorded but no engine has served it yet (its request seq
+        is newer than the last serve). Combined by the reconciler with a not-alive / not-finished probe
+        to detect a zombie whose resume spawn died before the engine ran."""
+        return self.last_resume_request_seq > self.last_resume_served_seq
+
     def best(self) -> Optional[Node]:
         return self.nodes.get(self.best_node_id) if self.best_node_id is not None else None
 
     def evaluated_nodes(self) -> list[Node]:
-        return [n for n in self.nodes.values() if n.status is NodeStatus.evaluated]
+        # `not n.tombstoned` gates ALL downstream selection at the source: feasible_nodes/
+        # breedable_nodes and the best-pick post-pass all read through here, so a logically-deleted
+        # node can never be selected best, bred from, or confirmed. (§6.3 append-only delete.)
+        return [n for n in self.nodes.values()
+                if n.status is NodeStatus.evaluated and not n.tombstoned]
 
     def feasible_nodes(self) -> list[Node]:
         """Evaluated nodes that satisfied all hard constraints (#5). These are the only nodes
@@ -523,8 +570,11 @@ class RunState(BaseModel):
         return [n for n in self.feasible_nodes() if n.id not in self.breed_excluded]
 
     def pending_nodes(self) -> list[Node]:
+        # A tombstoned pending node (its subtree was logically deleted while it was still queued)
+        # must NOT be handed back to the eval loop on resume — skip it here too (§6.3).
         return sorted(
-            (n for n in self.nodes.values() if n.status is NodeStatus.pending),
+            (n for n in self.nodes.values()
+             if n.status is NodeStatus.pending and not n.tombstoned),
             key=lambda n: n.id,
         )
 

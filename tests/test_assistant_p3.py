@@ -262,6 +262,34 @@ def test_background_timeout_reaps_a_hung_task(tmp_path):
     assert mgr.read(tid)["status"] == "exited"
 
 
+def test_background_watcher_reaps_without_any_poll(tmp_path):
+    # The always-on deadline watcher reaps a hung task past its budget even if NOBODY ever calls
+    # read()/list(). The old lazy-only enforcement leaked such a process for the life of the server.
+    mgr = BackgroundManager(max_seconds=0.1, watch_interval=0.05)
+    try:
+        tid = mgr.start([sys.executable, "-c", "import time; time.sleep(30)"], str(tmp_path))
+        proc = mgr._tasks[tid]["proc"]
+        for _ in range(200):                   # NO read()/list() — only the watcher thread can reap it
+            if proc.poll() is not None:
+                break
+            time.sleep(0.05)
+        assert proc.poll() is not None         # watcher force-killed the hung child
+        assert mgr._tasks[tid]["timed_out"] is True
+    finally:
+        mgr.shutdown()
+
+
+def test_background_watcher_disabled_when_interval_zero(tmp_path):
+    # watch_interval=0 keeps the old lazy-only behavior (no thread) — a hung task is NOT reaped until
+    # a read()/list() poll. Guards the opt-out that tests / non-server callers rely on.
+    mgr = BackgroundManager(max_seconds=0.1, watch_interval=0)
+    tid = mgr.start([sys.executable, "-c", "import time; time.sleep(2)"], str(tmp_path))
+    assert mgr._watcher is None                 # no watcher thread spawned
+    time.sleep(0.3)                             # deadline passed, but nothing polled
+    assert mgr._tasks[tid]["proc"].poll() is None   # still running — lazy-only, not reaped
+    assert mgr.read(tid)["timed_out"] is True       # the poll enforces it
+
+
 def test_background_evicts_oldest_finished_logs(tmp_path):
     mgr = BackgroundManager(max_finished=2)
     tids, logs = [], []

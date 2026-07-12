@@ -47,11 +47,16 @@ _BACKLOG_CAP = 262_144
 # helpers (a full test run, a build, a short training) — the engine's real ML training goes through the
 # sandbox eval path with its own timeout, not here — so a generous 2h cap can't abort legitimate work,
 # but it reaps a hung/runaway child that would otherwise leak a process (+ its growing log) for the life
-# of the server. Enforced LAZILY on read()/list() (no watchdog thread).
+# of the server. Enforced by the always-on watcher thread (below) AND opportunistically on read()/list().
 _BG_MAX_SECONDS = 7200.0
 # Bound retained FINISHED tasks (and their tmp log files): a long server session would else accumulate
 # one log per background command forever. Running tasks are never evicted.
 _MAX_FINISHED = 32
+# Cadence of the always-on deadline watcher (below). Lazy read()/list() enforcement alone let a hung
+# task NOBODY polls leak a process (+ growing log) for the whole server lifetime; a daemon thread now
+# sweeps deadlines on this interval so a wedged child is reaped within ~one tick of its budget even
+# with zero polls. Small vs the 2h budget, generous vs. per-task cost (a lock-guarded snapshot + poll).
+_WATCH_INTERVAL = 30.0
 
 
 def _child_env(argv) -> dict:
@@ -63,11 +68,18 @@ def _child_env(argv) -> dict:
 
 
 class BackgroundManager:
-    def __init__(self, max_seconds: float = _BG_MAX_SECONDS, max_finished: int = _MAX_FINISHED):
+    def __init__(self, max_seconds: float = _BG_MAX_SECONDS, max_finished: int = _MAX_FINISHED,
+                 watch_interval: float = _WATCH_INTERVAL):
         self._tasks: dict = {}
         self._lock = threading.Lock()
         self._max_seconds = max_seconds
         self._max_finished = max_finished
+        # Always-on deadline watcher (lazily spawned on first start()): a daemon thread so merely
+        # IMPORTING this module (tests, short CLI paths) never starts a thread, and it never blocks
+        # interpreter exit. `watch_interval=0`/None disables it, falling back to lazy-only enforcement.
+        self._watch_interval = watch_interval
+        self._watcher: threading.Thread | None = None
+        self._stop = threading.Event()
 
     def start(self, argv, cwd: str, wrap=None) -> str:
         run_argv = wrap(argv, cwd) if wrap else list(argv)
@@ -99,7 +111,47 @@ class BackgroundManager:
                                 "deadline": (time.monotonic() + self._max_seconds
                                              if self._max_seconds else None)}
         self._evict_finished()   # bound retained finished tasks + their log files
+        self._ensure_watcher()   # start the always-on deadline sweeper on first use
         return tid
+
+    def _ensure_watcher(self) -> None:
+        """Start the deadline watcher thread on first use (double-checked under the lock). Idempotent:
+        one thread per manager for its whole life. Skipped when the interval is disabled."""
+        if not self._watch_interval or self._watcher is not None:
+            return
+        with self._lock:
+            if self._watcher is None:
+                self._watcher = threading.Thread(target=self._watch_loop,
+                                                 name="looplab-bg-deadline", daemon=True)
+                self._watcher.start()
+
+    def _watch_loop(self) -> None:
+        # Sweep on a fixed cadence until shutdown(). Wrapped so one bad task never kills the watcher —
+        # it just retries next tick; the whole point is that enforcement no longer depends on a poll.
+        while not self._stop.wait(self._watch_interval):
+            try:
+                self._sweep_deadlines()
+            except Exception:  # noqa: BLE001 — a watchdog must survive any single-task error
+                pass
+
+    def _sweep_deadlines(self) -> None:
+        """Enforce deadlines + reap exited children across ALL tasks, then bound retained logs — the
+        same work read()/list() do lazily, now driven by the watcher. Snapshot under the lock, then act
+        outside it: `_enforce_deadline`/`_reap` operate on the handle directly and must not re-enter it."""
+        with self._lock:
+            tasks = list(self._tasks.values())
+        for t in tasks:
+            self._enforce_deadline(t)
+            self._reap(t)
+        self._evict_finished()
+
+    def shutdown(self) -> None:
+        """Stop the watcher thread (idempotent). For clean teardown/tests; the global MANAGER never
+        needs it because the thread is a daemon."""
+        self._stop.set()
+        w = self._watcher
+        if w is not None:
+            w.join(timeout=5)
 
     @staticmethod
     def _reap(t) -> None:
@@ -115,8 +167,9 @@ class BackgroundManager:
     @staticmethod
     def _enforce_deadline(t) -> None:
         """Reap a background task that outlived its wall-clock budget (SIGTERM to the process group,
-        like `kill`). Lazy — called on read()/list(), no watchdog thread. Idempotent; a None deadline
-        (timeout disabled) is a no-op. Operates on the handle `t` directly (never re-enters the lock)."""
+        like `kill`). Driven by the always-on watcher thread and also called opportunistically on
+        read()/list(). Idempotent; a None deadline (timeout disabled) is a no-op. Operates on the
+        handle `t` directly (never re-enters the lock)."""
         dl = t.get("deadline")
         if dl is None or t.get("timed_out") or t["proc"].poll() is not None:
             return

@@ -73,8 +73,8 @@ def test_artifacts_list_and_view(tmp_path):
 
 
 def test_artifacts_token_gated(tmp_path, monkeypatch):
-    """The artifact routes serve raw file CONTENT, so when LOOPLAB_UI_TOKEN is set they're gated like a
-    mutation — while other (projection-only) read routes stay open."""
+    """The artifact routes serve raw file CONTENT, so when LOOPLAB_UI_TOKEN is set they're gated — and
+    under P1-3 deny-default so is every other /api/ read (only the zero-model /api/health stays open)."""
     monkeypatch.setenv("LOOPLAB_UI_TOKEN", "sekret")
     _build_run(tmp_path)
     (tmp_path / "demo" / "out.txt").write_bytes(b"hi\n")
@@ -83,10 +83,11 @@ def test_artifacts_token_gated(tmp_path, monkeypatch):
     assert client.get("/api/runs/demo/artifacts").status_code == 401
     assert client.get("/api/runs/demo/artifact",
                       params={"root": "run", "path": "out.txt"}).status_code == 401
-    # a folded-projection GET stays open (unchanged behaviour)
-    assert client.get("/api/runs/demo/state").status_code == 200
+    # P1-3 deny-default: even a folded-projection GET now requires the token
+    assert client.get("/api/runs/demo/state").status_code == 401
     # with the token, content is served
     h = {"X-LoopLab-Token": "sekret"}
+    assert client.get("/api/runs/demo/state", headers=h).status_code == 200
     assert client.get("/api/runs/demo/artifacts", headers=h).status_code == 200
     assert client.get("/api/runs/demo/artifact", params={"root": "run", "path": "out.txt"},
                       headers=h).json()["content"] == "hi\n"
@@ -116,12 +117,13 @@ def test_raw_content_read_routes_are_token_gated(tmp_path, monkeypatch):
     assert client.get("/api/llm/health").status_code == 401
     # assistant progress is gated too (session query required once past auth)
     assert client.get("/api/assistant/progress?session=x").status_code == 401
-    # light projection reads stay open without the token (the established contract) — including the
-    # LIGHT /nodes/{nid}/metrics projection, which must NOT be over-gated by the node-detail rule
-    assert client.get("/api/runs/demo/state").status_code == 200
-    assert client.get("/api/runs/demo/events").status_code == 200
-    assert client.get("/api/runs/demo/nodes/0/metrics").status_code == 200
-    assert client.get("/api/runs").status_code == 200
+    # P1-3 deny-default: even LIGHT projection reads now require the token (a new sensitive route can no
+    # longer leak by being omitted from an allow-list). The zero-model /api/health is the sole exception.
+    for light in ("/api/runs/demo/state", "/api/runs/demo/events",
+                  "/api/runs/demo/nodes/0/metrics", "/api/runs"):
+        assert client.get(light).status_code == 401, light
+        assert client.get(light, headers={"X-LoopLab-Token": "sekret"}).status_code == 200, light
+    assert client.get("/api/health").status_code == 200          # zero-model liveness stays open
 
 
 def test_assistant_session_transcript_is_token_gated(tmp_path, monkeypatch):
@@ -132,8 +134,8 @@ def test_assistant_session_transcript_is_token_gated(tmp_path, monkeypatch):
     client = TestClient(make_app(tmp_path))
     # the session-transcript GET requires the token (not a 200 open read)
     assert client.get("/api/assistant/sessions/whatever").status_code == 401
-    # a folded-projection GET still stays open
-    assert client.get("/api/runs/demo/state").status_code == 200
+    # P1-3 deny-default: a folded-projection GET now also requires the token
+    assert client.get("/api/runs/demo/state").status_code == 401
 
 
 def test_reserved_run_id_is_case_insensitive(tmp_path):
@@ -237,6 +239,43 @@ def test_engine_liveness_lock_probe(tmp_path):
     assert _engine_alive(tmp_path / "demo") is False   # released on context exit
 
 
+def test_reconcile_pending_resume(tmp_path, monkeypatch):
+    """P1-1 recoverable-intent reconciler: re-spawn a run whose durable resume intent stayed unserved
+    past the grace window (its detached spawn died before the engine ran) — but ONLY then, and never
+    for a finished/alive/within-grace run. Idempotent via the singleton lock (not exercised here)."""
+    from looplab.serve import engine_proc as ep
+    from looplab.events.eventstore import EventStore
+    from looplab.events.replay import fold
+    rd = tmp_path / "run1"
+    rd.mkdir()
+    (rd / "task.snapshot.json").write_text("{}", encoding="utf-8")     # resumable
+    s = EventStore(rd / "events.jsonl")
+    s.append("run_started", {"run_id": "run1", "task_id": "t", "direction": "min"})
+    spawns = []
+    monkeypatch.setattr(ep, "_spawn_engine", lambda *a, **k: spawns.append((a, k)))
+    monkeypatch.setattr(ep, "_engine_alive", lambda _rd: False)
+
+    assert ep.reconcile_pending_resume(rd) is False and not spawns    # no intent -> no re-spawn
+    s.append("resume_requested", {})
+    req_ts = fold(s.read_all()).last_resume_request_ts
+    assert ep.reconcile_pending_resume(rd, now=req_ts + 1) is False and not spawns   # within grace
+    assert ep.reconcile_pending_resume(rd, now=req_ts + 31) is True and len(spawns) == 1  # zombie -> spawn
+    # backoff: the re-spawn re-recorded the intent, so a call within the NEW grace does NOT re-spawn
+    new_ts = fold(EventStore(rd / "events.jsonl").read_all()).last_resume_request_ts
+    assert ep.reconcile_pending_resume(rd, now=new_ts + 1) is False and len(spawns) == 1
+
+    monkeypatch.setattr(ep, "_engine_alive", lambda _rd: True)         # an engine IS running now
+    assert ep.reconcile_pending_resume(rd, now=req_ts + 31) is False and len(spawns) == 1
+    monkeypatch.setattr(ep, "_engine_alive", lambda _rd: False)
+    s.append("resume_served", {})                                     # engine served the intent
+    assert ep.reconcile_pending_resume(rd, now=req_ts + 100) is False and len(spawns) == 1
+
+    s.append("resume_requested", {})                                  # a new intent, but the run then finishes
+    s.append("run_finished", {"reason": "done"})
+    fin_ts = fold(s.read_all()).last_resume_request_ts
+    assert ep.reconcile_pending_resume(rd, now=fin_ts + 100) is False and len(spawns) == 1
+
+
 def test_time_travel_seq(tmp_path):
     _build_run(tmp_path)
     client = TestClient(make_app(tmp_path))
@@ -317,6 +356,18 @@ def test_control_append_and_validation(tmp_path):
     # unknown control event rejected
     bad = client.post("/api/runs/demo/control", json={"type": "danger", "data": {}})
     assert bad.status_code == 400
+    # P1-12 optimistic concurrency: a stale expected_seq -> 409 (the log advanced since); the matching
+    # tail seq -> 200. A non-integer expected_seq -> 400.
+    tail = client.post("/api/runs/demo/control", json={"type": "pause", "data": {}}).json()["seq"]
+    stale = client.post("/api/runs/demo/control",
+                        json={"type": "resume", "data": {}, "expected_seq": tail - 1})
+    assert stale.status_code == 409
+    fresh = client.post("/api/runs/demo/control",
+                        json={"type": "resume", "data": {}, "expected_seq": tail})
+    assert fresh.status_code == 200
+    nonint = client.post("/api/runs/demo/control",
+                         json={"type": "pause", "data": {}, "expected_seq": "nope"})
+    assert nonint.status_code == 400
 
 
 def test_config_masked_and_gpu_softfail(tmp_path):
@@ -362,12 +413,14 @@ def test_engine_alive_unsupported_flock_reads_not_alive(tmp_path, monkeypatch):
     assert _engine_alive(rd) is True            # genuinely held by a live engine
 
 
-def test_engine_singleton_fails_open_on_unsupported_flock(tmp_path, monkeypatch):
-    """The OTHER half of the lock: on a FUSE/S3 mount where flock raises a plain OSError, the engine
-    singleton must DEGRADE TO A NO-OP (yield True, run anyway) — NOT misread it as 'another engine holds
-    it' and silently refuse to run. Before the fix a bare `except OSError` failed CLOSED, so on a
-    JupyterHub geesefs home EVERY `run`/`resume` saw a phantom 'already running' and exited. Only a
-    genuine BlockingIOError = held. Mirrors _engine_alive's fail-open so the two halves agree on FUSE."""
+def test_engine_singleton_fails_closed_on_unsupported_flock(tmp_path, monkeypatch):
+    """The OTHER half of the lock: on a FUSE/S3 mount where flock raises a plain OSError, single-writer
+    CANNOT be enforced, so the engine singleton now FAILS CLOSED by default — it refuses startup with an
+    actionable RuntimeError. The old fail-open no-op let two engines (or the UI server + engine) corrupt
+    events.jsonl / mint duplicate seq numbers (P1-12, doc 17 §6.3). The refusal is LOUD, not the older
+    silent phantom-'already running' exit; LOOPLAB_ALLOW_UNLOCKED_WRITER=1 restores the degrade-and-run
+    opt-in for a single operator who vouches for one engine per run dir. A genuine BlockingIOError is
+    still just 'held' -> caller no-ops (not a refusal)."""
     fcntl = pytest.importorskip("fcntl")        # POSIX-only; Windows uses the msvcrt branch
     from looplab.cli import _engine_singleton
     rd = tmp_path / "r"
@@ -376,9 +429,15 @@ def test_engine_singleton_fails_open_on_unsupported_flock(tmp_path, monkeypatch)
         def _f(*a, **k):
             raise exc
         return _f
+    monkeypatch.delenv("LOOPLAB_ALLOW_UNLOCKED_WRITER", raising=False)
     monkeypatch.setattr(fcntl, "flock", _raise(OSError("flock not supported on this fs")))
+    with pytest.raises(RuntimeError, match="single writer"):   # unsupported lock -> fail CLOSED
+        with _engine_singleton(rd):
+            pass
+    monkeypatch.setenv("LOOPLAB_ALLOW_UNLOCKED_WRITER", "1")    # explicit opt-in -> degrade + run
     with _engine_singleton(rd) as ok:
-        assert ok is True            # unsupported lock -> fail OPEN (engine still runs)
+        assert ok is True
+    monkeypatch.delenv("LOOPLAB_ALLOW_UNLOCKED_WRITER", raising=False)
     monkeypatch.setattr(fcntl, "flock", _raise(BlockingIOError("held")))
     with _engine_singleton(rd) as ok:
         assert ok is False           # genuinely HELD by a live engine -> caller no-ops
@@ -634,19 +693,20 @@ def test_sse_emits_state_snapshot(tmp_path):
 
 
 def test_g1_auth_token_required_on_mutating(tmp_path, monkeypatch):
-    """G1: with LOOPLAB_UI_TOKEN set, mutating /api/* needs the X-LoopLab-Token header; reads stay open."""
+    """G1 + P1-3 deny-default: with LOOPLAB_UI_TOKEN set, EVERY /api/* request needs the
+    X-LoopLab-Token — reads too, not just mutations — except the zero-model /api/health liveness."""
     _build_run(tmp_path)
     monkeypatch.setenv("LOOPLAB_UI_TOKEN", "s3cret")
     client = TestClient(make_app(tmp_path))
-    # reads are open
-    assert client.get("/api/runs").status_code == 200
-    # mutating without the token -> 401
-    r = client.post("/api/runs/demo/control", json={"type": "pause", "data": {}})
-    assert r.status_code == 401
-    # with the token -> allowed
-    r = client.post("/api/runs/demo/control", json={"type": "pause", "data": {}},
-                    headers={"X-LoopLab-Token": "s3cret"})
-    assert r.status_code == 200
+    h = {"X-LoopLab-Token": "s3cret"}
+    # P1-3: reads now require the token (deny-default), except zero-model liveness
+    assert client.get("/api/runs").status_code == 401
+    assert client.get("/api/runs", headers=h).status_code == 200
+    assert client.get("/api/health").status_code == 200          # sole untokened-OK /api/ route
+    # mutating without the token -> 401; with it -> allowed
+    assert client.post("/api/runs/demo/control", json={"type": "pause", "data": {}}).status_code == 401
+    assert client.post("/api/runs/demo/control", json={"type": "pause", "data": {}},
+                       headers=h).status_code == 200
 
 
 def test_g1_no_token_means_open(tmp_path, monkeypatch):

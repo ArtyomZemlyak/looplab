@@ -18,8 +18,8 @@ from pydantic import ValidationError
 from looplab.core.atomicio import atomic_write_text
 from looplab.core.config import Settings
 from looplab.events.eventstore import EventStore
-from looplab.events.types import (EV_APPROVAL_GRANTED, EV_PAUSE, EV_RESUME, EV_RUN_ABORT,
-                                  EV_RUN_FINISHED, EV_RUN_REOPENED, EV_SPEC_APPROVED)
+from looplab.events.types import (EV_APPROVAL_GRANTED, EV_PAUSE, EV_RESUME, EV_RESUME_SERVED,
+                                  EV_RUN_ABORT, EV_RUN_FINISHED, EV_RUN_REOPENED, EV_SPEC_APPROVED)
 from looplab.engine.orchestrator import Engine
 from looplab.events.replay import fold
 from looplab.adapters.tasks import validate_task
@@ -397,6 +397,11 @@ def resume(
         if not ok:
             typer.echo(f"engine already running on {run_dir} — not resuming a second loop")
             return
+        # P1-1: we hold the singleton lock and are about to drive the loop, so FULFILL any outstanding
+        # durable resume intent (/resume records one before spawning us). Seq-gated in the fold, so one
+        # serve satisfies all piled-up requests; a no-op for a direct CLI resume (no intent recorded).
+        if fold(eng.store.read_all()).resume_pending():
+            eng.store.append(EV_RESUME_SERVED, {})
         state = _run_engine_guarded(eng)
     _print_result(state)
 

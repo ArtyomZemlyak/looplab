@@ -108,6 +108,188 @@ def test_fold_idempotent_to_duplicate_terminal_events(tmp_path):
     assert st.total_eval_seconds == 2.0          # counted once, not 4.0
 
 
+def test_fold_idempotent_to_duplicate_node_created_lifecycle(tmp_path):
+    # A DUPLICATE complete lifecycle (node_created + terminal for the SAME id, from a corrupt /
+    # double-appended / hand-edited log) must not double-charge the budget. Before first-create-wins,
+    # the second node_created replaced node 0 with a fresh status=pending Node, re-arming the
+    # first_terminal guard so the second node_evaluated re-added its eval_seconds (2.0 -> 4.0).
+    s = EventStore(tmp_path / "e.jsonl")
+    s.append("run_started", {"run_id": "r", "task_id": "t", "direction": "min"})
+    s.append("node_created", {"node_id": 0, "parent_ids": [], "operator": "draft",
+                              "idea": {"operator": "draft", "params": {}}, "code": ""})
+    s.append("node_evaluated", {"node_id": 0, "metric": 1.0, "eval_seconds": 2.0})
+    # duplicate whole lifecycle — the second create must NOT reset node 0 off `evaluated`
+    s.append("node_created", {"node_id": 0, "parent_ids": [], "operator": "draft",
+                              "idea": {"operator": "draft", "params": {}}, "code": ""})
+    s.append("node_evaluated", {"node_id": 0, "metric": 1.0, "eval_seconds": 2.0})
+    st = fold(s.read_all())
+    assert st.total_eval_seconds == 2.0          # counted once, not 4.0
+    assert st.nodes[0].status.name == "evaluated"
+
+
+def test_fold_duplicate_node_created_does_not_flip_settled_metric(tmp_path):
+    # A duplicate node_created carrying DIFFERENT terminal data must not overwrite the settled
+    # node (first-create-wins): the first lifecycle's metric/status is authoritative.
+    s = EventStore(tmp_path / "e.jsonl")
+    s.append("run_started", {"run_id": "r", "task_id": "t", "direction": "min"})
+    s.append("node_created", {"node_id": 0, "parent_ids": [], "operator": "draft",
+                              "idea": {"operator": "draft", "params": {}}, "code": ""})
+    s.append("node_evaluated", {"node_id": 0, "metric": 1.0, "eval_seconds": 2.0})
+    s.append("node_created", {"node_id": 0, "parent_ids": [], "operator": "draft",
+                              "idea": {"operator": "draft", "params": {}}, "code": ""})
+    s.append("node_failed", {"node_id": 0, "error": "boom", "eval_seconds": 5.0})   # conflicting terminal
+    st = fold(s.read_all())
+    assert st.nodes[0].status.name == "evaluated" and st.nodes[0].metric == 1.0
+    assert st.total_eval_seconds == 2.0
+
+
+def test_fold_node_tombstoned_excludes_from_selection(tmp_path):
+    # Append-only delete (§6.3): a node_tombstoned event marks the subtree logically deleted — the
+    # node STAYS in st.nodes (parent links resolve) but is excluded from every selection helper, so
+    # it can't be chosen best or bred from. Here node 1 is the min (best) until it is tombstoned.
+    from looplab.core.models import NodeStatus
+    s = EventStore(tmp_path / "e.jsonl")
+    s.append("run_started", {"run_id": "r", "task_id": "t", "direction": "min"})
+    _n(s, 0, 5.0)
+    _n(s, 1, 1.0)          # strictly better -> best while alive
+    st = fold(s.read_all())
+    assert st.best_node_id == 1
+    s.append("node_tombstoned", {"node_ids": [1]})
+    st = fold(s.read_all())
+    assert 1 in st.nodes and st.nodes[1].tombstoned          # kept in the log, flagged
+    assert st.best_node_id == 0                              # excluded from best-pick
+    assert 1 not in {n.id for n in st.evaluated_nodes()}
+    assert 1 not in {n.id for n in st.feasible_nodes()}
+
+
+def test_fold_node_tombstoned_idempotent_and_tolerant(tmp_path):
+    # Duplicate / overlapping tombstone events are a no-op; a forged/unknown id is skipped, not a crash.
+    s = EventStore(tmp_path / "e.jsonl")
+    s.append("run_started", {"run_id": "r", "task_id": "t", "direction": "min"})
+    _n(s, 0, 5.0)
+    s.append("node_tombstoned", {"node_ids": [0, 999, "bad", None]})   # 999/"bad"/None ignored
+    s.append("node_tombstoned", {"node_ids": [0]})                     # duplicate -> no-op
+    st = fold(s.read_all())
+    assert st.nodes[0].tombstoned and st.best_node_id is None          # nothing selectable left
+
+
+def test_fold_tombstoned_pending_node_not_re_evaluated(tmp_path):
+    # A pending node whose subtree was tombstoned must not be handed back to the eval loop on resume.
+    from looplab.core.models import NodeStatus
+    s = EventStore(tmp_path / "e.jsonl")
+    s.append("run_started", {"run_id": "r", "task_id": "t", "direction": "min"})
+    s.append("node_created", {"node_id": 0, "parent_ids": [], "operator": "draft",
+                              "idea": {"operator": "draft", "params": {}}, "code": ""})
+    st = fold(s.read_all())
+    assert st.nodes[0].status is NodeStatus.pending and st.pending_nodes()
+    s.append("node_tombstoned", {"node_ids": [0]})
+    st = fold(s.read_all())
+    assert st.pending_nodes() == []
+
+
+def test_fold_confirm_and_holdout_bound_to_attempt(tmp_path):
+    # P0-1: confirm-seed / node_confirmed / holdout_evaluated events stamped with an attempt the node
+    # has since abandoned (node_reset bumped the generation) must be dropped — their stale metrics must
+    # not land on the post-reset code, and the stale confirm-seed cost must not inflate the budget.
+    s = EventStore(tmp_path / "e.jsonl")
+    s.append("run_started", {"run_id": "r", "task_id": "t", "direction": "min"})
+    s.append("node_created", {"node_id": 0, "parent_ids": [], "operator": "draft",
+                              "idea": {"operator": "draft", "params": {}}, "code": "c"})
+    s.append("node_evaluated", {"node_id": 0, "metric": 0.5, "eval_seconds": 0.5, "attempt": 0})
+    s.append("node_reset", {"node_id": 0, "from_stage": "implement"})     # attempt 0 -> 1
+    # LATE events from the abandoned attempt 0 (their eval was in flight when the reset landed)
+    s.append("confirm_eval", {"node_id": 0, "seed": 1, "attempt": 0, "eval_seconds": 2.0, "metric": 0.4})
+    s.append("node_confirmed", {"node_id": 0, "attempt": 0, "mean": 0.4, "std": 0.0, "seeds": 3})
+    s.append("holdout_evaluated", {"node_id": 0, "attempt": 0, "metric": 0.3})
+    st = fold(s.read_all())
+    n = st.nodes[0]
+    assert n.confirmed_mean is None and n.holdout_metric is None    # stale confirm/holdout dropped
+    assert 0 not in st.holdout_evaluated_ids                        # gate not marked by a stale attempt
+    assert 0 not in st.confirm_seed_results                         # stale confirm-seed not memoized
+    assert st.total_eval_seconds == 0.5                             # stale confirm cost (2.0) NOT added
+    # a FRESH confirm at the current attempt (1) DOES land
+    s.append("node_confirmed", {"node_id": 0, "attempt": 1, "mean": 0.2, "std": 0.0, "seeds": 3})
+    assert fold(s.read_all()).nodes[0].confirmed_mean == 0.2
+
+
+def test_fold_reopen_rehides_holdout(tmp_path):
+    # P0-2: reopening a finished run bumps the search epoch and CLEARS the disclosed holdout (gate +
+    # node metrics) so the new epoch re-scores its leaders on a fresh split; a holdout score stamped
+    # with the prior epoch is dropped after the reopen, and a current-epoch one lands.
+    s = EventStore(tmp_path / "e.jsonl")
+    s.append("run_started", {"run_id": "r", "task_id": "t", "direction": "min", "holdout_select": True})
+    s.append("node_created", {"node_id": 0, "parent_ids": [], "operator": "draft",
+                              "idea": {"operator": "draft", "params": {}}, "code": "c"})
+    s.append("node_evaluated", {"node_id": 0, "metric": 0.5})
+    s.append("holdout_evaluated", {"node_id": 0, "metric": 0.4, "search_epoch": 0})
+    s.append("best_confirmed", {"node_id": 0, "significant": True})
+    s.append("run_finished", {"reason": "done"})
+    st = fold(s.read_all())
+    assert 0 in st.holdout_evaluated_ids and st.nodes[0].holdout_metric == 0.4
+    s.append("run_reopened", {})                                     # epoch 0 -> 1
+    st = fold(s.read_all())
+    assert st.search_epoch == 1
+    assert list(st.holdout_evaluated_ids) == [] and st.nodes[0].holdout_metric is None
+    # a STALE holdout score (prior epoch 0) after the reopen is dropped
+    s.append("holdout_evaluated", {"node_id": 0, "metric": 0.99, "search_epoch": 0})
+    st = fold(s.read_all())
+    assert st.nodes[0].holdout_metric is None and 0 not in st.holdout_evaluated_ids
+    # a FRESH holdout score at the current epoch (1) lands
+    s.append("holdout_evaluated", {"node_id": 0, "metric": 0.2, "search_epoch": 1})
+    st = fold(s.read_all())
+    assert st.nodes[0].holdout_metric == 0.2 and 0 in st.holdout_evaluated_ids
+
+
+def test_fold_resume_intent_seq_gated(tmp_path):
+    # P1-1: a resume_requested newer than the last resume_served is a PENDING (unfulfilled) resume;
+    # a serve at a later seq fulfills it, and one serve satisfies several piled-up requests.
+    s = EventStore(tmp_path / "e.jsonl")
+    s.append("run_started", {"run_id": "r", "task_id": "t", "direction": "min"})
+    assert not fold(s.read_all()).resume_pending()
+    s.append("resume_requested", {})
+    st = fold(s.read_all())
+    assert st.resume_pending() and st.last_resume_request_ts > 0
+    s.append("resume_served", {})
+    assert not fold(s.read_all()).resume_pending()             # fulfilled by a later-seq serve
+    s.append("resume_requested", {})
+    s.append("resume_requested", {})                            # two piled-up requests
+    assert fold(s.read_all()).resume_pending()
+    s.append("resume_served", {})
+    assert not fold(s.read_all()).resume_pending()             # one serve satisfies both
+
+
+def test_append_expected_last_seq_cas(tmp_path):
+    # P1-12 explicit-seq optimistic concurrency: an append with expected_last_seq lands only if the
+    # log tail is still exactly that seq — else it raises and writes NOTHING.
+    import pytest
+    from looplab.events.eventstore import EventStoreConcurrencyError
+    s = EventStore(tmp_path / "e.jsonl")
+    e0 = s.append("run_started", {"run_id": "r", "task_id": "t", "direction": "min"})
+    e1 = s.append("pause", {}, expected_last_seq=e0.seq)       # tail matches -> lands
+    assert e1.seq == e0.seq + 1
+    with pytest.raises(EventStoreConcurrencyError):
+        s.append("resume", {}, expected_last_seq=e0.seq)       # tail moved to e1 -> conflict
+    assert [ev.type for ev in s.read_all()] == ["run_started", "pause"]   # rejected write left no trace
+    # None (default) is unconditional, unchanged behavior
+    s.append("resume", {})
+    assert [ev.type for ev in s.read_all()][-1] == "resume"
+
+
+def test_fold_eval_seconds_split_into_buckets(tmp_path):
+    # P1-2: total_eval_seconds is ALSO split by category (node vs confirm) for observability; the
+    # buckets sum to the total, and confirm-seed cost is tracked apart from node-eval cost.
+    s = EventStore(tmp_path / "e.jsonl")
+    s.append("run_started", {"run_id": "r", "task_id": "t", "direction": "min"})
+    s.append("node_created", {"node_id": 0, "parent_ids": [], "operator": "draft",
+                              "idea": {"operator": "draft", "params": {}}, "code": "c"})
+    s.append("node_evaluated", {"node_id": 0, "metric": 0.5, "eval_seconds": 3.0})
+    s.append("confirm_eval", {"node_id": 0, "seed": 1, "eval_seconds": 2.0, "metric": 0.4})
+    s.append("confirm_eval", {"node_id": 0, "seed": 2, "eval_seconds": 1.0, "metric": 0.45})
+    st = fold(s.read_all())
+    assert st.eval_seconds_by_kind == {"node": 3.0, "confirm": 3.0}
+    assert st.total_eval_seconds == 6.0 == sum(st.eval_seconds_by_kind.values())
+
+
 def test_log_divergence_detects_mid_file_corruption(tmp_path):
     from looplab.events.eventstore import log_divergence
     p = tmp_path / "events.jsonl"

@@ -115,7 +115,12 @@
   "data_profile": null,
   "data_provenance": null,
   "direction": "min",
+  "dirty_inputs": [],
   "drifts": [],
+  "env": null,
+  "eval_seconds_by_kind": {
+    "node": 0.273
+  },
   "finished": true,
   "foresight_selected": [],
   "fork_requests": [],
@@ -133,6 +138,9 @@
   "hypothesis_ranking": null,
   "inject_requests": [],
   "injects_done": 0,
+  "last_resume_request_seq": 0,
+  "last_resume_request_ts": 0.0,
+  "last_resume_served_seq": 0,
   "leakage": null,
   "lessons_distilled": [
     {
@@ -289,6 +297,7 @@
       "stages": [],
       "status": "evaluated",
       "stdout_tail": "{\"metric\": 53.054167369999995}\n",
+      "tombstoned": false,
       "triage_rationale": "",
       "trials": [],
       "violations": []
@@ -334,6 +343,7 @@
       "stages": [],
       "status": "evaluated",
       "stdout_tail": "{\"metric\": 35.66064084999999}\n",
+      "tombstoned": false,
       "triage_rationale": "",
       "trials": [],
       "violations": []
@@ -382,6 +392,7 @@
       "stages": [],
       "status": "evaluated",
       "stdout_tail": "{\"metric\": 8.51019194}\n",
+      "tombstoned": false,
       "triage_rationale": "",
       "trials": [],
       "violations": []
@@ -432,6 +443,7 @@
       "stages": [],
       "status": "evaluated",
       "stdout_tail": "{\"metric\": 9.73679185}\n",
+      "tombstoned": false,
       "triage_rationale": "",
       "trials": [],
       "violations": []
@@ -479,6 +491,7 @@
       "stages": [],
       "status": "evaluated",
       "stdout_tail": "{\"metric\": 17.17538701}\n",
+      "tombstoned": false,
       "triage_rationale": "",
       "trials": [],
       "violations": []
@@ -529,6 +542,7 @@
       "stages": [],
       "status": "evaluated",
       "stdout_tail": "{\"metric\": 5.57026258}\n",
+      "tombstoned": false,
       "triage_rationale": "",
       "trials": [],
       "violations": []
@@ -580,6 +594,7 @@
       "stages": [],
       "status": "evaluated",
       "stdout_tail": "{\"metric\": 6.688963449999999}\n",
+      "tombstoned": false,
       "triage_rationale": "",
       "trials": [],
       "violations": []
@@ -627,6 +642,7 @@
       "stages": [],
       "status": "evaluated",
       "stdout_tail": "{\"metric\": 4.482711760000001}\n",
+      "tombstoned": false,
       "triage_rationale": "",
       "trials": [],
       "violations": []
@@ -695,6 +711,7 @@
   "rungs": [],
   "search_epoch": 0,
   "setup_done": true,
+  "setup_manifest": "",
   "spec_approval_requested": false,
   "spec_confirmed": false,
   "stop_reason": null,

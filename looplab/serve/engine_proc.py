@@ -137,7 +137,18 @@ def _spawn_engine(cli_args: list[str], env: Optional[dict] = None,
     if run_dir is not None:
         try:
             run_dir.mkdir(parents=True, exist_ok=True)
-            err_f = open(run_dir / "engine.stderr.log", "ab")
+            # P1-4 bounded logs: engine.stderr.log is append-only across resumes, so a run whose engine
+            # keeps crashing on startup (esp. one the P1-1 reconciler re-spawns) could grow it without
+            # bound. Cap it: past the ceiling, keep only the most-recent half (the recent crash is what
+            # matters) with a truncation marker. Best-effort — a stat/rewrite failure just skips it.
+            _errlog = run_dir / "engine.stderr.log"
+            try:
+                if _errlog.exists() and _errlog.stat().st_size > _ENGINE_STDERR_CAP:
+                    _tail = _errlog.read_bytes()[-(_ENGINE_STDERR_CAP // 2):]
+                    _errlog.write_bytes(b"...(engine.stderr.log truncated to the recent tail)...\n" + _tail)
+            except OSError:
+                pass
+            err_f = open(_errlog, "ab")
             err = err_f
         except OSError:
             err = subprocess.DEVNULL
@@ -149,6 +160,69 @@ def _spawn_engine(cli_args: list[str], env: Optional[dict] = None,
     finally:
         if err_f is not None:
             err_f.close()   # the child inherited its own dup; release the parent's handle
+
+
+# P1-1 recoverable-intent reconciler grace: wait this long after a durable resume_requested before
+# re-spawning it, so the ORIGINAL detached spawn has time to acquire the lock + append resume_served.
+# Only a resume that stays unserved past this window is treated as a died-on-startup zombie.
+_RESUME_RECONCILE_GRACE_S = 30.0
+
+# P1-4 bounded logs: ceiling for the append-only engine.stderr.log before `_spawn_engine` truncates it
+# to its recent tail — so a crash-looping (or reconciler-re-spawned) engine can't grow it without bound.
+_ENGINE_STDERR_CAP = 8 * 1024 * 1024
+
+
+def _resolve_task_file(rd: Path) -> Optional[str]:
+    """The task file a `resume` spawn needs — the UI's recorded task_file, else the verbatim
+    task.snapshot.json every `run` writes. Mirrors control._task_file_for so the reconciler can
+    re-spawn without the router closure. None => not resumable."""
+    import json
+    meta = rd / "ui_meta.json"
+    if meta.exists():
+        try:
+            tf = json.loads(meta.read_text(encoding="utf-8")).get("task_file")
+            if tf:
+                return tf
+        except (OSError, ValueError):
+            pass
+    snap = rd / "task.snapshot.json"
+    return str(snap) if snap.exists() else None
+
+
+def reconcile_pending_resume(rd: Path, *, now: Optional[float] = None) -> bool:
+    """P1-1 on-load reconciler (NO standing daemon): re-spawn the engine for a run whose durable resume
+    intent was recorded but never served — the detached `/resume` spawn died before the engine ran, so
+    the run is a zombie (not finished, no engine driving it). Returns True if it re-spawned. Idempotent
+    and safe to over-call: a second engine no-ops on the singleton lock. Conservative gates, ALL required:
+      * `resume_pending()` — a resume_requested seq newer than the last resume_served (unfulfilled);
+      * the request is older than the grace window (the real spawn had its chance to acquire the lock);
+      * the run is NOT finished AND no engine currently holds the lock (a genuine zombie);
+      * the run is resumable (a task file exists)."""
+    from looplab.events.eventstore import EventStore
+    from looplab.events.replay import fold
+    from looplab.events.types import EV_RESUME_REQUESTED
+    import time as _time
+    now = _time.time() if now is None else now
+    try:
+        st = fold(EventStore(rd / "events.jsonl").read_all())
+    except Exception:  # noqa: BLE001 — a corrupt/absent log is not reconcilable; never crash the list
+        return False
+    if st.finished or not st.resume_pending():
+        return False
+    if (now - float(st.last_resume_request_ts or 0.0)) < _RESUME_RECONCILE_GRACE_S:
+        return False                      # give the in-flight spawn time to acquire the lock + serve
+    if _engine_alive(rd):
+        return False                      # an engine IS running -> the intent is being served
+    task_file = _resolve_task_file(rd)
+    if not task_file:
+        return False                      # not resumable (predates self-describing runs)
+    # Re-record the intent BEFORE re-spawning so its fresh timestamp RESETS the grace window: a run
+    # whose engine keeps dying on startup then re-spawns at most once per grace (bounded), not on every
+    # dashboard load. Seq-gated fulfillment is unchanged — the (re)spawned engine's resume_served, at a
+    # newer seq, still clears every pending request at once.
+    EventStore(rd / "events.jsonl").append(EV_RESUME_REQUESTED, {"reconcile": True})
+    _spawn_engine(["resume", str(rd), "--task-file", str(task_file)], run_dir=rd)
+    return True
 
 
 def _reap_spawned_engines() -> None:

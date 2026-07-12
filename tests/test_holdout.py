@@ -37,6 +37,19 @@ def test_holdout_indices_zero_fraction_empty():
     assert _holdout_indices(50, 0.0) == frozenset()
 
 
+def test_holdout_indices_epoch_salt_fresh_but_same_size():
+    # P0-2: epoch 0 is byte-identical to the original (no-arg) partition; a later epoch reserves a
+    # DIFFERENT, freshly-hidden split of the SAME size, so a reopened run doesn't re-use the disclosed
+    # holdout ('already-seen exam'). Determinism holds per epoch.
+    base = _holdout_indices(40, 0.25)
+    assert base == _holdout_indices(40, 0.25, 0)          # epoch 0 == original -> old logs unchanged
+    e1 = _holdout_indices(40, 0.25, 1)
+    e2 = _holdout_indices(40, 0.25, 2)
+    assert e1 == _holdout_indices(40, 0.25, 1)            # deterministic per epoch
+    assert len(e1) == len(e2) == len(base) == 10          # same reserved count
+    assert e1 != base and e2 != base and e1 != e2         # each epoch is a fresh split
+
+
 # --------------------------------------------------------------------------- #
 # fold: holdout_evaluated + holdout_select champion override + gap
 # --------------------------------------------------------------------------- #

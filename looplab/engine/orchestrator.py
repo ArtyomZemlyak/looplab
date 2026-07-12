@@ -34,7 +34,7 @@ from looplab.events.types import (
     EV_RUN_STARTED, EV_RUNG_PROMOTED,
     EV_SETUP_FINISHED, EV_SETUP_STARTED, EV_SETUP_STEP, EV_SPEC_APPROVAL_REQUESTED,
     EV_SPEC_APPROVED, EV_SPEC_PROPOSED,
-    EV_WORKSPACE_CHANGED)
+    EV_ENV_CHANGED, EV_WORKSPACE_CHANGED)
 from looplab.engine.ablation import AblationMixin
 from looplab.engine.audit import AuditMixin
 from looplab.engine.confirm_phase import ConfirmPhaseMixin
@@ -74,6 +74,12 @@ from looplab.core.tracing import JsonlSpanExporter, Tracer
 # collapse (the signature takes **knobs now, so the orchestrator itself no longer needs it);
 # kept importable from this module path for pre-collapse importers.
 from looplab.engine.options import _UNSET  # noqa: F401
+
+# P0-5 dirty-input diff digest: the byte ceiling on how much of `git diff HEAD` is hashed before the
+# digest is marked truncated (`~`). A real code diff is far under this; beyond it we're diffing a
+# tracked data/generated file, where buffering the whole patch would spike run-start memory (a latent
+# OOM) and a truncated "did-it-change" signal is enough. Module-level so an operator/test can retune.
+_DIFF_DIGEST_CAP = 8 * 1024 * 1024
 
 
 # The confirm phase (engine/confirm_phase.py) and ablation (engine/ablation.py) clusters are
@@ -677,7 +683,15 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         # forever. Gating on setup_done re-runs the body until it actually completes. Legacy logs that
         # never emitted setup_finished but already reached a node (or finished) are treated as
         # set-up-complete via `state.nodes`/`state.finished`, so they never re-run setup.
-        if not (state.setup_done or state.nodes or state.finished):
+        # P0-3 material re-verification: on a PRE-node resume, re-run preflight if setup completed
+        # against a DIFFERENT material manifest than we now hold (edited config / changed data or
+        # workspace) — the `setup_done` boolean alone would skip the leakage/grounding checks on the
+        # changed inputs. Only pre-node (a node present => the run is underway; mid-run drift is handled
+        # by workspace_changed below). Re-running records a fresh setup_finished with the new manifest,
+        # so this can never loop. Old logs (no recorded manifest) keep the pure-boolean behavior.
+        _setup_stale = bool(state.setup_done and not state.nodes and state.setup_manifest
+                            and self._setup_manifest() != state.setup_manifest)
+        if not (state.setup_done or state.nodes or state.finished) or _setup_stale:
             # SETUP PHASE (task + data), an explicit, ONLINE-watchable phase: the pre-node work
             # (fingerprint the workspace, hash data provenance, profile columns, write AGENTS.md) is
             # otherwise silent between run_started and the first node. `setup_started` +/ `setup_step`
@@ -715,6 +729,13 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                             "direction": self.task.direction,
                             "config_hash": cfg_hash,
                             "workspace": wf,
+                            # P0-5 environment identity: pin the interpreter + key-lib versions so a
+                            # resume can flag a library upgrade that breaks bit-reproducibility.
+                            "env": self._env_fingerprint(),
+                            # P0-5 dirty-input enumeration: which repo files were uncommitted at start
+                            # (repo tasks only; a clean/non-repo run records []). Provenance on top of
+                            # the workspace content hash in `wf`.
+                            "dirty_inputs": (self._dirty_inputs(wf) if self._repo_spec else []),
                             # T2 trust enforcement: recorded here so the pure fold applies the same
                             # gate on replay/resume (config isn't available to `replay.fold`). Absent in
                             # old logs -> "audit" -> byte-identical legacy selection.
@@ -766,7 +787,10 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                 # data and a leak is detected, refuse to run — don't produce results on leaky data.
                 if self._leakage_blocks():
                     self.store.append(EV_RUN_FINISHED, {"reason": "leakage"})
-            self.store.append(EV_SETUP_FINISHED, {"seconds": round(time.time() - _su_t0, 3)})
+            # P0-3: bind this completion to the material it verified (reuse the wf computed above), so a
+            # later resume can tell "done for THIS material" from "done for material that has changed".
+            self.store.append(EV_SETUP_FINISHED, {"seconds": round(time.time() - _su_t0, 3),
+                                                  "manifest": self._setup_manifest(wf=wf)})
         elif self._repo_spec and state.workspace and not state.workspace_changed:
             # Resume (item #4): the editable workspace is copied fresh each node, so if the
             # operator's repo changed since the run started, later nodes silently evaluate a
@@ -774,6 +798,14 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
             now = self._workspace_fingerprint()
             if now != state.workspace:
                 self.store.append(EV_WORKSPACE_CHANGED, {"was": state.workspace, "now": now})
+        # P0-5 environment drift: on ANY resume where an env was pinned at run start, flag a Python/
+        # library change — a run continued after an upgrade is no longer bit-reproducible, so record it
+        # instead of pretending it is. Diagnostic-only (mirrors workspace_changed). state.env is None on
+        # the first run (run_started is appended mid-setup, after this fold) and on old logs -> skipped.
+        if state.env is not None:
+            _cur_env = self._env_fingerprint()
+            if _cur_env != state.env:
+                self.store.append(EV_ENV_CHANGED, {"was": state.env, "now": _cur_env})
 
     def _reentry_repin(self) -> bool:
         entry_finished = fold(self.store.read_all()).finished  # resuming a done run?
@@ -787,10 +819,14 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         # before vs. after a config change would be scored on different splits and the champion pick
         # would mix incomparable metrics. Recorded holdout_select likewise wins on resume.
         if _entry.holdout_fraction is not None:
-            if _entry.holdout_fraction != self._holdout_fraction:
-                self._holdout_fraction = _entry.holdout_fraction
-                self._holdout_idx = self._build_holdout_idx(self._holdout_fraction)
+            self._holdout_fraction = _entry.holdout_fraction
             self._holdout_select = _entry.holdout_select
+            # P0-2 freshly-hidden per-epoch holdout: rebuild the partition for the CURRENT search
+            # epoch. A run reopened after finishing (search_epoch>=1) then scores its new candidates
+            # on a never-disclosed split instead of the one revealed at the prior finish ('already-
+            # seen exam'). Epoch 0 rebuilds the byte-identical original partition, so a normal
+            # single-epoch run (and every replay of an existing log) is unchanged.
+            self._holdout_idx = self._build_holdout_idx(self._holdout_fraction, _entry.search_epoch)
         # E4: cross-run meta-learned priors. Excluding THIS run's id matters on resume: a run that
         # already mid-run-distilled its own comparative lessons (M6) must not read them back as if
         # they were another run's experience — its own results are already in the digest. The stamp
@@ -1422,6 +1458,131 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
     def _workspace_fingerprint(self) -> dict:
         return self.workspace.workspace_fingerprint()
 
+    def _setup_manifest(self, wf: "dict | None" = None) -> str:
+        """P0-3 content-addressed setup: a stable digest of the MATERIAL the task+data preflight
+        verified — the config hash, the workspace fingerprint, and the data-asset provenance. Binds
+        `setup_done` to the exact inputs so a pre-node resume re-runs preflight (leakage!) when they
+        changed rather than trusting a stale boolean. Deterministic (pure content hashes), so an
+        unchanged workspace yields the recorded digest and never loops. `wf` may be passed to reuse an
+        already-computed fingerprint. Both hashlib + orjson are imported for the setup block above."""
+        cfg = hashlib.sha256(orjson.dumps(self.task.model_dump(mode="json"))).hexdigest()[:12]
+        wf = self._workspace_fingerprint() if wf is None else wf
+        prov = {name: hashlib.sha256(
+                    c.encode("utf-8") if isinstance(c, str) else bytes(c)).hexdigest()[:16]
+                for name, c in (self._assets or {}).items()}
+        return hashlib.sha256(orjson.dumps(
+            {"config": cfg, "workspace": wf, "provenance": prov},
+            option=orjson.OPT_SORT_KEYS)).hexdigest()[:16]
+
+    def _env_fingerprint(self) -> dict:
+        """P0-5 environment identity: a small, stable record of the interpreter + the key libraries a
+        result depends on, pinned at run start so a resume after an upgrade can flag that the run is no
+        longer bit-reproducible. Best-effort: a missing/broken package is simply omitted, and
+        importlib.metadata never touches the network. Deterministic on a fixed environment."""
+        import platform
+        import sys
+        env: dict = {"python": sys.version.split()[0], "platform": platform.platform()}
+        libs: dict = {}
+        try:
+            from importlib.metadata import PackageNotFoundError, version
+            for pkg in ("numpy", "pandas", "scikit-learn", "scipy", "torch", "xgboost",
+                        "lightgbm", "tensorflow", "transformers"):
+                try:
+                    libs[pkg] = version(pkg)
+                except PackageNotFoundError:
+                    pass
+                except Exception:  # noqa: BLE001 — a broken metadata entry must not fail setup
+                    pass
+        except Exception:  # noqa: BLE001 — importlib.metadata unavailable: skip the lib pins
+            pass
+        if libs:
+            env["libs"] = libs
+        return env
+
+    def _dirty_inputs(self, wf: "dict | None") -> list:
+        """P0-5 dirty-input enumeration: for each git-repo workspace source, the uncommitted-file LIST
+        (`git status --porcelain`) plus a bounded DIGEST of the actual diff vs HEAD (`git diff HEAD`) —
+        the EXPLICIT record of which inputs differ from a clean checkout AND a content fingerprint of
+        HOW, on top of the HEAD-SHA the workspace fingerprint pins (which is blind to uncommitted work).
+        The digest (not the diff TEXT) is stored on purpose: it detects a changed dirty-content across
+        runs WITHOUT leaking a secret a raw patch could carry (a pasted key, an edited .env) into the
+        world-readable log.
+
+        Corner-case behavior (all best-effort — a source never fails the run):
+          * A heavy UNTRACKED artifact costs nothing: `git diff HEAD` never emits untracked files, so
+            only its NAME lands in the porcelain list. A heavy TRACKED+modified text file would make
+            git stream a giant patch, so the diff is hashed INCREMENTALLY and capped at
+            `_DIFF_DIGEST_CAP` — the engine never buffers the whole patch, and an over-cap digest is
+            marked `~` (truncated) so a reader knows the tail was not seen.
+          * A gitignored file is INVISIBLE here BY DESIGN — porcelain skips it and the repo fingerprint
+            is HEAD-only, so declared-non-source scratch (`runs/`, `__pycache__`, `model.pkl`, `.env`)
+            never pollutes the enumeration (and `.env`'s secret never enters the log). A gitignored
+            path that is genuinely a run INPUT should be mounted as a `data:` source, where
+            `_shallow_fingerprint` covers it outside git's ignore rules.
+          * Multiple sources under one repo share a single diff (computed once per resolved root).
+        Bounded output: <=500 porcelain lines x 200 chars, and one capped digest per repo root."""
+        import os
+        import subprocess
+        import time
+
+        def _diff_digest(root: str) -> "str | None":
+            # Incrementally hash `git diff HEAD` (staged + unstaged) so a multi-GB tracked-file diff
+            # never lands in memory: raw fd reads, an 8 MiB byte cap, and a wall-clock deadline.
+            proc = None
+            try:
+                proc = subprocess.Popen(["git", "-C", root, "diff", "HEAD"],
+                                        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+                fd = proc.stdout.fileno()
+                h, read, truncated, deadline = hashlib.sha256(), 0, False, time.monotonic() + 15
+                while read < _DIFF_DIGEST_CAP:
+                    if time.monotonic() > deadline:
+                        truncated = True
+                        break
+                    chunk = os.read(fd, min(65536, _DIFF_DIGEST_CAP - read))
+                    if not chunk:
+                        break                                       # EOF: the whole diff was hashed
+                    h.update(chunk)
+                    read += len(chunk)
+                else:
+                    truncated = bool(os.read(fd, 1))                # bytes remained past the cap
+                return (h.hexdigest()[:16] + ("~" if truncated else "")) if read else None
+            except Exception:  # noqa: BLE001 — no HEAD / git error / decode: keep the file list only
+                return None
+            finally:
+                if proc is not None:
+                    try:
+                        proc.stdout.close()
+                    except Exception:  # noqa: BLE001
+                        pass
+                    try:
+                        proc.terminate()                            # stop git if we bailed mid-stream
+                        proc.wait(timeout=5)
+                    except Exception:  # noqa: BLE001
+                        try:
+                            proc.kill()
+                        except Exception:  # noqa: BLE001
+                            pass
+
+        out: list = []
+        digests: dict = {}                                          # resolved-root -> digest (once)
+        for src in sorted((wf or {}).keys()):
+            try:
+                p = Path(src)
+                root = str(p if p.is_dir() else p.parent)
+                r = subprocess.run(["git", "-C", root, "status", "--porcelain"],
+                                   capture_output=True, text=True, timeout=10)
+                dirty = [ln[:200] for ln in r.stdout.splitlines() if ln.strip()][:500]
+                if r.returncode == 0 and dirty:
+                    entry = {"source": src, "dirty": dirty}
+                    if root not in digests:
+                        digests[root] = _diff_digest(root)
+                    if digests[root] is not None:
+                        entry["diff_digest"] = digests[root]
+                    out.append(entry)
+            except Exception:  # noqa: BLE001 — git missing / not a repo / timeout: no enumeration
+                pass
+        return out
+
     def _seed_workspace(self, workdir) -> None:
         return self.workspace.seed_workspace(workdir)
 
@@ -1464,8 +1625,8 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
     def _host_score_split(self, preds, g: dict, *, holdout: bool) -> Optional[float]:
         return self.holdout.host_score_split(preds, g, holdout=holdout)
 
-    def _build_holdout_idx(self, fraction: float) -> frozenset:
-        return self.holdout.build_holdout_idx(fraction)
+    def _build_holdout_idx(self, fraction: float, epoch: int = 0) -> frozenset:
+        return self.holdout.build_holdout_idx(fraction, epoch)
 
     def _holdout_topk(self, state: RunState) -> list[int]:
         return self.holdout.holdout_topk(state)

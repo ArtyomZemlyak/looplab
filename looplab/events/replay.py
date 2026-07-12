@@ -19,9 +19,10 @@ from looplab.events.types import (
     EV_HYPOTHESIS_RANKED, EV_HYPOTHESIS_UPDATED, EV_INJECT_DONE, EV_INJECT_NODE, EV_LESSONS_DISTILLED,
     EV_LESSONS_REFRESHED, EV_LLM_COST, EV_NODE_ABORT, EV_NODE_BUILDING, EV_NODE_CONFIRMED,
     EV_NODE_CREATED, EV_NODE_EVALUATED, EV_NODE_FAILED, EV_NODE_REPAIRED, EV_NODE_RESET,
-    EV_NOVELTY_REJECTED, EV_PAUSE, EV_STAGE_FINISHED,
+    EV_NODE_TOMBSTONED, EV_NOVELTY_REJECTED, EV_PAUSE, EV_STAGE_FINISHED,
     EV_POLICY_DECISION, EV_PROMOTE, EV_PROXY_SCORED, EV_REPORT_GENERATED,
-    EV_RESEARCH_COMPLETED, EV_RESUME, EV_REWARD_HACK_SUSPECTED, EV_RUN_ABORT,
+    EV_RESEARCH_COMPLETED, EV_RESUME, EV_RESUME_REQUESTED, EV_RESUME_SERVED,
+    EV_REWARD_HACK_SUSPECTED, EV_RUN_ABORT,
     EV_RUN_FINISHED, EV_RUN_REOPENED, EV_RUN_SETUP_FINISHED, EV_RUN_STARTED, EV_RUNG_PROMOTED,
     EV_SET_STRATEGY,
     EV_SETUP_FINISHED, EV_SPEC_APPROVAL_REQUESTED, EV_SPEC_APPROVED, EV_SPEC_DRIFT, EV_SPEC_PROPOSED,
@@ -108,6 +109,9 @@ def _on_run_started(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     st.direction = _dir if _dir in ("min", "max") else "min"
     st.config_hash = d.get("config_hash", "")
     st.workspace = d.get("workspace")
+    st.env = d.get("env")   # P0-5 environment identity pinned at start (None on old logs)
+    _di = d.get("dirty_inputs")
+    st.dirty_inputs = _di if isinstance(_di, list) else []   # P0-5 uncommitted-input enumeration
     _tg = str(d.get("trust_gate", "audit")).strip().lower()
     st.trust_gate = _tg if _tg in ("audit", "gate", "block") else "audit"
     # D1: recorded at start so replay applies the same selection rule. Absent in old
@@ -134,6 +138,24 @@ def _on_node_building(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
                    "parent_ids": d.get("parent_ids", []), "started": e.ts}
 
 def _on_node_created(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
+    # Don't let a duplicate node_created RESURRECT a settled node (invariant #2 "first terminal
+    # wins"): if the id already exists AND is in a TERMINAL state (evaluated/failed), skip the event.
+    # Overwriting a terminal node installed a fresh status=pending Node, which re-armed the
+    # `first_terminal` guard so a following duplicate terminal RE-added its eval_seconds to
+    # total_eval_seconds (cost double-charged) and could flip a settled metric/status/feasibility
+    # last-wins — the exact idempotency `_on_node_evaluated` protects the terminal against.
+    # A re-emit onto a PENDING id is legitimate and MUST apply: `node_reset` (propose/implement)
+    # re-opens a node to pending and the engine re-develops it in place, emitting a SECOND
+    # node_created for the same id (orchestrator `_rerun_reset_node`) whose new code/idea must land
+    # and clear `rerun_from` — dropping it loops the engine forever re-developing. So the guard keys
+    # on terminal status, not mere existence. A clean first build has no prior node -> applies.
+    nid = d.get("node_id")
+    try:
+        existing = st.nodes.get(nid)
+    except TypeError:
+        existing = None   # unhashable forged id -> treat as new; Node(...) below rejects the bad event
+    if existing is not None and existing.status is not NodeStatus.pending:
+        return
     # Defensive like the per-trial / unknown-node tolerance below: a malformed or incomplete
     # node_created (missing key, non-coercible idea param in a hand-edited / bring-your-own-script
     # log) must not crash the WHOLE fold — skip the bad event instead (the engine, sole writer,
@@ -174,6 +196,15 @@ def _nonneg_seconds(v) -> float:
     except (TypeError, ValueError):
         return 0.0
     return f if (math.isfinite(f) and f >= 0.0) else 0.0
+
+
+def _charge_eval_seconds(st: RunState, kind: str, raw) -> None:
+    """P1-2 budget buckets: add a coerced non-negative eval-seconds to the cumulative total AND to its
+    category bucket (node|confirm). One helper so the total and the per-kind split can never drift."""
+    secs = _nonneg_seconds(raw)
+    st.total_eval_seconds += secs
+    if secs:
+        st.eval_seconds_by_kind[kind] = st.eval_seconds_by_kind.get(kind, 0.0) + secs
 
 
 def _attempt_matches(n, d: dict) -> bool:
@@ -234,7 +265,7 @@ def _on_node_evaluated(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None
                 except Exception:
                     continue
             n.trials = trials
-            st.total_eval_seconds += _nonneg_seconds(d.get("eval_seconds"))
+            _charge_eval_seconds(st, "node", d.get("eval_seconds"))   # P1-2 bucket: search/node eval
 
 def _on_node_failed(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     if st.building and st.building.get("node_id") == d.get("node_id"):
@@ -257,7 +288,7 @@ def _on_node_failed(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
             n.rerun_stage = None                # any stage-scoped re-run has now landed
             if d.get("failed_stage"):
                 n.failed_stage = d.get("failed_stage")   # Phase 1: which pipeline stage broke
-            st.total_eval_seconds += _nonneg_seconds(d.get("eval_seconds"))
+            _charge_eval_seconds(st, "node", d.get("eval_seconds"))   # P1-2 bucket: search/node eval
 
 def _on_node_repaired(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     # In-node inline repair (hybrid crash repair): a NON-terminal event that replaces the
@@ -274,6 +305,20 @@ def _on_node_repaired(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
             n.files = d["files"]
         if d.get("deleted"):
             n.deleted = d["deleted"]
+
+def _on_node_tombstoned(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
+    # Append-only delete (§6.3): mark the listed node ids (a node + its descendant subtree, computed
+    # by the writer so the fold stays a pure, order-tolerant set op) as logically deleted. They REMAIN
+    # in st.nodes — so parent links still resolve, node-id allocation never reuses the id, and the
+    # delete is reversible/auditable — but the evaluated/feasible/breedable/pending helpers skip a
+    # tombstoned node, so it is excluded from best-pick, breeding, confirmation, and re-eval.
+    # Idempotent: setting the flag twice (duplicate/overlapping tombstone events) is a no-op. Ids
+    # coerced defensively — a forged/unhashable id in a hand-edited log is skipped, not a fold crash.
+    for raw in (d.get("node_ids") or []):
+        nid = _coerce_node_id({"node_id": raw})
+        n = st.nodes.get(nid) if nid is not None else None
+        if n is not None:
+            n.tombstoned = True
 
 def _on_node_reset(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     # Re-run an EXISTING node in place (no new id). Discard its state FROM `from_stage` so it
@@ -362,6 +407,14 @@ def _on_stage_finished(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None
             n.stages.append(rec)
 
 def _on_confirm_eval(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
+    # P0-1 attempt guard: a confirm-seed eval stamped with an attempt that no longer matches the
+    # node's current generation is from an abandoned attempt (its confirm was in flight when a
+    # node_reset bumped the attempt). Drop it — else its stale per-seed metric lands in
+    # `confirm_seed_results`, and the confirm phase memo-skips that seed and emits node_confirmed
+    # from PRE-reset seed metrics for the POST-reset code. Old logs (no `attempt`) default-match.
+    _n = st.nodes.get(d.get("node_id"))
+    if _n is not None and not _attempt_matches(_n, d):
+        return
     # First-occurrence eval-cost accounting: `confirm_eval` is the one eval-cost contributor
     # without the node-terminal first-terminal guard (events/types.py), so a duplicated/
     # double-folded confirm_eval would inflate `total_eval_seconds` and make the budget
@@ -374,13 +427,13 @@ def _on_confirm_eval(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     # double-count total_eval_seconds (order/duplication-sensitive — the fold must not be). The sole
     # emitter always writes both keys, so this only guards a future/foreign/hand-edited un-keyed event.
     if keyed and first:
-        st.total_eval_seconds += _nonneg_seconds(d.get("eval_seconds"))   # confirm-seed eval cost
+        _charge_eval_seconds(st, "confirm", d.get("eval_seconds"))   # P1-2 bucket: confirm-seed eval cost
     if keyed:                                                # per-seed resume memo (#0)
         st.confirm_seed_results.setdefault(d["node_id"], {})[d["seed"]] = d.get("metric")
 
 def _on_node_confirmed(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     n = st.nodes.get(d.get("node_id"))
-    if n is not None:
+    if n is not None and _attempt_matches(n, d):   # P0-1: ignore a confirm from an abandoned attempt
         n.confirmed_mean = d.get("mean")
         n.confirmed_std = d.get("std")
         n.confirmed_seeds = d.get("seeds")
@@ -391,9 +444,18 @@ def _on_holdout_evaluated(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> N
     # an event for an unknown node (corrupt log) is skipped, and a null metric (missing
     # predictions) records nothing — such a node simply can't win the holdout pick.
     nid = d.get("node_id")
+    n = st.nodes.get(nid)
+    # P0-1 attempt guard: a holdout score from an attempt the node has since abandoned (reset
+    # bumped the generation) must neither mark the gate nor set holdout_metric on the new code.
+    if n is not None and not _attempt_matches(n, d):
+        return
+    # P0-2 epoch guard: a holdout score from a PRIOR search epoch (its split was disclosed at the
+    # prior finish) must not land in the current epoch — the reopen re-scores on a fresh split. Old
+    # logs (no search_epoch) default to the current epoch and fold identically.
+    if d.get("search_epoch", st.search_epoch) != st.search_epoch:
+        return
     if nid is not None and nid not in st.holdout_evaluated_ids:
         st.holdout_evaluated_ids.append(nid)   # gate: attempted, even if metric is null
-    n = st.nodes.get(nid)
     if n is not None and d.get("metric") is not None:
         try:
             n.holdout_metric = float(d["metric"])
@@ -423,6 +485,10 @@ def _on_setup_finished(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None
     # tell "setup done" from "crashed mid-setup right after run_started" — the latter must re-run the
     # rest of preflight (leakage!) rather than skip it forever. Idempotent (a re-run re-appends it).
     st.setup_done = True
+    # P0-3 manifest: bind the completion to the material it verified (config/workspace/data digest).
+    # Additive: absent on old logs -> "" -> resume falls back to the boolean (unchanged behavior).
+    if d.get("manifest"):
+        st.setup_manifest = str(d.get("manifest"))
 
 def _on_run_setup_finished(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     # arch-review §5 P2: a SUCCESSFUL run-level `run_setup` (dep install) is folded (keyed by its
@@ -534,7 +600,12 @@ def _on_agent_decision(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None
     st.agent_decisions.append(d)
 
 def _on_reward_hack_suspected(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
-    st.reward_hacks.append({"node_id": d.get("node_id"), "signals": d.get("signals", [])})
+    # P1-7 versioned TrustEvidence: carry the evidence schema version + scanned-surface digest onto the
+    # folded record (provenance), additively — old logs lack them (version 0 / no digest) and fold the
+    # same. `signals` still drives the gate (is_hard_signal keys on signal STRING, unchanged).
+    st.reward_hacks.append({"node_id": d.get("node_id"), "signals": d.get("signals", []),
+                            "evidence_version": d.get("evidence_version", 0),
+                            "code_digest": d.get("code_digest")})
 
 def _on_foresight_selected(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     # FOREAGENT predict-before-execute pick (audit-only). Kept so the world model can be
@@ -627,6 +698,16 @@ def _on_resume_or_run_reopened(st: RunState, e: Event, d: dict, ctx: "_FoldCtx")
         st.approved = False
         st.awaiting_approval = False
         st.approval_subject = None
+        # P0-2 freshly-hidden per-epoch holdout: the prior epoch's holdout was DISCLOSED at the
+        # finish (its scores drove the champion pick), so the reopened epoch must NOT re-score its
+        # new candidates on that same partition — the engine rebuilds `_holdout_idx` for the new
+        # epoch (a different, never-disclosed split). Clear the gate + the now-stale holdout metrics
+        # so the holdout phase re-runs and re-scores every current leader on the fresh split (keeping
+        # the champion comparable on ONE holdout). New holdout_evaluated events carry the new epoch;
+        # a late one stamped with the prior epoch is dropped by the epoch guard in _on_holdout_evaluated.
+        st.holdout_evaluated_ids.clear()
+        for _n in st.nodes.values():
+            _n.holdout_metric = None
     st.paused = False
     st.finished = False
     st.stop_reason = None
@@ -634,6 +715,20 @@ def _on_resume_or_run_reopened(st: RunState, e: Event, d: dict, ctx: "_FoldCtx")
 
 # --- live operator control events (UI intervention). Intent only; the engine reads
 # these and writes the matching domain effect. Deterministic under replay. ---
+def _on_resume_requested(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
+    # P1-1 durable resume intent: record the request seq + time. A request seq newer than the last
+    # `resume_served` (below) is an unfulfilled resume the reconciler re-spawns. Monotonic by seq, so a
+    # duplicate/out-of-order fold is idempotent; the ts is the request event's own recorded time.
+    if e.seq > st.last_resume_request_seq:
+        st.last_resume_request_seq = e.seq
+        st.last_resume_request_ts = float(getattr(e, "ts", 0.0) or 0.0)
+
+def _on_resume_served(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
+    # P1-1: the engine acquired the singleton lock and is driving the loop -> every resume requested
+    # before this seq is fulfilled. Seq-gated so one serve satisfies several piled-up requests.
+    if e.seq > st.last_resume_served_seq:
+        st.last_resume_served_seq = e.seq
+
 def _on_run_abort(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     # FINALIZE: the loop turns stop_requested into a run_finished (which runs the end-of-run
     # finalization — report/lessons/case/cost). A bare `stop` uses EV_PAUSE instead (no finalize).
@@ -770,6 +865,9 @@ _HANDLERS = {
     EV_NODE_EVALUATED: _on_node_evaluated,
     EV_NODE_FAILED: _on_node_failed,
     EV_NODE_REPAIRED: _on_node_repaired,
+    EV_NODE_TOMBSTONED: _on_node_tombstoned,
+    EV_RESUME_REQUESTED: _on_resume_requested,
+    EV_RESUME_SERVED: _on_resume_served,
     EV_NODE_RESET: _on_node_reset,
     EV_STAGE_FINISHED: _on_stage_finished,
     EV_CONFIRM_EVAL: _on_confirm_eval,

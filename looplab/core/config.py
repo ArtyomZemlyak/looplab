@@ -152,6 +152,18 @@ class Settings(BaseSettings):
     # Ignored by the trusted_local (subprocess) tier.
     sandbox_memory: str = "4g"
     sandbox_cpus: str = ""
+    # Best-effort host-OOM guard for the TRUSTED-LOCAL (subprocess) tier. When set (e.g. "8g"), each
+    # eval child gets an RLIMIT_AS address-space cap so a runaway trainer hits MemoryError instead of
+    # OOM-killing the whole host (and the engine). POSIX only; a no-op on Windows. Default "" = OFF:
+    # RLIMIT_AS bounds VIRTUAL memory, and CUDA/torch reserve tens of GB of virtual without using it,
+    # so a default cap would spuriously kill GPU evals — leave it off for those and use the Docker
+    # tier's real --memory cgroup bound (sandbox_memory) instead. Ideal for CPU/numpy/sklearn runs.
+    sandbox_memory_local: str = ""
+    # Best-effort disk-fill guard for the TRUSTED-LOCAL tier (P1-5): an RLIMIT_FSIZE cap on the size of
+    # any single file an eval child writes (e.g. "2g"), so a runaway that writes an unbounded file gets
+    # SIGXFSZ instead of filling the host disk. POSIX only. Default "" = OFF (large model checkpoints
+    # need big files); set it for tasks that write only small artifacts.
+    sandbox_fsize_local: str = ""
     # Search policy (ADR-2): "greedy" | "evolutionary" | "mcts" | "asha".
     policy: str = "greedy"
     # Ablation-driven refinement (I7): every N improves, ablate the best to find the

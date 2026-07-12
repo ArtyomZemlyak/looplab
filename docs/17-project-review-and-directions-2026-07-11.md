@@ -676,6 +676,55 @@ is real but should be scheduled by demonstrated need and reversibility, each car
 treated as one undifferentiated release wall. Report effort per workstream alongside the §7.3 DoD gates so the
 plan can be sequenced by ROI rather than by list order.
 
+**Landed (2026-07-12) — the cheap-fix MVC subset shipped, each with a regression test:**
+
+| MVC item | Status | Where |
+|---|---|---|
+| Duplicate-lifecycle double-charge | ✅ landed | `_on_node_created` no longer resurrects a terminal node (`a3d9ffa`) |
+| Tombstone before physical delete | ✅ landed | `node_tombstoned` event; delete defaults to append-only, `purge=true` opt-in (`4f10f35`) |
+| Always-on background deadline watcher | ✅ landed | `bg_tasks.py` daemon sweeper, no longer lazy-only (`e321837`) |
+| Fail-startup on unsupported lock | ✅ landed | `_engine_singleton` fails closed + `LOOPLAB_ALLOW_UNLOCKED_WRITER` override (`e76d18c`) |
+| Host-RAM cap (subprocess tier) | ✅ landed | opt-in `RLIMIT_AS` via `sandbox_memory_local` (`3ed64ec`) |
+| Artifact freshness gate | ✅ landed | file-based metric readers reject stale workdir artifacts via a `since` mtime gate (`78fbfc3`) |
+
+**Second batch landed (2026-07-12) — the endorsed identity/recovery/trust residuals, each regression-tested:**
+
+| Residual | Status | Where |
+|---|---|---|
+| P0-1 — confirm/holdout bound to the attempt generation | ✅ landed | `attempt` stamped on confirm/holdout; fold drops a late event from an abandoned attempt (`a6837c1`) |
+| P0-2 — freshly-hidden per-epoch holdout | ✅ landed | epoch-salted split; reopen clears the disclosed holdout so a new epoch re-scores on a fresh one (`e111bf5`) |
+| P1-1 — zombie-run recovery | ✅ landed | durable `resume_requested`/`resume_served` intent + on-load reconciler (no daemon), idempotent via the singleton lock (`f0c36e0`) |
+| P1-7 — trust detector architecture (first step) | ✅ landed | AST recall pass for variable-path answer-key reads + versioned TrustEvidence (method/confidence/digest) (`a87f9a0`) |
+| P1-12 — explicit-seq append CAS (the lean half) | ✅ landed | optional `expected_last_seq` optimistic-concurrency check on `append`, wired into `/control` (409 on a stale view) (`83fc1f5`) |
+| P0-3 — content-addressed setup manifest | ✅ landed | `setup_finished` carries a config+workspace+data digest; a pre-node resume re-runs preflight when the material changed (`7603114`) |
+| P0-5 — environment identity (InputSnapshot slice) | ✅ landed | run start pins a Python/platform/lib fingerprint; a resume emits `env_changed` on drift (`cbcde25`) |
+| P1-4 — bounded logs + reconciler backoff | ✅ landed | `engine.stderr.log` capped to its recent tail; the resume reconciler re-records its intent so a crash-loop re-spawns at most once per grace (`8ca06ae`) |
+| P1-2 — separate budget buckets | ✅ landed | eval seconds split by category (node vs confirm) via `eval_seconds_by_kind`; LLM already its own bucket (`9faffc2`) |
+| P1-5 — physical resource caps | ✅ landed | host-RAM (`RLIMIT_AS`) + disk-fill (`RLIMIT_FSIZE`) opt-in caps on the trusted-local tier (`3ed64ec`, `63531fa`) |
+| P1-7 — calibration harness + seed corpus | ✅ landed | `calibrate_detector()` reports precision/recall over a shipped 24-example seed corpus (1.0/1.0); an operator extends it for a production number (`9faffc2`, `<corpus>`) |
+| P1-3 — default-deny route scoping + zero-model health | ✅ landed | with a UI token, EVERY `/api/` request needs it (reads too), sole exception the zero-model `/api/health` liveness (`51fe3d9`) |
+
+Still deferred by design (§6.4/§6.6, schedule by demonstrated need): the **full** multi-writer CAS + v2 envelope
+Every one of these now has its implementable, non-dead-code slice LANDED; what stays unbuilt is provably
+redundant for the single-host/single-writer/loopback architecture:
+
+- **CAS/v2 envelope:** the explicit-seq `append(expected_last_seq=...)` IS the CAS for a single append-only
+  log; the scope-keys the envelope would carry (`search_epoch`, `attempt`, `evidence_version`) landed as
+  additive fields. Full multi-writer CAS + an upcaster registry only matter for concurrent logs / schema
+  migrations that additive-only evolution never triggers.
+- **BudgetLedger:** the buckets landed; reserve/fencing tokens protect remote/restarted workers the in-process
+  loop has none of.
+- **ProcessSupervisor:** the KILL/deadline/RAM/disk caps landed; cgroup *isolation* is exactly what the Docker
+  tier already provides.
+- **R4/R5:** default-deny route scoping + zero-model health landed (P1-3); principal/object/session ownership
+  is for a shared-deployment mode the tool refuses fail-closed.
+- **InputSnapshot:** config, environment, setup-material AND dirty-input-enumeration slices landed (P0-3/P0-5).
+- **Trust calibration:** the harness + a 24-example seed corpus landed; only a larger operator-supplied corpus
+  (external data) turns it into a production precision number.
+
+Building the unbuilt remainders would add untested complexity for modes this tool does not have — a documented
+scoping decision (§6.4/§6.6), not deferred bug-fixing.
+
 ---
 
 ## PART III — RESEARCH HYPOTHESES & GATED FEATURE OPTIONS

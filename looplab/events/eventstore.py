@@ -42,6 +42,22 @@ class EventLogCorruptionError(RuntimeError):
             f"to back up and truncate the log to its last valid boundary before resuming.")
 
 
+class EventStoreConcurrencyError(RuntimeError):
+    """Optimistic-concurrency (explicit-seq) check failed on `append(expected_last_seq=...)`: the log
+    tail moved between the caller reading state and appending, so another writer landed an event in
+    between. The lean 'explicit seq' half of P1-12 (arch-review §2): the engine writer is already
+    lock-serialized, so this is for a CALLER that wants to append only against the exact state it saw
+    (e.g. a UI control intent raised on a now-stale view). Full multi-writer CAS stays deferred."""
+
+    def __init__(self, path: "str | os.PathLike", expected: int, actual: int):
+        self.path = str(path)
+        self.expected = int(expected)
+        self.actual = int(actual)
+        super().__init__(
+            f"append to {path} expected the log to be at seq {expected}, but it is at {actual} — "
+            f"another writer appended in between; re-read the state and retry.")
+
+
 @contextmanager
 def _interprocess_lock(lock_path: Path):
     """Best-effort exclusive cross-process lock (msvcrt on Windows, fcntl on POSIX). The live UI
@@ -370,7 +386,8 @@ class EventStore:
             pass  # best-effort healing; a read still tolerates the torn tail
 
     def append(self, type: str, data: dict[str, Any], *,
-               trace_id: "str | None" = _UNSET_TRACE, span_id: "str | None" = _UNSET_TRACE) -> Event:
+               trace_id: "str | None" = _UNSET_TRACE, span_id: "str | None" = _UNSET_TRACE,
+               expected_last_seq: "int | None" = None) -> Event:
         """Durably append one event and return it (the envelope with its assigned seq).
 
         Under a best-effort cross-process lock (the UI server and the engine write the SAME
@@ -379,7 +396,13 @@ class EventStore:
         from max(in-memory, on-disk tail) so a concurrent writer can't mint a duplicate.
         The record is written as one line + flush + best-effort fsync — fsync failures
         (FUSE/S3) never abort the engine, because reads tolerate a torn final line.
-        `_seq` advances only AFTER the durable write succeeds."""
+        `_seq` advances only AFTER the durable write succeeds.
+
+        `expected_last_seq` (P1-12 explicit-seq CAS): when given, the append lands ONLY if the log
+        tail is still exactly that seq at the moment we hold the lock — else raise
+        `EventStoreConcurrencyError`. The check + append are one critical section, so a caller that
+        read state at seq N can guarantee no other event slipped in before its intent (optimistic
+        concurrency for a UI control raised on a possibly-stale view). None = today's behavior."""
         # Stamp the event with the active span's (trace_id, span_id) so the UI can join events to the
         # trace — UNLESS the caller passes an EXPLICIT pair (even None): a telemetry event emitted AFTER
         # its op's span closed (foresight ranking) carries the captured trace_id of that op, and an
@@ -394,7 +417,12 @@ class EventStore:
             self._heal_torn_tail()
             # Derive seq from max(in-memory, on-disk tail) so a concurrent writer can't collide.
             # Single-process: _disk_last_seq == self._seq, so seq == self._seq + 1 (unchanged).
-            seq = max(self._seq, self._disk_last_seq()) + 1
+            cur = max(self._seq, self._disk_last_seq())
+            # P1-12 explicit-seq CAS: reject the append if the tail moved since the caller read state.
+            # Inside the critical section, so the check + write are atomic against another writer.
+            if expected_last_seq is not None and cur != expected_last_seq:
+                raise EventStoreConcurrencyError(self.path, expected_last_seq, cur)
+            seq = cur + 1
             e = Event(seq=seq, ts=time.time(), type=type, data=data,
                       trace_id=trace_id, span_id=span_id)
             line = orjson.dumps(e.model_dump(mode="json"))

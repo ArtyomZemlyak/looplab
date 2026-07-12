@@ -88,6 +88,7 @@ matter on a hub:
 | Env | Why |
 |---|---|
 | `LOOPLAB_RUN_ROOT` | Where runs persist. Defaults to `~/looplab-runs` (the user's home volume) so runs survive a hub idle-cull + pod restart instead of landing in an ephemeral CWD. **Don't** point it at an S3/geesefs FUSE mount — the append-only event log needs atomic rename. |
+| `LOOPLAB_ALLOW_UNLOCKED_WRITER` | Safety override. The engine holds an exclusive `engine.lock` so only one writer touches a run's `events.jsonl`. On a FUSE/S3 mount where OS file locking is unavailable that lock can't be enforced, so startup **fails closed** with an actionable error (two writers could corrupt the log). Set this to `1` **only** if you guarantee a single engine per run dir; it degrades to a best-effort no-op and runs anyway. Prefer a lock-capable local disk (`LOOPLAB_RUN_ROOT`). |
 | `LOOPLAB_UI_DIST` | A prebuilt React bundle. Set it (the image bakes one) so `looplab ui --no-build` serves instantly and never attempts an `npm build` on the noexec/FUSE home. |
 | `LOOPLAB_LLM_BASE_URL` | The cluster LLM endpoint (the default is localhost Ollama). A wrong/unreachable endpoint now surfaces as a terminal `run_finished{reason:error}` event rather than a silent stuck run. |
 

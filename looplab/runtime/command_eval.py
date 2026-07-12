@@ -79,11 +79,36 @@ def _regex_metric(text: str, pattern: str, group: int) -> Optional[float]:
         return None
 
 
-def read_metric(stdout: str, workdir: str, spec: dict, wrap=None) -> Optional[float]:
+# Freshness-gate slack (seconds): allow a metric file whose mtime is up to this far BEFORE the eval
+# start to still count as fresh, absorbing coarse filesystem mtime granularity (some mounts floor to
+# 1s) + minor clock skew. Small vs. the real staleness case (a prior attempt's artifact is seconds-to-
+# minutes old, well past this), so it never lets a genuinely stale file through.
+_FRESH_EPS = 2.0
+
+
+def _file_is_fresh(p: Path, since: Optional[float]) -> bool:
+    """True if the metric-source file `p` was (re)written by the CURRENT eval — its mtime is at/after
+    the eval start (minus _FRESH_EPS). `since=None` disables the gate (non-eval / legacy callers).
+    Guards the workdir-reuse trap: a successful-looking command that produced NO new output would else
+    let a STALE prior-attempt artifact (predictions/metrics file lingering in a coarsely-keyed, un-
+    cleaned workdir) be read as this eval's result and promote a false metric (arch-review §6.3)."""
+    if since is None:
+        return True
+    try:
+        return p.stat().st_mtime >= since - _FRESH_EPS
+    except OSError:
+        return False
+
+
+def read_metric(stdout: str, workdir: str, spec: dict, wrap=None,
+                since: Optional[float] = None) -> Optional[float]:
     """Read the metric for one eval according to `spec` (an eval_spec['metric']). Built-in
     readers parse host files/stdout in-process (data, never code). The `adapter` reader EXECS
     agent-authored code, so under the untrusted tier it must run in the same sandbox as the
-    eval — pass `wrap` (from make_docker_wrap) to run it inside the container."""
+    eval — pass `wrap` (from make_docker_wrap) to run it inside the container.
+
+    `since` (eval start time, from run_command_eval): FILE-based readers reject a metric-source file
+    older than it — a stale artifact left in a reused workdir must not read as this eval's result."""
     kind = spec.get("kind", "stdout_json")
     if kind == "stdout_json":
         return json_line_metric(stdout, spec.get("key", "metric"))
@@ -106,6 +131,8 @@ def read_metric(stdout: str, workdir: str, spec: dict, wrap=None) -> Optional[fl
             return None
         if not p.is_file():
             return None
+        if not _file_is_fresh(p, since):
+            return None                                 # stale prior-attempt file in a reused workdir
         # utf-8-sig strips a UTF-8 BOM (common on Windows-written metric files) that would
         # otherwise make json.loads fail / regex miss the first line.
         text = p.read_text(encoding="utf-8-sig", errors="replace")
@@ -149,6 +176,10 @@ def read_metric(stdout: str, workdir: str, spec: dict, wrap=None) -> Optional[fl
                 f"{guard_root} — it would be mounted/writable by the candidate. "
                 "Place the held-out labels outside the eval workspace.")
         if not preds_path.is_file() or not labels_path.is_file():
+            return None
+        if not _file_is_fresh(preds_path, since):
+            # The candidate's predictions must be written by THIS eval — a stale predictions.json from a
+            # prior attempt in a reused workdir could otherwise score as a perfect result (false promo).
             return None
         try:
             preds = json.loads(preds_path.read_text(encoding="utf-8-sig", errors="replace"))
@@ -475,14 +506,15 @@ def make_docker_wrap(mount_root: str, image: str, network: str = "none",
     return wrap
 
 
-def _violations(out, wd, constraints, wrap) -> list[dict]:
+def _violations(out, wd, constraints, wrap, since=None) -> list[dict]:
     """Read each constraint (a reader spec + a `max`/`min` bound) and return the ones not
     satisfied (incl. a value that couldn't be read — an unverifiable constraint is a
     violation, never a silent pass). Multi-objective gate (#2/#5): a violating node is still
-    measured but excluded from best-selection."""
+    measured but excluded from best-selection. `since` applies the same freshness gate as the
+    primary read — a stale constraint file reads as unverifiable -> violation (fail-closed)."""
     out_list = []
     for c in (constraints or []):
-        val = read_metric(out, wd, c, wrap=wrap)
+        val = read_metric(out, wd, c, wrap=wrap, since=since)
         bad = (val is None
                or (c.get("max") is not None and val > c["max"])
                or (c.get("min") is not None and val < c["min"]))
@@ -556,6 +588,12 @@ def run_command_eval(command: list[str], cwd: str, timeout: float, metric: dict,
         if rc != 0 or to:
             return RunResult(exit_code=rc, stdout=out, stderr="setup failed:\n" + err,
                              metric=None, timed_out=to)
+    # Freshness gate (§6.3): the eval's OWN work starts now (after setup, which installs deps, not
+    # results). Every FILE-based metric/constraint reader below must find a source file written at/after
+    # this instant — a stale artifact left by a prior attempt in a reused workdir is rejected, so a
+    # command that produced no new output can't promote an old metric. Captured before the child so its
+    # writes are strictly newer. stdout readers are inherently this-run and unaffected.
+    _eval_started = time.time()
     stage_results = None
     if stages:
         # Multi-stage pipeline (data_prep → train → eval): run each stage in ORDER in the SAME workdir
@@ -640,11 +678,11 @@ def run_command_eval(command: list[str], cwd: str, timeout: float, metric: dict,
             if _h is not None:
                 _h.set_many(exit_code=rc, timed_out=to)
     with _sp("read_metric", kind=metric.get("kind", "stdout_json")):
-        m = read_metric(out, str(wd), metric, wrap=wrap) if not to else None
+        m = read_metric(out, str(wd), metric, wrap=wrap, since=_eval_started) if not to else None
     drift = None
     if enforce_drift and cross_check and m is not None:
         validate_cross_check(cross_check)
-        cross = read_metric(out, str(wd), cross_check, wrap=wrap)
+        cross = read_metric(out, str(wd), cross_check, wrap=wrap, since=_eval_started)
         if _drift(m, cross, drift_tolerance):
             drift = {"primary": m, "cross": cross, "tolerance": drift_tolerance}
             m = None                                   # uncorroborated -> not trusted
@@ -656,7 +694,7 @@ def run_command_eval(command: list[str], cwd: str, timeout: float, metric: dict,
             raise ValueError("metrics/constraints readers must be built-in, not 'adapter' "
                              "(an agent-authored gate reader defeats the trust boundary).")
     declared = ({name: v for name, spec in metrics.items()
-                 if (v := read_metric(out, str(wd), spec, wrap=wrap)) is not None}
+                 if (v := read_metric(out, str(wd), spec, wrap=wrap, since=_eval_started)) is not None}
                 if (metrics and not to) else {})   # a MISSED reader (None) must not erase a
     #                                                successfully auto-captured value of the same name
     # Auto-capture: every other numeric key on the metric's own JSON line is also reported (no config
@@ -665,7 +703,8 @@ def run_command_eval(command: list[str], cwd: str, timeout: float, metric: dict,
     auto = (json_line_extras(out, metric.get("key", "metric"))
             if (not to and metric.get("kind", "stdout_json") == "stdout_json") else {})
     extra = ({**auto, **declared} or None)
-    viol = _violations(out, str(wd), constraints, wrap) if (constraints and not to and m is not None) else None
+    viol = (_violations(out, str(wd), constraints, wrap, since=_eval_started)
+            if (constraints and not to and m is not None) else None)
     # Intra-node sweep: a RepoTask command may emit the same `{"trials": [...]}` stdout line; carry
     # it so the engine can collapse it to the node's best metric (no eval_spec change required).
     trials = json_line_trials(out) if not to else None

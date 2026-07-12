@@ -113,6 +113,14 @@ def build_router(srv) -> APIRouter:
     # the route-calls-route dependency between this router and `routers/genesis.py`.
     srv.list_tasks_fn = list_tasks
 
+    @router.get("/api/health")
+    def health():
+        """P1-3 zero-model liveness: the ONE /api/ route that stays open without a UI token, so a
+        monitor can probe process reachability WITHOUT the X-LoopLab-Token AND without triggering a
+        billable model completion (that is /api/llm/health, which stays token-gated under deny-default).
+        Pure process-liveness — never touches the LLM, a run, or any sensitive state."""
+        return {"ok": True, "service": "looplab"}
+
     @router.get("/api/llm/health")
     def llm_health():
         """Liveness self-test for the configured LLM endpoint (the UI equivalent of `LoopLab
