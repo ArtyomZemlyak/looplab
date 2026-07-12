@@ -81,6 +81,14 @@ look at something and `resume` with no premature/duplicate lessons, or `finalize
 "reopens" a run that finished naturally to continue it with more budget. (Under the hood the fold still
 understands the legacy `run_reopened` alias of `resume` for old logs.)
 
+**Reopening a *finished* run starts a new search epoch.** The nodes you add with the extra budget are
+a fresh candidate set, so reopening bumps `search_epoch` and re-opens the promotion gates: the
+multi-seed **confirmation** pass runs again (already-confirmed nodes are reused for free, only the new
+candidates spend seeds) and, under HITL, **approval** is requested again for the possibly-new champion.
+Without this, a champion confirmed in the first epoch would lock selection and a strictly-better node
+found after the reopen could never be confirmed or win. (Reopening a merely *stopped* run — one that
+never finished — is the same epoch and leaves those gates untouched.)
+
 The UI also shows a node the **instant** the engine starts building it: a transient `node_building`
 marker (folded to a `building` slot, *not* the event-sourced node set, so it never affects node-id
 allocation or resume) that streams the node's live agent-trace right away, then is superseded by
@@ -194,6 +202,15 @@ A reported number is only useful if it generalizes. The trust layer is leakage-f
   promoted, so noise doesn't crown a lucky run.
 - **Multi-seed confirmation** — at the frontier, re-run the top-k under several seeds
   (`confirm_top_k`, `confirm_seeds`) and pick the robust best. A seed-lucky leader is demoted.
+
+The replay model keeps these promotions honest across resets and reopens:
+
+- **Attempt identity** — re-running a node in place (`node_reset`) bumps that node's *attempt*
+  generation. A late terminal from the attempt the reset abandoned (its eval was still in flight)
+  carries the old generation and is dropped, so it can't land a metric from the discarded code onto
+  the new attempt.
+- **Subject-bound approval** — a human `approve` grant is folded only if it names a real candidate
+  node; a forged/stale grant for a node that isn't in the run can't silently flip the run to approved.
 
 ## Trust & the sandbox
 
