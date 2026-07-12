@@ -143,6 +143,50 @@ def test_fold_duplicate_node_created_does_not_flip_settled_metric(tmp_path):
     assert st.total_eval_seconds == 2.0
 
 
+def test_fold_node_tombstoned_excludes_from_selection(tmp_path):
+    # Append-only delete (§6.3): a node_tombstoned event marks the subtree logically deleted — the
+    # node STAYS in st.nodes (parent links resolve) but is excluded from every selection helper, so
+    # it can't be chosen best or bred from. Here node 1 is the min (best) until it is tombstoned.
+    from looplab.core.models import NodeStatus
+    s = EventStore(tmp_path / "e.jsonl")
+    s.append("run_started", {"run_id": "r", "task_id": "t", "direction": "min"})
+    _n(s, 0, 5.0)
+    _n(s, 1, 1.0)          # strictly better -> best while alive
+    st = fold(s.read_all())
+    assert st.best_node_id == 1
+    s.append("node_tombstoned", {"node_ids": [1]})
+    st = fold(s.read_all())
+    assert 1 in st.nodes and st.nodes[1].tombstoned          # kept in the log, flagged
+    assert st.best_node_id == 0                              # excluded from best-pick
+    assert 1 not in {n.id for n in st.evaluated_nodes()}
+    assert 1 not in {n.id for n in st.feasible_nodes()}
+
+
+def test_fold_node_tombstoned_idempotent_and_tolerant(tmp_path):
+    # Duplicate / overlapping tombstone events are a no-op; a forged/unknown id is skipped, not a crash.
+    s = EventStore(tmp_path / "e.jsonl")
+    s.append("run_started", {"run_id": "r", "task_id": "t", "direction": "min"})
+    _n(s, 0, 5.0)
+    s.append("node_tombstoned", {"node_ids": [0, 999, "bad", None]})   # 999/"bad"/None ignored
+    s.append("node_tombstoned", {"node_ids": [0]})                     # duplicate -> no-op
+    st = fold(s.read_all())
+    assert st.nodes[0].tombstoned and st.best_node_id is None          # nothing selectable left
+
+
+def test_fold_tombstoned_pending_node_not_re_evaluated(tmp_path):
+    # A pending node whose subtree was tombstoned must not be handed back to the eval loop on resume.
+    from looplab.core.models import NodeStatus
+    s = EventStore(tmp_path / "e.jsonl")
+    s.append("run_started", {"run_id": "r", "task_id": "t", "direction": "min"})
+    s.append("node_created", {"node_id": 0, "parent_ids": [], "operator": "draft",
+                              "idea": {"operator": "draft", "params": {}}, "code": ""})
+    st = fold(s.read_all())
+    assert st.nodes[0].status is NodeStatus.pending and st.pending_nodes()
+    s.append("node_tombstoned", {"node_ids": [0]})
+    st = fold(s.read_all())
+    assert st.pending_nodes() == []
+
+
 def test_log_divergence_detects_mid_file_corruption(tmp_path):
     from looplab.events.eventstore import log_divergence
     p = tmp_path / "events.jsonl"

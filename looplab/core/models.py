@@ -110,6 +110,13 @@ class Node(BaseModel):
     # In-surface files the agent DELETED (patch-gate accepted the deletion). Applied to the eval
     # workdir after the pristine repo is seeded, so an accepted deletion actually takes effect.
     deleted: list[str] = Field(default_factory=list)
+    # Logically deleted via a `node_tombstoned` event (append-only delete, §6.3). The node and its
+    # events STAY in the log — so parent links still resolve, the delete is reversible/auditable, and
+    # node-id allocation never reuses the id — but a tombstoned node is invisible to selection: the
+    # evaluated/feasible/breedable/pending helpers skip it, so it can never be chosen best, bred from,
+    # or re-picked for eval. Irreversible physical purge is a separate explicit compaction, never an
+    # ordinary domain command. Additive + reader-defaulted: absent on old logs -> False -> unchanged fold.
+    tombstoned: bool = False
     metric: Optional[float] = None
     status: NodeStatus = NodeStatus.pending
     error: str = ""
@@ -500,7 +507,11 @@ class RunState(BaseModel):
         return self.nodes.get(self.best_node_id) if self.best_node_id is not None else None
 
     def evaluated_nodes(self) -> list[Node]:
-        return [n for n in self.nodes.values() if n.status is NodeStatus.evaluated]
+        # `not n.tombstoned` gates ALL downstream selection at the source: feasible_nodes/
+        # breedable_nodes and the best-pick post-pass all read through here, so a logically-deleted
+        # node can never be selected best, bred from, or confirmed. (§6.3 append-only delete.)
+        return [n for n in self.nodes.values()
+                if n.status is NodeStatus.evaluated and not n.tombstoned]
 
     def feasible_nodes(self) -> list[Node]:
         """Evaluated nodes that satisfied all hard constraints (#5). These are the only nodes
@@ -523,8 +534,11 @@ class RunState(BaseModel):
         return [n for n in self.feasible_nodes() if n.id not in self.breed_excluded]
 
     def pending_nodes(self) -> list[Node]:
+        # A tombstoned pending node (its subtree was logically deleted while it was still queued)
+        # must NOT be handed back to the eval loop on resume — skip it here too (§6.3).
         return sorted(
-            (n for n in self.nodes.values() if n.status is NodeStatus.pending),
+            (n for n in self.nodes.values()
+             if n.status is NodeStatus.pending and not n.tombstoned),
             key=lambda n: n.id,
         )
 

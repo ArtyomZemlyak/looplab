@@ -289,6 +289,7 @@
       "stages": [],
       "status": "evaluated",
       "stdout_tail": "{\"metric\": 53.054167369999995}\n",
+      "tombstoned": false,
       "triage_rationale": "",
       "trials": [],
       "violations": []
@@ -334,6 +335,7 @@
       "stages": [],
       "status": "evaluated",
       "stdout_tail": "{\"metric\": 35.66064084999999}\n",
+      "tombstoned": false,
       "triage_rationale": "",
       "trials": [],
       "violations": []
@@ -382,6 +384,7 @@
       "stages": [],
       "status": "evaluated",
       "stdout_tail": "{\"metric\": 8.51019194}\n",
+      "tombstoned": false,
       "triage_rationale": "",
       "trials": [],
       "violations": []
@@ -432,6 +435,7 @@
       "stages": [],
       "status": "evaluated",
       "stdout_tail": "{\"metric\": 9.73679185}\n",
+      "tombstoned": false,
       "triage_rationale": "",
       "trials": [],
       "violations": []
@@ -479,6 +483,7 @@
       "stages": [],
       "status": "evaluated",
       "stdout_tail": "{\"metric\": 17.17538701}\n",
+      "tombstoned": false,
       "triage_rationale": "",
       "trials": [],
       "violations": []
@@ -529,6 +534,7 @@
       "stages": [],
       "status": "evaluated",
       "stdout_tail": "{\"metric\": 5.57026258}\n",
+      "tombstoned": false,
       "triage_rationale": "",
       "trials": [],
       "violations": []
@@ -580,6 +586,7 @@
       "stages": [],
       "status": "evaluated",
       "stdout_tail": "{\"metric\": 6.688963449999999}\n",
+      "tombstoned": false,
       "triage_rationale": "",
       "trials": [],
       "violations": []
@@ -627,6 +634,7 @@
       "stages": [],
       "status": "evaluated",
       "stdout_tail": "{\"metric\": 4.482711760000001}\n",
+      "tombstoned": false,
       "triage_rationale": "",
       "trials": [],
       "violations": []

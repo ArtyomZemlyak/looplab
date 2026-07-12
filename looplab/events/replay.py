@@ -19,7 +19,7 @@ from looplab.events.types import (
     EV_HYPOTHESIS_RANKED, EV_HYPOTHESIS_UPDATED, EV_INJECT_DONE, EV_INJECT_NODE, EV_LESSONS_DISTILLED,
     EV_LESSONS_REFRESHED, EV_LLM_COST, EV_NODE_ABORT, EV_NODE_BUILDING, EV_NODE_CONFIRMED,
     EV_NODE_CREATED, EV_NODE_EVALUATED, EV_NODE_FAILED, EV_NODE_REPAIRED, EV_NODE_RESET,
-    EV_NOVELTY_REJECTED, EV_PAUSE, EV_STAGE_FINISHED,
+    EV_NODE_TOMBSTONED, EV_NOVELTY_REJECTED, EV_PAUSE, EV_STAGE_FINISHED,
     EV_POLICY_DECISION, EV_PROMOTE, EV_PROXY_SCORED, EV_REPORT_GENERATED,
     EV_RESEARCH_COMPLETED, EV_RESUME, EV_REWARD_HACK_SUSPECTED, EV_RUN_ABORT,
     EV_RUN_FINISHED, EV_RUN_REOPENED, EV_RUN_SETUP_FINISHED, EV_RUN_STARTED, EV_RUNG_PROMOTED,
@@ -292,6 +292,20 @@ def _on_node_repaired(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
             n.files = d["files"]
         if d.get("deleted"):
             n.deleted = d["deleted"]
+
+def _on_node_tombstoned(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
+    # Append-only delete (§6.3): mark the listed node ids (a node + its descendant subtree, computed
+    # by the writer so the fold stays a pure, order-tolerant set op) as logically deleted. They REMAIN
+    # in st.nodes — so parent links still resolve, node-id allocation never reuses the id, and the
+    # delete is reversible/auditable — but the evaluated/feasible/breedable/pending helpers skip a
+    # tombstoned node, so it is excluded from best-pick, breeding, confirmation, and re-eval.
+    # Idempotent: setting the flag twice (duplicate/overlapping tombstone events) is a no-op. Ids
+    # coerced defensively — a forged/unhashable id in a hand-edited log is skipped, not a fold crash.
+    for raw in (d.get("node_ids") or []):
+        nid = _coerce_node_id({"node_id": raw})
+        n = st.nodes.get(nid) if nid is not None else None
+        if n is not None:
+            n.tombstoned = True
 
 def _on_node_reset(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     # Re-run an EXISTING node in place (no new id). Discard its state FROM `from_stage` so it
@@ -788,6 +802,7 @@ _HANDLERS = {
     EV_NODE_EVALUATED: _on_node_evaluated,
     EV_NODE_FAILED: _on_node_failed,
     EV_NODE_REPAIRED: _on_node_repaired,
+    EV_NODE_TOMBSTONED: _on_node_tombstoned,
     EV_NODE_RESET: _on_node_reset,
     EV_STAGE_FINISHED: _on_stage_finished,
     EV_CONFIRM_EVAL: _on_confirm_eval,

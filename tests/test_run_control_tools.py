@@ -39,11 +39,33 @@ def test_plan_mode_denies(tmp_path):
     assert "plan mode" in t.execute("finalize_run", {"run_id": "r2"})
 
 
-def test_delete_node_takes_subtree_and_heals_best(tmp_path):
+def test_delete_node_default_tombstones_subtree_append_only(tmp_path):
+    # DEFAULT delete is now an append-only tombstone (§6.3): the subtree is logically removed
+    # (excluded from best-pick) while its events STAY in the log — no rewrite, no backup file, and
+    # parent links stay valid because nothing is physically dropped. Reversible.
     rd = tmp_path / "r3"
     _run(rd, nodes=(0, 1, 2)).append("pause", {})   # settled → the fresh-write live backstop stands down
     t = RunControlTools(tmp_path, alive_fn=lambda _rd: False, mode="auto")
-    out = t.execute("delete_node", {"run_id": "r3", "node_id": 1})   # deletes 1 AND its descendant 2
+    out = t.execute("delete_node", {"run_id": "r3", "node_id": 1})   # tombstones 1 AND descendant 2
+    assert "tombstoned node(s) [1, 2]" in out
+    st = fold(EventStore(rd / "events.jsonl").read_all())
+    assert set(st.nodes) == {0, 1, 2}                               # all events kept — nothing rewritten
+    assert st.nodes[1].tombstoned and st.nodes[2].tombstoned        # 1+2 logically deleted
+    assert not st.nodes[0].tombstoned and st.best_node_id == 0      # #0 survives + wins
+    assert not [p for n in st.nodes.values() if not n.tombstoned
+                for p in n.parent_ids if p not in st.nodes]         # no broken links among live nodes
+    assert not (rd / "events.jsonl.bak-del1").exists()              # append-only: no destructive backup
+    types = [e.type for e in EventStore(rd / "events.jsonl").read_all()]
+    assert types.count("node_tombstoned") == 1
+
+
+def test_delete_node_purge_physically_rewrites_and_backs_up(tmp_path):
+    # purge=true keeps the old irreversible behavior: physically drop the subtree's events + workdirs
+    # and leave a recoverable backup.
+    rd = tmp_path / "r3p"
+    _run(rd, nodes=(0, 1, 2)).append("pause", {})
+    t = RunControlTools(tmp_path, alive_fn=lambda _rd: False, mode="auto")
+    out = t.execute("delete_node", {"run_id": "r3p", "node_id": 1, "purge": True})
     assert "deleted node(s) [1, 2]" in out
     st = fold(EventStore(rd / "events.jsonl").read_all())
     assert set(st.nodes) == {0}                                     # only #0 remains

@@ -55,6 +55,14 @@ EV_NODE_CREATED = "node_created"
 EV_NODE_EVALUATED = "node_evaluated"
 EV_NODE_FAILED = "node_failed"
 EV_NODE_REPAIRED = "node_repaired"
+# Append-only node delete (§6.3): logically removes a node + its descendant subtree instead of
+# physically rewriting events.jsonl (which broke append-only semantics and could leave
+# parent/chosen/archive references stale). Data: {"node_ids": [subtree ids]} — the writer computes
+# the whole subtree so the fold stays a pure set op. Folded: marks each node tombstoned (kept in
+# st.nodes, excluded from selection). Written offline by the machine-runs boss tool while the engine
+# is stopped (delete refuses on a live run); irreversible physical purge is a separate explicit
+# compaction, never an ordinary domain command.
+EV_NODE_TOMBSTONED = "node_tombstoned"
 EV_CONFIRM_EVAL = "confirm_eval"
 EV_NODE_CONFIRMED = "node_confirmed"
 EV_HOLDOUT_EVALUATED = "holdout_evaluated"
