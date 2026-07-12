@@ -101,6 +101,23 @@ def test_action_needs_engine():
     assert tui.action_needs_engine({"type": "budget_extend"}) is True
     assert tui.action_needs_engine({"type": "hint"}) is False
     assert tui.action_needs_engine({}) is False
+    # arch-review §4 P1-10: approve/ratify/reset/reopen only take hold once the engine re-enters — they
+    # were omitted from the registry, so applying them on a finished run silently did nothing.
+    for t in ("approval_granted", "spec_approved", "node_reset", "run_reopened"):
+        assert tui.action_needs_engine({"type": t}) is True, t
+
+
+def test_tui_and_js_needs_resume_registries_match():
+    """The TUI (_NEEDS_RESUME) and JS (api.js NEEDS_RESUME) twins must stay in step — the P1-10 fix
+    adds the same four entries to both, so a future divergence is a failing test."""
+    import re
+    from pathlib import Path
+    from looplab.serve.tui_format import _NEEDS_RESUME
+    js = Path(__file__).resolve().parents[1] / "ui" / "src" / "api.js"
+    m = re.search(r"const NEEDS_RESUME = new Set\(\[([^\]]*)\]\)", js.read_text())
+    assert m, "could not locate NEEDS_RESUME in api.js"
+    js_set = set(re.findall(r"'([^']+)'", m.group(1)))
+    assert js_set == _NEEDS_RESUME, (js_set ^ _NEEDS_RESUME)
 
 
 def test_is_critical():

@@ -74,36 +74,58 @@ class AuditMixin:
         self._emit_role_telemetry(self.researcher, "last_foresight", EV_FORESIGHT_SELECTED, node_id)
 
     def _audit_workdir_writes(self, workdir, protected: set) -> list[dict]:
-        """4.4: after an eval, flag any PROTECTED/frozen file whose on-disk content differs from
-        what the engine wrote there (assets/answer keys) — a runtime tamper the static code scan
-        can't see. Pure host-side check; audit-only (feeds reward_hack_suspected). Best-effort."""
+        """4.4: after an eval, flag any PROTECTED/frozen file (assets/answer keys) whose on-disk state
+        no longer matches what the engine wrote — a runtime tamper the static code scan can't see. Pure
+        host-side check feeding `reward_hack_suspected`.
+
+        FAIL-CLOSED (arch-review §4 P1-6): the audit must never report CLEAN when it could not actually
+        VERIFY the file. So a protected file we placed that is now MISSING (a deletion — `os.remove`,
+        which the static scan misses) is a hard `protected_missing` signal; one that is UNREADABLE
+        (invalid bytes / permission) is `protected_unreadable`; and if the whole audit throws
+        unexpectedly it emits an advisory `protected_audit_unavailable` rather than an empty (=clean)
+        list. Only a file we have no baseline for (`original is None`) is genuinely un-judgeable and
+        skipped. `protected_missing`/`protected_unreadable` are HARD (gate/block); the whole-audit
+        failure stays advisory (a transient FS error should surface, not exclude an honest node)."""
         sigs: list[dict] = []
         try:
             wd = Path(workdir)
             for name in protected:
-                p = wd / name
-                if not p.is_file():
-                    continue
                 original = self._assets.get(name)
                 if original is None:
-                    continue
-                # Compare as TEXT for str assets: `_write_assets` writes them via
-                # `Path.write_text` (text mode translates '\n' -> os.linesep), so a raw-BYTES
-                # compare would flag EVERY honest eval on a platform where os.linesep != '\n'
-                # (e.g. Windows CRLF) as a tamper. Bytes assets compare byte-exact.
-                if isinstance(original, str):
-                    try:
-                        got = p.read_text(encoding="utf-8")
-                    except (OSError, UnicodeDecodeError):
-                        got = None
-                    tampered = got is not None and got != original
-                else:
-                    tampered = p.read_bytes() != bytes(original)
-                if tampered:
-                    sigs.append({"signal": "protected_write",
-                                 "detail": f"protected file '{name}' was modified at runtime"})
-        except Exception:  # noqa: BLE001 — an audit failure must never fail the eval
-            pass
+                    continue                        # no baseline placed -> genuinely un-judgeable
+                p = wd / name
+                try:
+                    if not p.is_file():
+                        # The engine placed this protected file; it is now GONE. A deletion is a tamper
+                        # the static write-scan never sees (os.remove/os.unlink/Path.unlink). Never clean.
+                        sigs.append({"signal": "protected_missing",
+                                     "detail": f"protected file '{name}' was deleted at runtime"})
+                        continue
+                    # Compare as TEXT for str assets: `_write_assets` writes them via `Path.write_text`
+                    # (text mode translates '\n' -> os.linesep), so a raw-BYTES compare would flag EVERY
+                    # honest eval where os.linesep != '\n' (Windows CRLF) as a tamper. Bytes byte-exact.
+                    if isinstance(original, str):
+                        try:
+                            got = p.read_text(encoding="utf-8")
+                        except (OSError, UnicodeDecodeError):
+                            # Unreadable protected input is NOT clean: an eval that corrupts the answer
+                            # key to invalid bytes must not read as untampered (the old code set got=None
+                            # and fell through to tampered=False). Surface it as a hard signal.
+                            sigs.append({"signal": "protected_unreadable",
+                                         "detail": f"protected file '{name}' is unreadable after the eval"})
+                            continue
+                        tampered = got != original
+                    else:
+                        tampered = p.read_bytes() != bytes(original)
+                    if tampered:
+                        sigs.append({"signal": "protected_write",
+                                     "detail": f"protected file '{name}' was modified at runtime"})
+                except Exception:  # noqa: BLE001 — one file's odd error must not abort the whole audit
+                    sigs.append({"signal": "protected_unreadable",
+                                 "detail": f"protected file '{name}' could not be audited"})
+        except Exception:  # noqa: BLE001 — an audit failure must never fail the eval NOR read as clean
+            sigs.append({"signal": "protected_audit_unavailable",
+                         "detail": "the protected-file audit did not complete"})
         return sigs
 
     def _redact(self, text: str) -> str:

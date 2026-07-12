@@ -125,5 +125,39 @@ class McpTools:
         return _CACHED
 
 
+class GatedMcpTools:
+    """Wrap `McpTools` so every MCP call passes the assistant's permission policy. An MCP tool is an
+    arbitrary EXTERNAL side effect, so CompositeTools dispatching it with NO gate was a bypass
+    (arch-review §3 P0-6): a `default`-mode session could fire an MCP mutation with no confirm-card.
+    Here each call is treated as a mutating `shell`-class effect — ASK in `default`/`acceptEdits`,
+    run inline only in `auto` (the user opted in). Read tools (specs) pass through unchanged; plan
+    mode never even builds this wrapper (build_tools drops MCP there, so no stdio server is started
+    in a read-only session)."""
+
+    def __init__(self, inner: "McpTools", mode: str, approver=None):
+        self._inner = inner
+        self._mode = mode
+        from looplab.tools.perm_modes import default_approver
+        self._approver = approver or default_approver
+
+    def specs(self) -> list[dict]:
+        return self._inner.specs()
+
+    def bind_state(self, state=None, parent=None) -> None:
+        return None
+
+    def execute(self, name: str, args: dict) -> str:
+        from looplab.tools.perm_modes import decide
+        d = decide(self._mode, "shell")          # an MCP tool is an untyped external side effect
+        if d == "deny":
+            return f"(MCP tool {name} is disabled in plan mode. Switch to default/acceptEdits/auto.)"
+        if d == "ask":
+            action = {"tool": name, "tool_kind": "shell", "label": f"MCP tool {name}",
+                      "verb": f"call MCP tool `{name}`", "preview": name, "cwd": ""}
+            if not str(self._approver(action) or "deny").startswith("allow"):
+                return f"(declined by the user: MCP tool {name})"
+        return self._inner.execute(name, args)
+
+
 _CACHED: Optional["McpTools"] = None
 _CACHE_LOCK = threading.Lock()

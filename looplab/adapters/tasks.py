@@ -131,9 +131,18 @@ def normalize_task(data: dict) -> dict:
         d["kind"] = "mlebench_real"
 
     # --- repo (editable codebase): "do whatever WITHIN it" — default the surface to ALL files ---
-    if "repo" in d and not d.get("editable_path"):
-        d["editable_path"] = d.pop("repo")
-        d.setdefault("edit_surface", ["**/*"])   # composable-repo default: full freedom (protect=exceptions)
+    if "repo" in d:
+        _repo = d.pop("repo")
+        # CONFLICTING aliases are an ERROR, not silent-keep-the-old (arch-review §3 P0-5): {repo: NEW,
+        # editable_path: OLD} used to keep OLD because `repo` was only consumed when editable_path was
+        # absent — so a user who switched the repo via the composable alias silently ran the old one.
+        if d.get("editable_path") and d["editable_path"] != _repo:
+            raise ValueError(
+                f"conflicting task aliases: repo={_repo!r} and editable_path={d['editable_path']!r} "
+                "name different codebases — set exactly one.")
+        if not d.get("editable_path"):
+            d["editable_path"] = _repo
+            d.setdefault("edit_surface", ["**/*"])   # composable-repo default: full freedom (protect=exceptions)
 
     # --- dataset: read-only mounts. A bare path -> one mount named "dataset"; a dict -> merged ---
     if "dataset" in d:
@@ -560,7 +569,10 @@ def make_roles(task: TaskAdapter, settings, run_dir=None):
     # isn't silently downgraded to sklearn. `task_runtime_caps` returns None for offline/synthetic
     # tasks (locked to numpy+stdlib), so only capable tasks (e.g. MLEBenchReal) get the kwarg.
     from looplab.core.hardware import detect_gpu, task_runtime_caps
-    _auto_install = bool(getattr(settings, "auto_install_deps", False)) and \
+    # Fallbacks MATCH the Settings defaults (arch-review §5 P3): a real Settings always carries the
+    # field, so these only bite an incremental/mock settings — where the conservative-but-DIFFERENT
+    # value (False) silently diverged from the shipped default (auto_install_deps=True).
+    _auto_install = bool(getattr(settings, "auto_install_deps", True)) and \
         getattr(settings, "trust_mode", "trusted_local") == "trusted_local"
     _caps = task_runtime_caps(task, auto_install=_auto_install,
                               gpu=detect_gpu() if _auto_install else None)

@@ -179,7 +179,11 @@ def slug(s: str) -> str:
 # Actions whose effect on a FINISHED/zombie run only takes hold once the engine is reopened+resumed —
 # the Python twin of util.js NEEDS_RESUME, so the TUI's apply path matches the web Dock's exactly.
 _NEEDS_RESUME = {"fork", "inject_node", "force_confirm", "force_ablate", "deep_research",
-                 "set_strategy", "budget_extend", "resume", "run_abort"}
+                 "set_strategy", "budget_extend", "resume", "run_abort",
+                 # arch-review §4 P1-10: these also only take effect once the engine re-enters on a
+                 # finished/zombie run — approving/ratifying/reopening/re-running are all no-ops without
+                 # a (re)spawned loop to fold them. Both registries omitted them; keep the twins in step.
+                 "approval_granted", "spec_approved", "node_reset", "run_reopened"}
 # run_abort = FINALIZE: on a run whose engine already exited (stopped/finished), the wrap-up
 # (report/lessons/cost) only runs once the engine is (re)spawned to fold stop_requested -> run_finished.
 

@@ -64,6 +64,34 @@ def test_mcp_specs_and_routing():
     assert "unknown tool" in m.execute("mcp__fs__missing", {})
 
 
+def test_gated_mcp_enforces_permission_policy():
+    """arch-review §3 P0-6: MCP dispatch must pass the permission policy — ask in default, deny in
+    plan, inline only in auto."""
+    from looplab.tools.mcp_tools import GatedMcpTools
+    inner = McpTools([_FakeServer()])
+    # default mode: the call is handed to the approver
+    denied = GatedMcpTools(inner, mode="default", approver=lambda a: "deny")
+    assert "declined" in denied.execute("mcp__fs__echo", {"x": "hi"})
+    allowed = GatedMcpTools(inner, mode="default", approver=lambda a: "allow_once")
+    assert allowed.execute("mcp__fs__echo", {"x": "hi"}) == "echoed:hi"
+    # auto mode: inline (no approver call needed)
+    auto = GatedMcpTools(inner, mode="auto", approver=lambda a: "deny")   # approver would deny, but auto is inline
+    assert auto.execute("mcp__fs__echo", {"x": "hi"}) == "echoed:hi"
+    # specs pass through unchanged
+    assert [s["function"]["name"] for s in denied.specs()] == ["mcp__fs__echo"]
+
+
+def test_plan_mode_excludes_mcp(tmp_path, monkeypatch):
+    """MCP is dropped entirely in read-only plan mode (so no stdio server is connected either)."""
+    import looplab.tools.mcp_tools as mcp_mod
+    from looplab.serve.assistant import build_tools
+    monkeypatch.setattr(mcp_mod.McpTools, "cached", classmethod(lambda cls: McpTools([_FakeServer()])))
+    plan_tools = build_tools(tmp_path, mode="plan", mcp=True)
+    assert not any(n.startswith("mcp__") for n in [s["function"]["name"] for s in plan_tools.specs()])
+    default_tools = build_tools(tmp_path, mode="default", mcp=True, approver=lambda a: "allow_once")
+    assert any(n.startswith("mcp__") for n in [s["function"]["name"] for s in default_tools.specs()])
+
+
 def test_mcp_tool_error_is_returned_not_raised():
     class _Boom:
         name = "b"

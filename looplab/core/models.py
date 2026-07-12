@@ -157,6 +157,12 @@ class Node(BaseModel):
     # Phase 2 stage-scoped re-run: the pipeline stage a reset asked to RESTART from (skip earlier stages,
     # reuse their artifacts). Transient — set by node_reset, cleared on the next terminal.
     rerun_stage: Optional[str] = None
+    # Attempt generation (arch-review §3 P0-1): bumped by every `node_reset`. The engine stamps the
+    # attempt it is evaluating onto the node's terminal event; the fold REJECTS a terminal whose attempt
+    # no longer matches — so a LATE node_evaluated/node_failed from an abandoned attempt (its eval was
+    # in flight when a reset bumped the generation) can't land as the first-terminal-after-reset and
+    # accept a metric/cost from discarded code. Absent in old logs -> 0 on both sides -> always matches.
+    attempt: int = 0
     # External-agent audit (ADR-7): set by an `agent_validated` event when the code was
     # produced by a validated CLI-agent Developer. {"ok": bool, "checks": [...]}.
     agent_report: Optional[dict] = None
@@ -284,6 +290,14 @@ class RunState(BaseModel):
     goal: str = ""
     direction: str = "min"  # "min" | "max"
     config_hash: str = ""
+    # Setup completion, folded from `setup_finished` (arch-review §3 P0-3). run_started is appended in
+    # the MIDDLE of setup (before AGENTS.md/provenance/host-grading/profiling and the leakage
+    # hard-stop), so gating the setup phase on run_id let a crash right after run_started PERMANENTLY
+    # skip the rest of preflight on resume — including leakage enforcement. Gating on setup_done
+    # instead makes setup re-run until it actually completes. Absent in old logs -> False; but old logs
+    # that already reached the first node also have run_id set, so `_setup_phase` treats a run with any
+    # node/finished as already-set-up (see the guard there) — legacy runs never re-run setup.
+    setup_done: bool = False
     # T2 trust enforcement (folded from run_started; "audit" for old logs). "gate"/"block" make
     # best-selection exclude nodes flagged for a reward-hack / data-leakage signal (not critic).
     trust_gate: str = "audit"

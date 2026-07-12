@@ -24,6 +24,24 @@ from looplab.core.tracing import current_ids
 _UNSET_TRACE = object()
 
 
+class EventLogCorruptionError(RuntimeError):
+    """A MID-FILE divergence (a COMPLETE corrupt line followed by MORE complete records) was found in
+    an append-only event log. `read_all` stops at the corrupt line, so appending would durably grow a
+    tail behind the unreadable boundary that `fold` can never see — an invisible tail (arch-review §3
+    P0-4). The store therefore FAILS CLOSED: no append until an operator runs `looplab repair-log`.
+    Reads still return the recoverable prefix (repair needs them). Carries the `log_divergence` detail."""
+
+    def __init__(self, path: "str | os.PathLike", detail: dict):
+        self.path = str(path)
+        self.detail = dict(detail)
+        run_dir = Path(path).parent
+        super().__init__(
+            f"event log {path} is corrupted at line {detail.get('corrupt_line')}: "
+            f"{detail.get('dropped_lines')} record(s) after it stay on disk but are DROPPED on "
+            f"replay (an invisible tail). Refusing to append. Run `looplab repair-log {run_dir}` "
+            f"to back up and truncate the log to its last valid boundary before resuming.")
+
+
 @contextmanager
 def _interprocess_lock(lock_path: Path):
     """Best-effort exclusive cross-process lock (msvcrt on Windows, fcntl on POSIX). The live UI
@@ -161,10 +179,23 @@ def log_divergence(path: str | os.PathLike) -> Optional[dict]:
         s = line.strip()
         if not s:
             continue
+        # A line is "good" only if `read_all` would ACCEPT it — i.e. it is a valid JSON object AND a
+        # constructible `Event`. read_all stops not just at non-JSON/non-dict lines but ALSO at a
+        # dict-valid line that fails `Event(**o)` (a byte-flip that renames a required key like `type`,
+        # or makes `data` a non-dict). Checking only `isinstance(..., dict)` here was strictly weaker
+        # than read_all's stop condition, so such a corruption dropped the tail on read yet went
+        # UNDETECTED — defeating the fail-closed guard that gates on this (review of arch-review §3 P0-4).
         try:
-            ok = isinstance(orjson.loads(s), dict)
+            obj = orjson.loads(s)
         except orjson.JSONDecodeError:
             ok = False
+        else:
+            ok = isinstance(obj, dict)
+            if ok:
+                try:
+                    Event(**obj)
+                except Exception:  # noqa: BLE001 — a dict that isn't a valid Event is where read_all stops
+                    ok = False
         if not ok:
             dropped = sum(1 for later in complete[i + 1:] if later.strip())
             if dropped:                       # a valid tail exists AFTER the corrupt complete line
@@ -172,6 +203,36 @@ def log_divergence(path: str | os.PathLike) -> Optional[dict]:
                         "corrupt_line": i + 1, "dropped_lines": dropped}
             return None                       # corrupt line is effectively the tail — not a divergence
     return None
+
+
+def repair_log(path: str | os.PathLike) -> dict:
+    """Operator recovery for a MID-FILE divergence (see `EventLogCorruptionError`). Idempotent:
+    returns `{}` (no-op) when the log has no divergence. Otherwise it (1) backs up the ORIGINAL bytes
+    to `events.jsonl.corrupt-<ts>.bak` (never destroy evidence — the dropped tail may be salvageable by
+    hand), (2) atomically truncates the log to its last valid boundary — exactly the recoverable prefix
+    `iter_jsonl`/`fold` already consume — and (3) records the repair provenance as a `log_repaired`
+    diagnostic event (unfolded) appended to the now-clean log. Returns the repair record."""
+    p = Path(path)
+    div = log_divergence(p)
+    if div is None:
+        return {}
+    raw = p.read_bytes()
+    ts = int(time.time())
+    backup = p.with_name(p.name + f".corrupt-{ts}.bak")
+    backup.write_bytes(raw)  # full original preserved before we truncate
+    # Truncate to the last valid boundary: keep every COMPLETE line before the first corrupt one. Those
+    # lines are newline-terminated, so re-joining reproduces the exact bytes iter_jsonl would have read.
+    lines = raw.split(b"\n")
+    keep = lines[: div["corrupt_line"] - 1]
+    truncated = (b"\n".join(keep) + b"\n") if keep else b""
+    from looplab.core.atomicio import atomic_write_bytes
+    atomic_write_bytes(p, truncated)
+    record = {"backup": backup.name, "corrupt_line": div["corrupt_line"],
+              "dropped_lines": div["dropped_lines"], "good_records": div["good_records"], "ts": ts}
+    # The log is clean now, so a fresh store folds/appends without tripping the fail-closed guard.
+    from looplab.events.types import EV_LOG_REPAIRED
+    EventStore(p).append(EV_LOG_REPAIRED, record, trace_id=None, span_id=None)
+    return record
 
 
 def _parse_jsonl_region(buf: bytes) -> tuple[list[tuple[dict, int]], int]:
@@ -232,6 +293,19 @@ class EventStore:
         # no-op — no torn line / duplicate seq. Held OUTSIDE the flock (consistent order, no deadlock).
         self._append_lock = threading.Lock()
         self._seq = self._scan_last_seq()
+        # Fail closed on a MID-FILE divergence (a corrupt COMPLETE line followed by MORE records —
+        # a FUSE/NFS/S3 mount can flip a middle byte; a single local writer never can). read_all()
+        # stops at it, so a later append is durable-but-invisible to fold (arch-review §3 P0-4).
+        # Detect ONCE here (O(events) at construction, no per-append re-scan); every append then
+        # refuses until `repair_log` truncates to the last valid boundary. Reads keep returning the
+        # recoverable prefix so repair/inspection still work.
+        self._divergence = log_divergence(self.path)
+
+    @property
+    def divergence(self) -> Optional[dict]:
+        """The mid-file divergence detected at construction (see `EventLogCorruptionError`), or None.
+        Commands check this to fail closed with an operator-friendly message before appending."""
+        return self._divergence
 
     def _scan_last_seq(self) -> int:
         last = -1
@@ -310,6 +384,10 @@ class EventStore:
         # trace — UNLESS the caller passes an EXPLICIT pair (even None): a telemetry event emitted AFTER
         # its op's span closed (foresight ranking) carries the captured trace_id of that op, and an
         # explicit None means "no trace" (so it never inherits the ambient node/eval trace by accident).
+        if self._divergence is not None:
+            # Fail closed: a durable append here would grow an invisible tail behind the corrupt line
+            # (arch-review §3 P0-4). Operator must `repair_log` first. read_all() still works.
+            raise EventLogCorruptionError(self.path, self._divergence)
         if trace_id is _UNSET_TRACE:
             trace_id, span_id = current_ids()
         with self._append_lock, _interprocess_lock(Path(str(self.path) + ".lock")):

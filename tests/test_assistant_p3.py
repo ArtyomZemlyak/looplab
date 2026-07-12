@@ -232,6 +232,21 @@ def test_shell_kill_background_tool(tmp_path):
     assert "(" in s.execute("kill_background", {"task_id": "nope"})   # graceful note, no crash
 
 
+def test_kill_background_goes_through_ask_mode_approver(tmp_path):
+    """arch-review §3 P0-6: kill_background is a side effect, so in the DEFAULT (ask) mode it must ask
+    the approver — the old code checked only plan-mode `deny` and killed with no approval."""
+    launcher = ShellTools([tmp_path], mode="auto")     # launch in auto (MANAGER is process-global)
+    r = launcher.execute("run_command",
+                         {"command": [sys.executable, "-c", "import time; time.sleep(30)"], "background": True})
+    tid = r.split("task ")[1].split(" ")[0]
+    # default mode + DENY approver: the kill is declined and the task survives
+    denied = ShellTools([tmp_path], mode="default", approver=lambda a: "deny")
+    assert "declined" in denied.execute("kill_background", {"task_id": tid})
+    # default mode + ALLOW approver: the kill goes through
+    allowed = ShellTools([tmp_path], mode="default", approver=lambda a: "allow_once")
+    assert "killed" in allowed.execute("kill_background", {"task_id": tid})
+
+
 def test_background_timeout_reaps_a_hung_task(tmp_path):
     # a wall-clock budget past which a hung/runaway child is SIGTERM'd (lazily, on read/list) so it
     # can't leak a process for the life of the server.
@@ -265,3 +280,46 @@ def test_background_evicts_oldest_finished_logs(tmp_path):
     assert tids[3] in mgr._tasks                # the newest is always retained
     retained = [t for t in mgr._tasks.values() if t["proc"].poll() is not None]
     assert len(retained) <= 3                   # bounded (≤ max_finished + the just-started one)
+
+
+def test_kill_waits_and_reports_exit_code(tmp_path):
+    # arch-review §4 P1-4: kill must WAIT for exit and report the ACTUAL outcome, not fire one SIGTERM
+    # and claim success.
+    mgr = BackgroundManager()
+    tid = mgr.start([sys.executable, "-c", "import time; time.sleep(30)"], str(tmp_path))
+    r = mgr.kill(tid)
+    assert r["ok"] and r["status"] == "killed" and r.get("exit_code") is not None
+    assert mgr._tasks[tid]["proc"].poll() is not None      # the process is actually gone
+
+
+def test_kill_reaps_the_whole_tree(tmp_path):
+    # arch-review §4 P1-4: killing the parent must reap its children too (tree kill), not orphan them.
+    import os
+    import time
+    if os.name == "nt":
+        import pytest
+        pytest.skip("POSIX liveness probe (os.kill(pid, 0))")
+    code = ("import subprocess, sys, time\n"
+            "c = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])\n"
+            "print(c.pid, flush=True)\n"
+            "time.sleep(60)\n")
+    mgr = BackgroundManager()
+    tid = mgr.start([sys.executable, "-c", code], str(tmp_path))
+    child_pid = None
+    for _ in range(60):
+        out = mgr.read(tid).get("new_output", "")
+        tok = out.strip().split()
+        if tok and tok[0].isdigit():
+            child_pid = int(tok[0]); break
+        time.sleep(0.1)
+    assert child_pid, "child pid not observed"
+    assert mgr.kill(tid)["ok"]
+    # the child must be gone within a moment (killpg / taskkill /T reaps the tree)
+    gone = False
+    for _ in range(50):
+        try:
+            os.kill(child_pid, 0)          # raises if the process no longer exists
+            time.sleep(0.1)
+        except OSError:
+            gone = True; break
+    assert gone, f"child {child_pid} survived the parent kill (tree not reaped)"

@@ -81,8 +81,8 @@ def _ui_dist() -> Path:
 # constants (not rebuilt inside `_require_token` on every request): `_RAW_GET_SUFFIX` match by
 # path suffix, `_RAW_GET_EXACT` by exact path. See `_require_token` for the per-route rationale.
 _RAW_GET_SUFFIX = ("/artifact", "/artifacts", "/log", "/logs", "/agents_md", "/chat-log",
-                   "/conversation", "/assistant/permissions")
-_RAW_GET_EXACT = ("/api/prompts", "/api/skills", "/api/knowledge", "/api/memory")
+                   "/conversation", "/assistant/permissions", "/assistant/progress")
+_RAW_GET_EXACT = ("/api/prompts", "/api/skills", "/api/knowledge", "/api/memory", "/api/llm/health")
 
 
 def make_app(run_root: str | os.PathLike) -> "FastAPI":
@@ -150,9 +150,20 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
             _parts = p.split("/")
             _run_scoped_raw = (len(_parts) > 4 and _parts[1] == "api" and _parts[2] == "runs"
                                and _parts[4] in ("spans", "trace"))
+            # Node DETAIL (/api/runs/{id}/nodes/{nid}) returns full code, files, persisted stdout_tail,
+            # trials, AND parent code — as sensitive as /logs (already gated), but it was open because
+            # it has no raw suffix (arch-review §4 P1-3: node detail leaked 200 to an untokened caller).
+            # Match the EXACT 6-part path so the LIGHTER /nodes/{nid}/metrics projection (7 parts) and
+            # /nodes/{nid}/logs|conversation (gated by suffix) are unaffected.
+            _node_detail = (len(_parts) == 6 and _parts[1] == "api" and _parts[2] == "runs"
+                            and _parts[4] == "nodes")
+            # Job / genesis-job results carry model output + synthesized scope reports. Random ids make
+            # them less enumerable (the review rates this P2), but gate them too — defense in depth.
+            _job_result = (len(_parts) >= 4 and _parts[1] == "api" and _parts[2] in ("jobs", "genesis"))
             sensitive_get = (request.method == "GET"
                              and (p.endswith(_RAW_GET_SUFFIX) or p in _RAW_GET_EXACT
-                                  or _run_scoped_raw or "/assistant/sessions" in p))
+                                  or _run_scoped_raw or _node_detail or _job_result
+                                  or "/assistant/sessions" in p))
             mutating = request.method in ("POST", "PUT", "PATCH", "DELETE")
             if ((mutating or sensitive_get) and p.startswith("/api/")
                     and request.headers.get("X-LoopLab-Token") != ui_token):

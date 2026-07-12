@@ -19,7 +19,6 @@ from __future__ import annotations
 
 import os
 import secrets
-import signal
 import subprocess
 import tempfile
 import threading
@@ -27,7 +26,7 @@ import time
 from pathlib import Path
 
 from looplab.core.gitenv import git_config_env
-from looplab.runtime.sandbox import SECRET_ENV
+from looplab.runtime.sandbox import SECRET_ENV, _kill_tree
 from looplab.core.context_budget import RESULT_CAP   # the agent loop's per-result cap (core home —
 # runtime must not import tools/: tools sits ABOVE runtime and already imports back into it)
 
@@ -76,7 +75,12 @@ class BackgroundManager:
         log = Path(tempfile.gettempdir()) / f"looplab-bg-{tid}.log"
         f = open(log, "wb")
         kwargs = {}
-        if os.name != "nt":
+        if os.name == "nt":
+            # A process GROUP on Windows too (arch-review §4 P1-4): without it a child's grandchildren
+            # (workers/nested trains) orphan. _kill_tree's taskkill /T reaps the tree either way, but
+            # the group keeps signalling coherent — matching run_argv's own creationflags.
+            kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+        else:
             kwargs["start_new_session"] = True
         try:
             proc = subprocess.Popen(run_argv, cwd=cwd, stdout=f, stderr=subprocess.STDOUT,
@@ -117,13 +121,10 @@ class BackgroundManager:
         if dl is None or t.get("timed_out") or t["proc"].poll() is not None:
             return
         if time.monotonic() > dl:
-            try:
-                if os.name != "nt":
-                    os.killpg(os.getpgid(t["proc"].pid), signal.SIGTERM)
-                else:
-                    t["proc"].terminate()
-            except (OSError, ProcessLookupError):
-                pass
+            # Escalating WHOLE-TREE kill (psutil / taskkill /T / killpg -9), not a single SIGTERM a
+            # stuck child can ignore forever — the old code sent one TERM and then latched timed_out,
+            # permanently suppressing any retry (arch-review §4 P1-4). _kill_tree force-kills the tree.
+            _kill_tree(t["proc"])
             t["timed_out"] = True
 
     def _evict_finished(self) -> None:
@@ -220,19 +221,25 @@ class BackgroundManager:
             return {"ok": False, "error": f"no such background task {tid!r}"}
         proc = t["proc"]
         if proc.poll() is None:
+            # Robust TREE kill + VERIFY (arch-review §4 P1-4): the old kill sent one SIGTERM/terminate,
+            # never waited, never escalated, and ALWAYS reported success — a parent could die while its
+            # children lived on. _kill_tree escalates to SIGKILL/taskkill /F over the whole tree; then
+            # wait so we report the ACTUAL outcome.
+            _kill_tree(proc)
             try:
-                if os.name != "nt":
-                    os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
-                else:
-                    proc.terminate()
-            except (OSError, ProcessLookupError):
+                proc.wait(timeout=10)
+            except Exception:  # noqa: BLE001 — a wait timeout means it's still alive; reported below
                 pass
         try:
             t["fh"].close()
         except OSError:
             pass
         t["closed"] = True
-        return {"ok": True, "task_id": tid, "status": "killed"}
+        rc = proc.poll()
+        if rc is None:                       # still alive after tree-kill + wait — do NOT claim success
+            return {"ok": False, "task_id": tid, "status": "kill_failed",
+                    "error": "process did not exit after tree-kill"}
+        return {"ok": True, "task_id": tid, "status": "killed", "exit_code": rc}
 
 
 # Process-global manager so background tasks persist across assistant turns.

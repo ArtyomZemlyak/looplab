@@ -9,6 +9,7 @@ looplab run             Start (or continue) a run from a config/task file or --g
 looplab resume          Resume/continue a run (crash, stopped, or finished) by replay
 looplab stop            Stop a run: freeze it, NO wrap-up (resumable)
 looplab finalize        Finalize a run: stop AND wrap up (report/lessons/cost)
+looplab repair-log      Repair a mid-file-corrupted event log (FUSE/NFS/S3)
 looplab inspect         Show the resolved config + best result
 looplab replay          Pure fold of the event log → state (read-only)
 looplab timings         Per-node wall-clock breakdown (LLM / eval / repair / tools)
@@ -155,6 +156,25 @@ driving the run, `finalize` re-enters the loop itself to produce the wrap-up.
 
 ```bash
 looplab finalize RUN_DIR
+```
+
+---
+
+## `repair-log`
+
+Repair an event log with a **mid-file corruption** — a complete corrupt line followed by more valid
+records. `events.jsonl` is append-only and a single local writer never produces this, but a FUSE / NFS
+/ S3-backed run directory can flip a byte in the middle. Replay stops at the first bad line, so
+`run`/`resume` **fail closed** (they refuse to append behind the boundary, which would grow a durable
+tail that fold can never see) and point you here. `repair-log` backs up the original bytes to
+`events.jsonl.corrupt-<ts>.bak`, atomically truncates the log to its last valid boundary (the
+recoverable prefix), and records the repair as a `log_repaired` event. The dropped tail is preserved
+in the backup for manual salvage. A torn *final* line (the normal crash-mid-append case) is tolerated
+on read and needs no repair.
+
+```bash
+looplab repair-log RUN_DIR
+# then: looplab resume RUN_DIR
 ```
 
 ---
@@ -352,14 +372,14 @@ Serve TensorBoard over a run's per-node training logs — online curves for all 
 framework logged, one comparable run per experiment. Needs `tensorboard` installed.
 
 ```bash
-looplab tensorboard RUN_DIR [--port 6006] [--host 0.0.0.0]
+looplab tensorboard RUN_DIR [--port 6006] [--host 127.0.0.1]
 ```
 
 | Option | Default | Description |
 |---|---|---|
 | `RUN_DIR` | *(required)* | Run dir; its `nodes/` hold each experiment's training logs |
 | `--port N` | `6006` | Port to serve on |
-| `--host ADDR` | `0.0.0.0` | Bind address |
+| `--host ADDR` | `127.0.0.1` | Bind address. Defaults to localhost — TensorBoard has no auth, so training logs (and any secret a script printed) aren't exposed on all interfaces. Pass `--host 0.0.0.0` to bind everywhere. |
 
 ## `build-ui`
 

@@ -144,14 +144,15 @@ nav:
       - MLE-bench runbook: MLEBENCH.md
   - Design records:
       - Index: 00-INDEX.md
+      - Current finding ledger (2026-07-11): 16-architecture-code-review-2026-07-11.md
+      - Current delivery plan (2026-07-11): 17-project-review-and-directions-2026-07-11.md
+      - Current UI/UX audit (2026-07-11): 18-ui-ux-review-2026-07-11.md
       - Product design: 01-product-design.md
       - Decisions (ADRs): 03-decisions.md
       - File layout: 04-file-layout.md
       - Build decisions: 05-build-decisions.md
-      - Current finding ledger (2026-07-11): 16-architecture-code-review-2026-07-11.md
-      - Current delivery plan (2026-07-11): 17-project-review-and-directions-2026-07-11.md
-      - Implementation plan (historical): 06-implementation-plan.md
-      - Architecture review (historical): 07-architecture-review.md
-      - Phased plan (historical, 2026-07-02): 12-phased-plan-2026-07.md
+      - Historical implementation plan: 06-implementation-plan.md
+      - Historical architecture review: 07-architecture-review.md
+      - Historical phased plan (2026-07): 12-phased-plan-2026-07.md
       - Strategist design: A7-strategist-design.md
-      - Roadmap (historical): ROADMAP.md
+      - Historical roadmap: ROADMAP.md

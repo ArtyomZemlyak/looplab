@@ -11,6 +11,7 @@ Layering: no runtime import of the orchestrator (TYPE_CHECKING only) and never s
 events, core and stdlib."""
 from __future__ import annotations
 
+import time
 from typing import Optional
 
 import anyio
@@ -51,6 +52,7 @@ class AblationMixin:
             return
         base = parent.metric if parent.metric is not None else 0.0
         impacts: dict[str, float] = {}
+        abl_seconds = 0.0                       # P1-2: sum the probe wall-clock so it's budgeted
         with self.tracer.span("ablate", new_trace=True, node_id=parent_id):
             for p in sorted(parent.idea.params):
                 ablated = parent.idea.model_copy(deep=True)
@@ -58,12 +60,17 @@ class AblationMixin:
                 workdir = self.run_dir / "ablate" / f"node_{parent_id}_{p}"
                 self._write_assets(workdir)
                 code = await anyio.to_thread.run_sync(self._probe_developer.implement, ablated)
+                _t0 = time.monotonic()
                 res = await anyio.to_thread.run_sync(
                     self.sandbox.run, code, str(workdir), self.timeout)
+                abl_seconds += time.monotonic() - _t0
                 if res.metric is not None and res.exit_code == 0 and not res.timed_out:
                     impacts[p] = abs(res.metric - base)
         async with self._write_lock:
-            self.store.append(EV_ABLATE, {"parent_id": parent_id, "impacts": impacts})
+            # Record the probes' eval cost on the event so the fold counts it against max_eval_seconds
+            # (arch-review §4 P1-2 — ablation used to spend entirely outside the cumulative accounting).
+            self.store.append(EV_ABLATE, {"parent_id": parent_id, "impacts": impacts,
+                                          "eval_seconds": round(abl_seconds, 3)})
 
         top = max(impacts, key=impacts.get) if impacts else (
             sorted(parent.idea.params)[0] if parent.idea.params else None)
@@ -129,13 +136,16 @@ class AblationMixin:
         base = parent.metric if parent.metric is not None else 0.0
         blocks = self._segment_blocks(code)
         impacts: dict[str, Optional[float]] = {}
+        abl_seconds = 0.0                       # P1-2: budget the code-block probes too
         with self.tracer.span("ablate_code", new_trace=True, node_id=parent_id, blocks=len(blocks)):
             for idx, blk in enumerate(blocks):
                 ablated = self._comment_block(code, blk)
                 workdir = self.run_dir / "ablate" / f"node_{parent_id}_block_{idx}"
                 self._write_assets(workdir)
+                _t0 = time.monotonic()
                 res = await anyio.to_thread.run_sync(
                     self.sandbox.run, ablated, str(workdir), self.timeout)
+                abl_seconds += time.monotonic() - _t0
                 if res.metric is not None and res.exit_code == 0 and not res.timed_out:
                     impacts[str(idx)] = round(abs(res.metric - base), 6)
                 else:
@@ -149,7 +159,7 @@ class AblationMixin:
         async with self._write_lock:
             self.store.append(EV_ABLATE, {"parent_id": parent_id, "impacts": impacts,
                                          "mode": "code_blocks", "blocks": len(blocks),
-                                         "top_block": top})
+                                         "top_block": top, "eval_seconds": round(abl_seconds, 3)})
         top_src = ""
         if top is not None:
             s, e = blocks[int(top)]

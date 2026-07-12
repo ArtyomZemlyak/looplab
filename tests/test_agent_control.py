@@ -188,3 +188,25 @@ def test_operator_policy_params_pin_applies_even_when_policy_is_locked(tmp_path)
     pol_before = eng2.policy
     eng2._apply_strategy({"policy": eng2._policy_name})   # policy-name-only, locked -> no-op
     assert eng2.policy is pol_before                      # untouched
+
+
+def test_strategist_policy_name_granted_but_params_locked(tmp_path):
+    """arch-review §4 P1-11: `policy` NAME and `policy_params` are gated INDEPENDENTLY. When the name
+    grant is present but params are LOCKED, switching the policy must rebuild it from the NEW policy's
+    OWN defaults — the raw params in the record must NOT ride past the params lock. The old code built
+    `pp` from the raw policy_params regardless of the params gate, so `{policy: mcts, policy_params:
+    {c: 9}}` produced MCTSPolicy(c=9) even though params were locked (a governance bypass)."""
+    eng = _engine(tmp_path / "np", agent_control={"policy": ["strategist"]})   # name granted, params NOT
+    eng._apply_strategy({"policy": "mcts", "policy_params": {"c": 9.0}})
+    assert eng._policy_name == "mcts"                     # the NAME switch is authorized -> applied
+    assert getattr(eng.policy, "c", None) == 1.4          # but params are LOCKED -> MCTS default, NOT 9
+
+
+def test_strategist_policy_name_locked_but_params_granted(tmp_path):
+    """The inverse asymmetry: `policy_params` granted, the NAME locked. A params change rebuilds the
+    CURRENT policy with the new params (the name stays put), and the strategist cannot smuggle a name
+    switch through the params grant."""
+    eng = _engine(tmp_path / "pl", agent_control={"policy_params": ["strategist"]})  # params granted, name NOT
+    name0 = eng._policy_name
+    eng._apply_strategy({"policy": "mcts", "policy_params": {}})   # try to switch name (locked) + params
+    assert eng._policy_name == name0                     # NAME locked -> unchanged (no smuggled switch)

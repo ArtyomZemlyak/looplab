@@ -1,6 +1,8 @@
 """I1 keystone: event store durability + replay determinism (the #1 P0 risk)."""
 from __future__ import annotations
 
+import pytest
+
 from looplab.events.eventstore import EventStore, iter_jsonl
 from looplab.events.replay import fold
 from looplab.search.archive import DiversityArchive
@@ -128,6 +130,55 @@ def test_log_divergence_ignores_a_torn_tail(tmp_path):
     # a wholly clean log: None
     p.write_bytes(b'{"seq":0,"type":"a"}\n{"seq":1,"type":"b"}\n')
     assert log_divergence(p) is None
+
+
+def test_fail_closed_detects_dict_valid_but_event_invalid_corruption(tmp_path):
+    """Review of P0-4: read_all stops not only at non-JSON lines but at a dict that fails Event(**o)
+    (a byte-flip renaming a required key like `type`). The divergence guard must match that stop
+    condition, else such a corruption drops the tail on read yet appends past it, undetected."""
+    from looplab.events.eventstore import EventStore, EventLogCorruptionError, log_divergence
+    p = tmp_path / "events.jsonl"
+    # line 3 is a valid JSON DICT but not a constructible Event (`type` renamed to `typ3`); line 4 valid
+    p.write_bytes(b'{"seq":0,"type":"a"}\n{"seq":1,"type":"b"}\n'
+                  b'{"seq":2,"typ3":"c"}\n{"seq":3,"type":"d"}\n')
+    div = log_divergence(p)
+    assert div and div["corrupt_line"] == 3 and div["dropped_lines"] == 1
+    es = EventStore(p)
+    assert es.divergence and es.divergence["corrupt_line"] == 3
+    with pytest.raises(EventLogCorruptionError):
+        es.append("resume", {})
+
+
+def test_append_fails_closed_on_mid_file_corruption(tmp_path):
+    """arch-review §3 P0-4: a store opened over a MID-FILE divergence must REFUSE to append — else
+    the new record is durable on disk but invisible to fold (grows behind the corrupt boundary)."""
+    from looplab.events.eventstore import EventStore, EventLogCorruptionError
+    p = tmp_path / "events.jsonl"
+    p.write_bytes(b'{"seq":0,"type":"a"}\n{"seq":1,"type":"b"}\n{corrupt\n{"seq":2,"type":"c"}\n')
+    es = EventStore(p)
+    assert es.divergence and es.divergence["corrupt_line"] == 3
+    with pytest.raises(EventLogCorruptionError):
+        es.append("resume", {})
+    # a torn tail (no divergence) still appends fine — this is NOT the corruption case
+    p.write_bytes(b'{"seq":0,"type":"a"}\n{"seq":1,"type":"partial')
+    EventStore(p).append("c", {"x": 1})   # heals the torn tail, does not raise
+
+
+def test_repair_log_truncates_backs_up_and_reopens(tmp_path):
+    """`repair_log` backs up the original, truncates to the last valid boundary, records provenance,
+    and leaves a log a fresh store can append to again."""
+    from looplab.events.eventstore import EventStore, repair_log, iter_jsonl
+    p = tmp_path / "events.jsonl"
+    p.write_bytes(b'{"seq":0,"type":"a"}\n{"seq":1,"type":"b"}\n{corrupt\n{"seq":2,"type":"c"}\n')
+    rec = repair_log(p)
+    assert rec["good_records"] == 2 and rec["dropped_lines"] == 1 and rec["corrupt_line"] == 3
+    assert (tmp_path / rec["backup"]).exists()                       # original preserved
+    types = [r["type"] for r in iter_jsonl(p)]
+    assert types == ["a", "b", "log_repaired"]                       # prefix + provenance, tail gone
+    es = EventStore(p)
+    assert es.divergence is None                                     # clean now
+    es.append("resume", {})                                          # appends without raising
+    assert repair_log(p) == {}                                       # idempotent no-op on a clean log
 
 
 def test_eventstore_heals_torn_final_line(tmp_path):
@@ -301,6 +352,68 @@ def test_conflicting_second_terminal_does_not_flip_the_node(tmp_path):
     s.append("node_failed", {"node_id": 0, "error": "boom", "reason": "crash"})
     n = fold(s.read_all()).nodes[0]
     assert n.status is NodeStatus.evaluated and n.metric == 5.0   # not flipped to failed
+
+
+def test_late_terminal_from_an_abandoned_attempt_is_rejected(tmp_path):
+    """arch-review §3 P0-1: after a node_reset bumps the attempt generation, a LATE node_evaluated
+    stamped with the OLD attempt (its eval was in flight when the reset happened) must be DROPPED — it
+    can't land as the first-terminal-after-reset and accept a metric/cost from the discarded code."""
+    from looplab.core.models import NodeStatus
+    s = EventStore(tmp_path / "e.jsonl")
+    s.append("run_started", {"run_id": "r", "task_id": "t", "direction": "min"})
+    s.append("node_created", {"node_id": 0, "parent_ids": [], "operator": "draft",
+                              "idea": {"operator": "draft", "params": {"x": 1.0}, "rationale": ""}})
+    s.append("node_reset", {"node_id": 0, "from_stage": "implement"})   # attempt 0 -> 1
+    # a LATE terminal from the pre-reset attempt (attempt=0) — must NOT be accepted
+    s.append("node_evaluated", {"node_id": 0, "attempt": 0, "metric": 9.0, "eval_seconds": 3.0})
+    st = fold(s.read_all())
+    assert st.nodes[0].status is NodeStatus.pending          # still pending — late terminal dropped
+    assert st.nodes[0].metric is None and st.total_eval_seconds == 0.0
+    # the NEW attempt's terminal (attempt=1) IS accepted
+    s.append("node_evaluated", {"node_id": 0, "attempt": 1, "metric": 1.0, "eval_seconds": 2.0})
+    st2 = fold(s.read_all())
+    assert st2.nodes[0].status is NodeStatus.evaluated and st2.nodes[0].metric == 1.0
+    assert st2.total_eval_seconds == 2.0                     # only the live attempt's cost counted
+
+
+def test_unstamped_terminal_still_accepted_backward_compat(tmp_path):
+    """Old logs don't carry `attempt`; a terminal with no attempt field defaults to the node's current
+    generation, so legacy runs (no resets) fold exactly as before."""
+    from looplab.core.models import NodeStatus
+    s = EventStore(tmp_path / "e.jsonl")
+    _seed_events(s)                                          # node_evaluated events carry no `attempt`
+    assert fold(s.read_all()).nodes[0].status is NodeStatus.evaluated
+
+
+def test_foreign_eval_cost_does_not_poison_the_fold(tmp_path):
+    """arch-review §5 P2: a hand-edited/foreign eval_seconds (string / negative / non-finite) must not
+    TypeError the whole fold nor reduce the cumulative budget."""
+    s = EventStore(tmp_path / "e.jsonl")
+    s.append("run_started", {"run_id": "r", "task_id": "t", "direction": "min"})
+    s.append("node_created", {"node_id": 0, "parent_ids": [], "operator": "draft",
+                              "idea": {"operator": "draft", "params": {}, "rationale": ""}})
+    s.append("node_evaluated", {"node_id": 0, "metric": 1.0, "eval_seconds": "3"})   # numeric str -> 3.0
+    s.append("node_created", {"node_id": 1, "parent_ids": [], "operator": "improve",
+                              "idea": {"operator": "improve", "params": {}, "rationale": ""}})
+    s.append("node_evaluated", {"node_id": 1, "metric": 2.0, "eval_seconds": -50.0})  # negative -> 0.0
+    s.append("node_created", {"node_id": 2, "parent_ids": [], "operator": "improve",
+                              "idea": {"operator": "improve", "params": {}, "rationale": ""}})
+    s.append("node_evaluated", {"node_id": 2, "metric": 3.0, "eval_seconds": "junk"})  # unparseable -> 0.0
+    st = fold(s.read_all())                                                            # must not raise
+    # "3" recovers to 3.0; the negative and the junk both contribute 0.0 (never REDUCE the budget)
+    assert st.total_eval_seconds == 3.0 and st.nodes[0].status.value == "evaluated"
+
+
+def test_ablation_eval_cost_is_budgeted(tmp_path):
+    """arch-review §4 P1-2: ablation probes run real evals; their wall-clock must count against the
+    cumulative budget (total_eval_seconds), not spend entirely outside accounting."""
+    s = EventStore(tmp_path / "e.jsonl")
+    s.append("run_started", {"run_id": "r", "task_id": "t", "direction": "min"})
+    s.append("ablate", {"parent_id": 0, "impacts": {"x": 0.1}, "eval_seconds": 4.5})
+    assert fold(s.read_all()).total_eval_seconds == 4.5
+    # an old ablate event with no eval_seconds adds nothing (backward compatible)
+    s.append("ablate", {"parent_id": 1, "impacts": {}})
+    assert fold(s.read_all()).total_eval_seconds == 4.5
 
 
 def test_normalize_task_rejects_cmd_and_eval_both():

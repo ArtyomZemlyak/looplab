@@ -1,24 +1,29 @@
-# LoopLab — Project Review, Architecture & Development Directions (2026-07-11, revalidated)
+# LoopLab — Project Review, Architecture & Development Directions (2026-07-11, reconciled 2026-07-12)
 
-> Current-state strategic synthesis for code revision `2ce82fdb05e6be27bd6e91d943d378dbcd73860c`.
-> The architecture verdict and roadmap were revalidated after the deeper audit in
-> [doc 16](16-architecture-code-review-2026-07-11.md) (`41f9345`). This revision therefore supersedes
-> the first version of doc 17 in `32dc6c0`; Git history preserves that version.
+> Current-state strategic synthesis for executable revision
+> `369d6a6c6fe0ccf0f921051ffba71c742879bfdb`; documentation/UI reconciliation is included through
+> `89af408`. [Doc 16](16-architecture-code-review-2026-07-11.md) (`41f9345`) remains the original
+> finding/reproduction ledger. This revision adds the implementation disposition of the subsequent
+> fix series and supersedes the first version of doc 17 in `32dc6c0`.
 
 | Metadata | Value |
 |---|---|
 | **Status** | current / canonical plan |
-| **As of code commit** | `2ce82fdb05e6be27bd6e91d943d378dbcd73860c` |
+| **As of executable commit** | `369d6a6c6fe0ccf0f921051ffba71c742879bfdb` |
+| **Documentation reconciliation** | `89af408` (doc 18 and post-fix UI disposition) |
 | **Normative for** | priority, dependencies, release gates, feature promotion criteria |
-| **Finding authority** | [doc 16](16-architecture-code-review-2026-07-11.md) |
+| **Finding/reproduction authority** | [doc 16](16-architecture-code-review-2026-07-11.md) |
+| **Current implementation disposition** | §6.3 and §13.2 of this document |
 | **Supersedes** | doc-17 verdict in `32dc6c0`; current-order claims in docs 06/10/11/12, ROADMAP, BACKLOG where they conflict |
 | **Superseded by** | — |
-| **Last verified** | 2026-07-11 |
+| **Last verified** | 2026-07-12 |
 
 **Companion docs:** [01-product-design.md](01-product-design.md) ·
 [02-architecture.md](02-architecture.md) · [03-decisions.md](03-decisions.md) (ADR-6, ADR-9,
 ADR-10) · [16-architecture-code-review-2026-07-11.md](16-architecture-code-review-2026-07-11.md)
 (authoritative tactical findings and reproductions) ·
+[18-ui-ux-review-2026-07-11.md](18-ui-ux-review-2026-07-11.md) (UI/UX observations and acceptance
+criteria, subordinate to this plan) ·
 [13-external-works-analysis-2026-07.md](13-external-works-analysis-2026-07.md) ·
 [ROADMAP.md](ROADMAP.md) · [BACKLOG.md](BACKLOG.md) · [guide/memory.md](guide/memory.md).
 
@@ -30,8 +35,10 @@ Frameworks/Libs knowledge base, NapMem, SciResearcher, and research-exploration 
 stabilization plan rather than treating them as immediately shippable flags.
 
 **Method and evidence discipline.** The revision combines a fresh code/doc cross-check, direct inspection
-of the current state/event/security/execution seams, the completed test evidence recorded in doc 16, a local
-verification attempt, and primary-source research. Statements are classified implicitly as:
+of the current state/event/security/execution seams, commit-by-commit review of the 23-commit remediation
+series from
+`37f5304..369d6a6`, current CI evidence, local documentation/UI verification, and primary-source research.
+Statements are classified implicitly as:
 
 - **code-confirmed** — traced to the current repository and, where meaningful, reproduced or covered by a
   named test;
@@ -54,40 +61,43 @@ composition and recommendation · §13 verification and sources.
 
 ### 1. Executive summary — where LoopLab stands
 
-**LoopLab has a strong experimental foundation, but it is not yet safe to describe the remaining frontier
-as small or primarily maintainability work.** The revalidated audit confirms **7 P0 release blockers and
-12 P1 stabilization blockers**. The lower dependency direction, pure fold, host-side scoring, operator
-stack, memory system, and broad UI are valuable and should be preserved. The missing guarantees sit at the
-boundaries between those pieces: identity across retries/reopen, crash-safe setup and manifests, centralized
-authorization, hard resource accounting, and process/control ownership.
+**LoopLab has a strong experimental foundation, and the post-audit fix series materially reduced its
+immediate risk, but the remaining frontier is still not small feature work.** Doc 16 originally confirmed
+**7 P0 and 12 P1 findings**. At `369d6a6`, the exact reproductions behind many of them are contained and
+covered by regression tests. P0-2, P1-1, and P1-12 remain wholly open; the rest range from a closed original
+reproduction to a partial architectural contract, depending on the residual stated in §13.2. Commit titles
+are therefore not counted automatically as architectural closure.
 
 The first doc-17 verdict — “the load-bearing invariants hold; zero reproducible replay/data-corruption
 defects; risks are maintainability, not correctness” — is refuted by executable counterexamples in
 [doc 16 §§3–4](16-architecture-code-review-2026-07-11.md). The event log remains a good projection and
-audit substrate, but replay is safe only for a fixed log that does not cross the currently unmodelled
-attempt, epoch, request, setup, or source-identity boundaries.
+audit substrate. Setup re-entry, corrupt-middle refusal/repair, task-alias conflict, and late terminal
+containment are now stronger; replay-complete continuation still lacks full attempt, epoch, request,
+run-instance, and manifest boundaries.
 
 **The verdict on each axis:**
 
 | Axis | Verdict |
 |---|---|
-| **Architecture** | **Strong substrate, unsafe lifecycle model.** Layering and pure projection hold narrowly; reset/reopen/resume/finalization need explicit attempt, epoch, request, and manifest identities. Distributed policy enforcement is already producing correctness and security regressions. |
-| **Code & tests** | **Substantial and generally disciplined, but over-claimed.** The suite and registry tests are valuable; they did not cover the adversarial interleavings, no-lock behavior, route census, process trees, and workspace drift that expose the P0/P1 set. |
+| **Architecture** | **Strong substrate, partially contained lifecycle model.** Setup completion, terminal-attempt generation, several permission/path boundaries, and event-log repair landed. Search epoch, complete attempt/request identity, immutable run manifests, hard budget reservation, and one control writer remain missing. |
+| **Code & tests** | **Substantial, disciplined, and green in validation CI.** The remediation series added focused regressions and the full suite passes for validation commit `89af408`; green examples do not prove the remaining interleavings, fail-open-lock behavior, object authorization, unpolled deadlines, or workspace identity. |
 | **Functionality** | **Broad, unevenly production-ready.** The default trust posture is mostly audit/off, temporal CV has no shipped caller, six adapters are synthetic/harness-oriented, and the isolated real-task path is under-validated. |
-| **Directions** | **Two tracks, one hard dependency.** Stabilization is the release-critical path. Feature discovery may continue in isolated prototypes, but production activation must wait for the relevant identity, policy, budget, and provenance gates. |
+| **Directions** | **Finish residual stabilization, then promote features through gates.** Offline discovery may continue, but live production activation still waits for the relevant identity, policy, budget, and provenance contracts. |
 
-Four missing identities explain much of the defect cluster:
+Four incomplete identity families explain much of the residual defect cluster:
 
-1. **`NodeAttemptId`** — a reset currently reuses `node_id`, so late evaluation/trust/confirmation events
-   can mutate the replacement attempt.
+1. **`NodeAttemptId`** — reset now increments a node `attempt`, and stamped `node_evaluated`/`node_failed`
+   terminals from an older attempt are rejected (`47f786a`). Confirmation, holdout, trust, abort, repair,
+   forced-operation, artifact, and cost effects are not all scoped to that generation, so P0-1 is partial.
 2. **`SearchEpoch`** — reopening can retain confirmation, holdout, approval, and finalization state from an
    older candidate set.
-3. **`RequestId` + `SubjectHash`** — approvals, aborts, forced operations, and permission decisions are not
-   bound to the exact pending request and subject revision.
-4. **`RunInstanceId` + `RunManifest`/`InputSnapshot`** — `run_id` is reused across reset, and an event log
-   can be resumed with different task, config, dirty tracked input files, environment, or materialized
-   inputs while appearing to be the same execution. Mutable attempt workdirs and their artifacts need a
-   separate identity and manifest; they are outputs, not part of the immutable source snapshot.
+3. **`RequestId` + `SubjectHash`** — permission resolution now uses pending→resolved CAS and centrally gates
+   MCP/background kill (`87dfc7e`), but approvals, aborts, forced operations, and promotion/finalization
+   decisions are not all bound to the exact request and subject revision.
+4. **`RunInstanceId` + `RunManifest`/`InputSnapshot`** — `run` now rejects a different task ID and conflicting
+   repo aliases before overwriting an existing run (`4c6c59f`), and setup completion is folded (`5f5ce46`).
+   Config, dirty tracked input bytes, environment, materialized inputs, mutable attempt workdirs, and their
+   artifacts still lack one immutable instance/manifest boundary, so P0-5/R2 remain partial.
 
 Two earlier product findings remain valid, but they are **post-stabilization credibility work**, not the
 top engineering priority:
@@ -100,14 +110,16 @@ top engineering priority:
    host-side scoring and held-out selection while **most optional confirmation, detector, and enforcement
    mechanisms remain disabled** — a narrower posture than the product and the UI's own
    "Trust & rigor — the point of LoopLab" panel
-   (`ui/src/panels.jsx:118`) — advertises. **Do not enable hard gating until the leakage detector and
-   workdir audit stop producing false-clean/false-positive enforcement outcomes.**
+   (`ui/src/panels.jsx:118`) — advertises. The reproduced false-clean workdir states and leakage-regex
+   precision/recall defects are fixed (`d8d240c`, `4d0f362`, `13f087c`); **do not enable hard gating by
+   default until a labelled calibration corpus establishes precision, recall, abstention, and missing-input
+   behavior beyond those examples.**
 2. **The temporal/target-leakage differentiator (ADR-6's stated edge) has no live caller.** `trust/cv.py`'s
    own docstring says `purged_walk_forward` / `consistent_cv` / the `Evaluator` Protocol are "complete and
    tested, but not yet consumed by a shipped adapter"; the `timeseries` adapter runs its own embedded
    backtest instead. **The claimed moat needs one adapter that exercises it end-to-end.**
 
-**Roadmap decision:** stabilize state identity and fail-closed boundaries first; then prove real-task trust
+**Roadmap decision:** finish state identity and the remaining fail-closed boundaries first; then prove real-task trust
 and evaluation; only then broaden networked research, memory navigation, and quality-diversity search.
 This is not a rewrite: keep the event-log spine and flat public read model, restore append-only domain
 semantics (tombstones plus explicit compaction generations), and add a versioned envelope and explicit
@@ -117,21 +129,21 @@ services/value objects behind the existing `Engine` facade.
 
 | Package | Files | LoC | Role |
 |---|---|---|---|
-| `engine/` | 27 | 7,125 | orchestrator + 12 mixins + cross-run memory |
-| `serve/` | 30 | 6,723 | FastAPI server, routers, TUI, assistant |
-| `tools/` | 24 | 4,914 | agent-facing tools, memora/vectorstore, env_inspect |
-| `adapters/` | 15 | 4,592 | 9 task kinds + composable front-end |
-| `core/` | 19 | 4,562 | domain models, Settings, LLM client, parse/trace |
-| `agents/` | 10 | 3,271 | roles, tool-loop, cli-agent, unified agent, strategist |
-| `events/` | 9 | 2,483 | event store, replay/fold, projections, exporters |
-| `search/` | 9 | 1,874 | policies, operators, foresight, hybrid-merge, coverage |
-| `runtime/` | 8 | 1,662 | sandbox tiers, command-eval, deps |
-| `cli/` | 6 | 1,171 | run/export/inspect/ui command groups |
-| `trust/` | 10 | 876 | leakage, reward-hack, CV, redaction, confirm, harden |
-| **Total** | **170** | **~39.7k** | 167 package files + 3 root modules; 156 Python test files / ~26.5k physical test lines |
+| `engine/` | 27 | 7,192 | orchestrator + 12 mixins + cross-run memory |
+| `serve/` | 30 | 6,756 | FastAPI server, routers, TUI, assistant |
+| `tools/` | 24 | 4,959 | agent-facing tools, memora/vectorstore, env_inspect |
+| `adapters/` | 15 | 4,604 | 9 task kinds + composable front-end |
+| `core/` | 19 | 4,598 | domain models, Settings, LLM client, parse/trace |
+| `agents/` | 10 | 3,292 | roles, tool-loop, cli-agent, unified agent, strategist |
+| `events/` | 9 | 2,623 | event store, replay/fold, projections, exporters |
+| `search/` | 9 | 1,901 | policies, operators, foresight, hybrid-merge, coverage |
+| `runtime/` | 8 | 1,763 | sandbox tiers, command-eval, deps |
+| `cli/` | 6 | 1,225 | run/export/inspect/ui command groups |
+| `trust/` | 10 | 918 | leakage, reward-hack, CV, redaction, confirm, harden |
+| **Total** | **170** | **40,242** | 167 package files + 3 root modules; 157 Python test files / 27,170 physical test lines |
 
-Hotspots (LoC): `engine/orchestrator.py` 1486 · `adapters/repo_developer.py` 962 · `events/replay.py` 961 ·
-`core/llm.py` 865 · `core/config.py` 768 · `agents/roles.py` 727.
+Hotspots (LoC): `engine/orchestrator.py` 1497 · `events/replay.py` 1008 ·
+`adapters/repo_developer.py` 962 · `core/llm.py` 865 · `core/config.py` 780 · `agents/roles.py` 748.
 
 ### 3. Functionality review
 
@@ -139,33 +151,34 @@ Hotspots (LoC): `engine/orchestrator.py` 1486 · `adapters/repo_developer.py` 96
 
 | Area | Status | Notes (code-anchored) |
 |---|---|---|
-| **Task adapters** (9 kinds) | 🟡 | The registry is real, but only **`repo`, `mlebench_real`, `dataset`** are real-work paths; six are synthetic/demo/trust harnesses. `mlebench_real` offline baselines cover three competitions. Relative sources, aliases, and exact input identity are not yet canonicalized into a run manifest. |
-| **Composable task front-end** | 🟡 | Capability inference and most ambiguity checks are useful, but `{repo: NEW, editable_path: OLD}` can silently retain the legacy value and relative paths may resolve in different parent/child CWDs (P0-5). |
-| **Roles & backends (ADR-7)** | 🟡 | Role routing is broad, but RepoDeveloper step failures are stringly ignored and BestOfN does not preserve parent-aware capabilities, so a wrapper can silently evaluate baseline/lose `implement_from` semantics (P1-9). |
+| **Task adapters** (9 kinds) | 🟡 | The registry is real, but only **`repo`, `mlebench_real`, `dataset`** are real-work paths; six are synthetic/demo/trust harnesses. `mlebench_real` offline baselines cover three competitions. Exact input/environment identity is not yet canonicalized into a run manifest. |
+| **Composable task front-end** | 🟡 | Capability inference and ambiguity checks are useful; conflicting `{repo, editable_path}` aliases are now rejected (`4c6c59f`). Relative sources can still resolve in different parent/child contexts, and aliases are not a substitute for a canonical InputSnapshot. |
+| **Roles & backends (ADR-7)** | 🟡 | Role routing is broad. BestOfN/Validating wrappers now forward parent-aware hooks (`65221f6`), closing the reproduced baseline-regeneration bug. RepoDeveloper step outcomes remain stringly and wrappers still lack a typed `DevelopmentResult` contract. |
 | **"Evaluator" role** | ⬜ | There is **no first-class Evaluator**; verification is a distributed subsystem (sandbox + host grader + trust gates + critic + memo-verifier), and `trust/cv.py`'s `Evaluator` Protocol is **unused**. A naming/architecture gap. |
 | **Search policies** | 🟡 | Greedy is the static default and alternatives are opt-in/under-benchmarked. More importantly, policies disagree about raw vs promoted fitness after reopen because confirmation/holdout state lacks a search epoch (P0-2). |
-| **Operators** | 🟡 | The operator set is rich, but `node_reset` has no attempt identity and forced fork/inject remains request-id/crash-window sensitive. Ablation also bypasses cumulative eval accounting. |
-| **Trust layer** | ⛔ for hard gating | Defaults are mostly disabled/`trust_gate="audit"`; held-out selection is on. The leakage regex has known false positives/negatives and workdir audit can report unavailable evidence as clean, so globally enabling `gate` would amplify current P1-6/P1-7 defects. Temporal CV remains unwired. |
-| **Sandbox / command evaluation** | ⛔ on affected paths | Tiers exist, but stage/adapter/prediction path escape, post-spawn cleanup gaps, unbounded output/readers/regex, and Windows extra-mount grammar are confirmed. Real adapters also lack a validated isolated data/image contract. |
+| **Operators** | 🟡 | The operator set is rich. Reset now bumps an attempt generation and rejects stale eval/fail terminals, and ablation wall time is charged (`47f786a`, `a5f74b1`). Other attempt-scoped effects, forced-operation request identity, and reserve-before-spawn accounting remain open. |
+| **Trust layer** | 🟡 for audit; gated promotion uncalibrated | Defaults are mostly disabled/`trust_gate="audit"`; held-out selection is on. Missing/unreadable protected files now fail closed and the reproduced leakage-regex defects are fixed (`d8d240c`, `4d0f362`, `13f087c`). A labelled detector corpus, epoch-bound evidence, and abstention policy are still required before global hard gating. Temporal CV remains unwired. |
+| **Sandbox / command evaluation** | 🟡 | Stage/adapter/prediction path escapes, non-finite timeouts, post-spawn NUL cleanup, and Windows bind grammar were fixed (`cdc5423`, `c4a2113`). Full CPU/RAM/disk enforcement, an unpolled deadline watcher, bounded readers/regex, and a validated real-adapter image/data contract remain. |
 | **Memory / knowledge** | 🟡 | Seven useful stores and retrieval primitives exist, but they are not a provenance-linked pyramid; shared content and vector indices are outside the run manifest, and the dormant `CaseLibrary` is only one retrieval primitive, not “80% of NapMem.” |
-| **Serve / UI** | ⛔ for shared deployment | Broad UI/TUI exists, but sensitive GET auth is blacklist-based, assistant permission flows have bypasses, and client control metadata is duplicated/divergent (P0-6, P1-3, P1-10). |
-| **CLI / run control** | 🟡 | Command breadth is strong, but `run` can mix a new task snapshot into an old log and resume during finalization can leave a zombie run. A local lock does not make the multi-step control transition atomic. |
-| **Genesis / Strategist / deep research** | 🟡 | The capabilities are real, but spec approval is not subject-bound, one strategy-governance asymmetry applies forbidden params, and web/literature are correctly opt-in until network permission, budget, and provenance controls exist. |
+| **Serve / UI** | ⛔ for shared deployment | Permission CAS/MCP/background-kill gates are centralized, sensitive routes were gated, public state was redacted, and TUI/JS needs-engine registries now match (`87dfc7e`, `eee59c3`, `c4fbf70`, `3170d85`). Auth remains a blacklist rather than default-deny, object ownership is absent, and direct AssistantBar/Dock control postconditions still diverge (doc 18 CTRL-01). |
+| **CLI / run control** | 🟡 | A different task ID or conflicting repo alias is now rejected before reusing a run directory (`4c6c59f`). Full config/source/environment identity and atomic resume/finalization ownership remain absent; P1-1 can still leave a zombie run. |
+| **Genesis / Strategist / deep research** | 🟡 | The strategy name/params governance asymmetry is fixed (`ca3c9fe`). Spec approval remains not subject-bound, and web/literature are correctly opt-in until network permission, budget, and provenance controls exist. |
 
 #### The functionality gaps worth prioritizing
 
 Release-safety work comes first:
 
-1. **Identity-safe reset/reopen/approval/finalization** — attempt, epoch, request, subject, and expected-revision
-   semantics shared by fold, engine, API, and clients.
-2. **Reproducible run continuation** — explicit setup completion plus immutable task/config/workspace/environment
-   manifest; `run` creates and `resume` continues, never a hybrid.
-3. **Central effects and authorization** — route scopes, `ToolSpec` policy enforcement (including MCP), one
-   run-command service, and CAS permission resolution.
-4. **Bounded execution** — one `BudgetLedger`, one `ProcessSupervisor`, one `PathPolicy`, bounded output/input,
-   and a Windows/Linux container contract.
-5. **Trust evidence that can safely gate** — tri-state workdir audit and structured/high-confidence leakage
-   analysis before changing the default from audit.
+1. **Complete identity-safe reset/reopen/approval/finalization** — extend the landed terminal-attempt guard to
+   confirmation/trust/holdout/abort/cost/artifacts; add epoch, request, subject, and expected-revision semantics.
+2. **Reproducible run continuation** — build on folded setup completion and task-ID refusal with an immutable
+   task/config/InputSnapshot/environment manifest; `run` creates and `resume` continues, never a hybrid.
+3. **Finish central effects and authorization** — invert route auth to default-deny, add principal/object checks,
+   put every tool behind host-owned `ToolSpec`, and converge clients on one RunCommandService. Permission CAS
+   and the reproduced MCP/background bypasses are already fixed.
+4. **Finish bounded execution** — replace partial cost accounting/tree kill/path containment with one durable
+   `BudgetLedger`, one deadline-owning `ProcessSupervisor`, bounded output/input/regex, and physical quotas.
+5. **Calibrate trust evidence** — the known workdir/leakage defects are fixed; now measure structured evidence
+   on a labelled corpus before changing the default from audit.
 
 After those gates, the credibility/feature gaps are: a live temporal-CV adapter; a real adapter with a private
 grader; one real adapter validated in an isolated tier; one proven external Developer wrapper; a first-class
@@ -176,21 +189,22 @@ assistant or production remote execution until its permission and process bounda
 
 The codebase is substantial and often disciplined; the previous conclusion failed by equating a large green
 suite with coverage of the system's hardest state and effect boundaries. Current size is 170 production Python
-modules / 39,664 physical lines and 156 Python test files / 26,501 physical lines. Doc 16 records two full
-Linux runs (Python 3.11 and 3.12) at **1,711 passed, 33 skipped, 1 stale-test failure** each, plus focused
-Windows and UI matrices. That is good evidence of regression stability, not proof of reset/reopen/concurrency
-safety.
+modules / 40,242 physical lines and 157 Python test files / 27,170 physical lines. Doc 16's historical
+baseline records two Linux runs (Python 3.11 and 3.12) at **1,711 passed, 33 skipped, 1 stale-test failure**
+each. More importantly for this revision, the complete GitHub `python -m pytest` workflow and strict docs
+workflow both pass for validation commit `89af408` (code tree `369d6a6`; §13.2). This is strong regression
+evidence, not proof of the remaining epoch/CAS/concurrency/resource guarantees.
 
 #### What the tests establish — and what they do not
 
 | Area | Established strength | Missing/adversarial coverage now required |
 |---|---|---|
-| Fold/event log | Pure deterministic fold for a fixed ordered log; unknown-event read tolerance; first-terminal-wins within one attempt; torn final-line handling | Attempt/epoch/request identity; late events; corrupt middle; unsupported locks; authoritative unknown writer schema; expected-revision CAS |
-| Engine | Real crash/resume path, broad phase/operator coverage, many source-registry guards | Crash after every setup append; reset during parallel eval; finish→resume wakeup; stale finalization; hard budget reservation |
-| Trust/evaluation | Host-side held-out scoring and detector unit tests | Detector calibration, false-positive/negative corpus, missing/unreadable protected inputs, disclosed-holdout reopen, path/symlink fuzzing |
-| Serve/tools | API, assistant, and tool tests exist | Route-scope census; stale permission resolution; MCP lazy authorization; all client control paths; object-level authorization |
-| Runtime/platform | Normal subprocess and Docker paths are covered | Parent/child tree termination, unpolled deadlines, unbounded output/JSON/regex, Windows bind mounts and Job Objects |
-| Contracts | Several two-way source scans catch rename drift | The fold-handler scan currently targets an old dispatch form; wrappers can erase undeclared capabilities; string results cannot express partial failure |
+| Fold/event log | Pure fixed-log fold; torn-tail handling; invalid JSON/**Event envelope** refusal+repair; explicit folded/diagnostic partition; stale eval/fail terminal rejection by node attempt | Full attempt/epoch/request identity; corruption-after-open/append-lock TOCTOU; unsupported locks; expected-revision CAS; duplicate complete lifecycle |
+| Engine | Real crash/resume path; setup completion folds and re-enters after crash; broad phase/operator coverage | Content-addressed crash points for every setup step/effect; reset during parallel eval; finish→resume wakeup; stale finalization; reserve-before-spawn budget |
+| Trust/evaluation | Host-side held-out scoring; missing/unreadable protected inputs fail closed; named leakage FP/FN/NaN regressions pass | Labelled detector calibration and abstention; disclosed-holdout epoch; evidence/decision versioning; path/symlink fuzzing beyond known cases |
+| Serve/tools | Permission resolution CAS; gated MCP/background kill; named sensitive GET and public-state regressions; TUI/JS registry parity | Default-deny route/tool census; lazy MCP authorization; direct AssistantBar/Dock postconditions; principal/object authorization |
+| Runtime/platform | Contained stage/adapter/prediction paths; finite timeouts; robust explicit background tree kill; Windows mount-unit regressions | Unpolled deadline watcher; bounded output/JSON/regex; physical CPU/RAM/disk quotas; Windows Docker/Job Object integration matrix |
+| Contracts | Exact event partition and several two-way source scans; parent-aware wrapper regression | Generated ControlSpec; typed DevelopmentResult/ToolSpec/TrustEvidence; wrapper failure semantics; one policy/fitness owner |
 
 The central test upgrade is **model-based state-machine testing**, not more isolated examples. Hypothesis's
 [`RuleBasedStateMachine`](https://hypothesis.readthedocs.io/en/latest/stateful.html) generates action
@@ -208,8 +222,9 @@ append boundary and platform process-tree tests.
   methods, and flat lifecycle fields let wrappers and clients silently lose semantics.
 - **The middle layer is conceptually cyclic.** `adapters <-> agents <-> search <-> tools` is hidden partly by
   lazy imports; composition should move above those packages.
-- **Configuration has multiple sources of truth.** Flat env-compatible Settings can remain public, while
-  validated internal option groups and one schema source eliminate literal fallback drift.
+- **Configuration has multiple sources of truth.** `369d6a6` aligns the known incremental-construction
+  fallbacks with Settings, but the architectural duplication remains. Flat env-compatible Settings can stay
+  public while validated internal option groups and one schema source prevent the next drift.
 - **Compatibility is hand-maintained.** The `_LAYOUT` alias map and monkeypatch behavior need an immutable
   compatibility manifest and an explicit retirement policy, not incidental edits.
 
@@ -226,14 +241,17 @@ mechanical file split does not.
   direct `engine -> serve` import.
 - `fold` is pure and deterministic for one fixed ordered log. Unknown **diagnostic** events can be ignored,
   and first-terminal-wins is correct within one lifecycle attempt.
-- EventStore handles ordinary local serialization and a torn final line; host-side scoring keeps private
-  labels outside a candidate workspace.
+- EventStore handles ordinary local serialization and a torn final line; it now refuses a corrupt middle or
+  invalid Event envelope detected at construction and exposes a repair command. Host-side scoring keeps
+  private labels outside a candidate workspace.
 
 Those properties do **not** imply order tolerance, exactly-once effects, or replay-complete continuation.
-State-sensitive UI/CLI commands validate and append in separate steps; reset/reopen reuse logical identities;
-setup is inferred from `run_id`; continuation also depends on mutable snapshots/workdirs/source/environment;
-and a corrupt middle can make all later appends invisible. Unknown authoritative/security event types must
-not be ignored by a writer that does not understand them — doing so could replay a revoke or gate fail-open.
+State-sensitive UI/CLI commands still validate and append in separate steps; reset/reopen reuse incomplete
+logical identities; setup has only a folded completion boolean rather than content-addressed step/manifest
+identity; continuation also depends on mutable snapshots/workdirs/source/environment. Corruption detected at
+construction now blocks append, but corruption-after-open is not rechecked under the writer lock. Unknown
+authoritative/security event types must not be ignored by a writer that does not understand them — doing so
+could replay a revoke or gate fail-open.
 
 #### Target shape: additive identities and explicit owners
 
@@ -359,15 +377,16 @@ remain useful research/history but are not authoritative when they disagree with
 | State | Current examples | Planning meaning |
 |---|---|---|
 | **Shipped / stable foundation** | lower dependency direction, fixed-log fold, host-side held-out scoring, core operators, memory stores, error taxonomy, broad UI surfaces | Preserve; regression-gate while changing adjacent contracts |
-| **Shipped / unsafe or partial** | reset/reopen, holdout promotion after reopen, permission modes, hard trust gating, command-eval paths, BestOfN wrapper, shared run controls | Do not count as complete; map to R0–R5 below |
+| **Shipped / unsafe or partial** | reset/reopen and holdout promotion, terminal-only attempt generation, blacklist auth, hard trust gating, post-hoc budget checks, shared run controls | Do not count a bounded containment fix as completion; map residuals to R0–R5 below |
 | **Open product work** | live temporal-CV adapter, private real-task grader, isolated real-adapter image/data contract, validated external Developer | Schedule only after prerequisites |
 | **Research hypothesis** | KB schema, NapMem navigation, proactive breadth/QD, SciResearcher backend/self-distillation | Prototype and measure; no production promise |
 | **External/infra gated** | published real MLE-bench, remote worker fleet, AgentDS-style adapter | Requires the release-safety gates and external resources |
 
 The LLM response cache is already implemented (`llm_cache`) but off by default; it is not a missing scale
-subsystem. Direct RepoDeveloper already has a parent-aware path; the confirmed gap is that wrappers such as
-BestOfN do not preserve that capability. `operator_yields` also reaches StrategyContext/Strategist prompts,
-but its cost denominator is incomplete until confirmation/ablation/parallel reservations share one ledger.
+subsystem. Direct RepoDeveloper already has a parent-aware path, and BestOfN/Validating wrappers now preserve
+it; the remaining gap is typed failure/deletion semantics and validation against a real external backend.
+`operator_yields` also reaches StrategyContext/Strategist prompts, but its cost denominator is incomplete
+until confirmation and parallel reservations share one ledger (ablation is now charged post-hoc).
 
 #### 6.2 Temporary safe operating envelope
 
@@ -379,14 +398,15 @@ Until R0–R3 close, the defensible operating mode is intentionally narrower tha
   unsupported until upstream principal identity, per-object authorization, and session isolation pass R5;
 - `max_parallel=1`, trusted inputs, and trusted-local execution only; do not treat Docker/hostile tiers as
   validated for real adapters yet;
-- if a crash may have occurred after `run_started` but before all preflight/setup steps completed, do not
-  resume that directory: preserve it for diagnosis and start a new run until explicit `setup_completed`
-  exists;
+- setup now re-enters after a crash before folded `setup_finished`; resume only with the same task/config/input
+  bytes because a full manifest does not yet prove that identity. If EventStore reports corruption, stop and
+  use `repair-log` with its backup/provenance rather than appending past the boundary;
 - do not reset or reopen an actively evaluating/finalized unattended run; start a new run when a hidden
   holdout has already been disclosed;
 - keep heuristic trust signals in audit mode; review them manually rather than hard-gating;
-- keep web/literature, MCP, and mutating assistant tools **disabled**; current ask-mode supervision is not a
-  safety boundary while the permission bypass is open;
+- keep web/literature and MCP off by default. In loopback single-user operation, mutating assistant/MCP tools
+  may be used only through explicit ask-mode approval; `87dfc7e` closes the known bypasses, but the absence of
+  a complete host-owned ToolSpec/effect inventory still rules out unattended use;
 - treat node/run code, stdout, jobs, and provenance as authenticated data, not public projections.
 
 This is a containment policy, not the desired product endpoint. R0 should encode the highest-risk parts as
@@ -396,12 +416,12 @@ fail-closed behavior so safety does not depend on an operator remembering this l
 
 | Workstream | Primary finding IDs | Status | Scope | Depends on | Exit gate |
 |---|---|---|---|---|---|
-| **R0 — fail-closed containment** | P0-4, P0-6, P0-7; P1-3, P1-6, P1-7, P1-11, P1-12 | **open · release blocker** | deny-by-default route/object scopes or loopback-only refusal; permission CAS; central MCP/kill gate; StageName/PathPolicy; strict envelope reader + append refusal/repair; exact folded/diagnostic registry; aggregate-context postcondition; finite positive timeouts; filtered strategy delta; heuristic leakage forced advisory and workdir evidence tri-state; minimal durable run intent/wakeup | none | every known bypass/reproduction is red before and green after; unambiguous v1 logs still read; no unsupported shared mode starts |
-| **R1 — event/state identity** | P0-1, P0-2; P1-12 | **open · release blocker** | run instances; event IDs; node attempts/evaluations; search epochs; request/subject revisions; transition validator; append CAS; typed payload/upcaster registry | R0 | model-based stale-event/reset/reopen/approval tests; exactly one terminal per attempt; no old instance/attempt/epoch can mutate, promote, or finalize |
-| **R2 — durability/reproducibility** | P0-3, P0-5; P1-6; replay extensions in §13.2 | **open · release blocker** | setup state machine; RunManifest/InputSnapshot; attempt-scoped clean workdirs and ArtifactManifests; strict `run` vs `resume`; repair generation/provenance | R1 | crash at every setup/effect boundary converges or fails closed; dirty inputs and stale outputs cannot masquerade as current |
-| **R3 — execution infrastructure** | P1-2, P1-4, P1-5, P1-8 | **open · stabilization blocker** | multidimensional BudgetLedger with separate result authorization/cost settlement; ProcessSupervisor; bounded logs/readers/regex; stable Windows Docker mounts; physical token/deadline/OS quotas | R0–R2 | no over-admission; incurred stale-worker cost is still settled once; no orphan tree after kill; memory/disk bounds; Windows/Linux matrix green |
-| **R4 — typed domain services** | P0-2; P1-7, P1-9, P1-11 | **open · stabilization blocker** | TaskSpec/capabilities; DevelopmentRequest/Result; ToolSpec/Result/ExecutionContext; SearchFitness/PromotionFitness; versioned TrustEvidence/Decision; lifecycle/evaluation/promotion/strategy services | R1–R3 | wrappers preserve capabilities/failures; one policy gate and one fitness owner; Engine remains a compatible facade |
-| **R5 — clients/compatibility** | P1-1, P1-3, P1-10 | **open · stabilization blocker** | complete RunCommandService/EngineSupervisor; generated ControlSpec; upstream principal/run-owner/session isolation for shared mode; UI/TUI e2e; Settings schema source; legacy alias manifest | R0–R4 | every client has identical transition semantics; no zombie run; route/object/control/schema census is exact; shared mode either passes its auth matrix or refuses startup |
+| **R0 — fail-closed containment** | P0-4, P0-6, P0-7; P1-3, P1-6, P1-7, P1-11, P1-12 | **in progress · release blocker** | **Landed:** known corrupt-tail refusal/repair, permission CAS and MCP/kill gates, stage/path/timeout containment, tri-state workdir audit, named leakage fixes, strategy-param guard, event partition, aggregate-context fix. **Remaining:** recheck divergence under writer coordination, fail on unsupported locks, default-deny route/object scopes, one ToolSpec/effect inventory, global PathPolicy/fresh artifacts, calibrated advisory policy, durable wakeup | none | every known and newly identified bypass is red before and green after; unambiguous v1 logs still read; no unsupported shared mode starts |
+| **R1 — event/state identity** | P0-1, P0-2; P1-12 | **in progress · release blocker** | **Landed:** node attempt generation for eval/fail terminals. **Remaining:** run instances, event/evaluation IDs, attempt scope for all effects, search epochs, request/subject revisions, transition validator, append CAS, typed payload/upcaster registry | R0 | model-based stale-event/reset/reopen/approval tests; exactly one terminal per attempt; no old instance/attempt/epoch can mutate, promote, or finalize |
+| **R2 — durability/reproducibility** | P0-3, P0-5; replay extensions in §13.2 | **in progress · release blocker** | **Landed:** folded setup completion/re-entry, different-task and alias refusal, corrupt-log repair. **Remaining:** content-addressed setup steps; RunManifest/InputSnapshot; attempt-scoped clean workdirs and ArtifactManifests; strict `run` vs `resume`; repair generation/digest provenance | R1 | crash at every setup/effect boundary converges or fails closed; dirty inputs and stale outputs cannot masquerade as current |
+| **R3 — execution infrastructure** | P1-2, P1-4, P1-5, P1-8 | **in progress · stabilization blocker** | **Landed:** ablation cost accounting, explicit background tree kill/wait, finite timeout/path fixes, `--mount` Windows grammar. **Remaining:** multidimensional reserve-before-spawn BudgetLedger; session-owned deadline watcher; bounded logs/readers/regex; stable cross-platform input mapping; physical token/deadline/OS quotas | R0–R2 | no over-admission; incurred stale-worker cost is settled once; no orphan tree after kill; memory/disk bounds; real Windows/Linux matrix green |
+| **R4 — typed domain services** | P0-2; P1-7, P1-9, P1-11 | **in progress · stabilization blocker** | **Landed:** parent-aware wrapper forwarding and the concrete strategy-param bypass fix. **Remaining:** TaskSpec/capabilities; DevelopmentRequest/Result; ToolSpec/Result/ExecutionContext; SearchFitness/PromotionFitness; versioned TrustEvidence/Decision; lifecycle/evaluation/promotion/strategy services | R1–R3 | wrappers preserve typed capabilities/failures; one policy gate and one fitness owner; Engine remains a compatible facade |
+| **R5 — clients/compatibility** | P1-1, P1-3, P1-10 | **in progress · stabilization blocker** | **Landed:** named sensitive-route gates/state redaction and TUI/JS needs-engine parity. **Remaining:** RunCommandService/EngineSupervisor; generated ControlSpec; direct-client postconditions; upstream principal/run-owner/session isolation; UI e2e; Settings schema source; legacy alias manifest | R0–R4 | every client has identical transition semantics; no zombie run; route/object/control/schema census is exact; shared mode either passes its auth matrix or refuses startup |
 
 Two P0 details belong explicitly in R1/R2 rather than being hidden under “event sourcing”:
 
@@ -441,7 +461,7 @@ than saying “current.” Shared object storage still needs a single writer or 
 | Web/literature grounding | R0 ToolPolicy+network approval; R2 source snapshot; R3 token/time budget; R4 ToolSpec | explicit `research_grounding=literature` profile, read-only, cached evidence | promote if grounded-claim precision and useful-direction yield improve within cost; stop on injection/data-egress bypass |
 | Trust-by-default | R1 attempt/subject binding; R2 provenance/fresh artifacts; R3 bounded evaluator; R4 versioned TrustEvidence/Decision and promotion owner | shadow/audit on a labelled leakage/reward-hack corpus | enable gate only at a predeclared precision/recall and zero false-clean protected-input target |
 | Temporal-CV adapter | R1 epoch/promotion model; R2 dataset/split manifest | one real adapter with immutable split IDs and private grader | promote if leakage/generalization gap improves without hidden-set reuse |
-| Parent-aware Developer | R4 capability protocol and DevelopmentResult | wrapper contract tests around direct RepoDeveloper baseline | promote only if wrapper never loses parent/failure/deletion semantics |
+| External Developer validation | R4 capability protocol and DevelopmentResult | run one real external backend through the landed parent-aware wrappers and failure/deletion contract tests | promote only if wrapper/backend never loses parent/failure/deletion semantics |
 | Cost-aware search reward | R3 durable ledger across eval/confirm/ablate/holdout/LLM; R4 SearchFitness owner | shadow compute-efficiency score | promote on better valid improvement per budget, not incomplete wall time |
 | KB / NapMem | R2 provenance IDs; R4 typed memory/tool contract | offline corpus + retrieval benchmark before live steering | build hierarchy only after flat retrieval measurably fails at corpus scale (§8–§9) |
 | Proactive breadth / QD | R1 epoch identity; R4 SearchFitness/PromotionFitness and EvaluationService; trustworthy evaluator; explicit open-ended capability | frozen A/B benchmark against greedy/reactive baseline | promote only if novelty/diversity improves without unacceptable quality, trust, or cost regression (§11) |
@@ -475,24 +495,25 @@ must pass through the prerequisite gates above.
 
 #### 7.2 Delivery horizons
 
-**Horizon 0 — containment in small reviewable PRs.** Complete doc 16 Phase 0, including strict validation of
-the full Event envelope (not merely “JSON object”), append refusal after any invalid middle record, a
-provenance-preserving repair command, route scopes, permission CAS, centralized MCP/`kill_background`
-authorization, PathPolicy/StageName, finite timeouts, filtered StrategyDelta, aggregate context postcondition,
-an exact authoritative-versus-diagnostic event registry, immediate advisory-only heuristic leakage, tri-state
-missing/unreadable/tampered workdir evidence, and durable resume intent plus reconciler liveness. Temporarily
-reject reset/reopen/run-dir reuse where identity is ambiguous. Add a tombstone event before any further
-physical `events.jsonl` deletion work.
+**Horizon 0 — finish containment after the landed fix series.** Preserve the shipped envelope-aware
+corrupt-tail refusal/repair, permission CAS/MCP/kill gates, StageName/contained eval paths, finite timeouts,
+strategy-param fix, aggregate-context postcondition, explicit event partition, and tri-state trust audit.
+Now move corruption validation under append/writer coordination, fail startup on unsupported locks, invert
+route/tool policy to default-deny, finish object authorization and ToolSpec coverage, keep uncalibrated
+heuristics advisory, and add durable resume intent plus reconciler liveness. Temporarily reject ambiguous
+reset/reopen/run-dir reuse. Add a tombstone event before further physical `events.jsonl` deletion work.
 
-**Horizon 1 — identity and reproducibility.** Land `RunInstanceId`, the v2 envelope/upcaster registry, and
-append CAS first; then `NodeAttemptRef`/`EvaluationRef` with clean attempt workdirs, ArtifactManifests, and
-fresh-output checks; then
-`SearchEpoch`/PromotionState/RequestLedger with subject-bound approvals; finally explicit setup completion
-and `RunManifest`/`InputSnapshot`. Every PR must keep old unambiguous logs readable. Legacy reset/reopen
+**Horizon 1 — complete identity and reproducibility.** Extend the landed terminal-attempt generation to
+every node effect; land `RunInstanceId`, the v2 envelope/upcaster registry, and append CAS; then
+`NodeAttemptRef`/`EvaluationRef` with clean attempt workdirs, ArtifactManifests, and fresh-output checks;
+then `SearchEpoch`/PromotionState/RequestLedger with subject-bound approvals; finally evolve the landed
+setup-completion boolean into content-addressed setup plus `RunManifest`/`InputSnapshot`. Every PR must keep
+old unambiguous logs readable. Legacy reset/reopen
 logs are marked identity-ambiguous and continue only through an explicit new boundary or legacy read-only
 mode — never through a guessed global zero ID.
 
-**Horizon 2 — bounded execution, trustworthy evaluation, and real ownership.** Introduce a durable ledger
+**Horizon 2 — bounded execution, trustworthy evaluation, and real ownership.** Build on post-hoc ablation
+accounting and explicit background tree kill by introducing a durable ledger
 with `reserve(worst_case) -> commit(actual) | release`, fencing tokens, integer/Decimal units, and separate
 resource buckets where the product contract requires them. Route normal eval, confirmation, forced confirm,
 ablation, holdout, and LLM spend through it. Separate **result authorization** from **cost settlement**: an
@@ -507,7 +528,7 @@ calibrated/high-confidence evidence. Extract typed domain services
 behind Engine, then finish server/client convergence.
 
 **Horizon 3 — gated product experiments.** Run, in order of dependency and reversibility: private-grader/
-temporal-CV credibility pilot; validated parent-aware Developer wrapper; curated KB retrieval baseline;
+temporal-CV credibility pilot; validated external Developer through the parent-aware wrapper; curated KB retrieval baseline;
 explicit literature-grounded research profile; NapMem-style navigation A/B; proactive breadth/QD A/B;
 single remote evaluator; then a preregistered real MLE-bench proof. “Enable by default” is a result of these
 experiments, not their starting assumption.
@@ -963,7 +984,7 @@ not a heuristic inferred from adapter name.
 |---|---|---|
 | Concentration proxy | **Built** — `coverage_signal` (`coverage.py:50-100`), recorded every cadence | Within-run theme-label concentration only; not calibrated against semantic/citation distance or human judgements; drives proposal content reactively, never selection |
 | Novelty gate | `_llm_novelty_gate` default (`novelty.py:70-131`) — **within-run dedup** ("already tried in THIS run"), prefers NOVEL only vs repeats; doesn't hard-reject (worst case keeps the original) | No notion of "too close to the seed literature"; `"algo"` semantic gate off by default (`config.py:298`) — but *fires* whenever the Strategist flips stance to `explore` |
-| Diversity archive | `DiversityArchive` (`archive.py:12-46`) — **audit-only** ("never affects selection", `models.py:323`); build() feeds only the `niches` count into `coverage_signal` | No MAP-Elites "expand an empty niche" operator |
+| Diversity archive | `DiversityArchive` (`archive.py:12-46`) — **audit-only** (`core/models.py:335` stores its run-end summary); build() feeds only the `niches` count into `coverage_signal` | No MAP-Elites "expand an empty niche" operator |
 | Selection diversity | Only `GreedyTree`'s **IMPROVE** arm targets `state.best()` (`policy.py:286`); parent-selection diversity lives in `weighted_parent` (`policy.py:133`, used by `EvolutionaryPolicy`), `MCTSPolicy` (`policy.py:369`), ASHA/BOHB (`policy.py:450`) — **all off by default** (`policy=greedy`) | Default is exploitation on the IMPROVE arm; **the agentic Strategist *can* switch policy at runtime** (`agent_control`) — reactively |
 | Broaden lever | Strategist `novelty_stance=explore\|balanced\|exploit` (`strategist.py:50-68`) — **the main dial**; the default `strategist_backend='agent'` (`config.py:377`) governs it live | **Reactive**: `_rule_novelty_stance` flips to `explore` only *after* concentration ≥0.6–0.75 (`strategist.py:145-160`), i.e. after collapse; stall logic keys on metric stagnation, blind to coverage collapse (`strategist.py:305-324`) |
 | Diverse seeding | Genesis authors *what to solve*, not an idea portfolio (`genesis.py:161-238`); seeds = 3 blind drafts (`policy.py:225-227`) | No "generate N orthogonal seed directions" step |
@@ -1057,18 +1078,18 @@ flowchart LR
 The recommended near-term output of Part III is therefore **evaluation harnesses and governed schemas**, not
 default-on web, a production pyramid, or a global diversity policy.
 
-### 13. Verification, corrections, and evidence status (2026-07-11)
+### 13. Verification, corrections, and evidence status (reconciled 2026-07-12)
 
 #### 13.1 Disposition of the first doc-17 verdict
 
 | Earlier claim | Current disposition |
 |---|---|
-| Architecture is sound; correctness/replay are not concerns | **Refuted.** Seven P0 and twelve P1 findings include stale-attempt mutation, stale promotion/approval, setup crash window, invisible log tail, mixed run identity, permission bypass, and workspace escape. |
+| Architecture is sound; correctness/replay are not concerns | **Refuted as a baseline claim.** Doc 16's seven P0 and twelve P1 reproductions were real. The post-audit series contains fixes for many of them; the current tally is **2 fixed / 14 partial / 3 open** (§13.2). |
 | The remaining frontier is small and mostly flags | **Refuted.** R0–R5 are prerequisite engineering programs; feature flags expand unsafe surfaces if enabled first. |
 | `resume = replay` | **Refuted as a continuation guarantee.** Projection comes from the log; continuation also depends on task/config/source/environment/workdirs/processes/shared memory. |
-| Event log is universally append-only/idempotent | **Narrowed.** First-terminal-wins holds within one uninterrupted attempt. Full lifecycle duplication can re-charge cost, and ordinary node delete currently rewrites the log. |
-| Trust defaults are “advisory” and can simply be enabled | **Corrected.** The spelling is `audit`; current leakage/workdir evidence is not safe for blanket hard gating. |
-| Parent-aware improve is absent | **Corrected.** Direct RepoDeveloper has it; BestOfN/other wrappers can erase the capability. |
+| Event log is universally append-only/idempotent | **Narrowed.** First-terminal-wins holds within one matching node-attempt generation. Full lifecycle duplication can re-charge cost, and ordinary node delete currently rewrites the log. |
+| Trust defaults are “advisory” and can simply be enabled | **Corrected.** The spelling is `audit`; the named workdir/regex failures are fixed, but blanket hard gating still lacks calibrated structured evidence. |
+| Parent-aware improve is absent | **Resolved.** Direct RepoDeveloper had it; BestOfN/Validating wrappers now forward it (`65221f6`). Typed failure/deletion semantics and real external-backend validation remain. |
 | LLM response cache is missing | **Corrected.** It exists and is off by default. |
 | CaseLibrary is 80% of a memory pyramid | **Refuted.** It is a useful flat retrieval/consolidation primitive without hierarchy/provenance/navigation/evaluation. |
 | Proactive/QD exploration is the clear next feature | **Downgraded to A/B hypothesis.** Current coverage is an uncalibrated proxy; Heuresis's six-strategy, three-domain study shows steering without measured quality–novelty frontier expansion. |
@@ -1076,30 +1097,59 @@ default-on web, a production pyramid, or a global diversity policy.
 
 #### 13.2 Code and test evidence
 
-- Current census was reproduced: 170 production Python files / 39,664 physical lines; 156 Python test files /
-  26,501 physical lines; 77 event types and 64 fold handlers in doc 16's independent census.
+Post-audit implementation disposition at executable revision `369d6a6`:
+
+| Finding | Status | Landed containment | Residual exit gate |
+|---|---|---|---|
+| P0-1 attempt identity | **partial** | `47f786a`: attempt generation rejects stale eval/fail terminals | bind confirm/holdout/trust/abort/repair/forced/cost/artifact effects |
+| P0-2 epoch/subject identity | **open** | — | SearchEpoch, subject-bound requests, promotion/finalization invalidation |
+| P0-3 setup crash window | **partial** | `5f5ce46`: folded completion and crash re-entry | content-addressed step state and manifest digest |
+| P0-4 invisible event tail | **partial** | `57e6312`, `13f087c`: JSON/Event-envelope refusal and repair | recheck under writer coordination; serialize repair; collision-safe digest provenance |
+| P0-5 run/task/workspace mixing | **partial** | `4c6c59f`: different-task and conflicting-alias refusal | canonical config/source/dirty-bytes/environment InputSnapshot |
+| P0-6 permission enforcement | **partial** | `87dfc7e`: resolve CAS, gated MCP and background kill | one ToolSpec/effect inventory; authorize before lazy MCP connection |
+| P0-7 workspace boundary | **partial** | `cdc5423`: stage slug, contained adapter/prediction paths, finite timeout | global PathPolicy, fresh attempt artifacts, remaining paths and hard deadline semantics |
+| P1-1 zombie run | **open** | — | atomic durable command intent plus EngineSupervisor/reconciler |
+| P1-2 cumulative budget | **partial** | `a5f74b1`: ablation cost enters fold | reserve-before-spawn ledger for parallel, confirm, holdout, LLM and stale settlement |
+| P1-3 GET authorization | **partial** | `eee59c3`, `c4fbf70`: named routes gated and public state redacted | default-deny route scopes, principal/object ownership, zero-call public health |
+| P1-4 process termination | **partial** | `34efd95`: explicit kill waits/escalates over the tree | session ownership, always-on deadline watcher, bounded logs |
+| P1-5 resource bypasses | **partial** | `cdc5423`: pathological timeouts and post-spawn ValueError fixed | bounded pipe/JSON/log/regex/stage count and physical CPU/RAM/disk limits |
+| P1-6 workdir audit | **fixed** | `d8d240c`: missing/unreadable/unavailable are no longer clean | typed evidence is R4 evolution, not a residual of this finding |
+| P1-7 leakage hard gate | **partial** | `4d0f362`, `13f087c`: named FP/FN/NaN regressions fixed | calibrated AST/token evidence, confidence, abstention/corroboration |
+| P1-8 Windows Docker mounts | **partial** | `c4a2113`: colon grammar replaced with `--mount` | stable Linux container destinations and real Docker Desktop integration test |
+| P1-9 Developer wrappers | **partial** | `65221f6`: parent hooks forwarded | typed DevelopmentResult and failure/deletion propagation |
+| P1-10 client controls | **partial** | `3170d85`: TUI/JS registry entries and parity guard | generated ControlSpec and one server command/postcondition path |
+| P1-11 strategy params | **fixed** | `ca3c9fe`: asymmetric policy-param bypass closed | typed StrategyDelta is R4 evolution, not a residual of this finding |
+| P1-12 fail-open locks/CAS | **open** | — | mandatory lock or startup refusal plus expected-revision append CAS |
+
+- Current census was reproduced: 170 production Python files / 40,242 physical lines; 157 Python test files /
+  27,170 physical lines; 78 event types, 65 fold handlers, 13 explicit diagnostic types, and zero
+  unclassified registered types.
 - Doc 16 records full Linux Python 3.11 and 3.12 runs of **1,711 passed, 33 skipped, 1 failed** each. The one
-  repeated failure patches a stale keepalive transport seam; focused current watchdog tests pass. It also
-  records focused Windows, Docker, UI build/grouping, Ruff complexity, and event-census evidence.
-- A local full-suite retry was first blocked before test execution by the sandbox denying pytest's system
-  temp directory. The approved out-of-sandbox retry then stopped making progress and was terminated without
-  a test verdict. Setup/harness failures are not project regressions; the authoritative completed runs above
-  are neither replaced nor claimed as independently reproduced here.
-- MkDocs builds this document successfully (including all three Mermaid diagrams). Remaining build warnings are
-  pre-existing unresolved links in other documentation files, not links introduced by doc 17; all 11 local
-  relative links in this document resolve.
+  repeated failure came from a stale test patch targeting the old `urllib` seam, while the implementation had
+  moved to OpenAI SDK/httpx; current watchdog/raw-httpx tests pass. This is historical evidence for the
+  pre-fix baseline, not the verdict for `369d6a6`.
+- Validation commit `89af408` has a successful complete
+  [`python -m pytest` workflow](https://github.com/ArtyomZemlyak/looplab/actions/runs/29174130154)
+  and successful [strict documentation workflow](https://github.com/ArtyomZemlyak/looplab/actions/runs/29174130166).
+  These validate the repository suite after the fix series; they do not prove the residual gates above.
+- Local integration verification on 2026-07-12: strict MkDocs passes; the Vite production build passes at
+  224 modules / 636.04 kB JavaScript (201.22 kB gzip) with only the known >500 kB chunk warning. A 13-suite
+  focused pytest command produced no progress output and exceeded its 180-second harness timeout, so it is
+  **not** counted as a local test pass; its processes were terminated. The successful `89af408` full CI
+  run above remains the completed test verdict. All 55 local links across the reconciled index/docs 17–18
+  resolve (12 in this document); conflict-marker, fence, and whitespace checks pass.
 - The revalidation inspected/reproduced more than the original P0/P1 list: structurally valid JSON with an
-  invalid Event envelope can also create an undetected invisible tail; a duplicated complete lifecycle can
-  charge twice; stale workdir outputs can become a new metric; malformed/non-finite cost payloads can break or
-  disable accounting; and physical node deletion violates the additive-log model. These are incorporated in
-  R0–R2 and the DoD matrix.
-- This document changes planning/documentation only. It does **not** claim the P0/P1 defects are fixed.
+  invalid Event envelope and malformed/non-finite persisted eval cost are now fixed (`13f087c`, `94dddc0`).
+  A duplicated complete lifecycle can still charge twice; stale workdir outputs can still become a new metric;
+  physical node deletion still violates the additive-log model. These residuals remain in R0–R2 and the DoD.
+- This reconciliation distinguishes **fixed**, **partial**, and **open** findings. It does not infer full
+  architectural closure from a passing regression or a commit title.
 
 #### 13.3 Retained code-level corner cases
 
 - `default`/`fast` profiles are empty; `thorough` enables confirmation and several trust/quality controls but
   leaves web/literature, novelty policy, and diversity policy off. The Strategist can still mutate several
-  exploration knobs at runtime, subject to the governance matrix (whose asymmetric param case is itself P1).
+  exploration knobs at runtime, subject to the governance matrix; the asymmetric policy-param bypass is fixed.
 - `kb_search` is top-k plus a conditional harmonic anchor hop; the deep-research no-abstract path is flat.
   Cross-run JSONL content persists by default; the vector index is rebuilt in memory.
 - `coverage_signal` already influences proposal text after `novelty_stance=explore`; it never selects a node.
@@ -1144,15 +1194,18 @@ default-on web, a production pyramid, or a global diversity policy.
 
 #### 13.5 Scope limits and documentation authority
 
-- Findings and code anchors are current for the revision named at the top. Re-run the census, suite, and
+- Current-state dispositions and code anchors are current for the executable revision named at the top;
+  doc 16 preserves the original reproduction anchors. Re-run the census, suite, and
   source verification after material code or paper revisions.
 - External papers establish results in their own tasks/models; LoopLab applicability is explicitly an
   inference and requires the experiments defined above.
-- Doc 16 is authoritative for finding-level evidence; doc 17 is authoritative for ordering, gates, and
-  feature dependencies. Docs 06/10/11/12, ROADMAP, and BACKLOG contain useful history but stale status claims.
+- Doc 16 is authoritative for original finding-level evidence; doc 17 is authoritative for current
+  disposition, ordering, gates, and feature dependencies; doc 18 is authoritative for UI/UX observations and
+  UI-specific acceptance criteria. Docs 06/10/11/12, ROADMAP, and BACKLOG contain useful history but stale
+  status claims.
 - Future planning documents should carry `Status`, `As of commit`, `Normative for`, `Supersedes`,
-  `Superseded by`, and `Last verified` metadata. This revision also updates the documentation index/nav to
-  surface docs 16–17 and label older plans as historical; future authority changes must update those surfaces
+  `Superseded by`, and `Last verified` metadata. The documentation index/nav surfaces docs 16–18 and labels
+  older plans as historical; future authority changes must update those surfaces
   in the same PR.
 
 **Final verdict:** prioritize identity-safe state transitions, fail-closed durability, centralized effects,

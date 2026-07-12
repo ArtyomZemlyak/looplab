@@ -196,7 +196,7 @@ def _engine(run_dir: Path, task: TaskAdapter, settings: Settings,
         # surrogate wrapper exposes none -> falls through). YIELDS to an explicitly-configured numeric
         # `researcher_panel > 1` so opting into the k-NN panel is never silently overridden by the default.
         if (getattr(settings, "foresight", True) and settings.backend == "llm"
-                and getattr(settings, "foresight_panel", 1) > 1
+                and getattr(settings, "foresight_panel", 2) > 1
                 and settings.researcher_panel <= 1
                 and getattr(researcher, "client", None) is not None):
             from looplab.search.foresight import ForesightPanelResearcher
@@ -207,7 +207,7 @@ def _engine(run_dir: Path, task: TaskAdapter, settings: Settings,
         elif settings.researcher_panel > 1:
             from looplab.serve.panel import PanelResearcher
             researcher = PanelResearcher(researcher, k=settings.researcher_panel)
-    elif (getattr(settings, "foresight", True) and getattr(settings, "foresight_panel", 1) > 1
+    elif (getattr(settings, "foresight", True) and getattr(settings, "foresight_panel", 2) > 1
           and settings.researcher_panel <= 1
           and getattr(researcher, "client", None) is not None):
         # Foresight in UNIFIED mode: the wrappers above are skipped because they'd re-wrap only the

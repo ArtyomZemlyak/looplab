@@ -57,6 +57,12 @@ _WRITE_RE = re.compile(
     r"open\(\s*['\"]([^'\"]+)['\"]\s*,\s*(?:mode\s*=\s*)?['\"][wa]"
     r"|['\"]([^'\"]+)['\"]\s*\)?\s*\.\s*write_(?:text|bytes)\s*\("
     r"|(?:savetxt|to_csv|to_parquet|save)\s*\(\s*['\"]([^'\"]+)['\"]")
+# Deletion/rename tells for a protected file (arch-review §4 P1-6 — the write-scan missed os.remove):
+# os.remove/os.unlink/shutil.rmtree/send2trash/os.rename(name, ...) and Path("name").unlink(). The
+# capture group is the target filename.
+_DELETE_RE = re.compile(
+    r"(?:os\.remove|os\.unlink|shutil\.rmtree|send2trash|os\.rename|os\.replace)\s*\(\s*['\"]([^'\"]+)['\"]"
+    r"|['\"]([^'\"]+)['\"]\s*\)?\s*\.\s*unlink\s*\(")
 
 
 def detect_reward_hacks(code: str, metric: float | None, direction: str,
@@ -114,6 +120,17 @@ def detect_reward_hacks(code: str, metric: float | None, direction: str,
                 signals.append({"signal": "protected_write",
                                 "detail": f"runtime write to a protected/frozen file: {w!r}"})
                 break
+        # DELETION is also a tamper the write-scan missed (arch-review §4 P1-6): removing/renaming a
+        # protected file (os.remove/os.unlink/Path.unlink/shutil.rmtree/send2trash/os.rename) evades
+        # the on-disk content compare too if it's re-created. The authoritative catch is the runtime
+        # `protected_missing` audit, but flag the static tell here so an `audit`-mode operator sees it.
+        if not any(s["signal"] == "protected_delete" for s in signals):
+            for groups in _DELETE_RE.findall(code):
+                d = next((g for g in groups if g), "")
+                if d and d.replace("\\", "/").lower() in protected:
+                    signals.append({"signal": "protected_delete",
+                                    "detail": f"runtime delete/rename of a protected/frozen file: {d!r}"})
+                    break
 
     # Suspiciously-perfect score: an exact theoretical optimum is rare from real learning and is the
     # classic specification-gaming tell (e.g. MSE == 0.0, accuracy == 1.0). Heuristic, audit-only.

@@ -65,23 +65,37 @@ class EvalDispatchMixin:
             raise RuntimeError(f"run_setup failed (exit={rc}, timed_out={timed}); see {log}\n"
                                + (err or out or "")[-500:])
 
-    def _data_binds(self) -> Optional[list]:
-        """(host_path, read_only) binds for the untrusted tier: every SYMLINK-mounted data /
-        reference source, bound at its own absolute path inside the container (the workspace bind
-        carries only the symlink, which would otherwise dangle there). read_only unless the data
-        source's `edit` permission grants in-place writes — so `edit:false` is enforced at the
-        MOUNT layer for sandboxed runs, not just in the agent-facing write-tool gate. (The
-        trusted_local tier runs on the host and keeps only the tool gate; documented in
-        docs/guide/tasks.md.) Copy-in (mount:false) sources live inside the workdir already."""
+    def _data_binds(self, workdir) -> Optional[list]:
+        """(host_path, read_only) binds for the untrusted tier: every data/reference source that was
+        actually materialized as a SYMLINK in `workdir`, bound at its own absolute path inside the
+        container (the workspace bind carries only the symlink, which would otherwise dangle there).
+        read_only unless the data source's `edit` permission grants in-place writes — so `edit:false`
+        is enforced at the MOUNT layer for sandboxed runs, not just in the agent-facing write-tool
+        gate. (The trusted_local tier runs on the host and keeps only the tool gate; documented in
+        docs/guide/tasks.md.)
+
+        Only ACTUAL symlinks are bound (arch-review §4 P1-8): a source that was copied IN — either
+        `mount:false`, or a `mount:true` source on a host where `os.symlink` fell back to a copy
+        (Windows without the symlink privilege) — already lives inside the /work bind, so re-binding
+        it is redundant, and on Windows its drive-letter path has no valid Linux container target. `workdir`
+        is already seeded (`_materialize` runs before `_run_eval`), so the symlink check is reliable."""
+        wd = Path(workdir)
+
+        def _linked(name) -> bool:
+            try:
+                return (wd / name).is_symlink()
+            except OSError:
+                return False
+
         binds: list = []
-        for spec in (self._repo_spec or {}).get("data", {}).values():
+        for name, spec in (self._repo_spec or {}).get("data", {}).items():
             if isinstance(spec, dict):                    # DataSpec dict | bare path (back-compat)
-                if spec.get("mount", True) and spec.get("path"):
+                if spec.get("mount", True) and spec.get("path") and _linked(name):
                     binds.append((spec["path"], not spec.get("edit", False)))
-            elif spec:
+            elif spec and _linked(name):
                 binds.append((spec, True))
         for ref in (self._repo_spec or {}).get("references", []):
-            if ref.get("mount") and ref.get("path"):
+            if ref.get("mount") and ref.get("path") and _linked(ref["name"]):
                 binds.append((ref["path"], True))         # references are read-only by definition
         return binds or None
 
@@ -126,7 +140,7 @@ class EvalDispatchMixin:
                         root, self.docker_image,
                         mem=self.sandbox_memory or None, cpus=self.sandbox_cpus or None,
                         runtime=("runsc" if self.trust_mode == "hostile" else None),
-                        binds=self._data_binds(),
+                        binds=self._data_binds(workdir),
                         env=env)   # forward LOOPLAB_EVAL_SEED etc. into the container (per-eval env)
                     if self.trust_mode in ("untrusted", "hostile") else None)
             res = command_eval.run_command_eval(

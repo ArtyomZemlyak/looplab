@@ -106,12 +106,21 @@ def test_raw_content_read_routes_are_token_gated(tmp_path, monkeypatch):
                  "/api/runs/demo/chat-log", "/api/runs/demo/spans/abc", "/api/runs/demo/trace",
                  "/api/runs/demo/trace/tail", "/api/runs/demo/trace/by_trace/t1",
                  "/api/runs/demo/nodes/0/conversation", "/api/prompts", "/api/skills",
-                 "/api/knowledge", "/api/memory", "/api/assistant/permissions"):
+                 "/api/knowledge", "/api/memory", "/api/assistant/permissions",
+                 # arch-review §4 P1-3: node DETAIL (full code/files/stdout_tail/parent code) and the
+                 # billable model-completion health check were open; gate them.
+                 "/api/runs/demo/nodes/0", "/api/llm/health"):
         assert client.get(path).status_code == 401, f"{path} should be gated"
         assert client.get(path, headers={"X-LoopLab-Token": "sekret"}).status_code == 200, path
-    # light projection reads stay open without the token (the established contract)
+    # unauthenticated health must NOT reach a (billable) model completion — 401 first
+    assert client.get("/api/llm/health").status_code == 401
+    # assistant progress is gated too (session query required once past auth)
+    assert client.get("/api/assistant/progress?session=x").status_code == 401
+    # light projection reads stay open without the token (the established contract) — including the
+    # LIGHT /nodes/{nid}/metrics projection, which must NOT be over-gated by the node-detail rule
     assert client.get("/api/runs/demo/state").status_code == 200
     assert client.get("/api/runs/demo/events").status_code == 200
+    assert client.get("/api/runs/demo/nodes/0/metrics").status_code == 200
     assert client.get("/api/runs").status_code == 200
 
 
@@ -125,6 +134,41 @@ def test_assistant_session_transcript_is_token_gated(tmp_path, monkeypatch):
     assert client.get("/api/assistant/sessions/whatever").status_code == 401
     # a folded-projection GET still stays open
     assert client.get("/api/runs/demo/state").status_code == 200
+
+
+def test_reserved_run_id_is_case_insensitive(tmp_path):
+    """arch-review §5 P2: a reserved run id (assistant/reports) must be refused case-INSENSITIVELY —
+    on a case-insensitive FS `ASSISTANT` would otherwise alias the reserved service store."""
+    client = TestClient(make_app(tmp_path))
+    for rid in ("assistant", "ASSISTANT", "Assistant", "REPORTS"):
+        r = client.post("/api/start", json={"run_id": rid, "task": {"kind": "quadratic",
+                                                                     "goal": "g", "direction": "min"}})
+        assert r.status_code == 400 and "reserved" in r.json()["detail"], rid
+
+
+def test_public_state_drops_stdout_and_redacts_error(tmp_path):
+    """arch-review §4 P1-3: the public /state projection (served without the UI token) must not ship
+    raw captured stdout, and must redact the short error snippet it shows — a secret the candidate
+    printed could otherwise leak. The full tail stays behind the token-gated node-detail endpoint."""
+    from looplab.events.eventstore import EventStore
+    secret = "AKIAIOSFODNN7EXAMPLE1234"
+    rd = tmp_path / "demo"
+    rd.mkdir(parents=True)
+    s = EventStore(rd / "events.jsonl")
+    s.append("run_started", {"run_id": "demo", "task_id": "t", "goal": "g", "direction": "min"})
+    s.append("node_created", {"node_id": 0, "parent_ids": [], "operator": "draft",
+                              "idea": {"operator": "draft", "params": {}, "rationale": ""}})
+    s.append("node_evaluated", {"node_id": 0, "metric": 1.0,
+                                "stdout_tail": f"token={secret} printed near the start"})
+    s.append("node_created", {"node_id": 1, "parent_ids": [], "operator": "improve",
+                              "idea": {"operator": "improve", "params": {}, "rationale": ""}})
+    s.append("node_failed", {"node_id": 1, "error": f"crashed with key={secret}", "reason": "crash"})
+    client = TestClient(make_app(tmp_path))
+    nodes = client.get("/api/runs/demo/state").json()["state"]["nodes"]
+    assert "stdout_tail" not in nodes["0"]                       # raw captured stdout dropped from /state
+    assert secret not in (nodes["1"].get("error") or "")         # error snippet redacted
+    # the FULL stdout tail is still available via the node-detail endpoint (token-gated in prod)
+    assert secret in (client.get("/api/runs/demo/nodes/0").json().get("stdout_tail") or "")
 
 
 def test_runs_list_state_and_node_detail(tmp_path):

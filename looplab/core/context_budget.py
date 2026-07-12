@@ -47,9 +47,15 @@ def truncate_history(messages: list[dict], max_chars: int, *, keep_last: int = 2
     n = len(messages)
     head = per_msg_cap // 2
 
-    def _mt(s: str) -> str:                       # middle-truncate a long string, keeping head+tail
-        return (s[:head] + f"\n…[truncated {len(s) - 2 * head} chars]…\n" + s[-head:]
-                if len(s) > per_msg_cap else s)
+    def _mt(s: str) -> str:                       # shrink a string toward the aggregate target
+        if len(s) > per_msg_cap:                  # long: middle-truncate, keeping head+tail
+            return s[:head] + f"\n…[truncated {len(s) - 2 * head} chars]…\n" + s[-head:]
+        # SHORT content, but we are still over the AGGREGATE budget: elide it to a compact marker so a
+        # long tail of small messages (each <= per_msg_cap) can still be reduced (arch-review §5 P2 —
+        # the old `msize <= per_msg_cap` skip left the aggregate unbounded: a 2000-char target could
+        # never be reached by many <=400-char turns). Compaction runs oldest-first and STOPS the moment
+        # the running total is back under budget, so the most-recent context is preserved verbatim.
+        return f"…[elided {len(s)} chars]…" if len(s) > 24 else s
 
     def _mt_args(s: str) -> str:
         # A tool call's `arguments` is a JSON STRING that a strict OpenAI-compatible gateway may
@@ -70,7 +76,11 @@ def truncate_history(messages: list[dict], max_chars: int, *, keep_last: int = 2
         # ARGUMENT-heavy turn (a write_file(content=<KB>) carried in tool_calls.arguments, tiny content)
         # actually shrink — otherwise it trips the over-budget trigger but can never be reduced, and the
         # deterministic fallback keeps growing until the endpoint 400s on context length.
-        if protected or msize <= per_msg_cap or total <= max_chars:
+        # Compact every NON-protected message while still over the AGGREGATE budget — not only those
+        # over per_msg_cap. Stop as soon as the running total is back under max_chars (oldest-first), so
+        # the recent turns stay verbatim; if only protected head/tail remain, that is the irreducible
+        # floor and the loop simply appends them (arch-review §5 P2).
+        if protected or total <= max_chars:
             out.append(m)
             continue
         nm: dict = {**m, "content": _mt(str(m.get("content") or ""))}
