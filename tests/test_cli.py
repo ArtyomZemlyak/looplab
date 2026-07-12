@@ -336,3 +336,34 @@ def test_approve_rejects_a_nonexistent_node_id(tmp_path):
     ok = runner.invoke(app, ["approve", str(rd), "--node-id", "0"])
     assert ok.exit_code == 0, ok.output
     assert any(e.type == "approval_granted" for e in EventStore(rd / "events.jsonl").read_all())
+
+
+def test_approve_with_no_best_node_errors(tmp_path):
+    """`approve` with no --node-id and no evaluated best must refuse, not append a bare `None` grant
+    that folds to approved=True and finalizes a run with no champion (code-review test gap)."""
+    from looplab.events.eventstore import EventStore
+    rd = tmp_path / "run"
+    rd.mkdir()
+    es = EventStore(rd / "events.jsonl")
+    es.append("run_started", {"run_id": "r", "task_id": "t", "goal": "g", "direction": "min"})
+    result = runner.invoke(app, ["approve", str(rd)])               # no --node-id, no evaluated node
+    assert result.exit_code == 2, result.output
+    assert "no evaluated best" in result.output
+    assert not any(e.type == "approval_granted" for e in EventStore(rd / "events.jsonl").read_all())
+
+
+def test_approve_defaults_to_best_even_when_best_id_is_zero(tmp_path):
+    """`approve` with no --node-id ratifies the current best; guard the falsy-zero footgun — best.id==0
+    must not be mistaken for "no best" (a future `if nid:` instead of `if nid is None:` would break it)."""
+    from looplab.events.eventstore import EventStore
+    rd = tmp_path / "run"
+    rd.mkdir()
+    es = EventStore(rd / "events.jsonl")
+    es.append("run_started", {"run_id": "r", "task_id": "t", "goal": "g", "direction": "min"})
+    es.append("node_created", {"node_id": 0, "parent_ids": [], "operator": "draft",
+                               "idea": {"operator": "draft", "params": {}, "rationale": ""}})
+    es.append("node_evaluated", {"node_id": 0, "metric": 0.5})      # node 0 IS the best
+    result = runner.invoke(app, ["approve", str(rd)])               # no --node-id -> default best (id 0)
+    assert result.exit_code == 0, result.output
+    grants = [e for e in EventStore(rd / "events.jsonl").read_all() if e.type == "approval_granted"]
+    assert len(grants) == 1 and grants[0].data.get("node_id") == 0

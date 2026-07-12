@@ -355,10 +355,11 @@ class RunState(BaseModel):
     search_epoch: int = 0
     awaiting_approval: bool = False       # HITL: approval requested, not yet granted (I21)
     approved: bool = False                # HITL: a human approved the result (I21)
-    # P0-2 subject-bound approval: the node id the pending approval request was raised for (folded
-    # from `approval_requested`). A grant is honored only if it names this same node — closing
-    # `approval_granted(node_id=999)` globally approving a node that isn't under review. None when
-    # no request is pending (or an old log recorded no subject — then any grant is accepted).
+    # P0-2: the node id the pending approval request was raised for (folded from `approval_requested`),
+    # audit-only — surfaced in the projection so the UI can show WHAT is awaiting approval. It does NOT
+    # gate the grant: `_on_approval_granted` honors any grant that names a REAL node in the run (so an
+    # operator may `approve --node-id N` a non-best node) and rejects a forged/unhashable/non-existent id.
+    # None when no request is pending.
     approval_subject: Optional[int] = None
     archive: Optional[dict] = None        # diversity-archive summary at run end (I22)
     # Breadth read-model recorded at the strategist cadence: the run's narrowing curve (themes,

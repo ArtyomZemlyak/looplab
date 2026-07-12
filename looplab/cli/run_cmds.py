@@ -472,6 +472,13 @@ def approve(run_dir: Path = typer.Argument(..., help="Run dir awaiting approval.
         typer.echo(f"no node #{node_id} in run {run_dir.name} — nothing approved "
                    f"(pass a real node id, or omit --node-id to approve the current best)")
         raise typer.Exit(2)
+    # No explicit id AND no evaluated best -> there is nothing to approve. Appending a bare
+    # `{"node_id": None}` here would still fold to approved=True (the back-compat path) and finalize an
+    # approved run with no champion — refuse instead, symmetric with the bad-id guard above.
+    if nid is None:
+        typer.echo(f"run {run_dir.name} has no evaluated best node to approve yet "
+                   "(nothing to approve — let a node evaluate first, or pass --node-id).")
+        raise typer.Exit(2)
     store.append(EV_APPROVAL_GRANTED, {"node_id": nid})
     typer.echo(f"approved node {nid} for run {run_dir.name}")
 

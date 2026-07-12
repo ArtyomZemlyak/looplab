@@ -553,6 +553,58 @@ def test_run_setup_finished_folds_exactly_once_by_command(tmp_path):
     assert run_setup_key(["make"]) not in fold(s.read_all()).run_setup_done
 
 
+def _fake_eval_engine(store, cmd, trust_mode="trusted_local"):
+    """A minimal object exposing exactly what `EvalDispatchMixin._ensure_run_setup` reads, so the ENGINE
+    skip path (fold-based, cross-process) can be unit-tested without building a whole Engine."""
+    import threading
+    from looplab.engine.eval_dispatch import EvalDispatchMixin
+
+    class _FakeEngine(EvalDispatchMixin):
+        def __init__(self):
+            self.store = store
+            self._eval_spec = {"run_setup": cmd}
+            self.trust_mode = trust_mode
+            self._run_setup_done = False
+            self._run_setup_lock = threading.Lock()
+            self.ran: list = []
+
+        def _do_run_setup(self, c):
+            self.ran.append(c)      # record instead of actually installing
+
+    return _FakeEngine()
+
+
+def test_ensure_run_setup_skips_a_completed_command_on_resume(tmp_path):
+    """arch-review §5 P2 (engine skip path): a fresh Engine whose log already carries a SUCCESSFUL
+    run_setup_finished for this command skips re-running it (crash-safe exactly-once across resume),
+    rather than re-installing deps every resume."""
+    cmd = ["pip", "install", "-r", "requirements.txt"]
+    store = EventStore(tmp_path / "events.jsonl")
+    store.append("run_started", {"run_id": "r", "task_id": "t", "direction": "min"})
+    store.append("run_setup_finished", {"command": cmd, "exit_code": 0, "timed_out": False})
+    eng = _fake_eval_engine(store, cmd)
+    eng._ensure_run_setup()
+    assert eng.ran == [] and eng._run_setup_done is True            # skipped, not re-run
+
+
+def test_ensure_run_setup_runs_when_not_yet_completed(tmp_path):
+    """Conversely, with no prior successful record (fresh run, or only a FAILED prior attempt), the
+    engine actually runs run_setup."""
+    cmd = ["pip", "install", "-r", "requirements.txt"]
+    store = EventStore(tmp_path / "events.jsonl")
+    store.append("run_started", {"run_id": "r", "task_id": "t", "direction": "min"})
+    store.append("run_setup_finished", {"command": cmd, "exit_code": 1, "timed_out": False})  # failed
+    eng = _fake_eval_engine(store, cmd)
+    eng._ensure_run_setup()
+    assert eng.ran == [cmd]                                         # not skipped — the prior attempt failed
+    # an untrusted tier never runs the host-side run_setup (fresh container uses per-node setup)
+    store2 = EventStore(tmp_path / "e2.jsonl")
+    store2.append("run_started", {"run_id": "r", "task_id": "t", "direction": "min"})
+    eng2 = _fake_eval_engine(store2, cmd, trust_mode="untrusted")
+    eng2._ensure_run_setup()
+    assert eng2.ran == [] and eng2._run_setup_done is True          # gated off by trust_mode, not run
+
+
 def test_run_setup_done_serializes_sorted_for_determinism(tmp_path):
     """final ultra-review §A: a str-set dumps in hash-randomized order across processes; the projection
     (looplab replay / /state) must be deterministic, so run_setup_done serializes as a SORTED list."""
@@ -590,8 +642,8 @@ def test_approval_granted_tolerates_unhashable_and_bool_node_id(tmp_path):
     (list/dict) — a sanctioned /control event appended verbatim — must NOT crash fold (hashing an
     unhashable in `subj not in st.nodes` raises TypeError and bricks every replay). A bool id must not
     spuriously match node 1 (bool subclasses int). Both are ignored; the run stays awaiting approval."""
-    for bad in ([999], {}, {"x": 1}, True, False):
-        s = EventStore(tmp_path / f"e_{hash(str(bad)) & 0xffff}.jsonl")
+    for i, bad in enumerate([[999], {}, {"x": 1}, True, False]):   # enumerate -> deterministic, no filename collision
+        s = EventStore(tmp_path / f"e_{i}.jsonl")
         s.append("run_started", {"run_id": "r", "task_id": "t", "direction": "min"})
         _n(s, 0, 0.4)                       # node 0 exists; a bool id must NOT approve it via True->1/0
         _n(s, 1, 0.5)
@@ -605,8 +657,8 @@ def test_annotation_tolerates_unhashable_and_bool_node_id(tmp_path):
     """final-verification §4: `annotation` is a sanctioned /control event appended verbatim and
     `_on_annotation` keys `st.annotations` by node id — a forged unhashable/bool id must not crash the
     fold (setdefault would hash it), the same blocker class as approval_granted."""
-    for bad in ([999], {}, True, "x", None):
-        s = EventStore(tmp_path / f"a_{hash(str(bad)) & 0xffff}.jsonl")
+    for i, bad in enumerate([[999], {}, True, "x", None]):   # enumerate -> deterministic, no filename collision
+        s = EventStore(tmp_path / f"a_{i}.jsonl")
         s.append("run_started", {"run_id": "r", "task_id": "t", "direction": "min"})
         s.append("annotation", {"node_id": bad, "text": "note"})
         st = fold(s.read_all())             # must not raise

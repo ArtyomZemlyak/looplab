@@ -186,6 +186,23 @@ def _attempt_matches(n, d: dict) -> bool:
     return d.get("attempt", n.attempt) == n.attempt
 
 
+def _coerce_node_id(d: dict, key: str = "node_id"):
+    """Coerce a raw event `node_id` to an int for a fold KEY/membership op, or None if it isn't a usable
+    node id. Several sanctioned /control events (`approval_granted`, `annotation`) are appended VERBATIM,
+    so a forged `{"node_id":[999]}` (unhashable) / bool / non-numeric id must be rejected BEFORE it
+    reaches a dict/set hash — else the fold raises `TypeError: unhashable` and bricks every replay. Rejects
+    a bool (subclasses int, so int(True)==1 would spuriously match node 1) and anything non-coercible
+    (incl. a non-finite float -> OverflowError). A missing/None id also returns None; each handler decides
+    whether that means accept (a bare grant) or drop."""
+    v = d.get(key)
+    if v is None or isinstance(v, bool):
+        return None
+    try:
+        return int(v)
+    except (TypeError, ValueError, OverflowError):
+        return None
+
+
 def _on_node_evaluated(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     n = st.nodes.get(d.get("node_id"))          # tolerate an event for an unknown/missing node
     if n is not None and _attempt_matches(n, d):   # (corrupt/hand-edited log) — skip, don't crash
@@ -420,38 +437,25 @@ def _on_data_leakage(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
 
 def _on_approval_requested(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     st.awaiting_approval = True
-    # P0-2: record WHICH node the request is for (the engine emits the current best). The grant
-    # below is honored only for this same subject. `node_id` has always been in the event payload;
-    # reading it now makes old logs bind their (matching) grant identically.
+    # P0-2: record WHICH node the request is for (the engine emits the current best) as audit context,
+    # surfaced in the projection so the UI can show what is awaiting approval. This is NOT the grant
+    # gate — `_on_approval_granted` binds to node existence, not to this subject (see there).
     st.approval_subject = d.get("node_id")
 
 def _on_approval_granted(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
-    # P0-2 subject-bound approval: honor a grant that names a REAL candidate node under review — the
-    # current best, OR an operator-chosen node (`approve --node-id N` / the boss `approve` action both
-    # exist to ratify a specific node). A grant for a node that doesn't exist in the run — a
-    # forged/typo'd `approval_granted(node_id=999)` — is ignored so it can't globally flip `approved`;
-    # the run correctly stays awaiting the real approval. Binding to node EXISTENCE (not to the exact
-    # best) closes the forged-id hole without dropping the legitimate non-best `--node-id` grant.
-    # Back-compat: a bare grant with no node_id (old logs / a direct grant) is accepted, so legacy HITL
-    # runs fold identically.
-    subj = d.get("node_id")
-    if subj is not None:
-        # Make the membership test TOTAL (final-verification §F): node ids are int keys, and
-        # `approval_granted` is a sanctioned /control event appended VERBATIM, so a forged
-        # `{"node_id":[999]}` / `{"node_id":{}}` must not reach `subj not in st.nodes` — hashing an
-        # unhashable list/dict there raises TypeError and bricks every fold/replay/engine-loop (the exact
-        # forged-grant DoS this subject-binding exists to prevent). So: reject a bool (subclasses int, so
-        # int(True)==1 would spuriously match node 1), coerce a JSON string/number id to int, and ignore
-        # anything non-coercible (unhashable container / non-numeric string) WITHOUT hashing it — the run
-        # then stays awaiting the real approval. A `{"node_id":"3"}` still coerces and is honored.
-        if isinstance(subj, bool):
-            return
-        try:
-            subj = int(subj)
-        except (TypeError, ValueError, OverflowError):
-            return   # non-coercible id (incl. a non-finite float that slipped in) -> ignore, never hashed
-        if subj not in st.nodes:
-            return   # not a real candidate — ignore (the run stays awaiting the real approval)
+    # P0-2 approval gate: honor a grant that names a REAL node in the run — the current best OR an
+    # operator-chosen node (`approve --node-id N` / the boss `approve` action both ratify a specific
+    # node). A grant for a node that doesn't exist — a forged/typo'd `approval_granted(node_id=999)`, or
+    # an unhashable/bool/non-numeric id — is ignored, so it can't globally flip `approved`; the run stays
+    # awaiting the real approval. Binding to node EXISTENCE (deliberately NOT to the pending
+    # `approval_subject`) closes the forged-id hole while still allowing a legitimate non-best `--node-id`
+    # grant. The id is coerced/guarded by `_coerce_node_id` BEFORE the membership test so a forged
+    # unhashable id can't raise inside the `in` and brick the fold. Back-compat: a bare grant with no
+    # node_id (old logs / a direct grant) is accepted, so legacy HITL runs fold identically.
+    if d.get("node_id") is not None:               # a TARGETED grant must name a real, coercible node
+        subj = _coerce_node_id(d)
+        if subj is None or subj not in st.nodes:
+            return                                 # forged / unhashable / non-existent -> ignore
     st.awaiting_approval = False
     st.approved = True
     st.approval_subject = None
@@ -744,15 +748,11 @@ def _on_confirm_done(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
 def _on_annotation(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     # `annotation` is a sanctioned /control event appended VERBATIM, and `annotations` is keyed by int
     # node id (dict[int, list[str]]) — so a forged `{"node_id":[999]}` would make `setdefault` hash the
-    # unhashable list and raise TypeError, bricking the fold (same class as the approval grant above,
-    # final-verification §4). Coerce/guard the key first (reject a bool — it subclasses int — and any
-    # non-coercible id) so the key op can never raise; a null/garbage id simply drops the note.
-    nid = d.get("node_id")
-    if isinstance(nid, bool):
-        return
-    try:
-        nid = int(nid)
-    except (TypeError, ValueError, OverflowError):
+    # unhashable list and raise TypeError, bricking the fold (same class as the approval grant above).
+    # `_coerce_node_id` guards the key (reject bool / unhashable / non-coercible) so it can never raise; a
+    # null/garbage id simply drops the note.
+    nid = _coerce_node_id(d)
+    if nid is None:
         return
     st.annotations.setdefault(nid, []).append(d.get("text", ""))
 
