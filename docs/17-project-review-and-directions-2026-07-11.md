@@ -676,6 +676,23 @@ is real but should be scheduled by demonstrated need and reversibility, each car
 treated as one undifferentiated release wall. Report effort per workstream alongside the §7.3 DoD gates so the
 plan can be sequenced by ROI rather than by list order.
 
+**Landed (2026-07-12) — the cheap-fix MVC subset shipped, each with a regression test:**
+
+| MVC item | Status | Where |
+|---|---|---|
+| Duplicate-lifecycle double-charge | ✅ landed | `_on_node_created` no longer resurrects a terminal node (`a3d9ffa`) |
+| Tombstone before physical delete | ✅ landed | `node_tombstoned` event; delete defaults to append-only, `purge=true` opt-in (`4f10f35`) |
+| Always-on background deadline watcher | ✅ landed | `bg_tasks.py` daemon sweeper, no longer lazy-only (`e321837`) |
+| Fail-startup on unsupported lock | ✅ landed | `_engine_singleton` fails closed + `LOOPLAB_ALLOW_UNLOCKED_WRITER` override (`e76d18c`) |
+| Host-RAM cap (subprocess tier) | ✅ landed | opt-in `RLIMIT_AS` via `sandbox_memory_local` (`3ed64ec`) |
+| Artifact freshness gate | ✅ landed | file-based metric readers reject stale workdir artifacts via a `since` mtime gate (`78fbfc3`) |
+
+Still open in the MVC set: the **zombie-run reconciler** (P1-1 — a recoverable-intent kernel, not a standing
+daemon) and the **additive fold-field identity residuals** (bind confirm/holdout/trust/repair effects to the
+attempt generation; stamp `search_epoch` on promotion/finalization; a freshly-hidden per-epoch holdout). Trust
+stays advisory pending the detector-architecture work (§6.6). These extend already-landed patterns; the heavy
+machinery listed above stays deferred.
+
 ---
 
 ## PART III — RESEARCH HYPOTHESES & GATED FEATURE OPTIONS
