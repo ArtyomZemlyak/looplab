@@ -10,6 +10,7 @@
 |---|---|
 | **Status** | current / canonical plan |
 | **As of executable commit** | `369d6a6c6fe0ccf0f921051ffba71c742879bfdb` |
+| **Post-audit increment** | `931c28b` (P0-2 open→partial; census 66/12; see §13.6). Quantitative figures are pinned per statement; unpinned counts are as of `369d6a6`. |
 | **Documentation reconciliation** | `89af408` (doc 18 and post-fix UI disposition) |
 | **Normative for** | priority, dependencies, release gates, feature promotion criteria |
 | **Finding/reproduction authority** | [doc 16](16-architecture-code-review-2026-07-11.md) |
@@ -64,7 +65,8 @@ composition and recommendation · §13 verification and sources.
 **LoopLab has a strong experimental foundation, and the post-audit fix series materially reduced its
 immediate risk, but the remaining frontier is still not small feature work.** Doc 16 originally confirmed
 **7 P0 and 12 P1 findings**. At `369d6a6`, the exact reproductions behind many of them are contained and
-covered by regression tests. P0-2, P1-1, and P1-12 remain wholly open; the rest range from a closed original
+covered by regression tests. P1-1 and P1-12 remain wholly open (P0-2 advanced open→partial at `931c28b` —
+the reopen-epoch + subject-bound approval increment; see §13.6); the rest range from a closed original
 reproduction to a partial architectural contract, depending on the residual stated in §13.2. Commit titles
 are therefore not counted automatically as architectural closure.
 
@@ -79,7 +81,7 @@ run-instance, and manifest boundaries.
 
 | Axis | Verdict |
 |---|---|
-| **Architecture** | **Strong substrate, partially contained lifecycle model.** Setup completion, terminal-attempt generation, several permission/path boundaries, and event-log repair landed. Search epoch, complete attempt/request identity, immutable run manifests, hard budget reservation, and one control writer remain missing. |
+| **Architecture** | **Strong substrate, partially contained lifecycle model.** Setup completion, terminal-attempt generation, the reopen-search-epoch + subject-bound approval, several permission/path boundaries, and event-log repair landed. Full search-epoch stamping (promotion/finalization and per-epoch hidden holdout), complete attempt/request identity, immutable run manifests, hard budget reservation, and one control writer remain missing. |
 | **Code & tests** | **Substantial, disciplined, and green in validation CI.** The remediation series added focused regressions and the full suite passes for validation commit `89af408`; green examples do not prove the remaining interleavings, fail-open-lock behavior, object authorization, unpolled deadlines, or workspace identity. |
 | **Functionality** | **Broad, unevenly production-ready.** The default trust posture is mostly audit/off, temporal CV has no shipped caller, six adapters are synthetic/harness-oriented, and the isolated real-task path is under-validated. |
 | **Directions** | **Finish residual stabilization, then promote features through gates.** Offline discovery may continue, but live production activation still waits for the relevant identity, policy, budget, and provenance contracts. |
@@ -89,8 +91,11 @@ Four incomplete identity families explain much of the residual defect cluster:
 1. **`NodeAttemptId`** — reset now increments a node `attempt`, and stamped `node_evaluated`/`node_failed`
    terminals from an older attempt are rejected (`47f786a`). Confirmation, holdout, trust, abort, repair,
    forced-operation, artifact, and cost effects are not all scoped to that generation, so P0-1 is partial.
-2. **`SearchEpoch`** — reopening can retain confirmation, holdout, approval, and finalization state from an
-   older candidate set.
+2. **`SearchEpoch`** — reopening a *finished* run now bumps `search_epoch` and re-opens confirmation and
+   subject-bound approval for the new candidate set (`931c28b`), so an older champion no longer locks
+   selection. The residual is partial: holdout is not re-hidden per epoch, and promotion/finalization outputs
+   are not yet epoch-stamped, so a reopened run still scores against an already-disclosed holdout — P0-2
+   partial (§13.6).
 3. **`RequestId` + `SubjectHash`** — permission resolution now uses pending→resolved CAS and centrally gates
    MCP/background kill (`87dfc7e`), but approvals, aborts, forced operations, and promotion/finalization
    decisions are not all bound to the exact request and subject revision.
@@ -110,7 +115,7 @@ top engineering priority:
    host-side scoring and held-out selection while **most optional confirmation, detector, and enforcement
    mechanisms remain disabled** — a narrower posture than the product and the UI's own
    "Trust & rigor — the point of LoopLab" panel
-   (`ui/src/panels.jsx:118`) — advertises. The reproduced false-clean workdir states and leakage-regex
+   (`ui/src/panels.jsx:132`) — advertises. The reproduced false-clean workdir states and leakage-regex
    precision/recall defects are fixed (`d8d240c`, `4d0f362`, `13f087c`); **do not enable hard gating by
    default until a labelled calibration corpus establishes precision, recall, abstention, and missing-input
    behavior beyond those examples.**
@@ -155,7 +160,7 @@ Hotspots (LoC): `engine/orchestrator.py` 1497 · `events/replay.py` 1008 ·
 | **Composable task front-end** | 🟡 | Capability inference and ambiguity checks are useful; conflicting `{repo, editable_path}` aliases are now rejected (`4c6c59f`). Relative sources can still resolve in different parent/child contexts, and aliases are not a substitute for a canonical InputSnapshot. |
 | **Roles & backends (ADR-7)** | 🟡 | Role routing is broad. BestOfN/Validating wrappers now forward parent-aware hooks (`65221f6`), closing the reproduced baseline-regeneration bug. RepoDeveloper step outcomes remain stringly and wrappers still lack a typed `DevelopmentResult` contract. |
 | **"Evaluator" role** | ⬜ | There is **no first-class Evaluator**; verification is a distributed subsystem (sandbox + host grader + trust gates + critic + memo-verifier), and `trust/cv.py`'s `Evaluator` Protocol is **unused**. A naming/architecture gap. |
-| **Search policies** | 🟡 | Greedy is the static default and alternatives are opt-in/under-benchmarked. More importantly, policies disagree about raw vs promoted fitness after reopen because confirmation/holdout state lacks a search epoch (P0-2). |
+| **Search policies** | 🟡 | Greedy is the static default and alternatives are opt-in/under-benchmarked. Reopen now bumps `search_epoch` and re-opens confirmation/approval (P0-2 partial, `931c28b`); the residual disagreement about raw vs promoted fitness is driven by holdout reuse and unstamped promotion/finalization, not confirmation. |
 | **Operators** | 🟡 | The operator set is rich. Reset now bumps an attempt generation and rejects stale eval/fail terminals, and ablation wall time is charged (`47f786a`, `a5f74b1`). Other attempt-scoped effects, forced-operation request identity, and reserve-before-spawn accounting remain open. |
 | **Trust layer** | 🟡 for audit; gated promotion uncalibrated | Defaults are mostly disabled/`trust_gate="audit"`; held-out selection is on. Missing/unreadable protected files now fail closed and the reproduced leakage-regex defects are fixed (`d8d240c`, `4d0f362`, `13f087c`). A labelled detector corpus, epoch-bound evidence, and abstention policy are still required before global hard gating. Temporal CV remains unwired. |
 | **Sandbox / command evaluation** | 🟡 | Stage/adapter/prediction path escapes, non-finite timeouts, post-spawn NUL cleanup, and Windows bind grammar were fixed (`cdc5423`, `c4a2113`). Full CPU/RAM/disk enforcement, an unpolled deadline watcher, bounded readers/regex, and a validated real-adapter image/data contract remain. |
@@ -188,8 +193,10 @@ assistant or production remote execution until its permission and process bounda
 ### 4. Code & test health
 
 The codebase is substantial and often disciplined; the previous conclusion failed by equating a large green
-suite with coverage of the system's hardest state and effect boundaries. Current size is 170 production Python
-modules / 40,242 physical lines and 157 Python test files / 27,170 physical lines. Doc 16's historical
+suite with coverage of the system's hardest state and effect boundaries. Current size (as of the pinned
+`369d6a6`) is 170 production Python modules / 40,242 physical lines and 157 Python test files / 27,170
+physical lines; the `931c28b` increment adds ~128 production and ~248 test lines with no new modules (§13.6).
+Doc 16's historical
 baseline records two Linux runs (Python 3.11 and 3.12) at **1,711 passed, 33 skipped, 1 stale-test failure**
 each. More importantly for this revision, the complete GitHub `python -m pytest` workflow and strict docs
 workflow both pass for validation commit `89af408` (code tree `369d6a6`; §13.2). This is strong regression
@@ -216,7 +223,7 @@ append boundary and platform process-tree tests.
 #### Structural debt — sequence it behind the state model
 
 - **The mixin Engine is a shared-state god object.** The 12 mixins improve navigation but share an implicit
-  `self` with roughly 106 initialized attributes. This is real debt, but a broad extraction before the event
+  `self` with roughly 111 initialized attributes. This is real debt, but a broad extraction before the event
   identities are fixed would merely redistribute ambiguous state.
 - **Domain contracts are stringly/duck-typed.** Untyped policy actions, provider strings, optional Developer
   methods, and flat lifecycle fields let wrappers and clients silently lose semantics.
@@ -417,7 +424,7 @@ fail-closed behavior so safety does not depend on an operator remembering this l
 | Workstream | Primary finding IDs | Status | Scope | Depends on | Exit gate |
 |---|---|---|---|---|---|
 | **R0 — fail-closed containment** | P0-4, P0-6, P0-7; P1-3, P1-6, P1-7, P1-11, P1-12 | **in progress · release blocker** | **Landed:** known corrupt-tail refusal/repair, permission CAS and MCP/kill gates, stage/path/timeout containment, tri-state workdir audit, named leakage fixes, strategy-param guard, event partition, aggregate-context fix. **Remaining:** recheck divergence under writer coordination, fail on unsupported locks, default-deny route/object scopes, one ToolSpec/effect inventory, global PathPolicy/fresh artifacts, calibrated advisory policy, durable wakeup | none | every known and newly identified bypass is red before and green after; unambiguous v1 logs still read; no unsupported shared mode starts |
-| **R1 — event/state identity** | P0-1, P0-2; P1-12 | **in progress · release blocker** | **Landed:** node attempt generation for eval/fail terminals. **Remaining:** run instances, event/evaluation IDs, attempt scope for all effects, search epochs, request/subject revisions, transition validator, append CAS, typed payload/upcaster registry | R0 | model-based stale-event/reset/reopen/approval tests; exactly one terminal per attempt; no old instance/attempt/epoch can mutate, promote, or finalize |
+| **R1 — event/state identity** | P0-1, P0-2; P1-12 | **in progress · release blocker** | **Landed:** node attempt generation for eval/fail terminals; reopen-of-finished `search_epoch` bump with confirmation/approval re-open and subject-bound (existence-checked) approval (P0-2 partial, `931c28b`). **Remaining:** run instances, event/evaluation IDs, attempt scope for all effects, full search-epoch stamping of promotion/finalization plus a per-epoch hidden holdout, request/subject revisions on all forced/control requests, transition validator, append CAS, typed payload/upcaster registry | R0 | model-based stale-event/reset/reopen/approval tests; exactly one terminal per attempt; no old instance/attempt/epoch can mutate, promote, or finalize |
 | **R2 — durability/reproducibility** | P0-3, P0-5; replay extensions in §13.2 | **in progress · release blocker** | **Landed:** folded setup completion/re-entry, different-task and alias refusal, corrupt-log repair. **Remaining:** content-addressed setup steps; RunManifest/InputSnapshot; attempt-scoped clean workdirs and ArtifactManifests; strict `run` vs `resume`; repair generation/digest provenance | R1 | crash at every setup/effect boundary converges or fails closed; dirty inputs and stale outputs cannot masquerade as current |
 | **R3 — execution infrastructure** | P1-2, P1-4, P1-5, P1-8 | **in progress · stabilization blocker** | **Landed:** ablation cost accounting, explicit background tree kill/wait, finite timeout/path fixes, `--mount` Windows grammar. **Remaining:** multidimensional reserve-before-spawn BudgetLedger; session-owned deadline watcher; bounded logs/readers/regex; stable cross-platform input mapping; physical token/deadline/OS quotas | R0–R2 | no over-admission; incurred stale-worker cost is settled once; no orphan tree after kill; memory/disk bounds; real Windows/Linux matrix green |
 | **R4 — typed domain services** | P0-2; P1-7, P1-9, P1-11 | **in progress · stabilization blocker** | **Landed:** parent-aware wrapper forwarding and the concrete strategy-param bypass fix. **Remaining:** TaskSpec/capabilities; DevelopmentRequest/Result; ToolSpec/Result/ExecutionContext; SearchFitness/PromotionFitness; versioned TrustEvidence/Decision; lifecycle/evaluation/promotion/strategy services | R1–R3 | wrappers preserve typed capabilities/failures; one policy gate and one fitness owner; Engine remains a compatible facade |
@@ -503,10 +510,12 @@ route/tool policy to default-deny, finish object authorization and ToolSpec cove
 heuristics advisory, and add durable resume intent plus reconciler liveness. Temporarily reject ambiguous
 reset/reopen/run-dir reuse. Add a tombstone event before further physical `events.jsonl` deletion work.
 
-**Horizon 1 — complete identity and reproducibility.** Extend the landed terminal-attempt generation to
+**Horizon 1 — complete identity and reproducibility.** Extend the landed terminal-attempt generation and the
+landed reopen-`SearchEpoch`/subject-bound approval (`931c28b`) to
 every node effect; land `RunInstanceId`, the v2 envelope/upcaster registry, and append CAS; then
 `NodeAttemptRef`/`EvaluationRef` with clean attempt workdirs, ArtifactManifests, and fresh-output checks;
-then `SearchEpoch`/PromotionState/RequestLedger with subject-bound approvals; finally evolve the landed
+then complete `SearchEpoch`/PromotionState/RequestLedger — epoch-stamped promotion/finalization and a
+per-epoch hidden holdout on top of the landed reopen partial, with subject-bound approvals; finally evolve the landed
 setup-completion boolean into content-addressed setup plus `RunManifest`/`InputSnapshot`. Every PR must keep
 old unambiguous logs readable. Legacy reset/reopen
 logs are marked identity-ambiguous and continue only through an explicit new boundary or legacy read-only
@@ -702,9 +711,9 @@ the sole source of truth.
 | Concern | Seam | Change |
 |---|---|---|
 | Storage/format | `knowledge/{frameworks,libs}/*.md` | Add dirs plus stable IDs, schema validation, canonical serialization, content/source digests, and atomic lifecycle updates |
-| **Note metadata** | `KnowledgeWriteTools`/`KnowledgeTools` (`knowledge_tools.py:163-189, 220-265`) | Borrow parsing ideas from Skills, but implement one shared schema rather than copying its reader/writer regex divergence |
+| **Note metadata** | `KnowledgeWriteTools`/`KnowledgeTools` (`knowledge_tools.py:163-189, 211-265`) | Borrow parsing ideas from Skills, but implement one shared schema rather than copying its reader/writer regex divergence |
 | Trust lifecycle | central ToolPolicy + candidate/reviewed/invalid ledger | Web/agent writes always enter `candidate`; only an authorized review transition reaches the trusted index; invalidation is append-only/auditable |
-| Indexing/retrieval | `KnowledgeTools._build_index`/`_records` (`knowledge_tools.py:220-265`) | Separate trusted curated and untrusted/ingested facets; index schema/model/version and rebuild from canonical notes; add type/version filters |
+| Indexing/retrieval | `KnowledgeTools._build_index`/`_records` (`knowledge_tools.py:211-265`) | Separate trusted curated and untrusted/ingested facets; index schema/model/version and rebuild from canonical notes; add type/version filters |
 | Environment observation | `tools/env_inspect.py` | Run inside the same pinned evaluation environment/image, bind results to its digest, enforce a timeout, and prefer non-import source/metadata inspection where possible; document the pairing (curated note ↔ observed API) |
 | Agent access | `kb_search`/`read_note` (+ `use_skill`) | Expose provenance/status/version in results and keep external text data-only; do not auto-promote retrieved instructions into tool authority |
 | Persistence | `InMemoryVectorStore` (`vectorstore.py:165-201`) | Fine for the pilot; measure rebuild latency/corpus threshold before selecting a persistent index. Persisted index is derived, never canonical |
@@ -792,7 +801,7 @@ good fit, but the provenance graph and navigation policy are new work.
 #### The ready-made seam — a dormant `CaseLibrary`
 
 There is a **`CaseLibrary`** class (`memory.py:514-609`) — VectorStore-backed, with anchor-expanding
-`retrieve` (`:578-585`), build-time `_consolidate` of near-duplicates (`:545-576`), and `retain_if_improved`
+`retrieve` (`:578-585`), build-time near-duplicate consolidation on `add` (`:545-556`) via `_consolidate` (`:559-576`), and `retain_if_improved`
 (`:587-609`) — **defined but never instantiated in production** (the wired one is `JsonlCaseLibrary`, a flat
 keyword top-k, `:449-511`). It is a reusable retrieval/consolidation primitive, not “80% of a pyramid”: it has
 no level model, typed provenance, persistent tier indices, navigation state, principal scope, or evaluation.
@@ -883,8 +892,8 @@ test-time search scaling (which for us is ADR-6's throughput lever).
   equivalent profile) after R0/R2/R3/R4: host-classified read/network effects, explicit egress approval,
   allow/deny rules, bounded tool/token/time budget, cached source bytes+digest+retrieval time, and untrusted-
   content separation. The
-  plumbing to *act* on the output already exists — when `track_hypotheses` is on (default True) the first 5
-  non-empty `recommended_directions` become OPEN hypotheses (`research_cadence.py:130-136`), and all top-5
+  plumbing to *act* on the output already exists — when `track_hypotheses` is on (default True) up to the
+  first 5 `recommended_directions` (blank entries skipped) become OPEN hypotheses (`research_cadence.py:130-136`), and all top-5
   also surface as a standing operator hint (`research_cadence.py:122-126`). Seam: `make_deep_researcher`
   (`deep_research.py:214`) plus the policy/provenance/budget services. Start explicit opt-in; consider a
   task-scoped default only after the security and usefulness benchmark.
@@ -983,8 +992,8 @@ not a heuristic inferred from adapter name.
 | Lever | Status today | Gap |
 |---|---|---|
 | Concentration proxy | **Built** — `coverage_signal` (`coverage.py:50-100`), recorded every cadence | Within-run theme-label concentration only; not calibrated against semantic/citation distance or human judgements; drives proposal content reactively, never selection |
-| Novelty gate | `_llm_novelty_gate` default (`novelty.py:70-131`) — **within-run dedup** ("already tried in THIS run"), prefers NOVEL only vs repeats; doesn't hard-reject (worst case keeps the original) | No notion of "too close to the seed literature"; `"algo"` semantic gate off by default (`config.py:298`) — but *fires* whenever the Strategist flips stance to `explore` |
-| Diversity archive | `DiversityArchive` (`archive.py:12-46`) — **audit-only** (`core/models.py:335` stores its run-end summary); build() feeds only the `niches` count into `coverage_signal` | No MAP-Elites "expand an empty niche" operator |
+| Novelty gate | `_llm_novelty_gate` default (`novelty.py:70-131`) — **within-run dedup** ("already tried in THIS run"), prefers NOVEL only vs repeats; doesn't hard-reject (worst case keeps the original) | No notion of "too close to the seed literature"; the embedding/semantic duplicate check is off by default (`novelty_semantic`, `config.py:298`), while the broader deterministic novelty gate separately *fires* whenever the Strategist flips stance to `explore` |
+| Diversity archive | `DiversityArchive` (`archive.py:12-46`) — **audit-only** (`core/models.py:363` stores its run-end summary); build() feeds only the `niches` count into `coverage_signal` | No MAP-Elites "expand an empty niche" operator |
 | Selection diversity | Only `GreedyTree`'s **IMPROVE** arm targets `state.best()` (`policy.py:286`); parent-selection diversity lives in `weighted_parent` (`policy.py:133`, used by `EvolutionaryPolicy`), `MCTSPolicy` (`policy.py:369`), ASHA/BOHB (`policy.py:450`) — **all off by default** (`policy=greedy`) | Default is exploitation on the IMPROVE arm; **the agentic Strategist *can* switch policy at runtime** (`agent_control`) — reactively |
 | Broaden lever | Strategist `novelty_stance=explore\|balanced\|exploit` (`strategist.py:50-68`) — **the main dial**; the default `strategist_backend='agent'` (`config.py:377`) governs it live | **Reactive**: `_rule_novelty_stance` flips to `explore` only *after* concentration ≥0.6–0.75 (`strategist.py:145-160`), i.e. after collapse; stall logic keys on metric stagnation, blind to coverage collapse (`strategist.py:305-324`) |
 | Diverse seeding | Genesis authors *what to solve*, not an idea portfolio (`genesis.py:161-238`); seeds = 3 blind drafts (`policy.py:225-227`) | No "generate N orthogonal seed directions" step |
@@ -1084,7 +1093,7 @@ default-on web, a production pyramid, or a global diversity policy.
 
 | Earlier claim | Current disposition |
 |---|---|
-| Architecture is sound; correctness/replay are not concerns | **Refuted as a baseline claim.** Doc 16's seven P0 and twelve P1 reproductions were real. The post-audit series contains fixes for many of them; the current tally is **2 fixed / 14 partial / 3 open** (§13.2). |
+| Architecture is sound; correctness/replay are not concerns | **Refuted as a baseline claim.** Doc 16's seven P0 and twelve P1 reproductions were real. The post-audit series contains fixes for many of them; the current tally is **2 fixed / 15 partial / 2 open** (§13.2, P0-2 advanced open→partial at `931c28b`). |
 | The remaining frontier is small and mostly flags | **Refuted.** R0–R5 are prerequisite engineering programs; feature flags expand unsafe surfaces if enabled first. |
 | `resume = replay` | **Refuted as a continuation guarantee.** Projection comes from the log; continuation also depends on task/config/source/environment/workdirs/processes/shared memory. |
 | Event log is universally append-only/idempotent | **Narrowed.** First-terminal-wins holds within one matching node-attempt generation. Full lifecycle duplication can re-charge cost, and ordinary node delete currently rewrites the log. |
@@ -1103,7 +1112,7 @@ to **partial** in the follow-on increment at `931c28b` — see §13.6):
 | Finding | Status | Landed containment | Residual exit gate |
 |---|---|---|---|
 | P0-1 attempt identity | **partial** | `47f786a`: attempt generation rejects stale eval/fail terminals | bind confirm/holdout/trust/abort/repair/forced/cost/artifact effects |
-| P0-2 epoch/subject identity | **partial** | `931c28b`: reopen-of-finished bumps `search_epoch` and re-opens confirmation + approval for the new candidate set; subject-bound (existence-checked) approval; `spec_approved` requires a proposal (§13.6) | stamp `search_epoch` on promotion/finalization outputs; subject/`expected_seq` on all forced/control requests; epoch-specific still-hidden holdout |
+| P0-2 epoch/subject identity | **partial** | `a23ca92`+`daf585d` (increment tip `931c28b`): reopen-of-finished bumps `search_epoch` and re-opens confirmation + approval for the new candidate set; subject-bound (existence-checked) approval; `spec_approved` requires a proposal (§13.6) | stamp `search_epoch` on promotion/finalization outputs; subject/`expected_seq` on all forced/control requests; epoch-specific still-hidden holdout |
 | P0-3 setup crash window | **partial** | `5f5ce46`: folded completion and crash re-entry | content-addressed step state and manifest digest |
 | P0-4 invisible event tail | **partial** | `57e6312`, `13f087c`: JSON/Event-envelope refusal and repair | recheck under writer coordination; serialize repair; collision-safe digest provenance |
 | P0-5 run/task/workspace mixing | **partial** | `4c6c59f`: different-task and conflicting-alias refusal | canonical config/source/dirty-bytes/environment InputSnapshot |
@@ -1122,9 +1131,10 @@ to **partial** in the follow-on increment at `931c28b` — see §13.6):
 | P1-11 strategy params | **fixed** | `ca3c9fe`: asymmetric policy-param bypass closed | typed StrategyDelta is R4 evolution, not a residual of this finding |
 | P1-12 fail-open locks/CAS | **open** | — | mandatory lock or startup refusal plus expected-revision append CAS |
 
-- Current census was reproduced: 170 production Python files / 40,242 physical lines; 157 Python test files /
-  27,170 physical lines; 78 event types, 65 fold handlers, 13 explicit diagnostic types, and zero
-  unclassified registered types.
+- Current census was reproduced (as of the pinned `369d6a6`): 170 production Python files / 40,242 physical
+  lines; 157 Python test files / 27,170 physical lines; 78 event types, 65 fold handlers, 13 explicit
+  diagnostic types, and zero unclassified registered types. At `931c28b` this is 66 fold handlers / 12
+  diagnostic (78 registered, zero unclassified) after `run_setup_finished` moved diagnostic→folded — see §13.6.
 - Doc 16 records full Linux Python 3.11 and 3.12 runs of **1,711 passed, 33 skipped, 1 failed** each. The one
   repeated failure came from a stale test patch targeting the old `urllib` seam, while the implementation had
   moved to OpenAI SDK/httpx; current watchdog/raw-httpx tests pass. This is historical evidence for the
@@ -1263,7 +1273,7 @@ risky slices:
    state-sensitive appends. This is a platform-dependent storage-layer change, not a local patch. (§13.2 P1-12;
    KurrentDB expected-revision, SQLite WAL in §13.4.)
 4. **Engine decomposition (structural debt).** `Engine` remains a distributed god-object (12 mixins, ~120
-   methods, ~110 constructor fields sharing one mutable projection), which is *why* a reset invalidates local
+   methods, ~111 constructor fields sharing one mutable projection), which is *why* a reset invalidates local
    node fields but can miss run-level collections. Fix: split into typed services (`NodeLifecycleService`,
    `EvaluationService`, `PromotionService`, `StrategyController`) behind the Engine compatibility facade, only
    after service tests exist — a pure refactor with no immediate correctness payoff, so it is sequenced after
