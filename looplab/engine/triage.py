@@ -109,21 +109,29 @@ def _normalize_error_sig(err: str) -> str:
     return s[-160:]
 
 
-def _holdout_indices(n: int, fraction: float) -> frozenset:
+def _holdout_indices(n: int, fraction: float, epoch: int = 0) -> frozenset:
     """D1: the deterministic holdout partition over n host-held labels. A pure function of
-    (n, fraction) — identical on every resume/replay with no state to persist.
+    (n, fraction, epoch) — identical on every resume/replay with no state to persist.
 
     Reserves an EXACT count = round(fraction·n) rows (clamped to [1, n-1] whenever fraction>0), so
     the holdout size is controlled even for small n — a per-index Bernoulli threshold would leave
     the count uncontrolled (e.g. n=4, frac=0.25 could reserve 0/2/3 rows), making the champion-
     selecting 'unseen signal' noisy on exactly the small-data tasks where it matters most. Which
     rows are chosen is spread deterministically through the label order by Knuth multiplicative
-    hashing (no head/tail bias if the data is sorted)."""
+    hashing (no head/tail bias if the data is sorted).
+
+    P0-2 freshly-hidden per-epoch holdout: `epoch` (RunState.search_epoch) SALTS the hash so a run
+    reopened after finishing scores its new candidates on a DIFFERENT, never-disclosed partition
+    instead of the already-revealed one ('already-seen exam'). `epoch=0` XORs with 0 -> the exact
+    original selection, so a normal single-epoch run (and every existing log/golden replay) is
+    byte-identical; only a reopened run (epoch>=1) rotates to a fresh split."""
     if float(fraction) <= 0 or n < 2:
         return frozenset()          # fraction 0 = holdout off; n<2 can't split without collapsing
     k = max(1, min(n - 1, int(round(float(fraction) * n))))   # exact reserved count, non-degenerate
-    # Pick the k rows with the smallest hash — a stable, uniform, deterministic selection.
-    ranked = sorted(range(n), key=lambda i: (((i * 2654435761) & 0xFFFFFFFF), i))
+    # Pick the k rows with the smallest hash — a stable, uniform, deterministic selection. The epoch
+    # salt (0 for the first search) reshuffles which rows rank smallest per epoch; XOR 0 is identity.
+    salt = (int(epoch) * 0x9E3779B1) & 0xFFFFFFFF
+    ranked = sorted(range(n), key=lambda i: ((((i * 2654435761) ^ salt) & 0xFFFFFFFF), i))
     return frozenset(ranked[:k])
 
 

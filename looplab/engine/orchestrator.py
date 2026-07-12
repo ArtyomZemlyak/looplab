@@ -787,10 +787,14 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         # before vs. after a config change would be scored on different splits and the champion pick
         # would mix incomparable metrics. Recorded holdout_select likewise wins on resume.
         if _entry.holdout_fraction is not None:
-            if _entry.holdout_fraction != self._holdout_fraction:
-                self._holdout_fraction = _entry.holdout_fraction
-                self._holdout_idx = self._build_holdout_idx(self._holdout_fraction)
+            self._holdout_fraction = _entry.holdout_fraction
             self._holdout_select = _entry.holdout_select
+            # P0-2 freshly-hidden per-epoch holdout: rebuild the partition for the CURRENT search
+            # epoch. A run reopened after finishing (search_epoch>=1) then scores its new candidates
+            # on a never-disclosed split instead of the one revealed at the prior finish ('already-
+            # seen exam'). Epoch 0 rebuilds the byte-identical original partition, so a normal
+            # single-epoch run (and every replay of an existing log) is unchanged.
+            self._holdout_idx = self._build_holdout_idx(self._holdout_fraction, _entry.search_epoch)
         # E4: cross-run meta-learned priors. Excluding THIS run's id matters on resume: a run that
         # already mid-run-distilled its own comparative lessons (M6) must not read them back as if
         # they were another run's experience — its own results are already in the digest. The stamp
@@ -1464,8 +1468,8 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
     def _host_score_split(self, preds, g: dict, *, holdout: bool) -> Optional[float]:
         return self.holdout.host_score_split(preds, g, holdout=holdout)
 
-    def _build_holdout_idx(self, fraction: float) -> frozenset:
-        return self.holdout.build_holdout_idx(fraction)
+    def _build_holdout_idx(self, fraction: float, epoch: int = 0) -> frozenset:
+        return self.holdout.build_holdout_idx(fraction, epoch)
 
     def _holdout_topk(self, state: RunState) -> list[int]:
         return self.holdout.holdout_topk(state)

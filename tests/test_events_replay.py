@@ -212,6 +212,34 @@ def test_fold_confirm_and_holdout_bound_to_attempt(tmp_path):
     assert fold(s.read_all()).nodes[0].confirmed_mean == 0.2
 
 
+def test_fold_reopen_rehides_holdout(tmp_path):
+    # P0-2: reopening a finished run bumps the search epoch and CLEARS the disclosed holdout (gate +
+    # node metrics) so the new epoch re-scores its leaders on a fresh split; a holdout score stamped
+    # with the prior epoch is dropped after the reopen, and a current-epoch one lands.
+    s = EventStore(tmp_path / "e.jsonl")
+    s.append("run_started", {"run_id": "r", "task_id": "t", "direction": "min", "holdout_select": True})
+    s.append("node_created", {"node_id": 0, "parent_ids": [], "operator": "draft",
+                              "idea": {"operator": "draft", "params": {}}, "code": "c"})
+    s.append("node_evaluated", {"node_id": 0, "metric": 0.5})
+    s.append("holdout_evaluated", {"node_id": 0, "metric": 0.4, "search_epoch": 0})
+    s.append("best_confirmed", {"node_id": 0, "significant": True})
+    s.append("run_finished", {"reason": "done"})
+    st = fold(s.read_all())
+    assert 0 in st.holdout_evaluated_ids and st.nodes[0].holdout_metric == 0.4
+    s.append("run_reopened", {})                                     # epoch 0 -> 1
+    st = fold(s.read_all())
+    assert st.search_epoch == 1
+    assert list(st.holdout_evaluated_ids) == [] and st.nodes[0].holdout_metric is None
+    # a STALE holdout score (prior epoch 0) after the reopen is dropped
+    s.append("holdout_evaluated", {"node_id": 0, "metric": 0.99, "search_epoch": 0})
+    st = fold(s.read_all())
+    assert st.nodes[0].holdout_metric is None and 0 not in st.holdout_evaluated_ids
+    # a FRESH holdout score at the current epoch (1) lands
+    s.append("holdout_evaluated", {"node_id": 0, "metric": 0.2, "search_epoch": 1})
+    st = fold(s.read_all())
+    assert st.nodes[0].holdout_metric == 0.2 and 0 in st.holdout_evaluated_ids
+
+
 def test_log_divergence_detects_mid_file_corruption(tmp_path):
     from looplab.events.eventstore import log_divergence
     p = tmp_path / "events.jsonl"

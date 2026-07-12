@@ -436,6 +436,11 @@ def _on_holdout_evaluated(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> N
     # bumped the generation) must neither mark the gate nor set holdout_metric on the new code.
     if n is not None and not _attempt_matches(n, d):
         return
+    # P0-2 epoch guard: a holdout score from a PRIOR search epoch (its split was disclosed at the
+    # prior finish) must not land in the current epoch — the reopen re-scores on a fresh split. Old
+    # logs (no search_epoch) default to the current epoch and fold identically.
+    if d.get("search_epoch", st.search_epoch) != st.search_epoch:
+        return
     if nid is not None and nid not in st.holdout_evaluated_ids:
         st.holdout_evaluated_ids.append(nid)   # gate: attempted, even if metric is null
     if n is not None and d.get("metric") is not None:
@@ -671,6 +676,16 @@ def _on_resume_or_run_reopened(st: RunState, e: Event, d: dict, ctx: "_FoldCtx")
         st.approved = False
         st.awaiting_approval = False
         st.approval_subject = None
+        # P0-2 freshly-hidden per-epoch holdout: the prior epoch's holdout was DISCLOSED at the
+        # finish (its scores drove the champion pick), so the reopened epoch must NOT re-score its
+        # new candidates on that same partition — the engine rebuilds `_holdout_idx` for the new
+        # epoch (a different, never-disclosed split). Clear the gate + the now-stale holdout metrics
+        # so the holdout phase re-runs and re-scores every current leader on the fresh split (keeping
+        # the champion comparable on ONE holdout). New holdout_evaluated events carry the new epoch;
+        # a late one stamped with the prior epoch is dropped by the epoch guard in _on_holdout_evaluated.
+        st.holdout_evaluated_ids.clear()
+        for _n in st.nodes.values():
+            _n.holdout_metric = None
     st.paused = False
     st.finished = False
     st.stop_reason = None
