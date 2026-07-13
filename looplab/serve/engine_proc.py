@@ -157,6 +157,51 @@ def _run_lifecycle_lock(rd: Path):
     with local, _interprocess_lock(_run_lifecycle_lock_path(rd)):
         yield
 
+
+def sweep_stale_lifecycle_locks(root: Path, *, max_age_s: float = 3600.0) -> int:
+    """Best-effort startup GC of orphaned per-run lifecycle lock files (F22). These live in the runs
+    root and are deliberately never deleted inline (their inode is the fence during a run's own delete),
+    so a long-lived server slowly accumulates one `.looplab-lifecycle-*.lock` dot-file per run ever
+    resumed/reset/deleted. Remove one ONLY when it is (a) OLD — untouched for `max_age_s`, while a real
+    lifecycle op touches its lock within seconds — AND (b) not currently held (a non-blocking flock
+    acquires cleanly). Removing an unheld stale lock never breaks locking: a later op recreates the file
+    on demand. Skips silently on any error or a mount without flock. Returns the count removed."""
+    import time
+    try:
+        candidates = list(root.glob(".looplab-lifecycle-*.lock"))
+    except OSError:
+        return 0
+    now = time.time()
+    removed = 0
+    for lp in candidates:
+        try:
+            if now - lp.stat().st_mtime < max_age_s:
+                continue                       # recently touched → an op may be using it; leave it
+        except OSError:
+            continue
+        if os.name == "nt":
+            try:                               # Windows refuses to unlink an open/locked file → skip
+                lp.unlink()
+                removed += 1
+            except OSError:
+                pass
+            continue
+        try:
+            import fcntl
+            with open(lp, "a") as f:
+                try:
+                    fcntl.flock(f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except OSError:
+                    continue                   # held by a live op (or flock unsupported) → leave it
+                try:
+                    lp.unlink()                # unlink WHILE holding the flock: no op can be mid-write
+                    removed += 1
+                finally:
+                    fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+        except OSError:
+            continue
+    return removed
+
 # A resume can arrive after ``run_finished`` has landed but before the old engine releases its
 # singleton lock (final read-model/trace writes still run).  Returning ``already_running`` in that
 # window loses the wake-up: the old loop has already broken and no replacement is spawned.  Keep one

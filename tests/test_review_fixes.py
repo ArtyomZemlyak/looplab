@@ -150,3 +150,41 @@ def test_modern_holdout_disclosure_still_requeues():
     # (holdout_epoch_aware is back to False here — the rotation that event 8 triggers CONSUMES it.)
     assert st.nodes[0].metric is None and st.nodes[0].status is NodeStatus.pending
     assert st.nodes[0].attempt == 1
+
+
+# ------------------------------------------------------------ F18: env_changed folds once (dedup)
+def test_env_changed_is_folded_and_deduped():
+    """F18: env_changed now sets a folded flag (like workspace_changed) so the emit is gated on
+    `not state.env_changed` — no unbounded re-append across resumes. It must be folded, not diagnostic."""
+    from looplab.events.types import DIAGNOSTIC_EVENTS
+    import looplab.events.replay as R
+    assert T.EV_ENV_CHANGED in R._HANDLERS and T.EV_ENV_CHANGED not in DIAGNOSTIC_EVENTS
+    st = fold([Event(seq=1, type=T.EV_ENV_CHANGED, ts=0.0, data={"was": {}, "now": {}})])
+    assert st.env_changed is True
+
+
+# ------------------------------------------------------- F25: /state no longer masks identifiers
+def test_public_state_value_keeps_identifiers():
+    """F25: the entropy heuristic used to mask legitimate high-entropy identifiers on the public /state.
+    A run-slug / content-hash must now pass through; a known key-pattern is still redacted."""
+    from looplab.serve.appstate import _public_state_value
+    assert _public_state_value("runs/exp_2026_ablation_study_v3") == "runs/exp_2026_ablation_study_v3"
+    assert _public_state_value("a" * 40) == "a" * 40
+    masked = _public_state_value("sk-ant-api03-" + "x" * 40)             # known key pattern still masked
+    assert "***" in masked and "xxxx" not in masked
+
+
+# ---------------------------------------------------- F22: stale lifecycle lock sweep is safe
+def test_sweep_stale_lifecycle_locks_only_old_and_unheld(tmp_path):
+    """F22: the startup GC removes only OLD, UNHELD lifecycle lock files — never a fresh one, a held
+    one, or a non-lock file."""
+    import os
+    import time
+    from looplab.serve.engine_proc import sweep_stale_lifecycle_locks
+    old = tmp_path / ".looplab-lifecycle-aaa.lock"; old.write_text("")
+    fresh = tmp_path / ".looplab-lifecycle-bbb.lock"; fresh.write_text("")
+    keep = tmp_path / "events.jsonl"; keep.write_text("x")
+    past = time.time() - 7200
+    os.utime(old, (past, past))
+    assert sweep_stale_lifecycle_locks(tmp_path) == 1
+    assert not old.exists() and fresh.exists() and keep.exists()

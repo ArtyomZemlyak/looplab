@@ -37,7 +37,7 @@ from looplab.serve.protocol import CONTROL_EVENTS, POLL_SECONDS  # noqa: F401 �
 from looplab.adapters.tasks import make_llm_client  # noqa: F401 — patchable re-export
 from looplab.serve.engine_proc import (  # noqa: F401 — _engine_alive/_kill_process_tree re-exported
     _engine_alive, _kill_process_tree, _on_shared_hub, install_reap_hooks,
-    install_resume_reconcile_hooks)
+    install_resume_reconcile_hooks, sweep_stale_lifecycle_locks)
 from looplab.serve.projects import ProjectStore
 from looplab.serve.schemas import _GenesisSpec  # noqa: F401 — historical pure-model re-export
 from looplab.serve.settings_store import SettingsStore
@@ -245,6 +245,7 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
     projects = ProjectStore(root / "projects.json")   # ClearML-style run organization (UI-only)
     # JupyterHub reaper hooks (ASGI shutdown + atexit backstop) — registered before the secret
     # priming below, matching the original make_app construction side-effect order.
+    sweep_stale_lifecycle_locks(root)   # F22: GC orphaned per-run lifecycle lock files at startup
     resume_cancel = install_resume_reconcile_hooks(app, root)
     # Shutdown handlers run in registration order. Cancel/join resume timers + tail waiters first,
     # then reap every child that was registered before cancellation won the spawn gate.

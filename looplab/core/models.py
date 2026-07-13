@@ -438,6 +438,9 @@ class RunState(BaseModel):
     # run_started, and whether a resume detected the source changed underneath.
     workspace: Optional[dict] = None
     workspace_changed: bool = False
+    # F18: folded like workspace_changed so the env-drift note is emitted ONCE, not re-appended on
+    # every resume of an upgraded run (the emit is gated on `not state.env_changed`).
+    env_changed: bool = False
     # P0-5 environment identity: the Python/platform + key-library version fingerprint pinned at
     # run_started. A resume compares the current environment against it and emits `env_changed` (a
     # diagnostic) on drift — a run continued after a library upgrade is no longer bit-reproducible, so

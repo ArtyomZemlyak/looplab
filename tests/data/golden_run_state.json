@@ -123,6 +123,7 @@
   "dirty_inputs": [],
   "drifts": [],
   "env": null,
+  "env_changed": false,
   "eval_seconds_by_kind": {
     "node": 0.273
   },

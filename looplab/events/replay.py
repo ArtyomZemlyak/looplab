@@ -12,7 +12,7 @@ from looplab.core.models import (Event, Hypothesis, Idea, Node, NodeStatus, RunS
 from looplab.events.types import (
     EV_ABLATE, EV_AGENT_DECISION, EV_AGENT_VALIDATED, EV_ANNOTATION, EV_APPROVAL_GRANTED,
     EV_APPROVAL_REQUESTED, EV_BEST_CONFIRMED, EV_BUDGET_EXTEND, EV_CONFIRM_DONE,
-    EV_CONFIRM_EVAL, EV_DATA_LEAKAGE, EV_DATA_PROFILED, EV_DATA_PROVENANCE,
+    EV_CONFIRM_EVAL, EV_DATA_LEAKAGE, EV_DATA_PROFILED, EV_DATA_PROVENANCE, EV_ENV_CHANGED,
     EV_COVERAGE_SNAPSHOT, EV_DEEP_RESEARCH, EV_DIVERSITY_ARCHIVE, EV_FINALIZATION_FINISHED,
     EV_FORCE_ABLATE, EV_FORCE_CONFIRM,
     EV_FORESIGHT_SELECTED, EV_FORK,
@@ -1056,6 +1056,10 @@ def _on_spec_drift(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
 def _on_workspace_changed(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     st.workspace_changed = True                 # resume saw the source repo/data change
 
+
+def _on_env_changed(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
+    st.env_changed = True                       # resume saw the Python/lib environment drift (F18)
+
 def _on_diversity_archive(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     st.archive = d
 
@@ -1603,6 +1607,7 @@ _HANDLERS = {
     EV_SPEC_APPROVED: _on_spec_approved,
     EV_SPEC_DRIFT: _on_spec_drift,
     EV_WORKSPACE_CHANGED: _on_workspace_changed,
+    EV_ENV_CHANGED: _on_env_changed,
     EV_DIVERSITY_ARCHIVE: _on_diversity_archive,
     EV_COVERAGE_SNAPSHOT: _on_coverage_snapshot,
     EV_LLM_COST: _on_llm_cost,

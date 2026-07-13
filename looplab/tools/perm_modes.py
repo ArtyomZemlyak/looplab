@@ -56,15 +56,21 @@ DEFAULT_PROTECT = [
     "**/events.jsonl", "**/spans.jsonl", "**/readmodel.sqlite", "**/engine.lock",
     "**/task.snapshot.json", "**/config.snapshot.json",
     "**/answers/**", "**/answers.csv", "**/held_out/**", "**/private/**",
-    # grader / grade / grading files — anchored to a filename-boundary COMPONENT (name-start, or after
-    # a `_`/`-` separator) so upgrade.py / downgrade.py / upgrader.py (which merely CONTAIN "grade")
-    # stay editable, while grader.py / grade.py / grading.py / mle_grader.py / grade_submission.py stay
-    # protected. The old `**/*grade*.py` used fnmatch's substring `*` and locked upgrade.py in EVERY mode.
-    "**/grade*.py", "**/grader*.py", "**/grading*.py",
-    "**/*_grade*.py", "**/*-grade*.py",
-    # `autograder.py`/`autograde.py` is a common no-separator grader convention — protect it (but NOT
-    # `autograd.py`, the PyTorch lib: `autograde*` needs the trailing `e`, which `autograd` lacks).
-    "**/autograde*.py",
+    # grader / grade / grading files — protected BROADLY (any name containing "grade"/"grader"/"grading")
+    # so no-separator forms like `mygrader.py` / `pregrader.py` / `finalgrader.py` are caught too (F11),
+    # not just the separated `mle_grader.py`. Migration scripts that merely CONTAIN "grade"
+    # (upgrade.py / downgrade.py / upgrader.py) — which no glob can distinguish from a real grader — are
+    # carved back out by DEFAULT_PROTECT_EXCEPTIONS below. (`autograd.py`, the PyTorch lib, has no
+    # "grade" substring — g-r-a-d, no trailing 'e' — so it stays editable.)
+    "**/*grade*.py", "**/*grader*.py", "**/*grading*.py",
+]
+
+# Editable EXCEPTIONS that OVERRIDE the broad grader protection above (F11): migration scripts that
+# contain "grade"/"grader" but are NOT graders. Threaded into SurfacePolicy(allow_exceptions=...) only
+# on the DEFAULT protect path (WriteTools); a repo task's OWN manifest protect list is never overridden.
+DEFAULT_PROTECT_EXCEPTIONS = [
+    "**/upgrade.py", "**/downgrade.py", "**/upgrader.py", "**/downgrader.py",
+    "**/upgrade_*.py", "**/downgrade_*.py",       # alembic-style migration scripts (e.g. upgrade_003.py)
 ]
 
 

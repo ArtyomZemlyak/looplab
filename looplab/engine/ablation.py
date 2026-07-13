@@ -50,7 +50,10 @@ class AblationMixin:
                 if not current:
                     cancel.set()
                     return
-                await anyio.sleep(0.1)
+                # 1.0s, not 0.1s (F26): each check re-folds the whole event log; 10x/s per probe was
+                # O(total-events) CPU scaling with run length. First check runs before the sleep, so
+                # the ~1s supersede-cancel latency never delays a fresh probe.
+                await anyio.sleep(1.0)
 
         def _run():
             return self.sandbox.run(

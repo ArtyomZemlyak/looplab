@@ -54,7 +54,13 @@ def _public_state_value(value):
     if isinstance(value, tuple):
         return [_public_state_value(v) for v in value]
     if isinstance(value, str):
-        return redact_secrets(value)
+        # entropy=False (F25): the entropy heuristic masked legitimate high-entropy IDENTIFIERS
+        # (config_hash, data_provenance content digests, run-slugs like `runs/exp_2026_ablation_v3`)
+        # as ***REDACTED*** on the public /state, breaking any UI/client logic keyed on them. Keep only
+        # the known-secret-PATTERN redaction here (sk-…/AWS-key shapes — no usability cost); the one
+        # free-form field where an unknown-format secret could realistically appear, node `error`, still
+        # gets full entropy redaction on its own path in `state_payload`.
+        return redact_secrets(value, entropy=False)
     return value
 
 

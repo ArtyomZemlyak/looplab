@@ -81,7 +81,11 @@ class ConfirmPhaseMixin:
                     if not current:
                         cancel.set()
                         return
-                    await anyio.sleep(0.1)
+                    # 1.0s, not 0.1s (F26): each check re-folds the WHOLE event log, so 10x/s per active
+                    # seed was O(total-events) CPU that scaled with run length. The first check runs
+                    # immediately (before the sleep); a ~1s supersede-cancel latency is imperceptible on
+                    # an eval that runs seconds-to-minutes.
+                    await anyio.sleep(1.0)
 
             def _run():
                 return self._run_eval(
