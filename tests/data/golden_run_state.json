@@ -132,6 +132,7 @@
   "fork_requests": [],
   "forks_done": 0,
   "goal": "min (x-3)^2",
+  "holdout_epoch_aware": false,
   "holdout_evaluated_ids": [],
   "holdout_fraction": 0.25,
   "holdout_select": true,

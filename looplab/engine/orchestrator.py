@@ -1708,7 +1708,8 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         changed rather than trusting a stale boolean. Deterministic (pure content hashes), so an
         unchanged workspace yields the recorded digest and never loops. `wf` may be passed to reuse an
         already-computed fingerprint. Both hashlib + orjson are imported for the setup block above."""
-        cfg = hashlib.sha256(orjson.dumps(self.task.model_dump(mode="json"))).hexdigest()[:12]
+        cfg = hashlib.sha256(orjson.dumps(self.task.model_dump(mode="json"),
+                                          option=orjson.OPT_SORT_KEYS)).hexdigest()[:12]
         wf = self._workspace_fingerprint() if wf is None else wf
         prov = {name: hashlib.sha256(
                     c.encode("utf-8") if isinstance(c, str) else bytes(c)).hexdigest()[:16]

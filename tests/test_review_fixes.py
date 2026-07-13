@@ -95,3 +95,58 @@ def test_options_preflight_not_gated_by_ui_token(monkeypatch):
     assert r.headers.get("access-control-allow-origin") == "http://localhost:5173"
     # a real mutating request without the token is still gated
     assert client.post("/api/runs/demo/control", json={"etype": "pause", "data": {}}).status_code == 401
+
+
+# ---------------------------------------------------------- F3: headerless SSE + share stay unauth-safe
+def test_unauth_api_ok_allows_sse_and_share_not_state():
+    """F3/F21: the redacted SSE stream and the intentionally-untokened share route must be servable
+    without the UI token (EventSource can't send it); ordinary reads/controls must NOT be."""
+    from looplab.serve.server import _unauth_api_ok
+    assert _unauth_api_ok("/api/health")
+    assert _unauth_api_ok("/api/runs/demo/events")
+    assert _unauth_api_ok("/api/assistant/shared/abc123")
+    assert not _unauth_api_ok("/api/runs/demo/state")
+    assert not _unauth_api_ok("/api/runs/demo/control")
+    assert not _unauth_api_ok("/api/runs/demo/nodes/0")
+
+
+# ------------------------------------------------------ F2: legacy holdout must not wipe incumbents
+def _holdout_scenario(*, stamped):
+    def idea(op="seed"):
+        return {"operator": op, "rationale": "r", "params": {"x": 1}}
+
+    def ev(seq, t, d):
+        return Event(seq=seq, type=t, data=d, ts=0.0)
+    evs = [
+        ev(1, T.EV_RUN_STARTED, {"run_id": "r", "task_id": "tk", "direction": "min", "holdout_select": True}),
+        ev(2, T.EV_NODE_CREATED, {"node_id": 0, "operator": "seed", "idea": idea(), "generation": 0}),
+        ev(3, T.EV_NODE_EVALUATED, {"node_id": 0, "metric": 1.0, "generation": 0}),
+        ev(4, T.EV_NODE_CREATED, {"node_id": 1, "operator": "seed", "idea": idea(), "generation": 0}),
+        ev(5, T.EV_NODE_EVALUATED, {"node_id": 1, "metric": 5.0, "generation": 0}),
+    ]
+    h0, h1 = {"node_id": 0, "metric": 1.1}, {"node_id": 1, "metric": 5.1}
+    if stamped:                                   # a modern producer stamps search_epoch + generation
+        h0.update({"search_epoch": 0, "generation": 0})
+        h1.update({"search_epoch": 0, "generation": 0})
+    evs += [ev(6, T.EV_HOLDOUT_EVALUATED, h0), ev(7, T.EV_HOLDOUT_EVALUATED, h1),
+            ev(8, T.EV_NODE_CREATED, {"node_id": 2, "operator": "draft", "idea": idea("draft"), "generation": 0})]
+    return fold(evs)
+
+
+def test_legacy_holdout_disclosure_does_not_wipe_incumbents():
+    """F2: replaying an old (unstamped) holdout_select log must NOT requeue/wipe surviving incumbents
+    when a later candidate lands — that changed the selected best on replay (invariant 5b)."""
+    st = _holdout_scenario(stamped=False)
+    assert st.holdout_epoch_aware is False
+    assert st.nodes[0].metric == 1.0 and st.nodes[1].metric == 5.0   # metrics preserved
+    assert st.best_node_id == 0                                       # best unchanged
+
+
+def test_modern_holdout_disclosure_still_requeues():
+    """F2 no-regression: a modern (search_epoch-stamped) disclosure MUST still requeue incumbents onto
+    the newly-hidden complement when a later candidate lands."""
+    from looplab.core.models import NodeStatus
+    st = _holdout_scenario(stamped=True)
+    # (holdout_epoch_aware is back to False here — the rotation that event 8 triggers CONSUMES it.)
+    assert st.nodes[0].metric is None and st.nodes[0].status is NodeStatus.pending
+    assert st.nodes[0].attempt == 1

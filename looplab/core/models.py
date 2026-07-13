@@ -466,6 +466,12 @@ class RunState(BaseModel):
     # its predictions file was gone). The replay-safe gate that stops the holdout phase from
     # re-attempting a node forever on resume.
     holdout_evaluated_ids: list[int] = Field(default_factory=list)
+    # Whether the CURRENTLY-disclosed holdout was recorded with epoch semantics (a modern
+    # holdout_evaluated stamps `search_epoch`; a legacy one does not). Derived during fold, not
+    # persisted. Gates the metric-wiping requeue when a later candidate change re-hides the split:
+    # legacy holdout logs predate search epochs and must NOT wipe surviving incumbents on replay
+    # (invariant 5b — old logs fold as before). Default False = legacy-safe for old logs.
+    holdout_epoch_aware: bool = False
 
     # --- live operator control (UI intervention via the event log) ---
     # These are folded from appended CONTROL events (intent). The engine remains the sole writer

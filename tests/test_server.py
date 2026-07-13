@@ -125,11 +125,16 @@ def test_raw_content_read_routes_are_token_gated(tmp_path, monkeypatch):
     assert client.get("/api/assistant/progress?session=x").status_code == 401
     # P1-3 deny-default: even LIGHT projection reads now require the token (a new sensitive route can no
     # longer leak by being omitted from an allow-list). The zero-model /api/health is the sole exception.
-    for light in ("/api/runs/demo/state", "/api/runs/demo/events",
+    for light in ("/api/runs/demo/state",
                   "/api/runs/demo/nodes/0/metrics", "/api/runs"):
         assert client.get(light).status_code == 401, light
         assert client.get(light, headers={"X-LoopLab-Token": "sekret"}).status_code == 200, light
     assert client.get("/api/health").status_code == 200          # zero-model liveness stays open
+    # F3: the live-state SSE stream is the ONE deny-default exception. The browser consumes it via a
+    # headerless EventSource that CANNOT send X-LoopLab-Token, and its payload is already redacted, so
+    # it MUST serve without the token — else every live update 401-loops and the dashboard freezes.
+    with client.stream("GET", "/api/runs/demo/events") as resp:
+        assert resp.status_code == 200
 
 
 def test_assistant_session_transcript_is_token_gated(tmp_path, monkeypatch):

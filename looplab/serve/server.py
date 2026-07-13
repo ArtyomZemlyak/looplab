@@ -80,6 +80,21 @@ def _ui_dist() -> Path:
 # affects it, only an untokened same-origin caller. (The old `_RAW_GET_*` sensitive enumeration is now
 # subsumed by deny-default; kept below only as documentation of the raw surface.)
 _SAFE_UNAUTH_API = ("/api/health",)   # zero-model liveness — the sole untokened-OK exact /api/ route
+
+
+def _unauth_api_ok(p: str) -> bool:
+    """Whether an /api/ path is safe to serve WITHOUT the UI token. Beyond the exact zero-model liveness
+    route, this includes the live-state SSE stream `/api/runs/<id>/events`: the browser consumes it via a
+    headerless `EventSource` that CANNOT attach `X-LoopLab-Token`, and its payload is already redacted
+    (`appstate._public_state_value`) precisely so it is safe unauthenticated. Gating it 401-loops every
+    live update and freezes the dashboard on any token-protected deployment (F3). The suffix match is
+    exact to the one SSE route (`runs.py::stream_events`); no other `/api/runs/.../events` route exists."""
+    return (p in _SAFE_UNAUTH_API
+            or (p.startswith("/api/runs/") and p.endswith("/events"))
+            # The share route (assistant.py::assistant_shared) is INTENTIONALLY untokened and returns
+            # only the read-only, separately-redacted transcript (_shared_message / _shared_text) — so a
+            # share link works for a non-token holder. Default-deny would otherwise 401 it (F21).
+            or p.startswith("/api/assistant/shared/"))
 _RAW_GET_SUFFIX = ("/artifact", "/artifacts", "/log", "/logs", "/agents_md", "/chat-log",
                    "/conversation", "/assistant/permissions", "/assistant/progress")
 _RAW_GET_EXACT = ("/api/prompts", "/api/skills", "/api/knowledge", "/api/memory", "/api/llm/health")
@@ -221,7 +236,8 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
             # request, and it has no side effect. Gating it here 401s the preflight before CORSMiddleware
             # can answer it, which blocks EVERY cross-origin API call from an allow-listed origin. Let it
             # through so CORSMiddleware can respond.
-            if (request.method != "OPTIONS" and p.startswith("/api/") and p not in _SAFE_UNAUTH_API
+            if (request.method != "OPTIONS" and p.startswith("/api/")
+                    and not _unauth_api_ok(p)
                     and request.headers.get("X-LoopLab-Token") != ui_token):
                 return JSONResponse({"detail": "unauthorized (missing/invalid UI token)"},
                                     status_code=401)
