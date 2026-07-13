@@ -1,10 +1,11 @@
 """Domain models + event envelope (I0). Pydantic v2; JSON Schemas derive from these."""
 from __future__ import annotations
 
+import math
 from enum import Enum
 from typing import Any, Optional
 
-from pydantic import BaseModel, Field, field_serializer, model_validator
+from pydantic import BaseModel, Field, field_serializer, field_validator, model_validator
 
 
 class NodeStatus(str, Enum):
@@ -26,7 +27,7 @@ class Idea(BaseModel):
     # Honored by the engine ONLY when the governance matrix grants the researcher the "timeout" setting
     # (Settings.agent_control); otherwise ignored. None => use the run-wide timeout. Flows through the
     # event log on the Idea automatically (no new event), so it's replay-safe.
-    eval_timeout: Optional[float] = Field(default=None, gt=0, allow_inf_nan=False)
+    eval_timeout: Optional[float] = None
     # Semantic grouping (UI #7): a short, reusable slug the Researcher assigns to cluster related
     # experiments in one search tree (e.g. "loss-fn", "architecture", "regularization"). Optional
     # and audit-only — never affects search/selection; the UI groups nodes by it. Flows through the
@@ -83,6 +84,24 @@ class Idea(BaseModel):
             if v < lo or v > hi:
                 self.params[k] = round(min(hi, max(lo, v)), 6)
         return self
+
+    @field_validator("eval_timeout", mode="before")
+    @classmethod
+    def _coerce_eval_timeout(cls, v):
+        # `eval_timeout` is LLM-proposed and its ONLY consumer treats a non-positive/non-finite value as
+        # "unset" (engine/eval_dispatch: `if etv and etv > 0`). COERCE such values to None rather than
+        # REJECT them: the fold rebuilds every idea through this validator, so a hard `gt=0`/`allow_inf_nan`
+        # constraint would raise ValidationError inside `Idea(**d["idea"])` and silently DROP a node when
+        # replaying an old log that carried eval_timeout ∈ {0, negative, inf, nan} — an invariant-5
+        # back-compat break (old logs must fold as before). Coercing keeps the "0 => use run default"
+        # semantics the consumer already honors, on both the live and replay paths, in one place.
+        if v is None:
+            return None
+        try:
+            f = float(v)
+        except (TypeError, ValueError):
+            return None
+        return f if math.isfinite(f) and f > 0 else None
 
 
 class Trial(BaseModel):
@@ -419,6 +438,9 @@ class RunState(BaseModel):
     # run_started, and whether a resume detected the source changed underneath.
     workspace: Optional[dict] = None
     workspace_changed: bool = False
+    # F18: folded like workspace_changed so the env-drift note is emitted ONCE, not re-appended on
+    # every resume of an upgraded run (the emit is gated on `not state.env_changed`).
+    env_changed: bool = False
     # P0-5 environment identity: the Python/platform + key-library version fingerprint pinned at
     # run_started. A resume compares the current environment against it and emits `env_changed` (a
     # diagnostic) on drift — a run continued after a library upgrade is no longer bit-reproducible, so
@@ -447,6 +469,12 @@ class RunState(BaseModel):
     # its predictions file was gone). The replay-safe gate that stops the holdout phase from
     # re-attempting a node forever on resume.
     holdout_evaluated_ids: list[int] = Field(default_factory=list)
+    # Whether the CURRENTLY-disclosed holdout was recorded with epoch semantics (a modern
+    # holdout_evaluated stamps `search_epoch`; a legacy one does not). Derived during fold, not
+    # persisted. Gates the metric-wiping requeue when a later candidate change re-hides the split:
+    # legacy holdout logs predate search epochs and must NOT wipe surviving incumbents on replay
+    # (invariant 5b — old logs fold as before). Default False = legacy-safe for old logs.
+    holdout_epoch_aware: bool = False
 
     # --- live operator control (UI intervention via the event log) ---
     # These are folded from appended CONTROL events (intent). The engine remains the sole writer

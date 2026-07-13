@@ -890,7 +890,9 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         # library change — a run continued after an upgrade is no longer bit-reproducible, so record it
         # instead of pretending it is. Diagnostic-only (mirrors workspace_changed). state.env is None on
         # the first run (run_started is appended mid-setup, after this fold) and on old logs -> skipped.
-        if state.env is not None:
+        if state.env is not None and not state.env_changed:
+            # `not state.env_changed` (F18): emit the drift note ONCE. Without the folded-flag gate a
+            # run resumed repeatedly after an env upgrade re-appended an identical env_changed every time.
             _cur_env = self._env_fingerprint()
             if _cur_env != state.env:
                 self.store.append(EV_ENV_CHANGED, {"was": state.env, "now": _cur_env})
@@ -1708,7 +1710,8 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         changed rather than trusting a stale boolean. Deterministic (pure content hashes), so an
         unchanged workspace yields the recorded digest and never loops. `wf` may be passed to reuse an
         already-computed fingerprint. Both hashlib + orjson are imported for the setup block above."""
-        cfg = hashlib.sha256(orjson.dumps(self.task.model_dump(mode="json"))).hexdigest()[:12]
+        cfg = hashlib.sha256(orjson.dumps(self.task.model_dump(mode="json"),
+                                          option=orjson.OPT_SORT_KEYS)).hexdigest()[:12]
         wf = self._workspace_fingerprint() if wf is None else wf
         prov = {name: hashlib.sha256(
                     c.encode("utf-8") if isinstance(c, str) else bytes(c)).hexdigest()[:16]

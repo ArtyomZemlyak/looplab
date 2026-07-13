@@ -73,6 +73,10 @@ DEFAULT_AGENT_CONTROL: dict[str, list[str]] = {
     "max_nodes": ["strategist", "boss"],
     "max_eval_seconds": ["strategist", "boss"],
     "policy": ["strategist"],
+    # The policy NAME and its PARAMS are gated independently in `_apply_strategy`; grant both by default
+    # so the Strategist that may switch to (say) MCTS may also apply the `c`/`eta` it decided — else its
+    # tuned params are silently dropped and the recorded `active_strategy` diverges from the live engine.
+    "policy_params": ["strategist"],
     "n_seeds": ["strategist"],
     "ablate_every": ["strategist"],
     "merge_mode": ["strategist"],

@@ -144,8 +144,8 @@ _LAYOUT = {
     "run_tools": "tools",
     "machine_runs_tools": "tools",
     "sandbox": "runtime",
-    "scope_report": "serve",
     "schemas": "serve",
+    "scope_report": "serve",
     "serve_prompts": "serve",   # UI-server prompt strings ("prompts" is taken by core/prompts.py)
     "server": "serve",
     "settings_store": "serve",

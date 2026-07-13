@@ -266,8 +266,13 @@ class BackgroundManager:
             pending = max(0, size - t["cursor"])
             text = skip_note + chunk.decode("utf-8", "replace")
         self._enforce_deadline(t)   # reap a task past its wall-clock budget before reporting status
-        self._reap(t)
-        rc = t["proc"].poll()
+        # Serialize the reaping poll() against a concurrent watcher kill (F10): poll() reaps the child
+        # and frees its PID, so an unlocked poll() here could reap mid-_kill_tree and let killpg target a
+        # REUSED PID — the exact hazard `deadline_lock` exists to prevent. `_enforce_deadline` already
+        # released the lock (or never took it), so re-acquiring here does not re-enter.
+        with t["deadline_lock"]:
+            self._reap(t)
+            rc = t["proc"].poll()
         return {"ok": True, "task_id": tid, "cmd": t["cmd"],
                 "status": "running" if rc is None else "exited", "exit_code": rc,
                 "new_output": text, "pending": pending, "timed_out": t.get("timed_out", False)}
@@ -278,8 +283,9 @@ class BackgroundManager:
         out = []
         for tid, t in items:
             self._enforce_deadline(t)
-            self._reap(t)
-            rc = t["proc"].poll()
+            with t["deadline_lock"]:      # F10: serialize the reaping poll() against a watcher kill
+                self._reap(t)
+                rc = t["proc"].poll()
             out.append({"task_id": tid, "cmd": t["cmd"],
                         "status": "running" if rc is None else "exited", "exit_code": rc,
                         "timed_out": t.get("timed_out", False)})

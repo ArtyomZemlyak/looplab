@@ -37,7 +37,7 @@ from looplab.serve.protocol import CONTROL_EVENTS, POLL_SECONDS  # noqa: F401 �
 from looplab.adapters.tasks import make_llm_client  # noqa: F401 — patchable re-export
 from looplab.serve.engine_proc import (  # noqa: F401 — _engine_alive/_kill_process_tree re-exported
     _engine_alive, _kill_process_tree, _on_shared_hub, install_reap_hooks,
-    install_resume_reconcile_hooks)
+    install_resume_reconcile_hooks, sweep_stale_lifecycle_locks)
 from looplab.serve.projects import ProjectStore
 from looplab.serve.schemas import _GenesisSpec  # noqa: F401 — historical pure-model re-export
 from looplab.serve.settings_store import SettingsStore
@@ -79,7 +79,22 @@ def _ui_dist() -> Path:
 # authenticated UI attaches the token to every request (ui/src/api.js::_authHeaders), so this never
 # affects it, only an untokened same-origin caller. (The old `_RAW_GET_*` sensitive enumeration is now
 # subsumed by deny-default; kept below only as documentation of the raw surface.)
-_SAFE_UNAUTH_API = ("/api/health",)   # zero-model liveness — the sole untokened-OK /api/ route
+_SAFE_UNAUTH_API = ("/api/health",)   # zero-model liveness — the sole untokened-OK exact /api/ route
+
+
+def _unauth_api_ok(p: str) -> bool:
+    """Whether an /api/ path is safe to serve WITHOUT the UI token. Beyond the exact zero-model liveness
+    route, this includes the live-state SSE stream `/api/runs/<id>/events`: the browser consumes it via a
+    headerless `EventSource` that CANNOT attach `X-LoopLab-Token`, and its payload is already redacted
+    (`appstate._public_state_value`) precisely so it is safe unauthenticated. Gating it 401-loops every
+    live update and freezes the dashboard on any token-protected deployment (F3). The suffix match is
+    exact to the one SSE route (`runs.py::stream_events`); no other `/api/runs/.../events` route exists."""
+    return (p in _SAFE_UNAUTH_API
+            or (p.startswith("/api/runs/") and p.endswith("/events"))
+            # The share route (assistant.py::assistant_shared) is INTENTIONALLY untokened and returns
+            # only the read-only, separately-redacted transcript (_shared_message / _shared_text) — so a
+            # share link works for a non-token holder. Default-deny would otherwise 401 it (F21).
+            or p.startswith("/api/assistant/shared/"))
 _RAW_GET_SUFFIX = ("/artifact", "/artifacts", "/log", "/logs", "/agents_md", "/chat-log",
                    "/conversation", "/assistant/permissions", "/assistant/progress")
 _RAW_GET_EXACT = ("/api/prompts", "/api/skills", "/api/knowledge", "/api/memory", "/api/llm/health")
@@ -217,7 +232,12 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
             # an untokened same-origin caller, which is who the token defends against. The raw surface
             # the old list enumerated (/artifacts, /log, /spans, /nodes/{nid}, /assistant/sessions,
             # /api/{prompts,skills,knowledge,memory}, …) is all covered now by "deny unless allow-listed".
-            if (p.startswith("/api/") and p not in _SAFE_UNAUTH_API
+            # OPTIONS is the CORS preflight: the browser sends it WITHOUT the token, before the real
+            # request, and it has no side effect. Gating it here 401s the preflight before CORSMiddleware
+            # can answer it, which blocks EVERY cross-origin API call from an allow-listed origin. Let it
+            # through so CORSMiddleware can respond.
+            if (request.method != "OPTIONS" and p.startswith("/api/")
+                    and not _unauth_api_ok(p)
                     and request.headers.get("X-LoopLab-Token") != ui_token):
                 return JSONResponse({"detail": "unauthorized (missing/invalid UI token)"},
                                     status_code=401)
@@ -225,6 +245,7 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
     projects = ProjectStore(root / "projects.json")   # ClearML-style run organization (UI-only)
     # JupyterHub reaper hooks (ASGI shutdown + atexit backstop) — registered before the secret
     # priming below, matching the original make_app construction side-effect order.
+    sweep_stale_lifecycle_locks(root)   # F22: GC orphaned per-run lifecycle lock files at startup
     resume_cancel = install_resume_reconcile_hooks(app, root)
     # Shutdown handlers run in registration order. Cancel/join resume timers + tail waiters first,
     # then reap every child that was registered before cancellation won the spawn gate.

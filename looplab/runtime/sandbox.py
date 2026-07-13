@@ -214,7 +214,9 @@ def parse_mem_bytes(spec) -> Optional[int]:
         s = s[:-1].strip()
     try:
         n = int(float(s) * mult)
-    except ValueError:
+    except (ValueError, OverflowError):
+        # OverflowError: `int(float("inf"))` / `int(float("1e400"))` — a non-finite operator value must
+        # SILENTLY DISABLE the cap (as the docstring promises), not crash make_sandbox on engine setup.
         return None
     return n if n > 0 else None
 

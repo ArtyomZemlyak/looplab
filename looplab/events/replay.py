@@ -12,7 +12,7 @@ from looplab.core.models import (Event, Hypothesis, Idea, Node, NodeStatus, RunS
 from looplab.events.types import (
     EV_ABLATE, EV_AGENT_DECISION, EV_AGENT_VALIDATED, EV_ANNOTATION, EV_APPROVAL_GRANTED,
     EV_APPROVAL_REQUESTED, EV_BEST_CONFIRMED, EV_BUDGET_EXTEND, EV_CONFIRM_DONE,
-    EV_CONFIRM_EVAL, EV_DATA_LEAKAGE, EV_DATA_PROFILED, EV_DATA_PROVENANCE,
+    EV_CONFIRM_EVAL, EV_DATA_LEAKAGE, EV_DATA_PROFILED, EV_DATA_PROVENANCE, EV_ENV_CHANGED,
     EV_COVERAGE_SNAPSHOT, EV_DEEP_RESEARCH, EV_DIVERSITY_ARCHIVE, EV_FINALIZATION_FINISHED,
     EV_FORCE_ABLATE, EV_FORCE_CONFIRM,
     EV_FORESIGHT_SELECTED, EV_FORK,
@@ -253,7 +253,6 @@ def _nonneg_seconds(v) -> float:
     TypeError the WHOLE fold — taking down every view/replay/resume of the run — and a negative value
     would silently REDUCE total_eval_seconds, extending the budget (arch-review §5 P2). Normal engine
     emitters always produce a clean non-negative float, so this only guards malformed input."""
-    import math
     try:
         f = float(v)
     except (TypeError, ValueError):
@@ -611,6 +610,7 @@ def _rotate_search_epoch(st: RunState, *, requeue_partition_scores: bool,
     """Advance one epoch and invalidate every value bound to the disclosed partition."""
     st.search_epoch += 1
     st.holdout_evaluated_ids.clear()
+    st.holdout_epoch_aware = False   # the disclosure is consumed; the new epoch has none yet
     for candidate in st.nodes.values():
         if candidate.tombstoned or candidate.id in st.aborted_nodes:
             continue                         # post-hoc audit evidence is not part of the new pool
@@ -625,8 +625,12 @@ def _invalidate_disclosed_holdout(
     """Close a disclosed epoch once active search changes again."""
     if not st.holdout_evaluated_ids:
         return False
+    # Requeue every incumbent (wiping its metric to force a re-eval on the newly-hidden complement)
+    # ONLY when the disclosed holdout was epoch-aware. A legacy (pre-search-epoch) disclosure must
+    # rotate WITHOUT the metric wipe, or replaying an old holdout_select log would drop incumbents the
+    # pre-batch fold left intact and change the selected best (invariant 5b, F2).
     _rotate_search_epoch(
-        st, requeue_partition_scores=True, fresh_node_ids=fresh_node_ids)
+        st, requeue_partition_scores=st.holdout_epoch_aware, fresh_node_ids=fresh_node_ids)
     return True
 
 
@@ -639,7 +643,12 @@ def _on_node_tombstoned(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> Non
     # Idempotent: setting the flag twice (duplicate/overlapping tombstone events) is a no-op. Ids
     # coerced defensively — a forged/unhashable id in a hand-edited log is skipped, not a fold crash.
     affected: set[int] = set()
-    for raw in (d.get("node_ids") or []):
+    # `node_ids` MUST be a list. A forged/hand-edited event with a truthy SCALAR (e.g. {"node_ids": 42})
+    # would make `42 or []` -> `42` and `for raw in 42` raise TypeError — and the fold loop has no
+    # per-event try/except, so that one bad record bricks EVERY replay/resume/view of the run. Guard the
+    # type like `_parent_generation_map_matches` already does for `parent_ids` (fold must stay total).
+    raw_ids = d.get("node_ids")
+    for raw in (raw_ids if isinstance(raw_ids, list) else []):
         nid = _coerce_node_id({"node_id": raw})
         n = st.nodes.get(nid) if nid is not None else None
         if n is not None and not n.tombstoned:
@@ -909,6 +918,12 @@ def _on_holdout_evaluated(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> N
     # hidden partition's gate or metric pool. Missing epoch remains legacy-current.
     if d.get("search_epoch", st.search_epoch) != st.search_epoch:
         return
+    if "search_epoch" in d:
+        # A modern producer stamps `search_epoch` (holdout.py); a legacy holdout_evaluated does not.
+        # Record that THIS disclosed holdout carries epoch semantics, so a later candidate change may
+        # safely requeue incumbents onto the newly-hidden complement. A legacy (unstamped) disclosure
+        # leaves this False, so the requeue-with-metric-wipe stays gated off (invariant-5b, F2).
+        st.holdout_epoch_aware = True
     if nid is not None and nid not in st.holdout_evaluated_ids:
         st.holdout_evaluated_ids.append(nid)   # gate: attempted, even if metric is null
     if n is not None and d.get("metric") is not None:
@@ -1040,6 +1055,10 @@ def _on_spec_drift(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
 
 def _on_workspace_changed(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     st.workspace_changed = True                 # resume saw the source repo/data change
+
+
+def _on_env_changed(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
+    st.env_changed = True                       # resume saw the Python/lib environment drift (F18)
 
 def _on_diversity_archive(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     st.archive = d
@@ -1276,7 +1295,9 @@ def _on_resume_or_run_reopened(st: RunState, e: Event, d: dict, ctx: "_FoldCtx")
     # keep search_epoch=0 and fold identically.
     if st.finished or st.holdout_evaluated_ids:
         if st.holdout_evaluated_ids:
-            _rotate_search_epoch(st, requeue_partition_scores=True)
+            # F2: requeue-with-metric-wipe only for an epoch-aware (modern) disclosure; a legacy
+            # holdout log rotates without wiping surviving incumbents (invariant 5b).
+            _rotate_search_epoch(st, requeue_partition_scores=st.holdout_epoch_aware)
         else:
             _rotate_search_epoch(st, requeue_partition_scores=False)
         st.confirmed_done = False
@@ -1586,6 +1607,7 @@ _HANDLERS = {
     EV_SPEC_APPROVED: _on_spec_approved,
     EV_SPEC_DRIFT: _on_spec_drift,
     EV_WORKSPACE_CHANGED: _on_workspace_changed,
+    EV_ENV_CHANGED: _on_env_changed,
     EV_DIVERSITY_ARCHIVE: _on_diversity_archive,
     EV_COVERAGE_SNAPSHOT: _on_coverage_snapshot,
     EV_LLM_COST: _on_llm_cost,

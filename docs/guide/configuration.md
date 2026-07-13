@@ -216,7 +216,7 @@ meta-controller), `boss` (run-chat operator-proxy), `researcher` (per-experiment
 A setting **absent** from the map is locked — only a human can change it via the snapshot/UI. This
 is **enforced at runtime** (`_agent_may`) at every **agent** seam, so removing a role from a knob
 truly locks it — not just a UI hint: the Strategist's whole applied control surface (`policy`,
-`ablate_every`, `merge_mode`, `complexity_cue`, `ablate_code_blocks`, `prefer_sweep`,
+`policy_params`, `ablate_every`, `merge_mode`, `complexity_cue`, `ablate_code_blocks`, `prefer_sweep`,
 `novelty_stance`, `developer`, `fidelity`, `timeout`, `max_parallel`) is gated in `_apply_strategy`.
 A `budget_extend`, by contrast, is a **human control intent** — the boss action-builder can only
 emit `add_nodes`, so its resource fields (`max_seconds`, `max_eval_seconds`, `timeout`,

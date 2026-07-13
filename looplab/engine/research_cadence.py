@@ -45,6 +45,9 @@ class ResearchCadenceMixin:
         # Since-last cadence (not `n % every == 0`): a rung-0/seed batch that jumps the node count by
         # k>1 must not step over the only multiple and skip the whole window. The last researched
         # at_node is the marker; `_already_researched_at` above already de-dups the same-n resume.
+        # `default=0` (no prior research → baseline at the run start, node 0): the first deep-research
+        # fires a full `every` nodes in (n >= every), so the opening window is the SAME width as every
+        # later one. (`default=-1` would fire it one node early — a narrower first window.)
         _last_research_n = max((int(m.get("at_node", -1)) for m in state.research
                                 if isinstance(m, dict) and m.get("at_node") is not None), default=0)
         if self._cadence_due(n, _last_research_n, self.deep_research_every):

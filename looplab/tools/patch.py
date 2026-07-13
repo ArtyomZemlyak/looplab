@@ -143,7 +143,8 @@ class SurfacePolicy:
     OUTSIDE_SURFACE = "outside_surface"
 
     def __init__(self, surface: list[str] | None, protected=None, prefixes: list[str] | None = None,
-                 *, protected_exact: bool = False, check_escapes: bool = True):
+                 *, protected_exact: bool = False, check_escapes: bool = True,
+                 allow_exceptions: list[str] | None = None):
         self.surface = None if surface is None else list(surface)
         self.prefixes = list(prefixes or [])
         self.protected_exact = protected_exact
@@ -151,9 +152,21 @@ class SurfacePolicy:
         # the case-insensitive/forward-slash canonical form once, like gate() always did.
         self.protected = (set(protected or []) if protected_exact
                           else [_ci(g) for g in (protected or [])])
+        # Explicit editable EXCEPTIONS that OVERRIDE the protect-list (F11). A protect glob broad enough
+        # to catch every grader (`**/*grader*.py`) also catches migration scripts that merely CONTAIN
+        # "grade" (upgrade.py / downgrade.py / upgrader.py) — which no glob can distinguish from a real
+        # `pregrader.py`. An explicit exception list carves those back out. EMPTY by default, so every
+        # existing site is byte-for-byte unchanged; only the DEFAULT_PROTECT write path opts in. Matched
+        # case-insensitively like the glob-mode protect list. NOT applied to a manifest's explicit
+        # protect entries — those callers pass no exceptions, so their intent always wins.
+        self.allow_exceptions = [_ci(g) for g in (allow_exceptions or [])]
         self.check_escapes = check_escapes
 
     def _is_protected(self, path: str) -> bool:
+        if self.allow_exceptions:
+            pc_x = _ci(path)
+            if any(pc_x == g or _match(pc_x, g) for g in self.allow_exceptions):
+                return False   # an explicit editable exception overrides the protect-list (F11)
         if self.protected_exact:
             if path in self.protected:
                 return True

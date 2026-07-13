@@ -21,8 +21,9 @@ from looplab.events.types import (
 )
 from looplab.serve.appstate import _RESERVED_RUN_IDS
 from looplab.serve.engine_proc import (
-    _claim_and_spawn_resume, _engine_alive, _fresh_resume_launch_pending,
-    _resolve_task_file, _run_lifecycle_lock, _spawn_engine)
+    _claim_and_spawn_resume, _clear_run_launching, _engine_alive, _fresh_resume_launch_pending,
+    _fresh_run_launch_pending, _mark_run_launching, _resolve_task_file, _run_lifecycle_lock,
+    _spawn_engine)
 from looplab.serve.protocol import CONTROL_EVENTS, GENESIS_CHAT_SEQ_BASE
 from looplab.serve.settings_store import _ALLOWED_FIELDS, _SECRET_FIELDS
 
@@ -330,6 +331,7 @@ def build_router(srv) -> APIRouter:
         # request/claim/Popen interval before a detached child has acquired engine.lock.
         with _run_lifecycle_lock(rd):
             if (_engine_alive(rd) or _fresh_resume_launch_pending(rd)
+                    or _fresh_run_launch_pending(rd)   # F9: another reset's fresh run may be mid-launch
                     or not srv.state(rd).finished):
                 raise HTTPException(
                     409, "run is still active or launching — stop it first "
@@ -426,8 +428,13 @@ def build_router(srv) -> APIRouter:
                             })
                     except (OSError, json.JSONDecodeError, ValueError):
                         env = None
+                # F9: stamp the launch marker BEFORE Popen (still under the lifecycle lock) so a delete
+                # or another reset arriving after we release the lock — but before the detached child
+                # owns engine.lock — is fenced out. Cleared below if the Popen itself fails.
+                _mark_run_launching(rd)
                 _spawn_engine(["run", str(task_file), "--out", str(rd)], env=env, run_dir=rd)
             except Exception as exc:  # noqa: BLE001 - failed Popen must restore the old runnable run
+                _clear_run_launching(rd)   # no child is starting — don't fence a delete for the grace
                 rollback_failures = _rollback_reset_archive()
                 suffix = (f"; rollback also failed for {rollback_failures}"
                           if rollback_failures else "")
