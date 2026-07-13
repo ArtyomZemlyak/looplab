@@ -166,7 +166,9 @@ const OP_TRACE_TYPES = new Set(['strategy_decision', 'hypothesis_merged', 'resea
 // the feed can surface "what was the Researcher thinking" inline. Returns [{op, text}] for the node.
 function collectThinking(trace, nid) {
   if (nid == null) return []
-  const spans = (trace?.nodes || {})[String(nid)] || []
+  // `trace` here is the PER-NODE trace (/nodes/{nid}/trace), whose `nodes` is already this node's tree
+  // LIST; tolerate the old whole-run shape (a {nid: [...]} map) too so nothing breaks mid-transition.
+  const spans = Array.isArray(trace?.nodes) ? trace.nodes : ((trace?.nodes || {})[String(nid)] || [])
   const out = []
   const walk = (arr) => (arr || []).forEach(s => {
     (s.events || []).forEach(ev => { if (ev.name === 'llm_call' && ev.thinking) out.push({ op: s.name, text: ev.thinking }) })
@@ -401,7 +403,7 @@ function OpTrace({ runId, traceId }) {
 }
 
 // One feed row, chat-message styled: an icon/color by kind, the narration, an expandable "why" card.
-function EventRow({ e, trace, onFocusEvent, autoOpen, runId }) {
+function EventRow({ e, onFocusEvent, autoOpen, runId }) {
   const [open, setOpen] = useState(autoOpen)
   const touched = useRef(false)   // once the user toggles, stop auto-following the live frontier
   // collapse-when-done: follow autoOpen (expand while live, collapse when the node resolves) UNLESS
@@ -420,8 +422,19 @@ function EventRow({ e, trace, onFocusEvent, autoOpen, runId }) {
   const traceNid = TRACE_OWNER_TYPES.has(e.type)
     ? (e.data?.node_id ?? (e.type === 'setup_started' ? -1 : null))
     : null
-  const nodeSpans = traceNid != null ? (trace?.nodes || {})[String(traceNid)] : null
-  const hasTrace = !!(nodeSpans && nodeSpans.length)
+  // LAZY: fetch only THIS node's trace (/nodes/{nid}/trace — reads just the node's spans via the index,
+  // O(node)), and only when the row is expanded. Replaces the old whole-run /trace fetch+4s poll that
+  // shipped (and re-rendered) the entire 4000-node timeline on every node boundary just to back a few
+  // inline "thinking" cards. Full per-observation I/O is still fetched on demand via /spans/{sid}.
+  const [nodeTrace, setNodeTrace] = useState(null)
+  useEffect(() => {
+    if (!open || traceNid == null) return undefined
+    let alive = true
+    get(`/api/runs/${runId}/nodes/${traceNid}/trace`).then(d => { if (alive) setNodeTrace(d) }).catch(() => {})
+    return () => { alive = false }
+  }, [open, runId, traceNid])
+  const nodeSpans = Array.isArray(nodeTrace?.nodes) ? nodeTrace.nodes : []
+  const hasTrace = traceNid != null
   // A sub-operation event the engine wrapped in its OWN named trace (strategy_decision, hypothesis_
   // merged) carries a trace_id — expand to ONLY that operation's trace (lazily fetched by trace_id),
   // never the node's whole Researcher+Developer trace. Old events (no trace_id) fall through to detail.
@@ -444,9 +457,12 @@ function EventRow({ e, trace, onFocusEvent, autoOpen, runId }) {
           {nid != null && <span className="ev-go">↗</span>}
         </div>
         {open && expandable && <div className="ev-detail-wrap">
-          {hasReason && reasoningDetail(e, trace)}
+          {hasReason && reasoningDetail(e, nodeTrace)}
           {hasGeneric && <GenericDetail e={e} />}
-          {hasTrace && <NodeTrace spans={nodeSpans} runId={runId} />}
+          {hasTrace && (nodeTrace === null
+            ? <div className="muted" style={{ fontSize: 12, padding: '4px 2px' }}>loading trace…</div>
+            : (nodeSpans.length ? <NodeTrace spans={nodeSpans} runId={runId} />
+              : <div className="muted" style={{ fontSize: 12, padding: '4px 2px' }}>no trace captured for this node</div>))}
           {opTraceId && <OpTrace runId={runId} traceId={opTraceId} />}
         </div>}
       </div>
@@ -458,7 +474,6 @@ function EventRow({ e, trace, onFocusEvent, autoOpen, runId }) {
 // the run's EVENTS window — the timeline feed + scrubber + filters + transport.
 export default function Dock({ runId, live, liveSeq, viewSeq, setViewSeq, onFocus, collapsed, onToggleCollapse, height = 230, onToast }) {
   const [log, setLog] = useState([])
-  const [trace, setTrace] = useState(null)
   const [filter, setFilter] = useState('')
   const [kinds, setKinds] = useState(() => new Set())     // selected kind chips (empty = all)
   const feedRef = useRef(null)
@@ -470,28 +485,10 @@ export default function Dock({ runId, live, liveSeq, viewSeq, setViewSeq, onFocu
     get(`/api/runs/${runId}/log`).then(d => { if (alive) setLog(d) }).catch(() => {})
     return () => { alive = false }
   }, [runId, liveSeq])
-  // The trace re-folds the whole spans.jsonl server-side, and it only backs the inline "thinking"
-  // cards — so refetch when a NODE is added (or the run finishes), not on every SSE seq tick.
-  const nodeCount = live ? Object.keys(live.nodes || {}).length : 0
-  // Refetch the trace when a node is ADDED or SETTLES (evaluate/repair spans land on a node-in-place,
-  // which doesn't change nodeCount) — so a node's eval/repair waterfall appears on its feed rows
-  // without waiting for the next node. Still not every SSE tick (idle ticks don't change either key).
-  const settledCount = live ? Object.values(live.nodes || {}).filter(n => n.status === 'evaluated' || n.status === 'failed').length : 0
-  // The task/data SETUP phase runs before any node exists (nodeCount 0), so the node-count/settled
-  // triggers never fire and its span tree would sit frozen. While in setup, key the refetch on liveSeq
-  // so the setup trace streams in live (the phase is short; a few small refetches). Once the first node
-  // lands this collapses to 0 and normal node-based refetching resumes.
-  const inSetup = !!live && !live.finished && live.engine_running !== false && nodeCount === 0
-  useEffect(() => { get(`/api/runs/${runId}/trace`).then(setTrace).catch(() => {}) },
-    [runId, nodeCount, settledCount, live?.finished, inSetup ? liveSeq : 0])
-  // While a node is BUILDING, its spans stream in but nodeCount/settledCount don't change — so the
-  // fetch above never re-runs and the building node's Trace stays FROZEN (you see spans, but they never
-  // grow). Poll the trace while a node builds so its Trace tab/row fills in live; the poll stops the
-  // moment building ends (node_created clears `building`), and the fetch above does the final refresh.
-  const buildingId = live && !live.finished && live.engine_running !== false && live.building
-    ? live.building.node_id : null
-  usePoll(() => get(`/api/runs/${runId}/trace`).then(setTrace).catch(() => {}),
-    4000, [runId, buildingId], { enabled: buildingId != null })
+  // No whole-run /trace fetch here anymore: it re-folded + shipped the ENTIRE run's timeline (all nodes)
+  // on every node boundary + a 4 s poll while building, just to back a few inline "thinking" cards. Each
+  // feed row now fetches ONLY its own node's trace lazily, when expanded (see EventRow) — O(node), and
+  // nothing until the user actually opens a row.
   const atLive = viewSeq == null || viewSeq >= liveSeq
 
   // The live frontier: the highest-id node still pending while the run runs — its proposal card stays
@@ -602,7 +599,7 @@ export default function Dock({ runId, live, liveSeq, viewSeq, setViewSeq, onFocu
           {feed.length === 0
             ? <div className="muted">{(filter || kinds.size) ? 'nothing matches the filter' : 'no events yet'}</div>
             : feed.map(e =>
-                <EventRow key={'e' + e.seq} e={e} trace={trace} onFocusEvent={focusEvent} runId={runId}
+                <EventRow key={'e' + e.seq} e={e} onFocusEvent={focusEvent} runId={runId}
                     autoOpen={false} />)}
           {(() => {
             // A short, honest "what's the agent doing now" strip at the foot of the feed.
