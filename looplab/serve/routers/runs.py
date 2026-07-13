@@ -317,12 +317,12 @@ def build_router(srv) -> APIRouter:
 
     def _node_trace(rd: Path, nid: int) -> dict:
         try:
-            from looplab.events.traceview import build_trace_view, load_spans
-            st = srv.state(rd)
             # light=True: the tree carries structure + tokens + timing but NOT the prompts/outputs —
             # the UI fetches a single observation's full I/O lazily via /spans/{sid} when expanded
             # (Langfuse-style), so a heavily-repaired node's trace stays small and nothing is lost.
-            tv = build_trace_view(st, load_spans(rd / "spans.jsonl"), light=True)
+            # `srv.trace_view` reads the light span INDEX (not the whole spans.jsonl) and caches by
+            # file identity — so a 1 GB run's node trace is served in ~ms, not a 15 s full re-parse.
+            tv = srv.trace_view(rd)
             return {"nodes": tv.get("nodes", {}).get(str(nid), []),
                     "rollup": tv.get("rollups", {}).get(str(nid), {}),
                     "summary": tv.get("summary", {})}
@@ -336,11 +336,21 @@ def build_router(srv) -> APIRouter:
         long run's trace is browser-safe; the complete text lives here and in spans.jsonl. No info lost."""
         rd = _run_dir(run_id)
         try:
-            for s in iter_jsonl(rd / "spans.jsonl"):
-                if s.get("span_id") == sid:
-                    return {"span_id": sid, "name": s.get("name"), "kind": s.get("kind"),
-                            "attributes": s.get("attributes") or {}, "events": s.get("events") or [],
-                            "duration_s": s.get("duration_s"), "status": s.get("status")}
+            # Seek straight to the span's byte offset via the index instead of scanning the whole
+            # (up to 1 GB) spans.jsonl for one span. Falls back to a scan if the index lacks it (a
+            # span past the indexed tail, a foreign/torn file) so nothing is ever unreachable.
+            from looplab.events.span_index import get_index
+            idx = get_index(rd / "spans.jsonl")
+            s = idx.full_span(sid) if idx is not None else None
+            if s is None:
+                for cand in iter_jsonl(rd / "spans.jsonl"):
+                    if cand.get("span_id") == sid:
+                        s = cand
+                        break
+            if s is not None:
+                return {"span_id": sid, "name": s.get("name"), "kind": s.get("kind"),
+                        "attributes": s.get("attributes") or {}, "events": s.get("events") or [],
+                        "duration_s": s.get("duration_s"), "status": s.get("status")}
         except Exception:  # noqa: BLE001
             pass
         return {"span_id": sid, "attributes": {}, "events": []}
@@ -416,7 +426,12 @@ def build_router(srv) -> APIRouter:
         rd = _run_dir(run_id)
         try:
             from looplab.events.traceview import build_conversation, load_spans
-            return build_conversation(srv.state(rd), load_spans(rd / "spans.jsonl"), nid)
+            from looplab.events.span_index import get_index
+            # Read only THIS node's traces' spans (by byte offset via the index), not the whole
+            # spans.jsonl — a node's conversation on a 1 GB run no longer scans the entire file.
+            idx = get_index(rd / "spans.jsonl")
+            spans = idx.full_spans_for_node(nid) if idx is not None else load_spans(rd / "spans.jsonl")
+            return build_conversation(srv.trace_scalars(rd), spans, nid)
         except Exception:  # noqa: BLE001
             return {"run_id": run_id, "node_id": str(nid), "stages": []}
 
@@ -472,11 +487,12 @@ def build_router(srv) -> APIRouter:
     @router.get("/api/runs/{run_id}/trace")
     def trace(run_id: str):
         rd = _run_dir(run_id)
-        from looplab.events.traceview import build_trace_view, load_spans
         try:
             # light=True: strip prompt/output text — the run-level timeline needs only structure +
-            # timing + token usage; a heavy run's full I/O is ~50 MB and crashes the browser.
-            return build_trace_view(srv.state(rd), load_spans(rd / "spans.jsonl"), light=True)
+            # timing + token usage; a heavy run's full I/O is ~50 MB and crashes the browser. Served
+            # via the light span index + a file-identity cache (`srv.trace_view`): reads ~20 MB of
+            # structure, not the whole (up to 1 GB) spans.jsonl, so the first click is ~1 s not ~15 s.
+            return srv.trace_view(rd)
         except Exception:  # noqa: BLE001 — a malformed/foreign spans.jsonl must degrade, not 500
             return {"run_id": run_id, "task_id": "", "nodes": {}, "unscoped": [],
                     "summary": {"spans": 0, "errors": 0, "total_eval_seconds": 0}}
@@ -491,8 +507,12 @@ def build_router(srv) -> APIRouter:
         rd = _run_dir(run_id)
         from looplab.events.traceview import load_spans, _tree, _cap_span_io
         try:
-            spans = [_cap_span_io(s) for s in load_spans(rd / "spans.jsonl")
-                     if s.get("trace_id") == trace_id]
+            # Read only this trace's spans (by byte offset via the index), not the whole spans.jsonl.
+            from looplab.events.span_index import get_index
+            idx = get_index(rd / "spans.jsonl")
+            raw = (idx.full_spans_for_trace(trace_id) if idx is not None
+                   else [s for s in load_spans(rd / "spans.jsonl") if s.get("trace_id") == trace_id])
+            spans = [_cap_span_io(s) for s in raw]
             return {"spans": _tree(spans), "count": len(spans)}
         except Exception:  # noqa: BLE001 — malformed spans must degrade, not 500
             return {"spans": [], "count": 0}

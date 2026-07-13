@@ -21,6 +21,20 @@ The earlier `tracing.py` emitted two flat spans (evaluate/ablate) — a placehol
 | Domain **events** | `events.jsonl` | source of truth, minimal | `replay.fold` → RunState |
 | **Traces** | `spans.jsonl` (+ OTLP) | observability, rich | `tracing.Tracer` |
 | UI **read model** | `readmodel.sqlite`, `trace.json`, `tree.html` | derived | `build_readmodel` + `build_trace_view` |
+| Trace **index** | `spans.index.jsonl` | derived cache (accelerator) | `events.span_index` |
+
+**Light span index** (`events/span_index.py`): `spans.jsonl` is dominated by heavy generation I/O
+(each generation carries the full re-sent message history + prompt/output/reasoning), so a long run's
+file reaches ~GB and parsing it whole made the UI's first trace click stall ~15 s. The index keeps a
+~25×-smaller light projection of every span (structure/timing/token-usage minus the heavy I/O) plus
+the byte `(offset,length)` of the full span in `spans.jsonl` — so the timeline reads only the tiny
+index and per-node/-span detail views seek to exact offsets. Built incrementally (parse only the
+appended tail; mirrors `EventStore`'s incremental read), persisted atomically, and STRICTLY an
+accelerator: any identity/size/corruption mismatch rebuilds from `spans.jsonl`, so every read is
+byte-identical to the un-indexed path — never wrong, worst case as slow as before. (Index/payload
+separation + byte-offset seeks is the Grafana-Tempo / Jaeger / Perfetto pattern; JSONL + orjson is
+kept over SQLite/Arrow deliberately — no locking, atomic-rename-safe on the FUSE/NFS/S3 mounts the
+rest of the store already guards for.)
 
 Events = *what was decided* (coarse, authoritative). Spans = *how execution unfolded* (fine,
 timing/status/errors). They are two projections of the same activity; **no duplication** — the

@@ -344,7 +344,10 @@ def build_router(srv) -> APIRouter:
             # transaction: on any failure restore every completed move and do not start a writer on
             # a mixed old/new directory. The old best-effort `except: pass` could leave events.jsonl
             # in place, partially archive nodes, then launch a second writer into the old history.
-            names = ("spans.jsonl", "readmodel.sqlite-wal", "readmodel.sqlite-shm",
+            # `spans.index.jsonl` is the derived light span index (events.span_index) — archive it
+            # alongside spans.jsonl so the fresh run rebuilds its own; a stale index would be rejected
+            # by its identity guard regardless, but archiving keeps the transaction clean.
+            names = ("spans.jsonl", "spans.index.jsonl", "readmodel.sqlite-wal", "readmodel.sqlite-shm",
                      "readmodel.sqlite", "nodes", "chat.jsonl", "events.jsonl")
             def _present(path: Path) -> bool:
                 return path.exists() or path.is_symlink()
@@ -470,6 +473,13 @@ def build_router(srv) -> APIRouter:
         if removed:
             # Atomic temp+rename so a crash mid-write can't truncate spans.jsonl to a partial trace.
             write_jsonl_atomic(sp, kept)
+            # The light span index (events.span_index) is derived from spans.jsonl by BYTE OFFSET, so a
+            # rewrite invalidates every offset. Drop the in-memory cache + stale persisted index; the
+            # next trace read rebuilds from the new spans.jsonl. (The index's identity guard would catch
+            # the changed inode anyway — this just keeps the run dir clean and skips a wasted reload.)
+            from looplab.events.span_index import invalidate
+            invalidate(sp)
+            (rd / "spans.index.jsonl").unlink(missing_ok=True)
         return {"ok": True, "removed": removed, "kept": len(kept)}
 
     @router.post("/api/start")
