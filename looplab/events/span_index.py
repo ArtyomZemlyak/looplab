@@ -38,7 +38,7 @@ from looplab.events.traceview import _strip_span_io
 
 # Bump when the persisted record shape changes so an old `spans.index.jsonl` is ignored (rebuilt),
 # never mis-read. The index is a cache — a version skew simply triggers one rebuild.
-_SCHEMA = 2
+_SCHEMA = 3
 _INDEX_NAME = "spans.index.jsonl"
 # Geometric re-persist factor (see `_persist`): re-write the persisted index only when the indexed
 # span bytes have grown by this factor since the last write. Bounds a live run's total index-write

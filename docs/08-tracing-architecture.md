@@ -23,9 +23,25 @@ The earlier `tracing.py` emitted two flat spans (evaluate/ablate) — a placehol
 | UI **read model** | `readmodel.sqlite`, `trace.json`, `tree.html` | derived | `build_readmodel` + `build_trace_view` |
 | Trace **index** | `spans.index.jsonl` | derived cache (accelerator) | `events.span_index` |
 
-**Light span index** (`events/span_index.py`): `spans.jsonl` is dominated by heavy generation I/O
-(each generation carries the full re-sent message history + prompt/output/reasoning), so a long run's
-file reaches ~GB and parsing it whole made the UI's first trace click stall ~15 s. The index keeps a
+**Delta-encoded generation input** (`tracing.generation`): the agent tool-loop re-sends the WHOLE
+growing conversation on every turn, so storing each generation's full `input` made ~90 % of
+`spans.jsonl` a re-send of the same messages. When a generation STRICTLY EXTENDS the prior one in its
+trace (a tool-loop turn that only appended to the same conversation — the prior input is a full leading
+prefix of this one), it stores only the appended tail plus a back-ref — `input` (the delta) +
+`input_carry` (carried-prefix count) + `input_from` (prior span_id); a context reset / new sub-loop
+(propose→implement→repair, whose history diverged, not merely grew) stores a full self-contained base
+(`input_carry == 0`, `input_from = None`). This shrinks `spans.jsonl` ~6×
+at the source (one append-only file, no separate blob store). The trace views reconstruct the full
+verbatim prompt when a single observation / one operation's trace is expanded
+(`traceview.hydrate_inputs`), so nothing is lost; `build_conversation` needs no reconstruction (it
+treats `input_carry == 0` as the sub-loop request boundary and shows that base's full initial context
+once, then each generation's delta). Old logs (no `input_carry`)
+are read unchanged. Correctness never depends on the write-time chain surviving thread/task hops — a
+stale chain just resets to a full base (less compression, never wrong).
+
+**Light span index** (`events/span_index.py`): even delta-encoded, `spans.jsonl` still carries heavy
+generation I/O (prompt/output/reasoning), so a long run's file is large and parsing it whole made the
+UI's first trace click stall ~15 s. The index keeps a
 ~25×-smaller light projection of every span (structure/timing/token-usage minus the heavy I/O) plus
 the byte `(offset,length)` of the full span in `spans.jsonl` — so the timeline reads only the tiny
 index and per-node/-span detail views seek to exact offsets. Built incrementally (parse only the

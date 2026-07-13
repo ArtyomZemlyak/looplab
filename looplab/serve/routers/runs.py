@@ -355,8 +355,24 @@ def build_router(srv) -> APIRouter:
                         s = cand
                         break
             if s is not None:
+                a = s.get("attributes") or {}
+                # Delta-encoded generation: reconstruct its FULL verbatim input from the trace's chain
+                # (tracing stores only the per-turn delta to keep spans.jsonl ~6x smaller) — so the
+                # expanded observation shows exactly the prompt the LLM received. No-op for tools/old logs.
+                if s.get("kind") == "generation" and "input_carry" in a:
+                    from looplab.events.traceview import hydrate_inputs
+                    tid = s.get("trace_id")
+                    trace_spans = (idx.full_spans_for_trace(tid) if idx is not None
+                                   else [c for c in iter_jsonl(rd / "spans.jsonl") if c.get("trace_id") == tid])
+                    # `s` may be a just-appended span past the indexed tail (found via the scan fallback
+                    # above but absent from the index snapshot) — include it so its own delta joins the
+                    # chain and reconstruction resolves, instead of returning the raw delta until top-up.
+                    if not any(c.get("span_id") == sid for c in trace_spans):
+                        trace_spans = trace_spans + [s]
+                    s = next((h for h in hydrate_inputs(trace_spans) if h.get("span_id") == sid), s)
+                    a = s.get("attributes") or {}
                 return {"span_id": sid, "name": s.get("name"), "kind": s.get("kind"),
-                        "attributes": s.get("attributes") or {}, "events": s.get("events") or [],
+                        "attributes": a, "events": s.get("events") or [],
                         "duration_s": s.get("duration_s"), "status": s.get("status")}
         except Exception:  # noqa: BLE001
             pass
@@ -512,14 +528,16 @@ def build_router(srv) -> APIRouter:
         inside, so eventstore stamps it), and the UI shows only THAT trace here, not the node's whole
         Researcher+Developer trace."""
         rd = _run_dir(run_id)
-        from looplab.events.traceview import load_spans, _tree, _cap_span_io
+        from looplab.events.traceview import load_spans, _tree, _cap_span_io, hydrate_inputs
         try:
             # Read only this trace's spans (by byte offset via the index), not the whole spans.jsonl.
             from looplab.events.span_index import get_index
             idx = get_index(rd / "spans.jsonl")
             raw = (idx.full_spans_for_trace(trace_id) if idx is not None
                    else [s for s in load_spans(rd / "spans.jsonl") if s.get("trace_id") == trace_id])
-            spans = [_cap_span_io(s) for s in raw]
+            # Reconstruct delta-encoded generation inputs to the full verbatim prompt before capping,
+            # so this per-op tree shows the real input (no-op on old logs / non-delta spans).
+            spans = [_cap_span_io(s) for s in hydrate_inputs(raw)]
             return {"spans": _tree(spans), "count": len(spans)}
         except Exception:  # noqa: BLE001 — malformed spans must degrade, not 500
             return {"spans": [], "count": 0}

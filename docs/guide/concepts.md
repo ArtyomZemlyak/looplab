@@ -71,6 +71,12 @@ per-span/per-node detail view seeks straight to the needed byte range. It is mai
 and is *strictly an accelerator* — if it is missing, stale, or corrupt the views transparently rebuild
 it from `spans.jsonl` (the sole source of truth), so results are always identical, never lost.
 
+The agent tool-loop re-sends the whole growing conversation to the LLM every turn, which once made
+each generation's recorded input a near-duplicate of the last. That input is now **delta-encoded** at
+write time — a generation that only appended to the prior turn stores just the appended messages plus a
+back-reference — so `spans.jsonl` itself is ~6× smaller before the index even applies; the trace views
+reconstruct the full verbatim prompt on demand when you expand a single call.
+
 Because the task and config are snapshotted, a run can be resumed from its directory alone.
 
 ## Stopping & resuming a run — three verbs
