@@ -13,7 +13,8 @@
 | Authority boundary | [Doc 16](16-architecture-code-review-2026-07-11.md) remains the defect ledger; [doc 17](17-project-review-and-directions-2026-07-11.md) retains overall delivery order; [doc 18](18-ui-ux-review-2026-07-11.md) retains UI/UX authority |
 | Supersedes | — |
 | Superseded by | — |
-| Last verified | 2026-07-12 |
+| Last verified | 2026-07-13 |
+| Revision | 2026-07-13 — every §4 code-confirmed claim re-verified at HEAD `5ed2e83` (unchanged; the one area a later fix touched is flagged in §4.2). Added: in-browser/WASM language-intelligence tier (§11.3), non-VS-Code desktop clients — JetBrains Gateway / Positron (§10.7), agent-assisted candidate editing (§11.8), and the multi-user / collaborative-editing boundary shared with doc 20 (§11.9). |
 
 **Companion material:** [current delivery plan](17-project-review-and-directions-2026-07-11.md) ·
 [UI/UX audit](18-ui-ux-review-2026-07-11.md) ·
@@ -32,8 +33,10 @@
 - **PoC-required** — compatibility, performance, or policy must be demonstrated in the real
   JupyterHub environment before adoption.
 
-Version-sensitive upstream facts and links were checked on 2026-07-12. Security policy interpretation,
-vendor licensing, and actual deployment versions remain deployment-owner decisions.
+Version-sensitive upstream facts and links were checked on 2026-07-12; references added in the
+2026-07-13 revision point to their upstream project repositories and inherit the same
+time-sensitivity caveat. Security policy interpretation, vendor licensing, and actual deployment
+versions remain deployment-owner decisions.
 
 ---
 
@@ -83,12 +86,15 @@ inside one isolated workspace?”
 |---|---|---|---|
 | Fast embedded candidate editing | CodeMirror 6, local-first | Small, modular, controlled; no synchronous request per key | Not a complete IDE by itself |
 | Embedded UI closest to VS Code | Monaco Core, local-first | VS Code's editor core and familiar diff/model APIs | No VS Code workbench, extension host, or Marketplace |
+| Fast language feedback with no server LSP | Client-side WASM checks in a Web Worker (lint/format/type/syntax) — §11.3 | Zero server process; typing never waits; fits the reserved-resource rules (§17) | Not full cross-file project intelligence — a server LSP is still needed for that |
+| Human steering of the autonomous loop | LoopLab-native editor with agent-assisted candidate diffs — §11.8 | The only path that makes candidate lineage and agent provenance first-class in the editing UX | Bounded to the candidate-overlay model; not a general IDE |
 | Maximum standard desktop functionality | OpenSSH/Remote-SSH through a custom WSS gateway; Teleport after feasibility gates | Preserves real OpenSSH and VS Code Remote-SSH | Remains SSH; Teleport uses TLS/ALPN rather than the custom WSS path |
 | Full ready-made workspace platform | Coder | Desktop IDEs, SSH, apps, ports, lifecycle, agents | Overlaps/replaces JupyterHub's control plane; SSH remains involved |
 | Quick exact VS Code experiment | Remote Tunnels | Outbound connection; no exposed inbound listener | Uses a Microsoft relay/identity and SSH internally; not generic SSH |
 | Strictly no SSH protocol | Scoped Kubernetes Attach | Remote files, extensions, tasks, debug, terminal in desktop VS Code | No generic SSH/SCP/rsync; powerful `pods/exec` authorization |
 | Full browser IDE | code-server/OpenVSCode | Fastest route to broad browser functionality | Same heavy browser/workspace class that is already laggy; extension gaps |
 | Strategic custom IDE platform | Eclipse Theia | Extensible IDE framework and remote architecture | Replatform, not a React editor component |
+| Desktop DS IDE beyond VS Code (PyCharm/DataSpell/Positron) | JetBrains Gateway or Positron over the **same** approved SSH access plane — §10.7 | Reuses the WSS/Teleport plane, no new transport; DS-native desktop UX | Heavier remote backend and separate licensing; VS Code Remote-SSH stays the reference client |
 
 ## 3. The policy question that must be answered first
 
@@ -117,7 +123,9 @@ protocol ban. Both ultimately carry SSH and must be reviewed and approved as suc
 
 ### 4.1 What LoopLab already has
 
-The following is **code-confirmed** at the executable baseline:
+The following is **code-confirmed** at the executable baseline, and re-verified against HEAD
+`5ed2e83` on 2026-07-13 — every item below still holds; the single area a later fix touched is
+flagged in §4.2:
 
 - The UI is a React 18/Vite SPA (`ui/package.json`) with a comparatively small runtime surface. It
   does not currently depend on Monaco, CodeMirror, an LSP client, a terminal, a file watcher, or an
@@ -160,6 +168,12 @@ LoopLab materializes workspaces from source plus node overlays. In a Git reposit
 directory fingerprint can collapse to the current `HEAD`, while materialization copies current file
 bytes. A dirty source edit can therefore change later materializations without changing the recorded
 Git fingerprint (`looplab/engine/triage.py`, `looplab/engine/workspace.py`).
+
+A partial mitigation now exists but does **not** close the hazard: the P0-5 fix records
+`git status --porcelain` into a `dirty_inputs` provenance field at run start
+(`looplab/core/models.py`). That makes dirtiness *visible*, yet it does not feed
+`workspace_fingerprint` (`looplab/engine/workspace.py`), so two runs whose only difference is
+uncommitted bytes can still collapse to one fingerprint. Detection is not determinism.
 
 **Consequence:** the first editable product should be **candidate-overlay editing**, not unconstrained
 live source mutation. Direct “edit source” mode should remain a separate, explicit action until the
@@ -312,6 +326,15 @@ OS user, not host root or cluster admin.
 “Full extensions” is never literally every extension: native binaries, architecture, operating
 system, proposed APIs, licensing, and extension assumptions can still exclude individual packages.
 
+**Desktop client is a separate axis from transport.** The two Remote-SSH rows above are *access
+planes*; the desktop client that rides them need not be VS Code. **JetBrains Gateway** (thin client
+plus a remote PyCharm/DataSpell/IntelliJ backend) and **Positron** (Posit's Code-OSS-based
+data-science IDE) both connect over ordinary SSH, and therefore inherit the same WSS/443 or Teleport
+plane with **no new transport** — see §10.7. They change the *client* functional profile (JetBrains
+plugin model vs. VS Code extensions; Open VSX vs. the Microsoft Marketplace) and the *server*
+resource profile (a JetBrains remote backend is a heavier JVM process), not the security or lifecycle
+contract.
+
 ## 8. Security, performance, and operational comparison
 
 | Option | Typing path | Training sensitivity | Added authority/surface | JupyterHub fit | Build/operate cost |
@@ -328,6 +351,11 @@ system, proposed APIs, licensing, and extension assumptions can still exclude in
 | Coder | Desktop-local UI | Usually better isolated, topology-dependent | Separate agent/control plane and workspace access | Poor as drop-in; strategic alternative | High platform adoption |
 | Remote Tunnels | Desktop-local UI | Lower browser pressure; server still shared | Outbound relay, remote shell/ports | Lifecycle integration is custom | Low pilot, policy-dependent |
 | Kubernetes Attach | Desktop-local UI | Lower browser pressure; `exec`/LSP still shared | Short-lived Kubernetes exec/attach/port-forward power | Good with a custom broker | High security integration |
+
+JetBrains Gateway and Positron (§10.7) sit inside the **Custom WSS-brokered SSH** / **Teleport** rows
+above: identical access authority and JupyterHub fit, but a JetBrains remote backend adds JVM CPU/RAM
+to the pod budget (§17, rule 10), and Positron carries the Code-OSS resource profile rather than
+reducing it. Neither changes the containment boundary in §14.
 
 ## 9. Embedded editor options in detail
 
@@ -427,6 +455,9 @@ full platform to customize.
 identical to Microsoft VS Code; embeds a second product architecture beside LoopLab.
 
 **Decision:** consider only if LoopLab deliberately becomes a general developer-workspace product.
+A Kubernetes-native packaging of this class is [Eclipse Che](https://eclipse.dev/che/) /
+DevWorkspaces, which runs Theia- or VS-Code-based workspaces as pods; it is the same replatform trade
+delivered as a K8s control plane, and it competes with Coder (§10.3) rather than with an embedded editor.
 
 ### 9.7 Hosting path is a separate decision from editor core
 
@@ -604,7 +635,34 @@ and cross-platform clients. This is effectively rebuilding much of an SSH/worksp
 a general SSH replacement merely to avoid the SSH name; use Kubernetes Attach for standard desktop
 VS Code under a strict no-SSH policy.
 
-### 10.7 Boundary and similar connection brokers
+### 10.7 Non-VS-Code desktop clients — JetBrains Gateway and Positron
+
+The desktop paths above default to VS Code, but the approved SSH access plane (§10.1/§10.2) is
+client-agnostic. Two alternatives matter for a data-science audience.
+
+**JetBrains Gateway** connects a thin local client to a remote IDE backend (PyCharm, DataSpell, or
+IntelliJ) over SSH; [JetBrains Remote Development](https://www.jetbrains.com/help/idea/remote-development-overview.html)
+documents the model. Because the transport is ordinary SSH, Gateway rides the same WSS/443 gateway or
+Teleport plane with no additional transport work, and DataSpell is JetBrains' DS-focused IDE
+(notebooks, data viewers, scientific plotting). **Costs:** the remote backend is a heavier JVM process
+— its CPU, heap, and indexer must fit the reserved interactive budget (§17, rule 10); the plugin
+ecosystem is JetBrains', not VS Code's; and it carries a separate commercial licence. **PoC-required:**
+backend bootstrap under the Restricted-PSS pod baseline (§15.1), reconnect, and cull/revoke propagation.
+
+**Positron** is Posit's open, data-science-oriented IDE built on Code-OSS
+([posit-dev/positron](https://github.com/posit-dev/positron)). It is attractive because it is
+ML/DS-native (integrated data explorer, R and Python, console/notebook workflows) while remaining
+VS-Code-shaped. It uses Open VSX rather than the Microsoft Marketplace, and its remote/server story and
+licensing for a *hosted* deployment are newer than VS Code's — treat hosted remote Positron as a
+**watch/PoC** item, not a proven path, and route it through the same licensing/distribution gate as §16.
+
+**Decision:** treat both as **client variants inside the already-approved SSH plane**, prioritised by
+measured user demand — not as new transports or new security surfaces. VS Code Remote-SSH remains the
+reference desktop client because its remote extension-host model and access-plane integration are the
+most documented; JetBrains Gateway is the strongest alternative when the team is JetBrains-first, and
+Positron is worth piloting specifically for the DS workflows LoopLab targets.
+
+### 10.8 Boundary and similar connection brokers
 
 Connection brokers can establish authenticated sessions without exposing target networks. For
 example, [Boundary](https://developer.hashicorp.com/boundary/docs/commands/connect/ssh) can broker an
@@ -674,6 +732,18 @@ last-write-wins. Choose one explicit persistence tier:
 - Do not make autocomplete correctness depend on a request synchronously completing for every key.
 
 These intervals are starting hypotheses for the PoC, not production SLOs.
+
+**Prefer a client-side (WASM) tier before any server LSP.** A large share of the useful Python
+feedback — syntax/parse errors, lint, formatting, and simple type checks — can run entirely in a Web
+Worker with no server process at all: `tree-sitter` for incremental parsing/highlighting, `ruff`
+(Rust→WASM) for lint/format, and a worker-hosted `Pyright`/`basedpyright` (or Astral's `ty`) for local
+type feedback. This tier directly serves rules 1 and 3 of §17 — typing never waits on the network and
+no language server competes with training for pod CPU — and it degrades gracefully when the proxy is
+slow. Reserve a **server** language server for what genuinely needs the workspace environment:
+cross-file/project-wide resolution, completions that must see installed packages, and go-to across the
+real interpreter. `Pyodide` can additionally run small client-side validators (AST checks, a quick
+`POST validate` pre-flight) without a kernel round-trip. Ship the WASM tier in Phase IDE-1/IDE-2 and
+add the server LSP only in Phase IDE-4, behind the same channel-separation rules.
 
 ### 11.4 File watching and storage
 
@@ -746,6 +816,60 @@ write-capable live attach taints the attempt and requires a clean rerun before s
 Doc 20 §8.6 is authoritative for AuthoringWorkspace, access-grant, snapshot, writer-fence,
 debug-copy, and multi-domain lifecycle semantics; this document remains authoritative for editor,
 transport, performance, security, and licensing choices.
+
+### 11.8 Agent-assisted candidate editing (the LoopLab-native differentiator)
+
+LoopLab is not a generic IDE host: it already runs a Researcher → Developer → sandbox → evaluator
+loop whose Developer emits multi-file candidate overlays (`files`/`deleted`/`code`) that become child
+nodes. The embedded editor's highest-leverage role is therefore not "another place to type" but a
+**human-in-the-loop steering seam over an otherwise autonomous search tree**. A generic remote IDE
+gives file access; only the LoopLab-native editor can make candidate lineage, agent provenance, and
+the event-log contract first-class in the editing UX. Three concrete capabilities:
+
+1. **Review-and-commit an agent proposal.** Render a Developer-proposed candidate as a real diff
+   (CodeMirror merge / Monaco diff) against its pinned parent, editable in place. The human accepts,
+   edits, or drops hunks and commits — producing exactly one `inject_node` child through the validated
+   path in §11.5. Provenance records both the original agent proposal and the human delta.
+2. **Seed or redirect the search by hand.** Open any node, edit its overlay, and commit a
+   hand-authored sibling that re-enters the normal evaluation flow. This is the mechanism for *guided
+   branches* in the tree the engine already builds — a way to inject human priors without leaving the
+   provenance model. (The dead `CONTROL.inject` client helper noted in §4.1 is the latent hook for
+   exactly this; wire it to the workspace API, not to last-write-wins source mutation.)
+3. **Invoke the agent from the editor.** Run the Developer/repair agent on the current draft as a
+   bounded tool-loop, review its proposed diff, then commit — closing the manual/autonomous loop on
+   one surface.
+
+**Invariants this must respect.** Every agent-assisted commit is still one engine-written
+`inject_node`; the editor never appends domain events directly (the engine is the sole writer). Agent
+invocation from the editor reuses the existing tool-loop and authorization — never a new privileged
+path. Live-attach edits remain out of scope (§11.7).
+
+**Why it changes build priority.** Because this seam unlocks human steering of the *core research
+loop* — something "Open in Desktop VS Code" cannot do — the local-first editor is worth delivering
+*before* the heavy remote-desktop work, not merely as a convenience. It is the one editor capability
+with no off-the-shelf substitute.
+
+### 11.9 Multi-user and collaborative editing (boundary shared with doc 20)
+
+§11.1 gives the *browser* authoritative ownership of buffers. That is correct for one editor but
+silent about two users — or two tabs — editing the same candidate/workspace at once, which is exactly
+the setting doc 20 introduces (one OIDC-authenticated multi-user LoopLab). Resolve it explicitly
+rather than by accident:
+
+- **v1 — single-writer per draft.** A draft is owned by one WorkspaceSession; a second opener gets a
+  read-only view plus an explicit *take over* / *branch* action, enforced by the optimistic-version
+  `If-Match` contract in §11.2. A stale writer receives a conflict, never a silent merge or draft
+  loss. This needs no CRDT and satisfies the §18.4 gates on isolation and conflict.
+- **Later — real-time co-editing, if demanded.** Do **not** simulate it with last-write-wins polling.
+  The standard path is a CRDT layer such as [Yjs](https://github.com/yjs/yjs) with editor bindings for
+  both candidates (`y-codemirror.next` for CodeMirror 6, `y-monaco` for Monaco) over an authenticated
+  WebSocket provider bound to the same Hub identity/named server as every other channel. It adds a
+  shared-document authority, presence/awareness, and its own persistence/audit interactions, so it
+  **inherits doc 20's multi-user resource, isolation, and lifecycle gates and must not ship ahead of
+  them.**
+
+Collaborative editing does not change the commit contract: a co-authored draft still commits exactly
+one `inject_node`, with co-author provenance recorded.
 
 ## 12. Desktop Remote-SSH through WSS/443
 
@@ -1078,6 +1202,9 @@ current system:
 
 - Lazy workspace tree; tabs; syntax editor; real candidate diff; keyboard/accessibility baseline.
 - CodeMirror and Monaco behind the same small adapter.
+- Client-side (WASM) highlighting and lint only; no server language server yet (§11.3).
+- The real candidate diff is already a standalone win for the existing read-only review journey
+  (§4.1), independent of any editing capability.
 - No writes, LSP, terminal, Git, or recursive watcher.
 
 **Exit:** A/B results under real training and an editor-core decision.
@@ -1097,6 +1224,9 @@ current system:
 
 - Validate and append one child `inject_node` event.
 - Complete diff, provenance, idempotency, audit, and evaluation handoff.
+- Optionally surface agent-proposed candidate diffs for human accept/edit/commit through the same
+  single-`inject_node` path, recording agent-vs-human provenance (§11.8); wire the latent
+  `CONTROL.inject` helper here, to the workspace API.
 - Read-only historical/artifact views.
 
 **Exit:** deterministic replay reproduces the edited child and duplicate submits cannot create
@@ -1104,7 +1234,9 @@ unintended children.
 
 ### Phase IDE-4 — intelligence and bounded tooling
 
-- Server-side search; Python LSP; diagnostics; command runner/background jobs.
+- Prefer client-side WASM checks (lint/format/type/syntax) before a server LSP; add the server
+  language server only for cross-file/project intelligence that needs the workspace environment
+  (§11.3). Server-side search; diagnostics; command runner/background jobs.
 - Separate channels and watcher exclusions.
 - Add terminal, Git, debug, or selective VS Code services only from measured user demand.
 
@@ -1137,7 +1269,8 @@ cross-user isolation pass.
 - Threat model and penetration review.
 - Legal/licensing decision.
 - HA, upgrades, observability, incident response, and support model.
-- Choose Teleport/custom gateway/Coder/Attach—or intentionally ship none.
+- Choose Teleport/custom gateway/Coder/Attach—or intentionally ship none. On the chosen SSH plane the
+  desktop client may be VS Code, JetBrains Gateway, or Positron (§10.7).
 
 **Exit:** production owner accepts both the functional limits and effective authority.
 
@@ -1154,6 +1287,8 @@ cross-user isolation pass.
 | Remote Tunnels | Relay, identity, egress, privacy, and license approved | Strict no-SaaS or no-SSH policy |
 | Kubernetes Attach | Broker issues pod-bound short credentials; RBAC and revocation pass | Desktop receives standing/broad kubeconfig or cross-user discovery |
 | Full browser IDE | Resource-isolated benchmark meets SLOs | It reproduces current multi-second lag or becomes the embedded critical path |
+| Client-side language tier | WASM lint/type/format runs in a worker with zero server LSP for the covered checks | Basic typing feedback requires a live server LSP process |
+| Multi-user editing | Single-writer drafts return an explicit conflict, not a silent merge; any co-editing follows doc 20's gates | Concurrent editors last-write-wins or bypass doc 20's multi-user gates |
 
 ## 22. Risks and open decisions
 
@@ -1171,6 +1306,10 @@ cross-user isolation pass.
 11. Required audit granularity for IDE file edits and terminal commands.
 12. Internal-only versus customer-facing distribution and resulting legal constraints.
 13. Production owner for a gateway/Teleport/Coder/Kubernetes broker.
+14. Whether the embedded editor hosts agent-assisted candidate editing, and how agent-vs-human
+    authorship is recorded in provenance (§11.8).
+15. The multi-user / collaborative-editing model and its dependency on doc 20's multi-user gates (§11.9).
+16. How much language intelligence can run client-side (WASM) before a server LSP is justified (§11.3).
 
 ---
 
@@ -1223,6 +1362,20 @@ browser IDE, a custom editor, and standard SSH are interchangeable.
 - [code-server requirements](https://coder.com/docs/code-server/requirements) ·
   [FAQ](https://github.com/coder/code-server/blob/main/docs/FAQ.md)
 - [OpenVSCode Server](https://github.com/gitpod-io/openvscode-server)
+- [JetBrains Remote Development / Gateway](https://www.jetbrains.com/help/idea/remote-development-overview.html)
+- [Positron (posit-dev/positron)](https://github.com/posit-dev/positron)
+- [Eclipse Che](https://eclipse.dev/che/)
+
+### Client-side language tooling and collaboration
+
+- [tree-sitter](https://tree-sitter.github.io/tree-sitter/) ·
+  [ruff](https://github.com/astral-sh/ruff) ·
+  [basedpyright](https://github.com/DetachHead/basedpyright) ·
+  [ty (Astral type checker)](https://github.com/astral-sh/ty) ·
+  [Pyodide](https://pyodide.org/en/stable/)
+- [Yjs](https://github.com/yjs/yjs) ·
+  [y-codemirror.next](https://github.com/yjs/y-codemirror.next) ·
+  [y-monaco](https://github.com/yjs/y-monaco)
 
 ### Jupyter
 
