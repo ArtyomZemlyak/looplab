@@ -94,6 +94,46 @@ The fastest credible product route is therefore **not** “replace `SubprocessSa
 Job.” It is “make evaluation a portable, durable domain operation; keep local execution as its first
 backend; then add schedulers.”
 
+### 1.1 Where to start, in plain terms
+
+The rest of this document is detailed; the starting decision comes down to one choice.
+
+**Move the *evaluation*, not the whole run.** In LoopLab only one step needs a GPU — running and
+measuring a candidate. Everything else (the LLM proposing ideas, the event log, deciding what to try
+next) is cheap and stays on one coordinator machine. So send individual evaluations to the cluster
+like jobs in a queue: an immutable request — “here is the code, the input snapshot, the image, give
+me one GPU, return a typed result” — goes out, a result comes back, and the worker never writes the
+authoritative log or holds a database credential (§4.2, §4.5). Moving the whole run into one remote
+container instead keeps the GPU reserved while the LLM thinks and makes steering and failover hard;
+it is a throwaway prototype, not the product seam.
+
+**Build it in this order — the order matters more than the backend choice:**
+
+1. keep the same contract but local: an `EvaluationService` whose first worker is today's subprocess.
+   Nothing changes for the user, but there is now a clean “evaluation request → result” seam (D1);
+2. then one remote worker on one GPU, and pass every hard case — duplicate submit, lost callback,
+   late stale result, cancel race — before scaling (D2);
+3. only then breadth: many independent one-GPU evaluations in parallel (D3).
+
+Skipping 1–2 buys a nice cluster that silently loses and duplicates results.
+
+**Concrete first stack for the common case** (a few data scientists, existing Kubernetes GPU nodes):
+PostgreSQL plus object storage (MinIO/S3) for state and blobs; one Kubernetes Job per evaluation
+behind Kueue and the NVIDIA GPU Operator; one whole GPU per evaluation, exclusive; JupyterHub as a
+workspace *provider*, not the run store; LiteLLM as the LLM gateway (§14.1). If the site already runs
+Slurm, use an `sbatch` adapter instead; for a handful of trusted GPU boxes, use dstack; with no
+remote infrastructure, finish the local contract and **measure first** before installing a platform.
+
+**Deliberately not on the critical path:** GPU slicing (MIG/time-slicing) for ordinary training,
+multi-node training, multiple clusters, cloud burst, and warm pools. Add each only when a measurement
+shows it is the actual bottleneck (§13.2), never by default.
+
+**Why breadth comes first, specific to LoopLab:** LoopLab is a *search* engine, not one large
+training job. It almost always gains more from eight independent one-GPU candidates than from one
+candidate stretched across eight GPUs — a wide multi-GPU evaluation narrows the search and fragments
+the queue (§2). Default to many small parallel evaluations; go wider only when a task provably needs
+the memory or the speed-up.
+
 ---
 
 ## 2. What “distributed” means
