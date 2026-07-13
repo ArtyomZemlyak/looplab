@@ -425,6 +425,20 @@ export default function AssistantBar({ runId, hidden = false }) {
     window.addEventListener('ll:attach-node', onAttach)
     return () => window.removeEventListener('ll:attach-node', onAttach)
   }, [hasChat])
+  // Contextual empty/recovery states can reveal and prefill the persistent Assistant without
+  // submitting anything. The user still reviews and explicitly sends the exact command.
+  useEffect(() => {
+    const onFocusAssistant = event => {
+      const text = String(event?.detail?.text || '').trim()
+      const draft = input.trim()
+      if (text && (!draft || draft === text)) setInput(text)
+      else if (text) flash(`Draft preserved — clear it before inserting ${text}`)
+      setView(value => value === 'bar' && hasChat ? 'side' : value)
+      requestAnimationFrame(() => inputRef.current?.focus())
+    }
+    window.addEventListener('ll:focus-assistant', onFocusAssistant)
+    return () => window.removeEventListener('ll:focus-assistant', onFocusAssistant)
+  }, [hasChat, input])
   const newChat = () => {
     if (abortRef.current) { try { abortRef.current.abort() } catch { /* gone */ } abortRef.current = null }
     // the departing turn's finally is sid-guarded — reset the shared flags here (see openSession)

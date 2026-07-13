@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react'
+import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { get, fmt, workingId, resetRun, getRunCommand, retryRunCommand, runCommand,
   commandFeedback, commandErrorMessage, commandFailureRecord, commandCanRetry, createIdempotencyKey,
   commandActionForEvent, commandRecordMatchesAction, commandEventForAction,
@@ -517,7 +517,7 @@ const observationKind = error => {
 
 // Round-9: the per-run "boss" chat moved to the single persistent assistant, so the Dock is purely
 // the run's EVENTS window — the timeline feed + scrubber + filters + transport.
-export default function Dock({ runId, live, liveSeq, expectedGeneration, viewSeq, setViewSeq, onFocus, collapsed, onToggleCollapse, height = 230, onToast, readOnly = false }) {
+export default function Dock({ runId, live, liveSeq, expectedGeneration, viewSeq, setViewSeq, onFocus, collapsed, onToggleCollapse, height = 230, onToast, readOnly = false, publishTransport = null }) {
   const [log, setLog] = useState([])
   const [logStatus, setLogStatus] = useState('loading')
   const [logNonce, setLogNonce] = useState(0)
@@ -955,6 +955,25 @@ export default function Dock({ runId, live, liveSeq, expectedGeneration, viewSeq
     if (!window.confirm('Reset this run? Wipes all events & nodes and restarts from scratch.')) return
     try { await resetRun(runId); onToast?.('replaying from scratch') } catch (e) { onToast?.('reset failed: ' + e.message) }
   }
+  // Publish only from the committed layout and bind the callable to this exact run generation. A
+  // functional identity cleanup prevents an old StrictMode/unmount cleanup from erasing a newer
+  // controller. The parent also receives busy/failure reactively, so a prominent canvas recovery CTA
+  // cannot look enabled while Dock is preserving or observing a command.
+  useLayoutEffect(() => {
+    if (!publishTransport || readOnly) return undefined
+    const controller = Object.freeze({
+      runId, expectedGeneration, busy: transportBusy,
+      pendingAction: transportPending?.action || externalTransportPending?.action || null,
+      failure: !!transportFailure,
+      invoke: action => {
+        if (action !== 'resume' && action !== 'finalize') return undefined
+        return runTransport(action)
+      },
+    })
+    publishTransport(controller)
+    return () => publishTransport(current => current === controller ? null : current)
+  }, [publishTransport, readOnly, runId, expectedGeneration, transportBusy,
+    transportPending?.action, externalTransportPending?.action, !!transportFailure])
   return (
     <div className="dock chat-dock">
       <div className="dock-tabs">

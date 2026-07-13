@@ -2,7 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 
 import {
-  ALL_RUNS, UNASSIGNED_RUNS, effectiveRunStatus, filterRuns, finalizationIncomplete,
+  ALL_RUNS, UNASSIGNED_RUNS, dagEmptyPresentation, effectiveRunStatus, filterRuns, finalizationIncomplete,
   lifecyclePhaseLabel, metricComparable, runLifecycle, scopeRuns, sortRuns, terminalReady,
 } from '../src/runIndex.js'
 
@@ -93,6 +93,57 @@ test('canonical header phase never falls back to a stale folded finished label d
   assert.equal(lifecyclePhaseLabel({
     finished: true, phase: 'finished', stop_requested: true, stop_reason: 'error', engine_running: false,
   }), 'finalization stalled')
+})
+
+test('zero-node DAG presentation is lifecycle-aware and read-only contexts win', () => {
+  const present = (live, context = {}) => dagEmptyPresentation({
+    displayed: live, live, resourceStatus: 'ready', connected: true, ...context,
+  })
+  const ids = value => value.actions.map(item => item.id)
+
+  assert.equal(present({ nodes: { 0: { id: 0 } }, engine_running: true }), null)
+  assert.equal(dagEmptyPresentation({ displayed: {}, resourceStatus: 'error' }), null,
+    'resource failures are handled by RunView and must never masquerade as successful empty')
+  assert.equal(dagEmptyPresentation({
+    displayed: { nodes: {}, phase: 'setup', engine_running: true }, resourceStatus: 'ready',
+  }).kind, 'preparing', 'displayed state remains authoritative when no separate live state is supplied')
+
+  const history = present({ nodes: {}, engine_running: false }, { historyActive: true, sequence: 7 })
+  assert.equal(history.kind, 'history')
+  assert.deepEqual(ids(history), ['return-live'])
+  assert.match(history.title, /seq 7/)
+
+  const review = present({ nodes: {}, engine_running: false }, { reviewMode: true })
+  assert.equal(review.kind, 'review')
+  assert.deepEqual(ids(review), [], 'a live-looking review must never expose owner mutations')
+
+  const cases = [
+    [{ nodes: {}, phase: 'finalizing', engine_running: false }, 'finalization-stalled', ['finalize', 'events']],
+    [{ nodes: {}, phase: 'finalizing', engine_running: true }, 'finalizing', []],
+    [{ nodes: {}, finished: true, engine_running: true }, 'finishing', []],
+    [{ nodes: {}, phase: 'spec_approval', paused: true, engine_running: false }, 'approval', ['assistant']],
+    [{ nodes: {}, phase: 'approval', engine_running: false }, 'approval-incomplete', ['events']],
+    [{ nodes: {}, phase: 'approval', best_node_id: 4, engine_running: false }, 'approval', ['assistant']],
+    [{ nodes: {}, paused: true, engine_running: false }, 'paused', ['resume', 'finalize']],
+    [{ nodes: {}, phase: 'search', engine_running: false }, 'stalled', ['resume', 'finalize', 'events']],
+    [{ nodes: {}, finished: true, engine_running: false }, 'finished', ['report', 'resume']],
+    [{ nodes: {}, phase: 'setup', engine_running: true }, 'preparing', ['events']],
+  ]
+  cases.forEach(([live, kind, actions]) => {
+    const value = present(live)
+    assert.equal(value.kind, kind)
+    assert.deepEqual(ids(value), actions)
+  })
+})
+
+test('zero-node fallback distinguishes a retained disconnected state', () => {
+  const value = dagEmptyPresentation({
+    displayed: { nodes: {} }, live: { nodes: {} }, resourceStatus: 'ready', connected: false,
+  })
+  assert.equal(value.kind, 'empty')
+  assert.equal(value.liveRegion, 'assertive')
+  assert.deepEqual(value.actions.map(item => item.id), ['events', 'retry-connection'])
+  assert.match(value.body, /connection is interrupted/)
 })
 
 test('metric ordering is objective-aware and missing values stay last', () => {

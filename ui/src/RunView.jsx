@@ -15,7 +15,7 @@ import {
   clearRunAccess, liveHistory, reconcileHistoricalSelection, rejectHistory,
   requestHistory, resolveHistory, setRunAccess,
 } from './runMode.js'
-import { lifecyclePhaseLabel, runLifecycle, terminalReady } from './runIndex.js'
+import { dagEmptyPresentation, lifecyclePhaseLabel, runLifecycle, terminalReady } from './runIndex.js'
 import {
   TrustPanel, SensitivityPanel, FailuresPanel, ParetoPanel, DataQualityPanel,
   ConfigPanel, AuthoringPanel, MemoryPanel, RegistryPanel, EventExplorer,
@@ -41,6 +41,44 @@ const HUB_OF = Object.fromEntries(HUBS.flatMap(([label, items]) => items.map(([k
 const REVIEW_SAFE_PANELS = new Set([
   'overview', 'trust', 'sensitivity', 'importance', 'failures', 'pareto', 'data', 'compare',
 ])
+
+const TRANSPORT_EMPTY_ACTIONS = new Set(['resume', 'finalize'])
+
+function DagEmptyOverlay({ presentation, transport, onAction }) {
+  if (!presentation) return null
+  let actions = presentation.actions
+  if (transport?.failure) {
+    actions = [
+      { id: 'events', label: 'Review command failure', emphasis: 'primary' },
+      ...actions.filter(item => !TRANSPORT_EMPTY_ACTIONS.has(item.id) && item.id !== 'events'),
+    ]
+  }
+  const pendingAction = transport?.pendingAction
+  return <section className={`dag-empty-card ${presentation.tone}`}
+    role={presentation.liveRegion === 'assertive' ? 'alert' : 'status'}
+    aria-live={presentation.liveRegion} aria-atomic="true">
+    {presentation.tone === 'progress' && <span className="dag-empty-spinner" aria-hidden="true" />}
+    <span className="dag-empty-eyebrow">Search canvas</span>
+    <h2>{presentation.title}</h2>
+    <p>{presentation.body}</p>
+    {transport?.failure && <p className="dag-empty-command-note">
+      The last run command needs attention. Its exact identity is preserved in Events &amp; timeline.
+    </p>}
+    {transport?.busy && <p className="dag-empty-command-note">
+      {pendingAction ? `${pendingAction} command is already in progress.` : 'A run command is already in progress.'}
+    </p>}
+    {actions.length > 0 && <div className="dag-empty-actions">
+      {actions.map(item => {
+        const isTransport = TRANSPORT_EMPTY_ACTIONS.has(item.id)
+        const generationReady = /^[0-9a-f]{64}$/.test(transport?.expectedGeneration || '')
+        const disabled = isTransport && (!!transport?.busy || !transport || !generationReady)
+        return <button type="button" key={item.id}
+          className={'btn' + (item.emphasis === 'primary' ? ' primary' : item.emphasis === 'danger' ? ' danger' : '')}
+          disabled={disabled} onClick={() => onAction(item.id)}>{item.label}</button>
+      })}
+    </div>}
+  </section>
+}
 
 export default function RunView({ runId, onBack, reviewMode = false, reviewMeta = null }) {
   const { live, seq, generation, connected, status: runStatus, error: runError, retry: retryRun } =
@@ -93,6 +131,10 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
   const [dockH, setDockH] = useState(() => +storageGet('ll.dockH', 230) || 230)
   const [sideC, setSideC] = useState(() => storageGet('ll.sideC') === '1')
   const [dockC, setDockC] = useState(() => storageGet('ll.dockC') === '1')
+  // Dock remains the sole owner of durable run-command recovery. It publishes a reactive controller
+  // only after its exact run/generation render commits, allowing the zero-node canvas CTA to reuse the
+  // same command identity, lock, persistence, and observation path without duplicating transport.
+  const [transportController, setTransportController] = useState(null)
   // Desktop panes keep their persisted layout. On tablet/mobile they become temporary surfaces so
   // neither Inspector nor Timeline permanently taxes the graph. Compact state is intentionally not
   // persisted: every narrow-screen visit starts with the canvas unobstructed.
@@ -402,6 +444,36 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
   const hasInspectorContext = selectedId != null || selectedGroup != null
   const showInspector = compactWorkspace ? (compactInspectorOpen && hasInspectorContext) : (!sideC && hasInspectorContext)
   const timelineCollapsed = compactWorkspace ? !compactTimelineOpen : dockC
+  const emptyPresentation = dagEmptyPresentation({
+    displayed: state, live, resourceStatus: runStatus, connected,
+    historyActive, reviewMode, sequence: history.resolvedSeq ?? viewSeq,
+  })
+  const approvalCommand = live.phase === 'spec_approval' ? '/ratify'
+    : live.phase === 'approval' && live.best_node_id != null ? `/approve #${live.best_node_id}` : null
+  const revealEvents = () => {
+    if (compactWorkspace) setCompactTimelineOpen(true)
+    else setDockC(false)
+  }
+  const onEmptyAction = (action) => {
+    if (action === 'events') { revealEvents(); return }
+    if (action === 'report') { setView('report'); return }
+    if (action === 'return-live') { changeViewSeq(null); return }
+    if (action === 'retry-connection') { retryRun(); return }
+    if (action === 'assistant') {
+      if (!approvalCommand) { revealEvents(); showToast('Approval target is missing; inspect the timeline before acting.'); return }
+      window.dispatchEvent(new CustomEvent('ll:focus-assistant', { detail: { text: approvalCommand } }))
+      return
+    }
+    if (!TRANSPORT_EMPTY_ACTIONS.has(action)) return
+    const exactController = transportController
+    if (!exactController || exactController.runId !== runId
+        || exactController.expectedGeneration !== generation) {
+      showToast('Run controls are refreshing for the displayed generation. Try again in a moment.')
+      return
+    }
+    if (exactController.failure) { revealEvents(); return }
+    exactController.invoke(action)
+  }
 
 
   return (
@@ -465,12 +537,19 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
       {/* All actions now run through the chat (type a /command or just say what to do). The approval
           phase shows an inline reminder of the exact command to type. */}
       {!readOnlyMode && (live.phase === 'approval' || live.phase === 'spec_approval') &&
-        <div className="topbar" style={{ background: 'rgba(74,163,255,.12)', borderBottom: '1px solid var(--accent-dim)' }}>
-          <b>{live.phase === 'approval'
-            ? `Human approval required for the final best — type `
-            : 'Eval spec needs ratification — type '}</b>
-          <code className="cmd-hint">{live.phase === 'approval' ? `/approve #${live.best_node_id}` : '/ratify'}</code>
-          <b>&nbsp;in the chat below.</b>
+        <div className="topbar" role={approvalCommand ? 'status' : 'alert'}
+          style={{ background: 'rgba(74,163,255,.12)', borderBottom: '1px solid var(--accent-dim)' }}>
+          {approvalCommand ? <>
+            <b>{live.phase === 'approval'
+              ? `Human approval required for the final best — type `
+              : 'Eval spec needs ratification — type '}</b>
+            <code className="cmd-hint">{approvalCommand}</code>
+            <b>&nbsp;in the chat below.</b>
+          </> : <>
+            <b>Approval target is missing.</b>
+            <span>Inspect Events before acting; no command has been guessed.</span>
+            <button className="btn sm" onClick={revealEvents}>Show events</button>
+          </>}
         </div>}
 
       <div className="topbar panel-bar" style={{ minHeight: 38, paddingTop: 4, paddingBottom: 4 }}>
@@ -516,12 +595,15 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
       <DirectionsOverview state={state} active={themeFilter} onPick={setThemeFilter} />
       <WhyStrip state={state} onSelect={selectNode} />
       <div className={'main run-workspace' + (compactWorkspace ? ' compact' : '')}>
-        <div className="canvas-wrap"><Dag state={state} selectedId={selectedId} onSelect={onCanvasSelect}
+        <div className={'canvas-wrap' + (emptyPresentation ? ' dag-empty' : '')}><Dag state={state} selectedId={selectedId} onSelect={onCanvasSelect}
           groupMode={groupMode} collapsed={collapsed} onToggleGroup={toggleGroup} onSetMode={changeMode}
           onCollapseAll={(keys) => setCollapsed(new Set(keys))} onExpandAll={() => setCollapsed(new Set())}
           onAutoCollapse={autoCollapse} onNodeAction={readOnlyMode ? null : onNodeAction}
           mergeArm={readOnlyMode ? null : mergeFrom}
-          selectedGroup={selectedGroup} onSelectGroup={selectGroup} themeFilter={themeFilter} /></div>
+          selectedGroup={selectedGroup} onSelectGroup={selectGroup} themeFilter={themeFilter} />
+          <DagEmptyOverlay presentation={emptyPresentation} transport={transportController}
+            onAction={onEmptyAction} />
+        </div>
         {compactWorkspace && !showInspector && hasInspectorContext &&
           <button className="workspace-pane-toggle" onClick={() => setCompactInspectorOpen(true)}
                   aria-label={`Open ${selectedGroup != null ? 'group' : 'inspector'} panel`}>
@@ -565,6 +647,7 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
             viewSeq={viewSeq} setViewSeq={changeViewSeq} onFocus={focusNode}
             onToast={showToast}
             readOnly={historyActive}
+            publishTransport={setTransportController}
             collapsed={timelineCollapsed}
             onToggleCollapse={() => compactWorkspace ? setCompactTimelineOpen(v => !v) : setDockC(c => !c)}
             height={dockH} />}

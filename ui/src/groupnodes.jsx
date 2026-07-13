@@ -23,11 +23,13 @@ export function RegionShell({ w, h, path, tint, tab }) {
 export function GroupRegion({ w, h, label, count, tint, onToggle }) {
   return (
     <div className="grp-band" style={{ width: w, height: h, '--grp-tint': tint }}>
-      <div className="grp-pill" onClick={(e) => { e.stopPropagation(); onToggle && onToggle(label) }} title="collapse group">
+      <button type="button" className="grp-pill"
+        onClick={(e) => { e.stopPropagation(); onToggle && onToggle(label) }}
+        aria-label={`Collapse group ${label}`} title="collapse group">
         <span className="grp-chev">▾</span>
         <span className="grp-pill-label">{label}</span>
         <span className="grp-n">{count}</span>
-      </div>
+      </button>
     </div>
   )
 }

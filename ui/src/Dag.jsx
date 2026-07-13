@@ -1,4 +1,4 @@
-import React, { useContext, useEffect, useMemo, useState } from 'react'
+import React, { useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { ReactFlow, Background, Controls, MiniMap, Handle, Position, Panel, useViewport } from '@xyflow/react'
 import '@xyflow/react/dist/style.css'
 import { fmt, layoutWithGroups, nodeClass, delta, workingId, operatorMeta, OPERATOR_LEGEND,
@@ -76,8 +76,23 @@ function Bolts() {
   )
 }
 
+function NodeActionTrigger({ nodeId, expanded, onOpen }) {
+  return <button type="button" className="node-action-trigger nodrag nopan"
+    aria-label={`Open actions for experiment #${nodeId}`} aria-haspopup="menu" aria-expanded={expanded}
+    title={`Actions for experiment #${nodeId}`}
+    onPointerDown={e => e.stopPropagation()}
+    onClick={e => { e.stopPropagation(); onOpen(nodeId, e) }}>•••</button>
+}
+
+function NodeSelectionTrigger({ nodeId, selected, label, onSelect }) {
+  return <button type="button" className="node-select-trigger"
+    data-node-select-id={nodeId} aria-label={label}
+    aria-current={selected ? 'true' : undefined} onClick={() => onSelect(nodeId)} />
+}
+
 function ExpNode({ data }) {
-  const { node, state, workId, selectedId, onSelect, themeFilter, groupTint } = data
+  const { node, state, workId, selectedId, onSelect, themeFilter, groupTint,
+    onOpenActions, actionsOpen } = data
   const lod = useContext(LodContext)   // overview zoom → render the compact glyph instead of the full card
   const m = node.confirmed_mean ?? node.metric
   const d = delta(node, state)
@@ -99,19 +114,28 @@ function ExpNode({ data }) {
     : node.status === 'evaluated' ? 0.55 : node.status === 'failed' ? 0.45 : 0.3
   const cardStyle = { '--core': coreI, ...(groupTint ? { '--grp-tint': groupTint } : {}) }
   const cardTitle = op.label + (node.idea?.rationale ? ' — ' + node.idea.rationale : '')
+  const selectionLabel = `Experiment #${node.id}, ${op.label}. Select to inspect`
   // Zoom LOD: below the threshold the full card is sub-pixel mush AND expensive (4 text rows + a Spark
   // SVG). Collapse to a glyph — the status-coloured body does the talking, plus the operator icon + id,
   // so the forest reads as a field of green/red blocks at overview (Blender/ELK level-of-detail pattern).
   if (lod) return (
-    <div className={cardCls + ' lod'} style={cardStyle} onClick={() => onSelect(node.id)} title={cardTitle}>
-      <Handle type="target" position={Position.Top} style={{ opacity: 0 }} />
-      {node.id === state.best_node_id && <><span className="ll-ring" aria-hidden="true" /><Bolts /></>}
-      <span className="lod-ic"><OpIcon name={op.icon} size={22} /></span>
-      <span className="lod-id">#{node.id}</span>
-      <Handle type="source" position={Position.Bottom} style={{ opacity: 0 }} />
+    <div className="node-card-shell">
+      <NodeSelectionTrigger nodeId={node.id} selected={node.id === selectedId}
+        label={selectionLabel} onSelect={onSelect} />
+      <div className={cardCls + ' lod'} style={cardStyle} onClick={() => onSelect(node.id)} title={cardTitle}>
+        <Handle type="target" position={Position.Top} style={{ opacity: 0 }} />
+        {node.id === state.best_node_id && <><span className="ll-ring" aria-hidden="true" /><Bolts /></>}
+        <span className="lod-ic"><OpIcon name={op.icon} size={22} /></span>
+        <span className="lod-id">#{node.id}</span>
+        <Handle type="source" position={Position.Bottom} style={{ opacity: 0 }} />
+      </div>
+      {onOpenActions && <NodeActionTrigger nodeId={node.id} expanded={actionsOpen} onOpen={onOpenActions} />}
     </div>
   )
   return (
+    <div className="node-card-shell">
+    <NodeSelectionTrigger nodeId={node.id} selected={node.id === selectedId}
+      label={selectionLabel} onSelect={onSelect} />
     <div className={cardCls} style={cardStyle}
          onClick={() => onSelect(node.id)} title={cardTitle}>
       <Handle type="target" position={Position.Top} style={{ opacity: 0 }} />
@@ -157,6 +181,8 @@ function ExpNode({ data }) {
           : node.feasible === false ? <div className="sub"><span className="badge reason">infeasible</span></div> : null}
       <Handle type="source" position={Position.Bottom} style={{ opacity: 0 }} />
     </div>
+    {onOpenActions && <NodeActionTrigger nodeId={node.id} expanded={actionsOpen} onOpen={onOpenActions} />}
+    </div>
   )
 }
 
@@ -199,12 +225,100 @@ function GroupSuper({ data }) {
 const nodeTypes = { exp: ExpNode, groupLane: GroupLane, groupSuper: GroupSuper }
 const edgeTypes = { energy: EnergyEdge }   // used only in Reactor/Energy FX mode (edge.type === 'energy')
 
+function visibleViewportBounds() {
+  const viewport = window.visualViewport
+  const left = viewport?.offsetLeft || 0
+  const top = viewport?.offsetTop || 0
+  return {
+    left, top,
+    right: left + (viewport?.width || document.documentElement.clientWidth),
+    bottom: top + (viewport?.height || document.documentElement.clientHeight),
+  }
+}
+
 export default function Dag({ state, selectedId, onSelect, groupMode = 'none', collapsed = new Set(),
                              onToggleGroup, onSetMode, onCollapseAll, onExpandAll, onAutoCollapse, selectedGroup, onSelectGroup,
                              themeFilter = null, onNodeAction, mergeArm = null }) {
   const workId = workingId(state)
   const [menu, setMenu] = useState(null)   // U3: right-click node menu {x,y,nodeId}
-  const act = (action) => { const id = menu?.nodeId; setMenu(null); if (id != null && onNodeAction) onNodeAction(action, id) }
+  const dagRef = useRef(null)
+  const menuRef = useRef(null)
+  const menuOpenSequence = useRef(0)
+  const closeMenu = useCallback((restoreFocus = false) => {
+    const { returnFocus, nodeId } = menu || {}
+    setMenu(null)
+    if (restoreFocus) requestAnimationFrame(() => {
+      const fallback = [...(dagRef.current?.querySelectorAll('[data-node-select-id]') || [])]
+        .find(element => element.dataset.nodeSelectId === String(nodeId))
+      const target = returnFocus?.isConnected ? returnFocus : fallback || dagRef.current
+      target?.focus({ preventScroll: true })
+    })
+  }, [menu])
+  const openMenu = useCallback((nodeId, x, y, returnFocus = null) => {
+    if (!onNodeAction) return
+    const viewport = visibleViewportBounds()
+    setMenu({
+      x: Math.max(viewport.left + 8, Math.min(x, viewport.right - 8)),
+      y: Math.max(viewport.top + 8, Math.min(y, viewport.bottom - 8)),
+      nodeId,
+      returnFocus,
+      focusToken: ++menuOpenSequence.current,
+    })
+  }, [onNodeAction])
+  const openActions = useCallback((nodeId, event) => {
+    const rect = event.currentTarget.getBoundingClientRect()
+    openMenu(nodeId, rect.right + 6, rect.top, event.currentTarget)
+  }, [openMenu])
+  const act = (action) => {
+    const id = menu?.nodeId
+    closeMenu(true)
+    if (id != null && onNodeAction) onNodeAction(action, id)
+  }
+  const onMenuKeyDown = (event) => {
+    const items = [...(menuRef.current?.querySelectorAll('[role="menuitem"]') || [])]
+    if (!items.length) return
+    const current = Math.max(0, items.indexOf(document.activeElement))
+    let next = null
+    if (event.key === 'ArrowDown') next = (current + 1) % items.length
+    else if (event.key === 'ArrowUp') next = (current - 1 + items.length) % items.length
+    else if (event.key === 'Home') next = 0
+    else if (event.key === 'End') next = items.length - 1
+    else if (event.key === 'Escape') { event.preventDefault(); closeMenu(true); return }
+    if (next != null) { event.preventDefault(); items[next].focus() }
+  }
+  useEffect(() => {
+    if (!menu) return
+    menuRef.current?.querySelector('[role="menuitem"]')?.focus({ preventScroll: true })
+  }, [menu?.focusToken])
+  useLayoutEffect(() => {
+    if (!menu || !menuRef.current) return
+    const rect = menuRef.current.getBoundingClientRect()
+    const viewport = visibleViewportBounds()
+    const x = Math.max(viewport.left + 8,
+      Math.min(menu.x, Math.max(viewport.left + 8, viewport.right - rect.width - 8)))
+    const y = Math.max(viewport.top + 8,
+      Math.min(menu.y, Math.max(viewport.top + 8, viewport.bottom - rect.height - 8)))
+    const maxHeight = Math.max(48, viewport.bottom - viewport.top - 16)
+    if (x !== menu.x || y !== menu.y || maxHeight !== menu.maxHeight) {
+      setMenu(current => current ? { ...current, x, y, maxHeight } : current)
+    }
+  }, [menu])
+  useEffect(() => {
+    if (!menu) return undefined
+    const viewport = window.visualViewport
+    const reclamp = () => setMenu(current => current ? { ...current, viewportTick: Date.now() } : current)
+    window.addEventListener('resize', reclamp)
+    viewport?.addEventListener('resize', reclamp)
+    viewport?.addEventListener('scroll', reclamp)
+    return () => {
+      window.removeEventListener('resize', reclamp)
+      viewport?.removeEventListener('resize', reclamp)
+      viewport?.removeEventListener('scroll', reclamp)
+    }
+  }, [!!menu])
+  useEffect(() => {
+    if (menu && (!onNodeAction || !state?.nodes?.[menu.nodeId])) closeMenu(true)
+  }, [menu, onNodeAction, state?.nodes, closeMenu])
   const fx = useFx()   // '' | 'subtle' | 'full' — Reactor/Energy FX: swaps edge rendering + the backdrop
   const [showMap, setShowMap] = useState(() => storageGet('ll.minimap') === '1')
   const [showLegend, setShowLegend] = useState(false)
@@ -289,8 +403,10 @@ export default function Dag({ state, selectedId, onSelect, groupMode = 'none', c
       // dim a node that's outside the selected lineage, or off the active theme filter
       const dimmed = (focusSet ? !focusSet.has(n.id) : false) || (themeFilter && n.idea?.theme !== themeFilter)
       rfNodes.push({ id: `n:${n.id}`, type: 'exp', position: p, zIndex: 1, width: NODE_W, height: NODE_H,
+        focusable: false,
         data: { node: n, state, workId, selectedId, onSelect, themeFilter, dim: dimmed,
-                groupTint: inLane ? tintOf(gkey) : null } })
+                groupTint: inLane ? tintOf(gkey) : null, onOpenActions: onNodeAction ? openActions : null,
+                actionsOpen: menu?.nodeId === n.id } })
     })
 
     // (Deep-research memos are no longer drawn in the DAG — they live in the Dock timeline + the
@@ -331,11 +447,11 @@ export default function Dag({ state, selectedId, onSelect, groupMode = 'none', c
     })
     return { nodes: rfNodes, edges: rfEdges, groupKeys: [...groups.keys()] }
   }, [state, selectedId, workId, onSelect, groupMode, collapsed, selectedGroup, onToggleGroup, onSelectGroup,
-      themeFilter, fx])
+      themeFilter, fx, onNodeAction, openActions, menu?.nodeId])
 
   return (
     <LodContext.Provider value={lod}>
-    <div className="dag-wrap">
+    <div ref={dagRef} className="dag-wrap" tabIndex={-1} aria-label="Experiment graph">
     {/* Reactor/Energy backdrop + shared SVG defs (the edge gradient + the neon glow filter), mounted
         only while FX is on so there's zero cost otherwise. The defs ids are referenced from CSS. */}
     {fx && <div className="reactor-bg" aria-hidden="true" />}
@@ -368,12 +484,9 @@ export default function Dag({ state, selectedId, onSelect, groupMode = 'none', c
                onNodeContextMenu={(e, rf) => {
                  const id = rf?.data?.node?.id
                  if (id == null || !onNodeAction) return
-                  e.preventDefault()
-                  setMenu({
-                    x: Math.max(8, Math.min(e.clientX, window.innerWidth - 270)),
-                    y: Math.max(8, Math.min(e.clientY, window.innerHeight - 390)),
-                    nodeId: id,
-                  })
+                 e.preventDefault()
+                 const trigger = e.target?.closest?.('.react-flow__node')?.querySelector?.('.node-action-trigger') || null
+                 openMenu(id, e.clientX, e.clientY, trigger)
                }}
                onNodeDragStop={(e, rf) => {
                  // U3 drag-to-merge: dropped a node near another -> merge the two. Manual intersection
@@ -397,7 +510,7 @@ export default function Dag({ state, selectedId, onSelect, groupMode = 'none', c
                  }
                  if (hit != null) onNodeAction('merge', { from, to: hit })
                }}
-               onPaneClick={() => { setMenu(null); onSelect(null); onSelectGroup && onSelectGroup(null) }}>
+               onPaneClick={() => { closeMenu(false); onSelect(null); onSelectGroup && onSelectGroup(null) }}>
       <LodWatcher lod={lod} onChange={setLod} />
       <ZoomFontWatcher />
       <Background color="#20252f" gap={22} />
@@ -440,19 +553,22 @@ export default function Dag({ state, selectedId, onSelect, groupMode = 'none', c
     </ReactFlow>
     {mergeArm != null && <div className="merge-arm-hint">click a node to merge with #{mergeArm} · Esc to cancel</div>}
     {menu && <>
-      <div className="menu-backdrop" onClick={() => setMenu(null)} onContextMenu={(e) => { e.preventDefault(); setMenu(null) }} />
-      <div className="node-menu" style={{ left: menu.x, top: menu.y }} onClick={e => e.stopPropagation()}>
-        <div className="nm-h">experiment #{menu.nodeId}</div>
-        <button className="nm-item" onClick={() => act('explore')}><OpIcon name="gitbranch" size={13} /> Explore from here</button>
-        <button className="nm-item" onClick={() => act('merge')}><OpIcon name="confluence" size={13} /> Merge with…</button>
-        <button className="nm-item" onClick={() => act('ablate')}><OpIcon name="target" size={13} /> Ablate</button>
-        <button className="nm-item" onClick={() => act('diff')}><OpIcon name="doc" size={13} /> Diff vs champion</button>
-        <button className="nm-item" onClick={() => act('inspect')}><OpIcon name="search" size={13} /> Inspect</button>
-        <div className="nm-h" style={{ marginTop: 4 }}>re-run in place (same #, no new node)</div>
-        <button className="nm-item" onClick={() => act('reset:eval')}><OpIcon name="play" size={13} /> Re-run · re-score (keep code)</button>
-        <button className="nm-item" onClick={() => act('reset:implement')}><OpIcon name="play" size={13} /> Re-run · re-code (keep idea)</button>
-        <button className="nm-item" onClick={() => act('reset:propose')}><OpIcon name="play" size={13} /> Re-run · full redo</button>
-        <button className="nm-item danger" onClick={() => act('kill')}><OpIcon name="cross" size={13} /> Kill branch</button>
+      <div className="menu-backdrop" onClick={() => closeMenu(true)} onContextMenu={(e) => { e.preventDefault(); closeMenu(true) }} />
+      <div ref={menuRef} className="node-menu" role="menu" aria-label={`Actions for experiment #${menu.nodeId}`}
+           style={{ left: menu.x, top: menu.y, maxHeight: menu.maxHeight }}
+           onClick={e => e.stopPropagation()} onKeyDown={onMenuKeyDown}
+           onBlur={event => { if (!event.currentTarget.contains(event.relatedTarget)) closeMenu(false) }}>
+        <div className="nm-h" role="presentation">experiment #{menu.nodeId}</div>
+        <button role="menuitem" className="nm-item" onClick={() => act('explore')}><OpIcon name="gitbranch" size={13} /> Explore from here</button>
+        <button role="menuitem" className="nm-item" onClick={() => act('merge')}><OpIcon name="confluence" size={13} /> Merge with…</button>
+        <button role="menuitem" className="nm-item" onClick={() => act('ablate')}><OpIcon name="target" size={13} /> Ablate</button>
+        <button role="menuitem" className="nm-item" onClick={() => act('diff')}><OpIcon name="doc" size={13} /> Diff vs champion</button>
+        <button role="menuitem" className="nm-item" onClick={() => act('inspect')}><OpIcon name="search" size={13} /> Inspect</button>
+        <div className="nm-h" role="presentation" style={{ marginTop: 4 }}>re-run in place (same #, no new node)</div>
+        <button role="menuitem" className="nm-item" onClick={() => act('reset:eval')}><OpIcon name="play" size={13} /> Re-run · re-score (keep code)</button>
+        <button role="menuitem" className="nm-item" onClick={() => act('reset:implement')}><OpIcon name="play" size={13} /> Re-run · re-code (keep idea)</button>
+        <button role="menuitem" className="nm-item" onClick={() => act('reset:propose')}><OpIcon name="play" size={13} /> Re-run · full redo</button>
+        <button role="menuitem" className="nm-item danger" onClick={() => act('kill')}><OpIcon name="cross" size={13} /> Kill branch</button>
       </div>
     </>}
     </div>
