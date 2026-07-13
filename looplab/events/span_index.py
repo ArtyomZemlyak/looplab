@@ -40,10 +40,11 @@ from looplab.events.traceview import _strip_span_io
 # never mis-read. The index is a cache — a version skew simply triggers one rebuild.
 _SCHEMA = 2
 _INDEX_NAME = "spans.index.jsonl"
-# Re-persist only after this many NEW payload bytes are indexed since the last write, so a live run
-# (which tops up the index on every node boundary) doesn't rewrite the whole 16 MB index each time.
-# A finished run's first open advances covers from 0 → full (>> threshold) and always persists.
-_PERSIST_MIN_DELTA = 8 * 1024 * 1024
+# Geometric re-persist factor (see `_persist`): re-write the persisted index only when the indexed
+# span bytes have grown by this factor since the last write. Bounds a live run's total index-write
+# volume to ~O(n) (a handful of full-object PUTs on S3/geesefs) instead of ~O(n²) full rewrites every
+# few MB. The first index (from covers 0) always persists.
+_PERSIST_GROWTH = 1.5
 # Bound the in-process cache: a 1 GB run's light spans are ~220 MB of Python dicts, so hold only a few
 # (the user views one run at a time; an evicted index just reloads its persisted form, not a rescan).
 _CACHE_MAX = 3
@@ -199,6 +200,16 @@ class SpanIndex:
             rows = list(self.by_tid.get(tid, ()))
         return self._read_full(rows)
 
+    def light_spans_for_node(self, node_id) -> list[dict]:
+        """The LIGHT spans of the traces attributed to this node — IN-MEMORY, no disk read (unlike
+        `full_spans_for_node`, which seeks each span's full I/O). Lets the node-detail timeline build
+        O(node) instead of O(whole run): `build_trace_view(light=True)` over just these yields the SAME
+        `nodes[nid]`/`rollup` as over ALL spans, because a span's effective node (its own node_id, else
+        its trace root's) is N iff it lives in one of N's traces — exactly what `node_tids` collects."""
+        with self._rlock:
+            return [self.light[r] for tid in self.node_tids.get(str(node_id), ())
+                    for r in self.by_tid.get(tid, ())]
+
     def full_spans_for_node(self, node_id) -> list[dict]:
         """Every FULL span in the traces attributed to this node (a node's create_node + evaluate +
         repair traces). Matches `build_conversation`'s grouping: it reads spans by TRACE and shows a
@@ -212,12 +223,18 @@ class SpanIndex:
 
     # -- persistence ---------------------------------------------------------------------------
     def _persist(self) -> None:
-        """Atomically write the light index to `spans.index.jsonl` (header + one line per span with
-        its byte offset/length). Throttled: only when coverage advanced by `_PERSIST_MIN_DELTA` since
-        the last write (a live run tops up on every node boundary; don't rewrite 16 MB each time)."""
+        """Atomically write the light index to `spans.index.jsonl` (header + one line per span with its
+        byte offset/length). Throttled GEOMETRICALLY: a live run tops up on every node boundary, and
+        re-writing the whole index each time is O(n²) total write volume over the run — and each rewrite
+        is a full-object PUT on the S3/geesefs mount the run dir often lives on. So persist only when the
+        covered span bytes grew ≥`_PERSIST_GROWTH`× since the last write (plus always the first time):
+        a 1 GB run persists ~O(log n) times / ~O(n) total bytes instead of ~covers/8MB full rewrites.
+        Trade: the persisted index may lag the in-memory one by up to (1 − 1/g); a fresh process
+        cold-loads it then re-parses that bounded tail delta from spans.jsonl — still far cheaper than a
+        full rebuild, and the in-memory index (the primary accelerator) is always current."""
         if self.identity is None or not self.light:
             return  # nothing to persist (no identity yet, or an empty/traceless spans.jsonl)
-        if self._persisted_covers >= 0 and (self.covers - self._persisted_covers) < _PERSIST_MIN_DELTA:
+        if self._persisted_covers > 0 and self.covers < self._persisted_covers * _PERSIST_GROWTH:
             return
         header = {"_idx": _SCHEMA, "covers": self.covers,
                   "dev": self.identity[0], "ino": self.identity[1]}
@@ -232,9 +249,14 @@ class SpanIndex:
 
 
 def _spotcheck(idx: SpanIndex) -> bool:
-    """Confirm the persisted offsets still line up with spans.jsonl: re-read the LAST indexed span at
-    its recorded (offset,length) and verify the span_id matches. Catches offset drift (a rewrite that
-    kept the same size/identity) cheaply — O(1), not a full re-scan."""
+    """Cheap O(1) sanity check that the persisted offsets still address spans.jsonl: re-read the LAST
+    indexed span at its recorded (offset,length) and confirm the span_id matches. This catches the
+    invalidations that actually occur — a truncation/rewrite that changed the tail — but, being a
+    single-span check, does NOT detect a mid-file byte shift that left the last span in place. That
+    pathological case can't arise here: spans.jsonl is append-only, and the only rewriters (clear_trace,
+    reset) go through atomic temp+rename → a NEW inode, which the dev/ino identity guard already rejects
+    before we get here. Full integrity is not the goal — the index is a rebuildable accelerator, so any
+    missed drift degrades to a wrong-offset read that `_read_full` skips, never wrong data."""
     if not idx.light:
         return True
     last = idx.light[-1]

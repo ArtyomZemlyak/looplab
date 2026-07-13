@@ -320,14 +320,21 @@ def build_router(srv) -> APIRouter:
             # light=True: the tree carries structure + tokens + timing but NOT the prompts/outputs —
             # the UI fetches a single observation's full I/O lazily via /spans/{sid} when expanded
             # (Langfuse-style), so a heavily-repaired node's trace stays small and nothing is lost.
-            # `srv.trace_view` reads the light span INDEX (not the whole spans.jsonl) and caches by
-            # file identity — so a 1 GB run's node trace is served in ~ms, not a 15 s full re-parse.
-            tv = srv.trace_view(rd)
+            # `srv.node_trace_view` builds over ONLY this node's spans via the light span INDEX (in-
+            # memory, O(node) — not the whole-run tree), so a 1 GB, 4000-node run's node trace is ~ms.
+            tv = srv.node_trace_view(rd, nid)
             return {"nodes": tv.get("nodes", {}).get(str(nid), []),
                     "rollup": tv.get("rollups", {}).get(str(nid), {}),
                     "summary": tv.get("summary", {})}
         except Exception:  # noqa: BLE001
             return {"nodes": [], "rollup": {}, "summary": {}}
+
+    @router.get("/api/runs/{run_id}/nodes/{nid}/trace")
+    def node_trace(run_id: str, nid: int):
+        """The LIGHT trace tree for ONE node — the hot path for expanding a node's trace card. Reads
+        only that node's spans via the index (O(node)), so the UI can fetch a node's trace lazily on
+        expand instead of loading (and re-rendering) the whole-run timeline for a 4000-node run."""
+        return _node_trace(_run_dir(run_id), nid)
 
     @router.get("/api/runs/{run_id}/spans/{sid}")
     def span_io(run_id: str, sid: str):

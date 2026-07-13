@@ -224,6 +224,20 @@ class AppState:
                 self._trace_view_cache.pop(next(iter(self._trace_view_cache)))
         return view
 
+    def node_trace_view(self, rd: Path, nid) -> dict:
+        """The LIGHT trace view built over ONLY one node's spans (via `light_spans_for_node`, in-memory)
+        — so expanding a node's trace is O(node), not O(whole run) indexed down. `build_trace_view` over
+        just that node's traces yields the SAME `nodes[nid]`/`rollups[nid]` as the whole-run view (a
+        span's effective node is N iff it lives in one of N's traces), so nothing is lost; only the
+        run-level `summary` narrows to the node (unused by the node-detail UI). Degrades to the whole-run
+        `trace_view` when the index is unavailable (missing/foreign spans), so the node tree still renders."""
+        from looplab.events.span_index import get_index
+        from looplab.events.traceview import build_trace_view
+        idx = get_index(rd / "spans.jsonl")
+        if idx is None:
+            return self.trace_view(rd)
+        return build_trace_view(self.trace_scalars(rd), idx.light_spans_for_node(nid), light=True)
+
     def phase(self, st) -> str:
         if st.finished:
             return PHASE_FINISHED

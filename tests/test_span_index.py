@@ -136,6 +136,51 @@ def test_incremental_topup_matches_full_rebuild(run):
     assert _canon(ref) == _canon(build_trace_view(ST, idx.light_spans(), light=True))
 
 
+def test_node_trace_view_is_o_node_and_identical(run):
+    """Building the node timeline over ONLY the node's spans (light_spans_for_node, in-memory) yields
+    the SAME nodes[nid]/rollup as the whole-run build_trace_view — so node-detail is O(node), not O(run),
+    with no change to what the UI renders."""
+    rd, sp, spans = run
+    idx = get_index(sp)
+    whole = build_trace_view(ST, idx.light_spans(), light=True)
+    for nid in (0, 1):
+        per_node = build_trace_view(ST, idx.light_spans_for_node(nid), light=True)
+        assert str(nid) in per_node["nodes"]
+        assert _canon(per_node["nodes"][str(nid)]) == _canon(whole["nodes"][str(nid)])
+        assert _canon(per_node["rollups"][str(nid)]) == _canon(whole["rollups"][str(nid)])
+        # O(node): only this node's traces were read (the fixture has single-node traces)
+        assert set(per_node["nodes"].keys()) == {str(nid)}
+
+
+def test_persist_rewrites_are_geometric(run, monkeypatch):
+    """The persisted index is re-written only when coverage grows ~1.5x — so a live run's total index-
+    write volume is O(n), not an ~O(n^2) full rewrite every few MB (each a full-object PUT on S3/geesefs).
+    Grow the file ~18x and assert the re-persists are logarithmic in count and geometric in coverage."""
+    rd, sp, spans = run
+    covers_at_write: list = []
+    import looplab.events.span_index as si
+    orig = si.atomic_write_bytes
+
+    def spy(p, b):
+        if getattr(p, "name", "") == "spans.index.jsonl":
+            try:
+                covers_at_write.append(orjson.loads(b.split(b"\n", 1)[0]).get("covers"))
+            except Exception:  # noqa: BLE001
+                pass
+        return orig(p, b)
+
+    monkeypatch.setattr(si, "atomic_write_bytes", spy)
+    get_index(sp)                                       # initial build + persist
+    for k in range(40):                                 # 40 small appends → ~18x growth
+        with open(sp, "ab") as f:
+            for s in _spans_for(1000 + k, f"tg{k}"):
+                f.write(orjson.dumps(s) + b"\n")
+        get_index(sp)
+    assert 1 < len(covers_at_write) <= 12, covers_at_write        # logarithmic, not ~40 rewrites
+    ratios = [b / a for a, b in zip(covers_at_write, covers_at_write[1:]) if a]
+    assert all(r >= 1.49 for r in ratios), covers_at_write        # each re-persist grew ≥ ~1.5x
+
+
 def test_persisted_index_is_written_and_smaller(run):
     rd, sp, spans = run
     get_index(sp)
@@ -301,6 +346,11 @@ def test_endpoints_serve_through_the_index(tmp_path):
     # /trace/by_trace: one operation's tree.
     bt = client.get("/api/runs/demo/trace/by_trace/tr1").json()
     assert bt["count"] == len(_spans_for(1, "tr1"))
+
+    # /nodes/{nid}/trace: the O(node) per-node timeline (hot path for lazy trace-card expand).
+    nt = client.get("/api/runs/demo/nodes/0/trace").json()
+    assert isinstance(nt["nodes"], list) and len(nt["nodes"]) >= 1   # node 0's tree (its create_node root)
+    assert nt["rollup"].get("generations") == 3                      # node 0's 3 generations, not the run's 6
 
     # clear_trace rewrites spans.jsonl (invalidating byte offsets) → the index is dropped and the next
     # read rebuilds cleanly against the shrunk file (node 0 gone, node 1 kept).
