@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { useMediaQuery, useRunState } from './hooks.js'
+import { useTimeline } from './useTimeline.js'
 import { get, fmt, fmtInt, phaseLabel, workingId, CONTROL, commandFeedback,
   storageGet, storageSet } from './util.js'
 import Dag from './Dag.jsx'
@@ -12,7 +13,7 @@ import EnergyToggle from './EnergyToggle.jsx'
 import { OpIcon } from './icons.jsx'
 import { useDialogFocus } from './useDialogFocus.js'
 import {
-  clearRunAccess, liveHistory, reconcileHistoricalSelection, rejectHistory,
+  clearRunAccess, historyMatches, liveHistory, reconcileHistoricalSelection, rejectHistory,
   requestHistory, resolveHistory, setRunAccess,
 } from './runMode.js'
 import { dagEmptyPresentation, lifecyclePhaseLabel, runLifecycle, terminalReady } from './runIndex.js'
@@ -43,6 +44,9 @@ const REVIEW_SAFE_PANELS = new Set([
 ])
 
 const TRANSPORT_EMPTY_ACTIONS = new Set(['resume', 'finalize'])
+// Expanded Timeline controls + pager + transport need enough room to leave a usable event viewport.
+// Heal old persisted splitter values instead of allowing a technically scrollable ~15 px sliver.
+const MIN_DOCK_HEIGHT = 200
 
 function DagEmptyOverlay({ presentation, transport, onAction }) {
   if (!presentation) return null
@@ -81,8 +85,14 @@ function DagEmptyOverlay({ presentation, transport, onAction }) {
 }
 
 export default function RunView({ runId, onBack, reviewMode = false, reviewMeta = null }) {
-  const { live, seq, generation, connected, status: runStatus, error: runError, retry: retryRun } =
+  const { live, seq, generation, eventCount: liveEventCount, connected,
+    status: runStatus, error: runError, retry: retryRun } =
     useRunState(runId, { pollOnly: reviewMode })
+  // One owner-only paged controller feeds both Dock and EventExplorer. Opening the explorer therefore
+  // adds no second raw-log scan, cursor stream, retained window, or competing generation fence.
+  const timeline = useTimeline(runId, {
+    liveSeq: seq, liveEventCount, expectedGeneration: generation, enabled: !reviewMode,
+  })
   const compactWorkspace = useMediaQuery('(max-width: 900px)')
   const [viewSeq, setViewSeq] = useState(null)
   const [history, setHistory] = useState(liveHistory)
@@ -96,6 +106,10 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
     setRunAccess(runId, { readOnly: reviewMode || n != null, seq: n,
       mode: reviewMode ? 'review' : n != null ? 'history' : 'live' })
     setViewSeq(n)
+  }
+  const returnToLive = () => {
+    changeViewSeq(null)
+    timeline.jumpToLive()
   }
   useEffect(() => {
     // A fresh route always starts live. This also heals any stale client registry entry left by an
@@ -148,7 +162,8 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
     storageSet('ll.sideC', sideC ? '1' : '0'); storageSet('ll.dockC', dockC ? '1' : '0')
   }, [sideW, dockH, sideC, dockC])
   const clampSide = (value) => Math.max(280, Math.min(Math.max(280, window.innerWidth - 486), value))
-  const clampDock = (value) => Math.max(90, Math.min(Math.max(140, window.innerHeight - 470), value))
+  const clampDock = (value) => Math.max(MIN_DOCK_HEIGHT,
+    Math.min(Math.max(MIN_DOCK_HEIGHT, window.innerHeight - 470), value))
   useEffect(() => {
     const clampPanes = () => { setSideW(w => clampSide(w)); setDockH(h => clampDock(h)) }
     clampPanes()
@@ -198,13 +213,14 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
     if (viewSeq == null) { setHistory(liveHistory()); return }
     let alive = true
     const want = Number(viewSeq)
-    setHistory(requestHistory(want))
+    setHistory(requestHistory(want, generation))
     get(`/api/runs/${encodeURIComponent(runId)}/state?seq=${want}`)
-      .then(p => { if (alive) setHistory(current => resolveHistory(current, want, p)) })
-      .catch(e => { if (alive) setHistory(current => rejectHistory(current, want, e)) })
+      .then(p => { if (alive) setHistory(current => resolveHistory(current, want, generation, p)) })
+      .catch(e => { if (alive) setHistory(current => rejectHistory(current, want, generation, e)) })
     return () => { alive = false }
-  }, [viewSeq, runId, historyRetry])
-  const hist = history.status === 'ready' && history.requestedSeq === viewSeq ? history.data : null
+  }, [viewSeq, runId, historyRetry, generation])
+  const currentHistory = historyMatches(history, viewSeq, generation) ? history : null
+  const hist = currentHistory?.status === 'ready' ? currentHistory.data : null
   const toastTimer = useRef(null)
   const showToast = (m) => {
     // Clear the previous timer so a second toast doesn't get hidden early by the first one's timeout.
@@ -426,11 +442,11 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
       <span className="history-lock" aria-hidden="true">◷</span>
       <b>Historical snapshot · seq {viewSeq} of {seq}</b>
       <span>read-only</span>
-      <button className="btn sm primary" onClick={() => changeViewSeq(null)}>Return to live</button>
+      <button className="btn sm primary" onClick={returnToLive}>Return to live</button>
     </div>
     <main className="history-resource">
-      {history.status === 'error'
-        ? <><h2>Snapshot unavailable</h2><p>{history.error}</p>
+      {currentHistory?.status === 'error'
+        ? <><h2>Snapshot unavailable</h2><p>{currentHistory.error}</p>
             <button className="btn" onClick={() => setHistoryRetry(n => n + 1)}>Retry</button></>
         : <><div className="history-spinner" aria-hidden="true" /><h2>Loading snapshot seq {viewSeq}…</h2>
             <p>The live workspace is hidden until this exact historical state resolves.</p></>}
@@ -457,7 +473,7 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
   const onEmptyAction = (action) => {
     if (action === 'events') { revealEvents(); return }
     if (action === 'report') { setView('report'); return }
-    if (action === 'return-live') { changeViewSeq(null); return }
+    if (action === 'return-live') { returnToLive(); return }
     if (action === 'retry-connection') { retryRun(); return }
     if (action === 'assistant') {
       if (!approvalCommand) { revealEvents(); showToast('Approval target is missing; inspect the timeline before acting.'); return }
@@ -531,7 +547,7 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
         <span className="history-lock" aria-hidden="true">◷</span>
         <b>Historical snapshot · seq {history.resolvedSeq} of {seq}</b>
         <span>read-only · actions target live and are disabled</span>
-        <button className="btn sm primary" onClick={() => changeViewSeq(null)}>Return to live</button>
+        <button className="btn sm primary" onClick={returnToLive}>Return to live</button>
       </div>}
 
       {/* All actions now run through the chat (type a /command or just say what to do). The approval
@@ -642,9 +658,10 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
 
       {!reviewMode && !compactWorkspace && !dockC && <div className="splitter h" onPointerDown={startDrag('dock')} onKeyDown={resizeWithKeys('dock')}
         role="separator" tabIndex={0} aria-orientation="horizontal" aria-label="Resize timeline"
-        aria-valuemin={90} aria-valuemax={Math.max(140, window.innerHeight - 470)} aria-valuenow={Math.round(dockH)} title="Drag or use arrow keys to resize" />}
+        aria-valuemin={MIN_DOCK_HEIGHT} aria-valuemax={Math.max(MIN_DOCK_HEIGHT, window.innerHeight - 470)} aria-valuenow={Math.round(dockH)} title="Drag or use arrow keys to resize" />}
       {!reviewMode && <Dock runId={runId} live={live} liveSeq={seq} expectedGeneration={generation}
-            viewSeq={viewSeq} setViewSeq={changeViewSeq} onFocus={focusNode}
+            timeline={timeline}
+            viewSeq={viewSeq} setViewSeq={changeViewSeq} onReturnToLive={returnToLive} onFocus={focusNode}
             onToast={showToast}
             readOnly={historyActive}
             publishTransport={setTransportController}
@@ -673,7 +690,8 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
       {panel === 'memory' && reviewPanelAllowed('memory') && <MemoryPanel onClose={closePanel} />}
       {panel === 'registry' && reviewPanelAllowed('registry') && <RegistryPanel state={state} onClose={closePanel} />}
       {panel === 'gpu' && reviewPanelAllowed('gpu') && <GpuPanel onClose={closePanel} />}
-      {panel === 'events' && reviewPanelAllowed('events') && <EventExplorer runId={runId} onClose={closePanel} />}
+      {panel === 'events' && reviewPanelAllowed('events') && <EventExplorer runId={runId} timeline={timeline}
+        historyActive={historyActive} onReturnToLive={returnToLive} onClose={closePanel} />}
       {panel === 'artifacts' && reviewPanelAllowed('artifacts') && <ArtifactsPanel runId={runId} onToast={showToast} onClose={closePanel} />}
 
       {toast && <div className="toast" role="status" aria-live="polite" aria-atomic="true">{toast}</div>}

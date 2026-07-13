@@ -3,27 +3,60 @@ import assert from 'node:assert/strict'
 
 import {
   assertRunMutationAllowed, clearRunAccess, liveHistory, reconcileHistoricalSelection,
-  rejectHistory, requestHistory, resolveHistory, runIdFromApiPath, setRunAccess,
+  historyMatches, rejectHistory, requestHistory, resolveHistory, runIdFromApiPath, setRunAccess,
 } from '../src/runMode.js'
 
+const GEN_A = 'a'.repeat(64)
+const GEN_B = 'b'.repeat(64)
+
 test('history resource never re-labels a stale response as the requested sequence', () => {
-  const loading10 = requestHistory(10)
-  const stale = resolveHistory(loading10, 9, { seq: 9, state: { nodes: { 9: {} } } })
+  const loading10 = requestHistory(10, GEN_A)
+  const stale = resolveHistory(loading10, 9, GEN_A, {
+    seq: 9, generation: GEN_A, state: { nodes: { 9: {} } },
+  })
   assert.deepEqual(stale, loading10)
 
-  const ready = resolveHistory(loading10, 10, { seq: 10, state: { nodes: { 10: {} } } })
+  const ready = resolveHistory(loading10, 10, GEN_A, {
+    seq: 10, generation: GEN_A, state: { nodes: { 10: {} } },
+  })
   assert.equal(ready.status, 'ready')
   assert.equal(ready.requestedSeq, 10)
+  assert.equal(ready.requestedGeneration, GEN_A)
+  assert.equal(ready.resolvedGeneration, GEN_A)
   assert.equal(ready.resolvedSeq, 10)
   assert.deepEqual(Object.keys(ready.data.nodes), ['10'])
 })
 
 test('failed history request contains no previous snapshot data', () => {
-  const loading = requestHistory(29)
-  const failed = rejectHistory(loading, 29, new Error('offline'))
+  const loading = requestHistory(29, GEN_A)
+  const failed = rejectHistory(loading, 29, GEN_A, new Error('offline'))
   assert.equal(failed.status, 'error')
   assert.equal(failed.data, null)
   assert.equal(failed.error, 'offline')
+})
+
+test('history generation is part of request, response, and error identity', () => {
+  const loadingB = requestHistory(10, GEN_B)
+
+  // A callback formed for generation A cannot fill generation B's loading resource.
+  const staleResponse = resolveHistory(loadingB, 10, GEN_A, {
+    seq: 10, generation: GEN_A, state: { nodes: { stale: {} } },
+  })
+  const staleError = rejectHistory(loadingB, 10, GEN_A, new Error('stale A error'))
+  assert.deepEqual(staleResponse, loadingB)
+  assert.deepEqual(staleError, loadingB)
+  assert.equal(historyMatches(loadingB, 10, GEN_A), false)
+  assert.equal(historyMatches(loadingB, 10, GEN_B), true)
+
+  // Even a callback with B identity fails closed if its payload was produced by A.
+  const mismatchedPayload = resolveHistory(loadingB, 10, GEN_B, {
+    seq: 10, generation: GEN_A, state: { nodes: { stale: {} } },
+  })
+  assert.equal(mismatchedPayload.status, 'error')
+  assert.equal(mismatchedPayload.requestedGeneration, GEN_B)
+  assert.equal(mismatchedPayload.resolvedGeneration, null)
+  assert.equal(mismatchedPayload.data, null)
+  assert.match(mismatchedPayload.error, /run changed/i)
 })
 
 test('historical selection is cleared when the node does not exist yet', () => {

@@ -707,6 +707,45 @@ def test_sse_emits_state_snapshot(tmp_path):
         assert "id:" in chunk or "state" in chunk
 
 
+def test_sse_reemits_for_generation_and_event_count_without_a_seq_change(tmp_path, monkeypatch):
+    """Generation/count are snapshot identity too; neither may be hidden by seq-only dedupe."""
+    import looplab.serve.appstate as appstate
+
+    rd = tmp_path / "demo"
+    rd.mkdir()
+    EventStore(rd / "events.jsonl").append(
+        "run_started", {"run_id": "demo", "task_id": "t", "goal": "g", "direction": "min"})
+    snapshots = [
+        ("a" * 64, 1, True, False),
+        ("a" * 64, 2, True, False),
+        ("b" * 64, 2, True, False),
+        ("b" * 64, 2, False, True),
+    ]
+    calls = [0]
+
+    def state_payload(_self, _rd, upto_seq=None):
+        assert upto_seq is None
+        generation, event_count, alive, finished = snapshots[min(calls[0], len(snapshots) - 1)]
+        calls[0] += 1
+        return {
+            "state": {"engine_running": alive, "finished": finished,
+                      "phase": "finished" if finished else "search"},
+            "seq": 7, "max_seq": 7, "generation": generation,
+            "event_count": event_count,
+        }
+
+    monkeypatch.setattr(appstate.AppState, "state_payload", state_payload)
+    response = TestClient(make_app(tmp_path)).get("/api/runs/demo/events")
+    frames = [frame for frame in response.text.split("\n\n") if "event: state" in frame]
+    payloads = [json.loads(next(line[6:] for line in frame.splitlines()
+                               if line.startswith("data: "))) for frame in frames]
+
+    assert [payload["event_count"] for payload in payloads] == [1, 2, 2, 2]
+    assert [payload["generation"] for payload in payloads] == [
+        "a" * 64, "a" * 64, "b" * 64, "b" * 64]
+    assert {payload["seq"] for payload in payloads} == {7}
+
+
 def test_sse_done_waits_for_finished_engine_to_exit(tmp_path, monkeypatch):
     """A folded run_finished event is a FINISHING state while the driver still owns engine.lock.
 

@@ -983,6 +983,7 @@ textarea.text { min-height: 220px; font-family: ui-monospace, Consolas, monospac
 .scrubber.inline { display: flex; align-items: center; gap: 8px; flex: 1; max-width: 520px; }
 .scrubber.inline input[type=range] { flex: 1; }
 .chat-body { display: flex; flex-direction: column; padding: 0; }
+.dock-body.chat-body { overflow: hidden; }
 
 .kind-chips { display: flex; flex-wrap: wrap; gap: 5px; padding: 6px 8px; border-bottom: 1px solid var(--line); align-items: center; }
 .kind-chip { font-size: 11px; padding: 2px 8px; border-radius: 999px; cursor: pointer;
@@ -993,15 +994,46 @@ textarea.text { min-height: 220px; font-family: ui-monospace, Consolas, monospac
 .feed-filter { flex: 1; min-width: 120px; height: 24px; }
 
 .chat-feed { flex: 1; overflow: auto; padding: 6px 8px; display: flex; flex-direction: column; gap: 2px; }
+.timeline-pagebar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; min-height: 30px; padding: 3px 8px;
+  border-bottom: 1px solid var(--line); flex: none; }
+.timeline-pagebar .muted { flex: 1; text-align: center; font-size: 11px; font-variant-numeric: tabular-nums; }
+.timeline-window-note { flex: none; padding: 4px 10px; color: var(--fg-mut); background: var(--bg-1);
+  border-bottom: 1px solid var(--line); font-size: 11px; }
+.timeline-window-note.warning { color: var(--working); }
+.timeline-resource { padding: 14px; text-align: center; }
+.timeline-virtual-wrap { position: relative; display: flex; flex: 1; min-height: 0; }
+.timeline-virtual { position: relative; flex: 1; min-height: 0; overflow: auto; overflow-anchor: none; }
+.timeline-virtual.chat-feed { display: block; }
+.timeline-virtual-space { position: relative; width: 100%; }
+.timeline-virtual-row { position: absolute; left: 0; right: 0; top: 0; contain: layout style; }
+.timeline-unread-status { position: absolute; left: 50%; bottom: 10px; z-index: 4; transform: translateX(-50%); }
+.timeline-unread { position: static;
+  min-height: 44px; padding: 6px 14px; border: 1px solid var(--accent); border-radius: 999px;
+  color: #fff; background: var(--accent-dim); box-shadow: var(--shadow); cursor: pointer; white-space: nowrap; }
+.timeline-unread:hover, .timeline-unread:focus-visible { background: var(--accent); outline: 2px solid var(--fg); outline-offset: 2px; }
+.event-explorer-tools { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-bottom: 8px; }
+.event-explorer-tools .text { flex: 1; min-width: 160px; }
+.event-explorer-timeline { height: min(62vh, 620px); border: 1px solid var(--line); border-radius: 8px;
+  background: var(--bg); font-family: ui-monospace, Consolas, monospace; font-size: 12px; }
+.event-explorer-row { display: grid; grid-template-columns: 72px minmax(150px, 210px) minmax(0, 1fr); gap: 8px;
+  align-items: baseline; min-height: 38px; padding: 8px; border-bottom: 1px solid var(--line); }
+.event-explorer-row:hover { background: var(--bg-2); }
+.event-explorer-seq { color: var(--fg-mut); font-variant-numeric: tabular-nums; }
+.event-explorer-type { color: var(--accent); overflow: hidden; text-overflow: ellipsis; }
+.event-explorer-data { color: var(--fg-mut); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 /* round-7: denser rows (~25% shorter) + monochrome glyphs. Type lives on the icon FORM, not hue. */
 .feed-msg { display: flex; gap: 6px; padding: 2px 6px; border-radius: 7px; border-left: 2px solid var(--line); align-items: flex-start; }
 .feed-msg:hover { background: var(--bg-1); }
 .feed-msg .fm-ic { width: 16px; flex: none; display: flex; align-items: center; justify-content: center; padding-top: 1px; }
 .feed-msg .fm-ic-svg { color: var(--fg-dim); }            /* monochrome by default — color is the exception */
 .feed-msg .fm-body { flex: 1; min-width: 0; }
-.feed-msg .fm-line { display: flex; align-items: baseline; gap: 6px; cursor: pointer; line-height: 1.3; }
+.feed-msg .fm-line { display: flex; align-items: baseline; gap: 6px; line-height: 1.3; }
+.feed-msg .fm-main { display: flex; align-items: baseline; gap: 6px; flex: 1; min-width: 0; padding: 0;
+  min-height: 24px; border: 0; background: transparent; color: inherit; text-align: left; font: inherit; cursor: pointer; }
+.feed-msg .fm-main:focus-visible, .feed-msg .fm-tw:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .feed-msg .fm-narr { flex: 1; min-width: 0; font-size: 12px; }
-.feed-msg .fm-tw { color: var(--fg-mut); font-size: 11px; cursor: pointer; flex: none; }
+.feed-msg .fm-tw { color: var(--fg-mut); font-size: 11px; cursor: pointer; flex: none;
+  min-width: 24px; min-height: 24px; padding: 0 2px; border: 0; background: transparent; font-family: inherit; }
 .feed-msg .ev-go { color: var(--accent); opacity: .6; font-size: 11px; }
 /* color policy: neutral by default; color ONLY for trust (safety), user, and agent-highlighted. */
 .feed-msg.k-lifecycle { opacity: .9; }
@@ -1079,6 +1111,7 @@ textarea.text { min-height: 220px; font-family: ui-monospace, Consolas, monospac
 .agent-status .as-seg { display: inline-flex; align-items: center; gap: 4px; }
 .agent-status .as-bullet { color: var(--line-2); }
 .agent-status .as-reply { color: var(--accent); }   /* the boss is replying to you, concurrently */
+.dock-agent-status { flex: none; max-height: 84px; overflow: auto; border-top: 1px solid var(--line); }
 
 /* Live agent-trace: a STANDARD inline disclosure — caret ▸ to the LEFT of the label (like every other
    expandable row), expanding IN PLACE. No pill, no floating popup. */
@@ -1152,7 +1185,10 @@ textarea.text { min-height: 220px; font-family: ui-monospace, Consolas, monospac
 /* round-7 dock: collapsible controls block, header mini-tag, transport buttons */
 .dock-controls { border-bottom: 1px solid var(--line); }
 .scrubber.inline { position: static; }                    /* was sticky via .scrubber — not needed in the controls block */
-.hist-tag-mini { font-size: 11px; color: var(--fg-mut); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.hist-tag-mini { font-size: 11px; color: var(--fg-mut); font-variant-numeric: tabular-nums; white-space: nowrap;
+  padding: 0; border: 0; background: transparent; font-family: inherit; cursor: pointer; }
+.hist-tag-mini:disabled { cursor: default; opacity: 1; }
+.hist-tag-mini:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .hist-tag-mini.hist { color: var(--working); }
 .transport { display: inline-flex; gap: 4px; align-items: center; justify-content: flex-end; flex-wrap: wrap; }
 .transport .btn { padding: 3px 7px; }

@@ -284,8 +284,15 @@ def test_state_cache_changes_generation_when_replacement_reuses_seq_size_and_mti
     ts_start = replacement.index(b'"ts":') + len(b'"ts":')
     ts_end = replacement.index(b",", ts_start)
     timestamp = bytearray(replacement[ts_start:ts_end])
-    assert timestamp[-1] in b"0123456789"
-    timestamp[-1] = ord("1") if timestamp[-1] != ord("1") else ord("2")
+    # Mutating the final fractional digit is flaky for epoch-scale timestamps: two different decimal
+    # spellings can round to the same IEEE-754 float and therefore the same canonical generation.
+    # Change the units digit instead; length stays fixed and the parsed float differs by exactly one.
+    decimal = timestamp.find(b".")
+    digit = decimal - 1 if decimal > 0 else len(timestamp) - 1
+    assert timestamp[digit] in b"0123456789"
+    current_digit = timestamp[digit] - ord("0")
+    timestamp[digit] = ord("0") + (current_digit + 1 if current_digit < 9 else 8)
+    assert float(timestamp) != float(replacement[ts_start:ts_end])
     replacement = replacement[:ts_start] + bytes(timestamp) + replacement[ts_end:]
     old_path.rename(rd / "events.jsonl.generation-a")
     old_path.write_bytes(replacement)
@@ -297,6 +304,32 @@ def test_state_cache_changes_generation_when_replacement_reuses_seq_size_and_mti
     assert second["seq"] == first["seq"] and second["max_seq"] == first["max_seq"]
     assert second["state"]["goal"] == "b"
     assert second["generation"] != first["generation"]
+
+
+def test_state_event_count_is_full_folded_projection_count_for_gaps_cache_hits_and_prefixes(tmp_path):
+    rd = _seed(tmp_path)
+    log = rd / "events.jsonl"
+    rows = [json.loads(line) for line in log.read_text("utf-8").splitlines()]
+    rows[-1]["seq"] = 7  # repaired logs may be monotonic while retaining legitimate seq gaps
+    log.write_text("".join(json.dumps(row, separators=(",", ":")) + "\n" for row in rows),
+                   encoding="utf-8")
+    client, srv = _client(tmp_path, _Driver())
+
+    first = client.get("/api/runs/demo/state").json()
+    assert first["event_count"] == len(rows) == 2
+    assert first["seq"] == first["max_seq"] == 7
+
+    original_events = srv.events
+    srv.events = lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("cache miss"))
+    try:
+        cached = client.get("/api/runs/demo/state").json()
+    finally:
+        srv.events = original_events
+    assert cached["event_count"] == 2 and cached["seq"] == 7
+
+    historical = client.get("/api/runs/demo/state", params={"seq": 0}).json()
+    assert historical["seq"] == 0
+    assert historical["event_count"] == 2  # full folded projection, not the history prefix length
 
 
 def test_resume_running_is_noop_without_event_or_spawn(tmp_path):

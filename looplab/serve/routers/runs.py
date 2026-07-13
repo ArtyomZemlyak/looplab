@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Optional
 
 import anyio
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import PlainTextResponse, StreamingResponse
 
 from looplab.core.atomicio import atomic_write_text
@@ -24,7 +24,10 @@ from looplab.events.digest import theme_rollup as _theme_rollup
 from looplab.serve.artifacts import (
     _ART_MAX_BYTES, _LOG_TAIL_MAX, _artifact_roots, _list_artifact_files)
 from looplab.serve.engine_proc import _engine_alive
-from looplab.serve.protocol import PHASE_FINALIZING, POLL_SECONDS, SSE_DONE, SSE_STATE
+from looplab.serve.log_pages import (
+    DEFAULT_BYTES, DEFAULT_ROWS, MAX_BYTES, MAX_ROWS, MIN_BYTES, EventLogPager)
+from looplab.serve.protocol import (
+    PHASE_FINALIZING, POLL_SECONDS, RUN_GENERATION_FIELD, SSE_DONE, SSE_STATE)
 
 # Snapshot-derived OPERATOR stage names, memoized per run DIRECTORY + snapshot VERSION: keyed on
 # (run dir, task.snapshot.json mtime_ns, size), so the normalize+validate work runs once per snapshot
@@ -82,6 +85,7 @@ def _operator_stage_names(rd: Path) -> tuple:
 
 def build_router(srv) -> APIRouter:
     router = APIRouter()
+    log_pages = EventLogPager()
     _run_dir, _phase = srv.run_dir, srv.phase
     _state_payload = srv.state_payload
 
@@ -155,6 +159,8 @@ def build_router(srv) -> APIRouter:
         async def gen():
             last_sent = -2
             last_alive = None
+            last_generation = None
+            last_event_count = None
             last_beat = time.monotonic()
             # A quiet/"thinking" run (a long LLM call or eval) advances no seq and flips no liveness,
             # so without this the stream goes byte-silent. Behind jupyter-server-proxy (tornado) and
@@ -173,9 +179,14 @@ def build_router(srv) -> APIRouter:
                     break
                 payload = await anyio.to_thread.run_sync(_state_payload, rd)
                 alive = payload["state"].get("engine_running")
-                if payload["seq"] != last_sent or alive != last_alive:
+                generation = payload.get(RUN_GENERATION_FIELD)
+                event_count = payload.get("event_count")
+                if (payload["seq"] != last_sent or alive != last_alive
+                        or generation != last_generation or event_count != last_event_count):
                     last_sent = payload["seq"]
                     last_alive = alive
+                    last_generation = generation
+                    last_event_count = event_count
                     last_beat = time.monotonic()
                     yield (f"id: {payload['seq']}\n"
                            f"event: {SSE_STATE}\n"
@@ -426,6 +437,27 @@ def build_router(srv) -> APIRouter:
         seq lower bound."""
         rd = _run_dir(run_id)
         return [o for o in iter_jsonl(rd / "events.jsonl") if o.get("seq", -1) > since]
+
+    @router.get("/api/runs/{run_id}/log-page")
+    def event_log_page(
+            run_id: str,
+            direction: str = "tail",
+            limit: int = Query(DEFAULT_ROWS, ge=1, le=MAX_ROWS),
+            byte_limit: int = Query(DEFAULT_BYTES, ge=MIN_BYTES, le=MAX_BYTES),
+            cursor: Optional[str] = None,
+            generation: Optional[str] = None,
+            anchor_seq: Optional[int] = Query(None, ge=0)):
+        """Bounded timeline transport. Cursors survive append and fail closed across run reset."""
+        rd = _run_dir(run_id)
+        candidate = rd / "events.jsonl"
+        if candidate.is_symlink():
+            raise HTTPException(404, "no such run")
+        log_path = candidate.resolve()
+        if rd not in log_path.parents:
+            raise HTTPException(404, "no such run")
+        return log_pages.page(
+            log_path, direction=direction, limit=limit, byte_limit=byte_limit,
+            cursor=cursor, generation=generation, anchor_seq=anchor_seq)
 
     @router.get("/api/runs/{run_id}/artifacts")
     def artifacts(run_id: str):

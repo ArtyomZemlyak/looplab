@@ -96,15 +96,20 @@ class AppState:
         if ckey is not None:
             hit = self._state_cache.get(ckey)
             if hit is not None:
-                d, last_seq, max_seq, generation = hit
+                d, last_seq, max_seq, generation, event_count = hit
                 out = dict(d)
                 # Liveness is a present-time fact. Stamping it into an old prefix fold creates a
                 # hybrid object that is neither historical nor live.
                 out["engine_running"] = _engine_alive(rd) if upto_seq is None else None
                 return {"state": out, "seq": last_seq, "max_seq": max_seq,
+                        "event_count": event_count,
                         RUN_GENERATION_FIELD: generation or None}
         all_evs = self.events(rd)
         generation = run_generation_token(all_evs)
+        # This is the count of the full recoverable folded projection, even for a historical
+        # ``upto_seq`` fold. It must not be inferred from seq: repaired logs may contain gaps. The
+        # raw timeline pager deliberately applies an additional strict-monotonic-seq boundary.
+        event_count = len(all_evs)
         max_seq = all_evs[-1].seq if all_evs else -1
         evs = all_evs if upto_seq is None else [e for e in all_evs if e.seq <= upto_seq]
         st = fold(evs)
@@ -145,10 +150,11 @@ class AppState:
         # showing a perpetual "thinking" strip and to resume on the next engine-needing chat action.
         d["engine_running"] = _engine_alive(rd) if upto_seq is None else None
         if ckey is not None:                 # cache the trimmed payload for the next unchanged tick
-            self._state_cache[ckey] = (d, last_seq, max_seq, generation)
+            self._state_cache[ckey] = (d, last_seq, max_seq, generation, event_count)
             if len(self._state_cache) > 256:  # bound the cache (many runs / seq points over a session)
                 self._state_cache.pop(next(iter(self._state_cache)))
         return {"state": d, "seq": last_seq, "max_seq": max_seq,
+                "event_count": event_count,
                 RUN_GENERATION_FIELD: generation or None}
 
     def phase(self, st, *, finalize_incomplete: bool = False) -> str:

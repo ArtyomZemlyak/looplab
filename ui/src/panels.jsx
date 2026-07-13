@@ -13,6 +13,8 @@ import SettingsForm from './SettingsForm.jsx'
 import { toForm, fromForm, FIELD_BY_KEY } from './settingsSchema.js'
 import { useDialogFocus } from './useDialogFocus.js'
 import { driftStatus, leakageStatus, rewardHackStatus } from './trustSemantics.js'
+import VirtualTimeline from './VirtualTimeline.jsx'
+import { timelineEventKey } from './timelineModel.js'
 
 export function Panel({ title, sub, onClose, children, wide }) {
   const dialogRef = useRef(null)
@@ -1208,17 +1210,73 @@ export function ComparePanel({ state, runId, onClose, initialPair = null }) {
 }
 
 
-export function EventExplorer({ runId, onClose }) {
-  const [log, setLog] = useState([])
+const explorerEvent = event => {
+  const omitted = event?._log_page?.truncated === true
+  const bytes = omitted ? Number(event._log_page.raw_bytes || 0) : 0
+  if (omitted) {
+    const preview = `details omitted · ${bytes.toLocaleString()} source bytes exceed page limit`
+    return { event, preview, search: `${event.type || ''} ${preview}`.toLowerCase(), omitted: true }
+  }
+  let serialized = '{}'
+  try { serialized = JSON.stringify(event.data || {}) } catch { serialized = '[unserializable event data]' }
+  const preview = serialized.length > 500 ? serialized.slice(0, 500) + '…' : serialized
+  return { event, preview, search: `${event.type || ''} ${serialized.slice(0, 4_000)}`.toLowerCase(), omitted: false }
+}
+const explorerEventKey = item => timelineEventKey(item.event)
+
+export function EventExplorer({ runId, timeline, historyActive = false, onReturnToLive = null, onClose }) {
   const [f, setF] = useState('')
-  useEffect(() => { get(`/api/runs/${runId}/log`).then(setLog).catch(() => {}) }, [runId])
-  const rows = log.filter(e => !f || e.type.includes(f))
+  const query = f.trim().toLowerCase()
+  const indexed = useMemo(() => timeline.rows.map(explorerEvent), [timeline.rows])
+  const rows = useMemo(() => indexed.filter(item => !query || item.search.includes(query)), [indexed, query])
+  const totalLabel = timeline.totalEvents == null
+    ? `${timeline.rows.length} loaded events`
+    : `${timeline.rows.length} loaded of ${timeline.totalEvents} events`
   return (
-    <Panel title="Event & span explorer" sub={`${log.length} events`} onClose={onClose} wide>
-      <input className="text" placeholder="filter by type…" value={f} onChange={e => setF(e.target.value)} style={{ marginBottom: 8 }} />
-      <table className="tbl"><thead><tr><th>seq</th><th>type</th><th>data</th></tr></thead><tbody>
-        {rows.map(e => <tr key={e.seq}><td>{e.seq}</td><td style={{ color: 'var(--accent)' }}>{e.type}</td><td className="muted" style={{ maxWidth: 600, overflow: 'hidden' }}>{JSON.stringify(e.data).slice(0, 200)}</td></tr>)}
-      </tbody></table>
+    <Panel title="Raw event explorer" sub={totalLabel} onClose={onClose} wide>
+      <div className="event-explorer-tools">
+        <input className="text" aria-label="Filter loaded events by type or first 4,000 data characters"
+          placeholder="filter loaded type or first 4k data chars…"
+          value={f} onChange={event => setF(event.target.value)} />
+        <button type="button" className="btn sm" disabled={!timeline.hasMore.older || timeline.loading.older}
+          onClick={timeline.loadOlder}>{timeline.loading.older ? 'Loading…' : 'Load older'}</button>
+        {timeline.hasMore.newer && <button type="button" className="btn sm" disabled={timeline.loading.newer}
+          onClick={timeline.loadNewer}>{timeline.loading.newer ? 'Loading…' : 'Load newer'}</button>}
+        <button type="button" className="btn sm ghost" disabled={timeline.loading.tail || (!historyActive && timeline.followingTail && timeline.windowAtTail)}
+          onClick={onReturnToLive || timeline.jumpToLive}>{timeline.loading.tail ? 'Refreshing…' : 'Latest'}</button>
+      </div>
+      {timeline.totalEvents != null && timeline.totalEvents > timeline.rows.length && <div className="timeline-window-note" role="note">
+        Search covers the loaded window only. Page through the log to inspect other source events.
+      </div>}
+      {timeline.errors.tail && <div className="notice resource-error compact" role="alert">
+        Newest events could not be refreshed. <button type="button" className="btn sm" onClick={() => timeline.retry('tail')}>Retry</button></div>}
+      {timeline.errors.older && <div className="notice resource-error compact" role="alert">
+        Could not load older events; current rows are unchanged. <button type="button" className="btn sm" onClick={timeline.loadOlder}>Retry</button></div>}
+      {timeline.errors.newer && <div className="notice resource-error compact" role="alert">
+        Newer-page refresh failed; loaded rows may be behind. <button type="button" className="btn sm" onClick={timeline.loadNewer}>Retry</button></div>}
+      {timeline.errors.around && <div className="notice resource-error compact" role="alert">
+        Replay window could not be loaded. <button type="button" className="btn sm" onClick={() => timeline.retry('around')}>Retry</button></div>}
+      {timeline.tornTail && <div className="timeline-window-note warning" role="status">
+        {timeline.sourceTailLimited ? 'Raw source tail exceeded the safety limit.' : 'Only the verified canonical event prefix is shown.'}
+      </div>}
+      {timeline.status === 'loading' && !timeline.rows.length
+        ? <div className="timeline-resource muted" role="status">Loading events…</div>
+        : timeline.status !== 'error' && rows.length === 0
+          ? <div className="timeline-resource muted">{query ? 'No matches in the loaded window.' : 'No verified events.'}</div>
+          : <VirtualTimeline rows={rows} getKey={explorerEventKey}
+              identity={`${runId}:${timeline.generation || 'pending'}:explorer`}
+              className="event-explorer-timeline" ariaLabel="Loaded raw events"
+              followingTail={!historyActive && timeline.followingTail} windowAtTail={!historyActive && timeline.windowAtTail}
+              unread={timeline.unread} unreadUnknown={timeline.unreadUnknown}
+              busy={Object.values(timeline.loading).some(Boolean)}
+              onFollowingTailChange={value => { if (!historyActive) timeline.setFollowingTail(value) }}
+              onJumpToLive={onReturnToLive || timeline.jumpToLive}
+              estimateSize={42}
+              renderRow={item => <div className={'event-explorer-row' + (item.omitted ? ' omitted' : '')}>
+                <span className="event-explorer-seq">{item.event.seq}</span>
+                <span className="event-explorer-type">{item.event.type}</span>
+                <span className="event-explorer-data">{item.preview}</span>
+              </div>} />}
     </Panel>
   )
 }

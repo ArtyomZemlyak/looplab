@@ -10,6 +10,8 @@ import Markdown from './markdown.jsx'
 import { NodeTrace } from './Inspector.jsx'
 import { OpIcon } from './icons.jsx'
 import { runLifecycle } from './runIndex.js'
+import VirtualTimeline from './VirtualTimeline.jsx'
+import { timelineEventKey } from './timelineModel.js'
 
 
 // The run's EVENTS window (round-9): one scrubbable, filterable feed that renders every run event
@@ -169,6 +171,7 @@ const TRACE_OWNER_TYPES = new Set(['node_created', 'node_evaluated', 'node_faile
 // create_node (spec_drift, novelty_rejected) would otherwise dump that whole node/eval trace.
 const OP_TRACE_TYPES = new Set(['strategy_decision', 'hypothesis_merged', 'research_completed',
   'report_generated', 'hypothesis_ranked', 'foresight_selected', 'lessons_distilled', 'lessons_refreshed'])
+const CLOSED_EXPANSION = Object.freeze({ open: false, touched: false })
 
 // Pull the model's raw <think> chain-of-thought for a node out of the trace view (spans.jsonl) — so
 // the feed can surface "what was the Researcher thinking" inline. Returns [{op, text}] for the node.
@@ -414,12 +417,20 @@ function OpTrace({ runId, traceId }) {
 }
 
 // One feed row, chat-message styled: an icon/color by kind, the narration, an expandable "why" card.
-function EventRow({ e, trace, onFocusEvent, autoOpen, runId, readOnly = false }) {
-  const [open, setOpen] = useState(autoOpen)
-  const touched = useRef(false)   // once the user toggles, stop auto-following the live frontier
+function EventRow({ e, trace, onFocusEvent, autoOpen, runId, readOnly = false,
+  expansion = null, onExpansionChange = null, traceError = false, onRetryTrace = null }) {
+  const [localOpen, setLocalOpen] = useState(autoOpen)
+  const localTouched = useRef(false)
+  const controlled = expansion != null
+  const open = controlled ? expansion.open === true : localOpen
+  const touched = controlled ? expansion.touched === true : localTouched.current
+  const changeOpen = (next, wasTouched = touched) => {
+    if (controlled) onExpansionChange?.({ open: next, touched: wasTouched })
+    else { localTouched.current = wasTouched; setLocalOpen(next) }
+  }
   // collapse-when-done: follow autoOpen (expand while live, collapse when the node resolves) UNLESS
   // the user manually toggled this card — then their choice wins.
-  useEffect(() => { if (!touched.current) setOpen(autoOpen) }, [autoOpen])
+  useEffect(() => { if (!touched && open !== autoOpen) changeOpen(autoOpen, false) }, [autoOpen])
   const nid = eventNode(e)
   const hasReason = REASONING_TYPES.has(e.type)
   // The node's span trace (create_node = propose+implement, or evaluate) belongs ONLY to the events
@@ -443,22 +454,40 @@ function EventRow({ e, trace, onFocusEvent, autoOpen, runId, readOnly = false })
   // expandable to its FULL content even without a dedicated reasoning card.
   const isRawFallback = !hasReason && !NARR[e.type]
   const hasGeneric = !hasReason && (genericRows(e).length > 0 || isRawFallback)
-  const expandable = hasReason || hasTrace || !!opTraceId || hasGeneric
+  const omittedBytes = e?._log_page?.truncated ? Number(e._log_page.raw_bytes || 0) : 0
+  const hasOmittedDetail = e?._log_page?.truncated === true
+  const traceCapable = !readOnly && traceNid != null
+  const expandable = hasReason || hasTrace || traceCapable || !!opTraceId || hasGeneric || hasOmittedDetail
   const { group, glyph } = kindOf(e.type)
-  const narr = (NARR[e.type] || ((d) => JSON.stringify(d).slice(0, 80)))(e.data)
+  const narr = hasOmittedDetail
+    ? `${e.type || 'event'} — details omitted (${omittedBytes.toLocaleString()} source bytes exceed page limit)`
+    : (NARR[e.type] || ((d) => JSON.stringify(d).slice(0, 80)))(e.data)
+  const detailsId = `timeline-event-${e.seq}-details`
   return (
     <div className={'feed-msg k-' + group}>
       <div className="fm-ic" title={group}><OpIcon name={glyph} size={14} className="fm-ic-svg" /></div>
       <div className="fm-body">
-        <div className="fm-line clickable" onClick={() => onFocusEvent(e)}
-             title={nid != null ? `open node #${nid} @ seq ${e.seq}` : `jump to seq ${e.seq}`}>
-          {expandable && <span className="fm-tw" onClick={(ev) => { ev.stopPropagation(); touched.current = true; setOpen(o => !o) }}>{open ? '▾' : '▸'}</span>}
-          <span className="fm-narr">{narr}</span>
-          {nid != null && <span className="ev-go">↗</span>}
+        <div className="fm-line">
+          {expandable && <button type="button" className="fm-tw" aria-expanded={open}
+            aria-controls={detailsId}
+            aria-label={`${open ? 'Collapse' : 'Expand'} details for event ${e.seq}`}
+            onClick={() => changeOpen(!open, true)}>{open ? '▾' : '▸'}</button>}
+          <button type="button" className="fm-main" onClick={() => onFocusEvent(e)}
+            title={nid != null ? `open node #${nid} @ seq ${e.seq}` : `jump to seq ${e.seq}`}>
+            <span className="fm-narr">{narr}</span>
+            {nid != null && <span className="ev-go">↗</span>}
+          </button>
         </div>
-        {open && expandable && <div className="ev-detail-wrap">
+        {open && expandable && <div className="ev-detail-wrap" id={detailsId}>
+          {hasOmittedDetail && <div className="notice" role="note">
+            Event details were not transferred: {omittedBytes.toLocaleString()} source bytes exceed the bounded page response.
+          </div>}
           {hasReason && reasoningDetail(e, trace)}
           {hasGeneric && <GenericDetail e={e} />}
+          {traceCapable && trace == null && !traceError && <div className="muted" role="status">loading node trace…</div>}
+          {traceCapable && traceError && <div className="notice resource-error compact" role="alert">
+            <span>Could not load node trace.</span><button type="button" className="btn sm" onClick={onRetryTrace}>Retry</button>
+          </div>}
           {hasTrace && <NodeTrace spans={nodeSpans} runId={runId} />}
           {opTraceId && <OpTrace runId={runId} traceId={opTraceId} />}
         </div>}
@@ -517,11 +546,11 @@ const observationKind = error => {
 
 // Round-9: the per-run "boss" chat moved to the single persistent assistant, so the Dock is purely
 // the run's EVENTS window — the timeline feed + scrubber + filters + transport.
-export default function Dock({ runId, live, liveSeq, expectedGeneration, viewSeq, setViewSeq, onFocus, collapsed, onToggleCollapse, height = 230, onToast, readOnly = false, publishTransport = null }) {
-  const [log, setLog] = useState([])
-  const [logStatus, setLogStatus] = useState('loading')
-  const [logNonce, setLogNonce] = useState(0)
+export default function Dock({ runId, live, liveSeq, expectedGeneration, timeline, viewSeq, setViewSeq, onReturnToLive, onFocus, collapsed, onToggleCollapse, height = 230, onToast, readOnly = false, publishTransport = null }) {
+  const log = timeline.rows
   const [trace, setTrace] = useState(null)
+  const [traceError, setTraceError] = useState(false)
+  const [traceNonce, setTraceNonce] = useState(0)
   const [filter, setFilter] = useState('')
   const [kinds, setKinds] = useState(() => new Set())     // selected kind chips (empty = all)
   const restoredRef = useRef(null)
@@ -533,7 +562,17 @@ export default function Dock({ runId, live, liveSeq, expectedGeneration, viewSeq
   const [runCommandLock, setRunCommandLock] = useState(() => loadRunCommandLock(runId))
   const externalTransportPending = runCommandLock?.source === 'assistant' ? runCommandLock : null
   const transportBusy = !!transportPending || !!externalTransportPending
-  const feedRef = useRef(null)
+  // Expansion is view-owned rather than row-owned: virtual rows may unmount offscreen, but a user's
+  // open reasoning/trace card must still be open when that retained event comes back into view.
+  const [eventExpansion, setEventExpansion] = useState(() => new Map())
+  useEffect(() => setEventExpansion(new Map()), [runId, timeline.generation])
+  useEffect(() => {
+    const retained = new Set(log.map(timelineEventKey))
+    setEventExpansion(current => {
+      if ([...current.keys()].every(key => retained.has(key))) return current
+      return new Map([...current].filter(([key]) => retained.has(key)))
+    })
+  }, [log])
   useEffect(() => {
     const restored = recoveryForRun(runId)
     const lock = loadRunCommandLock(runId)
@@ -569,16 +608,12 @@ export default function Dock({ runId, live, liveSeq, expectedGeneration, viewSeq
   // round-7: scrubber + filter chips collapse into one block to save space; default hidden, remembered.
   const [showControls, setShowControls] = useState(() => storageGet('ll.dock.controls') === '1')
   const toggleControls = () => setShowControls(v => { const n = !v; storageSet('ll.dock.controls', n ? '1' : '0'); return n })
-  useEffect(() => {
-    let alive = true
-    if (!log.length) setLogStatus('loading')
-    get(`/api/runs/${runId}/log`)
-      .then(d => { if (alive) { setLog(d); setLogStatus('ready') } })
-      .catch(() => { if (alive) setLogStatus('error') })
-    return () => { alive = false }
-  }, [runId, liveSeq, logNonce])
-  // The trace re-folds the whole spans.jsonl server-side, and it only backs the inline "thinking"
-  // cards — so refetch when a NODE is added (or the run finishes), not on every SSE seq tick.
+  const traceWanted = useMemo(() => log.some(event => {
+    const expansion = eventExpansion.get(timelineEventKey(event))
+    return expansion?.open && TRACE_OWNER_TYPES.has(event.type)
+  }), [log, eventExpansion])
+  // The trace re-folds the whole spans.jsonl server-side. Keep that scale cost lazy: a closed or
+  // merely virtualized timeline does not scan all spans just to decide whether a disclosure exists.
   const nodeCount = live ? Object.keys(live.nodes || {}).length : 0
   // Refetch the trace when a node is ADDED or SETTLES (evaluate/repair spans land on a node-in-place,
   // which doesn't change nodeCount) — so a node's eval/repair waterfall appears on its feed rows
@@ -590,18 +625,24 @@ export default function Dock({ runId, live, liveSeq, expectedGeneration, viewSeq
   // lands this collapses to 0 and normal node-based refetching resumes.
   const inSetup = !!live && !live.finished && live.engine_running !== false && nodeCount === 0
   useEffect(() => {
-    if (readOnly) { setTrace(null); return }
-    get(`/api/runs/${runId}/trace`).then(setTrace).catch(() => {})
-  }, [runId, nodeCount, settledCount, live?.finished, inSetup ? liveSeq : 0, readOnly])
+    if (readOnly || !traceWanted) { setTrace(null); setTraceError(false); return }
+    let active = true
+    setTraceError(false)
+    get(`/api/runs/${runId}/trace`).then(value => { if (active) setTrace(value) })
+      .catch(() => { if (active) { setTrace(null); setTraceError(true) } })
+    return () => { active = false }
+  }, [runId, nodeCount, settledCount, live?.finished, inSetup ? liveSeq : 0, readOnly, traceWanted, traceNonce])
   // While a node is BUILDING, its spans stream in but nodeCount/settledCount don't change — so the
   // fetch above never re-runs and the building node's Trace stays FROZEN (you see spans, but they never
   // grow). Poll the trace while a node builds so its Trace tab/row fills in live; the poll stops the
   // moment building ends (node_created clears `building`), and the fetch above does the final refresh.
   const buildingId = live && !live.finished && live.engine_running !== false && live.building
     ? live.building.node_id : null
-  usePoll(() => get(`/api/runs/${runId}/trace`).then(setTrace).catch(() => {}),
-    4000, [runId, buildingId, readOnly], { enabled: !readOnly && buildingId != null })
-  const atLive = viewSeq == null || viewSeq >= liveSeq
+  usePoll(() => get(`/api/runs/${runId}/trace`).then(value => { setTrace(value); setTraceError(false) })
+    .catch(() => setTraceError(true)),
+    4000, [runId, buildingId, readOnly, traceWanted], { enabled: !readOnly && traceWanted && buildingId != null })
+  const atLiveView = viewSeq == null || viewSeq >= liveSeq
+  const visiblyLive = atLiveView && timeline.followingTail && timeline.windowAtTail
 
   // The live frontier: the highest-id node still pending while the run runs — its proposal card stays
   // expanded ("thinking") until it resolves. null on a finished/replayed run — AND on a STALLED/zombie
@@ -613,27 +654,34 @@ export default function Dock({ runId, live, liveSeq, expectedGeneration, viewSeq
     return pend.length ? Math.max(...pend) : null
   }, [live])
 
-  // Scrubber: the thumb tracks a LOCAL value (instant) while the history fetch (re-folds + re-lays the
-  // DAG) is throttled to ~11fps. `drag == null` means "follow the committed seq".
+  // Scrubber: pointer/key movement is a LOCAL preview. Commit only on pointer-up/key-up/blur so a
+  // 50k-event drag cannot queue a series of expensive historical state folds on the server.
   const [drag, setDrag] = useState(null)
-  const thr = useRef({ last: 0, timer: null })
-  useEffect(() => () => clearTimeout(thr.current.timer), [])
+  const dragRef = useRef(null)
   useEffect(() => {
     if (viewSeq == null) {
-      clearTimeout(thr.current.timer)
-      thr.current.timer = null
+      dragRef.current = null
       setDrag(null)
     }
   }, [viewSeq])
-  const sliderVal = drag != null ? drag : (atLive ? liveSeq : viewSeq)
-  const commit = (v) => setViewSeq(v >= liveSeq ? null : v)
-  const onScrub = (v) => {
-    setDrag(v)
-    const now = Date.now(), st = thr.current
-    if (now - st.last >= 90) { st.last = now; commit(v) }
-    else { clearTimeout(st.timer); st.timer = setTimeout(() => { st.last = Date.now(); commit(v) }, 90) }
+  const sliderVal = drag != null ? drag : (atLiveView ? liveSeq : viewSeq)
+  const returnToLive = () => {
+    dragRef.current = null
+    setDrag(null)
+    if (onReturnToLive) onReturnToLive()
+    else { setViewSeq(null); timeline.jumpToLive() }
   }
-  const endScrub = () => { clearTimeout(thr.current.timer); commit(sliderVal); setDrag(null) }
+  const commit = (v) => v >= liveSeq ? returnToLive() : setViewSeq(v)
+  const onScrub = (v) => {
+    dragRef.current = v
+    setDrag(v)
+  }
+  const endScrub = () => {
+    if (dragRef.current == null) return
+    const value = dragRef.current
+    dragRef.current = null
+    commit(value); setDrag(null)
+  }
 
   const focusEvent = (e) => {
     const nid = eventNode(e)
@@ -641,26 +689,28 @@ export default function Dock({ runId, live, liveSeq, expectedGeneration, viewSeq
     onFocus?.(Number(nid), e.type === 'node_created' ? 'Trace' : 'Overview', e.seq)
   }
   const toggleKind = (g) => setKinds(s => { const n = new Set(s); n.has(g) ? n.delete(g) : n.add(g); return n })
-  const textMatch = (e) => {
-    if (!filter) return true
-    const q = filter.toLowerCase()
-    const narr = (NARR[e.type] || (() => ''))(e.data)
-    return e.type.toLowerCase().includes(q) || String(narr).toLowerCase().includes(q)
-  }
+  const searchableLog = useMemo(() => log.map(event => {
+    let narration = ''
+    try { narration = (NARR[event.type] || (() => ''))(event.data) } catch { /* malformed source stays inspectable */ }
+    // Unknown/forward-compatible event types are rendered from their raw data fallback. Include the
+    // same bounded source in search so text the user can plainly see is not reported as "0 matching".
+    // Keep the projection capped: the raw Explorer owns deeper payload inspection, and the Timeline
+    // may retain 5,000 rows.
+    let rawPreview = ''
+    try { rawPreview = JSON.stringify(event.data ?? {}).slice(0, 500) } catch { /* cyclic/malformed data */ }
+    return { event, search: `${event.type || ''} ${narration} ${rawPreview}`.toLowerCase() }
+  }), [log])
+  const filterQuery = filter.trim().toLowerCase()
   const kindMatch = (e) => kinds.size === 0 || kinds.has(TYPE2GROUP[e.type] || 'lifecycle')
 
   // The chronological feed: events, filtered + time-scrubbed.
   const feed = useMemo(() =>
-    log.filter(e => (atLive || e.seq <= viewSeq) && kindMatch(e) && textMatch(e)),
-    [log, atLive, viewSeq, filter, kinds])
-
-  // Scroll the CONTAINER after paint — tall detail cards lay out late, so scrollIntoView fired
-  // mid-layout would land short and leave a new row visually colliding with the row above it.
+    searchableLog.filter(({ event, search }) => (atLiveView || event.seq <= viewSeq)
+      && kindMatch(event) && (!filterQuery || search.includes(filterQuery))).map(item => item.event),
+    [searchableLog, atLiveView, viewSeq, filterQuery, kinds])
   useEffect(() => {
-    if (!atLive) return
-    const el = feedRef.current
-    if (el) requestAnimationFrame(() => { el.scrollTop = el.scrollHeight })
-  }, [feed.length, atLive])
+    if (!atLiveView && viewSeq != null) timeline.ensureSeq(viewSeq)
+  }, [atLiveView, viewSeq, timeline.revision, timeline.ensureSeq])
   // Observable run truth comes from the same pure lifecycle used by the run list/header. Local command
   // state only hides duplicate controls; it never promotes a run to finished by itself.
   const lifecycle = runLifecycle(live || {})
@@ -979,15 +1029,16 @@ export default function Dock({ runId, live, liveSeq, expectedGeneration, viewSeq
       <div className="dock-tabs">
         <span className="chat-label"><OpIcon name="flag" size={14} /> events &amp; timeline</span>
         {/* clickable so the user can return to live even when the controls (with the Live button) are hidden */}
-        <span className={'hist-tag-mini ' + (atLive ? 'live' : 'hist')}
-              onClick={() => { if (!atLive) { setViewSeq(null); setDrag(null) } }}
-              style={atLive ? undefined : { cursor: 'pointer' }}
-              title={atLive ? '' : 'click to return to live'}>
-          {atLive ? `live · ${liveSeq}` : `replay ${sliderVal}/${liveSeq} → live`}</span>
+        <button type="button" className={'hist-tag-mini ' + (visiblyLive ? 'live' : 'hist')}
+              onClick={returnToLive} disabled={visiblyLive}
+              title={visiblyLive ? '' : 'jump to the newest verified events'}>
+          {atLiveView
+            ? visiblyLive ? `live · ${liveSeq}` : 'reading · jump latest'
+            : `replay ${sliderVal}/${liveSeq} → live`}</button>
         {/* a left-over filter is invisible once controls collapse — surface it so the feed never looks empty for no reason */}
         {!showControls && (filter || kinds.size > 0) &&
-          <span className="hist-tag-mini hist" style={{ cursor: 'pointer' }}
-                title="a filter is active — open controls to change it" onClick={toggleControls}>⌕ filtered</span>}
+          <button type="button" className="hist-tag-mini hist"
+                title="a filter is active — open controls to change it" onClick={toggleControls}>⌕ filtered</button>}
         <span className="spacer" style={{ flex: 1 }} />
         <button className={'btn sm ghost' + (showControls ? ' on' : '')} title="time-travel & filters"
                 onClick={toggleControls}><OpIcon name="sliders" size={13} /> controls</button>
@@ -999,42 +1050,82 @@ export default function Dock({ runId, live, liveSeq, expectedGeneration, viewSeq
       {!collapsed && <div id="run-events-timeline" className="dock-body chat-body" style={{ height }}>
         {showControls && <div className="dock-controls">
           <div className="scrubber inline">
-            <button className="btn sm" onClick={() => { setViewSeq(null); setDrag(null) }} disabled={atLive && drag == null}><OpIcon name="play" size={11} /> Live</button>
+            <button className="btn sm" onClick={returnToLive} disabled={drag == null && visiblyLive}><OpIcon name="play" size={11} /> Live</button>
             <input type="range" min={0} max={Math.max(0, liveSeq)} value={sliderVal}
+                   aria-label="Timeline sequence" aria-valuetext={sliderVal >= liveSeq ? `live at ${liveSeq}` : `replay ${sliderVal} of ${liveSeq}`}
                    onChange={e => onScrub(Number(e.target.value))}
                    onPointerUp={endScrub} onMouseUp={endScrub} onKeyUp={endScrub} onBlur={endScrub} />
             <span className={(sliderVal >= liveSeq) ? 'live-tag' : 'hist-tag'}>{(sliderVal >= liveSeq) ? `live · ${liveSeq}` : `replay · ${sliderVal}/${liveSeq}`}</span>
           </div>
           <div className="kind-chips">
             {GROUPS.map(([g, label]) => <button key={g}
-              className={'kind-chip k-' + g + (kinds.has(g) ? ' on' : '')} onClick={() => toggleKind(g)}>
+              className={'kind-chip k-' + g + (kinds.has(g) ? ' on' : '')} aria-pressed={kinds.has(g)}
+              onClick={() => toggleKind(g)}>
               <OpIcon name={GROUP_GLYPH[g]} size={12} /> {label}</button>)}
             {kinds.size > 0 && <button className="kind-chip clear" onClick={() => setKinds(new Set())}>clear</button>}
-            <input className="text feed-filter" placeholder="filter text…" value={filter} onChange={e => setFilter(e.target.value)} />
+            <input className="text feed-filter" aria-label="Filter loaded timeline events" placeholder="filter loaded events…" value={filter} onChange={e => setFilter(e.target.value)} />
           </div>
         </div>}
-        <div className="feed chat-feed" ref={feedRef}>
-          {logStatus === 'loading' && log.length === 0 && <div className="muted" role="status">Loading timeline…</div>}
-          {logStatus === 'error' && <div className="notice resource-error" role="alert"><span>{log.length ? 'Could not refresh the timeline; showing the last loaded events.' : 'Could not load the timeline.'}</span><button className="btn sm" onClick={() => setLogNonce(n => n + 1)}>Retry</button></div>}
-          {feed.length === 0 && logStatus !== 'loading'
-            ? <div className="muted">{(filter || kinds.size) ? 'nothing matches the filter' : 'no events yet'}</div>
-            : feed.length > 0 ? feed.map(e =>
-                <EventRow key={'e' + e.seq} e={e} trace={readOnly ? null : trace} onFocusEvent={focusEvent} runId={runId}
-                    readOnly={readOnly}
-                    autoOpen={false} />) : null}
-          {(() => {
-            // A short, honest "what's the agent doing now" strip at the foot of the feed.
-            const pipeline = atLive ? agentStatus(live, log) : null
-            if (!pipeline) return null
-            return <div className="agent-status">
-              <div className="as-line">
-                <span className="as-dot" />
-                <span className="as-seg">{pipeline}</span>
-              </div>
-              <LiveTrace runId={runId} active={atLive} />
-            </div>
-          })()}
+        <div className="timeline-pagebar">
+          <button type="button" className="btn sm ghost" disabled={!timeline.hasMore.older || timeline.loading.older}
+            onClick={timeline.loadOlder}>{timeline.loading.older ? 'Loading…' : 'Load older'}</button>
+          <span className="muted">
+            {timeline.totalEvents != null ? `${log.length} loaded of ${timeline.totalEvents}` : `${log.length} loaded`}
+            {(filter || kinds.size) ? ` · ${feed.length} matching loaded events` : ''}
+          </span>
+          {timeline.hasMore.newer && <button type="button" className="btn sm ghost"
+            disabled={timeline.loading.newer} onClick={timeline.loadNewer}>
+            {timeline.loading.newer ? 'Loading…' : 'Load newer'}</button>}
         </div>
+        {(filter || kinds.size) && timeline.totalEvents != null && timeline.totalEvents > log.length &&
+          <div className="timeline-window-note" role="note">Filter searches this loaded window. Page older/newer to inspect other events.</div>}
+        {timeline.status === 'loading' && log.length === 0 && <div className="timeline-resource muted" role="status">Loading timeline…</div>}
+        {timeline.loading.around && <div className="timeline-resource muted" role="status">Loading replay events around seq {viewSeq}…</div>}
+        {timeline.errors.tail && <div className="notice resource-error" role="alert">
+          <span>{log.length ? 'Could not refresh the newest events; the loaded window is unchanged.' : timeline.errors.tail}</span>
+          <button className="btn sm" onClick={() => timeline.retry('tail')}>Retry</button></div>}
+        {timeline.errors.older && <div className="notice resource-error compact" role="alert">
+          <span>Could not load older events; the current window is unchanged.</span><button className="btn sm" onClick={timeline.loadOlder}>Retry</button></div>}
+        {timeline.errors.newer && <div className="notice resource-error compact" role="alert">
+          <span>Live event refresh failed; loaded events may be behind.</span><button className="btn sm" onClick={timeline.loadNewer}>Retry</button></div>}
+        {timeline.errors.around && <div className="notice resource-error compact" role="alert">
+          <span>Could not load events around replay seq {viewSeq}; the current window is unchanged.</span>
+          <button className="btn sm" onClick={() => timeline.retry('around')}>Retry</button></div>}
+        {timeline.tornTail && <div className="timeline-window-note warning" role="status">
+          {timeline.sourceTailLimited
+            ? 'The raw log tail exceeds the safety limit; showing the last verified canonical prefix.'
+            : 'The final source row is incomplete or non-canonical; showing the last verified event prefix.'}
+        </div>}
+        {feed.length === 0 && timeline.status === 'ready' && !timeline.loading.around
+          ? <div className="timeline-resource muted">{(filter || kinds.size) ? 'nothing matches the loaded window' : 'no events yet'}</div>
+          : <VirtualTimeline rows={feed} getKey={timelineEventKey}
+              identity={`${runId}:${timeline.generation || 'pending'}`}
+              className="feed chat-feed" ariaLabel="Run events"
+              followingTail={atLiveView && timeline.followingTail}
+              windowAtTail={atLiveView && timeline.windowAtTail}
+              unread={atLiveView ? timeline.unread : 0}
+              unreadUnknown={atLiveView && timeline.unreadUnknown}
+              busy={Object.values(timeline.loading).some(Boolean)}
+              onFollowingTailChange={value => { if (atLiveView) timeline.setFollowingTail(value) }}
+              onJumpToLive={returnToLive}
+              renderRow={event => {
+                const key = timelineEventKey(event)
+                return <EventRow e={event} trace={readOnly ? null : trace} onFocusEvent={focusEvent} runId={runId}
+                  readOnly={readOnly} autoOpen={false}
+                  traceError={traceError} onRetryTrace={() => setTraceNonce(value => value + 1)}
+                  expansion={eventExpansion.get(key) || CLOSED_EXPANSION}
+                  onExpansionChange={next => setEventExpansion(current => {
+                    const updated = new Map(current); updated.set(key, next); return updated
+                  })} />
+              }} />}
+        {!showControls && (() => {
+          const pipeline = atLiveView ? agentStatus(live, log) : null
+          if (!pipeline) return null
+          return <div className="agent-status dock-agent-status">
+            <div className="as-line"><span className="as-dot" /><span className="as-seg">{pipeline}</span></div>
+            <LiveTrace runId={runId} active={atLiveView} />
+          </div>
+        })()}
         <div className="dock-foot">
           <span className="muted" style={{ fontSize: 11, flex: 1 }}>
             {readOnly ? 'Historical timeline — live controls and sidecar trace details are disabled.' : <>

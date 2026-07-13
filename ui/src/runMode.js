@@ -4,28 +4,52 @@
 // accidentally targeting the live run while a historical snapshot is on screen.
 
 export const liveHistory = () => ({
-  status: 'live', requestedSeq: null, resolvedSeq: null, data: null, error: null,
+  status: 'live', requestedSeq: null, requestedGeneration: null,
+  resolvedSeq: null, resolvedGeneration: null, data: null, error: null,
 })
 
-export const requestHistory = (seq) => ({
-  status: 'loading', requestedSeq: Number(seq), resolvedSeq: null, data: null, error: null,
+const historyGeneration = generation => generation == null ? null : String(generation)
+
+export const requestHistory = (seq, generation = null) => ({
+  status: 'loading', requestedSeq: Number(seq),
+  requestedGeneration: historyGeneration(generation),
+  resolvedSeq: null, resolvedGeneration: null, data: null, error: null,
 })
 
-export function resolveHistory(resource, requestedSeq, payload) {
-  if (resource.requestedSeq !== Number(requestedSeq)) return resource
+export function historyMatches(resource, requestedSeq, requestedGeneration = null) {
+  return resource?.requestedSeq === Number(requestedSeq)
+    && resource?.requestedGeneration === historyGeneration(requestedGeneration)
+}
+
+export function resolveHistory(resource, requestedSeq, requestedGeneration, payload) {
+  if (!historyMatches(resource, requestedSeq, requestedGeneration)) return resource
+  const expectedGeneration = historyGeneration(requestedGeneration)
+  const actualGeneration = historyGeneration(payload?.generation)
+  if (actualGeneration !== expectedGeneration) {
+    return {
+      status: 'error', requestedSeq: Number(requestedSeq),
+      requestedGeneration: expectedGeneration,
+      resolvedSeq: null, resolvedGeneration: null, data: null,
+      error: 'The run changed while this historical snapshot was loading. Retry the snapshot.',
+    }
+  }
   return {
     status: 'ready',
     requestedSeq: Number(requestedSeq),
+    requestedGeneration: expectedGeneration,
     resolvedSeq: Number(payload?.seq ?? requestedSeq),
+    resolvedGeneration: actualGeneration,
     data: payload?.state ?? null,
     error: null,
   }
 }
 
-export function rejectHistory(resource, requestedSeq, error) {
-  if (resource.requestedSeq !== Number(requestedSeq)) return resource
+export function rejectHistory(resource, requestedSeq, requestedGeneration, error) {
+  if (!historyMatches(resource, requestedSeq, requestedGeneration)) return resource
   return {
-    status: 'error', requestedSeq: Number(requestedSeq), resolvedSeq: null, data: null,
+    status: 'error', requestedSeq: Number(requestedSeq),
+    requestedGeneration: historyGeneration(requestedGeneration),
+    resolvedSeq: null, resolvedGeneration: null, data: null,
     error: error?.message || String(error || 'Unable to load historical snapshot'),
   }
 }

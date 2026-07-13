@@ -66,12 +66,20 @@ function withBuilding(state) {
 }
 
 // Subscribe to a run's live folded state over SSE. The server emits `event: state` frames whose
-// data is { state, seq }. Returns the latest live state + connection status. Auto-reconnects.
+// data is { state, seq, generation, event_count? }. Returns the latest live state + connection
+// status; event_count is optional only for compatibility with a legacy server. Auto-reconnects.
+const normalizeEventCount = value => {
+  if (value == null) return null // additive field: tolerate a legacy server during rolling upgrades
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 ? value : undefined
+}
+
 export function useRunState(runId, { pollOnly = false, pollMs = 4000 } = {}) {
   const [live, setLive] = useState(null)
   const [seq, setSeq] = useState(-1)
   const [generationState, setGenerationState] = useState({ runId, value: null })
   const generation = generationState.runId === runId ? generationState.value : null
+  const [eventCountState, setEventCountState] = useState({ runId, value: null })
+  const eventCount = eventCountState.runId === runId ? eventCountState.value : null
   const [connected, setConnected] = useState(false)
   const [status, setStatus] = useState('loading')
   const [error, setError] = useState(null)
@@ -83,10 +91,11 @@ export function useRunState(runId, { pollOnly = false, pollMs = 4000 } = {}) {
     let stopped = false
     let timer = null
     let pollTimer = null
-    let lastSeq = -2, lastAlive, lastGeneration = null
+    let lastSeq = -2, lastAlive, lastGeneration = null, lastEventCount = null
     setLive(null)
     setSeq(-1)
     setGenerationState({ runId, value: null })
+    setEventCountState({ runId, value: null })
     setConnected(false)
     setStatus('loading')
     setError(null)
@@ -108,10 +117,14 @@ export function useRunState(runId, { pollOnly = false, pollMs = 4000 } = {}) {
         // new event/seq); track lastAlive in the closure (NOT stale React `live`) to avoid churn.
         const alive = p.state && p.state.engine_running
         const nextGeneration = normalizeRunGeneration(p.generation)
+        const nextEventCount = normalizeEventCount(p.event_count)
         if (p.generation != null && !nextGeneration) return
-        if (p.seq === lastSeq && alive === lastAlive && nextGeneration === lastGeneration) return
-        lastSeq = p.seq; lastAlive = alive; lastGeneration = nextGeneration
+        if (nextEventCount === undefined) return
+        if (p.seq === lastSeq && alive === lastAlive && nextGeneration === lastGeneration
+            && nextEventCount === lastEventCount) return
+        lastSeq = p.seq; lastAlive = alive; lastGeneration = nextGeneration; lastEventCount = nextEventCount
         setGenerationState({ runId, value: nextGeneration })
+        setEventCountState({ runId, value: nextEventCount })
         setLive(withBuilding(p.state)); setSeq(p.seq); setStatus('ready'); setError(null)
       })
       // `done` = the run reached a terminal state and the server ends the stream. We do NOT treat it
@@ -133,10 +146,13 @@ export function useRunState(runId, { pollOnly = false, pollMs = 4000 } = {}) {
         lastSeq = p.seq
         lastAlive = p.state && p.state.engine_running
         lastGeneration = normalizeRunGeneration(p.generation)
+        lastEventCount = normalizeEventCount(p.event_count)
         if (p.generation != null && !lastGeneration) {
           throw new Error('The server returned an invalid run generation.')
         }
+        if (lastEventCount === undefined) throw new Error('The server returned an invalid event count.')
         setGenerationState({ runId, value: lastGeneration })
+        setEventCountState({ runId, value: lastEventCount })
         setLive(withBuilding(p.state)); setSeq(p.seq); setStatus('ready'); setError(null)
         if (!pollOnly) connect()
         else {
@@ -148,12 +164,16 @@ export function useRunState(runId, { pollOnly = false, pollMs = 4000 } = {}) {
                 setConnected(true); setStatus('ready'); setError(null)
                 const alive = next.state && next.state.engine_running
                 const nextGeneration = normalizeRunGeneration(next.generation)
+                const nextEventCount = normalizeEventCount(next.event_count)
                 if (next.generation != null && !nextGeneration) {
                   throw new Error('The server returned an invalid run generation.')
                 }
-                if (next.seq !== lastSeq || alive !== lastAlive || nextGeneration !== lastGeneration) {
-                  lastSeq = next.seq; lastAlive = alive; lastGeneration = nextGeneration
+                if (nextEventCount === undefined) throw new Error('The server returned an invalid event count.')
+                if (next.seq !== lastSeq || alive !== lastAlive || nextGeneration !== lastGeneration
+                    || nextEventCount !== lastEventCount) {
+                  lastSeq = next.seq; lastAlive = alive; lastGeneration = nextGeneration; lastEventCount = nextEventCount
                   setGenerationState({ runId, value: nextGeneration })
+                  setEventCountState({ runId, value: nextEventCount })
                   setLive(withBuilding(next.state)); setSeq(next.seq)
                 }
                 pollTimer = setTimeout(poll, pollMs)
@@ -191,7 +211,8 @@ export function useRunState(runId, { pollOnly = false, pollMs = 4000 } = {}) {
   // create a small pre-render window where a click on visible generation A could be rebound to B.
   useLayoutEffect(() => { observeRunGeneration(runId, generation) }, [runId, generation])
 
-  return { live, seq, generation, connected, status, error, retry: () => setRetryToken(n => n + 1) }
+  return { live, seq, generation, eventCount, connected, status, error,
+    retry: () => setRetryToken(n => n + 1) }
 }
 
 // Browser notifications for finish / approval / failure-spike.

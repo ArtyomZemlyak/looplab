@@ -82,7 +82,7 @@ def _ui_dist() -> Path:
 # Raw-content GET routes the UI-token middleware gates (as sensitive as mutations). Module-level
 # constants (not rebuilt inside `_require_token` on every request): `_RAW_GET_SUFFIX` match by
 # path suffix, `_RAW_GET_EXACT` by exact path. See `_require_token` for the per-route rationale.
-_RAW_GET_SUFFIX = ("/artifact", "/artifacts", "/log", "/logs", "/agents_md", "/chat-log",
+_RAW_GET_SUFFIX = ("/artifact", "/artifacts", "/log", "/log-page", "/logs", "/agents_md", "/chat-log",
                    "/conversation", "/assistant/permissions", "/assistant/progress")
 _RAW_GET_EXACT = ("/api/prompts", "/api/skills", "/api/knowledge", "/api/memory", "/api/llm/health")
 
@@ -249,8 +249,8 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
             return response
 
     @app.middleware("http")
-    async def _command_status_no_store(request: "Request", call_next):
-        """Never cache lifecycle observations, including auth/validation exception responses.
+    async def _volatile_api_no_store(request: "Request", call_next):
+        """Never cache lifecycle observations or generation-bound log pages, including errors.
 
         Route-injected headers only cover successful handler returns: FastAPI replaces that Response
         for HTTPException, and the owner-auth middleware can return before routing.  Keeping this
@@ -263,10 +263,16 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
                       and parts[4] == "commands")
         is_start_status = (len(parts) == 5 and parts[1] == "api" and parts[2] == "start"
                            and parts[4] == "status")
-        if is_command or is_start_status:
+        is_log_page = (len(parts) == 5 and parts[1] == "api" and parts[2] == "runs"
+                       and parts[4] == "log-page")
+        if is_command or is_start_status or is_log_page:
             response.headers["Cache-Control"] = "no-store"
             vary = {item.strip() for item in response.headers.get("Vary", "").split(",") if item.strip()}
-            vary.update({"X-LoopLab-Token", "Authorization", "Idempotency-Key"})
+            vary.update({"X-LoopLab-Token", "Authorization"})
+            if is_log_page:
+                vary.add(REVIEW_HEADER)
+            else:
+                vary.add("Idempotency-Key")
             response.headers["Vary"] = ", ".join(sorted(vary, key=str.lower))
         return response
     projects = ProjectStore(root / "projects.json")   # ClearML-style run organization (UI-only)
