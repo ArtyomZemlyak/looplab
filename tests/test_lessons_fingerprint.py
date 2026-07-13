@@ -10,6 +10,7 @@ import tempfile
 from pathlib import Path
 
 import anyio
+import pytest
 import orjson
 
 from looplab.engine.memory import fingerprint_similarity, task_fingerprint
@@ -84,12 +85,16 @@ def test_reflection_reruns_when_a_reopened_run_grows(tmp_path):
     anyio.run(eng.run)
     lessons_before = (mem / "lessons.jsonl").read_text()
     meta_before = (mem / "meta_notes.jsonl").read_text().count("\n")
-    # simulate the extension: a folded state with MORE nodes than the first reflection covered
+    # simulate the extension: a folded state with MORE nodes than the first reflection covered. A real
+    # reopen (resume + budget_extend + new run_finished) also produces a NEW finish sequence, so give
+    # the grown state one — the crash-idempotency de-dup keys on (run_id, finish_seq), and re-using the
+    # first finish's seq would (correctly) read as a plain crash-retry rather than a grown reopen.
     grown = fold(eng.store.read_all())
     base = max(grown.nodes) + 1
     for i in range(base, base + 3):
         grown.nodes[i] = Node(id=i, operator="improve", idea=Idea(operator="improve"),
                               metric=0.01, status=NodeStatus.evaluated, feasible=True)
+    grown.last_finish_seq = grown.last_finish_seq + 100
     eng._write_reflection_note(grown)
     # the append-only meta-note grew → reflection genuinely re-ran on the grown run …
     assert (mem / "meta_notes.jsonl").read_text().count("\n") > meta_before
@@ -98,6 +103,61 @@ def test_reflection_reruns_when_a_reopened_run_grows(tmp_path):
     import orjson as _orjson
     rows = [_orjson.loads(x) for x in (mem / "lessons.jsonl").read_text().splitlines() if x.strip()]
     assert all(int(o.get("evidence_count", 1)) <= 1 for o in consolidate_lessons(rows))  # single run stays 1
+
+
+def test_reflection_meta_note_deduped_after_a_crash_before_the_marker(tmp_path):
+    """#3: finalization is RETRIED after a crash. If the engine dies AFTER the meta_notes line is
+    written but BEFORE the reflection marker (EV_REFLECTION_NOTE) commits, the retry must NOT append a
+    SECOND identical note — which would pollute a later run's warm-start prior. The (task_id,
+    finish_seq) key on the file itself de-dups it; the event-log marker cannot, since it isn't written
+    yet on that crash."""
+    from looplab.events.replay import fold
+    from looplab.events.types import EV_REFLECTION_NOTE
+    mem = tmp_path / "mem"
+    task = ToyTask.load(TASK)
+    r, d = task.build_roles()
+    eng = Engine(tmp_path / "r1", task=task, researcher=r, developer=d,
+                 sandbox=SubprocessSandbox(), policy=GreedyTree(n_seeds=2, max_nodes=4),
+                 reflection_priors=True, memory_dir=str(mem))
+    # A minimal finished run so last_finish_seq is set and best() returns a node.
+    eng.store.append("node_created", {"node_id": 0, "parent_ids": [], "operator": "draft",
+                                      "idea": {"operator": "draft", "params": {}, "rationale": ""}})
+    eng.store.append("node_evaluated", {"node_id": 0, "metric": 0.5})
+    eng.store.append("run_finished", {"reason": "done", "finalization_required": True})
+    fseq = fold(eng.store.read_all()).last_finish_seq
+    assert fseq >= 0
+    meta_path = mem / "meta_notes.jsonl"
+
+    def _notes_for_finish():
+        if not meta_path.exists():
+            return []
+        return [o for o in (orjson.loads(l) for l in meta_path.read_text().splitlines() if l.strip())
+                if o.get("finish_seq") == fseq]
+
+    # Crash the FIRST reflection right before the marker commits: the meta_notes line lands, then the
+    # EV_REFLECTION_NOTE append raises (process dies).
+    real_append = eng.store.append
+    def crashing_append(etype, data):
+        if etype == EV_REFLECTION_NOTE:
+            raise RuntimeError("simulated crash before finalization marker")
+        return real_append(etype, data)
+    eng.store.append = crashing_append           # type: ignore[method-assign]
+    with pytest.raises(RuntimeError):
+        eng._write_reflection_note(fold(eng.store.read_all()))
+    eng.store.append = real_append               # type: ignore[method-assign]
+    assert len(_notes_for_finish()) == 1         # exactly one note written pre-crash
+    assert not any(e.type == EV_REFLECTION_NOTE for e in eng.store.read_all())   # marker never committed
+
+    # The finalization RETRY: no marker for this finish exists, so the finish_seq early-return can't
+    # fire — the (task_id, finish_seq) file de-dup is what must prevent a duplicate note.
+    eng._write_reflection_note(fold(eng.store.read_all()))
+    assert len(_notes_for_finish()) == 1         # NOT duplicated
+    assert any(e.type == EV_REFLECTION_NOTE and e.data.get("finish_seq") == fseq
+               for e in eng.store.read_all())    # …and the marker committed this time
+
+    # A THIRD retry (marker now present) short-circuits on the finish_seq gate — still one note.
+    eng._write_reflection_note(fold(eng.store.read_all()))
+    assert len(_notes_for_finish()) == 1
 
 
 def _write_lessons(mem: Path, rows):

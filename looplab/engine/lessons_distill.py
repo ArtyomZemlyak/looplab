@@ -22,6 +22,7 @@ import orjson
 
 from looplab.core.models import NodeStatus, RunState
 from looplab.engine.lessons_priors import LESSON_ROLE_RESEARCHER
+from looplab.events.eventstore import read_jsonl_lenient
 from looplab.events.types import EV_LESSONS_DISTILLED, EV_REFLECTION_NOTE
 
 
@@ -45,9 +46,21 @@ class LessonDistillMixin:
         # longer inflates `evidence_count` — `consolidate_lessons` now counts DISTINCT run_ids, so a run
         # re-appending its own lesson still counts once. `reflection_note` (a diagnostic sidecar the fold
         # ignores) carries `at_nodes`; the highest prior value is the coverage watermark.
-        _reflected_at = [int(e.data.get("at_nodes", 0) or 0)
-                         for e in self._e.store.read_all() if e.type == EV_REFLECTION_NOTE]
+        _reflection_notes = [e.data for e in self._e.store.read_all()
+                             if e.type == EV_REFLECTION_NOTE]
+        _reflected_at = [int(d.get("at_nodes", 0) or 0) for d in _reflection_notes]
         if _reflected_at and len(final.nodes) <= max(_reflected_at):
+            return
+        # Crash-idempotency (#3): finalization is RETRIED after a crash. If this EXACT finish already
+        # committed a reflection marker, re-running would re-spend the reflection LLM (and, below, risk
+        # a duplicate meta_notes line). A REOPENED run gets a NEW run_finished seq, so its later
+        # reflection is not skipped here (it also grows the node count above). `last_finish_seq` is -1
+        # only off the modern finalize path — then this gate is inert and the meta_notes de-dup below
+        # still guards the file. This closes the COMMON retry (crash after the marker, during a later
+        # finalize step); the narrow crash-DURING-reflection window is closed by the file de-dup below.
+        finish_seq = final.last_finish_seq
+        _has_finish_seq = finish_seq is not None and finish_seq >= 0
+        if _has_finish_seq and any(d.get("finish_seq") == finish_seq for d in _reflection_notes):
             return
         best = final.best()
         base = Path(self._e.memory_dir)
@@ -63,8 +76,27 @@ class LessonDistillMixin:
             # case). Distil a causal summary with the LLM; fall back to the stats line if there's no
             # client / on any error (reflection is best-effort, never fails the run).
             note = self._e._causal_meta_note(final, best) or stats
-            with open(base / "meta_notes.jsonl", "a", encoding="utf-8") as f:
-                f.write(orjson.dumps({"task_id": final.task_id, "note": note}).decode() + "\n")
+            # Idempotent append (#3): a crash AFTER this line but BEFORE the reflection marker below
+            # would, on the finalization retry, blindly append a SECOND identical note (polluting a
+            # later run's warm-start prior + wasting the LLM call). The file itself is the durable
+            # de-dup record, so it closes the crash window the event-log marker cannot (the marker isn't
+            # written yet on that crash). De-dup key is (run_id, finish_seq): meta_notes.jsonl is a
+            # CROSS-RUN file and finish_seq is only a per-run event-log sequence, so two different runs
+            # can share one — run_id makes the key unique to THIS run's finish. A real reopen has a NEW
+            # finish_seq, so its updated note still appends (gated by the node-count watermark above);
+            # only a crash-retry of the SAME finish is skipped. Legacy/off-finalize-path notes (no
+            # finish_seq, or -1) fall through to the historical blind append.
+            npath = base / "meta_notes.jsonl"
+            _dup = _has_finish_seq and any(
+                o.get("run_id") == final.run_id and o.get("finish_seq") == finish_seq
+                for o in read_jsonl_lenient(npath))
+            if not _dup:
+                rec = {"task_id": final.task_id, "note": note}
+                if _has_finish_seq:
+                    rec["run_id"] = final.run_id
+                    rec["finish_seq"] = finish_seq
+                with open(npath, "a", encoding="utf-8") as f:
+                    f.write(orjson.dumps(rec).decode() + "\n")
 
         # M3 · lessons (incl. failures) with an M2 fingerprint. Memory of what DIDN'T work is as
         # valuable as what did (DS-Agent / MARS / ML-Master): it stops a later run re-treading a dead
@@ -121,6 +153,7 @@ class LessonDistillMixin:
         # cross-run files. One summary event makes "what this run concluded & wrote to memory" visible.
         self._e.store.append(EV_REFLECTION_NOTE, {
             "task_id": final.task_id, "fingerprint": fp, "note": note,
+            "finish_seq": finish_seq,          # #3: crash-idempotency key for a finalization retry
             "at_nodes": len(final.nodes),      # coverage watermark: re-reflect only if a reopen grows past it
             "n_lessons": len(lessons), "n_skills": len(skills),
             "lessons": [{"statement": lz.get("statement", ""), "outcome": lz.get("outcome", "")}
