@@ -693,10 +693,17 @@ def run_command_eval(command: list[str], cwd: str, timeout: float, metric: dict,
                 _h.set_many(exit_code=rc, timed_out=to)
     with _sp("read_metric", kind=metric.get("kind", "stdout_json")):
         m = read_metric(out, str(wd), metric, wrap=wrap, since=_eval_started) if not to else None
+    # F13 stage-reuse: on a stage-scoped re-run (`start_stage`), the earlier stages are DELIBERATELY
+    # reused — their on-disk artifacts keep their prior-eval mtime — so a constraint / extra / cross-check
+    # reader that points at a reused stage's file is legitimately "old" and the `_eval_started` gate would
+    # falsely reject it (a spurious violation → the node is wrongly excluded from best). Relax those
+    # secondary readers to no freshness gate in that mode. The PRIMARY metric stays strict: it comes from
+    # the final (re-RUN) stage, so it MUST be freshly produced — a no-op stage can't promote an old value.
+    _reader_since = None if start_stage else _eval_started
     drift = None
     if enforce_drift and cross_check and m is not None:
         validate_cross_check(cross_check)
-        cross = read_metric(out, str(wd), cross_check, wrap=wrap, since=_eval_started)
+        cross = read_metric(out, str(wd), cross_check, wrap=wrap, since=_reader_since)
         if _drift(m, cross, drift_tolerance):
             drift = {"primary": m, "cross": cross, "tolerance": drift_tolerance}
             m = None                                   # uncorroborated -> not trusted
@@ -708,7 +715,7 @@ def run_command_eval(command: list[str], cwd: str, timeout: float, metric: dict,
             raise ValueError("metrics/constraints readers must be built-in, not 'adapter' "
                              "(an agent-authored gate reader defeats the trust boundary).")
     declared = ({name: v for name, spec in metrics.items()
-                 if (v := read_metric(out, str(wd), spec, wrap=wrap, since=_eval_started)) is not None}
+                 if (v := read_metric(out, str(wd), spec, wrap=wrap, since=_reader_since)) is not None}
                 if (metrics and not to) else {})   # a MISSED reader (None) must not erase a
     #                                                successfully auto-captured value of the same name
     # Auto-capture: every other numeric key on the metric's own JSON line is also reported (no config
@@ -717,7 +724,7 @@ def run_command_eval(command: list[str], cwd: str, timeout: float, metric: dict,
     auto = (json_line_extras(out, metric.get("key", "metric"))
             if (not to and metric.get("kind", "stdout_json") == "stdout_json") else {})
     extra = ({**auto, **declared} or None)
-    viol = (_violations(out, str(wd), constraints, wrap, since=_eval_started)
+    viol = (_violations(out, str(wd), constraints, wrap, since=_reader_since)
             if (constraints and not to and m is not None) else None)
     # Intra-node sweep: a RepoTask command may emit the same `{"trials": [...]}` stdout line; carry
     # it so the engine can collapse it to the node's best metric (no eval_spec change required).

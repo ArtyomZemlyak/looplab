@@ -188,3 +188,44 @@ def test_sweep_stale_lifecycle_locks_only_old_and_unheld(tmp_path):
     os.utime(old, (past, past))
     assert sweep_stale_lifecycle_locks(tmp_path) == 1
     assert not old.exists() and fresh.exists() and keep.exists()
+
+
+# --------------------------------------------- F9: fresh-run (reset/replay) launch marker fences delete
+def test_run_launch_marker_fences_then_expires(tmp_path):
+    """F9: reset/replay spawns a fresh engine on an archived log, so a time-bounded marker file bridges
+    the Popen->engine.lock gap that a resume-log claim can't cover — a delete/reset checks it and refuses
+    until it expires (an abandoned/died-on-startup launch stays operator-deletable)."""
+    import os
+    import time
+    from looplab.serve.engine_proc import (
+        _clear_run_launching, _fresh_run_launch_pending, _mark_run_launching, _run_launch_marker_path)
+    assert _fresh_run_launch_pending(tmp_path) is False       # no marker
+    _mark_run_launching(tmp_path)
+    assert _fresh_run_launch_pending(tmp_path) is True         # in-flight launch → fence delete/reset
+    mp = _run_launch_marker_path(tmp_path)
+    past = time.time() - 3600
+    os.utime(mp, (past, past))
+    assert _fresh_run_launch_pending(tmp_path) is False        # expired lease → run deletable again
+    _mark_run_launching(tmp_path)
+    _clear_run_launching(tmp_path)                             # failed Popen path
+    assert _fresh_run_launch_pending(tmp_path) is False
+
+
+# ------------------------------------ F13: reused-stage files pass the freshness gate on a stage re-run
+def test_stage_reuse_relaxes_freshness_for_secondary_readers(tmp_path):
+    """F13: a file written by a REUSED earlier stage keeps its old mtime, so the `_eval_started`
+    freshness gate falsely rejects a constraint/extra reader pointed at it (spurious violation). On a
+    stage-scoped re-run the secondary readers use `since=None` (no gate) and read it; a strict anchor
+    (full re-run) still rejects a genuinely old file."""
+    import os
+    import time
+    import json
+    from looplab.runtime.command_eval import read_metric
+    (tmp_path / "metrics.json").write_text(json.dumps({"score": 0.9}))
+    past = time.time() - 600
+    os.utime(tmp_path / "metrics.json", (past, past))          # a reused earlier stage's artifact
+    spec = {"kind": "file_json", "path": "metrics.json", "key": "score"}
+    # strict anchor (full re-run) → the old file is rejected as stale
+    assert read_metric("", str(tmp_path), spec, since=time.time()) is None
+    # relaxed anchor (stage-scoped re-run reuses the stage) → the value is read
+    assert read_metric("", str(tmp_path), spec, since=None) == 0.9

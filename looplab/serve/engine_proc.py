@@ -341,6 +341,46 @@ def _fresh_resume_launch_pending(rd: Path, *, now: Optional[float] = None) -> bo
                      or _within_resume_grace(state.last_resume_request_ts, now)))
 
 
+_RUN_LAUNCH_MARKER = ".looplab-launching"
+
+
+def _run_launch_marker_path(rd: Path) -> Path:
+    return rd / _RUN_LAUNCH_MARKER
+
+
+def _mark_run_launching(rd: Path) -> None:
+    """Stamp the fresh-run launch marker just before a reset/replay Popen (F9), held under the lifecycle
+    lock. Reset spawns a fresh `run` engine on an ARCHIVED (emptied) event log, so a resume-style
+    launch claim in the log can't fence it; this short-lived FILE bridges the same gap — Popen -> the
+    detached child acquiring engine.lock — so a concurrent delete/reset can't rmtree the dir out from
+    under a starting engine. Best-effort: if it can't be written the reset still proceeds (today's
+    behavior), just without the extra fence."""
+    try:
+        _run_launch_marker_path(rd).write_text(str(time.time()), encoding="utf-8")
+    except OSError:
+        pass
+
+
+def _clear_run_launching(rd: Path) -> None:
+    """Drop the launch marker (a failed Popen: no child is starting, so nothing to fence)."""
+    try:
+        _run_launch_marker_path(rd).unlink()
+    except OSError:
+        pass
+
+
+def _fresh_run_launch_pending(rd: Path, *, now: Optional[float] = None) -> bool:
+    """Whether a fresh-run (reset/replay) launch is in flight: the marker exists and is within the same
+    grace the resume claim uses. Once the child holds engine.lock `_engine_alive` takes over; an engine
+    that died on startup lets the marker expire so the run stays operator-deletable (F9)."""
+    now = time.time() if now is None else now
+    try:
+        ts = _run_launch_marker_path(rd).stat().st_mtime
+    except OSError:
+        return False
+    return _within_resume_grace(ts, now)
+
+
 def _claim_and_spawn_resume(rd: Path, cli_args: list[str], *, env: Optional[dict] = None,
                             now: Optional[float] = None,
                             cancel_event: Optional[threading.Event] = None,

@@ -5,7 +5,7 @@ from __future__ import annotations
 from fastapi import APIRouter, HTTPException, Request
 
 from looplab.serve.engine_proc import (
-    _engine_alive, _fresh_resume_launch_pending, _run_lifecycle_lock)
+    _engine_alive, _fresh_resume_launch_pending, _fresh_run_launch_pending, _run_lifecycle_lock)
 from looplab.serve.projects import ProjectError
 
 
@@ -113,7 +113,8 @@ def build_router(srv) -> APIRouter:
             # The OS engine lock starts in the child, leaving a real claim -> Popen -> child-lock gap.
             # A fresh durable request/claim fences that gap, while an abandoned intent expires so a
             # genuine zombie remains deletable.
-            if _engine_alive(rd) or _fresh_resume_launch_pending(rd):
+            if (_engine_alive(rd) or _fresh_resume_launch_pending(rd)
+                    or _fresh_run_launch_pending(rd)):   # F9: a reset/replay fresh run may be mid-launch
                 raise HTTPException(
                     409, "run is live or launching — pause/stop it before deleting")
             # Don't report success on a partial delete (e.g. a Windows open handle on a node dir) —

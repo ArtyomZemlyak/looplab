@@ -892,10 +892,11 @@ class RunControlTools:
     def _delete_run_snapshot(self, rid: str, rd: Path, expected_tail: int) -> str:
         """Delete only the stopped run snapshot approved before a possibly-slow permission prompt."""
         from looplab.serve.engine_proc import (
-            _engine_alive, _fresh_resume_launch_pending, _run_lifecycle_lock)
+            _engine_alive, _fresh_resume_launch_pending, _fresh_run_launch_pending,
+            _run_lifecycle_lock)
 
         with _run_lifecycle_lock(rd):
-            if _fresh_resume_launch_pending(rd):
+            if _fresh_resume_launch_pending(rd) or _fresh_run_launch_pending(rd):
                 return f"(run {rid} is launching — retry delete after the engine settles)"
             # Mirror the node-delete guard (`_commit_delete_node_snapshot`): a directly-launched engine
             # (`looplab run/resume`) records no resume launch-claim, so `_fresh_resume_launch_pending` is
