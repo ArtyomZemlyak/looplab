@@ -13,6 +13,7 @@ import dataclasses
 import functools
 import hashlib
 import os
+import secrets
 import time
 from pathlib import Path
 from typing import Optional
@@ -24,9 +25,11 @@ from looplab.tools.agents_md import generate_agents_md
 from looplab.events.eventstore import EventStore
 from looplab.events.types import (
     EV_APPROVAL_REQUESTED,
+    EV_COMMAND_ACK,
     EV_DATA_PROFILED, EV_DATA_PROVENANCE,
     EV_DRIFT_UNAVAILABLE, EV_FORK_DONE, EV_HOST_GRADING,
     EV_INJECT_DONE, EV_INJECT_FAILED,
+    EV_FINALIZE_STEP,
     EV_NODE_BUILDING,
     EV_NODE_FAILED, EV_PAUSE,
     EV_POLICY_DECISION,
@@ -38,6 +41,7 @@ from looplab.events.types import (
 from looplab.engine.ablation import AblationMixin
 from looplab.engine.audit import AuditMixin
 from looplab.engine.confirm_phase import ConfirmPhaseMixin
+from looplab.engine.costs import bind_cost_accountants
 from looplab.engine.crash_repair import CrashRepairMixin
 from looplab.engine.eval_dispatch import EvalDispatchMixin
 from looplab.engine.eval_stages import EvalStagesMixin
@@ -47,7 +51,8 @@ from looplab.engine.proposal_cues import ProposalCuesMixin
 from looplab.engine.novelty import NoveltyGateMixin
 from looplab.engine.strategy import StrategyCadenceMixin
 from looplab.engine.research_cadence import ResearchCadenceMixin
-from looplab.engine.finalize import finalize_run
+from looplab.engine.finalize import (ensure_finish_report, finalize_run,
+                                     incomplete_finalize_scope)
 from looplab.engine.holdout import HoldoutGrader
 from looplab.engine.lessons import LessonMemory
 from looplab.engine.options import EngineOptions
@@ -393,6 +398,9 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         self._spec_activated = False
         self.run_dir.mkdir(parents=True, exist_ok=True)
         self.store = EventStore(self.run_dir / "events.jsonl")
+        # Bind after EventStore exists and before any role can make an LLM call. Paid usage now
+        # survives process restarts in the same append-only source of truth as the run itself.
+        bind_cost_accountants(self)
         self._write_lock = anyio.Lock()
         # Tracing (I14): nested, correlated spans -> spans.jsonl (files-as-truth), bridged to
         # OpenTelemetry when the SDK is configured. Diagnostics only; never drives state.
@@ -467,9 +475,60 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         return self.workspace.materialize(node, workdir)
 
     # ------------------------------------------------------------ loop control
+    def _ack_commands(self, events) -> None:
+        """Causally acknowledge every marked server command this engine has folded.
+
+        The ack is replay-neutral diagnostics.  It names both command id and exact intent sequence,
+        so an unrelated engine/background event can never be mistaken for command observation. The
+        caller passes the exact snapshot used for ``fold``: a second read here could include a command
+        appended after the fold and falsely acknowledge an intent this iteration never observed.
+        """
+        acked = {(str((event.data or {}).get("command_id")), (event.data or {}).get("event_seq"))
+                 for event in events if event.type == EV_COMMAND_ACK}
+        for event in events:
+            command_id = (event.data or {}).get("_command_id")
+            identity = (str(command_id), event.seq)
+            if command_id and identity not in acked:
+                self.store.append(EV_COMMAND_ACK, {
+                    "command_id": str(command_id), "event_seq": event.seq,
+                })
+                acked.add(identity)
+
+    def _begin_finalize(self, data: dict, *, scope: str | None = None,
+                        finish_report_planned: bool = False) -> str:
+        """Durably stage one exact terminal payload and return its stable wrap-up scope."""
+        scope = scope or f"finalize:{secrets.token_hex(16)}"
+        already_begun = any(
+            event.type == EV_FINALIZE_STEP and (event.data or {}).get("scope") == scope
+            and (event.data or {}).get("step") == "begun" for event in self.store.read_all())
+        if not already_begun:
+            self.store.append(EV_FINALIZE_STEP, {
+                "scope": scope,
+                "step": "begun",
+                "finish_data": dict(data),
+                "finish_report_planned": bool(finish_report_planned),
+            })
+        return scope
+
+    def _finish_run(self, data: dict, *, scope: str | None = None) -> None:
+        """Open one durable finalization scope, then publish its terminal run event.
+
+        The begun marker precedes ``run_finished``. A hard kill after the terminal event is therefore
+        distinguishable from a fully projected run, and re-entry can finish the same scope without
+        reopening search or repeating already-gated paid wrap-up work.
+        """
+        scope = self._begin_finalize(data, scope=scope)
+        self.store.append(EV_RUN_FINISHED, {**data, "finalize_scope": scope})
+
     async def run(self) -> RunState:
-        state = fold(self.store.read_all())
-        self._setup_phase(state)
+        events = self.store.read_all()
+        state = fold(events)
+        self._ack_commands(events)
+        # A hard kill can land after the durable terminal intent (`finalize_step:begun`) but before
+        # `run_finished`. Never run setup/search in that gap; finalization restores the exact terminal
+        # payload from the begun marker and resumes only the same wrap-up scope.
+        if incomplete_finalize_scope(events) is None:
+            self._setup_phase(state)
 
         entry_finished = self._reentry_repin()
         start = time.time()
@@ -481,7 +540,9 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         _created_no_terminal = 0
         _prev_terminal = -1
         while True:
-            state = fold(self.store.read_all())
+            events = self.store.read_all()
+            state = fold(events)
+            self._ack_commands(events)
             # node_reset (operator "re-run this node from a stage"): a reset from implement/propose
             # re-develops the SAME node id IN PLACE before any other loop work, so it never mints a new
             # node. (An eval-reset needs no help here — the fold left it pending-with-code and the normal
@@ -496,15 +557,26 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
             if _terminal_now != _prev_terminal:      # a node reached terminal (progress) -> reset
                 _created_no_terminal = 0
                 _prev_terminal = _terminal_now
-            if state.finished:
-                break
             # Live operator control (UI intervention via the event log). The UI appends a
             # control event; the engine — sole writer of domain events — reads the intent here
             # and writes the effect. `run_abort` terminates (resumable=no); `pause` breaks
             # WITHOUT finishing (a later `resume` event + re-entering run() continues), the same
             # files-as-truth shape as the HITL approval gate below.
-            if state.stop_requested:
-                self.store.append(EV_RUN_FINISHED, {"reason": "aborted"})
+            # A prior attempt can have written run_finished(reason=error) *after* the durable abort
+            # intent.  That is not a successful finalize.  Preserve the stop and let a retry write a
+            # fresh non-error finish; ordinary already-finished runs remain strict no-ops.
+            if getattr(self, "_pending_finalize_scope", None):
+                break
+            if state.stop_requested and (
+                    not state.finished or str(state.stop_reason or "").lower() == "error"):
+                # Abort identity already exists before terminalization, so its seq is a stable scope
+                # across both old-format caught-error retries and new hard-kill recovery.
+                abort = next((event for event in reversed(events)
+                              if event.type == "run_abort"), None)
+                abort_scope = f"abort:{abort.seq}" if abort is not None else None
+                self._finish_run({"reason": "aborted"}, scope=abort_scope)
+                break
+            if state.finished:
                 break
             if state.paused:
                 break
@@ -543,14 +615,14 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
             max_s, max_es = self._apply_control_overrides(state)
             # Budget (I13): per-invocation wall-clock ceiling (resets on each resume).
             if max_s is not None and (time.time() - start) >= max_s:
-                self.store.append(EV_RUN_FINISHED, {"reason": "time_budget"})
+                self._finish_run({"reason": "time_budget"})
                 break
             # Eval-compute budget (#2): cumulative time spent inside evals across the whole run
             # (persisted via the event log, so it survives resume — unlike wall-clock). Stops
             # the silent multi-hour sweep that real training runs can produce.
             if (max_es is not None
                     and state.total_eval_seconds >= max_es):
-                self.store.append(EV_RUN_FINISHED, {"reason": "eval_budget"})
+                self._finish_run({"reason": "eval_budget"})
                 break
 
             if await self._serve_forced_requests(state):
@@ -601,9 +673,23 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                 # robustness are settled — this is the definitive report (it reflects post-confirmation
                 # state a same-at_node cadence report wouldn't). Skip only when the cadence is off
                 # (report_every=0 = manual-only), so "manual only" stays truly call-free.
-                if self.report_writer is not None and self.report_every > 0:
-                    state = self._write_report(state, trigger="finish")
-                self.store.append(EV_RUN_FINISHED, {})
+                finish_data: dict = {}
+                # The final report can spend a provider call. Stage the exact terminal intent first:
+                # a kill after the paid response/report append but before run_finished then re-enters
+                # this scope's recovery path instead of returning here and buying the report again.
+                report_planned = self.report_writer is not None and self.report_every > 0
+                finish_scope = self._begin_finalize(
+                    finish_data,
+                    finish_report_planned=report_planned,
+                )
+                if report_planned:
+                    ensure_finish_report(
+                        self,
+                        self.store.read_all(),
+                        finish_scope,
+                        state=state,
+                    )
+                self._finish_run(finish_data, scope=finish_scope)
                 break
 
             ablates = [a for a in actions if a["kind"] == "ablate"]
@@ -627,7 +713,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                 # generously so operator injects / wide seed batches never false-trip.
                 _created_no_terminal += len(creates)
                 if _created_no_terminal > max(self.policy.max_nodes, 4) * 3 + 50:
-                    self.store.append(EV_RUN_FINISHED, {
+                    self._finish_run({
                         "reason": "stuck: node creation not converging (no node reached terminal)"})
                     break
                 self._create_paused = False   # set by _create_node's developer_crash circuit-breaker
@@ -765,7 +851,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                 # Leakage-first grounding (I9): if the task exposes split/feature/target/time
                 # data and a leak is detected, refuse to run — don't produce results on leaky data.
                 if self._leakage_blocks():
-                    self.store.append(EV_RUN_FINISHED, {"reason": "leakage"})
+                    self._finish_run({"reason": "leakage"})
             self.store.append(EV_SETUP_FINISHED, {"seconds": round(time.time() - _su_t0, 3)})
         elif self._repo_spec and state.workspace and not state.workspace_changed:
             # Resume (item #4): the editable workspace is copied fresh each node, so if the
@@ -776,10 +862,16 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                 self.store.append(EV_WORKSPACE_CHANGED, {"was": state.workspace, "now": now})
 
     def _reentry_repin(self) -> bool:
-        entry_finished = fold(self.store.read_all()).finished  # resuming a done run?
+        _events = self.store.read_all()
+        _entry = fold(_events)
+        self._pending_finalize_scope = incomplete_finalize_scope(_events)
+        # A failed finalize attempt is recorded as finished(reason=error) by the CLI guard, but its
+        # durable stop is still pending. Treat that as NOT already finalized so the retry below can
+        # write run_finished(aborted) and re-run budget/archive/case/cost wrap-up exactly once.
+        entry_finished = bool(_entry.finished and self._pending_finalize_scope is None and not (
+            _entry.stop_requested and str(_entry.stop_reason or "").lower() == "error"))
         # A7 Strategist: re-apply the last-decided strategy on (re)entry so a resumed run continues
         # with it WITHOUT re-consulting the Strategist (the decision lives in the event log).
-        _entry = fold(self.store.read_all())
         if _entry.active_strategy:
             self._apply_strategy(_entry.active_strategy)
         # D1 resume-safety: honor the holdout split the run ORIGINALLY committed to (recorded in

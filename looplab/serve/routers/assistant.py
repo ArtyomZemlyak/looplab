@@ -107,7 +107,10 @@ def build_router(srv) -> APIRouter:
         lock."""
         with _perm_lock:
             existing = _asst_cancel.get(sid)
-            if existing is not None and not existing.is_set():
+            # A set cancel flag means "stopping", not "finished": the old worker may still be inside
+            # an uninterruptible model/tool call and may already own a durable run command.  Keep the
+            # slot until its finally calls `_release_turn` so U2 cannot overtake the missing A1.
+            if existing is not None:
                 raise HTTPException(409, "a turn is already running for this session")
             _asst_cancel[sid] = cancel_ev
             _asst_progress[sid] = {"steps": [], "todos": [], "text": "", "updated": time.time(),
@@ -285,8 +288,8 @@ def build_router(srv) -> APIRouter:
     def _begin_turn(sid: str, body: dict):
         """Everything a turn does BEFORE the model runs, for both endpoints: session fetch/404,
         empty-message check, history snapshot, mode normalization, claiming the single active-turn
-        slot, persisting the user turn (with `raw`) and resolving settings. Returns
-        (instruction, eff_mode, history, cancel_ev, settings)."""
+        slot, persisting the user turn (with `raw`) and resolving settings. Returns the pinned
+        instruction/mode, prior history, turn owner, settings, turn id, and recovery flag."""
         instruction = (body.get("instruction") or body.get("content") or "").strip()
         # `display` (optional) is the CLEAN text the user typed; `instruction` may carry an invisible
         # UI-context preamble (open run, #experiments, files) for the model. Persist the clean bubble so
@@ -301,9 +304,9 @@ def build_router(srv) -> APIRouter:
             raise HTTPException(404, "no such session")
         if not instruction:
             raise HTTPException(400, "empty message")
-        history = list(sess["messages"])          # BEFORE appending the new user turn
+        history = list(sess["messages"])          # BEFORE appending/recovering the new user turn
         from looplab.serve.assistant import normalize_mode as _norm_mode
-        eff_mode = _norm_mode(mode or sess["meta"].get("mode") or "plan")   # never persist a junk mode
+        eff_mode = _norm_mode(mode or sess["meta"].get("mode") or "plan")   # fresh-turn default
         # Claim the single active-turn slot (409 if a turn is already running) BEFORE mutating the
         # transcript, so a rejected concurrent turn leaves no dangling user message — one running turn
         # per session across BOTH endpoints. The cancel event makes the turn interruptible (Stop).
@@ -313,20 +316,59 @@ def build_router(srv) -> APIRouter:
         # the session wedges at 409 forever. `_asst.append` raises ValueError if a concurrent DELETE
         # rmtree'd the session dir between `_asst.get` above and here; `_llm_settings` can also raise.
         try:
-            turn = {"role": "user", "content": display or instruction, "mode": eff_mode}
-            if display and display != instruction:
-                # Keep the FULL model-facing instruction (attached-file contents, UI-context preamble)
-                # alongside the clean bubble: later turns rebuild the model's history from this
-                # transcript, and an attachment exists nowhere else (it was read in the browser). The UI
-                # renders `content` only, so the bubble stays clean.
-                turn["raw"] = instruction
-            _asst.append(sid, turn)
+            shown = display or instruction
+            trailing = history[-1] if history else None
+            trailing_user = isinstance(trailing, dict) and trailing.get("role") == "user"
+            recover_turn = bool(
+                trailing_user
+                and trailing.get("turn_id") and trailing.get("content") == shown)
+            if recover_turn:
+                # A server died after this durably staged user turn but before its assistant reply.
+                # Re-run only the EXACT persisted intent with the same namespace. Matching merely
+                # the clean bubble is insufficient: `display` can hide a changed model-facing raw
+                # instruction, while a changed mode can promote an originally gated turn to auto.
+                persisted_instruction = str(trailing.get("raw") or trailing.get("content") or "")
+                persisted_mode_raw = trailing.get("mode")
+                persisted_mode = _norm_mode(persisted_mode_raw)
+                raw_mismatch = instruction != persisted_instruction
+                mode_mismatch = mode is not None and mode != persisted_mode
+                # New turn ids have always persisted a normalized mode. Treat a hand-edited/corrupt
+                # value as unavailable instead of silently interpreting it as read-only plan.
+                persisted_mode_invalid = persisted_mode_raw != persisted_mode
+                if raw_mismatch or mode_mismatch or persisted_mode_invalid:
+                    field = ("instruction" if raw_mismatch else
+                             "mode" if mode_mismatch else "persisted_mode")
+                    raise HTTPException(409, {
+                        "code": "assistant_turn_recovery_mismatch",
+                        "field": field,
+                        "message": "Recovery must use the exact persisted instruction and permission mode.",
+                    })
+                turn_id = str(trailing["turn_id"])
+                instruction = persisted_instruction
+                eff_mode = persisted_mode
+                history = history[:-1]
+            elif trailing_user:
+                # An unanswered U1 may already have completed an additive/paid run command.  Never
+                # feed it to a new T2 model turn under a fresh idempotency namespace; only exact
+                # recovery of U1 is safe.  Starting another session/deleting this one is the explicit
+                # abandon path.
+                raise HTTPException(409, {
+                    "code": "assistant_turn_recovery_required",
+                    "message": "The previous assistant turn has no durable reply; recover that exact turn before starting another.",
+                })
+            else:
+                turn_id = secrets.token_hex(16)
+                turn = {"role": "user", "content": shown, "mode": eff_mode, "turn_id": turn_id}
+                if display and display != instruction:
+                    # Keep the FULL model-facing instruction (attachments/context) beside clean copy.
+                    turn["raw"] = instruction
+                _asst.append(sid, turn)
             _asst.update_meta(sid, mode=eff_mode)   # remember the chosen mode so a reload/switch keeps it
             s = _llm_settings()
         except Exception:
             _release_turn(sid, cancel_ev)
             raise
-        return instruction, eff_mode, history, cancel_ev, s
+        return instruction, eff_mode, history, cancel_ev, s, turn_id, recover_turn
 
     def _make_progress_hooks(sid: str, cancel_ev: "threading.Event", q=None):
         """The per-turn `on_step`/`on_todos` callbacks. `q` (stream endpoint only) additionally mirrors
@@ -406,7 +448,7 @@ def build_router(srv) -> APIRouter:
         JOB (so a long turn returns {status:'running', job_id} the UI awaits via jobAwait instead of
         504ing), then persists the assistant reply. Soft-fails offline."""
         body = await request.json()
-        instruction, eff_mode, history, cancel_ev, s = _begin_turn(sid, body)
+        instruction, eff_mode, history, cancel_ev, s, turn_id, recover_turn = _begin_turn(sid, body)
         try:
             client = srv.make_llm_client(s)
         except Exception as e:  # noqa: BLE001 - offline / no model -> soft fail with a usable message
@@ -424,7 +466,11 @@ def build_router(srv) -> APIRouter:
                 res = _assistant_run_turn(client, root, history, instruction, eff_mode,
                                           alive_fn=_engine_alive, settings=s, approver=approver,
                                           on_step=_on_step, on_todos=_on_todos,
-                                          cancel_check=cancel_ev.is_set)
+                                           cancel_check=cancel_ev.is_set,
+                                           command_service=srv.commands,
+                                           command_key_namespace=f"{sid}:{turn_id}",
+                                           mutation_journal_path=_asst.mutation_journal_path(sid, turn_id),
+                                           mutation_recovery=recover_turn)
                 return _finish_turn(sid, history, instruction, client, res,
                                     best_effort_persist=True)
             finally:
@@ -439,7 +485,7 @@ def build_router(srv) -> APIRouter:
         action pauses the worker on the permission registry while the client polls /permissions."""
         import queue as _queue
         body = await request.json()
-        instruction, eff_mode, history, cancel_ev, s = _begin_turn(sid, body)
+        instruction, eff_mode, history, cancel_ev, s, turn_id, recover_turn = _begin_turn(sid, body)
         q: "_queue.Queue" = _queue.Queue()
         try:
             client = srv.make_llm_client(s)
@@ -488,7 +534,11 @@ def build_router(srv) -> APIRouter:
                                           alive_fn=_engine_alive, settings=s, approver=approver,
                                           on_step=_on_step, on_todos=_on_todos, on_text=_on_text,
                                           reply_sink=_reply_sink,
-                                          cancel_check=cancel_ev.is_set)
+                                           cancel_check=cancel_ev.is_set,
+                                           command_service=srv.commands,
+                                           command_key_namespace=f"{sid}:{turn_id}",
+                                           mutation_journal_path=_asst.mutation_journal_path(sid, turn_id),
+                                           mutation_recovery=recover_turn)
                 res = _finish_turn(sid, history, instruction, client, res,
                                    best_effort_persist=False)
                 q.put((SSE_DONE, {k: res.get(k) for k in

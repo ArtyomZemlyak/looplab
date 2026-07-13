@@ -1,9 +1,15 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react'
-import { get, fmt, workingId, CONTROL, resumeRun, resetRun } from './util.js'
+import { get, fmt, workingId, resetRun, getRunCommand, retryRunCommand, runCommand,
+  commandFeedback, commandErrorMessage, commandFailureRecord, commandCanRetry, createIdempotencyKey,
+  commandActionForEvent, commandRecordMatchesAction, commandEventForAction,
+  loadRunTransport, saveRunTransport, clearRunTransport, isTransientCommandReadError,
+  clearRunCommandLock, loadRunCommandLock, saveRunCommandLock, subscribeRunCommandLock,
+  COMMAND_SUCCEEDED, COMMAND_FAILED, storageGet, storageSet } from './util.js'
 import { usePoll } from './hooks.js'
 import Markdown from './markdown.jsx'
 import { NodeTrace } from './Inspector.jsx'
 import { OpIcon } from './icons.jsx'
+import { runLifecycle } from './runIndex.js'
 
 
 // The run's EVENTS window (round-9): one scrubbable, filterable feed that renders every run event
@@ -61,6 +67,7 @@ const NARR = {
   run_reopened: () => 'run reopened to keep going',
   resume: () => 'run resumed — continuing',
   run_abort: (d) => `finalize requested${d.reason ? ' (' + d.reason + ')' : ''} — wrapping up`,
+  command_ack: (d) => `engine acknowledged command${d.event_seq != null ? ` at event ${d.event_seq}` : ''}`,
   hypothesis_added: (d) => `hypothesis added${d.source ? ' (' + d.source + ')' : ''} — ${String(d.statement || '').slice(0, 90)}`,
   hypothesis_merged: (d) => `hypotheses merged — ${String(d.statement || '').slice(0, 80)}${(d.aliases || []).length ? ` (${(d.aliases || []).length} paraphrase${(d.aliases || []).length === 1 ? '' : 's'} folded)` : ''}`,
   lessons_distilled: (d) => `distilled ${d.count || 0} lesson${d.count === 1 ? '' : 's'}${d.trigger ? ' (' + d.trigger + ')' : ''}`,
@@ -124,6 +131,7 @@ const TYPE2GROUP = {
   fork: 'control', promote: 'control', annotation: 'control', inject_node: 'control', force_confirm: 'control',
   force_ablate: 'control', approval_requested: 'control', approval_granted: 'control', budget_extend: 'control',
   run_reopened: 'control', spec_approved: 'control', spec_approval_requested: 'control', spec_proposed: 'control',
+  command_ack: 'control',
   fork_done: 'control', inject_done: 'control',
   confirm_done: 'eval', confirm_eval: 'eval', agent_validated: 'eval',
   drift_unavailable: 'trust', workspace_changed: 'trust',
@@ -220,11 +228,16 @@ function LiveTrace({ runId, active }) {
 // right after a node (coverage/cost/lessons/reflection all fire post-eval).
 const STATUS_NOISE = new Set([
   'coverage_snapshot', 'llm_cost', 'reflection_note', 'diversity_archive',
-  'lessons_distilled', 'lessons_refreshed', 'budget', 'node_building',
+  'lessons_distilled', 'lessons_refreshed', 'budget', 'node_building', 'command_ack',
 ])
 
 function agentStatus(live, log) {
-  if (!live || live.finished) return null
+  if (!live) return null
+  const lifecycle = runLifecycle(live)
+  if (lifecycle.mode === 'finished') return null
+  if (lifecycle.mode === 'finishing') return 'Finishing terminal write-out…'
+  if (lifecycle.mode === 'finalization-stalled') return 'Finalization stalled — recovery is required.'
+  if (lifecycle.mode === 'finalizing') return 'Finalizing — wrapping up report, lessons, and cost…'
   if (live.paused) return 'Paused'
   // Zombie guard: the run isn't finished but no engine process holds the lock (engine_running===false,
   // server-probed). Without this the strip would pulse "Thinking about the next step…" forever even
@@ -454,6 +467,52 @@ function EventRow({ e, trace, onFocusEvent, autoOpen, runId, readOnly = false })
   )
 }
 
+const TRANSPORT_INTENTS = {
+  stop: { type: 'pause', data: {} },
+  finalize: { type: 'run_abort', data: { reason: 'finalized' } },
+  resume: { type: 'resume', data: {} },
+}
+
+const recoveryForRun = (runId) => {
+  const saved = loadRunTransport(runId)
+  if (!saved) return { pending: null, failure: null }
+  if (saved.protocolInvalid) return { pending: {
+    action: saved.action, idempotencyKey: saved.idempotencyKey, record: saved.record,
+    statusUnavailable: true, observationKind: 'protocol', protocolInvalid: true,
+    canResubmit: false, lastError: 'Stored command recovery data is invalid.',
+  }, failure: null }
+  const storedRecord = saved.record || (saved.commandId
+    ? { id: saved.commandId, status: 'accepted' }
+    : { status: 'submitting' })
+  const record = saved.commandId && !storedRecord.id ? { ...storedRecord, id: saved.commandId } : storedRecord
+  if (COMMAND_SUCCEEDED.has(record.status)) {
+    clearRunTransport(runId)
+    return { pending: null, failure: null }
+  }
+  const knownStatus = record.status === 'accepted' || record.status === 'executing'
+    || COMMAND_FAILED.has(record.status)
+  const needsObservation = !knownStatus || !record.id || !!saved.retrying || !!saved.checking
+  const entry = {
+    action: saved.action, idempotencyKey: saved.idempotencyKey, record,
+    statusUnavailable: !!saved.statusUnavailable || needsObservation,
+    observationKind: saved.observationKind || (!knownStatus && record.id ? 'protocol'
+      : (needsObservation ? 'transport' : null)),
+    lastError: saved.retrying || saved.checking
+      ? 'The page reloaded while recovery was in progress; check the durable command status.'
+      : !knownStatus ? 'Stored command state needs to be checked against the server.' : '',
+  }
+  return COMMAND_FAILED.has(record.status) && !saved.statusUnavailable && !saved.retrying && !saved.checking
+    ? { pending: null, failure: entry }
+    : { pending: entry, failure: null }
+}
+
+const observationKind = error => {
+  if (error?.status === 401 || error?.status === 403) return 'access'
+  if (error?.code === 'COMMAND_PROTOCOL_ERROR') return 'protocol'
+  if (error?.status === 404) return 'missing'
+  return isTransientCommandReadError(error) ? 'transport' : 'request'
+}
+
 // Round-9: the per-run "boss" chat moved to the single persistent assistant, so the Dock is purely
 // the run's EVENTS window — the timeline feed + scrubber + filters + transport.
 export default function Dock({ runId, live, liveSeq, viewSeq, setViewSeq, onFocus, collapsed, onToggleCollapse, height = 230, onToast, readOnly = false }) {
@@ -463,10 +522,49 @@ export default function Dock({ runId, live, liveSeq, viewSeq, setViewSeq, onFocu
   const [trace, setTrace] = useState(null)
   const [filter, setFilter] = useState('')
   const [kinds, setKinds] = useState(() => new Set())     // selected kind chips (empty = all)
+  const restoredRef = useRef(null)
+  if (!restoredRef.current || restoredRef.current.runId !== runId) {
+    restoredRef.current = { runId, ...recoveryForRun(runId) }
+  }
+  const [transportPending, setTransportPending] = useState(() => restoredRef.current.pending)
+  const [transportFailure, setTransportFailure] = useState(() => restoredRef.current.failure)
+  const [runCommandLock, setRunCommandLock] = useState(() => loadRunCommandLock(runId))
+  const externalTransportPending = runCommandLock?.source === 'assistant' ? runCommandLock : null
+  const transportBusy = !!transportPending || !!externalTransportPending
   const feedRef = useRef(null)
+  useEffect(() => {
+    const restored = recoveryForRun(runId)
+    const lock = loadRunCommandLock(runId)
+    if (lock && lock.source !== 'dock' && (restored.pending || restored.failure)) {
+      clearRunTransport(runId)
+      setTransportPending(null); setTransportFailure(null)
+    } else {
+      let pending = restored.pending
+      const entry = restored.pending || restored.failure
+      const lockMismatch = lock?.source === 'dock' && entry && (
+        lock.idempotencyKey !== entry.idempotencyKey || lock.action !== entry.action
+        || (lock.commandId && entry.record?.id && lock.commandId !== entry.record.id)
+      )
+      if (lockMismatch) pending = { ...entry, statusUnavailable: true, observationKind: 'protocol',
+        protocolInvalid: true, canResubmit: false, lockIdentity: lock,
+        lastError: 'Stored command identity does not match the active recovery lock.' }
+      setTransportPending(pending); setTransportFailure(lockMismatch ? null : restored.failure)
+      if (pending?.protocolInvalid) {
+        saveRunCommandLock(runId, { ...pending, source: 'dock' })
+      } else if (pending) saveRunTransport(runId, pending)
+      else if (!restored.failure && lock?.source === 'dock') {
+        clearRunCommandLock(runId, { source: 'dock', idempotencyKey: lock.idempotencyKey,
+          action: lock.action, commandId: lock.commandId })
+      }
+    }
+  }, [runId])
+  useEffect(() => {
+    setRunCommandLock(loadRunCommandLock(runId))
+    return subscribeRunCommandLock(runId, setRunCommandLock)
+  }, [runId])
   // round-7: scrubber + filter chips collapse into one block to save space; default hidden, remembered.
-  const [showControls, setShowControls] = useState(() => localStorage.getItem('ll.dock.controls') === '1')
-  const toggleControls = () => setShowControls(v => { const n = !v; localStorage.setItem('ll.dock.controls', n ? '1' : '0'); return n })
+  const [showControls, setShowControls] = useState(() => storageGet('ll.dock.controls') === '1')
+  const toggleControls = () => setShowControls(v => { const n = !v; storageSet('ll.dock.controls', n ? '1' : '0'); return n })
   useEffect(() => {
     let alive = true
     if (!log.length) setLogStatus('loading')
@@ -559,19 +657,266 @@ export default function Dock({ runId, live, liveSeq, viewSeq, setViewSeq, onFocu
     const el = feedRef.current
     if (el) requestAnimationFrame(() => { el.scrollTop = el.scrollHeight })
   }, [feed.length, atLive])
-  // round-7 transport: mode derived from live state; wired to existing control endpoints + reset.
-  const paused = !!live?.paused, finished = !!live?.finished
-  // Zombie: not finished, not paused, but no engine holds the lock (engine_running===false) — the run
-  // looks "running" in the event log yet nothing drives it. Give it its own transport so the user gets a
-  // resume button instead of the running-run's pause/stop (which would do nothing useful).
-  const stalled = !finished && !paused && live?.engine_running === false
-  const mode = finished ? 'finished' : stalled ? 'stalled' : paused ? 'paused' : 'running'
-  // Three operator controls: STOP freezes (no wrap-up), FINALIZE stops AND wraps up (report/lessons/
-  // cost), RESUME continues from any stopped state. finalize/resume also (re)spawn the engine if it
-  // already exited (the /resume endpoint no-ops when one is alive), so a stopped run actually acts.
-  const onStop = () => CONTROL.stop(runId).then(() => onToast?.('stopped — frozen, not finalized')).catch(e => onToast?.('stop failed: ' + e.message))
-  const onFinalize = async () => { try { await CONTROL.finalize(runId); await resumeRun(runId); onToast?.('finalizing — wrapping up') } catch (e) { onToast?.('finalize failed: ' + e.message) } }
-  const onResume = async () => { try { await CONTROL.resume(runId); await resumeRun(runId); onToast?.('resumed') } catch (e) { onToast?.('resume failed: ' + e.message) } }
+  // Observable run truth comes from the same pure lifecycle used by the run list/header. Local command
+  // state only hides duplicate controls; it never promotes a run to finished by itself.
+  const lifecycle = runLifecycle(live || {})
+  const mode = lifecycle.mode
+  const transportLabels = (action) => ({
+    stop: { success: 'Stopped — frozen, not finalized', noop: 'Run was already stopped',
+      executing: 'Stop requested — waiting for the run to freeze', failure: 'Stop failed' },
+    finalize: { success: 'Finalized — report and wrap-up complete', noop: 'Run was already finalized',
+      executing: 'Finalize requested — wrapping up', failure: 'Finalize failed' },
+    resume: { success: 'Run resumed', noop: 'Run was already running',
+      executing: 'Resume requested — waiting for the engine', failure: 'Resume failed' },
+  })[action] || { success: 'Run command completed', noop: 'Run command was already satisfied',
+    executing: 'Run command is pending', failure: 'Run command failed' }
+  const persistTransport = (entry) => saveRunTransport(runId, {
+    ...entry, commandId: entry?.record?.id || '',
+  })
+  const verifiedTransportAction = (action, record, protocolInvalid = false) => {
+    const actual = protocolInvalid || !TRANSPORT_INTENTS[action]
+      ? commandActionForEvent(record?.event_type) : action
+    return actual && TRANSPORT_INTENTS[actual] && commandRecordMatchesAction(record, actual, 'dock')
+      ? actual : null
+  }
+  const protocolTransportState = (action, idempotencyKey, record, message, lockIdentity = null) => {
+    const commandId = /^cmd_[0-9a-f]{32}$/.test(String(record?.id || '')) ? String(record.id) : ''
+    const entry = { action: action || 'unknown', idempotencyKey,
+      record: commandId ? { id: commandId, status: 'accepted' } : { status: 'submitting' },
+      statusUnavailable: true, observationKind: 'protocol', protocolInvalid: true,
+      canResubmit: false, lastError: message, lockIdentity }
+    saveRunCommandLock(runId, { ...entry, source: 'dock' })
+    setTransportPending(entry); setTransportFailure(null)
+    return entry
+  }
+  const storageTransportFailure = (action, idempotencyKey) => {
+    const record = { status: 'rejected', error: {
+      code: 'command_storage_unavailable',
+      message: 'The command was not sent because durable tab storage is unavailable.',
+      remediation: 'Enable session storage or free browser storage, then try again.', retryable: false,
+    } }
+    const entry = { action, idempotencyKey, record }
+    setTransportPending(null); setTransportFailure(entry)
+    onToast?.('Command not sent — durable recovery storage is unavailable')
+    return entry
+  }
+  const acceptTransportRecord = (action, record, idempotencyKey) => {
+    const pendingState = transportPending
+    const actualAction = verifiedTransportAction(action, record, pendingState?.protocolInvalid)
+    if (!actualAction) return protocolTransportState(action, idempotencyKey, record,
+      'Command identity does not match the requested action', pendingState?.lockIdentity)
+    if (pendingState?.protocolInvalid) {
+      const identity = pendingState.lockIdentity || {
+        source: 'dock', idempotencyKey: pendingState.idempotencyKey,
+        action: pendingState.action, commandId: pendingState.record?.id || '',
+      }
+      clearRunCommandLock(runId, identity)
+    }
+    const feedback = commandFeedback(record, transportLabels(actualAction))
+    onToast?.(feedback.message)
+    if (feedback.kind === 'pending') {
+      const entry = { action: actualAction, idempotencyKey, record, statusUnavailable: false }
+      if (!persistTransport(entry)) {
+        return protocolTransportState(actualAction, idempotencyKey, record,
+          'Command accepted, but its updated durable status could not be stored')
+      }
+      setTransportPending(entry)
+      setTransportFailure(null)
+    } else {
+      setTransportPending(null)
+      if (feedback.kind === 'error') {
+        const entry = { action: actualAction, idempotencyKey, record }
+        if (!persistTransport(entry)) clearRunTransport(runId)
+        setTransportFailure(entry)
+      } else {
+        clearRunTransport(runId); setTransportFailure(null)
+      }
+    }
+  }
+  const unavailableTransport = (action, idempotencyKey, record, error, extra = {}) => {
+    const kind = observationKind(error)
+    let recoveryRecord = record || { status: 'submitting' }
+    if (recoveryRecord.id && !recoveryRecord.event_type && TRANSPORT_INTENTS[action]) {
+      recoveryRecord = { ...recoveryRecord, event_type: commandEventForAction(action, 'dock') }
+    }
+    const entry = {
+      action, idempotencyKey, record: recoveryRecord,
+      statusUnavailable: true, observationKind: kind,
+      lastError: error?.message || String(error), ...extra,
+    }
+    if (!persistTransport(entry)) saveRunCommandLock(runId, { ...entry, source: 'dock' })
+    setTransportPending(entry); setTransportFailure(null)
+    return entry
+  }
+  const failTransport = (action, idempotencyKey, error, previous = null) => {
+    const record = commandFailureRecord(error, previous)
+    const entry = { action, idempotencyKey, record }
+    if (!persistTransport(entry)) clearRunTransport(runId)
+    setTransportPending(null); setTransportFailure(entry)
+    onToast?.(commandFeedback(record, transportLabels(action)).message)
+  }
+  const runTransport = async (action, idempotencyKey = createIdempotencyKey(), { allowPending = false } = {}) => {
+    if (!allowPending && (transportPending || loadRunCommandLock(runId))) return
+    const intent = TRANSPORT_INTENTS[action]
+    if (!intent) {
+      protocolTransportState(action, idempotencyKey, transportPending?.record,
+        'Stored command identity cannot be safely replayed', transportPending?.lockIdentity)
+      return
+    }
+    const start = { action, idempotencyKey, record: { status: 'submitting' } }
+    if (!persistTransport(start)) { storageTransportFailure(action, idempotencyKey); return }
+    setTransportPending(start)
+    setTransportFailure(null)
+    try {
+      const record = await runCommand(runId, intent.type, intent.data, {
+        idempotencyKey, waitMs: 0,
+        onRecord: next => {
+          const visible = { action, idempotencyKey, record: next, statusUnavailable: false }
+          if (!persistTransport(visible)) return
+          setTransportPending(current => current?.action === action && current?.idempotencyKey === idempotencyKey
+            ? visible : current)
+        },
+      })
+      acceptTransportRecord(action, record, idempotencyKey)
+    } catch (error) {
+      const record = error?.commandRecord || (error?.commandId
+        ? { id: error.commandId, status: 'accepted' } : null)
+      const kind = observationKind(error)
+      if (error?.commandUnknown || (record?.id && ['transport', 'access', 'protocol'].includes(kind))) {
+        unavailableTransport(action, idempotencyKey, record, error)
+        onToast?.(`${transportLabels(action).failure}: command status unavailable; the same intent was preserved`)
+      } else failTransport(action, idempotencyKey, error, record)
+    }
+  }
+  const onStop = () => runTransport('stop')
+  const onFinalize = () => runTransport('finalize')
+  const onResume = () => runTransport('resume')
+  const onRetryTransport = async () => {
+    const failure = transportFailure
+    if (transportBusy || loadRunCommandLock(runId) || !commandCanRetry(failure?.record)) return
+    const { action, record, idempotencyKey } = failure
+    const retrying = { action, idempotencyKey, record, retrying: true }
+    if (!persistTransport(retrying)) {
+      onToast?.('Retry not sent — durable recovery storage is unavailable')
+      return
+    }
+    setTransportFailure(null)
+    setTransportPending(retrying)
+    try {
+      const next = await retryRunCommand(runId, record.id, {
+        waitMs: 0,
+        onRecord: value => {
+          const visible = { action, idempotencyKey, record: value, retrying: true }
+          persistTransport(visible)
+          setTransportPending(current => current?.action === action && current?.idempotencyKey === idempotencyKey
+            ? visible : current)
+        },
+      })
+      acceptTransportRecord(action, next, idempotencyKey)
+    } catch (error) {
+      const kind = observationKind(error)
+      if (['transport', 'access', 'protocol'].includes(kind)) {
+        unavailableTransport(action, idempotencyKey, error?.commandRecord || record, error)
+      } else failTransport(action, idempotencyKey, error, error?.commandRecord || record)
+    }
+  }
+  const onCheckTransport = async () => {
+    const pending = transportPending
+    if (!pending || pending.checking) return
+    const checking = { ...pending, checking: true }
+    if (!pending.protocolInvalid) persistTransport(checking)
+    setTransportPending(checking)
+    if (!pending.record?.id) {
+      if (pending.protocolInvalid || pending.canResubmit === false) {
+        setTransportPending({ ...pending, checking: false })
+        onToast?.('Stored command identity is invalid and cannot be safely replayed; dismiss it to continue')
+        return
+      }
+      // The POST response was lost before the command id arrived. Re-submit the exact stored key and
+      // deterministic action payload; the server returns the same command record.
+      await runTransport(pending.action, pending.idempotencyKey, { allowPending: true })
+      return
+    }
+    try {
+      const record = await getRunCommand(runId, pending.record.id)
+      acceptTransportRecord(pending.action, record, pending.idempotencyKey)
+    } catch (error) {
+      const kind = observationKind(error)
+      if (pending.protocolInvalid) {
+        protocolTransportState(pending.action, pending.idempotencyKey, pending.record,
+          error?.message || 'Stored command could not be verified', pending.lockIdentity)
+      } else if (['transport', 'access', 'protocol'].includes(kind)) {
+        unavailableTransport(pending.action, pending.idempotencyKey, pending.record, error)
+      } else failTransport(pending.action, pending.idempotencyKey, error, pending.record)
+    }
+  }
+  useEffect(() => {
+    const command = transportPending?.record
+    if (transportPending?.statusUnavailable || transportPending?.retrying || transportPending?.checking
+        || !command?.id || (command.status !== 'accepted' && command.status !== 'executing')) return
+    let active = true, timer = null
+    let transientFailures = 0
+    const { action, idempotencyKey } = transportPending
+    const schedule = delay => { if (active) timer = setTimeout(poll, delay) }
+    const poll = async () => {
+      try {
+        const record = await getRunCommand(runId, command.id)
+        if (!active) return
+        transientFailures = 0
+        if (COMMAND_SUCCEEDED.has(record.status) || COMMAND_FAILED.has(record.status)) {
+          acceptTransportRecord(action, record, idempotencyKey)
+          return
+        }
+        const entry = { action, idempotencyKey, record, statusUnavailable: false }
+        persistTransport(entry); setTransportPending(entry)
+        schedule(1500)
+        return
+      } catch (error) {
+        if (!active) return
+        const kind = observationKind(error)
+        if (kind === 'transport') {
+          transientFailures += 1
+          if (transientFailures < 3) {
+            schedule(Math.max(Number(error.retryAfterMs) || 0, Math.min(6000, 750 * (2 ** transientFailures))))
+            return
+          }
+          unavailableTransport(action, idempotencyKey, command, error)
+          return
+        }
+        if (kind === 'access' || kind === 'protocol') {
+          unavailableTransport(action, idempotencyKey, command, error); return
+        }
+        failTransport(action, idempotencyKey, error, command); return
+      }
+    }
+    timer = setTimeout(poll, 1000)
+    return () => { active = false; clearTimeout(timer) }
+  }, [runId, transportPending?.record?.id, transportPending?.statusUnavailable,
+    transportPending?.retrying, transportPending?.checking])
+  const canRetryTransport = commandCanRetry(transportFailure?.record)
+  const failedCommandId = transportFailure?.record?.id
+  const conflictingCommandId = transportFailure?.record?.error?.existing_command_id
+  const failureCode = transportFailure?.record?.error?.code
+  const failureHeading = !transportFailure ? ''
+    : failureCode === 'owner_access_required' ? 'Owner access required'
+      : failureCode === 'command_protocol_error' ? 'Invalid command response'
+        : transportFailure.record?.status === 'rejected' ? `${transportLabels(transportFailure.action).failure} — rejected`
+          : transportFailure.action === 'finalize' && canRetryTransport ? 'Finalization stalled'
+            : transportLabels(transportFailure.action).failure
+  const dismissTransportFailure = () => {
+    clearRunTransport(runId); setTransportFailure(null)
+  }
+  const dismissProtocolTransport = () => {
+    const pending = transportPending
+    if (!pending?.protocolInvalid) return
+    clearRunTransport(runId)
+    const identity = pending.lockIdentity || {
+      source: 'dock', idempotencyKey: pending.idempotencyKey,
+      action: pending.action, commandId: pending.record?.id || '',
+    }
+    clearRunCommandLock(runId, identity)
+    setTransportPending(null)
+  }
   const onReplay = async () => {
     if (!window.confirm('Reset this run? Wipes all events & nodes and restarts from scratch.')) return
     try { await resetRun(runId); onToast?.('replaying from scratch') } catch (e) { onToast?.('reset failed: ' + e.message) }
@@ -594,9 +939,11 @@ export default function Dock({ runId, live, liveSeq, viewSeq, setViewSeq, onFocu
         <button className={'btn sm ghost' + (showControls ? ' on' : '')} title="time-travel & filters"
                 onClick={toggleControls}><OpIcon name="sliders" size={13} /> controls</button>
         <button className="btn sm ghost dock-collapse" title={collapsed ? 'expand' : 'collapse'}
+                aria-label={collapsed ? 'Expand events and timeline' : 'Collapse events and timeline'}
+                aria-expanded={!collapsed} aria-controls="run-events-timeline"
                 onClick={onToggleCollapse}><OpIcon name={collapsed ? 'chevron-up' : 'chevron-down'} size={13} /></button>
       </div>
-      {!collapsed && <div className="dock-body chat-body" style={{ height }}>
+      {!collapsed && <div id="run-events-timeline" className="dock-body chat-body" style={{ height }}>
         {showControls && <div className="dock-controls">
           <div className="scrubber inline">
             <button className="btn sm" onClick={() => { setViewSeq(null); setDrag(null) }} disabled={atLive && drag == null}><OpIcon name="play" size={11} /> Live</button>
@@ -642,15 +989,73 @@ export default function Dock({ runId, live, liveSeq, viewSeq, setViewSeq, onFocu
             </>}
           </span>
           {!readOnly && <div className="transport">
-            {mode === 'running' && <>
-              <button className="btn sm" title="Stop — freeze the run (no wrap-up; resume or finalize later)" onClick={onStop}><OpIcon name="pause" size={13} /></button>
-              <button className="btn sm danger" title="Finalize — stop AND wrap up (report, cross-run lessons, cost)" onClick={onFinalize}><OpIcon name="stop" size={13} /></button></>}
-            {(mode === 'paused' || mode === 'stalled') && <>
-              <button className="btn sm primary" title="Resume — continue the run" onClick={onResume}><OpIcon name="play" size={13} /></button>
-              <button className="btn sm danger" title="Finalize — wrap it up now (report, cross-run lessons, cost)" onClick={onFinalize}><OpIcon name="stop" size={13} /></button></>}
-            {mode === 'finished' && <>
-              <button className="btn sm primary" title="Resume — reopen & continue" onClick={onResume}><OpIcon name="play" size={13} /></button>
-              <button className="btn sm" title="reset & restart from scratch" onClick={onReplay}><OpIcon name="replay" size={13} /></button></>}
+            {transportPending && <div className={'transport-message' + (transportPending.statusUnavailable ? ' warning' : '')}
+              role={transportPending.statusUnavailable ? 'alert' : 'status'}>
+              <span>
+                {transportPending.statusUnavailable
+                  ? transportPending.observationKind === 'access' ? 'Owner access required to check command status'
+                    : transportPending.observationKind === 'protocol' ? 'Invalid command status response'
+                      : 'Command status unavailable — the same intent is preserved'
+                  : transportPending.checking ? 'Checking the same command…'
+                    : transportPending.retrying ? 'Retrying the same command…'
+                      : transportPending.record?.status === 'submitting'
+                        ? `Submitting ${transportPending.action}…`
+                        : transportPending.action === 'finalize' ? 'Finalizing…'
+                          : transportPending.action === 'stop' ? 'Stop requested…' : 'Resume requested…'}
+                {transportPending.record?.id
+                  ? <span className="transport-command-id" title={`Command ${transportPending.record.id}`}>
+                      {' · '}{String(transportPending.record.id).slice(0, 12)}…</span> : null}
+              </span>
+              {transportPending.statusUnavailable && <>
+                {transportPending.lastError && <span className="transport-detail">{transportPending.lastError}</span>}
+                <button className="btn sm" onClick={onCheckTransport}
+                  aria-label={`Check status of the preserved ${transportPending.action} command`}>
+                  Check same command</button>
+                {transportPending.protocolInvalid && <button className="btn sm ghost"
+                  onClick={dismissProtocolTransport}>Dismiss</button>}
+              </>}
+            </div>}
+            {!transportPending && externalTransportPending && <div className="transport-message" role="status"
+              aria-live="polite" aria-atomic="true">
+              <span>/{externalTransportPending.action} is pending in Assistant</span>
+              {externalTransportPending.commandId && <span className="transport-command-id"
+                title={`Command ${externalTransportPending.commandId}`}>
+                {' · '}{String(externalTransportPending.commandId).slice(0, 12)}…</span>}
+            </div>}
+            {!transportBusy && transportFailure && <>
+              <div className="transport-message error" role="alert">
+                <span>{failureHeading}{failedCommandId
+                  ? <span className="transport-command-id" title={`Command ${failedCommandId}`}>
+                      {' · '}{String(failedCommandId).slice(0, 12)}…</span> : null}
+                  {!failedCommandId && conflictingCommandId
+                    ? <span className="transport-command-id" title={`Conflicting active command ${conflictingCommandId}`}>
+                        {' · active '}{String(conflictingCommandId).slice(0, 12)}…</span> : null}</span>
+                <span className="transport-detail">{commandErrorMessage(transportFailure.record)}</span>
+              </div>
+              {canRetryTransport && <button className="btn sm" onClick={onRetryTransport}
+                title="Retry this exact durable command; no new intent is created">Retry same command</button>}
+              <button className="btn sm ghost" onClick={dismissTransportFailure}
+                title="Dismiss this command result">Dismiss</button>
+            </>}
+            {!transportBusy && !transportFailure && mode === 'finalizing' && <span className="muted" role="status">Finalizing…</span>}
+            {!transportBusy && !transportFailure && mode === 'finishing' && <span className="muted" role="status">Finishing terminal write-out…</span>}
+            {!transportBusy && !transportFailure && mode === 'finalization-stalled' && <>
+              <span className="muted" role="alert">Finalization stalled</span>
+              <button className="btn sm" onClick={onFinalize}
+                title="The engine stopped before wrap-up completed; safely reattach to pending finalization">Reattach finalization</button>
+            </>}
+            {!transportBusy && !transportFailure && mode === 'running' && <>
+              <button className="btn sm" aria-label="Stop run without finalizing"
+                title="Stop — freeze the run (no wrap-up; resume or finalize later)" onClick={onStop}><OpIcon name="pause" size={13} /></button>
+              <button className="btn sm danger" aria-label="Finalize run"
+                title="Finalize — stop AND wrap up (report, cross-run lessons, cost)" onClick={onFinalize}><OpIcon name="stop" size={13} /></button></>}
+            {!transportBusy && !transportFailure && (mode === 'paused' || mode === 'stalled') && <>
+              <button className="btn sm primary" aria-label="Resume run" title="Resume — continue the run" onClick={onResume}><OpIcon name="play" size={13} /></button>
+              <button className="btn sm danger" aria-label="Finalize run"
+                title="Finalize — wrap it up now (report, cross-run lessons, cost)" onClick={onFinalize}><OpIcon name="stop" size={13} /></button></>}
+            {!transportBusy && !transportFailure && mode === 'finished' && <>
+              <button className="btn sm primary" aria-label="Resume finished run" title="Resume — reopen & continue" onClick={onResume}><OpIcon name="play" size={13} /></button>
+              <button className="btn sm" aria-label="Replay run from scratch" title="reset & restart from scratch" onClick={onReplay}><OpIcon name="replay" size={13} /></button></>}
           </div>}
         </div>
       </div>}

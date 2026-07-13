@@ -5,6 +5,9 @@ their control-event mapping. Bodies are verbatim moves from `serve/server.py` (B
 historical `looplab.server._Action` import path keeps working for tests and callers."""
 from __future__ import annotations
 
+from contextlib import contextmanager
+import os
+import threading
 from typing import Optional
 
 import anyio
@@ -13,6 +16,8 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse
 
 from looplab.core.atomicio import best_effort_fsync
+from looplab.engine.costs import (
+    bind_run_client_cost, reconcile_cost_accountants, reconcile_usage_outbox)
 from looplab.events.eventstore import EventStore, iter_jsonl
 from looplab.events.types import (
     EV_ANNOTATION, EV_APPROVAL_GRANTED, EV_BUDGET_EXTEND, EV_DEEP_RESEARCH,
@@ -28,6 +33,151 @@ from looplab.serve.serve_prompts import CHAT_SYSTEM, COMMAND_SYSTEM, COMPACT_SYS
 # (boss mode auto-applies them in order, then reopens/resumes the run ONCE if any step needs the
 # engine). An empty actions list = pure conversation (only the reply is shown).
 from pydantic import BaseModel  # noqa: E402
+
+
+_PENDING_RUN_COST_INIT = threading.Lock()
+
+
+def _pending_run_cost_state(
+        srv) -> tuple[threading.Lock, dict[str, list[dict]], dict[str, threading.Lock]]:
+    """Return the app-owned registry for paid deltas awaiting a durable event append.
+
+    The registry deliberately lives on ``srv`` rather than in module-global run state: each FastAPI
+    app/test instance has an independent run root and command service.  Initialization itself is
+    serialized because two first-time boss requests may arrive concurrently.
+    """
+    with _PENDING_RUN_COST_INIT:
+        lock = getattr(srv, "_pending_run_cost_lock", None)
+        pending = getattr(srv, "_pending_run_costs", None)
+        flush_locks = getattr(srv, "_pending_run_cost_flush_locks", None)
+        if lock is None or not isinstance(pending, dict) or not isinstance(flush_locks, dict):
+            lock = threading.Lock()
+            pending = {}
+            flush_locks = {}
+            setattr(srv, "_pending_run_cost_lock", lock)
+            setattr(srv, "_pending_run_costs", pending)
+            setattr(srv, "_pending_run_cost_flush_locks", flush_locks)
+        return lock, pending, flush_locks
+
+
+def _pending_run_cost_key(run_dir) -> str:
+    # Match the command service's case-insensitive identity discipline on Windows/default macOS: two
+    # request spellings for the same directory must share one pending ledger + per-run flush lock.
+    return os.path.normcase(str(run_dir.resolve()))
+
+
+def _retain_pending_run_cost(srv, run_dir, generation: str, ledger, activity_ctx) -> None:
+    lock, pending, _flush_locks = _pending_run_cost_state(srv)
+    entry = {
+        "generation": generation,
+        "ledger": ledger,
+        "activity_ctx": activity_ctx,
+    }
+    with lock:
+        pending.setdefault(_pending_run_cost_key(run_dir), []).append(entry)
+
+
+def _flush_durable_run_costs_unlocked(run_dir) -> bool:
+    """Drain prior-process usage into this generation's event log without touching activities."""
+    try:
+        return reconcile_usage_outbox(EventStore(run_dir / "events.jsonl"))
+    except Exception:  # noqa: BLE001 - every destructive caller must fail closed
+        return False
+
+
+def _flush_durable_run_costs(srv, run_dir) -> bool:
+    """Serialize a store-only drain with every in-process full-ledger flush for this run."""
+    key = _pending_run_cost_key(run_dir)
+    lock, _pending, flush_locks = _pending_run_cost_state(srv)
+    with lock:
+        flush_lock = flush_locks.setdefault(key, threading.Lock())
+    # Destructive callers already own the command sequencer. A full flush can close a retained
+    # activity context and need that sequencer, so waiting here would invert the two locks. Refuse
+    # this destructive attempt instead; its pre-sequence full flush or a retry will drain safely.
+    if not flush_lock.acquire(blocking=False):
+        return False
+    try:
+        return _flush_durable_run_costs_unlocked(run_dir)
+    finally:
+        flush_lock.release()
+
+
+def _flush_pending_run_costs(srv, run_dir) -> bool:
+    """Retry retained same-ID deltas for one run without issuing another provider request.
+
+    A failed sink append leaves its ``run_activity`` context entered, so reset/delete remains blocked
+    and this usage can never drift into a replacement generation.  Successful reconciliation closes
+    that exact context and releases its activity claim.  Failed entries are put back for an explicit
+    later flush or the next metered boss request; there is intentionally no retry loop/background
+    provider work here.
+    """
+    key = _pending_run_cost_key(run_dir)
+    lock, pending, flush_locks = _pending_run_cost_state(srv)
+    with lock:
+        # I/O is serialized only per run. Without this second lock, temporarily popping the entries
+        # below lets a concurrent request observe an empty registry and start another paid provider
+        # call while the first delta is still nondurable.
+        flush_lock = flush_locks.setdefault(key, threading.Lock())
+    with flush_lock:
+        # The run-local outbox survives a server restart, while ``pending`` deliberately does not.
+        # Drain it before the RAM-registry fast path so a fresh AppState cannot reset/delete past a
+        # paid delta whose original process died after the atomic outbox write.
+        if not _flush_durable_run_costs_unlocked(run_dir):
+            return False
+        with lock:
+            entries = pending.pop(key, [])
+        if not entries:
+            return True
+
+        retained = []
+        for entry in entries:
+            try:
+                same_generation = srv.commands.run_generation(run_dir) == entry["generation"]
+                durable = same_generation and reconcile_cost_accountants(entry["ledger"])
+            except Exception:  # noqa: BLE001 - retain known usage and its destructive-operation lease
+                durable = False
+            if not durable:
+                retained.append(entry)
+                continue
+            # ``run_activity`` owns best-effort cleanup of its claim under the command sequencer. Its
+            # generator holds no lock across yield, so exiting it from this request thread is safe.
+            entry["activity_ctx"].__exit__(None, None, None)
+
+        if retained:
+            with lock:
+                # A concurrent metered call may have retained another ledger after our initial pop.
+                pending.setdefault(key, []).extend(retained)
+        with lock:
+            return not pending.get(key)
+
+
+@contextmanager
+def _metered_run_client(srv, settings, run_dir, generation):
+    """Attribute one UI-side model client to the same durable run ledger as engine roles."""
+    # Flush known prior deltas before incurring another provider charge.  If storage is still
+    # unavailable, fail this new call before client construction while the old generation lease stays
+    # live; the caller's normal offline/degraded response path handles the exception.
+    if not _flush_pending_run_costs(srv, run_dir):
+        raise RuntimeError("a prior paid call is still waiting for durable run-cost accounting")
+
+    activity_ctx = srv.commands.run_activity(run_dir, "ui_llm", generation=generation)
+    activity_ctx.__enter__()
+    retained = False
+    try:
+        client = srv.make_llm_client(settings)
+        ledger = bind_run_client_cost(client, EventStore(run_dir / "events.jsonl"))
+        try:
+            yield client
+        finally:
+            # Normal sinks are synchronous; this retries only a known, same-ID telemetry append and
+            # never repeats the provider call. The route's primary result remains best-effort/offline.
+            if not reconcile_cost_accountants(ledger):
+                _retain_pending_run_cost(
+                    srv, run_dir, generation, ledger, activity_ctx)
+                retained = True
+    finally:
+        if not retained:
+            activity_ctx.__exit__(None, None, None)
 
 
 class _Action(BaseModel):
@@ -144,6 +294,14 @@ def build_router(srv) -> APIRouter:
     router = APIRouter()
     _run_dir = srv.run_dir
     _llm_settings = srv.llm_settings
+    # RunCommandService invokes this optional callback before acquiring its destructive sequencer.
+    # That is the non-paid recovery seam for a pending boss delta: flushing may close an activity
+    # context (which acquires the same sequencer), so registering a callback is safer than importing
+    # this router from the command layer or calling it after destructive_guard already owns the lock.
+    srv.flush_pending_run_costs = lambda run_dir: _flush_pending_run_costs(srv, run_dir)
+    # Reset/delete invoke this durable-only twin a second time while already holding the command
+    # sequencer. It cannot close activity contexts or recursively acquire that sequencer.
+    srv.flush_durable_run_costs = lambda run_dir: _flush_durable_run_costs(srv, run_dir)
 
     # ---- persisted chat transcript (the human↔boss conversation, saved WITH the run) --------------
     # The /chat and /command endpoints below are stateless thinking aids — the UI holds the history.
@@ -164,14 +322,16 @@ def build_router(srv) -> APIRouter:
         so it survives a remount/reload. Single writer (this server) + a synchronous fsync'd append
         per request serialize within the process, so no cross-process lock is needed here."""
         rd = _run_dir(run_id)
+        generation = srv.commands.run_generation(rd)
         turn = await request.json()
         if not isinstance(turn, dict):
             raise HTTPException(400, "chat turn must be a JSON object")
         path = rd / "chat.jsonl"
-        with open(path, "ab") as f:
-            f.write(orjson.dumps(turn) + b"\n")
-            f.flush()
-            best_effort_fsync(f.fileno())   # FUSE/S3 fsync may raise — don't fail the chat append
+        with srv.commands.run_activity(rd, "chat_append", generation=generation):
+            with open(path, "ab") as f:
+                f.write(orjson.dumps(turn) + b"\n")
+                f.flush()
+                best_effort_fsync(f.fileno())  # FUSE/S3 fsync may raise — don't fail the chat append
         return {"ok": True}
 
     @router.post("/api/runs/{run_id}/chat-compact")
@@ -182,6 +342,7 @@ def build_router(srv) -> APIRouter:
         durable `summary` turn and then sends to the boss IN PLACE OF those turns. Read-only + soft-fail
         offline — compaction is opt-in, so a missing model just leaves the chat uncompacted."""
         rd = _run_dir(run_id)
+        generation = srv.commands.run_generation(rd)
         body = await request.json()
         msgs = body.get("messages") or []
         convo = "\n".join(f"{m.get('role')}: {m.get('content', '')}"
@@ -189,13 +350,15 @@ def build_router(srv) -> APIRouter:
         if not convo.strip():
             return {"ok": True, "summary": "", "tokens": None}
         try:
-            client = srv.make_llm_client(_llm_settings(rd))
-            sys_prompt = COMPACT_SYSTEM
-            summary = await anyio.to_thread.run_sync(lambda: client.complete_text(
-                [{"role": "system", "content": sys_prompt}, {"role": "user", "content": convo}]))
+            with _metered_run_client(srv, _llm_settings(rd), rd, generation) as client:
+                sys_prompt = COMPACT_SYSTEM
+                summary = await anyio.to_thread.run_sync(lambda: client.complete_text(
+                    [{"role": "system", "content": sys_prompt},
+                     {"role": "user", "content": convo}]))
+                tokens = _client_tokens(client)
         except Exception as e:  # noqa: BLE001 - offline / no model -> soft fail (chat stays uncompacted)
             return JSONResponse({"ok": False, "error": str(e)}, status_code=200)
-        return {"ok": True, "summary": (summary or "").strip(), "tokens": _client_tokens(client)}
+        return {"ok": True, "summary": (summary or "").strip(), "tokens": tokens}
 
     @router.post("/api/runs/{run_id}/chat")
     async def chat(run_id: str, request: Request):
@@ -203,6 +366,7 @@ def build_router(srv) -> APIRouter:
         never appends events; it's a thinking aid. The UI keeps the history and posts the full
         message list each turn. Soft-fails offline so the panel degrades cleanly."""
         rd = _run_dir(run_id)
+        generation = srv.commands.run_generation(rd)
         body = await request.json()
         msgs = body.get("messages") or []
         nid = body.get("node_id")
@@ -211,11 +375,13 @@ def build_router(srv) -> APIRouter:
         # not command ("you MUST act: resume") — else the model claims actions it can't take.
         sys_prompt = CHAT_SYSTEM + _boss_context(st, nid, rd, advisory=True)
         try:
-            client = srv.make_llm_client(_llm_settings(rd))
-            # Offload to a thread — an `async def` handler must not run the blocking completion on the
-            # event loop (it would freeze all other clients + the SSE streams for up to the 180s timeout).
-            text = await anyio.to_thread.run_sync(
-                lambda: client.complete_text([{"role": "system", "content": sys_prompt}, *msgs]))
+            with _metered_run_client(srv, _llm_settings(rd), rd, generation) as client:
+                # Offload to a thread — an `async def` handler must not run the blocking completion on
+                # the event loop (it would freeze other clients/SSE for up to the client timeout).
+                text = await anyio.to_thread.run_sync(
+                    lambda: client.complete_text([{"role": "system", "content": sys_prompt}, *msgs]))
+                model = getattr(client, "model", None)
+                tokens = _client_tokens(client)
         except Exception as e:  # noqa: BLE001 - offline / no model -> soft fail
             return JSONResponse({"ok": False, "error": str(e)}, status_code=200)
         # Return the LLM I/O so the chat row can expand into a langfuse-style trace. We include the
@@ -225,9 +391,9 @@ def build_router(srv) -> APIRouter:
         # chat (the single latest user turn is O(1)). `text` unchanged.
         user_msg = next((m.get("content", "") for m in reversed(msgs) if m.get("role") == "user"), "")
         return {"ok": True, "text": text,
-                "trace": {"model": getattr(client, "model", None),
+                "trace": {"model": model,
                           "system": sys_prompt, "user": user_msg, "completion": text,
-                          "tokens": _client_tokens(client)}}
+                          "tokens": tokens}}
 
     @router.post("/api/runs/{run_id}/suggest")
     async def suggest(run_id: str, request: Request):
@@ -235,6 +401,7 @@ def build_router(srv) -> APIRouter:
         (operator + params + rationale) the UI can drop straight into the inject-node dialog.
         Uses structured output so the result is a ready-to-run Idea. Soft-fails offline."""
         rd = _run_dir(run_id)
+        generation = srv.commands.run_generation(rd)
         body = await request.json()
         nid = body.get("node_id")
         instruction = (body.get("instruction") or "").strip()
@@ -250,27 +417,21 @@ def build_router(srv) -> APIRouter:
                   + (f"\n\nInstruction: {instruction}" if instruction else ""))
         s = _llm_settings(rd)
         try:
-            client = srv.make_llm_client(s)
+            with _metered_run_client(srv, s, rd, generation) as client:
+                try:
+                    # Offload — the blocking parser/completion must not stall the event loop.
+                    idea = await anyio.to_thread.run_sync(lambda: parse_structured(
+                        client, [{"role": "user", "content": prompt}], Idea, s.llm_parser))
+                    return {"ok": True, "idea": idea.model_dump(mode="json"), "parsed": True}
+                except Exception:  # small models can fumble strict output; fall back to editable text
+                    text = await anyio.to_thread.run_sync(lambda: client.complete_text([
+                        {"role": "system", "content": "Reply with a one-line experiment suggestion: "
+                         "the operator (improve/draft/debug), suggested params, and why — plain text."},
+                        {"role": "user", "content": prompt}]))
+                    return {"ok": True, "parsed": False, "idea": {
+                        "operator": "improve", "params": {}, "rationale": text.strip()[:600]}}
         except Exception as e:  # noqa: BLE001 - offline / no model
             return JSONResponse({"ok": False, "error": str(e)}, status_code=200)
-        try:
-            # Offload — `async def` handler; the blocking parse_structured / complete_text below would
-            # otherwise stall the event loop (and the SSE streams) for the whole LLM round-trip.
-            idea = await anyio.to_thread.run_sync(
-                lambda: parse_structured(client, [{"role": "user", "content": prompt}], Idea, s.llm_parser))
-            return {"ok": True, "idea": idea.model_dump(mode="json"), "parsed": True}
-        except Exception:  # noqa: BLE001 - small models fumble strict tool-call output; fall back to
-            # a free-text suggestion the operator can finish editing in the inject dialog. Never the
-            # difference between "got a starting point" and "got nothing".
-            try:
-                text = await anyio.to_thread.run_sync(lambda: client.complete_text([
-                    {"role": "system", "content": "Reply with a one-line experiment suggestion: the "
-                     "operator (improve/draft/debug), suggested params, and why — plain text."},
-                    {"role": "user", "content": prompt}]))
-                return {"ok": True, "parsed": False,
-                        "idea": {"operator": "improve", "params": {}, "rationale": text.strip()[:600]}}
-            except Exception as e:  # noqa: BLE001
-                return JSONResponse({"ok": False, "error": str(e)}, status_code=200)
 
     @router.post("/api/runs/{run_id}/command")
     async def command(run_id: str, request: Request):
@@ -282,22 +443,19 @@ def build_router(srv) -> APIRouter:
         via jobAwait instead of 504ing — a fast model still returns the plan inline within the wait,
         so the confirm-card flow downstream is unchanged."""
         rd = _run_dir(run_id)
+        generation = srv.commands.run_generation(rd)
         body = await request.json()
         msgs = body.get("messages") or []
         nid = body.get("node_id")
         instruction = (body.get("instruction") or "").strip()
         st = srv.state(rd)
         s = _llm_settings(rd)
-        try:
-            client = srv.make_llm_client(s)
-        except Exception as e:  # noqa: BLE001 - offline / no model
-            return JSONResponse({"ok": False, "error": str(e)}, status_code=200)
         sys_prompt = COMMAND_SYSTEM + _boss_context(st, nid, rd)
         convo = "\n".join(f"{m.get('role')}: {m.get('content')}" for m in msgs)
         user = (f"Instruction: {instruction}" if instruction else "") + (f"\n\nDiscussion:\n{convo}" if convo else "")
         from looplab.core.parse import parse_structured
 
-        def _route_with_tools() -> Optional["_Plan"]:
+        def _route_with_tools(client) -> Optional["_Plan"]:
             """Boss decision grounded by the run-introspection tools: it MAY read experiments / data
             before choosing, then emits ONE _Plan (reply + ordered actions). None when the model can't
             drive the tool loop (then the caller falls back to a plain single-call route)."""
@@ -356,44 +514,49 @@ def build_router(srv) -> APIRouter:
         # blocking call off the event loop too, so it never stalls SSE tails / other clients. Each
         # response dict below is the EXACT contract the UI's runCommand already handles.
         def _compute() -> dict:
-            plan = None
             try:
-                plan = _route_with_tools()
-            except Exception:  # noqa: BLE001 - model can't tool-call / loop error -> single-call route
-                plan = None
-            if plan is None:
-                try:
-                    plan = parse_structured(client, [{"role": "system", "content": sys_prompt},
-                                                     {"role": "user", "content": user}], _Plan, s.llm_parser)
-                except Exception:  # noqa: BLE001 - parse fumble -> fall through to advisory reply
-                    plan = None
-            if plan is not None:
-                actions = _plan_to_actions(plan, st)
-                tok = _client_tokens(client)     # whole-turn token cost (incl. any tool-loop sub-calls)
-                if actions:
-                    # An agentic plan: the ordered actions the UI applies in sequence, plus the boss's
-                    # narration. `reply` (if any) is shown as the chat message above the applied rows.
-                    return {"ok": True, "actions": actions, "reply": plan.reply or "", "tokens": tok}
-                if plan.reply:                   # the boss chose to only talk back — show its reply
-                    return {"ok": True, "reply": plan.reply, "tokens": tok}
-            try:
-                # advisory=True: this fallback only talks back (no plan/actions emitted), so the RUN
-                # STATUS block recommends rather than commands — same reasoning as /chat above.
-                advise_sys = ("You are an ML research collaborator embedded in an experiment loop. Answer "
-                              "concisely, grounded on the run.\n" + _boss_context(st, nid, rd, advisory=True))
-                advise_msgs = msgs + ([{"role": "user", "content": instruction}] if instruction else [])
-                text = client.complete_text([{"role": "system", "content": advise_sys}, *advise_msgs])
-                # Carry the LLM I/O back so the chat row can expand into a langfuse-style trace card. We
-                # include the user's instruction + system prompt so the trace shows the real input, but
-                # omit the rest of the echoed conversation (the client holds it) to avoid O(n²) growth.
-                user_msg = instruction or next(
-                    (m.get("content", "") for m in reversed(msgs) if m.get("role") == "user"), "")
-                return {"ok": True, "reply": text,
-                        "trace": {"model": getattr(client, "model", None),
-                                  "system": advise_sys, "user": user_msg, "completion": text,
-                                  "tokens": _client_tokens(client)}}
-            except Exception as e:  # noqa: BLE001 - offline / no model -> soft fail (advisory chat)
+                context = _metered_run_client(srv, s, rd, generation)
+                client = context.__enter__()
+            except Exception as e:  # noqa: BLE001 - offline / no model
                 return {"ok": False, "error": str(e)}
+            try:
+                plan = None
+                try:
+                    plan = _route_with_tools(client)
+                except Exception:  # model can't tool-call / loop error -> single-call route
+                    plan = None
+                if plan is None:
+                    try:
+                        plan = parse_structured(
+                            client, [{"role": "system", "content": sys_prompt},
+                                     {"role": "user", "content": user}], _Plan, s.llm_parser)
+                    except Exception:  # parse fumble -> fall through to advisory reply
+                        plan = None
+                if plan is not None:
+                    actions = _plan_to_actions(plan, st)
+                    tok = _client_tokens(client)
+                    if actions:
+                        return {"ok": True, "actions": actions, "reply": plan.reply or "", "tokens": tok}
+                    if plan.reply:
+                        return {"ok": True, "reply": plan.reply, "tokens": tok}
+                try:
+                    advise_sys = ("You are an ML research collaborator embedded in an experiment "
+                                  "loop. Answer concisely, grounded on the run.\n"
+                                  + _boss_context(st, nid, rd, advisory=True))
+                    advise_msgs = msgs + ([{"role": "user", "content": instruction}]
+                                          if instruction else [])
+                    text = client.complete_text(
+                        [{"role": "system", "content": advise_sys}, *advise_msgs])
+                    user_msg = instruction or next(
+                        (m.get("content", "") for m in reversed(msgs)
+                         if m.get("role") == "user"), "")
+                    return {"ok": True, "reply": text, "trace": {
+                        "model": getattr(client, "model", None), "system": advise_sys,
+                        "user": user_msg, "completion": text, "tokens": _client_tokens(client)}}
+                except Exception as e:  # noqa: BLE001 - offline/model soft fail
+                    return {"ok": False, "error": str(e)}
+            finally:
+                context.__exit__(None, None, None)
 
         return await srv.jobs.run_as_job(_compute)
 
@@ -407,6 +570,7 @@ def build_router(srv) -> APIRouter:
         so it hands back {status:'running', job_id} the UI awaits via jobAwait instead of 504ing — a
         fast model still returns {ok, seq, content} inline within the wait."""
         rd = _run_dir(run_id)
+        generation = srv.commands.run_generation(rd)
         st = srv.state(rd)
         s = _llm_settings(rd)
 
@@ -416,13 +580,14 @@ def build_router(srv) -> APIRouter:
             # Append the event from the thread too — appends are lock-guarded, same as a control event.
             try:
                 from looplab.serve.report import generate_report
-                client = srv.make_llm_client(s)
-                content = generate_report(st, client, parser=s.llm_parser, trigger="manual")
+                with _metered_run_client(srv, s, rd, generation) as client:
+                    content = generate_report(st, client, parser=s.llm_parser, trigger="manual")
+                    ev = EventStore(rd / "events.jsonl").append(
+                        EV_REPORT_GENERATED, {
+                            "content": content, "at_node": content.get("at_node"), "trigger": "manual",
+                        })
             except Exception as e:  # noqa: BLE001 — offline / no model -> soft fail, no event
                 return {"ok": False, "error": str(e)}
-            ev = EventStore(rd / "events.jsonl").append(
-                EV_REPORT_GENERATED, {"content": content, "at_node": content.get("at_node"),
-                                     "trigger": "manual"})
             return {"ok": True, "seq": ev.seq, "content": content}
 
         return await srv.jobs.run_as_job(_compute)

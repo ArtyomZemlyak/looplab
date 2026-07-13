@@ -20,6 +20,7 @@ from looplab.core.config import Settings
 from looplab.events.eventstore import EventStore
 from looplab.events.types import (EV_APPROVAL_GRANTED, EV_PAUSE, EV_RESUME, EV_RUN_ABORT,
                                   EV_RUN_FINISHED, EV_RUN_REOPENED, EV_SPEC_APPROVED)
+from looplab.engine.finalize import incomplete_finalize_scope
 from looplab.engine.orchestrator import Engine
 from looplab.events.replay import fold
 from looplab.adapters.tasks import validate_task
@@ -296,7 +297,9 @@ def run(
         # then reopen the old event log — that silently mixed two experiments (a reproduced
         # task.snapshot=poly_regression while run_started.task_id=toy_quadratic — arch-review §3 P0-5).
         # Continuing the SAME task is fine; an empty/fresh dir has no prior run_started.
-        prior = fold(eng.store.read_all())
+        prior_events = eng.store.read_all()
+        prior = fold(prior_events)
+        pending_finalize_scope = incomplete_finalize_scope(prior_events)
         if prior.run_id and prior.task_id and prior.task_id != task.id:
             typer.echo(
                 f"run dir {out} already holds task {prior.task_id!r}, not {task.id!r} — refusing to "
@@ -322,7 +325,10 @@ def run(
         # reason=error un-retryable: fixing the cause and re-running the same command does nothing.
         # Reopen it (the same event the Web UI/TUI append to continue a finished run) so the loop
         # processes the new budget / retries the failure, and SAY so — never silently no-op.
-        if prior.stop_requested and not prior.finished:
+        if pending_finalize_scope is not None:
+            typer.echo("run has an incomplete terminal projection — completing its existing wrap-up")
+        elif prior.stop_requested and (
+                not prior.finished or str(prior.stop_reason or "").lower() == "error"):
             # a pending finalize (a stop was requested) — let the loop wrap it up; don't reopen/resume.
             typer.echo("run has a pending finalize — wrapping it up (report / cross-run lessons / cost)")
         elif prior.finished:
@@ -386,8 +392,13 @@ def resume(
     # appended run_abort then spawned us) must be RESPECTED: don't lift it, let the loop fold
     # stop_requested -> run_finished -> the wrap-up. This is why the UI's finalize path can spawn the
     # same `resume` command and still finalize.
-    prior = fold(eng.store.read_all())
-    if prior.stop_requested and not prior.finished:
+    prior_events = eng.store.read_all()
+    prior = fold(prior_events)
+    pending_finalize_scope = incomplete_finalize_scope(prior_events)
+    if pending_finalize_scope is not None:
+        typer.echo("run has an incomplete terminal projection — completing its existing wrap-up")
+    elif prior.stop_requested and (
+            not prior.finished or str(prior.stop_reason or "").lower() == "error"):
         typer.echo("run has a pending finalize — wrapping it up (report / cross-run lessons / cost)")
     elif prior.paused or prior.finished:
         typer.echo(f"run was {'finished' if prior.finished else 'stopped'} — resuming to continue "
@@ -425,10 +436,17 @@ def finalize(run_dir: Path = typer.Argument(..., help="Run directory to FINALIZE
         raise typer.Exit(2)
     store = EventStore(run_dir / "events.jsonl")
     _require_healthy_log(store, run_dir)   # fail closed on a mid-file corruption before appending (P0-4)
-    store.append(EV_RUN_ABORT, {"reason": "finalized"})
+    before = store.read_all()
+    prior = fold(before)
+    pending_finalize_scope = incomplete_finalize_scope(before)
+    if prior.finished and pending_finalize_scope is None:
+        typer.echo(f"finalized {run_dir}")
+        return
+    if pending_finalize_scope is None:
+        store.append(EV_RUN_ABORT, {"reason": "finalized"})
     # If no engine is driving the run, re-enter the loop ourselves so the wrap-up actually runs: the
     # loop folds, sees stop_requested, appends run_finished and finalizes (report/lessons/…), then exits.
-    if fold(store.read_all()).finished:
+    if fold(store.read_all()).finished and pending_finalize_scope is None:
         typer.echo(f"finalized {run_dir}")
         return
     snap = run_dir / "task.snapshot.json"

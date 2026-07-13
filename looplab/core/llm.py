@@ -16,9 +16,11 @@ from __future__ import annotations
 
 import copy
 import json
+import math
+import sys
 import threading
 import time
-from typing import Optional
+from typing import Callable, Optional
 
 # The LIVE transport runs on the openai SDK over an httpx client. Both are declared runtime deps
 # (pyproject `dependencies`), but the import is GUARDED: `core.config` imports `DEFAULT_HEADER_TIMEOUT_S`
@@ -67,6 +69,92 @@ STREAM_STALL_DEGRADE_AFTER = 2       # stream stalls before this client goes non
 # Default first-byte (response-headers) window, seconds. The single source: config.py's
 # `Settings.llm_header_timeout` imports this constant as its field default.
 DEFAULT_HEADER_TIMEOUT_S = 45.0
+
+# Provider usage is untrusted JSON.  A signed 64-bit ceiling is far above any real context/call
+# count, remains exactly representable by the durable integer stores used by LoopLab, and prevents a
+# hand-written/hostile ``10**400`` value from turning every later roll-up into an enormous bigint.
+_MAX_USAGE_TOKENS = (1 << 63) - 1
+_USAGE_FIELDS = ("prompt_tokens", "completion_tokens", "total_tokens")
+
+
+def _safe_cost(value) -> float:
+    """Return a cost only when it is a finite, non-negative numeric value.
+
+    Cost is budget-enforcement input, not merely telemetry. Strings and booleans are malformed,
+    while NaN/Infinity can poison comparisons and roll-ups. Decimal-like numeric values remain
+    valid for internal gateways such as LiteLLM. Every rejected/absent value degrades to the
+    local-model default of zero instead of crashing a completed LLM call or reducing spend.
+    """
+    if value is None or isinstance(value, (bool, str, bytes, bytearray)):
+        return 0.0
+    try:
+        cost = float(value)
+    except (OverflowError, TypeError, ValueError):
+        return 0.0
+    if not math.isfinite(cost) or cost < 0.0:
+        return 0.0
+    return 0.0 if cost == 0.0 else cost  # canonicalize provider ``-0`` as ordinary zero
+
+
+def _usage_cost(usage) -> float:
+    """Extract OpenRouter-style JSON ``usage.cost`` without trusting provider payload types."""
+    value = usage.get("cost") if isinstance(usage, dict) else None
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return 0.0
+    return _safe_cost(value)
+
+
+def _safe_token_count(value) -> int:
+    """Canonicalize one provider token count without coercion.
+
+    JSON booleans, numeric-looking text and integral floats are deliberately not integers here.
+    Negative and beyond-int64 values are corrupt telemetry and degrade to zero.
+    """
+    if type(value) is not int:
+        return 0
+    return value if 0 <= value <= _MAX_USAGE_TOKENS else 0
+
+
+def _normalize_usage(usage) -> dict[str, int | float]:
+    """Return the one bounded usage shape consumed by accounting, tracing and UI telemetry.
+
+    The input is copied before any field is inspected so a surprising dict subclass cannot expose a
+    half-read mutable view.  Every field is normalized before callers mutate accountant state.  An
+    absent/invalid/internally contradictory total retains the historical prompt+completion
+    fallback, saturated at the same signed-int64 ceiling. A provider total smaller than its two
+    components is corrupt telemetry, not an independently trustworthy counter.
+    """
+    try:
+        raw = dict(usage) if isinstance(usage, dict) else {}
+    except Exception:  # noqa: BLE001 - provider telemetry must never break a completed response
+        raw = {}
+    prompt = _safe_token_count(raw.get("prompt_tokens"))
+    completion = _safe_token_count(raw.get("completion_tokens"))
+    marker = object()
+    reported_total = raw.get("total_tokens", marker)
+    component_total = min(_MAX_USAGE_TOKENS, prompt + completion)
+    if (reported_total is not marker and type(reported_total) is int
+            and component_total <= reported_total <= _MAX_USAGE_TOKENS):
+        total = reported_total
+    else:
+        total = component_total
+    return {
+        "prompt_tokens": prompt,
+        "completion_tokens": completion,
+        "total_tokens": total,
+        "cost": _usage_cost(raw),
+    }
+
+
+def _stream_usage(value) -> dict:
+    """Best-effort mapping extraction for an SDK streaming usage object."""
+    if isinstance(value, dict):
+        return value
+    try:
+        dumped = value.model_dump()
+    except Exception:  # noqa: BLE001 - malformed optional telemetry is not a transport failure
+        return {}
+    return dumped if isinstance(dumped, dict) else {}
 
 
 def reasoning_body(model: str, mode: str = "", style: str = "auto",
@@ -411,12 +499,20 @@ class OpenAICompatibleClient:
         # in events), so this is a within-run/live cost saver, not a correctness dependency.
         ck = self._cache_key(payload)
         if ck is not None and ck in self._cache:
-            cached = self._cache[ck]
+            cached = copy.deepcopy(self._cache[ck])
+            # A cache hit performs no provider work. Zero every billed usage counter in this call's
+            # copy: otherwise trace aggregation would duplicate both tokens and paid cost even though
+            # CostAccountant correctly skips cache hits. The original cached body remains untouched.
+            usage = _normalize_usage(cached.get("usage"))
+            for field in _USAGE_FIELDS:
+                usage[field] = 0
+            usage["cost"] = 0.0
+            cached["usage"] = usage
             # Restore the per-call telemetry a live call would have set, and hand back a DEEP COPY:
             # downstream (e.g. complete_text -> _apply_native_tool_calls) mutates the message in
             # place, which would otherwise corrupt the shared cached entry for every later hit.
-            self._last_usage = cached.get("usage") or {}
-            return copy.deepcopy(cached)
+            self._last_usage = usage
+            return cached
         # A network blip / HTTP error / non-JSON body must surface as a clean LLMError, not an
         # unhandled transport exception that aborts the whole run — the role layer
         # already retries + falls back on LLMError.
@@ -539,13 +635,17 @@ class OpenAICompatibleClient:
                 raise LLMError(f"LLM returned non-JSON/empty after {self._max_retries + 1} attempts")
         if body is None:  # loop exhausted retries on a transient code without ever succeeding
             raise LLMError(f"LLM request to {self.base_url} failed: no response after retries")
+        usage = _normalize_usage(body.get("usage"))
+        body["usage"] = usage
+        # OpenRouter includes the billed amount in usage.cost. Local/OpenAI-compatible servers that
+        # omit it retain the historical zero-dollar behaviour; malformed values are ignored safely.
+        # Account a parsed provider response before semantic validation: a billable HTTP-200 envelope
+        # with known usage but no choices is still a real call and may otherwise be retried for free.
+        self.accountant.add(usage["cost"], usage=usage)
+        self._last_usage = usage
         if "choices" not in body or not body["choices"]:
             # Ollama/vLLM emit {"error": ...} envelopes on a bad request — don't index [0] blind.
             raise LLMError(f"LLM response had no choices: {str(body)[:200]}")
-        usage = body.get("usage") or {}
-        # No price table for local models -> account tokens as 0 cost, but track them.
-        self.accountant.add(0.0, usage=usage)
-        self._last_usage = usage
         if ck is not None:                       # T7: cache a COPY (the returned body is mutated
             self._cache[ck] = copy.deepcopy(body)  # in place by callers — keep the cached entry clean)
         return body
@@ -566,7 +666,8 @@ class OpenAICompatibleClient:
             # Record the clean answer as the completion (the conclusion) and the raw reasoning
             # separately; return the original text so downstream parsing is unchanged.
             thinking, answer = _clean_thinking(out, _reasoning_of(msg))
-            gen.output(answer or out).thinking(thinking).usage(body.get("usage"))
+            usage = body.get("usage")
+            gen.output(answer or out).thinking(thinking).usage(usage).cost(_usage_cost(usage))
             return out
 
     def complete_text_stream(self, messages: list[dict]):
@@ -575,61 +676,75 @@ class OpenAICompatibleClient:
         back to a single yield of the whole text if the endpoint doesn't stream. Best-effort — any
         transport error mid-stream ends the generator (the caller keeps what it got)."""
         pieces: list[str] = []
-        usage: dict = {}
+        usage = _normalize_usage(None)
+        usage_observed = False
+        stream_completed = False
+        delegated_to_fallback = False
         # The generation span stays open for the whole stream (its duration = time-to-full-answer).
         with tracing.generation(op="complete_text_stream", model=self.model, messages=messages,
                                 model_parameters=self._model_params()) as gen:
-            # Reasoning-param retry: like `_post`, a model that 400s on our reasoning toggle (glm-5.1
-            # behind litellm) must not silently lose streaming forever — flip `_reasoning_ok` off for
-            # this client and retry the stream ONCE without it, instead of paying a wasted 400
-            # round-trip per turn and always falling back to the blocking path.
-            for _attempt in range(2):
-                kwargs: dict = {"model": self.model, "messages": messages,
-                                "temperature": self.temperature, "stream": True,
-                                "stream_options": {"include_usage": True}}
-                if self.reasoning and self._reasoning_ok:
-                    kwargs["extra_body"] = dict(self.reasoning)
-                try:
-                    # httpx's per-read timeout bounds each stream iteration, so a stalled/silent
-                    # stream raises openai.APITimeoutError here instead of hanging — the reliable
-                    # interrupt the urllib+watchdog path approximated. Reasoning-param retry mirrors
-                    # `_post`: a model that 400s on the toggle (glm-5.1) drops it and retries once.
-                    for ev in _stream_with_idle_guard(
-                            self._sdk.chat.completions.create(**kwargs), self.timeout, self.header_timeout):
-                        if getattr(ev, "usage", None):
-                            usage = ev.usage.model_dump()
-                        if not ev.choices:
-                            continue
-                        piece = getattr(ev.choices[0].delta, "content", None) or ""
-                        if piece:
-                            pieces.append(piece)
-                            yield piece
-                    break                        # streamed (or cleanly ended) -> done
-                except openai.BadRequestError as e:
-                    if (self.reasoning and self._reasoning_ok and not pieces and _attempt == 0
-                            and _is_reasoning_reject(_err_body(e))):
-                        self._reasoning_ok = False
-                        continue                 # retry the stream once without the reasoning toggle
-                    if not pieces:               # any other bad request -> blocking fallback
-                        text = self.complete_text(messages)
-                        if text:
-                            yield text
-                        return
-                    break
-                except openai.APIError:
-                    # Covers a raw httpx stream-body error too: `_stream_with_idle_guard` normalizes it
-                    # to openai.APIConnectionError (an openai.APIError subclass), so this best-effort
-                    # generator ends via the blocking fallback instead of crashing the caller.
-                    if not pieces:               # never streamed -> fall back to a single blocking call
-                        text = self.complete_text(messages)   # its own nested generation span
-                        if text:
-                            yield text
-                        return
-                    break
-            if usage:                            # account the streamed answer's tokens like every other call
-                self.accountant.add(0.0, usage=usage)
-                self._last_usage = usage
-            gen.output("".join(pieces)).usage(usage or None)
+            try:
+                # Reasoning-param retry: like `_post`, a model that 400s on our reasoning toggle
+                # retries once without it instead of silently losing streaming forever.
+                for _attempt in range(2):
+                    kwargs: dict = {"model": self.model, "messages": messages,
+                                    "temperature": self.temperature, "stream": True,
+                                    "stream_options": {"include_usage": True}}
+                    if self.reasoning and self._reasoning_ok:
+                        kwargs["extra_body"] = dict(self.reasoning)
+                    try:
+                        # Capture usage BEFORE yielding a co-located delta: if a consumer closes or
+                        # cancels while suspended at that yield, the finally block still charges it.
+                        for ev in _stream_with_idle_guard(
+                                self._sdk.chat.completions.create(**kwargs),
+                                self.timeout, self.header_timeout):
+                            observed = getattr(ev, "usage", None)
+                            if observed is not None:
+                                usage_observed = True
+                                usage = _normalize_usage(_stream_usage(observed))
+                            if not ev.choices:
+                                continue
+                            piece = getattr(ev.choices[0].delta, "content", None) or ""
+                            if piece:
+                                pieces.append(piece)
+                                yield piece
+                        stream_completed = True
+                        break                    # streamed (or cleanly ended) -> done
+                    except openai.BadRequestError as e:
+                        if (self.reasoning and self._reasoning_ok and not pieces and _attempt == 0
+                                and _is_reasoning_reject(_err_body(e))):
+                            self._reasoning_ok = False
+                            continue             # retry the stream once without the reasoning toggle
+                        if not pieces:           # any other bad request -> blocking fallback
+                            delegated_to_fallback = True
+                            text = self.complete_text(messages)
+                            if text:
+                                yield text
+                            return
+                        break
+                    except openai.APIError:
+                        # A fallback owns/accountants its own provider call.  The outer stream still
+                        # records independently if it had already observed provider usage.
+                        if not pieces:
+                            delegated_to_fallback = True
+                            text = self.complete_text(messages)
+                            if text:
+                                yield text
+                            return
+                        break
+            finally:
+                # A clean stream is one logical call even if usage is absent. Once content was
+                # yielded, a consumer close/cancel also records the known call even when this
+                # provider sends usage only in an unread final chunk; its unknown cost/tokens remain
+                # zero rather than pretending the partial generation was free or fully measured.
+                # A blocking fallback owns its own successful provider call.
+                account_here = usage_observed or (
+                    not delegated_to_fallback and (stream_completed or bool(pieces)))
+                if account_here:
+                    self.accountant.add(usage["cost"], usage=usage)
+                    self._last_usage = usage
+                gen.output("".join(pieces)).usage(usage if usage_observed else None) \
+                   .cost(usage["cost"] if usage_observed else 0.0)
 
     def chat(self, messages: list[dict], tools: list[dict],
              tool_choice: str = "auto") -> dict:
@@ -646,7 +761,9 @@ class OpenAICompatibleClient:
             thinking, answer = _clean_thinking(msg.get("content") or "", _reasoning_of(msg))
             # The output records BOTH the assistant text AND any tool_calls it decided to make, so the
             # trace shows what this generation produced (its content + the tool calls the loop will run).
-            gen.output(_assistant_text({**msg, "content": answer})).thinking(thinking).usage(body.get("usage"))
+            usage = body.get("usage")
+            gen.output(_assistant_text({**msg, "content": answer})).thinking(thinking) \
+               .usage(usage).cost(_usage_cost(usage))
             if msg.get("tool_calls"):
                 gen.set("tool_calls", [{"name": (c.get("function") or {}).get("name"),
                                         "arguments": (c.get("function") or {}).get("arguments")}
@@ -681,19 +798,23 @@ class OpenAICompatibleClient:
                     msg["content"] = _clean
             calls = msg.get("tool_calls")
             if not calls:  # endpoint ignored tool_choice -> let parse.py fall back to text
-                gen.usage(body.get("usage")).error("no tool_calls in response")
+                usage = body.get("usage")
+                gen.usage(usage).cost(_usage_cost(usage)).error("no tool_calls in response")
                 raise KeyError("no tool_calls in response")
             args = calls[0]["function"]["arguments"]
             # Reasoning models emit their chain-of-thought (a `reasoning` field, or inline <think> in
             # `content`) alongside the tool call; capture it (debug channel) instead of discarding it.
             # The completion stays the structured tool args — the clean conclusion the UI renders.
             thinking, _ = _clean_thinking(msg.get("content") or "", _reasoning_of(msg))
-            gen.output(args if isinstance(args, str) else json.dumps(args)).thinking(thinking).usage(body.get("usage"))
+            usage = body.get("usage")
+            gen.output(args if isinstance(args, str) else json.dumps(args)).thinking(thinking) \
+               .usage(usage).cost(_usage_cost(usage))
             return json.loads(args) if isinstance(args, str) else args
 
 
 class CostAccountant:
-    def __init__(self, limit: Optional[float] = None, warn_frac: float = 0.8):
+    def __init__(self, limit: Optional[float] = None, warn_frac: float = 0.8,
+                 on_delta: Optional[Callable[[dict], None]] = None):
         self.limit = limit
         self.warn_frac = warn_frac
         self.spent = 0.0
@@ -708,26 +829,111 @@ class CostAccountant:
         # prompt_tokens (which SUMS the same context re-sent every tool-loop turn → O(turns²)); the UI
         # reads this to show "context" honestly instead of the billed re-send sum.
         self.peak_prompt = 0
+        # Optional durable-accounting seam.  The provider call has already succeeded when add() runs,
+        # so a sink failure is telemetry failure: remember it, never turn it into a provider retry.
+        if on_delta is not None and not callable(on_delta):
+            raise TypeError("on_delta must be callable or None")
+        self.on_delta = on_delta
+        self.last_sink_error: Optional[str] = None
+        self._lock = threading.Lock()
+
+    def set_sink(self, callback: Optional[Callable[[dict], None]]) -> None:
+        """Install/replace the post-commit delta sink used by a durable run ledger."""
+        if callback is not None and not callable(callback):
+            raise TypeError("accounting sink must be callable or None")
+        with self._lock:
+            self.on_delta = callback
+            self.last_sink_error = None
+
+    def bind_sink(self, factory: Callable[[Optional[Callable[[dict], None]]],
+                                          Optional[Callable[[dict], None]]]) -> dict:
+        """Atomically replace a sink and return counters at the ownership boundary.
+
+        Durable run accounting uses this seam so a concurrent ``add`` belongs wholly to the old or
+        new owner. There is no snapshot-then-install window in which committed usage can be lost or
+        charged to both runs. The factory must only construct a callback; it executes under the
+        accountant lock and must not call back into this object.
+        """
+        if not callable(factory):
+            raise TypeError("accounting sink factory must be callable")
+        with self._lock:
+            callback = factory(self.on_delta)
+            if callback is not None and not callable(callback):
+                raise TypeError("accounting sink must be callable or None")
+            self.on_delta = callback
+            self.last_sink_error = None
+            return {
+                "cost": self.spent,
+                "calls": self.calls,
+                "prompt_tokens": self.prompt_tokens,
+                "completion_tokens": self.completion_tokens,
+                "total_tokens": self.total_tokens,
+            }
 
     def add(self, cost: Optional[float], usage: Optional[dict] = None) -> float:
-        self.spent += max(0.0, float(cost or 0.0))
-        if usage:
-            self.calls += 1
-            pt = int(usage.get("prompt_tokens") or 0)
-            ct = int(usage.get("completion_tokens") or 0)
-            self.prompt_tokens += pt
-            self.completion_tokens += ct
-            self.total_tokens += int(usage.get("total_tokens") or (pt + ct))
-            self.peak_prompt = max(self.peak_prompt, pt)
-        if self.limit is not None:
-            if not self.warned and self.spent >= self.warn_frac * self.limit:
-                self.warned = True  # caller may surface a warning event
-            if self.spent >= self.limit:
-                raise BudgetExceeded(f"spent {self.spent:.4f} >= budget {self.limit:.4f}")
-        return self.spent
+        """Commit one logical provider-call delta after fully sanitizing untrusted telemetry.
+
+        ``calls`` is provider-call truth, not "responses whose gateway happened to report tokens": a
+        successful response with missing/malformed usage still increments it once.  Cache hits never
+        invoke ``add``.  All candidate counters are computed before one lock-protected assignment, so
+        a bad late field cannot leave cost/calls/tokens partially mutated.
+        """
+        safe_cost = _safe_cost(cost)
+        normalized = _normalize_usage(usage)
+        delta = {
+            "cost": safe_cost,
+            "calls": 1,
+            "prompt_tokens": int(normalized["prompt_tokens"]),
+            "completion_tokens": int(normalized["completion_tokens"]),
+            "total_tokens": int(normalized["total_tokens"]),
+        }
+        with self._lock:
+            # Keep every durable/public roll-up finite and bounded even after repeated individually
+            # valid near-float/int ceilings. Saturation is safer than wrap/Infinity or an exception
+            # after some counters have already changed.
+            candidate_spent = self.spent + safe_cost
+            if not math.isfinite(candidate_spent):
+                candidate_spent = sys.float_info.max
+            candidate_prompt = min(_MAX_USAGE_TOKENS,
+                                   self.prompt_tokens + delta["prompt_tokens"])
+            candidate_completion = min(_MAX_USAGE_TOKENS,
+                                       self.completion_tokens + delta["completion_tokens"])
+            candidate_total = min(_MAX_USAGE_TOKENS,
+                                  self.total_tokens + delta["total_tokens"])
+            candidate_calls = min(_MAX_USAGE_TOKENS, self.calls + 1)
+            candidate_peak = max(self.peak_prompt, delta["prompt_tokens"])
+            candidate_warned = self.warned
+            if (self.limit is not None and not candidate_warned
+                    and candidate_spent >= self.warn_frac * self.limit):
+                candidate_warned = True
+            exceeded = self.limit is not None and candidate_spent >= self.limit
+
+            self.spent = candidate_spent
+            self.calls = candidate_calls
+            self.prompt_tokens = candidate_prompt
+            self.completion_tokens = candidate_completion
+            self.total_tokens = candidate_total
+            self.peak_prompt = candidate_peak
+            self.warned = candidate_warned
+            sink = self.on_delta
+            committed_spent = self.spent
+
+        if sink is not None:
+            try:
+                sink(dict(delta))
+            except Exception as e:  # noqa: BLE001 - never retry a paid provider call for sink failure
+                with self._lock:
+                    self.last_sink_error = f"{type(e).__name__}: {e}"[:500]
+            else:
+                with self._lock:
+                    self.last_sink_error = None
+        if exceeded:
+            raise BudgetExceeded(f"spent {committed_spent:.4f} >= budget {self.limit:.4f}")
+        return committed_spent
 
     def remaining(self) -> Optional[float]:
-        return None if self.limit is None else max(0.0, self.limit - self.spent)
+        with self._lock:
+            return None if self.limit is None else max(0.0, self.limit - self.spent)
 
 
 class LiteLLMClient:
@@ -767,19 +973,16 @@ class LiteLLMClient:
         raise LLMError(f"litellm completion for {self.model} failed: {last}")
 
     def _account(self, resp) -> None:
-        cost = None
-        try:
-            cost = resp._hidden_params.get("response_cost")  # type: ignore[attr-defined]
-        except Exception:
-            cost = None
-        self.accountant.add(cost or 0.0, usage=self._usage(resp))
+        self.accountant.add(self._cost(resp), usage=self._usage(resp))
 
     def _usage(self, resp) -> Optional[dict]:
         try:
             u = resp.usage
-            return {"prompt_tokens": getattr(u, "prompt_tokens", 0),
-                    "completion_tokens": getattr(u, "completion_tokens", 0),
-                    "total_tokens": getattr(u, "total_tokens", 0)}
+            return _normalize_usage({
+                "prompt_tokens": getattr(u, "prompt_tokens", 0),
+                "completion_tokens": getattr(u, "completion_tokens", 0),
+                "total_tokens": getattr(u, "total_tokens", 0),
+            })
         except Exception:
             return None
 
@@ -796,7 +999,7 @@ class LiteLLMClient:
             thinking, answer = _clean_thinking(
                 out, getattr(m, "reasoning_content", None) or getattr(m, "reasoning", None) or "")
             u = self._usage(resp)
-            gen.output(answer or out).thinking(thinking).usage(u).cost(self._cost(resp))
+            gen.output(answer or out).thinking(thinking).usage(u).cost(_safe_cost(self._cost(resp)))
             return out
 
     def _cost(self, resp):
@@ -830,7 +1033,7 @@ class LiteLLMClient:
                 getattr(m, "content", None) or "",
                 getattr(m, "reasoning_content", None) or getattr(m, "reasoning", None) or "")
             gen.output(args if isinstance(args, str) else json.dumps(args)).thinking(thinking) \
-               .usage(self._usage(resp)).cost(self._cost(resp))
+               .usage(self._usage(resp)).cost(_safe_cost(self._cost(resp)))
             return json.loads(args) if isinstance(args, str) else (args or {})
 
 

@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { useMediaQuery, useRunState } from './hooks.js'
-import { get, fmt, fmtInt, phaseLabel, workingId, CONTROL, resumeRun } from './util.js'
+import { get, fmt, fmtInt, phaseLabel, workingId, CONTROL, commandFeedback,
+  storageGet, storageSet } from './util.js'
 import Dag from './Dag.jsx'
 import Inspector, { GroupSummary } from './Inspector.jsx'
 import Dock from './Dock.jsx'
@@ -14,6 +15,7 @@ import {
   clearRunAccess, liveHistory, reconcileHistoricalSelection, rejectHistory,
   requestHistory, resolveHistory, setRunAccess,
 } from './runMode.js'
+import { lifecyclePhaseLabel, runLifecycle, terminalReady } from './runIndex.js'
 import {
   TrustPanel, SensitivityPanel, FailuresPanel, ParetoPanel, DataQualityPanel,
   ConfigPanel, AuthoringPanel, MemoryPanel, RegistryPanel, EventExplorer,
@@ -87,10 +89,10 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
   const [themeFilter, setThemeFilter] = useState(null)       // E1: drill the tree to one direction
   const landedRef = useRef(false)                            // auto-land on Report once, on finish
   // Resizable / collapsible panes (standard multi-pane layout), persisted across sessions.
-  const [sideW, setSideW] = useState(() => +localStorage.getItem('ll.sideW') || 420)
-  const [dockH, setDockH] = useState(() => +localStorage.getItem('ll.dockH') || 230)
-  const [sideC, setSideC] = useState(() => localStorage.getItem('ll.sideC') === '1')
-  const [dockC, setDockC] = useState(() => localStorage.getItem('ll.dockC') === '1')
+  const [sideW, setSideW] = useState(() => +storageGet('ll.sideW', 420) || 420)
+  const [dockH, setDockH] = useState(() => +storageGet('ll.dockH', 230) || 230)
+  const [sideC, setSideC] = useState(() => storageGet('ll.sideC') === '1')
+  const [dockC, setDockC] = useState(() => storageGet('ll.dockC') === '1')
   // Desktop panes keep their persisted layout. On tablet/mobile they become temporary surfaces so
   // neither Inspector nor Timeline permanently taxes the graph. Compact state is intentionally not
   // persisted: every narrow-screen visit starts with the canvas unobstructed.
@@ -100,8 +102,8 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
   const compactInspectorRef = useRef(null)
   useDialogFocus(compactInspectorRef, () => setCompactInspectorOpen(false), compactWorkspace && compactInspectorOpen)
   useEffect(() => {
-    localStorage.setItem('ll.sideW', sideW); localStorage.setItem('ll.dockH', dockH)
-    localStorage.setItem('ll.sideC', sideC ? '1' : '0'); localStorage.setItem('ll.dockC', dockC ? '1' : '0')
+    storageSet('ll.sideW', sideW); storageSet('ll.dockH', dockH)
+    storageSet('ll.sideC', sideC ? '1' : '0'); storageSet('ll.dockC', dockC ? '1' : '0')
   }, [sideW, dockH, sideC, dockC])
   const clampSide = (value) => Math.max(280, Math.min(Math.max(280, window.innerWidth - 486), value))
   const clampDock = (value) => Math.max(90, Math.min(Math.max(140, window.innerHeight - 470), value))
@@ -141,11 +143,15 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
   const [toast, setToast] = useState(null)
   const [cfg, setCfg] = useState(null)
   useEffect(() => { get(`/api/runs/${encodeURIComponent(runId)}/config`).then(setCfg).catch(() => {}) }, [runId])
-  // Auto-land on the Report once, when a live run finishes — the conclusion is what the user wants
-  // at that moment. Guarded so a manual switch back to the DAG sticks. Live runs default to 'dag'.
+  const liveTerminalReady = terminalReady(live || {})
+  // Auto-land only after terminal write-out genuinely completed. A run_finished(error) during an
+  // explicit finalize is recovery state, not a completed report, and a still-live engine may still be
+  // writing report/lessons/cost after the terminal event appeared.
   useEffect(() => {
-    if (!historyActive && live?.finished && !landedRef.current) { landedRef.current = true; setView('report') }
-  }, [live?.finished, historyActive])
+    if (!historyActive && liveTerminalReady && !landedRef.current) {
+      landedRef.current = true; setView('report')
+    }
+  }, [liveTerminalReady, historyActive])
   useEffect(() => {
     if (viewSeq == null) { setHistory(liveHistory()); return }
     let alive = true
@@ -162,7 +168,7 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
     // Clear the previous timer so a second toast doesn't get hidden early by the first one's timeout.
     if (toastTimer.current) clearTimeout(toastTimer.current)
     setToast(m)
-    toastTimer.current = setTimeout(() => setToast(null), 2200)
+    toastTimer.current = setTimeout(() => setToast(null), 5000)
   }
   // Members of the selected group — memoized so unrelated re-renders (toast, live ticks) don't
   // re-walk all nodes; only recomputes when the node set / mode / selection actually changes.
@@ -201,26 +207,34 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
       ;(kids[x] || []).forEach(k => stack.push(k)) }
     return out
   }
-  // fork/ablate/merge only append an INTENT to the event log — a dead engine (finished/idle run)
-  // never reads it, so the button silently "does nothing". Mirror the chat's apply path: reopen the
-  // run + re-enter the loop so the engine actually processes the action (same NEEDS_RESUME logic).
-  const kickEngine = async (label) => {
-    const engineDead = !!live2?.finished || live?.engine_running === false
-    if (!engineDead) return
-    await CONTROL.reopen(runId)
-    await resumeRun(runId)
-    showToast(`${label} — run reopened, engine resuming`)
+  const checkedCommand = (record, labels) => {
+    const feedback = commandFeedback(record, labels)
+    if (feedback.kind === 'error') throw new Error(feedback.message)
+    return feedback
   }
   const onNodeAction = async (action, arg) => {
     if (readOnlyMode) { showToast(reviewMode ? 'This review link is read-only' : `Historical snapshot seq ${viewSeq} is read-only`); return }
     try {
       if (action === 'merge' && arg && typeof arg === 'object') {   // drag drop A->B
-        await CONTROL.merge(runId, [arg.from, arg.to]); await kickEngine(`merging #${arg.from} + #${arg.to}`)
-        showToast(`merging #${arg.from} + #${arg.to}`); return
+        const f = checkedCommand(await CONTROL.merge(runId, [arg.from, arg.to]), {
+          success: `Merge #${arg.from} + #${arg.to} applied — the engine is processing it`, noop: 'That merge was already satisfied',
+          executing: `Merge #${arg.from} + #${arg.to} requested — waiting for the engine`, failure: 'Merge failed',
+        })
+        showToast(f.message); return
       }
       const id = arg
-      if (action === 'explore') { await CONTROL.fork(runId, id); await kickEngine(`exploring from #${id}`); showToast(`exploring from #${id}`) }
-      else if (action === 'ablate') { await CONTROL.forceAblate(runId, id); await kickEngine(`ablating #${id}`); showToast(`ablating #${id}`) }
+      if (action === 'explore') {
+        const f = checkedCommand(await CONTROL.fork(runId, id), {
+          success: `Fork from #${id} applied — the engine is processing it`, noop: `Branch from #${id} already exists`,
+          executing: `Fork from #${id} requested — waiting for the engine`, failure: 'Fork failed',
+        }); showToast(f.message)
+      }
+      else if (action === 'ablate') {
+        const f = checkedCommand(await CONTROL.forceAblate(runId, id), {
+          success: `Ablation of #${id} applied — the engine is processing it`, noop: `Ablation of #${id} was already satisfied`,
+          executing: `Ablation of #${id} requested — waiting for the engine`, failure: 'Ablation failed',
+        }); showToast(f.message)
+      }
       else if (action === 'inspect') {
         selectNode(id)
         if (compactWorkspace) setCompactInspectorOpen(true)
@@ -231,26 +245,39 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
       else if (action === 'merge') { setMergeFrom(id); showToast(`click a node to merge with #${id}`) }
       else if (action.startsWith('reset:')) {   // re-run this node IN PLACE from a stage (no new node)
         const stage = action.split(':')[1]
-        await CONTROL.resetNode(runId, id, stage)
-        await kickEngine(`re-running #${id} from ${stage}`)
-        showToast(`#${id}: re-running from ${stage} — applied on resume`)
+        const f = checkedCommand(await CONTROL.resetNode(runId, id, stage), {
+          success: `Reset #${id} from ${stage} applied — the engine is processing it`, noop: `#${id} already reflects that reset`,
+          executing: `Reset #${id} from ${stage} requested — waiting for the engine`, failure: 'Reset failed',
+        }); showToast(f.message)
       }
       else if (action === 'kill') {
         const ids = pendingDescendants(id)
         if (!ids.length) { showToast(`#${id}: nothing pending to kill (already evaluated)`); return }
-        for (const k of ids) await CONTROL.nodeAbort(runId, k)
-        showToast(`killed ${ids.length} pending experiment(s) under #${id}`)
+        let waiting = 0
+        for (const k of ids) {
+          const f = checkedCommand(await CONTROL.nodeAbort(runId, k), {
+            success: `Cancelled #${k}`, noop: `#${k} was already settled`,
+            executing: `Cancellation of #${k} requested`, failure: `Could not cancel #${k}`,
+          })
+          if (f.kind === 'pending') waiting++
+        }
+        showToast(waiting
+          ? `Cancellation requested for ${ids.length} experiment(s); ${waiting} still pending`
+          : `Cancelled ${ids.length} pending experiment(s) under #${id}`)
       }
-    } catch (e) { showToast(`action failed: ${e.message || 'run not live?'}`) }
+    } catch (e) { showToast(e.message || 'Run command failed') }
   }
   // When armed for merge, a node click completes the merge instead of selecting.
   const onCanvasSelect = (id) => {
     if (readOnlyMode && mergeFrom != null) { setMergeFrom(null); return }
     if (mergeFrom != null && id != null && id !== mergeFrom) {
       CONTROL.merge(runId, [mergeFrom, id])
-        .then(() => kickEngine(`merging #${mergeFrom} + #${id}`))
-        .then(() => showToast(`merging #${mergeFrom} + #${id}`))
-        .catch(() => showToast('merge failed'))
+        .then(record => checkedCommand(record, {
+          success: `Merge #${mergeFrom} + #${id} applied — the engine is processing it`, noop: 'That merge was already satisfied',
+          executing: `Merge #${mergeFrom} + #${id} requested — waiting for the engine`, failure: 'Merge failed',
+        }))
+        .then(feedback => showToast(feedback.message))
+        .catch(error => showToast(error.message || 'Merge failed'))
       setMergeFrom(null); return
     }
     if (mergeFrom != null) setMergeFrom(null)
@@ -329,11 +356,22 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
   // connected run is still going; a finished run shows a calm "finished", a dropped SSE "offline".
   // A ZOMBIE (not finished, but no engine holds the lock) gets its own "stalled" badge — otherwise it
   // would falsely breathe green "live" while nothing actually runs.
-  const intentionallyPaused = !!live.paused || live.phase === 'paused'
-  const awaitingApproval = live.phase === 'approval' || live.phase === 'spec_approval'
-  const stalled = live.engine_running === false && !live.finished && !intentionallyPaused && !awaitingApproval
-  const liveStatus = !connected ? 'off' : (live.finished ? 'done' : stalled ? 'stalled' : (intentionallyPaused || awaitingApproval) ? 'paused' : 'on')
-  const liveLabel = !connected ? 'offline' : (live.finished ? 'finished' : stalled ? 'stalled' : intentionallyPaused ? 'paused' : awaitingApproval ? 'approval needed' : 'live')
+  const lifecycle = runLifecycle(live)
+  const finalizing = lifecycle.mode === 'finalizing' || lifecycle.mode === 'finalization-stalled'
+    || lifecycle.mode === 'finishing'
+  const liveStatus = !connected ? 'off'
+    : finalizing ? 'finalizing'
+      : lifecycle.mode === 'finished' ? 'done'
+        : lifecycle.mode === 'stalled' ? 'stalled'
+          : (lifecycle.mode === 'paused' || lifecycle.mode === 'approval') ? 'paused' : 'on'
+  const liveLabel = !connected ? 'offline'
+    : lifecycle.mode === 'finalization-stalled' ? 'finalization stalled'
+      : lifecycle.mode === 'finishing' ? 'finishing'
+        : lifecycle.mode === 'finalizing' ? 'finalizing'
+          : lifecycle.mode === 'finished' ? 'finished'
+            : lifecycle.mode === 'stalled' ? 'stalled'
+              : lifecycle.mode === 'paused' ? 'paused'
+                : lifecycle.mode === 'approval' ? 'approval needed' : 'live'
   if (historyActive && !hist) return <div className="app">
     <div className="topbar run-head">
       <span className="brand"><span className="dot">◉</span> LoopLab</span>
@@ -357,6 +395,7 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
     </main>
   </div>
   const state = historyActive ? hist : live
+  const displayedPhase = historyActive ? phaseLabel(state) : lifecyclePhaseLabel(live)
   const evalSec = state.total_eval_seconds || 0
   const maxEval = cfg?.max_eval_seconds
   const cost = state.llm_cost
@@ -383,7 +422,7 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
             title="at-a-glance run summary — best metric, budget, strategy, hints">Overview</button>
         </div>
         <EnergyToggle />
-        <span className="pill phase">{phaseLabel(state)}</span>
+        <span className="pill phase">{displayedPhase}</span>
         <span className="muted" style={{ maxWidth: 280, overflow: 'hidden', whiteSpace: 'nowrap', textOverflow: 'ellipsis' }} title={state.goal}>{state.goal || state.task_id}</span>
         <span className={'live ' + (reviewMode ? 'off' : liveStatus)}><span className="led" />{reviewMode ? 'read-only' : liveLabel}{historyActive && ' · history'}</span>
         <span className="spacer" />
@@ -399,7 +438,11 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
         {state.reward_hacks?.length > 0 && <span className="chip alarm" title={historyActive ? 'Historical mode — return live to open Trust' : 'suspicious wins flagged (B5) — open Trust'}
           onClick={event => { if (!historyActive) { panelReturnFocusRef.current = event.currentTarget; setPanel('trust') } }} style={{ cursor: historyActive ? 'default' : 'pointer' }}>
           <span className="k"><OpIcon name="alert" size={11} /> hack?</span> {state.reward_hacks.length}</span>}
-        {live.paused && <span className="chip warn"><OpIcon name="pause" size={11} /> paused</span>}
+        {finalizing
+          ? <span className="chip warn"><OpIcon name="stop" size={11} />
+              {lifecycle.mode === 'finalization-stalled' ? 'finalization stalled'
+                : lifecycle.mode === 'finishing' ? 'finishing' : 'finalizing'}</span>
+          : live.paused && <span className="chip warn"><OpIcon name="pause" size={11} /> paused</span>}
       </div>
 
       {reviewMode && <div className="review-banner" role="status">
@@ -549,7 +592,7 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
       {panel === 'events' && reviewPanelAllowed('events') && <EventExplorer runId={runId} onClose={closePanel} />}
       {panel === 'artifacts' && reviewPanelAllowed('artifacts') && <ArtifactsPanel runId={runId} onToast={showToast} onClose={closePanel} />}
 
-      {toast && <div className="toast">{toast}</div>}
+      {toast && <div className="toast" role="status" aria-live="polite" aria-atomic="true">{toast}</div>}
     </div>
   )
 }

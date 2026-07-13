@@ -67,6 +67,42 @@ class _FakeWriter:
                 "trigger": trigger}
 
 
+class _PaidFinishWriter:
+    def __init__(self, provider_calls):
+        from types import SimpleNamespace
+
+        from looplab.core.llm import CostAccountant
+
+        self.provider_calls = provider_calls
+        self.accountant = CostAccountant()
+        self.client = SimpleNamespace(accountant=self.accountant)
+
+    def generate(self, state, trigger=""):
+        self.provider_calls.append(trigger)
+        self.accountant.add(.25, {
+            "prompt_tokens": 10,
+            "completion_tokens": 2,
+            "total_tokens": 12,
+        })
+        return {
+            "headline": "paid finish report",
+            "verdict": "ok",
+            "at_node": len(state.nodes),
+            "trigger": trigger,
+        }
+
+
+def _paid_finish_engine(root: Path, provider_calls):
+    task = ToyTask.load(TASK)
+    researcher, developer = task.build_roles()
+    return Engine(
+        root / "paid-finish", task=task, researcher=researcher,
+        developer=developer, sandbox=SubprocessSandbox(),
+        policy=GreedyTree(n_seeds=1, max_nodes=1),
+        report_writer=_PaidFinishWriter(provider_calls), report_every=999,
+    )
+
+
 def _build_run(root: Path, name: str, writer=None, report_every: int = 0):
     task = ToyTask.load(TASK)
     r, d = task.build_roles()
@@ -74,6 +110,20 @@ def _build_run(root: Path, name: str, writer=None, report_every: int = 0):
                  sandbox=SubprocessSandbox(), policy=GreedyTree(n_seeds=2, max_nodes=4),
                  report_writer=writer, report_every=report_every)
     return anyio.run(eng.run)
+
+
+def _seed_finished_run(root: Path, name: str = "demo") -> Path:
+    """Minimal legacy-finished fixture for HTTP concurrency tests that need no experiment loop."""
+    from looplab.events.eventstore import EventStore
+
+    rd = root / name
+    rd.mkdir()
+    store = EventStore(rd / "events.jsonl")
+    store.append("run_started", {
+        "run_id": name, "task_id": "toy", "goal": "g", "direction": "min"})
+    store.append("run_finished", {"reason": "budget"})
+    (rd / "task.snapshot.json").write_text(TASK.read_text(encoding="utf-8"), encoding="utf-8")
+    return rd
 
 
 def test_engine_writes_report_on_cadence_and_finish(tmp_path):
@@ -86,6 +136,153 @@ def test_engine_writes_report_on_cadence_and_finish(tmp_path):
     evs = [e for e in _read_events(tmp_path / "demo") if e.type == "report_generated"]
     assert evs, "expected report_generated events"
     assert any(e.data.get("trigger") == "finish" for e in evs)
+
+
+def test_paid_finish_report_is_not_rebilled_after_terminal_append_crash(monkeypatch, tmp_path):
+    """The paid finish report belongs to a durable terminal scope before its provider call."""
+    from looplab.events.eventstore import EventStore
+
+    provider_calls = []
+    first = _paid_finish_engine(tmp_path, provider_calls)
+    real_append = first.store.append
+    crashed = False
+
+    def crash_before_terminal_append(event_type, data, *args, **kwargs):
+        nonlocal crashed
+        if event_type == "run_finished" and data.get("finalize_scope") and not crashed:
+            crashed = True
+            raise RuntimeError("hard kill after paid report")
+        return real_append(event_type, data, *args, **kwargs)
+
+    monkeypatch.setattr(first.store, "append", crash_before_terminal_append)
+    with pytest.raises(RuntimeError, match="hard kill after paid report"):
+        anyio.run(first.run)
+
+    store = EventStore(tmp_path / "paid-finish" / "events.jsonl")
+    after_crash = store.read_all()
+    begun = [event.data for event in after_crash if event.type == "finalize_step"
+             and event.data.get("step") == "begun"]
+    assert len(begun) == 1 and begun[0]["finish_data"] == {}
+    scope = begun[0]["scope"]
+    reports = [event.data for event in after_crash if event.type == "report_generated"
+               and event.data.get("trigger") == "finish"]
+    assert len(reports) == 1 and reports[0]["finalize_scope"] == scope
+    assert provider_calls == ["finish"]
+
+    # A fresh engine/accountant represents a process restart. It must recover the staged terminal
+    # payload, never revisit the natural-finish report branch, and preserve the durable report.
+    state = anyio.run(_paid_finish_engine(tmp_path, provider_calls).run)
+    assert provider_calls == ["finish"]
+    assert state.finished and state.report["headline"] == "paid finish report"
+    events = store.read_all()
+    assert len([event for event in events if event.type == "report_generated"
+                and event.data.get("trigger") == "finish"]) == 1
+    assert len([event for event in events if event.type == "llm_usage"]) == 1
+    assert state.llm_cost["calls"] == 1
+    assert state.llm_cost["cost"] == pytest.approx(.25)
+    successful = [event.data for event in events if event.type == "run_finished"
+                  and str(event.data.get("reason") or "").lower() != "error"]
+    assert successful == [{
+        "finalize_scope": scope,
+        "recovered_from_finalize_begun": True,
+    }]
+    assert {event.data.get("scope") for event in events if event.type == "finalize_step"} == {scope}
+
+
+def test_finish_report_recovers_once_when_crash_precedes_attempt_marker(monkeypatch, tmp_path):
+    """A staged plan with no attempt marker is safe to execute once in a fresh process."""
+    from looplab.events.eventstore import EventStore
+
+    provider_calls = []
+    first = _paid_finish_engine(tmp_path, provider_calls)
+    real_append = first.store.append
+
+    def crash_before_report_begun(event_type, data, *args, **kwargs):
+        if event_type == "finalize_step" and data.get("step") == "report_begun":
+            raise RuntimeError("hard kill before report attempt")
+        return real_append(event_type, data, *args, **kwargs)
+
+    monkeypatch.setattr(first.store, "append", crash_before_report_begun)
+    with pytest.raises(RuntimeError, match="hard kill before report attempt"):
+        anyio.run(first.run)
+
+    store = EventStore(tmp_path / "paid-finish" / "events.jsonl")
+    before_retry = store.read_all()
+    begun = [event.data for event in before_retry if event.type == "finalize_step"
+             and event.data.get("step") == "begun"]
+    assert len(begun) == 1 and begun[0]["finish_report_planned"] is True
+    assert begun[0]["finish_data"] == {}
+    scope = begun[0]["scope"]
+    assert provider_calls == []
+    assert not [event for event in before_retry if event.type == "report_generated"]
+
+    state = anyio.run(_paid_finish_engine(tmp_path, provider_calls).run)
+    assert state.finished and state.report["headline"] == "paid finish report"
+    assert provider_calls == ["finish"]
+    events = store.read_all()
+    reports = [event.data for event in events if event.type == "report_generated"]
+    assert len(reports) == 1 and reports[0]["finalize_scope"] == scope
+    assert len([event for event in events if event.type == "llm_usage"]) == 1
+    assert any(event.type == "finalize_step" and event.data.get("scope") == scope
+               and event.data.get("step") == "report"
+               and event.data.get("outcome") == "completed" for event in events)
+    successful = [event.data for event in events if event.type == "run_finished"
+                  and str(event.data.get("reason") or "").lower() != "error"]
+    assert successful == [{
+        "finalize_scope": scope,
+        "recovered_from_finalize_begun": True,
+    }]
+
+
+def test_finish_report_does_not_rebill_ambiguous_paid_attempt(monkeypatch, tmp_path):
+    """A durable attempt without its report is explicitly incomplete and never replayed."""
+    from looplab.events.eventstore import EventStore
+
+    provider_calls = []
+    first = _paid_finish_engine(tmp_path, provider_calls)
+    real_append = first.store.append
+
+    def crash_before_report_append(event_type, data, *args, **kwargs):
+        if event_type == "report_generated" and data.get("finalize_scope"):
+            raise RuntimeError("hard kill after paid response")
+        return real_append(event_type, data, *args, **kwargs)
+
+    monkeypatch.setattr(first.store, "append", crash_before_report_append)
+    with pytest.raises(RuntimeError, match="hard kill after paid response"):
+        anyio.run(first.run)
+
+    store = EventStore(tmp_path / "paid-finish" / "events.jsonl")
+    before_retry = store.read_all()
+    begun = next(event.data for event in before_retry if event.type == "finalize_step"
+                 and event.data.get("step") == "begun")
+    scope = begun["scope"]
+    assert provider_calls == ["finish"]
+    assert len([event for event in before_retry if event.type == "llm_usage"]) == 1
+    assert not [event for event in before_retry if event.type == "report_generated"]
+    assert any(event.type == "finalize_step" and event.data.get("step") == "report_begun"
+               for event in before_retry)
+
+    state = anyio.run(_paid_finish_engine(tmp_path, provider_calls).run)
+    assert state.finished and state.report is None
+    assert provider_calls == ["finish"]
+    assert state.llm_cost["calls"] == 1
+    assert state.llm_cost["cost"] == pytest.approx(.25)
+    events = store.read_all()
+    assert len([event for event in events if event.type == "llm_usage"]) == 1
+    report_outcome = [event.data for event in events if event.type == "finalize_step"
+                      and event.data.get("scope") == scope
+                      and event.data.get("step") == "report"]
+    assert report_outcome == [{
+        "scope": scope,
+        "step": "report",
+        "outcome": "prior_attempt_incomplete_not_replayed",
+    }]
+    successful = [event.data for event in events if event.type == "run_finished"
+                  and str(event.data.get("reason") or "").lower() != "error"]
+    assert successful == [{
+        "finalize_scope": scope,
+        "recovered_from_finalize_begun": True,
+    }]
 
 
 def test_engine_no_writer_no_report(tmp_path):
@@ -147,6 +344,582 @@ def test_report_refresh_async_job_path(tmp_path, monkeypatch):
     # the worker thread appended report_generated -> it folded into state.report
     st = client.get("/api/runs/demo/state").json()["state"]
     assert st["report"]["headline"] == "live"
+
+
+def test_report_refresh_lease_blocks_reset_through_durable_append(tmp_path, monkeypatch):
+    """A manual report owns its captured run generation until ``report_generated`` is durable.
+
+    Reset must fail while the model is blocked, the append must still occur under the activity
+    marker, and only the completed worker may release the run for reset.
+    """
+    import threading
+    import time
+
+    import looplab.serve.routers.control as control_router
+    import looplab.serve.report as report_mod
+    from looplab.events.eventstore import EventStore
+    from looplab.events.types import EV_REPORT_GENERATED
+
+    monkeypatch.setenv("LOOPLAB_JOB_INLINE_WAIT", "0")
+    rd = _seed_finished_run(tmp_path)
+    entered = threading.Event()
+    release = threading.Event()
+    appended_under_lease = threading.Event()
+
+    def blocked_report(state, client, **kwargs):
+        entered.set()
+        assert release.wait(5), "test did not release the report generation"
+        return {"headline": "leased", "at_node": len(state.nodes),
+                "trigger": kwargs.get("trigger", "")}
+
+    original_append = EventStore.append
+
+    def watched_append(self, event_type, data, **kwargs):
+        if event_type == EV_REPORT_GENERATED and self.path == rd / "events.jsonl":
+            if list((rd / ".commands").glob(".activity_*.json")):
+                appended_under_lease.set()
+        return original_append(self, event_type, data, **kwargs)
+
+    monkeypatch.setattr(report_mod, "generate_report", blocked_report)
+    monkeypatch.setattr(EventStore, "append", watched_append)
+    monkeypatch.setattr("looplab.serve.server.make_llm_client", lambda _s: object())
+    monkeypatch.setattr(control_router, "_spawn_engine", lambda *_a, **_k: 9101)
+    client = TestClient(make_app(tmp_path))
+
+    queued = client.post("/api/runs/demo/report_refresh").json()
+    assert queued["status"] == "running" and entered.wait(3)
+    assert list((rd / ".commands").glob(".activity_*.json"))
+    assert client.post("/api/runs/demo/reset").status_code == 409
+
+    release.set()
+    job = None
+    for _ in range(100):
+        job = client.get(f"/api/jobs/{queued['job_id']}").json()
+        if job.get("status") == "done":
+            break
+        time.sleep(0.05)
+    assert job and job["status"] == "done" and job["ok"] is True
+    assert appended_under_lease.is_set()
+    assert not list((rd / ".commands").glob(".activity_*.json"))
+    assert client.post("/api/runs/demo/reset").status_code == 200
+
+
+def test_metered_boss_call_lease_blocks_reset_until_provider_returns(tmp_path, monkeypatch):
+    """A billable boss call is active run work even though advisory chat writes no domain event."""
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+
+    import looplab.serve.routers.control as control_router
+    from looplab.core.llm import CostAccountant
+
+    rd = _seed_finished_run(tmp_path)
+    entered = threading.Event()
+    release = threading.Event()
+
+    class BlockingBoss:
+        model = "metered-test"
+
+        def __init__(self):
+            self.accountant = CostAccountant()
+
+        def complete_text(self, _messages):
+            entered.set()
+            assert release.wait(5), "test did not release the boss completion"
+            self.accountant.add(0.01, {
+                "prompt_tokens": 7, "completion_tokens": 3, "total_tokens": 10})
+            return "done"
+
+    monkeypatch.setattr("looplab.serve.server.make_llm_client", lambda _s: BlockingBoss())
+    monkeypatch.setattr(control_router, "_spawn_engine", lambda *_a, **_k: 9102)
+    client = TestClient(make_app(tmp_path))
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        response = pool.submit(
+            client.post, "/api/runs/demo/chat",
+            json={"messages": [{"role": "user", "content": "status?"}]})
+        assert entered.wait(3), "boss call never reached the provider"
+        assert list((rd / ".commands").glob(".activity_*.json"))
+        assert client.post("/api/runs/demo/reset").status_code == 409
+        release.set()
+        result = response.result(timeout=5)
+
+    assert result.status_code == 200 and result.json()["ok"] is True
+    assert any(event.type == "llm_usage" for event in _read_events(rd))
+    assert not list((rd / ".commands").glob(".activity_*.json"))
+    assert client.post("/api/runs/demo/reset").status_code == 200
+
+
+def test_metered_boss_pending_cost_survives_context_and_flushes_same_id(tmp_path, monkeypatch):
+    """A known paid delta outlives its route context without replaying the provider call."""
+    from looplab.core.llm import CostAccountant
+    from looplab.events.eventstore import EventStore
+    from looplab.events.types import EV_LLM_USAGE
+    from looplab.serve.routers.boss import _flush_pending_run_costs
+
+    rd = _seed_finished_run(tmp_path)
+    app = make_app(tmp_path)
+    provider_calls = []
+
+    class MeteredBoss:
+        model = "metered-recovery-test"
+
+        def __init__(self):
+            self.accountant = CostAccountant()
+
+        def complete_text(self, _messages):
+            provider_calls.append(True)
+            self.accountant.add(0.25, {
+                "prompt_tokens": 7, "completion_tokens": 3, "total_tokens": 10})
+            return "paid reply"
+
+    original_append = EventStore.append
+    usage_attempt_ids = []
+
+    def fail_first_three_usage_appends(self, event_type, data, **kwargs):
+        if event_type == EV_LLM_USAGE and self.path == rd / "events.jsonl":
+            usage_attempt_ids.append(data.get("usage_id"))
+            if len(usage_attempt_ids) <= 3:
+                raise OSError("simulated transient event-log outage")
+        return original_append(self, event_type, data, **kwargs)
+
+    monkeypatch.setattr("looplab.serve.server.make_llm_client", lambda _s: MeteredBoss())
+    monkeypatch.setattr(EventStore, "append", fail_first_three_usage_appends)
+    client = TestClient(app)
+
+    response = client.post(
+        "/api/runs/demo/chat",
+        json={"messages": [{"role": "user", "content": "status?"}]})
+
+    assert response.status_code == 200 and response.json()["text"] == "paid reply"
+    assert len(provider_calls) == 1
+    assert not [event for event in _read_events(rd) if event.type == EV_LLM_USAGE]
+    # The failed sink + failed context-exit reconciliation retain both the ledger and its generation
+    # lease, so reset/delete cannot replace the destination before the exact delta is durable.
+    assert len(usage_attempt_ids) == 2 and len(set(usage_attempt_ids)) == 1
+    assert list((rd / ".commands").glob(".activity_*.json"))
+    assert client.post("/api/runs/demo/reset").status_code == 409
+    assert len(usage_attempt_ids) == 3 and len(set(usage_attempt_ids)) == 1
+    assert len(provider_calls) == 1
+
+    assert _flush_pending_run_costs(app.state.looplab, rd) is True
+    usage_events = [event for event in _read_events(rd) if event.type == EV_LLM_USAGE]
+    assert len(usage_events) == 1
+    assert usage_events[0].data["usage_id"] == usage_attempt_ids[0]
+    assert usage_events[0].data["cost"] == pytest.approx(0.25)
+    assert len(usage_attempt_ids) == 4 and len(set(usage_attempt_ids)) == 1
+    assert len(provider_calls) == 1
+    assert not list((rd / ".commands").glob(".activity_*.json"))
+
+
+def test_destructive_guard_nonpaid_flushes_pending_boss_cost(tmp_path, monkeypatch):
+    """Reset/delete guards recover known usage before checking and never re-call the provider."""
+    from looplab.core.llm import CostAccountant
+    from looplab.events.eventstore import EventStore
+    from looplab.events.types import EV_LLM_USAGE
+
+    rd = _seed_finished_run(tmp_path)
+    app = make_app(tmp_path)
+    provider_calls = []
+
+    class MeteredBoss:
+        model = "metered-destructive-recovery-test"
+
+        def __init__(self):
+            self.accountant = CostAccountant()
+
+        def complete_text(self, _messages):
+            provider_calls.append(True)
+            self.accountant.add(0.125, {
+                "prompt_tokens": 4, "completion_tokens": 1, "total_tokens": 5})
+            return "paid reply"
+
+    original_append = EventStore.append
+    usage_attempt_ids = []
+
+    def fail_first_two_usage_appends(self, event_type, data, **kwargs):
+        if event_type == EV_LLM_USAGE and self.path == rd / "events.jsonl":
+            usage_attempt_ids.append(data.get("usage_id"))
+            if len(usage_attempt_ids) <= 2:
+                raise OSError("simulated transient event-log outage")
+        return original_append(self, event_type, data, **kwargs)
+
+    monkeypatch.setattr("looplab.serve.server.make_llm_client", lambda _s: MeteredBoss())
+    monkeypatch.setattr(EventStore, "append", fail_first_two_usage_appends)
+    client = TestClient(app)
+
+    response = client.post(
+        "/api/runs/demo/chat",
+        json={"messages": [{"role": "user", "content": "status?"}]})
+    assert response.status_code == 200 and response.json()["text"] == "paid reply"
+    assert len(provider_calls) == 1 and len(usage_attempt_ids) == 2
+    assert list((rd / ".commands").glob(".activity_*.json"))
+
+    # This is the exact boundary shared by reset/delete/clear-trace and Assistant destructive tools.
+    # Its optional callback flushes before acquiring the sequencer, then the ordinary guard proceeds.
+    with app.state.looplab.commands.destructive_guard(rd, "reset run") as canonical:
+        assert canonical == rd.resolve()
+
+    usage_events = [event for event in _read_events(rd) if event.type == EV_LLM_USAGE]
+    assert len(usage_events) == 1
+    assert usage_events[0].data["usage_id"] == usage_attempt_ids[0]
+    assert usage_events[0].data["cost"] == pytest.approx(0.125)
+    assert len(usage_attempt_ids) == 3 and len(set(usage_attempt_ids)) == 1
+    assert len(provider_calls) == 1
+    assert not list((rd / ".commands").glob(".activity_*.json"))
+
+
+def test_reset_drains_crashed_process_outbox_into_old_generation(tmp_path, monkeypatch):
+    """A fresh AppState recovers paid evidence before reset archives the old event generation."""
+    from types import SimpleNamespace
+
+    from looplab.core.llm import CostAccountant
+    from looplab.engine.costs import bind_run_client_cost
+    from looplab.events.eventstore import EventStore
+    from looplab.events.types import EV_LLM_USAGE
+    from looplab.serve.routers import control as control_router
+
+    rd = _seed_finished_run(tmp_path)
+    accountant = CostAccountant()
+    store = EventStore(rd / "events.jsonl")
+    bind_run_client_cost(SimpleNamespace(accountant=accountant), store)
+    real_append = store.append
+
+    def unavailable_usage_log(event_type, data, *args, **kwargs):
+        if event_type == EV_LLM_USAGE:
+            raise OSError("simulated process-ending event-log outage")
+        return real_append(event_type, data, *args, **kwargs)
+
+    store.append = unavailable_usage_log
+    accountant.add(.375, {
+        "prompt_tokens": 8, "completion_tokens": 2, "total_tokens": 10})
+    pending = list((rd / ".llm-usage-outbox").glob("*.json"))
+    assert len(pending) == 1
+    usage_id = pending[0].stem
+
+    # New app = new process-local registry. Recovery must come from disk, not the old ledger object.
+    app = make_app(tmp_path)
+    srv = app.state.looplab
+    assert not getattr(srv, "_pending_run_costs", {})
+
+    def spawn_replacement(*_args, **_kwargs):
+        archived_log = next(rd.glob("events.jsonl.reset-*"))
+        old_usage = [event for event in EventStore(archived_log).read_all()
+                     if event.type == EV_LLM_USAGE]
+        assert len(old_usage) == 1 and old_usage[0].data["usage_id"] == usage_id
+        EventStore(rd / "events.jsonl").append("run_started", {
+            "run_id": "demo", "task_id": "replacement", "goal": "new", "direction": "min"})
+        return 4242
+
+    monkeypatch.setattr(control_router, "_spawn_engine", spawn_replacement)
+    response = TestClient(app).post("/api/runs/demo/reset")
+
+    assert response.status_code == 200
+    old_log = next(rd.glob("events.jsonl.reset-*"))
+    old_usage = [event.data for event in EventStore(old_log).read_all()
+                 if event.type == EV_LLM_USAGE]
+    assert len(old_usage) == 1 and old_usage[0]["cost"] == pytest.approx(.375)
+    assert old_usage[0]["usage_id"] == usage_id
+    assert not [event for event in EventStore(rd / "events.jsonl").read_all()
+                if event.type == EV_LLM_USAGE]
+    archived_outbox = list(rd.glob(".llm-usage-outbox.reset-*"))
+    assert len(archived_outbox) == 1 and not list(archived_outbox[0].glob("*.json"))
+    assert not (rd / ".llm-usage-outbox").exists()
+    assert srv.flush_durable_run_costs(rd) is True
+    assert not [event for event in EventStore(rd / "events.jsonl").read_all()
+                if event.type == EV_LLM_USAGE]
+
+
+@pytest.mark.parametrize("route", ["reset", "delete"])
+@pytest.mark.parametrize("evidence", ["malformed", "conflicting"])
+def test_late_unsafe_usage_outbox_blocks_destructive_boundary(
+        route, evidence, tmp_path, monkeypatch):
+    """The under-sequencer second drain catches evidence appearing after the first flush."""
+    import orjson
+
+    from looplab.events.eventstore import EventStore
+    from looplab.events.types import EV_LLM_USAGE
+    from looplab.serve.routers import control as control_router
+
+    rd = _seed_finished_run(tmp_path)
+    usage_id = "a" * 32
+    delta = {
+        "cost": .2, "calls": 1, "prompt_tokens": 3,
+        "completion_tokens": 1, "total_tokens": 4,
+    }
+    if evidence == "conflicting":
+        EventStore(rd / "events.jsonl").append(EV_LLM_USAGE, {
+            **delta, "cost": .1, "usage_id": usage_id})
+
+    app = make_app(tmp_path)
+    srv = app.state.looplab
+    original_preflush = srv.flush_pending_run_costs
+    injected = False
+
+    def preflush_then_publish_evidence(run_dir):
+        nonlocal injected
+        result = original_preflush(run_dir)
+        if result and not injected:
+            directory = run_dir / ".llm-usage-outbox"
+            directory.mkdir()
+            path = directory / f"{usage_id}.json"
+            if evidence == "malformed":
+                path.write_bytes(b"{not-json")
+            else:
+                path.write_bytes(orjson.dumps({
+                    "version": 1, "usage_id": usage_id, "delta": delta}))
+            injected = True
+        return result
+
+    srv.flush_pending_run_costs = preflush_then_publish_evidence
+    spawns = []
+    monkeypatch.setattr(
+        control_router, "_spawn_engine", lambda *args, **kwargs: spawns.append((args, kwargs)))
+    client = TestClient(app)
+    response = (client.post("/api/runs/demo/reset") if route == "reset"
+                else client.delete("/api/runs/demo"))
+
+    assert response.status_code == 409
+    assert "run-cost evidence" in response.json()["detail"]
+    assert rd.exists() and (rd / "events.jsonl").exists()
+    assert (rd / ".llm-usage-outbox" / f"{usage_id}.json").exists()
+    assert not list(rd.glob("*.reset-*"))
+    assert spawns == []
+
+
+@pytest.mark.parametrize("route", ["reset", "delete"])
+def test_broken_outbox_directory_symlink_blocks_destructive_boundary(
+        route, tmp_path, monkeypatch):
+    """A broken/reparse outbox is evidence, never absence, on every destructive route."""
+    import os
+
+    from looplab.serve.routers import control as control_router
+
+    rd = _seed_finished_run(tmp_path)
+    outbox = rd / ".llm-usage-outbox"
+    missing_target = tmp_path / "missing-outbox-target"
+    simulated_reparse = False
+    try:
+        outbox.symlink_to(missing_target, target_is_directory=True)
+    except OSError:
+        # Windows without Developer Mode cannot create symlinks. Preserve a real directory entry and
+        # deterministically emulate only its reparse classification; all route/recovery code remains
+        # real, including lexists, event reads, command guards, and destructive decisions.
+        outbox.write_text("simulated broken directory reparse point", encoding="utf-8")
+        real_is_symlink = type(outbox).is_symlink
+
+        def is_outbox_symlink(path):
+            return path == outbox or real_is_symlink(path)
+
+        monkeypatch.setattr(type(outbox), "is_symlink", is_outbox_symlink)
+        simulated_reparse = True
+
+    assert os.path.lexists(outbox)
+    app = make_app(tmp_path)
+    spawns = []
+    monkeypatch.setattr(
+        control_router, "_spawn_engine", lambda *args, **kwargs: spawns.append((args, kwargs)))
+    response = (TestClient(app).post("/api/runs/demo/reset") if route == "reset"
+                else TestClient(app).delete("/api/runs/demo"))
+
+    assert response.status_code == 409
+    assert rd.exists() and (rd / "events.jsonl").exists()
+    assert os.path.lexists(outbox)
+    if simulated_reparse:
+        assert outbox.read_text(encoding="utf-8").startswith("simulated broken")
+    else:
+        assert outbox.is_symlink() and not outbox.exists()
+    assert not list(rd.glob("*.reset-*"))
+    assert spawns == []
+
+
+def test_reset_archive_defense_rejects_reparse_even_if_recovery_hook_regresses(
+        tmp_path, monkeypatch):
+    """Reset never skips/archives a reparse outbox even if both recovery gates misreport success."""
+    from looplab.serve.routers import control as control_router
+
+    rd = _seed_finished_run(tmp_path)
+    outbox = rd / ".llm-usage-outbox"
+    outbox.write_text("simulated reparse evidence", encoding="utf-8")
+    real_is_symlink = type(outbox).is_symlink
+
+    def is_outbox_symlink(path):
+        return path == outbox or real_is_symlink(path)
+
+    monkeypatch.setattr(type(outbox), "is_symlink", is_outbox_symlink)
+    app = make_app(tmp_path)
+    srv = app.state.looplab
+    srv.flush_pending_run_costs = lambda _run_dir: True
+    srv.flush_durable_run_costs = lambda _run_dir: True
+    spawns = []
+    monkeypatch.setattr(
+        control_router, "_spawn_engine", lambda *args, **kwargs: spawns.append((args, kwargs)))
+
+    response = TestClient(app).post("/api/runs/demo/reset")
+
+    assert response.status_code == 409
+    assert "symlink or reparse" in response.json()["detail"]
+    assert outbox.read_text(encoding="utf-8") == "simulated reparse evidence"
+    assert (rd / "events.jsonl").exists() and not list(rd.glob("*.reset-*"))
+    assert spawns == []
+
+
+def test_durable_only_flush_refuses_lock_inversion_inside_destructive_sequence(tmp_path):
+    """The second boundary never waits on a full flush that may need the command sequencer."""
+    import threading
+    from types import SimpleNamespace
+
+    from looplab.serve.routers.boss import (
+        _flush_durable_run_costs, _pending_run_cost_key, _pending_run_cost_state)
+
+    rd = tmp_path / "run"
+    rd.mkdir()
+    srv = SimpleNamespace()
+    lock, _pending, flush_locks = _pending_run_cost_state(srv)
+    key = _pending_run_cost_key(rd)
+    with lock:
+        flush_lock = flush_locks.setdefault(key, threading.Lock())
+    flush_lock.acquire()
+    try:
+        assert _flush_durable_run_costs(srv, rd) is False
+    finally:
+        flush_lock.release()
+    # No command service is installed: the durable-only path itself neither closes activities nor
+    # acquires the command sequencer.
+    assert _flush_durable_run_costs(srv, rd) is True
+
+
+def test_pending_cost_flush_serializes_same_run_before_new_provider(tmp_path, monkeypatch):
+    """A concurrent flush cannot mistake an in-progress pop for an empty durable ledger."""
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+    from contextlib import contextmanager
+    from types import SimpleNamespace
+
+    from looplab.core.llm import CostAccountant
+    from looplab.events.types import EV_LLM_USAGE
+    import looplab.serve.routers.boss as boss_router
+
+    run_dir = tmp_path / "run"
+    generation = "generation-a"
+
+    class FakeStore:
+        def __init__(self):
+            self.events = []
+            self.usage_attempts = 0
+
+        def append(self, event_type, data):
+            if event_type == EV_LLM_USAGE:
+                self.usage_attempts += 1
+                if self.usage_attempts <= 2:
+                    raise OSError("simulated transient event-log outage")
+            event = Event(seq=len(self.events), type=event_type, data=dict(data))
+            self.events.append(event)
+            return event
+
+        def read_all(self):
+            return list(self.events)
+
+    class FakeCommands:
+        def __init__(self):
+            self.active = 0
+            self.lock = threading.Lock()
+
+        def run_generation(self, _run_dir):
+            return generation
+
+        @contextmanager
+        def run_activity(self, _run_dir, _kind, *, generation: str):
+            assert generation == "generation-a"
+            with self.lock:
+                self.active += 1
+            try:
+                yield
+            finally:
+                with self.lock:
+                    self.active -= 1
+
+    store = FakeStore()
+    commands = FakeCommands()
+    clients = []
+    second_client_created = threading.Event()
+
+    def make_client(_settings):
+        client = SimpleNamespace(accountant=CostAccountant())
+        clients.append(client)
+        if len(clients) > 1:
+            second_client_created.set()
+        return client
+
+    srv = SimpleNamespace(commands=commands, make_llm_client=make_client)
+    monkeypatch.setattr(boss_router, "EventStore", lambda _path: store)
+
+    # The original provider result is known, but both its synchronous sink append and context-exit
+    # reconciliation fail. Its ledger + activity context must therefore remain retained.
+    with boss_router._metered_run_client(srv, object(), run_dir, generation) as client:
+        client.accountant.add(0.5, {
+            "prompt_tokens": 5, "completion_tokens": 2, "total_tokens": 7})
+    assert len(clients) == 1 and commands.active == 1 and store.usage_attempts == 2
+
+    original_reconcile = boss_router.reconcile_cost_accountants
+    flush_entered = threading.Event()
+    release_flush = threading.Event()
+
+    def blocked_reconcile(ledger):
+        flush_entered.set()
+        assert release_flush.wait(5), "test did not release the retained-ledger flush"
+        return original_reconcile(ledger)
+
+    monkeypatch.setattr(boss_router, "reconcile_cost_accountants", blocked_reconcile)
+
+    def start_second_metered_call():
+        with boss_router._metered_run_client(srv, object(), run_dir, generation):
+            return True
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first_flush = pool.submit(boss_router._flush_pending_run_costs, srv, run_dir)
+        assert flush_entered.wait(3)
+        second_call = pool.submit(start_second_metered_call)
+        # The second request has reached the per-run flush boundary, but may not construct a client
+        # while the first thread owns the popped, not-yet-durable ledger entry.
+        assert not second_client_created.wait(0.2)
+        assert not second_call.done()
+        release_flush.set()
+        assert first_flush.result(timeout=5) is True
+        assert second_call.result(timeout=5) is True
+
+    assert len(clients) == 2
+    assert store.usage_attempts == 3
+    assert len([event for event in store.events if event.type == EV_LLM_USAGE]) == 1
+    assert commands.active == 0
+
+
+def test_report_worker_rejects_replaced_generation_before_client_creation(tmp_path, monkeypatch):
+    """A queued report for an archived generation may neither spend nor write into its replacement."""
+    from looplab.events.eventstore import EventStore
+
+    rd = _seed_finished_run(tmp_path)
+    app = make_app(tmp_path)
+    created = []
+
+    def forbidden_client(_settings):
+        created.append(True)
+        raise AssertionError("a stale generation must be rejected before client construction")
+
+    async def replace_before_worker(compute, **_kwargs):
+        (rd / "events.jsonl").rename(rd / "events.jsonl.replaced")
+        EventStore(rd / "events.jsonl").append("run_started", {
+            "run_id": "replacement", "task_id": "new", "goal": "new", "direction": "min"})
+        return compute()
+
+    monkeypatch.setattr("looplab.serve.server.make_llm_client", forbidden_client)
+    monkeypatch.setattr(app.state.looplab.jobs, "run_as_job", replace_before_worker)
+    response = TestClient(app).post("/api/runs/demo/report_refresh")
+
+    assert response.status_code == 200 and response.json()["ok"] is False
+    assert "run_generation_changed" in response.json()["error"]
+    assert created == []
+    new_types = [event.type for event in EventStore(rd / "events.jsonl").read_all()]
+    assert "llm_usage" not in new_types and "report_generated" not in new_types
 
 
 def _read_events(rd: Path):

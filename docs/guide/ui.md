@@ -2,8 +2,8 @@
 
 LoopLab ships a live React control plane. It's a **separate read/control process** — it tails each
 run's `events.jsonl`, folds it with `replay.fold`, streams the state to the browser over SSE, serves
-the built React app, and turns UI actions into appended control events. It never changes the engine
-and is never imported by it (ADR-18).
+the built React app, and submits interactive controls through the server-owned durable command
+lifecycle. It never changes the engine in-process and is never imported by it (ADR-18).
 
 > **No browser? Use the terminal.** `looplab tui` is a chat-first **terminal control plane** over the
 > same server — a run dashboard, the "describe a goal → the boss launches it" genesis flow, and a
@@ -41,10 +41,21 @@ Then open the printed URL. The server serves the **built** React bundle from `ui
 ## What it does
 
 - **Live runs** — watch a run unfold in real time over SSE: the lineage graph, per-node metrics,
-  status, and tokens. Reopening a finished run still streams (runs are self-describing via
-  `task.snapshot.json`).
-- **Create a run by describing it** — the main-menu chat ("New run") turns a plain-text goal into an
-  editable run spec: the boss invents a name, picks or authors the task, and sets the knobs (model,
+  status, tokens, and returned provider-reported paid cost. Per-call numeric usage is append-only, so the total
+  already written to `events.jsonl` survives resume/new engine processes. Same-ID ledger retries do
+  not double-count. Before append, the ledger first attempts to atomically retain a numeric-only
+  delta in the run-local `.llm-usage-outbox`; a successful outbox rename or event append is the first
+  durable boundary, and a later reconciliation in a fresh Engine/server process can finish the same-ID append. Reset/delete
+  drain it fail-closed and reset archives it with the old generation. This is observed
+  run-attributable usage, not invoice reconciliation: a process kill before either first durable
+  persistence completes or an ambiguous paid timeout/reset/empty-response retry can leave an unknown
+  charge, and missing final usage cannot be invented. The overall command/activity service is
+  validated for the supported single UI server process, not a multi-worker deployment. Genesis, `/api/research`, global
+  Assistant, cross-run scope reports, health probes, and other non-run-scoped calls are excluded.
+  Reopening a finished run still
+  streams (runs are self-describing via `task.snapshot.json`).
+- **Create a run by describing it** — the main-menu chat ("New run") turns a plain-text goal into a
+  proposed run spec: the boss invents a name, picks or authors the task, and sets the knobs (model,
   node budget, seeds, policy). It also authors **repo runs** — point it at a repo to optimize and it
   fills the repo path, the run/eval command, the metric key, and the edit surface, plus an
   **adaptation checklist** (how to make the repo LoopLab-ready: expose a JSON metric, pin deps, choose
@@ -55,20 +66,59 @@ Then open the printed URL. The server serves the **built** React bundle from `ui
   defaults `backend=llm` — the rule lives in `/api/start`, the funnel every launch goes through
   (genesis cards, assistant-proposed runs, direct API calls), matching `looplab run --goal` — so a
   UI-launched run never silently falls back to the offline toy developer; the genesis card shows the
-  inferred backend up front so you can change it before launching, and a backend you set explicitly
-  (in the card, the Settings page, or `LOOPLAB_BACKEND`) always wins. Tweak any field,
-  then launch. See **[Generating train & test code](generating-code.md)** for the full Genesis flow
+  inferred backend up front for review. The current card is not an inline editor: ask the Assistant
+  for a revised proposal before starting if a field is wrong. A backend set explicitly in Settings or
+  `LOOPLAB_BACKEND` still wins. See **[Generating train & test code](generating-code.md)** for the full
+  Genesis flow
   and every "let the agent write the code" case (from-scratch, repo edit, test-without-train,
   onboarding) plus how to point at your data.
 - **Drive a run** — start, resume, fork, branch, or inject nodes from the browser; the server spawns
-  the engine as a subprocess. A finished run can be extended with a new batch.
+  the engine as a subprocess. New-run start uses its dedicated launch route and the shared spawn
+  lease. A finished run can be extended with a new batch. Existing-run interactive controls use one
+  idempotent, observable [command lifecycle](concepts.md#authoritative-command-lifecycle),
+  shared with the boss and TUI, so pending work is not presented as completed. `accepted` and
+  `executing` remain pending; an engine acknowledgement means the engine observed that exact intent,
+  not that all resulting domain work is done. While finalization or terminal write-out is active, the
+  run list/header/Dock show it and hide conflicting Resume/Replay controls. If the Web response is
+  lost or temporarily unreadable, Dock and Assistant preserve the same command identity and offer
+  **Check same command** or, for an eligible terminal failure, **Retry same command** instead of
+  silently submitting a fresh action. Both surfaces persist a sanitized allowlisted envelope and one
+  exact per-run tab lock before POST; if session storage cannot be written, the command is not sent.
+  Corrupt, tampered, mismatched, or unsafe stored state is quarantined and never replayed. The shared
+  lock makes an Assistant command visible in Dock and blocks a competing same-run action on either
+  surface, while commands for other runs remain independent. Assistant keeps failures across reload,
+  attributes an in-flight result only to the run that originated it, and uses focused live status/error
+  regions plus touch-sized wrapping recovery controls on narrow screens. Structured conflicts explain
+  whether an identical command can be reattached or a different active command must finish first.
+  Model-driven command-backed run mutations are staged in a durable per-turn journal before
+  execution; recovering an unanswered turn may replay only its exact command-backed intents, while
+  changed/new or uncertain direct-storage mutations are blocked. Recovery pins the persisted raw
+  instruction and mode, rejects
+  either mismatch, and exposes only read/Todo tools plus journal-backed run control — no file, shell,
+  git, knowledge, MCP, proposal, or subagent mutators. A different message cannot overtake a dangling
+  or still-cancelling turn. The TUI likewise stages the exact key and deep-copied payload before POST
+  and uses same-key recovery when an early 404 races a delayed original request.
+  On Web reload/session re-open, a dangling `turn_id` is re-read and recovered with its persisted
+  `raw || content`, clean display, and exact mode; the UI polls that same turn without adding a second
+  user bubble. A changed/corrupt identity is blocked instead of retried with rebuilt context. Retry of
+  a completed persisted turn is a new turn, but it also reuses that durable raw/display/mode exactly.
+  Reset preserves terminal command records and run-scoped background LLM/report work holds a
+  generation lease. A brand-new command request formed before reset but delivered for the first time
+  after reset does not yet carry an expected-generation token; avoid keeping an unsent stale control
+  request across Replay (tracked P1).
+  Natural finish reports use a durable planned/attempt/result boundary. A restart safely performs a
+  report only when no attempt marker exists, reuses a scoped durable report, and records an ambiguous
+  paid attempt as incomplete instead of issuing a second provider call.
+  Standalone legacy CLI `stop`/`finalize`/`resume`/`approve` commands are still outside this server
+  sequencer and should not be run concurrently with an active server-owned command.
 - **Reset a node in place** — the node inspector's **↻ Reset** button (or `reset(node_id, stage)` in
   chat) re-runs an EXISTING node from a chosen stage instead of spawning a new one: `eval` re-scores it
   (keep the idea + code — for an infra/API-key blip), `implement` re-runs only the Developer (keep the
   Researcher's idea — for crashed code), `propose` is a full redo. Any eval-**pipeline** stage name
   (`train`, `data_prep`, …) is also accepted — it restarts the node's pipeline from that stage,
-  reusing earlier stages' artifacts. Same node id, no proliferation;
-  applied on the next resume (`node_reset` control event).
+  reusing earlier stages' artifacts. Same node id, no proliferation. The command service wakes or
+  attaches the driver automatically. Its exact `command_ack` means the engine accepted that reset
+  intent; re-development/re-evaluation may still be running and remains visible as normal run work.
 - **Chat / boss** — an agentic run chat turns one message into a plan of ordered actions, with each
   action narrated in a durable feed (`chat.jsonl`).
 - **Reports** — an agent-authored, conclusion-first run report plus deterministic metric-improvement

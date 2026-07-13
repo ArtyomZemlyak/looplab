@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react'
-import { get, putText, post, fmt, fmtInt, fmtBytes, CONTROL, gpuStat, saveRunConfig, resumeRun, apiPrefix, operatorMeta,
+import { get, putText, post, fmt, fmtInt, fmtBytes, CONTROL, gpuStat, saveRunConfig, apiPrefix, operatorMeta,
+  commandFeedback, getRunCommand, COMMAND_SUCCEEDED, COMMAND_FAILED,
   createRunReview, listRunReviews, revokeRunReview } from './util.js'
 import { usePoll } from './hooks.js'
 import { Bars, ParallelCoords, Scatter, MultiTrajectory } from './charts.jsx'
@@ -73,8 +74,12 @@ export function OverviewPanel({ state, maxEval, onClose, onOpenPanel }) {
 export function ResearchPanel({ state, runId, onToast, onClose }) {
   const memos = [...(state.research || [])].reverse()   // newest first
   const steer = async (text) => {
-    try { await CONTROL.hint(runId, 'try this research direction: ' + text); onToast && onToast('steered the next proposal →') }
-    catch { onToast && onToast('could not steer (run offline?)') }
+    try {
+      const feedback = commandFeedback(await CONTROL.hint(runId, 'try this research direction: ' + text), {
+        success: 'Steered the next proposal', noop: 'That direction was already queued',
+        executing: 'Steer request accepted — waiting for the run', failure: 'Could not steer',
+      }); onToast?.(feedback.message)
+    } catch (error) { onToast?.(`Could not steer: ${error.message || error}`) }
   }
   return (
     <Panel title="Deep research" sub={memos.length ? `${memos.length} memo${memos.length === 1 ? '' : 's'}` : 'none yet'} onClose={onClose} wide>
@@ -145,8 +150,12 @@ export function TrustPanel({ state, runId, onClose, onSelect, onToast, readOnly 
   }, [runId, configNonce])
   const cfg = configResource.data
   const quarantine = async (id) => {   // U6: act on a flagged node — remove it from the search
-    try { await CONTROL.nodeAbort(runId, id); onToast && onToast(`quarantined #${id} (aborted)`) }
-    catch { onToast && onToast('could not quarantine (run not live?)') }
+    try {
+      const feedback = commandFeedback(await CONTROL.nodeAbort(runId, id), {
+        success: `Quarantined #${id}`, noop: `#${id} was already settled`,
+        executing: `Quarantine of #${id} requested — waiting for the run`, failure: `Could not quarantine #${id}`,
+      }); onToast?.(feedback.message)
+    } catch (error) { onToast?.(`Could not quarantine #${id}: ${error.message || error}`) }
   }
   const nodes = Object.values(state.nodes)
   const evald = nodes.filter(n => n.metric != null && n.feasible !== false)
@@ -276,8 +285,12 @@ export function QueuePanel({ state, runId, onSelect, onClose, onToast }) {
   const confirmReq = (state.confirm_requests || []).filter(id => !(state.confirmed_forced || []).includes(id))
   const ablateReq = state.ablate_requests || []
   const cancel = async (id) => {
-    try { await CONTROL.nodeAbort(runId, id); onToast && onToast(`cancelled #${id}`) }
-    catch { onToast && onToast('could not cancel (run not live?)') }
+    try {
+      const feedback = commandFeedback(await CONTROL.nodeAbort(runId, id), {
+        success: `Cancelled #${id}`, noop: `#${id} was already settled`,
+        executing: `Cancellation of #${id} requested — waiting for the run`, failure: `Could not cancel #${id}`,
+      }); onToast?.(feedback.message)
+    } catch (error) { onToast?.(`Could not cancel #${id}: ${error.message || error}`) }
   }
   const queuedCount = pending.length + injects.length + forks.length + confirmReq.length + ablateReq.length
   return (
@@ -436,6 +449,7 @@ export function ConfigPanel({ runId, state, live, onClose, onToast }) {
   const [savedAC, setSavedAC] = useState({})
   const [sec, setSec] = useState('')
   const [busy, setBusy] = useState(false)
+  const [restartPending, setRestartPending] = useState(null) // {stage:'pause'|'resume', record}
   const [raw, setRaw] = useState(false)
   const load = () => get(`/api/runs/${runId}/config`).then(c => {
     setCfg(c); const f = toForm(c); setForm(f); setSaved(f)
@@ -446,6 +460,49 @@ export function ConfigPanel({ runId, state, live, onClose, onToast }) {
   // A live engine keeps its in-memory settings until it restarts; gate on `live` (not the possibly
   // historical `state`) so time-travel doesn't misreport liveness.
   const engineLive = live?.engine_running === true
+  const controlBusy = busy || restartPending != null
+  const pauseLabels = { success: 'Run paused', noop: 'Run was already paused',
+    executing: 'Pause requested — waiting for the current experiment to stop', failure: 'Pause failed' }
+  const resumeLabels = { success: 'Resumed with the saved settings', noop: 'Run was already running',
+    executing: 'Resume requested — waiting for the engine to load the saved settings', failure: 'Resume failed' }
+  const acceptResume = async () => {
+    const record = await CONTROL.resume(runId)
+    const feedback = commandFeedback(record, resumeLabels)
+    onToast(feedback.message)
+    setRestartPending(feedback.kind === 'pending' ? { stage: 'resume', record } : null)
+    return feedback
+  }
+  useEffect(() => {
+    const pending = restartPending
+    if (!pending?.record?.id || !['accepted', 'executing'].includes(pending.record.status)) return
+    let active = true, timer = null
+    const poll = async () => {
+      try {
+        const record = await getRunCommand(runId, pending.record.id)
+        if (!active) return
+        if (COMMAND_SUCCEEDED.has(record.status) || COMMAND_FAILED.has(record.status)) {
+          const feedback = commandFeedback(record, pending.stage === 'pause' ? pauseLabels : resumeLabels)
+          if (feedback.kind === 'error' || pending.stage === 'resume') {
+            onToast(feedback.message); setRestartPending(null); return
+          }
+          onToast('Pause completed — resuming with the saved settings…')
+          try { await acceptResume() }
+          catch (error) { onToast(`Resume failed: ${error.message || error}`); setRestartPending(null) }
+          return
+        }
+      } catch (error) {
+        if ([401, 403, 404].includes(error?.status) || error?.code === 'COMMAND_PROTOCOL_ERROR') {
+          onToast(`Restart status unavailable: ${error.message || error}`)
+          setRestartPending(null)
+          return
+        }
+        // Transport/5xx is ambiguous: preserve the same command and retry its authoritative GET.
+      }
+      if (active) timer = setTimeout(poll, 1500)
+    }
+    timer = setTimeout(poll, 1000)
+    return () => { active = false; clearTimeout(timer) }
+  }, [runId, restartPending?.record?.id])
   const dirty = useMemo(() => {
     if (!form || !saved) return new Set()
     const cur = fromForm(form), base = fromForm(saved), s = new Set()
@@ -459,8 +516,6 @@ export function ConfigPanel({ runId, state, live, onClose, onToast }) {
     const cur = new Set(ac[key] || []); cur.has(role) ? cur.delete(role) : cur.add(role)
     return { ...ac, [key]: [...cur] }
   })
-  const sleep = ms => new Promise(r => setTimeout(r, ms))
-
   const onSave = async () => {
     const cur = fromForm(form), changed = {}
     for (const k of dirty) changed[k] = cur[k]    // send ONLY edited fields (minimal snapshot diff)
@@ -477,27 +532,36 @@ export function ConfigPanel({ runId, state, live, onClose, onToast }) {
     finally { setBusy(false) }
   }
   const onResume = async () => {           // stalled/finished: just spawn the engine (re-reads the snapshot)
+    if (restartPending) return
     setBusy(true)
-    try { await resumeRun(runId); onToast('resuming with the saved settings…') }
-    catch (e) { onToast('resume failed: ' + e.message) }
+    try {
+      await acceptResume()
+    } catch (e) { onToast('Resume failed: ' + e.message) }
     finally { setBusy(false) }
   }
-  const onPauseResume = async () => {      // live: pause → wait for the engine to stop → resume with new settings
+  const onPauseResume = async () => {      // command service owns both postconditions and engine policy
+    if (restartPending) return
     setBusy(true)
     try {
       onToast('pausing — the current experiment finishes first…')
-      await CONTROL.pause(runId)
-      let stopped = false
-      for (let i = 0; i < 900 && !stopped; i++) {   // poll up to ~15 min (a node can hold an eval that long)
-        await sleep(1000)
-        const s = await get(`/api/runs/${runId}/state`).then(r => r.state).catch(() => null)
-        if (s && s.engine_running === false) stopped = true
-      }
-      if (!stopped) { onToast('still busy — retry once the current experiment finishes'); return }
-      await CONTROL.resume(runId)          // clear the paused flag so the fresh engine doesn't immediately re-pause
-      await resumeRun(runId)               // new engine process re-reads the snapshot
-      onToast('resumed with the new settings')
-    } catch (e) { onToast('pause/resume failed: ' + e.message) }
+      const record = await CONTROL.pause(runId)
+      const stopped = commandFeedback(record, pauseLabels)
+      onToast(stopped.message)
+      if (stopped.kind === 'error') return
+      if (stopped.kind === 'pending') { setRestartPending({ stage: 'pause', record }); return }
+      await acceptResume()
+    } catch (e) { onToast('Pause/resume failed: ' + e.message) }
+    finally { setBusy(false) }
+  }
+  const extendBudget = async () => {
+    if (!sec || controlBusy) return
+    setBusy(true)
+    try {
+      const feedback = commandFeedback(await CONTROL.budget(runId, Number(sec)), {
+        success: `Budget extended +${sec}s`, noop: 'That budget extension was already applied',
+        executing: `Budget extension +${sec}s requested — waiting for the run`, failure: 'Budget extension failed',
+      }); onToast(feedback.message)
+    } catch (error) { onToast(`Budget extension failed: ${error.message || error}`) }
     finally { setBusy(false) }
   }
 
@@ -509,7 +573,7 @@ export function ConfigPanel({ runId, state, live, onClose, onToast }) {
       <div className="toolbar" style={{ marginBottom: 12 }}>
         <span className="muted">extend eval budget:</span>
         <input className="text" style={{ width: 120 }} placeholder="seconds" value={sec} onChange={e => setSec(e.target.value)} />
-        <button className="btn sm primary" disabled={!sec} onClick={async () => { await CONTROL.budget(runId, Number(sec)); onToast('budget extended +' + sec + 's') }}>apply</button>
+        <button className="btn sm primary" disabled={!sec || controlBusy} onClick={extendBudget}>apply</button>
       </div>
       {!form ? <div className="muted">…</div> : <>
         <div className="notice" style={{ marginBottom: 10 }}>
@@ -518,14 +582,19 @@ export function ConfigPanel({ runId, state, live, onClose, onToast }) {
             : <>Edits are saved to this run's <code>config.snapshot.json</code> and applied on the next <b>resume</b>.</>}
           {' '}<span className="sf-dot unsaved">●</span> = changed.
         </div>
+        {restartPending && <div className="notice" role="status" style={{ marginBottom: 10 }}>
+          {restartPending.stage === 'pause'
+            ? 'Pause requested. Waiting for the current experiment to stop before resuming with the saved settings…'
+            : 'Resume requested. Waiting for the engine to load the saved settings…'}
+        </div>}
         <div className="toolbar" style={{ marginBottom: 10 }}>
           <span className="spacer" style={{ flex: 1 }} />
           <button className="btn sm ghost" onClick={() => setRaw(r => !r)}>{raw ? 'form' : 'raw'}</button>
-          <button className="btn sm ghost" disabled={busy || !canSave} onClick={() => { setForm(saved); setAgentControl(savedAC) }}>↺ revert</button>
-          <button className="btn sm primary" disabled={busy || !canSave} onClick={onSave}>Save</button>
+          <button className="btn sm ghost" disabled={controlBusy || !canSave} onClick={() => { setForm(saved); setAgentControl(savedAC) }}>↺ revert</button>
+          <button className="btn sm primary" disabled={controlBusy || !canSave} onClick={onSave}>Save</button>
           {engineLive
-            ? <button className="btn sm" disabled={busy || canSave} onClick={onPauseResume} title="pause the run, then resume it with the saved settings">Pause &amp; resume ▸</button>
-            : <button className="btn sm" disabled={busy || canSave} onClick={onResume} title="continue this run with the saved settings">Resume ▸</button>}
+            ? <button className="btn sm" disabled={controlBusy || canSave} onClick={onPauseResume} title="pause the run, then resume it with the saved settings">Pause &amp; resume ▸</button>
+            : <button className="btn sm" disabled={controlBusy || canSave} onClick={onResume} title="continue this run with the saved settings">Resume ▸</button>}
         </div>
         {/* This panel's `dirty` is changed-vs-saved (unsaved), so feed it as `unsaved` → the amber dot that clears on Save. */}
         {raw ? rawTable : <SettingsForm form={form} onChange={onChange} unsaved={dirty} agentControl={agentControl} onToggleAgent={onToggleAgent} hideSecret />}
@@ -969,19 +1038,37 @@ export function HypothesisBoard({ state, runId, onSelect, onClose, onToast }) {
   const add = async () => {
     const s = draft.trim()
     if (!s) return
-    try { await CONTROL.addHypothesis(runId, s); setDraft(''); onToast && onToast('hypothesis added') }
-    catch { onToast && onToast('could not add (run not live?)') }
+    try {
+      const feedback = commandFeedback(await CONTROL.addHypothesis(runId, s), {
+        success: 'Hypothesis added', noop: 'That hypothesis was already tracked',
+        executing: 'Hypothesis requested — waiting for the run', failure: 'Could not add hypothesis',
+      })
+      if (feedback.kind === 'success') setDraft('')
+      onToast?.(feedback.message)
+    } catch (error) { onToast?.(`Could not add hypothesis: ${error.message || error}`) }
   }
   const _revert = (id) => setOptim(o => { const n = { ...o }; delete n[id]; return n })
   const abandon = async (h) => {
     setOptim(o => ({ ...o, [h.id]: 'abandoned' }))          // reflect immediately (SSE lag)
-    try { await CONTROL.abandonHypothesis(runId, h.id); onToast && onToast('hypothesis abandoned') }
-    catch { _revert(h.id); onToast && onToast('could not update') }
+    try {
+      const feedback = commandFeedback(await CONTROL.abandonHypothesis(runId, h.id), {
+        success: 'Hypothesis abandoned', noop: 'Hypothesis was already abandoned',
+        executing: 'Abandon requested — waiting for the run', failure: 'Could not update hypothesis',
+      })
+      if (feedback.kind !== 'success') _revert(h.id)
+      onToast?.(feedback.message)
+    } catch (error) { _revert(h.id); onToast?.(`Could not update hypothesis: ${error.message || error}`) }
   }
   const del = async (h) => {
     setOptim(o => ({ ...o, [h.id]: 'deleted' }))            // remove from the board at once
-    try { await CONTROL.deleteHypothesis(runId, h.id); onToast && onToast('hypothesis deleted') }
-    catch { _revert(h.id); onToast && onToast('could not delete') }
+    try {
+      const feedback = commandFeedback(await CONTROL.deleteHypothesis(runId, h.id), {
+        success: 'Hypothesis deleted', noop: 'Hypothesis was already deleted',
+        executing: 'Delete requested — waiting for the run', failure: 'Could not delete hypothesis',
+      })
+      if (feedback.kind !== 'success') _revert(h.id)
+      onToast?.(feedback.message)
+    } catch (error) { _revert(h.id); onToast?.(`Could not delete hypothesis: ${error.message || error}`) }
   }
   return (
     <Panel title="Hypotheses" sub={`${hyps.length} tracked — what the run is trying to learn`} onClose={onClose} wide>

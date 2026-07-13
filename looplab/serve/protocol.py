@@ -15,7 +15,8 @@ Protocols named here:
   "status == running + job_id" as the only poll trigger (tui `_await_job`, util.js `jobAwait`).
 
 * SSE event names — the run stream (`/api/runs/{id}/events`) emits SSE_STATE ticks and a final
-  SSE_DONE (plus `: keepalive` comment lines clients ignore); the assistant stream
+  SSE_DONE only after the folded run is finished AND its engine has released the live lock (plus
+  `: keepalive` comment lines clients ignore); the assistant stream
   (`.../message_stream`) emits SSE_TOKEN / SSE_STEP / SSE_TODOS / SSE_TEXT / SSE_ERROR and a
   final SSE_DONE. ASSISTANT_STREAM_END_SENTINEL is server-INTERNAL: the worker thread's
   end-of-queue marker, never sent on the wire.
@@ -56,7 +57,8 @@ JOB_DONE = "done"
 JOB_UNKNOWN = "unknown"
 
 # ---- SSE event names ----------------------------------------------------------------------------
-# Run stream (/api/runs/{id}/events): a state tick per change, then a terminal done.
+# Run stream (/api/runs/{id}/events): a state tick per change, then done once terminal-ready
+# (run_finished is folded and the engine has released its singleton lock).
 SSE_STATE = "state"
 SSE_DONE = "done"      # also ends the assistant stream (carrying the full result dict)
 # Assistant stream (.../message_stream): live turn progress.
@@ -76,6 +78,7 @@ PERM_DENY = "deny"
 
 # ---- run phase names (server._phase) --------------------------------------------------------------
 PHASE_FINISHED = "finished"
+PHASE_FINALIZING = "finalizing"
 PHASE_PAUSED = "paused"
 PHASE_APPROVAL = "approval"
 PHASE_SPEC_APPROVAL = "spec_approval"

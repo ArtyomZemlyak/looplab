@@ -20,6 +20,7 @@ from looplab.agents.strategist import (NOVELTY_STANCES, StrategyContext, failure
                                        improves_since_best, is_numeric_space, run_phase,
                                        validate_strategy)
 from looplab.core.models import RunState
+from looplab.engine.costs import bind_cost_accountants
 from looplab.events.replay import fold
 from looplab.events.types import EV_COVERAGE_SNAPSHOT, EV_STRATEGY_DECISION
 from looplab.search.coverage import coverage_signal
@@ -236,6 +237,8 @@ class StrategyCadenceMixin:
                 and dev != self._developer_name and not self.unified_agent:
             try:
                 self.developer = self.developer_factory(dev)
+                # Bind the replacement between calls, before its first implementation request.
+                bind_cost_accountants(self)
                 self._developer_name = dev
             except Exception:  # noqa: BLE001 — a bad backend swap must never abort the run
                 pass

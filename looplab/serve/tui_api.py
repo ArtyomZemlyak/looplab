@@ -9,12 +9,29 @@ import os
 import socket
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
+import uuid
 from typing import Any, Optional
 
 # The one looplab import this module allows itself: the wire-protocol vocabulary it shares with the
 # server (job statuses). Everything else stays stdlib so the TUI adds no dependencies.
 from looplab.serve.protocol import JOB_DONE, JOB_RUNNING, JOB_UNKNOWN
+
+
+_COMMAND_TERMINAL = frozenset({"succeeded", "noop", "failed", "rejected", "timed_out"})
+_COMMAND_PENDING = frozenset({"accepted", "executing"})
+
+
+def command_error_transient(error: "ApiError") -> bool:
+    """HTTP statuses whose response may follow durable server acceptance."""
+    status = getattr(error, "status", None)
+    return status is None or status in {408, 425, 429} or status >= 500
+
+
+def _path_segment(value: Any) -> str:
+    """Quote one opaque URL path segment (run/command ids may contain spaces or slashes)."""
+    return urllib.parse.quote(str(value), safe="")
 
 # ----------------------------------------------------------------------------- HTTP client
 
@@ -22,9 +39,21 @@ class ApiError(Exception):
     """A non-2xx response (or transport failure). `.detail` carries the server's human reason when
     FastAPI returned one (it puts it in `detail`), so callers can show "n_seeds: …" not just "422"."""
 
-    def __init__(self, message: str, status: Optional[int] = None):
-        super().__init__(message)
-        self.detail = message
+    def __init__(self, message: Any, status: Optional[int] = None):
+        self.payload = dict(message) if isinstance(message, dict) else None
+        self.code = str(self.payload.get("code") or "") if self.payload else ""
+        self.existing_command_id = (str(self.payload.get("existing_command_id") or "")
+                                    if self.payload else "")
+        if self.payload:
+            lead = str(self.payload.get("message") or self.code or "request failed")
+            command = (f" (command {self.existing_command_id})"
+                       if self.existing_command_id else "")
+            remediation = str(self.payload.get("remediation") or "")
+            text = f"{lead}{command}" + (f"; {remediation}" if remediation else "")
+        else:
+            text = str(message)
+        super().__init__(text)
+        self.detail = text
         self.status = status
 
 
@@ -46,10 +75,13 @@ class Api:
             h["X-LoopLab-Token"] = self.token
         return h
 
-    def _request(self, method: str, path: str, body: Optional[dict] = None, timeout: Optional[float] = None) -> Any:
+    def _request(self, method: str, path: str, body: Optional[dict] = None,
+                 timeout: Optional[float] = None, headers: Optional[dict] = None) -> Any:
         data = json.dumps(body).encode() if body is not None else None
+        request_headers = self._headers(body is not None)
+        request_headers.update(headers or {})
         req = urllib.request.Request(self.base + path, data=data, method=method,
-                                     headers=self._headers(body is not None))
+                                     headers=request_headers)
         try:
             with urllib.request.urlopen(req, timeout=timeout or self.timeout) as r:
                 raw = r.read().decode("utf-8", errors="replace")
@@ -74,6 +106,92 @@ class Api:
 
     def post(self, path: str, body: Optional[dict] = None, timeout: Optional[float] = None) -> Any:
         return self._request("POST", path, body=body or {}, timeout=timeout)
+
+    @staticmethod
+    def _command_record(record: Any, path: str, *, expected_id: Optional[str] = None) -> dict:
+        """Validate the minimum lifecycle envelope before the TUI trusts its status."""
+        if not isinstance(record, dict):
+            raise ApiError(f"{path}: invalid command response", status=200)
+        command_id = record.get("id")
+        if not command_id:
+            raise ApiError(f"{path}: command response has no id", status=200)
+        if expected_id is not None and str(command_id) != str(expected_id):
+            raise ApiError(f"{path}: command response id does not match the requested command", status=200)
+        status = record.get("status")
+        if status not in _COMMAND_TERMINAL and status not in _COMMAND_PENDING:
+            raise ApiError(f"{path}: invalid command status {status!r}", status=200)
+        return record
+
+    def run_command(self, run_id: str, event_type: str, data: Optional[dict] = None,
+                    wait_s: float = 8.0, submit_retries: int = 1,
+                    idempotency_key: Optional[str] = None) -> dict:
+        """Submit one authoritative run command and briefly follow its observable lifecycle.
+
+        The idempotency key belongs to this logical submission. A lost response or 5xx may replay the
+        POST with that *same* key; polling then uses the returned command id. A slow command is not
+        reported as successful merely because the POST was accepted; after the bounded client wait it
+        comes back as ``executing`` so the TUI can render an honest requested/pending row. Terminal
+        command failures are records, not transport exceptions.
+        """
+        path = f"/api/runs/{_path_segment(run_id)}/commands"
+        key = str(idempotency_key or uuid.uuid4())
+        record = None
+        for attempt in range(max(0, int(submit_retries)) + 1):
+            try:
+                record = self._request(
+                    "POST", path, body={"type": event_type, "data": data or {}},
+                    headers={"Idempotency-Key": key})
+                break
+            except ApiError as exc:
+                # A 4xx is an authoritative client/state rejection. Transport failures and 5xx may
+                # happen after the durable command was accepted, so replay only those with the same
+                # key and let the server return the existing record.
+                if (exc.status == 409 and exc.code == "retry_existing_command"
+                        and exc.existing_command_id):
+                    record = self.get_run_command(run_id, exc.existing_command_id)
+                    break
+                retryable = command_error_transient(exc)
+                if not retryable or attempt >= max(0, int(submit_retries)):
+                    raise
+                time.sleep(0.15)
+        record = self._command_record(record, path)
+        if record.get("status") in _COMMAND_TERMINAL:
+            return record
+
+        command_id = record.get("id")
+        last = record
+        deadline = time.monotonic() + max(0.0, float(wait_s))
+        try:
+            while time.monotonic() < deadline:
+                # A short cadence makes quick stop/resume transitions feel immediate without turning the
+                # command endpoint into a long-held HTTP request. Only transport failures and 5xx are
+                # transient. Auth/not-found responses are authoritative and must not be disguised as an
+                # indefinitely executing command.
+                time.sleep(min(0.25, max(0.0, deadline - time.monotonic())))
+                try:
+                    refreshed = self.get_run_command(run_id, command_id)
+                except ApiError as exc:
+                    if command_error_transient(exc):
+                        continue
+                    raise
+                last = refreshed
+                if refreshed.get("status") in _COMMAND_TERMINAL:
+                    return refreshed
+        except KeyboardInterrupt:
+            # Ctrl-C stops only the local wait, never an accepted server command.
+            pass
+        return {**last, "status": "executing"}
+
+    def get_run_command(self, run_id: str, command_id: str) -> dict:
+        """Fetch one durable command record using URL-safe opaque identifiers."""
+        path = (f"/api/runs/{_path_segment(run_id)}/commands/"
+                f"{_path_segment(command_id)}")
+        return self._command_record(self.get(path), path, expected_id=str(command_id))
+
+    def refresh_report(self, run_id: str) -> dict:
+        """Regenerate a report through its dedicated background-job endpoint (not run commands)."""
+        resp = self.post(f"/api/runs/{_path_segment(run_id)}/report_refresh", {}, timeout=60)
+        return self._await_job(resp, lambda j: f"/api/jobs/{j}", interval=1.5, deadline_s=600)
 
     def ping(self) -> bool:
         """Is a LoopLab server answering here? (a cheap, short-timeout GET on the runs list)."""
@@ -117,6 +235,6 @@ class Api:
         return self._await_job(resp, lambda j: f"/api/genesis/{j}", interval=1.5, deadline_s=300)
 
     def command(self, run_id: str, messages: list, instruction: str, node_id=None) -> dict:
-        resp = self.post(f"/api/runs/{run_id}/command",
+        resp = self.post(f"/api/runs/{_path_segment(run_id)}/command",
                          {"messages": messages, "instruction": instruction, "node_id": node_id}, timeout=60)
         return self._await_job(resp, lambda j: f"/api/jobs/{j}", interval=1.5, deadline_s=600)

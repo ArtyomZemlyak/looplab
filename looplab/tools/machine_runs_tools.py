@@ -12,7 +12,11 @@ by the server (`_engine_alive`) to avoid a circular import and to reuse the one 
 """
 from __future__ import annotations
 
+import hashlib
 import json
+import re
+import uuid
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -27,6 +31,357 @@ from looplab.tools._runcache import RunStateCache
 # the tail with no marker). Stay under that cap (-400 headroom for the header + our truncation hint)
 # so our own truncation + the "narrow with `stage`" hint engage first.
 _TRACE_CHARS = RESULT_CAP - 400
+
+
+_COMMAND_PENDING = frozenset({"accepted", "executing"})
+_COMMAND_FAILED = frozenset({"failed", "rejected", "timed_out"})
+
+
+class _MutationRecoveryBlocked(RuntimeError):
+    """Fail-closed signal for a mutation that a recovered assistant turn may not issue."""
+
+    def __init__(self, code: str, message: str):
+        super().__init__(message)
+        self.code = code
+
+
+class _TurnMutationFence:
+    """Durable, ordered mutation journal for one assistant user turn.
+
+    A process crash loses the model/tool trace, so replaying the dangling user turn can produce a
+    different sequence or different payload.  Fresh turns stage every mutation intent here *before*
+    touching the run.  A recovered turn may consume only the exact entries that were already staged;
+    once those entries are exhausted, or when the next intent differs, it fails closed.  Command-backed
+    entries reuse the journaled key and can therefore safely observe/re-submit the same command.  Direct
+    storage mutations are not replayed because their crash point cannot be proven from this journal.
+    """
+
+    _VERSION = 1
+
+    def __init__(self, path: Path, namespace: str, *, recovering: bool):
+        self.path = Path(path)
+        self.namespace = str(namespace or "")
+        self.recovering = bool(recovering)
+        self._namespace_digest = hashlib.sha256(self.namespace.encode("utf-8")).hexdigest()
+        self._cursor = 0
+        self._invalid = ""
+        self._entries: list[dict] = []
+        self._load()
+        # A server-created turn id is unique.  Finding a pre-existing journal while the router says
+        # this is a fresh turn means ownership/recovery state is inconsistent; never append through it.
+        if not self.recovering and self._entries:
+            self._invalid = "a mutation journal already exists for a fresh assistant turn"
+
+    @staticmethod
+    def _canonical(intent: dict) -> str:
+        return json.dumps(intent, sort_keys=True, separators=(",", ":"), ensure_ascii=False,
+                          allow_nan=False)
+
+    def _key(self, index: int, raw: str) -> str:
+        material = f"{self.namespace}\0mutation\0{index}\0{raw}"
+        return "asst_" + hashlib.sha256(material.encode("utf-8")).hexdigest()
+
+    def _load(self) -> None:
+        try:
+            if not self.path.exists():
+                return
+            payload = json.loads(self.path.read_text(encoding="utf-8"))
+            if not isinstance(payload, dict) or payload.get("version") != self._VERSION:
+                raise ValueError("unsupported mutation journal")
+            if payload.get("namespace_digest") != self._namespace_digest:
+                raise ValueError("mutation journal belongs to another turn")
+            entries = payload.get("entries")
+            if not isinstance(entries, list):
+                raise ValueError("mutation journal entries are malformed")
+            checked = []
+            for index, entry in enumerate(entries):
+                if not isinstance(entry, dict) or entry.get("index") != index:
+                    raise ValueError("mutation journal ordering is malformed")
+                intent = entry.get("intent")
+                if not isinstance(intent, dict) or not isinstance(entry.get("command_backed"), bool):
+                    raise ValueError("mutation journal intent is malformed")
+                raw = self._canonical(intent)
+                digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()
+                if entry.get("intent_digest") != digest or entry.get("idempotency_key") != self._key(index, raw):
+                    raise ValueError("mutation journal integrity check failed")
+                checked.append(dict(entry))
+            self._entries = checked
+        except (OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
+            self._invalid = str(exc) or "mutation journal is unreadable"
+            self._entries = []
+
+    def _persist(self) -> None:
+        from looplab.core.atomicio import atomic_write_text
+        payload = {"version": self._VERSION, "namespace_digest": self._namespace_digest,
+                   "entries": self._entries}
+        atomic_write_text(self.path, json.dumps(payload, ensure_ascii=False, separators=(",", ":")))
+
+    def claim(self, intent: dict, *, command_backed: bool) -> str:
+        if self._invalid:
+            raise _MutationRecoveryBlocked(
+                "assistant_turn_journal_unavailable",
+                "The durable mutation journal is unavailable; no run mutation was attempted.")
+        try:
+            raw = self._canonical(intent)
+        except (TypeError, ValueError):
+            raise _MutationRecoveryBlocked(
+                "assistant_turn_intent_invalid",
+                "The mutation intent is not durably serializable; no run mutation was attempted.")
+
+        if self.recovering:
+            if self._cursor >= len(self._entries):
+                raise _MutationRecoveryBlocked(
+                    "assistant_turn_recovery_fenced",
+                    "This recovered turn may not introduce a new run mutation. Start a new turn after reviewing recovery.")
+            entry = self._entries[self._cursor]
+            if entry.get("intent_digest") != hashlib.sha256(raw.encode("utf-8")).hexdigest() \
+                    or entry.get("intent") != intent \
+                    or bool(entry.get("command_backed")) != bool(command_backed):
+                raise _MutationRecoveryBlocked(
+                    "assistant_turn_recovery_conflict",
+                    "The recovered mutation differs from the durable original intent; no run mutation was attempted.")
+            self._cursor += 1
+            if not command_backed:
+                raise _MutationRecoveryBlocked(
+                    "assistant_turn_direct_mutation_uncertain",
+                    "The original direct mutation may already have completed; inspect its state before a new turn.")
+            return str(entry["idempotency_key"])
+
+        index = len(self._entries)
+        key = self._key(index, raw)
+        entry = {
+            "index": index,
+            "intent": intent,
+            "intent_digest": hashlib.sha256(raw.encode("utf-8")).hexdigest(),
+            "idempotency_key": key,
+            "command_backed": bool(command_backed),
+        }
+        self._entries.append(entry)
+        try:
+            self._persist()
+        except OSError:
+            self._entries.pop()
+            raise _MutationRecoveryBlocked(
+                "assistant_turn_journal_unavailable",
+                "The mutation could not be staged durably; no run mutation was attempted.")
+        return key
+
+
+def _command_record(value) -> dict:
+    """Coerce the command service's record/model to the small mapping this tool consumes."""
+    if isinstance(value, dict):
+        return dict(value)
+    for method in ("model_dump", "to_dict"):
+        fn = getattr(value, method, None)
+        if callable(fn):
+            out = fn()
+            if isinstance(out, dict):
+                return dict(out)
+    if value is not None and hasattr(value, "__dict__"):
+        return dict(vars(value))
+    return {}
+
+
+def _safe_command_text(value, limit: int = 300) -> str:
+    """Bound one server-owned display field; never stringify arbitrary exception payloads."""
+    if not isinstance(value, (str, int, float, bool)):
+        return ""
+    return " ".join(str(value).split())[:limit]
+
+
+def _safe_command_error(record: dict) -> dict:
+    """Return only the command contract's public error fields (never raw internals/tracebacks)."""
+    error = (record or {}).get("error")
+    if not isinstance(error, dict):
+        return {
+            "code": "command_failed",
+            "message": "The run command did not complete.",
+            "retryable": False,
+            "remediation": "Review the run state before retrying.",
+        }
+    code = _safe_command_text(error.get("code"), 80) or "command_failed"
+    code = re.sub(r"[^a-zA-Z0-9_.-]", "_", code)
+    return {
+        "code": code,
+        "message": _safe_command_text(error.get("message")) or "The run command did not complete.",
+        "retryable": bool(error.get("retryable", False)),
+        "remediation": _safe_command_text(error.get("remediation")),
+    }
+
+
+class _RunCommandAdapter:
+    """Narrow seam around the server-owned run-command service."""
+
+    def __init__(self, service, *, key_namespace: str = ""):
+        self.service = service
+        self._pending_by_run: dict[str, dict] = {}
+        self._key_namespace = str(key_namespace or "")
+        self._intent_occurrences: dict[str, int] = {}
+
+    def _observe(self, rd: Path, record: dict) -> dict:
+        """Briefly observe an accepted command; observation failure leaves it honestly pending."""
+        status = record.get("status")
+        command_id = record.get("id")
+        if status not in _COMMAND_PENDING or not command_id:
+            return record
+        try:
+            get = getattr(self.service, "get", None)
+            value = get(rd, command_id) if callable(get) else None
+        except Exception:  # accepted is durable; a failed observation is not command failure
+            return record
+        observed = _command_record(value)
+        return observed or record
+
+    def submit(self, rd: Path, event_type: str, data: dict, *, idempotency_key: str = "") -> dict:
+        if self.service is None or not callable(getattr(self.service, "submit", None)):
+            return {"status": "failed", "event_type": event_type, "error": {
+                "code": "command_service_unavailable",
+                "message": "Run commands are temporarily unavailable.",
+                "retryable": True,
+                "remediation": "Retry after the control service is available.",
+            }}
+        run_key = str(rd.resolve())
+        pending = self._pending_by_run.get(run_key)
+        if pending is not None:
+            pending = self._observe(rd, pending)
+            if pending.get("status") in _COMMAND_PENDING:
+                command_id = _safe_command_text(pending.get("id"), 100)
+                return {"status": "rejected", "event_type": event_type,
+                        "error": {
+                            "code": "command_in_progress",
+                            "message": "A prior run command is still pending; no conflicting command was submitted.",
+                            "retryable": False,
+                            "remediation": (f"Observe command {command_id} to a terminal status first."
+                                            if command_id else "Observe the prior command first."),
+                        }}
+            self._pending_by_run.pop(run_key, None)
+
+        if idempotency_key:
+            key = str(idempotency_key)
+        elif self._key_namespace:
+            # The user turn is durably staged before the model runs. Replaying that dangling turn
+            # after a server crash reconstructs the same ordered tool keys, so a succeeded additive
+            # budget/fork cannot be submitted again merely because the reply was never persisted.
+            raw = json.dumps({"type": event_type, "data": data}, sort_keys=True,
+                             separators=(",", ":"), ensure_ascii=False, allow_nan=False)
+            intent = f"{run_key}\0{event_type}\0{raw}"
+            occurrence = self._intent_occurrences.get(intent, 0)
+            self._intent_occurrences[intent] = occurrence + 1
+            material = f"{self._key_namespace}\0{intent}\0{occurrence}"
+            key = "asst_" + hashlib.sha256(material.encode("utf-8")).hexdigest()
+        else:
+            key = str(uuid.uuid4())          # compatibility for direct/test construction
+        predicted_id = "cmd_" + hashlib.sha256(key.encode("utf-8")).hexdigest()[:32]
+        try:
+            record = _command_record(self.service.submit(rd, key, event_type, data))
+        except Exception as exc:  # never expose internals or retry a possibly accepted submission
+            # HTTP 409 from the service names the already-authoritative command. A transport failure
+            # may have happened after acceptance, in which case the id is deterministic from our key.
+            detail = getattr(exc, "detail", "")
+            detail_payload = detail if isinstance(detail, dict) else {}
+            conflict_code = _safe_command_text(detail_payload.get("code"), 80)
+            match = re.search(r"cmd_[0-9a-f]{32}", str(detail))
+            command_id = match.group(0) if match else predicted_id
+            uncertain = {"id": command_id, "status": "executing", "event_type": event_type}
+            observed = self._observe(rd, uncertain)
+            # A different active command is only a serialization conflict, never the outcome of this
+            # requested action. Even if GET races and finds that old command succeeded, reporting it as
+            # this action's success would be a dangerous false positive (e.g. stop vs prior resume).
+            if conflict_code == "command_in_progress":
+                if observed.get("status") in _COMMAND_PENDING:
+                    self._pending_by_run[run_key] = observed
+                message = (_safe_command_text(detail_payload.get("message"))
+                           or "Another run command was in progress; this action was not submitted.")
+                remediation = (_safe_command_text(detail_payload.get("remediation"))
+                               or f"Observe command {command_id}, then submit this action again.")
+                return {"status": "rejected", "event_type": event_type, "error": {
+                    "code": "command_in_progress", "message": message, "retryable": False,
+                    "remediation": remediation,
+                }}
+            # Only the server's explicit identical-intent code may safely attach this invocation to a
+            # differently-keyed existing command. Unknown structured conflicts stay rejected below.
+            if detail_payload and conflict_code != "retry_existing_command":
+                return {"status": "rejected", "event_type": event_type, "error": {
+                    "code": conflict_code or "command_submit_conflict",
+                    "message": (_safe_command_text(detail_payload.get("message"))
+                                or "The run command was not submitted."),
+                    "retryable": False,
+                    "remediation": (_safe_command_text(detail_payload.get("remediation"))
+                                    or f"Inspect command {command_id} before trying again."),
+                }}
+            if conflict_code == "retry_existing_command":
+                if observed.get("status") in _COMMAND_PENDING:
+                    self._pending_by_run[run_key] = observed
+                return observed
+            if observed.get("status") in _COMMAND_PENDING:
+                self._pending_by_run[run_key] = observed
+            else:
+                return observed
+            return {"id": command_id, "status": "failed", "event_type": event_type, "error": {
+                "code": "command_status_uncertain",
+                "message": "The submission outcome is uncertain; no blind duplicate will be sent.",
+                "retryable": False,
+                "remediation": f"Observe command {command_id} before retrying or issuing another control.",
+            }}
+        record = self._observe(rd, record)
+        if record.get("status") in _COMMAND_PENDING:
+            self._pending_by_run[run_key] = record
+        else:
+            self._pending_by_run.pop(run_key, None)
+        return record
+
+    @contextmanager
+    def destructive_guard(self, rd: Path, operation: str):
+        """Use the server's per-run command sequencer when this provider runs in the UI server."""
+        guard = getattr(self.service, "destructive_guard", None)
+        if callable(guard):
+            with guard(rd, operation) as canonical:
+                yield canonical
+            return
+        # Standalone/unit-tool use has no AppState command coordinator. Preserve the historical tool
+        # surface there; the live check below remains mandatory and is re-run immediately before I/O.
+        yield rd
+
+    @contextmanager
+    def mutation_guard(self, rd: Path, operation: str):
+        """Serialize a direct non-registry event/snapshot mutation with run commands and deletion."""
+        sequence = getattr(self.service, "sequence", None)
+        validate = getattr(self.service, "validate_paths", None)
+        reject = getattr(self.service, "reject_if_active", None)
+        if callable(sequence) and callable(validate):
+            with sequence(rd):
+                canonical = validate(rd)
+                if callable(reject):
+                    reject(canonical, operation)
+                yield canonical
+            return
+        # Standalone compatibility: at least re-check existence immediately before the write. The UI
+        # server always supplies the real sequencer above.
+        if not (rd / "events.jsonl").exists():
+            raise RuntimeError("run disappeared before mutation")
+        yield rd
+
+
+def _render_command_result(record: dict, *, name: str, run_id: str, completed: str) -> str:
+    """Render an honest, bounded tool result for the model and eventual user-facing answer."""
+    status = _safe_command_text((record or {}).get("status"), 40)
+    command_id = _safe_command_text((record or {}).get("id"), 100)
+    command = f"; command {command_id}" if command_id else ""
+    if status == "succeeded":
+        return f"(completed: {completed}{command})"
+    if status == "noop":
+        return f"(completed/no-op: {completed} was already satisfied{command})"
+    if status in _COMMAND_PENDING:
+        return (f"(requested/pending: {name} for {run_id}{command}; the server accepted the command "
+                "but has not observed its postcondition yet)")
+    if status not in _COMMAND_FAILED:
+        record = {**(record or {}), "error": {"code": "unexpected_command_status",
+                  "message": "The run command returned an unknown status.", "retryable": False,
+                  "remediation": "Inspect the run before retrying."}}
+    error = _safe_command_error(record)
+    tail = f"; remediation={error['remediation']}" if error["remediation"] else ""
+    return (f"(command failed: {name} for {run_id}; code={error['code']}; "
+            f"message={error['message']}; retryable={'yes' if error['retryable'] else 'no'}{tail}{command})")
 
 
 def _render_conversation(convo: dict, run_id, nid, stage: Optional[str], max_chars: int) -> str:
@@ -397,18 +752,26 @@ class RunLauncherTools:
 
 class RunControlTools:
     """Lets the assistant DRIVE an existing run's lifecycle — finalize, stop, resume, reset a node,
-    delete a node, or delete the whole run — by writing the control event / editing the log the way the
-    UI does. Mutating: every verb goes through `decide(mode, ...)` + the injected `approver` (a UI
+    delete a node, or delete the whole run. Lifecycle/engine commands go through the server-owned
+    command service; only the deliberately separate destructive delete implementations edit storage
+    here. Every verb first goes through `decide(mode, ...)` + the injected `approver` (a UI
     confirm-card), so it's denied in read-only `plan` mode, asks in default/acceptEdits, and runs inline
     only in `auto`. Destructive edits (delete node/run) additionally REFUSE while the engine is live —
     the engine is the sole writer of events.jsonl, so rewriting it under a live one would corrupt it."""
 
     def __init__(self, run_root, alive_fn: Optional[Callable[[Path], bool]] = None,
-                 mode: str = "plan", approver: Optional[Callable] = None):
+                 mode: str = "plan", approver: Optional[Callable] = None, *,
+                 command_service=None, command_key_namespace: str = "",
+                 mutation_journal_path=None, mutation_recovery: bool = False):
         self.run_root = Path(run_root)
         self.alive_fn = alive_fn
         self.mode = mode
         self.approver = approver
+        self._commands = _RunCommandAdapter(
+            command_service, key_namespace=command_key_namespace)
+        self._mutation_fence = (_TurnMutationFence(
+            Path(mutation_journal_path), command_key_namespace, recovering=mutation_recovery)
+            if mutation_journal_path is not None and command_key_namespace else None)
 
     def bind_state(self, state=None, parent=None) -> None:
         return None
@@ -417,19 +780,19 @@ class RunControlTools:
         return [
             fn_spec("finalize_run",
                 "Finalize a run: stop it AND wrap up (final report + cross-run lessons + cost roll-up). "
-                "Use to END a run cleanly. Takes effect while the engine is running (it reads the event).",
+                "Use to END a run cleanly; the command service attaches the driver when needed.",
                 {"run_id": {"type": "string"}}, ["run_id"]),
             fn_spec("stop_run",
                 "Freeze a run (pause, NO wrap-up) — resumable later. Use to PAUSE without finalizing.",
                 {"run_id": {"type": "string"}}, ["run_id"]),
             fn_spec("resume_run",
-                "Mark a stopped/finished run to resume. (Records the resume intent; if no engine is "
-                "attached, the user still starts it from the UI Resume button.)",
+                "Resume a stopped/finished run. The command service records the intent, attaches the "
+                "engine when needed, and reports the observed outcome.",
                 {"run_id": {"type": "string"}}, ["run_id"]),
             fn_spec("reset_node",
                 "Re-run an existing node IN PLACE from a stage (no new node): 'eval' re-scores (keep the "
                 "code), 'implement' re-runs only the Developer (keep the idea), 'propose' is a full redo. "
-                "Applied on the next resume.",
+                "The command service resumes the run when needed.",
                 {"run_id": {"type": "string"}, "node_id": {"type": "integer"},
                  # No enum: the executor + HTTP route accept ANY pipeline stage name, and an enum here
                  # would make the model refuse legitimate stage resets (train, data_prep, …).
@@ -450,8 +813,8 @@ class RunControlTools:
             fn_spec("extend_budget",
                 "Give a run MORE budget (and REOPEN it if it already finished, so the new budget is "
                 "actually used). Set any of: add_nodes (N more experiment nodes), max_seconds (new "
-                "wall-clock ceiling), max_eval_seconds (new cumulative-eval ceiling). Takes effect "
-                "while the engine runs; if none is attached, start it from the UI Resume.",
+                "wall-clock ceiling), max_eval_seconds (new cumulative-eval ceiling). The command "
+                "service attaches the engine when needed and reports the observed outcome.",
                 {"run_id": {"type": "string"},
                  "add_nodes": {"type": "integer", "description": "additive: N more experiment nodes"},
                  "max_seconds": {"type": "number", "description": "new whole-run wall-clock ceiling (s)"},
@@ -479,8 +842,21 @@ class RunControlTools:
         rid = str(run_id or "").strip().strip("/")
         if not rid or "/" in rid or "\\" in rid or rid.startswith("."):
             return None
-        rd = self.run_root / rid
-        return rd if (rd / "events.jsonl").exists() else None
+        root = self.run_root.resolve()
+        candidate = root / rid
+        try:
+            # Refuse aliases even when they happen to resolve to another direct child: direct mutation
+            # paths (notably set_trust_gate) must never follow a run/events symlink outside the root.
+            if candidate.is_symlink():
+                return None
+            rd = candidate.resolve()
+            events = rd / "events.jsonl"
+            if rd.parent != root or events.is_symlink() or not events.exists() \
+                    or events.resolve().parent != rd:
+                return None
+        except OSError:
+            return None
+        return rd
 
     def _gate(self, name: str, rid: str, verb: str) -> Optional[str]:
         # Returns a "declined/disabled" string to short-circuit, or None to proceed.
@@ -520,6 +896,15 @@ class RunControlTools:
         except Exception:  # noqa: BLE001
             return False
 
+    @contextmanager
+    def _mutation_intent(self, name: str, rid: str, data: dict, *, command_backed: bool):
+        """Stage one canonical run mutation before any command/event/storage side effect."""
+        key = ""
+        if self._mutation_fence is not None:
+            key = self._mutation_fence.claim(
+                {"tool": name, "run_id": rid, "data": data}, command_backed=command_backed)
+        yield key
+
     # ------------------------------------------------------------------ dispatch
     def execute(self, name: str, args: dict) -> str:
         args = args or {}
@@ -538,12 +923,13 @@ class RunControlTools:
                 return self._delete_node(rid, rd, args)
             if name == "delete_run":
                 return self._delete_run(rid, rd)
+        except _MutationRecoveryBlocked as e:
+            return f"(run mutation blocked: code={e.code}; {e})"
         except Exception as e:  # noqa: BLE001 — a tool error must never crash the loop
             return f"(tool error in {name}: {e})"
         return f"(unknown tool: {name})"
 
     def _control(self, name: str, rid: str, rd: Path) -> str:
-        from looplab.events.eventstore import EventStore
         from looplab.events.types import EV_PAUSE, EV_RESUME, EV_RUN_ABORT
         etype, data, verb = {
             "finalize_run": (EV_RUN_ABORT, {"reason": "finalized"}, f"finalize run {rid} (stop + wrap up)"),
@@ -553,21 +939,19 @@ class RunControlTools:
         blocked = self._gate(name, rid, verb)
         if blocked:
             return blocked
-        EventStore(rd / "events.jsonl").append(etype, data)
-        tail = (" — takes effect while the engine is running; if it isn't, start it from the UI."
-                if name != "resume_run" else " — start it from the UI Resume if no engine is attached.")
-        return f"({name.split('_')[0]} recorded for {rid}{tail})"
+        with self._mutation_intent(
+                name, rid, {"event_type": etype, "data": data}, command_backed=True) as key:
+            record = self._commands.submit(rd, etype, data, idempotency_key=key)
+        return _render_command_result(record, name=name, run_id=rid, completed=verb)
 
     def _settings(self, name: str, rid: str, rd: Path, args: dict) -> str:
         """Change an allow-listed LIVE run setting by appending the matching control/config event the UI
         writes (budget extension, a standing directive, or the trust gate). Gated exactly like the other
-        mutations. The engine reads these on its next loop fold; a settled run needs a UI Resume to
-        re-attach an engine (same caveat as resume_run)."""
+        mutations. Command-backed settings use the server's engine policy and postcondition; the legacy
+        trust-gate path remains a direct event + snapshot update until it joins that control registry."""
         import math
         from looplab.events.eventstore import EventStore
-        from looplab.events.replay import fold
         from looplab.events.types import EV_BUDGET_EXTEND, EV_HINT, EV_TRUST_GATE_CHANGED
-        store = EventStore(rd / "events.jsonl")
         if name == "extend_budget":
             data: dict = {}
             for k in ("add_nodes", "max_seconds", "max_eval_seconds"):
@@ -587,15 +971,13 @@ class RunControlTools:
             blocked = self._gate(name, rid, f"extend budget of {rid}: {data}")
             if blocked:
                 return blocked
-            store.append(EV_BUDGET_EXTEND, data)
-            # Deliberately do NOT reopen a finished run here: clearing `finished` with no engine
-            # attached leaves it in limbo — not running, and reset_run refuses a non-finished run. The
-            # budget is recorded now and takes effect the moment the run is resumed (resume_run / UI
-            # Resume clears `finished`), so a finished run stays cleanly resettable until then.
-            finished = fold(store.read_all()).finished
-            tail = (" — the run has FINISHED; resume it (resume_run / UI Resume) to use the new budget."
-                    if finished else " — takes effect while the engine runs.")
-            return f"(budget extended for {rid}: {data}{tail})"
+            with self._mutation_intent(
+                    name, rid, {"event_type": EV_BUDGET_EXTEND, "data": data},
+                    command_backed=True) as key:
+                record = self._commands.submit(
+                    rd, EV_BUDGET_EXTEND, data, idempotency_key=key)
+            return _render_command_result(
+                record, name=name, run_id=rid, completed=f"budget extended for {rid}: {data}")
         if name == "set_directive":
             text = " ".join(str(args.get("text") or "").split())
             if not text:
@@ -603,8 +985,12 @@ class RunControlTools:
             blocked = self._gate(name, rid, f"directive for {rid}: {text[:60]}")
             if blocked:
                 return blocked
-            store.append(EV_HINT, {"text": text, "replace": bool(args.get("replace"))})
-            return f"(directive recorded for {rid}: {text[:80]!r})"
+            data = {"text": text, "replace": bool(args.get("replace"))}
+            with self._mutation_intent(
+                    name, rid, {"event_type": EV_HINT, "data": data}, command_backed=True) as key:
+                record = self._commands.submit(rd, EV_HINT, data, idempotency_key=key)
+            return _render_command_result(
+                record, name=name, run_id=rid, completed=f"directive recorded for {rid}: {text[:80]!r}")
         if name == "set_trust_gate":
             tg = str(args.get("trust_gate") or "").strip().lower()
             if tg not in ("audit", "gate", "block"):
@@ -612,21 +998,25 @@ class RunControlTools:
             blocked = self._gate(name, rid, f"set trust_gate={tg} for {rid}")
             if blocked:
                 return blocked
-            store.append(EV_TRUST_GATE_CHANGED, {"trust_gate": tg, "source": "assistant"})
-            # Mirror the UI PUT /config path: the fold already applies the event, but also update
-            # config.snapshot.json so a later RESUME re-enters with the new gate and the settings panel
-            # doesn't show a stale value (the two mutation paths must not drift). Best-effort.
-            snap = rd / "config.snapshot.json"
-            if snap.exists():
-                try:
-                    import json as _json
-                    from looplab.core.atomicio import atomic_write_text
-                    cfg = _json.loads(snap.read_text(encoding="utf-8"))
-                    cfg["trust_gate"] = tg
-                    atomic_write_text(snap, _json.dumps(cfg, indent=2))
-                except (OSError, ValueError):
-                    pass
-            return f"(trust_gate set to {tg} for {rid})"
+            with self._mutation_intent(
+                    name, rid, {"trust_gate": tg}, command_backed=False):
+                with self._commands.mutation_guard(rd, "set the trust gate") as rd:
+                    store = EventStore(rd / "events.jsonl")
+                    store.append(EV_TRUST_GATE_CHANGED, {"trust_gate": tg, "source": "assistant"})
+                    # Mirror the UI PUT /config path: the fold already applies the event, but also update
+                    # config.snapshot.json so a later RESUME re-enters with the new gate and the settings panel
+                    # doesn't show a stale value (the two mutation paths must not drift). Best-effort.
+                    snap = rd / "config.snapshot.json"
+                    if snap.exists():
+                        try:
+                            import json as _json
+                            from looplab.core.atomicio import atomic_write_text
+                            cfg = _json.loads(snap.read_text(encoding="utf-8"))
+                            cfg["trust_gate"] = tg
+                            atomic_write_text(snap, _json.dumps(cfg, indent=2))
+                        except (OSError, ValueError):
+                            pass
+                    return f"(trust_gate set to {tg} for {rid})"
         return f"(unknown settings tool: {name})"
 
     def _reset_node(self, rid: str, rd: Path, args: dict) -> str:
@@ -645,8 +1035,14 @@ class RunControlTools:
         blocked = self._gate("reset_node", rid, f"reset node #{nid} of {rid} from {stage}")
         if blocked:
             return blocked
-        EventStore(rd / "events.jsonl").append(EV_NODE_RESET, {"node_id": nid, "from_stage": stage})
-        return f"(node #{nid} of {rid} queued to re-run from {stage} — applied on the next resume)"
+        data = {"node_id": nid, "from_stage": stage}
+        with self._mutation_intent(
+                "reset_node", rid, {"event_type": EV_NODE_RESET, "data": data},
+                command_backed=True) as key:
+            record = self._commands.submit(rd, EV_NODE_RESET, data, idempotency_key=key)
+        return _render_command_result(
+            record, name="reset_node", run_id=rid,
+            completed=f"node #{nid} of {rid} re-run from {stage}")
 
     def _delete_node(self, rid: str, rd: Path, args: dict) -> str:
         import json
@@ -657,62 +1053,86 @@ class RunControlTools:
             nid = int(args.get("node_id"))
         except (TypeError, ValueError):
             return "(delete_node needs an integer node_id)"
-        if self._live(rd):
-            return f"(run {rid} is LIVE — stop it first; the engine is the sole writer of its log)"
-        st = fold(EventStore(rd / "events.jsonl").read_all())
-        if nid not in st.nodes:
+        preview = fold(EventStore(rd / "events.jsonl").read_all())
+        if nid not in preview.nodes:
             return f"(no node #{nid} in {rid})"
-        # The node AND every descendant (deleting a node alone would orphan its children's parent links).
-        subtree = {nid}
-        changed = True
-        while changed:
-            changed = False
-            for n in st.nodes.values():
-                if n.id not in subtree and any(p in subtree for p in n.parent_ids):
-                    subtree.add(n.id)
-                    changed = True
-        blocked = self._gate("delete_node", rid, f"delete node(s) {sorted(subtree)} of {rid}")
+
+        def _subtree(st):
+            # The node AND every descendant (deleting a node alone would orphan child parent links).
+            out = {nid}
+            changed = True
+            while changed:
+                changed = False
+                for node in st.nodes.values():
+                    if node.id not in out and any(parent in out for parent in node.parent_ids):
+                        out.add(node.id)
+                        changed = True
+            return out
+
+        approved_subtree = _subtree(preview)
+        blocked = self._gate(
+            "delete_node", rid, f"delete node(s) {sorted(approved_subtree)} of {rid}")
         if blocked:
             return blocked
-        from looplab.core.atomicio import atomic_write_text
-        evp = rd / "events.jsonl"
-        recs = [json.loads(x) for x in evp.read_text("utf-8").splitlines() if x.strip()]
-        kept = [r for r in recs
-                if not (isinstance(r.get("data"), dict) and r["data"].get("node_id") in subtree)]
-        # Compute the spans filter BEFORE any destructive write: a torn spans line must not be able to
-        # leave the source-of-truth events.jsonl already rewritten while spans/workdirs are un-cleaned
-        # (a misleading half-deletion reported as failure). Guard each parse — a torn/hand-edited span
-        # is KEPT verbatim (soft-fail, mirroring read_run_trace) rather than crashing the whole delete.
-        sp = rd / "spans.jsonl"
-        skept = None
-        if sp.exists():
-            def _span_node(line):
-                try:
-                    return (json.loads(line).get("attributes") or {}).get("node_id")
-                except (ValueError, TypeError, AttributeError):
-                    return None   # torn OR valid-JSON-non-object line -> unknown node -> keep it (never crash)
-            skept = [x for x in sp.read_text("utf-8").splitlines()
-                     if x.strip() and _span_node(x) not in subtree]
-        shutil.copy(evp, rd / f"events.jsonl.bak-del{nid}")     # recoverable backup (before the writes)
-        # ATOMIC rewrites (temp + os.replace) of BOTH source-of-truth logs — an interrupted delete must
-        # never leave events.jsonl half-written (the same atomicio the sibling snapshot write uses).
-        atomic_write_text(evp, "".join(json.dumps(r) + "\n" for r in kept))
-        if skept is not None:
-            atomic_write_text(sp, "".join(x + "\n" for x in skept))
-        for d in subtree:
-            shutil.rmtree(rd / "nodes" / f"node_{d}", ignore_errors=True)
-        st2 = fold(EventStore(evp).read_all())
-        broken = sorted({p for n in st2.nodes.values() for p in n.parent_ids if p not in st2.nodes})
-        return (f"(deleted node(s) {sorted(subtree)} from {rid}; {len(st2.nodes)} nodes left, "
-                f"best now #{st2.best_node_id}, broken parent links: {broken or 'none'}. "
-                f"Backup: events.jsonl.bak-del{nid})")
+        with self._mutation_intent(
+                "delete_node", rid,
+                {"node_id": nid, "subtree": sorted(approved_subtree)}, command_backed=False):
+            pass
+        with self._commands.destructive_guard(rd, "delete node") as rd:
+            # The authoritative liveness/state checks belong after approval and inside the command
+            # sequencer. A command accepted while the confirm card was open cannot spawn under us.
+            if self._live(rd):
+                return f"(run {rid} is LIVE — stop it first; the engine is the sole writer of its log)"
+            st = fold(EventStore(rd / "events.jsonl").read_all())
+            if nid not in st.nodes:
+                return f"(no node #{nid} in {rid})"
+            subtree = _subtree(st)
+            if subtree != approved_subtree:
+                return (f"(delete scope changed while approval was open: approved "
+                        f"{sorted(approved_subtree)}, now {sorted(subtree)}; review and approve again)")
+            from looplab.core.atomicio import atomic_write_text
+            evp = rd / "events.jsonl"
+            recs = [json.loads(x) for x in evp.read_text("utf-8").splitlines() if x.strip()]
+            kept = [r for r in recs
+                    if not (isinstance(r.get("data"), dict) and r["data"].get("node_id") in subtree)]
+            # Compute the spans filter BEFORE any destructive write: a torn spans line must not be able to
+            # leave the source-of-truth events.jsonl already rewritten while spans/workdirs are un-cleaned
+            # (a misleading half-deletion reported as failure). Guard each parse — a torn/hand-edited span
+            # is KEPT verbatim (soft-fail, mirroring read_run_trace) rather than crashing the whole delete.
+            sp = rd / "spans.jsonl"
+            skept = None
+            if sp.exists():
+                def _span_node(line):
+                    try:
+                        return (json.loads(line).get("attributes") or {}).get("node_id")
+                    except (ValueError, TypeError, AttributeError):
+                        return None   # torn OR valid-JSON-non-object line -> unknown node -> keep it
+                skept = [x for x in sp.read_text("utf-8").splitlines()
+                         if x.strip() and _span_node(x) not in subtree]
+            shutil.copy(evp, rd / f"events.jsonl.bak-del{nid}")  # recoverable backup before writes
+            # ATOMIC rewrites (temp + os.replace) of BOTH source-of-truth logs.
+            atomic_write_text(evp, "".join(json.dumps(r) + "\n" for r in kept))
+            if skept is not None:
+                atomic_write_text(sp, "".join(x + "\n" for x in skept))
+            for node_id in subtree:
+                shutil.rmtree(rd / "nodes" / f"node_{node_id}", ignore_errors=True)
+            st2 = fold(EventStore(evp).read_all())
+            broken = sorted({p for n in st2.nodes.values() for p in n.parent_ids if p not in st2.nodes})
+            return (f"(deleted node(s) {sorted(subtree)} from {rid}; {len(st2.nodes)} nodes left, "
+                    f"best now #{st2.best_node_id}, broken parent links: {broken or 'none'}. "
+                    f"Backup: events.jsonl.bak-del{nid})")
 
     def _delete_run(self, rid: str, rd: Path) -> str:
         import shutil
-        if self._live(rd):
-            return f"(run {rid} is LIVE — stop it first before deleting)"
         blocked = self._gate("delete_run", rid, f"DELETE the entire run {rid} (irreversible)")
         if blocked:
             return blocked
-        shutil.rmtree(rd, ignore_errors=True)
-        return f"(deleted run {rid} and all its artifacts)"
+        with self._mutation_intent("delete_run", rid, {}, command_backed=False):
+            pass
+        with self._commands.destructive_guard(rd, "delete run") as rd:
+            if self._live(rd):
+                return f"(run {rid} is LIVE — stop it first before deleting)"
+            shutil.rmtree(rd, ignore_errors=True)
+            if rd.exists():
+                return f"(delete failed for run {rid}: some artifacts are still present)"
+            return f"(deleted run {rid} and all its artifacts)"

@@ -152,7 +152,7 @@ export default function RunList({ onOpen, onSettings }) {
   const [sortDir, setSortDir] = useState('desc')   // asc | desc
   const [query, setQuery] = useState('')           // free-text over label/id/task/goal
   const [taskFilter, setTaskFilter] = useState(ALL)
-  const [statusFilter, setStatusFilter] = useState('all')   // all | running | finished
+  const [statusFilter, setStatusFilter] = useState('all')   // effective status vocabulary from runIndex
   const [stFilter, setStFilter] = useState(ALL)             // super-task filter (ALL | UNASSIGNED | id)
   const [superdata, setSuperdata] = useState({ supertasks: [], assignments: {} })
   const [stModal, setStModal] = useState(false)             // manage-super-tasks popup open?
@@ -357,6 +357,7 @@ export default function RunList({ onOpen, onSettings }) {
             <select className="sel" value={statusFilter} onChange={e => setStatusFilter(e.target.value)} title="status">
               <option value="all">all status</option>
                <option value="running">running</option>
+               <option value="finalizing">finalizing</option>
                <option value="paused">paused</option>
                <option value="approval">approval needed</option>
                <option value="stalled">stalled</option>
@@ -415,7 +416,9 @@ export default function RunList({ onOpen, onSettings }) {
                 const stalled = status === 'stalled'
                 return <span className={'pill phase ' + status} role="link" tabIndex={0}
                              onKeyDown={e => { if (e.key === 'Enter') onOpen(r.run_id) }} onClick={() => onOpen(r.run_id)}
-                             title={stalled ? 'engine stopped unexpectedly — open to resume' : status === 'paused' ? 'paused intentionally' : undefined}>{status}</span>
+                             title={stalled ? 'engine stopped unexpectedly — open to resume'
+                               : status === 'finalizing' ? 'wrapping up report, lessons, and cost'
+                               : status === 'paused' ? 'paused intentionally' : undefined}>{status}</span>
               })()}
               <div onClick={() => onOpen(r.run_id)} onKeyDown={e => { if (e.key === 'Enter') onOpen(r.run_id) }}
                    role="link" tabIndex={0} aria-label={`Open run ${r.label || r.run_id}`} style={{ cursor: 'pointer', flex: 1 }}>

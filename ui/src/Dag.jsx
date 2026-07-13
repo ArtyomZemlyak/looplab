@@ -1,7 +1,8 @@
 import React, { useContext, useEffect, useMemo, useState } from 'react'
 import { ReactFlow, Background, Controls, MiniMap, Handle, Position, Panel, useViewport } from '@xyflow/react'
 import '@xyflow/react/dist/style.css'
-import { fmt, layoutWithGroups, nodeClass, delta, workingId, operatorMeta, OPERATOR_LEGEND, isSweep, sweepInfo, chipFontSize } from './util.js'
+import { fmt, layoutWithGroups, nodeClass, delta, workingId, operatorMeta, OPERATOR_LEGEND,
+  isSweep, sweepInfo, chipFontSize, storageGet, storageSet } from './util.js'
 import { nodeChip } from './report.js'
 import { OpIcon } from './icons.jsx'
 import { Spark } from './charts.jsx'
@@ -205,10 +206,10 @@ export default function Dag({ state, selectedId, onSelect, groupMode = 'none', c
   const [menu, setMenu] = useState(null)   // U3: right-click node menu {x,y,nodeId}
   const act = (action) => { const id = menu?.nodeId; setMenu(null); if (id != null && onNodeAction) onNodeAction(action, id) }
   const fx = useFx()   // '' | 'subtle' | 'full' — Reactor/Energy FX: swaps edge rendering + the backdrop
-  const [showMap, setShowMap] = useState(() => localStorage.getItem('ll.minimap') === '1')
+  const [showMap, setShowMap] = useState(() => storageGet('ll.minimap') === '1')
   const [showLegend, setShowLegend] = useState(false)
   const [lod, setLod] = useState(false)   // zoom level-of-detail: full cards ↔ glyphs (set by LodWatcher)
-  const toggleMap = () => setShowMap(v => { localStorage.setItem('ll.minimap', v ? '0' : '1'); return !v })
+  const toggleMap = () => setShowMap(v => { storageSet('ll.minimap', v ? '0' : '1'); return !v })
 
   const { nodes, edges, groupKeys } = useMemo(() => {
     const ns = state?.nodes || {}

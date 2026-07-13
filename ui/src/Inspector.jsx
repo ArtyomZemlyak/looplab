@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState, useRef } from 'react'
-import { get, fmt, fmtInt, isSweep, spanDetail, nodeConversation, CONTROL, clearNodeTrace } from './util.js'
+import { get, fmt, fmtInt, isSweep, spanDetail, nodeConversation, CONTROL, clearNodeTrace, commandFeedback } from './util.js'
 import { usePoll } from './hooks.js'
 import { Trajectory, ParallelCoords, Scatter, MetricLines } from './charts.jsx'
 import { groupAggregate } from './grouping.js'
@@ -25,21 +25,29 @@ const TABS = ['Overview', 'Trace', 'Code', 'Metrics', 'Trust', 'Cost']
 // event; the engine applies it on the next resume.
 function ResetBtn({ runId, id, onToast }) {
   const [open, setOpen] = useState(false)
+  const [busy, setBusy] = useState(false)
   const STAGES = [
     ['eval', 're-score', 'keep the idea + code, just re-run the evaluation (an infra / API-key blip)'],
     ['implement', 're-run the Developer', "keep the Researcher's idea, re-write the code (its code crashed)"],
     ['propose', 'full redo', 're-propose the idea, re-develop, then re-evaluate'],
   ]
-  const doReset = (stage) => {
+  const doReset = async (stage) => {
+    if (busy) return
     setOpen(false)
-    CONTROL.resetNode(runId, id, stage)
-      .then(() => onToast && onToast(`Reset #${id} (${stage}) queued — resume the run to apply`))
-      .catch(() => onToast && onToast(`Reset #${id} failed`))
+    setBusy(true)
+    try {
+      const feedback = commandFeedback(await CONTROL.resetNode(runId, id, stage), {
+        success: `Reset #${id} from ${stage} applied — the engine is processing it`, noop: `#${id} already reflects that reset`,
+        executing: `Reset #${id} from ${stage} requested — waiting for the engine`, failure: `Reset #${id} failed`,
+      })
+      onToast?.(feedback.message)
+    } catch (error) { onToast?.(`Reset #${id} failed: ${error.message || error}`) }
+    finally { setBusy(false) }
   }
   return <span style={{ position: 'relative', marginLeft: 8 }}>
     <button className="ctx-chip" style={{ padding: '0 6px', cursor: 'pointer' }}
             title="re-run THIS node in place (no new node) from a chosen stage"
-            onClick={() => setOpen(o => !o)}>↻ Reset ▾</button>
+            disabled={busy} onClick={() => setOpen(o => !o)}>{busy ? '↻ Resetting…' : '↻ Reset ▾'}</button>
     {open && <div style={{ position: 'absolute', zIndex: 30, top: '110%', left: 0, background: 'var(--panel,#1b1f2a)', border: '1px solid var(--border,#333)', borderRadius: 6, padding: 4, minWidth: 240, boxShadow: '0 4px 16px rgba(0,0,0,.4)' }}>
       {STAGES.map(([stage, label, desc]) =>
         <div key={stage} style={{ padding: '6px 8px', cursor: 'pointer', borderRadius: 4 }}
@@ -176,19 +184,29 @@ export function GroupSummary({ groupKey, memberIds, state, onSelectNode, onClose
 // crash is pinpointed to its stage instead of hiding behind one opaque "evaluate". Empty on single-command
 // evals. The failed stage is tinted red; a still-pending tail (not yet reached) shows muted.
 function StagePipeline({ stages, failed, runId, id, onToast }) {
+  const [pendingStage, setPendingStage] = useState(null)
   if (!stages || !stages.length) return null
   const tone = (s) => s.status === 'ok' ? 'var(--ok)' : s.status === 'timeout' ? 'var(--working)'
     : s.status === 'reused' ? 'var(--muted, #888)' : 'var(--fail)'
   const ic = (s) => s.status === 'ok' ? '✓' : s.status === 'timeout' ? '⧗' : s.status === 'reused' ? '↺' : '✗'
-  const rerun = (name) => runId && CONTROL.resetNode(runId, id, name)
-    .then(() => onToast && onToast(`re-running #${id} from '${name}' — reuses earlier stages`))
-    .catch(() => onToast && onToast('re-run failed'))
+  const rerun = async (name) => {
+    if (!runId || pendingStage) return
+    setPendingStage(name)
+    try {
+      const feedback = commandFeedback(await CONTROL.resetNode(runId, id, name), {
+        success: `Reset #${id} from '${name}' applied — the engine is processing it`, noop: `#${id} already reflects that reset`,
+        executing: `Re-run of #${id} from '${name}' requested — waiting for the engine`, failure: 'Re-run failed',
+      })
+      onToast?.(feedback.message)
+    } catch (error) { onToast?.(`Re-run failed: ${error.message || error}`) }
+    finally { setPendingStage(null) }
+  }
   return <div style={{ margin: '8px 0' }}>
     <div className="muted" style={{ fontSize: 10, marginBottom: 3 }}>
       eval pipeline{failed ? ` — failed at ${failed}` : ''}{runId ? ' · click a stage to re-run from there' : ' · historical result (read-only)'}</div>
     <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4, alignItems: 'center' }}>
       {stages.map((s, i) => <React.Fragment key={i}>
-        {runId ? <button type="button" onClick={() => rerun(s.name)}
+        {runId ? <button type="button" disabled={pendingStage != null} onClick={() => rerun(s.name)}
           style={{ padding: '2px 7px', borderRadius: 4, fontSize: 11, cursor: 'pointer', background: 'transparent',
                    border: `1px solid ${tone(s)}`, color: tone(s) }}
           title={`${s.name}: ${s.status}${s.seconds != null ? ` · ${s.seconds}s` : ''}${s.exit_code != null ? ` · exit ${s.exit_code}` : ''} — click to re-run the pipeline FROM here (reuse earlier stages)`}>

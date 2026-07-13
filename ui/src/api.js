@@ -32,83 +32,813 @@ export function setOwnerToken(token) {
   } catch { /* module memory keeps this tab usable when session storage is disabled */ }
 }
 
+export const COMMAND_SUCCEEDED = new Set(['succeeded', 'noop'])
+export const COMMAND_FAILED = new Set(['failed', 'rejected', 'timed_out'])
+const COMMAND_PENDING = new Set(['accepted', 'executing'])
+const COMMAND_STATUSES = new Set([...COMMAND_SUCCEEDED, ...COMMAND_FAILED, ...COMMAND_PENDING])
+const TRANSIENT_HTTP = new Set([408, 425, 429])
+const COMMAND_REQUEST_TIMEOUT_MS = 8000
+const TRANSPORT_STORAGE_PREFIX = 'll.command-transport.'
+const TRANSPORT_ACTIONS = new Set(['stop', 'finalize', 'resume'])
+const ASSISTANT_TRANSPORT_STORAGE_PREFIX = 'll.assistant-command-transport.'
+const ASSISTANT_TRANSPORT_ACTIONS = new Set(['stop', 'finalize', 'resume', 'pause', 'abort', 'ratify', 'approve'])
+const RUN_COMMAND_LOCK_PREFIX = 'll.command-lock.'
+const RUN_COMMAND_LOCK_EVENT = 'll:command-lock'
+const COMMAND_ID_RE = /^cmd_[0-9a-f]{32}$/
+const STORED_COMMAND_STATUSES = new Set(['submitting', ...COMMAND_STATUSES])
+const OBSERVATION_KINDS = new Set([null, 'transport', 'access', 'protocol', 'missing', 'request'])
+const TRANSPORT_EVENT_BY_ACTION = Object.freeze({ stop: 'pause', finalize: 'run_abort', resume: 'resume' })
+const ASSISTANT_EVENT_BY_ACTION = Object.freeze({
+  stop: 'pause', pause: 'pause', finalize: 'run_abort', abort: 'run_abort', resume: 'resume',
+  ratify: 'spec_approved', approve: 'approval_granted',
+})
+const CANONICAL_ACTION_BY_EVENT = Object.freeze({
+  pause: 'stop', run_abort: 'finalize', resume: 'resume', spec_approved: 'ratify',
+  approval_granted: 'approve',
+})
+// Durable command recovery is deliberately metadata-only. Server-provided messages/remediation can
+// contain task data (or even serialized JSON with credentials), so storage keeps only a known stable
+// code plus booleans/ids. Presentation is reconstructed from this client-owned copy after reload.
+const STORED_ERROR_KEYS = new Set(['code', 'retryable', 'existing_command_id'])
+const STORED_ERROR_CODES = new Set([
+  'command_failed', 'command_request_failed', 'command_request_timeout',
+  'owner_access_required', 'command_protocol_error', 'command_record_missing',
+  'command_storage_unavailable', 'command_timeout', 'postcondition_timeout',
+  'invalid_command', 'command_target_not_found', 'command_intent_missing',
+  'command_not_retryable', 'command_in_progress', 'retry_existing_command',
+  'finalize_payload_conflict', 'finalize_in_progress', 'engine_finishing',
+  'engine_start_uncertain', 'spawn_claim_confirmation_required', 'engine_failed',
+  'spawn_failed', 'command_worker_failed', 'approval_not_requested',
+  'ratification_not_requested', 'invalid_transition',
+])
+const STORED_ERROR_COPY = Object.freeze({
+  command_failed: ['Command failed', 'Refresh run state before acting again.'],
+  command_request_failed: ['The command request failed', 'Refresh run state before acting again.'],
+  command_request_timeout: ['The command request timed out', 'Check the same durable command before acting again.'],
+  owner_access_required: ['Owner access is required', 'Restore owner access, then check the same command.'],
+  command_protocol_error: ['The server returned an invalid command response', 'Check the same durable command; do not submit a new intent.'],
+  command_record_missing: ['The durable command record is missing', 'Refresh run state before acting again.'],
+  command_storage_unavailable: ['Durable tab storage is unavailable', 'Enable session storage or free browser storage, then try again.'],
+  command_timeout: ['The command timed out', 'Retry this same command only when the interface offers it.'],
+  postcondition_timeout: ['The command did not reach its expected state in time', 'Check or retry this same command.'],
+  invalid_command: ['The command was rejected as invalid', 'Correct the action and submit a new intent.'],
+  command_target_not_found: ['The command target no longer exists', 'Refresh run state before acting again.'],
+  command_intent_missing: ['The durable command intent is missing or changed', 'Inspect the run before acting again.'],
+  command_not_retryable: ['This command cannot be retried', 'Refresh run state before choosing another action.'],
+  command_in_progress: ['Another run command is already in progress', 'Wait for the active command to finish.'],
+  retry_existing_command: ['An identical command already exists', 'Observe the existing command.'],
+  finalize_payload_conflict: ['A different finalization is already pending', 'Observe the existing finalization.'],
+  finalize_in_progress: ['Finalization is still in progress', 'Wait for finalization to finish.'],
+  engine_finishing: ['The engine is finishing terminal write-out', 'Wait until the engine stops, then check again.'],
+  engine_start_uncertain: ['Engine startup could not be confirmed', 'Check this same command; do not launch another driver.'],
+  spawn_claim_confirmation_required: ['Engine startup needs confirmation', 'Resolve the startup state before acting again.'],
+  engine_failed: ['The run engine reported a failure', 'Correct the run error, then retry this same command if offered.'],
+  spawn_failed: ['The run engine could not be started', 'Correct the startup problem, then retry this same command if offered.'],
+  command_worker_failed: ['The command worker failed', 'Correct the cause, then retry this same command if offered.'],
+  approval_not_requested: ['The run is not awaiting approval', 'Approve only while approval is requested.'],
+  ratification_not_requested: ['The run is not awaiting ratification', 'Ratify only while specification approval is requested.'],
+  invalid_transition: ['The run cannot perform that transition now', 'Refresh run state and choose an available action.'],
+})
+const STORED_RECORD_KEYS = new Set(['id', 'status', 'event_type', 'error'])
+const RUN_ENVELOPE_KEYS = new Set([
+  'runId', 'action', 'idempotencyKey', 'commandId', 'record', 'statusUnavailable',
+  'observationKind', 'retrying', 'checking', 'updatedAt', 'committed',
+])
+const ASSISTANT_ENVELOPE_KEYS = new Set([...RUN_ENVELOPE_KEYS, 'arg'])
+const LOCK_KEYS = new Set([
+  'runId', 'source', 'action', 'idempotencyKey', 'commandId', 'status', 'statusUnavailable', 'updatedAt',
+])
+
+export const commandEventForAction = (action, source = 'assistant') =>
+  (source === 'dock' ? TRANSPORT_EVENT_BY_ACTION : ASSISTANT_EVENT_BY_ACTION)[action] || null
+export const commandActionForEvent = eventType => CANONICAL_ACTION_BY_EVENT[eventType] || null
+
+const hasOnlyKeys = (value, allowed) => Object.keys(value).every(key => allowed.has(key))
+const safeIdentityText = value => typeof value === 'string' && value.length > 0 && value.length <= 200
+  && !/[\u0000-\u001f\u007f]/.test(value)
+const sanitizeStoredError = (error, { strict = false } = {}) => {
+  if (!error || typeof error !== 'object' || Array.isArray(error)) {
+    return strict ? null : { code: 'command_failed', retryable: false }
+  }
+  if (strict && !hasOnlyKeys(error, STORED_ERROR_KEYS)) return null
+  const candidate = String(error.code || '')
+  const code = STORED_ERROR_CODES.has(candidate) ? candidate : 'command_failed'
+  const stored = {
+    code,
+    retryable: error.retryable === true,
+  }
+  if (error.existing_command_id != null) {
+    if (!COMMAND_ID_RE.test(String(error.existing_command_id))) return strict ? null : stored
+    stored.existing_command_id = String(error.existing_command_id)
+  }
+  return stored
+}
+
+const storedRecord = (record, action, source, { strict = false } = {}) => {
+  if (!record || typeof record !== 'object' || Array.isArray(record)) return null
+  if (strict && !hasOnlyKeys(record, STORED_RECORD_KEYS)) return null
+  const status = String(record.status || '')
+  if (!STORED_COMMAND_STATUSES.has(status)) return null
+  if (status === 'submitting') {
+    if (strict && (record.id != null || record.event_type != null || record.error != null)) return null
+    return { status }
+  }
+  const expectedEvent = commandEventForAction(action, source)
+  const id = record.id == null ? '' : String(record.id)
+  const eventType = record.event_type == null ? '' : String(record.event_type)
+  const serverRecord = COMMAND_ID_RE.test(id) && !!expectedEvent && eventType === expectedEvent
+  const localFailure = COMMAND_FAILED.has(status) && !id && !eventType
+  if (!serverRecord && !localFailure) return null
+  const result = { ...(id ? { id } : {}), status, ...(eventType ? { event_type: eventType } : {}) }
+  if (COMMAND_FAILED.has(status)) {
+    const error = sanitizeStoredError(record.error, { strict })
+    if (!error) return null
+    result.error = error
+  } else if (strict && record.error != null) return null
+  return result
+}
+
+export const commandRecordMatchesAction = (record, action, source = 'assistant') =>
+  storedRecord(record, action, source) != null
+
+const protocolTransport = (runId, source, payload = null) => {
+  const allowedActions = source === 'dock' ? TRANSPORT_ACTIONS : ASSISTANT_TRANSPORT_ACTIONS
+  const rawAction = typeof payload?.action === 'string' ? payload.action : ''
+  const action = allowedActions.has(rawAction) ? rawAction : 'unknown'
+  const rawKey = payload?.idempotencyKey
+  const idempotencyKey = safeIdentityText(rawKey) ? rawKey : `invalid-${source}-envelope`
+  const topId = COMMAND_ID_RE.test(String(payload?.commandId || '')) ? String(payload.commandId) : ''
+  const recordId = COMMAND_ID_RE.test(String(payload?.record?.id || '')) ? String(payload.record.id) : ''
+  const commandId = topId && recordId && topId !== recordId ? '' : (topId || recordId)
+  return {
+    runId: String(runId), action, arg: null, idempotencyKey, commandId,
+    record: commandId ? { id: commandId, status: 'accepted' } : { status: 'submitting' },
+    statusUnavailable: true, observationKind: 'protocol', retrying: false, checking: false,
+    protocolInvalid: true, canResubmit: false,
+  }
+}
+
+// Status reads are observation, not command replay. A missing/forbidden command is therefore an
+// authoritative terminal condition for this client; only failures that can plausibly disappear on
+// the next request (network/timeouts, overload/rate-limit, and 5xx) keep the durable id observable.
+export function isTransientCommandReadError(error) {
+  if (error?.code === 'COMMAND_PROTOCOL_ERROR') return false
+  if (error?.code === 'COMMAND_REQUEST_TIMEOUT' || error?.transient === true) return true
+  if (error?.name === 'AbortError') return false
+  if (error?.status == null) return true
+  const status = Number(error.status)
+  return Number.isFinite(status) && (status >= 500 || TRANSIENT_HTTP.has(status))
+}
+
+export function commandCanRetry(record) {
+  return !!record?.id
+    && (record.status === 'failed' || record.status === 'timed_out')
+    && record?.error?.retryable === true
+}
+
+export function createIdempotencyKey(source = globalThis.crypto) {
+  if (source?.randomUUID) return source.randomUUID()
+  const bytes = new Uint8Array(16)
+  if (source?.getRandomValues) source.getRandomValues(bytes)
+  else for (let i = 0; i < bytes.length; i++) bytes[i] = Math.floor(Math.random() * 256)
+  bytes[6] = (bytes[6] & 0x0f) | 0x40
+  bytes[8] = (bytes[8] & 0x3f) | 0x80
+  const hex = [...bytes].map(value => value.toString(16).padStart(2, '0')).join('')
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`
+}
+
+const transportStorage = (storage) => {
+  if (storage !== undefined) return storage
+  try { return typeof sessionStorage === 'undefined' ? null : sessionStorage }
+  catch { return null }
+}
+const transportStorageKey = runId => TRANSPORT_STORAGE_PREFIX + encodeURIComponent(String(runId || ''))
+const assistantTransportStorageKey = runId => ASSISTANT_TRANSPORT_STORAGE_PREFIX + encodeURIComponent(String(runId || ''))
+const runCommandLockKey = runId => RUN_COMMAND_LOCK_PREFIX + encodeURIComponent(String(runId || ''))
+
+const notifyRunCommandLock = (runId) => {
+  if (typeof window === 'undefined' || typeof window.dispatchEvent !== 'function'
+      || typeof CustomEvent === 'undefined') return
+  // The event is only an invalidation signal. Consumers re-read sessionStorage, so command ids,
+  // idempotency keys, credentials, and payloads never enter the DOM event channel.
+  try { window.dispatchEvent(new CustomEvent(RUN_COMMAND_LOCK_EVENT, { detail: { runId: String(runId) } })) }
+  catch { /* storage still provides recovery when DOM events are unavailable */ }
+}
+
+const commandStatePending = state => !!state && (
+  state.statusUnavailable || state.retrying || state.checking
+  || !state.record || state.record.status === 'submitting'
+  || COMMAND_PENDING.has(state.record.status)
+)
+
+const compatibleCommandLock = (current, next) => !current || (
+  current.source === next.source
+  && current.idempotencyKey === next.idempotencyKey
+  && current.action === next.action
+  && (!current.commandId || !next.commandId || current.commandId === next.commandId)
+)
+
+// A tiny shared per-run lock makes Dock and Assistant one control surface. It deliberately stores no
+// command payload: the owning surface keeps the safe, deterministic recovery data in its own record.
+export function saveRunCommandLock(runId, state, storage = undefined) {
+  const target = transportStorage(storage)
+  const source = state?.source
+  const action = String(state?.action || '')
+  const idempotencyKey = String(state?.idempotencyKey || '')
+  const commandId = String(state?.commandId || state?.record?.id || '')
+  const status = String(state?.record?.status || 'submitting')
+  if (!target || !runId || (source !== 'dock' && source !== 'assistant')
+      || !safeIdentityText(action) || !safeIdentityText(idempotencyKey)
+      || (commandId && !COMMAND_ID_RE.test(commandId)) || !STORED_COMMAND_STATUSES.has(status)) return false
+  const payload = {
+    runId: String(runId), source, action, idempotencyKey, commandId,
+    status, statusUnavailable: !!state.statusUnavailable,
+    updatedAt: Date.now(),
+  }
+  try {
+    const current = loadRunCommandLock(runId, target)
+    if (!compatibleCommandLock(current, payload)) return false
+    if (current?.commandId && !payload.commandId) payload.commandId = current.commandId
+    target.setItem(runCommandLockKey(runId), JSON.stringify(payload))
+    if (storage === undefined) notifyRunCommandLock(runId)
+    return true
+  } catch { return false }
+}
+
+export function loadRunCommandLock(runId, storage = undefined) {
+  const target = transportStorage(storage)
+  if (!target || !runId) return null
+  try {
+    const payload = JSON.parse(target.getItem(runCommandLockKey(runId)) || 'null')
+    if (!payload || typeof payload !== 'object' || Array.isArray(payload) || !hasOnlyKeys(payload, LOCK_KEYS)
+        || payload.runId !== String(runId)
+        || (payload.source !== 'dock' && payload.source !== 'assistant')
+        || !safeIdentityText(payload.action) || !safeIdentityText(payload.idempotencyKey)
+        || (payload.commandId && !COMMAND_ID_RE.test(payload.commandId))
+        || !STORED_COMMAND_STATUSES.has(payload.status)
+        || typeof payload.statusUnavailable !== 'boolean'
+        || !Number.isFinite(payload.updatedAt)) return null
+    return payload
+  } catch { return null }
+}
+
+export function clearRunCommandLock(runId, expected = {}, storage = undefined) {
+  const target = transportStorage(storage)
+  if (!target || !runId) return false
+  try {
+    const current = loadRunCommandLock(runId, target)
+    if (current && ((expected.source && current.source !== expected.source)
+        || (expected.idempotencyKey && current.idempotencyKey !== expected.idempotencyKey)
+        || (expected.action && current.action !== expected.action)
+        // Once the lock learned a durable id, an id-less/stale cleanup must not remove it. Requiring
+        // exact identity here prevents an older render from unlocking a newer accepted command.
+        || (current.commandId && current.commandId !== String(expected.commandId || '')))) return false
+    target.removeItem(runCommandLockKey(runId))
+    if (storage === undefined) notifyRunCommandLock(runId)
+    return true
+  } catch { return false }
+}
+
+export function subscribeRunCommandLock(runId, callback) {
+  if (typeof window === 'undefined' || typeof window.addEventListener !== 'function') return () => {}
+  const listener = event => {
+    if (String(event.detail?.runId) === String(runId)) callback(loadRunCommandLock(runId))
+  }
+  window.addEventListener(RUN_COMMAND_LOCK_EVENT, listener)
+  return () => window.removeEventListener(RUN_COMMAND_LOCK_EVENT, listener)
+}
+
+// A command key is written before POST. Consequently a reload can re-submit the SAME intent even if
+// every response was lost before the browser learned the server's command id. Records contain no
+// owner/review credential and stay tab-scoped in sessionStorage.
+export function saveRunTransport(runId, state, storage = undefined) {
+  const target = transportStorage(storage)
+  if (!target || !runId || !TRANSPORT_ACTIONS.has(state?.action) || !state?.idempotencyKey) return false
+  const record = storedRecord(state.record, state.action, 'dock')
+  if (!record) return false
+  const explicitId = String(state.commandId || '')
+  if ((explicitId && !COMMAND_ID_RE.test(explicitId))
+      || (explicitId && record.id && explicitId !== record.id)) return false
+  const commandId = explicitId || record.id || ''
+  const payload = {
+    runId: String(runId), action: state.action, idempotencyKey: String(state.idempotencyKey),
+    commandId, record,
+    statusUnavailable: !!state.statusUnavailable,
+    observationKind: OBSERVATION_KINDS.has(state.observationKind || null) ? state.observationKind || null : 'protocol',
+    retrying: !!state.retrying,
+    checking: !!state.checking,
+    updatedAt: Date.now(),
+    committed: true,
+  }
+  const pending = commandStatePending(payload)
+  const lockState = { ...payload, source: 'dock' }
+  const currentLock = loadRunCommandLock(runId, target)
+  const prospectiveLock = {
+    source: 'dock', action: payload.action, idempotencyKey: payload.idempotencyKey,
+    commandId, status: record.status,
+  }
+  if (pending && !compatibleCommandLock(currentLock, prospectiveLock)) return false
+  if (pending && currentLock?.commandId && !commandId) return false
+  try {
+    const key = transportStorageKey(runId)
+    const previous = target.getItem(key)
+    if (pending) {
+      // Two-phase storage commit. If the lock write or rollback fails, `committed:false` survives as
+      // an explicit quarantine marker and reload will never auto-submit the staged envelope.
+      target.setItem(key, JSON.stringify({ ...payload, committed: false }))
+      if (!saveRunCommandLock(runId, lockState, storage)) {
+        try { if (previous == null) target.removeItem(key); else target.setItem(key, previous) } catch { /* quarantine remains */ }
+        return false
+      }
+    }
+    target.setItem(key, JSON.stringify(payload))
+    if (!pending) clearRunCommandLock(runId, {
+      source: 'dock', idempotencyKey: payload.idempotencyKey, action: payload.action, commandId,
+    }, storage)
+    return true
+  } catch { return false }
+}
+
+export function loadRunTransport(runId, storage = undefined) {
+  const target = transportStorage(storage)
+  if (!target || !runId) return null
+  try {
+    const raw = target.getItem(transportStorageKey(runId))
+    if (raw == null) return null
+    let payload
+    try { payload = JSON.parse(raw) } catch { return protocolTransport(runId, 'dock') }
+    if (!payload || typeof payload !== 'object' || Array.isArray(payload)
+        || !hasOnlyKeys(payload, RUN_ENVELOPE_KEYS)
+        || payload.runId !== String(runId) || !TRANSPORT_ACTIONS.has(payload.action)
+        || !safeIdentityText(payload.idempotencyKey)
+        || typeof payload.commandId !== 'string'
+        || (payload.commandId && !COMMAND_ID_RE.test(payload.commandId))
+        || typeof payload.statusUnavailable !== 'boolean'
+        || !OBSERVATION_KINDS.has(payload.observationKind)
+        || typeof payload.retrying !== 'boolean' || typeof payload.checking !== 'boolean'
+        || payload.committed !== true
+        || !Number.isFinite(payload.updatedAt)) return protocolTransport(runId, 'dock', payload)
+    const record = storedRecord(payload.record, payload.action, 'dock', { strict: true })
+    if (!record || (payload.commandId && record.id && payload.commandId !== record.id)
+        || (!!payload.commandId !== !!record.id)) return protocolTransport(runId, 'dock', payload)
+    const { committed: _committed, ...restored } = payload
+    return { ...restored, commandId: payload.commandId, record, lastError: '' }
+  } catch { return protocolTransport(runId, 'dock') }
+}
+
+export function clearRunTransport(runId, storage = undefined) {
+  const target = transportStorage(storage)
+  if (!target || !runId) return false
+  try {
+    const saved = loadRunTransport(runId, target)
+    target.removeItem(transportStorageKey(runId))
+    clearRunCommandLock(runId, {
+      source: 'dock', idempotencyKey: saved?.idempotencyKey,
+      action: saved?.action, commandId: saved?.commandId,
+    }, storage)
+    return true
+  } catch { return false }
+}
+
+// Assistant slash commands use the same durable envelope as Dock but a separate key. Only the
+// allow-listed action and an optional numeric node id are persisted; arbitrary command data is not.
+export function saveAssistantRunTransport(runId, state, storage = undefined) {
+  const target = transportStorage(storage)
+  if (!target || !runId || !ASSISTANT_TRANSPORT_ACTIONS.has(state?.action) || !state?.idempotencyKey) return false
+  const record = storedRecord(state.record, state.action, 'assistant')
+  if (!record) return false
+  const explicitId = String(state.commandId || '')
+  if ((explicitId && !COMMAND_ID_RE.test(explicitId))
+      || (explicitId && record.id && explicitId !== record.id)) return false
+  const commandId = explicitId || record.id || ''
+  const numericArg = state.arg == null ? null : Number(state.arg)
+  if (state.action === 'approve' && !commandId
+      && (!Number.isSafeInteger(numericArg) || numericArg < 0)) return false
+  const payload = {
+    runId: String(runId), action: state.action, arg: state.action === 'approve' ? numericArg : null,
+    idempotencyKey: String(state.idempotencyKey), commandId, record,
+    statusUnavailable: !!state.statusUnavailable,
+    observationKind: OBSERVATION_KINDS.has(state.observationKind || null) ? state.observationKind || null : 'protocol',
+    retrying: !!state.retrying, checking: !!state.checking,
+    updatedAt: Date.now(),
+    committed: true,
+  }
+  const pending = commandStatePending(payload)
+  const lockState = { ...payload, source: 'assistant' }
+  const currentLock = loadRunCommandLock(runId, target)
+  const prospectiveLock = {
+    source: 'assistant', action: payload.action, idempotencyKey: payload.idempotencyKey,
+    commandId, status: record.status,
+  }
+  if (pending && !compatibleCommandLock(currentLock, prospectiveLock)) return false
+  if (pending && currentLock?.commandId && !commandId) return false
+  try {
+    const key = assistantTransportStorageKey(runId)
+    const previous = target.getItem(key)
+    if (pending) {
+      target.setItem(key, JSON.stringify({ ...payload, committed: false }))
+      if (!saveRunCommandLock(runId, lockState, storage)) {
+        try { if (previous == null) target.removeItem(key); else target.setItem(key, previous) } catch { /* quarantine remains */ }
+        return false
+      }
+    }
+    target.setItem(key, JSON.stringify(payload))
+    if (!pending) clearRunCommandLock(runId, {
+      source: 'assistant', idempotencyKey: payload.idempotencyKey, action: payload.action, commandId,
+    }, storage)
+    return true
+  } catch { return false }
+}
+
+export function loadAssistantRunTransport(runId, storage = undefined) {
+  const target = transportStorage(storage)
+  if (!target || !runId) return null
+  try {
+    const raw = target.getItem(assistantTransportStorageKey(runId))
+    if (raw == null) return null
+    let payload
+    try { payload = JSON.parse(raw) } catch { return protocolTransport(runId, 'assistant') }
+    if (!payload || typeof payload !== 'object' || Array.isArray(payload)
+        || !hasOnlyKeys(payload, ASSISTANT_ENVELOPE_KEYS)
+        || payload.runId !== String(runId) || !ASSISTANT_TRANSPORT_ACTIONS.has(payload.action)
+        || !safeIdentityText(payload.idempotencyKey)
+        || typeof payload.commandId !== 'string'
+        || (payload.commandId && !COMMAND_ID_RE.test(payload.commandId))
+        || typeof payload.statusUnavailable !== 'boolean'
+        || !OBSERVATION_KINDS.has(payload.observationKind)
+        || typeof payload.retrying !== 'boolean' || typeof payload.checking !== 'boolean'
+        || payload.committed !== true
+        || !Number.isFinite(payload.updatedAt)) return protocolTransport(runId, 'assistant', payload)
+    const record = storedRecord(payload.record, payload.action, 'assistant', { strict: true })
+    if (!record || (payload.commandId && record.id && payload.commandId !== record.id)
+        || (!!payload.commandId !== !!record.id)) return protocolTransport(runId, 'assistant', payload)
+    const arg = payload.action === 'approve' && payload.arg != null ? Number(payload.arg) : null
+    if (payload.action === 'approve' && ((arg != null && (!Number.isSafeInteger(arg) || arg < 0))
+        || (!payload.commandId && arg == null))) return protocolTransport(runId, 'assistant', payload)
+    if (payload.action !== 'approve' && payload.arg !== null) return protocolTransport(runId, 'assistant', payload)
+    const { committed: _committed, ...restored } = payload
+    return { ...restored, arg, commandId: payload.commandId, record, lastError: '' }
+  } catch { return protocolTransport(runId, 'assistant') }
+}
+
+export function clearAssistantRunTransport(runId, storage = undefined, expected = {}) {
+  const target = transportStorage(storage)
+  if (!target || !runId) return false
+  try {
+    const saved = loadAssistantRunTransport(runId, target)
+    if (saved && expected.idempotencyKey && saved.idempotencyKey !== expected.idempotencyKey) return false
+    target.removeItem(assistantTransportStorageKey(runId))
+    clearRunCommandLock(runId, {
+      source: 'assistant', idempotencyKey: saved?.idempotencyKey,
+      action: saved?.action, commandId: saved?.commandId,
+    }, storage)
+    return true
+  } catch { return false }
+}
+
+export function commandErrorMessage(record) {
+  const error = record?.error
+  if (error && typeof error === 'object') {
+    const canonical = STORED_ERROR_COPY[error.code] || STORED_ERROR_COPY.command_failed
+    // Live responses may include a server-redacted explanation. A restored record contains no free
+    // text, so it deterministically falls back to client-owned copy instead of persisted server data.
+    const message = String(error.message || error.detail || canonical[0]).slice(0, 500)
+    const remediation = String(error.remediation || (!error.message && !error.detail ? canonical[1] : '')).trim().slice(0, 500)
+    return remediation && !message.toLowerCase().includes(remediation.toLowerCase())
+      ? `${message} — ${remediation}` : message
+  }
+  return String(error || record?.detail || 'Command failed').slice(0, 500)
+}
+
+export function commandFailureRecord(error, previous = error?.commandRecord || null) {
+  const localCode = error?.code === 'COMMAND_PROTOCOL_ERROR' ? 'command_protocol_error'
+    : error?.code === 'COMMAND_REQUEST_TIMEOUT' ? 'command_request_timeout'
+      : error?.code
+  return {
+    ...(previous || {}),
+    ...(error?.commandId && !previous?.id ? { id: error.commandId } : {}),
+    status: 'failed',
+    error: {
+      code: error?.status === 401 || error?.status === 403 ? 'owner_access_required'
+        : error?.status === 404 ? 'command_record_missing' : localCode || 'command_request_failed',
+      message: error?.message || String(error),
+      retryable: false,
+      remediation: error?.remediation || (error?.status === 401 || error?.status === 403
+        ? 'restore owner access, then check this command again'
+        : error?.code === 'COMMAND_PROTOCOL_ERROR'
+          ? 'check the same durable command again; do not submit a new intent'
+          : error?.status === 404
+            ? 'refresh the run; this server no longer has the durable command record'
+            : 'refresh run state before submitting another action'),
+      ...(error?.existingCommandId ? { existing_command_id: String(error.existingCommandId) } : {}),
+    },
+  }
+}
+
+// Pure presentation contract shared by every control surface. Only succeeded/noop are completion;
+// executing is deliberately pending, and terminal server failures stay structured/actionable.
+export function commandFeedback(record, labels = {}) {
+  const status = record?.status
+  if (status === 'succeeded') return { kind: 'success', terminal: true, status,
+    message: labels.success || 'Command completed' }
+  if (status === 'noop') return { kind: 'success', terminal: true, status,
+    message: labels.noop || `${labels.success || 'Command completed'} (already satisfied)` }
+  if (COMMAND_PENDING.has(status)) return { kind: 'pending', terminal: false, status,
+    message: labels.executing || `${labels.requested || 'Command'} requested — waiting for completion` }
+  if (COMMAND_FAILED.has(status)) return { kind: 'error', terminal: true, status,
+    message: `${labels.failure || 'Command failed'}: ${commandErrorMessage(record)}` }
+  return { kind: 'error', terminal: true, status: status || 'missing',
+    message: `${labels.failure || 'Command failed'}: unexpected command status ${status || 'missing'}` }
+}
+
+const commandSleep = (ms) => new Promise(resolve => setTimeout(resolve, ms))
+
+function commandProtocolError(path, message, record = null) {
+  const error = new Error(`${path}: ${message}`)
+  error.code = 'COMMAND_PROTOCOL_ERROR'
+  if (record && typeof record === 'object') error.commandRecord = record
+  return error
+}
+
+function validatedCommandRecord(record, path, expectedId = null) {
+  if (!record || typeof record !== 'object' || Array.isArray(record)) {
+    throw commandProtocolError(path, 'invalid command response')
+  }
+  if (!String(record.id || '').trim()) {
+    throw commandProtocolError(path, 'command response has no id', record)
+  }
+  if (expectedId != null && String(record.id || '') !== String(expectedId)) {
+    throw commandProtocolError(path, 'response command id does not match the request', record)
+  }
+  if (!COMMAND_STATUSES.has(record.status)) {
+    throw commandProtocolError(path, `unexpected command status ${record.status || 'missing'}`, record)
+  }
+  return record
+}
+
+async function commandResponseJson(response, path, { submission = false } = {}) {
+  try { return await response.json() }
+  catch (cause) {
+    const error = commandProtocolError(path, 'response is not valid JSON')
+    error.status = response?.status
+    error.cause = cause
+    if (submission) error.submissionMayHaveSucceeded = true
+    throw error
+  }
+}
+
+const commandTimeoutError = (path, timeout, cause = null) => {
+  const error = new Error(`${path}: request timed out after ${timeout}ms`)
+  error.code = 'COMMAND_REQUEST_TIMEOUT'
+  error.transient = true
+  if (cause) error.cause = cause
+  return error
+}
+
+// The deadline owns the complete response lifecycle, not just receipt of HTTP headers. Keeping the
+// same controller/timer alive while the consumer reads and parses the body prevents a stalled JSON
+// stream from leaving a command surface pending forever. Promise.race also bounds test doubles and
+// runtimes whose body parser does not promptly reject on AbortSignal.
+async function commandFetch(path, options = {}, timeoutMs = COMMAND_REQUEST_TIMEOUT_MS,
+  consume = response => response) {
+  const timeout = Math.max(0, Number(timeoutMs) || 0)
+  const controller = typeof AbortController === 'undefined' ? null : new AbortController()
+  let timedOut = false, timer = null
+  const work = Promise.resolve().then(async () => {
+    const response = await fetch(apiUrl(path), controller ? { ...options, signal: controller.signal } : options)
+    return consume(response)
+  })
+  if (!timeout) return work
+  const deadline = new Promise((_, reject) => {
+    timer = setTimeout(() => {
+      timedOut = true
+      controller?.abort()
+      reject(commandTimeoutError(path, timeout))
+    }, timeout)
+  })
+  try { return await Promise.race([work, deadline]) }
+  catch (cause) {
+    if (timedOut) throw cause?.code === 'COMMAND_REQUEST_TIMEOUT'
+      ? cause : commandTimeoutError(path, timeout, cause)
+    throw cause
+  } finally { clearTimeout(timer) }
+}
+
+const notifyCommandRecord = (callback, record) => {
+  if (!callback) return
+  try { callback(record) } catch { /* persistence/presentation must not break command execution */ }
+}
+
+export async function submitRunCommand(runId, type, data = {}, {
+  idempotencyKey = createIdempotencyKey(), requestTimeoutMs = COMMAND_REQUEST_TIMEOUT_MS,
+} = {}) {
+  const path = `/api/runs/${encodeURIComponent(runId)}/commands`
+  assertNotReviewMutation(path)
+  assertRunMutationAllowed(path)
+  try {
+    return await commandFetch(path, {
+      method: 'POST',
+      headers: _authHeaders({ 'Content-Type': 'application/json', 'Idempotency-Key': idempotencyKey }),
+      body: JSON.stringify({ type, data: data || {} }),
+    }, requestTimeoutMs, async response => {
+      if (!response.ok) await _throw(response, path)
+      return validatedCommandRecord(await commandResponseJson(response, path, { submission: true }), path)
+    })
+  }
+  catch (error) {
+    if (error?.code === 'COMMAND_PROTOCOL_ERROR' || error?.code === 'COMMAND_REQUEST_TIMEOUT') {
+      error.submissionMayHaveSucceeded = true
+    }
+    throw error
+  }
+}
+
+export async function getRunCommand(runId, commandId, { requestTimeoutMs = COMMAND_REQUEST_TIMEOUT_MS } = {}) {
+  const path = `/api/runs/${encodeURIComponent(runId)}/commands/${encodeURIComponent(commandId)}`
+  return commandFetch(path, { headers: _authHeaders({}), cache: 'no-store' }, requestTimeoutMs,
+    async response => {
+      if (!response.ok) await _throw(response, path)
+      return validatedCommandRecord(await commandResponseJson(response, path), path, commandId)
+    })
+}
+
+async function awaitRunCommand(runId, record, {
+  waitMs = 8000, pollMs = 250, requestTimeoutMs = COMMAND_REQUEST_TIMEOUT_MS, onRecord = null,
+} = {}) {
+  notifyCommandRecord(onRecord, record)
+  if (COMMAND_SUCCEEDED.has(record.status) || COMMAND_FAILED.has(record.status)) return record
+  let last = record
+  const deadline = Date.now() + Math.max(0, Number(waitMs) || 0)
+  const baseDelay = Math.max(0, Number(pollMs) || 0)
+  let nextDelay = baseDelay, transientFailures = 0
+  while (Date.now() < deadline) {
+    await commandSleep(Math.min(nextDelay, Math.max(0, deadline - Date.now())))
+    try {
+      const refreshed = await getRunCommand(runId, record.id, { requestTimeoutMs })
+      last = refreshed
+      notifyCommandRecord(onRecord, last)
+      transientFailures = 0; nextDelay = baseDelay
+      if (COMMAND_SUCCEEDED.has(last.status) || COMMAND_FAILED.has(last.status)) return last
+    } catch (error) {
+      if (isTransientCommandReadError(error)) {
+        transientFailures += 1
+        nextDelay = Math.max(Number(error.retryAfterMs) || 0,
+          Math.min(2000, Math.max(25, baseDelay || 25) * (2 ** Math.min(5, transientFailures - 1))))
+        continue
+      }
+      // Let a control surface stop polling and retain the durable command id for an honest recovery
+      // message. This is client metadata only; the server error remains untouched.
+      error.commandRecord = last
+      throw error
+    }
+  }
+  return last
+}
+
+export async function retryRunCommand(runId, commandId, {
+  waitMs = 8000, pollMs = 250, requestTimeoutMs = COMMAND_REQUEST_TIMEOUT_MS, onRecord = null,
+} = {}) {
+  const encodedId = encodeURIComponent(commandId)
+  const path = `/api/runs/${encodeURIComponent(runId)}/commands/${encodedId}/retry`
+  assertNotReviewMutation(path)
+  assertRunMutationAllowed(path)
+  let record
+  try {
+    record = await commandFetch(path, { method: 'POST', headers: _authHeaders({}) }, requestTimeoutMs,
+      async response => {
+        if (!response.ok) await _throw(response, path)
+        return commandResponseJson(response, path, { submission: true })
+      })
+  } catch (error) {
+    // A different active command is not evidence that retrying this failed id succeeded. Propagate
+    // the conflict with its separate existingCommandId; observing the old failed record here would
+    // mask the conflict and invite repeated contradictory retries.
+    if (error?.status === 409 && error?.code === 'command_in_progress') throw error
+    // 409 is often a cross-tab race: another owner tab already re-armed this exact id. Observe the
+    // record before declaring failure. Transport/timeout/protocol ambiguity follows the same rule.
+    if (error?.status !== 409 && !isTransientCommandReadError(error)
+        && !error?.submissionMayHaveSucceeded) {
+      error.commandRecord = { id: String(commandId), status: 'failed', error: null }
+      throw error
+    }
+    // The retry POST may have reached the server even when its response was lost. Observe the SAME
+    // record before offering another click: active/succeeded means recovery was accepted; the old
+    // retryable failure means it was not and can still be retried safely.
+    try {
+      record = await getRunCommand(runId, commandId, { requestTimeoutMs })
+    } catch (readError) {
+      readError.commandRecord = { id: String(commandId), status: 'accepted' }
+      throw readError
+    }
+  }
+  record = validatedCommandRecord(record, path, commandId)
+  return awaitRunCommand(runId, record, { waitMs, pollMs, requestTimeoutMs, onRecord })
+}
+
+export async function runCommand(runId, type, data = {}, {
+  waitMs = 8000, pollMs = 250, idempotencyKey = createIdempotencyKey(), submitRetries = 1,
+  retryMs = 150, requestTimeoutMs = COMMAND_REQUEST_TIMEOUT_MS, onRecord = null,
+} = {}) {
+  let record
+  const retries = Math.max(0, Math.trunc(Number(submitRetries) || 0))
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    try {
+      record = await submitRunCommand(runId, type, data, { idempotencyKey, requestTimeoutMs })
+      notifyCommandRecord(onRecord, record)
+      break
+    } catch (error) {
+      // A fresh browser key may encounter the unresolved identical command created before reload.
+      // Attach to the id named by the server; never create another intent.
+      if (error?.status === 409 && error?.code === 'retry_existing_command' && error?.existingCommandId) {
+        try {
+          record = await getRunCommand(runId, error.existingCommandId, { requestTimeoutMs })
+          notifyCommandRecord(onRecord, record)
+          break
+        } catch (readError) {
+          readError.commandRecord = { id: error.existingCommandId, status: 'accepted' }
+          readError.idempotencyKey = idempotencyKey
+          readError.commandUnknown = true
+          throw readError
+        }
+      }
+      // A 5xx may arrive after durable acceptance. Replay only transport/5xx failures, using the
+      // SAME idempotency key; a 4xx is an authoritative payload/auth/state rejection.
+      const retryable = isTransientCommandReadError(error) || error?.submissionMayHaveSucceeded
+      if (!retryable || error?.name === 'AbortError' || attempt >= retries) {
+        if (retryable) {
+          error.idempotencyKey = idempotencyKey
+          error.commandUnknown = true
+        }
+        throw error
+      }
+      await commandSleep(Math.max(Number(retryMs) || 0, Number(error.retryAfterMs) || 0))
+    }
+  }
+  try {
+    return await awaitRunCommand(runId, record, { waitMs, pollMs, requestTimeoutMs, onRecord })
+  } catch (error) {
+    error.idempotencyKey ||= idempotencyKey
+    throw error
+  }
+}
+
 export const CONTROL = {
   // Three operator controls (see docs/guide/concepts.md → "Stopping a run"):
   //   stop     — freeze the run, NO finalization (event: pause). Resumable; finalize later if wanted.
   //   finalize — stop AND wrap up (report / cross-run lessons+case / cost roll-up). event: run_abort.
   //   resume   — continue from ANY stopped state (pause / finalize / natural finish). event: resume.
-  stop: (rid) => post(`/api/runs/${rid}/control`, { type: 'pause', data: {} }),
-  finalize: (rid) => post(`/api/runs/${rid}/control`, { type: 'run_abort', data: { reason: 'finalized' } }),
-  resume: (rid) => post(`/api/runs/${rid}/control`, { type: 'resume', data: {} }),
+  stop: (rid) => runCommand(rid, 'pause', {}),
+  finalize: (rid) => runCommand(rid, 'run_abort', { reason: 'finalized' }),
+  resume: (rid) => runCommand(rid, 'resume', {}),
   // back-compat aliases (older callers / NL control): pause≡stop, abort≡finalize, reopen≡resume.
-  pause: (rid) => post(`/api/runs/${rid}/control`, { type: 'pause', data: {} }),
-  abort: (rid) => post(`/api/runs/${rid}/control`, { type: 'run_abort', data: { reason: 'finalized' } }),
-  nodeAbort: (rid, id) => post(`/api/runs/${rid}/control`, { type: 'node_abort', data: { node_id: id, reason: 'ui' } }),
+  pause: (rid) => runCommand(rid, 'pause', {}),
+  abort: (rid) => runCommand(rid, 'run_abort', { reason: 'finalized' }),
+  nodeAbort: (rid, id) => runCommand(rid, 'node_abort', { node_id: id, reason: 'ui' }),
   // Re-run an existing node IN PLACE from a stage (no new node): eval=re-score (keep code),
-  // implement=re-run the Developer (keep the idea), propose=full redo. Resume the run to apply.
-  resetNode: (rid, id, stage) => post(`/api/runs/${rid}/control`, { type: 'node_reset', data: { node_id: id, from_stage: stage } }),
-  approve: (rid, id) => post(`/api/runs/${rid}/control`, { type: 'approval_granted', data: { node_id: id } }),
-  ratify: (rid) => post(`/api/runs/${rid}/control`, { type: 'spec_approved', data: {} }),
-  hint: (rid, text) => post(`/api/runs/${rid}/control`, { type: 'hint', data: { text } }),
-  budget: (rid, sec) => post(`/api/runs/${rid}/control`, { type: 'budget_extend', data: { max_eval_seconds: sec } }),
-  forceConfirm: (rid, id) => post(`/api/runs/${rid}/control`, { type: 'force_confirm', data: { node_id: id } }),
-  forceAblate: (rid, id) => post(`/api/runs/${rid}/control`, { type: 'force_ablate', data: { node_id: id } }),
-  fork: (rid, id) => post(`/api/runs/${rid}/control`, { type: 'fork', data: { from_node_id: id } }),
-  annotate: (rid, id, text) => post(`/api/runs/${rid}/control`, { type: 'annotation', data: { node_id: id, text } }),
-  promote: (rid, id) => post(`/api/runs/${rid}/control`, { type: 'promote', data: { node_id: id, alias: 'champion' } }),
+  // implement=re-run the Developer (keep the idea), propose=full redo. The command service drives it.
+  resetNode: (rid, id, stage) => runCommand(rid, 'node_reset', { node_id: id, from_stage: stage }),
+  approve: (rid, id) => runCommand(rid, 'approval_granted', { node_id: id }),
+  ratify: (rid) => runCommand(rid, 'spec_approved', {}),
+  hint: (rid, text) => runCommand(rid, 'hint', { text }),
+  budget: (rid, sec) => runCommand(rid, 'budget_extend', { max_eval_seconds: sec }),
+  forceConfirm: (rid, id) => runCommand(rid, 'force_confirm', { node_id: id }),
+  forceAblate: (rid, id) => runCommand(rid, 'force_ablate', { node_id: id }),
+  fork: (rid, id) => runCommand(rid, 'fork', { from_node_id: id }),
+  annotate: (rid, id, text) => runCommand(rid, 'annotation', { node_id: id, text }),
+  promote: (rid, id) => runCommand(rid, 'promote', { node_id: id, alias: 'champion' }),
   // Operator-authored experiment: hand-add a node to the search tree. `idea` = {operator, params,
   // rationale, theme?}; optional parent_id (branch from a node) and code (ship ready-made code).
   inject: (rid, { idea, parent_id = null, code = null }) =>
-    post(`/api/runs/${rid}/control`, { type: 'inject_node', data: { idea, parent_id, code } }),
-  reopen: (rid) => post(`/api/runs/${rid}/control`, { type: 'run_reopened', data: {} }),
+    runCommand(rid, 'inject_node', { idea, parent_id, code }),
+  reopen: (rid) => runCommand(rid, 'run_reopened', {}),
   // U3: merge two nodes — inject a multi-parent `merge` node; the engine recombines the parents'
   // solutions via its real merge/ensemble operator (not a blank manual node).
-  merge: (rid, ids) => post(`/api/runs/${rid}/control`, { type: 'inject_node', data: {
-    idea: { operator: 'merge', rationale: `merge ${ids.map(i => '#' + i).join(' + ')}` }, parent_ids: ids } }),
+  merge: (rid, ids) => runCommand(rid, 'inject_node', {
+    idea: { operator: 'merge', rationale: `merge ${ids.map(i => '#' + i).join(' + ')}` }, parent_ids: ids }),
   // A7: pin/override the Strategist's choice live (HITL parity). `strategy` = a Strategy dict
   // {policy?, policy_params?, developer?, operators?, fidelity?, rationale?}.
-  setStrategy: (rid, strategy) => post(`/api/runs/${rid}/control`, { type: 'set_strategy', data: { strategy } }),
+  setStrategy: (rid, strategy) => runCommand(rid, 'set_strategy', { strategy }),
   // P2: ask the engine to run the Deep-Research stage now (read all results + the web, write a memo).
-  deepResearch: (rid) => post(`/api/runs/${rid}/control`, { type: 'deep_research', data: {} }),
+  deepResearch: (rid) => runCommand(rid, 'deep_research', {}),
   // P1: register an open hypothesis on the board (a question the search should resolve), or drop one.
-  addHypothesis: (rid, statement) => post(`/api/runs/${rid}/control`, { type: 'hypothesis_added', data: { statement, source: 'human' } }),
-  abandonHypothesis: (rid, id) => post(`/api/runs/${rid}/control`, { type: 'hypothesis_updated', data: { id, status: 'abandoned' } }),
-  deleteHypothesis: (rid, id) => post(`/api/runs/${rid}/control`, { type: 'hypothesis_updated', data: { id, status: 'deleted' } }),
+  addHypothesis: (rid, statement) => runCommand(rid, 'hypothesis_added', { statement, source: 'human' }),
+  abandonHypothesis: (rid, id) => runCommand(rid, 'hypothesis_updated', { id, status: 'abandoned' }),
+  deleteHypothesis: (rid, id) => runCommand(rid, 'hypothesis_updated', { id, status: 'deleted' }),
   // Workstream A: force a high-quality regeneration of the agent-authored run report now. Dedicated
   // endpoint (not /control) — appends a `report_generated` event. Runs as a background job, so we
   // jobAwait the response (a slow/large regen can't 504 behind a proxy; a fast one returns inline).
   // Contract preserved: resolves to {ok, seq, content} (or {ok:false} offline), never a job_id.
   refreshReport: async (rid) => jobAwait(await post(`/api/runs/${rid}/report_refresh`, {})),
-  // Workstream C: a generic control append by {type, data} — the single execution path every chat
-  // action funnels through (slash commands and the LLM action-router both produce {type, data}).
-  raw: (rid, type, data = {}) => post(`/api/runs/${rid}/control`, { type, data }),
+  // Generic authoritative command by {type, data}; slash commands and action routers share this path.
+  raw: (rid, type, data = {}) => runCommand(rid, type, data),
 }
 
-// Workstream C: chat actions on a FINISHED run must reopen + re-enter the loop so the engine actually
-// processes them (mirrors InjectModal's reopen→inject→resume). These verbs need the loop running.
-// `budget_extend` is here too: raising the node budget on a finished run is pointless unless the run
-// reopens and keeps going (the agentic boss pairs it with inject/hint steps).
-// Actions whose effect only takes hold once the engine is (re)spawned on a stopped/finished run.
-// run_abort = FINALIZE: the wrap-up (report/lessons/cost) needs the engine to fold stop_requested
-// into run_finished; resume needs it to keep going. (Twin of tui.py _NEEDS_RESUME.)
-// arch-review §4 P1-10: approval_granted/spec_approved/node_reset/run_reopened also only take hold once
-// the engine re-enters a finished/zombie run — keep this in step with tui_format.py::_NEEDS_RESUME.
-const NEEDS_RESUME = new Set(['fork', 'inject_node', 'force_confirm', 'force_ablate', 'deep_research', 'set_strategy', 'budget_extend', 'resume', 'run_abort', 'approval_granted', 'spec_approved', 'node_reset', 'run_reopened'])
-
-// Does applying this action on a FINISHED run require reopening + resuming the engine? (Used to batch a
-// multi-action plan: append every step's intent, then reopen+resume ONCE if any step needs the loop.)
-export const actionNeedsEngine = (action) => NEEDS_RESUME.has(action?.type)
-
-// Append ONE action's control intent WITHOUT reopening/resuming — the building block for applying an
-// agentic plan as a batch (append every step, then resume once at the end). `__refresh_report__` is
-// the report-refresh special case (its own endpoint, never the engine loop).
+// Apply one assistant/boss action through the same authoritative lifecycle. Report regeneration keeps
+// its dedicated background-job endpoint; all event commands delegate engine policy to the server.
 export async function appendAction(runId, action) {
   if (action.type === '__refresh_report__') return CONTROL.refreshReport(runId)
   return CONTROL.raw(runId, action.type, action.data || {})
 }
-
-// Re-enter the engine loop on an existing run dir (used to continue a finished run after an inject).
-export const resumeRun = (rid) => post(`/api/runs/${encodeURIComponent(rid)}/resume`, {})
 
 // round-7 "Replay": reset a run IN PLACE — the server archives its event log + spans and re-spawns a
 // fresh run on the same run-id. Only offered on a FINISHED run (no live engine), so it's race-free.
@@ -137,10 +867,31 @@ const _authHeaders = (base) => {
 // bare status code — so e.g. a 422 from a per-run config save reads "invalid settings — n_seeds: …"
 // in the toast rather than just "422". Falls back to status when there's no JSON body.
 async function _throw(r, path) {
-  let detail = ''
-  try { const j = await r.json(); detail = (j && (j.detail || j.error)) || '' } catch { /* no body */ }
-  const err = new Error(detail ? String(detail) : `${path}: ${r.status}`)
+  let detail = '', payload = null
+  try { payload = await r.json(); detail = (payload && (payload.detail ?? payload.error)) ?? '' } catch { /* no body */ }
+  const structured = detail && typeof detail === 'object' && !Array.isArray(detail) ? detail : null
+  const message = structured
+    ? String(structured.message || structured.detail || structured.error || structured.code || `${path}: ${r.status}`)
+    : detail ? String(detail) : `${path}: ${r.status}`
+  const err = new Error(message)
   err.status = r.status   // callers branch on the code (e.g. 409 = run live / name taken), not a regex on the message
+  err.detail = structured || detail || null
+  if (structured?.code) err.code = String(structured.code)
+  if (structured?.remediation) err.remediation = String(structured.remediation)
+  const detailText = `${message} ${typeof detail === 'string' ? detail : ''}`
+  const existingCommandId = structured?.existing_command_id || structured?.existingCommandId
+    || detailText.match(/\bcmd_[0-9a-f]{32}\b/i)?.[0]
+  const commandId = structured?.command_id || structured?.commandId
+  // A conflicting command belongs to another action. Keeping it separate prevents callers from
+  // fabricating a failed record for the requested action with the active command's durable id.
+  if (existingCommandId) err.existingCommandId = String(existingCommandId)
+  if (commandId) err.commandId = String(commandId)
+  const retryAfter = r.headers?.get?.('Retry-After')
+  if (retryAfter) {
+    const seconds = Number(retryAfter)
+    const millis = Number.isFinite(seconds) ? seconds * 1000 : Date.parse(retryAfter) - Date.now()
+    if (Number.isFinite(millis) && millis > 0) err.retryAfterMs = Math.min(60_000, millis)
+  }
   throw err
 }
 
@@ -305,7 +1056,9 @@ export const assistantFork = (sid) => post(`/api/assistant/sessions/${encodeURIC
 export async function assistantMessageStream(sid, instruction, mode, cbs = {}, signal, display = null) {
   const r = await fetch(apiUrl(`/api/assistant/sessions/${encodeURIComponent(sid)}/message_stream`),
     { method: 'POST', headers: _authHeaders({ 'Content-Type': 'application/json' }),
-      body: JSON.stringify(display && display !== instruction ? { instruction, mode, display } : { instruction, mode }), signal })
+      // Recovery must send the persisted clean display even when it happens to equal `instruction`:
+      // the explicit three-field body is the exact durable-turn contract, not a newly composed send.
+      body: JSON.stringify(display != null ? { instruction, display, mode } : { instruction, mode }), signal })
   if (!r.ok || !r.body) { await _throw(r, 'message_stream'); return null }
   const reader = r.body.getReader(); const dec = new TextDecoder()
   let buf = ''; let result = null

@@ -18,7 +18,7 @@ import inspect
 from looplab.core.models import Event
 from looplab.events.replay import fold
 from looplab.events.types import (ALL_EVENT_TYPES, BACKGROUND_APPENDABLE, EV_HINT,
-                                   EV_HYPOTHESIS_ADDED, EV_RESEARCH_COMPLETED)
+                                   EV_HYPOTHESIS_ADDED, EV_LLM_USAGE, EV_RESEARCH_COMPLETED)
 
 
 def _base_events() -> list[Event]:
@@ -42,6 +42,9 @@ def _payload(etype: str) -> dict:
         return {"text": "try this research direction: x", "kind": "steer"}
     if etype == EV_HYPOTHESIS_ADDED:
         return {"statement": "explore larger x", "source": "deep_research", "at_node": 0}
+    if etype == EV_LLM_USAGE:
+        return {"cost": 0.001, "calls": 1, "prompt_tokens": 10,
+                "completion_tokens": 2, "total_tokens": 12}
     raise AssertionError(f"add a payload builder for new background type {etype!r}")
 
 
@@ -50,7 +53,9 @@ def test_registry_sane():
     assert BACKGROUND_APPENDABLE <= ALL_EVENT_TYPES
     # Growing this set is a DECISION, not a drive-by: a new member needs a payload builder above
     # and must pass the splice test below. This assertion forces that edit to happen here.
-    assert BACKGROUND_APPENDABLE == frozenset({EV_RESEARCH_COMPLETED, EV_HINT, EV_HYPOTHESIS_ADDED})
+    assert BACKGROUND_APPENDABLE == frozenset({
+        EV_RESEARCH_COMPLETED, EV_HINT, EV_HYPOTHESIS_ADDED, EV_LLM_USAGE,
+    })
 
 
 def test_background_events_are_selection_neutral_at_every_position():

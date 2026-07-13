@@ -200,10 +200,13 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
             _job_result = (len(_parts) >= 4 and _parts[1] == "api" and _parts[2] in ("jobs", "genesis"))
             _review_admin = (len(_parts) >= 5 and _parts[1] == "api" and _parts[2] == "runs"
                              and _parts[4] == "reviews")
+            _command_status = (len(_parts) >= 5 and _parts[1] == "api" and _parts[2] == "runs"
+                               and _parts[4] == "commands")
             sensitive_get = (request.method == "GET"
                              and (p.endswith(_RAW_GET_SUFFIX) or p in _RAW_GET_EXACT
                                   or _run_scoped_raw or _node_detail or _job_result
-                                  or _review_admin or "/assistant/sessions" in p))
+                                  or _review_admin or _command_status
+                                  or "/assistant/sessions" in p))
             mutating = request.method in ("POST", "PUT", "PATCH", "DELETE")
             if ((mutating or sensitive_get) and p.startswith("/api/")
                     and not _owner_authenticated(request)):
@@ -240,6 +243,26 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
             response.headers["Referrer-Policy"] = "no-referrer"
             response.headers["Vary"] = REVIEW_HEADER
             return response
+
+    @app.middleware("http")
+    async def _command_status_no_store(request: "Request", call_next):
+        """Never cache lifecycle observations, including auth/validation exception responses.
+
+        Route-injected headers only cover successful handler returns: FastAPI replaces that Response
+        for HTTPException, and the owner-auth middleware can return before routing.  Keeping this
+        middleware outermost makes accepted/executing, 4xx, and early 401 responses share one cache
+        contract, so polling cannot be frozen by a browser or intermediary.
+        """
+        response = await call_next(request)
+        parts = request.url.path.split("/")
+        is_command = (len(parts) >= 5 and parts[1] == "api" and parts[2] == "runs"
+                      and parts[4] == "commands")
+        if is_command:
+            response.headers["Cache-Control"] = "no-store"
+            vary = {item.strip() for item in response.headers.get("Vary", "").split(",") if item.strip()}
+            vary.update({"X-LoopLab-Token", "Authorization"})
+            response.headers["Vary"] = ", ".join(sorted(vary, key=str.lower))
+        return response
     projects = ProjectStore(root / "projects.json")   # ClearML-style run organization (UI-only)
     # JupyterHub reaper hooks (ASGI shutdown + atexit backstop) — registered before the secret
     # priming below, matching the original make_app construction side-effect order.
@@ -250,6 +273,9 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
     srv = AppState(root=root, projects=projects, settings=settings_store, jobs=JobRegistry(),
                    reviews=reviews)
     srv.owner_auth_enabled = bool(ui_token)
+    # Explicit app-state handle for lifecycle integrations/tests; routers still close over the same
+    # AppState instance, so replacing a dependency such as srv.commands is immediately observed.
+    app.state.looplab = srv
 
     @app.get("/api/auth/status")
     def auth_status(request: Request):

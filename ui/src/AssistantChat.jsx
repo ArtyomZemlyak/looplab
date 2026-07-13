@@ -75,7 +75,10 @@ export function Turn({ m, runsById, onRevert, onRetry, onOpenSettings, readOnly 
             {onRevert && a.abs_path && <button className="asst-undo" title="undo this change"
               onClick={() => onRevert(a.abs_path)}>undo</button>}</span>)}</div>}
       {m.role === 'assistant' && <Todos items={m.todos} />}
-      {(m.content || !m.streaming) && <div className={'chat-bubble' + (assistantError ? ' assistant-error-bubble' : '')}>
+      {(m.content || !m.streaming) && <div
+        className={'chat-bubble' + (assistantError ? ' assistant-error-bubble' : '')
+          + (m.recoveryBlocked ? ' assistant-recovery-blocked' : '')}
+        role={m.recoveryBlocked ? 'alert' : undefined}>
         {m.role === 'assistant'
           ? assistantError
             ? <AssistantErrorCard error={assistantError} onRetry={onRetry} onOpenSettings={onOpenSettings} />

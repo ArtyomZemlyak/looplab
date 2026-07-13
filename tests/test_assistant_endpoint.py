@@ -147,6 +147,39 @@ def test_run_turn_write_declined(tmp_path):
     assert res["ok"] and not target.exists() and not res["applied"]
 
 
+def test_run_turn_threads_commands_into_run_control_tools(tmp_path):
+    """The Assistant tool loop submits lifecycle work and never appends the intent itself."""
+    import uuid
+
+    rd = tmp_path / "demo"; rd.mkdir()
+    events = rd / "events.jsonl"
+    events.write_text(
+        '{"seq":0,"type":"run_started","data":{"run_id":"demo","task_id":"t",'
+        '"goal":"g","direction":"max"}}\n', encoding="utf-8")
+    before = events.read_bytes()
+
+    class Commands:
+        def __init__(self):
+            self.calls = []
+
+        def submit(self, rd, idempotency_key, event_type, data):
+            self.calls.append((rd.name, event_type, data, idempotency_key))
+            return {"id": "assistant-cmd", "status": "executing", "event_type": event_type}
+
+    commands = Commands()
+    client = _FakeChatClient([_call("finalize_run", {"run_id": "demo"}),
+                              _final("Finalization was requested.")])
+    res = run_turn(client, tmp_path, [], "finalize demo", "auto",
+                   alive_fn=lambda _p: False, command_service=commands)
+    assert res["ok"] and commands.calls[0][0:3] == (
+        "demo", "run_abort", {"reason": "finalized"})
+    assert uuid.UUID(commands.calls[0][3])
+    assert events.read_bytes() == before
+    tool_messages = [m for turn in client.turns for m in turn if m.get("role") == "tool"]
+    result = "\n".join(m.get("content") or "" for m in tool_messages)
+    assert "requested/pending" in result and "completed" not in result
+
+
 def test_run_turn_propose_run(tmp_path):
     # propose_run validates the task before proposing (so an unrunnable card is bounced) — a dataset
     # task's data path must EXIST, so point it at a real file under tmp_path.
@@ -169,6 +202,44 @@ def test_plan_mode_has_no_write_tool(tmp_path):
     assert res["ok"] and not (tmp_path / "x").exists()
     tool_msgs = [m for turn in client.turns for m in turn if m.get("role") == "tool"]
     assert any("unknown tool" in (m.get("content") or "") for m in tool_msgs)
+
+
+def test_recovered_turn_exposes_only_reads_todo_and_journaled_run_control(tmp_path):
+    """Lost model traces cannot safely replay any mutator outside the durable run-command journal."""
+    from types import SimpleNamespace
+
+    from looplab.serve.assistant import build_tools
+
+    tools = build_tools(
+        tmp_path, mode="auto", client=object(), subagents=True, mcp=True,
+        settings=SimpleNamespace(knowledge_dir=str(tmp_path / "kb")),
+        command_service=object(), command_key_namespace="session-a:turn-a",
+        mutation_journal_path=tmp_path / "turn-a.json", mutation_recovery=True)
+
+    assert [type(provider).__name__ for provider in tools.providers] == [
+        "RepoScoutTools", "MachineRunsTools", "RunControlTools", "TodoTools"]
+    names = {spec["function"]["name"] for spec in tools.specs()}
+    assert {"read_file", "list_runs", "write_todos", "extend_budget"} <= names
+    assert names.isdisjoint({
+        "propose_run", "write_file", "edit_file", "apply_patch", "delete_file",
+        "run_command", "run_tests", "git_add", "git_commit", "git_checkout",
+        "remember", "task",
+    })
+
+
+def test_recovered_turn_without_journal_identity_has_no_run_control(tmp_path):
+    """Recovery never degrades from a missing fence identity to an ordinary mutable provider."""
+    from looplab.serve.assistant import build_tools
+
+    for kwargs in (
+        {"command_key_namespace": "session-a:turn-a"},
+        {"mutation_journal_path": tmp_path / "turn-a.json"},
+    ):
+        tools = build_tools(tmp_path, mode="auto", mutation_recovery=True, **kwargs)
+        assert [type(provider).__name__ for provider in tools.providers] == [
+            "RepoScoutTools", "MachineRunsTools", "TodoTools"]
+        names = {spec["function"]["name"] for spec in tools.specs()}
+        assert "extend_budget" not in names and "write_file" not in names
 
 
 # --------------------------------------------------------------------------- HTTP routes
@@ -196,6 +267,202 @@ def test_assistant_endpoints_roundtrip(tmp_path, monkeypatch):
     assert child["parent"] == sid
     assert client.delete(f"/api/assistant/sessions/{sid}").json()["ok"]
     assert client.get(f"/api/assistant/sessions/{sid}").status_code == 404
+
+
+def test_assistant_router_passes_the_app_command_service(tmp_path, monkeypatch):
+    """Both HTTP turn layers share the app-owned command service with ``run_turn``."""
+    monkeypatch.setattr("looplab.serve.server.make_llm_client", lambda _s: _FakeChatClient([]))
+    seen = []
+    namespaces = []
+
+    def fake_run_turn(_client, _root, _history, _instruction, mode, **kwargs):
+        seen.append(kwargs.get("command_service"))
+        namespaces.append(kwargs.get("command_key_namespace"))
+        return {"ok": True, "reply": "ok", "steps": [], "applied": [], "proposals": [],
+                "todos": [], "refs": [], "mode": mode}
+
+    monkeypatch.setattr("looplab.serve.routers.assistant._assistant_run_turn", fake_run_turn)
+    client = TestClient(make_app(tmp_path))
+    sid = client.post("/api/assistant/sessions", json={"mode": "plan"}).json()["id"]
+    result = client.post(f"/api/assistant/sessions/{sid}/message",
+                         json={"instruction": "hello", "mode": "plan"}).json()
+    assert result.get("ok") is True
+    streamed = client.post(f"/api/assistant/sessions/{sid}/message_stream",
+                           json={"instruction": "again", "mode": "plan"})
+    assert streamed.status_code == 200 and "event: done" in streamed.text
+    assert len(seen) == 2 and seen[0] is seen[1] and seen[0] is not None
+    assert all(value and value.startswith(f"{sid}:") for value in namespaces)
+    assert namespaces[0] != namespaces[1]
+
+
+def test_dangling_user_turn_reuses_command_namespace_without_duplicate_append(tmp_path, monkeypatch):
+    monkeypatch.setattr("looplab.serve.server.make_llm_client", lambda _s: _FakeChatClient([]))
+    observed = []
+
+    def fake_run_turn(_client, _root, history, instruction, mode, **kwargs):
+        observed.append((history, instruction, kwargs.get("command_key_namespace"),
+                         kwargs.get("mutation_journal_path"), kwargs.get("mutation_recovery")))
+        return {"ok": True, "reply": "recovered", "steps": [], "applied": [],
+                "proposals": [], "todos": [], "refs": [], "mode": mode}
+
+    monkeypatch.setattr("looplab.serve.routers.assistant._assistant_run_turn", fake_run_turn)
+    client = TestClient(make_app(tmp_path))
+    sid = client.post("/api/assistant/sessions", json={"mode": "auto"}).json()["id"]
+    SessionStore(tmp_path).append(sid, {
+        "role": "user", "content": "extend the budget", "mode": "auto", "turn_id": "fixed-turn",
+    })
+
+    result = client.post(
+        f"/api/assistant/sessions/{sid}/message",
+        json={"instruction": "extend the budget", "mode": "auto"}).json()
+
+    assert result["ok"] is True
+    expected_journal = SessionStore(tmp_path).mutation_journal_path(sid, "fixed-turn")
+    assert observed == [([], "extend the budget", f"{sid}:fixed-turn", expected_journal, True)]
+    messages = client.get(f"/api/assistant/sessions/{sid}").json()["messages"]
+    assert [message["role"] for message in messages] == ["user", "assistant"]
+
+
+def test_dangling_turn_pins_persisted_raw_instruction_and_mode(tmp_path, monkeypatch):
+    monkeypatch.setattr("looplab.serve.server.make_llm_client", lambda _s: _FakeChatClient([]))
+    observed = []
+
+    def fake_run_turn(_client, _root, history, instruction, mode, **kwargs):
+        observed.append((history, instruction, mode, kwargs.get("mutation_recovery")))
+        return {"ok": True, "reply": "recovered", "steps": [], "applied": [],
+                "proposals": [], "todos": [], "refs": [], "mode": mode}
+
+    monkeypatch.setattr("looplab.serve.routers.assistant._assistant_run_turn", fake_run_turn)
+    client = TestClient(make_app(tmp_path))
+    sid = client.post("/api/assistant/sessions", json={"mode": "auto"}).json()["id"]
+    raw = "[persisted hidden context]\nextend the budget"
+    SessionStore(tmp_path).append(sid, {
+        "role": "user", "content": "extend the budget", "raw": raw,
+        "mode": "default", "turn_id": "fixed-raw-turn",
+    })
+
+    result = client.post(
+        f"/api/assistant/sessions/{sid}/message",
+        json={"instruction": raw, "display": "extend the budget"}).json()
+
+    assert result["ok"] is True
+    assert observed == [([], raw, "default", True)]
+    assert client.get(f"/api/assistant/sessions/{sid}").json()["meta"]["mode"] == "default"
+
+
+def test_dangling_turn_rejects_raw_or_mode_mismatch(tmp_path, monkeypatch):
+    monkeypatch.setattr("looplab.serve.server.make_llm_client", lambda _s: _FakeChatClient([]))
+    called = []
+
+    def fake_run_turn(*_args, **_kwargs):
+        called.append(True)
+        raise AssertionError("a mismatched recovery must not reach the model")
+
+    monkeypatch.setattr("looplab.serve.routers.assistant._assistant_run_turn", fake_run_turn)
+    client = TestClient(make_app(tmp_path))
+    original_raw = "[context-v1]\nextend the budget"
+
+    sid_raw = client.post("/api/assistant/sessions", json={"mode": "default"}).json()["id"]
+    SessionStore(tmp_path).append(sid_raw, {
+        "role": "user", "content": "extend the budget", "raw": original_raw,
+        "mode": "default", "turn_id": "fixed-raw-turn",
+    })
+    raw_response = client.post(
+        f"/api/assistant/sessions/{sid_raw}/message",
+        json={"instruction": "[context-v2]\nextend the budget",
+              "display": "extend the budget", "mode": "default"})
+    assert raw_response.status_code == 409
+    assert raw_response.json()["detail"] == {
+        "code": "assistant_turn_recovery_mismatch", "field": "instruction",
+        "message": "Recovery must use the exact persisted instruction and permission mode.",
+    }
+
+    sid_mode = client.post("/api/assistant/sessions", json={"mode": "default"}).json()["id"]
+    SessionStore(tmp_path).append(sid_mode, {
+        "role": "user", "content": "extend the budget", "raw": original_raw,
+        "mode": "default", "turn_id": "fixed-mode-turn",
+    })
+    mode_response = client.post(
+        f"/api/assistant/sessions/{sid_mode}/message",
+        json={"instruction": original_raw, "display": "extend the budget", "mode": "auto"})
+    assert mode_response.status_code == 409
+    assert mode_response.json()["detail"]["code"] == "assistant_turn_recovery_mismatch"
+    assert mode_response.json()["detail"]["field"] == "mode"
+    assert called == []
+
+
+def test_dangling_user_turn_blocks_different_next_message(tmp_path, monkeypatch):
+    """U2 cannot turn an unanswered, possibly-mutating U1 into ordinary model history."""
+    monkeypatch.setattr("looplab.serve.server.make_llm_client", lambda _s: _FakeChatClient([]))
+    called = []
+
+    def fake_run_turn(*_args, **_kwargs):
+        called.append(True)
+        raise AssertionError("a different U2 must not reach the model")
+
+    monkeypatch.setattr("looplab.serve.routers.assistant._assistant_run_turn", fake_run_turn)
+    client = TestClient(make_app(tmp_path))
+    sid = client.post("/api/assistant/sessions", json={"mode": "auto"}).json()["id"]
+    SessionStore(tmp_path).append(sid, {
+        "role": "user", "content": "extend the budget", "mode": "auto", "turn_id": "fixed-turn",
+    })
+
+    response = client.post(
+        f"/api/assistant/sessions/{sid}/message",
+        json={"instruction": "do something else", "mode": "auto"})
+
+    assert response.status_code == 409
+    assert response.json()["detail"]["code"] == "assistant_turn_recovery_required"
+    assert called == []
+    messages = client.get(f"/api/assistant/sessions/{sid}").json()["messages"]
+    assert [message["content"] for message in messages] == ["extend the budget"]
+
+
+def test_cancel_keeps_turn_slot_until_worker_releases(tmp_path, monkeypatch):
+    """Stop marks a turn as stopping; an immediate U2 is 409 until the old worker's finally runs."""
+    import threading
+    import time
+
+    monkeypatch.setenv("LOOPLAB_JOB_INLINE_WAIT", "0.01")
+    monkeypatch.setattr("looplab.serve.server.make_llm_client", lambda _s: _FakeChatClient([]))
+    entered = threading.Event()
+    release = threading.Event()
+    calls = []
+
+    def fake_run_turn(_client, _root, _history, instruction, mode, **_kwargs):
+        calls.append(instruction)
+        entered.set()
+        assert release.wait(timeout=5)
+        return {"ok": True, "reply": "stopped safely", "steps": [], "applied": [],
+                "proposals": [], "todos": [], "refs": [], "mode": mode}
+
+    monkeypatch.setattr("looplab.serve.routers.assistant._assistant_run_turn", fake_run_turn)
+    client = TestClient(make_app(tmp_path))
+    sid = client.post("/api/assistant/sessions", json={"mode": "auto"}).json()["id"]
+    try:
+        first = client.post(
+            f"/api/assistant/sessions/{sid}/message",
+            json={"instruction": "extend by ten", "mode": "auto"}).json()
+        assert first.get("status") == "running"
+        assert entered.wait(timeout=2)
+        assert client.post(f"/api/assistant/sessions/{sid}/cancel").json()["cancelling"] is True
+
+        second = client.post(
+            f"/api/assistant/sessions/{sid}/message",
+            json={"instruction": "now do something else", "mode": "auto"})
+        assert second.status_code == 409
+        assert calls == ["extend by ten"]
+        messages = client.get(f"/api/assistant/sessions/{sid}").json()["messages"]
+        assert [message["content"] for message in messages] == ["extend by ten"]
+    finally:
+        release.set()
+
+    for _ in range(100):
+        messages = client.get(f"/api/assistant/sessions/{sid}").json()["messages"]
+        if [message["role"] for message in messages] == ["user", "assistant"]:
+            break
+        time.sleep(0.02)
+    assert [message["role"] for message in messages] == ["user", "assistant"]
 
 
 def test_assistant_permission_pause_resume(tmp_path, monkeypatch):

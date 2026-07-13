@@ -108,22 +108,39 @@ def build_router(srv) -> APIRouter:
         property of that environment, not of delete. The UI confirms the delete with the operator."""
         import shutil
         rd = _run_dir(run_id)
-        if _engine_alive(rd):
-            raise HTTPException(409, "run is live (engine running) — pause/stop it before deleting")
-        # Don't report success on a partial delete (e.g. a Windows open handle on a node dir) — that
-        # would leave a ghost run the UI thinks is gone. Retry once: an S3-backed FUSE mount (geesefs)
-        # can transiently leave entries on the first rmtree pass. Only forget it if the dir is actually
-        # gone; otherwise surface the failure with the leftover that blocked it.
-        for _ in range(2):
-            shutil.rmtree(rd, ignore_errors=True)
-            if not rd.exists():
-                break
-        if rd.exists():
-            leftover = next((str(p.relative_to(rd)) for p in rd.rglob("*")), "(dir)")
-            raise HTTPException(500, f"run dir could not be fully removed (e.g. {leftover!r} — a file "
-                                     "may be open or the storage is read-only); retry once nothing holds it")
-        projects.forget(run_id)
-        srv.summary_cache.pop(run_id, None)
-        return {"ok": True}
+        with srv.commands.destructive_guard(rd, "delete run") as rd:
+            # Approval/routing happened before the guard; liveness must be checked again *inside* it,
+            # after pending command workers are excluded, or one can spawn between check and rmtree.
+            if _engine_alive(rd):
+                raise HTTPException(409, "run is live (engine running) — pause/stop it before deleting")
+            # The first guard flush handles live in-process ledgers before taking the sequencer. This
+            # durable-only second pass closes the fresh-AppState/crashed-process window without
+            # closing an activity context or trying to reacquire the sequencer we already hold.
+            flush_durable_costs = getattr(srv, "flush_durable_run_costs", None)
+            if not callable(flush_durable_costs):
+                raise HTTPException(503, "cannot delete run: durable run-cost recovery is unavailable")
+            try:
+                durable_costs_flushed = flush_durable_costs(rd)
+            except Exception as exc:  # noqa: BLE001 - delete must fail closed on unknown evidence
+                raise HTTPException(
+                    503, "cannot delete run: durable run-cost recovery failed") from exc
+            if durable_costs_flushed is not True:
+                raise HTTPException(
+                    409, "cannot delete run: run-cost evidence is pending, busy, malformed, or conflicting")
+            # Don't report success on a partial delete (e.g. a Windows open handle on a node dir) — that
+            # would leave a ghost run the UI thinks is gone. Retry once: an S3-backed FUSE mount (geesefs)
+            # can transiently leave entries on the first rmtree pass. Only forget it if the dir is actually
+            # gone; otherwise surface the failure with the leftover that blocked it.
+            for _ in range(2):
+                shutil.rmtree(rd, ignore_errors=True)
+                if not rd.exists():
+                    break
+            if rd.exists():
+                leftover = next((str(p.relative_to(rd)) for p in rd.rglob("*")), "(dir)")
+                raise HTTPException(500, f"run dir could not be fully removed (e.g. {leftover!r} — a file "
+                                         "may be open or the storage is read-only); retry once nothing holds it")
+            projects.forget(run_id)
+            srv.summary_cache.pop(run_id, None)
+            return {"ok": True}
 
     return router

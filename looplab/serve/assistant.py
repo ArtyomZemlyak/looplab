@@ -14,6 +14,7 @@ pause-resume approval flow arrive in P1.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import secrets
@@ -115,6 +116,11 @@ class SessionStore:
 
     def _msgs_path(self, sid: str) -> Path:
         return self._sdir(sid) / "messages.jsonl"
+
+    def mutation_journal_path(self, sid: str, turn_id: str) -> Path:
+        """Private durable mutation journal path for one server-issued assistant turn id."""
+        digest = hashlib.sha256(str(turn_id).encode("utf-8")).hexdigest()
+        return self._sdir(sid) / "turn_mutations" / f"{digest}.json"
 
     def create(self, title: str = "", parent: Optional[str] = None, mode: str = DEFAULT_MODE,
                *, now: Optional[float] = None) -> dict:
@@ -319,19 +325,40 @@ def _emit_spec() -> dict:
 def build_tools(run_root, alive_fn: Optional[Callable] = None, mode: str = DEFAULT_MODE, *,
                 approver: Optional[Callable] = None, trust_mode: str = "trusted_local", extra_roots=(),
                 client=None, subagents: bool = False, mcp: bool = False, settings=None,
-                on_todos: Optional[Callable] = None, cancel_check: Optional[Callable] = None):
+                on_todos: Optional[Callable] = None, cancel_check: Optional[Callable] = None,
+                command_service=None, command_key_namespace: str = "",
+                mutation_journal_path=None, mutation_recovery: bool = False):
     """The assistant's toolset. Read tools (filesystem scout + cross-run introspection) are present in
     EVERY mode; the mutating write/shell/git providers are added only when the mode allows mutation
     (plan is read-only), mirroring "deny drops the tool from the schema". Each mutating provider gets
     the mode + the injected `approver` (which blocks on a UI confirm-card in `ask` situations).
     `subagents`/`mcp` add the `task` delegation tool and any configured MCP-server tools (top level
-    only — a subagent runs with subagents=False to prevent unbounded nesting)."""
+    only — a subagent runs with subagents=False to prevent unbounded nesting).
+
+    A recovered dangling turn is deliberately narrower than its original toolset. Its model trace
+    was lost, so write/shell/git/KB/MCP/subagent/proposal actions cannot be proven to match the first
+    attempt. Recovery exposes only read tools, Todo, and (for a mutating persisted mode)
+    RunControlTools backed by this turn's durable mutation journal. Missing journal identity means
+    no run-control provider at all — recovery must never silently fall back to an unfenced one.
+    """
     from looplab.agents.agent import CompositeTools
     from looplab.tools.reposcout import RepoScoutTools
     from looplab.tools.machine_runs_tools import MachineRunsTools, RunLauncherTools, RunControlTools
     mode = normalize_mode(mode)
     roots = [Path.home(), REPO_ROOT, Path(run_root)] + list(extra_roots)
-    providers = [RepoScoutTools(roots), MachineRunsTools(run_root, alive_fn=alive_fn), RunLauncherTools()]
+    providers = [RepoScoutTools(roots), MachineRunsTools(run_root, alive_fn=alive_fn)]
+    if mutation_recovery:
+        if mode != "plan" and mutation_journal_path is not None and command_key_namespace:
+            providers.append(RunControlTools(
+                run_root, alive_fn=alive_fn, mode=mode, approver=approver,
+                command_service=command_service,
+                command_key_namespace=command_key_namespace,
+                mutation_journal_path=mutation_journal_path,
+                mutation_recovery=True))
+        providers.append(TodoTools(on_todos=on_todos))
+        return CompositeTools(providers)
+
+    providers.append(RunLauncherTools())
     kdir = getattr(settings, "knowledge_dir", None) if settings else None
     if kdir:                                            # write half of the KB — safe (scoped .md append) in EVERY mode
         from looplab.tools.knowledge_tools import KnowledgeWriteTools
@@ -348,7 +375,11 @@ def build_tools(run_root, alive_fn: Optional[Callable] = None, mode: str = DEFAU
                       sh, GitTools(sh, cwd=REPO_ROOT),
                       # Drive an existing run's lifecycle (finalize/stop/resume/reset/delete node/run),
                       # self-gated by the same mode+approver so destructive verbs raise a confirm card.
-                      RunControlTools(run_root, alive_fn=alive_fn, mode=mode, approver=approver)]
+                      RunControlTools(run_root, alive_fn=alive_fn, mode=mode, approver=approver,
+                                      command_service=command_service,
+                                      command_key_namespace=command_key_namespace,
+                                      mutation_journal_path=mutation_journal_path,
+                                      mutation_recovery=mutation_recovery)]
     providers.append(TodoTools(on_todos=on_todos))
     if subagents and client is not None:
         providers.append(SubagentTools(client, run_root, alive_fn=alive_fn, settings=settings,
@@ -371,7 +402,9 @@ def run_turn(client, run_root, messages: list, instruction: str, mode: str = DEF
              alive_fn: Optional[Callable] = None, settings=None, on_step: Optional[Callable] = None,
              approver: Optional[Callable] = None, extra_roots=(), _subagent: bool = False,
              on_todos: Optional[Callable] = None, reply_sink: Optional[Callable] = None,
-             on_text: Optional[Callable] = None, cancel_check: Optional[Callable] = None) -> dict:
+             on_text: Optional[Callable] = None, cancel_check: Optional[Callable] = None,
+             command_service=None, command_key_namespace: str = "",
+             mutation_journal_path=None, mutation_recovery: bool = False) -> dict:
     """Run ONE assistant turn: drive the shared tool loop over the mode's toolset and return a
     response dict {ok, reply, steps, applied, mode}. `messages` is the prior conversation
     (role/content); `instruction` is the new user message. Pure orchestration — the caller injects the
@@ -383,7 +416,11 @@ def run_turn(client, run_root, messages: list, instruction: str, mode: str = DEF
     tools = build_tools(run_root, alive_fn=alive_fn, mode=mode, approver=approver,
                         trust_mode=trust_mode, extra_roots=extra_roots,
                         client=client, subagents=not _subagent, mcp=not _subagent, settings=settings,
-                        on_todos=on_todos, cancel_check=cancel_check)
+                        on_todos=on_todos, cancel_check=cancel_check,
+                        command_service=command_service,
+                        command_key_namespace=command_key_namespace,
+                        mutation_journal_path=mutation_journal_path,
+                        mutation_recovery=mutation_recovery)
     roots = [Path.home(), REPO_ROOT, Path(run_root)] + list(extra_roots)
     from looplab.serve.assistant_commands import expand_command
     grounded, refs = expand_mentions(expand_command(instruction), run_root, alive_fn=alive_fn, roots=roots)

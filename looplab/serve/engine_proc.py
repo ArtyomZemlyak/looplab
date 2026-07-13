@@ -119,7 +119,7 @@ _spawned_engine_pids: set[int] = set()
 
 
 def _spawn_engine(cli_args: list[str], env: Optional[dict] = None,
-                  run_dir: Optional[Path] = None) -> None:
+                  run_dir: Optional[Path] = None) -> Optional[int]:
     cmd = [sys.executable, "-m", "looplab.cli", *cli_args]
     kw: dict = {"cwd": str(Path(__file__).resolve().parents[2])}
     if env:
@@ -141,14 +141,22 @@ def _spawn_engine(cli_args: list[str], env: Optional[dict] = None,
             err = err_f
         except OSError:
             err = subprocess.DEVNULL
+    pid: Optional[int] = None
     try:
         proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=err, **kw)
-        pid = getattr(proc, "pid", None)   # defensive: tests stub Popen; a real Popen always has it
+        raw_pid = getattr(proc, "pid", None)   # tests may stub Popen without a real integer pid
+        pid = raw_pid if isinstance(raw_pid, int) and not isinstance(raw_pid, bool) else None
         if pid is not None:
             _spawned_engine_pids.add(pid)
     finally:
         if err_f is not None:
-            err_f.close()   # the child inherited its own dup; release the parent's handle
+            try:
+                err_f.close()   # the child inherited its own dup; release the parent's handle
+            except OSError:
+                # Popen may already have succeeded. A FUSE close/flush error must not make callers
+                # cancel the pre-spawn lease (or reset archives) underneath that live child.
+                pass
+    return pid
 
 
 def _reap_spawned_engines() -> None:

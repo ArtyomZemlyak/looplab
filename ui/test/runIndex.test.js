@@ -2,8 +2,8 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 
 import {
-  ALL_RUNS, UNASSIGNED_RUNS, effectiveRunStatus, filterRuns, metricComparable,
-  scopeRuns, sortRuns,
+  ALL_RUNS, UNASSIGNED_RUNS, effectiveRunStatus, filterRuns, finalizationIncomplete,
+  lifecyclePhaseLabel, metricComparable, runLifecycle, scopeRuns, sortRuns, terminalReady,
 } from '../src/runIndex.js'
 
 const projects = [
@@ -36,6 +36,63 @@ test('intentional pause and approval are not mislabeled as stalled', () => {
   assert.equal(effectiveRunStatus(paused), 'paused')
   assert.equal(effectiveRunStatus(approval), 'approval')
   assert.equal(effectiveRunStatus({ finished: false, phase: 'search', engine_running: false }), 'stalled')
+})
+
+test('finalizing outranks paused/stalled and is filterable', () => {
+  const finalizing = { run_id: 'f', finished: false, paused: true, phase: 'finalizing', engine_running: false }
+  assert.equal(effectiveRunStatus(finalizing), 'finalizing')
+  assert.equal(effectiveRunStatus({ finished: false, stop_requested: 'finalized', engine_running: false }), 'finalizing')
+  assert.deepEqual(filterRuns([finalizing, ...runs], {
+    project: ALL_RUNS, projects, status: 'finalizing',
+  }).map(run => run.run_id), ['f'])
+})
+
+test('error-finished finalize remains recovery state across every UI surface', () => {
+  const run = {
+    run_id: 'error-finalize', finished: true, phase: 'finalizing', stop_requested: true,
+    stop_reason: 'error', paused: true, engine_running: false,
+  }
+  assert.equal(finalizationIncomplete(run), true)
+  assert.equal(terminalReady(run), false)
+  assert.equal(runLifecycle(run).mode, 'finalization-stalled')
+  assert.equal(effectiveRunStatus(run), 'finalizing')
+  assert.equal(finalizationIncomplete({ ...run, phase: 'finished' }), true,
+    'stop_requested + error remains authoritative even if a cached phase lags')
+})
+
+test('finished event does not become terminal-ready until the engine exits', () => {
+  const writing = {
+    finished: true, phase: 'finished', stop_requested: true,
+    stop_reason: 'finalized', engine_running: true,
+  }
+  assert.equal(finalizationIncomplete(writing), true)
+  assert.equal(terminalReady(writing), false)
+  assert.equal(runLifecycle(writing).mode, 'finalizing')
+  assert.equal(effectiveRunStatus(writing), 'finalizing')
+
+  const complete = { ...writing, engine_running: false }
+  assert.equal(finalizationIncomplete(complete), false)
+  assert.equal(terminalReady(complete), true)
+  assert.equal(runLifecycle(complete).mode, 'finished')
+  assert.equal(effectiveRunStatus(complete), 'finished')
+})
+
+test('natural finish with a live process is terminal write-out, not Resume/Replay-ready', () => {
+  const writing = { finished: true, phase: 'finished', engine_running: true }
+  assert.equal(finalizationIncomplete(writing), false)
+  assert.equal(terminalReady(writing), false)
+  assert.equal(runLifecycle(writing).mode, 'finishing')
+  assert.equal(effectiveRunStatus(writing), 'finalizing')
+  assert.equal(lifecyclePhaseLabel(writing), 'finishing')
+})
+
+test('canonical header phase never falls back to a stale folded finished label during finalization', () => {
+  assert.equal(lifecyclePhaseLabel({
+    finished: true, phase: 'finished', stop_requested: true, engine_running: true,
+  }), 'finalizing')
+  assert.equal(lifecyclePhaseLabel({
+    finished: true, phase: 'finished', stop_requested: true, stop_reason: 'error', engine_running: false,
+  }), 'finalization stalled')
 })
 
 test('metric ordering is objective-aware and missing values stay last', () => {

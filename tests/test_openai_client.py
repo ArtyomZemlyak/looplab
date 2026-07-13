@@ -2,8 +2,11 @@
 Verifies tool-call parsing, the text/JSON fallback path, and <think> stripping."""
 from __future__ import annotations
 
+from contextlib import contextmanager
+from decimal import Decimal
 import json
 import threading
+import types
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import pytest
@@ -106,6 +109,151 @@ _OK_BODY = {"choices": [{"message": {"role": "assistant", "content": "ok"}, "fin
 _EMPTY_STREAM = {"choices": [{"message": {"role": "assistant", "content": ""}, "finish_reason": None}],
                  "usage": {}}
 _REQ = _httpx.Request("POST", "http://x/v1/chat/completions")
+
+
+class _CostTrace:
+    """Small fluent generation-handle stand-in used to verify billed-cost tracing."""
+
+    def __init__(self, seen):
+        self.seen = seen
+
+    def output(self, _value):
+        return self
+
+    def thinking(self, _value):
+        return self
+
+    def usage(self, _value):
+        return self
+
+    def cost(self, value):
+        self.seen.append(value)
+        return self
+
+
+@pytest.mark.parametrize("reported, expected", [
+    (None, 0.0),                       # absent/null provider cost -> local-model default
+    (0.012345, 0.012345),             # OpenRouter's numeric usage.cost
+    ("0.5", 0.0),                    # numeric-looking strings are not JSON numbers
+    ("not-a-cost", 0.0),
+    (True, 0.0),                      # bool is an int subclass, but not a valid billed amount
+    (-0.25, 0.0),
+    (float("nan"), 0.0),
+    (float("inf"), 0.0),
+    (float("-inf"), 0.0),
+    (10 ** 400, 0.0),                 # float conversion itself can overflow
+])
+def test_openrouter_usage_cost_is_accounted_safely_once(monkeypatch, reported, expected):
+    """A completed non-stream response charges exactly one sanitized usage.cost and always keeps
+    token accounting. Invalid provider telemetry must neither crash nor reduce/poison spend."""
+    import looplab.core.llm as llm
+
+    usage = {"prompt_tokens": 3, "completion_tokens": 2, "total_tokens": 5}
+    if reported is not None:
+        usage["cost"] = reported
+    body = {"choices": [{"message": {"role": "assistant", "content": "ok"},
+                         "finish_reason": "stop"}], "usage": usage}
+    c = llm.OpenAICompatibleClient("m", base_url="http://x/v1", stream=False)
+    monkeypatch.setattr(c, "_sdk_chat", lambda _payload, _use_stream: body)
+
+    assert c.complete_text([{"role": "user", "content": "go"}]) == "ok"
+    assert c.accountant.spent == pytest.approx(expected)
+    assert (c.accountant.calls, c.accountant.prompt_tokens,
+            c.accountant.completion_tokens, c.accountant.total_tokens) == (1, 3, 2, 5)
+
+
+def test_openrouter_usage_cost_is_attached_to_nonstream_trace(monkeypatch):
+    import looplab.core.llm as llm
+
+    seen = []
+
+    @contextmanager
+    def generation(**_kwargs):
+        yield _CostTrace(seen)
+
+    usage = {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2, "cost": 0.0042}
+    body = {"choices": [{"message": {"role": "assistant", "content": "ok"},
+                         "finish_reason": "stop"}], "usage": usage}
+    c = llm.OpenAICompatibleClient("m", base_url="http://x/v1", stream=False)
+    monkeypatch.setattr(c, "_sdk_chat", lambda _payload, _use_stream: body)
+    monkeypatch.setattr(llm.tracing, "generation", generation)
+
+    assert c.complete_text([{"role": "user", "content": "go"}]) == "ok"
+    assert seen == [pytest.approx(0.0042)]
+
+
+def test_openrouter_final_stream_usage_cost_is_accounted_and_traced_once(monkeypatch):
+    """The assistant's direct streaming primitive bypasses `_post`; its final include_usage chunk
+    must therefore account and trace the same cost itself, once and only once."""
+    import looplab.core.llm as llm
+
+    seen = []
+
+    @contextmanager
+    def generation(**_kwargs):
+        yield _CostTrace(seen)
+
+    def chunk(text="", *, usage=None, choices=True):
+        ch = types.SimpleNamespace(delta=types.SimpleNamespace(content=text), finish_reason=None)
+        return types.SimpleNamespace(choices=[ch] if choices else [], usage=usage)
+
+    final_usage = types.SimpleNamespace(model_dump=lambda: {
+        "prompt_tokens": 4, "completion_tokens": 2, "total_tokens": 6, "cost": 0.0067,
+    })
+    events = [chunk("Hel"), chunk("lo"), chunk(usage=final_usage, choices=False)]
+    c = llm.OpenAICompatibleClient("m", base_url="http://x/v1", stream=True)
+    monkeypatch.setattr(c._sdk.chat.completions, "create", lambda **_kwargs: iter(events))
+    monkeypatch.setattr(llm.tracing, "generation", generation)
+
+    assert list(c.complete_text_stream([{"role": "user", "content": "hi"}])) == ["Hel", "lo"]
+    assert c.accountant.spent == pytest.approx(0.0067)
+    assert (c.accountant.calls, c.accountant.total_tokens) == (1, 6)
+    assert seen == [pytest.approx(0.0067)]
+
+
+def test_openrouter_cached_response_is_not_recharged_or_retraced(monkeypatch):
+    """A deterministic cache hit may retain token/context telemetry, but it is not a second bill."""
+    import looplab.core.llm as llm
+
+    seen = []
+    calls = 0
+
+    @contextmanager
+    def generation(**_kwargs):
+        yield _CostTrace(seen)
+
+    usage = {"prompt_tokens": 5, "completion_tokens": 2, "total_tokens": 7, "cost": 0.007}
+    body = {"choices": [{"message": {"role": "assistant", "content": "cached"},
+                         "finish_reason": "stop"}], "usage": usage}
+    c = llm.OpenAICompatibleClient("m", base_url="http://x/v1", temperature=0,
+                                   stream=False, cache=True)
+
+    def request(_payload, _use_stream):
+        nonlocal calls
+        calls += 1
+        return body
+
+    monkeypatch.setattr(c, "_sdk_chat", request)
+    monkeypatch.setattr(llm.tracing, "generation", generation)
+
+    messages = [{"role": "user", "content": "same"}]
+    assert c.complete_text(messages) == "cached"
+    assert c.complete_text(messages) == "cached"
+    assert calls == 1
+    assert c.accountant.spent == pytest.approx(0.007)
+    assert c.accountant.calls == 1
+    assert seen == [pytest.approx(0.007), pytest.approx(0.0)]
+    assert c._last_usage == {
+        "prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0, "cost": 0.0,
+    }
+
+
+def test_cost_accountant_keeps_decimal_gateway_costs():
+    """LiteLLM and similar internal gateways may expose Decimal rather than a raw JSON float."""
+    import looplab.core.llm as llm
+
+    acc = llm.CostAccountant()
+    assert acc.add(Decimal("0.0123")) == pytest.approx(0.0123)
 
 
 def _timeout_exc():

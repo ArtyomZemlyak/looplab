@@ -220,7 +220,8 @@ class ResearchCadenceMixin:
             return state
         return self._write_report(state, trigger="cadence")
 
-    def _write_report(self, state: RunState, *, trigger: str) -> RunState:
+    def _write_report(self, state: RunState, *, trigger: str,
+                      finalize_scope: str | None = None) -> RunState:
         """Generate one run report and record it as a `report_generated` event, then re-fold. Never
         raises — the writer itself degrades to a minimal report on any failure."""
         if self.report_writer is None:
@@ -228,6 +229,10 @@ class ResearchCadenceMixin:
         with self.tracer.span("report", new_trace=True, trigger=trigger):
             content = self.report_writer.generate(state, trigger=trigger)
             # append INSIDE the span so report_generated is stamped with the report op-trace (UI scopes it).
-            self.store.append(EV_REPORT_GENERATED, {
-                "content": content, "at_node": content.get("at_node"), "trigger": trigger})
+            payload = {
+                "content": content, "at_node": content.get("at_node"), "trigger": trigger,
+            }
+            if finalize_scope is not None:
+                payload["finalize_scope"] = finalize_scope
+            self.store.append(EV_REPORT_GENERATED, payload)
         return fold(self.store.read_all())

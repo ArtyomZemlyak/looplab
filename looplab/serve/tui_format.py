@@ -17,7 +17,7 @@ from typing import Any, Optional
 
 # The one looplab import this module allows itself: the wire-protocol vocabulary it shares with the
 # server (phase names). Everything else stays stdlib so the TUI adds no dependencies.
-from looplab.serve.protocol import (PHASE_APPROVAL, PHASE_FINISHED, PHASE_GROUNDING,
+from looplab.serve.protocol import (PHASE_APPROVAL, PHASE_FINALIZING, PHASE_FINISHED, PHASE_GROUNDING,
                                     PHASE_ONBOARDING, PHASE_PAUSED, PHASE_SEARCH,
                                     PHASE_SPEC_APPROVAL)
 from looplab.serve.tui_api import Api, ApiError
@@ -62,6 +62,7 @@ def fmt_ago(sec: Optional[float], now: Optional[float] = None) -> str:
 # The keys are the server's phase names (`server._phase`) — the PHASE_* protocol constants.
 _PHASE_META = {
     PHASE_FINISHED:      ("✓", "green",   "finished"),
+    PHASE_FINALIZING:    ("◐", "yellow",  "finalizing"),
     PHASE_PAUSED:        ("⏸", "yellow",  "paused"),
     PHASE_APPROVAL:      ("◆", "magenta", "awaiting approval"),
     PHASE_SPEC_APPROVAL: ("◆", "magenta", "awaiting spec approval"),
@@ -77,6 +78,10 @@ def phase_meta(summary: dict) -> tuple[str, str, str]:
     phase = summary.get("phase") or ("finished" if summary.get("finished") else "search")
     glyph, colour, label = _PHASE_META.get(phase, ("●", "cyan", phase))
     engine = summary.get("engine_running")
+    if phase == PHASE_FINALIZING:
+        # A pending run_abort is never an ordinary pause/running state. Keep the lifecycle visible;
+        # if its driver has disappeared, say so without relabelling the operation itself as "stalled".
+        return (glyph, colour, label if engine is not False else f"{label} · engine stopped")
     if phase not in ("finished", "paused"):
         if engine is True:
             return ("●", "green", "running" if phase == "search" else label)
@@ -176,24 +181,8 @@ def slug(s: str) -> str:
     return _SLUG_RE.sub("-", str(s or "").lower()).strip("-")[:40]
 
 
-# Actions whose effect on a FINISHED/zombie run only takes hold once the engine is reopened+resumed —
-# the Python twin of util.js NEEDS_RESUME, so the TUI's apply path matches the web Dock's exactly.
-_NEEDS_RESUME = {"fork", "inject_node", "force_confirm", "force_ablate", "deep_research",
-                 "set_strategy", "budget_extend", "resume", "run_abort",
-                 # arch-review §4 P1-10: these also only take effect once the engine re-enters on a
-                 # finished/zombie run — approving/ratifying/reopening/re-running are all no-ops without
-                 # a (re)spawned loop to fold them. Both registries omitted them; keep the twins in step.
-                 "approval_granted", "spec_approved", "node_reset", "run_reopened"}
-# run_abort = FINALIZE: on a run whose engine already exited (stopped/finished), the wrap-up
-# (report/lessons/cost) only runs once the engine is (re)spawned to fold stop_requested -> run_finished.
-
-
-def action_needs_engine(action: dict) -> bool:
-    return (action or {}).get("type") in _NEEDS_RESUME
-
-
 # Destructive verbs worth a louder confirm marker — the Python twin of the web Dock's isCritical.
-_CRITICAL = {"run_abort", "node_abort", "reset", "run_reopened"}
+_CRITICAL = {"run_abort", "node_abort", "node_reset", "reset", "run_reopened"}
 
 
 def is_critical(action: dict) -> bool:
@@ -214,9 +203,10 @@ def history_for_boss(history: list) -> list[dict]:
                 out.append({"role": role, "content": content})
         elif role == "action":
             act = m.get("action") or {}
-            # A failed action must not be reported to the boss as "applied" — it would plan on top of
-            # a change that never happened.
-            verb = "failed: " if m.get("status") == "failed" else "applied: "
+            # A failed OR still-running command must not be reported as "applied" — the next boss turn
+            # would otherwise plan on top of a postcondition the server has not observed.
+            verb = {"failed": "failed: ", "pending": "requested (pending): ",
+                    "running": "requested: "}.get(m.get("status"), "applied: ")
             out.append({"role": "assistant", "content": verb + (act.get("label") or act.get("type") or "action")})
         elif role == "summary":
             content = (m.get("content") or "").strip()

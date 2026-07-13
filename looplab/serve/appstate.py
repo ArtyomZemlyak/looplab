@@ -18,6 +18,7 @@ from typing import Callable, Optional
 from fastapi import HTTPException
 
 from looplab.core.models import Event
+from looplab.engine.finalize import incomplete_finalize_scope
 from looplab.events.eventstore import iter_jsonl
 from looplab.events.replay import fold
 from looplab.serve.engine_proc import _engine_alive
@@ -25,14 +26,15 @@ from looplab.serve.jobs import JobRegistry
 from looplab.serve.llm_context import llm_settings
 from looplab.serve.projects import ProjectStore
 from looplab.serve.protocol import (
-    PHASE_APPROVAL, PHASE_FINISHED, PHASE_GROUNDING, PHASE_ONBOARDING, PHASE_PAUSED,
+    PHASE_APPROVAL, PHASE_FINALIZING, PHASE_FINISHED, PHASE_GROUNDING, PHASE_ONBOARDING, PHASE_PAUSED,
     PHASE_SEARCH, PHASE_SPEC_APPROVAL)
 from looplab.serve.reviews import ReviewStore
+from looplab.serve.run_commands import RunCommandService
 from looplab.serve.settings_store import SettingsStore
 
 # run-root subdirectories that are NOT runs and must never be used as a run_id (would collide with the
 # cross-run scope-report store at <run-root>/reports/).
-_RESERVED_RUN_IDS = {"reports", "assistant", ".reviews"}
+_RESERVED_RUN_IDS = {"reports", "assistant", ".reviews", ".command-locks"}
 
 
 class AppState:
@@ -45,6 +47,7 @@ class AppState:
         self.settings = settings
         self.jobs = jobs
         self.reviews = reviews or ReviewStore(root / ".reviews")
+        self.commands = RunCommandService(self)
         self.summary_cache: dict[str, tuple] = {}   # run_id -> (size, mtime, summary); skips re-folding
         # Per-run folded-state cache keyed by (size, mtime, upto_seq): state_payload re-read + re-folded
         # the WHOLE events.jsonl on every SSE tick (every ~0.4s per client), O(n²) for a repo run whose
@@ -129,7 +132,9 @@ class AppState:
                     "count": len(trials), "best": best, "ok": ok, "failed": len(trials) - ok,
                     "series": vals[:64],   # cap the inline sparkline series
                 }
-        d["phase"] = self.phase(st)
+        finalize_incomplete = incomplete_finalize_scope(evs) is not None
+        d["finalization_incomplete"] = finalize_incomplete
+        d["phase"] = self.phase(st, finalize_incomplete=finalize_incomplete)
         # Liveness: is a real engine process driving this run RIGHT NOW? (lock probe, not the event log).
         # A run with finished=False but engine_running=False is a ZOMBIE — the UI uses this to stop
         # showing a perpetual "thinking" strip and to resume on the next engine-needing chat action.
@@ -140,7 +145,14 @@ class AppState:
                 self._state_cache.pop(next(iter(self._state_cache)))
         return {"state": d, "seq": last_seq, "max_seq": max_seq}
 
-    def phase(self, st) -> str:
+    def phase(self, st, *, finalize_incomplete: bool = False) -> str:
+        # A pending run_abort is not an ordinary pause: the engine must preserve it, write
+        # run_finished, and complete the wrap-up. Surface this before paused because finalize-after-
+        # stop intentionally has both stop_requested and paused set. An error finish is not a
+        # successful finalize either: explicit retry preserves the stop and re-enters wrap-up.
+        if finalize_incomplete or (st.stop_requested and (
+                not st.finished or str(st.stop_reason or "").lower() == "error")):
+            return PHASE_FINALIZING
         if st.finished:
             return PHASE_FINISHED
         if st.paused:

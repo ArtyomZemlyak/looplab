@@ -14,6 +14,7 @@ from fastapi.responses import PlainTextResponse, StreamingResponse
 
 from looplab.core.atomicio import atomic_write_text
 from looplab.core.config import Settings
+from looplab.engine.finalize import incomplete_finalize_scope
 from looplab.events.eventstore import EventStore, iter_jsonl
 from looplab.events.replay import fold
 from looplab.events.types import EV_TRUST_GATE_CHANGED
@@ -23,7 +24,7 @@ from looplab.events.digest import theme_rollup as _theme_rollup
 from looplab.serve.artifacts import (
     _ART_MAX_BYTES, _LOG_TAIL_MAX, _artifact_roots, _list_artifact_files)
 from looplab.serve.engine_proc import _engine_alive
-from looplab.serve.protocol import POLL_SECONDS, SSE_DONE, SSE_STATE
+from looplab.serve.protocol import PHASE_FINALIZING, POLL_SECONDS, SSE_DONE, SSE_STATE
 
 # Snapshot-derived OPERATOR stage names, memoized per run DIRECTORY + snapshot VERSION: keyed on
 # (run dir, task.snapshot.json mtime_ns, size), so the normalize+validate work runs once per snapshot
@@ -102,12 +103,15 @@ def build_router(srv) -> APIRouter:
                 if cached and cached[:2] == sig:    # unchanged log -> reuse (finished runs never re-fold)
                     out.append(cached[2])
                     continue
-                st = srv.state(rd)
+                events = srv.events(rd)
+                st = fold(events)
+                finalize_incomplete = incomplete_finalize_scope(events) is not None
                 best = st.best()
                 summary = {
                     "run_id": rd.name, "task_id": st.task_id, "goal": st.goal,
                     "direction": st.direction, "finished": st.finished,
-                    "phase": _phase(st), "nodes": len(st.nodes),
+                    "phase": _phase(st, finalize_incomplete=finalize_incomplete),
+                    "finalization_incomplete": finalize_incomplete, "nodes": len(st.nodes),
                     "best_metric": (best.metric if best else None),
                     "best_confirmed": (best.confirmed_mean if best else None),
                     "stop_reason": st.stop_reason,
@@ -176,11 +180,16 @@ def build_router(srv) -> APIRouter:
                     yield (f"id: {payload['seq']}\n"
                            f"event: {SSE_STATE}\n"
                            f"data: {json.dumps(payload)}\n\n")
-                    if payload["state"].get("finished"):   # reuse the threaded fold; don't re-fold
-                        # End this stream — but the client deliberately does NOT close on `done`; it
-                        # lets the closed connection trigger its reconnect, so a reopen (fork / branch
-                        # / add-experiment) is picked up within a couple seconds. (Holding the stream
-                        # open instead would never terminate, which hangs the TestClient SSE test.)
+                    if (payload["state"].get("finished") and alive is False
+                            and payload["state"].get("phase") != PHASE_FINALIZING):
+                        # ``run_finished`` precedes the engine releasing its singleton while terminal
+                        # reports/cost/lessons are still being flushed; an error finish with the stop
+                        # intent preserved is also canonical finalization recovery, not terminal. Keep
+                        # the stream open through
+                        # that FINISHING window; emitting ``done`` on the event alone made the browser
+                        # close/reconnect every 2.5s while the canonical lifecycle correctly remained
+                        # non-terminal. Once the driver is gone, end this stream — the client then
+                        # reconnect-polls so a later reopen is picked up without a manual reload.
                         yield f"event: {SSE_DONE}\ndata: {{}}\n\n"
                         break
                 elif time.monotonic() - last_beat >= KEEPALIVE:

@@ -7,6 +7,12 @@
   background: color-mix(in srgb, var(--fail) 6%, var(--bg-2));
 }
 
+.feed-msg.chat.assistant .chat-bubble.assistant-recovery-blocked {
+  border-color: color-mix(in srgb, var(--fail) 58%, var(--line));
+  background: color-mix(in srgb, var(--fail) 7%, var(--bg-2));
+  color: var(--fg-dim);
+}
+
 .assistant-error-card {
   --assistant-error-accent: var(--fail);
   display: grid;
@@ -79,8 +85,39 @@
   border-color: var(--accent);
 }
 
+.assistant-command-pending {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 7px;
+  padding: 6px 8px;
+  border: 1px solid var(--accent-dim);
+  border-radius: 7px;
+  color: var(--fg-dim);
+  background: color-mix(in srgb, var(--accent) 7%, transparent);
+  font-size: 11px;
+}
+.assistant-command-pending.error {
+  border-color: color-mix(in srgb, var(--fail) 58%, var(--line));
+  color: var(--fail);
+  background: color-mix(in srgb, var(--fail) 7%, transparent);
+}
+
+.cmdbar-status.recovery {
+  max-width: min(70%, 620px);
+  overflow: visible;
+  white-space: normal;
+  flex-wrap: wrap;
+}
+.cmdbar-status.recovery .btn { min-height: 44px; padding: 8px 10px; flex: none; }
+.cmdbar-status.error { color: var(--fail); }
+
 @media (max-width: 600px) {
   .feed-msg.chat.assistant .chat-bubble.assistant-error-bubble {
     width: 100%;
   }
+  .assistant-command-pending { align-items: stretch; flex-direction: column; }
+  .assistant-command-pending .btn { min-height: 44px; }
+  .cmdbar-status.recovery { max-width: 78%; }
 }

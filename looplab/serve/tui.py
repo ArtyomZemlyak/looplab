@@ -23,20 +23,98 @@ Three surfaces, reached from one dashboard:
 """
 from __future__ import annotations
 
+import copy
+import hashlib
 import select
 import sys
 import time
+import uuid
 from typing import Any, Callable, Optional
+from urllib.parse import quote
 
 # Split-module re-exports (docs/15 §P5.2): the HTTP client now lives in serve/tui_api.py and the
 # pure helpers + server autostart in serve/tui_format.py, but this module remains the public face —
 # tests (tests/test_tui.py, tests/test_stop_finalize_resume.py) and external callers import every
 # one of these names from `looplab.serve.tui`, so each moved name is re-exported verbatim.
-from looplab.serve.tui_api import Api, ApiError  # noqa: F401
+from looplab.serve.tui_api import Api, ApiError, command_error_transient  # noqa: F401
 from looplab.serve.tui_format import (  # noqa: F401 — re-exported for the import-compat note above
-    _free_port, _stop_child, action_needs_engine, dashboard_sig, ensure_server, fmt_ago, fmt_metric,
-    history_for_boss, is_critical, parse_pick, phase_meta, run_sig, slug, sort_runs, spec_lines,
-    spec_ready)
+    _free_port, _stop_child, dashboard_sig, ensure_server, fmt_ago, fmt_metric, history_for_boss,
+    is_critical, parse_pick, phase_meta, run_sig, slug, sort_runs, spec_lines, spec_ready)
+
+
+_COMMAND_DONE = {"succeeded", "noop"}
+_COMMAND_FAILED = {"failed", "rejected", "timed_out"}
+_COMMAND_PENDING = {"accepted", "executing"}
+
+
+def _url_id(value: Any) -> str:
+    return quote(str(value), safe="")
+
+
+def _command_error(record: dict) -> str:
+    """Return the command service's structured or plain error as one terminal-friendly line."""
+    err = (record or {}).get("error")
+    if isinstance(err, dict):
+        return str(err.get("message") or err.get("detail") or err.get("code") or "command failed")
+    return str(err or "command failed")
+
+
+def _staged_command(event_type: str, data: dict, idempotency_key: str) -> dict:
+    """Build the durable pre-POST envelope used to recover an unconfirmed submission.
+
+    The command id alone is insufficient after an early 404: the original POST may still be queued
+    behind a proxy/server lock, and SHA-256 is intentionally not reversible.  Persist the exact key
+    and intent before sending so a fresh TUI can replay the *same* logical request, never mint a new
+    additive budget/fork intent.
+    """
+    key = str(idempotency_key)
+    # Detach nested dictionaries/lists from the visible boss action. Otherwise a later in-memory
+    # mutation could rewrite both copies and make the recovery equality check bless a different POST.
+    payload = copy.deepcopy(data or {})
+    return {
+        "id": "cmd_" + hashlib.sha256(key.encode("utf-8")).hexdigest()[:32],
+        "status": "accepted",
+        "event_type": str(event_type),
+        "idempotency_key": key,
+        "intent": {"type": str(event_type), "data": payload},
+        "submit_unconfirmed": True,
+    }
+
+
+def _staged_replay(turn: dict) -> Optional[tuple[str, str, dict]]:
+    """Validate and return the exact staged submission, or refuse unsafe/corrupt recovery data."""
+    command = turn.get("command") if isinstance(turn, dict) else None
+    action = turn.get("action") if isinstance(turn, dict) else None
+    if not isinstance(command, dict) or command.get("submit_unconfirmed") is not True:
+        return None
+    key = command.get("idempotency_key")
+    intent = command.get("intent")
+    if not isinstance(key, str) or not key or len(key) > 512 or not isinstance(intent, dict):
+        return None
+    event_type = intent.get("type")
+    data = intent.get("data")
+    expected_id = "cmd_" + hashlib.sha256(key.encode("utf-8")).hexdigest()[:32]
+    if (command.get("id") != expected_id or not isinstance(event_type, str) or not event_type
+            or not isinstance(data, dict) or command.get("event_type") != event_type):
+        return None
+    # The visible action and the hidden replay envelope must describe one immutable intent. A local
+    # edit/corrupt status row must fail closed instead of turning reconciliation into a new mutation.
+    if (not isinstance(action, dict) or action.get("type") != event_type
+            or (action.get("data") or {}) != data):
+        return None
+    return key, event_type, dict(data)
+
+
+def _observed_command(record: dict, staged: Optional[dict] = None) -> dict:
+    """Keep only public lifecycle fields once a server response proves the command record exists."""
+    observed = {k: record.get(k) for k in ("id", "status", "event_type", "error")
+                if record.get(k) is not None}
+    staged_id = (staged or {}).get("id")
+    if staged_id and observed.get("id") and staged_id != observed["id"]:
+        # The server may attach an identical fresh-key request to an older unresolved command. Keep
+        # the pre-POST id as a fold alias so the append-only command_status row can update its action.
+        observed["staged_id"] = staged_id
+    return observed
 
 # ----------------------------------------------------------------------------- the interactive app
 
@@ -167,7 +245,7 @@ class Tui:
 
     def _fetch_state(self, run_id: str) -> Optional[dict]:
         try:
-            return (self.api.get(f"/api/runs/{run_id}/state") or {}).get("state") or {}
+            return (self.api.get(f"/api/runs/{_url_id(run_id)}/state") or {}).get("state") or {}
         except ApiError:
             return None
 
@@ -313,7 +391,7 @@ class Tui:
             with self.console.status("waiting for the engine to start…", spinner="dots"):
                 for _ in range(25):
                     try:
-                        self.api.get(f"/api/runs/{rid}/state")
+                        self.api.get(f"/api/runs/{_url_id(rid)}/state")
                         break
                     except ApiError:
                         time.sleep(0.2)
@@ -327,6 +405,9 @@ class Tui:
         """A LIVE per-run view: the status panel auto-refreshes the instant the engine ticks, and a chat
         steers the boss. Returns to the dashboard on `back`."""
         history = self._load_chat(run_id)
+        # A prior session may have ended after a durable command was accepted but before its terminal
+        # status arrived. Reconcile that record before this session can plan or submit anything else.
+        self._reconcile_pending(run_id, history)
         while True:
             raw, _ = self._live_prompt("[bold green]» [/bold green]",
                                        fetch=lambda: self._fetch_state(run_id),
@@ -347,7 +428,8 @@ class Tui:
                 self._run_help()
                 self._pause("")                              # let them read it before the live redraw
                 continue
-            # Quick controls map to the same /control endpoint the web buttons use — deterministic, no LLM.
+            # Quick controls use the same durable command lifecycle as Web/Assistant — deterministic,
+            # idempotent, and no LLM.
             # 3 verbs: stop = freeze (no wrap-up, reversible), finalize = stop + wrap-up (terminal),
             # resume = continue from any stopped state. `pause` is a back-compat alias of `stop`.
             if low in ("stop", "pause", "finalize", "resume"):
@@ -355,14 +437,13 @@ class Tui:
                         "Finalize this run? (stops AND writes the final report / cross-run lessons / cost)"):
                     continue
                 _ev = {"stop": "pause", "pause": "pause", "finalize": "run_abort", "resume": "resume"}[low]
-                self._control(run_id, _ev, {"reason": "finalized"} if _ev == "run_abort" else {})
-                if low in ("finalize", "resume"):      # (re)spawn the engine so a stopped run actually acts
-                    try:
-                        self.api.post(f"/api/runs/{run_id}/resume", {})
-                    except Exception:  # noqa: BLE001 — a running engine no-ops the spawn; ignore
-                        pass
+                self._control(run_id, _ev, {"reason": "finalized"} if _ev == "run_abort" else {},
+                              history=history, label=low)
                 continue
             # Anything else: talk to the boss. It may just reply, or propose a plan we confirm then run.
+            if not self._reconcile_pending(run_id, history):
+                self.console.print("[yellow]wait for the pending run command before planning another action.[/yellow]")
+                continue
             user_turn = {"role": "user", "content": raw}
             history.append(user_turn)
             self._persist(run_id, user_turn)                 # save the question too (the web persists it)
@@ -393,7 +474,8 @@ class Tui:
                 self.console.print(f"[bold green]you ›[/bold green] {m.get('content', '')}")
             elif role == "action":
                 act = m.get("action") or {}
-                mark = {"done": "[green]✓[/green]", "failed": "[red]✗[/red]"}.get(m.get("status"), "[cyan]·[/cyan]")
+                mark = {"done": "[green]✓[/green]", "pending": "[yellow]…[/yellow]",
+                        "failed": "[red]✗[/red]"}.get(m.get("status"), "[cyan]·[/cyan]")
                 self.console.print(f"  {mark} [cyan]{act.get('label') or act.get('type', 'action')}[/cyan]")
             elif role == "summary":
                 self.console.print(f"[dim]— recap: {m.get('content', '')}[/dim]")
@@ -402,8 +484,11 @@ class Tui:
                 self.console.print(Markdown(m.get("content", "")))
 
     def _boss_turn(self, run_id: str, instruction: str, history: list) -> None:
-        """One boss command: free text -> a plan applied in order (then reopen+resume if needed), or an
-        advisory reply. Mirrors the web Dock's runCommand + autoApplyPlan."""
+        """One boss command: free text -> a plan applied in order by the command service, or an
+        advisory reply. The TUI never owns engine wake-up or transition postconditions."""
+        if not self._reconcile_pending(run_id, history):
+            self.console.print("[yellow]pending command is not complete; no new plan was requested.[/yellow]")
+            return
         prior = history_for_boss(history[:-1])              # cleaned history minus the new user turn
         try:
             with self.console.status("boss is reading & deciding…", spinner="dots"):
@@ -456,45 +541,256 @@ class Tui:
             return [actions[i] for i in picks]
 
     def _apply_plan(self, run_id: str, history: list, actions: list) -> None:
-        # Probe liveness once: a finished or zombie run needs reopen+resume to actually run engine steps.
-        try:
-            state = (self.api.get(f"/api/runs/{run_id}/state") or {}).get("state") or {}
-        except ApiError:
-            state = {}
-        engine_dead = bool(state.get("finished")) or state.get("engine_running") is False
-        needs_resume = False
-        for action in actions:
+        """Apply an ordered boss plan through the authoritative command lifecycle.
+
+        The command service owns event validation, engine wake-up and postconditions. In particular,
+        this method must never append ``run_reopened`` after ``run_abort``: doing so clears the pending
+        finalize and resumes computation instead of wrapping the run up.
+        """
+        if not self._reconcile_pending(run_id, history):
+            self.console.print("[yellow]plan held: a previous command is still pending.[/yellow]")
+            return
+        for index, action in enumerate(actions):
             label = action.get("label") or action.get("type", "action")
             turn = {"role": "action", "action": action, "status": "running"}
+            staged_index = None
             try:
-                self.api.post(f"/api/runs/{run_id}/control",
-                              {"type": action.get("type"), "data": action.get("data") or {}})
-                turn["status"] = "done"
-                self.console.print(f"  [green]✓[/green] [cyan]{label}[/cyan]")
-                if engine_dead and action_needs_engine(action):
-                    needs_resume = True
+                if action.get("type") == "__refresh_report__":
+                    result = self.api.refresh_report(run_id)
+                    if not isinstance(result, dict) or result.get("ok") is not True:
+                        turn["status"] = "failed"
+                        error = (result or {}).get("error") if isinstance(result, dict) else None
+                        turn["error"] = error or "report refresh returned no confirmed success"
+                        self.console.print(f"  [red]✗[/red] {label} — {turn['error']}")
+                    else:
+                        turn["status"] = "done"
+                        self.console.print(f"  [green]✓[/green] [cyan]{label}[/cyan]")
+                else:
+                    key = str(uuid.uuid4())
+                    turn["status"] = "pending"
+                    turn["command"] = _staged_command(
+                        str(action.get("type") or ""), action.get("data") or {}, key)
+                    history.append(turn)
+                    staged_index = len(history) - 1
+                    if self._persist(run_id, turn) is False:
+                        turn["status"] = "failed"
+                        turn["error"] = "could not durably stage command identity; nothing was submitted"
+                        self.console.print(f"  [red]✗[/red] {label} — {turn['error']}")
+                        return
+                    result = self.api.run_command(
+                        run_id, str(action.get("type") or ""), action.get("data") or {},
+                        idempotency_key=key)
+                    turn["command"] = _observed_command(result, turn.get("command"))
+                    status = result.get("status")
+                    if status in _COMMAND_DONE:
+                        turn["status"] = "done"
+                        suffix = " (already satisfied)" if status == "noop" else ""
+                        self.console.print(f"  [green]✓[/green] [cyan]{label}[/cyan]{suffix}")
+                    elif status in _COMMAND_PENDING:
+                        turn["status"] = "pending"
+                        self.console.print(f"  [yellow]…[/yellow] [cyan]{label}[/cyan] — requested, pending")
+                    elif status in _COMMAND_FAILED:
+                        turn["status"] = "failed"
+                        turn["error"] = _command_error(result)
+                        self.console.print(f"  [red]✗[/red] {label} — {turn['error']}")
+                    else:
+                        turn["status"] = "failed"
+                        turn["error"] = f"unexpected command status: {status or 'missing'}"
+                        self.console.print(f"  [red]✗[/red] {label} — {turn['error']}")
             except ApiError as e:
-                turn["status"] = "failed"
-                self.console.print(f"  [red]✗[/red] {label} — {e}")
-            history.append(turn)
-            self._persist(run_id, turn)
-        if needs_resume:
-            try:
-                with self.console.status("reopening & resuming the run…", spinner="dots"):
-                    self.api.post(f"/api/runs/{run_id}/control", {"type": "run_reopened", "data": {}})
-                    self.api.post(f"/api/runs/{run_id}/resume", {})
-                self.console.print("[green]↻ resumed — running the plan[/green]")
-            except (ApiError, KeyboardInterrupt) as e:
-                self.console.print(f"[red]resume failed: {e}[/red]")
-        elif engine_dead:
-            self.console.print("[dim]saved — these take effect on the next reopen[/dim]")
+                ambiguous = command_error_transient(e)
+                turn["status"] = "pending" if ambiguous else "failed"
+                turn["error"] = str(e)
+                if ambiguous:
+                    self.console.print(
+                        f"  [yellow]…[/yellow] {label} — response lost; checking the staged command id")
+                else:
+                    self.console.print(f"  [red]✗[/red] {label} — {e}")
+            if staged_index is None:
+                history.append(turn)
+                self._persist(run_id, turn)
+            else:
+                self._persist_command_status(run_id, turn, action_index=staged_index)
+            remaining = len(actions) - index - 1
+            if turn["status"] == "pending":
+                if remaining:
+                    self.console.print(f"  [yellow]{remaining} later plan step(s) were not submitted; "
+                                       "retry after this command completes.[/yellow]")
+                return
+            if turn["status"] == "failed":
+                if remaining:
+                    self.console.print(f"  [yellow]{remaining} later plan step(s) were not submitted "
+                                       "because this ordered step failed.[/yellow]")
+                return
+            if action.get("type") == "run_abort":
+                if remaining:
+                    self.console.print(f"  [dim]{remaining} later plan step(s) were not submitted: "
+                                       "the run is finalized.[/dim]")
+                return
 
-    def _control(self, run_id: str, etype: str, data: dict) -> None:
+    def _control(self, run_id: str, etype: str, data: dict, *, history: Optional[list] = None,
+                 label: Optional[str] = None) -> dict:
+        if history is not None and not self._reconcile_pending(run_id, history):
+            self.console.print("[yellow]another run command is still pending.[/yellow]")
+            return {"status": "executing", "error": "another command is pending", "event_type": etype}
+        key = None
+        staged_turn = None
+        staged_index = None
+        if history is not None:
+            key = str(uuid.uuid4())
+            staged_turn = {
+                "role": "action", "action": {"type": etype, "data": data, "label": label or etype},
+                "status": "pending",
+                "command": _staged_command(etype, data, key),
+            }
+            history.append(staged_turn)
+            staged_index = len(history) - 1
+            if self._persist(run_id, staged_turn) is False:
+                staged_turn["status"] = "failed"
+                staged_turn["error"] = "could not durably stage command identity; nothing was submitted"
+                self.console.print(f"[red]{etype} failed: {staged_turn['error']}[/red]")
+                return {"status": "failed", "error": staged_turn["error"], "event_type": etype}
         try:
-            self.api.post(f"/api/runs/{run_id}/control", {"type": etype, "data": data})
-            self.console.print(f"[green]✓ {etype}[/green]")
+            result = self.api.run_command(run_id, etype, data, idempotency_key=key)
+            status = result.get("status")
+            if staged_turn is not None:
+                staged_turn["command"] = _observed_command(result, staged_turn.get("command"))
+            if status in _COMMAND_DONE:
+                suffix = " (already satisfied)" if status == "noop" else ""
+                self.console.print(f"[green]✓ {etype}{suffix}[/green]")
+                if staged_turn is not None:
+                    staged_turn["status"] = "done"
+            elif status in _COMMAND_PENDING:
+                self.console.print(f"[yellow]… {etype} requested — pending[/yellow]")
+            elif status in _COMMAND_FAILED:
+                self.console.print(f"[red]{etype} failed: {_command_error(result)}[/red]")
+                if staged_turn is not None:
+                    staged_turn["status"] = "failed"
+                    staged_turn["error"] = _command_error(result)
+            else:
+                self.console.print(f"[red]{etype} failed: unexpected command status {status or 'missing'}[/red]")
+                if staged_turn is not None:
+                    staged_turn["status"] = "failed"
+                    staged_turn["error"] = f"unexpected command status: {status or 'missing'}"
+            if staged_turn is not None:
+                self._persist_command_status(run_id, staged_turn, action_index=staged_index)
+            return result
         except ApiError as e:
-            self.console.print(f"[red]{etype} failed: {e}[/red]")
+            ambiguous = command_error_transient(e)
+            self.console.print(
+                f"[yellow]… {etype} response lost — checking the staged command id[/yellow]"
+                if ambiguous else f"[red]{etype} failed: {e}[/red]")
+            if staged_turn is not None:
+                staged_turn["status"] = "pending" if ambiguous else "failed"
+                staged_turn["error"] = str(e)
+                self._persist_command_status(run_id, staged_turn, action_index=staged_index)
+            if ambiguous and staged_turn is not None:
+                return {**staged_turn["command"], "status": "executing", "error": str(e)}
+            return {"status": "failed", "error": str(e), "event_type": etype}
+
+    def _reconcile_pending(self, run_id: str, history: list) -> bool:
+        """Refresh persisted pending action rows before allowing another ordered action.
+
+        Chat storage is append-only, so terminal reconciliations are persisted as compact
+        ``command_status`` rows. ``_load_chat`` folds those rows back into their original action; this
+        keeps the transcript to one visible action while making the outcome survive a new process.
+        Transport/5xx failures leave the row pending. A 404 is terminal only for a command whose POST
+        was confirmed: a pre-POST/ambiguous staged row still owns its exact key+intent, so it first
+        replays that same logical request through the bounded command client. 401/403 keep it pending
+        so restored credentials can retry without lying about the command's outcome.
+        """
+        unresolved = False
+        for action_index, turn in enumerate(history):
+            if turn.get("role") != "action" or turn.get("status") != "pending":
+                continue
+            command = turn.get("command") or {}
+            command_id = command.get("id")
+            label = (turn.get("action") or {}).get("label") or command.get("event_type") or "action"
+            if not command_id:
+                turn["status"] = "failed"
+                turn["error"] = "pending command has no durable id; its outcome cannot be verified"
+                self._persist_command_status(run_id, turn, action_index=action_index)
+                self.console.print(f"  [red]✗[/red] {label} — {turn['error']}")
+                continue
+            try:
+                record = self.api.get_run_command(run_id, command_id)
+            except ApiError as exc:
+                # ``TuiApi._command_record`` reports a malformed/mismatched 200 envelope as an
+                # ApiError(status=200).  That is an authoritative local protocol failure, not a
+                # transient outage: keeping it pending would block every later control forever.
+                replay = _staged_replay(turn) if exc.status == 404 else None
+                if replay is not None:
+                    key, event_type, data = replay
+                    try:
+                        # GET may race a still-queued first POST. Re-submit the exact durable key and
+                        # payload; server idempotency serializes both arrivals into one command/event.
+                        record = self.api.run_command(
+                            run_id, event_type, data, wait_s=2.0, idempotency_key=key)
+                    except ApiError as retry_exc:
+                        if command_error_transient(retry_exc) or retry_exc.status in (401, 403):
+                            unresolved = True
+                            kind = ("access denied" if retry_exc.status in (401, 403)
+                                    else "same-command status unavailable")
+                            self.console.print(
+                                f"  [yellow]…[/yellow] {label} — {kind}: {retry_exc}")
+                            continue
+                        turn["status"] = "failed"
+                        turn["error"] = f"staged command could not be recovered: {retry_exc}"
+                        self._persist_command_status(run_id, turn, action_index=action_index)
+                        self.console.print(f"  [red]✗[/red] {label} — {turn['error']}")
+                        continue
+                elif exc.status in (200, 404):
+                    turn["status"] = "failed"
+                    if exc.status == 200:
+                        prefix = "invalid command response"
+                    elif command.get("submit_unconfirmed") is True:
+                        prefix = "staged command recovery data is invalid"
+                    else:
+                        prefix = "command record is unavailable"
+                    turn["error"] = f"{prefix}: {exc}"
+                    self._persist_command_status(run_id, turn, action_index=action_index)
+                    self.console.print(f"  [red]✗[/red] {label} — {turn['error']}")
+                    continue
+                if replay is None:
+                    unresolved = True
+                    kind = "access denied" if exc.status in (401, 403) else "status unavailable"
+                    self.console.print(f"  [yellow]…[/yellow] {label} — {kind}: {exc}")
+                    continue
+
+            turn["command"] = _observed_command(record, command)
+            status = record.get("status")
+            if status in _COMMAND_DONE:
+                turn["status"] = "done"
+                turn.pop("error", None)
+                self._persist_command_status(run_id, turn, action_index=action_index)
+                suffix = " (already satisfied)" if status == "noop" else ""
+                self.console.print(f"  [green]✓[/green] [cyan]{label}[/cyan]{suffix}")
+            elif status in _COMMAND_FAILED:
+                turn["status"] = "failed"
+                turn["error"] = _command_error(record)
+                self._persist_command_status(run_id, turn, action_index=action_index)
+                self.console.print(f"  [red]✗[/red] {label} — {turn['error']}")
+            elif status in _COMMAND_PENDING:
+                unresolved = True
+            else:
+                unresolved = True
+                self.console.print(
+                    f"  [yellow]…[/yellow] {label} — unexpected command status {status or 'missing'}")
+        return not unresolved
+
+    def _persist_command_status(self, run_id: str, turn: dict, *, action_index: Optional[int] = None) -> None:
+        command = turn.get("command") or {}
+        update = {
+            "role": "command_status",
+            "command_id": command.get("id"),
+            "status": turn.get("status"),
+            "command": command,
+        }
+        if action_index is not None:
+            update["action_index"] = action_index
+        if turn.get("error"):
+            update["error"] = turn["error"]
+        self._persist(run_id, update)
 
     def _append_and_show(self, run_id: str, history: list, turn: dict) -> None:
         from rich.markdown import Markdown
@@ -503,19 +799,54 @@ class Tui:
         self.console.print(Markdown(turn.get("content", "")))
         self._persist(run_id, turn)
 
-    def _persist(self, run_id: str, turn: dict) -> None:
+    def _persist(self, run_id: str, turn: dict) -> bool:
         """Best-effort durable append to the run's chat.jsonl (the same sidecar the web UI writes), so a
         TUI conversation survives and shows up in the browser too. Never fails the chat on error."""
         try:
-            self.api.post(f"/api/runs/{run_id}/chat-log", turn)
+            self.api.post(f"/api/runs/{_url_id(run_id)}/chat-log", turn)
         except ApiError:
-            pass
+            return False
+        return True
 
     def _load_chat(self, run_id: str) -> list:
         try:
-            return list(self.api.get(f"/api/runs/{run_id}/chat-log") or [])
+            rows = list(self.api.get(f"/api/runs/{_url_id(run_id)}/chat-log") or [])
         except ApiError:
             return []
+        history: list[dict] = []
+        by_command: dict[str, dict] = {}
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            if row.get("role") == "command_status":
+                row_command_id = row.get("command_id")
+                target = by_command.get(str(row_command_id or ""))
+                row_command = row.get("command") if isinstance(row.get("command"), dict) else {}
+                staged_id = row_command.get("staged_id")
+                if target is None and staged_id:
+                    target = by_command.get(str(staged_id))
+                if target is None and not row_command_id and isinstance(row.get("action_index"), int):
+                    index = row["action_index"]
+                    if 0 <= index < len(history) and history[index].get("role") == "action":
+                        target = history[index]
+                if target is not None:
+                    target["status"] = row.get("status") or target.get("status")
+                    if isinstance(row.get("command"), dict):
+                        target["command"] = row["command"]
+                    if row.get("error"):
+                        target["error"] = row["error"]
+                    else:
+                        target.pop("error", None)
+                    current_id = (target.get("command") or {}).get("id")
+                    if current_id:
+                        by_command[str(current_id)] = target
+                continue
+            history.append(row)
+            if row.get("role") == "action":
+                command_id = (row.get("command") or {}).get("id")
+                if command_id:
+                    by_command[str(command_id)] = row
+        return history
 
     def _run_help(self) -> None:
         self.console.print(

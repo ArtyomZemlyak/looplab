@@ -5,6 +5,9 @@ node detail, the control append, and config masking through FastAPI's TestClient
 from __future__ import annotations
 
 import json
+import os
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import anyio
@@ -144,6 +147,14 @@ def test_reserved_run_id_is_case_insensitive(tmp_path):
         r = client.post("/api/start", json={"run_id": rid, "task": {"kind": "quadratic",
                                                                      "goal": "g", "direction": "min"}})
         assert r.status_code == 400 and "reserved" in r.json()["detail"], rid
+
+
+def test_start_rejects_filesystem_ambiguous_run_names(tmp_path):
+    client = TestClient(make_app(tmp_path))
+    for rid in ("trailing.", " trailing", "trailing ", "bad:name", "NUL", "com1.txt"):
+        response = client.post(
+            "/api/start", json={"run_id": rid, "task_file": str(TASK)})
+        assert response.status_code == 400, rid
 
 
 def test_public_state_drops_stdout_and_redacts_error(tmp_path):
@@ -581,6 +592,45 @@ def test_start_validation_and_env(tmp_path, monkeypatch):
     assert client.post("/api/start", json={"task_file": str(TASK), "run_id": "fromui"}).status_code == 409
 
 
+def test_concurrent_start_reserves_run_before_popen(tmp_path, monkeypatch):
+    """Two requests that both pass the advisory no-events preflight still launch exactly one engine.
+
+    The first Popen is held behind a barrier, keeping the engine.lock window open while the second
+    request reaches the same run. The durable start lease must make that second request a 409 rather
+    than a second detached child.
+    """
+    import looplab.serve.routers.control as control_router
+
+    entered = threading.Event()
+    release = threading.Event()
+    calls = []
+
+    def blocked_spawn(args, **kwargs):
+        calls.append((args, kwargs))
+        entered.set()
+        assert release.wait(3), "test did not release the blocked start"
+        # Return a PID the OS can prove belongs to a live process. A made-up dead PID is now
+        # intentionally retired immediately by the spawn-lease hardening, which would authorize a
+        # later (non-overlapping) retry and make this concurrency fixture test the wrong boundary.
+        return os.getpid()
+
+    monkeypatch.setattr(control_router, "_spawn_engine", blocked_spawn)
+    client = TestClient(make_app(tmp_path))
+    payload = {"task_file": str(TASK), "run_id": "one-owner"}
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first = pool.submit(client.post, "/api/start", json=payload)
+        assert entered.wait(3), "first request never reached Popen"
+        second = pool.submit(client.post, "/api/start", json=payload)
+        release.set()
+        responses = [first.result(timeout=5), second.result(timeout=5)]
+
+    assert sorted(r.status_code for r in responses) == [200, 409]
+    assert len(calls) == 1
+    conflict = next(r for r in responses if r.status_code == 409)
+    assert "start is already in progress" in conflict.json()["detail"]
+
+
 def test_inject_node_control_append(tmp_path):
     _build_run(tmp_path)
     client = TestClient(make_app(tmp_path))
@@ -655,6 +705,124 @@ def test_sse_emits_state_snapshot(tmp_path):
                 break
             chunk = next(resp.iter_lines())
         assert "id:" in chunk or "state" in chunk
+
+
+def test_sse_done_waits_for_finished_engine_to_exit(tmp_path, monkeypatch):
+    """A folded run_finished event is a FINISHING state while the driver still owns engine.lock.
+
+    The stream must deliver the live finished snapshot, stay connected, then emit a second snapshot
+    and ``done`` only after liveness flips false. Otherwise the browser closes/reconnects every 2.5s
+    throughout terminal write-out.
+    """
+    import looplab.serve.appstate as appstate
+
+    _build_run(tmp_path)
+    probes = iter((True, False))
+    monkeypatch.setattr(appstate, "_engine_alive", lambda _rd: next(probes, False))
+    client = TestClient(make_app(tmp_path))
+
+    response = client.get("/api/runs/demo/events")
+    assert response.status_code == 200
+    frames = [frame for frame in response.text.split("\n\n") if frame]
+    state_frames = [frame for frame in frames if "event: state" in frame]
+    done_index = next(i for i, frame in enumerate(frames) if "event: done" in frame)
+
+    assert len(state_frames) == 2
+    assert '"engine_running": true' in state_frames[0]
+    assert '"engine_running": false' in state_frames[1]
+    assert done_index > frames.index(state_frames[1])
+
+
+def test_sse_done_waits_for_error_finalize_recovery(tmp_path):
+    """A dead driver plus run_finished(error) is finalization-stalled, not terminal-ready."""
+    rd = tmp_path / "recovering"
+    rd.mkdir()
+    store = EventStore(rd / "events.jsonl")
+    store.append("run_started", {
+        "run_id": "recovering", "task_id": "t", "goal": "g", "direction": "min"})
+    store.append("run_abort", {"reason": "operator"})
+    store.append("run_finished", {"reason": "error", "error": "late wrap-up failed"})
+
+    # Let the stream expose the stalled/error snapshot first, then model a successful same-intent
+    # recovery so the request terminates and the ordering is assertable without an endless client.
+    recovered = threading.Event()
+
+    def finish_recovery():
+        store.append("run_finished", {"reason": "aborted"})
+        recovered.set()
+
+    timer = threading.Timer(0.6, finish_recovery)
+    timer.start()
+    try:
+        response = TestClient(make_app(tmp_path)).get("/api/runs/recovering/events")
+    finally:
+        timer.join(timeout=2)
+    assert recovered.is_set() and response.status_code == 200
+    frames = [frame for frame in response.text.split("\n\n") if frame]
+    states = [frame for frame in frames if "event: state" in frame]
+    done_index = next(i for i, frame in enumerate(frames) if "event: done" in frame)
+    assert any('"phase": "finalizing"' in frame for frame in states[:-1])
+    assert '"phase": "finished"' in states[-1]
+    assert done_index > frames.index(states[-1])
+
+
+def test_scoped_incomplete_finalize_is_visible_and_blocks_reset_and_legacy_control_resume(
+        tmp_path, monkeypatch):
+    """A durable terminal event is still ``finalizing`` until its scoped projection marker lands.
+
+    The state/list projections must agree. Reset and a legacy ``/control`` resume append fail closed,
+    while the stop-aware ``/resume`` driver remains available to finish the same terminal scope. An
+    unscoped legacy terminal remains finished for backwards compatibility.
+    """
+    import looplab.serve.routers.control as control_router
+
+    def seed(name: str, *, scope: str | None):
+        rd = tmp_path / name
+        rd.mkdir()
+        store = EventStore(rd / "events.jsonl")
+        store.append("run_started", {
+            "run_id": name, "task_id": "t", "goal": "g", "direction": "min"})
+        payload = {"reason": "aborted"}
+        if scope is not None:
+            payload["finalize_scope"] = scope
+        store.append("run_finished", payload)
+        (rd / "task.snapshot.json").write_text(
+            '{"kind":"quadratic","goal":"g","direction":"min"}', encoding="utf-8")
+        return rd
+
+    seed("scoped", scope="finish:1")
+    seed("legacy", scope=None)
+    spawns = []
+
+    def recovery_spawn(args, **kwargs):
+        spawns.append((args, kwargs))
+        return 9201
+
+    monkeypatch.setattr(control_router, "_spawn_engine", recovery_spawn)
+    client = TestClient(make_app(tmp_path))
+
+    scoped_state = client.get("/api/runs/scoped/state").json()["state"]
+    legacy_state = client.get("/api/runs/legacy/state").json()["state"]
+    listed = {row["run_id"]: row for row in client.get("/api/runs").json()}
+    assert scoped_state["finished"] is True
+    assert scoped_state["finalization_incomplete"] is True
+    assert scoped_state["phase"] == "finalizing"
+    assert listed["scoped"]["finalization_incomplete"] is True
+    assert listed["scoped"]["phase"] == "finalizing"
+    assert legacy_state["finalization_incomplete"] is False
+    assert legacy_state["phase"] == listed["legacy"]["phase"] == "finished"
+
+    reset = client.post("/api/runs/scoped/reset")
+    legacy_resume = client.post(
+        "/api/runs/scoped/control", json={"type": "resume", "data": {}})
+    assert reset.status_code == 409 and "projections are incomplete" in reset.json()["detail"]
+    assert legacy_resume.status_code == 409
+    assert legacy_resume.json()["detail"]["code"] == "finalize_in_progress"
+    assert spawns == []
+
+    recovery = client.post("/api/runs/scoped/resume")
+    assert recovery.status_code == 200
+    assert len(spawns) == 1 and spawns[0][0][0] == "resume"
 
 
 def test_g1_auth_token_required_on_mutating(tmp_path, monkeypatch):

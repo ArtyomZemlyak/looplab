@@ -17,7 +17,7 @@ from looplab.events.types import (
     EV_FORESIGHT_SELECTED, EV_FORK,
     EV_FORK_DONE, EV_HINT, EV_HOLDOUT_EVALUATED, EV_HOST_GRADING, EV_HYPOTHESIS_ADDED, EV_HYPOTHESIS_MERGED,
     EV_HYPOTHESIS_RANKED, EV_HYPOTHESIS_UPDATED, EV_INJECT_DONE, EV_INJECT_NODE, EV_LESSONS_DISTILLED,
-    EV_LESSONS_REFRESHED, EV_LLM_COST, EV_NODE_ABORT, EV_NODE_BUILDING, EV_NODE_CONFIRMED,
+    EV_LESSONS_REFRESHED, EV_LLM_COST, EV_LLM_USAGE, EV_NODE_ABORT, EV_NODE_BUILDING, EV_NODE_CONFIRMED,
     EV_NODE_CREATED, EV_NODE_EVALUATED, EV_NODE_FAILED, EV_NODE_REPAIRED, EV_NODE_RESET,
     EV_NOVELTY_REJECTED, EV_PAUSE, EV_STAGE_FINISHED,
     EV_POLICY_DECISION, EV_PROMOTE, EV_PROXY_SCORED, EV_REPORT_GENERATED,
@@ -84,13 +84,16 @@ def hard_flagged_ids(st: RunState) -> set:
 
 
 class _FoldCtx:
-    """The fold's cross-arm state: `best_confirmed` (EV_BEST_CONFIRMED -> _select_best) is the
-    only value that flows BETWEEN arms without living on `st` — threaded explicitly so every
-    handler stays a pure function of its arguments."""
-    __slots__ = ("best_confirmed",)
+    """Cross-arm fold state: confirmed-best selection plus legacy/ledger cost mode."""
+    __slots__ = ("best_confirmed", "llm_usage_seen", "llm_usage_ids")
 
     def __init__(self):
         self.best_confirmed: int | None = None
+        # Legacy summaries are last-write-wins only until the durable delta ledger begins.
+        self.llm_usage_seen = False
+        # New ledgers retry an ambiguously acknowledged append with the same identity. Replay is
+        # first-write-wins for that ID; legacy usage events without an ID remain additive.
+        self.llm_usage_ids: set[str] = set()
 
 def _on_run_started(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     # Read with defaults like every other fold handler (RunState already defaults these to ""): the
@@ -437,8 +440,60 @@ def _on_diversity_archive(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> N
 def _on_coverage_snapshot(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     st.coverage_snapshots.append(d)   # audit-only breadth curve; the at_node gate dedups on resume
 
+_MAX_LLM_COUNTER = (1 << 63) - 1
+_MAX_LLM_COST = 1.7976931348623157e308
+
+
+def _llm_counter(value) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        return 0
+    return value if 0 <= value <= _MAX_LLM_COUNTER else 0
+
+
+def _llm_cost_value(value) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return 0.0
+    out = float(value)
+    return out if math.isfinite(out) and out >= 0.0 else 0.0
+
+
+def _clean_llm_totals(d: dict | None) -> dict:
+    try:
+        raw = dict(d) if isinstance(d, dict) else {}
+    except Exception:  # noqa: BLE001 - a corrupt event must not poison every replay
+        raw = {}
+    out = dict(raw)
+    out.update({
+        "cost": _llm_cost_value(raw.get("cost")),
+        "calls": _llm_counter(raw.get("calls")),
+        "prompt_tokens": _llm_counter(raw.get("prompt_tokens")),
+        "completion_tokens": _llm_counter(raw.get("completion_tokens")),
+        "total_tokens": _llm_counter(raw.get("total_tokens")),
+    })
+    return out
+
+
 def _on_llm_cost(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
-    st.llm_cost = d
+    if not ctx.llm_usage_seen:
+        # Compatibility base: latest legacy summary before the new ledger. Once a usage delta is
+        # present, later summaries are derived snapshots and may not overwrite durable totals.
+        st.llm_cost = _clean_llm_totals(d)
+
+
+def _on_llm_usage(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
+    usage_id = d.get("usage_id")
+    if isinstance(usage_id, str) and usage_id:
+        if usage_id in ctx.llm_usage_ids:
+            ctx.llm_usage_seen = True
+            return
+        ctx.llm_usage_ids.add(usage_id)
+    base = _clean_llm_totals(st.llm_cost)
+    delta = _clean_llm_totals(d)
+    base["cost"] = min(_MAX_LLM_COST, float(base["cost"]) + float(delta["cost"]))
+    for key in ("calls", "prompt_tokens", "completion_tokens", "total_tokens"):
+        base[key] = min(_MAX_LLM_COUNTER, int(base[key]) + int(delta[key]))
+    st.llm_cost = base
+    ctx.llm_usage_seen = True
 
 def _on_ablate(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     st.ablations.append(d)   # {parent_id, impacts} — parameter-sensitivity audit
@@ -719,6 +774,7 @@ _HANDLERS = {
     EV_DIVERSITY_ARCHIVE: _on_diversity_archive,
     EV_COVERAGE_SNAPSHOT: _on_coverage_snapshot,
     EV_LLM_COST: _on_llm_cost,
+    EV_LLM_USAGE: _on_llm_usage,
     EV_ABLATE: _on_ablate,
     EV_POLICY_DECISION: _on_policy_decision,
     EV_STRATEGY_DECISION: _on_strategy_decision,

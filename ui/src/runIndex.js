@@ -1,6 +1,53 @@
 export const ALL_RUNS = '__all__'
 export const UNASSIGNED_RUNS = '__unassigned__'
 
+const stopFinishedWithError = run => String(run?.stop_reason || '').toLowerCase() === 'error'
+
+// One lifecycle truth for the run list, workspace header, and transport. A run_finished(error)
+// written while an explicit finalize is pending is not a completed finalization, and a process that
+// is still alive after run_finished is still doing terminal write-out (report/lessons/cost). Neither
+// state may expose Resume/Replay or auto-open an incomplete report.
+export function finalizationIncomplete(run = {}) {
+  if (run.phase === 'finalizing') return true
+  if (!run.stop_requested) return false
+  return !run.finished || stopFinishedWithError(run) || run.engine_running === true
+}
+
+export function terminalReady(run = {}) {
+  return !!run.finished && !finalizationIncomplete(run) && run.engine_running !== true
+}
+
+export function runLifecycle(run = {}) {
+  const incomplete = finalizationIncomplete(run)
+  if (incomplete) return {
+    finalizationIncomplete: true,
+    terminalReady: false,
+    mode: run.engine_running === false ? 'finalization-stalled' : 'finalizing',
+  }
+  // A natural finish and an explicit successful finalize both have a short process write-out window.
+  if (run.finished && run.engine_running === true) return {
+    finalizationIncomplete: false, terminalReady: false, mode: 'finishing',
+  }
+  if (run.finished) return { finalizationIncomplete: false, terminalReady: true, mode: 'finished' }
+  if (run.paused || run.phase === 'paused') return {
+    finalizationIncomplete: false, terminalReady: false, mode: 'paused',
+  }
+  if (run.phase === 'approval' || run.phase === 'spec_approval') return {
+    finalizationIncomplete: false, terminalReady: false, mode: 'approval',
+  }
+  if (run.engine_running === false) return {
+    finalizationIncomplete: false, terminalReady: false, mode: 'stalled',
+  }
+  return { finalizationIncomplete: false, terminalReady: false, mode: 'running' }
+}
+
+export function lifecyclePhaseLabel(run = {}) {
+  const mode = runLifecycle(run).mode
+  if (mode === 'finalization-stalled') return 'finalization stalled'
+  if (mode === 'finalizing' || mode === 'finishing' || mode === 'finished') return mode
+  return run.phase || mode || '—'
+}
+
 export function indexProjects(projects = []) {
   const byParent = {}
   const byId = Object.fromEntries(projects.map(project => [project.id, project]))
@@ -18,11 +65,11 @@ export function indexProjects(projects = []) {
 }
 
 export function effectiveRunStatus(run) {
-  if (run.finished) return 'finished'
-  if (run.paused || run.phase === 'paused') return 'paused'
-  if (run.phase === 'approval' || run.phase === 'spec_approval') return 'approval'
-  if (run.engine_running === false) return 'stalled'
-  return 'running'
+  const mode = runLifecycle(run).mode
+  // The list has one operator-facing "finalizing" filter. Fold its stalled and terminal-write-out
+  // sub-phases into it while the workspace transport keeps their more precise copy/actions.
+  if (mode === 'finalization-stalled' || mode === 'finishing') return 'finalizing'
+  return mode
 }
 
 export function scopeRuns(runs = [], project = ALL_RUNS, projects = []) {

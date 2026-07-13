@@ -74,6 +74,7 @@ EV_DIVERSITY_ARCHIVE = "diversity_archive"
 # can plot coverage over time. See looplab/search/coverage.py.
 EV_COVERAGE_SNAPSHOT = "coverage_snapshot"
 EV_LLM_COST = "llm_cost"
+EV_LLM_USAGE = "llm_usage"  # durable sanitized provider-call delta; folded cumulatively
 EV_ABLATE = "ablate"
 EV_POLICY_DECISION = "policy_decision"
 EV_STRATEGY_DECISION = "strategy_decision"
@@ -132,6 +133,8 @@ EV_LOG_REPAIRED = "log_repaired"                # operator `repair-log`: provena
 EV_REFLECTION_NOTE = "reflection_note"          # run-end LLM distillation: causal note + lessons + auto-skills
 EV_LESSONS_RECONCILED = "lessons_reconciled"    # a node re-eval changed an outcome → this run's lessons
 #                                                 citing it were retired + re-derived from the corrected state
+EV_COMMAND_ACK = "command_ack"                  # engine folded a server command intent (causal ack)
+EV_FINALIZE_STEP = "finalize_step"              # one logical finalize's replay-safe step gate
 EV_SETUP_STARTED = "setup_started"
 EV_SETUP_STEP = "setup_step"
 EV_SETUP_FINISHED = "setup_finished"
@@ -157,10 +160,13 @@ ALL_EVENT_TYPES: frozenset[str] = frozenset(
 # an operator `replace` hint can change which STEERING text survives a resume — accepted:
 # steering is transient advice; selection is what replay must pin. EV_HYPOTHESIS_ADDED only
 # appends to the `hypotheses_added` board list — same class: board order is transient advice,
-# selection is untouched.) `research_cadence._record_deep_research` appends all three from the
-# concurrent task and asserts each against this set, so a future selection-affecting append from
-# that task is an AssertionError in every test that exercises it, not a nondeterministic replay.
-BACKGROUND_APPENDABLE: frozenset[str] = frozenset({EV_RESEARCH_COMPLETED, EV_HINT, EV_HYPOTHESIS_ADDED})
+# selection is untouched.) `research_cadence._record_deep_research` gates its three domain records;
+# EV_LLM_USAGE can additionally arrive through the durable accountant sink while that background
+# role is calling its client. The splice test below proves every member remains selection-neutral
+# regardless of thread-dependent position.
+BACKGROUND_APPENDABLE: frozenset[str] = frozenset({
+    EV_RESEARCH_COMPLETED, EV_HINT, EV_HYPOTHESIS_ADDED, EV_LLM_USAGE,
+})
 
 # Event types the fold DELIBERATELY does not handle — diagnostic / sidecar records that exist for the
 # live activity feed, the audit trail, and observability, but never mutate the RunState projection
@@ -173,4 +179,5 @@ DIAGNOSTIC_EVENTS: frozenset[str] = frozenset({
     EV_SETUP_STARTED, EV_SETUP_STEP, EV_DRIFT_UNAVAILABLE, EV_INJECT_FAILED, EV_BUDGET,
     EV_READMODEL_SKIPPED, EV_DEPS_INSTALLED, EV_WORKSPACE_SEEDED, EV_RUN_SETUP_STARTED,
     EV_RUN_SETUP_FINISHED, EV_LOG_REPAIRED, EV_REFLECTION_NOTE, EV_LESSONS_RECONCILED,
+    EV_COMMAND_ACK, EV_FINALIZE_STEP,
 })

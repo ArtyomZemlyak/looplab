@@ -7,6 +7,19 @@ export * from './api.js'
 export * from './format.js'
 export * from './layout.js'
 
+// Browser storage is optional infrastructure, not a render prerequisite. SecurityError is common in
+// locked-down/private contexts; every preference read/write therefore degrades to an in-memory
+// default instead of blanking the whole React tree before command recovery UI can render.
+export function storageGet(key, fallback = null) {
+  try { return window.localStorage.getItem(key) ?? fallback } catch { return fallback }
+}
+export function storageSet(key, value) {
+  try { window.localStorage.setItem(key, value); return true } catch { return false }
+}
+export function storageRemove(key) {
+  try { window.localStorage.removeItem(key); return true } catch { return false }
+}
+
 // Assistant permission modes — shared by the docked assistant (AssistantBar) and the full-page view
 // (AssistantChat) so the list stays defined once.
 export const ASSISTANT_MODES = [
@@ -24,7 +37,7 @@ export const tokText = (tok) => (tok && tok.text != null) ? tok.text : (typeof t
 export function workingId(state) {
   // A stalled run (engine_running===false, not finished) has no live work — no "working" pulse on a
   // node whose dev session already died.
-  if (!state || state.finished || state.paused || state.engine_running === false) return null
+  if (!state || state.finished || state.paused || state.phase === 'finalizing' || state.stop_requested || state.engine_running === false) return null
   // A node mid-BUILD (dev session running) is the true "working" node — it precedes any pending eval.
   if (state.building && state.building.node_id != null) return state.building.node_id
   const pend = Object.values(state.nodes || {}).filter(n => n.status === 'pending')

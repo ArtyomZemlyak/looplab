@@ -31,22 +31,29 @@ the end, the top candidates can be **confirmed** under multiple seeds, and the b
 Researcher → Novelty gate → Developer → Sandbox → Evaluator → trust/confirm → policy picks next → repeat → champion
 ```
 
-## Event log = source of truth
+## Event log = canonical replay state
 
-The orchestrator is the **sole writer** of an append-only event log, `events.jsonl`. Everything that
-happens — a node created, code run, a metric recorded, a merge, a confirmation, an approval — is an
-appended event. Nothing else is canonical.
+`events.jsonl` is the append-only source of truth for the **replayable run state**: nodes, metrics,
+controls, approvals, terminal scopes, and numeric LLM usage. The engine writes domain effects; the
+server writes serialized control intents; and the durable accountant may append `llm_usage` from a
+background callback. `EventStore` serializes these writers across processes.
+
+Not every artifact is an event. Full trace I/O (`spans.jsonl`), Assistant/run chat, logs, and node
+workspaces are independent sidecars. They are useful evidence, but replay does not reconstruct them
+and their absence does not change the folded research state.
 
 This buys two properties:
 
 - **Reproducibility.** `looplab replay RUN_DIR` folds the log into the current state with a pure
   function (`replay.fold`) — no side effects, identical result every time.
-- **Crash-resume.** A run can be hard-killed at any point; `looplab resume RUN_DIR` replays the log,
-  reconstructs the exact frontier, and continues. No duplicated or lost work. The append-only writer
-  tolerates a torn final line from a mid-write kill.
+- **Crash-resume.** `looplab resume RUN_DIR` replays every complete event, reconstructs the durable
+  frontier, and continues pending work. The reader tolerates a torn final line. External operations
+  have narrower guarantees: an effect not yet represented by an event/receipt can be lost, while
+  explicitly begun reflection work is recovered at-most-once rather than blindly repeated.
 
-Derived views (the SQLite read-model, the HTML tree, trace spans) are all **regenerable** from the
-log and are never read back by `replay`.
+The SQLite read-model and HTML/JSON tree projections are rebuildable from events plus whatever trace
+sidecar still exists. Trace spans themselves are original diagnostic telemetry, not regenerable from
+the event log, and are never read by `replay.fold`.
 
 ### Run directory
 
@@ -56,30 +63,211 @@ runs/<name>/
 ├── config.snapshot.json  # resolved settings at launch (secret-masked)
 ├── task.snapshot.json    # verbatim task copy → the run is self-describing
 ├── engine.lock           # single-writer lock (one live engine per run dir)
+├── .commands/            # durable command records plus execution/activity claims
+├── .llm-usage-outbox/    # numeric same-ID usage awaiting/confirming its event append
 ├── nodes/node_<id>/      # per-node eval workdirs (also confirm/ and ablate/ scratch dirs)
 ├── tree.html             # static lineage view (regenerable)
-└── spans.jsonl           # diagnostic trace spans (regenerable; never read by replay)
+├── trace.json            # derived event/trace projection for the UI
+├── chat.jsonl            # run-scoped operator/boss transcript sidecar
+└── spans.jsonl           # original diagnostic telemetry; never read by replay
 ```
 
 Because the task and config are snapshotted, a run can be resumed from its directory alone.
 
 ## Stopping & resuming a run — three verbs
 
-Operator control (the UI transport buttons, the TUI `stop/finalize/resume`, the `looplab` commands,
-and the boss chat) is exactly **three verbs**, all appended as events to the log:
+The run-lifecycle subset of operator control has exactly **three verbs**:
+`stop`/`finalize`/`resume`. Fork, reset, approve, budget, and other experiment controls remain
+separate commands. Interactive Web, boss, and TUI paths first pass through the authoritative command
+lifecycle below:
 
 | Verb | Event | Effect | Wrap-up? |
 |---|---|---|---|
-| **stop** | `pause` | Freeze the run where it is. Reversible. | **No** — no report/lessons/cost |
-| **finalize** | `run_abort` → `run_finished` | Stop **and** run the end-of-run wrap-up | **Yes** — report, cross-run lessons + KB case, cost roll-up, tree.html |
+| **stop** | `pause` | Freeze the run where it is. Reversible. | **No final wrap-up** — already-appended usage remains visible |
+| **finalize** | `run_abort` → `run_finished` | Stop **and** run the end-of-run wrap-up | **Yes** — projections/tree, cross-run lessons + KB case, cost roll-up; an agent narrative report is generated only on configured natural completion |
 | **resume** | `resume` | Continue from any stopped state (stopped / finalized / naturally finished) | — |
 
-The one real difference is **finalization**: the end-of-run wrap-up (`finalize.py`) is gated on the
-run being *finished*, and only **finalize** sets that. **stop** is a cheap freeze — so you can stop to
-look at something and `resume` with no premature/duplicate lessons, or `finalize` later to wrap it up
-(finalize works on a live *or* an already-stopped run). `resume` lifts every stopped state, so it also
-"reopens" a run that finished naturally to continue it with more budget. (Under the hood the fold still
-understands the legacy `run_reopened` alias of `resume` for old logs.)
+The one real difference is **finalization**. **stop** is a cheap freeze: it does not author the final
+case/reflection/cost summary or terminal projections, although numeric usage already appended while
+the run was live is not erased. An explicit finalize or a natural budget/search completion writes
+`run_finished` and enters
+the wrap-up. `resume` lifts an ordinary pause or a fully completed terminal state; it does not cancel
+an incomplete terminal scope. The fold still understands legacy `run_reopened` as a resume alias.
+
+### Authoritative command lifecycle
+
+The Web UI, boss tools, and TUI submit interactive controls through one server-owned lifecycle rather
+than treating an event append or process spawn as completion:
+
+```text
+POST /api/runs/{run_id}/commands       {"type": "resume", "data": {}}
+Idempotency-Key: <one key for this logical action>
+
+GET  /api/runs/{run_id}/commands/{command_id}
+POST /api/runs/{run_id}/commands/{command_id}/retry
+```
+
+The POST returns a durable command record. `accepted` and `executing` mean the request is still
+pending; only `succeeded` or `noop` mean the requested postcondition was observed. `failed`,
+`rejected`, and `timed_out` are terminal and include a safe structured error with retry/remediation
+guidance. Clients poll the GET route for a bounded time and keep saying **requested/pending** if the
+server has not reached a terminal state.
+
+An idempotency key is scoped to one payload. A retry with the same key and payload returns the same
+command, so a lost HTTP response cannot append the control event or start the engine twice; the same
+key with a different payload is rejected. A failed/timed-out command whose intent is already durable
+is retried through its same command ID, without appending the marked event again. A later GET can also
+reconcile the record if the requested postcondition arrived after the original observation deadline.
+The persisted record stores the key's digest, not the key.
+
+The command's central `ControlSpec` decides whether it is fold-only, must ensure an engine is running,
+or must preserve a pending stop while a driver finishes wrap-up. The service then observes the
+matching postcondition — for example, **stop** requires paused state with no live driver and
+**finalize** requires a non-error finished state with no live driver. Other engine-driving controls
+complete when the engine emits an exact `command_ack` for that command ID and event sequence. That
+ack means **the engine observed the intent**; it does not mean the downstream fork/reset/evaluation or
+research work itself has finished.
+
+The command service and engine acknowledgement monitor currently scan the run log from the beginning
+on each observation pass. That is correct but not yet scale-efficient: a cursor or indexed read model
+is tracked as P2 performance work before claiming command-volume scalability on very long logs.
+
+Each control type also has an explicit payload allowlist. Unknown fields and lossy coercions are
+rejected before append, so an ignored key cannot be persisted while the command reports success.
+
+Decision, event append, and driver start are serialized per run. A pre-`Popen` lease covers the gap
+before `engine.lock` appears. If a detached child remains cold past the observation deadline, the
+lease is quarantined until its lock appears or its PID is definitively dead; timeout alone cannot
+authorize a second `Popen`. A different active command returns structured
+`409 command_in_progress`; an unresolved identical intent returns `409 retry_existing_command`, which
+lets a reloaded client reattach without confusing one action's result with another. Command reads and
+writes are `no-store`, so an intermediary cannot pin an old `accepted` response.
+
+If a server crash leaves a quarantined spawn claim without knowable ownership, an operator can call
+`POST /api/start/{run_id}/resolve-claim` after the recovery delay with the exact verification phrase
+`I verified no LoopLab engine process is running`. The route cannot override a claim whose PID and
+creation identity still match a live process. Worker execution claims use the same creation-identity
+principle: elapsed heartbeat time alone cannot replace a possibly suspended live owner. New worker
+claims publish a complete owner record with an exclusive hard-link rather than exposing an empty
+authoritative file between create and write. Windows reads the native process creation FILETIME even
+without optional `psutil`. For a pre-upgrade, malformed, inaccessible-owner, or filesystem-fallback
+execution/activity claim, `POST /api/runs/{run_id}/resolve-activity-claims` is the explicit recovery
+seam after process inspection and a safety delay; it requires the exact phrase
+`I verified no LoopLab command or run activity is active` and cannot clear a claim whose exact owner
+process generation is provably alive.
+
+Creation identities are source-tagged (`psutil`, Windows FILETIME, or `/proc` start time). Unequal
+tokens prove PID reuse only when both use the same source scheme; a cross-scheme or tagged/legacy
+mismatch is inconclusive and blocks automatic takeover. This avoids replacing a live process merely
+because the optional inspection backend changed between writes; delayed exact-phrase operator
+recovery remains available when ownership is genuinely unknowable.
+
+Each new terminal attempt opens a durable scope with its exact terminal payload before `run_finished`
+and publishes `finalize_step:complete` only after the read-model build attempt (success or an explicit
+best-effort skip) and successful trace/tree projections. Until that last marker, the canonical phase
+is `finalizing` even if the engine died before or after `run_finished`; run list,
+workspace, reset/delete, and legacy mutation guards all preserve the same recovery state. The
+stop-aware `/resume` driver may finish it without appending a resume event. Wrap-up steps carry stable
+scope gates, so a projection retry does not duplicate budget/diversity/cost events or already-marked
+case/reflection work.
+The effective latest terminal controls recovery: a later outer `run_finished(reason=error)` after a
+scoped success/projection failure causes the original begun payload to be republished in that same
+scope. A configured natural-finish report uses its own durable sequence inside the scope:
+`finalize_step(begun, finish_report_planned=true) -> finalize_step(report_begun) ->` scoped
+`report_generated -> finalize_step(report, outcome=...)`. Recovery can make the first
+call when no attempt marker exists, reuses a durable report, and deliberately does not replay an
+ambiguous begun attempt with no report. That last state is recorded as incomplete rather than risking
+a second paid request.
+Reflection writes its begun marker before external/LLM work. If that attempt is interrupted, recovery
+records it as incomplete without replaying it; this deliberately guarantees at-most-once external
+writes/billing rather than silently risking duplicate memory or model side effects.
+
+Observed, run-attributable LLM usage is recorded as calls return, including calls made during
+wrap-up, before finalization can complete. Each returned provider result produces a sanitized
+numeric `llm_usage` delta (cost, call count, token counts, and an opaque usage ID only—never prompts,
+responses, model URLs, or credentials). Same-ID retries are first-write-wins, covering an append that
+committed and then raised. Engine roles and run-scoped boss/chat/per-run-report clients feed the run
+ledger. Before the event append, the ledger first attempts to atomically persist the exact sanitized
+delta as `.llm-usage-outbox/<usage_id>.json`; a successful outbox rename or event append is the first
+durable boundary. The next reconciliation/metered/destructive boundary in a fresh process drains a
+persisted record with the same ID; an exact stale record
+is acknowledged after its matching event, while malformed, conflicting, symlinked, non-regular, or
+unacknowledgeable evidence fails closed. A server client whose append remains unavailable is retained with its run-generation activity
+lease. The next metered-route entry retries the same ID before constructing a provider client; a
+reset/delete guard performs the same non-paid flush before taking its destructive sequencer. No new
+provider request or destructive mutation starts while the usage remains pending. Reset/delete also
+perform a store-only second drain under the destructive sequence; reset archives the outbox with the
+old event generation, so generation-A usage cannot appear in generation B.
+Non-run-scoped spend is excluded: global Assistant, Genesis/new-run planning, `/api/research`,
+cross-run scope reports, `/api/llm/health`, and analogous CLI/global calls have no unambiguous run
+attribution.
+
+Replay uses the latest pre-ledger `llm_cost` summary as a compatibility base, then adds unique durable
+deltas and ignores derived summaries as accounting input. A restart preserves deltas already appended.
+There is still a measurement gap if the OS/server process dies after the provider returns but before
+either the atomic outbox rename or event append completes. An ambiguous
+timeout/reset/decode/empty-response retry can issue a fresh provider request after an earlier attempt
+was accepted or billed but its usage was lost; without provider-side idempotency, only returned usage
+is ledgered, so this total is not invoice reconciliation. A cancelled stream or any response missing
+terminal usage records only what became known and cannot invent exact tokens or cost.
+Finalization refuses to mark its cost step complete while a known in-process or outbox delta remains pending and
+emits the presentation `llm_cost` summary after reflection. A custom `CostAccountant(limit=...)` is
+not seeded from the durable total after restart and is not a shared multi-role budget guard; LoopLab
+currently exposes no configured run-dollar limit, so this is a future enforcement boundary rather
+than part of the displayed durable total.
+The outbox makes known-delta restart recovery independent of the process-local retained-client
+registry. LoopLab's command/activity service is nevertheless validated for its supported single UI
+server process, not as a general multi-worker deployment.
+
+The Web Dock and Assistant store a strictly allowlisted, sanitized envelope and acquire the same exact
+per-run lock in tab-scoped session storage before POST. The lock binds the source, action, idempotency
+key, and learned command ID. If storage is blocked or the write fails, the UI does not send the POST.
+Malformed, tampered, mismatched, or unsafe stored state is quarantined as a non-resubmittable protocol
+failure instead of being replayed.
+
+Reload or a lost/network/rate-limited/invalid response shows explicit **status unavailable** recovery
+with **Check same command**, not a new intent. With a known durable ID, Dock and Assistant GET/retry
+that ID. If a POST response is lost before its ID arrives, they resubmit the same idempotency key and
+deterministic payload, which resolves to the same server record. Assistant also restores a terminal
+failure after reload and exposes **Retry same command** only when the record allows it. The shared tab lock makes a pending Assistant action visible to Dock
+and blocks a competing same-run intent on either surface, while other runs stay independent. A direct
+Assistant result remains attached to its originating run rather than appearing in a newly selected
+run. Boss tools block a conflicting control while one command is pending. The TUI derives the command
+ID from its key and durably stages that ID, exact key, and deep-copied intent **before** POST;
+ambiguous 408/425/429/5xx or lost responses keep the row pending. An early 404 on an unconfirmed POST
+causes bounded same-key/same-payload replay, so a delayed original arrival cannot turn a later fresh
+click into an additive duplicate. The TUI stops an ordered plan at the first pending step.
+
+Assistant command-backed run tools also have a durable per-session/turn mutation journal. A fresh
+turn stages each normalized run-command intent before its side effect. Recovery may consume only the exact ordered
+command-backed entries and reuses their keys; different/new intents are blocked, while direct storage
+mutations are conservatively marked outcome-uncertain and not replayed. The recovered model receives
+only read tools, Todo, and the journal-backed run-control provider: file/shell/git, knowledge writes,
+MCP, run proposals, and subagents are absent. Its persisted model-facing instruction and permission
+mode are pinned exactly; a changed raw instruction or mode is rejected with `409`. A different user
+message is rejected while an unanswered turn is dangling. Cancel keeps the session's single-turn
+slot until the old worker actually exits, so a new turn cannot overtake an already-issued mutation.
+The Web client uses the same identity boundary after reload or server-process loss: it rechecks the
+last durable `turn_id`, sends its persisted raw/display/mode once, and reattaches to the transcript
+without creating a second logical turn. Identity corruption/mismatch is a blocked alert, not a
+clean-content retry under the current mode. A completed persisted turn can be retried as a new turn,
+but that retry still carries its durable raw instruction, clean display, and original mode.
+
+Reset and delete coordinate with the run sequencer and refuse active command, execution, finalization,
+or run-generation activity claims. Run-scoped LLM/report/chat work holds such an activity lease, so a
+reset cannot redirect an old callback into the new event log. Terminal `.commands` records survive an
+in-place reset, preserving accepted same-key idempotency across generations. A fresh request created
+for generation A but delivered for the first time after reset to B still lacks a client/server
+generation precondition; this is an explicit remaining P1 rather than an exact cross-generation claim.
+
+The older `POST .../control` and `POST .../resume` routes remain compatibility surfaces. Legacy
+mutation events cannot overtake an active/retryable command or incomplete finalize; the mutation-free,
+stop-aware `/resume` route remains available specifically to attach a recovery driver. Current Web,
+boss, and TUI controls use the command lifecycle above. Report regeneration remains a background job,
+but its run-generation lease and cost events share the same destructive boundary.
+Standalone legacy CLI `stop`, `finalize`, `resume`, and `approve` commands are not yet participants in
+the server sequencer and must not be run concurrently with an active server-owned command. Migrating
+those direct CLI paths is an explicit compatibility boundary.
 
 The UI also shows a node the **instant** the engine starts building it: a transient `node_building`
 marker (folded to a `building` slot, *not* the event-sourced node set, so it never affects node-id
@@ -324,8 +512,10 @@ Where each concept lives in the code:
 | Sandbox seam + subprocess/Docker bodies | `sandbox.py` |
 | Researcher/Developer roles (toy + LLM) | `roles.py`, `unified_agent.py` |
 | Structured output + LLM client + cost accountant | `parse.py`, `llm.py` |
+| Durable per-run observed-usage ledger | `engine/costs.py` |
 | Operators (merge/ensemble, sweep) | `operators.py`, `sweep.py` |
 | Control loop + crash-resume | `orchestrator.py` |
+| Authoritative server command lifecycle + leases | `serve/run_commands.py` |
 | Variance gate + multi-seed confirmation | `gate.py`, `confirm.py` |
 | CV harness, K-fold, purged walk-forward | `cv.py` |
 | Leakage detectors + data profiler | `leakage.py`, `profile.py` |
