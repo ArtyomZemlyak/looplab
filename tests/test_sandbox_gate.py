@@ -251,3 +251,55 @@ def test_run_argv_force_removes_daemon_container_after_cancel(tmp_path, monkeypa
     assert "--cidfile" in seen["argv"]
     assert seen["cleanup"] == ["docker", "rm", "-f", cid]
     assert not list(tmp_path.glob(".looplab-container-*.cid"))
+
+
+def test_run_argv_cidfile_lives_outside_the_bind_mounted_workdir(tmp_path, monkeypatch):
+    """SECURITY (#5): the docker cidfile must NOT be created under the workdir, which DockerSandbox
+    bind-mounts into the container as writable /work. If it lived there, untrusted root code could
+    enumerate + overwrite it and redirect the post-timeout `docker rm -f <cid>` at another tenant's
+    container. It must live in the host-only temp dir the container never sees."""
+    import io
+    import looplab.runtime.sandbox as sb
+
+    seen = {"cidfile": None}
+
+    class Proc:
+        def __init__(self, argv, **_kwargs):
+            self.stdout, self.stderr, self.returncode = io.BytesIO(b""), io.BytesIO(b""), 0
+            seen["cidfile"] = Path(argv[argv.index("--cidfile") + 1])
+
+        def wait(self, timeout=None):
+            return 0
+
+    monkeypatch.setattr(sb.subprocess, "Popen", Proc)
+    sb.run_argv(["docker", "run", "--rm", "image", "python", "solution.py"],
+                str(tmp_path), timeout=30)
+
+    cidfile = seen["cidfile"]
+    assert cidfile is not None
+    # Not under the bind-mounted workdir…
+    assert tmp_path not in cidfile.parents
+    # …and cleaned up afterwards (no host-temp leak).
+    assert not cidfile.exists()
+
+
+def test_run_argv_cleanup_swallows_a_cidfile_oserror(tmp_path, monkeypatch):
+    """Robustness (#4): a cleanup OSError (e.g. the path turned into a directory, or a FUSE hiccup)
+    must NOT turn a normal run into an engine-visible crash on the untrusted eval path."""
+    import io
+    import looplab.runtime.sandbox as sb
+
+    class Proc:
+        def __init__(self, argv, **_kwargs):
+            self.stdout, self.stderr, self.returncode = io.BytesIO(b""), io.BytesIO(b""), 0
+            cpath = Path(argv[argv.index("--cidfile") + 1])
+            cpath.mkdir(parents=True, exist_ok=True)   # unlink() on a dir raises IsADirectoryError
+
+        def wait(self, timeout=None):
+            return 0
+
+    monkeypatch.setattr(sb.subprocess, "Popen", Proc)
+    # Must not raise.
+    rc, _out, _err, _timed = sb.run_argv(
+        ["docker", "run", "--rm", "image", "python", "solution.py"], str(tmp_path), timeout=30)
+    assert rc == 0

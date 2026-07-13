@@ -373,10 +373,15 @@ def _generation_map_matches(st: RunState, d: dict) -> bool:
     winner computed using a reset competitor's stale seeds. Old events have no map and remain valid."""
     raw = d.get("generations", _MISSING)
     if raw is _MISSING:
-        if st.aborted_nodes or any(n.tombstoned for n in st.nodes.values()):
-            return False
+        # Legacy best_confirmed (pre-generation-map). Modern producers ALWAYS stamp `generations`
+        # (confirm_phase), so this branch is reached only by OLD persisted logs. Validate just the
+        # CHOSEN winner: rejecting whenever ANY unrelated node was later aborted/tombstoned would
+        # retroactively drop a legitimately-completed confirmation that the pre-batch fold accepted
+        # (invariant 5b — an old log must fold as it did before). A winner that is itself
+        # aborted/tombstoned is still correctly rejected.
         n = _node_for_event(st, d)
-        return n is None or (not n.tombstoned and _generation_matches(n, d))
+        return n is None or (not n.tombstoned and n.id not in st.aborted_nodes
+                             and _generation_matches(n, d))
     if not isinstance(raw, dict):
         return False
     chosen = _coerce_node_id(d)
@@ -780,7 +785,16 @@ def _on_node_reset(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
             st.building = None
         # Reset itself clears `finished`, so a later resume cannot observe the old finished edge.
         # Invalidate the completed confirmation/approval epoch here, before clearing it.
-        if holdout_was_disclosed:
+        # Requeuing every OTHER incumbent (wiping its metric to force a re-eval on the newly-hidden
+        # complement) is a NEW epoch-aware semantic. A legacy unstamped node_reset predates search
+        # epochs; firing it there wipes surviving incumbents' metrics that the pre-batch fold left
+        # intact — an invariant-5b divergence when replaying an old log. Gate the requeue-all on a
+        # modern generation stamp. (A modern generation-0 reset that omits the stamp — allowed only at
+        # attempt 0 — likewise skips it: a rare, benign fairness gap, never corruption.) The plain
+        # finished-reopen epoch bump below is deliberately NOT gated: a reset is itself the reopen edge
+        # and bumps the epoch regardless of stamp (it wipes no incumbent metric — requeue=False).
+        reset_is_epoch_aware = _event_generation(d) is not _MISSING
+        if holdout_was_disclosed and reset_is_epoch_aware:
             # The target is already a fresh pending generation. Every OTHER active incumbent must
             # also be re-evaluated on the newly-hidden complement; retaining its raw/confirm metric
             # would rank values measured on different partitions in one candidate pool.

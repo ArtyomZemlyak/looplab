@@ -294,6 +294,64 @@ def test_reset_of_any_confirmation_competitor_invalidates_winner_snapshot(tmp_pa
     assert not st.confirmed_done and st.best_node_id == 1
 
 
+def test_fold_legacy_best_confirmed_survives_an_unrelated_abort(tmp_path):
+    """Backward-compat (invariant 5b): a pre-batch `best_confirmed` carries NO `generations` map
+    (modern producers always stamp it). It must still mark confirmation complete — and keep its
+    robust-winner override — even when some OTHER node was later aborted. The new map-validation's
+    legacy branch used to reject the event outright whenever any node was aborted/tombstoned, which
+    silently dropped `confirmed_done` and the winner override on replay of an old log."""
+    s = EventStore(tmp_path / "e.jsonl")
+    s.append("run_started", {"run_id": "r", "task_id": "t", "direction": "min"})
+    _n(s, 0, 2.0)                      # confirmation's robust winner (override)
+    _n(s, 1, 1.0)                      # raw best (min) — would win WITHOUT the confirmed override
+    _n(s, 2, 3.0)                      # an also-ran…
+    s.append("node_abort", {"node_id": 2, "reason": "ui"})   # …later aborted (legacy, unstamped)
+    s.append("best_confirmed", {"node_id": 0, "significant": True})   # legacy: no generations map
+    st = fold(s.read_all())
+    assert st.confirmed_done is True
+    assert st.best_node_id == 0        # the confirmed override survives the unrelated abort
+    # A legacy best_confirmed naming an aborted/tombstoned WINNER is still correctly rejected.
+    s2 = EventStore(tmp_path / "e2.jsonl")
+    s2.append("run_started", {"run_id": "r", "task_id": "t", "direction": "min"})
+    _n(s2, 0, 2.0)
+    _n(s2, 1, 1.0)
+    s2.append("node_abort", {"node_id": 0, "reason": "ui"})
+    s2.append("best_confirmed", {"node_id": 0, "significant": True})   # winner itself aborted
+    assert fold(s2.read_all()).confirmed_done is False
+
+
+def test_fold_legacy_node_reset_after_holdout_leaves_other_incumbents_intact(tmp_path):
+    """Backward-compat (invariant 5b): a pre-batch `node_reset` carries no generation stamp and
+    predates search epochs. The new 'requeue every surviving incumbent on a disclosed holdout' epoch
+    rotation must NOT fire for such a legacy event — else replaying an old log wipes the OTHER
+    incumbents' metrics and bumps the epoch, diverging from the pre-batch fold of the same bytes
+    (which reset only the target node)."""
+    s = EventStore(tmp_path / "e.jsonl")
+    s.append("run_started", {"run_id": "r", "task_id": "t", "direction": "min"})
+    _n(s, 0, 2.0)
+    _n(s, 1, 1.0)
+    s.append("holdout_evaluated", {"node_id": 0, "metric": 2.3})   # legacy: no generation/search_epoch
+    s.append("holdout_evaluated", {"node_id": 1, "metric": 1.3})
+    s.append("node_reset", {"node_id": 0, "from_stage": "eval"})   # legacy: no generation stamp
+    st = fold(s.read_all())
+    # The reset target IS reopened…
+    assert st.nodes[0].status.value == "pending" and st.nodes[0].metric is None
+    # …but the OTHER incumbent is untouched (the bug requeued it: attempt->1, metric+holdout wiped).
+    assert st.nodes[1].status.value == "evaluated"
+    assert st.nodes[1].metric == 1.0
+    assert st.nodes[1].attempt == 0
+    assert st.nodes[1].holdout_metric == 1.3
+    assert st.search_epoch == 0        # no epoch rotation for a legacy reset
+    # A MODERN (stamped) reset after a disclosed holdout still requeues the incumbents + rotates.
+    s.append("node_evaluated", {"node_id": 0, "generation": 1, "metric": 2.0})
+    s.append("holdout_evaluated", {"node_id": 0, "generation": 1, "metric": 2.3, "search_epoch": 0})
+    s.append("holdout_evaluated", {"node_id": 1, "generation": 0, "metric": 1.3, "search_epoch": 0})
+    s.append("node_reset", {"node_id": 0, "generation": 1, "from_stage": "eval"})
+    st2 = fold(s.read_all())
+    assert st2.search_epoch == 1
+    assert st2.nodes[1].status.value == "pending" and st2.nodes[1].metric is None
+
+
 def test_fold_confirm_and_holdout_bound_to_attempt(tmp_path):
     # P0-1: confirm-seed / node_confirmed / holdout_evaluated events stamped with an attempt the node
     # has since abandoned (node_reset bumped the generation) must be dropped — their stale metrics must

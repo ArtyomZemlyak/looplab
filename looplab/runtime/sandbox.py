@@ -252,8 +252,16 @@ def run_argv(argv: list[str], workdir: str, timeout: float,
     # then force-remove that exact container if host timeout/cancel kills the client first.
     if (len(argv) >= 2 and Path(str(argv[0])).stem.lower() in {"docker", "docker.exe"}
             and argv[1] == "run" and "--cidfile" not in argv):
+        import tempfile
         import uuid
-        docker_cidfile = wd / f".looplab-container-{uuid.uuid4().hex}.cid"
+        # SECURITY: the cidfile MUST live outside the bind-mounted workdir. DockerSandbox mounts `wd`
+        # into the container as writable /work (as root, no --user), so a cidfile under `wd` is
+        # enumerable AND overwritable by untrusted solution code — which could then redirect the
+        # post-timeout `docker rm -f <cid>` at a co-tenant container on a shared daemon (cross-tenant
+        # DoS) or turn cleanup into an uncaught crash. Put it in the host-only temp dir the container
+        # never sees; the random name doesn't pre-exist so docker's --cidfile (which refuses an
+        # existing file) writes it, and we unlink it below.
+        docker_cidfile = Path(tempfile.gettempdir()) / f".looplab-container-{uuid.uuid4().hex}.cid"
         argv[2:2] = ["--cidfile", str(docker_cidfile)]
     kwargs: dict = {}
     if os.name == "nt":
@@ -342,9 +350,16 @@ def run_argv(argv: list[str], workdir: str, timeout: float,
     # could accumulate its whole output in HOST RAM for up to `timeout` seconds — a host-memory DoS.
     rc, out, err, timed_out = _tee_drain(proc, log_path, timeout, max_output_bytes, cancel)
     if docker_cidfile is not None:
-        if timed_out:
-            _remove_docker_container(str(argv[0]), docker_cidfile)
-        docker_cidfile.unlink(missing_ok=True)
+        # Defense-in-depth: the cidfile now lives in the host temp dir (unreachable by the container),
+        # but never let a cleanup hiccup (a FUSE OSError, or — pre-#5 — untrusted code having replaced
+        # the path with a directory so unlink raises IsADirectoryError) turn a normal timeout into an
+        # engine-visible crash on the untrusted eval path.
+        try:
+            if timed_out:
+                _remove_docker_container(str(argv[0]), docker_cidfile)
+            docker_cidfile.unlink(missing_ok=True)
+        except OSError:
+            pass
     return rc, _clamp_tail_bytes(out, max_output_bytes), _clamp_tail_bytes(err, max_output_bytes), timed_out
 
 
