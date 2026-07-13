@@ -198,6 +198,59 @@ def test_missing_spans_returns_none(tmp_path):
     assert get_index(tmp_path / "nope.jsonl") is None
 
 
+def test_concurrent_topup_and_reads_are_safe(run):
+    """Thread safety: the serve threadpool calls the READ methods lock-free while another request's
+    get_index() tops up the SAME cached index (appending to node_tids/by_tid/light). Without the
+    per-index snapshot lock, `full_spans_for_node`'s `for tid in node_tids[...]` races a concurrent
+    `.add()` → 'set changed size during iteration'. Hammer both paths concurrently: no exception, and
+    every read returns a self-consistent result. (Also guards lock ORDER — a deadlock would hang.)"""
+    import threading, orjson
+    rd, sp, spans = run
+    # Give node 0 many traces so the set-iteration window is wide.
+    with open(sp, "ab") as f:
+        for k in range(500):
+            f.write(orjson.dumps({"name": "o", "kind": "operation", "trace_id": f"x{k}",
+                                  "span_id": f"xs{k}", "parent_id": None, "run_id": "demo",
+                                  "attributes": {"node_id": 0}, "events": [], "status": "OK",
+                                  "start": 0.0, "duration_s": 1.0}) + b"\n")
+    get_index(sp)
+    errors: list = []
+    stop = threading.Event()
+
+    def writer():
+        k = 1000
+        while not stop.is_set():
+            try:
+                with open(sp, "ab") as f:
+                    f.write(orjson.dumps({"name": "o", "kind": "operation", "trace_id": f"y{k}",
+                                          "span_id": f"ys{k}", "parent_id": None, "run_id": "demo",
+                                          "attributes": {"node_id": 0}, "events": [], "status": "OK",
+                                          "start": 0.0, "duration_s": 1.0}) + b"\n")
+                k += 1
+                get_index(sp)                       # topup → node_tids["0"].add(...) under the lock
+            except Exception as e:                  # noqa: BLE001
+                errors.append(repr(e))
+
+    def reader():
+        while not stop.is_set():
+            try:
+                idx = get_index(sp)
+                idx.full_spans_for_node(0)          # snapshots node_tids/by_tid under the lock
+                idx.light_spans()
+            except Exception as e:                  # noqa: BLE001
+                errors.append(repr(e))
+
+    ts = [threading.Thread(target=writer)] + [threading.Thread(target=reader) for _ in range(6)]
+    for t in ts:
+        t.start()
+    stop.wait(2.0)
+    stop.set()
+    for t in ts:
+        t.join(5)
+    assert not any(t.is_alive() for t in ts), "a thread hung — possible lock-order deadlock"
+    assert errors == [], f"concurrent read/topup raised: {errors[:3]}"
+
+
 def test_torn_final_line_is_ignored(run):
     rd, sp, spans = run
     with open(sp, "ab") as f:
@@ -255,3 +308,19 @@ def test_endpoints_serve_through_the_index(tmp_path):
     tv2 = client.get("/api/runs/demo/trace").json()
     assert set(tv2["nodes"].keys()) == {"1"}
     assert client.get("/api/runs/demo/spans/g0_1").json()["attributes"] == {}   # node 0's span is gone
+
+
+def test_trace_carries_run_id_even_with_an_unfoldable_log(tmp_path):
+    """Degraded path: `trace_scalars` reads run_id/task_id from the folded state, but if events.jsonl
+    can't be folded it must still return the correct run_id (from the run dir name) so /trace's run_id
+    matches the pre-index endpoint's behavior — not an empty string — while the span tree still renders."""
+    pytest.importorskip("fastapi")
+    from fastapi.testclient import TestClient
+    from looplab.serve.server import make_app
+    rd = _http_run(tmp_path)
+    # Corrupt the FIRST event line so the fold yields no run_started (torn/garbage tail rule).
+    (rd / "events.jsonl").write_bytes(b"{not valid json at all\n")
+    client = TestClient(make_app(tmp_path))
+    tv = client.get("/api/runs/demo/trace").json()
+    assert tv["run_id"] == "demo"                      # falls back to the run dir name, never ""
+    assert set(tv["nodes"].keys()) == {"0", "1"}       # the span tree still renders from the index

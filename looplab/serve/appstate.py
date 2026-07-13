@@ -12,6 +12,7 @@ TIME: the test suite (and any operator tooling) monkeypatches `looplab.server.ma
 the flat alias + this late binding keep that single patch point working for every router."""
 from __future__ import annotations
 
+import threading
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -84,6 +85,11 @@ class AppState:
         # fetch rebuilt the view. Combined with the span index (which makes the span read O(new spans)),
         # an unchanged run's trace is served from here instantly. See `trace_view`.
         self._trace_view_cache: dict[str, tuple] = {}
+        # Guards the trace-view cache's insert+evict: the FastAPI threadpool runs `trace_view`
+        # concurrently, and `pop(next(iter(dict)))` on a dict another thread is inserting into raises
+        # "dictionary changed size during iteration". Held only around the cheap dict ops, never the
+        # (slow) span read + build below.
+        self._trace_view_lock = threading.Lock()
         self.reports_dir = root / "reports"
         # Late-bound route callables (set by their owning router's build_router; see module docstring).
         self.list_runs_fn: Optional[Callable[[], list]] = None
@@ -181,7 +187,10 @@ class AppState:
             s = self.state_payload(rd)["state"]
         except Exception:  # noqa: BLE001 — a malformed log must not 500 the trace; degrade to spans-only
             s = {}
-        return SimpleNamespace(run_id=s.get("run_id") or "", task_id=s.get("task_id") or "",
+        # Fall back to the run dir name for run_id (rd == root/run_id, so rd.name IS the run id) when the
+        # log can't be folded — so a corrupt-log `/trace` still carries the correct run_id, matching the
+        # pre-index endpoint's degraded response (which returned the URL's run_id) rather than an empty one.
+        return SimpleNamespace(run_id=s.get("run_id") or rd.name, task_id=s.get("task_id") or "",
                                total_eval_seconds=float(s.get("total_eval_seconds") or 0.0))
 
     def trace_view(self, rd: Path) -> dict:
@@ -206,12 +215,13 @@ class AppState:
         idx = get_index(sp)
         spans = idx.light_spans() if idx is not None else load_spans(sp)
         view = build_trace_view(self.trace_scalars(rd), spans, light=True)
-        self._trace_view_cache[key] = (sig, view)
-        # Keep this SMALL: a 1 GB run's light view is ~200 MB, so cap by count at a few recently-viewed
-        # runs (node-detail clicks on one run all share its single entry). An evicted view just rebuilds
-        # from the still-cached span index (~1 s), never a re-parse of the whole spans.jsonl.
-        while len(self._trace_view_cache) > 4:
-            self._trace_view_cache.pop(next(iter(self._trace_view_cache)))
+        with self._trace_view_lock:      # only the dict ops — the slow build above ran lock-free
+            self._trace_view_cache[key] = (sig, view)
+            # Keep this SMALL: a 1 GB run's light view is ~200 MB, so cap by count at a few recently-
+            # viewed runs (node-detail clicks on one run all share its single entry). An evicted view
+            # just rebuilds from the still-cached span index (~1 s), never a re-parse of spans.jsonl.
+            while len(self._trace_view_cache) > 4:
+                self._trace_view_cache.pop(next(iter(self._trace_view_cache)))
         return view
 
     def phase(self, st) -> str:

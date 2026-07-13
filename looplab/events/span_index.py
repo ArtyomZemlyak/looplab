@@ -96,9 +96,17 @@ class SpanIndex:
         self.node_tids: dict[str, set] = defaultdict(set)       # str(node_id) -> {trace_id}
         self.covers: int = 0
         self.identity: Optional[tuple] = None
-        self.size: int = 0
         self.mtime_ns: Optional[int] = None
         self._persisted_covers: int = -1          # covers at last persist (throttle re-writes)
+        # Guards the mutable in-memory maps against a concurrent read. `get_index` runs a `_topup`
+        # (append) under the module `_LOCK`, but the READ methods below are called lock-free by the
+        # serve threadpool AFTER get_index returns — so a read that iterates `node_tids`/`by_tid` (or
+        # copies `light`) would otherwise race a concurrent topup's `.add()`/`.append()` ("set/dict
+        # changed size during iteration"). Reads take a cheap in-memory SNAPSHOT under this lock, then
+        # do the (slow) disk seeks OUTSIDE it. Per-INDEX (not the module lock) so a read of run A never
+        # waits on a slow rebuild of run B. Held strictly inside the module lock's scope in get_index
+        # (order: _LOCK → _rlock), never the reverse, so the two can't deadlock.
+        self._rlock = threading.Lock()
 
     # -- construction --------------------------------------------------------------------------
     def _append(self, light: dict, off: int, length: int) -> None:
@@ -120,16 +128,17 @@ class SpanIndex:
             self._append(light, off, length)
 
     def _rebuild(self, size: int) -> None:
-        self.light.clear(); self.meta.clear(); self.by_sid.clear()
-        self.by_tid.clear(); self.node_tids.clear()
         try:
             with open(self.path, "rb") as f:
                 buf = f.read(size)
         except OSError:
             buf = b""
-        records, consumed = _scan_light(buf, 0)
-        self._extend(records)
-        self.covers = consumed
+        records, consumed = _scan_light(buf, 0)      # parse OUTSIDE the lock (the slow part)
+        with self._rlock:                            # publish the new maps atomically vs a lock-free read
+            self.light.clear(); self.meta.clear(); self.by_sid.clear()
+            self.by_tid.clear(); self.node_tids.clear()
+            self._extend(records)
+            self.covers = consumed
 
     def _topup(self, size: int) -> None:
         """Parse only the bytes appended since `self.covers` (spans.jsonl is append-only)."""
@@ -141,20 +150,25 @@ class SpanIndex:
                 buf = f.read(size - self.covers)
         except OSError:
             return
-        records, consumed = _scan_light(buf, self.covers)
-        self._extend(records)
-        self.covers = consumed
+        records, consumed = _scan_light(buf, self.covers)   # parse OUTSIDE the lock
+        with self._rlock:                                   # append is atomic vs a lock-free read
+            self._extend(records)
+            self.covers = consumed
 
-    # -- reads ---------------------------------------------------------------------------------
+    # -- reads (snapshot the in-memory maps under `_rlock`, then do disk I/O outside it) ---------
     def light_spans(self) -> list[dict]:
-        """The full light span list (for `build_trace_view(light=True)`). Returned by reference —
-        build_trace_view copies every span it touches (`_strip_span_io`/`_tree` build new dicts), so
-        the cached list is never mutated."""
-        return self.light
+        """A SNAPSHOT of the light span list (for `build_trace_view(light=True)`). A copy, not a live
+        reference: build_trace_view iterates it while a concurrent `_topup` may append to `self.light`,
+        and a plain-reference iteration would silently pick up half-appended tail spans. The dicts
+        inside are shared (never mutated after creation), so the copy is shallow and cheap (~ms)."""
+        with self._rlock:
+            return list(self.light)
 
     def _read_full(self, rows: list[int]) -> list[dict]:
         """Read the FULL (uncapped) span lines for the given rows by seeking to their byte offsets —
-        so a per-node/-trace/-span detail view touches only those bytes, not the whole file."""
+        so a per-node/-trace/-span detail view touches only those bytes, not the whole file. `rows`
+        is a snapshot taken under `_rlock` by the caller; `self.meta` is append-only, so reading
+        `meta[r]` here (outside the lock) is safe — a concurrent append never moves an existing row."""
         out: list[dict] = []
         try:
             with open(self.path, "rb") as f:
@@ -173,14 +187,17 @@ class SpanIndex:
         return out
 
     def full_span(self, sid: str) -> Optional[dict]:
-        row = self.by_sid.get(sid)
+        with self._rlock:
+            row = self.by_sid.get(sid)
         if row is None:
             return None
         got = self._read_full([row])
         return got[0] if got else None
 
     def full_spans_for_trace(self, tid: str) -> list[dict]:
-        return self._read_full(list(self.by_tid.get(tid, ())))
+        with self._rlock:
+            rows = list(self.by_tid.get(tid, ()))
+        return self._read_full(rows)
 
     def full_spans_for_node(self, node_id) -> list[dict]:
         """Every FULL span in the traces attributed to this node (a node's create_node + evaluate +
@@ -189,9 +206,8 @@ class SpanIndex:
         span and read every span in them (a harmless superset; build_conversation re-filters by the
         trace root's node_id, so an extra trace is dropped there, and a node-idless child of a matching
         trace is still included because we read by trace)."""
-        rows: list[int] = []
-        for tid in self.node_tids.get(str(node_id), ()):
-            rows.extend(self.by_tid.get(tid, ()))
+        with self._rlock:                              # snapshot rows — never iterate the live set/lists
+            rows = [r for tid in self.node_tids.get(str(node_id), ()) for r in self.by_tid.get(tid, ())]
         return self._read_full(rows)
 
     # -- persistence ---------------------------------------------------------------------------
@@ -304,7 +320,7 @@ def get_index(spans_path: str | os.PathLike) -> Optional[SpanIndex]:
             if not (replaced or same_size_rewrite or shrank):
                 if idx.covers < size:
                     idx._topup(size)            # parse only the appended tail
-                idx.size, idx.mtime_ns = size, mtime_ns
+                idx.mtime_ns = mtime_ns
                 _CACHE.move_to_end(key)
                 idx._persist()
                 return idx
@@ -316,7 +332,7 @@ def get_index(spans_path: str | os.PathLike) -> Optional[SpanIndex]:
             idx._rebuild(size)
         elif idx.covers < size:
             idx._topup(size)
-        idx.size, idx.mtime_ns = size, mtime_ns
+        idx.mtime_ns = mtime_ns
         _CACHE[key] = idx
         _CACHE.move_to_end(key)
         while len(_CACHE) > _CACHE_MAX:
