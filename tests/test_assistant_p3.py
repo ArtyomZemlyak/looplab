@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -277,6 +278,117 @@ def test_background_watcher_reaps_without_any_poll(tmp_path):
         assert mgr._tasks[tid]["timed_out"] is True
     finally:
         mgr.shutdown()
+
+
+def test_background_watcher_publishes_timeout_before_kill_returns(tmp_path, monkeypatch):
+    """Expose the Windows exit-before-taskkill-return window deterministically."""
+    killed = threading.Event()
+    release_killer = threading.Event()
+
+    def delayed_kill_tree(proc):
+        proc.kill()
+        proc.wait(timeout=10)
+        killed.set()
+        release_killer.wait(timeout=5)
+
+    monkeypatch.setattr("looplab.runtime.bg_tasks._kill_tree", delayed_kill_tree)
+    mgr = BackgroundManager(max_seconds=0.05, watch_interval=0.01)
+    tid = None
+    try:
+        tid = mgr.start([sys.executable, "-c", "import time; time.sleep(30)"], str(tmp_path))
+        assert killed.wait(timeout=10)
+        assert mgr._tasks[tid]["proc"].poll() is not None
+        assert mgr._tasks[tid]["timed_out"] is True
+    finally:
+        release_killer.set()
+        mgr.shutdown()
+        if tid is not None:
+            mgr.kill(tid)
+
+
+def test_background_watcher_retries_a_noop_tree_kill(tmp_path, monkeypatch):
+    attempts = 0
+
+    def flaky_kill_tree(proc):
+        nonlocal attempts
+        attempts += 1
+        if attempts > 1:
+            proc.kill()
+            proc.wait(timeout=10)
+
+    monkeypatch.setattr("looplab.runtime.bg_tasks._kill_tree", flaky_kill_tree)
+    mgr = BackgroundManager(max_seconds=0.05, watch_interval=0.01)
+    tid = None
+    try:
+        tid = mgr.start([sys.executable, "-c", "import time; time.sleep(30)"], str(tmp_path))
+        proc = mgr._tasks[tid]["proc"]
+        for _ in range(200):
+            if proc.poll() is not None:
+                break
+            time.sleep(0.01)
+        assert proc.poll() is not None
+        assert attempts >= 2
+        assert mgr._tasks[tid]["timed_out"] is True
+    finally:
+        mgr.shutdown()
+        if tid is not None:
+            mgr.kill(tid)
+
+
+def test_background_deadline_kill_is_serialized_per_task(tmp_path, monkeypatch):
+    """Concurrent watcher/read sweeps must never tree-kill the same PID in parallel."""
+    attempts = 0
+    first_kill_entered = threading.Event()
+    release_first_kill = threading.Event()
+
+    def blocked_then_effective_kill(proc):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            first_kill_entered.set()
+            release_first_kill.wait(timeout=5)
+            return                              # first best-effort attempt was a no-op
+        proc.kill()
+        proc.wait(timeout=10)
+
+    monkeypatch.setattr("looplab.runtime.bg_tasks._kill_tree", blocked_then_effective_kill)
+    mgr = BackgroundManager(max_seconds=0.01, watch_interval=0)
+    tid = None
+    first = None
+    try:
+        tid = mgr.start([sys.executable, "-c", "import time; time.sleep(30)"], str(tmp_path))
+        task = mgr._tasks[tid]
+        time.sleep(0.05)
+        first = threading.Thread(target=mgr._enforce_deadline, args=(task,))
+        first.start()
+        assert first_kill_entered.wait(timeout=10)
+
+        competing = threading.Thread(target=mgr._enforce_deadline, args=(task,))
+        competing.start()
+        competing.join(timeout=2)
+        assert not competing.is_alive()          # nonblocking: it skipped the in-flight kill
+        assert attempts == 1
+
+        release_first_kill.set()
+        first.join(timeout=10)
+        assert not first.is_alive()
+        assert task["proc"].poll() is None       # the first attempt really was a no-op
+
+        mgr._enforce_deadline(task)               # a later sweep retries after lock release
+        assert attempts == 2
+        assert task["proc"].poll() is not None
+        assert task["timed_out"] is True
+    finally:
+        release_first_kill.set()
+        if first is not None:
+            first.join(timeout=10)
+        mgr.shutdown()
+        if tid is not None:
+            task = mgr._tasks[tid]
+            if task["proc"].poll() is None:
+                task["proc"].kill()
+                task["proc"].wait(timeout=10)
+            mgr._reap(task)                    # close the Windows log handle before tmp cleanup
 
 
 def test_background_watcher_disabled_when_interval_zero(tmp_path):

@@ -183,6 +183,21 @@ def test_docker_wrap_forwards_env(monkeypatch):
     assert argv[i + 1] == "LOOPLAB_EVAL_SEED=7"
 
 
+def test_docker_wrap_preserves_posix_absolute_bind_path(monkeypatch, tmp_path):
+    """A Windows Docker client must not prefix a Linux symlink target with its current drive."""
+    import shutil
+    from looplab.runtime import command_eval as ce
+    monkeypatch.setattr(shutil, "which", lambda name: "/usr/bin/docker")
+    native = (tmp_path / "native-data").resolve().as_posix()
+    wrap = ce.make_docker_wrap(
+        str(tmp_path), "img",
+        binds=[("/data/../data/raw", True), (str(tmp_path / "native-data"), False)],
+    )
+    argv = wrap(["python", "solution.py"], str(tmp_path))
+    assert "type=bind,src=/data/raw,dst=/data/raw,readonly" in argv
+    assert f"type=bind,src={native},dst={native}" in argv
+
+
 # ---------------------------------------------------- path-boundary + timeout hardening (P0-7 / P1-5)
 def test_stage_name_must_be_a_safe_slug():
     from looplab.runtime.command_eval import validate_stages, safe_stage_name

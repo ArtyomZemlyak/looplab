@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import os
+import posixpath
 import re
 import sys
 import time
@@ -459,7 +460,17 @@ def make_docker_wrap(mount_root: str, image: str, network: str = "none",
     root = Path(mount_root).resolve()
     extra: list[str] = []
     for p, ro in (binds or []):
-        ap = Path(p).resolve().as_posix()
+        raw = os.fspath(p)
+        # A task may deliberately carry a POSIX-absolute source path even when the Docker
+        # client runs on Windows.  WindowsPath.resolve() treats `/data/raw` as rooted on the
+        # current drive and silently rewrites it to `C:/data/raw`, so the same-path mount no
+        # longer matches the symlink target inside the Linux container.  Preserve that path
+        # dialect (while lexically normalizing `.`/`..`); drive/UNC and relative host paths
+        # still go through the native resolver as before.
+        if os.name == "nt" and raw.startswith("/") and not raw.startswith("//"):
+            ap = posixpath.normpath(raw)
+        else:
+            ap = Path(raw).resolve().as_posix()
         # Use `--mount` (comma-separated key=value) instead of `-v host:container[:ro]`: the colon form
         # is MALFORMED for a resolved Windows host path — `C:/data:C:/data:ro` -> Docker Desktop "too
         # many colons" — so untrusted Windows RepoTasks with extra inputs failed (arch-review §4 P1-8).

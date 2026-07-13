@@ -108,6 +108,11 @@ class BackgroundManager:
         with self._lock:
             self._tasks[tid] = {"proc": proc, "log": log, "fh": f, "cursor": 0,
                                 "cmd": " ".join(argv), "cwd": cwd,
+                                "timed_out": False,
+                                # Serialize deadline enforcement per task without blocking readers:
+                                # watcher/read/list may sweep concurrently, but only one may act on
+                                # this PID at a time (the second kill would carry a PID-reuse risk).
+                                "deadline_lock": threading.Lock(),
                                 "deadline": (time.monotonic() + self._max_seconds
                                              if self._max_seconds else None)}
         self._evict_finished()   # bound retained finished tasks + their log files
@@ -171,14 +176,27 @@ class BackgroundManager:
         read()/list(). Idempotent; a None deadline (timeout disabled) is a no-op. Operates on the
         handle `t` directly (never re-enters the lock)."""
         dl = t.get("deadline")
-        if dl is None or t.get("timed_out") or t["proc"].poll() is not None:
+        if dl is None or time.monotonic() <= dl or t["proc"].poll() is not None:
             return
-        if time.monotonic() > dl:
+        deadline_lock = t["deadline_lock"]
+        if not deadline_lock.acquire(blocking=False):
+            return
+        try:
+            # Re-check after acquiring: another sweep may have killed/reaped the process while this
+            # caller was racing for the task. Never issue a second kill against a stale/reused PID.
+            if t["proc"].poll() is not None:
+                return
             # Escalating WHOLE-TREE kill (psutil / taskkill /T / killpg -9), not a single SIGTERM a
             # stuck child can ignore forever — the old code sent one TERM and then latched timed_out,
             # permanently suppressing any retry (arch-review §4 P1-4). _kill_tree force-kills the tree.
-            _kill_tree(t["proc"])
+            # Publish the timeout before killing: Windows can expose the process exit while taskkill
+            # is still returning, and observers must not see an exited task without its final status.
+            # Do not use this flag as an early-return latch: if a best-effort tree kill was a no-op,
+            # the next watcher/read sweep must retry while the process remains alive.
             t["timed_out"] = True
+            _kill_tree(t["proc"])
+        finally:
+            deadline_lock.release()
 
     def _evict_finished(self) -> None:
         """Drop the OLDEST finished tasks (insertion order) once more than `max_finished` are retained,
@@ -273,16 +291,19 @@ class BackgroundManager:
         if not t:
             return {"ok": False, "error": f"no such background task {tid!r}"}
         proc = t["proc"]
-        if proc.poll() is None:
-            # Robust TREE kill + VERIFY (arch-review §4 P1-4): the old kill sent one SIGTERM/terminate,
-            # never waited, never escalated, and ALWAYS reported success — a parent could die while its
-            # children lived on. _kill_tree escalates to SIGKILL/taskkill /F over the whole tree; then
-            # wait so we report the ACTUAL outcome.
-            _kill_tree(proc)
-            try:
-                proc.wait(timeout=10)
-            except Exception:  # noqa: BLE001 — a wait timeout means it's still alive; reported below
-                pass
+        # Serialize an explicit kill with deadline enforcement too. Otherwise the user-facing kill
+        # can race the watcher exactly like two sweeps and issue a second tree-kill for a stale PID.
+        with t["deadline_lock"]:
+            if proc.poll() is None:
+                # Robust TREE kill + VERIFY (arch-review §4 P1-4): the old kill sent one
+                # SIGTERM/terminate, never waited, never escalated, and ALWAYS reported success — a
+                # parent could die while its children lived on. _kill_tree escalates to
+                # SIGKILL/taskkill /F over the whole tree; then wait so we report the ACTUAL outcome.
+                _kill_tree(proc)
+                try:
+                    proc.wait(timeout=10)
+                except Exception:  # noqa: BLE001 — still alive; reported below
+                    pass
         try:
             t["fh"].close()
         except OSError:
